@@ -1,0 +1,61 @@
+=== TopGun soak harness (G4b / TODO-484) ===
+duration=1800s churn_clients=6 keyspace=200 crash_interval=None steady_interval=300s wal_fsync=batched or_churn=true
+starting server (port 47355, data /Users/koristuvac/Projects/topgun/topgun/target/spec355-sweep300-data) ...
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[   303s] steady   writes=51416 errs=0 reconnects=260 crashes=0 steady=1 recovery=0 converged=true confirms=146 lastEpoch=36 confirmErrs=4 rss=140MB(peak 140)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[   603s] steady   writes=99004 errs=0 reconnects=498 crashes=0 steady=2 recovery=0 converged=true confirms=290 lastEpoch=67 confirmErrs=8 rss=363MB(peak 363)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[   903s] steady   writes=146596 errs=0 reconnects=736 crashes=0 steady=3 recovery=0 converged=true confirms=434 lastEpoch=99 confirmErrs=12 rss=585MB(peak 585)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  1203s] steady   writes=193315 errs=0 reconnects=970 crashes=0 steady=4 recovery=0 converged=true confirms=577 lastEpoch=130 confirmErrs=17 rss=419MB(peak 836)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  1503s] steady   writes=238350 errs=0 reconnects=1194 crashes=0 steady=5 recovery=0 converged=true confirms=721 lastEpoch=160 confirmErrs=21 rss=752MB(peak 836)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+
+=== SOAK SUMMARY ===
+result:            PASS
+finished_reason:   duration reached
+actual_duration:   1800s
+total_writes:      284593
+write_errors:      0
+reconnects:        1426
+resends:           47334
+confirm_apply:     confirms=865 lastEpoch=191 errors=25 (tracked client advances the low-water-mark that licenses pruning; confirms=0 with a climbing gauge = LWM never advanced)
+steady_checkpts:   5
+recovery_checkpts: 0 (crashes 0)
+memory:            first=12MB peak=836MB last=449MB slope=1218.8MB/h -> ok (backstop)
+tombstone_bytes:   first=0 peak=30096 last=15202 slope=-7106.8B/h samples=360 -> ok (slope + blind-monitor both hard-gate)
+tombstone_corpus_redb_scan: 22352 bytes (independent of gauge; last gauge value 15202 bytes) -> DIVERGED (positive-control cross-check, report-only)
+disk_mb:           first=1.5 peak=35.9 last=35.6 slope=43.4MB/h samples=360 -> ok (slope report-only until TODO-566; blind-monitor hard-gates)
+wrote JSON report to /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec355-sweep300.soak.json
+
+=== OR-CHURN MECHANISM REPORT (report-only, Q1-Q4) ===
+Q1 bytes/frame:    OR early(mean=175B max=209B) late(mean=140B max=209B) max=209B | LWW mean=220B max=299B | OR/LWW=0.8x | rises=false
+OR frame census:   delta(n=2418 mean=157B max=209B total=380767B) | snapshot(n=0 mean=0B max=0B total=0B)
+Q2 drain window:   before=2.9MB after=2.9MB delta=-0.0MB | no significant drain burst (WAL delta -0.0MB)
+Q3 RSS holder:     rss_slope=1218.8MB/h disk_slope=43.4MB/h corr=0.70 | RSS slope 1218.8MB/h, disk slope 43.4MB/h, r=0.70
+Q4 not tombstone:  or_wal_bytes=380767 tombstone_corpus=22352 gauge=15202 | growth_is_or=false
+scan:              segments=497 or_frames=2418 lww_frames=3017 remove_frames=0
+conclusion:        REFUTED / INCONCLUSIVE: OR frame size did NOT rise late-vs-early over the retained corpus — the O(N)-per-op-frame hypothesis is not confirmed by this run. Inspect the acked-beyond-applied tail bound and write-behind retention before choosing the fix.
+sequencing:        Sequencing option for the R1 /xask gate: tail-bounding the acked-beyond-applied WAL is the lowest-risk FIRST containment (OOM/disk-full -> backpressure, zero recovery-path risk); delta-framing is the eventual O(1)-frame fix. If Q2 shows the drain burst is buffered O(N) frames, tail-bounding addresses it directly.
+wrote mechanism report to /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec355-sweep300.soak.mechanism.json

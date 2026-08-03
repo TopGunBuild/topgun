@@ -1,0 +1,55 @@
+{
+  "mode": "soak",
+  "durationSecsTarget": 1800,
+  "durationSecsActual": 1800,
+  "churnClients": 6,
+  "keyspace": 200,
+  "walFsync": "batched",
+  "epochWidth": 300,
+  "totalWrites": 284593,
+  "writeErrors": 0,
+  "reconnects": 1426,
+  "resends": 47334,
+  "steadyCheckpoints": 5,
+  "recoveryCheckpoints": 0,
+  "crashes": 0,
+  "convergenceFailures": [],
+  "recoveryFailures": [],
+  "pendingGates": [],
+  "memory": {
+    "samples": 360,
+    "first_mb": 12.0,
+    "peak_mb": 835.546875,
+    "last_mb": 449.25,
+    "slope_mb_per_hour": 1218.8069521236955,
+    "passed": true,
+    "reason": null
+  },
+  "tombstones": {
+    "samples": 360,
+    "firstBytes": 0,
+    "peakBytes": 30096,
+    "lastBytes": 15202,
+    "slopeBytesPerHour": -7106.77393714643,
+    "passed": true,
+    "reason": null
+  },
+  "disk": {
+    "samples": 360,
+    "firstMb": 1.5234375,
+    "peakMb": 35.85546875,
+    "lastMb": 35.5703125,
+    "slopeMbPerHour": 43.39573863450286,
+    "passed": true,
+    "reason": null
+  },
+  "confirmApply": {
+    "confirms": 865,
+    "lastConfirmedEpoch": 191,
+    "confirmErrors": 25
+  },
+  "panicReport": null,
+  "passed": true,
+  "finishedReason": "duration reached",
+  "timestamp": "2026-08-02T13:13:33Z"
+}

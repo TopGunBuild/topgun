@@ -1,0 +1,63 @@
+=== TopGun soak harness (G4b / TODO-484) ===
+duration=1800s churn_clients=6 keyspace=200 crash_interval=None steady_interval=300s wal_fsync=batched or_churn=true
+starting server (port 47355, data /Users/koristuvac/Projects/topgun/topgun/target/spec355-cellC-data) ...
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[   303s] steady   writes=51178 errs=0 reconnects=260 crashes=0 steady=1 recovery=0 converged=true confirms=147 lastEpoch=12 confirmErrs=4 rss=102MB(peak 102)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[   603s] steady   writes=98491 errs=0 reconnects=496 crashes=0 steady=2 recovery=0 converged=true confirms=290 lastEpoch=21 confirmErrs=8 rss=171MB(peak 171)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[   903s] steady   writes=144975 errs=0 reconnects=732 crashes=0 steady=3 recovery=0 converged=true confirms=434 lastEpoch=30 confirmErrs=12 rss=239MB(peak 239)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  1203s] steady   writes=192953 errs=0 reconnects=973 crashes=0 steady=4 recovery=0 converged=true confirms=578 lastEpoch=40 confirmErrs=17 rss=508MB(peak 508)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  1503s] steady   writes=239689 errs=0 reconnects=1212 crashes=0 steady=5 recovery=0 converged=true confirms=721 lastEpoch=49 confirmErrs=21 rss=757MB(peak 757)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+
+=== SOAK SUMMARY ===
+result:            FAIL
+finished_reason:   tombstone-byte growth slope 175367.6 bytes/h exceeds 512.0 bytes/h: tombstone-byte growth slope 175367.6 bytes/h exceeds 512.0 bytes/h (total growth 89628 bytes over 360 samples, last-half window 896s)
+actual_duration:   1800s
+total_writes:      285911
+write_errors:      0
+reconnects:        1446
+resends:           48007
+confirm_apply:     confirms=865 lastEpoch=59 errors=25 (tracked client advances the low-water-mark that licenses pruning; confirms=0 with a climbing gauge = LWM never advanced)
+steady_checkpts:   5
+recovery_checkpts: 0 (crashes 0)
+memory:            first=11MB peak=1089MB last=1089MB slope=2031.5MB/h -> ok (backstop)
+tombstone_bytes:   first=0 peak=89628 last=73128 slope=175367.6B/h samples=360 -> FAIL (slope + blind-monitor both hard-gate) reason=tombstone-byte growth slope 175367.6 bytes/h exceeds 512.0 bytes/h (total growth 89628 bytes over 360 samples, last-half window 896s)
+tombstone_corpus_redb_scan: 83864 bytes (independent of gauge; last gauge value 73128 bytes) -> DIVERGED (positive-control cross-check, report-only)
+disk_mb:           first=1.5 peak=5082.1 last=5082.1 slope=8686.0MB/h samples=359 -> FAIL (slope report-only until TODO-566; blind-monitor hard-gates) reason=peak disk usage 5082.1MB exceeds ceiling 4096.0MB; disk growth slope 8686.0MB/h exceeds 50.0MB/h (total growth 5080.6MB over 359 samples)
+pending_gates (expected-fail, did NOT fail the run):
+  - disk growth slope 8686.0 MB/h exceeds 50.0 MB/h — EXPECTED until TODO-566 bounds OR-Map tombstones (report-only, did NOT fail the run)
+wrote JSON report to /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec355-cellC.soak.json
+
+=== OR-CHURN MECHANISM REPORT (report-only, Q1-Q4) ===
+Q1 bytes/frame:    OR early(mean=89746B max=136626B) late(mean=130587B max=173807B) max=173807B | LWW mean=220B max=298B | OR/LWW=594.2x | rises=true
+OR frame census:   delta(n=0 mean=0B max=0B total=0B) | snapshot(n=41509 mean=110167B max=173807B total=4572931860B)
+Q2 drain window:   before=5116.2MB after=5111.1MB delta=-5.1MB | no significant drain burst (WAL delta -5.1MB)
+Q3 RSS holder:     rss_slope=2031.5MB/h disk_slope=8686.0MB/h corr=0.98 | RSS tracks disk in lockstep (r=0.98); the growing OR blobs sit in the write-behind queue / record cache — delta-framing should reduce RSS too
+Q4 not tombstone:  or_wal_bytes=4572931860 tombstone_corpus=83864 gauge=73128 | growth_is_or=true
+scan:              segments=2732 or_frames=41509 lww_frames=17578 remove_frames=0
+conclusion:        CONFIRMED: the OR write path appends the full per-key OR-Map snapshot per op, so an OR frame grows O(N) over the run while LWW frames stay flat, and the growth is the OR record/snapshot serialization path — NOT the bounded tombstone corpus. Fix surface: delta-frame the OR write path (append the mutation, fold on recovery).
+sequencing:        Sequencing option for the R1 /xask gate: tail-bounding the acked-beyond-applied WAL is the lowest-risk FIRST containment (OOM/disk-full -> backpressure, zero recovery-path risk); delta-framing is the eventual O(1)-frame fix. If Q2 shows the drain burst is buffered O(N) frames, tail-bounding addresses it directly.
+wrote mechanism report to /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec355-cellC.soak.mechanism.json
