@@ -30,8 +30,8 @@
 //! pins nothing); tracked cursors are always `>= 1`.
 //!
 //! Both `delivered_conn` and `current_max_epoch` are **settable/injectable**: no
-//! production epoch-stamping provider exists yet (that is SPEC-342b's Wave-3
-//! deliverable), so at Wave 2 `current_max_epoch` defaults to `u64::MAX` (the
+//! production epoch-stamping provider exists yet, so at Wave 2
+//! `current_max_epoch` defaults to `u64::MAX` (the
 //! global bound is inert — `delivered_conn` is the operative clamp) and every
 //! `delivered_conn` defaults to 0. The delta-delivery path and 342b later feed
 //! real values. The settable fields make the delivered-clamp and global-bound
@@ -128,7 +128,7 @@ pub struct TombstoneRef {
 /// `__backup`). The record KEY is the opaque `ClientId` (`frontier_client_id`
 /// encoding).
 ///
-/// `_v2`: one-shot poison-purge, version-bumped by the SPEC-342b cross-map
+/// `_v2`: one-shot poison-purge, version-bumped by the cross-map
 /// covering-epoch fix. Before that fix a client's device-wide cursor could be
 /// confirmed off a SINGLE OR-Map's sync completion while the epoch counter and
 /// cursor are GLOBAL across all OR-Maps — an inflated claim that could outrun
@@ -175,7 +175,7 @@ struct FrontierState {
     /// "no/uncomputable epoch" sentinel and no tombstone is ever stamped 0.
     current_epoch: Epoch,
     /// RAM-only `epoch → tombstone refs` index (pure CACHE — never durable on the
-    /// hot path; unclean recovery rebuilds it in SPEC-342j). Keyed by the ACTUAL
+    /// hot path; unclean recovery rebuilds it). Keyed by the ACTUAL
     /// stamped epoch; key 0 is never inserted, so the prune sweep (which iterates
     /// these keys, never a `0..=max` range) can never touch the sentinel.
     epoch_tags: HashMap<Epoch, Vec<TombstoneRef>>,
@@ -490,7 +490,7 @@ impl FrontierState {
     /// Re-insert a drained tombstone ref whose storage drop FAILED, so the tag is
     /// retried on a later sweep instead of being orphaned un-prunable in storage.
     /// The `epoch_max_seq` entry is re-created best-effort (the index is a pure
-    /// RAM cache — SPEC-342j's unclean-recovery rebuild is the authoritative
+    /// RAM cache — the unclean-recovery rebuild is the authoritative
     /// recovery for any imprecision here).
     fn restore(&mut self, epoch: Epoch, tombstone_ref: TombstoneRef) {
         self.epoch_tags
@@ -1104,7 +1104,7 @@ impl TombstoneFrontier {
     }
 
     /// Whether re-admission protection is ACTIVE. True once the durability
-    /// watermark is non-zero (SPEC-342j activation). While it is 0 (dark by
+    /// watermark is non-zero (prune activation). While it is 0 (dark by
     /// construction) the forgotten-client gate is fully wired but transparent: no
     /// tombstone can be pruned, so a re-admission cannot resurrect anything and
     /// blocking would only break an un-migrated client. The gate's active blocking
@@ -1415,7 +1415,7 @@ impl TombstoneFrontier {
     /// Re-insert a drained tombstone ref whose storage drop FAILED (see
     /// [`Self::drain_prunable_tombstones`]). The index entry is restored so a later
     /// sweep retries the drop; `epoch_max_seq` is re-created best-effort (pure RAM
-    /// cache — SPEC-342j's rebuild is the authoritative recovery).
+    /// cache — the unclean-recovery rebuild is the authoritative recovery).
     pub fn restore_tombstone_ref(&self, epoch: Epoch, tombstone_ref: TombstoneRef) {
         let snapshot = {
             let mut state = self.lock();
@@ -3138,7 +3138,7 @@ mod persistence_tests {
         assert!(!f.is_tracked(&fresh), "no persisted cursor → untracked");
     }
 
-    /// One-shot poison-purge (SPEC-342b Review v1 Major fix): a cursor persisted
+    /// One-shot poison-purge: a cursor persisted
     /// under the PRE-bump keyspace name (before the cross-map ACK-inflation fix)
     /// is never read back after the version bump — an inflated pre-barrier cursor
     /// cannot silently resurrect via rehydration. The row is orphaned, not

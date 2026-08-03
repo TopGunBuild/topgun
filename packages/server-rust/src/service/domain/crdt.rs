@@ -85,7 +85,7 @@ pub struct CrdtService {
     /// Per-KEY single-writer registry. Serializes the `OR_ADD` apply RMW
     /// (`store.get` -> merge -> `store.put`) so concurrent `OR_ADD`s on the
     /// SAME key cannot both read the pre-mutation state and race to `put`,
-    /// which would silently drop one add (SPEC-333b lost-update race).
+    /// which would silently drop one add (a lost-update race).
     /// Internal-only: not exposed via `new()` so existing call sites are
     /// unaffected.
     ///
@@ -543,7 +543,7 @@ impl CrdtService {
             // Serialize the compound read-modify-write per key: without this, two
             // concurrent OR_ADDs on the SAME key could each read the pre-mutation
             // state below and race to `store.put`, with the second `put` silently
-            // clobbering the first's merge and losing an update (SPEC-333b). Held
+            // clobbering the first's merge and losing an update. Held
             // across `store.get` through the single `store.put` merge-commit only —
             // does NOT cover the OR_REMOVE RMW below (342b's responsibility).
             let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
@@ -6655,7 +6655,7 @@ mod tests {
         );
     }
 
-    // AC6 (SPEC-342d / SPEC-333b): N concurrent OR_ADDs on the SAME key must
+    // N concurrent OR_ADDs on the SAME key must
     // all survive — the per-key writer lock now serializes the
     // `store.get` -> merge -> `store.put` RMW inside `apply_single_op`'s
     // OR_ADD branch, so no concurrent add can read stale pre-mutation state
