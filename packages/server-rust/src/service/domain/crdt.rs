@@ -36,6 +36,7 @@ use crate::service::security::WriteAdmission;
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::wal::OrDelta;
 use crate::storage::{CallerProvenance, ExpiryPolicy, MutateOutcome, RecordStoreFactory};
+use crate::tombstone_frontier::{Epoch, PruneEpochRecord, PrunePassRecord};
 use crate::tombstone_frontier_impl::TombstoneFrontier;
 use crate::traits::SchemaProvider;
 
@@ -1498,12 +1499,62 @@ pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticV
 /// apart from "the closure ran and the tag was already gone" — which must NOT be
 /// restored, or the prune loop livelocks on it — by a flag the closure itself
 /// sets, because the `Ok(bool)` from `update_in_place` conflates the two.
+///
+/// Every ref leaves the loop body through exactly one of six counted exits, so
+/// `considered == dropped + matched_nothing + absent + restored_read_error +
+/// restored_evicted + restored_write_error` holds by construction. The tombstone-byte
+/// decrement stays where it already was — in the post-write success arm, behind
+/// `dropped` — because a decrement moved to follow the ledger would credit bytes the
+/// durable write never actually freed.
+// Kept as one body deliberately: splitting the loop out would move the exit
+// counters and the tombstone-byte decrement into a helper, where neither the
+// summing identity nor the "exactly one decrement, in the post-write arm behind
+// `dropped`" siting is assertable against this function any more.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn prune_epoch_tombstones(
     frontier: &TombstoneFrontier,
     factory: &RecordStoreFactory,
     key_writer: &KeyWriterRegistry,
 ) {
-    for (epoch, r) in frontier.drain_prunable_tombstones() {
+    let drained = frontier.drain_prunable_tombstones();
+    // One record per invocation, empty drains included: a pass that drains nothing
+    // is exactly the regime this record has to be able to describe, so the pass is
+    // counted here rather than behind any eligibility or per-ref condition. A pass
+    // counted inside the loop below would read zero during a total stall.
+    let mut pass = PrunePassRecord {
+        empty_drain: drained.is_empty(),
+        ..PrunePassRecord::default()
+    };
+    // Snapshot the epoch/watermark triple ONCE, adjacent to the drain, so each
+    // per-epoch record carries the state in force when the epoch drained rather
+    // than a value re-read after the loop's awaits let it move. Read only on a
+    // non-empty drain: `low_water_mark` folds over the tracked claims, which is
+    // work an empty pass must not pay for a record it would never emit.
+    let (current_epoch, low_water_mark, durable_epoch_watermark) = if drained.is_empty() {
+        (0, 0, 0)
+    } else {
+        (
+            frontier.current_epoch(),
+            frontier.low_water_mark(),
+            frontier.durable_epoch_watermark(),
+        )
+    };
+    let mut per_epoch: BTreeMap<Epoch, PruneEpochRecord> = BTreeMap::new();
+
+    for (epoch, r) in drained {
+        // The exhaustiveness identity's left-hand side: every ref the body examines
+        // is counted here and leaves through exactly one exit counter below.
+        pass.considered += 1;
+        per_epoch
+            .entry(epoch)
+            .or_insert(PruneEpochRecord {
+                epoch,
+                current_epoch,
+                low_water_mark,
+                durable_epoch_watermark,
+                ..PruneEpochRecord::default()
+            })
+            .considered += 1;
         let store = factory.get_or_create(&r.map, hash_to_partition(&r.key));
         // Serialize the drop against concurrent OR writes on this key.
         let _guard = key_writer.acquire(&r.map, &r.key).await;
@@ -1515,9 +1566,17 @@ pub(crate) async fn prune_epoch_tombstones(
         match store.get(&r.key, false).await {
             Ok(Some(_)) => {}
             // Truly gone (no resident and no durable record): nothing to reclaim.
-            Ok(None) => continue,
+            // The ref is consumed WITHOUT a tombstone-byte decrement, so it is
+            // counted apart from a drop rather than folded into a "not dropped"
+            // bucket: a growing share here is a candidate mechanism for a falling
+            // reclaim fraction that no other instrument can see.
+            Ok(None) => {
+                pass.absent += 1;
+                continue;
+            }
             Err(e) => {
                 tracing::warn!(map = %r.map, key = %r.key, epoch, "prune read failed, re-indexing tombstone for retry: {e}");
+                pass.restored_read_error += 1;
                 frontier.restore_tombstone_ref(epoch, r);
                 continue;
             }
@@ -1592,6 +1651,13 @@ pub(crate) async fn prune_epoch_tombstones(
             Ok(_) => {
                 if dropped {
                     crate::storage::record::sub_tombstone_bytes(r.tag.len() as u64);
+                    let freed = r.tag.len() as u64;
+                    pass.dropped += 1;
+                    pass.bytes_freed += freed;
+                    if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
+                        epoch_record.dropped += 1;
+                        epoch_record.bytes_freed += freed;
+                    }
                 }
                 // The closure never ran: the key was evicted between the
                 // rehydrating get and this write, so init=None mutated nothing
@@ -1603,6 +1669,9 @@ pub(crate) async fn prune_epoch_tombstones(
                 // reports "changed" with nothing pruned) cannot livelock the
                 // loop by getting the ref restored on every pass. `dropped`
                 // implies `ran`, so the gauge above and this arm are exclusive.
+                // `dropped` implies `ran`, so these three dispositions are mutually
+                // exclusive and together cover every way out of a successful write —
+                // which is what makes the exit ledger sum back to `considered`.
                 if !ran {
                     tracing::debug!(
                         map = %r.map,
@@ -1610,17 +1679,34 @@ pub(crate) async fn prune_epoch_tombstones(
                         epoch,
                         "prune found key evicted mid-write, re-indexing tombstone for retry"
                     );
+                    pass.restored_evicted += 1;
                     frontier.restore_tombstone_ref(epoch, r);
+                } else if !dropped {
+                    // The closure ran and matched no tag; it may still have owed the
+                    // shape-upgrade write above, but no tombstone was reclaimed.
+                    pass.matched_nothing += 1;
                 }
             }
             Err(e) => {
                 // Operator-visible: a swallowed storage error on the prune path
                 // would silently stall tombstone reclamation.
                 tracing::warn!(map = %r.map, key = %r.key, epoch, "prune update failed, re-indexing tombstone for retry: {e}");
+                pass.restored_write_error += 1;
                 frontier.restore_tombstone_ref(epoch, r);
             }
         }
     }
+
+    pass.epochs_drained = per_epoch.len() as u64;
+    for epoch_record in per_epoch.values() {
+        frontier
+            .prune_observer()
+            .observe_drained_epoch(epoch_record);
+    }
+    // Exactly one pass observation per invocation, outside the loop body and on
+    // every path through this function — the recorder counts the pass itself, so a
+    // second or a conditional call would break the pass identity.
+    frontier.prune_observer().observe_pass(&pass);
 }
 
 // ---------------------------------------------------------------------------
