@@ -208,6 +208,25 @@ struct FrontierState {
     /// Defaults to [`DEFAULT_FORGET_LAG_EPOCHS`]; settable so RAM pressure / an
     /// operator override can tighten it.
     forget_lag_epochs: u64,
+    /// Total tombstone refs held across every entry of `epoch_tags`, maintained
+    /// INCREMENTALLY at stamp / drain / restore / rebuild. Summing the per-epoch
+    /// vector lengths would be a fold over the whole index on a path that runs on
+    /// every `OR_REMOVE`, so the count is carried rather than derived. (The epoch
+    /// count needs no companion field — `HashMap::len` is already O(1).)
+    indexed_refs: u64,
+    /// The highest epoch any drain has removed from the index, 0 before the first
+    /// drain. Last-value only; the per-epoch join is not representable over the
+    /// metrics transport anyway.
+    last_drained_epoch: Epoch,
+    /// The low-water-mark as of the last cursor mutation. Cached so the per-remove
+    /// path can publish the LWM without folding the cursor map: the MIN can only
+    /// change when a cursor is inserted, raised or removed, and every such site
+    /// refreshes this through [`Self::refresh_low_water_mark`].
+    observed_lwm: Epoch,
+    /// Wall-clock millis of the last low-water-mark ADVANCE, seeded at construction
+    /// so the stall is measured from process start rather than from the epoch (which
+    /// would render a ~57-year stall until the first advance).
+    last_lwm_advance_millis: u64,
 }
 
 impl FrontierState {
@@ -223,6 +242,10 @@ impl FrontierState {
             epoch_max_seq: HashMap::new(),
             durable_epoch_watermark: 0,
             forget_lag_epochs: DEFAULT_FORGET_LAG_EPOCHS,
+            indexed_refs: 0,
+            last_drained_epoch: 0,
+            observed_lwm: 0,
+            last_lwm_advance_millis: now_millis(),
         }
     }
 
@@ -327,12 +350,44 @@ impl FrontierState {
                 key: key.to_string(),
                 tag: tag.to_string(),
             });
+        // One ref in, one increment — the whole index-size accounting on this path.
+        self.indexed_refs += 1;
         // Record the durability bound for this epoch: the highest write sequence
         // the store had assigned at stamp time. The epoch is byte-durable only
         // once the store's flushed watermark reaches this value.
         let slot = self.epoch_max_seq.entry(epoch).or_insert(0);
         *slot = (*slot).max(write_seq);
         epoch
+    }
+
+    /// Epochs currently carrying tombstone refs. O(1) — `HashMap::len` is a stored
+    /// count, so this is a read rather than the index fold the observation contract
+    /// forbids.
+    fn indexed_epochs(&self) -> u64 {
+        u64::try_from(self.epoch_tags.len()).unwrap_or(u64::MAX)
+    }
+
+    /// Recompute the fleet-wide low-water-mark, refresh the cache, and report the
+    /// distance it ADVANCED, if it advanced.
+    ///
+    /// Called from every site that mutates a cursor — an ACK advance, a forget, a
+    /// rehydrate — and from nowhere else, so the cursor fold is paid once per
+    /// cursor mutation instead of once per tombstone. The MIN can also FALL (a
+    /// reconnecting laggard rejoins the fold), which is a legitimate movement but
+    /// not an advance: the cache follows it down, and only an increase counts.
+    fn refresh_low_water_mark(&mut self, now: u64) -> Option<u64> {
+        let lwm = self.low_water_mark();
+        let advanced = lwm.checked_sub(self.observed_lwm).filter(|&d| d > 0);
+        self.observed_lwm = lwm;
+        if advanced.is_some() {
+            self.last_lwm_advance_millis = now;
+        }
+        advanced
+    }
+
+    /// Seconds since the last low-water-mark advance.
+    fn lwm_stall_seconds(&self, now: u64) -> u64 {
+        now.saturating_sub(self.last_lwm_advance_millis) / 1000
     }
 
     /// The byte-durability watermark: the greatest `E` such that EVERY stamped
@@ -372,6 +427,9 @@ impl FrontierState {
         // Position op_seq so the NEXT genuinely-new tombstone lands in e_rec + 1,
         // keeping every epoch below e_rec empty.
         self.op_seq = e_rec.saturating_mul(width);
+        // The rebuild replaces the index wholesale, so the carried ref count is
+        // re-seeded from the restamped set rather than adjusted.
+        self.indexed_refs = u64::try_from(live.len()).unwrap_or(u64::MAX);
         if !live.is_empty() {
             self.epoch_max_seq.insert(e_rec, 0);
             self.epoch_tags.insert(e_rec, live);
@@ -411,6 +469,12 @@ impl FrontierState {
         let mut drained = Vec::new();
         for e in eligible {
             if let Some(refs) = self.epoch_tags.remove(&e) {
+                // Decrement by what this epoch actually held, so the carried count
+                // stays exact without ever re-reading the rest of the index.
+                self.indexed_refs = self
+                    .indexed_refs
+                    .saturating_sub(u64::try_from(refs.len()).unwrap_or(u64::MAX));
+                self.last_drained_epoch = self.last_drained_epoch.max(e);
                 drained.extend(refs.into_iter().map(|r| (e, r)));
             }
             self.epoch_max_seq.remove(&e);
@@ -428,8 +492,107 @@ impl FrontierState {
             .entry(epoch)
             .or_default()
             .push(tombstone_ref);
+        // The drain already decremented this ref; putting it back re-adds it, so a
+        // drained-then-restored ref is never double-counted in either direction.
+        self.indexed_refs += 1;
         self.epoch_max_seq.entry(epoch).or_insert(0);
     }
+
+    /// Snapshot of the frontier state the record publishes as last-value gauges.
+    ///
+    /// Every field is a stored value: the ref count is carried, the epoch count is a
+    /// `HashMap::len`, and the low-water-mark comes from the cursor-path cache. The
+    /// snapshot is therefore O(1) and safe on the per-remove path.
+    fn observation_snapshot(&self) -> FrontierObservation {
+        FrontierObservation {
+            indexed_refs: self.indexed_refs,
+            indexed_epochs: self.indexed_epochs(),
+            current_epoch: self.current_epoch,
+            low_water_mark: self.observed_lwm,
+            durable_epoch_watermark: self.durable_epoch_watermark,
+            last_drained_epoch: self.last_drained_epoch,
+        }
+    }
+
+    /// The eligible / ineligible split of the indexed corpus, plus the claim span
+    /// and per-claim lags observed at the same instant.
+    ///
+    /// O(indexed epochs + tracked claims), which the perturbation budget permits
+    /// ONLY on the low-water-mark-movement path and on non-empty drains — never per
+    /// `OR_REMOVE`. The cursor fold is hoisted out of the epoch loop: calling
+    /// `is_epoch_prune_eligible` per epoch would re-fold the cursor map once per
+    /// epoch and turn this into O(epochs × claims) for an identical answer.
+    fn split_observation(&self) -> SplitObservation {
+        let watermark = self.durable_epoch_watermark;
+        let lwm = self.low_water_mark();
+        let current_epoch = self.current_epoch;
+        let mut eligible_refs = 0u64;
+        let mut ineligible_refs = 0u64;
+        for (&epoch, refs) in &self.epoch_tags {
+            let held = u64::try_from(refs.len()).unwrap_or(u64::MAX);
+            // The FULL call-site conjunction the drain applies, with epoch 0 rejected
+            // for the same belt-and-suspenders reason: a split computed under a weaker
+            // predicate than the drain's would report refs as eligible that no pass
+            // would ever take.
+            if epoch != 0 && watermark >= epoch && lwm > epoch {
+                eligible_refs += held;
+            } else {
+                ineligible_refs += held;
+            }
+        }
+        let claim_lags: Vec<Epoch> = self
+            .cursors
+            .values()
+            .map(|&cursor| current_epoch.saturating_sub(cursor))
+            .collect();
+        SplitObservation {
+            eligible_refs,
+            ineligible_refs,
+            computed_at_epoch: current_epoch,
+            claim_span: PruneClaimSpanRecord {
+                current_epoch,
+                low_water_mark: lwm,
+                span_epochs: current_epoch.saturating_sub(lwm),
+                tracked_claims: u64::try_from(self.cursors.len()).unwrap_or(u64::MAX),
+            },
+            claim_lags,
+        }
+    }
+}
+
+/// The frontier state published as last-value gauges at an observation point.
+///
+/// Gathered under the state lock and emitted after it drops, so no observation call
+/// ever runs while the frontier is held.
+#[derive(Debug, Clone, Copy)]
+struct FrontierObservation {
+    indexed_refs: u64,
+    indexed_epochs: u64,
+    current_epoch: Epoch,
+    low_water_mark: Epoch,
+    durable_epoch_watermark: Epoch,
+    last_drained_epoch: Epoch,
+}
+
+/// The eligible / ineligible split with its staleness marker, plus the claim span
+/// captured at the same instant.
+///
+/// The split is only ever recomputed on the events that STOP happening during a
+/// scheduling or low-water-mark stall, which is why `computed_at_epoch` travels with
+/// it: a reader that cannot tell a fresh sample from one frozen at its last recompute
+/// would read a stalled split as a fresh "not growing" exactly when it is least
+/// entitled to.
+///
+/// The per-claim lags are a `Vec` here and NOT a field of the record struct: the
+/// record stays allocation-free and copyable, and this vector is built only on the
+/// two paths the budget already licenses index-proportional work on.
+#[derive(Debug, Clone)]
+struct SplitObservation {
+    eligible_refs: u64,
+    ineligible_refs: u64,
+    computed_at_epoch: Epoch,
+    claim_span: PruneClaimSpanRecord,
+    claim_lags: Vec<Epoch>,
 }
 
 impl PruneSafety for FrontierState {
@@ -645,6 +808,45 @@ impl TombstoneFrontier {
         self.prune_observer.as_ref()
     }
 
+    /// Publish the frontier's index and epoch state.
+    ///
+    /// Both calls are a fixed handful of gauge stores over already-resolved handles,
+    /// which is what keeps this affordable on the per-`OR_REMOVE` stamp path. The
+    /// snapshot is taken under the lock by the caller and this runs after it drops.
+    fn publish_frontier_state(&self, snapshot: &FrontierObservation) {
+        let observer = self.prune_observer.as_ref();
+        observer.observe_index_state(snapshot.indexed_refs, snapshot.indexed_epochs);
+        observer.observe_epoch_state(
+            snapshot.current_epoch,
+            snapshot.low_water_mark,
+            snapshot.durable_epoch_watermark,
+            snapshot.last_drained_epoch,
+        );
+    }
+
+    /// Publish the eligible / ineligible split with its staleness marker, and the
+    /// claim span captured at the same instant.
+    ///
+    /// The recompute counter behind `observe_eligibility_split` is what makes a
+    /// stale split detectable, so this is called on every recompute and on nothing
+    /// else: a split published without a recompute would inflate the counter and
+    /// present a frozen sample as a fresh one.
+    fn publish_split(&self, split: &SplitObservation) {
+        let observer = self.prune_observer.as_ref();
+        observer.observe_eligibility_split(
+            split.eligible_refs,
+            split.ineligible_refs,
+            split.computed_at_epoch,
+        );
+        observer.observe_claim_span(&split.claim_span, &split.claim_lags);
+    }
+
+    /// Publish a low-water-mark advance together with the split it triggered.
+    fn publish_lwm_movement(&self, epochs_advanced: u64, split: &SplitObservation) {
+        self.prune_observer.observe_lwm_advance(epochs_advanced);
+        self.publish_split(split);
+    }
+
     /// Enqueue a durability message onto the worker if one is wired. Returns
     /// `false` if there is no worker (no store, or already shut down).
     fn enqueue_persist(&self, msg: PersistMsg) -> bool {
@@ -783,7 +985,10 @@ impl TombstoneFrontier {
         // delete BEFORE this advance, letting the worker delete then re-persist and
         // resurrect a forgotten cursor. `enqueue_persist` is a non-blocking channel
         // send, so holding the std Mutex across it is safe (no await under the lock).
-        let advanced = {
+        // Read the clock BEFORE the lock: it feeds the stall gauge, and a syscall
+        // under the frontier lock would lengthen the hold for every concurrent ACK.
+        let now = now_millis();
+        let (advanced, movement, stall_seconds) = {
             let mut state = self.lock();
             let advanced = state.advance_on_ack(client, claimed, conn);
             if let Some(epoch) = advanced {
@@ -803,8 +1008,21 @@ impl TombstoneFrontier {
                     }
                 }
             }
-            advanced
+            // Only a cursor that actually moved can move the fleet-wide MIN, so a
+            // replayed / clamped / delivered-bounded ACK pays no fold at all here.
+            let movement = advanced
+                .and_then(|_| state.refresh_low_water_mark(now))
+                .map(|epochs_advanced| (epochs_advanced, state.split_observation()));
+            // Refreshed on EVERY ack, advance or not: the regime worth seeing is the
+            // one where the low-water-mark is not moving, and a stall gauge that only
+            // ticked on an advance would freeze exactly when it starts to matter.
+            let stall_seconds = state.lwm_stall_seconds(now);
+            (advanced, movement, stall_seconds)
         };
+        self.prune_observer.observe_lwm_stall(stall_seconds);
+        if let Some((epochs_advanced, split)) = movement {
+            self.publish_lwm_movement(epochs_advanced, &split);
+        }
         advanced.is_some()
     }
 
@@ -826,7 +1044,24 @@ impl TombstoneFrontier {
             return;
         };
         match load_cursor(store.as_ref(), client).await {
-            Ok(Some(epoch)) => self.lock().rehydrate(client, epoch),
+            Ok(Some(epoch)) => {
+                let now = now_millis();
+                // A rehydrate is a cursor mutation, so it is one of the three sites
+                // that can move the low-water-mark. Usually it moves it DOWN (a
+                // laggard rejoins the fold) and reports no advance; refreshing here
+                // anyway is what keeps the cached MIN from going stale and making a
+                // later ACK report an advance this reconnect actually caused.
+                let movement = {
+                    let mut state = self.lock();
+                    state.rehydrate(client, epoch);
+                    state
+                        .refresh_low_water_mark(now)
+                        .map(|epochs_advanced| (epochs_advanced, state.split_observation()))
+                };
+                if let Some((epochs_advanced, split)) = movement {
+                    self.publish_lwm_movement(epochs_advanced, &split);
+                }
+            }
             Ok(None) => {}
             Err(e) => debug!(client = %client, "cursor rehydrate load failed: {e}"),
         }
@@ -902,19 +1137,31 @@ impl TombstoneFrontier {
         // every prior offloaded advance for this client — a late advance can no longer
         // land after the delete and resurrect the stale row. Enqueue is a non-blocking
         // send; the `done` oneshot is awaited AFTER the lock drops.
-        let rx = {
+        let now = now_millis();
+        let (rx, movement) = {
             let mut state = self.lock();
             state.forget_client(client);
+            // Dropping the fleet's laggard is the single largest source of
+            // low-water-mark movement there is; leaving it unobserved would put a
+            // hole in the advance cadence exactly where the retention ceiling gets
+            // its headroom.
+            let movement = state
+                .refresh_low_water_mark(now)
+                .map(|epochs_advanced| (epochs_advanced, state.split_observation()));
             let (done_tx, done_rx) = oneshot::channel();
-            if self.enqueue_persist(PersistMsg::Forget {
+            let rx = if self.enqueue_persist(PersistMsg::Forget {
                 client: client.clone(),
                 done: done_tx,
             }) {
                 Some(done_rx)
             } else {
                 None
-            }
+            };
+            (rx, movement)
         };
+        if let Some((epochs_advanced, split)) = movement {
+            self.publish_lwm_movement(epochs_advanced, &split);
+        }
         // Whether the durable delete still needs a direct fallback. Three cases:
         //   * `None`         — never enqueued (no store, or worker already shut down).
         //   * `Some(Err(_))` — enqueued, but the worker died/was dropped before
@@ -964,7 +1211,18 @@ impl TombstoneFrontier {
             .store
             .as_ref()
             .map_or(0, |s| s.assigned_write_sequence());
-        self.lock().stamp_tombstone(map, key, tag, write_seq)
+        let (epoch, snapshot) = {
+            let mut state = self.lock();
+            let epoch = state.stamp_tombstone(map, key, tag, write_seq);
+            (epoch, state.observation_snapshot())
+        };
+        // The stamp is the ONE path that grows the index, so it is where the index
+        // and epoch gauges have to be refreshed for them to mean anything. Everything
+        // published here is a stored value (carried ref count, `HashMap::len`, cached
+        // low-water-mark), so the per-remove cost is a fixed handful of gauge stores
+        // and no fold — the eligible/ineligible split deliberately does NOT run here.
+        self.publish_frontier_state(&snapshot);
+        epoch
     }
 
     /// Recompute the cached byte-durability watermark from the store's live
@@ -1034,7 +1292,15 @@ impl TombstoneFrontier {
 
         let live = scan_live_tombstones(store.as_ref()).await?;
         let restamped = live.len();
-        self.lock().rebuild_into_epoch(e_rec, live);
+        let snapshot = {
+            let mut state = self.lock();
+            state.rebuild_into_epoch(e_rec, live);
+            state.observation_snapshot()
+        };
+        // The rebuild replaces the whole index in the pre-listener recovery window,
+        // so publishing here is what stops the first post-recovery scrape reporting
+        // the pre-crash index size.
+        self.publish_frontier_state(&snapshot);
         debug!(
             e_rec,
             max_cursor_epoch,
@@ -1104,12 +1370,35 @@ impl TombstoneFrontier {
         // the store's watermark outside the lock keeps the frontier lock hold
         // short; the field is then updated and consumed under one lock.
         let flushed = self.store.as_ref().map(|s| s.flushed_watermark());
-        let mut state = self.lock();
-        if let Some(flushed) = flushed {
-            let computed = state.compute_durable_epoch_watermark(flushed);
-            state.durable_epoch_watermark = state.durable_epoch_watermark.max(computed);
+        let (drained, snapshot, split, last_advance_millis) = {
+            let mut state = self.lock();
+            if let Some(flushed) = flushed {
+                let computed = state.compute_durable_epoch_watermark(flushed);
+                state.durable_epoch_watermark = state.durable_epoch_watermark.max(computed);
+            }
+            let drained = state.drain_prunable();
+            // A non-empty drain is the second of the two events the budget licenses
+            // index-proportional work on. An empty drain — which is every drain while
+            // the prune is dark, i.e. the per-remove case — takes the cheap path and
+            // recomputes nothing, which is also why the split needs its staleness
+            // marker to be readable at all.
+            let split = (!drained.is_empty()).then(|| state.split_observation());
+            (
+                drained,
+                state.observation_snapshot(),
+                split,
+                state.last_lwm_advance_millis,
+            )
+        };
+        self.publish_frontier_state(&snapshot);
+        if let Some(split) = split {
+            self.publish_split(&split);
+            // The clock is read only on the non-empty branch, so the per-remove path
+            // pays no syscall for a gauge the ACK path already refreshes.
+            self.prune_observer
+                .observe_lwm_stall(now_millis().saturating_sub(last_advance_millis) / 1000);
         }
-        state.drain_prunable()
+        drained
     }
 
     /// Re-insert a drained tombstone ref whose storage drop FAILED (see
@@ -1117,7 +1406,15 @@ impl TombstoneFrontier {
     /// sweep retries the drop; `epoch_max_seq` is re-created best-effort (pure RAM
     /// cache — SPEC-342j's rebuild is the authoritative recovery).
     pub fn restore_tombstone_ref(&self, epoch: Epoch, tombstone_ref: TombstoneRef) {
-        self.lock().restore(epoch, tombstone_ref);
+        let snapshot = {
+            let mut state = self.lock();
+            state.restore(epoch, tombstone_ref);
+            state.observation_snapshot()
+        };
+        // A restore puts a ref back into the index, so the index gauge has to follow
+        // it back up: a drain that decremented and a restore that did not would make
+        // the gauge drift down by exactly the refs a failing store keeps handing back.
+        self.publish_frontier_state(&snapshot);
     }
 
     /// Set the epoch width (stamped ops per epoch, clamped `>= 1`). Wired from the
@@ -1922,6 +2219,320 @@ mod tests {
                  render was:\n{rendered}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Prune record — the frontier observation call sites
+    // -----------------------------------------------------------------------
+
+    /// Bind a fresh Prometheus recorder, run `body` under it, and return the render.
+    ///
+    /// Binding BEFORE `body` is load-bearing rather than stylistic: the frontier
+    /// resolves its metric handles at construction, and a handle resolved before a
+    /// recorder is bound binds to a no-op for its whole lifetime — the inverted order
+    /// would silently turn every assertion below into an assertion about nothing.
+    fn rendered_under_a_recorder(body: impl FnOnce()) -> String {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, body);
+        handle.render()
+    }
+
+    /// Drive an async frontier call from a synchronous test body.
+    ///
+    /// `metrics::with_local_recorder` binds a THREAD-LOCAL recorder and takes a
+    /// synchronous closure, so a `#[tokio::test]` body cannot be wrapped in one. A
+    /// current-thread runtime driven from inside the binding keeps the recorder
+    /// visible to everything the call touches.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(fut)
+    }
+
+    /// The index gauges are maintained incrementally at stamp / drain / restore, and
+    /// the carried count agrees with what a fold over the index would produce.
+    ///
+    /// The fold is the reference implementation and it lives HERE, in a test, which is
+    /// the whole point: on the hot path it would be work proportional to the index on
+    /// every `OR_REMOVE`, and the carried count exists so that fold never has to run
+    /// in production.
+    #[test]
+    fn index_state_gauges_track_the_index_without_folding_it() {
+        let mut folded = 0;
+        let rendered = rendered_under_a_recorder(|| {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for k in ["k1", "k2", "k3"] {
+                f.stamp_tombstone("m", k, "t");
+            }
+            // Epochs 1 and 2 are eligible (watermark 2, LWM 3), epoch 3 is not.
+            f.set_durable_epoch_watermark(2);
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:alice|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 3, CONN_A)));
+
+            let drained = f.drain_prunable_tombstones();
+            assert_eq!(drained.len(), 2, "epochs 1 and 2 drain, epoch 3 does not");
+            // One drop failed: the ref comes back and the index must follow it back up.
+            let (epoch, tombstone_ref) = drained.into_iter().next().expect("a drained ref");
+            f.restore_tombstone_ref(epoch, tombstone_ref);
+
+            let state = f.lock();
+            folded = state.epoch_tags.values().map(Vec::len).sum::<usize>();
+            assert_eq!(
+                u64::try_from(folded).unwrap(),
+                state.indexed_refs,
+                "the carried ref count must equal the fold it exists to avoid"
+            );
+        });
+
+        assert_eq!(folded, 2, "one epoch-3 ref plus the restored one");
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_INDEXED_REFS),
+            Some("2"),
+            "render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_INDEXED_EPOCHS),
+            Some("2"),
+            "render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_LAST_DRAINED_EPOCH),
+            Some("2"),
+            "render was:\n{rendered}"
+        );
+    }
+
+    /// A low-water-mark advance publishes the advance cadence, the eligible /
+    /// ineligible split, the split's staleness marker, and the claim span.
+    #[test]
+    fn an_lwm_advance_publishes_the_split_and_the_claim_span() {
+        let rendered = rendered_under_a_recorder(|| {
+            let f = frontier();
+            f.set_epoch_width(1);
+            // Injected BEFORE the stamps: the durability watermark is republished by
+            // the stamp / drain / restore path, and production recomputes it from the
+            // store on every drain — this test takes neither after injecting it.
+            f.set_durable_epoch_watermark(2);
+            for k in ["k1", "k2", "k3"] {
+                f.stamp_tombstone("m", k, "t");
+            }
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:alice|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+        });
+
+        // Watermark 2 and LWM 2: only epoch 1 clears BOTH conjuncts.
+        for (name, value) in [
+            (METRIC_PRUNE_ELIGIBLE_REFS, "1"),
+            (METRIC_PRUNE_INELIGIBLE_REFS, "2"),
+            // The staleness marker: the epoch the split was computed at.
+            (METRIC_PRUNE_SPLIT_COMPUTED_EPOCH, "3"),
+            (METRIC_PRUNE_CURRENT_EPOCH, "3"),
+            (METRIC_PRUNE_LOW_WATER_MARK, "2"),
+            (METRIC_PRUNE_DURABLE_EPOCH_WATERMARK, "2"),
+            (METRIC_PRUNE_TRACKED_CLAIMS, "1"),
+            // ... and its monotone companion: one recompute.
+            (METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL, "1"),
+            (METRIC_PRUNE_LWM_ADVANCES_TOTAL, "1"),
+            (METRIC_PRUNE_LWM_EPOCHS_ADVANCED_TOTAL, "2"),
+        ] {
+            assert_eq!(
+                rendered_value(&rendered, name),
+                Some(value),
+                "{name} must render {value}; render was:\n{rendered}"
+            );
+        }
+        // The claim span is `current_epoch - low_water_mark` = 1, over one tracked
+        // claim whose own lag is the same 1.
+        for name in [
+            METRIC_PRUNE_CLAIM_SPAN_EPOCHS,
+            METRIC_PRUNE_CLAIM_LAG_EPOCHS,
+        ] {
+            assert_eq!(
+                rendered_value(&rendered, &format!("{name}_sum")),
+                Some("1"),
+                "render was:\n{rendered}"
+            );
+            assert_eq!(
+                rendered_value(&rendered, &format!("{name}_count")),
+                Some("1"),
+                "render was:\n{rendered}"
+            );
+        }
+    }
+
+    /// A stale split is DETECTABLE, and the recompute counter is what detects it.
+    ///
+    /// After the last recompute the split gauges keep rendering their old values
+    /// while the corpus they describe keeps growing — read alone they say "not
+    /// growing" precisely when they are least entitled to. The recompute counter is
+    /// frozen alongside them, which is the signal that makes the sample inadmissible
+    /// rather than reassuring.
+    #[test]
+    fn a_split_frozen_at_its_last_recompute_is_detectable_from_the_recompute_counter() {
+        let rendered = rendered_under_a_recorder(|| {
+            let f = frontier();
+            f.set_epoch_width(1);
+            f.stamp_tombstone("m", "k1", "t");
+            f.set_durable_epoch_watermark(1);
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:alice|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 1, CONN_A)));
+
+            // The LWM stops moving; removes keep arriving. Every drain from here is
+            // empty (the new epochs are all above the watermark), so nothing
+            // recomputes the split.
+            for k in ["k2", "k3", "k4"] {
+                f.stamp_tombstone("m", k, "t");
+                assert!(f.drain_prunable_tombstones().is_empty());
+            }
+        });
+
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL),
+            Some("1"),
+            "the split must NOT be recomputed per remove; render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_SPLIT_COMPUTED_EPOCH),
+            Some("1"),
+            "the marker must still name the epoch of the LAST recompute; \
+             render was:\n{rendered}"
+        );
+        // The frozen split still claims one ineligible ref while the index actually
+        // holds four — exactly the misreading the marker exists to expose.
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_INELIGIBLE_REFS),
+            Some("1"),
+            "render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_INDEXED_REFS),
+            Some("4"),
+            "the index gauge, unlike the split, IS refreshed per stamp; \
+             render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_CURRENT_EPOCH),
+            Some("4"),
+            "render was:\n{rendered}"
+        );
+    }
+
+    /// A NON-empty drain is the second recompute trigger, and it moves the marker.
+    #[test]
+    fn a_nonempty_drain_recomputes_the_split() {
+        let rendered = rendered_under_a_recorder(|| {
+            let f = frontier();
+            f.set_epoch_width(1);
+            f.stamp_tombstone("m", "k1", "t");
+            f.stamp_tombstone("m", "k2", "t");
+            f.set_durable_epoch_watermark(1);
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:alice|dev-1".into();
+            // Recompute 1: the LWM advance.
+            assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+            // Recompute 2: the non-empty drain.
+            assert_eq!(f.drain_prunable_tombstones().len(), 1);
+            // Still 2: an empty drain recomputes nothing.
+            assert!(f.drain_prunable_tombstones().is_empty());
+        });
+
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL),
+            Some("2"),
+            "render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_LAST_DRAINED_EPOCH),
+            Some("1"),
+            "render was:\n{rendered}"
+        );
+        // Epoch 1 has been drained out of the index, so nothing is eligible any more.
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_ELIGIBLE_REFS),
+            Some("0"),
+            "render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_INELIGIBLE_REFS),
+            Some("1"),
+            "render was:\n{rendered}"
+        );
+    }
+
+    /// A replayed ACK moves no cursor, so it triggers no split recompute and reports
+    /// no advance — the advance counter stays a count of MOVEMENTS. The stall gauge is
+    /// refreshed anyway, because the regime worth seeing is the one where the
+    /// low-water-mark is not moving.
+    #[test]
+    fn a_replayed_ack_reports_no_advance_and_recomputes_no_split() {
+        let rendered = rendered_under_a_recorder(|| {
+            let f = frontier();
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:alice|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 5, CONN_A)));
+            assert!(!block_on(f.confirm_apply_ack(&c, 3, CONN_A)), "replay");
+            assert!(!block_on(f.confirm_apply_ack(&c, 5, CONN_A)), "duplicate");
+        });
+
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_LWM_ADVANCES_TOTAL),
+            Some("1"),
+            "render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL),
+            Some("1"),
+            "render was:\n{rendered}"
+        );
+        assert!(
+            rendered_value(&rendered, METRIC_PRUNE_LWM_STALL_SECONDS).is_some(),
+            "the stall gauge must be refreshed on every ack; render was:\n{rendered}"
+        );
+    }
+
+    /// Forgetting the fleet's laggard is a low-water-mark ADVANCE and is observed as
+    /// one: leaving it out would put a hole in the advance cadence exactly where the
+    /// retention ceiling gets its headroom.
+    #[test]
+    fn forgetting_the_laggard_is_observed_as_an_lwm_advance() {
+        let rendered = rendered_under_a_recorder(|| {
+            let f = frontier();
+            f.set_delivered(CONN_A, 100);
+            f.set_delivered(CONN_B, 100);
+            let fast: ClientId = "a5:alice|dev-1".into();
+            let slow: ClientId = "a5:bob|dev-2".into();
+            assert!(block_on(f.confirm_apply_ack(&fast, 9, CONN_A)));
+            assert!(block_on(f.confirm_apply_ack(&slow, 2, CONN_B)));
+            assert_eq!(f.low_water_mark(), 2, "the laggard pins the fleet");
+            block_on(f.forget_client(&slow));
+            assert_eq!(f.low_water_mark(), 9);
+        });
+
+        // Two advances: 0→9 (fast) and 2→9 (forget). The laggard's own ack moved its
+        // cursor but dropped the fleet MIN from 9 to 2 — a genuine movement, and
+        // deliberately NOT an advance, so it neither increments the counter nor is
+        // reported as negative epochs advanced.
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_LWM_ADVANCES_TOTAL),
+            Some("2"),
+            "render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_LWM_EPOCHS_ADVANCED_TOTAL),
+            Some("16"),
+            "9 epochs on the first advance, 7 more on the forget; render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_LOW_WATER_MARK),
+            Some("9"),
+            "render was:\n{rendered}"
+        );
     }
 
     /// A dropped ACK (one that never arrives) never advances any frontier: with no
