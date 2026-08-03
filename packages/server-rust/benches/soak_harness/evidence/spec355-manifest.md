@@ -1270,9 +1270,12 @@ run that has *not*. Its ratios are **lower bounds** on any equilibrium ratio, so
   and **29.0×** (`lastBytes`) — *overshooting* 10× while still climbing. This is a
   **duration-mismatched** comparison (no 4 h width-100 run exists) and is offered only to show the
   miss is not one-directional, never as a test of the model;
-- decisively for §10.4.3's *use* of this test: **both binaries are equally unconverged at 1800 s**,
-  so the HEAD-vs-pre-family comparison stays like-for-like and the deviation's discriminating-power
-  argument is untouched by the censoring.
+- decisively for §10.4.3's *use* of this test: **both binaries are unconverged at 1800 s** — not
+  *equally* so, and the asymmetry runs the conservative way: §10.4.2's width-1000 slopes are
+  pre-family 191,961 vs HEAD 65,049 B/h, so pre-family sits higher **and** climbs 2.95× faster,
+  which can only strengthen "HEAD is better". Neither arm has levelled, so the HEAD-vs-pre-family
+  comparison stays like-for-like and the deviation's discriminating-power argument is untouched by
+  the censoring.
 
 **No growth-class claim is made.** Two durations cannot fit a model, so "superlinear" is not
 written anywhere. What the data *does* support: the **average rate roughly doubled** between the
