@@ -961,7 +961,7 @@ These are measurements, not a branch call. Keeping them apart from the determina
 | Branch (1) — regression | **NOT DETERMINED** (not refuted, not established) | Cell C **reproduces** at `Spre = 176,954.34 B/h`, which is evidence *against* a regression newer than 2026-07-27 — but `S100 = 7,938.86 B/h` sits in the ambiguous band, so the matrix does not carry a branch call. |
 | Branch (2) — width-scaled prune math | **NOT DETERMINED** | Same pair. Cell C's reproduction is consistent with (2), but cell B's breach means (2)'s clean form ("width 100 still passes") is *already false*, and the row-3 band that would have carried "(2) with its premise broken at both widths" is not met. |
 | Cell D | **REQUIRED** — it is §5's step 1 under row 5 | Was "not required" only while the determination was expected to be rows 1–4. |
-| Cell E | **NOT-APPLICABLE** | Its firing condition is conjunctive and its **first** conjunct fails: cell E fires only if **row 1 has been taken**, and row 1 was not taken. The second conjunct (§8's R4.1a magnitude gap) is not reached. Recorded here with the measurement that ruled it out: `S100 = 7,938.86 B/h`, which excludes row 1 by itself. |
+| Cell E | **NOT-APPLICABLE at this point — SUPERSEDED, do not read this row as final** | The reading here was that its **first** conjunct fails, since cell E fires only if **row 1 has been taken** and the table returned no row 1 (`S100 = 7,938.86 B/h` excludes row 1 by itself). **§10.4.5 overturns exactly this**: the branch arrived at row 1's *substance* via the tie-break, so dismissing the gap on the route it took would be the evasion §4.6 exists to prevent. The conjunct is treated as satisfied in substance from §10.4.5 onward, and cell E's final disposition is **§10.5.4** — NOT RUN, deferred with a named owner (`TODO-634`). |
 
 #### §10.3.3 — Routing
 
@@ -1422,6 +1422,7 @@ defect with a mechanism and a testable next step.
 | **TODO-586** | gated on TODO-630 | gated on **TODO-634**; carries a SPEC-355 finding of its own (design the redb cross-check against a *level* estimator, not the current rate detector). |
 | **TODO-484** (72 h soak) | blocked | **STILL BLOCKED**, now on TODO-634. It would red on the tombstone clause by construction, exactly as before — the difference is the cause is now named, measured and owned. |
 | **SPEC-348** (disk gate) | unblocked | **Unblocked, unaffected** — restated below. |
+| **The 2026-07-13 → 2026-07-27 interval** (cell E) | unowned — the gap row 1's claim stops short of | **Owned by TODO-634** as a *diagnostic-on-demand* task, with §4.6's protocol runnable and its own acceptance checkbox. **NOT probed by this spec** (§10.5.4) — it is deferred, not ruled out. |
 
 **Sequencing: TODO-630 (resolved) → TODO-634 → TODO-586 → TODO-484.**
 
