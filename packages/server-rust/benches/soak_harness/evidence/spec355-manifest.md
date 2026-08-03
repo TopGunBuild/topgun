@@ -1089,7 +1089,13 @@ prediction" diagnoses **the model is wrong**, not **a regression landed** — an
 dichotomy has no branch for that case. The rule is a classifier with a blind spot, and this data
 landed in it.
 
-**The falsification condition was fixed BEFORE the deciding runs** and committed in `e3ce61aa`:
+**The falsification condition was fixed and committed BEFORE either deciding RESULT existed**, in
+`e3ce61aa` (2026-08-02 17:05:31). Stated precisely, because the looser phrasing is falsifiable by an
+`ls -T`: `cellC2` is entirely subsequent (started 17:36:02, result 18:06:03), while `sweep1000b` was
+already **46 s into** its 1800 s run at that moment (its `matrix.txt`, written by the runner at run
+start, is 17:04:49) and did not produce a result until **17:34:49**. Neither run's *outcome* was
+observable when the condition was written — which is the property that matters and the one that is
+checkable.
 
 > *If HEAD remains no worse than pre-family across n = 2 vs 2, declare (2) on the ground that the
 > rule's dichotomy is unsound for this case. **If HEAD is worse, accept (1) and bisect.***
@@ -1420,6 +1426,24 @@ and **never reads the tombstone gauge**. Nothing in this spec touches that deriv
 was modified, no committed SPEC-349c2 artifact was altered, and the tombstone finding is confined to
 the gauge-backed clause. **SPEC-348's disk gate remains unblocked either way**, exactly as §0 said
 it would be at the outset.
+
+### §11.2a — The repo gate (AC14), as actually run
+
+AC14's antecedent — *"green after any `.rs` change"* — **never fired**: this spec changed no `.rs`
+byte (`git diff --stat <spec-base>..HEAD -- '*.rs'` is empty), so the gate is recorded here as a
+floor that was checked, not as a proof of anything about a change. Its one unconditional limb is
+`scripts/check-invariants.sh`, which R5b requires.
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | exit **0** |
+| `cargo clippy --all-targets --all-features -p topgun-server -- -D warnings` | exit **0** |
+| `bash scripts/check-invariants.sh` | exit **0**, prints `invariants: 20 entries, 4 NAKED (baseline 4)` |
+
+**What this does NOT assert.** AC14 is explicitly *"a floor, not the anti-tautology proof"*, and the
+proof it is not a substitute for (AC8b's mutation control) is NOT-APPLICABLE here for the same reason
+the gate is uninformative: no bound, guard or calibration constant was touched. A green gate on a
+branch containing no Rust is evidence of nothing except that nothing was broken.
 
 ### §11.3 — The 90 s smoke observation
 
