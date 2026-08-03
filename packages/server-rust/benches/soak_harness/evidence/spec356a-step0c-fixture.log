@@ -1,0 +1,185 @@
+SPEC-356a EG-2 -- THE CAPTURED GUARD-FIRE ARTIFACT
+==================================================
+
+WHAT THIS FILE IS. The `STEP0C ADMISSIBILITY:` emitter of `spec356-prune.sh`,
+SEEN TO FIRE, with its bytes captured verbatim. It is not a measurement
+artifact: no harness is started on this path, no cell is run, and its basename
+is one no SPEC-356b cell can produce.
+
+WHY IT EXISTS. Every other fail-path in this spec is demonstrated -- the
+`exit 2` refusal is run with its console output and exit code recorded, the
+arming witness is fired in BOTH directions, the exhaustiveness test's RED is
+shown. The STEP0C line was the one fail-path carried only by a code-reading
+("would print"), and it is the one line whose BYTES a downstream MECHANICAL
+gate depends on: SPEC-356b's checklist runs `grep -c 'STEP0C ADMISSIBILITY'`
+and reads a non-zero count as an admissibility routing input, so a mis-typed
+emitter returns 0 -- indistinguishable from a clean run. That is
+character-for-character the vacuous-guard defect this family already shipped
+once, and a code-reading cannot discharge it.
+
+WHY THE FIXTURE IS HAND-BUILT, AND WHY THAT IS A CONSEQUENCE RATHER THAN A
+WORKAROUND. Once eager registration of all 33 series at recorder construction
+and the sampler's scrape gate are both in force, a blank cell is UNREACHABLE on
+a correct instrument -- so no produced artifact can trigger this branch and the
+trigger has to be synthesized. The two fixes and this demonstration are
+complementary, not in tension.
+
+THE FIXTURE. A copy of the scratch smoke `prune.csv` with EXACTLY ONE CELL of
+ONE MEASURAND column blanked, which trips the POPULATION-ONLY shape on its
+`empty > 0` limb. An ALL-ZERO column does NOT fire the line and must not be
+used: passing an all-zero column is the entire point of the POPULATION-ONLY
+fork ("POPULATION check, not non-zero: a genuinely bounded tombstone corpus may
+legitimately read 0 for a whole run"). A column emptied of ALL its values fires
+the same line via `n == 0` and is an acceptable second fixture, not a
+substitute for the blanked one.
+
+  $ cp /tmp/spec356-smoke/spec356-smoke.prune.csv /tmp/spec356-fixture.prune.csv
+  $ awk -F, -v OFS=, 'NR==6 { $3 = "" } { print }' \
+      /tmp/spec356-smoke/spec356-smoke.prune.csv > /tmp/spec356-fixture.prune.csv
+
+  blanked: line 6 (data row 5), column index 3
+           = topgun_or_prune_considered_total   [tag: MEASURAND]
+
+  It is deliberately a column whose OTHER cells are non-zero, so the line that
+  fires can only have fired on the `empty > 0` limb.
+
+  diff against the source artifact:
+    6c6
+    < 40,1122,0,0,0,0,0,0,0,0,0,1122,0,3,3,3,1122,2,0,1003,3,3,3,0,0,2,1,0,0,0,0,0,3,0,3,0,0,0,0,0,0,22300
+    ---
+    > 40,1122,,0,0,0,0,0,0,0,0,1122,0,3,3,3,1122,2,0,1003,3,3,3,0,0,2,1,0,0,0,0,0,3,0,3,0,0,0,0,0,0,22300
+
+THE INVOCATION (verbatim, as run):
+
+  SPEC356_SMOKE_DURATION=120 SPEC356_OUT_DIR=/tmp/spec356-smoke \
+  SPEC356_COLCHECK_FIXTURE=/tmp/spec356-fixture.prune.csv \
+  bash spec356-prune.sh smoke 2>&1 | tee .../evidence/spec356a-step0c-fixture.log
+
+The fixture path is entered by ENV VAR ONLY, is honoured only in smoke mode, is
+evaluated BEFORE the clock starts, and takes NO new positional argument -- the
+inherited contract is exactly one positional cell id and this runner does not
+widen it.
+
+WHAT THE DISPOSITION MUST BE, stated before the output so the reader checks the
+output against it rather than the other way round. A MEASURAND-tagged column
+that fails emits a DISTINCT line -- `STEP0C ADMISSIBILITY: <column> ...` --
+which does NOT carry the instrument-defect literal, does NOT set INSTRUMENT_OK,
+and does NOT exit 9. Its exit status is PINNED, not merely constrained: this
+path sets no exit status of its own and alters none, falling through to the
+inherited `exit "$HARNESS_RC"`, which here is 0. The line is a RECORD, not a
+failure. Discarding and re-running on a legitimately-zero or legitimately-blank
+MEASURAND would be SELECTION ON THE OUTCOME, which is the one thing the
+pre-registration freeze exists to prevent.
+
+Note which SHAPE ran and why it is not the same choice as the disposition. The
+cell id is `smoke`, so every column is checked with the POPULATION-ONLY shape,
+tag notwithstanding -- which is also why no INSTRUMENT-tagged column can fire
+here. The DISPOSITION is pinned to the measurement one, because demonstrating
+that disposition is the entire purpose of this path.
+
+--------------------------------------------------------------------------------
+CAPTURED RUN OUTPUT (verbatim)
+--------------------------------------------------------------------------------
+############################################################
+## SMOKE MODE -- THIS IS NOT A CHARACTERIZATION RUN       ##
+##   --duration          = 120s (override)        
+##   primary CSV cadence = 10s            
+##   prune.csv cadence   = 10s (pinned)
+## Its artifacts MUST NOT be committed as evidence.       ##
+############################################################
+WARNING: artifact dir overridden to /tmp/spec356-smoke
+         A characterization run's artifacts belong in /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence
+         (git-tracked); artifacts written elsewhere are not evidence.
+
+=== COLUMN-CHECK FIXTURE PATH (no harness is started) ===
+  fixture:      /tmp/spec356-fixture.prune.csv
+  cell:         smoke (armed=yes)
+  shape:        POPULATION-ONLY on every column (non-measurement cell)
+  disposition:  MEASURAND -- the STEP0C admissibility line, which is what
+                this path exists to demonstrate. A MEASURAND failure must NOT
+                carry the instrument-defect literal, must NOT write
+                INSTRUMENT_OK and must NOT exit 9.
+  fixture header: matches the pinned schema (42 columns)
+
+prune.csv columns (fixture):
+  elapsed_secs                                 [POPULATN] n=13 empty=0 min=0 max=120
+  topgun_or_prune_passes_total                 [POPULATN] n=13 empty=0 min=0 max=3689
+  topgun_or_prune_considered_total             [POPULATN] n=12 empty=1 min=0 max=3000
+STEP0C ADMISSIBILITY: topgun_or_prune_considered_total failed the population check (n == 0 or empty > 0 at column index 3) -- the cell STANDS;
+                      this is an admissibility failure that routes the
+                      classification predicate to INDETERMINATE. It is NOT an
+                      instrument defect and it changes no exit status.
+  topgun_or_prune_dropped_total                [POPULATN] n=13 empty=0 min=0 max=3000
+  topgun_or_prune_matched_nothing_total        [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_absent_total                 [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_restored_read_error_total    [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_restored_evicted_total       [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_restored_write_error_total   [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_bytes_freed_total            [POPULATN] n=13 empty=0 min=0 max=61355
+  topgun_or_prune_epochs_drained_total         [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_empty_drains_total           [POPULATN] n=13 empty=0 min=0 max=3686
+  topgun_or_prune_nonempty_drains_total        [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_lwm_advances_total           [POPULATN] n=13 empty=0 min=0 max=5
+  topgun_or_prune_lwm_epochs_advanced_total    [POPULATN] n=13 empty=0 min=0 max=5
+  topgun_or_prune_split_recomputes_total       [POPULATN] n=13 empty=0 min=0 max=8
+  topgun_or_prune_indexed_refs                 [POPULATN] n=13 empty=0 min=0 max=2849
+  topgun_or_prune_indexed_epochs               [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_eligible_refs                [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_ineligible_refs              [POPULATN] n=13 empty=0 min=0 max=2072
+  topgun_or_prune_split_computed_epoch         [POPULATN] n=13 empty=0 min=0 max=5
+  topgun_or_prune_current_epoch                [POPULATN] n=13 empty=0 min=1 max=5
+  topgun_or_prune_low_water_mark               [POPULATN] n=13 empty=0 min=0 max=5
+  topgun_or_prune_durable_epoch_watermark      [POPULATN] n=13 empty=0 min=0 max=4
+  topgun_or_prune_last_drained_epoch           [POPULATN] n=13 empty=0 min=0 max=4
+  topgun_or_prune_lwm_stall_seconds            [POPULATN] n=13 empty=0 min=0 max=26
+  topgun_or_prune_tracked_claims               [POPULATN] n=13 empty=0 min=0 max=1
+  topgun_or_prune_drain_refs_sum               [POPULATN] n=13 empty=0 min=0 max=3000
+  topgun_or_prune_drain_refs_count             [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_sum             [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_count           [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_claim_span_epochs_sum        [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_claim_span_epochs_count      [POPULATN] n=13 empty=0 min=0 max=8
+  topgun_or_prune_claim_lag_epochs_sum         [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_claim_lag_epochs_count       [POPULATN] n=13 empty=0 min=0 max=8
+  topgun_or_prune_epoch_considered_sum         [POPULATN] n=13 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_considered_count       [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_epoch_dropped_sum            [POPULATN] n=13 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_dropped_count          [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_epoch_bytes_freed_sum        [POPULATN] n=13 empty=0 min=0 max=61355
+  topgun_or_prune_epoch_bytes_freed_count      [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_ormap_tombstone_bytes_total           [POPULATN] n=13 empty=0 min=0 max=75824
+
+  STEP0C ADMISSIBILITY lines emitted: 1
+  INSTRUMENT_OK:                      1 (unchanged by a MEASURAND failure)
+  exit status:                        0 (the pinned fall-through, exit "$HARNESS_RC")
+EXIT STATUS: 0
+
+--------------------------------------------------------------------------------
+SPEC-356b's OWN PATTERNS, RUN AGAINST THIS ARTIFACT (not against the runner's
+source -- a code-reading does not discharge this gate)
+--------------------------------------------------------------------------------
+
+  $ grep -c 'STEP0C ADMISSIBILITY' spec356a-step0c-fixture.log
+  5          <- MUST be non-zero.  PASS
+
+  $ grep -c '<the instrument-defect literal>' spec356a-step0c-fixture.log
+  0          <- MUST be zero.      PASS
+
+  The instrument-defect literal is deliberately NOT SPELLED anywhere in this
+  file, including in the line that checks for it. Spelling it would make the
+  check satisfy itself, and a gate that passes on its own text is exactly the
+  vacuous guard this artifact exists to rule out. (The runner had that defect
+  when this artifact was first produced: its fixture-path banner spelled the
+  literal while merely talking ABOUT it, which made the count 1. The repair was
+  in the RUNNER -- rephrase the banner -- never in the check.) The pattern is
+  the one SPEC-356b greps: same case, single space, unanchored, colon outside
+  the pattern.
+
+  EXIT STATUS: 0 -- the pinned fall-through, `exit "$HARNESS_RC"`. NEVER 1 and
+  NEVER 9. A MEASURAND failure is a record, not a failure; the cell STANDS and
+  the failure is carried into SPEC-356b's classification walk as an
+  admissibility failure that routes the predicate to INDETERMINATE.
+
+  Keeping these bytes character-for-character identical is a constraint on any
+  future edit to the runner or to either spec: this artifact is what makes a
+  drift mechanically visible instead of silently vacuous.

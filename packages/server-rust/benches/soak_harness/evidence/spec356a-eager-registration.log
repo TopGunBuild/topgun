@@ -1,0 +1,359 @@
+SPEC-356a EG-1 -- EAGER REGISTRATION: ZERO BLANK CELLS ACROSS ALL COLUMNS,
+                  FROM THE FIRST ROW
+===========================================================================
+
+WHAT THIS GATE ANSWERS. "Is a blank cell actually impossible now, or only
+argued to be?" A reviewer can only take that on trust; a run settles it. The
+gate has two limbs and BOTH are required.
+
+WHY IT MATTERS. The derived POPULATION-ONLY column shape carries one named
+delta over the shape it inherits: an `empty > 0` failing limb. Arming that limb
+is only safe once a blank scrape-derived cell is unreachable on a correct
+instrument, and a blank arises from exactly two causes -- (i) the series is not
+yet registered when the scrape happens, and (ii) the scrape itself failed,
+which returns nothing for every column alike. Limb (a) below proves (i) is
+unrepresentable: all 33 pinned series render at 0 with ZERO observations taken.
+Limb (b) proves the pair of fixes holds end-to-end over a real produced
+artifact: zero empty fields across every column of every row, first row
+included.
+
+The parent lineage's committed evidence is what makes this non-theoretical: 10
+of 10 whole-run `spec355-*.csv` files carry exactly one blank, in the
+scrape-derived column, at `elapsed_secs = 0`. That is a BOOT PROPERTY, not
+flakiness, and the `elapsed_secs == 0` tolerance is deliberately NOT adopted
+here.
+
+A NON-ZERO COUNT FAILS THIS GATE AND IS REPAIRED IN CODE OR IN THE SAMPLER.
+Relaxing a column check is not an available repair.
+
+================================================================================
+LIMB (a) -- DETERMINISTIC, IN-PROCESS: the first render with NO observations
+================================================================================
+
+With the Prometheus recorder installed first, the observer is constructed, NO
+observations are taken, and the render is taken through `PrometheusHandle::
+render()`. The assertion is that all 33 pinned names are present -- the 15
+counters at 0, the 11 gauges at 0, and each of the 7 histograms rendering BOTH
+`<name>_sum` and `<name>_count`. `describe_*` does NOT register in this
+exporter and is never the registration mechanism; the eager touch at recorder
+construction is.
+
+INVOCATION (verbatim, as run):
+
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib -- \
+    tombstone_frontier_impl::tests::every_pinned_prune_series_is_present_in_the_first_render \
+    --exact --nocapture
+
+--------------------------------------------------------------------------------
+CAPTURED RENDER (verbatim)
+--------------------------------------------------------------------------------
+--- FIRST SCRAPE (no observations) ---
+# TYPE topgun_or_prune_dropped_total counter
+topgun_or_prune_dropped_total 0
+
+# TYPE topgun_or_prune_passes_total counter
+topgun_or_prune_passes_total 0
+
+# TYPE topgun_or_prune_restored_read_error_total counter
+topgun_or_prune_restored_read_error_total 0
+
+# TYPE topgun_or_prune_lwm_epochs_advanced_total counter
+topgun_or_prune_lwm_epochs_advanced_total 0
+
+# TYPE topgun_or_prune_nonempty_drains_total counter
+topgun_or_prune_nonempty_drains_total 0
+
+# TYPE topgun_or_prune_lwm_advances_total counter
+topgun_or_prune_lwm_advances_total 0
+
+# TYPE topgun_or_prune_restored_evicted_total counter
+topgun_or_prune_restored_evicted_total 0
+
+# TYPE topgun_or_prune_split_recomputes_total counter
+topgun_or_prune_split_recomputes_total 0
+
+# TYPE topgun_or_prune_absent_total counter
+topgun_or_prune_absent_total 0
+
+# TYPE topgun_or_prune_considered_total counter
+topgun_or_prune_considered_total 0
+
+# TYPE topgun_or_prune_restored_write_error_total counter
+topgun_or_prune_restored_write_error_total 0
+
+# TYPE topgun_or_prune_empty_drains_total counter
+topgun_or_prune_empty_drains_total 0
+
+# TYPE topgun_or_prune_matched_nothing_total counter
+topgun_or_prune_matched_nothing_total 0
+
+# TYPE topgun_or_prune_bytes_freed_total counter
+topgun_or_prune_bytes_freed_total 0
+
+# TYPE topgun_or_prune_epochs_drained_total counter
+topgun_or_prune_epochs_drained_total 0
+
+# TYPE topgun_or_prune_ineligible_refs gauge
+topgun_or_prune_ineligible_refs 0
+
+# TYPE topgun_or_prune_lwm_stall_seconds gauge
+topgun_or_prune_lwm_stall_seconds 0
+
+# TYPE topgun_or_prune_tracked_claims gauge
+topgun_or_prune_tracked_claims 0
+
+# TYPE topgun_or_prune_current_epoch gauge
+topgun_or_prune_current_epoch 0
+
+# TYPE topgun_or_prune_split_computed_epoch gauge
+topgun_or_prune_split_computed_epoch 0
+
+# TYPE topgun_or_prune_indexed_refs gauge
+topgun_or_prune_indexed_refs 0
+
+# TYPE topgun_or_prune_low_water_mark gauge
+topgun_or_prune_low_water_mark 0
+
+# TYPE topgun_or_prune_durable_epoch_watermark gauge
+topgun_or_prune_durable_epoch_watermark 0
+
+# TYPE topgun_or_prune_last_drained_epoch gauge
+topgun_or_prune_last_drained_epoch 0
+
+# TYPE topgun_or_prune_indexed_epochs gauge
+topgun_or_prune_indexed_epochs 0
+
+# TYPE topgun_or_prune_eligible_refs gauge
+topgun_or_prune_eligible_refs 0
+
+# TYPE topgun_or_prune_epoch_bytes_freed summary
+topgun_or_prune_epoch_bytes_freed{quantile="0"} 0
+topgun_or_prune_epoch_bytes_freed{quantile="0.5"} 0
+topgun_or_prune_epoch_bytes_freed{quantile="0.9"} 0
+topgun_or_prune_epoch_bytes_freed{quantile="0.95"} 0
+topgun_or_prune_epoch_bytes_freed{quantile="0.99"} 0
+topgun_or_prune_epoch_bytes_freed{quantile="0.999"} 0
+topgun_or_prune_epoch_bytes_freed{quantile="1"} 0
+topgun_or_prune_epoch_bytes_freed_sum 0
+topgun_or_prune_epoch_bytes_freed_count 0
+
+# TYPE topgun_or_prune_drain_refs summary
+topgun_or_prune_drain_refs{quantile="0"} 0
+topgun_or_prune_drain_refs{quantile="0.5"} 0
+topgun_or_prune_drain_refs{quantile="0.9"} 0
+topgun_or_prune_drain_refs{quantile="0.95"} 0
+topgun_or_prune_drain_refs{quantile="0.99"} 0
+topgun_or_prune_drain_refs{quantile="0.999"} 0
+topgun_or_prune_drain_refs{quantile="1"} 0
+topgun_or_prune_drain_refs_sum 0
+topgun_or_prune_drain_refs_count 0
+
+# TYPE topgun_or_prune_drain_epochs summary
+topgun_or_prune_drain_epochs{quantile="0"} 0
+topgun_or_prune_drain_epochs{quantile="0.5"} 0
+topgun_or_prune_drain_epochs{quantile="0.9"} 0
+topgun_or_prune_drain_epochs{quantile="0.95"} 0
+topgun_or_prune_drain_epochs{quantile="0.99"} 0
+topgun_or_prune_drain_epochs{quantile="0.999"} 0
+topgun_or_prune_drain_epochs{quantile="1"} 0
+topgun_or_prune_drain_epochs_sum 0
+topgun_or_prune_drain_epochs_count 0
+
+# TYPE topgun_or_prune_claim_lag_epochs summary
+topgun_or_prune_claim_lag_epochs{quantile="0"} 0
+topgun_or_prune_claim_lag_epochs{quantile="0.5"} 0
+topgun_or_prune_claim_lag_epochs{quantile="0.9"} 0
+topgun_or_prune_claim_lag_epochs{quantile="0.95"} 0
+topgun_or_prune_claim_lag_epochs{quantile="0.99"} 0
+topgun_or_prune_claim_lag_epochs{quantile="0.999"} 0
+topgun_or_prune_claim_lag_epochs{quantile="1"} 0
+topgun_or_prune_claim_lag_epochs_sum 0
+topgun_or_prune_claim_lag_epochs_count 0
+
+# TYPE topgun_or_prune_epoch_dropped summary
+topgun_or_prune_epoch_dropped{quantile="0"} 0
+topgun_or_prune_epoch_dropped{quantile="0.5"} 0
+topgun_or_prune_epoch_dropped{quantile="0.9"} 0
+topgun_or_prune_epoch_dropped{quantile="0.95"} 0
+topgun_or_prune_epoch_dropped{quantile="0.99"} 0
+topgun_or_prune_epoch_dropped{quantile="0.999"} 0
+topgun_or_prune_epoch_dropped{quantile="1"} 0
+topgun_or_prune_epoch_dropped_sum 0
+topgun_or_prune_epoch_dropped_count 0
+
+# TYPE topgun_or_prune_epoch_considered summary
+topgun_or_prune_epoch_considered{quantile="0"} 0
+topgun_or_prune_epoch_considered{quantile="0.5"} 0
+topgun_or_prune_epoch_considered{quantile="0.9"} 0
+topgun_or_prune_epoch_considered{quantile="0.95"} 0
+topgun_or_prune_epoch_considered{quantile="0.99"} 0
+topgun_or_prune_epoch_considered{quantile="0.999"} 0
+topgun_or_prune_epoch_considered{quantile="1"} 0
+topgun_or_prune_epoch_considered_sum 0
+topgun_or_prune_epoch_considered_count 0
+
+# TYPE topgun_or_prune_claim_span_epochs summary
+topgun_or_prune_claim_span_epochs{quantile="0"} 0
+topgun_or_prune_claim_span_epochs{quantile="0.5"} 0
+topgun_or_prune_claim_span_epochs{quantile="0.9"} 0
+topgun_or_prune_claim_span_epochs{quantile="0.95"} 0
+topgun_or_prune_claim_span_epochs{quantile="0.99"} 0
+topgun_or_prune_claim_span_epochs{quantile="0.999"} 0
+topgun_or_prune_claim_span_epochs{quantile="1"} 0
+topgun_or_prune_claim_span_epochs_sum 0
+topgun_or_prune_claim_span_epochs_count 0
+
+
+test tombstone_frontier_impl::tests::every_pinned_prune_series_is_present_in_the_first_render ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1791 filtered out; finished in 0.20s
+
+
+--------------------------------------------------------------------------------
+INDEPENDENT CENSUS OVER THE RENDER ABOVE
+--------------------------------------------------------------------------------
+
+  distinct pinned base names rendered      : 33   (MUST be 33)
+    # TYPE ... counter                     : 15   (MUST be 15)
+    # TYPE ... gauge                       : 11   (MUST be 11)
+    # TYPE ... summary                     : 7    (MUST be  7)
+
+  $ grep -E '^topgun_or_prune_[a-z_]+ 0$' | wc -l
+  40   (MUST be 40 = 15 counters + 11 gauges + 7 x 2 histogram _sum/_count)
+    of which _sum 0                        : 7
+    of which _count 0                      : 7
+
+  each of the 7 histograms carries BOTH totals:
+    topgun_or_prune_drain_refs           _sum=1 _count=1
+    topgun_or_prune_drain_epochs         _sum=1 _count=1
+    topgun_or_prune_claim_span_epochs    _sum=1 _count=1
+    topgun_or_prune_claim_lag_epochs     _sum=1 _count=1
+    topgun_or_prune_epoch_considered     _sum=1 _count=1
+    topgun_or_prune_epoch_dropped        _sum=1 _count=1
+    topgun_or_prune_epoch_bytes_freed    _sum=1 _count=1
+
+  LIMB (a): PASS.
+
+================================================================================
+LIMB (b) -- EMPIRICAL, OVER THE PRODUCED ARTIFACT: the zero-empty-field census
+================================================================================
+
+Taken over the scratch smoke `prune.csv` -- the ARMED cell, where the scrape
+gate is in full force. Not "the columns exist"; not "the later rows are fine".
+Every cell of every column of every row, FIRST ROW INCLUDED.
+
+INVOCATION (verbatim, as run):
+
+  SPEC356_SMOKE_DURATION=120 SPEC356_SMOKE_SAMPLE_INTERVAL=10 \
+  SPEC356_OUT_DIR=/tmp/spec356-smoke bash spec356-prune.sh smoke
+
+  $ awk -F, '{ for (i = 1; i <= NF; i++) if ($i == "") e++ } END { print "empty_fields=" e + 0 }' \
+      /tmp/spec356-smoke/spec356-smoke.prune.csv
+
+--------------------------------------------------------------------------------
+CENSUS
+--------------------------------------------------------------------------------
+
+  empty_fields=0
+
+  rows including header                    : 14
+  data rows                                : 13
+  distinct field counts per line           : 42 (every line carries all 42 columns)
+  ticks skipped by the scrape gate         : 0
+  header                                   : matches the pinned schema, in the frozen order
+
+  THE FIRST DATA ROW, in full, because "the later rows are fine" is not what
+  this limb asserts:
+
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+
+  READ THE FIRST ROW'S `elapsed_secs` CORRECTLY. Under the scrape gate the
+  first row of `prune.csv` is the FIRST COMPLETE SCRAPE, and its
+  `elapsed_secs` is whatever the sampler's clock reads at that instant -- it
+  is NOT required to be 0, and a value other than 0 is the gate working rather
+  than a missing sample. In THIS run the first complete scrape happened to land
+  at elapsed = 0 with 0 tick(s) skipped. A run of the same runner minutes
+  earlier, on a colder page cache, skipped its elapsed = 0 tick because the
+  /metrics listener had not answered yet and recorded:
+
+    prune.csv ticks SKIPPED by the scrape gate: 1
+        elapsed=0s scrape FAILED -- no row written, retrying next tick
+    first COMPLETE scrape at elapsed = 10s
+
+  Both shapes satisfy this limb, and that is the point: the census asserts ZERO
+  BLANK CELLS, never a particular first `elapsed_secs`. What the gate removes
+  is the parent lineage's routine blank-at-boot -- it becomes a skipped tick
+  instead of a blank row.
+
+  Note also that the first row reads 0 in almost every column. That is a
+  MEASURAND reading, not a blank, and the POPULATION-ONLY shape passes it by
+  design: "POPULATION check, not non-zero: a genuinely bounded tombstone corpus
+  may legitimately read 0 for a whole run."
+
+  LIMB (b): PASS -- empty_fields=0.
+
+--------------------------------------------------------------------------------
+THE PER-COLUMN POPULATION REPORT FROM THE SAME RUN (all 42 columns)
+--------------------------------------------------------------------------------
+prune.csv columns:
+  elapsed_secs                                 [POPULATN] n=13 empty=0 min=0 max=120
+  topgun_or_prune_passes_total                 [POPULATN] n=13 empty=0 min=0 max=3689
+  topgun_or_prune_considered_total             [POPULATN] n=13 empty=0 min=0 max=3000
+  topgun_or_prune_dropped_total                [POPULATN] n=13 empty=0 min=0 max=3000
+  topgun_or_prune_matched_nothing_total        [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_absent_total                 [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_restored_read_error_total    [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_restored_evicted_total       [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_restored_write_error_total   [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_bytes_freed_total            [POPULATN] n=13 empty=0 min=0 max=61355
+  topgun_or_prune_epochs_drained_total         [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_empty_drains_total           [POPULATN] n=13 empty=0 min=0 max=3686
+  topgun_or_prune_nonempty_drains_total        [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_lwm_advances_total           [POPULATN] n=13 empty=0 min=0 max=5
+  topgun_or_prune_lwm_epochs_advanced_total    [POPULATN] n=13 empty=0 min=0 max=5
+  topgun_or_prune_split_recomputes_total       [POPULATN] n=13 empty=0 min=0 max=8
+  topgun_or_prune_indexed_refs                 [POPULATN] n=13 empty=0 min=0 max=2849
+  topgun_or_prune_indexed_epochs               [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_eligible_refs                [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_ineligible_refs              [POPULATN] n=13 empty=0 min=0 max=2072
+  topgun_or_prune_split_computed_epoch         [POPULATN] n=13 empty=0 min=0 max=5
+  topgun_or_prune_current_epoch                [POPULATN] n=13 empty=0 min=1 max=5
+  topgun_or_prune_low_water_mark               [POPULATN] n=13 empty=0 min=0 max=5
+  topgun_or_prune_durable_epoch_watermark      [POPULATN] n=13 empty=0 min=0 max=4
+  topgun_or_prune_last_drained_epoch           [POPULATN] n=13 empty=0 min=0 max=4
+  topgun_or_prune_lwm_stall_seconds            [POPULATN] n=13 empty=0 min=0 max=26
+  topgun_or_prune_tracked_claims               [POPULATN] n=13 empty=0 min=0 max=1
+  topgun_or_prune_drain_refs_sum               [POPULATN] n=13 empty=0 min=0 max=3000
+  topgun_or_prune_drain_refs_count             [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_sum             [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_count           [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_claim_span_epochs_sum        [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_claim_span_epochs_count      [POPULATN] n=13 empty=0 min=0 max=8
+  topgun_or_prune_claim_lag_epochs_sum         [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_claim_lag_epochs_count       [POPULATN] n=13 empty=0 min=0 max=8
+  topgun_or_prune_epoch_considered_sum         [POPULATN] n=13 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_considered_count       [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_epoch_dropped_sum            [POPULATN] n=13 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_dropped_count          [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_epoch_bytes_freed_sum        [POPULATN] n=13 empty=0 min=0 max=61355
+  topgun_or_prune_epoch_bytes_freed_count      [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_ormap_tombstone_bytes_total           [POPULATN] n=13 empty=0 min=0 max=75824
+
+  Every column: n > 0 and empty = 0. That is the population limb of the
+  acceptance criterion this gate feeds -- header presence alone does NOT
+  satisfy it, because a named-but-unwritten column reads as coverage while
+  providing none.
+
+================================================================================
+VERDICT: EG-1 PASS (both limbs).
+================================================================================
+
+Recorded for the next reader: the disarmed cell is NOT part of this census and
+must not be added to it. On a disarmed cell the sampler runs IDENTICALLY -- same
+10 s cadence, same scrape, same row-writing cadence, so its cost stays
+common-mode and the armed-vs-disarmed control still varies exactly one thing --
+but it writes its row with the prune-record columns EMPTY by design, and no
+column check reads them. Series absence there is the ARMING WITNESS, checked
+once and fail-closed; it is never an instrument defect. This census is over the
+ARMED cell, where the completeness gate binds.
