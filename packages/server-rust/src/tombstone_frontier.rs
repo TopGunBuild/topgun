@@ -266,3 +266,370 @@ pub trait PruneSafety: CausalFrontier {
     /// defense-in-depth on the *stated single-use intent*, orthogonal to this correctness argument.
     fn gate_decision_holds_at_commit(&self, token: GateToken) -> bool;
 }
+
+// ---------------------------------------------------------------------------
+// Prune-record observation contract
+// ---------------------------------------------------------------------------
+//
+// Types and traits only, consistent with this module's charter. The implementing recorder, the
+// arming read and the observation call sites live in the sibling implementation module; the
+// prune-loop ledger lives in the CRDT domain service.
+
+/// How a single tombstone ref left the prune loop body.
+///
+/// The set is **CLOSED**: every ref the loop considers leaves through exactly one of these, and the
+/// identity `considered == dropped + matched_nothing + absent + restored_read_error +
+/// restored_evicted + restored_write_error` MUST hold. Exhaustiveness is load-bearing rather than
+/// tidiness: [`PruneExit::AbsentKey`] consumes a ref **without** a tombstone-byte decrement, so a
+/// growing `AbsentKey` share is a candidate mechanism for a falling reclaim fraction that no other
+/// instrument in the tree can see. This contract takes no position on whether that happens; it
+/// requires that the record be able to say.
+///
+/// Modelled as an enum rather than a string because the exit set is known and closed, and because
+/// the summing identity above is only mechanically checkable against a fixed set of counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PruneExit {
+    /// The prune closure pruned at least one tag AND the durable write succeeded.
+    Dropped,
+    /// The closure ran but matched no tag. It may still owe a shape-upgrade write; no tag left.
+    MatchedNothing,
+    /// The backing read returned `Ok(None)` — the key is gone. The ref is **consumed** and **no
+    /// tombstone-byte decrement occurs**, which is why this exit must be counted separately from
+    /// [`PruneExit::Dropped`] instead of being folded into a generic "not dropped" bucket.
+    AbsentKey,
+    /// The backing read errored; the ref is re-indexed for a later pass.
+    RestoredReadError,
+    /// The closure never ran because the key was evicted mid-write; the ref is re-indexed.
+    RestoredEvicted,
+    /// The in-place update errored; the ref is re-indexed.
+    RestoredWriteError,
+}
+
+/// One prune pass — one whole invocation of the epoch-tombstone prune loop, empty drains included.
+///
+/// # Field widths
+/// Every field is a count or a byte total and is therefore an unsigned integer, never a float.
+/// `u64` is used uniformly because the metrics counter API takes `u64`, so the emit boundary needs
+/// no cast; only the gauge/histogram boundary converts, and it does so at the emit call site.
+///
+/// `empty_drain` is a boolean predicate about the drain, not a count, which is why it is the one
+/// non-integral field: the pass identity `passes == empty_drains + nonempty_drains` is derived from
+/// it, and folding it into a count would make a single pass increment two different counters.
+///
+/// # Where the pass increment is sited
+/// A pass is counted on **every** invocation, before any eligibility test and **outside** the loop
+/// body — never inside the per-ref loop and never behind a `dropped` / `ran` condition. An
+/// increment sited inside the loop body would read zero during a legitimate total stall, which is
+/// precisely the regime the record has to be able to describe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PrunePassRecord {
+    /// Refs the pass considered — the exhaustiveness identity's left-hand side and the denominator
+    /// of every exit share.
+    pub considered: u64,
+    /// Refs that left through [`PruneExit::Dropped`].
+    pub dropped: u64,
+    /// Refs that left through [`PruneExit::MatchedNothing`].
+    pub matched_nothing: u64,
+    /// Refs that left through [`PruneExit::AbsentKey`].
+    pub absent: u64,
+    /// Refs that left through [`PruneExit::RestoredReadError`].
+    pub restored_read_error: u64,
+    /// Refs that left through [`PruneExit::RestoredEvicted`].
+    pub restored_evicted: u64,
+    /// Refs that left through [`PruneExit::RestoredWriteError`].
+    pub restored_write_error: u64,
+    /// Tombstone bytes the pass freed.
+    pub bytes_freed: u64,
+    /// Epochs the pass drained.
+    pub epochs_drained: u64,
+    /// Whether the drain came back empty. Empty and non-empty drains are counted separately so
+    /// neither pollutes the other's distribution: a per-drain mean taken over a denominator that
+    /// includes empty drains measures scheduling frequency, not batch size.
+    pub empty_drain: bool,
+}
+
+/// One drained epoch inside a pass.
+///
+/// # The join is deliberately out of scope
+/// The `(current_epoch, low_water_mark, durable_epoch_watermark)` triple is carried here so the
+/// caller snapshots it **atomically with the drain** rather than re-reading it later. The joined
+/// per-epoch record — epoch id tied to its own counts tied to the triple in force when *that* epoch
+/// drained — is **not representable** over the Prometheus transport: a histogram carries only
+/// `_sum` / `_count` and rendered quantiles and loses the per-observation association, and a gauge
+/// is last-value at scrape granularity, so two epochs draining inside one scrape interval are
+/// indistinguishable. That is a property of the transport, not an omission, and no consumer of this
+/// contract needs the join — every decision term downstream is an aggregate. An implementation
+/// emits the counts as distributions and the triple through the last-value epoch gauges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PruneEpochRecord {
+    /// The drained epoch's id.
+    pub epoch: Epoch,
+    /// Refs this epoch contributed to the pass's `considered`.
+    pub considered: u64,
+    /// Refs of this epoch that left through [`PruneExit::Dropped`].
+    pub dropped: u64,
+    /// Tombstone bytes this epoch freed.
+    pub bytes_freed: u64,
+    /// `current_epoch` in force when this epoch drained.
+    pub current_epoch: Epoch,
+    /// [`CausalFrontier::low_water_mark`] in force when this epoch drained.
+    pub low_water_mark: Epoch,
+    /// The durable epoch watermark in force when this epoch drained.
+    pub durable_epoch_watermark: Epoch,
+}
+
+/// The claim span observed at an instant that moves the frontier — an LWM movement or a non-empty
+/// drain.
+///
+/// The span is the empirical evidence base for a retention ceiling expressed as
+/// `min_live_claim − fixed_margin`: without a measured distribution of how far the fleet's slowest
+/// tracked claim lags the current epoch, such a ceiling can only be guessed.
+///
+/// `span_epochs` is carried explicitly rather than left to be recomputed from the two epochs
+/// because the subtraction is saturating at the observation point — a caller that recomputes it
+/// later can observe a different, non-atomic pair.
+///
+/// Per-tracked-claim lags are NOT a field: they are a variable-length sequence, and holding them in
+/// the record would force an allocation on a path whose whole point is to stay cheap. They are
+/// passed as a borrowed slice to [`PruneRecordObserver::observe_claim_span`] instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PruneClaimSpanRecord {
+    /// `current_epoch` at the observation instant.
+    pub current_epoch: Epoch,
+    /// [`CausalFrontier::low_water_mark`] at the observation instant.
+    pub low_water_mark: Epoch,
+    /// `current_epoch − low_water_mark`, saturating, computed at the observation instant.
+    pub span_epochs: u64,
+    /// How many claims were tracked at the observation instant — the denominator that makes the
+    /// per-claim lag distribution readable.
+    pub tracked_claims: u64,
+}
+
+/// Whether the prune record is recording.
+///
+/// Read **once**, at frontier construction, from `TOPGUN_PRUNE_RECORD`, and never per pass — so the
+/// arming gate and the recording branch cannot observe different answers for the same operation.
+/// The parse follows the established kill-switch discipline in this tree: the default is
+/// [`PruneRecordArming::Armed`], only an explicit falsey word (`false` / `0` / `no` / `off`,
+/// case-insensitive) disarms, and an unrecognised value stays ARMED rather than quietly turning the
+/// instrument off on a typo.
+///
+/// The effective arming is provable mechanically from a `/metrics` scrape — armed implies the
+/// prune-record series are present, disarmed implies they are absent — which is why no boot-summary
+/// field carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PruneRecordArming {
+    /// Recording. The observer resolves and touches every pinned series at construction.
+    Armed,
+    /// Not recording. The observer is a null implementation that performs no allocation, no atomic
+    /// write and no metrics call.
+    Disarmed,
+}
+
+/// Sink for the prune record.
+///
+/// The prune loop and the frontier code against this trait, never against a concrete recorder, so
+/// the disarmed path is a null implementation rather than a branch at every call site.
+///
+/// # Gauge neutrality (HARD — the instrument MUST NOT move what it measures)
+///
+/// This contract exists to observe reclamation, not to participate in it. `TG-OR-004` — the
+/// tombstone-bytes accounting invariant — MUST NOT be perturbed by anything an implementation of
+/// this trait does. Concretely, and mechanically checkable:
+///
+/// - An implementation's body names **no** tombstone-byte counter or gauge at all. Adjusting the
+///   tombstone-byte accounting is the prune path's job; an observer that also adjusts it would
+///   double-count, and a red tombstone gate would then be evidence about the instrument rather than
+///   about the system.
+/// - An armed run and a disarmed run over the same workload MUST produce **identical** tombstone
+///   byte-gauge deltas and **identical** dropped counts. Observation is the only difference between
+///   them.
+/// - The tombstone-byte decrement stays exactly where the prune loop already sites it — in the
+///   post-write success arm, behind `dropped` — and adding an exit ledger MUST NOT move it, because
+///   a decrement that follows the ledger instead of the write would credit bytes that were never
+///   freed.
+///
+/// # Perturbation budget
+///
+/// - On the hot path (every remove-apply, every sync leaf): at most a fixed, small number of atomic
+///   increments. No allocation, no formatting, no additional lock acquisition, no index fold.
+/// - Work proportional to the indexed epoch count is permitted **only** on the LWM-movement path
+///   and on non-empty drains.
+/// - Metric handles are resolved **once**, at recorder construction, and stored. Per-call-site
+///   `counter!` / `gauge!` / `histogram!` macro invocations are forbidden because each performs a
+///   registry lookup by name.
+///
+/// # Construction-order precondition (a property this contract DEPENDS ON, not one it establishes)
+///
+/// A metric handle resolved **before** the Prometheus recorder is installed binds to a no-op for
+/// that handle's whole lifetime — it never re-resolves. Caching handles at construction is
+/// therefore only sound if the recorder is installed first. Every implementation MUST be
+/// constructed after observability initialisation, and any test that constructs one MUST install a
+/// recorder first, so a test-order inversion cannot mask the hazard.
+///
+/// # Registration is eager, so an absent series is unrepresentable
+///
+/// Resolving the handle is what registers a series with this exporter; a `describe_*` call alone
+/// registers nothing. An implementation therefore resolves a handle for **every** name pinned below
+/// at construction and touches each one, so the very first scrape already renders all of them —
+/// counters and gauges at zero, histograms with a zero `_sum` and `_count`. A series that is
+/// unobserved must read as a zero, never as an absence, because a downstream sampler cannot
+/// distinguish an absent series from a stalled one.
+///
+/// # Emitting
+///
+/// Implementations emit **only** through the name constants declared below. A string literal at an
+/// emit call site is a defect: binding the emitter to the constant is what makes it impossible for
+/// an emitted name to drift from the pinned one, and it makes the compiler rather than a document
+/// review the thing that enforces it.
+pub trait PruneRecordObserver: Send + Sync {
+    /// One completed prune pass.
+    ///
+    /// Feeds the pass counter, the six exit counters, `considered`, `bytes_freed`,
+    /// `epochs_drained`, exactly one of the empty / non-empty drain counters, and — on a non-empty
+    /// drain only — the refs-per-drain and epochs-per-drain distributions.
+    fn observe_pass(&self, record: &PrunePassRecord);
+
+    /// One epoch drained inside a pass. Feeds the three per-drained-epoch distributions.
+    fn observe_drained_epoch(&self, record: &PruneEpochRecord);
+
+    /// The claim span at an LWM movement or a non-empty drain.
+    ///
+    /// Feeds the claim-span distribution, the tracked-claim gauge, and the per-claim lag
+    /// distribution — one observation per element of `claim_lags`. The lags are borrowed rather
+    /// than owned so this call allocates nothing.
+    fn observe_claim_span(&self, record: &PruneClaimSpanRecord, claim_lags: &[Epoch]);
+
+    /// The low-water-mark advanced by `epochs_advanced` epochs.
+    ///
+    /// Feeds both LWM-advance counters: one advance, and the epoch distance it covered. Called only
+    /// on an actual advance, so the advance count stays a count of movements rather than of
+    /// confirmations.
+    fn observe_lwm_advance(&self, epochs_advanced: u64);
+
+    /// Time elapsed since the last low-water-mark advance.
+    ///
+    /// Separate from [`PruneRecordObserver::observe_lwm_advance`] on purpose: the interesting
+    /// regime is the one in which the LWM is **not** advancing, and a stall that is only refreshed
+    /// on an advance would freeze at its last value exactly when it matters.
+    fn observe_lwm_stall(&self, stall_seconds: u64);
+
+    /// The O(1)-maintained size of the tombstone index.
+    ///
+    /// Both values are maintained incrementally at stamp / drain / restore; an implementation MUST
+    /// NOT fold the index to produce them.
+    fn observe_index_state(&self, indexed_refs: u64, indexed_epochs: u64);
+
+    /// The frontier's epoch state, as last-value gauges.
+    fn observe_epoch_state(
+        &self,
+        current_epoch: Epoch,
+        low_water_mark: Epoch,
+        durable_epoch_watermark: Epoch,
+        last_drained_epoch: Epoch,
+    );
+
+    /// The eligible / ineligible split of the indexed corpus, with its staleness marker.
+    ///
+    /// The split is computed **only** on the LWM-movement path and on non-empty drains — never per
+    /// remove — which is exactly why it needs a staleness marker: those triggers are the events that
+    /// stop happening during a scheduling or LWM stall, so a split frozen at its last recompute
+    /// reads as a fresh "not growing" precisely when it is least entitled to. `computed_at_epoch`
+    /// and the monotone recompute counter this call increments are what let a reader tell a fresh
+    /// sample from a frozen one; a reader that sees no recompute across its window MUST treat the
+    /// split as inadmissible rather than as a measurement.
+    fn observe_eligibility_split(
+        &self,
+        eligible_refs: u64,
+        ineligible_refs: u64,
+        computed_at_epoch: Epoch,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pinned metric names — 15 counters, 11 gauges, 7 histograms
+// ---------------------------------------------------------------------------
+//
+// The name set is CLOSED. Emitting a series under this prefix that is not named here, or emitting
+// one of these under a literal instead of its constant, is a defect: the set is frozen in a
+// pre-registered evidence manifest that cannot be edited afterwards, so a divergence between code
+// and manifest is only ever repairable in the code. Adding a name is not an executor's decision.
+//
+// Naming follows the shape already in the tree (`topgun_ormap_tombstone_bytes_total`): monotone
+// counters end `_total`, gauges carry no suffix, histograms carry no suffix and export `_sum` /
+// `_count` totals alongside the exporter's rendered quantiles. The `_sum` / `_count` pair is the
+// primary reading — the installed exporter renders histograms as SLIDING-WINDOW summaries, so a
+// rendered quantile is a window statistic, not an over-the-run distribution, and reading one as if
+// it were is the defect these totals exist to prevent.
+
+/// Counter: prune passes run, including empty drains.
+pub const METRIC_PRUNE_PASSES_TOTAL: &str = "topgun_or_prune_passes_total";
+/// Counter: tombstone refs considered — the exhaustiveness identity's left-hand side.
+pub const METRIC_PRUNE_CONSIDERED_TOTAL: &str = "topgun_or_prune_considered_total";
+/// Counter: refs that left through [`PruneExit::Dropped`].
+pub const METRIC_PRUNE_DROPPED_TOTAL: &str = "topgun_or_prune_dropped_total";
+/// Counter: refs that left through [`PruneExit::MatchedNothing`].
+pub const METRIC_PRUNE_MATCHED_NOTHING_TOTAL: &str = "topgun_or_prune_matched_nothing_total";
+/// Counter: refs that left through [`PruneExit::AbsentKey`] — consumed with no byte decrement.
+pub const METRIC_PRUNE_ABSENT_TOTAL: &str = "topgun_or_prune_absent_total";
+/// Counter: refs that left through [`PruneExit::RestoredReadError`].
+pub const METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL: &str =
+    "topgun_or_prune_restored_read_error_total";
+/// Counter: refs that left through [`PruneExit::RestoredEvicted`].
+pub const METRIC_PRUNE_RESTORED_EVICTED_TOTAL: &str = "topgun_or_prune_restored_evicted_total";
+/// Counter: refs that left through [`PruneExit::RestoredWriteError`].
+pub const METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL: &str =
+    "topgun_or_prune_restored_write_error_total";
+/// Counter: tombstone bytes freed by the prune.
+pub const METRIC_PRUNE_BYTES_FREED_TOTAL: &str = "topgun_or_prune_bytes_freed_total";
+/// Counter: epochs drained.
+pub const METRIC_PRUNE_EPOCHS_DRAINED_TOTAL: &str = "topgun_or_prune_epochs_drained_total";
+/// Counter: empty drains, counted separately from non-empty ones.
+pub const METRIC_PRUNE_EMPTY_DRAINS_TOTAL: &str = "topgun_or_prune_empty_drains_total";
+/// Counter: non-empty drains — the denominator for every per-drain mean.
+pub const METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL: &str = "topgun_or_prune_nonempty_drains_total";
+/// Counter: low-water-mark advances.
+pub const METRIC_PRUNE_LWM_ADVANCES_TOTAL: &str = "topgun_or_prune_lwm_advances_total";
+/// Counter: total epochs the low-water-mark advanced.
+pub const METRIC_PRUNE_LWM_EPOCHS_ADVANCED_TOTAL: &str =
+    "topgun_or_prune_lwm_epochs_advanced_total";
+/// Counter: eligible / ineligible split recomputes — the split's staleness marker.
+pub const METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL: &str = "topgun_or_prune_split_recomputes_total";
+
+/// Gauge: indexed tombstone refs, maintained incrementally.
+pub const METRIC_PRUNE_INDEXED_REFS: &str = "topgun_or_prune_indexed_refs";
+/// Gauge: indexed epochs, maintained incrementally.
+pub const METRIC_PRUNE_INDEXED_EPOCHS: &str = "topgun_or_prune_indexed_epochs";
+/// Gauge: the licensed backlog — indexed refs in prune-eligible epochs.
+pub const METRIC_PRUNE_ELIGIBLE_REFS: &str = "topgun_or_prune_eligible_refs";
+/// Gauge: the pinned pool — indexed refs no tracked claim licenses reclaiming yet.
+pub const METRIC_PRUNE_INELIGIBLE_REFS: &str = "topgun_or_prune_ineligible_refs";
+/// Gauge: the `current_epoch` at which the eligible / ineligible split was last computed.
+pub const METRIC_PRUNE_SPLIT_COMPUTED_EPOCH: &str = "topgun_or_prune_split_computed_epoch";
+/// Gauge: the current server epoch.
+pub const METRIC_PRUNE_CURRENT_EPOCH: &str = "topgun_or_prune_current_epoch";
+/// Gauge: the fleet-wide low-water-mark.
+pub const METRIC_PRUNE_LOW_WATER_MARK: &str = "topgun_or_prune_low_water_mark";
+/// Gauge: the durable epoch watermark.
+pub const METRIC_PRUNE_DURABLE_EPOCH_WATERMARK: &str = "topgun_or_prune_durable_epoch_watermark";
+/// Gauge: the id of the most recently drained epoch.
+pub const METRIC_PRUNE_LAST_DRAINED_EPOCH: &str = "topgun_or_prune_last_drained_epoch";
+/// Gauge: seconds since the last low-water-mark advance.
+pub const METRIC_PRUNE_LWM_STALL_SECONDS: &str = "topgun_or_prune_lwm_stall_seconds";
+/// Gauge: tracked-claim count.
+pub const METRIC_PRUNE_TRACKED_CLAIMS: &str = "topgun_or_prune_tracked_claims";
+
+/// Histogram: refs per non-empty drain.
+pub const METRIC_PRUNE_DRAIN_REFS: &str = "topgun_or_prune_drain_refs";
+/// Histogram: epochs per non-empty drain.
+pub const METRIC_PRUNE_DRAIN_EPOCHS: &str = "topgun_or_prune_drain_epochs";
+/// Histogram: `current_epoch − low_water_mark` at each LWM movement and each non-empty drain.
+pub const METRIC_PRUNE_CLAIM_SPAN_EPOCHS: &str = "topgun_or_prune_claim_span_epochs";
+/// Histogram: per-tracked-claim lag at those same instants.
+pub const METRIC_PRUNE_CLAIM_LAG_EPOCHS: &str = "topgun_or_prune_claim_lag_epochs";
+/// Histogram: refs considered, per drained epoch.
+pub const METRIC_PRUNE_EPOCH_CONSIDERED: &str = "topgun_or_prune_epoch_considered";
+/// Histogram: refs dropped, per drained epoch.
+pub const METRIC_PRUNE_EPOCH_DROPPED: &str = "topgun_or_prune_epoch_dropped";
+/// Histogram: tombstone bytes freed, per drained epoch.
+pub const METRIC_PRUNE_EPOCH_BYTES_FREED: &str = "topgun_or_prune_epoch_bytes_freed";
