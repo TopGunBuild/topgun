@@ -729,3 +729,106 @@ precedence rule.
 
 *(Subsequent addenda are appended below these as `ADJ-7`, `ADJ-8`, … in the same form. Nothing above is
 edited to accommodate them.)*
+
+### ADJ-7
+
+- **ADJ id:** ADJ-7
+- **Date:** 2026-08-04
+- **Target:** **§2.1** — the definition of `L`, the licensed backlog (and, through it, Step 2 versus Steps
+  3–4 in §2.3 and the routing consequence §2.5 draws from them).
+- **ORIGINAL TEXT (verbatim, §2.1):**
+
+  > - **`L`** — the **licensed backlog**: indexed tombstone refs in epochs satisfying
+  >   `is_epoch_prune_eligible(E) && durable_epoch_watermark >= E`. This is the work the prune is licensed to
+  >   do.
+
+- **FINDING — the definition was right and the SERIES did not implement it.** The emitted series
+  `topgun_or_prune_eligible_refs` was recomputed at the drain **after** `drain_prunable` had already removed
+  every eligible epoch, and that drain is **unbounded** — it takes every ref it just counted. The drain's
+  sample was therefore **0 by construction**, on every pass, whatever the backlog had been. The other three
+  recompute sites (the low-water-mark movements) can observe a non-zero backlog, but the drain runs orders of
+  magnitude more often and its zero is the last writer before any 10 s scrape.
+  **The committed evidence already shows it**, which is why this is a measurement rather than an argument:
+  `spec356a-eager-registration.log` reports `topgun_or_prune_eligible_refs [POPULATN] n=13 empty=0 min=0
+  max=0` on a smoke cell that recorded 3 non-empty drains, 5 LWM advances, 8 split recomputes and an index
+  peaking at 2,849 refs. Thirteen samples, flat zero.
+  **Consequence under §2 as adjudicated by ADJ-2:** `median(L) ≤ B` holds for **any** `B ≥ 0`, so *"licensed
+  work DRAINS"* is true by construction; Step 2 fires whenever the exit share is `≤ 10 %`, Steps 3–4 become
+  unreachable, and §2.5's *"the modal outcome lands unambiguously at Step 2 → REGISTRY"* follows from the
+  emitter rather than from the prune's behaviour. This is the **structural** form of the misclassification
+  `/xask` **X2** described as a contingency: X2 argued the backlog would *often* read near zero right after a
+  pass; the emitter guaranteed it *always* would. **ADJ-2 does not reach it** — the bias was in the sampling
+  instant, not in the aggregator, so replacing `min` with `median` changes nothing about a series that is
+  zero at every instant.
+  Found by the SPEC-356a **Review v1, finding C1**, 2026-08-04.
+- **ADJUDICATED FORM (governs):**
+
+  > **§2.1's definition of `L` STANDS, unedited.** The predicate was never wrong; the instrument was. This
+  > addendum records an **instrument-side repair**, not a change of rule: no threshold, no ordering, no
+  > conditional and no aggregator moves.
+  >
+  > **The drain samples the split BEFORE its removal loop.** `drain_prunable` snapshots the
+  > eligible / ineligible split on the near side of the work that consumes it and returns it with the drained
+  > refs; the post-loop recompute is deleted. The snapshot is gated on a **non-empty eligible set**, so the
+  > per-`OR_REMOVE` path still pays no index-proportional fold and §1's perturbation budget is unchanged. The
+  > three low-water-mark recompute sites are untouched.
+  >
+  > **A binary that predates this repair emits an `L` that is inadmissible for §2.** Any cell measured
+  > against such a build reads `L ≡ 0` and MUST NOT be classified — its Step-2 determination would be a
+  > reading of the emitter. SPEC-356b pins the merged SPEC-356a SHA as its build identity, so this is
+  > enforced by the pin rather than by vigilance.
+  >
+  > **The flat-zero census above is retained as the before-picture.** It stays in the record as the evidence
+  > that produced this addendum, and the repair carries a directed regression cell in which the licensed
+  > backlog reads **3** where the pre-repair emitter would read **0** and a stale split would read **1**.
+
+- **AUTHORITY:** SPEC-356a Review v1 finding C1; user ruling 2026-08-04 (*"the post-drain zeroed read
+  dies"*).
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed while no `spec356-*.soak.json` exists anywhere in the
+  history (`git log --all --diff-filter=A -- '*spec356*soak.json'` is empty); `git log --follow` decides.
+
+### ADJ-8
+
+- **ADJ id:** ADJ-8
+- **Date:** 2026-08-04
+- **Target:** **§1.1** — the series control's power, and the disposition of `/xask` finding **X11**
+  (`n = 2` per arm).
+- **ORIGINAL TEXT (verbatim, §1.1):**
+
+  > On SPEC-355's observed sd (1,479 B) that is **≈ 6,400 B ≈ 17 % of the level**. **A smaller perturbation is
+  > NOT excluded** — the control is honestly weak, and this sentence is part of the pre-registration precisely
+  > so a non-rejection is not read as a proof of zero effect.
+
+- **FINDING:** the frozen text states the weakness but **imposes no obligation on how it is reported**, and
+  X11 — the one `/xask` finding disposed as *"escalated to the user"* — had **no landing site**: not an
+  addendum here, not a rule in SPEC-356b, not a tracked item. An escalation with nowhere to land is
+  indistinguishable, six weeks later, from a finding that was quietly dropped, and *"escalated"* is a third
+  disposition category the round's own preamble does not admit (it recognises **applied** and
+  **refuted-with-reason** only). Raised by the SPEC-356a **Review v1, finding M3**, 2026-08-04.
+- **ADJUDICATED FORM (governs):**
+
+  > **The role is stated, not implied: at `n = 2` per arm the series control is a CATASTROPHE DETECTOR.** It
+  > is powered to reject a gross instrument perturbation (`≈ 17 %` of the level on SPEC-355's observed sd) and
+  > nothing finer. A non-rejection is **evidence that no catastrophe occurred**, and is **not** evidence of
+  > neutrality.
+  >
+  > **`n = 6` is DECLINED, with its cost on the record.** Each cell is a 4 h run, so `n = 6` per arm is
+  > **≈ 48 h of additional control time** — against a family whose next gate (TODO-484) is itself a 72 h soak.
+  > The spend is refused because the control's *job* here is to catch a catastrophe, and `n = 2` discharges
+  > that job; buying `MDE ≈ 5.0 %` would not convert the control into a neutrality proof either, only into a
+  > better-powered non-proof. The vendor's table (`n = 4 ⇒ ≈ 6.8 %`, `n = 6 ⇒ ≈ 5.0 %`, `n = 8 ⇒ ≈ 4.2 %`)
+  > stands in the record so the decision keeps its numbers.
+  >
+  > **REPORTING BOUND (this is the obligation the escalation lacked).** Every neutrality statement SPEC-356b
+  > writes — in its results, its cell-E disposition, or any summary of them — MUST cite, verbatim, both
+  > **`MDE ≈ 17 %`** (recomputed from the pair's own observed pooled sd, per §1.1's formula) and **"a smaller
+  > perturbation is NOT excluded"**. A neutrality claim published without both is **out of contract**. The
+  > companion obligations of **ADJ-5** (bounded-and-flagged, and the dynamics companions) apply unchanged and
+  > are not weakened by this.
+  >
+  > **X11's disposition is hereby APPLIED, landing as ADJ-8.** The *"escalated to the user"* category is
+  > withdrawn; the round's two-category preamble holds, and every finding is applied or
+  > refuted-with-reason.
+
+- **AUTHORITY:** SPEC-356a Review v1 finding M3; `/xask` round finding X11; user ruling 2026-08-04.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — same boundary as ADJ-7: no measurement artifact exists.
