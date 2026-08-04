@@ -165,7 +165,18 @@ CONSOLE_OUT="${OUT_DIR}/${BASE}.harness-console.log"
 #     bytes exact rather than a 60s-sampled lower bound.
 #
 #     Column order is manifest §5.2's: elapsed_secs, then §5.3 in its frozen
-#     order, then the inherited counter. 42 columns, governed by 35 rows.
+#     order, then the inherited counter.
+#
+#     42 COLUMNS FROM 35 NAMES, AND WHY THE TWO COUNTS ARE THE SAME TABLE.
+#     SPEC-356a R4.3a.2 tags 35 rows — the 33 pinned §5.3 names plus the two
+#     inherited columns — and this table has one row per COLUMN, so it has 42:
+#     each of the 7 histogram names contributes its `_sum` and its `_count`
+#     column, and both inherit their name's tag. The tag totals follow the same
+#     arithmetic and are checkable rather than asserted: R4.3a.2's 6 INSTRUMENT
+#     / 29 MEASURAND over names becomes 6 INSTRUMENT / 36 MEASURAND over
+#     columns, because all 7 expanded names are MEASURAND (29 + 7 = 36). A
+#     reader who counts one table against the other and finds 35 vs 42 is
+#     looking at names versus columns, not at a drift.
 #
 #     THE TAG COLUMN IS THE CLASSIFICATION RULE'S OUTPUT, NOT A PREFERENCE.
 #     A column is INSTRUMENT only if its zero is impossible under a working

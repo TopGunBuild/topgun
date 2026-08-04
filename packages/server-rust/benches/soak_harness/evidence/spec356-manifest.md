@@ -781,6 +781,26 @@ edited to accommodate them.)*
   > **The flat-zero census above is retained as the before-picture.** It stays in the record as the evidence
   > that produced this addendum, and the repair carries a directed regression cell in which the licensed
   > backlog reads **3** where the pre-repair emitter would read **0** and a stale split would read **1**.
+  >
+  > **A ZERO IS NOW A READING, NOT A CONSTRUCTION — and the residency bound is stated here rather than left
+  > to be discovered.** The repaired instrument was run on a real armed smoke cell
+  > (`spec356a-backlog-and-failpath-demos.log`, Part 1): the licensed backlog reads **1000** — one epoch's
+  > refs at width 1000 — at **2 of 12** sample instants, `max = 1000` where the pre-repair census read
+  > `max = 0`. **Ten of the twelve rows still read 0, and a second run of the same cell caught none at all.**
+  > That is the world, not the defect returning: this prune sweeps on **every `OR_REMOVE`** (4,288 passes in
+  > 120 s on that cell), so a newly-licensed ref is drained within milliseconds and the backlog at width 1000
+  > under this workload is genuinely **transient**. The consequences are pre-registered here so no later
+  > reader has to infer them:
+  >
+  > - **A 10 s gauge sample of a transient quantity is a LOWER BOUND on it.** `median(L)` may therefore
+  >   still read 0 in a regime where the prune is keeping up, and **Step 2 may still be the modal outcome**.
+  >   What has changed is that this is now **contradictable by data**: a prune that cannot keep up leaves a
+  >   backlog that persists ACROSS sample instants and is caught, where the pre-repair emitter would have
+  >   reported 0 for that regime too.
+  > - **A Step-2 determination must be reported together with `max(L)` over the window**, not with the
+  >   median alone. A window whose `max(L)` is also 0 is a window in which the sampler never observed a
+  >   non-empty drain, and that is an admissibility observation (§2.2 limb (b)'s territory), not evidence
+  >   that the prune is licensed-and-draining.
 
 - **AUTHORITY:** SPEC-356a Review v1 finding C1; user ruling 2026-08-04 (*"the post-drain zeroed read
   dies"*).

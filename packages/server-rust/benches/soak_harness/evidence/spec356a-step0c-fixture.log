@@ -152,7 +152,13 @@ STEP0C ADMISSIBILITY: topgun_or_prune_considered_total failed the population che
   STEP0C ADMISSIBILITY lines emitted: 1
   INSTRUMENT_OK:                      1 (unchanged by a MEASURAND failure)
   exit status:                        0 (the pinned fall-through, exit "$HARNESS_RC")
-EXIT STATUS: 0
+[CAPTURE HARNESS, NOT RUNNER OUTPUT] $ echo "EXIT STATUS: $?"  ->  0
+
+  The line above is the capturing shell's, not the runner's: the runner's own
+  last line is the `exit status:` line inside the block, and this one records
+  what the shell then observed in `$?`. It is marked because everything else
+  between the two rules IS the runner's bytes, and a reader must be able to
+  diff this file against a re-run without hitting a line no emitter produces.
 
 --------------------------------------------------------------------------------
 SPEC-356b's OWN PATTERNS, RUN AGAINST THIS ARTIFACT (not against the runner's
@@ -160,7 +166,16 @@ source -- a code-reading does not discharge this gate)
 --------------------------------------------------------------------------------
 
   $ grep -c 'STEP0C ADMISSIBILITY' spec356a-step0c-fixture.log
-  5          <- MUST be non-zero.  PASS
+  7          <- MUST be non-zero.  PASS
+
+  The count is over the WHOLE file, so it includes this document's own prose
+  mentions and moves whenever the prose does -- which is exactly why the gate
+  predicate is NON-ZERO and never a pinned integer. The number that is pinned
+  is the runner's own emitter count, reported inside the captured block above
+  as `STEP0C ADMISSIBILITY lines emitted: 1`. Recorded as 5 when this artifact
+  was first written and corrected to 7 here after two later edits added
+  mentions; the correction is the count catching up with the file, not a gate
+  changing its mind.
 
   $ grep -c '<the instrument-defect literal>' spec356a-step0c-fixture.log
   0          <- MUST be zero.      PASS

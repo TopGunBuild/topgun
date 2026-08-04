@@ -1,0 +1,265 @@
+SPEC-356a -- THE LICENSED-BACKLOG DIRECTED CELL, AND THE THREE FAIL PATHS
+                        THAT HAD NO COMMITTED ARTIFACT
+=========================================================================
+
+WHAT THIS FILE IS. Four demonstrations, each produced by running the thing
+rather than by reading it:
+
+  PART 1  the licensed backlog (`topgun_or_prune_eligible_refs`) read NON-ZERO
+          at sample instants on the repaired instrument -- the directed cell
+          ADJ-7 rests on, with the pre-repair flat-zero census as its
+          before-picture.
+  PART 2  the exhaustiveness identity's RED, driven by a mutation (A2).
+  PART 3  the arming witness firing in BOTH directions, exit 9 each (A3).
+  PART 4  the `exit 2` refusals, all six of them, with their console output
+          and their exit codes (A7a).
+
+WHY IT EXISTS. Parts 2-4 were required by their acceptance criteria to be
+RECORDED and were carried only as claims in the execution summary; a claim
+about a fail path is exactly the thing this spec's two evidence gates exist to
+distrust. Part 1 is the evidence for the repair those gates' own census
+exposed the need for.
+
+NOT A MEASUREMENT ARTIFACT. Every run below is a smoke cell or a unit test.
+The basenames are ones no SPEC-356b cell can produce, the artifacts were
+written to scratch directories, and nothing here is an input to any
+classification.
+
+WHY THIS FILE MAY SPELL THE INSTRUMENT-DEFECT LITERAL WHILE THE EG-2 ARTIFACT
+MAY NOT. SPEC-356b's consumer greps are FILE-SCOPED: it counts the literal in
+each cell's own `<cell>.harness-console.log` and in `spec356a-step0c-fixture.log`,
+never across this directory. Parts 3 and 4 below are recordings of runs whose
+whole purpose was to FIRE that defect, so the literal appears here as captured
+output -- the thing it names actually happened. Adding a grep that reads this
+directory as a whole would break that distinction and is not one of 356b's
+checks.
+
+================================================================================
+PART 1 -- THE LICENSED BACKLOG, READ NON-ZERO AT SAMPLE INSTANTS
+================================================================================
+
+THE BEFORE-PICTURE (committed, spec356a-eager-registration.log): on the
+pre-repair instrument the licensed backlog was recomputed AFTER the drain had
+removed every eligible epoch, so it read a structural zero at every sample:
+
+  topgun_or_prune_eligible_refs                [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_ineligible_refs              [POPULATN] n=13 empty=0 min=0 max=2072
+
+INVOCATION (verbatim, as run, on the repaired instrument):
+
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  SPEC356_SMOKE_DURATION=120 SPEC356_OUT_DIR=/tmp/spec356-fix-smoke2 \
+    packages/server-rust/benches/soak_harness/evidence/spec356-prune.sh smoke
+
+--------------------------------------------------------------------------------
+CAPTURED COLUMN REPORT, prune-record split rows (verbatim)
+--------------------------------------------------------------------------------
+  topgun_or_prune_nonempty_drains_total        [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_split_recomputes_total       [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_indexed_refs                 [POPULATN] n=12 empty=0 min=350 max=1887
+  topgun_or_prune_eligible_refs                [POPULATN] n=12 empty=0 min=0 max=1000
+  topgun_or_prune_ineligible_refs              [POPULATN] n=12 empty=0 min=64 max=1069
+
+--------------------------------------------------------------------------------
+THE ROWS THEMSELVES (verbatim from the produced prune.csv)
+--------------------------------------------------------------------------------
+  row   eligible   ineligible nonempty_drains  split_recomputes
+  1     0          64         0                2
+  2     0          64         0                2
+  3     0          1065       0                3
+  4     0          1065       0                3
+  5     0          1065       0                3
+  6     0          1063       1                5
+  7     0          1063       1                5
+  8     1000       780        2                6
+  9     0          1034       2                7
+  10    0          1034       2                7
+  11    1000       996        2                8
+  12    0          1069       3                9
+
+READING IT. Rows 8 and 11 read 1000 -- one epoch's worth of refs at width
+1000. The pre-repair emitter could not produce that number at any sample: its
+recompute site ran after an UNBOUNDED drain had taken every ref it had just
+counted. The split-recompute counter moves alongside, so these are fresh
+computations and not a frozen sample.
+
+AND THE HONEST BOUND, STATED HERE RATHER THAN LEFT TO BE DISCOVERED. Ten of
+the twelve rows still read 0, and a second run of the same cell caught NO
+non-zero sample at all (n=13, max=0). That is not the defect coming back --
+it is the world: this prune sweeps on every OR_REMOVE (4,288 passes in 120 s
+here), so a newly-licensed ref is drained within milliseconds and the backlog
+is genuinely transient at width 1000 under this workload. The repair's claim
+is therefore precise: a zero is now a READING rather than a CONSTRUCTION, and
+a regime in which the prune cannot keep up -- the one Steps 3-4 exist to name
+-- leaves a backlog that persists across sample instants and IS caught. A
+10 s gauge sample of a transient quantity remains a lower bound on it, and
+SPEC-356b reads L with that bound in view.
+
+================================================================================
+PART 2 -- A2: THE EXHAUSTIVENESS IDENTITY, SEEN RED
+================================================================================
+
+MUTATION. One exit is dropped from the ledger in the prune loop:
+
+  -                    pass.matched_nothing += 1;
+  +                    // MUTATION: exit dropped from the ledger
+
+INVOCATION (verbatim, as run):
+
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test -p topgun-server --lib prune_exit_ledger_sums_to_considered
+
+--------------------------------------------------------------------------------
+CAPTURED FAILURE (verbatim tail)
+--------------------------------------------------------------------------------
+  
+    left: 0
+   right: 1
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  
+  
+  failures:
+      service::domain::crdt::tests::prune_exit_ledger_sums_to_considered
+  
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1794 filtered out; finished in 0.21s
+  
+  error: test failed, to rerun pass `-p topgun-server --lib`
+
+The identity is 'every considered ref left through exactly one exit'. With one
+exit unrecorded the sum falls short by exactly the refs that took it (left 0,
+right 1), which is the property TG-OR-006 names. The mutation was reverted and
+the working tree verified clean before the next step.
+
+================================================================================
+PART 3 -- A3: THE ARMING WITNESS, FIRING IN BOTH DIRECTIONS
+================================================================================
+
+Direction 1 -- an ARMED cell whose child process is forced DISARMED. The
+witness must catch the ABSENCE of series that arming requires.
+
+  SPEC356_SMOKE_DURATION=45 SPEC356_OUT_DIR=/tmp/spec356-w1 \
+  SPEC356_WITNESS_DEMO_ARMING=false spec356-prune.sh smoke
+
+  arming witness:
+    cell expects:        armed=yes
+    TOPGUN_PRUNE_RECORD: false (on the child)
+    topgun_or_prune_ lines in the scrape: 0
+    pinned prune columns resolved:        0/40
+    topgun_ormap_tombstone_bytes present: 2 line(s)
+  INSTRUMENT DEFECT: arming witness: cell 'smoke' is ARMED but the scrape carries NO topgun_or_prune_ series -- the process that ran was DISARMED
+  RESULT: INSTRUMENT DEFECT -- this run's series must not be recorded as evidence.
+  -> exit status: 9
+
+Direction 2 -- a DISARMED cell whose child process is forced ARMED. The witness
+must catch the PRESENCE of series that disarming forbids.
+
+  SPEC356_SMOKE_DURATION=45 SPEC356_OUT_DIR=/tmp/spec356-w2 \
+  SPEC356_WITNESS_DEMO_ARMING=true spec356-prune.sh smokeoff
+
+  
+  arming witness:
+    cell expects:        armed=no
+    TOPGUN_PRUNE_RECORD: true (on the child)
+    topgun_or_prune_ lines in the scrape: 89
+    pinned prune columns resolved:        40/40
+    topgun_ormap_tombstone_bytes present: 2 line(s)
+  INSTRUMENT DEFECT: arming witness: cell 'smokeoff' is DISARMED but the scrape carries 89 topgun_or_prune_ line(s) -- the process that ran was ARMED
+  RESULT: INSTRUMENT DEFECT -- this run's series must not be recorded as evidence.
+  -> exit status: 9
+
+Both directions exit 9 and both write INSTRUMENT DEFECT. A witness that could
+only fail closed in one direction would pass a cell that ran armed while
+labelled disarmed -- the control arm silently measuring the treatment.
+
+================================================================================
+PART 4 -- A7a: THE SIX exit 2 REFUSALS
+================================================================================
+
+  ### exit-2 refusal 1: no positional argument
+  usage: spec356-prune.sh <cell>
+  
+    The measurement matrix. NO ROW OF THIS TABLE IS RUN BY SPEC-356a; every one
+    of them is executed by SPEC-356b, against this committed runner unedited.
+  
+      ctl        armed,    width 1000,  1800s, n=2  -- series control vs SPEC-355
+      ctloff     DISARMED, width 1000,  1800s, n=2  -- armed-vs-disarmed control
+      w100       armed,    width  100,  1800s, n=1  -- the keeping-up reference
+      long       armed,    width 1000, 14400s, n=1  -- the classification run
+      cellE      PROVENANCE pre-346 server,
+                 width 1000, 1800s, n=1             -- CONDITIONAL gap probe
+  
+    The two NON-MEASUREMENT cells. They exist to demonstrate the schema and the
+    fail-closed witnesses, they carry basenames no SPEC-356b artifact can ever
+    have, and they REFUSE to run without SPEC356_SMOKE_DURATION:
+  
+      smoke      armed,    width 1000   -- schema + population demonstration
+      smokeoff   DISARMED, width 1000   -- arming witness, absent direction
+  
+    A provenance cell (cellE) REQUIRES SOAK_SERVER_BINARY to be exported and to
+    name an existing executable. It never falls back to the binary the bench was
+    compiled beside.
+    -> exit status: 2
+  
+  ### exit-2 refusal 2: a second positional argument
+  FATAL: spec356-prune.sh takes exactly ONE positional argument, the cell id.
+         There is no --smoke flag and no second positional argument: smoke is
+         entered ONLY through SPEC356_SMOKE_DURATION (R4.5, carried forward
+         from spec355-width.sh's one-argument contract).
+    -> exit status: 2
+  
+  ### exit-2 refusal 3: unknown cell name
+  usage: spec356-prune.sh <cell>
+  
+    The measurement matrix. NO ROW OF THIS TABLE IS RUN BY SPEC-356a; every one
+    of them is executed by SPEC-356b, against this committed runner unedited.
+  
+      ctl        armed,    width 1000,  1800s, n=2  -- series control vs SPEC-355
+      ctloff     DISARMED, width 1000,  1800s, n=2  -- armed-vs-disarmed control
+      w100       armed,    width  100,  1800s, n=1  -- the keeping-up reference
+      long       armed,    width 1000, 14400s, n=1  -- the classification run
+      cellE      PROVENANCE pre-346 server,
+                 width 1000, 1800s, n=1             -- CONDITIONAL gap probe
+  
+    The two NON-MEASUREMENT cells. They exist to demonstrate the schema and the
+    fail-closed witnesses, they carry basenames no SPEC-356b artifact can ever
+    have, and they REFUSE to run without SPEC356_SMOKE_DURATION:
+  
+      smoke      armed,    width 1000   -- schema + population demonstration
+      smokeoff   DISARMED, width 1000   -- arming witness, absent direction
+  
+    A provenance cell (cellE) REQUIRES SOAK_SERVER_BINARY to be exported and to
+    name an existing executable. It never falls back to the binary the bench was
+    compiled beside.
+    -> exit status: 2
+  
+  ### exit-2 refusal 4: smoke without SPEC356_OUT_DIR (would write into the tracked evidence dir)
+  REFUSING: cell 'smoke' is a NON-MEASUREMENT cell and SPEC356_SMOKE_DURATION
+            is unset. It is not in the measurement table and it must not be run
+            as if it were: set SPEC356_SMOKE_DURATION (and SPEC356_OUT_DIR to a
+            scratch directory) to run it as the schema/witness demonstration it is.
+    -> exit status: 2
+  
+  ### exit-2 refusal 5: the arming defect injection outside smoke mode
+  FATAL: SPEC356_WITNESS_DEMO_ARMING is a SMOKE-ONLY defect injection.
+         It deliberately contradicts the cell's arming literal so the arming
+         witness can be seen to fire; on a measurement cell that would be a
+         silently mislabelled cell.
+    -> exit status: 2
+  
+  ### exit-2 refusal 6: smoke with a duration but NO scratch out-dir (tracked evidence dir)
+  ############################################################
+  ## SMOKE MODE -- THIS IS NOT A CHARACTERIZATION RUN       ##
+  ##   --duration          = 30s (override)        
+  ##   primary CSV cadence = 10s            
+  ##   prune.csv cadence   = 10s (pinned)
+  ## Its artifacts MUST NOT be committed as evidence.       ##
+  ############################################################
+  REFUSING: smoke mode would write into the tracked evidence dir
+    /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence
+  Set SPEC356_OUT_DIR to a scratch directory.
+    -> exit status: 2
+
+All six refuse before any clock starts and none of them is reachable from a
+SPEC-356b measurement invocation: they guard the one-positional-argument
+contract, the smoke entry point, the tracked evidence directory, and the
+smoke-only defect injection.
