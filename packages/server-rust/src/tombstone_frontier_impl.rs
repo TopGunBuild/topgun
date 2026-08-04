@@ -455,14 +455,24 @@ impl FrontierState {
     /// evaluated true at 0. DARK by construction: with `durable_epoch_watermark ==
     /// 0` the conjunction is false for every stamped epoch (all `>= 1`), so this
     /// returns empty in production; tests inject a watermark to exercise the drop.
-    fn drain_prunable(&mut self) -> Vec<(Epoch, TombstoneRef)> {
+    ///
+    /// Returns the drained refs TOGETHER WITH the eligible/ineligible split taken
+    /// **before** the removal loop consumes it. The split's eligible side is the
+    /// licensed backlog — the work the prune was permitted to do at the instant it
+    /// started — and this drain is UNBOUNDED: it takes every ref it just counted.
+    /// A split recomputed after the loop would therefore report an eligible side of
+    /// exactly 0 at every drain, on every cell, whatever the backlog had been — a
+    /// series that cannot tell a prune that has caught up from one that is
+    /// starving. Snapshotting before the loop is what makes the published series
+    /// the quantity it is named for.
+    fn drain_prunable(&mut self) -> (Vec<(Epoch, TombstoneRef)>, Option<SplitObservation>) {
         let watermark = self.durable_epoch_watermark;
         // Fast-path: a 0 watermark (no epoch byte-durable yet, or dark before the
         // recovery rebuild) means NO stamped epoch (all `>= 1`) can pass the
         // conjunction, so skip the per-epoch low-water-mark fold entirely — this
         // runs on every OR_REMOVE and every SYNC-leaf request.
         if watermark == 0 {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         let eligible: Vec<Epoch> = self
             .epoch_tags
@@ -471,6 +481,11 @@ impl FrontierState {
             // Cheap watermark conjunct first so it short-circuits the LWM fold.
             .filter(|&e| watermark >= e && self.is_epoch_prune_eligible(e))
             .collect();
+        // Gated on a non-empty eligible set, so the per-remove path — where the
+        // drain finds nothing — still pays no index-proportional fold. This is the
+        // same budget the post-loop recompute honoured; only the INSTANT moves.
+        let pre_drain_split =
+            (!eligible.is_empty()).then(|| self.split_observation(self.low_water_mark()));
         let mut drained = Vec::new();
         for e in eligible {
             if let Some(refs) = self.epoch_tags.remove(&e) {
@@ -484,7 +499,7 @@ impl FrontierState {
             }
             self.epoch_max_seq.remove(&e);
         }
-        drained
+        (drained, pre_drain_split)
     }
 
     /// Re-insert a drained tombstone ref whose storage drop FAILED, so the tag is
@@ -1386,14 +1401,19 @@ impl TombstoneFrontier {
                 let computed = state.compute_durable_epoch_watermark(flushed);
                 state.durable_epoch_watermark = state.durable_epoch_watermark.max(computed);
             }
-            let drained = state.drain_prunable();
             // A non-empty drain is the second of the two events the budget licenses
             // index-proportional work on. An empty drain — which is every drain while
             // the prune is dark, i.e. the per-remove case — takes the cheap path and
             // recomputes nothing, which is also why the split needs its staleness
-            // marker to be readable at all.
-            let split =
-                (!drained.is_empty()).then(|| state.split_observation(state.low_water_mark()));
+            // marker to be readable at all. The split travels OUT of the drain because
+            // it is taken before the removal: the licensed backlog only exists to be
+            // read on the near side of the work that consumes it.
+            let (drained, pre_drain_split) = state.drain_prunable();
+            let split = if drained.is_empty() {
+                None
+            } else {
+                pre_drain_split
+            };
             (
                 drained,
                 state.observation_snapshot(),
@@ -2459,10 +2479,13 @@ mod tests {
             Some("1"),
             "render was:\n{rendered}"
         );
-        // Epoch 1 has been drained out of the index, so nothing is eligible any more.
+        // The split published by a drain is the backlog the drain was licensed to
+        // take, read on the near side of taking it — epoch 1's single ref. Reading it
+        // on the far side would render 0 here and at every other drain, because this
+        // drain is unbounded.
         assert_eq!(
             rendered_value(&rendered, METRIC_PRUNE_ELIGIBLE_REFS),
-            Some("0"),
+            Some("1"),
             "render was:\n{rendered}"
         );
         assert_eq!(
@@ -2470,6 +2493,215 @@ mod tests {
             Some("1"),
             "render was:\n{rendered}"
         );
+    }
+
+    /// The eligible side of a drain's split is the backlog the drain was LICENSED to
+    /// take, sampled on the near side of taking it.
+    ///
+    /// This is a directed cell: the split published at the ACK reports **1** eligible
+    /// ref, the watermark then rises without publishing anything, and the drain that
+    /// follows is licensed for **3**. Three distinct values are therefore
+    /// distinguishable at the gauge — `3` is the drain's own pre-drain computation,
+    /// `1` would be the ACK's stale split, and `0` is what a recompute made AFTER the
+    /// removal loop reports on every drain of an unbounded prune, whatever the backlog
+    /// was. Only `3` is the licensed backlog the classification's terms name.
+    #[test]
+    fn the_licensed_backlog_is_sampled_before_the_drain_consumes_it() {
+        let rendered = rendered_under_a_recorder(|| {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for k in ["k1", "k2", "k3", "k4"] {
+                f.stamp_tombstone("m", k, "t");
+            }
+            // Only epoch 1 is byte-durable when the ACK lands, so the ACK's split sees
+            // a licensed backlog of one ref out of four.
+            f.set_durable_epoch_watermark(1);
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:alice|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 4, CONN_A)));
+
+            // Durability catches up to epoch 3. Injection publishes nothing, so the
+            // gauge still holds the ACK's value until the drain recomputes it.
+            f.set_durable_epoch_watermark(3);
+            assert_eq!(
+                f.drain_prunable_tombstones().len(),
+                3,
+                "epochs 1-3 clear both conjuncts, epoch 4 is above the watermark"
+            );
+        });
+
+        for (name, value) in [
+            (METRIC_PRUNE_ELIGIBLE_REFS, "3"),
+            // Epoch 4's ref, pinned by the watermark at the same instant.
+            (METRIC_PRUNE_INELIGIBLE_REFS, "1"),
+            // The ACK's recompute plus the drain's.
+            (METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL, "2"),
+            // The index gauge is the far-side reading, and it MOVED — which is what
+            // makes the eligible gauge's 3 a different instant rather than a stale
+            // copy of the same one.
+            (METRIC_PRUNE_INDEXED_REFS, "1"),
+            (METRIC_PRUNE_LAST_DRAINED_EPOCH, "3"),
+        ] {
+            assert_eq!(
+                rendered_value(&rendered, name),
+                Some(value),
+                "{name} must render {value}; render was:\n{rendered}"
+            );
+        }
+    }
+
+    /// The body of an item that starts at `anchor` and closes at the first brace at
+    /// `indent` columns — the source-scan primitive the two structural tests below
+    /// share.
+    fn item_body<'a>(source: &'a str, anchor: &str, indent: &str) -> &'a str {
+        let start = source
+            .find(anchor)
+            .unwrap_or_else(|| panic!("`{anchor}` is defined in the scanned file"));
+        let tail = &source[start..];
+        let close = format!("\n{indent}}}\n");
+        let end = tail
+            .find(&close)
+            .unwrap_or_else(|| panic!("`{anchor}` closes at a brace in column {}", indent.len()));
+        &tail[..end]
+    }
+
+    /// The epoch triple the pruning caller reads is taken under ONE acquisition of the
+    /// drain's own lock, and the record never republishes it.
+    ///
+    /// Both halves are structural because neither is observable from a single-threaded
+    /// test: a triple re-read through a second `lock()` tears only against a concurrent
+    /// ACK, and a republish from the record is indistinguishable from the locked
+    /// publish whenever the two happen to agree. A test that can only catch the
+    /// interleaving is a test that reports green on the defect, so the guard is sited
+    /// where the defect actually lives — in the shape of the code.
+    #[test]
+    fn the_drain_snapshot_is_one_acquisition_and_the_record_never_republishes_it() {
+        const SOURCE: &str = include_str!("tombstone_frontier_impl.rs");
+        const CONTRACT: &str = include_str!("tombstone_frontier.rs");
+
+        let drain = item_body(
+            SOURCE,
+            "pub fn drain_prunable_tombstones(&self) -> Vec<(Epoch, TombstoneRef)> {",
+            "    ",
+        );
+        assert_eq!(
+            drain.matches("self.lock()").count(),
+            1,
+            "the drain must take its state lock exactly once: the drained refs, the \
+             frontier snapshot and the split are one observation of one instant, and a \
+             second acquisition lets a concurrent ACK move the epochs between them"
+        );
+
+        let record = item_body(
+            SOURCE,
+            "fn observe_drained_epoch(&self, record: &PruneEpochRecord) {",
+            "    ",
+        );
+        assert!(
+            !record.contains(".set("),
+            "the per-epoch record must write no gauge: the epoch gauges are published \
+             from the drain's locked snapshot, and a second writer here would publish \
+             whatever the unlocked pruning caller happened to read — letting the torn \
+             copy win. Body was:\n{record}"
+        );
+
+        let declared = item_body(CONTRACT, "pub struct PruneEpochRecord {", "");
+        for field in [
+            "current_epoch",
+            "low_water_mark",
+            "durable_epoch_watermark",
+            "last_drained_epoch",
+        ] {
+            assert!(
+                !declared.contains(field),
+                "`PruneEpochRecord` must not carry `{field}`: a caller that holds no \
+                 lock cannot fill an epoch field without reading it separately, so \
+                 carrying one re-creates the tearable triple by construction. \
+                 Declaration was:\n{declared}"
+            );
+        }
+    }
+
+    /// The two writers of `current_epoch` / `low_water_mark` agree BY CONSTRUCTION,
+    /// and this is what asserts it.
+    ///
+    /// The gauges are written both from the frontier snapshot (`observe_epoch_state`)
+    /// and from the claim span the split carries (`observe_claim_span`). The snapshot
+    /// reads the CACHED low-water mark and the split's caller reads the LIVE fold, so
+    /// the two agree only while every cursor mutation refreshes the cache under the
+    /// same lock that mutated it. That is an invariant of three call sites, and an
+    /// invariant nobody checks is a coincidence — so it is checked here across all
+    /// three cursor mutations plus the drain, and the writer count is pinned so a
+    /// third writer cannot be added silently.
+    #[test]
+    fn the_two_epoch_gauge_writers_agree_on_one_locked_reading() {
+        const SOURCE: &str = include_str!("tombstone_frontier_impl.rs");
+        for field in ["current_epoch", "low_water_mark"] {
+            // Composed rather than written whole: a scanning literal that spells the
+            // thing it counts counts itself, and this test would then be measuring its
+            // own source.
+            let writer = format!("self.{field}.set(");
+            assert_eq!(
+                SOURCE.matches(writer.as_str()).count(),
+                2,
+                "`{writer}` must have exactly the two known writers — the claim span \
+                 and the frontier snapshot; a third would publish a reading neither \
+                 this test nor the drain's lock covers"
+            );
+        }
+        for publisher in [
+            "fn publish_split(&self, split: &SplitObservation) {",
+            "fn publish_frontier_state(&self, snapshot: &FrontierObservation) {",
+        ] {
+            assert!(
+                !item_body(SOURCE, publisher, "    ").contains("self.lock()"),
+                "`{publisher}` must publish from the caller's snapshot and take no \
+                 lock of its own: a publisher that re-reads the state is a second \
+                 instant wearing the first one's name"
+            );
+        }
+
+        let f = frontier();
+        f.set_epoch_width(1);
+        let cached_matches_the_fold = |stage: &str| {
+            let state = f.lock();
+            assert_eq!(
+                state.observed_lwm,
+                state.low_water_mark(),
+                "the cached low-water mark must equal the live fold after {stage}: \
+                 the claim span publishes the fold and the frontier snapshot publishes \
+                 the cache, and they are the same gauge"
+            );
+        };
+
+        for k in ["k1", "k2", "k3"] {
+            f.stamp_tombstone("m", k, "t");
+        }
+        f.set_durable_epoch_watermark(2);
+        f.set_delivered(CONN_A, 100);
+        f.set_delivered(CONN_B, 100);
+        let laggard: ClientId = "a5:alice|dev-1".into();
+        let leader: ClientId = "a5:alice|dev-2".into();
+
+        block_on(async {
+            assert!(f.confirm_apply_ack(&laggard, 1, CONN_A).await);
+            cached_matches_the_fold("an ACK that advances");
+            assert!(f.confirm_apply_ack(&leader, 3, CONN_B).await);
+            cached_matches_the_fold("an ACK by a second client");
+            // Dropping the fleet laggard is the largest single LWM movement there is.
+            f.forget_client(&laggard).await;
+            cached_matches_the_fold("forgetting the laggard");
+            // No durable store is wired, so this rehydrate loads nothing — it still
+            // has to leave the cache and the fold in agreement.
+            f.rehydrate(&laggard).await;
+            cached_matches_the_fold("a rehydrate");
+        });
+        assert_eq!(
+            f.drain_prunable_tombstones().len(),
+            2,
+            "epochs 1 and 2 clear both conjuncts once the laggard is gone"
+        );
+        cached_matches_the_fold("a non-empty drain");
     }
 
     /// A replayed ACK moves no cursor, so it triggers no split recompute and reports
