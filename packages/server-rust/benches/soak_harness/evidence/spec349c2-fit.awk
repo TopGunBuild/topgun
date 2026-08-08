@@ -17,6 +17,15 @@
 #           because every column it was built for is a megabyte column. For
 #           `tombstone_bytes` the fit is arithmetically identical but the unit
 #           is BYTES per hour -- read the name as "value units per hour" there.
+#   xaxis   OPTIONAL x-axis column, resolved by HEADER NAME. Default:
+#           elapsed_secs, with the historical hours conversion -- every
+#           committed invocation omits this parameter and its output is
+#           byte-identical to the pre-parameter script (regression-proven in
+#           spec356-adj15-xask.md). With an explicit xaxis (e.g.
+#           current_epoch, ADJ-15's pass-rate fit) the x values are used RAW:
+#           no hours conversion, and the output fields are named
+#           x_start/x_end/x_span and slope_per_x_unit, so a reader can never
+#           mistake a per-epoch slope for a per-hour one.
 #   window  last_half (default) | full
 #             last_half = rows [floor(n/2) .. n-1] over the FULL row count n,
 #             the same floor-biased split the harness's own last-half statistic
@@ -67,6 +76,7 @@ BEGIN {
     FS = ","
     failed = 0
     if (col == "") die("-v col=<column> is required")
+    if (xaxis == "") xaxis = "elapsed_secs"
     if (window == "") window = "last_half"
     if (window != "last_half" && window != "full") die("-v window= must be last_half or full")
     n = 0
@@ -77,10 +87,10 @@ BEGIN {
 NR == 1 {
     for (i = 1; i <= NF; i++) {
         h = trim($i)
-        if (h == "elapsed_secs") xcol = i
+        if (h == xaxis) xcol = i
         if (h == col) ycol = i
     }
-    if (xcol < 0) die("no elapsed_secs column in header")
+    if (xcol < 0) die("no " xaxis " column in header")
     if (ycol < 0) die("no column named '" col "' in header")
     next
 }
@@ -102,7 +112,7 @@ NR == 1 {
         next
     }
     if (!isnum(xs) || !isnum(ys)) {
-        die("non-numeric cell at line " NR " (elapsed_secs='" xs "', " col "='" ys "')")
+        die("non-numeric cell at line " NR " (" xaxis "='" xs "', " col "='" ys "')")
     }
     t[n] = xs + 0
     y[n] = ys + 0
@@ -121,7 +131,9 @@ END {
 
     sx = 0; sy = 0
     for (i = start; i < n; i++) {
-        x[i] = t[i] / 3600.0          # hours, so the slope is MB/h
+        # The hours conversion is the elapsed_secs convention only; an explicit
+        # xaxis is used raw, so a per-epoch slope stays per-epoch.
+        x[i] = (xaxis == "elapsed_secs") ? t[i] / 3600.0 : t[i]
         sx += x[i]
         sy += y[i]
     }
@@ -162,8 +174,15 @@ END {
     # than folded in as zeros. Reported alongside `skipped_empty` so a reader can
     # see how much of the series was actually measured.
     printf "col=%s window=%s rows_used=%d n=%d skipped_empty=%d", col, window, n, m, skipped + 0
-    printf " t_start_secs=%.1f t_end_secs=%.1f span_secs=%.1f", t[start], t[n-1], t[n-1] - t[start]
-    printf " y_first=%.3f y_last=%.3f", y[start], y[n-1]
-    printf " slope_mb_per_hour=%.6f se_mb_per_hour=%s", b, se_s
-    printf " intercept_mb=%.6f r2=%s sxx_hours2=%.9f sse=%.9f\n", a, r2_s, sxx, sse
+    if (xaxis == "elapsed_secs") {
+        printf " t_start_secs=%.1f t_end_secs=%.1f span_secs=%.1f", t[start], t[n-1], t[n-1] - t[start]
+        printf " y_first=%.3f y_last=%.3f", y[start], y[n-1]
+        printf " slope_mb_per_hour=%.6f se_mb_per_hour=%s", b, se_s
+        printf " intercept_mb=%.6f r2=%s sxx_hours2=%.9f sse=%.9f\n", a, r2_s, sxx, sse
+    } else {
+        printf " xaxis=%s x_start=%.1f x_end=%.1f x_span=%.1f", xaxis, t[start], t[n-1], t[n-1] - t[start]
+        printf " y_first=%.3f y_last=%.3f", y[start], y[n-1]
+        printf " slope_per_x_unit=%.6f se_per_x_unit=%s", b, se_s
+        printf " intercept=%.6f r2=%s sxx=%.9f sse=%.9f\n", a, r2_s, sxx, sse
+    }
 }
