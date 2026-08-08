@@ -36,6 +36,7 @@ use crate::service::security::WriteAdmission;
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::wal::OrDelta;
 use crate::storage::{CallerProvenance, ExpiryPolicy, MutateOutcome, RecordStoreFactory};
+use crate::tombstone_frontier::{Epoch, PruneEpochRecord, PrunePassRecord};
 use crate::tombstone_frontier_impl::TombstoneFrontier;
 use crate::traits::SchemaProvider;
 
@@ -84,7 +85,7 @@ pub struct CrdtService {
     /// Per-KEY single-writer registry. Serializes the `OR_ADD` apply RMW
     /// (`store.get` -> merge -> `store.put`) so concurrent `OR_ADD`s on the
     /// SAME key cannot both read the pre-mutation state and race to `put`,
-    /// which would silently drop one add (SPEC-333b lost-update race).
+    /// which would silently drop one add (a lost-update race).
     /// Internal-only: not exposed via `new()` so existing call sites are
     /// unaffected.
     ///
@@ -542,7 +543,7 @@ impl CrdtService {
             // Serialize the compound read-modify-write per key: without this, two
             // concurrent OR_ADDs on the SAME key could each read the pre-mutation
             // state below and race to `store.put`, with the second `put` silently
-            // clobbering the first's merge and losing an update (SPEC-333b). Held
+            // clobbering the first's merge and losing an update. Held
             // across `store.get` through the single `store.put` merge-commit only —
             // does NOT cover the OR_REMOVE RMW below (342b's responsibility).
             let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
@@ -1498,12 +1499,49 @@ pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticV
 /// apart from "the closure ran and the tag was already gone" — which must NOT be
 /// restored, or the prune loop livelocks on it — by a flag the closure itself
 /// sets, because the `Ok(bool)` from `update_in_place` conflates the two.
+///
+/// Every ref leaves the loop body through exactly one of six counted exits, so
+/// `considered == dropped + matched_nothing + absent + restored_read_error +
+/// restored_evicted + restored_write_error` holds by construction. The tombstone-byte
+/// decrement stays where it already was — in the post-write success arm, behind
+/// `dropped` — because a decrement moved to follow the ledger would credit bytes the
+/// durable write never actually freed.
+// Kept as one body deliberately: splitting the loop out would move the exit
+// counters and the tombstone-byte decrement into a helper, where neither the
+// summing identity nor the "exactly one decrement, in the post-write arm behind
+// `dropped`" siting is assertable against this function any more.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn prune_epoch_tombstones(
     frontier: &TombstoneFrontier,
     factory: &RecordStoreFactory,
     key_writer: &KeyWriterRegistry,
 ) {
-    for (epoch, r) in frontier.drain_prunable_tombstones() {
+    let drained = frontier.drain_prunable_tombstones();
+    // One record per invocation, empty drains included: a pass that drains nothing
+    // is exactly the regime this record has to be able to describe, so the pass is
+    // counted here rather than behind any eligibility or per-ref condition. A pass
+    // counted inside the loop below would read zero during a total stall.
+    let mut pass = PrunePassRecord {
+        empty_drain: drained.is_empty(),
+        ..PrunePassRecord::default()
+    };
+    // The epoch/watermark state is NOT read here. The drain has already released the
+    // frontier lock, so three accessor calls would be three independent acquisitions
+    // and could tear against a concurrent ACK; the frontier publishes that state
+    // itself, from a snapshot taken under the drain's own lock.
+    let mut per_epoch: BTreeMap<Epoch, PruneEpochRecord> = BTreeMap::new();
+
+    for (epoch, r) in drained {
+        // The exhaustiveness identity's left-hand side: every ref the body examines
+        // is counted here and leaves through exactly one exit counter below.
+        pass.considered += 1;
+        per_epoch
+            .entry(epoch)
+            .or_insert(PruneEpochRecord {
+                epoch,
+                ..PruneEpochRecord::default()
+            })
+            .considered += 1;
         let store = factory.get_or_create(&r.map, hash_to_partition(&r.key));
         // Serialize the drop against concurrent OR writes on this key.
         let _guard = key_writer.acquire(&r.map, &r.key).await;
@@ -1515,9 +1553,17 @@ pub(crate) async fn prune_epoch_tombstones(
         match store.get(&r.key, false).await {
             Ok(Some(_)) => {}
             // Truly gone (no resident and no durable record): nothing to reclaim.
-            Ok(None) => continue,
+            // The ref is consumed WITHOUT a tombstone-byte decrement, so it is
+            // counted apart from a drop rather than folded into a "not dropped"
+            // bucket: a growing share here is a candidate mechanism for a falling
+            // reclaim fraction that no other instrument can see.
+            Ok(None) => {
+                pass.absent += 1;
+                continue;
+            }
             Err(e) => {
                 tracing::warn!(map = %r.map, key = %r.key, epoch, "prune read failed, re-indexing tombstone for retry: {e}");
+                pass.restored_read_error += 1;
                 frontier.restore_tombstone_ref(epoch, r);
                 continue;
             }
@@ -1592,6 +1638,13 @@ pub(crate) async fn prune_epoch_tombstones(
             Ok(_) => {
                 if dropped {
                     crate::storage::record::sub_tombstone_bytes(r.tag.len() as u64);
+                    let freed = r.tag.len() as u64;
+                    pass.dropped += 1;
+                    pass.bytes_freed += freed;
+                    if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
+                        epoch_record.dropped += 1;
+                        epoch_record.bytes_freed += freed;
+                    }
                 }
                 // The closure never ran: the key was evicted between the
                 // rehydrating get and this write, so init=None mutated nothing
@@ -1603,6 +1656,9 @@ pub(crate) async fn prune_epoch_tombstones(
                 // reports "changed" with nothing pruned) cannot livelock the
                 // loop by getting the ref restored on every pass. `dropped`
                 // implies `ran`, so the gauge above and this arm are exclusive.
+                // `dropped` implies `ran`, so these three dispositions are mutually
+                // exclusive and together cover every way out of a successful write —
+                // which is what makes the exit ledger sum back to `considered`.
                 if !ran {
                     tracing::debug!(
                         map = %r.map,
@@ -1610,17 +1666,34 @@ pub(crate) async fn prune_epoch_tombstones(
                         epoch,
                         "prune found key evicted mid-write, re-indexing tombstone for retry"
                     );
+                    pass.restored_evicted += 1;
                     frontier.restore_tombstone_ref(epoch, r);
+                } else if !dropped {
+                    // The closure ran and matched no tag; it may still have owed the
+                    // shape-upgrade write above, but no tombstone was reclaimed.
+                    pass.matched_nothing += 1;
                 }
             }
             Err(e) => {
                 // Operator-visible: a swallowed storage error on the prune path
                 // would silently stall tombstone reclamation.
                 tracing::warn!(map = %r.map, key = %r.key, epoch, "prune update failed, re-indexing tombstone for retry: {e}");
+                pass.restored_write_error += 1;
                 frontier.restore_tombstone_ref(epoch, r);
             }
         }
     }
+
+    pass.epochs_drained = per_epoch.len() as u64;
+    for epoch_record in per_epoch.values() {
+        frontier
+            .prune_observer()
+            .observe_drained_epoch(epoch_record);
+    }
+    // Exactly one pass observation per invocation, outside the loop body and on
+    // every path through this function — the recorder counts the pass itself, so a
+    // second or a conditional call would break the pass identity.
+    frontier.prune_observer().observe_pass(&pass);
 }
 
 // ---------------------------------------------------------------------------
@@ -1637,6 +1710,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Weak};
 
+    use metrics_exporter_prometheus::PrometheusBuilder;
     use parking_lot::Mutex;
     use topgun_core::messages::Message;
     use topgun_core::{SystemClock, Timestamp, HLC};
@@ -1657,6 +1731,13 @@ mod tests {
     use crate::storage::record::Record;
     use crate::storage::record_store::RecordStore;
     use crate::storage::tombstone_gauge::with_isolated_gauge;
+    use crate::tombstone_frontier::{
+        METRIC_PRUNE_ABSENT_TOTAL, METRIC_PRUNE_CONSIDERED_TOTAL, METRIC_PRUNE_DROPPED_TOTAL,
+        METRIC_PRUNE_EMPTY_DRAINS_TOTAL, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL,
+        METRIC_PRUNE_MATCHED_NOTHING_TOTAL, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL,
+        METRIC_PRUNE_PASSES_TOTAL, METRIC_PRUNE_RESTORED_EVICTED_TOTAL,
+        METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
+    };
 
     // -----------------------------------------------------------------------
     // Normalized source search
@@ -4302,6 +4383,7 @@ mod tests {
     struct ArmableStore {
         data: Mutex<HashMap<(String, String), RecordValue>>,
         reject_keys: Mutex<HashSet<String>>,
+        reject_read_keys: Mutex<HashSet<String>>,
     }
 
     impl ArmableStore {
@@ -4309,6 +4391,18 @@ mod tests {
         /// still inspect what survived durably.
         fn reject_writes_to(&self, key: &str) {
             self.reject_keys.lock().insert(key.to_string());
+        }
+
+        /// Fail every subsequent rehydrating LOAD of `key`.
+        ///
+        /// Separate from the write arming because the prune's read failure is a
+        /// different exit from its write failure, and the two must be drivable
+        /// independently — arming one key for both would collapse two counters
+        /// into one observation. [`ArmableStore::durable`] reads the backing map
+        /// directly rather than through `load`, so a test can still inspect what
+        /// survived on a read-armed key.
+        fn reject_reads_to(&self, key: &str) {
+            self.reject_read_keys.lock().insert(key.to_string());
         }
 
         fn durable(&self, map: &str, key: &str) -> Option<RecordValue> {
@@ -4374,6 +4468,9 @@ mod tests {
         }
 
         async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            if self.reject_read_keys.lock().contains(key) {
+                return Err(anyhow::anyhow!("armed read rejection for {key}"));
+            }
             Ok(self
                 .data
                 .lock()
@@ -4386,6 +4483,15 @@ mod tests {
             map: &str,
             keys: &[String],
         ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            // A read-armed key fails on every read path, not just the single-key
+            // one — otherwise a batched rehydration would silently succeed
+            // against a store the test believes is failing.
+            {
+                let rejected = self.reject_read_keys.lock();
+                if let Some(key) = keys.iter().find(|key| rejected.contains(*key)) {
+                    return Err(anyhow::anyhow!("armed read rejection for {key}"));
+                }
+            }
             let guard = self.data.lock();
             Ok(keys
                 .iter()
@@ -5678,6 +5784,495 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // The prune exit ledger: exhaustiveness (TG-OR-006) and instrument
+    // neutrality
+    // -----------------------------------------------------------------------
+
+    /// The fixture the six-exit workload runs against.
+    ///
+    /// Kept as a value the caller constructs separately from the workload
+    /// because WHERE the frontier is built relative to a bound metrics recorder
+    /// is what decides whether its prune record can emit at all: the recorder
+    /// resolves every handle once, at construction, and a handle resolved before
+    /// a recorder is bound stays a no-op for its whole lifetime.
+    struct SixExitFixture {
+        store: Arc<ArmableStore>,
+        evictor: Arc<EvictOnRehydrate>,
+        svc: Arc<CrdtService>,
+        factory: Arc<RecordStoreFactory>,
+        frontier: Arc<TombstoneFrontier>,
+    }
+
+    /// What one six-exit prune pass leaves behind, in terms only the prune's own
+    /// behaviour can move.
+    ///
+    /// This is the armed-vs-disarmed comparison's payload: it has to be readable
+    /// without any metrics surface at all, because the disarmed arm has none.
+    #[derive(Debug, PartialEq, Eq)]
+    struct PruneWorkloadOutcome {
+        /// Durable tombstone set per workload key, in a fixed order.
+        durable_tombstones: Vec<(String, Option<Vec<String>>)>,
+        /// Seeded tags the pass actually reclaimed from durable storage.
+        dropped_observed: u64,
+        /// Refs the pass handed back to the frontier for a later sweep.
+        restored_refs: Vec<(Epoch, String, String)>,
+    }
+
+    fn build_six_exit_fixture() -> SixExitFixture {
+        let store = Arc::new(ArmableStore::default());
+        let evictor = Arc::new(EvictOnRehydrate::default());
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&store) as Arc<dyn MapDataStore>,
+            vec![Arc::clone(&evictor) as Arc<dyn MutationObserver>],
+        );
+        SixExitFixture {
+            store,
+            evictor,
+            svc,
+            factory,
+            frontier,
+        }
+    }
+
+    /// One fixed synthetic prune workload that drives **all six** exits of
+    /// `prune_epoch_tombstones` in a single non-empty pass.
+    ///
+    /// Every exit has to actually fire. An exit nothing reaches contributes zero
+    /// to both sides of the exhaustiveness identity, so its increment could be
+    /// deleted and the identity would stay green — the identity would then be
+    /// asserting nothing about that exit, which is exactly the failure mode a
+    /// demonstrated RED is supposed to rule out.
+    ///
+    /// Epoch width is 1, so each stamp lands its ref in its own epoch and which
+    /// epoch drains is decided by the injected low-water mark rather than by a
+    /// clock. The failure modes are armed only after seeding, so every setup
+    /// write succeeds and the prune's own read/write is the one that fails.
+    #[allow(clippy::too_many_lines)]
+    async fn run_six_exit_prune_workload(fixture: SixExitFixture) -> PruneWorkloadOutcome {
+        let SixExitFixture {
+            store,
+            evictor,
+            svc,
+            factory,
+            frontier,
+        } = fixture;
+
+        // Four keys that reach the prune holding a real durable tombstone.
+        for (epoch, key, tag) in [
+            (1, "kdrop", "TDROP"),
+            (2, "kwrite", "TWRITE"),
+            (3, "kevict", "TEVICT"),
+            (4, "kread", "TREAD"),
+        ] {
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", key, "v", tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", key, tag))
+                .await
+                .unwrap();
+            assert_eq!(
+                frontier.current_epoch(),
+                epoch,
+                "{key}'s tombstone must own epoch {epoch}"
+            );
+        }
+        // A resident record whose tombstone set never held the tag the sweep is
+        // about to look for: the mutate closure RUNS and matches nothing.
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "kmatch", "v", "TLIVE"))
+            .await
+            .unwrap();
+        assert_eq!(
+            frontier.stamp_tombstone("m", "kmatch", "GHOST"),
+            5,
+            "the ghost ref sits in epoch 5"
+        );
+        // Neither resident nor durable: the read comes back `Ok(None)` and the
+        // ref is consumed with no byte decrement.
+        assert_eq!(
+            frontier.stamp_tombstone("m", "kabsent", "TABSENT"),
+            6,
+            "the absent ref sits in epoch 6"
+        );
+        // Pins an epoch the drain must NOT take, so the low-water mark can sit
+        // strictly past all six workload epochs without the fixture needing an
+        // ack cursor beyond the epochs that exist.
+        assert_eq!(
+            frontier.stamp_tombstone("m", "kpinned", "TPINNED"),
+            7,
+            "the pin sits in epoch 7"
+        );
+
+        let client: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 100);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, 7, ConnectionId(1))
+                .await
+        );
+        assert_eq!(
+            frontier.low_water_mark(),
+            7,
+            "epochs 1..=6 are eligible, epoch 7 is pinned"
+        );
+        frontier.set_durable_epoch_watermark(1000);
+
+        // The prune's durable write fails.
+        store.reject_writes_to("kwrite");
+        // Evicted between the rehydrating read and the in-place write, so the
+        // mutate closure never runs.
+        let kevict_store = factory.get_or_create("m", hash_to_partition("kevict"));
+        assert!(
+            kevict_store.evict("kevict", false).is_some(),
+            "precondition: kevict is resident before the modelled eviction"
+        );
+        evictor.arm(&kevict_store, "kevict");
+        // Non-resident with a failing backend read, so the rehydrating read is
+        // the call that errors.
+        let kread_store = factory.get_or_create("m", hash_to_partition("kread"));
+        assert!(
+            kread_store.evict("kread", false).is_some(),
+            "precondition: kread is resident before it is dropped from memory"
+        );
+        store.reject_reads_to("kread");
+
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+        let seeded = [
+            ("kdrop", "TDROP"),
+            ("kwrite", "TWRITE"),
+            ("kevict", "TEVICT"),
+            ("kread", "TREAD"),
+        ];
+        let durable_tombstones = ["kdrop", "kwrite", "kevict", "kread", "kmatch", "kabsent"]
+            .into_iter()
+            .map(|key| {
+                let tombstones = match store.durable("m", key) {
+                    Some(RecordValue::OrMap { tombstones, .. }) => Some(tombstones),
+                    Some(RecordValue::OrTombstones { tags }) => Some(tags),
+                    Some(_) => Some(Vec::new()),
+                    None => None,
+                };
+                (key.to_string(), tombstones)
+            })
+            .collect();
+        let dropped_observed = seeded
+            .into_iter()
+            .filter(|(key, tag)| match store.durable("m", key) {
+                Some(RecordValue::OrMap { tombstones, .. }) => {
+                    !tombstones.contains(&(*tag).to_string())
+                }
+                _ => false,
+            })
+            .count() as u64;
+        let mut restored_refs: Vec<(Epoch, String, String)> = frontier
+            .drain_prunable_tombstones()
+            .into_iter()
+            .map(|(epoch, r)| (epoch, r.key, r.tag))
+            .collect();
+        restored_refs.sort();
+
+        PruneWorkloadOutcome {
+            durable_tombstones,
+            dropped_observed,
+            restored_refs,
+        }
+    }
+
+    /// Run the six-exit workload once and return its outcome, its isolated
+    /// tombstone-gauge delta and the Prometheus render taken afterwards.
+    ///
+    /// `record_armed` decides only ONE thing: whether the fixture — and with it
+    /// the frontier's prune-record handles — is constructed inside the recorder
+    /// binding. Constructed inside, the record writes its series; constructed
+    /// outside, every handle is a permanent no-op and the render carries no
+    /// prune-record series at all, which is the observable surface of the
+    /// disarmed `NullPruneRecorder`. Reproducing the disarmed surface this way
+    /// rather than by flipping `TOPGUN_PRUNE_RECORD` is forced: the kill-switch
+    /// is read from the process environment and this crate's
+    /// `env_isolation_guard` forbids a test mutating it. That the env word
+    /// selects `NullPruneRecorder`, and that `NullPruneRecorder` registers no
+    /// series, are proven in `tombstone_frontier_impl.rs`; what is proven HERE
+    /// is that the prune path's gauge movement and reclaim outcome do not depend
+    /// on whether the record emits.
+    ///
+    /// `metrics::with_local_recorder` binds a THREAD-local recorder and takes a
+    /// synchronous closure, so the workload is driven from a current-thread
+    /// runtime inside the binding rather than from a `#[tokio::test]` body.
+    fn six_exit_run(record_armed: bool) -> (PruneWorkloadOutcome, u64, String) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let prebuilt = if record_armed {
+            None
+        } else {
+            Some(rt.block_on(async { build_six_exit_fixture() }))
+        };
+        let (outcome, gauge_delta) = metrics::with_local_recorder(&recorder, || {
+            let fixture =
+                prebuilt.unwrap_or_else(|| rt.block_on(async { build_six_exit_fixture() }));
+            rt.block_on(with_isolated_gauge(run_six_exit_prune_workload(fixture)))
+        });
+        (outcome, gauge_delta, handle.render())
+    }
+
+    /// Read one counter's value out of a Prometheus render.
+    fn rendered_counter(rendered: &str, name: &str) -> u64 {
+        rendered
+            .lines()
+            // The space is the exposition format's name/value separator, so
+            // requiring it stops a shorter name matching a longer one's prefix.
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+            .unwrap_or_else(|| panic!("counter {name} is absent from the render:\n{rendered}"))
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("counter {name} did not render an integer: {e}"))
+    }
+
+    /// The prune ledger is exit-path EXHAUSTIVE, and a pass is counted once per
+    /// invocation rather than once per ref.
+    ///
+    /// Two identities, one test, because they share a workload and because the
+    /// second is the premise the first's usefulness rests on:
+    ///
+    /// The exit identity, `considered == dropped + matched_nothing + absent +
+    /// restored_read_error + restored_evicted + restored_write_error`. Every ref
+    /// the loop examines leaves through exactly one counted exit, so a ref that
+    /// quietly stops being accounted for — the mechanism behind a reclaim
+    /// fraction that falls with no instrument able to say why — cannot hide.
+    ///
+    /// The pass identity, `passes == empty_drains + nonempty_drains`, pinned
+    /// alongside `nonempty_drains == 1` and `empty_drains >= 1`: the pass
+    /// observation is sited at the invocation and outside the loop body. Sited
+    /// inside the loop it would read zero in a total stall — precisely the
+    /// regime the record exists to describe — and would here count six passes
+    /// for one drain; made conditional on work, it would drop every empty pass.
+    #[test]
+    fn prune_exit_ledger_sums_to_considered() {
+        let (outcome, _gauge_delta, rendered) = six_exit_run(true);
+
+        assert_eq!(
+            outcome.dropped_observed, 1,
+            "exactly one seeded tag is reclaimed durably; the other three exits \
+             leave their tag in place"
+        );
+
+        let considered = rendered_counter(&rendered, METRIC_PRUNE_CONSIDERED_TOTAL);
+        let dropped = rendered_counter(&rendered, METRIC_PRUNE_DROPPED_TOTAL);
+        let matched_nothing = rendered_counter(&rendered, METRIC_PRUNE_MATCHED_NOTHING_TOTAL);
+        let absent = rendered_counter(&rendered, METRIC_PRUNE_ABSENT_TOTAL);
+        let restored_read_error =
+            rendered_counter(&rendered, METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL);
+        let restored_evicted = rendered_counter(&rendered, METRIC_PRUNE_RESTORED_EVICTED_TOTAL);
+        let restored_write_error =
+            rendered_counter(&rendered, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL);
+
+        // Each exit fired exactly once. Asserted before the sum so a workload
+        // that stopped reaching an exit fails HERE, loudly, instead of leaving
+        // the identity below vacuously true for that exit.
+        for (name, observed) in [
+            (METRIC_PRUNE_DROPPED_TOTAL, dropped),
+            (METRIC_PRUNE_MATCHED_NOTHING_TOTAL, matched_nothing),
+            (METRIC_PRUNE_ABSENT_TOTAL, absent),
+            (METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL, restored_read_error),
+            (METRIC_PRUNE_RESTORED_EVICTED_TOTAL, restored_evicted),
+            (
+                METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
+                restored_write_error,
+            ),
+        ] {
+            assert_eq!(
+                observed, 1,
+                "the workload must drive {name} exactly once, or the \
+                 exhaustiveness identity asserts nothing about that exit; \
+                 render was:\n{rendered}"
+            );
+        }
+
+        assert_eq!(
+            considered,
+            dropped
+                + matched_nothing
+                + absent
+                + restored_read_error
+                + restored_evicted
+                + restored_write_error,
+            "every considered ref must leave through exactly one counted exit; \
+             render was:\n{rendered}"
+        );
+        assert_eq!(considered, 6, "six refs drained, one per exit");
+
+        let passes = rendered_counter(&rendered, METRIC_PRUNE_PASSES_TOTAL);
+        let empty_drains = rendered_counter(&rendered, METRIC_PRUNE_EMPTY_DRAINS_TOTAL);
+        let nonempty_drains = rendered_counter(&rendered, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL);
+        assert_eq!(
+            passes,
+            empty_drains + nonempty_drains,
+            "every pass is counted exactly once and lands in exactly one of the \
+             two drain buckets; render was:\n{rendered}"
+        );
+        assert_eq!(
+            nonempty_drains, 1,
+            "the pass observation is sited at the invocation, so the one drain \
+             that took work counts ONCE — six here would mean it had been moved \
+             into the per-ref loop; render was:\n{rendered}"
+        );
+        assert!(
+            empty_drains >= 1,
+            "the OR write path sweeps while the gates are shut, and those empty \
+             passes must be counted too — a pass increment inside the loop body \
+             would count none of them; render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_counter(&rendered, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL),
+            6,
+            "one epoch per ref at epoch width 1; render was:\n{rendered}"
+        );
+    }
+
+    /// The prune record is INSTRUMENT-NEUTRAL: arming it moves no tombstone
+    /// bytes and reclaims no differently.
+    ///
+    /// Behavioural limb: one fixed workload run twice, once with the record
+    /// emitting and once with it inert, produces identical isolated gauge deltas
+    /// and an identical reclaim outcome — same durable tombstone sets, same
+    /// dropped count, same restored refs.
+    ///
+    /// Structural limb: the gauge decrement is where it was before the record
+    /// existed. `prune_epoch_tombstones` still names exactly ONE
+    /// `sub_tombstone_bytes` call, still in the post-write `Ok(_)` arm behind
+    /// `dropped`; the recorder body names no tombstone-byte counter at all; and
+    /// `apply_or_delta` stays counter-free. The behavioural limb cannot see a
+    /// counter on a path it happens not to drive, which is what the structural
+    /// one is for.
+    #[test]
+    fn prune_record_armed_disarmed_gauge_neutral() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        const RECORDER_SOURCE: &str = include_str!("../../tombstone_frontier_impl.rs");
+
+        let (armed_outcome, armed_delta, armed_render) = six_exit_run(true);
+        let (disarmed_outcome, disarmed_delta, disarmed_render) = six_exit_run(false);
+
+        // Arming witness: the two runs really did differ in whether the record
+        // emitted, so the equalities below are not comparing a run against
+        // itself.
+        assert_eq!(
+            rendered_counter(&armed_render, METRIC_PRUNE_CONSIDERED_TOTAL),
+            6,
+            "the armed run must write its prune-record series, populated; \
+             render was:\n{armed_render}"
+        );
+        assert!(
+            !disarmed_render.contains("topgun_or_prune_"),
+            "the disarmed run must write no prune-record series at all; render \
+             was:\n{disarmed_render}"
+        );
+        // The gauge comparison is made over the isolated SINK's delta, not over
+        // either render: the sink deliberately replaces the process gauge for
+        // the scope's duration, so `topgun_ormap_tombstone_bytes` is absent from
+        // both renders by construction. That is what makes the delta exact
+        // rather than a reading of whatever else the test binary was doing.
+        assert_eq!(
+            armed_delta, disarmed_delta,
+            "arming the prune record must move no tombstone-gauge bytes"
+        );
+        assert_eq!(
+            armed_outcome, disarmed_outcome,
+            "arming the prune record must reclaim exactly what the disarmed run \
+             reclaims, ref for ref"
+        );
+        assert_eq!(
+            armed_outcome.dropped_observed, 1,
+            "the comparison is over a run that actually reclaimed something"
+        );
+
+        let start = SOURCE
+            .find("pub(crate) async fn prune_epoch_tombstones(")
+            .expect("the prune loop is defined in this file");
+        let tail = &SOURCE[start..];
+        let end = tail
+            .find("\n}\n")
+            .expect("the prune body closes at a column-0 brace");
+        let body = &tail[..end];
+
+        assert_eq!(
+            body.matches("sub_tombstone_bytes").count(),
+            1,
+            "the prune must name exactly one tombstone-byte decrement; a second \
+             one double-counts a reclaim and a zeroth one strands the gauge"
+        );
+        let after_match = body
+            .split_once("match result {")
+            .expect("the prune dispatches on the write result")
+            .1;
+        let ok_arm = after_match
+            .find("Ok(_) => {")
+            .expect("the write result has a success arm");
+        let err_arm = after_match
+            .find("Err(e) => {")
+            .expect("the write result has a failure arm");
+        let call = after_match
+            .find("sub_tombstone_bytes")
+            .expect("the decrement is inside the result dispatch");
+        assert!(
+            ok_arm < call && call < err_arm,
+            "the decrement must sit in the post-write success arm: the gauge \
+             tracks bytes actually gone from storage, not bytes removed from an \
+             in-memory copy"
+        );
+        let guard_to_call = after_match[ok_arm..call]
+            .rsplit_once("if dropped {")
+            .expect("the decrement sits behind the `dropped` guard")
+            .1;
+        assert!(
+            !guard_to_call.contains(['{', '}', ';']),
+            "the decrement must be the first statement of the `if dropped` \
+             block, found intervening code: {guard_to_call:?}"
+        );
+
+        for anchor in [
+            "impl MetricsPruneRecorder {",
+            "impl PruneRecordObserver for MetricsPruneRecorder {",
+        ] {
+            let start = RECORDER_SOURCE
+                .find(anchor)
+                .unwrap_or_else(|| panic!("`{anchor}` is defined in tombstone_frontier_impl.rs"));
+            let recorder_tail = &RECORDER_SOURCE[start..];
+            let recorder_end = recorder_tail
+                .find("\n}\n")
+                .expect("the block closes at a column-0 brace");
+            assert!(
+                !recorder_tail[..recorder_end].contains("_tombstone_bytes"),
+                "the prune recorder must name no tombstone-byte counter, found \
+                 one in `{anchor}`"
+            );
+        }
+
+        // Split needle: `the_or_algebra_has_exactly_one_implementation` counts
+        // this literal package-wide to catch a second copy of the OR algebra, and
+        // a scanning literal is not an implementation — writing it whole would
+        // grow that guard's carve-out instead of leaving its baseline alone.
+        let apply_start = SOURCE
+            .find(concat!("pub(crate) fn ", "apply_or_delta("))
+            .expect("the apply seam is defined in this file");
+        let apply_tail = &SOURCE[apply_start..];
+        let apply_end = apply_tail
+            .find("\n}\n")
+            .expect("the apply's body closes at a column-0 brace");
+        assert!(
+            !apply_tail[..apply_end].contains("_tombstone_bytes"),
+            "the apply must stay counter-free: a delta-fold recovery caller \
+             reconstructs state through it and must not perturb a gauge whose \
+             post-recovery truth comes from the boot re-baseline"
+        );
+    }
+
     /// Op-path data-loss guard: the OR write path has NO forgotten-client gate,
     /// so a NOT-yet-ACKed (untracked) device's `CLIENT_OP` / `OP_BATCH` OR writes
     /// are APPLIED and acked even with tombstone protection active — never
@@ -6060,7 +6655,7 @@ mod tests {
         );
     }
 
-    // AC6 (SPEC-342d / SPEC-333b): N concurrent OR_ADDs on the SAME key must
+    // N concurrent OR_ADDs on the SAME key must
     // all survive — the per-key writer lock now serializes the
     // `store.get` -> merge -> `store.put` RMW inside `apply_single_op`'s
     // OR_ADD branch, so no concurrent add can read stale pre-mutation state
