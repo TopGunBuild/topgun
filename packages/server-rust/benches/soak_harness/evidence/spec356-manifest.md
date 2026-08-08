@@ -889,3 +889,117 @@ edited to accommodate them.)*
 
 - **AUTHORITY:** SPEC-356a Review v1 finding M3; `/xask` round finding X11; user ruling 2026-08-04.
 - **PRE-DATA / POST-DATA:** **PRE-DATA** — same boundary as ADJ-7: no measurement artifact exists.
+
+### ADJ-9
+
+- **ADJ id:** ADJ-9
+- **Date:** 2026-08-08
+- **Target:** **§4** (cell E's protocol) versus the runner's cell table (`spec356-prune.sh`, `cellE` arm).
+- **ORIGINAL TEXT (verbatim, §4):**
+
+  > **Cell E carries NO prune-record columns**: the pre-346 server has no recorder, and expecting them is a
+  > category error.
+
+- **FINDING:** the runner's cell table set `cellE) ARMED=yes`, and the arming witness branches ONLY on
+  `ARMED`: an armed cell whose scrape carries zero `topgun_or_prune_` series is `fail_instrument` → exit 9.
+  A pre-346 server structurally emits no such series, so cell E was **guaranteed** to exit 9 — the runner
+  embodied exactly the category error §4 forbids. A second, independent exit 9 followed: with `ARMED=yes`
+  the column checks do not take the disarmed early return, so the six INSTRUMENT columns fail their NONZERO
+  limb. R4.3's *"discarded and re-run"* disposition would loop forever. Raised by SPEC-356b **Audit v3,
+  critical C1**.
+- **ADJUDICATED FORM (governs):**
+
+  > **Cell E is a DISARMED-expectation cell.** The runner's cell-table entry is repaired (`ARMED=yes` →
+  > `ARMED=no`) in the same commit as this addendum, PRE-DATA. The arming witness's disarmed branch — a
+  > scrape carrying **zero** `topgun_or_prune_` series — is the §4-consistent check for this cell, and the
+  > column completeness gate takes the ADJ-6 disarmed early return. `PROVENANCE=yes` is unchanged: cell E
+  > remains the §4.2 half-swap identity-checked cell. **No expected-exit-9 carve-out is created**: exit 9 on
+  > cell E (as on any cell) remains a real instrument-defect signal, and the fail-closed STEP 0 taxonomy is
+  > intact. The repair-the-instrument disposition was chosen over pre-registering an exit-9 interpretation
+  > precisely because teaching the protocol that "exit 9 sometimes means success" would corrode the defect
+  > signal for every later consumer.
+
+- **AUTHORITY:** SPEC-356b Audit v3 critical C1; Conductor ruling 2026-08-08.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+### ADJ-10
+
+- **ADJ id:** ADJ-10
+- **Date:** 2026-08-08
+- **Target:** **ADJ-8's adjudicated form** — the costing of the declined `n = 6` series-control extension.
+- **ORIGINAL TEXT (verbatim, ADJ-8):**
+
+  > **`n = 6` is DECLINED, with its cost on the record.** Each cell is a 4 h run, so `n = 6` per arm is
+  > **≈ 48 h of additional control time** — against a family whose next gate (TODO-484) is itself a 72 h soak.
+
+- **FINDING:** the arithmetic was computed from the 4 h `long` cell, but the series-control arms are the
+  1800 s cells (`ctl` / `ctloff`, runner cell table; R4.4). The true incremental cost of `n = 2 → 6` is
+  **8 × 1800 s = 4 h** (all twelve control runs from zero: 6 h) — twelve times smaller than the figure the
+  decline cited. Raised by SPEC-356b **Audit v3, critical C2**.
+- **ADJUDICATED FORM (governs):**
+
+  > The corrected figures govern the record: `n = 2 → 6` costs **≈ 4 h**, not ≈ 48 h. With the cost leg
+  > corrected, **the DECLINE of `n = 6` is RE-AFFIRMED on the role leg alone**: ADJ-8's adjudication that the
+  > series control is a CATASTROPHE DETECTOR stands, `n = 6` would buy a better-powered **non-proof** of
+  > neutrality rather than a neutrality proof, and no downstream consumer of SPEC-356b conditions on an MDE
+  > finer than the reporting bound. The **REPORTING BOUND is unchanged**: every neutrality statement still
+  > cites `MDE ≈ 17 %` (recomputed from the pair's own pooled sd) and *"a smaller perturbation is NOT
+  > excluded"*, verbatim. Any future re-litigation of the extension MUST argue from the corrected 4 h figure.
+
+- **AUTHORITY:** SPEC-356b Audit v3 critical C2; Conductor ruling 2026-08-08.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+### ADJ-11
+
+- **ADJ id:** ADJ-11
+- **Date:** 2026-08-08
+- **Target:** **ADJ-7's `max(L)` reporting obligation** and its interaction with **§2.2 Step 0** routing.
+- **ORIGINAL TEXT (verbatim, ADJ-7):**
+
+  > A Step-2 determination must be reported together with `max(L)` over the window, not with the median
+  > alone. A window whose `max(L)` is also 0 is a window in which the sampler never observed a non-empty
+  > drain, and that is an admissibility observation (§2.2 limb (b)'s territory), not evidence that the prune
+  > is licensed-and-draining.
+
+- **FINDING:** the clause leaves a two-sided hazard unadjudicated. (a) If `max(L) = 0` auto-routes to
+  INDETERMINATE via limb (b)'s fail-closed rule, a genuinely eligibility-starved system — one whose every
+  pass observes zero licensed backlog — becomes structurally unclassifiable: the instrument would
+  predetermine against one of the two verdicts it exists to distinguish. (b) `eligible_refs` is a
+  pass-retained GAUGE scraped on a 10 s cadence while prune passes may run far more often, so a scrape-level
+  `max(L) = 0` cannot by itself distinguish genuine starvation from under-sampling. Raised by SPEC-356b
+  Audit v3 recommendation 7; both clauses of the first draft resolution were then broken by an adversarial
+  cross-vendor round (glm-5.2, 2026-08-08, artifact `spec356-adj11-xask.md`): flat drains prove only that
+  nothing DRAINED, not that nothing was ELIGIBLE, and letting counters "carry the determination" in the
+  under-sampled regime is the instrument's own limitation silently picking a verdict.
+- **ADJUDICATED FORM (governs — counter-anchored, the gauge alone decides nothing):**
+
+  > Window disposition under `max(L) = 0` is decided by the MONOTONE COUNTERS, whose per-pass identity
+  > `passes_total == empty_drains_total + nonempty_drains_total` is pinned in code and test (TG-OR-006's
+  > exhaustiveness family). Over the window, with Δ denoting the counter delta:
+  >
+  > 0. **Conservation first:** if `Δpasses ≠ Δempty_drains + Δnonempty_drains`, the window is
+  >    **INDETERMINATE** (unaccounted passes).
+  > 1. **Step 0(b) unchanged:** a window failing the split-recompute certification is **INDETERMINATE**.
+  > 2. **Eligibility-starved evidence requires per-pass counter proof:** `Δnonempty_drains = 0` AND
+  >    `Δempty_drains = Δpasses > 0` AND the error counters are flat (`restored_read_error_total`,
+  >    `restored_write_error_total` — a blocked drain can report an empty drain while licensed work exists)
+  >    AND the tombstone backlog series grows ⇒ **every pass observed zero licensed backlog**: valid
+  >    evidence toward ELIGIBILITY-BOUND, with `max(L) = 0` as corroboration only. ADJ-7's prohibition
+  >    stands — this is never read as "the prune is licensed-and-draining". A window with advancing error
+  >    counters is **INDETERMINATE**.
+  > 3. **Under-sampled regime:** `Δnonempty_drains > 0` while scrape-level `max(L) = 0` ⇒ the `max(L)` cell
+  >    is **INADMISSIBLE** for that window (a non-sample: it bounds nothing), and the window's primary
+  >    classification is **INDETERMINATE**. The counters are reported as SECONDARY evidence (refs drained,
+  >    bytes freed); a backlog stable-or-shrinking while drains advance is an affirmative *keeping-up*
+  >    secondary finding. The counters can EXCLUDE pure eligibility-starvation here; they cannot CONFIRM
+  >    throughput-boundedness, and no clause may treat that one-sided exclusion as a completed
+  >    determination.
+  >
+  > **Diagnostic obligation:** every window report states `Δpasses` alongside its scrape count, so the
+  > under-sampling regime is visible on the record rather than inferred.
+
+- **AUTHORITY:** SPEC-356b Audit v3 recommendation 7; adversarial `/xask` round 2026-08-08 (findings
+  adopted: the transient-eligibility false-positive closed by the empty-drains counter anchor; the
+  broken-gauge hazard subsumed because clause 2 no longer rests on the gauge; INADMISSIBLE-plus-
+  INDETERMINATE adopted verbatim for the under-sampled regime); Conductor ruling 2026-08-08.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
