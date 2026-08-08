@@ -118,7 +118,7 @@ case "$CELL" in
              MEASUREMENT=yes; BASE="spec356-w100" ;;
   long)      WIDTH="";   ARMED=yes; DURATION=14400; SAMPLE_INTERVAL=60; PROVENANCE=no
              MEASUREMENT=yes; BASE="spec356-long" ;;
-  cellE)     WIDTH="";   ARMED=yes; DURATION=1800;  SAMPLE_INTERVAL=60; PROVENANCE=yes
+  cellE)     WIDTH="";   ARMED=no;  DURATION=1800;  SAMPLE_INTERVAL=60; PROVENANCE=yes
              MEASUREMENT=yes; BASE="spec356-cellE" ;;
   # The two NON-MEASUREMENT cells. Their basenames are deliberately outside
   # SPEC-356b's committed set (ctl / ctloff / w100 / long / cellE), so a stray
