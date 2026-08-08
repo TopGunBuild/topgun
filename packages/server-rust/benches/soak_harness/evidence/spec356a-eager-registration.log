@@ -676,3 +676,124 @@ VERDICT: EG-1 PASS (both limbs) AT THE FINAL INSTRUMENT.
 
 Part I is retained as ADJ-7's before-picture and is not superseded as evidence
 of what the pre-repair instrument did -- only as the discharge of this gate.
+
+
+================================================================================
+PART III -- RE-CAPTURE AT THE ADJ-12 INSTRUMENT (the 43-column selection table).
+================================================================================
+
+WHY PART III EXISTS. ADJ-12 (manifest §8A) made the exporter-rendered p50 of the
+batch-size summary the committed source of B, which added column 43
+(topgun_or_prune_drain_refs_p50, MEASURAND) to the runner's selection table and
+a synthetic-name resolution to BOTH scrape readers. Parts I/II certify a
+42-column instrument that no SPEC-356b cell will run. Per the same rule that
+forced Part II: a code-reading does not discharge this gate; only the artifact
+does. The smoke was re-run; Parts I/II are retained as before-pictures.
+
+BUILD IDENTITY (stated from the runner's own comparison, with the real numbers).
+  server binary: target/release/topgun-server         built 2026-08-08T14:29:41Z
+  bench  binary: target/release/deps/soak_harness-9abf891ab72dea71  built 2026-08-08T14:28:20Z
+  BUILD_GAP = 81s -- inside the runner's 600s same-build window, no WARN.
+  The .rs tree is byte-identical to the pinned instrument commit: `git diff
+  efa2c249..HEAD -- '*.rs'` is EMPTY, so the binaries carry the certified Rust
+  behavior; the changed component is the RUNNER, which is exactly what this
+  re-capture exercises. Behavioral fingerprint of the change: the p50 column
+  below is populated (sentinel 0 and 999.94...), which the Part I/II runner
+  never sampled.
+
+THE RE-CAPTURED CENSUS (verbatim from the fresh smoke console, UNINDENTED so
+downstream greps read the same shape as Parts I/II; the run took the harder
+first-scrape shape again -- a skipped tick, first complete scrape at
+elapsed=10s):
+
+prune.csv:      /tmp/spec356-smoke/spec356-smoke.prune.csv
+prune.csv rows: 12  (cadence 10s)
+prune.csv ticks SKIPPED by the scrape gate: 1
+    elapsed=0s scrape FAILED -- no row written, retrying next tick
+first COMPLETE scrape at elapsed = 10s
+prune.csv columns:
+  elapsed_secs                                 [POPULATN] n=12 empty=0 min=10 max=120
+  topgun_or_prune_passes_total                 [POPULATN] n=12 empty=0 min=365 max=4495
+  topgun_or_prune_considered_total             [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_dropped_total                [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_matched_nothing_total        [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_absent_total                 [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_restored_read_error_total    [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_restored_evicted_total       [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_restored_write_error_total   [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_bytes_freed_total            [POPULATN] n=12 empty=0 min=0 max=61355
+  topgun_or_prune_epochs_drained_total         [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_empty_drains_total           [POPULATN] n=12 empty=0 min=365 max=4492
+  topgun_or_prune_nonempty_drains_total        [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_lwm_advances_total           [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_lwm_epochs_advanced_total    [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_split_recomputes_total       [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_indexed_refs                 [POPULATN] n=12 empty=0 min=365 max=1956
+  topgun_or_prune_indexed_epochs               [POPULATN] n=12 empty=0 min=1 max=2
+  topgun_or_prune_eligible_refs                [POPULATN] n=12 empty=0 min=0 max=1000
+  topgun_or_prune_ineligible_refs              [POPULATN] n=12 empty=0 min=69 max=1108
+  topgun_or_prune_split_computed_epoch         [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_current_epoch                [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_low_water_mark               [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_durable_epoch_watermark      [POPULATN] n=12 empty=0 min=0 max=4
+  topgun_or_prune_last_drained_epoch           [POPULATN] n=12 empty=0 min=0 max=4
+  topgun_or_prune_lwm_stall_seconds            [POPULATN] n=12 empty=0 min=0 max=28
+  topgun_or_prune_tracked_claims               [POPULATN] n=12 empty=0 min=1 max=1
+  topgun_or_prune_drain_refs_sum               [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_drain_refs_count             [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_sum             [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_count           [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_claim_span_epochs_sum        [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_claim_span_epochs_count      [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_claim_lag_epochs_sum         [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_claim_lag_epochs_count       [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_epoch_considered_sum         [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_considered_count       [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_epoch_dropped_sum            [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_dropped_count          [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_epoch_bytes_freed_sum        [POPULATN] n=12 empty=0 min=0 max=61355
+  topgun_or_prune_epoch_bytes_freed_count      [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_ormap_tombstone_bytes_total           [POPULATN] n=12 empty=0 min=7120 max=92750
+  topgun_or_prune_drain_refs_p50               [POPULATN] n=12 empty=0 min=0 max=1000
+  progress.jsonl: not required -- duration 120s <= steady interval 300s,
+                  so the harness reached no checkpoint to snapshot.
+  soak.json "walFsync": "batched",
+  soak.json "epochWidth": 1000,
+  soak.json "crashes": 0,
+  soak.json "churnClients": 6,
+  soak.json "keyspace": 200,
+  soak.json "durationSecsActual": 120,
+  mechanism.json "orDeltaFrames": 1704,
+  mechanism.json "orSnapshotFrames": 0,
+
+arming witness:
+  cell expects:        armed=yes
+  TOPGUN_PRUNE_RECORD: true (on the child)
+  topgun_or_prune_ lines in the scrape: 89
+  pinned prune columns resolved:        41/41
+  topgun_ormap_tombstone_bytes present: 2 line(s)
+  => arming witness PASSED: armed cell, all pinned series present.
+
+THE DISARMED DIRECTION (fresh smokeoff run, same binaries):
+
+arming witness:
+  cell expects:        armed=no
+  TOPGUN_PRUNE_RECORD: false (on the child)
+  topgun_or_prune_ lines in the scrape: 0
+  pinned prune columns resolved:        0/41
+  topgun_ormap_tombstone_bytes present: 2 line(s)
+  => arming witness PASSED: disarmed cell, no prune-record series present.
+
+================================================================================
+VERDICT: EG-1 PASS (both limbs) AT THE ADJ-12 INSTRUMENT.
+================================================================================
+
+  limb (a): 33/33 pinned names in the first render -- the NAME set is untouched
+            by ADJ-12 (p50 is a rendered line of an existing summary family,
+            not a new registration); set-identical to Parts I/II.
+  limb (b): empty_fields=0 over every column of every row, 43 columns x 12 rows,
+            the new p50 column included (n=12 empty=0 min=0 max=1000).
+  A9:       0 population defects, 0 instrument defects; RESULT: instrument
+            sound; harness exit code 0.
+  witness:  armed 41/41 resolved (40 + the synthetic p50), PASSED; disarmed
+            direction PASSED on the fresh smokeoff.
