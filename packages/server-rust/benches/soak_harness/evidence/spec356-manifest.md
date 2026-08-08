@@ -1003,3 +1003,127 @@ edited to accommodate them.)*
   broken-gauge hazard subsumed because clause 2 no longer rests on the gauge; INADMISSIBLE-plus-
   INDETERMINATE adopted verbatim for the under-sampled regime); Conductor ruling 2026-08-08.
 - **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+### ADJ-12
+
+- **ADJ id:** ADJ-12
+- **Date:** 2026-08-08
+- **Target:** **§2.1's definition of `B`** and **§5.4's demotion of rendered quantiles**, jointly — the
+  committed source of the Step 2 / Steps 3–4 partition's right-hand side.
+- **ORIGINAL TEXT (verbatim, §2.1 then §5.4):**
+
+  > **`B`** — the **median refs per non-empty drain** over the last half. Self-calibrating: it is one prune
+  > batch.
+
+  > That is why the **per-interval means differenced from the monotone totals are the PRIMARY reading**, and
+  > any exporter-rendered quantile is **corroboration only**.
+
+- **FINDING:** `B` is defined as a median, but no committed column could produce one:
+  `topgun_or_prune_drain_refs` is a histogram and the CSV sampled only `_sum` / `_count`, from which a
+  median is not derivable. The estimator would have been chosen at G4 **with the data visible**, on the
+  partition that decides the modal routing. Raised by SPEC-356b **Audit v4, critical C1**. The adversarial
+  cross-vendor round (artifact `spec356-adj12-xask.md`) then rejected both repair candidates the audit
+  left open: the **mean** (`Δsum/Δcount`) is unboundedly inflated by a heavy right tail — one catch-up
+  megabatch can collapse the partition to Step 2 (the modal outcome) regardless of the true `L`, a
+  confirmation-shaped failure; a **guard band** on the mean destroys the exact-complement partition and
+  introduces an arbitrary constant.
+- **ADJUDICATED FORM (governs):**
+
+  > **`B` := the median over the last-half `prune.csv` rows of the committed column
+  > `topgun_or_prune_drain_refs_p50`** — the exporter-rendered p50 of the batch-size summary, added to the
+  > selection table as column 43 (MEASURAND) in the same commit as this addendum. Bindings:
+  >
+  > - **Window length is COMMITTED, not assumed:** the rolling window is `3 × 20 s = 60 s` — §5.4's own
+  >   figure, re-verified against the locked crate source (`metrics-exporter-prometheus 0.16.2`,
+  >   `src/distribution.rs`: `DEFAULT_SUMMARY_BUCKET_COUNT = 3`, `DEFAULT_SUMMARY_BUCKET_DURATION = 20 s`)
+  >   and the exporter is constructed with no override (`PrometheusBuilder::new()`).
+  > - **The 0-sentinel rule (verified against the live exposition, not assumed):** the summary records only
+  >   NON-EMPTY drains, so a populated window renders `p50 ≥ 1`, and an empty or expired window renders
+  >   **`0`, not `NaN`**. Sentinel rows are **EXCLUDED** from `B`'s median and the excluded fraction is
+  >   **REPORTED** per window.
+  > - **Escape hatch, not a third branch:** if more than **50 %** of the last-half rows are sentinel, `B`
+  >   is unreliable for that window and the window routes via **Step 0(c) (deciding column unreadable) to
+  >   INDETERMINATE**. The Step 2 / Steps 3–4 exact-complement partition is untouched.
+  > - **§5.4 STANDS in full:** no `n`, no sd, no standard error and no t-statistic may be computed by
+  >   counting rows of the p50 column; `B`'s median is a **location estimate** over an autocorrelated
+  >   series (effective independent observations ≈ half-window / 60 s), and the `_sum` / `_count`
+  >   differenced means remain the PRIMARY reading for every THROUGHPUT quantity. The "corroboration only"
+  >   demotion is adjudicated as governing **counting-based inference**, which this use is not: the p50
+  >   column is the one committed order statistic, and `B` is an order-statistic parameter.
+  > - **Known-and-accepted caveat on the record:** a median over per-scrape window-medians weights each
+  >   window equally regardless of how many drains it contains; if batch sizes covary with drain frequency
+  >   across the half-window, `B` carries a bounded weighting distortion of unknown direction. This is
+  >   irreducible without `.rs` changes and is accepted as the bounded-unknown over the mean's
+  >   unbounded-known.
+
+- **AUTHORITY:** SPEC-356b Audit v4 critical C1; adversarial `/xask` round 2026-08-08
+  (`spec356-adj12-xask.md`: mean rejected for unbounded partition collapse, p50 adopted conditional on a
+  committed window length and a pre-registered sentinel threshold with a protocol exit); live exposition
+  probe 2026-08-08 (0-sentinel semantics); Conductor ruling 2026-08-08.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+### ADJ-13
+
+- **ADJ id:** ADJ-13
+- **Date:** 2026-08-08
+- **Target:** **§2.3 Steps 3–4** — the passes-per-epoch slope test's series construction (mandated
+  unconditional by ADJ-3, but never constructed).
+- **ORIGINAL TEXT (verbatim, §2.3 Step 3):**
+
+  > (exit share ≤ 10 %) **and** **PERSISTENT** licensed backlog (`min(L) > B`) **and** passes-per-epoch
+  > last-half OLS slope rejects **negative** (α = 0.05)
+
+- **FINDING:** neither document says how the passes-per-epoch series is formed from `passes_total` /
+  `current_epoch`. Raised by SPEC-356b **Audit v4, critical C2**. The natural per-epoch-delta construction
+  (group rows by `current_epoch`, exclude intervals spanning unobserved epoch boundaries) was then broken
+  by the adversarial round: the excluded epochs are **mechanically the fast-advancing (busy) ones**, so
+  exclusion biases the slope toward flat/negative — toward the SCHEDULING verdict — and the exclusion
+  fraction is set by the scrape-cadence-to-epoch-width ratio, an operational parameter with no relation to
+  the defect being diagnosed. An instrument limitation would have picked the verdict.
+- **ADJUDICATED FORM (governs — the cumulative construction, zero exclusion):**
+
+  > The pass-rate evidence is read from the **cumulative curve**: `passes_total` (y) against
+  > `current_epoch` (x) over **ALL** last-half `prune.csv` rows — no grouping, no exclusion. Rows with
+  > `Δcurrent_epoch = 0` add intra-epoch weight; rows jumping several epochs are valid coarse steps; no
+  > information is discarded. The Step 3 / Step 4 discriminator is a **declining-rate test via split-half
+  > slopes of that curve, both fit with the SAME pinned fitter §6 names for `tombstone_bytes`**: let
+  > `s_early` be the fitted slope over the first half of the last half and `s_late` over the second half.
+  > **Step 3 (SCHEDULING / LICENSING) requires `s_late` significantly BELOW `s_early`** (one-sided,
+  > α = 0.05 — the original test's level and direction, recast onto the unbiased construction); otherwise
+  > the branch reads **Step 4 (THROUGHPUT)**. Reduced statistical power relative to a per-epoch series is
+  > **accepted on the record** in exchange for zero selection bias: under this protocol's ranking, an
+  > instrument limitation that silently picks a verdict is strictly worse than one that honestly widens a
+  > confidence interval.
+
+- **AUTHORITY:** SPEC-356b Audit v4 critical C2; adversarial `/xask` round 2026-08-08
+  (`spec356-adj12-xask.md`: exclusion construction rejected for mechanical selection of busy epochs;
+  cumulative construction adopted); Conductor ruling 2026-08-08.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+### ADJ-14
+
+- **ADJ id:** ADJ-14
+- **Date:** 2026-08-08
+- **Target:** **ADJ-11's adjudicated form, clause 2** — the unnamed "tombstone backlog series".
+- **ORIGINAL TEXT (verbatim, ADJ-11 clause 2):**
+
+  > AND the tombstone backlog series grows ⇒ **every pass observed zero licensed backlog**: valid
+  > evidence toward ELIGIBILITY-BOUND, with `max(L) = 0` as corroboration only.
+
+- **FINDING:** "the tombstone backlog series" names no committed series, and the candidates disagree: the
+  soak CSV's gauge is on a 60 s cadence while the prune CSV runs at 10 s, and `indexed_refs` is sampled
+  POST-drain (the ADJ-7 asymmetry family). A naïve pick of `topgun_ormap_tombstone_bytes_total` alone
+  would also be wrong in the opposite direction: it is a monotone ADDED-bytes counter and grows even under
+  healthy reclaim. Raised by SPEC-356b **Audit v4, recommendation 6**.
+- **ADJUDICATED FORM (governs):**
+
+  > Backlog growth in ADJ-11 clause 2 is the **difference of two monotone counters from the same
+  > `prune.csv` rows**: `Δbacklog_bytes := Δ topgun_ormap_tombstone_bytes_total −
+  > Δ topgun_or_prune_bytes_freed_total`, and "the backlog grows" ⟺ `Δbacklog_bytes > 0` over the window.
+  > Counter-anchored, same 10 s cadence as every other quantity the clause reads, and immune to the
+  > added-bytes-alone confusion: in clause 2's own regime (`Δnonempty_drains = 0`) the freed term is 0 and
+  > the test degenerates to "garbage kept arriving while nothing drained", which is exactly the starvation
+  > semantics the clause needs. Neither `indexed_refs` nor the 60 s soak-CSV gauge may stand in for it.
+
+- **AUTHORITY:** SPEC-356b Audit v4 recommendation 6; Conductor ruling 2026-08-08.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.

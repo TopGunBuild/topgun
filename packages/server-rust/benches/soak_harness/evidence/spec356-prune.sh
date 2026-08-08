@@ -167,15 +167,17 @@ CONSOLE_OUT="${OUT_DIR}/${BASE}.harness-console.log"
 #     Column order is manifest §5.2's: elapsed_secs, then §5.3 in its frozen
 #     order, then the inherited counter.
 #
-#     42 COLUMNS FROM 35 NAMES, AND WHY THE TWO COUNTS ARE THE SAME TABLE.
+#     43 COLUMNS FROM 35 NAMES, AND WHY THE TWO COUNTS ARE THE SAME TABLE.
 #     SPEC-356a R4.3a.2 tags 35 rows — the 33 pinned §5.3 names plus the two
-#     inherited columns — and this table has one row per COLUMN, so it has 42:
+#     inherited columns — and this table has one row per COLUMN, so it has 43:
 #     each of the 7 histogram names contributes its `_sum` and its `_count`
-#     column, and both inherit their name's tag. The tag totals follow the same
-#     arithmetic and are checkable rather than asserted: R4.3a.2's 6 INSTRUMENT
-#     / 29 MEASURAND over names becomes 6 INSTRUMENT / 36 MEASURAND over
-#     columns, because all 7 expanded names are MEASURAND (29 + 7 = 36). A
-#     reader who counts one table against the other and finds 35 vs 42 is
+#     column, and both inherit their name's tag; the batch-size histogram
+#     additionally contributes its rendered `_p50` column (ADJ-12, the
+#     committed source of B). The tag totals follow the same arithmetic and
+#     are checkable rather than asserted: R4.3a.2's 6 INSTRUMENT / 29 MEASURAND
+#     over names becomes 6 INSTRUMENT / 37 MEASURAND over columns, because all
+#     7 expanded names are MEASURAND and so is the p50 (29 + 7 + 1 = 37). A
+#     reader who counts one table against the other and finds 35 vs 43 is
 #     looking at names versus columns, not at a drift.
 #
 #     THE TAG COLUMN IS THE CLASSIFICATION RULE'S OUTPUT, NOT A PREFERENCE.
@@ -235,18 +237,23 @@ PRUNE_COLUMNS='
 40|topgun_or_prune_epoch_bytes_freed_sum|MEASURAND|same trigger; also zero whenever drained epochs free nothing
 41|topgun_or_prune_epoch_bytes_freed_count|MEASURAND|same trigger; also zero whenever drained epochs free nothing
 42|topgun_ormap_tombstone_bytes_total|INSTRUMENT|monotone ADDED-bytes counter on the OR add path; added bytes are an established input and an all-zero reading makes the reclaim fraction uncomputable. It is boot-seeded before the listener accepts connections and the scrape gate forbids a row from an incomplete scrape, so empty > 0 is unreachable here on a correct instrument
+43|topgun_or_prune_drain_refs_p50|MEASURAND|the exporter-rendered p50 of the batch-size summary over its 3x20s rolling window, sampled for ADJ-12 as the committed source of B. The summary records only NON-EMPTY drains, so a populated window renders p50 >= 1 and 0 is the RESERVED empty-window sentinel (verified against the live exposition: an expired or never-filled window renders 0, not NaN); the stall regime legitimately renders the sentinel for the whole run
 '
 
 # The scrape-derived names, in column order, space-separated: every column
-# except the sampler-local elapsed_secs. 41 names.
+# except the sampler-local elapsed_secs. 42 names. The one synthetic name,
+# topgun_or_prune_drain_refs_p50, is resolved by BOTH scrape readers (the
+# sampler and the arming witness) from the labelled exposition line
+# topgun_or_prune_drain_refs{quantile="0.5"} -- the same synthesis in both
+# places, so the witness cannot demand a name the sampler cannot see.
 PRUNE_SCRAPE_NAMES="$(printf '%s\n' "$PRUNE_COLUMNS" \
   | awk -F'|' 'NF >= 3 && $1 != 1 { printf "%s ", $2 } END { print "" }')"
 # The header the sampler writes and the post-run check re-reads.
 PRUNE_HEADER="$(printf '%s\n' "$PRUNE_COLUMNS" \
   | awk -F'|' 'NF >= 3 { if (out == "") out = $2; else out = out "," $2 } END { print out }')"
 PRUNE_COL_COUNT="$(printf '%s\n' "$PRUNE_COLUMNS" | awk -F'|' 'NF >= 3 { n++ } END { print n + 0 }')"
-if [ "$PRUNE_COL_COUNT" != "42" ]; then
-  echo "FATAL: the selection table must govern exactly 42 columns; it governs ${PRUNE_COL_COUNT}." >&2
+if [ "$PRUNE_COL_COUNT" != "43" ]; then
+  echo "FATAL: the selection table must govern exactly 43 columns; it governs ${PRUNE_COL_COUNT}." >&2
   exit 1
 fi
 
@@ -1160,7 +1167,7 @@ SAMPLER_PID=$!
 #     THE SCRAPE GATE (the rule that makes a blank cell unreachable):
 #
 #       On an ARMED cell, a row is written ONLY from a scrape that (a) returned
-#       successfully and (b) carries ALL 41 scrape-derived series. A tick whose
+#       successfully and (b) carries ALL 42 scrape-derived series. A tick whose
 #       scrape fails either test writes NO ROW AT ALL, logs the tick, and
 #       retries on the next tick -- so the first row of prune.csv is the first
 #       COMPLETE scrape, and its elapsed_secs is whatever the sampler's clock
@@ -1202,6 +1209,15 @@ scrape_prune_series() {   # prints "COMPLETE|<missing>|<v1>,<v2>,..." or "SCRAPE
     /^[[:space:]]*#/ { next }
     {
       nm = $1
+      # The one synthetic name: the labelled p50 line of the batch summary is
+      # captured under <base>_p50 BEFORE the label-stripping fold, mirroring
+      # the arming witness exactly.
+      if (nm ~ /\{quantile="0\.5"\}$/) {
+        q = nm
+        sub(/\{.*$/, "", q)
+        q = q "_p50"
+        if (!(q in val)) val[q] = $2
+      }
       sub(/\{.*$/, "", nm)
       if (!(nm in val)) val[nm] = $2
     }
@@ -1475,7 +1491,15 @@ else
   PRUNE_NAMES_SEEN="$(awk -v names="$PRUNE_SCRAPE_NAMES" '
     BEGIN { want = split(names, a, " ") }
     /^[[:space:]]*#/ { next }
-    { nm = $1; sub(/\{.*$/, "", nm); seen[nm] = 1 }
+    {
+      nm = $1
+      # Same p50 synthesis as the sampler: the witness must never demand a
+      # name the sampler cannot resolve from the identical exposition.
+      if (nm ~ /\{quantile="0\.5"\}$/) {
+        q = nm; sub(/\{.*$/, "", q); seen[q "_p50"] = 1
+      }
+      sub(/\{.*$/, "", nm); seen[nm] = 1
+    }
     END {
       c = 0
       for (i = 1; i <= want; i++) {
