@@ -773,6 +773,31 @@ edited to accommodate them.)*
   > per-`OR_REMOVE` path still pays no index-proportional fold and §1's perturbation budget is unchanged. The
   > three low-water-mark recompute sites are untouched.
   >
+  > **CONSEQUENCE THE 356b ANALYST MUST READ BEFORE COMPUTING ANY SHARE: the split gauges and the index
+  > gauges are now published from TWO DIFFERENT INSTANTS of the same scrape.** Moving the split to the near
+  > side of the removal loop is what makes `L` a reading, and it necessarily de-synchronises the split from
+  > the index. Explicitly, per scrape:
+  >
+  > | series | which side of the drain it samples |
+  > |---|---|
+  > | `topgun_or_prune_eligible_refs` (`L`) | **PRE-drain** — the snapshot taken before the removal loop |
+  > | `topgun_or_prune_ineligible_refs` (`P`) | **PRE-drain** — the same snapshot, same instant as `L` |
+  > | `topgun_or_prune_indexed_refs` | **POST-drain** — the observation snapshot after the loop |
+  > | `topgun_or_prune_indexed_epochs` | **POST-drain** — the same observation snapshot |
+  >
+  > **Therefore `L + P ≠ indexed_refs`, by design and not by drift.** The directed regression asserts exactly
+  > this shape: `3 + 1` against `indexed_refs = 1`. `L` and `P` remain mutually consistent — one snapshot,
+  > one instant — so every ratio *between them* is sound; what is NOT sound is a ratio taken **across** the
+  > boundary. **An "ineligible share" computed as `P / indexed_refs`, or a "backlog share" as
+  > `L / indexed_refs`, is a quantity with no referent and MUST NOT be reported.** Use `L / (L + P)` if a
+  > share is wanted.
+  >
+  > **This costs §2 nothing, which is why the repair is admissible at all:** no term of the frozen
+  > classification predicate divides by `indexed_refs` or by `L + P`, so no threshold, ordering or
+  > determination in §1–§2 reads across the boundary. The hazard is entirely in *derived* reporting a 356b
+  > analyst might invent, which is why it is stated here rather than left in the regression test's comment
+  > where only a reader of that file would find it.
+  >
   > **A binary that predates this repair emits an `L` that is inadmissible for §2.** Any cell measured
   > against such a build reads `L ≡ 0` and MUST NOT be classified — its Step-2 determination would be a
   > reading of the emitter. SPEC-356b pins the merged SPEC-356a SHA as its build identity, so this is
@@ -788,12 +813,24 @@ edited to accommodate them.)*
   > refs at width 1000 — at **2 of 12** sample instants, `max = 1000` where the pre-repair census read
   > `max = 0`. **Ten of the twelve rows still read 0, and a second run of the same cell caught none at all.**
   > That is the world, not the defect returning: this prune sweeps on **every `OR_REMOVE`** (4,288 passes in
-  > 120 s on that cell), so a newly-licensed ref is drained within milliseconds and the backlog at width 1000
-  > under this workload is genuinely **transient**. The consequences are pre-registered here so no later
-  > reader has to infer them:
+  > 120 s on that cell), so a newly-licensed ref is drained within milliseconds and the backlog is
+  > **transient — under the smoke's churn shape, and that scope is the whole of what has been observed.**
+  >
+  > **THE EVIDENCE BASE FOR THE TRANSIENCE CLAIM IS A NON-MEASUREMENT CELL, AND THE CLAIM IS SCOPED TO IT.**
+  > The two runs cited above are 120 s scratch smoke cells whose duration and cadence differ from every R4.4
+  > measurement cell. "Transient" is therefore asserted **for the smoke's churn shape only** — its client
+  > count, keyspace, remove rate and 120 s window — and **NOT** for width 1000 in general. **The 4 h `long`
+  > cell owns the general claim**, and nothing here pre-empts it: a regime in which the prune cannot keep up
+  > would show exactly the persistent backlog this addendum says is contradictable, and the smoke has no
+  > standing to rule that out. A SPEC-356b reader must treat the sentence below as a statement about what has
+  > been seen, never as a prediction the measurement is expected to confirm.
+  >
+  > The consequences are pre-registered here so no later reader has to infer them:
   >
   > - **A 10 s gauge sample of a transient quantity is a LOWER BOUND on it.** `median(L)` may therefore
-  >   still read 0 in a regime where the prune is keeping up, and **Step 2 may still be the modal outcome**.
+  >   still read 0 in a regime where the prune is keeping up, and **Step 2 may still be the modal outcome
+  >   under the smoke's churn shape** — an observation about what was seen there, not a forecast for the
+  >   measurement cells.
   >   What has changed is that this is now **contradictable by data**: a prune that cannot keep up leaves a
   >   backlog that persists ACROSS sample instants and is caught, where the pre-repair emitter would have
   >   reported 0 for that regime too.
