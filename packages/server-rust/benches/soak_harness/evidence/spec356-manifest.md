@@ -1187,3 +1187,45 @@ edited to accommodate them.)*
   no-routing rule adopted verbatim); regression-proof over all committed CSVs; Conductor ruling
   2026-08-08.
 - **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+### ADJ-16
+
+- **ADJ id:** ADJ-16
+- **Date:** 2026-08-08
+- **Target:** **ADJ-5's third obligation** (the armed-vs-disarmed dynamics companions) against
+  **ADJ-6 / ADJ-9's disarmed-absence rule**; and, jointly, **ADJ-15's degeneracy routing scope**.
+- **ORIGINAL TEXT (verbatim, ADJ-5, the third paragraph of the adjudicated form):**
+
+  > **The armed-vs-disarmed comparison is ALSO reported for the three dynamics statistics the predicate
+  > reads** — non-drop exit share, `median(L)/B`, and the passes-per-epoch slope — as **descriptive
+  > companions**.
+
+- **FINDING:** structurally unsatisfiable, and the conflict is between two frozen PRE-DATA addenda. All
+  three dynamics statistics read `topgun_or_prune_*` columns; the disarmed arm emits none of them —
+  `NullPruneRecorder` registers no series, the disarmed arming witness **REQUIRES** their absence, and
+  ADJ-6 rules those columns empty **by design and never a finding**. ADJ-5's own finding (ii) — the
+  dynamics blind spot — was left unmitigated while AC limb B3(e) still promised the mitigation, so an
+  executor would either publish armed-only numbers as a "comparison" or drop the limb silently. Raised by
+  SPEC-356b **Audit v6, critical C1** (recommendation 7 raised the routing-scope half).
+- **ADJUDICATED FORM (governs):**
+
+  > 1. **The armed-vs-disarmed dynamics COMPARISON is WITHDRAWN** as structurally impossible with the
+  >    committed instrument. **X6's dynamics blind spot is thereby UNMITIGATED and OPEN**, and the record
+  >    must say so rather than imply coverage: **wherever §9 cites the level controls, it must state
+  >    verbatim — "a dynamics-only perturbation from recorder presence or activation is not excluded by
+  >    any control in this protocol"** — routed to **TODO-638** (post-356b instrument work; a dynamics
+  >    control needs a disarmed-visible statistic source, which is `.rs` work under a later spec).
+  > 2. **The ARMED arm's three dynamics statistics are still computed and reported** — as SINGLE-ARM
+  >    observations, explicitly labeled *"NOT a comparison; no control arm exists for these"*. Dropping
+  >    them entirely would discard real information to mourn a comparison that never existed.
+  > 3. **ADJ-15's degeneracy routing is SCOPED** (this resolves the over-foreclosure): `s_early < 5`
+  >    fires only at the Step 3 / Step 4 evaluation, which a window reaches only AFTER Step 1
+  >    (exit share ≤ 10 %) and Step 2's complement (persistent backlog) are already facts of record.
+  >    Those readings STAND. The window's outcome is reported as **"Steps 3–4, NOT SEPARABLE (degenerate
+  >    pass rate)"** — a COARSENED leaf, not a new branch: every window still reaches exactly one
+  >    reported outcome, and at §2.5's routing level the coarse outcome carries the consequence Steps 3
+  >    and 4 SHARE (the accelerator family), leaving the registry-vs-accelerator boundary — the modal
+  >    question this spec exists to answer — undamaged.
+
+- **AUTHORITY:** SPEC-356b Audit v6 critical C1 and recommendation 7; Conductor ruling 2026-08-08.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
