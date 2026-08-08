@@ -1127,3 +1127,63 @@ edited to accommodate them.)*
 
 - **AUTHORITY:** SPEC-356b Audit v4 recommendation 6; Conductor ruling 2026-08-08.
 - **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+### ADJ-15
+
+- **ADJ id:** ADJ-15
+- **Date:** 2026-08-08
+- **Target:** **ADJ-13's adjudicated form** — the pass-rate fit's axis and its Step 3 / Step 4
+  discriminator — against the pinned fitter's own contract (`spec349c2-fit.awk`).
+- **ORIGINAL TEXT (verbatim, ADJ-13):**
+
+  > both fit with the SAME pinned fitter §6 names for `tombstone_bytes` […] **Step 3 (SCHEDULING /
+  > LICENSING) requires `s_late` significantly BELOW `s_early`** (one-sided, α = 0.05 — the original
+  > test's level and direction, recast onto the unbiased construction)
+
+- **FINDING:** two defects, both raised by SPEC-356b **Audit v5 (C1, C2)**. (1) The pinned fitter
+  hardwired `x = elapsed_secs`: the two-column pass-rate CSV was unfittable (exit 2), and the silent
+  workaround — regressing against TIME — yields the OPPOSITE verdict on accelerating-epoch data (probe:
+  time-axis `s_early = s_late` → Step 4 while epoch-axis `21600 / 7200` → Step 3). (2) The fitter's own
+  doc-contract states that for cumulative autocorrelated series its SE is OPTIMISTIC and *"SE separation
+  alone must never carry a discrimination claim; the minimum effect-size floor does"* — yet ADJ-13 made
+  SE-separation-alone the sole discriminator with no floor, biasing toward SCHEDULING, the very direction
+  it rejected the per-epoch construction for. The third adversarial cross-vendor round
+  (`spec356-adj15-xask.md`) then rejected my two-leg repair: an optimistic-SE precondition is **theater
+  with a back door** — the only case where it binds is the one where it overrides the material floor
+  using the instrument its own contract discredits.
+- **ADJUDICATED FORM (governs):**
+
+  > 1. **Axis.** `spec349c2-fit.awk` gains an additive `-v xaxis=<header>` parameter. The default
+  >    (`elapsed_secs`, hours conversion, historical field names) is **byte-identical** to the
+  >    pre-parameter script — regression-proven over EVERY committed evidence CSV × both windows × all
+  >    five columns (190 output lines, `cmp` clean; recorded in `spec356-adj15-xask.md`). The pass-rate
+  >    fit runs `-v col=passes_total -v xaxis=current_epoch` with raw x (no hours conversion) and
+  >    honestly-renamed output fields (`slope_per_x_unit`), on TWO derived slice CSVs: `early` = first
+  >    half of the last-half rows, `late` = second half, each fit with `window=full`.
+  > 2. **Discriminator — floor-only; the SE leg is REMOVED.**
+  >    **Step 3 (SCHEDULING) ⟺ `s_early ≥ 5` passes/epoch AND `s_late ≤ 0.5 × s_early`.** Otherwise
+  >    Step 4 — EXCEPT the degeneracy case `s_early < 5` passes/epoch, which routes via **Step 0(c) to
+  >    INDETERMINATE**: at noise-floor pass rates the instrument cannot distinguish scheduling decline
+  >    from noise, and defaulting to either branch would be the instrument picking. The `5` is a coarse
+  >    fixed margin in this protocol's tradition (not a derived formula): the measured healthy rate on
+  >    the armed smoke probe is ≈ 950 passes/epoch, so the guard sits two orders of magnitude below
+  >    nominal and can only fire on genuine degeneracy.
+  > 3. **Sensitivity — CONTESTED, with an iron no-routing rule.** The verdict at `0.5` GOVERNS. It is
+  >    also computed at `0.4` and `0.6`; a flip within that band attaches ADJ-3's **CONTESTED** label.
+  >    **CONTESTED changes exactly zero routing decisions** — a consumer that re-runs, escalates,
+  >    re-weights or "holds for review" on it is out of contract. The ±20 % band is the same coarseness
+  >    class as the floor itself and is pre-registered as coarse.
+  > 4. **Warmup.** The last-half window is the pre-registered warmup exclusion (the early slice is hours
+  >    2–3 of the 4 h cell). Both raw slopes are REPORTED in §9 so residual transients are visible. Two
+  >    accepted limitations stand on the record: a slow compounding decline (≈ 0.8× per half) is below
+  >    this floor's detection threshold, and a warmup transient surviving into the early slice would
+  >    bias toward Step 3 — the reported raw slopes are the reader's check on both.
+  > 5. **No reading was ever taken under the defective text:** no pass-rate fit was executed before this
+  >    addendum (PRE-DATA holds), so the correction repairs pre-registration text, not results.
+
+- **AUTHORITY:** SPEC-356b Audit v5 criticals C1 and C2; adversarial `/xask` round 2026-08-08
+  (`spec356-adj15-xask.md`: SE leg dropped as theater-with-a-back-door; absolute degeneracy guard added
+  with the INDETERMINATE routing chosen over the vendor's default-to-Step-4 to avoid a lean; CONTESTED
+  no-routing rule adopted verbatim); regression-proof over all committed CSVs; Conductor ruling
+  2026-08-08.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
