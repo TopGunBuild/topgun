@@ -26,6 +26,33 @@ here.
 A NON-ZERO COUNT FAILS THIS GATE AND IS REPAIRED IN CODE OR IN THE SAMPLER.
 Relaxing a column check is not an available repair.
 
+READ THIS FILE IN TWO PARTS. It carries TWO captures, and which one discharges
+the gate is not a matter of taste:
+
+  PART I  (below)  the ORIGINAL capture, taken on the PRE-REPAIR instrument.
+                   Its limb-(b) census is the one ADJ-7 cites as its
+                   BEFORE-PICTURE -- the flat `eligible_refs max=0` that
+                   exposed the licensed-backlog defect in the first place.
+                   It is retained deliberately and is NOT the discharging
+                   capture.
+  PART II (end)    the RE-CAPTURE at the FINAL instrument. This is the one
+                   that discharges EG-1.
+
+WHY PART II EXISTS. The licensed-backlog repair changed `drain_prunable` --
+its signature, and the side of the removal loop the eligible/ineligible split
+is computed on -- i.e. it changed the drain path the record is emitted from,
+AFTER Part I was captured. A gate whose whole premise is that "a code-reading
+does not discharge this gate; only the artifact does" cannot then be discharged
+by arguing that the change was harmless. It is re-run instead. Part II is that
+re-run, on binaries built from the final tree.
+
+================================================================================
+PART I -- THE ORIGINAL CAPTURE (PRE-REPAIR INSTRUMENT)
+================================================================================
+
+Retained in full. Its limb-(b) census is ADJ-7's before-picture; its limb-(a)
+render is re-proven unchanged in Part II.
+
 ================================================================================
 LIMB (a) -- DETERMINISTIC, IN-PROCESS: the first render with NO observations
 ================================================================================
@@ -243,6 +270,14 @@ Taken over the scratch smoke `prune.csv` -- the ARMED cell, where the scrape
 gate is in full force. Not "the columns exist"; not "the later rows are fine".
 Every cell of every column of every row, FIRST ROW INCLUDED.
 
+  *** THIS IS THE PRE-REPAIR CENSUS -- ADJ-7's BEFORE-PICTURE. ***
+  Its `topgun_or_prune_eligible_refs ... min=0 max=0` row is the flat zero that
+  exposed the licensed-backlog defect: on this instrument the split was
+  recomputed AFTER the drain had removed every eligible epoch, so the licensed
+  backlog could not read anything but 0 at any sample instant. The zero below
+  is a CONSTRUCTION, not a reading. Part II carries the discharging census,
+  taken on the repaired instrument, where the same column reads max=1000.
+
 INVOCATION (verbatim, as run):
 
   SPEC356_SMOKE_DURATION=120 SPEC356_SMOKE_SAMPLE_INTERVAL=10 \
@@ -346,7 +381,8 @@ prune.csv columns:
   providing none.
 
 ================================================================================
-VERDICT: EG-1 PASS (both limbs).
+PART I VERDICT: both limbs PASS on the pre-repair instrument.
+                This is NOT the gate's discharge -- see PART II.
 ================================================================================
 
 Recorded for the next reader: the disarmed cell is NOT part of this census and
@@ -357,3 +393,243 @@ but it writes its row with the prune-record columns EMPTY by design, and no
 column check reads them. Series absence there is the ARMING WITNESS, checked
 once and fail-closed; it is never an instrument defect. This census is over the
 ARMED cell, where the completeness gate binds.
+
+================================================================================
+PART II -- THE RE-CAPTURE AT THE FINAL INSTRUMENT (THIS IS THE DISCHARGE)
+================================================================================
+
+WHY THIS PART IS THE ONE THAT COUNTS. The licensed-backlog repair landed after
+Part I was captured. It changed `drain_prunable`'s signature and moved the
+eligible/ineligible split to the NEAR side of the removal loop -- the drain path
+this record is emitted from. Whether that change can reintroduce a blank cell is
+answerable by reading the diff, and reading the diff is precisely what R12
+refuses to accept as a discharge. So both limbs were re-run end-to-end against
+binaries built from the final tree.
+
+BUILD IDENTITY OF THIS CAPTURE. Working tree clean; server binary and
+soak_harness bench binary built together from that tree by one
+
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo build --release --bin topgun-server --bench soak_harness
+
+with 60s between their link times -- inside the runner's own 600s
+same-build window, so it does not warn. The reader who wants to know WHICH
+tree: it is this spec's final content commit, whose SHA is resolved by
+SPEC-356b from `git log main` per R11.1. No SHA is written here, because
+writing one here would be the self-referential pin R0.1 forbids.
+
+--------------------------------------------------------------------------------
+LIMB (a) AT THE FINAL INSTRUMENT
+--------------------------------------------------------------------------------
+
+INVOCATION (verbatim, as run):
+
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib -- \
+    tombstone_frontier_impl::tests::every_pinned_prune_series_is_present_in_the_first_render \
+    --exact --nocapture
+
+  test tombstone_frontier_impl::tests::every_pinned_prune_series_is_present_in_the_first_render ... ok
+
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1794 filtered out; finished in 0.20s
+
+  (1794 filtered out, against Part I's 1791: the repair round added three tests.
+   That delta is the only difference between the two test-result lines.)
+
+INDEPENDENT CENSUS OVER THE RE-CAPTURED RENDER
+
+  distinct pinned base names rendered      : 33   (MUST be 33)
+    # TYPE ... counter                     : 15   (MUST be 15)
+    # TYPE ... gauge                       : 11   (MUST be 11)
+    # TYPE ... summary                     : 7    (MUST be  7)
+
+  $ grep -E '^topgun_or_prune_[a-z_]+ 0$' | wc -l
+  40   (MUST be 40 = 15 counters + 11 gauges + 7 x 2 histogram _sum/_count)
+    of which _sum 0                        : 7
+    of which _count 0                      : 7
+
+SET-IDENTITY AGAINST PART I, AND WHY THE COMPARISON IS SORTED RATHER THAN
+BYTE-ORDERED. This exporter does NOT render in a stable order: the same test on
+the same binary emits the same 33 families in a different sequence run to run,
+because the render walks a hash map. A raw `diff` of the two captures is
+therefore all noise and no signal, and anyone who runs one will see ~90 changed
+lines that mean nothing. The predicate this gate actually asserts is over the
+SET -- every pinned name present, every value 0 -- so the comparison is made
+over the sorted lines:
+
+  $ grep -E '^(# TYPE )?topgun_or_prune_' <part I render>   | sort > set-old
+  $ grep -E '^(# TYPE )?topgun_or_prune_' <re-captured render> | sort > set-head
+  $ diff set-old set-head
+  (no output)                              <- 122 lines each, IDENTICAL
+
+  So the repair moved neither the registered name set nor any first-scrape
+  value. The full byte listing in Part I is thereby re-proven current; it is not
+  reprinted here, because reprinting 160 lines of zeros would invite exactly the
+  "which run produced this?" ambiguity this Part exists to remove.
+
+  LIMB (a): PASS at the final instrument.
+
+--------------------------------------------------------------------------------
+LIMB (b) AT THE FINAL INSTRUMENT -- the zero-empty-field census
+--------------------------------------------------------------------------------
+
+INVOCATION (verbatim, as run):
+
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  SPEC356_SMOKE_DURATION=120 SPEC356_SMOKE_SAMPLE_INTERVAL=10 \
+  SPEC356_OUT_DIR=/tmp/spec356-smoke \
+    packages/server-rust/benches/soak_harness/evidence/spec356-prune.sh smoke
+
+  $ awk -F, '{ for (i = 1; i <= NF; i++) if ($i == "") e++ } END { print "empty_fields=" e + 0 }' \
+      /tmp/spec356-smoke/spec356-smoke.prune.csv
+
+CENSUS
+
+  empty_fields=0
+
+  rows including header                    : 12
+  data rows                                : 11
+  distinct field counts per line           : 42 (every line carries all 42 columns)
+  ticks skipped by the scrape gate         : 1
+  header                                   : matches the pinned schema, in the frozen order
+
+  THE FIRST DATA ROW, in full:
+
+    10,390,0,0,0,0,0,0,0,0,0,390,0,2,2,2,390,1,0,66,2,2,2,0,0,8,1,0,0,0,0,0,2,0,2,0,0,0,0,0,0,7620
+
+  THIS RUN TOOK THE OTHER OF THE TWO SHAPES PART I DESCRIBES, which is worth
+  noting precisely because Part I predicted it. The runner reported:
+
+    prune.csv ticks SKIPPED by the scrape gate: 1
+        elapsed=0s scrape FAILED -- no row written, retrying next tick
+    first COMPLETE scrape at elapsed = 10s
+
+  Part I's own first row landed at elapsed = 0; this one's lands at elapsed = 10
+  because the /metrics listener had not answered by the first tick. BOTH satisfy
+  this limb, and the difference is the point: the census asserts ZERO BLANK
+  CELLS, never a particular first `elapsed_secs`. The parent lineage's routine
+  blank-at-boot has become a SKIPPED TICK rather than a blank row -- and this
+  capture is the shape that actually exercises that, so the gate is discharged
+  by the harder of its two cases, not the easier one.
+
+  LIMB (b): PASS at the final instrument -- empty_fields=0.
+
+--------------------------------------------------------------------------------
+THE PER-COLUMN POPULATION REPORT FROM THE SAME RUN (all 42 columns)
+--------------------------------------------------------------------------------
+prune.csv columns:
+  elapsed_secs                                 [POPULATN] n=11 empty=0 min=10 max=110
+  topgun_or_prune_passes_total                 [POPULATN] n=11 empty=0 min=390 max=4017
+  topgun_or_prune_considered_total             [POPULATN] n=11 empty=0 min=0 max=3000
+  topgun_or_prune_dropped_total                [POPULATN] n=11 empty=0 min=0 max=3000
+  topgun_or_prune_matched_nothing_total        [POPULATN] n=11 empty=0 min=0 max=0
+  topgun_or_prune_absent_total                 [POPULATN] n=11 empty=0 min=0 max=0
+  topgun_or_prune_restored_read_error_total    [POPULATN] n=11 empty=0 min=0 max=0
+  topgun_or_prune_restored_evicted_total       [POPULATN] n=11 empty=0 min=0 max=0
+  topgun_or_prune_restored_write_error_total   [POPULATN] n=11 empty=0 min=0 max=0
+  topgun_or_prune_bytes_freed_total            [POPULATN] n=11 empty=0 min=0 max=61355
+  topgun_or_prune_epochs_drained_total         [POPULATN] n=11 empty=0 min=0 max=3
+  topgun_or_prune_empty_drains_total           [POPULATN] n=11 empty=0 min=390 max=4014
+  topgun_or_prune_nonempty_drains_total        [POPULATN] n=11 empty=0 min=0 max=3
+  topgun_or_prune_lwm_advances_total           [POPULATN] n=11 empty=0 min=2 max=6
+  topgun_or_prune_lwm_epochs_advanced_total    [POPULATN] n=11 empty=0 min=2 max=6
+  topgun_or_prune_split_recomputes_total       [POPULATN] n=11 empty=0 min=2 max=9
+  topgun_or_prune_indexed_refs                 [POPULATN] n=11 empty=0 min=390 max=1938
+  topgun_or_prune_indexed_epochs               [POPULATN] n=11 empty=0 min=1 max=2
+  topgun_or_prune_eligible_refs                [POPULATN] n=11 empty=0 min=0 max=1000
+  topgun_or_prune_ineligible_refs              [POPULATN] n=11 empty=0 min=66 max=1148
+  topgun_or_prune_split_computed_epoch         [POPULATN] n=11 empty=0 min=2 max=6
+  topgun_or_prune_current_epoch                [POPULATN] n=11 empty=0 min=2 max=6
+  topgun_or_prune_low_water_mark               [POPULATN] n=11 empty=0 min=2 max=6
+  topgun_or_prune_durable_epoch_watermark      [POPULATN] n=11 empty=0 min=0 max=4
+  topgun_or_prune_last_drained_epoch           [POPULATN] n=11 empty=0 min=0 max=4
+  topgun_or_prune_lwm_stall_seconds            [POPULATN] n=11 empty=0 min=0 max=28
+  topgun_or_prune_tracked_claims               [POPULATN] n=11 empty=0 min=1 max=1
+  topgun_or_prune_drain_refs_sum               [POPULATN] n=11 empty=0 min=0 max=3000
+  topgun_or_prune_drain_refs_count             [POPULATN] n=11 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_sum             [POPULATN] n=11 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_count           [POPULATN] n=11 empty=0 min=0 max=3
+  topgun_or_prune_claim_span_epochs_sum        [POPULATN] n=11 empty=0 min=0 max=0
+  topgun_or_prune_claim_span_epochs_count      [POPULATN] n=11 empty=0 min=2 max=9
+  topgun_or_prune_claim_lag_epochs_sum         [POPULATN] n=11 empty=0 min=0 max=0
+  topgun_or_prune_claim_lag_epochs_count       [POPULATN] n=11 empty=0 min=2 max=9
+  topgun_or_prune_epoch_considered_sum         [POPULATN] n=11 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_considered_count       [POPULATN] n=11 empty=0 min=0 max=3
+  topgun_or_prune_epoch_dropped_sum            [POPULATN] n=11 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_dropped_count          [POPULATN] n=11 empty=0 min=0 max=3
+  topgun_or_prune_epoch_bytes_freed_sum        [POPULATN] n=11 empty=0 min=0 max=61355
+  topgun_or_prune_epoch_bytes_freed_count      [POPULATN] n=11 empty=0 min=0 max=3
+  topgun_ormap_tombstone_bytes_total           [POPULATN] n=11 empty=0 min=7620 max=82712
+
+  Every column: n > 0 and empty = 0, over all 42 columns. That is the population
+  limb of the acceptance criterion this gate feeds -- header presence alone does
+  NOT satisfy it, because a named-but-unwritten column reads as coverage while
+  providing none.
+
+  AND THE COLUMN THE REPAIR WAS FOR, side by side with Part I:
+
+    PART I  (pre-repair)  topgun_or_prune_eligible_refs   n=13 empty=0 min=0 max=0
+    PART II (final)       topgun_or_prune_eligible_refs   n=11 empty=0 min=0 max=1000
+
+  The licensed backlog now reads a real number at a real sample instant on the
+  same gate's own artifact. It is worth being exact about what that does and
+  does not add: EG-1 is a BLANK-CELL gate, and `max=0` was never a blank -- Part
+  I passed this gate honestly. What the side-by-side shows is that the census
+  which discharges EG-1 is now taken on the instrument whose `L` is admissible
+  for the classification predicate, so the two facts stop being about different
+  binaries.
+
+--------------------------------------------------------------------------------
+THE A9 VERDICT AND THE EXIT STATUS OF THE SAME RUN
+--------------------------------------------------------------------------------
+
+The census above is a reading taken from the artifact. The runner's OWN verdict
+over the same file is a separate, mechanical statement, and it is recorded here
+because a census that a human computed and a verdict that the runner computed
+are not the same evidence:
+
+  A9 POPULATION DEFECT lines emitted:  0
+    (the runner's `a9_population_defect` fires on any MEASURAND column that
+     fails the population check on a NON-MEASUREMENT cell -- n == 0 or
+     empty > 0 -- and sets A9_OK=0. It fired on none of the 42.)
+  STEP0C ADMISSIBILITY lines:          0   (none due; nothing failed)
+  INSTRUMENT DEFECT lines:             0
+
+  runner's terminal line, verbatim:
+
+    RESULT: instrument sound; harness exit code 0.
+
+  $ echo "EXIT STATUS: $?"
+  EXIT STATUS: 0
+
+  Read the exit status against the runner's own fork, so 0 is not taken as
+  vacuous: an A9 failure on this path exits 1 (a blocking non-measurement
+  population defect), an INSTRUMENT failure exits 9, and a clean run falls
+  through to the harness's own code. 0 here is the clean fall-through, and it is
+  the branch the 42 clean columns above predict.
+
+  ONE FALSE START IS RECORDED RATHER THAN QUIETLY RETRIED, because a runner
+  guard that fires is evidence about the runner. The first attempt at this
+  re-capture exited 1 before starting anything:
+
+    FATAL: data dir is NOT empty: <target>/spec356-smoke-data
+           Each run needs its own fresh, empty dir -- retained frames from a
+           previous run would answer this run's frame-kind census.
+
+  That is the fresh-corpus guard refusing to let a stale corpus answer a new
+  run's census. The repair was to remove the stale scratch dir -- never to
+  relax the guard -- and the run above is the one that followed.
+
+================================================================================
+VERDICT: EG-1 PASS (both limbs) AT THE FINAL INSTRUMENT.
+================================================================================
+
+  limb (a): 33/33 pinned names in the first render with zero observations,
+            set-identical to Part I.
+  limb (b): empty_fields=0 over every column of every row of the post-repair
+            smoke prune.csv, first row included, on the harder of the two
+            first-scrape shapes (a skipped tick, not a lucky elapsed=0).
+  A9:       0 population defects, 0 instrument defects, exit 0.
+
+Part I is retained as ADJ-7's before-picture and is not superseded as evidence
+of what the pre-repair instrument did -- only as the discharge of this gate.
