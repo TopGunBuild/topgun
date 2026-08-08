@@ -407,16 +407,59 @@ refuses to accept as a discharge. So both limbs were re-run end-to-end against
 binaries built from the final tree.
 
 BUILD IDENTITY OF THIS CAPTURE. Working tree clean; server binary and
-soak_harness bench binary built together from that tree by one
+soak_harness bench binary were produced by
 
   SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
   cargo build --release --bin topgun-server --bench soak_harness
 
-with 60s between their link times -- inside the runner's own 600s
-same-build window, so it does not warn. The reader who wants to know WHICH
-tree: it is this spec's final content commit, whose SHA is resolved by
-SPEC-356b from `git log main` per R11.1. No SHA is written here, because
-writing one here would be the self-referential pin R0.1 forbids.
+and their link times, read back afterwards by the runner's own resolution
+recipe (`spec356-prune.sh`, binary-resolution block), are:
+
+  server binary: target/release/topgun-server
+    built:       2026-08-08T08:37:57Z
+  soak binary:   target/release/deps/soak_harness-9abf891ab72dea71
+    built:       2026-08-08T08:48:33Z
+  BUILD_GAP:     636s          (the runner's window is 600s)
+
+CORRECTION -- THIS BLOCK WAS WRONG, AND IS CORRECTED RATHER THAN OVERWRITTEN.
+It previously read: "with 60s between their link times -- inside the runner's
+own 600s same-build window, so it does not warn." BOTH halves are false. The
+gap is 636s, which EXCEEDS the 600s window, so the branch that fires on this
+pair is the runner's "probably NOT from one build" WARNING, not the silent
+path. The 60s came from comparing the bench binary against ITS OWN `.d` file
+(11:47:31 -> 11:48:33 local = 62s) -- the wrong pair. The runner compares the
+bench binary against the SERVER binary, which is the 636s above. The error is
+recorded here instead of being quietly replaced, on the same rule this
+artifact applies to every other finding against its own text: an evidence log
+that silently repairs its own false claims is worth less than one that shows
+the repair.
+
+WHAT THIS BLOCK THEREFORE NO LONGER CLAIMS. It does not claim the two binaries
+came from ONE cargo invocation. With the gap outside the window, the runner's
+own heuristic declines that inference and nothing else recorded here
+establishes it. The discharge does not rest on it. It rests on two facts that
+stand without it:
+
+  (a) BOTH LINK TIMES POSTDATE THE FIX. Both binaries were linked 2026-08-08.
+      The licensed-backlog repair whose landing is the entire reason for this
+      re-capture was committed 2026-08-04 22:19 +0300 -- four days earlier
+      (branch-local pre-merge hash f76f3208, subject "fix(sf-356a): sample the
+      licensed backlog before the drain consumes it"; the subject is recorded
+      alongside the hash because the hash does not survive a rebase). Neither
+      binary can predate the fix, whatever their relationship to each other.
+
+  (b) BEHAVIOURAL FINGERPRINT -- the stronger of the two. The census below
+      reads eligible_refs max=1000. The pre-fix code recomputed that quantity
+      only AFTER an unbounded drain and could therefore only ever read 0,
+      which is exactly what Part I reads (max=0). A binary that prints 1000 is
+      not the pre-fix binary. This is a property of the running code rather
+      than of a file mtime, so it survives every objection available against
+      (a).
+
+The reader who wants to know WHICH tree: it is this spec's final content
+commit, whose SHA is resolved by SPEC-356b from `git log main` per R11.1. No
+lineage SHA is written here, because writing one here would be the
+self-referential pin R0.1 forbids.
 
 --------------------------------------------------------------------------------
 LIMB (a) AT THE FINAL INSTRUMENT

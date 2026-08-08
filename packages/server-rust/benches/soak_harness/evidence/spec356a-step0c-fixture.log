@@ -229,18 +229,37 @@ source -- a code-reading does not discharge this gate)
 PART II -- THE RE-CAPTURE AT THE FINAL INSTRUMENT (THIS IS THE DISCHARGE)
 ================================================================================
 
-BUILD IDENTITY. Server binary and soak_harness bench binary built together from
-the final, clean tree by one `cargo build --release --bin topgun-server --bench
-soak_harness`. The source artifact for this fixture is the post-repair smoke
-`prune.csv` -- the same file whose census discharges EG-1 in
-`spec356a-eager-registration.log` Part II, so the two gates are now cut from ONE
-run of ONE instrument rather than from two runs of two.
+BUILD IDENTITY. Server binary and soak_harness bench binary were produced by
+`cargo build --release --bin topgun-server --bench soak_harness` over the final,
+clean tree. Their link times are 2026-08-08T08:37:57Z (server) and
+2026-08-08T08:48:33Z (bench) -- a 636s gap, which EXCEEDS the runner's own 600s
+window, so the branch that fires on this pair is the runner's "probably NOT from
+one build" WARNING.
+
+CORRECTION. This block previously asserted the two binaries were provably built
+together, and the companion EG-1 artifact quoted a 60s gap in support. That
+assertion is WITHDRAWN and the 60s figure was wrong; `spec356a-eager-registration.log`
+Part II carries the full correction, including where the false number came from.
+Nothing in this Part ever depended on same-build identity. What it needs is that
+the SOURCE ARTIFACT came from a POST-FIX instrument, and that is carried by two
+facts that are not same-build claims: both link times postdate the
+licensed-backlog repair of 2026-08-04 by four days, and the eligible_refs
+max=1000 fingerprint recorded in `spec356a-eager-registration.log` Part II is
+unreachable by the pre-fix code.
+
+The source artifact for this fixture is the post-repair smoke `prune.csv` -- the
+same file whose census discharges EG-1 in `spec356a-eager-registration.log`
+Part II, so the two gates are still cut from ONE RUN of ONE instrument rather
+than from two runs of two. That is a statement about one runner invocation, and
+is untouched by the withdrawal above.
 
 Note what this path does NOT depend on, so the reader does not over-read the
 rebuild: the fixture path starts no harness and never resolves either binary --
 it is entered, validated and executed before the runner reaches its binary
 resolution. The rebuild matters because the SOURCE ARTIFACT had to come from the
-final instrument, not because this path executes any of it.
+final instrument, not because this path executes any of it. The same structure
+is why the build-gap WARNING above is inert for THIS gate in particular: the
+runner branch that would emit it is never reached on the fixture path.
 
 THE FIXTURE, rebuilt from the post-repair artifact by the same recipe:
 
