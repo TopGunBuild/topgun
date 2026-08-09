@@ -1268,3 +1268,47 @@ edited to accommodate them.)*
 - **AUTHORITY:** SPEC-356b Audit v12 critical C1; Conductor ruling 2026-08-09 (remove-the-freedom over
   bound-the-parameter, the same ruling shape as ADJ-9/ADJ-16/ADJ-17's precedents).
 - **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+### ADJ-18
+
+- **ADJ id:** ADJ-18
+- **Date:** 2026-08-09
+- **Target:** **ADJ-17's adjudicated form** — the split axis and the density band.
+- **ORIGINAL TEXT (verbatim, ADJ-17):**
+
+  > **Early / late split:** within that window, `early` = rows with `current_epoch ≤ (e_lo + e_hi) / 2`,
+  > `late` = the rest […] the provenance limb must require the ledger's row count within **[0.5×, 1.5×] of
+  > `span / cadence`**
+
+- **FINDING:** two residuals, surfaced by Response v12's own STOP (the fixes need a manifest byte, which
+  the response correctly did not take). (1) The split midpoint reads `e_hi` from the ledger's LAST row, so
+  a **monotone forward stretch of one epoch value** — passing monotonicity and the cadence cap — drags the
+  boundary and starves the late slice (measured: honest `600/200` → `564.7/195.0` → `436.8/32.7`). The
+  epoch axis is the one axis NO provenance limb binds. (2) The `[0.5×, 1.5×]` band is ledger-global, which
+  leaves a **50 % deletion budget inside a single half**: coordinate membership stops boundary movement,
+  but value-selective thinning within one half still tilts that half's fit.
+- **ADJUDICATED FORM (governs):**
+
+  > 1. **The split boundary moves to the provenance-guarded axis:** `early` = rows of the last-half window
+  >    with `elapsed_secs ≤ (t_lo + t_hi) / 2` of THAT WINDOW, `late` = the rest. `elapsed_secs` is
+  >    already bound by the provenance limb (cadence, span, `matrix.txt` identity), and the temporal
+  >    halving is ADJ-13's own semantics — "run less and less often as the run progresses". The FIT axis
+  >    is unchanged (`current_epoch`, per ADJ-15/ADJ-17); only slice MEMBERSHIP moves to elapsed.
+  > 2. **The epoch axis gains a coarse integrity bound of its own:** within the parent window,
+  >    `current_epoch` must be non-decreasing and every single-row jump must be
+  >    **≤ 10 × the median positive jump** — a fixed coarse multiple in this protocol's tradition, wide
+  >    enough for any legitimate scheduling burst and narrow enough that a boundary-moving stretch of one
+  >    point is RED on its own row.
+  > 3. **The density band localizes and tightens:** row count within **[0.8×, 1.2×] of `span / cadence`**,
+  >    enforced for the ledger AND for EACH derived half separately. The observed legitimate skip rate is
+  >    ~1 % (one gated tick per smoke); 20 % headroom is coarse-generous, and a 50 % in-half deletion is
+  >    RED by the half's own band.
+  > 4. **The graders' bound, restated honestly (the R5.7(f) shape):** these limbs catch honest mistakes,
+  >    drift, and cheap launderings. A fully coherent forged ledger — every column rewritten consistently
+  >    with its own cadence, spans, identities and digests — is out of scope for content checks by
+  >    construction; the defense at that layer is the provenance of the run itself, not arithmetic over
+  >    the artifact.
+
+- **AUTHORITY:** SPEC-356b Response v12 STOP items (both residuals measured there); Conductor ruling
+  2026-08-09.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
