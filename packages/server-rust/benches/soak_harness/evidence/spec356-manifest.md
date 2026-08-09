@@ -1229,3 +1229,42 @@ edited to accommodate them.)*
 
 - **AUTHORITY:** SPEC-356b Audit v6 critical C1 and recommendation 7; Conductor ruling 2026-08-08.
 - **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+### ADJ-17
+
+- **ADJ id:** ADJ-17
+- **Date:** 2026-08-09
+- **Target:** **ADJ-15's slice construction** — the pass-rate chain's window and split definitions.
+- **ORIGINAL TEXT (verbatim, ADJ-15, the slice clause):**
+
+  > on TWO derived slice CSVs: `early` = first half of the last-half rows, `late` = second half, each fit
+  > with `window=full`
+
+- **FINDING:** a ROW-INDEX split makes the ledger's row count a free parameter of the verdict. SPEC-356b
+  Audit v12 (critical C1) exhibited the minimal pair: the honest 1440-row ledger reads
+  `s_early 600 / s_late 200` (Step 3), while a 1-in-4 subsample of the same cell — preserving span,
+  monotonicity and the cadence cap — moves the row-index boundaries in time and reads `200 / 200`
+  (Step 4), both green. The v11 repair (deriving slices from the parent) removed the SLICE FILES as an
+  input but left the BOUNDARY a function of `n`; the freedom moved rather than disappeared.
+- **ADJUDICATED FORM (governs — coordinates, not counts):**
+
+  > Every window and split in the pass-rate chain is defined on the **x-axis**, never on row indices:
+  >
+  > - **Last-half window:** the rows of the cell's ledger whose `elapsed_secs` exceeds
+  >   `(t_first + t_last) / 2` of the FULL ledger.
+  > - **Early / late split:** within that window, `early` = rows with
+  >   `current_epoch ≤ (e_lo + e_hi) / 2`, `late` = the rest — where `e_lo` / `e_hi` are the window's
+  >   first and last `current_epoch` values. The midpoint of the SPAN, not the median row.
+  >
+  > A point's half-membership now depends only on its own coordinates, so dropping or duplicating rows
+  > cannot move any boundary: the subsampling family of attacks loses its lever **by construction**
+  > rather than by bound. **Density is guarded separately, both directions:** the provenance limb must
+  > require the ledger's row count within **[0.5×, 1.5×] of `span / cadence`** — thinning AND padding are
+  > detectable, and the bound is a coarse fixed band in this protocol's tradition. The fitter's own
+  > historical row-based `last_half` window is UNTOUCHED for the byte-slope fits it is regression-locked
+  > to; the pass-rate driver derives its windows itself from the coordinates above and fits each derived
+  > window with `window=full`.
+
+- **AUTHORITY:** SPEC-356b Audit v12 critical C1; Conductor ruling 2026-08-09 (remove-the-freedom over
+  bound-the-parameter, the same ruling shape as ADJ-9/ADJ-16/ADJ-17's precedents).
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
