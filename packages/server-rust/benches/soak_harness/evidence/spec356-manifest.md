@@ -1312,3 +1312,37 @@ edited to accommodate them.)*
 - **AUTHORITY:** SPEC-356b Response v12 STOP items (both residuals measured there); Conductor ruling
   2026-08-09.
 - **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+### ADJ-19
+
+- **ADJ id:** ADJ-19
+- **Date:** 2026-08-09
+- **Target:** **ADJ-18's clauses 2 and 3** — the jump bound's small-sample hole and the band's
+  concentration hole.
+- **ORIGINAL TEXT (verbatim, ADJ-18):**
+
+  > every single-row jump must be **≤ 10 × the median positive jump** […] row count within
+  > **[0.8×, 1.2×] of `span / cadence`**, enforced for the ledger AND for EACH derived half separately
+
+- **FINDING:** two measured constructions, surfaced by Response v13's STOP. (1) Below three positive
+  jumps the median is dominated by the attack itself: jump set `{1, 1398}` yields median `699.5`, bound
+  `6995` — the stretched row passes its own guard. (2) Any density band leaves a budget, and the budget
+  can be CONCENTRATED: deleting a contiguous run of rows adjacent to the split boundary stays inside the
+  per-half band while tilting that half's fit — the band bounds volume, not distribution.
+- **ADJUDICATED FORM (governs):**
+
+  > 1. **Minimum evidence for the jump bound:** the `10 × median positive jump` rule applies only when
+  >    the parent window carries **≥ 5 positive jumps**. Below that the epoch axis cannot support a
+  >    pass-rate fit at all, and the window routes to **INDETERMINATE via the existing Step 0(c) hatch**
+  >    (the ADJ-12/ADJ-15 route — no new mechanism, no default to either branch). A guard whose reference
+  >    statistic the attacker's own row can dominate is not a guard.
+  > 2. **Distribution is bounded, not just volume:** within EACH derived half, the maximum gap between
+  >    consecutive `elapsed_secs` values must be **≤ 5 × cadence**. A legitimate skipped scrape gives
+  >    2×; two consecutive skips 3×; the measured skip rate is ~1 %. A concentrated deletion — the
+  >    100-row edge run — is a ~100× gap and REDs on its own bytes. Uniform sparse thinning inside the
+  >    band is harmless BY CONSTRUCTION under coordinate membership: it moves no boundary and biases no
+  >    fit direction. Both constants are coarse fixed margins in this protocol's tradition.
+
+- **AUTHORITY:** SPEC-356b Response v13 STOP items (both constructions measured there); Conductor ruling
+  2026-08-09.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
