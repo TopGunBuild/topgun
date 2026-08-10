@@ -2208,3 +2208,129 @@ ask carried to it is narrow and stated so it can be actioned rather than re-deri
 for the INDETERMINATE determination, and `CELLE_DISPOSITION`'s enum needs the corresponding value —
 **both are changes to a pre-registered surface, so both belong to a spec that RE-PINS, never to an
 execution.**
+
+---
+
+### §9.9 — The §8.1 REPEAT OBLIGATION: **OWED, NOT DONE**
+
+**This spec does NOT execute the repeat.** The obligation is recorded here in full, as owed, so that it
+cannot be read as discharged by the paragraph that names it.
+
+| | The obligation, as §8.1 pre-registered it before the data existed |
+|---|---|
+| **What** | **exactly one repeat** of the deciding configuration |
+| **Which cell** | the **`long`** cell — the one whose walk returned INDETERMINATE |
+| **Duration** | **28,800 s** (2 × 14,400 s) — **DOUBLED** |
+| **Replicates** | **n = 2** (2 × 1) — **DOUBLED** |
+| **Pin** | the **SAME** pin, `feb85268952001813e502e27f65180855676ac25` |
+| **Predicate** | the **SAME** frozen predicate — §0–§8 together with §8A's twenty addenda |
+| **Forbidden** | it **may not adjust a threshold, an ordering or a conditional** |
+| **STATUS AT THE CLOSE OF SPEC-356b** | **OWED — NOT DONE** |
+| **Owner** | **TODO-634** |
+
+**Both axes are doubled, and §8.1's reason for each is carried rather than paraphrased away.** Doubling
+**duration** addresses an effect too slow to separate in 4 h; doubling **replicates** addresses the n = 1
+fragility SPEC-355 §10.4.2 measured — the level replicates at 5.4 % spread while the slope moved 2.0×,
+4.6× and changed sign. **One axis alone leaves the other cause unaddressed.** The repeat is a **second
+observation, not a re-specification.**
+
+**Why this spec does not run it, stated as a scope fact rather than an excuse.** It is an **8 h
+measurement** at n = 2 — 16 h of cell clock — against a wave budgeted for discharge and close-out. It is
+not deferred because it is hard; it is deferred because it is a *new measurement round*, and a
+measurement round belongs to the item that owns the follow-on. **Nothing about it is softened here:** no
+threshold is loosened in anticipation, no shortcut configuration is proposed, and the deciding
+configuration named above is the one that must run.
+
+**IF THE REPEAT IS STILL INDETERMINATE, §8.2 ESCALATES — and the escalation is not "record a note".** It
+**names the unclassified cause, quotes the evaluated value of every step that failed to fire and the
+admissibility limb that blocked**, and is carried into the family's design phase **as a stated open
+input**. Owner: **TODO-634**. This record already supplies what that escalation would quote for round
+one: Step 0 limb (c) blocked on ADJ-12's `>50 %` sentinel rule at **708/720 = 98.333333 %**; Steps 1–4
+were **never evaluated**; §9.5.3 carries every bundle value.
+
+**§8.3 QUOTED BESIDE THIS OUTCOME, as §8.3's own last sentence requires of ANY Step-5 outcome:**
+
+> **The recommended reclamation model closes safety REGARDLESS of which cause it turns out to be.**
+> `ReclamationRegistry` (cursor-shaped consumers only) + retention SLA **N = 30 d** + the cursor-age fence
+> with HLC-horizon quarantine + `ceiling = min_live_claim − fixed_margin` bound the reclaimable set by
+> **live claims**, not by any hypothesis about *why* the current prune falls behind. **A selection defect,
+> a scheduling defect and a throughput defect are all *contained* by a registry that never reclaims below
+> a live claim.**
+>
+> What an unclassified cause costs is **fix-shape efficiency** — the family would design without knowing
+> which limb to optimize first — **not safety, and not the family's ability to proceed.** A Step-5 outcome
+> is therefore to be read as **an expensive answer, not a blocked one**.
+
+**So the honest summary of this spec's terminal state, in one sentence:** the classification round ran to
+completion under a predicate frozen before the data, returned **INDETERMINATE** on a pre-registered
+admissibility hatch, routed to a repeat it does **not** perform, and left the reclamation family's safety
+argument **untouched and intact** — the registry model does not depend on which mechanism this round
+failed to name.
+
+---
+
+### §9.10 — Lineage close-out: the NINE PRE-DATA re-pins, and what each hop obliged
+
+**Recorded here so a reader who diffs `fc95b86d..feb85268` finds an explanation rather than an anomaly.**
+All nine moves are **PRE-DATA** — every one landed before the first `spec356-*.soak.json` existed (§9.2,
+§9.3) — so each cost nothing: no cell to discard, no matrix to re-run, and **§0–§8 byte-identical across
+all nine**.
+
+| Hop | To | PR | What moved | Gate it obliged |
+|---|---|---|---|---|
+| — | `fc95b86d` | #133 | the FREEZE: SPEC-356a's instrument + manifest §0–§8 | — (the baseline) |
+| 1 | `efa2c249` | #134 | manifest §8A (ADJ-9/10/11) **and the RUNNER** — cell E's arming disarmed | both Wave-1 gate artifacts |
+| 2 | `f2f72c62` | #135 | manifest §8A (ADJ-12/13/14) **and the RUNNER** — `B`'s committed source | both Wave-1 gate artifacts, re-captured |
+| 3 | `cb9682e5` | #136 | manifest §8A (ADJ-15) **and the FITTER only** | the fitter's default-path regression proof (190 lines, `cmp` clean; checklist 6) |
+| 4 | `f9d02d3e` | #137 | manifest **only** (ADJ-16) | **none** — re-capturing one would be theatre |
+| 5 | `07b1fda6` | #138 | manifest **only** (ADJ-17) | **none** |
+| 6 | `1f18b2b3` | #139 | manifest **only** (ADJ-18) | **none** |
+| 7 | `55edacb1` | #140 | manifest **only** (ADJ-19) | **none** |
+| 8 | `c0d8cc73` | #141 | manifest §8A (ADJ-20), **the RUNNER** (`19  0`), **and three new read-only sidecars** | both Wave-1 gate artifacts, in #135's Part-III shape |
+| 9 | **`feb85268`** | #142 | **no program byte and no manifest byte** — it IS hop 8's gate discharge (`PART IV`, `126  0` and `78  0`, taken at the ADJ-20 runner) | **none of its own**; it CLOSES hop 8's, and **TODO-647 is RESOLVED** |
+
+**`TODO-637` DID NOT FIRE ON ANY OF THEM, and §9 records only that observation.** TODO-637 owns exactly
+two **POST-DATA** branches — a **blocking R5.4 cell** and a **missing pinned column** — and neither was
+taken: §9.4 names the 2×2 cell **CLEAN**, and §9.5.1 limb (c) records all 43 columns present with
+`n=1440 empty=0`. **The PRE-DATA re-pin channel above is NOT TODO-637's** — it is this spec's ordinary
+correction path. **No acceptance criterion of this spec ticks, edits or closes `TODO-637`, and this wave
+edited no byte of `.specflow/todos/TODO-637.md`.** Closure, if it is ever warranted, belongs to whoever
+retires the branch.
+
+**Every cell in this record was run from a worktree checked out AT THE PIN**, and every committed
+`matrix.txt` carries `  repo HEAD:      feb85268952001813e502e27f65180855676ac25` exactly once
+(§9.3, §9.5). **This wave ran no cell**, so it moved nothing in that ledger.
+
+---
+
+### §9.11 — B13: EVERY BRANCH ROUTED TO A NAMED OWNER
+
+**No outcome of this spec terminates in a paragraph of this manifest.** Each row below names what was
+produced, where its evidence is, and **which tracker file owns what remains**. A row with no owner would
+be the defect this section exists to prevent.
+
+| # | Branch / outcome of this spec | Evidence | NAMED owner |
+|---|---|---|---|
+| 1 | **The classification determination: `INDETERMINATE`** (Step 5, via Step 0 limb (c), ADJ-12's sentinel hatch at 708/720 = 98.333333 %) | §9.5.1, §9.5.2 | **`TODO-634`** |
+| 2 | **The §8.1 repeat — `long` @ 28,800 s, n = 2, same pin, same frozen predicate — OWED, NOT DONE** | §9.9 | **`TODO-634`** |
+| 3 | **§8.2's escalation if the repeat is still INDETERMINATE** (name the cause, quote every step's evaluated value and the blocking limb) | §9.9 | **`TODO-634`** |
+| 4 | **Cell E: NOT FIRED. The 2026-07-13 → 2026-07-27 interval REMAINS UN-PROBED** and no claim about `6c35785a` / `2769570f` is made or widened | §9.7.1, §9.8.1 | **`TODO-634`** |
+| 5 | **PD-1** — ADJ-20's BASENAME binding vs R4.4a's replicate RENAME; verbatim checklist 18 limb (0) REDs on name resolution for the four control replicates (bytes 28/28 identical under the committed map; `long` and `w100` GREEN verbatim) | §9.7.2 | **`TODO-648`** |
+| 6 | **PD-2** — R8.2 **and** R5.7(e)'s `CELLE_DISPOSITION` enum are BOTH silent on an INDETERMINATE determination; the slot is filled out of enum and checklist 16 REDs by construction | §9.7.2, §9.8.2 | **`TODO-634`** |
+| 7 | **PD-3** — the committed driver's `B` (median over ALL last-half rows) is not ADJ-12's `B` (0-sentinel rows EXCLUDED); `MEDIAN_L_OVER_B` suppressed; **checklist 18 RED and 19 WITHHELD, structurally, unrepairable without editing a pinned sidecar** | §9.7.2, §9.13 | **`TODO-648`** |
+| 8 | **PD-4** — the exit-share denominator is small in absolute terms (Δconsidered = 2,000 inside a window carrying 232,367 passes) | §9.7.2, §9.8.1 | **`TODO-634`** |
+| 9 | **PD-5** — SPEC-356b's own body has drifted against its governing set: checklist 12's headline still reads *"All NINETEEN §8A addenda"* and its out-of-range probe `ADJ-2[0-9]\|ADJ-[3-9][0-9]` now matches **ADJ-20 itself**; the G1 task-cell says eight commits / nineteen addenda where the manifest carries nine / twenty. **R8.0b already declares all TWENTY in force, so the GOVERNING SET IS NOT IN DOUBT** and no walk above read the stale count. **Editing a graded checklist mid-execution is forbidden — recorded and routed.** | this row | **`TODO-637`** — the named owner for SPEC-356b changes that must land in a spec rather than at an executor's keyboard |
+| 10 | **The dynamics blind spot** — *"a dynamics-only perturbation from recorder presence or activation is not excluded by any control in this protocol"*, stated verbatim beside all three neutrality statements | §9.C block | **`TODO-638`** (this spec does not mutate it) |
+| 11 | **The control-power inversion** — R5.2's within-lineage MDE (34.675840 %) came out **worse** than R5.1's cross-lineage (12.232573 %), inverting §1.2's own expectation | §9.4 | **`TODO-638`** |
+| 12 | **The armed pair's reclaim fraction below §1.1's committed HEAD reference** (63.5 % / 69.3 % vs 80.1 %) — corroboration only, deciding nothing | §9.4 | **`TODO-634`** |
+| 13 | **The DUAL-USE capture** — claim spans, LWM cadence, prune-batch sizes, and the `w100` keeping-up contrast — committed so the family inherits it rather than re-measuring it | §9.6 | **`TODO-634`** (design phase) |
+| 14 | **The registry-versus-accelerator decision is NOT routed by this run.** Step 2 did not fire because it was never evaluated; `median(L)` and `B` are bundle items, not a Step-2 determination | §9.5.2 | **`TODO-634`** (the decision remains open there) |
+| 15 | **The blocking-cell and missing-column branches DID NOT FIRE** — 2×2 CLEAN, all 43 columns present | §9.4, §9.5.1, §9.10 | **`TODO-637`** stays open and unfired; **this spec edits no byte of it** |
+| 16 | **`TG-OR-005`, `NAKED_BASELINE`, the bounded-steady-state demonstration, the level/ceiling gate re-derivation and the 630 → 634 → 586 → 484 sequencing statement** — untouched by this spec, by ruling | §9.13 (repo gate), `INVARIANTS.md` unedited | **`TODO-634`** (checkboxes stay OPEN) |
+
+**Two rows deserve their prohibition restated, because both are places a reader could mistake a record
+for an action.** Rows 5 and 7 are findings against **pinned, un-editable surfaces** — ADJ-20's naming
+construction and `spec356-slottruth.sh`'s reduction — and a POST-DATA record **may not** edit either.
+Row 6 is a finding against **two** pre-registered surfaces at once (R8.2's branch set and R5.7(e)'s
+enum), and widening either after the data landed is exactly the post-hoc adjustment pre-registration
+exists to prevent. **All three land in a spec that RE-PINS, or they do not land at all.**
