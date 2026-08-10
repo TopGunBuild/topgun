@@ -1615,11 +1615,11 @@ DECLINED n = 6 EXTENSION — COST RE-DERIVED, NOT TYPED (ADJ-10)
 8 control cells × 1800 s = 4 h
 
 SINGLE-ARM DYNAMICS OBSERVATIONS (ARMED ARM ONLY)
-non-drop exit share = {{EXIT_SHARE_PCT}} % — NOT a comparison; no control arm exists for these
+non-drop exit share = 0.000000 % — NOT a comparison; no control arm exists for these
 median(L)/B = {{MEDIAN_L_OVER_B}} — NOT a comparison; no control arm exists for these
-s_late / s_early = {{S_RATIO}} — NOT a comparison; no control arm exists for these
-s_early = {{S_EARLY}} passes/epoch raw, from fitter field {{S_EARLY_FIELD}} — NOT a comparison; no control arm exists for these
-s_late = {{S_LATE}} passes/epoch raw, from fitter field {{S_LATE_FIELD}} — NOT a comparison; no control arm exists for these
+s_late / s_early = 1.000256 — NOT a comparison; no control arm exists for these
+s_early = 998.589613 passes/epoch raw, from fitter field slope_per_x_unit — NOT a comparison; no control arm exists for these
+s_late = 998.845155 passes/epoch raw, from fitter field slope_per_x_unit — NOT a comparison; no control arm exists for these
 dynamics blind spot owner: TODO-638
 
 CLASSIFICATION LEAF PUBLISHED BY THIS RUN (R8.1's frozen ordered predicate)
