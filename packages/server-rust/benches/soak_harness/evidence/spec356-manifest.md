@@ -2334,3 +2334,128 @@ construction and `spec356-slottruth.sh`'s reduction — and a POST-DATA record *
 Row 6 is a finding against **two** pre-registered surfaces at once (R8.2's branch set and R5.7(e)'s
 enum), and widening either after the data landed is exactly the post-hoc adjustment pre-registration
 exists to prevent. **All three land in a spec that RE-PINS, or they do not land at all.**
+
+---
+
+### §9.12 — R9's cross-vendor gate, and the one finding it produced
+
+**`/xreview` ran on this spec's executed record at G5, before merge, and is committed to the evidence
+directory as `spec356-xreview.md`** — model, invocation, reviewed diff, cost, the reviewer's verbatim
+assessment, and **every finding marked APPLIED or REFUTED-WITH-REASON**. **SPEC-356a's `/xask` is CITED,
+not repeated:** it had to run before the freeze, and re-running it after the data landed is exactly what
+it exists to prevent (R9).
+
+**Three findings returned: ONE verified real and applied, TWO refuted as already-recorded.** F2 is PD-3
+and F3 is PD-5 — both already carry an owner (§9.11 rows 7 and 9), and the reviewer concurred with both
+dispositions. **Zero findings would have required editing a frozen section, a pinned sidecar, a
+predicate, a threshold, an ordering or a conditional, and zero verdicts moved.**
+
+**PD-6 — THE TWO CONTROLS ARE NOT INDEPENDENT, SO §1.4's `9.8 %` IS AN UPPER BOUND RATHER THAN AN EXACT
+RATE.** R5.1 tests `{ctl-r1, ctl-r2}` against SPEC-355's committed HEAD pair; R5.2 tests the **same**
+`{ctl-r1, ctl-r2}` levels against `{ctloff-r1, ctloff-r2}`. **The `ctl` arm is shared**, so the two
+`t`-statistics are computed from common data and are **positively dependent**: a high `ctl` pair pushes
+both toward rejection together. Since
+`P(at least one rejects) = 0.05 + 0.05 − P(both) = 0.0975` only when `P(both) = 0.0025` (independence),
+positive dependence gives `P(both) > 0.0025` and therefore a family-wise rate **at or below** the stated
+figure.
+
+- **The error is in the CONSERVATIVE direction**, which is the direction §1.4 chose deliberately: its
+  reason for declining an α-correction — *"a false adverse reading costs a re-run while a false clean
+  reading would license invalid numbers"* — is **strengthened**, not weakened, by the real rate being no
+  larger than the quoted one.
+- **No verdict moves.** Neither control rejected (`t = 0.346905` and `t = 0.800515`, both against
+  `4.303`), so no rejection has to be read against the family-wise rate at all, at either value.
+- **§1.4's `9.8 %` and its "under independence" wording are FROZEN, PRE-DATA text**, and §9.4 quotes them
+  faithfully. **A POST-DATA record may not edit either, and neither is edited**; §9.4's committed prose is
+  byte-unchanged. This is a record beside the number, not a correction of it.
+- **Owner: `TODO-638`**, which already owns the control set's power and blind-spot questions (§9.11 rows
+  10 and 11).
+
+**The reviewer's clean cardinal-rule assessment is NOT read as a green, and R5.7(f)'s bound is why.** An
+advisory pass is evidence the record is internally consistent with its pre-registration; it is **never**
+evidence that the run happened as described. Run provenance carries that, and no reviewer can be asked to
+carry it instead. **Checklists 16, 18 and 19 are RED at this commit and stay RED** (§9.13).
+
+---
+
+### §9.13 — The grader state at close, and the repo gate (B12 / B2 / B11)
+
+#### §9.13.1 — THE GRADERS, RUN AT THIS COMMIT FROM THE COMMITTED SIDECARS
+
+All three sidecars were copied into `$PWD` and digest-checked **before** execution — `tmplconf.awk`
+`7c14b900…`, `slottruth.sh` `280f7a34…`, `skeleton.txt` `bfaac337…`, all three reproducing their pinned
+values from the committed files — and the grader was run in the mandated `-v ev=` mode against the real
+evidence directory. **Fixture mode was not used.**
+
+```
+PASS 15 -- block is the pinned skeleton, byte-exact modulo slots
+FAIL 16 -- slot CELLE_DISPOSITION = 'NOT-FIRED-DETERMINATION-INDETERMINATE' is not well-formed (grammar ENUM_CELLE)
+SKIP 18 -- not attempted: the block is not a well-formed filled skeleton
+SKIP 19 -- not attempted: the block is not a well-formed filled skeleton
+exit=1
+```
+
+| Item | Verdict at close | Cause, named |
+|---|---|---|
+| **limb (0) provenance** | **GREEN** on `spec356-long` and `spec356-w100` (7/7 each), verbatim; **RED PROVENANCE on name resolution** for the four control replicates, whose bytes are nonetheless 28/28 identical under the committed map | **PD-1** → `TODO-648` |
+| **15** | **PASS** | the block is the pasted skeleton; only slot values moved |
+| **16** | **FAIL** — one out-of-enum value, `CELLE_DISPOSITION` | **PD-2** → `TODO-634`. **This RED is deliberate**: R8.2 produced an outcome the enum has no value for, and the alternative was publishing a claim this run cannot prove (§9.8.2) |
+| **18** | **SKIP at this commit** (the grader does not attempt 18 or 19 while item 16 is red); **FAIL under the mandated diagnostic substitution** — `truth file is INCOMPLETE -- 1 of 11 re-derivable slots are MISSING and therefore UNGRADED: MEDIAN_L_OVER_B` | **PD-3** → `TODO-648`. Structural on this evidence set: the driver medians column 43 over ALL last-half rows and ADJ-12 excludes the 0-sentinel rows, so the driver's `bb > 0` guard suppressed the slot. **Unrepairable without editing a pinned sidecar, which is forbidden.** |
+| **19** | **SKIP at this commit**; **WITHHELD behind item 18** under the same substitution, and **NOT APPLICABLE on its own terms** because `STEP_LEAF` is `INDETERMINATE` | R5.7(f)'s recorded escape, in the **safe direction only** — `INDETERMINATE` reads no classification number off any run, so it cannot launder one |
+
+**Both readings for 18 and 19 are stated, and hiding either would be the defect.** The `SKIP` is what the
+grader prints at the committed bytes; the `FAIL 18` / `WITHHELD 19` is what it prints when the one
+out-of-enum value is provisionally replaced by an in-enum one — a diagnostic run against a **scratch
+copy, changing no committed byte**, whose only purpose is to show that filling the slot legally would
+**not** have produced a green either. **A record showing only `SKIP` would hide PD-3.**
+
+**THESE REDS ARE NOT FORCED GREEN, AND NO ATTEMPT WAS MADE TO FORCE THEM.** No sidecar was edited, no
+grammar widened, no required-set entry dropped, no `-v truth=` fixture substituted for the mandated
+re-derivation. **Three findings against pre-registered surfaces stand RED with a named owner each**,
+which is the outcome the pre-registration is for: a green that cannot be proven is worth less than a red
+that can be explained.
+
+#### §9.13.2 — THE REPO GATE, AND B2 RE-VERIFIED AT CLOSE
+
+| Gate | Command | Result |
+|---|---|---|
+| **B2 — zero post-pin `.rs`** | `git diff --stat feb85268..HEAD -- '*.rs'` | **EMPTY** — 0 lines. **The lineage is intact and every cell in this record was measured on the binary this source builds.** |
+| **Frozen programs and sidecars** | same diff over `spec356-prune.sh`, `spec349c2-fit.awk`, `spec356-tmplconf.awk`, `spec356-slottruth.sh`, `spec356-skeleton.txt` | **EMPTY** — 0 lines |
+| **Catalog and its ratchet** | same diff over `INVARIANTS.md`, `scripts/check-invariants.sh` | **EMPTY** — 0 lines |
+| **The gauge instrument** | same diff over `benches/soak_harness/monitor.rs` | **EMPTY** — 0 lines |
+| **Manifest — APPEND-ONLY against the pin** | `git diff --numstat feb85268..HEAD -- …/spec356-manifest.md` | **`946  0`** — **946 insertions, ZERO deletions.** §0–§8 and every §8A addendum are byte-identical to the pin, and the 1,390-line prefix `cmp`s clean. |
+| **Invariant catalog green** | `scripts/check-invariants.sh` | **exit 0** — `invariants: 21 entries, 4 NAKED (baseline 4)` |
+| **`TG-OR-005` untouched** | `INVARIANTS.md:481` | **`Status: open (TODO-634)`**, still NAKED; `NAKED_BASELINE=4` at `scripts/check-invariants.sh:20` |
+| **Formatting** | `cargo fmt --check` | **exit 0** |
+| **Release build** | `cargo build --release --bin topgun-server` | **exit 0** — `Finished release profile [optimized] target(s) in 3m 31s` |
+
+**`cargo test --release -p topgun-server` and `cargo clippy --all-targets --all-features -- -D warnings`
+are green BY CONSTRUCTION, and the construction is stated rather than assumed:** B2 holds — the `.rs`
+diff against the pin is **empty** — so both run over **byte-identical source** to `feb85268`, which is a
+merged commit whose own CI ran them. Nothing in this wave could have changed their outcome; the release
+build above is executed as the direct check that the source still compiles at this tree.
+
+**`TG-OR-004` IS NOT FLIPPED, and the reason is §1's frozen text, read rather than re-written.** Every
+cell in this record ends `exit 1` carrying the harness's tombstone-byte growth-slope gate, and §1's
+opening paragraph already rules that **a red tombstone gate is not evidence against `TG-OR-004`** — gauge
+fidelity and corpus boundedness are different properties, and `INVARIANTS.md:564-567` says so in the
+catalog itself. **Nothing in this spec bears on `TG-OR-005` either:** a second observation in a new
+lineage neither closes nor refutes it.
+
+**No frozen manifest section was edited, and §8A was not appended to under the pin.** This spec's
+execution contained **no addendum window** — an addendum is always a RE-PIN — and none was opened.
+
+#### §9.13.3 — THE TERMINAL STATE OF SPEC-356b, STATED WITHOUT ROUNDING
+
+- **The classification round is COMPLETE and its answer is `INDETERMINATE`.** No mechanism is named, a
+  mechanism outside the four is not excluded, and the named residual evidence that would indicate one is
+  not observed by this instrument.
+- **Cell E did NOT fire, and the 2026-07-13 → 2026-07-27 interval is still UN-PROBED.**
+- **The §8.1 repeat is OWED, NOT DONE** — `long` @ 28,800 s, n = 2, same pin, same frozen predicate.
+- **Checklists 16, 18 and 19 are RED**, each with a cause and a named owner; **15 passes and limb (0) is
+  GREEN on both measurement cells.**
+- **Six branches route to `TODO-634`, three to `TODO-648`, three to `TODO-638`, two to `TODO-637`.** No
+  branch terminates in a paragraph.
+- **The reclamation family is NOT blocked.** §8.3, quoted at §9.5.2 and again at §9.9: the registry model
+  closes safety **regardless of which cause it turns out to be**. What an unclassified cause costs is
+  **fix-shape efficiency, not safety** — an expensive answer, not a blocked one.
