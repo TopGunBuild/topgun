@@ -2,3 +2,4 @@
 /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctl-r2-out -> spec356-ctl-r2
 /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r1-out -> spec356-ctloff-r1
 /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out -> spec356-ctloff-r2
+/private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/w100-out -> spec356-w100
