@@ -1346,3 +1346,45 @@ edited to accommodate them.)*
 - **AUTHORITY:** SPEC-356b Response v13 STOP items (both constructions measured there); Conductor ruling
   2026-08-09.
 - **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+### ADJ-20
+
+- **ADJ id:** ADJ-20
+- **Date:** 2026-08-10
+- **Target:** the **class** behind Response v15's four STOP residuals (TODO-639 median-planting,
+  TODO-640 span-band tail deletion, TODO-641 `passes_total` y-axis, TODO-642 control
+  `tombstone_bytes`) — against **ADJ-18 clause 4's** stated boundary.
+- **ORIGINAL TEXT (verbatim, ADJ-18 clause 4):**
+
+  > A fully coherent forged ledger — every column rewritten consistently with its own cadence, spans,
+  > identities and digests — is out of scope for content checks by construction; the defense at that
+  > layer is the provenance of the run itself, not arithmetic over the artifact.
+
+- **FINDING:** all four residuals are instances of ONE class — an edit to one column or region of a
+  committed artifact that the per-column guards do not bind. The ledger carries 43 columns and the
+  protocol was guarding the third; a per-column arms race does not converge. Clause 4 already names the
+  correct defense layer — the provenance of the run — but no mechanism implemented it: nothing bound an
+  artifact's bytes to the run that produced them.
+- **ADJUDICATED FORM (governs):**
+
+  > 1. **The run binds its own artifacts at the moment of production.** The runner's terminal act writes
+  >    `${BASE}.artifacts.sha256` — the SHA-256 of every artifact it produced, by BASENAME (so the file
+  >    verifies unchanged after the scratch-to-evidence copy). The digest file cannot contain itself; it
+  >    is bound by being runner-written and committed **in the same commit** as the artifacts it names.
+  > 2. **Graders verify before they read:** every committed artifact a grader or driver consumes is
+  >    checked against the run's digest file BEFORE any content check; a mismatch is a **PROVENANCE
+  >    failure** (RED), distinct from every content disposition.
+  > 3. **TODO-639/640/641/642 are closed AS A CLASS:** a single-column or single-region edit now requires
+  >    forging a coherent digest set, which is exactly the coherent-forgery case clause 4 places outside
+  >    the content-check layer. The per-column guards (jump bound, density band, gap bound, span, epoch
+  >    monotonicity) are NOT weakened — they retain their real role: catching honest mistakes and
+  >    instrument faults in artifacts whose provenance is intact.
+  > 4. **The embedded programs become committed evidence files** (`spec356-tmplconf.awk`,
+  >    `spec356-slottruth.sh`, `spec356-skeleton.txt`), extracted from the spec's bytes by its own marker
+  >    commands and digest-verified against its own pins at extraction (`280f7a34…` / `7c14b900…` /
+  >    `bfaac337…` — all three matched). The committed file is now the canonical copy; the spec
+  >    references path + digest, and the digests are unchanged by the move.
+
+- **AUTHORITY:** SPEC-356b Response v15 STOP residuals TODO-639..642 (each measured there); Conductor
+  ruling 2026-08-10.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
