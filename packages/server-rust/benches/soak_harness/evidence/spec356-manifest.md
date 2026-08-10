@@ -2005,14 +2005,25 @@ graded green while carrying an ungraded classification would be the defect. **It
 2,288 B), pasted rather than retyped, with numeric slots filled and no other byte edited (R5.7(b)).** The
 executor never types the mandated sentences, so they cannot be mistyped, re-wrapped or truncated.
 
-**TEN of the nineteen slots are filled at this wave; NINE are not, and that is a wave boundary rather than
-an omission.** `CELLE_DISPOSITION`, `EXIT_SHARE_PCT`, `MEDIAN_L_OVER_B`, `S_RATIO`, `S_EARLY`, `S_LATE`,
-`S_EARLY_FIELD`, `S_LATE_FIELD` and `STEP_LEAF` are functions of the `w100` / `long` measurement runs, of
-R8.1's classification walk, and of cell E's disposition — none of which exists yet. **The block is therefore
-NOT in its graded final state at this commit:** checklist 15 (byte-exactness modulo slots) passes, and
-checklist 16 correctly FAILS on the nine residual `{{…}}` tokens until the later waves fill them. Recording
-that as a stated intermediate state is the point; a block that graded green while carrying no measurement
-would be the defect.
+**SLOT FILLING IS A WAVE LEDGER, and it is kept current rather than restated once.** G2 filled the ten
+control-derived slots. G3 filled the six the `long` cell's measurement supplies — `EXIT_SHARE_PCT`,
+`S_RATIO`, `S_EARLY`, `S_LATE`, `S_EARLY_FIELD`, `S_LATE_FIELD` — and deliberately left
+`MEDIAN_L_OVER_B` open, because the committed driver DECLINED to emit it and a statistic a driver
+declined to compute is not zero. **G4 fills the two the R8.1 walk derives:** `STEP_LEAF` =
+`INDETERMINATE` (the walk halted at Step 0 limb (c) on ADJ-12's sentinel hatch — §9.5.1), and
+`MEDIAN_L_OVER_B` = `0.000000`, which is `median(L) = 0` over **ADJ-12's** `B` = `999.944741`, the median
+of column 43 with the 0-sentinel rows EXCLUDED as the addendum requires. The excluded fraction —
+**98.333333 %** — is reported beside it at §9.5.3(iii), unconditionally, and it is the very figure that
+failed limb (c).
+
+**EIGHTEEN of the nineteen slots are now filled; ONE is not, and that is a wave boundary rather than an
+omission.** `CELLE_DISPOSITION` is R8.2 / R8.3's, evaluated at §9.7.1 — and §9.7.2's record **PD-2** is
+why it is left rather than guessed: under an `INDETERMINATE` determination **neither R8.2 branch fires**,
+and none of the enum's four values describes that outcome. **The block is therefore NOT in its graded
+final state at this commit:** checklist 15 (byte-exactness modulo slots) passes, checklist 16 FAILS on
+the one residual `{{…}}` token, and checklists 18 and 19 carry the dispositions §9.7.3 tabulates.
+Recording that as a stated intermediate state is the point; a block that graded green while carrying an
+ungraded classification would be the defect.
 
 <!-- TG356B-CTRL BEGIN v2 -->
 ### 9.C — Controls and dynamics (PINNED TEMPLATE v2 — fill slots only, edit no other byte)
@@ -2053,12 +2064,12 @@ DECLINED n = 6 EXTENSION — COST RE-DERIVED, NOT TYPED (ADJ-10)
 
 SINGLE-ARM DYNAMICS OBSERVATIONS (ARMED ARM ONLY)
 non-drop exit share = 0.000000 % — NOT a comparison; no control arm exists for these
-median(L)/B = {{MEDIAN_L_OVER_B}} — NOT a comparison; no control arm exists for these
+median(L)/B = 0.000000 — NOT a comparison; no control arm exists for these
 s_late / s_early = 1.000256 — NOT a comparison; no control arm exists for these
 s_early = 998.589613 passes/epoch raw, from fitter field slope_per_x_unit — NOT a comparison; no control arm exists for these
 s_late = 998.845155 passes/epoch raw, from fitter field slope_per_x_unit — NOT a comparison; no control arm exists for these
 dynamics blind spot owner: TODO-638
 
 CLASSIFICATION LEAF PUBLISHED BY THIS RUN (R8.1's frozen ordered predicate)
-leaf: {{STEP_LEAF}}
+leaf: INDETERMINATE
 <!-- TG356B-CTRL END v2 -->
