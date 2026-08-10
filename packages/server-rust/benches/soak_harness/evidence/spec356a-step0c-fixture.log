@@ -507,3 +507,81 @@ VERDICT AT THE ADJ-12 INSTRUMENT:
   two spaces, which broke that comparison in-file; the append was re-done
   unindented rather than the claim weakened.
   instrument-defect literal: count 0 over the run, unchanged exit status 0.
+
+================================================================================
+PART IV -- RE-CAPTURE AT THE ADJ-20 INSTRUMENT (hop 8 moved the RUNNER).
+================================================================================
+
+WHY. Same obligation as EG-1 Part IV (TODO-647): hop 8 changed the runner, so the
+guard must be SEEN to fire on the c0d8cc73 bytes. Fixture re-cut from the fresh
+Part IV smoke artifact, blanking the SAME cell as Parts I-III (one row of column
+index 3, topgun_or_prune_considered_total).
+
+THE CAPTURED GUARD-FIRE (verbatim console, UNINDENTED):
+
+=== COLUMN-CHECK FIXTURE PATH (no harness is started) ===
+  fixture:      /tmp/spec356-p4-smoke/fixture-blanked.csv
+  cell:         smoke (armed=yes)
+  shape:        POPULATION-ONLY on every column (non-measurement cell)
+  disposition:  MEASURAND -- the STEP0C admissibility line, which is what
+                this path exists to demonstrate. A MEASURAND failure must NOT
+                carry the instrument-defect literal, must NOT write
+                INSTRUMENT_OK and must NOT exit 9.
+  fixture header: matches the pinned schema (43 columns)
+
+prune.csv columns (fixture):
+  elapsed_secs                                 [POPULATN] n=12 empty=0 min=10 max=120
+  topgun_or_prune_passes_total                 [POPULATN] n=12 empty=0 min=381 max=4276
+  topgun_or_prune_considered_total             [POPULATN] n=11 empty=1 min=0 max=3000
+STEP0C ADMISSIBILITY: topgun_or_prune_considered_total failed the population check (n == 0 or empty > 0 at column index 3) -- the cell STANDS;
+                      this is an admissibility failure that routes the
+                      classification predicate to INDETERMINATE. It is NOT an
+                      instrument defect and it changes no exit status.
+  topgun_or_prune_dropped_total                [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_matched_nothing_total        [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_absent_total                 [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_restored_read_error_total    [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_restored_evicted_total       [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_restored_write_error_total   [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_bytes_freed_total            [POPULATN] n=12 empty=0 min=0 max=61357
+  topgun_or_prune_epochs_drained_total         [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_empty_drains_total           [POPULATN] n=12 empty=0 min=381 max=4273
+  topgun_or_prune_nonempty_drains_total        [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_lwm_advances_total           [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_lwm_epochs_advanced_total    [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_split_recomputes_total       [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_indexed_refs                 [POPULATN] n=12 empty=0 min=381 max=1997
+  topgun_or_prune_indexed_epochs               [POPULATN] n=12 empty=0 min=1 max=2
+  topgun_or_prune_eligible_refs                [POPULATN] n=12 empty=0 min=0 max=1000
+  topgun_or_prune_ineligible_refs              [POPULATN] n=12 empty=0 min=68 max=1146
+  topgun_or_prune_split_computed_epoch         [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_current_epoch                [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_low_water_mark               [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_durable_epoch_watermark      [POPULATN] n=12 empty=0 min=0 max=4
+  topgun_or_prune_last_drained_epoch           [POPULATN] n=12 empty=0 min=0 max=4
+  topgun_or_prune_lwm_stall_seconds            [POPULATN] n=12 empty=0 min=4 max=28
+  topgun_or_prune_tracked_claims               [POPULATN] n=12 empty=0 min=1 max=1
+  topgun_or_prune_drain_refs_sum               [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_drain_refs_count             [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_sum             [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_count           [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_claim_span_epochs_sum        [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_claim_span_epochs_count      [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_claim_lag_epochs_sum         [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_claim_lag_epochs_count       [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_epoch_considered_sum         [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_considered_count       [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_epoch_dropped_sum            [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_dropped_count          [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_epoch_bytes_freed_sum        [POPULATN] n=12 empty=0 min=0 max=61357
+  topgun_or_prune_epoch_bytes_freed_count      [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_ormap_tombstone_bytes_total           [POPULATN] n=12 empty=0 min=7442 max=88153
+  topgun_or_prune_drain_refs_p50               [POPULATN] n=12 empty=0 min=0 max=1000
+
+  STEP0C ADMISSIBILITY lines emitted: 1
+  INSTRUMENT_OK:                      1 (unchanged by a MEASURAND failure)
+  exit status:                        0 (the pinned fall-through, exit "$HARNESS_RC")
+
+VERDICT AT THE ADJ-20 INSTRUMENT: emitted STEP0C line byte-identical to Parts
+I-III (sort -u over all four captures yields ONE line); instrument-defect literal
+count 0 over the run; exit 0.
