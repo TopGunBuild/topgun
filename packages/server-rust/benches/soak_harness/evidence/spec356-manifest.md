@@ -1430,3 +1430,198 @@ under an unrecorded build.
   routed to a named follow-on — never a predicate edit and never an addendum (§8A preamble, R0.0c).
 - **Governing text read for this execution:** §0–§8 **together with** §8A's **TWENTY** addenda
   (`ADJ-1` … `ADJ-20`), all PRE-DATA and all governing.
+
+### §9.3 — The executed control cells (G2)
+
+**PRE-DATA CLOSED.** The first `spec356-*.soak.json` in this history is
+`…/evidence/spec356-ctl-r1.soak.json`, added at commit `0cc71f06`. From that commit onward every finding
+against §0–§8 or §8A is a **POST-DATA record**: it may be recorded and routed to a named owner, and it may
+not alter any predicate, threshold, ordering or conditional (§8A preamble, R0.0c). All twenty addenda were
+read at this manifest **before** that artifact existed.
+
+**How the runner was invoked, and why it was not invoked from the main checkout.** The runner records
+`git -C "$REPO_ROOT" rev-parse HEAD` into every `matrix.txt` (`spec356-prune.sh:865`). §9.1's own mandated
+write moved `main`'s tip past the pin, so a cell run from the main checkout would have recorded the *newer*
+SHA and been discarded by checklist 2 — the artifact would have been unusable, not merely untidy. Every
+cell below was therefore run from a **worktree checked out at the pin itself**, whose `spec356-prune.sh` is
+byte-identical to the pin's blob (`fc66a1e6…`). This is the mechanism R8.3b already uses for cell E's
+pre-346 build. **The pin was NOT moved**, and each cell's `matrix.txt` carries
+`  repo HEAD:      feb85268952001813e502e27f65180855676ac25` exactly once.
+
+| Cell | Arming | Width | Duration | Exit | Arming witness | INSTRUMENT DEFECT | `STEP0C` | Pin needle |
+|---|---|---|---|---|---|---|---|---|
+| `spec356-ctl-r1` | armed | 1000 (default) | 1800 s | 1 | PASSED (present) | 0 | 0 | 1 |
+| `spec356-ctl-r2` | armed | 1000 (default) | 1800 s | 1 | PASSED (present) | 0 | 0 | 1 |
+| `spec356-ctloff-r1` | **disarmed** | 1000 (default) | 1800 s | 1 | PASSED (**absent**) | 0 | 0 | 1 |
+| `spec356-ctloff-r2` | **disarmed** | 1000 (default) | 1800 s | 1 | PASSED (**absent**) | 0 | 0 | 1 |
+
+**THE EXIT CODE IS ATTRIBUTED, NOT READ AS A VERDICT — and it is not an admissibility event.** All four
+cells end `exit 1`, and on all four the runner prints `RESULT: instrument sound`. The code is the inherited
+`exit "$HARNESS_RC"` (`spec356-prune.sh:1647`) carrying the harness's own **tombstone-byte gate**:
+`finishedReason` on `ctl-r1` reads *"tombstone-byte growth slope 70492.8 bytes/h exceeds 512.0 bytes/h"*.
+**That is the defect this family exists to characterize, observed rather than repaired** — and §1's opening
+paragraph already rules that a red tombstone gate is not evidence against `TG-OR-004`. It is **not** exit 9,
+**not** an `INSTRUMENT DEFECT`, and **not** a `STEP0C ADMISSIBILITY` routing: convergence failures, recovery
+failures and pending gates are all empty on every cell, and the memory gate (neutralized by design) passed.
+No cell was discarded and no cell was re-run.
+
+**The armed cells' column census.** All 43 columns populated on both `ctl` replicates, `empty=0` on every
+column, with the six INSTRUMENT-tagged columns nonzero and the 37 MEASURAND columns taking the
+population-only shape — the shape R4.3a assigns them.
+
+**The disarmed cells' empty prune-record columns are the SPECIFIED behaviour (ADJ-6, ADJ-9), and are
+reported here as such rather than as a finding.** Each `ctloff` replicate's `prune.csv` carries **180 data
+rows at the same 10 s cadence as the armed arm** — the sampler runs identically, so its cost stays
+common-mode and §1.2's *"one difference"* survives — with the prune-record columns empty and only the
+sampler-local `elapsed_secs` and the inherited `topgun_ormap_tombstone_bytes_total` populated. What was
+checked on these cells is the arming witness in its **absent** direction and the sampler's own liveness, and
+nothing else. **Reporting an instrument finding against the pin on a disarmed cell is forbidden**, and none
+is reported.
+
+**Replicate production (R4.4a).** Each replicate ran in its **own** `SPEC356_OUT_DIR` and its own data dir,
+both outside the tracked evidence dir, and was then **copied** — never moved, never renamed in place — to
+its `-r1` / `-r2` basenames. `SPEC356_FORCE=1` was never set and no control was re-run in place; either
+would have destroyed replicate 1, which is the run the df = 2 two-sample `t` needs. Each run's
+`${BASE}.artifacts.sha256` was verified with `shasum -a 256 -c` **in the scratch dir**, where the digest
+file's own un-suffixed basenames still resolve, **before** the copy; every artifact matched. The
+`scratch OUT_DIR → committed basename` mapping is committed as
+`…/evidence/spec356-control-replicate-map.txt`, four lines, and reconciles green against all four copied
+`matrix.txt` files (checklist 13: exactly one map line per basename; each `  csv:` and `  console log:`
+names that line's dir).
+
+| Scratch `SPEC356_OUT_DIR` | Committed basename |
+|---|---|
+| `…/scratchpad/ctl-r1-out` | `spec356-ctl-r1` |
+| `…/scratchpad/ctl-r2-out` | `spec356-ctl-r2` |
+| `…/scratchpad/ctloff-r1-out` | `spec356-ctloff-r1` |
+| `…/scratchpad/ctloff-r2-out` | `spec356-ctloff-r2` |
+
+**Artifact binding (R4.5 / ADJ-20).** Every cell's nine committed files include its runner-written
+`${BASE}.artifacts.sha256`, and each digest file entered history **in the same commit as the bytes it
+names** — `0cc71f06`, `0655842a`, `75a801bd`, `b073d9af`. No commit adds one without the other.
+
+### §9.4 — The two measured controls, their MDEs, the family-wise rate, and the §1.3 cell
+
+**The reduction is the one the graded driver re-derives, not a bespoke one.** Each replicate contributes
+**one level**: the mean of its `tombstone_bytes` column over the **ADJ-17 coordinate last-half window**
+(rows whose `elapsed_secs` exceeds the full ledger's elapsed midpoint), empty cells skipped exactly as the
+pinned fitter skips them. Run against SPEC-355's two committed HEAD CSVs the same reduction returns
+**38715.466667** and **36624.133333** — i.e. it reproduces the `38,715 · 36,624` pair §1.1 publishes, from
+the real bytes, without being told the answer.
+
+| Replicate | Coordinate-window level (B) |
+|---|---|
+| `spec356-ctl-r1` | 37788.666667 |
+| `spec356-ctl-r2` | 38297.600000 |
+| `spec356-ctloff-r1` | 38624.666667 |
+| `spec356-ctloff-r2` | 32706.666667 |
+| `spec355-sweep1000` (arm B of §1.1) | 38715.466667 |
+| `spec355-sweep1000b` (arm B of §1.1) | 36624.133333 |
+
+**§1.1 / R5.1 — CROSS-LINEAGE**, this build's `ctl` pair against SPEC-355's committed HEAD pair. Arm means
+38043.133 and 37669.800; `s_pooled = 1076.184028`; grand mean `37856.466667`; two-sample
+`t = 0.346905` against the pre-registered critical value **4.303** (df 2, two-sided α = 0.05) ⇒
+**NOT REJECTED**. Recomputed MDE, by §1.1's own formula `4.303 × s_pooled / mean × 100` = **12.232573 %**.
+
+**§1.2 / R5.2 — WITHIN-LINEAGE**, one build, one lineage, one difference: `ctl` (armed) against `ctloff`
+(disarmed). Arm means 38043.133 and 35665.667; `s_pooled = 2969.921596`; grand mean `36854.400000`;
+`t = 0.800515` against 4.303 ⇒ **NOT REJECTED**. Recomputed MDE = **34.675840 %**.
+
+**Family-wise error rate (§1.4).** Two tests, each at α = 0.05, each pre-registered as a **non-rejection**
+predicate. Under independence the probability that at least one control rejects when the instrument is in
+fact neutral is `1 − 0.95² = 0.0975` ≈ **9.8 %** — roughly a 1-in-10 chance of a spurious *adverse* reading
+across the control set, not the 5 % a single test suggests. **No α correction is applied**, deliberately,
+per §1.4: a false adverse reading costs a re-run while a false clean reading would license invalid numbers.
+Neither control rejected, so no single rejection has to be read against this rate here.
+
+**THE §1.3 / R5.4 CELL, NAMED: `R5.1 passes / R5.2 passes` ⇒ CLEAN.** Both controls hold, both MDEs are
+stated, and **classification proceeds**. **The BUILD-LINEAGE cell did NOT fire**, so ADJ-5's
+*"STAND, BOUNDED AND FLAGGED"* qualification is not triggered by this control set and no cross-lineage
+bound on unexplained shift is owed from it. **No blocking cell fired**, so nothing routes to `TODO-637` and
+G3 is not gated by this walk.
+
+**Reclaim fraction, reported BESIDE the controls as corroboration and never as the deciding statistic
+(§1.1).** Over the armed pair, `topgun_or_prune_bytes_freed_total ÷ topgun_ormap_tombstone_bytes_total` at
+the ledger's last row is **63.5 %** (`ctl-r1`) and **69.3 %** (`ctl-r2`), against §1.1's committed HEAD
+reference of 80.1 % at width 1000 / 1800 s. The disarmed arm emits neither counter, so it contributes no
+reclaim figure — by design, not by omission. **This is corroboration only and decides nothing here**; the
+deciding statistic is the level mean above, and it did not reject.
+
+**POST-DATA RECORDS — recorded and routed, changing no predicate.** Both are readings taken after the data
+boundary closed, so neither may adjust a threshold, an ordering or a conditional.
+
+1. **The within-lineage control came out LOWER-powered than the cross-lineage one on these data**
+   (MDE 34.7 % versus 12.2 %), inverting the "higher power" expectation §1.2's own heading carries. The
+   cause is visible in the table: `ctloff-r2`'s level (32,706.7) sits ~5,900 B below its own arm-mate's,
+   which inflates the pooled sd. The predicate is pre-registered as a **formula over the observed pooled
+   sd**, not as a number, so the verdict stands exactly as computed — but a NOT-REJECTED at this MDE
+   excludes even less than the reporting bound's `≈ 17 %`. Routed to **`TODO-638`**, which already owns the
+   control set's power and blind-spot questions.
+2. **The armed pair's reclaim fraction (63.5 % / 69.3 %) runs below §1.1's committed HEAD reference
+   (80.1 %).** It is a cross-lineage comparison of a corroborating statistic and decides nothing under
+   §1.1. Routed to **`TODO-634`** as an input to the classification waves, which read the reclaim path
+   directly.
+
+### §9.C — Controls and dynamics: the PINNED TEMPLATE
+
+**This block is the pinned skeleton `…/evidence/spec356-skeleton.txt` (sha256 `bfaac337…`, 46 lines,
+2,288 B), pasted rather than retyped, with numeric slots filled and no other byte edited (R5.7(b)).** The
+executor never types the mandated sentences, so they cannot be mistyped, re-wrapped or truncated.
+
+**TEN of the nineteen slots are filled at this wave; NINE are not, and that is a wave boundary rather than
+an omission.** `CELLE_DISPOSITION`, `EXIT_SHARE_PCT`, `MEDIAN_L_OVER_B`, `S_RATIO`, `S_EARLY`, `S_LATE`,
+`S_EARLY_FIELD`, `S_LATE_FIELD` and `STEP_LEAF` are functions of the `w100` / `long` measurement runs, of
+R8.1's classification walk, and of cell E's disposition — none of which exists yet. **The block is therefore
+NOT in its graded final state at this commit:** checklist 15 (byte-exactness modulo slots) passes, and
+checklist 16 correctly FAILS on the nine residual `{{…}}` tokens until the later waves fill them. Recording
+that as a stated intermediate state is the point; a block that graded green while carrying no measurement
+would be the defect.
+
+<!-- TG356B-CTRL BEGIN v2 -->
+### 9.C — Controls and dynamics (PINNED TEMPLATE v2 — fill slots only, edit no other byte)
+
+NORMATIVITY: this block is the ONLY surface the acceptance criteria read for the controls, the
+single-arm dynamics claims and the published classification leaf. Prose elsewhere in §9 is
+NON-NORMATIVE for those claims and carries no adjudicated finding.
+
+NEUTRALITY STATEMENT 1 of 3 — R5.1 (role-swap control)
+result: NOT REJECTED
+observed pooled sd: 1076.184028
+observed pair mean: 37856.466667
+recomputed MDE: 12.232573 %
+MDE ≈ 17 %
+a smaller perturbation is NOT excluded
+role: CATASTROPHE DETECTOR; n = 6 DECLINED at ≈ 4 h
+a dynamics-only perturbation from recorder presence or activation is not excluded by any control in this protocol
+
+NEUTRALITY STATEMENT 2 of 3 — R5.2 (order control)
+result: NOT REJECTED
+observed pooled sd: 2969.921596
+observed pair mean: 36854.400000
+recomputed MDE: 34.675840 %
+MDE ≈ 17 %
+a smaller perturbation is NOT excluded
+role: CATASTROPHE DETECTOR; n = 6 DECLINED at ≈ 4 h
+a dynamics-only perturbation from recorder presence or activation is not excluded by any control in this protocol
+
+NEUTRALITY STATEMENT 3 of 3 — cell E disposition
+disposition: {{CELLE_DISPOSITION}}
+MDE ≈ 17 %
+a smaller perturbation is NOT excluded
+role: CATASTROPHE DETECTOR; n = 6 DECLINED at ≈ 4 h
+a dynamics-only perturbation from recorder presence or activation is not excluded by any control in this protocol
+
+DECLINED n = 6 EXTENSION — COST RE-DERIVED, NOT TYPED (ADJ-10)
+8 control cells × 1800 s = 4 h
+
+SINGLE-ARM DYNAMICS OBSERVATIONS (ARMED ARM ONLY)
+non-drop exit share = {{EXIT_SHARE_PCT}} % — NOT a comparison; no control arm exists for these
+median(L)/B = {{MEDIAN_L_OVER_B}} — NOT a comparison; no control arm exists for these
+s_late / s_early = {{S_RATIO}} — NOT a comparison; no control arm exists for these
+s_early = {{S_EARLY}} passes/epoch raw, from fitter field {{S_EARLY_FIELD}} — NOT a comparison; no control arm exists for these
+s_late = {{S_LATE}} passes/epoch raw, from fitter field {{S_LATE_FIELD}} — NOT a comparison; no control arm exists for these
+dynamics blind spot owner: TODO-638
+
+CLASSIFICATION LEAF PUBLISHED BY THIS RUN (R8.1's frozen ordered predicate)
+leaf: {{STEP_LEAF}}
+<!-- TG356B-CTRL END v2 -->
