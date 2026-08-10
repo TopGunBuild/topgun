@@ -1388,3 +1388,45 @@ edited to accommodate them.)*
 - **AUTHORITY:** SPEC-356b Response v15 STOP residuals TODO-639..642 (each measured there); Conductor
   ruling 2026-08-10.
 - **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+---
+
+## §9 — The executed record (SPEC-356b)
+
+**This section is SPEC-356b's own. It is created here by B1/G1 carrying the RESOLVED PIN and nothing
+else; the executed cells, the controls block, the classification walk and cell E's disposition are
+written by the later waves.** No byte of §0–§8 or §8A was touched to record it (§0(a): the frozen
+sections carry no SHA and no SHA slot).
+
+### §9.1 — Lineage: the resolved pin
+
+| | Value |
+|---|---|
+| **Resolved instrument-lineage tip** (`git rev-parse main`, B1's first action) | **`feb85268952001813e502e27f65180855676ac25`** |
+| Short form used in the record | **`feb85268`** |
+| Agreement with the recorded pin | **AGREES** — resolved value equals the value recorded in SPEC-356b R0.0b, so B1 proceeds rather than stopping |
+| Lineage name | **INSTRUMENTED** (§0(a)) |
+| Binary | built **once** from that SHA: `cargo build --release --bin topgun-server --bench soak_harness` |
+| Every `matrix.txt` | records it as `  repo HEAD:      feb85268952001813e502e27f65180855676ac25` |
+
+**How the pin was obtained, stated so it is a reading rather than a copy (R0.0b).** B1 does not read the
+SHA out of the spec: it resolves the tip of the instrument lineage from `git log main` and then checks
+the resolved value against the recorded one. The two agree at execution time, so no cell is measured
+under an unrecorded build.
+
+### §9.2 — Build identity and freeze proof, as discharged at this pin
+
+- **Zero post-pin `.rs` (§0(d), R0.0a).** `git diff --stat feb85268..HEAD -- '*.rs'` is **empty**, and so
+  is the same diff for `INVARIANTS.md`, `scripts/check-invariants.sh`, `spec349c2-fit.awk`,
+  `spec356-prune.sh` and all three `spec356a-*` gate artifacts. The working tree is clean.
+- **The freeze proof is COMMIT ORDER, not a hash written into this file.** `git log --follow` over this
+  manifest returns **NINE** commits — the freeze at `fc95b86d`, then §8A's **eight** PRE-DATA appends
+  (`114 0`, `124 0`, `60 0`, `42 0`, `39 0`, `44 0`, `34 0`, `42 0`), insertions only, end-to-end
+  `fc95b86d feb85268` → **`499 0`**. Hop 9 (`feb85268`) appends no addendum and touches no manifest byte.
+- **PRE-DATA holds at this pin.** `git log --diff-filter=A --format=%H --reverse --
+  '…/evidence/spec356-*.soak.json'` is **empty**, and so is the same query over `--all` for
+  `'*spec356*soak.json'`: not one measurement cell has run, so **all nine manifest commits precede every
+  `spec356-*.soak.json` vacuously**. From the first such artifact onward, a finding is a POST-DATA record
+  routed to a named follow-on — never a predicate edit and never an addendum (§8A preamble, R0.0c).
+- **Governing text read for this execution:** §0–§8 **together with** §8A's **TWENTY** addenda
+  (`ADJ-1` … `ADJ-20`), all PRE-DATA and all governing.
