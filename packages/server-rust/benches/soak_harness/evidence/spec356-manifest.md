@@ -1520,7 +1520,7 @@ the real bytes, without being told the answer.
 
 **§1.1 / R5.1 — CROSS-LINEAGE**, this build's `ctl` pair against SPEC-355's committed HEAD pair. Arm means
 38043.133 and 37669.800; `s_pooled = 1076.184028`; grand mean `37856.466667`; two-sample
-`t = 0.346905` against the pre-registered critical value **4.303** (df 2, two-sided α = 0.05) ⇒
+R5.1's `t = 0.346905` against its pre-registered critical value **4.303** (df 2, two-sided α = 0.05) ⇒
 **NOT REJECTED**. Recomputed MDE, by §1.1's own formula `4.303 × s_pooled / mean × 100` = **12.232573 %**.
 
 **§1.2 / R5.2 — WITHIN-LINEAGE**, one build, one lineage, one difference: `ctl` (armed) against `ctloff`
@@ -1562,6 +1562,443 @@ boundary closed, so neither may adjust a threshold, an ordering or a conditional
    §1.1. Routed to **`TODO-634`** as an input to the classification waves, which read the reclaim path
    directly.
 
+### §9.5 — The executed measurement cells, and the R8.1 walk in its FROZEN ORDER (G4)
+
+**Governing text read for this walk: §0–§8 TOGETHER WITH §8A's TWENTY addenda, read AT THIS MANIFEST.**
+`ADJ-1` … `ADJ-20`, all PRE-DATA, all governing. Six of them supersede another addendum rather than
+§0–§8 — ADJ-15 → ADJ-13, ADJ-16 → ADJ-5 and ADJ-15's degeneracy scope, ADJ-17 → ADJ-15's slice
+construction, ADJ-18 → ADJ-17's split axis and density band, ADJ-19 → ADJ-18's clauses 2 and 3, ADJ-20 →
+ADJ-18's clause 4 — so neither §0–§8 alone nor §8A read piecemeal is the predicate this section walks.
+
+**PRE-DATA IS CLOSED** (§9.3). Every finding below is a **POST-DATA record**: recorded, routed to a named
+owner, acting on no predicate, no threshold, no ordering and no conditional.
+
+| Cell | Arming | Width | Duration | Exit | `RESULT:` | Arming witness | INSTRUMENT DEFECT | `STEP0C` | Pin needle | `prune.csv` rows |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `spec356-w100` | armed | **100** | 1800 s | 1 | `instrument sound` | PASSED (present) | 0 | 0 | 1 | 180 |
+| `spec356-long` | armed | 1000 (default) | 14,400 s | 1 | `instrument sound` | PASSED (present) | 0 | 0 | 1 | 1440 |
+
+**The exit code is attributed exactly as it was for the control cells, and it is not an admissibility
+event.** Both cells end `exit 1` carrying the harness's inherited **tombstone-byte growth-slope gate**,
+and the runner prints `RESULT: instrument sound` on both. It is **not** `exit 9`, **not** an
+`INSTRUMENT DEFECT` line and **not** a `STEP0C ADMISSIBILITY` routing. Both cells STAND.
+
+**Artifact binding (R4.5 / ADJ-20), verified BEFORE any content check — checklist 18 limb (0).** Each
+cell's seven artifacts were verified against its runner-written `${BASE}.artifacts.sha256` with
+`shasum -a 256 -c` in the evidence directory: **`spec356-long` 7/7 GREEN, `spec356-w100` 7/7 GREEN**, and
+each digest file entered history in the same commit as the bytes it names. **The classification below
+reads the `long` cell, and the `long` cell's provenance limb is GREEN verbatim.** The four control
+replicates carry a naming residual recorded as POST-DATA finding **PD-1** in §9.7; their bytes are
+GREEN 28/28.
+
+**The graders were run from the COMMITTED SIDECARS, digest-checked before execution.**
+`spec356-tmplconf.awk` `7c14b900…`, `spec356-slottruth.sh` `280f7a34…`, `spec356-skeleton.txt`
+`bfaac337…` — all three matched their pinned values, and the grader re-verified the driver's digest
+itself before executing it (`MODE -- driver sha256 280f7a34…f060 == DRIVER_SHA256`). The re-derivation ran
+in the mandated `-v ev=` mode against the real evidence directory; **fixture mode was not used.**
+
+#### §9.5.1 — STEP 0: the FOUR admissibility limbs, each with its evaluated value
+
+Evaluated over the `long` cell's **ADJ-17/ADJ-18 COORDINATE last-half window** — the rows whose
+`elapsed_secs` exceeds the FULL ledger's elapsed midpoint. Full ledger: 1440 rows, `t_first = 10 s`,
+`t_last = 14,400 s`, midpoint **`7,205 s`**. Window: **720 rows, `t_lo = 7,210 s`, `t_hi = 14,400 s`,
+span 7,190 s.** No window and no split anywhere below is a row index (ADJ-17); the ledger's row count is
+not a free parameter of any boundary.
+
+| Limb | Rule | Evaluated value | Verdict |
+|---|---|---|---|
+| **(a)** | §1.3's 2×2 landed in **CLEAN** or **BUILD-LINEAGE-EFFECT** | **`R5.1 passes / R5.2 passes` ⇒ CLEAN** — re-derived by the driver: `R51_RESULT = NOT REJECTED` (`t = 0.346905`), `R52_RESULT = NOT REJECTED` (`t = 0.800515`), against the pre-registered critical value `4.303` | **PASSES** |
+| **(b)** | R1.3a reports **≥ 1 split recompute** in the window read (ADJ-1, fail-closed) | **Δ`topgun_or_prune_split_recomputes_total` = 465**; `topgun_or_prune_split_computed_epoch` moves 230 → 462 across the window | **PASSES** |
+| **(c)** | every deciding column passed the R4.3 population check **AND**, per ADJ-12, `topgun_or_prune_drain_refs_p50` is READABLE — **`≤ 50 %` of its last-half rows are the 0-sentinel** | population check: all 43 columns `n=1440 empty=0`, zero `STEP0C ADMISSIBILITY`, zero `INSTRUMENT DEFECT` ⇒ **passes**. ADJ-12 readability: **708 of 720 last-half rows are the 0-sentinel ⇒ sentinel fraction `98.333333 %`, against the pre-registered `50 %` threshold** | **FAILS** |
+| **(d)** | ADJ-11 clause 0, evaluated FIRST of all: `Δpasses = Δempty_drains + Δnonempty_drains` | **Δpasses = 232,367**; **Δempty_drains = 232,365**; **Δnonempty_drains = 2**; `232,365 + 2 = 232,367` | **HOLDS** |
+
+**LIMB (c) FAILS. THE DETERMINATION IS THEREFORE `INDETERMINATE` (§2 Step 5), AND NO LATER STEP IS
+EVALUATED.** This is ADJ-12's escape hatch firing on its own pre-registered threshold, and it is a
+**PROTOCOL EXIT, NOT A THIRD BRANCH**: it leaves the ordered predicate exactly as it was, the Step 2 /
+Steps 3–4 partition remains the pair of exact complements on `median(L) ≤ B` / `median(L) > B`, and
+nothing is added between them. **Reading this hatch as a third determination would be out of contract,
+and none is read.**
+
+**Why the hatch is doing its job here rather than obstructing it, stated as a measurement.** The rendered
+p50 is a **60 s rolling window** (`3 × 20 s`, committed) over a summary that records **NON-EMPTY drains
+only**, so an expired window renders `0`. Over these 7,190 s the prune executed **232,367 passes and
+exactly 2 non-empty drains**. The twelve non-sentinel rows are the two 60 s windows those two drains
+populate — six scrapes each, at `t = 12,120…12,170 s` and `t = 13,410…13,460 s`, every one of them
+reading `999.9447405703887`. **`B` would rest on two observations.** The same column on the `w100`
+keeping-up contrast cell reads **0 % sentinel** over its own coordinate last-half window (216 non-empty
+drains in 900 s, `B = 99.992983`), so the unreadability is a property of the measured regime at width
+1000, **not an instrument fault** — the runner's population check passes on the column in both cells.
+
+**THE PASS-RATE DEGENERACY IS NOT WHAT HALTED THIS WINDOW, and the distinction is load-bearing.** ADJ-16
+clause 3 removed `s_early < 5` from Step 0 and scoped it to the Steps 3/4 evaluation. That limb is **not
+engaged here at all**: `s_early = 998.589613 ≥ 5`, so the window is nowhere near the pass-rate noise
+floor. **Limb (c) carries ADJ-12's sentinel hatch and NOT ADJ-15's degeneracy** — the sentinel hatch is
+genuinely an unreadable **deciding column** (`B` appears in Step 2's own predicate, upstream of
+everything), and that is the limb that failed.
+
+**ADJ-19 clause 1's minimum-evidence gate did NOT route this window.** The parent window carries **232
+positive `current_epoch` jumps** — far above the `≥ 5` floor — every jump exactly `1`, median positive
+jump `1.000`, bound `10 × 1.000 = 10.000`, maximum jump `1`. The epoch axis is non-decreasing. **No
+classification leaf is published here off a parent window with fewer than five positive epoch jumps**,
+and none could have been: this window has 232.
+
+**The remaining coordinate guards, re-derived rather than assumed** (ADJ-18 clauses 1–3, ADJ-19
+clause 2). Split midpoint of the window's own elapsed span: `(7,210 + 14,400)/2 = 10,805 s`. Early half
+`n = 360`, span 3,590 s, density `1.002786 ×`; late half `n = 360`, span 3,590 s, density `1.002786 ×` —
+both inside `[0.8×, 1.2×]`, enforced per half as well as for the ledger (`1.000695 ×`). Maximum gap
+between consecutive `elapsed_secs`: **11 s = 1.1 × cadence in each half**, against the `5 ×` bound.
+Distinct `current_epoch` values: **117 per slice**, against the floor of 2. The committed
+`spec356-long-passrate{,-early,-late}.csv` are convenience copies; the driver materialised the parent and
+both slices itself from `spec356-long.prune.csv` and `cmp`-ed them clean.
+
+#### §9.5.2 — The step that fired, the n = 1 caveat, and the routing consequences
+
+**THE STEP THAT FIRED IS STEP 5 — `INDETERMINATE` — via Step 0 limb (c).** Steps 1, 2, 3 and 4 were **not
+evaluated**, because Step 0 is evaluated before any step below it and its failure is fail-closed. The
+values reported in §9.5.3 are ADJ-3's **unconditional evidence bundle**; they are **not** step
+evaluations, and **no leaf is read off any of them**.
+
+**THE n = 1 CAVEAT, IN THIS PARAGRAPH BY OBLIGATION (§2.6).** The `long` and `w100` cells are **n = 1**.
+SPEC-355 §10.4.2's lesson is that the **level** replicates (5.4 % spread at width 1000) while the
+**slope** does not (it moved 2.0×, 4.6× and changed sign), so this record rests on a **single
+unreplicated 4 h series**. **Which kind of statistic decided, stated as §2.6 requires:** the halt turned
+on a **COUNT** — the census of 708 sentinel rows in 720 — and on two further counts, the 465 split
+recomputes and the conservation identity over three monotone counters. **No slope entered the
+determination at all.** The two pass-rate slopes reported below are the fragile quantities, and they are
+reported as evidence rather than as a verdict, so the n = 1 slope fragility touches the bundle and not
+the outcome. What the n = 1 fragility does bear on directly is the **repeat §8.1 mandates**, which
+doubles replicates precisely for it.
+
+**THE REGISTRY-BRANCH ROUTING CONSEQUENCE DOES NOT ATTACH, AND THAT IS THE POINT OF SAYING SO.** §2.5's
+routing consequence is triggered by **Step 2 firing** — the modal *"prune drains its licensed work while
+the pinned pool grows"* shape, which routes to the **REGISTRY branch of the TODO-634 family and NOT to a
+prune-accelerator**. **Step 2 did not fire, because it was never evaluated.** The window's `median(L)`
+and `B` are reported below as bundle items; they are **not** a Step-2 determination, they carry **no**
+REGISTRY routing, and reading them as one would be reading the ordered predicate past a failed
+admissibility gate. **This run routes nothing to the registry-versus-accelerator decision.**
+
+**§8.3 QUOTED BESIDE THIS STEP-5 OUTCOME, as §8.3's own last sentence requires:**
+
+> **The recommended reclamation model closes safety REGARDLESS of which cause it turns out to be.**
+> `ReclamationRegistry` (cursor-shaped consumers only) + retention SLA **N = 30 d** + the cursor-age
+> fence with HLC-horizon quarantine + `ceiling = min_live_claim − fixed_margin` bound the reclaimable set
+> by **live claims**, not by any hypothesis about *why* the current prune falls behind. **A selection
+> defect, a scheduling defect and a throughput defect are all *contained* by a registry that never
+> reclaims below a live claim.**
+>
+> What an unclassified cause costs is **fix-shape efficiency** — the family would design without knowing
+> which limb to optimize first — **not safety, and not the family's ability to proceed.** A Step-5
+> outcome is therefore to be read as **an expensive answer, not a blocked one**.
+
+**THE ROUTING TARGET, PRE-REGISTERED BEFORE THE DATA EXISTED (§8.1).** This outcome routes to **exactly
+one repeat of the deciding configuration at DOUBLED duration AND DOUBLED replicates — the `long` cell at
+28,800 s with n = 2 — under the SAME pin and the SAME frozen predicate**, which may not adjust a
+threshold, an ordering or a conditional. If that repeat is still INDETERMINATE, §8.2 escalates the
+unclassified cause as an **explicit input to TODO-634's design phase**, naming it, quoting every step's
+evaluated value and the admissibility limb that blocked. **Both are recorded here as owed, not as done:
+the repeat is a 8 h measurement this spec does not execute.** Owner: **TODO-634**.
+
+**ADJ-4's BOUND, worded as ADJ-4 requires even though no mechanism is named.** A determination under this
+predicate is reported as **"the best-supported of the FOUR PRE-REGISTERED mechanisms", never as "the
+cause"**. **This run names NO best-supported mechanism**: the admissibility gate closed upstream of the
+discrimination, so SELECTION/FRONTIER, SCHEDULING/LICENSING and THROUGHPUT are all left standing and none
+is endorsed. The bound's second obligation is unchanged and is discharged here: **a mechanism outside the
+four is NOT excluded**, and the residual evidence that would indicate one is named — **per-pass cost
+growth, index-scan cost, allocator and page-cache effects — none of which this instrument observes.**
+
+#### §9.5.3 — ADJ-3's UNCONDITIONAL REPORTING BUNDLE, due whatever step fires
+
+**(i) The pass-rate fit and its FLOOR-ONLY result — computed and reported even though Steps 3/4 were
+never reached.** Series: ADJ-13's **cumulative** construction — `passes_total` (y) against
+`current_epoch` (x) over **ALL** last-half rows, **no grouping, no exclusion, no row discarded**. The
+per-epoch-delta construction ADJ-13 forbids by name was not computed. Fitter: the **unforked**
+`spec349c2-fit.awk` at ADJ-15's pinned invocation `-v col=passes_total -v xaxis=current_epoch
+-v window=full`, run once per derived slice.
+
+| | `s_early` | `s_late` |
+|---|---|---|
+| **RAW slope (ADJ-15 clause 4)** | **998.589613 passes/epoch** | **998.845155 passes/epoch** |
+| Fitter field | `slope_per_x_unit` | `slope_per_x_unit` |
+| x axis / window | `current_epoch` / `full` | `current_epoch` / `full` |
+| rows / x span | 360 / 230.0 → 346.0 | 360 / 346.0 → 462.0 |
+| r² | 0.999931 | 0.999933 |
+
+**FLOOR-ONLY VERDICT (R8.1d).** `s_early = 998.589613 ≥ 5` ⇒ **the floor is cleared; the window is NOT
+degenerate**, so ADJ-16 clause 3's coarsened leaf is not in play. `s_late ≤ 0.5 × s_early` ⇒
+`998.845155 ≤ 499.294807` is **FALSE**, so **the decline test does NOT fire.** Ratio
+`s_late / s_early = 1.000256` — the pass rate is flat to within 0.03 % across the two halves.
+
+**SENSITIVITY at 0.4 / 0.6, with the iron no-routing rule.** `998.845155 ≤ 0.4 × s_early = 399.435845` is
+FALSE; `998.845155 ≤ 0.6 × s_early = 599.153768` is FALSE. **The verdict does not flip anywhere in the
+band, so ADJ-3's CONTESTED label does NOT attach on this leg.** The verdict at `0.5` governs, as it would
+have regardless: **CONTESTED changes exactly zero routing decisions.**
+
+**AND THE DECLINE-CONTESTED LABEL DOES NOT ATTACH EITHER.** R8.1b's label fires on *"a Step-1 or Step-2
+determination that coincides with ADJ-15's floor-only test firing"*. The floor-only test did not fire,
+and there is no Step-1 or Step-2 determination to attach it to. **No CONTESTED label is applied anywhere
+in this record.**
+
+**Per ADJ-15, no α, no standard error, no confidence interval and no "significantly below" is claimed for
+this fit.** The SE leg is REMOVED (ADJ-15 clause 2). The fitter still prints `se_per_x_unit`
+(`0.439085` early, `0.432885` late); those numbers are **printed, not used**, and carry no inferential
+weight here.
+
+**(ii) `L` statistics over the same window, with the `L ≤ B` fraction.**
+
+| Statistic | Value |
+|---|---|
+| `min(L)` | **0** |
+| **`median(L)`** — the ADJ-2 aggregator, the only one that decides | **0** |
+| `max(L)` | **1000** |
+| fraction of last-half samples with `L ≤ B` | **403 / 720 = 55.972222 %** |
+
+**`L` is exactly bimodal over this window: 403 rows read `0` and 317 rows read `1000`** — one epoch's
+refs at width 1000 — with no intermediate value. **`min(L)` is reported and does NOT decide** (ADJ-2);
+any evaluation of Step 2 or Step 3 that read it would be reading the pre-ADJ-2 predicate, and none is
+made here in any case.
+
+**R8.1b IS NOT ENGAGED, AND THE REASON IS NAMED RATHER THAN LEFT TO INFERENCE.** R8.1b's counter-anchored
+clause table is triggered by **`max(L) = 0`**. Here **`max(L) = 1000 ≠ 0`**: the repaired ADJ-7 emitter
+observed non-zero licensed backlog at 317 of 720 sample instants, so the gauge is a reading and not a
+construction. **No clause of R8.1b — neither clause 2's ELIGIBILITY-BOUND evidence nor clause 3's
+INADMISSIBLE-plus-INDETERMINATE — is taken, and this record leans neither way on a bare `max(L)`.**
+R8.1b's clause 0 and clause 1 are separately Step 0's limbs (d) and (b) and both hold. For completeness,
+because clause 2's conjuncts are cheap and their absence should be visible: **ADJ-14's named backlog
+series `Δbacklog_bytes := Δ topgun_ormap_tombstone_bytes_total − Δ topgun_or_prune_bytes_freed_total` =
+`5,349,731 − 46,000` = `+5,303,731` bytes** over the window, both counters from the same 10 s
+`prune.csv` rows; and `Δnonempty_drains = 2 ≠ 0`, which is clause 2's own disqualifying conjunct.
+
+**ADJ-7's boundary rule, observed.** `L` and `P` are **PRE-drain**, `indexed_refs` is **POST-drain**, so
+**no share is taken across that boundary anywhere in this record.** The within-snapshot share
+`L / (L + P)` over the window: **mean 0.269592, min 0.000000, max 0.761035**. `P`
+(`topgun_or_prune_ineligible_refs`, PRE-drain) moves **1031 → 537** across the window, range 314…1157 —
+a **falling**, not a growing, pinned pool. ADJ-7's prohibited ratios `P / indexed_refs` and
+`L / indexed_refs` are **never** reported here; those quantities have no referent.
+
+**(iii) `B`, with ADJ-12's provenance and its quality figure.**
+
+| | Value |
+|---|---|
+| **`B`** | **999.944741** |
+| Source (ADJ-12, and no other estimator is admissible) | the **median** over the coordinate last-half `prune.csv` rows of committed column **43**, `topgun_or_prune_drain_refs_p50` — the exporter-rendered p50 of the batch-size summary over its committed `3 × 20 s = 60 s` rolling window, **0-sentinel rows EXCLUDED** |
+| **0-sentinel EXCLUDED FRACTION (unconditional)** | **708 / 720 = 98.333333 %** |
+| Observations `B` actually rests on | **12 rows, behind exactly 2 non-empty drains** |
+| Non-sentinel values present | `999.9447405703887`, all twelve |
+
+**This is the figure that failed Step 0 limb (c)**, and it is reported here because R8.1a(iii) makes the
+fraction unconditional — a `B` published without it is incomplete even when the fraction is 0. **No `n`,
+no sd, no standard error and no t-statistic is computed by counting rows of the p50 column** (§5.4,
+restated by ADJ-12 and observed here). **`B` was never derived from `Δ_sum / Δ_count` — that estimator is
+REJECTED by ADJ-12 and MUST NOT be used for `B`.** The differenced mean is reported in §9.6 as a
+THROUGHPUT quantity only, which is the role §5.4 keeps it in.
+
+**(iv) The non-drop exit share and the PER-EXIT breakdown from the ledger.**
+
+| Exit | Δ over the window |
+|---|---|
+| `topgun_or_prune_matched_nothing_total` | **0** |
+| `topgun_or_prune_absent_total` | **0** |
+| `topgun_or_prune_restored_read_error_total` | **0** |
+| `topgun_or_prune_restored_evicted_total` | **0** |
+| `topgun_or_prune_restored_write_error_total` | **0** |
+| **non-drop numerator** | **0** |
+| `topgun_or_prune_considered_total` (denominator) | **2,000** |
+| `topgun_or_prune_dropped_total` | **2,000** (100.000000 % of considered) |
+| **non-drop exit share** | **0.000000 %** |
+
+**The denominator is stated beside the ratio because it is small and the reader must see it.** Over a
+window carrying 232,367 passes, only **2,000 refs were ever considered** — the two non-empty drains, at
+1,000 refs each. Every one of them was `Dropped`. **A zero share over a 2,000-ref denominator is a
+different object from a zero share over a large one**, and the pairing is what makes that visible on the
+record rather than inferred.
+
+**(v) ADJ-11's DIAGNOSTIC COLUMN — `Δpasses` stated ALONGSIDE the window's scrape count, unconditional.**
+
+| Quantity | Value |
+|---|---|
+| **`Δpasses` over the window** | **232,367** |
+| **window scrape count** | **720** |
+| ratio | **322.73 passes per 10 s scrape** |
+| `Δempty_drains` | 232,365 |
+| `Δnonempty_drains` | **2** |
+| `Δrestored_read_error_total` | **0** (flat) |
+| `Δrestored_write_error_total` | **0** (flat) |
+
+**The under-sampling regime is therefore VISIBLE rather than inferred**, which is this limb's whole
+purpose: at 322.73 passes per scrape a 10 s gauge sample of `L` bounds nothing about the intervening
+passes, and a reader shown both numbers can tell that from a window where the prune genuinely idled.
+
+#### §9.5.4 — What was NOT done, listed because each is named out of contract
+
+- **No ROW-INDEX split** — every window and split above is a coordinate (ADJ-17/ADJ-18).
+- **No `current_epoch`-MIDPOINT split** — slice membership is `elapsed_secs ≤ (t_lo + t_hi)/2` of the
+  window (ADJ-18 clause 1); only the **fit** axis is `current_epoch`.
+- **No `slope_mb_per_hour`** on any pass-rate figure — that field belongs to the `tombstone_bytes`
+  byte-slope fits alone. Both pass-rate slopes are reported from the field `slope_per_x_unit`, which is
+  the rename that makes a wrong-axis fit visible without further checking.
+- **No per-epoch-delta series** (ADJ-13, forbidden by name).
+- **No α, no SE-based claim, no "significantly below"** (ADJ-15 clause 2 / R8.1d).
+- **No classification leaf other than INDETERMINATE** — and the parent window carries 232 positive epoch
+  jumps, so ADJ-19 clause 1's floor was never the constraint.
+- **No whole-window INDETERMINATE reported off a degenerate pass rate** — the pass rate is not degenerate
+  here (`s_early = 998.589613`), and the INDETERMINATE this record publishes comes from ADJ-12's sentinel
+  hatch at Step 0 limb (c), which is a different mechanism with a different owner.
+
+---
+
+### §9.6 — The DUAL-USE capture (B7a): claim spans, LWM cadence, prune-batch sizes
+
+Same `long` cell, same coordinate last-half window (720 rows, 7,190 s). This capture is **dual-use** — it
+is the evidence base the `ReclamationRegistry` claim/retention model is designed against, and it is owed
+whatever the classification returns.
+
+| Quantity | Series | Δ over the window | Derived |
+|---|---|---|---|
+| **Claim span** | `claim_span_epochs_{sum,count}` | sum **0**, count **465** | **mean 0.000000 epochs** over 465 observations |
+| **Claim lag** | `claim_lag_epochs_{sum,count}` | sum **0**, count **465** | **mean 0.000000 epochs** over 465 observations |
+| **Tracked claims** | `tracked_claims` | — | **constant 1** across all 720 rows (min 1, max 1) |
+| **LWM position** | `low_water_mark` | 230 → 462 | advances in lockstep with `current_epoch` (230 → 462) |
+| **LWM advances** | `lwm_advances_total` | **232** | **cadence 30.991 s per advance** |
+| **LWM epochs advanced** | `lwm_epochs_advanced_total` | **232** | **1.000 epoch per advance** |
+| **LWM stall** | `lwm_stall_seconds` | 8 → 26 | **max 34 s** over the window |
+| **Prune batch size** | `drain_refs_{sum,count}` | sum **2,000**, count **2** | **1000.000000 refs per non-empty drain** (the `_sum`/`_count` differenced mean, §5.4's PRIMARY reading for a THROUGHPUT quantity) |
+| **Drain breadth** | `drain_epochs_{sum,count}` | sum **2**, count **2** | **1.000 epoch per drain** |
+| **Epochs drained** | `epochs_drained_total` | **2** | — |
+| **Split recomputes** | `split_recomputes_total` | **465** | 0.646 recomputes per scrape |
+
+**THE TWO FREQUENCIES, STATED SEPARATELY BECAUSE THEY ARE THE POINT OF THE TABLE.**
+
+| Frequency | Per scrape | Per pass |
+|---|---|---|
+| **LWM movement** | **0.322222 advances / scrape** | **0.000998 advances / pass** (232 in 232,367) |
+| **Non-empty drain** | **0.002778 drains / scrape** | **0.0000086 drains / pass** (2 in 232,367) |
+
+**What the table shows, reported as observation and routed nowhere.** The low-water mark **moves freely**
+— 232 advances, one epoch each, every ~31 s, tracking `current_epoch` exactly — and the tracked claim set
+is a **single claim of zero span and zero lag** for the whole window. **So the prune is not LWM-stalled
+and is not claim-pinned in this window**, while it converted 232,367 passes into 2 non-empty drains and
+freed 46,000 bytes against 5,349,731 bytes of tombstone arrival. **This is evidence, not a
+determination**: Step 0 closed upstream of the step that would have read it, and nothing here is routed
+to the registry-versus-accelerator decision. It is committed so the repeat §8.1 mandates, and TODO-634's
+design phase, inherit it rather than re-measure it. Owner: **TODO-634**.
+
+**The `w100` keeping-up contrast, for the same reason.** Over its own coordinate last-half window (90
+rows, 900 s): 29,991 passes, **216 non-empty drains**, 294 LWM advances, `B = 99.992983` at **0 %
+sentinel**, `Δbytes_freed = 651,200` against `Δtombstone_bytes = 659,802` — **a backlog delta of +8,602
+bytes, versus the `long` cell's +5,303,731.** Non-drop exit share **0.000000 %** there too. The contrast
+is committed as capture; it decides nothing here.
+
+---
+
+### §9.7 — Cell E's disposition under R8.2, and the POST-DATA records
+
+#### §9.7.1 — R8.2 applied, with the ledger numbers that ruled it
+
+**R8.2's two branches, evaluated on this run's determination and this run's ledger:**
+
+| Branch | Condition | Evaluated | Fires? |
+|---|---|---|---|
+| **RUN** | determination is **SELECTION/FRONTIER** | determination is **INDETERMINATE** | **NO** |
+| **RUN** | **or** non-`Dropped` exits **> 10 %** of considered over the `long` run's last half | **0.000000 % ≤ 10 %** (numerator 0, denominator 2,000) | **NO** |
+| **CLOSE as not needed** | determination is **THROUGHPUT** or **SCHEDULING** | determination is **INDETERMINATE** | **NO** |
+| **CLOSE as not needed** | **and** non-`Dropped` exit share **≤ 10 %** | **0.000000 % ≤ 10 %** — **satisfied** | (conjunct met, branch still not reached) |
+
+**BOTH NUMBERS ARE QUOTED, as §3 requires — the redundancy is a cross-check, not a licence to omit one.**
+The exit share is **0.000000 %** and the literal is **10 %**; the ledger numbers that ruled it are
+`Δconsidered = 2,000`, `Δdropped = 2,000`, and all five non-`Dropped` exit counters flat at **0**.
+
+**THE DISPOSITION: CELL E DOES NOT FIRE. IT IS NOT RUN.** R8.2's RUN branch is a biconditional over a
+disjunction both of whose disjuncts are false, so **not running is the rule's own answer**, not a
+judgement call. **It is equally NOT "CLOSED as not needed":** that branch's *first* conjunct requires a
+THROUGHPUT or SCHEDULING determination, and this walk produced neither. **G5 executes no cell E.**
+
+**§3's coherence argument, checked rather than assumed — and it is where the gap shows.** §3 argues the
+rule is self-consistent by construction: a THROUGHPUT/SCHEDULING determination can only be reached via
+Step 3 or Step 4, both of which require exit share ≤ 10 %, so CLOSE's second conjunct is automatically
+satisfied whenever its first is; and a SELECTION/FRONTIER determination reached via Step 1 automatically
+satisfies RUN. **Both implications hold and neither has an antecedent here.** The argument is stated over
+the four *mechanism* determinations and is silent on the **fifth outcome the same predicate can
+produce** — `INDETERMINATE`, which §2.3 Step 5 and ADJ-12's hatch both route to. Recorded as **PD-2**
+below.
+
+#### §9.7.2 — POST-DATA records: recorded, routed, acting on nothing
+
+**Every item here is a reading taken after the data boundary closed (§9.3). None alters a predicate, a
+threshold, an ordering or a conditional, and none was acted on.**
+
+**PD-1 — ADJ-20's BASENAME binding and R4.4a's replicate RENAME are in tension, and the verbatim
+checklist 18 limb (0) command REDs on the four control replicates.** ADJ-20 clause 1 writes
+`${BASE}.artifacts.sha256` *"by BASENAME, so the file verifies unchanged after the scratch-to-evidence
+copy"*; R4.4a step 5 requires each replicate to run in its own scratch `SPEC356_OUT_DIR` under the
+**un-suffixed** cell name and then be copied to the `-r1` / `-r2` committed basenames. The copy therefore
+**renames**, and the committed digest files name `spec356-ctl.csv` where the committed artifact is
+`spec356-ctl-r1.csv`. **Measured at this wave:** the verbatim loop reports `RED PROVENANCE` on all four
+control replicates on **name resolution**, while the byte check under the committed
+`spec356-control-replicate-map.txt` rename passes **28 of 28, byte-identical** — and §9.3 already records
+that G2 verified each set with `shasum -a 256 -c` **in the scratch dir, before the copy**, where the
+digest file's own basenames still resolve. **The two measurement cells `long` and `w100` are GREEN
+verbatim, with no mapping**, and the classification above reads the `long` cell. **Disposition:** the
+artifacts' bytes ARE their runs'; `RED PROVENANCE`'s own remedy — *"re-run the cell, do not re-read
+it"* — is inapplicable, because a re-run under R4.4a reproduces the rename identically. **This is a
+finding against ADJ-20 clause 1's naming construction, which a POST-DATA record may not edit.** Routed to
+**TODO-648**, which already owns checklist 18 limb (0)'s mechanics.
+
+**PD-2 — R8.2 and the `CELLE_DISPOSITION` enum are both silent on an INDETERMINATE determination.**
+R8.2's RUN and CLOSE branches are stated over SELECTION/FRONTIER, THROUGHPUT and SCHEDULING; §2.3 Step 5
+can also return `INDETERMINATE`, and under it **neither branch fires**. R5.7(e)'s closed enum for
+`CELLE_DISPOSITION` carries `CLOSED-NOT-NEEDED` | `RUN-NON-REPRODUCTION-RECORDED-AND-SPUN-OFF` |
+`RUN-REPRODUCTION-WIDENS-CLAIM` | `RUN-INDETERMINATE`, and **none of the four describes "cell E does not
+fire because the classification is INDETERMINATE"**: `CLOSED-NOT-NEEDED` is glossed as *"R8.2's CLOSE
+branch"*, whose precondition is unmet, and the three `RUN-` values presuppose the cell ran. **The
+disposition itself is unambiguous — cell E is not run — but the normative surface has no value for it.**
+Routed to **TODO-634**, as an input to the family that owns the follow-on; the slot is G5's to fill and
+this record is what it must fill against.
+
+**PD-3 — the committed driver's `B` is NOT ADJ-12's `B`, and the divergence is what suppressed
+`MEDIAN_L_OVER_B`.** ADJ-12 defines `B` as the median of column 43 with **0-sentinel rows EXCLUDED**;
+`spec356-slottruth.sh` takes the median over **all** last-half rows of that column and emits the ratio
+only when that median is `> 0`. On this window the two differ maximally: **ADJ-12's `B` = 999.944741**
+(12 non-sentinel rows), the driver's = **0** (708 of 720 rows are the sentinel), so the driver's `bb > 0`
+guard fired and the slot was not emitted. **The driver's refusal is correct in substance** — it declined
+to divide by a zero, and the predicate's answer to the identical condition is ADJ-12's hatch, which this
+walk took — but the two disagree on *which* quantity `B` is, and only one of them is the pre-registration.
+**Consequence at the grading layer, measured:** checklist 18 limb (a)'s required set names
+`MEDIAN_L_OVER_B` among eleven, so it reports `FAIL 18 -- truth file is INCOMPLETE -- 1 of 11
+re-derivable slots are MISSING and therefore UNGRADED: MEDIAN_L_OVER_B`, and checklist 19 is
+`WITHHELD` behind it. **Both are structural on this evidence set and neither can be repaired without
+editing a pinned sidecar, which this wave may not do.** Routed to **TODO-648**.
+
+**PD-4 — the exit-share denominator is small in absolute terms, and the record says so rather than
+letting the percentage stand alone.** `0.000000 %` is computed over `Δconsidered = 2,000` in a window of
+232,367 passes. R8.1e names this coupling for the degenerate-pass-rate leaf — *"a prune that barely runs
+considers barely anything"* — and although that leaf is not the outcome here, the same coupling holds and
+is reported for the same reason: the two statistics degrade together and the record must show both.
+Routed to **TODO-634** as an input to the repeat §8.1 mandates.
+
+#### §9.7.3 — Grader verdicts at this wave, stated as an intermediate state
+
+Run from the committed sidecars in the mandated `-v ev=` mode, after checklist 18 limb (0):
+
+| Item | Verdict at this commit | Why |
+|---|---|---|
+| **limb (0) provenance** | **GREEN** on `spec356-long` and `spec356-w100` (7/7 each), verbatim | the cells the classification reads |
+| **15** — template is the pinned skeleton, byte-exact modulo slots | **PASS** | the block is pasted, not retyped; only slot values moved |
+| **16** — every slot well-formed | **FAIL on ONE residual token**, `{{CELLE_DISPOSITION}}` | a wave boundary: R8.2/R8.3's slot is G5's, and PD-2 records that R8.2 supplies no enum value for this outcome |
+| **18** — re-derivation | **`SKIP` at this commit** (the grader does not attempt 18 or 19 while a `{{…}}` token stands); **`FAIL` once the residual token is filled** — `truth file is INCOMPLETE -- 1 of 11 re-derivable slots are MISSING and therefore UNGRADED: MEDIAN_L_OVER_B` | structural on this evidence set (PD-3); the driver declined the ratio and the driver is a pinned sidecar this wave may not edit |
+| **19** — reconciliation | **`SKIP` at this commit**; then **`NOT APPLICABLE` on its own terms**, reported `WITHHELD` behind item 18 | `STEP_LEAF` is `INDETERMINATE`, so limb (b) has nothing to reconcile — Step 0/5 admissibility is decided upstream of these four slots, and the escape runs in the safe direction only |
+
+**Both verdicts for 18 and 19 are stated because the grader reports the second only after the first is
+cleared, and a record that showed only `SKIP` would hide PD-3.** The `FAIL 18` / `WITHHELD 19` line above
+was produced by running the same committed grader, in the same `-v ev=` mode, over this manifest with the
+one residual token provisionally substituted — a diagnostic run against a scratch copy, changing no
+committed byte.
+
+**Recording this as a stated intermediate state is the point, exactly as it was at G2:** a block that
+graded green while carrying an ungraded classification would be the defect. **Item 19's
+`NOT APPLICABLE` is not a pass and is not claimed as one** — no comparison was performed, because
+`INDETERMINATE` reads no classification number off any run and therefore cannot launder one.
+
+---
 ### §9.C — Controls and dynamics: the PINNED TEMPLATE
 
 **This block is the pinned skeleton `…/evidence/spec356-skeleton.txt` (sha256 `bfaac337…`, 46 lines,
