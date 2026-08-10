@@ -2016,14 +2016,18 @@ of column 43 with the 0-sentinel rows EXCLUDED as the addendum requires. The exc
 **98.333333 %** — is reported beside it at §9.5.3(iii), unconditionally, and it is the very figure that
 failed limb (c).
 
-**EIGHTEEN of the nineteen slots are now filled; ONE is not, and that is a wave boundary rather than an
-omission.** `CELLE_DISPOSITION` is R8.2 / R8.3's, evaluated at §9.7.1 — and §9.7.2's record **PD-2** is
-why it is left rather than guessed: under an `INDETERMINATE` determination **neither R8.2 branch fires**,
-and none of the enum's four values describes that outcome. **The block is therefore NOT in its graded
-final state at this commit:** checklist 15 (byte-exactness modulo slots) passes, checklist 16 FAILS on
-the one residual `{{…}}` token, and checklists 18 and 19 carry the dispositions §9.7.3 tabulates.
-Recording that as a stated intermediate state is the point; a block that graded green while carrying an
-ungraded classification would be the defect.
+**G5 fills the nineteenth and last: `CELLE_DISPOSITION` = `NOT-FIRED-DETERMINATION-INDETERMINATE`.**
+That value is **deliberately OUTSIDE R5.7(e)'s four-value closed enum**, and the reason is §9.7.2's
+record **PD-2**: under an `INDETERMINATE` determination **neither R8.2 branch fires**, and none of
+`CLOSED-NOT-NEEDED` / `RUN-NON-REPRODUCTION-RECORDED-AND-SPUN-OFF` / `RUN-REPRODUCTION-WIDENS-CLAIM` /
+`RUN-INDETERMINATE` is true of this run. **All nineteen slots now carry a value; the block is complete
+and it is NOT green**, and §9.8.2 states in full which value was written, why, what it costs at
+checklist 16, and who owns the gap. **The block is therefore NOT in its graded final state:**
+checklist 15 (byte-exactness modulo slots) passes, checklist 16 FAILS on this one out-of-enum value —
+by construction, as the honest signal that the normative surface has no value for this outcome — and
+checklists 18 and 19 carry the dispositions §9.7.3 and §9.13 tabulate. Recording that as a stated,
+measured state is the point; a block that graded green while publishing a claim this run cannot prove
+would be the defect.
 
 <!-- TG356B-CTRL BEGIN v2 -->
 ### 9.C — Controls and dynamics (PINNED TEMPLATE v2 — fill slots only, edit no other byte)
@@ -2053,7 +2057,7 @@ role: CATASTROPHE DETECTOR; n = 6 DECLINED at ≈ 4 h
 a dynamics-only perturbation from recorder presence or activation is not excluded by any control in this protocol
 
 NEUTRALITY STATEMENT 3 of 3 — cell E disposition
-disposition: {{CELLE_DISPOSITION}}
+disposition: NOT-FIRED-DETERMINATION-INDETERMINATE
 MDE ≈ 17 %
 a smaller perturbation is NOT excluded
 role: CATASTROPHE DETECTOR; n = 6 DECLINED at ≈ 4 h
@@ -2073,3 +2077,134 @@ dynamics blind spot owner: TODO-638
 CLASSIFICATION LEAF PUBLISHED BY THIS RUN (R8.1's frozen ordered predicate)
 leaf: INDETERMINATE
 <!-- TG356B-CTRL END v2 -->
+
+---
+
+### §9.8 — Cell E's recorded disposition, and the nineteenth slot (G5)
+
+**PRE-DATA remains CLOSED** (§9.3). Everything in §9.8 through §9.13 is a **POST-DATA record**: it is
+recorded, it is routed to a named owner, and it acts on no predicate, no threshold, no ordering and no
+conditional.
+
+#### §9.8.1 — CELL E IS NOT RUN, AND THIS IS THE RECORD OF IT WITH THE LEDGER NUMBERS THAT RULED IT
+
+**G5 executed no cell E.** The decision is R8.2's own, taken on a rule frozen before any measurement
+existed, and it is recorded here with its numbers rather than asserted.
+
+**The ledger, RE-DERIVED at this wave rather than copied forward from §9.5.3(iv).** G5 recomputed the
+window and every counter delta directly from the committed `spec356-long.prune.csv` under ADJ-17/ADJ-18's
+coordinate rule — full ledger 1440 rows, `t_first = 10 s`, `t_last = 14,400 s`, midpoint **`7,205 s`**;
+window = the rows whose `elapsed_secs` exceeds that midpoint, **720 rows, `t_lo = 7,210 s`,
+`t_hi = 14,400 s`, span 7,190 s**; each Δ taken between the window's first and last rows. Every value
+below reproduces §9.5.3(iv) exactly.
+
+| Ledger quantity (coordinate last-half window of the `long` run) | Value |
+|---|---|
+| `topgun_or_prune_considered_total` — **Δconsidered, the denominator** | **2,000** |
+| `topgun_or_prune_dropped_total` — **Δdropped** | **2,000** (100.000000 % of considered) |
+| `topgun_or_prune_matched_nothing_total` | 0 |
+| `topgun_or_prune_absent_total` | 0 |
+| `topgun_or_prune_restored_read_error_total` | 0 |
+| `topgun_or_prune_restored_evicted_total` | 0 |
+| `topgun_or_prune_restored_write_error_total` | 0 |
+| **non-`Dropped` NUMERATOR** (the five counters above, summed) | **0** |
+| **NON-`Dropped` EXIT SHARE** | **0.000000 %** |
+| **THE PRE-REGISTERED LITERAL it is compared against** | **10 %** |
+| `Δpasses` over the same window, quoted so the denominator is read in context | 232,367 |
+
+**THE RULE WAS FROZEN BEFORE THE DATA EXISTED, and that is the whole of its value.** §3's own words:
+*"The 10 % literal is arbitrary-but-fixed. Its role is to make the decision un-chooseable after the data
+lands."* The manifest carrying it is PRE-DATA by commit order (§9.2), and §3 was never edited: the
+`10 %` above is read out of the frozen section, not chosen at this keyboard. **Both numbers are quoted,
+as §3 requires** — the share `0.000000 %` and the literal `10 %` — because §3 keeps the redundancy as a
+cross-check and calls omitting either a licence it does not grant.
+
+**R8.2 EVALUATED, LIMB BY LIMB — AND NEITHER BRANCH'S ANTECEDENT IS SATISFIED.**
+
+| R8.2 branch | Conjunct / disjunct | Evaluated at this run | Holds? |
+|---|---|---|---|
+| **RUN** | determination is **SELECTION/FRONTIER** | determination is **INDETERMINATE** (§2 Step 5, via Step 0 limb (c)) | **NO** |
+| **RUN** | **or** non-`Dropped` share **> 10 %** | **0.000000 % > 10 %** is FALSE | **NO** |
+| ⇒ | RUN fires iff either disjunct holds | both disjuncts FALSE | **RUN DOES NOT FIRE** |
+| **CLOSE-as-not-needed** | determination is **THROUGHPUT** or **SCHEDULING** | determination is **INDETERMINATE** | **NO** |
+| **CLOSE-as-not-needed** | **and** non-`Dropped` share **≤ 10 %** | **0.000000 % ≤ 10 %** is TRUE | yes — but it is the SECOND conjunct of a conjunction whose FIRST is false |
+| ⇒ | CLOSE fires iff both conjuncts hold | first conjunct FALSE | **CLOSE DOES NOT FIRE** |
+
+**SO THE DISPOSITION IS: CELL E DOES NOT FIRE, AND IT IS NOT "CLOSED AS NOT NEEDED".** Not running is
+R8.2's own answer to a disjunction both of whose disjuncts are false — it is the rule's output, not a
+judgement made at execution time. **It is emphatically not R8.2's CLOSE branch**, whose first conjunct
+requires a THROUGHPUT or SCHEDULING determination and which this walk did not produce. Calling this run
+`CLOSED-NOT-NEEDED` would assert a determination that was never reached; calling it any `RUN-` outcome
+would assert a cell that was never executed. **Neither is written anywhere in this record.**
+
+**WHAT B8 DOES AND DOES NOT GET FROM THIS, STATED PLAINLY RATHER THAN SMOOTHED OVER.** B8 enumerates
+exactly two limbs — **(a) RUN** and **(b) CLOSED as not needed** — and **this run takes NEITHER**, for
+the reasons the table above measures. What is discharged is B8's binding closing sentence: *"It must not
+lapse unrecorded, and the disposition must not be a footnote."* The disposition is recorded here, in a
+titled subsection, with the pre-registered rule, the determination, the exit share, the denominator and
+the frozen literal all quoted as numbers. **What is NOT discharged is B8's two-limb enumeration itself**,
+because the enumeration is silent on the fifth outcome the same predicate can produce. That silence is
+**PD-2** (§9.7.2), it is a finding against a normative surface a POST-DATA record may not edit, and its
+owner is **TODO-634**.
+
+**And the consequence for the carried question, so it cannot be read as answered:** the
+**2026-07-13 → 2026-07-27 interval REMAINS UN-PROBED**. Cell E's *disposition* is discharged; the
+*interval* is not, and no claim about `6c35785a` (sf-346) or `2769570f` (sf-347) is made or widened here
+in either direction. Ownership returns intact to **TODO-634**, which carried it in from SPEC-355 and
+carries it out of SPEC-356b unchanged.
+
+**R8.3b's three provenance exports were NOT set, and that is correct rather than an omission.**
+`SPEC356_PIN_SHA`, `SPEC356_PIN_CMD` and `SPEC356_PIN_WORKTREE` exist to make a cell-E `matrix.txt`
+provable. No cell E ran, so there is no `matrix.txt` to provenance, no pre-346 binary was built, no
+half-swap was performed and no `spec356-cellE.*` artifact exists in this evidence directory. **Exporting
+them would have provenanced nothing.**
+
+#### §9.8.2 — THE NINETEENTH SLOT: WHICH VALUE WAS WRITTEN, AND WHY IT IS OUT OF ENUM ON PURPOSE
+
+**Written:** `CELLE_DISPOSITION` = **`NOT-FIRED-DETERMINATION-INDETERMINATE`**.
+
+**It is NOT one of R5.7(e)'s four admissible values, and the choice is deliberate and loud.** Each of the
+four would have published something this run cannot prove:
+
+| Enum value | What writing it would have asserted | Why it is false here |
+|---|---|---|
+| `CLOSED-NOT-NEEDED` | R8.2's CLOSE branch fired | its **first conjunct** requires a THROUGHPUT or SCHEDULING determination; this walk produced **INDETERMINATE** |
+| `RUN-NON-REPRODUCTION-RECORDED-AND-SPUN-OFF` | cell E ran and did **not** reproduce | **no cell E ran** |
+| `RUN-REPRODUCTION-WIDENS-CLAIM` | cell E ran and reproduced, widening the no-regression claim to 2026-07-13 | **no cell E ran**, and no claim is widened |
+| `RUN-INDETERMINATE` | cell E ran and its result was **unreadable** | **no cell E ran**; the INDETERMINATE here is the *classification's*, produced upstream of cell E and before it could have been scheduled |
+
+**The disposition is unambiguous; the normative surface has no value for it.** That asymmetry is exactly
+**PD-2**, and the honest way to carry it onto the graded block is to write a value that **says the true
+thing and REDs**, rather than one that says a false thing and passes. `NOT-FIRED-DETERMINATION-INDETERMINATE`
+is self-describing in the enum's own shape and cannot be mistaken for a run that happened.
+
+**WHAT IT COSTS, MEASURED RATHER THAN PREDICTED.** Run from the committed sidecars in the mandated
+`-v ev=` mode, the grader reports:
+
+```
+PASS 15 -- block is the pinned skeleton, byte-exact modulo slots
+FAIL 16 -- slot CELLE_DISPOSITION = 'NOT-FIRED-DETERMINATION-INDETERMINATE' is not well-formed (grammar ENUM_CELLE)
+SKIP 18 -- not attempted: the block is not a well-formed filled skeleton
+SKIP 19 -- not attempted: the block is not a well-formed filled skeleton
+exit=1
+```
+
+**This FAIL is the signal, not the defect.** `spec356-tmplconf.awk:56-57` admits four literals and
+nothing else; the value this run must publish is not among them; so the grader's red is the normative
+surface reporting its own gap at exactly the point a reader will look. **No sidecar was edited to widen
+the enum** — `spec356-tmplconf.awk` is a pinned, digest-checked, un-editable file under this spec's
+constraints, and widening a grammar after the data lands is precisely the post-hoc adjustment the
+pre-registration exists to prevent. **No R5.7(e) byte was edited either**, for the same reason.
+
+**The counterfactual is stated because it is the tempting one and it is wrong.** Substituting
+`RUN-INDETERMINATE` makes the grader print `PASS 16 -- all 19 slots well-formed` and unblocks items 18
+and 19 — which then report `FAIL 18 … MEDIAN_L_OVER_B` and `WITHHELD 19` (PD-3, §9.13). **That green on
+item 16 would have been bought with a false claim** — that a cell ran which did not — and it would not
+have produced a green record anyway. **A green that cannot be proven is the defect; the FAIL above is the
+record being honest at the cost of its own colour.**
+
+**Owner of the gap: `TODO-634`**, which owns the cell-E question and the follow-on family. The concrete
+ask carried to it is narrow and stated so it can be actioned rather than re-derived: R8.2 needs a limb
+for the INDETERMINATE determination, and `CELLE_DISPOSITION`'s enum needs the corresponding value —
+**both are changes to a pre-registered surface, so both belong to a spec that RE-PINS, never to an
+execution.**
