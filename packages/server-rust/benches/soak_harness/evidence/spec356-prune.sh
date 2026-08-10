@@ -1624,6 +1624,25 @@ elif [ -f "$FIT" ] && [ "$ROWS" -ge 4 ]; then
 fi
 
 echo
+# ---------------------------------------------------------------------------
+# 12. ARTIFACT BINDING (ADJ-20). The run digests its own outputs at the moment
+#     of production, into ${BASE}.artifacts.sha256 -- basenames, not paths, so
+#     the file verifies unchanged after the scratch-to-evidence copy. This is
+#     what turns "edit one column of a committed CSV" from a per-column
+#     arms race into a coherent-forgery problem, which ADJ-18 clause 4 already
+#     places outside the content-check layer by construction. The digest file
+#     cannot contain itself; it is bound by being runner-written and committed
+#     in the same commit as the artifacts it names.
+# ---------------------------------------------------------------------------
+DIGEST_OUT="${OUT_DIR}/${BASE}.artifacts.sha256"
+: > "$DIGEST_OUT"
+for f in "$CSV_OUT" "$PRUNE_CSV" "$JSON_OUT" "$PROGRESS_OUT" "$MECH_OUT" "$MATRIX_OUT" "$CONSOLE_OUT"; do
+  if [ -s "$f" ]; then
+    ( cd "$(dirname "$f")" && shasum -a 256 "$(basename "$f")" ) >> "$DIGEST_OUT"
+  fi
+done
+echo "artifact binding (ADJ-20): $(wc -l < "$DIGEST_OUT" | tr -d ' ') artifacts digested into $(basename "$DIGEST_OUT")"
+sed 's/^/  /' "$DIGEST_OUT"
 if [ "$INSTRUMENT_OK" != "1" ]; then
   echo "RESULT: INSTRUMENT DEFECT -- this run's series must not be recorded as evidence." >&2
   exit 9
