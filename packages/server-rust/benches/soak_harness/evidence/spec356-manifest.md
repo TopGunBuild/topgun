@@ -2423,7 +2423,7 @@ that can be explained.
 | **Frozen programs and sidecars** | same diff over `spec356-prune.sh`, `spec349c2-fit.awk`, `spec356-tmplconf.awk`, `spec356-slottruth.sh`, `spec356-skeleton.txt` | **EMPTY** — 0 lines |
 | **Catalog and its ratchet** | same diff over `INVARIANTS.md`, `scripts/check-invariants.sh` | **EMPTY** — 0 lines |
 | **The gauge instrument** | same diff over `benches/soak_harness/monitor.rs` | **EMPTY** — 0 lines |
-| **Manifest — APPEND-ONLY against the pin** | `git diff --numstat feb85268..HEAD -- …/spec356-manifest.md` | **`946  0`** — **946 insertions, ZERO deletions.** §0–§8 and every §8A addendum are byte-identical to the pin, and the 1,390-line prefix `cmp`s clean. |
+| **Manifest — APPEND-ONLY against the pin** | `git diff --numstat feb85268..HEAD -- …/spec356-manifest.md` | **`1071  0`** — **1,071 insertions, ZERO deletions**, measured at the close-out commit. **The ZERO is the load-bearing half**: §0–§8 and every §8A addendum are byte-identical to the pin, and the 1,390-line prefix `cmp`s clean. *(The insertion count is the only figure in this table that cannot be self-consistent while it is being written — a section reporting its own file's growth is stale the instant it is appended — so it is taken at the commit that closes the wave, and the deletion count, which is what the freeze actually rests on, is invariant to that.)* |
 | **Invariant catalog green** | `scripts/check-invariants.sh` | **exit 0** — `invariants: 21 entries, 4 NAKED (baseline 4)` |
 | **`TG-OR-005` untouched** | `INVARIANTS.md:481` | **`Status: open (TODO-634)`**, still NAKED; `NAKED_BASELINE=4` at `scripts/check-invariants.sh:20` |
 | **Formatting** | `cargo fmt --check` | **exit 0** |
