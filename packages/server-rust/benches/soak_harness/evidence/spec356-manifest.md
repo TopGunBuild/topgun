@@ -1462,8 +1462,25 @@ cells end `exit 1`, and on all four the runner prints `RESULT: instrument sound`
 **That is the defect this family exists to characterize, observed rather than repaired** — and §1's opening
 paragraph already rules that a red tombstone gate is not evidence against `TG-OR-004`. It is **not** exit 9,
 **not** an `INSTRUMENT DEFECT`, and **not** a `STEP0C ADMISSIBILITY` routing: convergence failures, recovery
-failures and pending gates are all empty on every cell, and the memory gate (neutralized by design) passed.
-No cell was discarded and no cell was re-run.
+failures and pending gates are all empty **on all four of these control cells**, and the memory gate
+(neutralized by design) passed. No cell was discarded and no cell was re-run.
+
+**PENDING-GATE SCOPE, STATED SO THE SENTENCE ABOVE CANNOT BE OVER-READ (added post-review).** The
+"pending gates are all empty" clause is scoped to **§9.3's four control cells**, where it is exact:
+`pendingGates` is the empty array `[]` on `ctl-r1`, `ctl-r2`, `ctloff-r1`, `ctloff-r2` — and on `w100`. It
+is **NOT** empty on the `long` cell. `spec356-long.soak.json` carries exactly one entry:
+
+```
+"disk growth slope 143.9 MB/h exceeds 50.0 MB/h — EXPECTED until TODO-566 bounds OR-Map tombstones (report-only, did NOT fail the run)"
+```
+
+**This is report-only and it decided nothing.** It is the disk-growth slope `TODO-566` already owns, the
+gate's own text says it did not fail the run, and `long`'s `exit 1` is attributed to the tombstone-byte
+gate exactly as the four controls' is (`finishedReason` on `long`: *"tombstone-byte growth slope 76298.1
+bytes/h exceeds 512.0 bytes/h"*). **No admissibility limb, no control, no step of the R8.1 walk and no
+published slot reads `pendingGates`.** It is disclosed here because a reader arriving at §9.3's clause and
+carrying it forward to the measurement cells would carry it wrongly — not because anything in the record
+depended on it. Owner: **`TODO-566`** (report-only disk-growth slope; untouched by this spec).
 
 **The armed cells' column census.** All 43 columns populated on both `ctl` replicates, `empty=0` on every
 column, with the six INSTRUMENT-tagged columns nonzero and the 37 MEASURAND columns taking the
@@ -1471,12 +1488,37 @@ population-only shape — the shape R4.3a assigns them.
 
 **The disarmed cells' empty prune-record columns are the SPECIFIED behaviour (ADJ-6, ADJ-9), and are
 reported here as such rather than as a finding.** Each `ctloff` replicate's `prune.csv` carries **180 data
-rows at the same 10 s cadence as the armed arm** — the sampler runs identically, so its cost stays
-common-mode and §1.2's *"one difference"* survives — with the prune-record columns empty and only the
+rows (`ctloff-r1`) and 179 (`ctloff-r2`) at the same 10 s cadence as the armed arm** — the sampler runs
+identically, so its cost stays common-mode and §1.2's *"one difference"* survives — with the
+prune-record columns empty and only the
 sampler-local `elapsed_secs` and the inherited `topgun_ormap_tombstone_bytes_total` populated. What was
 checked on these cells is the arming witness in its **absent** direction and the sampler's own liveness, and
 nothing else. **Reporting an instrument finding against the pin on a disarmed cell is forbidden**, and none
 is reported.
+
+**`ctloff-r2` ENDED ONE SAMPLER TICK EARLY, AND THE PUBLISHED LEVEL IS UNAFFECTED — corrected
+post-review, having originally been stated as a flat `180` for both replicates.** Re-counted from the
+committed bytes: `ctloff-r1.prune.csv` carries **180 data rows, last `elapsed_secs` 1790 → 1800**;
+`ctloff-r2.prune.csv` carries **179, last `elapsed_secs` 1790**. The same one-tick shortfall appears on
+that replicate's **primary** CSV — 30 data rows to the other three cells' 31, last `elapsed_secs` **1740**
+against **1800** — while `durationSecsActual` is **1800** on all four, so the run itself was full length
+and only the final scrape is missing.
+
+- **The cadence claim stands**: both replicates sample at 10 s (prune) and 60 s (primary), unchanged. The
+  shortfall is a missing terminal row, not a different sampling rate, so §1.2's *"one difference"* and the
+  common-mode sampler cost are untouched.
+- **The published level is arithmetically unaffected, re-derived rather than asserted.** §9.4's reduction
+  is the mean of `tombstone_bytes` over the **coordinate** last-half window, and a coordinate window moves
+  with the ledger it is read from: `ctloff-r2`'s midpoint is `(0 + 1740)/2 = 870 s` rather than `900 s`, and
+  the window it selects still holds **15 rows** — the same count as every other control. Re-running the
+  reduction over the real 15-row window returns **32706.666667**, byte-for-byte the level §9.4 publishes.
+  Every one of §9.4's six levels was re-derived at this fix and all six reproduce, including SPEC-355's
+  `38715.466667` / `36624.133333`.
+- **This shape is not novel in the family**: SPEC-355's own committed arm-B CSV `spec355-sweep1000b.csv`
+  has the identical geometry — 30 primary rows, last `elapsed_secs` 1740 — and §1.1 publishes its level
+  without qualification. The coordinate-window reduction is what makes both robust.
+- **No admissibility limb reads a row count.** ADJ-17 exists precisely so no boundary is a row index; the
+  ledger's row count is not a free parameter of any window, split or verdict in this record.
 
 **Replicate production (R4.4a).** Each replicate ran in its **own** `SPEC356_OUT_DIR` and its own data dir,
 both outside the tracked evidence dir, and was then **copied** — never moved, never renamed in place — to
@@ -1485,9 +1527,13 @@ would have destroyed replicate 1, which is the run the df = 2 two-sample `t` nee
 `${BASE}.artifacts.sha256` was verified with `shasum -a 256 -c` **in the scratch dir**, where the digest
 file's own un-suffixed basenames still resolve, **before** the copy; every artifact matched. The
 `scratch OUT_DIR → committed basename` mapping is committed as
-`…/evidence/spec356-control-replicate-map.txt`, four lines, and reconciles green against all four copied
-`matrix.txt` files (checklist 13: exactly one map line per basename; each `  csv:` and `  console log:`
-names that line's dir).
+`…/evidence/spec356-control-replicate-map.txt`, **six lines at close** — the four control lines below,
+written here at G2, plus a `w100` line and a `long` line appended at G3 when those two cells ran from
+scratch dirs of their own — and it reconciles green against **all six** copied `matrix.txt` files
+(checklist 13: exactly one map line per basename; each `  csv:` and `  console log:` names that line's
+dir). **The count was originally stated as "four lines", which was true when this paragraph was written
+and stale by the time the wave closed; it is corrected here post-review.** The four rows tabulated below
+are §9.3's own subject — the control replicates — and are unchanged.
 
 | Scratch `SPEC356_OUT_DIR` | Committed basename |
 |---|---|
@@ -1495,6 +1541,16 @@ names that line's dir).
 | `…/scratchpad/ctl-r2-out` | `spec356-ctl-r2` |
 | `…/scratchpad/ctloff-r1-out` | `spec356-ctloff-r1` |
 | `…/scratchpad/ctloff-r2-out` | `spec356-ctloff-r2` |
+
+*(The two G3 lines — `…/scratchpad/w100-out → spec356-w100` and `…/scratchpad/long-out → spec356-long` —
+are recorded at §9.5's cell block, which is where those cells are reported. **Checklist 13's inline
+`# must be 4` comment is stale for the same reason and is deliberately NOT edited**: it is a graded
+checklist surface, and this is a POST-DATA record against it — **the same drifted-own-body class as PD-5,
+and it routes with PD-5 to `TODO-637` (§9.11 row 9)** — not a repair. The comment is diagnostic only; the
+item's pass condition is `rc`-based, not count-based, so the verbatim repaired form still runs green.
+**Re-run at this fix over the committed six-line map it returns `PASS ctl-r1 / ctl-r2 / ctloff-r1 /
+ctloff-r2`, `rc=0`, with `wc -l` reporting 6** — i.e. the stale comment and the green `rc` coexist, which
+is precisely why the comment is a record and not a defect.)*
 
 **Artifact binding (R4.5 / ADJ-20).** Every cell's nine committed files include its runner-written
 `${BASE}.artifacts.sha256`, and each digest file entered history **in the same commit as the bytes it
@@ -1843,6 +1899,26 @@ passes, and a reader shown both numbers can tell that from a window where the pr
 - **No whole-window INDETERMINATE reported off a degenerate pass rate** — the pass rate is not degenerate
   here (`s_early = 998.589613`), and the INDETERMINATE this record publishes comes from ADJ-12's sentinel
   hatch at Step 0 limb (c), which is a different mechanism with a different owner.
+
+**CORRECTION, POST-REVIEW — THIS LIST WAS INCOMPLETE AT MERGE, AND THE OMISSION IT MISSED WAS ITS OWN
+SUBJECT.** The bullet above about `slope_mb_per_hour` says the field *"belongs to the `tombstone_bytes`
+byte-slope fits alone"*, and at merge **those fits' results were nowhere in this manifest.** R6 obliges
+this spec to *"report all 8 slopes with standard errors"* for the `long` cell's eight `tombstone_bytes`
+window fits. At the close-out commit `bf07ae3d`:
+
+- **The obligation was UNDISCHARGED.** The eight segments were sliced and committed
+  (`spec356-long-seg{1..8}.csv`, commit `37f184f0`) and the fits were run, but **not one slope, standard
+  error or r² appeared in §9, in any committed artifact, or in that commit's own message.**
+- **AND the omission was UNDISCLOSED.** It was absent from this very list — the section whose job is to
+  enumerate what was not done — absent from §9.11's routing table, and absent from §9.13.3's terminal
+  state. **Both halves are stated because the second is the worse one:** an undischarged obligation that
+  is disclosed is a known gap with an owner; one that is not is a silent hole, and this was the latter.
+
+**It is discharged in full at §9.14**, appended by this fix, with the fitter's verbatim output for all
+eight windows. **Nothing above this note moves**: no window, no split, no admissibility limb, no step of
+the R8.1 walk and no published slot reads a byte-slope, and §9.5.2 already records that **no slope entered
+the determination at all**. This is a reporting gap closed by reporting — not a verdict that changed.
+Routed at §9.11 rows 17 and 18.
 
 ---
 
@@ -2327,6 +2403,8 @@ be the defect this section exists to prevent.
 | 14 | **The registry-versus-accelerator decision is NOT routed by this run.** Step 2 did not fire because it was never evaluated; `median(L)` and `B` are bundle items, not a Step-2 determination | §9.5.2 | **`TODO-634`** (the decision remains open there) |
 | 15 | **The blocking-cell and missing-column branches DID NOT FIRE** — 2×2 CLEAN, all 43 columns present | §9.4, §9.5.1, §9.10 | **`TODO-637`** stays open and unfired; **this spec edits no byte of it** |
 | 16 | **`TG-OR-005`, `NAKED_BASELINE`, the bounded-steady-state demonstration, the level/ceiling gate re-derivation and the 630 → 634 → 586 → 484 sequencing statement** — untouched by this spec, by ruling | §9.13 (repo gate), `INVARIANTS.md` unedited | **`TODO-634`** (checkboxes stay OPEN) |
+| 17 | **PD-7 — R6/B5's EIGHT `tombstone_bytes` WINDOW FITS WERE UNREPORTED *AND* UNDISCLOSED AT MERGE, and this row is its closure, not its deferral.** R6 obliges *"report all 8 slopes with standard errors"*; at `bf07ae3d` the segments were committed and the fits run, but no slope, SE or r² existed anywhere in §9, in any artifact, or in `37f184f0`'s message — and the gap appeared in neither §9.5.4, §9.11 nor §9.13.3. **DISCHARGED IN FULL at §9.14** from the unforked committed fitter over the committed segments. **No verdict moves:** §9.5.2 records that no slope entered the determination, and no limb, step or slot reads a byte-slope | §9.14, §9.5.4 correction note | **CLOSED HERE** — the reporting obligation is discharged in this manifest; **no tracker inherits the gap** |
+| 18 | **PD-8 — THE ROOT CAUSE IS A CHECKLIST THAT CANNOT FAIL ON AN ABSENT TABLE, and it is a PRE-DECLARATION defect the repeat must not inherit.** Checklist 6(a)'s pass condition is *"8 fits reproduce the slopes **quoted in the manifest**"* — **unsatisfiable-when-none-are-quoted, so it cannot distinguish "reproduced" from "never reported"**; checklist 7(i)'s grep was carved out to tolerate the table's formatting and therefore **passes VACUOUSLY on a §9 that has no table at all**. Same vacuous-guard class as Audit v1 C3, checklist 13's first form, and the `INSTRUMENT_DEFECT`-vs-`INSTRUMENT DEFECT` grep. **THE OBLIGATION ON THE REPEAT: its pre-declaration must carry a PRESENCE limb — a checklist item that REDs when a required reporting artifact is ABSENT, evaluated before any reproduce-the-values limb.** **The frozen checklists are NOT patched here**: editing a graded checklist after the data boundary is exactly what a POST-DATA record may not do, and the repeat is a re-pinning spec, which is the only channel that can | this row, §9.5.4 correction note | **`TODO-634`** — which owns the §8.1 repeat (rows 2 and 3), where the pre-declaration is authored |
 
 **Two rows deserve their prohibition restated, because both are places a reader could mistake a record
 for an action.** Rows 5 and 7 are findings against **pinned, un-editable surfaces** — ADJ-20's naming
@@ -2454,8 +2532,196 @@ execution contained **no addendum window** — an addendum is always a RE-PIN �
 - **The §8.1 repeat is OWED, NOT DONE** — `long` @ 28,800 s, n = 2, same pin, same frozen predicate.
 - **Checklists 16, 18 and 19 are RED**, each with a cause and a named owner; **15 passes and limb (0) is
   GREEN on both measurement cells.**
-- **Six branches route to `TODO-634`, three to `TODO-648`, three to `TODO-638`, two to `TODO-637`.** No
-  branch terminates in a paragraph.
+- **Eleven branches route to `TODO-634`, two to `TODO-648`, two to `TODO-638`, two to `TODO-637`, and
+  one — row 17 — closes in this manifest with no tracker inheriting it.** No branch terminates in a
+  paragraph. **This tally is corrected post-review (Review v2) and re-counted from §9.11's eighteen rows:
+  `TODO-634` rows 1, 2, 3, 4, 6, 8, 12, 13, 14, 16, 18; `TODO-648` rows 5, 7; `TODO-638` rows 10, 11;
+  `TODO-637` rows 9, 15; row 17 CLOSED HERE. It originally read "Six … three … three … two", which was
+  wrong against the table as it then stood** — see the correction note at §9.14 for what that miscount
+  was and was not.
 - **The reclamation family is NOT blocked.** §8.3, quoted at §9.5.2 and again at §9.9: the registry model
   closes safety **regardless of which cause it turns out to be**. What an unclassified cause costs is
   **fix-shape efficiency, not safety** — an expensive answer, not a blocked one.
+
+---
+
+### §9.14 — R6 / B5's EIGHT WINDOWED `tombstone_bytes` FITS: THE LATE DISCHARGE, AND WHAT IT DOES NOT MOVE
+
+**Appended post-review (Review v1, critical 1). This section exists because the obligation below was
+undischarged AND undisclosed at the close-out commit `bf07ae3d`** — see the correction note at §9.5.4 for
+both halves stated plainly, and §9.11 rows 17 and 18 for the routing. **It is a REPORTING discharge and
+nothing else:** no predicate, threshold, ordering or conditional is touched, no frozen section or pinned
+sidecar is edited, no addendum is opened, the pin is NOT moved, and **no verdict moves** — §9.5.2 already
+records that **no slope entered the determination at all**, and no admissibility limb, no step of the R8.1
+walk and no published R5.7 slot reads a byte-slope.
+
+#### §9.14.1 — THE OBLIGATION, QUOTED, AND HOW EACH LIMB IS DISCHARGED
+
+R6, verbatim: *"partition the `long` CSV into 8 consecutive equal header-bearing segments with the
+committed one-liner (`spec355-manifest.md` §10.5.2), fit each with the **unforked** `spec349c2-fit.awk` at
+`-v col=tombstone_bytes -v window=full`, **report all 8 slopes with standard errors**, and commit the
+segments as `spec356-long-seg{1..8}.csv`. **Do not fork the fitter and do not design a new one.**"* B5 adds
+r² to the reported set.
+
+| Limb | State at `bf07ae3d` | State here |
+|---|---|---|
+| Segments committed as `spec356-long-seg{1..8}.csv` | **DISCHARGED** (commit `37f184f0`) | unchanged, byte-identical |
+| Fitter unforked | **DISCHARGED** — `git diff --stat feb85268..HEAD -- …/spec349c2-fit.awk` is **EMPTY**, re-checked at this fix; the file digests `840813461e3b1bd5c3a79291044d8ac515e09b94333ee530cd6a10de8fa0436f` | unchanged |
+| **Report all 8 slopes with standard errors (+ r², B5)** | **UNDISCHARGED and UNDISCLOSED** | **DISCHARGED at §9.14.2** |
+
+#### §9.14.2 — THE EIGHT FITS, RE-RUN AT THIS FIX, THE FITTER'S OWN OUTPUT PASTED VERBATIM
+
+**Invocation, once per segment, exactly as R6 pins it — no fork, no added parameter, no `xaxis`** (an
+explicit `xaxis` is R6a's pass-rate invocation and belongs to a different series; these are the byte-slope
+fits, so the fields keep their `_mb_per_hour` names):
+
+```
+awk -v col=tombstone_bytes -v window=full -f spec349c2-fit.awk spec356-long-seg<N>.csv
+```
+
+**The output below is the program's, pasted unedited — not a transcription.**
+
+```
+--- W1 (spec356-long-seg1.csv)
+col=tombstone_bytes window=full rows_used=30 n=30 skipped_empty=1 t_start_secs=60.0 t_end_secs=1800.0 span_secs=1740.0 y_first=23328.000 y_last=41668.000 slope_mb_per_hour=46117.828699 se_mb_per_hour=8022.681814 intercept_mb=20580.694253 r2=0.541318 sxx_hours2=0.624305556 sse=1125108400.078902245
+--- W2 (spec356-long-seg2.csv)
+col=tombstone_bytes window=full rows_used=31 n=31 skipped_empty=0 t_start_secs=1860.0 t_end_secs=3660.0 span_secs=1800.0 y_first=38214.000 y_last=164054.000 slope_mb_per_hour=197635.365249 se_mb_per_hour=8679.028215 intercept_mb=-52549.178824 r2=0.947036 sxx_hours2=0.689027987 sse=1505140565.806789875
+--- W3 (spec356-long-seg3.csv)
+col=tombstone_bytes window=full rows_used=31 n=31 skipped_empty=0 t_start_secs=3720.0 t_end_secs=5520.0 span_secs=1800.0 y_first=165638.000 y_last=230126.000 slope_mb_per_hour=111163.330645 se_mb_per_hour=9657.589626 intercept_mb=50111.327823 r2=0.820423 sxx_hours2=0.688888889 sse=1863308102.451209545
+--- W4 (spec356-long-seg4.csv)
+col=tombstone_bytes window=full rows_used=31 n=31 skipped_empty=0 t_start_secs=5580.0 t_end_secs=7380.0 span_secs=1800.0 y_first=229712.000 y_last=298597.000 slope_mb_per_hour=144036.387097 se_mb_per_hour=9980.314764 intercept_mb=8312.664516 r2=0.877784 sxx_hours2=0.688888889 sse=1989920174.090322971
+--- W5 (spec356-long-seg5.csv)
+col=tombstone_bytes window=full rows_used=31 n=31 skipped_empty=0 t_start_secs=7440.0 t_end_secs=9240.0 span_secs=1800.0 y_first=301817.000 y_last=350117.000 slope_mb_per_hour=93919.572581 se_mb_per_hour=10388.807898 intercept_mb=122125.076210 r2=0.738101 sxx_hours2=0.688888889 sse=2156148205.644756317
+--- W6 (spec356-long-seg6.csv)
+col=tombstone_bytes window=full rows_used=31 n=31 skipped_empty=0 t_start_secs=9300.0 t_end_secs=11100.0 span_secs=1800.0 y_first=376774.000 y_last=399061.000 slope_mb_per_hour=68027.322581 se_mb_per_hour=8028.692292 intercept_mb=191271.951613 r2=0.712279 sxx_hours2=0.688888889 sse=1287765556.251613617
+--- W7 (spec356-long-seg7.csv)
+col=tombstone_bytes window=full rows_used=31 n=31 skipped_empty=0 t_start_secs=11160.0 t_end_secs=12960.0 span_secs=1800.0 y_first=396278.000 y_last=440185.000 slope_mb_per_hour=73479.435484 se_mb_per_hour=10815.435417 intercept_mb=174390.600806 r2=0.614144 sxx_hours2=0.688888889 sse=2336873451.056453228
+--- W8 (spec356-long-seg8.csv)
+col=tombstone_bytes window=full rows_used=24 n=24 skipped_empty=0 t_start_secs=13020.0 t_end_secs=14400.0 span_secs=1380.0 y_first=440208.000 y_last=456860.000 slope_mb_per_hour=66993.393061 se_mb_per_hour=11611.265170 intercept_mb=195809.302706 r2=0.602093 sxx_hours2=0.319476926 sse=947591735.097388983
+```
+
+**The table R6 asks for, reduced from the block above and from nothing else:**
+
+| Window | `t_start` … `t_end` (s) | rows used | **`slope_mb_per_hour`** | **`se_mb_per_hour`** | **r²** |
+|---|---|---|---|---|---|
+| **W1** | 60 … 1,800 | 30 (1 empty skipped) | **46,117.828699** | **8,022.681814** | 0.541318 |
+| **W2** | 1,860 … 3,660 | 31 | **197,635.365249** | **8,679.028215** | 0.947036 |
+| **W3** | 3,720 … 5,520 | 31 | **111,163.330645** | **9,657.589626** | 0.820423 |
+| **W4** | 5,580 … 7,380 | 31 | **144,036.387097** | **9,980.314764** | 0.877784 |
+| **W5** | 7,440 … 9,240 | 31 | **93,919.572581** | **10,388.807898** | 0.738101 |
+| **W6** | 9,300 … 11,100 | 31 | **68,027.322581** | **8,028.692292** | 0.712279 |
+| **W7** | 11,160 … 12,960 | 31 | **73,479.435484** | **10,815.435417** | 0.614144 |
+| **W8** | 13,020 … 14,400 | 24 | **66,993.393061** | **11,611.265170** | 0.602093 |
+
+**Three properties of the block, named because a reader should not have to re-derive them:**
+
+- **`rows_used=30` on W1 is the fitter's own `skipped_empty=1`, not a slicing error.** The `long` primary
+  CSV's first row carries an empty `tombstone_bytes` cell, and the pinned fitter skips empty cells — the
+  same skip §9.4's level reduction inherits. W1's window therefore opens at `t=60 s`, not `t=0`.
+- **W8 carries 24 rows, not 31, and that is the committed one-liner's arithmetic.** 241 data rows at
+  `seg = 31` gives W1…W7 thirty-one rows each and W8 the remaining 24 — the same shape SPEC-355's own
+  eight-window series has, stated in `37f184f0`'s message.
+- **The segments are the committed ones.** These fits read `spec356-long-seg{1..8}.csv` as committed at
+  `37f184f0`; no segment was re-sliced, and the slicing is not re-done by this fix.
+
+#### §9.14.3 — WHAT THESE EIGHT NUMBERS ARE, AND WHAT READING THEM AS A VERDICT WOULD COST
+
+**They are R6's reporting obligation and ADJ-3's evidence class — they are NOT a classification input, and
+nothing here promotes them to one.**
+
+- **No step reads them.** The determination is `INDETERMINATE` via Step 0 limb (c) (§9.5.1), and Step 0
+  precedes every numbered step. Steps 1–4 were never evaluated. A byte-slope is not a term in any of them.
+- **No leaf is published off them.** R8.1's Steps 3/4 discriminator is the **pass-rate** fit
+  (`slope_per_x_unit`, per epoch), and §9.5.4's bullet already forbids reporting a pass-rate figure as
+  `slope_mb_per_hour`. **These eight are the only figures in this manifest entitled to that field name**,
+  which is the property the rename exists to make visible — and it is the reason their absence was
+  invisible for as long as it was.
+- **The n = 1 fragility applies to them in full, and §2.6's caveat is repeated rather than assumed.** The
+  `long` cell is a **single unreplicated 4 h series**, and SPEC-355 §10.4.2 measured that the *level*
+  replicates (5.4 % spread at width 1000) while the *slope* does not — it moved 2.0×, 4.6× and changed
+  sign. **Eight window slopes off one series are therefore a shape, not a measurement of a shape**, and the
+  spread visible above (W2 at 197,635 against W8 at 66,993, a 2.95× range within one run) is exactly the
+  instability that lesson predicts. **No claim is made about the trend across these eight**, and the §8.1
+  repeat at n = 2 is where such a claim could first be attempted.
+- **The harness gate they belong to is already attributed, not re-litigated.** `long`'s `exit 1` carries
+  `finishedReason` *"tombstone-byte growth slope 76298.1 bytes/h exceeds 512.0 bytes/h"* — the harness's
+  own last-half fit over 2,878 samples, a **different reduction** from these eight windowed fits and
+  reported here without reconciliation, because §1's frozen text already rules that a red tombstone gate
+  is not evidence against `TG-OR-004` and no gate outcome moves on this section.
+
+#### §9.14.4 — THE LATE-DISCHARGE ACCOUNTING, STATED AGAINST THIS SPEC'S OWN RULES
+
+- **PRE-DATA is and remains CLOSED** (§9.3). This section is a **POST-DATA record** in the strict sense
+  the §8A preamble defines: it records and routes, and it alters no predicate, threshold, ordering or
+  conditional.
+- **Nothing frozen moved.** §0–§8 and all twenty §8A addenda are byte-identical to the pin
+  `feb85268952001813e502e27f65180855676ac25`; the 1,390-line prefix `cmp`s clean at this fix as it did at
+  close. No sidecar (`spec356-prune.sh`, `spec349c2-fit.awk`, `spec356-tmplconf.awk`,
+  `spec356-slottruth.sh`, `spec356-skeleton.txt`) is edited. **No re-pin, and no addendum window opened.**
+- **The graded checklists are NOT patched.** Checklist 6(a) remains unsatisfiable-when-none-are-quoted and
+  7(i) remains vacuous on an absent table; both are recorded as **PD-8** and routed to the repeat's
+  pre-declaration (§9.11 row 18), which is a re-pinning spec and the only channel entitled to fix them.
+  **Patching them here would be the post-hoc adjustment the pre-registration exists to prevent** — and it
+  would also be self-serving, since the item being patched is the one that failed to catch this section's
+  own absence.
+- **§9.13.1's grader verdicts are unchanged by this section, and were RE-RUN rather than assumed.** The
+  three committed sidecars were copied to a scratch `$PWD` and digest-checked first — `tmplconf.awk`
+  `7c14b900c4759cec9350aeddf06bcff23289f90425679ac07f6cb3ab75ac58a5`, `slottruth.sh`
+  `280f7a3466a0bffc89059815bb3862bb9581cb95d7efa3fe58b1152749b8f060`, `skeleton.txt`
+  `bfaac33728dd6974b9922b46b370a256064f0c9d3708dc195c03120e656ba528`, all three reproducing their pinned
+  values — and the grader was run in the **mandated `-v ev=` mode** (never `truth=`) against the real
+  evidence directory, over the `TG356B-CTRL` block as it stands in the **post-fix** manifest:
+
+  ```
+  PASS 15 -- block is the pinned skeleton, byte-exact modulo slots
+  FAIL 16 -- slot CELLE_DISPOSITION = 'NOT-FIRED-DETERMINATION-INDETERMINATE' is not well-formed (grammar ENUM_CELLE)
+  SKIP 18 -- not attempted: the block is not a well-formed filled skeleton
+  SKIP 19 -- not attempted: the block is not a well-formed filled skeleton
+  exit=1
+  ```
+
+  **Byte-identical to §9.13.1's recorded transcript.** No slot value moves, because §9.C's nineteen slots
+  contain no byte-slope, and this fix edited no byte inside the marker pair. **Checklists 16, 18 and 19
+  stay RED with their named owners.**
+- **THIS SECTION IS NOT A GREEN.** It closes a reporting gap. The classification round's answer is still
+  `INDETERMINATE`, cell E is still un-fired, the 2026-07-13 → 2026-07-27 interval is still un-probed, and
+  the §8.1 repeat is still **OWED, NOT DONE**.
+- **One accounting figure elsewhere was wrong, and this bullet's first draft misdiagnosed HOW — both are
+  corrected here, post-review (Review v2).** §9.13.3's owner tally originally read *"Six branches route to
+  `TODO-634`, three to `TODO-648`, three to `TODO-638`, two to `TODO-637`"*. This bullet first claimed the
+  sentence merely *predated* rows 17 and 18 — i.e. that it was stale by the single `TODO-634` routing row
+  18 adds — and on that basis left it standing. **That diagnosis was itself wrong.** Counted against
+  §9.11 as it stood at `bf07ae3d` (rows 1–16, before this fix appended rows 17 and 18) the true tally was
+  already **`TODO-634` 10, `TODO-648` 2, `TODO-638` 2, `TODO-637` 2** — so the sentence was not stale by
+  one routing, it was a substantial miscount of the table it summarised, and row 18 moved only the first
+  figure (10 → 11). **The tally is therefore corrected at its own site in §9.13.3, marked post-review,**
+  which is the pattern the numstat bullet below states for exactly this case: a false sentence left
+  standing with its correction filed elsewhere is the hazard, not the remedy. **What the miscount does NOT
+  touch:** every individual §9.11 row's own named owner is and was correct, so no branch was ever
+  unrouted or mis-routed — the defect was confined to one summary sentence's arithmetic. No predicate, no
+  threshold, no slot, no checklist grade and no verdict reads this figure.
+- **§9.13.2's `1071  0` numstat was measured at the close-out commit and is NOT re-measured here.** Its
+  own parenthetical already says a section reporting its own file's growth is stale the instant it is
+  appended, and that **the ZERO is the load-bearing half**. That zero is a claim about the **frozen prefix
+  against the pin**, and it still holds: the prefix `cmp`s clean. **This fix does produce deletions in the
+  manifest's whole-file numstat against `bf07ae3d` — exactly SEVEN — and they are named rather than
+  glossed:** two lines at §9.3's pending-gate clause, two at its `ctloff` row-count sentence, and three at
+  its replicate-map line-count sentence. **Re-measured post-review (Review v2), that figure is now NINE
+  against `bf07ae3d`, not seven:** the two added deletions are the §9.13.3 owner-tally bullet corrected
+  above. *(The seven is left standing as what it was — the count measured at `c22bc070`, the commit that
+  closed Review v1 — rather than overwritten, because a figure scoped to a named commit is not made false
+  by a later commit.)* **Against the PIN `feb85268` the whole-file numstat still shows ZERO
+  deletions after both fixes** — the insertion half is deliberately not quoted, for the reason this
+  bullet's own parenthetical gives below — which is the half the freeze actually rests on: every line
+  either fix removed was a line one of these same post-pin appends had introduced, so no byte present at
+  the pin has been touched. *(The matching insertion count is deliberately NOT quoted here:
+  §9.13.2's parenthetical already records that a section reporting its own file's growth is stale the
+  instant it is appended, and this section proved that rule on itself — a first draft of this bullet quoted
+  an insertion count that its own later edits invalidated. The DELETION count is the figure the freeze
+  rests on, and it is invariant to further appends.)* **All seven are re-flowed prose at the three sites this
+  fix corrects, all inside §9 — this spec's own executed record — and not one is a frozen byte.** They are
+  corrections made **at their own sites rather than contradicted from 900 lines away**: a false sentence
+  left standing with its correction filed elsewhere is the hazard, not the remedy, and each is marked
+  *post-review* in place. The distinction that matters is the one §9.13.2 already draws — **append-only is
+  a claim about the frozen prefix against the pin, not about the whole file's numstat**, and the prefix is
+  untouched.
