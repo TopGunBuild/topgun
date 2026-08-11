@@ -923,3 +923,233 @@ VERDICT: EG-1 PASS (both limbs) AT THE ADJ-20 INSTRUMENT.
             sound; exit 0.
   witness:  armed 41/41 PASSED; disarmed direction PASSED.
   binding:  6 artifacts digested; independent shasum -c 6/6 OK.
+
+
+================================================================================
+PART V -- RE-CAPTURE AT THE SPEC-356c RUNNER (two additive 28,800s cell arms).
+================================================================================
+
+WHY PART V EXISTS. The repeat's runner gained two ADDITIVE cell arms --
+`long8h_r1` and `long8h_r2`, each the `long` arm in every literal but the
+duration (28800) and the basename. That edit MOVES THE RUNNER, and the
+categorical rule is the one Parts II-IV were each captured under: the Wave-1
+evidence gates are re-captured, not inherited, whenever the runner changes, and
+a code-reading that "the added arms are only two case entries" does NOT
+discharge the gate. Only a captured artifact does. This Part is that capture.
+
+READ PART IV FOR THE SHAPE, NOT PART III. This Part reproduces PART IV's
+FOUR-block verdict -- limb (a), limb (b), the arming witness, and the ADJ-20
+artifact binding. PART III carries only THREE: it predates the artifact-binding
+block, so its verdict has no binding limb and is NOT the shape to compare
+against. A reader sent to PART III would find a three-block verdict and
+conclude the fourth block here was surplus; it is not.
+
+BUILD IDENTITY. The .rs tree has not moved: `git diff feb85268..HEAD -- '*.rs'`
+is EMPTY, and so is the same diff against this Part's own runner commit. The
+binaries are therefore the Part III/IV pair, unchanged and re-read here by the
+runner's own resolution recipe:
+
+  soak binary:   target/release/deps/soak_harness-9abf891ab72dea71
+    built:       2026-08-08T14:28:20Z
+  server binary: target/release/topgun-server
+    built:       2026-08-08T14:29:41Z
+  BUILD_GAP = 81s -- inside the runner's 600s same-build window, no WARN.
+
+The changed component is the RUNNER, at the exact bytes of the arms commit;
+working tree clean, and the runner stamped that into the run's own matrix.txt:
+
+  repo HEAD:      4a3390666082cfea13bf8c3c5ffefec558c0885e
+  dirty tree:     no
+
+SMOKE ARTIFACTS ARE NOT EVIDENCE, AND THEY WERE NOT WRITTEN AS SUCH. Both cells
+below ran with SPEC356_OUT_DIR pointed at a scratch directory outside the tracked
+evidence dir, which is what the runner's own banner demands. Nothing from these
+runs is committed; only this transcript is.
+
+--------------------------------------------------------------------------------
+LIMB (a) AT THE SPEC-356c RUNNER -- the pinned-name registration
+--------------------------------------------------------------------------------
+
+RE-RUN, not inherited. The registration is .rs-side and the .rs tree is
+unchanged, but this Part declines to discharge limb (a) by that argument, on
+exactly the rule that forced the Part itself into existence.
+
+INVOCATION (verbatim, as run):
+
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib -- \
+    tombstone_frontier_impl::tests::every_pinned_prune_series_is_present_in_the_first_render \
+    --exact --nocapture
+
+  test tombstone_frontier_impl::tests::every_pinned_prune_series_is_present_in_the_first_render ... ok
+
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1794 filtered out; finished in 0.20s
+
+INDEPENDENT CENSUS OVER THE RE-CAPTURED RENDER
+
+  distinct pinned base names rendered      : 33   (MUST be 33)
+    # TYPE ... counter                     : 15   (MUST be 15)
+    # TYPE ... gauge                       : 11   (MUST be 11)
+    # TYPE ... summary                     : 7    (MUST be  7)
+
+  $ grep -E '^topgun_or_prune_[a-z_]+ 0$' | wc -l
+  40   (MUST be 40 = 15 counters + 11 gauges + 7 x 2 histogram _sum/_count)
+    of which _sum 0                        : 7
+    of which _count 0                      : 7
+
+SET-IDENTITY AGAINST PART I, sorted for the reason Part II states (the exporter
+walks a hash map, so raw byte order is noise):
+
+  $ grep -E '^(# TYPE )?topgun_or_prune_' <part I render>       | sort > set-old
+  $ grep -E '^(# TYPE )?topgun_or_prune_' <re-captured render>  | sort > set-head
+  $ diff set-old set-head
+  (no output)                              <- 122 lines each, IDENTICAL
+
+  LIMB (a): PASS at the SPEC-356c runner. 33/33 pinned names in the first render
+  with zero observations. This is NOT the 41/41 figure below: 33 is the count of
+  registered metric FAMILIES in the .rs-side render, 41 is the count of pinned
+  prune COLUMNS the runner resolves out of a live scrape. They are different
+  measurements over different surfaces and this Part keeps them apart.
+
+--------------------------------------------------------------------------------
+LIMB (b) AT THE SPEC-356c RUNNER -- the zero-empty-field census
+--------------------------------------------------------------------------------
+
+INVOCATION (verbatim, as run; scratch out-dir and data-dir elided to <scratch>):
+
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  SPEC356_SMOKE_DURATION=120 SPEC356_SMOKE_SAMPLE_INTERVAL=10 \
+  SPEC356_OUT_DIR=<scratch>/p5-smoke SPEC356_DATA_DIR=<scratch>/p5-smoke-data \
+    packages/server-rust/benches/soak_harness/evidence/spec356-prune.sh smoke
+
+  $ awk -F, '{ for (i = 1; i <= NF; i++) if ($i == "") e++ } END { print "empty_fields=" e + 0 }' \
+      <scratch>/p5-smoke/spec356-smoke.prune.csv
+  empty_fields=0
+
+THE RE-CAPTURED CENSUS (verbatim, unindented; armed smoke at 4a339066):
+
+prune.csv:      /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/5c5f03fb-fac6-451d-bcbd-27e00f7670d6/scratchpad/p5-smoke/spec356-smoke.prune.csv
+prune.csv rows: 12  (cadence 10s)
+prune.csv ticks SKIPPED by the scrape gate: 1
+    elapsed=0s scrape FAILED -- no row written, retrying next tick
+first COMPLETE scrape at elapsed = 10s
+prune.csv columns:
+  elapsed_secs                                 [POPULATN] n=12 empty=0 min=10 max=120
+  topgun_or_prune_passes_total                 [POPULATN] n=12 empty=0 min=342 max=4300
+  topgun_or_prune_considered_total             [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_dropped_total                [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_matched_nothing_total        [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_absent_total                 [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_restored_read_error_total    [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_restored_evicted_total       [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_restored_write_error_total   [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_bytes_freed_total            [POPULATN] n=12 empty=0 min=0 max=61357
+  topgun_or_prune_epochs_drained_total         [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_empty_drains_total           [POPULATN] n=12 empty=0 min=342 max=4297
+  topgun_or_prune_nonempty_drains_total        [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_lwm_advances_total           [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_lwm_epochs_advanced_total    [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_split_recomputes_total       [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_indexed_refs                 [POPULATN] n=12 empty=0 min=342 max=2033
+  topgun_or_prune_indexed_epochs               [POPULATN] n=12 empty=0 min=1 max=3
+  topgun_or_prune_eligible_refs                [POPULATN] n=12 empty=0 min=0 max=1000
+  topgun_or_prune_ineligible_refs              [POPULATN] n=12 empty=0 min=62 max=1208
+  topgun_or_prune_split_computed_epoch         [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_current_epoch                [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_low_water_mark               [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_durable_epoch_watermark      [POPULATN] n=12 empty=0 min=0 max=4
+  topgun_or_prune_last_drained_epoch           [POPULATN] n=12 empty=0 min=0 max=4
+  topgun_or_prune_lwm_stall_seconds            [POPULATN] n=12 empty=0 min=0 max=24
+  topgun_or_prune_tracked_claims               [POPULATN] n=12 empty=0 min=1 max=1
+  topgun_or_prune_drain_refs_sum               [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_drain_refs_count             [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_sum             [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_count           [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_claim_span_epochs_sum        [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_claim_span_epochs_count      [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_claim_lag_epochs_sum         [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_claim_lag_epochs_count       [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_epoch_considered_sum         [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_considered_count       [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_epoch_dropped_sum            [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_dropped_count          [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_epoch_bytes_freed_sum        [POPULATN] n=12 empty=0 min=0 max=61357
+  topgun_or_prune_epoch_bytes_freed_count      [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_ormap_tombstone_bytes_total           [POPULATN] n=12 empty=0 min=6662 max=88678
+  topgun_or_prune_drain_refs_p50               [POPULATN] n=12 empty=0 min=0 max=1000
+  progress.jsonl: not required -- duration 120s <= steady interval 300s,
+                  so the harness reached no checkpoint to snapshot.
+  soak.json "walFsync": "batched",
+  soak.json "epochWidth": 1000,
+  soak.json "crashes": 0,
+  soak.json "churnClients": 6,
+  soak.json "keyspace": 200,
+  soak.json "durationSecsActual": 120,
+  mechanism.json "orDeltaFrames": 3676,
+  mechanism.json "orSnapshotFrames": 0,
+
+--------------------------------------------------------------------------------
+THE ARMING WITNESS AT THE SPEC-356c RUNNER -- its own block, armed direction
+--------------------------------------------------------------------------------
+
+arming witness:
+  cell expects:        armed=yes
+  TOPGUN_PRUNE_RECORD: true (on the child)
+  topgun_or_prune_ lines in the scrape: 89
+  pinned prune columns resolved:        41/41
+  topgun_ormap_tombstone_bytes present: 2 line(s)
+  => arming witness PASSED: armed cell, all pinned series present.
+
+--------------------------------------------------------------------------------
+THE ADJ-20 ARTIFACT BINDING, seen live on the same run
+--------------------------------------------------------------------------------
+
+artifact binding (ADJ-20): 6 artifacts digested into spec356-smoke.artifacts.sha256
+  dffeb2bc550a12f492389e9673594aa91924efdba843f21c83d92965083b5ed9  spec356-smoke.csv
+  9e7638bdd0ce5b2f6136c66be208d086c6f9cb3719b408e86a8e07c19a39d2cd  spec356-smoke.prune.csv
+  ec05c6eb8be2161cce543870d09c8e7c3ce48707cea00f21f11f93844c4aea81  spec356-smoke.soak.json
+  eb76d4828a82b3bc9c06a08124f9eeac9cc03bf87ac4591194e216709082ff08  spec356-smoke.mechanism.json
+  2881818d127c7f0d33584df9e96bf6bf13bdd4180ca7ec99272030c9d48458e7  spec356-smoke.matrix.txt
+  1b99c43dfcb9500c11689bf0a612d88b2d45a43769d9a077e90030da5c768a13  spec356-smoke.harness-console.log
+RESULT: instrument sound; harness exit code 0.
+independent verification: shasum -a 256 -c -- 6/6 OK
+
+  Run from inside the out-dir, against the runner's own artifacts.sha256, by a
+  command the runner did not issue:
+
+  $ shasum -a 256 -c spec356-smoke.artifacts.sha256
+  spec356-smoke.csv: OK
+  spec356-smoke.prune.csv: OK
+  spec356-smoke.soak.json: OK
+  spec356-smoke.mechanism.json: OK
+  spec356-smoke.matrix.txt: OK
+  spec356-smoke.harness-console.log: OK
+
+  N is 6 here and is REPORTED, not assumed: a smoke cell writes no
+  progress.jsonl (duration 120s reaches no checkpoint), so it digests six
+  artifacts where a measurement cell digests seven. The figure to check is the
+  runner's own digest-line count against the verifier's OK count, and they agree
+  at 6.
+
+THE DISARMED DIRECTION (fresh smokeoff, same binaries, fresh data dir):
+
+arming witness:
+  cell expects:        armed=no
+  TOPGUN_PRUNE_RECORD: false (on the child)
+  topgun_or_prune_ lines in the scrape: 0
+  pinned prune columns resolved:        0/41
+  topgun_ormap_tombstone_bytes present: 2 line(s)
+  => arming witness PASSED: disarmed cell, no prune-record series present.
+
+================================================================================
+VERDICT: EG-1 PASS (both limbs) AT THE SPEC-356c RUNNER.
+================================================================================
+
+  limb (a): 33/33 pinned names -- registration is .rs-side and unchanged, and
+            was re-run rather than argued.
+  limb (b): empty_fields=0 over 43 columns x 12 rows (47 empty=0 column lines
+            counted on the run).
+  A9:       0 population defects, 0 instrument defects; RESULT: instrument
+            sound; exit 0.
+  witness:  armed 41/41 PASSED; disarmed direction 0/41 PASSED.
+  binding:  6 artifacts digested; independent shasum -c 6/6 OK.

@@ -1,0 +1,71 @@
+# T4 -- NON-EMPTY DRAIN RATE vs DURATION. DERIVED (R3.3).
+# BUILDER: spec356c-targets.sh -- SPEC-356c R3.4's ONE target builder, committed before the data.
+# SUBJECT: spec356-long.prune.csv    PRIOR-DURATION ARM: spec356-long.prune.csv
+# STATUS:  REFERENCE ONLY, NEVER EVIDENCE. This file is the R3.5 PRE-DATA dry run: it is built
+#   from an ALREADY-COMMITTED prior-arm ledger, it carries that prior arm's basename in its own
+#   filename, and NO classification limb, step, slot or target table may ever read it. It exists to
+#   prove the builder was exercised over real bytes before the 16 h clock started.
+# NOT A PREDICATE: this builder computes no predicate term, reads no threshold, decides nothing
+#   and emits no verdict; it alters no Step, threshold, ordering or conditional. A column it
+#   cannot compute is emitted EMPTY and never a substitute.
+# NO FIT: no OLS fit, no slope, no standard error, no r2, no alpha, no t-statistic and no
+#   significance claim is computed on any series in this file.
+# (C1) SAMPLED, NOT EVENT-DRIVEN: the ledger scrapes every 10 s while LWM advances ~31 s apart,
+#   so every 'at the moment LWM passes' reading here is THE FIRST SCRAPE AT OR AFTER the
+#   advance -- a BUCKET, not an instant, carrying up to one cadence of lag.
+# (C2) THE ADJ-7 BOUNDARY IS NOT CROSSED: eligible_refs (L) and ineligible_refs (P) are
+#   PRE-drain; indexed_refs is POST-drain. No ratio is taken across that boundary anywhere in
+#   this file, and the prohibited ratios P/indexed_refs and L/indexed_refs appear NOWHERE.
+# (C3) MULTI-EVENT BUCKETS ARE REPORTED, NEVER SMOOTHED: a 10 s bucket carrying more than one
+#   event does not separate into its events; the per-bucket event count is published
+#   explicitly and is NEVER averaged into a per-event figure.
+# UNITS DIFFER ON PURPOSE AND ARE NOT RECONCILED: indexed_refs is a REF COUNT, tombstone_bytes
+#   is BYTES. No bytes-per-ref constant is assumed, fitted or implied anywhere in this file.
+# The first non-'#' line below is the column header; every line after it is a data row.
+# THE BINDING, MARKED IN THE TABLE ITSELF BY THE `discriminant_role` COLUMN AND RESTATED HERE:
+#   THE DISCRIMINANT IS THE COORDINATE-LAST-HALF COUNT, AND ONLY IT. The whole-run count is PUBLISHED
+#   FOR COMPLETENESS AND IS NEVER THE DISCRIMINANT.
+#   The reason the whole-run count is disqualified is MEASURED, not stylistic: the process is
+#   NON-STATIONARY AND FRONT-LOADED. On the committed prior arm, 39 of 53 drains occur before
+#   t = 1,860 s and 51 of 53 before t = 5,090 s, leaving 2 in the last 9,310 s. A STARTUP BURST DOES
+#   NOT SCALE WITH DURATION AT ALL, so a whole-run reading answers T4's question with an artefact of
+#   when the run began. Only the last-half regime is quasi-stationary.
+#   The discriminant reads: a fixed-rate periodic trigger predicts a count roughly PROPORTIONAL to
+#   duration; a one-time transient predicts a count that DOES NOT GROW.
+# ROWS. `row_kind` takes exactly these values:
+#   WINDOW                      -- one per T3 window, REUSING T3's windows unchanged; carries the
+#                                  CUMULATIVE nonempty_drains_total at the 1,000 s boundary.
+#   SUBJECT_WHOLE_RUN           -- the subject's whole-run count. NO RATE: its span crosses the
+#                                  PARTIAL tail, and R3 excludes PARTIAL from EVERY rate.
+#   SUBJECT_FULL_WINDOWS        -- the subject's rate over its FULL windows only, which is the
+#                                  whole-run rate with the PARTIAL tail excluded as R3 requires.
+#   SUBJECT_COORD_LAST_HALF     -- the subject's coordinate-last-half count. THE DISCRIMINANT.
+#   PRIOR_ARM_WHOLE_RUN         -- the prior-duration arm, read from the committed, unmodified
+#                                  prior ledger. PUBLISHED, NEVER THE DISCRIMINANT.
+#   PRIOR_ARM_COORD_LAST_HALF   -- the prior-duration arm's coordinate-last-half count. THE
+#                                  DISCRIMINANT's comparison term.
+# NO RATE IS COMPUTED FROM A PARTIAL WINDOW: every PARTIAL row carries an EMPTY drains_per_hour and
+#   names the exclusion in rate_excluded_reason. An empty rate here is a REFUSAL, not a zero.
+# CAVEATS, PRE-DECLARED: the prior arm is n = 1 and each new arm is n = 1. THIS IS A COMPARISON OF
+#   OBSERVATIONS, NOT AN INFERENCE. No test statistic is computed, no significance is claimed.
+row_kind,source_ledger,w_index,window_kind,t_lo,t_hi,span_secs,cum_nonempty_drains_at_t_lo_boundary,cum_nonempty_drains_at_t_hi,d_nonempty_drains,drains_per_hour,discriminant_role,rate_excluded_reason
+WINDOW,spec356-long,0,FULL,10,1000,1000,0,30,30,108.000000,n/a,
+WINDOW,spec356-long,1,FULL,1010,2000,1000,30,39,9,32.400000,n/a,
+WINDOW,spec356-long,2,FULL,2010,3001,1000,39,39,0,0.000000,n/a,
+WINDOW,spec356-long,3,FULL,3010,4000,1000,39,39,0,0.000000,n/a,
+WINDOW,spec356-long,4,FULL,4010,5000,1000,39,49,10,36.000000,n/a,
+WINDOW,spec356-long,5,FULL,5010,6000,1000,49,51,2,7.200000,n/a,
+WINDOW,spec356-long,6,FULL,6010,7000,1000,51,51,0,0.000000,n/a,
+WINDOW,spec356-long,7,FULL,7010,8000,1000,51,51,0,0.000000,n/a,
+WINDOW,spec356-long,8,FULL,8010,9000,1000,51,51,0,0.000000,n/a,
+WINDOW,spec356-long,9,FULL,9010,10000,1000,51,51,0,0.000000,n/a,
+WINDOW,spec356-long,10,FULL,10010,11000,1000,51,51,0,0.000000,n/a,
+WINDOW,spec356-long,11,FULL,11010,12000,1000,51,51,0,0.000000,n/a,
+WINDOW,spec356-long,12,FULL,12010,13000,1000,51,52,1,3.600000,n/a,
+WINDOW,spec356-long,13,FULL,13010,14000,1000,52,53,1,3.600000,n/a,
+WINDOW,spec356-long,14,PARTIAL,14010,14400,390,53,53,0,,n/a,PARTIAL window: R3 excludes it from every rate
+SUBJECT_WHOLE_RUN,spec356-long,,,10,14400,14390,0,53,53,,PUBLISHED_NEVER_THE_DISCRIMINANT,span crosses the PARTIAL tail; R3 excludes PARTIAL from every rate
+SUBJECT_FULL_WINDOWS,spec356-long,,FULL,10,14000,14000,0,53,53,13.628571,PUBLISHED_NEVER_THE_DISCRIMINANT,
+SUBJECT_COORD_LAST_HALF,spec356-long,,,7210,14400,7200,51,53,2,1.000000,THE_DISCRIMINANT,
+PRIOR_ARM_WHOLE_RUN,spec356-long,,,10,14400,14390,0,53,53,,PUBLISHED_NEVER_THE_DISCRIMINANT,startup-burst confound: the count is front-loaded and does not scale with duration
+PRIOR_ARM_COORD_LAST_HALF,spec356-long,,,7210,14400,7200,51,53,2,1.000000,THE_DISCRIMINANT,

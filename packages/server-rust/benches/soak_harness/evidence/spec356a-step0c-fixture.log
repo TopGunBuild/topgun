@@ -585,3 +585,109 @@ STEP0C ADMISSIBILITY: topgun_or_prune_considered_total failed the population che
 VERDICT AT THE ADJ-20 INSTRUMENT: emitted STEP0C line byte-identical to Parts
 I-III (sort -u over all four captures yields ONE line); instrument-defect literal
 count 0 over the run; exit 0.
+
+================================================================================
+PART V -- RE-CAPTURE AT THE SPEC-356c RUNNER (two additive 28,800s cell arms).
+================================================================================
+
+WHY. Same obligation as EG-1's PART V. The runner gained two ADDITIVE cell arms,
+`long8h_r1` and `long8h_r2`; a moved runner is a moved instrument, so the guard
+must be SEEN to fire on these bytes rather than argued to still fire. Fixture
+re-cut from THIS Part's own fresh smoke artifact, blanking the SAME cell as
+Parts I-IV: one row of column index 3, topgun_or_prune_considered_total.
+
+  $ awk -F, -v OFS=, 'NR==6 { $3 = "" } { print }' \
+      <scratch>/p5-smoke/spec356-smoke.prune.csv > <scratch>/p5-smoke/fixture-blanked.csv
+  blanked: line 6 (data row 5), column index 3
+
+BUILD IDENTITY. The .rs tree has not moved (`git diff feb85268..HEAD -- '*.rs'`
+is EMPTY); the binaries are the Part III/IV pair. The changed component is the
+RUNNER, at repo HEAD 4a3390666082cfea13bf8c3c5ffefec558c0885e, working tree
+clean. The fixture path starts no harness, so it reads the runner and nothing
+else -- which is precisely what a runner-change gate wants.
+
+THE CAPTURED GUARD-FIRE (verbatim console, UNINDENTED):
+
+=== COLUMN-CHECK FIXTURE PATH (no harness is started) ===
+  fixture:      <scratch>/p5-smoke/fixture-blanked.csv
+  cell:         smoke (armed=yes)
+  shape:        POPULATION-ONLY on every column (non-measurement cell)
+  disposition:  MEASURAND -- the STEP0C admissibility line, which is what
+                this path exists to demonstrate. A MEASURAND failure must NOT
+                carry the instrument-defect literal, must NOT write
+                INSTRUMENT_OK and must NOT exit 9.
+  fixture header: matches the pinned schema (43 columns)
+
+prune.csv columns (fixture):
+  elapsed_secs                                 [POPULATN] n=12 empty=0 min=10 max=120
+  topgun_or_prune_passes_total                 [POPULATN] n=12 empty=0 min=342 max=4300
+  topgun_or_prune_considered_total             [POPULATN] n=11 empty=1 min=0 max=3000
+STEP0C ADMISSIBILITY: topgun_or_prune_considered_total failed the population check (n == 0 or empty > 0 at column index 3) -- the cell STANDS;
+                      this is an admissibility failure that routes the
+                      classification predicate to INDETERMINATE. It is NOT an
+                      instrument defect and it changes no exit status.
+  topgun_or_prune_dropped_total                [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_matched_nothing_total        [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_absent_total                 [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_restored_read_error_total    [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_restored_evicted_total       [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_restored_write_error_total   [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_bytes_freed_total            [POPULATN] n=12 empty=0 min=0 max=61357
+  topgun_or_prune_epochs_drained_total         [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_empty_drains_total           [POPULATN] n=12 empty=0 min=342 max=4297
+  topgun_or_prune_nonempty_drains_total        [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_lwm_advances_total           [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_lwm_epochs_advanced_total    [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_split_recomputes_total       [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_indexed_refs                 [POPULATN] n=12 empty=0 min=342 max=2033
+  topgun_or_prune_indexed_epochs               [POPULATN] n=12 empty=0 min=1 max=3
+  topgun_or_prune_eligible_refs                [POPULATN] n=12 empty=0 min=0 max=1000
+  topgun_or_prune_ineligible_refs              [POPULATN] n=12 empty=0 min=62 max=1208
+  topgun_or_prune_split_computed_epoch         [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_current_epoch                [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_low_water_mark               [POPULATN] n=12 empty=0 min=2 max=6
+  topgun_or_prune_durable_epoch_watermark      [POPULATN] n=12 empty=0 min=0 max=4
+  topgun_or_prune_last_drained_epoch           [POPULATN] n=12 empty=0 min=0 max=4
+  topgun_or_prune_lwm_stall_seconds            [POPULATN] n=12 empty=0 min=0 max=24
+  topgun_or_prune_tracked_claims               [POPULATN] n=12 empty=0 min=1 max=1
+  topgun_or_prune_drain_refs_sum               [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_drain_refs_count             [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_sum             [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_drain_epochs_count           [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_claim_span_epochs_sum        [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_claim_span_epochs_count      [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_claim_lag_epochs_sum         [POPULATN] n=12 empty=0 min=0 max=0
+  topgun_or_prune_claim_lag_epochs_count       [POPULATN] n=12 empty=0 min=2 max=9
+  topgun_or_prune_epoch_considered_sum         [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_considered_count       [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_epoch_dropped_sum            [POPULATN] n=12 empty=0 min=0 max=3000
+  topgun_or_prune_epoch_dropped_count          [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_or_prune_epoch_bytes_freed_sum        [POPULATN] n=12 empty=0 min=0 max=61357
+  topgun_or_prune_epoch_bytes_freed_count      [POPULATN] n=12 empty=0 min=0 max=3
+  topgun_ormap_tombstone_bytes_total           [POPULATN] n=12 empty=0 min=6662 max=88678
+  topgun_or_prune_drain_refs_p50               [POPULATN] n=12 empty=0 min=0 max=1000
+
+  STEP0C ADMISSIBILITY lines emitted: 1
+  INSTRUMENT_OK:                      1 (unchanged by a MEASURAND failure)
+  exit status:                        0 (the pinned fall-through, exit "$HARNESS_RC")
+
+================================================================================
+VERDICT AT THE SPEC-356c RUNNER: emitted STEP0C line byte-identical to Parts
+I-IV (sort -u over all FIVE captures yields ONE line); instrument-defect literal
+count 0 over the run; exit 0.
+================================================================================
+
+  guard seen to fire            : yes, 1 emitted line, bytes captured verbatim
+  STEP0C ADMISSIBILITY lines    : 1, the runner's own emitter count
+  line uniqueness across Parts  : $ grep '^STEP0C ADMISSIBILITY' <this file> \
+                                      | sort -u | wc -l
+                                  1          <- five captures, ONE distinct line
+  instrument-defect line        : absent from the run, count 0 over the file
+  exit status                   : 0, the pinned fall-through, exit "$HARNESS_RC"
+
+The literal remains DELIBERATELY UNSPELLED in this file, this Part included --
+spelling it anywhere, even in prose about it, would make the check satisfy
+itself. Only the surrounding population figures move against Parts I-IV, because
+they are readings from a different smoke run; the emitted line itself is
+character-for-character the same, which is what makes a future drift
+mechanically visible instead of silently vacuous.

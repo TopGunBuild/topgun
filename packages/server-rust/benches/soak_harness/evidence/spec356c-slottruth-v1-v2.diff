@@ -1,0 +1,181 @@
+# spec356c-slottruth-v1-v2.diff -- the v1 -> v2 grader diff, produced at -U0, EVERY HUNK CLASSIFIED.
+# Subject files, both committed in this directory:
+#   v1  spec356-slottruth.sh        (UNEDITED; pinned digest 280f7a3466a0bffc89059815bb3862bb9581cb95d7efa3fe58b1152749b8f060)
+#   v2  spec356c-slottruth-v2.sh    (NEW sidecar)
+#
+# ================================ THE EXACT INVOCATION, VERBATIM ================================
+# Run from this directory (packages/server-rust/benches/soak_harness/evidence):
+#
+#     diff -U0 spec356-slottruth.sh spec356c-slottruth-v2.sh
+#
+# -U0 means ZERO context lines, and the width is load-bearing rather than tidy: at the default width
+# the header/usage block (v1:2-18) and the first subject line (v1:22) are separated by exactly three
+# unchanged lines (`set -e`, `E=$1`, `FIT=...`), so they would MERGE INTO ONE HUNK that is
+# simultaneously two classes and therefore neither, and "every hunk carries exactly one label" would be
+# unsatisfiable on correct work. At -U0 a hunk cannot span an unchanged line at all.
+# NO OTHER CONTEXT WIDTH WAS USED, anywhere, at any point of producing this artifact.
+#
+# ================================== RE-GENERATION CHECK ==================================
+# Every ANNOTATION line in this file begins with `#`; NO line of diff output ever does (diff -U0 emits
+# only `@@`, `+`, `-` and `\` lines once the two file-header lines are dropped). So the body is
+# recoverable mechanically and the artifact is byte-checkable:
+#
+#     diff -U0 spec356-slottruth.sh spec356c-slottruth-v2.sh | tail -n +3 \
+#       | diff - "$(grep -v '^#' spec356c-slottruth-v1-v2.diff > /tmp/body; echo /tmp/body)"
+#
+# must be CLEAN. `tail -n +3` drops diff's own `---` / `+++` lines: they carry FILE MTIMES, which are
+# not a property of the bytes, so including them would make the check fail on a fresh checkout for a
+# reason that says nothing about either sidecar. They are recorded here instead, for completeness:
+#     --- spec356-slottruth.sh
+#     +++ spec356c-slottruth-v2.sh
+#
+# ============================= THE THREE MECHANICAL TESTS (R4.2) =============================
+# The taxonomy is CLOSED and EXHAUSTIVE-OR-RED. Every hunk below carries EXACTLY ONE of `class A`,
+# `class B`, `class C`. A hunk carrying none, carrying two, or failing its own test below is RED, and
+# the RED is the finding: it means v2 holds an edit that is neither ADJ-12's fix, nor the enumerated
+# forced set, nor a comment -- i.e. a fork wearing a version number.
+#
+# HOW TO READ A -U0 HUNK HEADER (needed by test A, and stated so a reader with this file and no other
+# context can decide it): a hunk header `@@ -a,b +c,d @@` gives the v1 side as `a,b` -- the hunk touches
+# v1 lines `a .. a+b-1`. `b` OMITTED means `b = 1` (exactly line `a`). `b = 0` means a PURE INSERTION
+# that touches no v1 line and lands between v1 lines `a` and `a+1`.
+#
+# CLASS A -- the fix. ONE semantic change: `bs[]` is populated from the NON-SENTINEL rows only
+#   (`v[i,h[B]]+0 > 0`) and THAT population is medianed (ADJ-12's `B`); `B_SENTINEL_EXCLUDED_PCT` is
+#   emitted beside it UNCONDITIONALLY; the 100 %-sentinel branch emits `B` UNDEFINED (never `0` --
+#   `0` IS the sentinel) with `B_SENTINEL_EXCLUDED_PCT = 100.000000` and `MEDIAN_L_OVER_B` WITHHELD WITH
+#   ITS REASON PRINTED (R4.6). `median(L)` is UNCHANGED -- it is ADJ-2's aggregator over ALL rows.
+#   v2 does NOT implement the `>50 %` hatch: this driver REPORTS, the predicate DECIDES (R4.4).
+#   TEST (line-bounded exactly as class B is, per Audit v2 rec 1): the class-A region in v1 is
+#   `spec356-slottruth.sh:259-264` -- `bs[]` population at `:259`, the SHARED sort loop at `:260-261`
+#   (the two populations now differ in size, so the hunk necessarily spans it; that is still ONE
+#   semantic change, not one line), `bb` at `:263`, the `bb > 0` suppression at `:264`. THE PUBLISHED
+#   BOUND IS `:258-265`.
+#     => A `class A` label on a hunk whose v1 range falls OUTSIDE `:258-265` is RED.
+#        Formally: with `@@ -a,b`, RED unless `258 <= a` and `a+b-1 <= 265`; for a pure insertion
+#        (`b = 0`) at `a`, RED unless `258 <= a <= 264`.
+#   WIDENED OR TRUE-MINIMAL? NOT WIDENED. The minimal correct v2 required NO change outside
+#   `:258-265`: the single class-A hunk below occupies v1 `:259-264`, strictly inside the bound the
+#   spec names, and no other executable line of v1 moved. The bound is published as `:258-265` because
+#   that is the spec's own bound; the TRUE minimal region observed is the tighter `:259-264`.
+#
+# CLASS B -- the mechanically forced subject parameter. v1 hardcodes its subject and the `long` cell's
+#   literals, so it cannot read SPEC-356c's cells at all. v2 takes the cell basename and duration as
+#   PARAMETERS DEFAULTING TO v1'S OWN SUBJECT AND LITERALS, so `v2 <evidence-dir>` with no override
+#   reads EXACTLY the files v1 reads (which is what makes run 1 vs run 2 a regression test).
+#   TEST: the forced set is EXACTLY these five v1 lines and no others --
+#     `:22` PR=  the driver-consumed ledger (the subject itself)
+#     `:23` PP=  the committed parent-series convenience copy
+#     `:24` LO=  the early-slice convenience copy
+#     `:25` HI=  the late-slice convenience copy
+#     `:77` the subject cell's provenance triple -- basename, cell name and the `14400` duration literal
+#   A `class B` label on any line outside that table is RED, and so is a v2 leaving any line inside it
+#   unparameterised: the enumeration is the check IN BOTH DIRECTIONS. The five `prov` calls for cells
+#   this spec does not read (`:72-76`) and the `cellE` guard (`:78-79`) are NOT forced and diff clean.
+#   IN-PLACE ONLY (Audit v2 rec 1, second limb): class B is defined BY v1 LINE NUMBER, so a hunk that
+#   ADDS a line has no v1 line and is UNLABELABLE => RED on compliant work. A zero-added-line v2 is
+#   constructible with inline `${2:-...}` / `${3:-...}` defaults, and that is how v2 is built.
+#     => A `class B` hunk MUST add zero lines: with `@@ -a,b +c,d`, RED unless `d == b`.
+#        OBSERVED: `@@ -22,4 +28,4` (4 -> 4) and `@@ -77 +83` (1 -> 1). TOTAL CLASS-B LINES ADDED: 0.
+#
+# CLASS C -- comment-only. TEST: a hunk is class C IFF every one of its `+` and `-` lines, after
+#   stripping leading whitespace, begins with `#`, and the hunk contains no other changed line. Nothing
+#   about purpose, docstring quality or authorial intent enters the test.
+#   LINE 1 (THE SHEBANG) IS EXCLUDED (Audit v2 rec 2): `#!/bin/sh` begins with `#` after leading
+#   whitespace and would pass the mechanical test while being an INTERPRETER CHANGE, which R4.2's own
+#   prose forbids class C from carrying. A hunk touching v1 `:1` is therefore RED, not class C.
+#     => VERIFIED: v2's shebang is byte-identical to v1's (`#!/bin/sh`); v1 `:1` appears in NO hunk
+#        below. No interpreter change is required, because `${2:-...}` parameter defaults are POSIX
+#        `sh` -- checked with `sh -n spec356c-slottruth-v2.sh` (clean) and by running v2 under `sh`.
+#   Class C is UNAVOIDABLE: v1's own header/usage block (`:2-18`) names the wrong subject for v2
+#   ("usage: slottruth.sh <evidence-dir>"), so v2 either ships a lying docstring or emits this hunk.
+#   NOT TOUCHED HERE: `:63-64`'s "the LWM epoch" comment. That is v1 text routed to TODO-648, and
+#   correcting it in v2 would be a class-C hunk with NO forcing reason. It diffs clean below.
+#
+# ==================================== HUNK LEDGER ====================================
+# WHERE A HUNK'S LABEL LIVES, MECHANICALLY: a hunk's label is the UNIQUE line matching
+# `^# -+ class [ABC] -+$` standing between the end of the previous hunk and this hunk's `@@` header.
+# The prose above mentions the class names many times and NONE of those mentions match that pattern,
+# so the count is exact and a grader never has to guess:
+#     grep -c '^@@'                     spec356c-slottruth-v1-v2.diff   ->  4
+#     grep -cE '^# -+ class [ABC] -+$'  spec356c-slottruth-v1-v2.diff   ->  4
+# A hunk with 0 such lines before it (unlabelled) or 2 (doubly labelled) is RED with the hunk quoted.
+#
+# 4 hunks: 1 x class A, 2 x class B, 1 x class C. Every hunk below carries exactly one label.
+#   1. @@ -2,2 +2,8    @@  class C   (v1 :2-3    -- all changed lines are comments; :1 untouched)
+#   2. @@ -22,4 +28,4  @@  class B   (v1 :22-25  -- forced lines 1-4 of 5; 4 -> 4, zero added)
+#   3. @@ -77 +83      @@  class B   (v1 :77     -- forced line 5 of 5; 1 -> 1, zero added)
+#   4. @@ -259,6 +265,23 @@ class A (v1 :259-264 -- inside the published bound :258-265)
+# NOTHING ELSE IN v1 MOVED.
+#
+# ==================================== BEGIN DIFF BODY ====================================
+#
+# ---------------------------------------- class C ----------------------------------------
+# v1 range :2-3. Every `+` and `-` line begins with `#` after stripping leading whitespace, and the
+# hunk contains no other changed line => class C. v1 :1 (the shebang) is NOT in this hunk.
+@@ -2,2 +2,8 @@
+-# slottruth.sh -- RE-DERIVE every re-derivable §9 slot from the COMMITTED artifacts.
+-# usage: slottruth.sh <evidence-dir> > truth.tsv
++# slottruth-v2.sh -- RE-DERIVE every re-derivable slot from the COMMITTED artifacts.
++# usage: spec356c-slottruth-v2.sh <evidence-dir> [cell-basename] [duration-s] > truth.tsv
++#   defaults: cell-basename = spec356-long, duration-s = 14400 -- with NO override this driver reads
++#   EXACTLY the files v1 reads, which is what makes the run-1 / run-2 comparison a regression test.
++# v2 differs from spec356-slottruth.sh (v1, UNEDITED, digest 280f7a34..f060) in three admitted ways and
++# the published `diff -U0` classifies every hunk: the B fix (ADJ-12 -- the rendered p50 column is
++# medianed over the NON-SENTINEL rows only, and the excluded fraction is emitted unconditionally beside
++# it), the subject parameter above, and this comment block. NOTHING ELSE MOVED.
+# ---------------------------------------- class B ----------------------------------------
+# v1 range :22-25 -- forced lines 1-4 of the five-row table. 4 lines out, 4 lines in: IN-PLACE, ZERO
+# ADDED. Each default is v1's own literal, so `v2 <evidence-dir>` resolves to v1's exact filenames.
+@@ -22,4 +28,4 @@
+-PR=$E/spec356-long.prune.csv                    # the `long` cell's ledger -- THE ONLY PASS-RATE INPUT
+-PP=$E/spec356-long-passrate.csv                 # committed CONVENIENCE COPY of the parent series
+-LO=$E/spec356-long-passrate-early.csv           # committed CONVENIENCE COPY of the early slice
+-HI=$E/spec356-long-passrate-late.csv            # committed CONVENIENCE COPY of the late slice
++PR=$E/${2:-spec356-long}.prune.csv               # the cell's ledger -- THE ONLY PASS-RATE INPUT
++PP=$E/${2:-spec356-long}-passrate.csv            # committed CONVENIENCE COPY of the parent series
++LO=$E/${2:-spec356-long}-passrate-early.csv      # committed CONVENIENCE COPY of the early slice
++HI=$E/${2:-spec356-long}-passrate-late.csv       # committed CONVENIENCE COPY of the late slice
+# ---------------------------------------- class B ----------------------------------------
+# v1 range :77 -- forced line 5 of 5, the subject cell's provenance triple. 1 line out, 1 line in:
+# IN-PLACE, ZERO ADDED. The cell name (`long`) and the width literal are NOT parameterised; only the
+# basename and the duration are, and both default to v1's literals.
+@@ -77 +83 @@
+-prov spec356-long      long   "<unset: production default 1000>" 14400  "$PR"                      10
++prov "${2:-spec356-long}" long   "<unset: production default 1000>" "${3:-14400}" "$PR"     10
+# ---------------------------------------- class A ----------------------------------------
+# v1 range :259-264 -- INSIDE the published bound :258-265 (258 <= 259 and 264 <= 265). This is the ONE
+# semantic change. It spans the shared sort loop because the two populations no longer share a size.
+# `med` (median(L)) keeps v1's formula over ALL m rows, byte for byte; no threshold and no conditional
+# keyed on the excluded fraction is introduced; the `Delta_sum / Delta_count` mean appears nowhere.
+@@ -259,6 +265,23 @@
+-  m=0; for (i=lo;i<=hi;i++) { m++; ls[m]=v[i,h[L]]+0; bs[m]=v[i,h[B]]+0 }
+-  for (i=1;i<m;i++) for (j=1;j<m;j++) { if (ls[j]>ls[j+1]) {t=ls[j];ls[j]=ls[j+1];ls[j+1]=t}
+-                                        if (bs[j]>bs[j+1]) {t=bs[j];bs[j]=bs[j+1];bs[j+1]=t} }
+-  med = (m%2) ? ls[(m+1)/2] : (ls[m/2]+ls[m/2+1])/2
+-  bb  = (m%2) ? bs[(m+1)/2] : (bs[m/2]+bs[m/2+1])/2
+-  if (bb > 0) printf "MEDIAN_L_OVER_B\t%.6f\n", med/bb
++  m=0; k=0                                     # m = ALL rows (median(L)); k = NON-SENTINEL rows (B)
++  for (i=lo;i<=hi;i++) { m++; ls[m]=v[i,h[L]]+0
++                         if (v[i,h[B]]+0 > 0) { k++; bs[k]=v[i,h[B]]+0 } }
++  # The two populations differ in size now, so the ONE shared sort loop v1 used cannot bound both.
++  for (i=1;i<m;i++) for (j=1;j<m;j++) if (ls[j]>ls[j+1]) { t=ls[j];ls[j]=ls[j+1];ls[j+1]=t }
++  for (i=1;i<k;i++) for (j=1;j<k;j++) if (bs[j]>bs[j+1]) { t=bs[j];bs[j]=bs[j+1];bs[j+1]=t }
++  med = (m%2) ? ls[(m+1)/2] : (ls[m/2]+ls[m/2+1])/2  # ADJ-2 aggregator over ALL rows -- UNCHANGED
++  # ADJ-12: B is the median of the rendered p50 column with the 0-SENTINEL rows EXCLUDED, and the
++  # excluded fraction is published WITH it, unconditionally -- a B without it is incomplete even at 0 %.
++  # The >50 % hatch is NOT implemented here: this driver REPORTS, the predicate DECIDES.
++  if (k == 0) {
++    # 100 % sentinel: B is a median over an EMPTY set. 0 is the sentinel value itself, so emitting 0
++    # would publish the sentinel as the estimate; and a bare suppression is indistinguishable from a
++    # miss, which is the defect this lineage has already paid for once.
++    printf "B\tUNDEFINED (100 %% sentinel, 0 non-sentinel rows)\n"
++    printf "B_SENTINEL_EXCLUDED_PCT\t%.6f\n", 100
++    printf "MEDIAN_L_OVER_B\twithheld: 0 non-sentinel rows; B undefined\n"
++  } else {
++    bb = (k%2) ? bs[(k+1)/2] : (bs[k/2]+bs[k/2+1])/2
++    printf "B\t%.6f\n", bb
++    printf "B_SENTINEL_EXCLUDED_PCT\t%.6f\n", 100*(m-k)/m
++    printf "MEDIAN_L_OVER_B\t%.6f\n", med/bb
++  }
+# ===================================== END DIFF BODY =====================================
