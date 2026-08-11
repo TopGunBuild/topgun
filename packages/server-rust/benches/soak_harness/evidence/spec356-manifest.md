@@ -2532,8 +2532,13 @@ execution contained **no addendum window** — an addendum is always a RE-PIN �
 - **The §8.1 repeat is OWED, NOT DONE** — `long` @ 28,800 s, n = 2, same pin, same frozen predicate.
 - **Checklists 16, 18 and 19 are RED**, each with a cause and a named owner; **15 passes and limb (0) is
   GREEN on both measurement cells.**
-- **Six branches route to `TODO-634`, three to `TODO-648`, three to `TODO-638`, two to `TODO-637`.** No
-  branch terminates in a paragraph.
+- **Eleven branches route to `TODO-634`, two to `TODO-648`, two to `TODO-638`, two to `TODO-637`, and
+  one — row 17 — closes in this manifest with no tracker inheriting it.** No branch terminates in a
+  paragraph. **This tally is corrected post-review (Review v2) and re-counted from §9.11's eighteen rows:
+  `TODO-634` rows 1, 2, 3, 4, 6, 8, 12, 13, 14, 16, 18; `TODO-648` rows 5, 7; `TODO-638` rows 10, 11;
+  `TODO-637` rows 9, 15; row 17 CLOSED HERE. It originally read "Six … three … three … two", which was
+  wrong against the table as it then stood** — see the correction note at §9.14 for what that miscount
+  was and was not.
 - **The reclamation family is NOT blocked.** §8.3, quoted at §9.5.2 and again at §9.9: the registry model
   closes safety **regardless of which cause it turns out to be**. What an unclassified cause costs is
   **fix-shape efficiency, not safety** — an expensive answer, not a blocked one.
@@ -2681,18 +2686,35 @@ nothing here promotes them to one.**
 - **THIS SECTION IS NOT A GREEN.** It closes a reporting gap. The classification round's answer is still
   `INDETERMINATE`, cell E is still un-fired, the 2026-07-13 → 2026-07-27 interval is still un-probed, and
   the §8.1 repeat is still **OWED, NOT DONE**.
-- **One accounting figure elsewhere is now stale, and it is named instead of silently re-tallied.**
-  §9.13.3's owner tally (*"Six branches route to `TODO-634` …"*) predates rows 17 and 18; row 18 adds one
-  `TODO-634` routing and row 17 adds none. **That sentence is left exactly as its author wrote it** — a
-  post-hoc re-tally of a terminal-state paragraph is the kind of quiet edit this manifest's whole
-  discipline is against — and the delta is recorded here instead.
+- **One accounting figure elsewhere was wrong, and this bullet's first draft misdiagnosed HOW — both are
+  corrected here, post-review (Review v2).** §9.13.3's owner tally originally read *"Six branches route to
+  `TODO-634`, three to `TODO-648`, three to `TODO-638`, two to `TODO-637`"*. This bullet first claimed the
+  sentence merely *predated* rows 17 and 18 — i.e. that it was stale by the single `TODO-634` routing row
+  18 adds — and on that basis left it standing. **That diagnosis was itself wrong.** Counted against
+  §9.11 as it stood at `bf07ae3d` (rows 1–16, before this fix appended rows 17 and 18) the true tally was
+  already **`TODO-634` 10, `TODO-648` 2, `TODO-638` 2, `TODO-637` 2** — so the sentence was not stale by
+  one routing, it was a substantial miscount of the table it summarised, and row 18 moved only the first
+  figure (10 → 11). **The tally is therefore corrected at its own site in §9.13.3, marked post-review,**
+  which is the pattern the numstat bullet below states for exactly this case: a false sentence left
+  standing with its correction filed elsewhere is the hazard, not the remedy. **What the miscount does NOT
+  touch:** every individual §9.11 row's own named owner is and was correct, so no branch was ever
+  unrouted or mis-routed — the defect was confined to one summary sentence's arithmetic. No predicate, no
+  threshold, no slot, no checklist grade and no verdict reads this figure.
 - **§9.13.2's `1071  0` numstat was measured at the close-out commit and is NOT re-measured here.** Its
   own parenthetical already says a section reporting its own file's growth is stale the instant it is
   appended, and that **the ZERO is the load-bearing half**. That zero is a claim about the **frozen prefix
   against the pin**, and it still holds: the prefix `cmp`s clean. **This fix does produce deletions in the
   manifest's whole-file numstat against `bf07ae3d` — exactly SEVEN — and they are named rather than
   glossed:** two lines at §9.3's pending-gate clause, two at its `ctloff` row-count sentence, and three at
-  its replicate-map line-count sentence. *(The matching insertion count is deliberately NOT quoted here:
+  its replicate-map line-count sentence. **Re-measured post-review (Review v2), that figure is now NINE
+  against `bf07ae3d`, not seven:** the two added deletions are the §9.13.3 owner-tally bullet corrected
+  above. *(The seven is left standing as what it was — the count measured at `c22bc070`, the commit that
+  closed Review v1 — rather than overwritten, because a figure scoped to a named commit is not made false
+  by a later commit.)* **Against the PIN `feb85268` the whole-file numstat still shows ZERO
+  deletions after both fixes** — the insertion half is deliberately not quoted, for the reason this
+  bullet's own parenthetical gives below — which is the half the freeze actually rests on: every line
+  either fix removed was a line one of these same post-pin appends had introduced, so no byte present at
+  the pin has been touched. *(The matching insertion count is deliberately NOT quoted here:
   §9.13.2's parenthetical already records that a section reporting its own file's growth is stale the
   instant it is appended, and this section proved that rule on itself — a first draft of this bullet quoted
   an insertion count that its own later edits invalidated. The DELETION count is the figure the freeze
