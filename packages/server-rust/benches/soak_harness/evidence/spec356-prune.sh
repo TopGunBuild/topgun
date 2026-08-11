@@ -78,6 +78,12 @@ usage: spec356-prune.sh <cell>
     cellE      PROVENANCE pre-346 server,
                width 1000, 1800s, n=1             -- CONDITIONAL gap probe
 
+  The two 8h repeat cells. They are the `long` row in every literal but the
+  duration and the basename, and they are NOT part of the matrix above:
+
+    long8h_r1  armed,    width 1000, 28800s, n=1  -- the repeat, replicate 1
+    long8h_r2  armed,    width 1000, 28800s, n=1  -- the repeat, replicate 2
+
   The two NON-MEASUREMENT cells. They exist to demonstrate the schema and the
   fail-closed witnesses, they carry basenames no SPEC-356b artifact can ever
   have, and they REFUSE to run without SPEC356_SMOKE_DURATION:
@@ -118,6 +124,14 @@ case "$CELL" in
              MEASUREMENT=yes; BASE="spec356-w100" ;;
   long)      WIDTH="";   ARMED=yes; DURATION=14400; SAMPLE_INTERVAL=60; PROVENANCE=no
              MEASUREMENT=yes; BASE="spec356-long" ;;
+  # The two 8h repeat replicates. Every literal but the duration and the
+  # basename is the `long` arm's, so a repeat differs from it in duration
+  # alone; each replicate carries its own final basename, so neither can
+  # overwrite the other and no post-hoc rename is ever needed.
+  long8h_r1) WIDTH="";   ARMED=yes; DURATION=28800; SAMPLE_INTERVAL=60; PROVENANCE=no
+             MEASUREMENT=yes; BASE="spec356c-long-r1" ;;
+  long8h_r2) WIDTH="";   ARMED=yes; DURATION=28800; SAMPLE_INTERVAL=60; PROVENANCE=no
+             MEASUREMENT=yes; BASE="spec356c-long-r2" ;;
   cellE)     WIDTH="";   ARMED=no;  DURATION=1800;  SAMPLE_INTERVAL=60; PROVENANCE=yes
              MEASUREMENT=yes; BASE="spec356-cellE" ;;
   # The two NON-MEASUREMENT cells. Their basenames are deliberately outside
