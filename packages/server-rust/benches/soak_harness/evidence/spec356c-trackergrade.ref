@@ -1,0 +1,38 @@
+# spec356c-trackergrade.ref -- the PRE-DATA reference ledger read by spec356c-trackergrade.sh.
+#
+# THESE ARE THE VALUES THE GRADE IS MADE AGAINST, so they live in a committed file rather than in
+# an invocation line: a reference typed at the keyboard makes the grade as strong as the operator's
+# memory, which is an assertion and not a measurement. This file has its own digest, is pinned
+# verbatim in spec356-manifest.md §10.0, and is the SAME bytes for the both-directions proof runs
+# and for the real wave-5 run.
+#
+# Measured 2026-08-11, PRE-DATA, at pin feb85268952001813e502e27f65180855676ac25, against the live
+# .specflow/todos/ files. `.specflow/` is gitignored (.gitignore:111) and NOT tracked, so these
+# digests -- not a git diff -- are the only provenance those files have. R0.5 point 1.
+#
+# Format: <key><single space><value>; the value is the rest of the line VERBATIM (it may contain
+# spaces, brackets and non-ASCII). Lines beginning # and empty lines are ignored.
+
+todo634_pre_sha256 555c3aa92a569c030a7fbacfafdee5933bf4beda668d79fff126f1a2c0e74f8c
+todo637_sha256 48a16fbdfa923770b673882ae58b7a1aa5f15e5a1d3b8a1ee36ce3142b02940f
+todo638_sha256 756082197b6efd7b9158fea53c859724f78c82d5a2e3684eaa38e206571825df
+todo648_sha256 56fb3f59f7159b3acd0afa3a66f04df74e3bf9096614ae5357940d149847ef2c
+
+# Tick counts on TODO-634.md, with the census that makes them exhaustive: the file carries 7
+# top-level boxes and NO indented ones, so ticked + unticked covers every box it has.
+ticked_count 2
+unticked_count 5
+total_boxes 7
+indented_boxes 0
+
+# The strict anchor is a line PREFIX ending at REPEAT:, chosen so it survives the required edit
+# (which appends to the box) but breaks the instant the box is ticked. The loose anchor is the
+# same text without the checkbox marker and is used ONLY to LOCATE the box, so that a ticked box
+# still REDs limb (c) while limbs (d) and (e) stay computable.
+box_anchor - [ ] **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT:
+box_anchor_loose **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT:
+
+# Limb (d). The pointer literal is required verbatim in the box's after-text. The outcome tokens
+# are the determination vocabulary of the frozen predicate; at least one must appear.
+pointer_literal spec356-manifest.md §10
+outcome_tokens INDETERMINATE SELECTION FRONTIER THROUGHPUT SCHEDULING
