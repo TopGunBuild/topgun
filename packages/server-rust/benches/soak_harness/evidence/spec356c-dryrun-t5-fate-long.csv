@@ -1,0 +1,293 @@
+# T5 -- EPOCH CONTENT FATE LEDGER (coordinate last half). DERIVED, ONE COLUMN OUT-OF-SCOPE (R3.3).
+# BUILDER: spec356c-targets.sh -- SPEC-356c R3.4's ONE target builder, committed before the data.
+# SUBJECT: spec356-long.prune.csv    PRIOR-DURATION ARM: spec356-long.prune.csv
+# STATUS:  REFERENCE ONLY, NEVER EVIDENCE. This file is the R3.5 PRE-DATA dry run: it is built
+#   from an ALREADY-COMMITTED prior-arm ledger, it carries that prior arm's basename in its own
+#   filename, and NO classification limb, step, slot or target table may ever read it. It exists to
+#   prove the builder was exercised over real bytes before the 16 h clock started.
+# NOT A PREDICATE: this builder computes no predicate term, reads no threshold, decides nothing
+#   and emits no verdict; it alters no Step, threshold, ordering or conditional. A column it
+#   cannot compute is emitted EMPTY and never a substitute.
+# NO FIT: no OLS fit, no slope, no standard error, no r2, no alpha, no t-statistic and no
+#   significance claim is computed on any series in this file.
+# (C1) SAMPLED, NOT EVENT-DRIVEN: the ledger scrapes every 10 s while LWM advances ~31 s apart,
+#   so every 'at the moment LWM passes' reading here is THE FIRST SCRAPE AT OR AFTER the
+#   advance -- a BUCKET, not an instant, carrying up to one cadence of lag.
+# (C2) THE ADJ-7 BOUNDARY IS NOT CROSSED: eligible_refs (L) and ineligible_refs (P) are
+#   PRE-drain; indexed_refs is POST-drain. No ratio is taken across that boundary anywhere in
+#   this file, and the prohibited ratios P/indexed_refs and L/indexed_refs appear NOWHERE.
+# (C3) MULTI-EVENT BUCKETS ARE REPORTED, NEVER SMOOTHED: a 10 s bucket carrying more than one
+#   event does not separate into its events; the per-bucket event count is published
+#   explicitly and is NEVER averaged into a per-event figure.
+# UNITS DIFFER ON PURPOSE AND ARE NOT RECONCILED: indexed_refs is a REF COUNT, tombstone_bytes
+#   is BYTES. No bytes-per-ref constant is assumed, fitted or implied anywhere in this file.
+# The first non-'#' line below is the column header; every line after it is a data row.
+# WINDOW: the COORDINATE LAST HALF -- the SAME window the R8.1 walk reads, so this ledger and the walk
+#   describe the same rows. One row per epoch observed there as a topgun_or_prune_current_epoch value.
+# WHAT THIS LEDGER ANSWERS: which content arrived, when the watermark passed it, whether anything ever
+#   drained it, and what the prune attributed. WHAT IT DOES NOT ANSWER: whether that content was ever
+#   in the drainable index -- that is T1(a), OUT-OF-SCOPE, owner TODO-634.
+# THE COLUMN NAME CARRIES ITS OWN MARKER: indexed_refs_at_lwm_pass__AGGREGATE_NOT_PER_EPOCH is the
+#   AGGREGATE index gauge at the first scrape at or after the LWM passed this epoch. It is OUT-OF-SCOPE
+#   IN ITS PER-EPOCH FORM and is NOT presented as a per-epoch residency reading. No committed column,
+#   and no derivation from committed columns, can attribute a ref to an epoch; producing that is a
+#   per-epoch labelled emission on the prune path, a .rs change R0.4 forbids categorically.
+# added_bytes IS SAMPLED. It is the delta of topgun_ormap_tombstone_bytes_total across the epoch's
+#   currency window, measured from the row immediately PRECEDING the epoch's first scrape. At width
+#   1000 an epoch is current for ~31 s ~ 3 scrapes, so boundary attribution carries up to ONE SCRAPE AT
+#   EACH END => ~1/3 relative uncertainty. scrapes_in_epoch is published BESIDE it so the reader SEES
+#   that uncertainty rather than having to infer it. When no preceding row exists the cell is EMPTY.
+# was_drained_ever FOLLOWS A STATED INFERENCE RULE, AND THE ASSUMPTION IS VISIBLE HERE.
+#   Drains are read over the FULL LEDGER (the question is "ever", not "in this window"). For a drain
+#   bucket whose drain_epochs delta is k: when k == 1 the drained epoch is EXACTLY the bucket's
+#   last_drained_epoch and the set is EXACT; when k > 1 THE DRAINED SET IS INFERRED AS THE k EPOCHS
+#   ENDING AT last_drained_epoch, WHICH ASSUMES CONTIGUITY. Nothing in the committed surface proves
+#   contiguity. Whether the assumption was exercised at all is readable from the d_drain_epochs_sum
+#   column of the t2-drains table (SPEC-356b measured 1.000 epoch per drain, i.e. never exercised).
+# bytes_freed_attributed IS NOT SPLIT WHEN k > 1: the drain's whole epoch_bytes_freed_sum delta is
+#   published against EACH epoch of the inferred k-epoch set, because NO COMMITTED COLUMN LICENSES A
+#   SPLIT. It is EMPTY for an epoch nothing ever drained.
+# lwm_passed_at_t IS SAMPLED (C1): it is the bucket at which low_water_mark FIRST EXCEEDS this epoch,
+#   i.e. the first scrape at or after the advance. EMPTY when the LWM never passed the epoch inside
+#   this ledger -- an EMPTY here is "not observed", never "did not happen".
+# T1(b) AND T5 ARE ONE OBSERVATION REACHED BY TWO ROUTES wherever current_epoch == low_water_mark: the
+#   t1-lwmpass rows are a PROJECTION of these epoch rows, and agreement between the two tables is a
+#   RESTATEMENT, NOT CORROBORATION. Whether that identity survives is published, not assumed, on the
+#   EQUALITY_RATE line below -- if it breaks, the two tables become independent and the reader must be
+#   told which regime is being read. THE EQUALITY RATE FOR THIS REPLICATE IS CARRIED HERE, IN THIS
+#   HEADER COMMENT, AND NOWHERE ELSE.
+# EQUALITY_RATE current_epoch == low_water_mark: full_ledger=1403/1440=0.974306 coordinate_last_half=703/720=0.976389
+epoch,t_first_seen,t_last_seen,scrapes_in_epoch,added_bytes,indexed_refs_at_lwm_pass__AGGREGATE_NOT_PER_EPOCH,was_drained_ever,bytes_freed_attributed,lwm_passed_at_t
+230,7210,7230,3,19090,1285,false,,7240
+231,7240,7260,3,22586,1234,false,,7270
+232,7270,7290,3,21873,1217,false,,7300
+233,7300,7320,3,21482,1164,false,,7330
+234,7330,7350,3,22448,1136,false,,7360
+235,7360,7380,3,21482,1080,false,,7390
+236,7390,7410,3,22632,1055,false,,7420
+237,7420,7450,4,30590,1379,false,,7460
+238,7460,7480,3,21643,1328,false,,7490
+239,7490,7510,3,20102,1191,false,,7520
+240,7520,7540,3,21183,1115,false,,7550
+241,7550,7570,3,26818,1094,false,,7580
+242,7580,7600,3,17388,1434,false,,7620
+243,7610,7630,3,26588,1379,false,,7650
+244,7640,7670,4,26749,1360,false,,7680
+245,7680,7700,3,21689,1306,false,,7710
+246,7710,7730,3,22563,1284,false,,7740
+247,7740,7760,3,23644,1234,false,,7770
+248,7770,7790,3,22057,1221,false,,7800
+249,7800,7820,3,17940,1057,false,,7830
+250,7830,7850,3,22563,1042,false,,7860
+251,7860,7890,4,31142,1387,false,,7900
+252,7900,7920,3,22034,1351,false,,7930
+253,7930,7950,3,22747,1336,false,,7960
+254,7960,7980,3,22011,1294,false,,7990
+255,7990,8010,3,22747,1286,false,,8020
+256,8020,8040,3,21827,1237,false,,8050
+257,8050,8070,3,24610,1221,false,,8080
+258,8080,8100,3,19872,1047,false,,8110
+259,8110,8130,3,24334,1038,false,,8140
+260,8140,8170,4,26588,1382,false,,8180
+261,8180,8200,3,22931,1338,false,,8210
+262,8210,8230,3,21850,1322,false,,8240
+263,8240,8260,3,22609,1268,false,,8270
+264,8270,8290,3,21689,1251,false,,8300
+265,8300,8320,3,25116,1201,false,,8330
+266,8330,8350,3,19412,1190,false,,8360
+267,8360,8380,3,22034,1149,false,,8390
+268,8390,8410,3,20194,1403,false,,8430
+269,8420,8450,4,30682,1357,false,,8460
+270,8460,8480,3,22862,1351,false,,8491
+271,8491,8510,3,21827,1296,false,,8520
+272,8520,8540,3,22655,1246,false,,8550
+273,8550,8570,3,22310,1228,false,,8580
+274,8580,8600,3,24472,1182,false,,8610
+275,8610,8630,3,19642,1168,false,,8640
+276,8640,8660,3,21804,1113,false,,8670
+277,8670,8690,3,22448,1102,false,,8700
+278,8700,8730,4,28221,1322,false,,8740
+279,8740,8760,3,22770,1281,false,,8770
+280,8770,8790,3,21919,1263,false,,8800
+281,8800,8820,3,22816,1220,false,,8830
+282,8830,8850,3,25070,1211,false,,8860
+283,8860,8880,3,19642,1207,false,,8890
+284,8890,8910,3,21942,1163,false,,8920
+285,8920,8940,3,22977,1161,false,,8950
+286,8950,8970,3,22241,1129,false,,8980
+287,8980,9000,3,27163,1121,false,,9010
+288,9010,9030,3,21068,1075,false,,9040
+289,9040,9060,3,20332,1076,false,,9070
+290,9070,9090,3,22126,1074,false,,9100
+291,9100,9120,3,26473,1045,false,,9130
+292,9130,9150,3,18906,1444,false,,9170
+293,9160,9180,3,26496,1408,false,,9200
+294,9190,9210,3,20539,1410,false,,9230
+295,9220,9250,4,29233,1362,false,,9260
+296,9260,9280,3,22954,1355,false,,9290
+297,9290,9310,3,20217,1198,false,,9320
+298,9320,9340,3,21850,1182,false,,9350
+299,9350,9370,3,27186,1180,false,,9380
+300,9380,9400,3,17641,1138,false,,9410
+301,9410,9430,3,23276,1138,false,,9440
+302,9440,9460,3,21850,1098,false,,9470
+303,9470,9490,3,23115,1104,false,,9500
+304,9500,9520,3,26611,1072,false,,9530
+305,9530,9550,3,21712,1068,false,,9560
+306,9560,9580,3,21252,1074,false,,9591
+307,9591,9620,4,26864,1303,false,,9630
+308,9630,9650,3,22908,1252,false,,9660
+309,9660,9680,3,21942,1245,false,,9690
+310,9690,9710,3,22862,1204,false,,9720
+311,9720,9740,3,24863,1194,false,,9750
+312,9750,9770,3,20056,1152,false,,9780
+313,9780,9800,3,22034,1153,false,,9810
+314,9810,9830,3,23115,1114,false,,9840
+315,9840,9860,3,22379,1119,false,,9870
+316,9870,9890,3,26082,1338,false,,9910
+317,9900,9930,4,24610,1330,false,,9940
+318,9940,9960,3,21873,1279,false,,9970
+319,9970,9990,3,23598,1277,false,,10000
+320,10000,10020,3,21275,1235,false,,10030
+321,10030,10050,3,22747,1220,false,,10060
+322,10060,10080,3,21597,1155,false,,10090
+323,10090,10110,3,27232,1151,false,,10120
+324,10120,10140,3,18653,1121,false,,10150
+325,10150,10170,3,23851,1118,false,,10180
+326,10180,10210,4,27623,1392,false,,10221
+327,10221,10240,3,22011,1356,false,,10250
+328,10250,10270,3,22954,1353,false,,10280
+329,10280,10300,3,22011,1305,false,,10310
+330,10310,10330,3,22954,1305,false,,10340
+331,10340,10360,3,23069,1256,false,,10370
+332,10370,10390,3,21827,1266,false,,10400
+333,10400,10420,3,23046,1223,false,,10430
+334,10430,10450,3,21942,1208,false,,10460
+335,10460,10480,3,26174,1198,false,,10491
+336,10491,10510,3,18561,1151,false,,10520
+337,10520,10540,3,24288,1164,false,,10550
+338,10550,10570,3,21206,1140,false,,10580
+339,10580,10600,3,22770,1121,false,,10610
+340,10610,10630,3,22402,1101,false,,10640
+341,10640,10660,3,27347,1097,false,,10670
+342,10670,10690,3,18262,1062,false,,10700
+343,10700,10720,3,22471,1057,false,,10730
+344,10730,10750,3,21919,1414,false,,10770
+345,10760,10780,3,27324,1367,false,,10800
+346,10790,10820,4,23966,1241,false,,10830
+347,10830,10850,3,23874,1191,false,,10860
+348,10860,10880,3,21804,1186,false,,10890
+349,10890,10910,3,21965,1156,false,,10920
+350,10920,10940,3,22103,1146,false,,10950
+351,10950,10970,3,22701,1127,false,,10980
+352,10980,11000,3,26013,1074,false,,11010
+353,11010,11030,3,22218,1076,false,,11040
+354,11040,11060,3,21114,1041,false,,11070
+355,11070,11090,3,21252,1047,false,,11100
+356,11100,11130,4,27876,1285,false,,11140
+357,11140,11160,3,23115,1286,false,,11170
+358,11170,11190,3,23000,1288,false,,11200
+359,11200,11220,3,21827,1235,false,,11230
+360,11230,11250,3,25507,1226,false,,11260
+361,11260,11280,3,19136,1175,false,,11290
+362,11290,11310,3,22862,1170,false,,11320
+363,11320,11340,3,21827,1125,false,,11350
+364,11350,11370,3,23092,1116,false,,11380
+365,11380,11410,4,28152,1340,false,,11420
+366,11420,11440,3,22563,1290,false,,11450
+367,11450,11470,3,22011,1285,false,,11480
+368,11480,11501,3,23345,1244,false,,11510
+369,11510,11530,3,21781,1249,false,,11540
+370,11540,11560,3,22057,1202,false,,11570
+371,11570,11590,3,23000,1209,false,,11600
+372,11600,11620,3,22011,1162,false,,11630
+373,11630,11650,3,24633,1148,false,,11660
+374,11660,11680,3,20746,1097,false,,11690
+375,11690,11720,4,28382,1368,false,,11730
+376,11730,11750,3,21965,1327,false,,11760
+377,11760,11780,3,22931,1325,false,,11790
+378,11790,11810,3,21850,1282,false,,11820
+379,11820,11840,3,23046,1274,false,,11850
+380,11850,11870,3,23299,1237,false,,11880
+381,11880,11900,3,21597,1230,false,,11910
+382,11910,11930,3,23023,1187,false,,11940
+383,11940,11960,3,22011,1182,false,,11970
+384,11970,11990,3,25231,1150,false,,12000
+385,12000,12020,3,17342,1036,false,,12030
+386,12030,12050,3,22586,1026,false,,12060
+387,12060,12090,4,31326,1381,true,23000,12100
+388,12100,12120,3,22954,1336,false,,12130
+389,12130,12150,3,22172,1351,false,,12160
+390,12160,12180,3,23092,1350,false,,12191
+391,12191,12210,3,22126,1309,false,,12220
+392,12220,12240,3,22885,1304,false,,12250
+393,12250,12270,3,22057,1264,false,,12280
+394,12280,12300,3,22885,1137,false,,12310
+395,12310,12330,3,19182,1090,false,,12340
+396,12340,12360,3,22977,1093,false,,12370
+397,12370,12390,3,26358,1046,false,,12400
+398,12400,12420,3,18377,1428,false,,12440
+399,12430,12460,4,31188,1386,false,,12470
+400,12470,12490,3,22954,1385,false,,12500
+401,12500,12520,3,22287,1337,false,,12530
+402,12530,12550,3,22195,1322,false,,12560
+403,12560,12580,3,21689,1270,false,,12590
+404,12590,12610,3,22954,1263,false,,12620
+405,12620,12641,3,22931,1223,false,,12650
+406,12650,12670,3,24311,1220,false,,12680
+407,12680,12700,3,20585,1216,false,,12710
+408,12710,12730,3,21896,1159,false,,12740
+409,12740,12760,3,22816,1156,false,,12770
+410,12770,12790,3,22747,1103,false,,12800
+411,12800,12820,3,25208,1103,false,,12830
+412,12830,12850,3,20102,1096,false,,12860
+413,12860,12880,3,21390,1439,false,,12900
+414,12890,12920,4,29256,1321,false,,12930
+415,12930,12950,3,22126,1279,false,,12960
+416,12960,12980,3,22839,1270,false,,12990
+417,12990,13010,3,24311,1213,false,,13020
+418,13020,13040,3,20171,1197,false,,13050
+419,13050,13070,3,22793,1196,false,,13080
+420,13080,13100,3,21758,1136,false,,13110
+421,13110,13130,3,22678,1131,false,,13140
+422,13140,13160,3,26312,1084,false,,13170
+423,13170,13190,3,20401,1078,false,,13200
+424,13200,13230,4,26657,1320,false,,13240
+425,13240,13260,3,22839,1323,false,,13270
+426,13270,13290,3,21965,1274,false,,13300
+427,13300,13320,3,22701,1263,false,,13330
+428,13330,13350,3,22103,1221,false,,13360
+429,13360,13380,3,24196,1207,true,23000,13390
+430,13390,13410,3,20240,1153,false,,13420
+431,13420,13440,3,23207,1157,false,,13450
+432,13450,13470,3,22816,1111,false,,13480
+433,13480,13500,3,25875,1101,false,,13510
+434,13510,13530,3,19021,1435,false,,13550
+435,13540,13560,3,21436,1423,false,,13580
+436,13570,13590,3,22862,1378,false,,13610
+437,13601,13630,4,30774,1363,false,,13640
+438,13640,13660,3,22655,1299,false,,13670
+439,13670,13690,3,21344,1275,false,,13700
+440,13700,13720,3,24863,1270,false,,13731
+441,13731,13750,3,19987,1219,false,,13760
+442,13760,13780,3,22678,1211,false,,13790
+443,13790,13810,3,21804,1154,false,,13820
+444,13820,13840,3,24104,1143,false,,13850
+445,13850,13870,3,23046,1089,false,,13880
+446,13880,13900,3,20148,1082,false,,13910
+447,13910,13930,3,21781,1033,false,,13940
+448,13940,13960,3,22563,1408,false,,13980
+449,13970,14000,4,30981,1363,false,,14010
+450,14010,14030,3,22931,1360,false,,14040
+451,14040,14060,3,21988,1314,false,,14070
+452,14070,14090,3,23598,1311,false,,14100
+453,14100,14120,3,19412,1143,false,,14130
+454,14130,14150,3,23299,1144,false,,14160
+455,14160,14180,3,24449,1107,false,,14190
+456,14190,14210,3,20700,1050,false,,14220
+457,14220,14240,3,20493,1405,false,,14260
+458,14250,14270,3,21850,1385,false,,14290
+459,14280,14310,4,31832,1341,false,,14320
+460,14320,14340,3,21988,1342,false,,14350
+461,14350,14370,3,22977,1343,false,,14380
+462,14380,14400,3,21988,,false,,
