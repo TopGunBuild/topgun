@@ -1,0 +1,156 @@
+spec356c-slottruth-v1-v2-runs.txt
+=================================
+RUNS 1 AND 2 OF R4.3's THREE-RUN MATRIX, TRANSCRIBED IN FULL.
+
+R4.3's matrix has three runs. Runs 1 and 2 are BOTH over the SAME committed `spec356-long` bytes and
+are the regression proof that the v1 -> v2 diff does exactly one thing. RUN 3 (v2 over the repeat's
+own cells, `spec356c-long-r1.*` / `spec356c-long-r2.*`) IS NOT HERE AND WAS NOT RUN: those cells do
+not exist yet -- they are a later wave's measurement. Its absence is a sequencing fact, not a gap.
+
+WHY THIS FILE EXISTS AND WHY IT IS ONE FILE. P8 requires BOTH transcripts to be present, but the
+spec's Delta ledger did not name a file for them. This single artifact is that home, recorded as a
+deliberate, named addition rather than scattering the two transcripts across several files.
+
+SUBJECTS AND DRIVERS, PINNED BY DIGEST (all in packages/server-rust/benches/soak_harness/evidence):
+  v1 driver   spec356-slottruth.sh        280f7a3466a0bffc89059815bb3862bb9581cb95d7efa3fe58b1152749b8f060
+                                          ^ UNEDITED -- the pinned digest, re-verified after both runs
+  v2 driver   spec356c-slottruth-v2.sh    a95f49fa99f7f39ad777b0789ec778eda1ffec3aa3221031d98b587b62a4f348
+  the ledger  spec356-long.prune.csv      c6eee53b7db164047cf3454fc9b7d8ae7e25b22f6f137776a6e386902d3b9d64
+                                          ^ READ by both runs, IDENTICAL bytes, never rewritten
+
+---------------------------------------------------------------------------------------------------
+RUN 1 -- v1, UNMODIFIED, over spec356-long. EXPECTED: reproduces PD-3.
+---------------------------------------------------------------------------------------------------
+EXACT INVOCATION (from the evidence directory):
+
+    sh ./spec356-slottruth.sh .
+
+EXIT STATUS: 0.  STDERR: empty.
+FULL STDOUT:
+
+S_EARLY	998.589613
+S_LATE	998.845155
+EXIT_SHARE_PCT	0.000000
+R51_SD	1076.184028
+R51_MEAN	37856.466667
+R51_T	0.346905
+R51_RESULT	NOT REJECTED
+R52_SD	2969.921596
+R52_MEAN	36854.400000
+R52_T	0.800515
+R52_RESULT	NOT REJECTED
+N6_COST_CELLS	8
+
+PD-3 REPRODUCED, AS EXPECTED. There is NO `MEDIAN_L_OVER_B` line above. v1 builds `bs[]` from EVERY
+row of the coordinate last-half window, so on this 98.3 %-sentinel window its internal `bb` (the
+median of that all-rows population) is 0, and the bare `bb > 0` guard at v1:264 suppresses the slot
+SILENTLY. v1 emits no `B` slot at all, so the driver's `B` = 0 is visible only as the ABSENCE of the
+ratio -- which is precisely the defect: a suppression is indistinguishable from a miss.
+
+---------------------------------------------------------------------------------------------------
+RUN 2 -- v2, DEFAULT PARAMETERS, over the SAME spec356-long bytes.
+---------------------------------------------------------------------------------------------------
+EXACT INVOCATION (from the evidence directory; NO parameter overrides, so the defaults resolve to
+v1's own subject and literals and the two runs read the same files):
+
+    sh ./spec356c-slottruth-v2.sh .
+
+EXIT STATUS: 0.  STDERR: empty.
+FULL STDOUT:
+
+S_EARLY	998.589613
+S_LATE	998.845155
+EXIT_SHARE_PCT	0.000000
+B	999.944741
+B_SENTINEL_EXCLUDED_PCT	98.333333
+MEDIAN_L_OVER_B	0.000000
+R51_SD	1076.184028
+R51_MEAN	37856.466667
+R51_T	0.346905
+R51_RESULT	NOT REJECTED
+R52_SD	2969.921596
+R52_MEAN	36854.400000
+R52_T	0.800515
+R52_RESULT	NOT REJECTED
+N6_COST_CELLS	8
+
+MEASURED AGAINST R4.3's EXPECTATION -- BOTH HIT, EXACTLY:
+  B                       = 999.944741   EXPECTED 999.944741   MATCH
+  B_SENTINEL_EXCLUDED_PCT = 98.333333    EXPECTED 98.333333    MATCH
+  MEDIAN_L_OVER_B         EMITTED (0.000000)  -- no longer structurally WITHHELD
+
+THE `MEDIAN_L_OVER_B = 0.000000` IS REPORTED AS MEASURED AND IS NOT A DEFECT OF v2. It is 0 because
+its NUMERATOR is 0: median(L) -- ADJ-2's aggregator over ALL 720 rows of the coordinate last-half
+window -- is 0, since 403 of those 720 rows carry `topgun_or_prune_eligible_refs` = 0 (317 rows are
+> 0, max 1000). The independently-computed census of the same window:
+
+    parent rows m=720   non-sentinel B rows k=12   excluded=98.333333%   median(L)=0.000000
+    (720 - 12) / 720 = 98.333333 %, which is the emitted fraction
+
+WHAT v2 BOUGHT IS THE POINT R4.4 MAKES: the ratio is now GRADEABLE rather than structurally absent.
+A published 0.000000 with its excluded fraction beside it is a reading of the evidence; v1's silence
+was a reading of nothing. The window still routes to INDETERMINATE at 98.3 % via ADJ-12's EXISTING
+`>50 %` hatch -- v2 does NOT implement that hatch and did not suppress anything above 50 %.
+
+---------------------------------------------------------------------------------------------------
+RUN 1 vs RUN 2 -- THE REGRESSION DIFF (the proof class B otherwise lacks)
+---------------------------------------------------------------------------------------------------
+EXACT INVOCATION:
+
+    diff <run-1 stdout> <run-2 stdout>
+
+FULL OUTPUT (diff exit status 1 = "differences found", as expected):
+
+3a4,6
+> B	999.944741
+> B_SENTINEL_EXCLUDED_PCT	98.333333
+> MEDIAN_L_OVER_B	0.000000
+
+DID THE CLAIM HOLD? YES -- run 2 differs from run 1 ONLY in the three `B`-derived lines (`B`,
+`B_SENTINEL_EXCLUDED_PCT`, `MEDIAN_L_OVER_B`), all ADDED, none removed and none altered: every other
+slot -- S_EARLY, S_LATE, EXIT_SHARE_PCT, all eight control-arm slots and N6_COST_CELLS -- is
+BYTE-IDENTICAL. In particular `median(L)`'s consumer and the fitter slots did not move, which is what
+"the class-A change touched only `B`" has to mean to be checkable.
+
+---------------------------------------------------------------------------------------------------
+SUPPLEMENTARY -- R4.6's EMPTY-POPULATION BRANCH, EXERCISED (it is unreachable on this subject)
+---------------------------------------------------------------------------------------------------
+R4.6 is NORMATIVE and its state is LIVE for a repeat whose transient has already finished, but the
+`spec356-long` window is 98.3 %-sentinel, not 100 %, so runs 1 and 2 CANNOT reach the branch. A
+branch shipped untested is the same hazard in a smaller box, so v2's `B` block was extracted verbatim
+(`spec356c-slottruth-v2.sh` lines 251-287 plus the closing brace) and run against three SYNTHETIC
+fixtures. The fixtures are throwaway files under /tmp -- they are NOT committed, NOT evidence, and
+NOT any of R3.5's dry-run CSVs; they exist only to reach the three arms of the emitted `B` path.
+
+  fixture               window     p50 column        emitted
+  --------------------  ---------  ----------------  -----------------------------------------------
+  all-sentinel          2 rows     0, 0              B	UNDEFINED (100 % sentinel, 0 non-sentinel rows)
+                                                     B_SENTINEL_EXCLUDED_PCT	100.000000
+                                                     MEDIAN_L_OVER_B	withheld: 0 non-sentinel rows; B undefined
+  no-sentinel           2 rows     4, 6              B	5.000000
+                                                     B_SENTINEL_EXCLUDED_PCT	0.000000
+                                                     MEDIAN_L_OVER_B	3.000000
+  two-thirds-sentinel   3 rows     0, 0, 9           B	9.000000
+                                                     B_SENTINEL_EXCLUDED_PCT	66.666667
+                                                     MEDIAN_L_OVER_B	2.222222
+
+WHAT EACH ONE ESTABLISHES:
+  all-sentinel        -- R4.6 items 1-3 hold: `B` is UNDEFINED and never the coerced `0` (0 IS the
+                         sentinel), the fraction is 100.000000, and `MEDIAN_L_OVER_B` is WITHHELD
+                         WITH ITS REASON PRINTED -- the literal `withheld: 0 non-sentinel rows; B
+                         undefined` -- never silently absent, which is exactly v1's PD-3 failure.
+  no-sentinel         -- the fraction is UNCONDITIONAL: ADJ-12 requires it published even at 0 %, and
+                         a `B` without it is incomplete. It is emitted.
+  two-thirds-sentinel -- v2 does NOT implement the `>50 %` hatch (R4.4). At 66.7 % sentinel the driver
+                         still REPORTS `B` and the fraction; nothing is suppressed above 50 %. The
+                         predicate decides, the sidecar does not.
+
+---------------------------------------------------------------------------------------------------
+CLOSING CHECKS
+---------------------------------------------------------------------------------------------------
+  shasum -a 256 spec356-slottruth.sh
+  280f7a3466a0bffc89059815bb3862bb9581cb95d7efa3fe58b1152749b8f060  spec356-slottruth.sh
+  -> v1's pinned digest DID NOT MOVE across the whole of this work (AC7).
+  sh -n spec356c-slottruth-v2.sh -> clean; both runs executed under `sh`, and v2's shebang is
+  byte-identical to v1's (`#!/bin/sh`): the `${2:-...}` defaults are POSIX sh, so no interpreter
+  change was required and none was made.
