@@ -1388,3 +1388,1074 @@ edited to accommodate them.)*
 - **AUTHORITY:** SPEC-356b Response v15 STOP residuals TODO-639..642 (each measured there); Conductor
   ruling 2026-08-10.
 - **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists.
+
+---
+
+## §9 — The executed record (SPEC-356b)
+
+**This section is SPEC-356b's own. It is created here by B1/G1 carrying the RESOLVED PIN and nothing
+else; the executed cells, the controls block, the classification walk and cell E's disposition are
+written by the later waves.** No byte of §0–§8 or §8A was touched to record it (§0(a): the frozen
+sections carry no SHA and no SHA slot).
+
+### §9.1 — Lineage: the resolved pin
+
+| | Value |
+|---|---|
+| **Resolved instrument-lineage tip** (`git rev-parse main`, B1's first action) | **`feb85268952001813e502e27f65180855676ac25`** |
+| Short form used in the record | **`feb85268`** |
+| Agreement with the recorded pin | **AGREES** — resolved value equals the value recorded in SPEC-356b R0.0b, so B1 proceeds rather than stopping |
+| Lineage name | **INSTRUMENTED** (§0(a)) |
+| Binary | built **once** from that SHA: `cargo build --release --bin topgun-server --bench soak_harness` |
+| Every `matrix.txt` | records it as `  repo HEAD:      feb85268952001813e502e27f65180855676ac25` |
+
+**How the pin was obtained, stated so it is a reading rather than a copy (R0.0b).** B1 does not read the
+SHA out of the spec: it resolves the tip of the instrument lineage from `git log main` and then checks
+the resolved value against the recorded one. The two agree at execution time, so no cell is measured
+under an unrecorded build.
+
+### §9.2 — Build identity and freeze proof, as discharged at this pin
+
+- **Zero post-pin `.rs` (§0(d), R0.0a).** `git diff --stat feb85268..HEAD -- '*.rs'` is **empty**, and so
+  is the same diff for `INVARIANTS.md`, `scripts/check-invariants.sh`, `spec349c2-fit.awk`,
+  `spec356-prune.sh` and all three `spec356a-*` gate artifacts. The working tree is clean.
+- **The freeze proof is COMMIT ORDER, not a hash written into this file.** `git log --follow` over this
+  manifest returns **NINE** commits — the freeze at `fc95b86d`, then §8A's **eight** PRE-DATA appends
+  (`114 0`, `124 0`, `60 0`, `42 0`, `39 0`, `44 0`, `34 0`, `42 0`), insertions only, end-to-end
+  `fc95b86d feb85268` → **`499 0`**. Hop 9 (`feb85268`) appends no addendum and touches no manifest byte.
+- **PRE-DATA holds at this pin.** `git log --diff-filter=A --format=%H --reverse --
+  '…/evidence/spec356-*.soak.json'` is **empty**, and so is the same query over `--all` for
+  `'*spec356*soak.json'`: not one measurement cell has run, so **all nine manifest commits precede every
+  `spec356-*.soak.json` vacuously**. From the first such artifact onward, a finding is a POST-DATA record
+  routed to a named follow-on — never a predicate edit and never an addendum (§8A preamble, R0.0c).
+- **Governing text read for this execution:** §0–§8 **together with** §8A's **TWENTY** addenda
+  (`ADJ-1` … `ADJ-20`), all PRE-DATA and all governing.
+
+### §9.3 — The executed control cells (G2)
+
+**PRE-DATA CLOSED.** The first `spec356-*.soak.json` in this history is
+`…/evidence/spec356-ctl-r1.soak.json`, added at commit `0cc71f06`. From that commit onward every finding
+against §0–§8 or §8A is a **POST-DATA record**: it may be recorded and routed to a named owner, and it may
+not alter any predicate, threshold, ordering or conditional (§8A preamble, R0.0c). All twenty addenda were
+read at this manifest **before** that artifact existed.
+
+**How the runner was invoked, and why it was not invoked from the main checkout.** The runner records
+`git -C "$REPO_ROOT" rev-parse HEAD` into every `matrix.txt` (`spec356-prune.sh:865`). §9.1's own mandated
+write moved `main`'s tip past the pin, so a cell run from the main checkout would have recorded the *newer*
+SHA and been discarded by checklist 2 — the artifact would have been unusable, not merely untidy. Every
+cell below was therefore run from a **worktree checked out at the pin itself**, whose `spec356-prune.sh` is
+byte-identical to the pin's blob (`fc66a1e6…`). This is the mechanism R8.3b already uses for cell E's
+pre-346 build. **The pin was NOT moved**, and each cell's `matrix.txt` carries
+`  repo HEAD:      feb85268952001813e502e27f65180855676ac25` exactly once.
+
+| Cell | Arming | Width | Duration | Exit | Arming witness | INSTRUMENT DEFECT | `STEP0C` | Pin needle |
+|---|---|---|---|---|---|---|---|---|
+| `spec356-ctl-r1` | armed | 1000 (default) | 1800 s | 1 | PASSED (present) | 0 | 0 | 1 |
+| `spec356-ctl-r2` | armed | 1000 (default) | 1800 s | 1 | PASSED (present) | 0 | 0 | 1 |
+| `spec356-ctloff-r1` | **disarmed** | 1000 (default) | 1800 s | 1 | PASSED (**absent**) | 0 | 0 | 1 |
+| `spec356-ctloff-r2` | **disarmed** | 1000 (default) | 1800 s | 1 | PASSED (**absent**) | 0 | 0 | 1 |
+
+**THE EXIT CODE IS ATTRIBUTED, NOT READ AS A VERDICT — and it is not an admissibility event.** All four
+cells end `exit 1`, and on all four the runner prints `RESULT: instrument sound`. The code is the inherited
+`exit "$HARNESS_RC"` (`spec356-prune.sh:1647`) carrying the harness's own **tombstone-byte gate**:
+`finishedReason` on `ctl-r1` reads *"tombstone-byte growth slope 70492.8 bytes/h exceeds 512.0 bytes/h"*.
+**That is the defect this family exists to characterize, observed rather than repaired** — and §1's opening
+paragraph already rules that a red tombstone gate is not evidence against `TG-OR-004`. It is **not** exit 9,
+**not** an `INSTRUMENT DEFECT`, and **not** a `STEP0C ADMISSIBILITY` routing: convergence failures, recovery
+failures and pending gates are all empty on every cell, and the memory gate (neutralized by design) passed.
+No cell was discarded and no cell was re-run.
+
+**The armed cells' column census.** All 43 columns populated on both `ctl` replicates, `empty=0` on every
+column, with the six INSTRUMENT-tagged columns nonzero and the 37 MEASURAND columns taking the
+population-only shape — the shape R4.3a assigns them.
+
+**The disarmed cells' empty prune-record columns are the SPECIFIED behaviour (ADJ-6, ADJ-9), and are
+reported here as such rather than as a finding.** Each `ctloff` replicate's `prune.csv` carries **180 data
+rows at the same 10 s cadence as the armed arm** — the sampler runs identically, so its cost stays
+common-mode and §1.2's *"one difference"* survives — with the prune-record columns empty and only the
+sampler-local `elapsed_secs` and the inherited `topgun_ormap_tombstone_bytes_total` populated. What was
+checked on these cells is the arming witness in its **absent** direction and the sampler's own liveness, and
+nothing else. **Reporting an instrument finding against the pin on a disarmed cell is forbidden**, and none
+is reported.
+
+**Replicate production (R4.4a).** Each replicate ran in its **own** `SPEC356_OUT_DIR` and its own data dir,
+both outside the tracked evidence dir, and was then **copied** — never moved, never renamed in place — to
+its `-r1` / `-r2` basenames. `SPEC356_FORCE=1` was never set and no control was re-run in place; either
+would have destroyed replicate 1, which is the run the df = 2 two-sample `t` needs. Each run's
+`${BASE}.artifacts.sha256` was verified with `shasum -a 256 -c` **in the scratch dir**, where the digest
+file's own un-suffixed basenames still resolve, **before** the copy; every artifact matched. The
+`scratch OUT_DIR → committed basename` mapping is committed as
+`…/evidence/spec356-control-replicate-map.txt`, four lines, and reconciles green against all four copied
+`matrix.txt` files (checklist 13: exactly one map line per basename; each `  csv:` and `  console log:`
+names that line's dir).
+
+| Scratch `SPEC356_OUT_DIR` | Committed basename |
+|---|---|
+| `…/scratchpad/ctl-r1-out` | `spec356-ctl-r1` |
+| `…/scratchpad/ctl-r2-out` | `spec356-ctl-r2` |
+| `…/scratchpad/ctloff-r1-out` | `spec356-ctloff-r1` |
+| `…/scratchpad/ctloff-r2-out` | `spec356-ctloff-r2` |
+
+**Artifact binding (R4.5 / ADJ-20).** Every cell's nine committed files include its runner-written
+`${BASE}.artifacts.sha256`, and each digest file entered history **in the same commit as the bytes it
+names** — `0cc71f06`, `0655842a`, `75a801bd`, `b073d9af`. No commit adds one without the other.
+
+### §9.4 — The two measured controls, their MDEs, the family-wise rate, and the §1.3 cell
+
+**The reduction is the one the graded driver re-derives, not a bespoke one.** Each replicate contributes
+**one level**: the mean of its `tombstone_bytes` column over the **ADJ-17 coordinate last-half window**
+(rows whose `elapsed_secs` exceeds the full ledger's elapsed midpoint), empty cells skipped exactly as the
+pinned fitter skips them. Run against SPEC-355's two committed HEAD CSVs the same reduction returns
+**38715.466667** and **36624.133333** — i.e. it reproduces the `38,715 · 36,624` pair §1.1 publishes, from
+the real bytes, without being told the answer.
+
+| Replicate | Coordinate-window level (B) |
+|---|---|
+| `spec356-ctl-r1` | 37788.666667 |
+| `spec356-ctl-r2` | 38297.600000 |
+| `spec356-ctloff-r1` | 38624.666667 |
+| `spec356-ctloff-r2` | 32706.666667 |
+| `spec355-sweep1000` (arm B of §1.1) | 38715.466667 |
+| `spec355-sweep1000b` (arm B of §1.1) | 36624.133333 |
+
+**§1.1 / R5.1 — CROSS-LINEAGE**, this build's `ctl` pair against SPEC-355's committed HEAD pair. Arm means
+38043.133 and 37669.800; `s_pooled = 1076.184028`; grand mean `37856.466667`; two-sample
+R5.1's `t = 0.346905` against its pre-registered critical value **4.303** (df 2, two-sided α = 0.05) ⇒
+**NOT REJECTED**. Recomputed MDE, by §1.1's own formula `4.303 × s_pooled / mean × 100` = **12.232573 %**.
+
+**§1.2 / R5.2 — WITHIN-LINEAGE**, one build, one lineage, one difference: `ctl` (armed) against `ctloff`
+(disarmed). Arm means 38043.133 and 35665.667; `s_pooled = 2969.921596`; grand mean `36854.400000`;
+`t = 0.800515` against 4.303 ⇒ **NOT REJECTED**. Recomputed MDE = **34.675840 %**.
+
+**Family-wise error rate (§1.4).** Two tests, each at α = 0.05, each pre-registered as a **non-rejection**
+predicate. Under independence the probability that at least one control rejects when the instrument is in
+fact neutral is `1 − 0.95² = 0.0975` ≈ **9.8 %** — roughly a 1-in-10 chance of a spurious *adverse* reading
+across the control set, not the 5 % a single test suggests. **No α correction is applied**, deliberately,
+per §1.4: a false adverse reading costs a re-run while a false clean reading would license invalid numbers.
+Neither control rejected, so no single rejection has to be read against this rate here.
+
+**THE §1.3 / R5.4 CELL, NAMED: `R5.1 passes / R5.2 passes` ⇒ CLEAN.** Both controls hold, both MDEs are
+stated, and **classification proceeds**. **The BUILD-LINEAGE cell did NOT fire**, so ADJ-5's
+*"STAND, BOUNDED AND FLAGGED"* qualification is not triggered by this control set and no cross-lineage
+bound on unexplained shift is owed from it. **No blocking cell fired**, so nothing routes to `TODO-637` and
+G3 is not gated by this walk.
+
+**Reclaim fraction, reported BESIDE the controls as corroboration and never as the deciding statistic
+(§1.1).** Over the armed pair, `topgun_or_prune_bytes_freed_total ÷ topgun_ormap_tombstone_bytes_total` at
+the ledger's last row is **63.5 %** (`ctl-r1`) and **69.3 %** (`ctl-r2`), against §1.1's committed HEAD
+reference of 80.1 % at width 1000 / 1800 s. The disarmed arm emits neither counter, so it contributes no
+reclaim figure — by design, not by omission. **This is corroboration only and decides nothing here**; the
+deciding statistic is the level mean above, and it did not reject.
+
+**POST-DATA RECORDS — recorded and routed, changing no predicate.** Both are readings taken after the data
+boundary closed, so neither may adjust a threshold, an ordering or a conditional.
+
+1. **The within-lineage control came out LOWER-powered than the cross-lineage one on these data**
+   (MDE 34.7 % versus 12.2 %), inverting the "higher power" expectation §1.2's own heading carries. The
+   cause is visible in the table: `ctloff-r2`'s level (32,706.7) sits ~5,900 B below its own arm-mate's,
+   which inflates the pooled sd. The predicate is pre-registered as a **formula over the observed pooled
+   sd**, not as a number, so the verdict stands exactly as computed — but a NOT-REJECTED at this MDE
+   excludes even less than the reporting bound's `≈ 17 %`. Routed to **`TODO-638`**, which already owns the
+   control set's power and blind-spot questions.
+2. **The armed pair's reclaim fraction (63.5 % / 69.3 %) runs below §1.1's committed HEAD reference
+   (80.1 %).** It is a cross-lineage comparison of a corroborating statistic and decides nothing under
+   §1.1. Routed to **`TODO-634`** as an input to the classification waves, which read the reclaim path
+   directly.
+
+### §9.5 — The executed measurement cells, and the R8.1 walk in its FROZEN ORDER (G4)
+
+**Governing text read for this walk: §0–§8 TOGETHER WITH §8A's TWENTY addenda, read AT THIS MANIFEST.**
+`ADJ-1` … `ADJ-20`, all PRE-DATA, all governing. Six of them supersede another addendum rather than
+§0–§8 — ADJ-15 → ADJ-13, ADJ-16 → ADJ-5 and ADJ-15's degeneracy scope, ADJ-17 → ADJ-15's slice
+construction, ADJ-18 → ADJ-17's split axis and density band, ADJ-19 → ADJ-18's clauses 2 and 3, ADJ-20 →
+ADJ-18's clause 4 — so neither §0–§8 alone nor §8A read piecemeal is the predicate this section walks.
+
+**PRE-DATA IS CLOSED** (§9.3). Every finding below is a **POST-DATA record**: recorded, routed to a named
+owner, acting on no predicate, no threshold, no ordering and no conditional.
+
+| Cell | Arming | Width | Duration | Exit | `RESULT:` | Arming witness | INSTRUMENT DEFECT | `STEP0C` | Pin needle | `prune.csv` rows |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `spec356-w100` | armed | **100** | 1800 s | 1 | `instrument sound` | PASSED (present) | 0 | 0 | 1 | 180 |
+| `spec356-long` | armed | 1000 (default) | 14,400 s | 1 | `instrument sound` | PASSED (present) | 0 | 0 | 1 | 1440 |
+
+**The exit code is attributed exactly as it was for the control cells, and it is not an admissibility
+event.** Both cells end `exit 1` carrying the harness's inherited **tombstone-byte growth-slope gate**,
+and the runner prints `RESULT: instrument sound` on both. It is **not** `exit 9`, **not** an
+`INSTRUMENT DEFECT` line and **not** a `STEP0C ADMISSIBILITY` routing. Both cells STAND.
+
+**Artifact binding (R4.5 / ADJ-20), verified BEFORE any content check — checklist 18 limb (0).** Each
+cell's seven artifacts were verified against its runner-written `${BASE}.artifacts.sha256` with
+`shasum -a 256 -c` in the evidence directory: **`spec356-long` 7/7 GREEN, `spec356-w100` 7/7 GREEN**, and
+each digest file entered history in the same commit as the bytes it names. **The classification below
+reads the `long` cell, and the `long` cell's provenance limb is GREEN verbatim.** The four control
+replicates carry a naming residual recorded as POST-DATA finding **PD-1** in §9.7; their bytes are
+GREEN 28/28.
+
+**The graders were run from the COMMITTED SIDECARS, digest-checked before execution.**
+`spec356-tmplconf.awk` `7c14b900…`, `spec356-slottruth.sh` `280f7a34…`, `spec356-skeleton.txt`
+`bfaac337…` — all three matched their pinned values, and the grader re-verified the driver's digest
+itself before executing it (`MODE -- driver sha256 280f7a34…f060 == DRIVER_SHA256`). The re-derivation ran
+in the mandated `-v ev=` mode against the real evidence directory; **fixture mode was not used.**
+
+#### §9.5.1 — STEP 0: the FOUR admissibility limbs, each with its evaluated value
+
+Evaluated over the `long` cell's **ADJ-17/ADJ-18 COORDINATE last-half window** — the rows whose
+`elapsed_secs` exceeds the FULL ledger's elapsed midpoint. Full ledger: 1440 rows, `t_first = 10 s`,
+`t_last = 14,400 s`, midpoint **`7,205 s`**. Window: **720 rows, `t_lo = 7,210 s`, `t_hi = 14,400 s`,
+span 7,190 s.** No window and no split anywhere below is a row index (ADJ-17); the ledger's row count is
+not a free parameter of any boundary.
+
+| Limb | Rule | Evaluated value | Verdict |
+|---|---|---|---|
+| **(a)** | §1.3's 2×2 landed in **CLEAN** or **BUILD-LINEAGE-EFFECT** | **`R5.1 passes / R5.2 passes` ⇒ CLEAN** — re-derived by the driver: `R51_RESULT = NOT REJECTED` (`t = 0.346905`), `R52_RESULT = NOT REJECTED` (`t = 0.800515`), against the pre-registered critical value `4.303` | **PASSES** |
+| **(b)** | R1.3a reports **≥ 1 split recompute** in the window read (ADJ-1, fail-closed) | **Δ`topgun_or_prune_split_recomputes_total` = 465**; `topgun_or_prune_split_computed_epoch` moves 230 → 462 across the window | **PASSES** |
+| **(c)** | every deciding column passed the R4.3 population check **AND**, per ADJ-12, `topgun_or_prune_drain_refs_p50` is READABLE — **`≤ 50 %` of its last-half rows are the 0-sentinel** | population check: all 43 columns `n=1440 empty=0`, zero `STEP0C ADMISSIBILITY`, zero `INSTRUMENT DEFECT` ⇒ **passes**. ADJ-12 readability: **708 of 720 last-half rows are the 0-sentinel ⇒ sentinel fraction `98.333333 %`, against the pre-registered `50 %` threshold** | **FAILS** |
+| **(d)** | ADJ-11 clause 0, evaluated FIRST of all: `Δpasses = Δempty_drains + Δnonempty_drains` | **Δpasses = 232,367**; **Δempty_drains = 232,365**; **Δnonempty_drains = 2**; `232,365 + 2 = 232,367` | **HOLDS** |
+
+**LIMB (c) FAILS. THE DETERMINATION IS THEREFORE `INDETERMINATE` (§2 Step 5), AND NO LATER STEP IS
+EVALUATED.** This is ADJ-12's escape hatch firing on its own pre-registered threshold, and it is a
+**PROTOCOL EXIT, NOT A THIRD BRANCH**: it leaves the ordered predicate exactly as it was, the Step 2 /
+Steps 3–4 partition remains the pair of exact complements on `median(L) ≤ B` / `median(L) > B`, and
+nothing is added between them. **Reading this hatch as a third determination would be out of contract,
+and none is read.**
+
+**Why the hatch is doing its job here rather than obstructing it, stated as a measurement.** The rendered
+p50 is a **60 s rolling window** (`3 × 20 s`, committed) over a summary that records **NON-EMPTY drains
+only**, so an expired window renders `0`. Over these 7,190 s the prune executed **232,367 passes and
+exactly 2 non-empty drains**. The twelve non-sentinel rows are the two 60 s windows those two drains
+populate — six scrapes each, at `t = 12,120…12,170 s` and `t = 13,410…13,460 s`, every one of them
+reading `999.9447405703887`. **`B` would rest on two observations.** The same column on the `w100`
+keeping-up contrast cell reads **0 % sentinel** over its own coordinate last-half window (216 non-empty
+drains in 900 s, `B = 99.992983`), so the unreadability is a property of the measured regime at width
+1000, **not an instrument fault** — the runner's population check passes on the column in both cells.
+
+**THE PASS-RATE DEGENERACY IS NOT WHAT HALTED THIS WINDOW, and the distinction is load-bearing.** ADJ-16
+clause 3 removed `s_early < 5` from Step 0 and scoped it to the Steps 3/4 evaluation. That limb is **not
+engaged here at all**: `s_early = 998.589613 ≥ 5`, so the window is nowhere near the pass-rate noise
+floor. **Limb (c) carries ADJ-12's sentinel hatch and NOT ADJ-15's degeneracy** — the sentinel hatch is
+genuinely an unreadable **deciding column** (`B` appears in Step 2's own predicate, upstream of
+everything), and that is the limb that failed.
+
+**ADJ-19 clause 1's minimum-evidence gate did NOT route this window.** The parent window carries **232
+positive `current_epoch` jumps** — far above the `≥ 5` floor — every jump exactly `1`, median positive
+jump `1.000`, bound `10 × 1.000 = 10.000`, maximum jump `1`. The epoch axis is non-decreasing. **No
+classification leaf is published here off a parent window with fewer than five positive epoch jumps**,
+and none could have been: this window has 232.
+
+**The remaining coordinate guards, re-derived rather than assumed** (ADJ-18 clauses 1–3, ADJ-19
+clause 2). Split midpoint of the window's own elapsed span: `(7,210 + 14,400)/2 = 10,805 s`. Early half
+`n = 360`, span 3,590 s, density `1.002786 ×`; late half `n = 360`, span 3,590 s, density `1.002786 ×` —
+both inside `[0.8×, 1.2×]`, enforced per half as well as for the ledger (`1.000695 ×`). Maximum gap
+between consecutive `elapsed_secs`: **11 s = 1.1 × cadence in each half**, against the `5 ×` bound.
+Distinct `current_epoch` values: **117 per slice**, against the floor of 2. The committed
+`spec356-long-passrate{,-early,-late}.csv` are convenience copies; the driver materialised the parent and
+both slices itself from `spec356-long.prune.csv` and `cmp`-ed them clean.
+
+#### §9.5.2 — The step that fired, the n = 1 caveat, and the routing consequences
+
+**THE STEP THAT FIRED IS STEP 5 — `INDETERMINATE` — via Step 0 limb (c).** Steps 1, 2, 3 and 4 were **not
+evaluated**, because Step 0 is evaluated before any step below it and its failure is fail-closed. The
+values reported in §9.5.3 are ADJ-3's **unconditional evidence bundle**; they are **not** step
+evaluations, and **no leaf is read off any of them**.
+
+**THE n = 1 CAVEAT, IN THIS PARAGRAPH BY OBLIGATION (§2.6).** The `long` and `w100` cells are **n = 1**.
+SPEC-355 §10.4.2's lesson is that the **level** replicates (5.4 % spread at width 1000) while the
+**slope** does not (it moved 2.0×, 4.6× and changed sign), so this record rests on a **single
+unreplicated 4 h series**. **Which kind of statistic decided, stated as §2.6 requires:** the halt turned
+on a **COUNT** — the census of 708 sentinel rows in 720 — and on two further counts, the 465 split
+recomputes and the conservation identity over three monotone counters. **No slope entered the
+determination at all.** The two pass-rate slopes reported below are the fragile quantities, and they are
+reported as evidence rather than as a verdict, so the n = 1 slope fragility touches the bundle and not
+the outcome. What the n = 1 fragility does bear on directly is the **repeat §8.1 mandates**, which
+doubles replicates precisely for it.
+
+**THE REGISTRY-BRANCH ROUTING CONSEQUENCE DOES NOT ATTACH, AND THAT IS THE POINT OF SAYING SO.** §2.5's
+routing consequence is triggered by **Step 2 firing** — the modal *"prune drains its licensed work while
+the pinned pool grows"* shape, which routes to the **REGISTRY branch of the TODO-634 family and NOT to a
+prune-accelerator**. **Step 2 did not fire, because it was never evaluated.** The window's `median(L)`
+and `B` are reported below as bundle items; they are **not** a Step-2 determination, they carry **no**
+REGISTRY routing, and reading them as one would be reading the ordered predicate past a failed
+admissibility gate. **This run routes nothing to the registry-versus-accelerator decision.**
+
+**§8.3 QUOTED BESIDE THIS STEP-5 OUTCOME, as §8.3's own last sentence requires:**
+
+> **The recommended reclamation model closes safety REGARDLESS of which cause it turns out to be.**
+> `ReclamationRegistry` (cursor-shaped consumers only) + retention SLA **N = 30 d** + the cursor-age
+> fence with HLC-horizon quarantine + `ceiling = min_live_claim − fixed_margin` bound the reclaimable set
+> by **live claims**, not by any hypothesis about *why* the current prune falls behind. **A selection
+> defect, a scheduling defect and a throughput defect are all *contained* by a registry that never
+> reclaims below a live claim.**
+>
+> What an unclassified cause costs is **fix-shape efficiency** — the family would design without knowing
+> which limb to optimize first — **not safety, and not the family's ability to proceed.** A Step-5
+> outcome is therefore to be read as **an expensive answer, not a blocked one**.
+
+**THE ROUTING TARGET, PRE-REGISTERED BEFORE THE DATA EXISTED (§8.1).** This outcome routes to **exactly
+one repeat of the deciding configuration at DOUBLED duration AND DOUBLED replicates — the `long` cell at
+28,800 s with n = 2 — under the SAME pin and the SAME frozen predicate**, which may not adjust a
+threshold, an ordering or a conditional. If that repeat is still INDETERMINATE, §8.2 escalates the
+unclassified cause as an **explicit input to TODO-634's design phase**, naming it, quoting every step's
+evaluated value and the admissibility limb that blocked. **Both are recorded here as owed, not as done:
+the repeat is a 8 h measurement this spec does not execute.** Owner: **TODO-634**.
+
+**ADJ-4's BOUND, worded as ADJ-4 requires even though no mechanism is named.** A determination under this
+predicate is reported as **"the best-supported of the FOUR PRE-REGISTERED mechanisms", never as "the
+cause"**. **This run names NO best-supported mechanism**: the admissibility gate closed upstream of the
+discrimination, so SELECTION/FRONTIER, SCHEDULING/LICENSING and THROUGHPUT are all left standing and none
+is endorsed. The bound's second obligation is unchanged and is discharged here: **a mechanism outside the
+four is NOT excluded**, and the residual evidence that would indicate one is named — **per-pass cost
+growth, index-scan cost, allocator and page-cache effects — none of which this instrument observes.**
+
+#### §9.5.3 — ADJ-3's UNCONDITIONAL REPORTING BUNDLE, due whatever step fires
+
+**(i) The pass-rate fit and its FLOOR-ONLY result — computed and reported even though Steps 3/4 were
+never reached.** Series: ADJ-13's **cumulative** construction — `passes_total` (y) against
+`current_epoch` (x) over **ALL** last-half rows, **no grouping, no exclusion, no row discarded**. The
+per-epoch-delta construction ADJ-13 forbids by name was not computed. Fitter: the **unforked**
+`spec349c2-fit.awk` at ADJ-15's pinned invocation `-v col=passes_total -v xaxis=current_epoch
+-v window=full`, run once per derived slice.
+
+| | `s_early` | `s_late` |
+|---|---|---|
+| **RAW slope (ADJ-15 clause 4)** | **998.589613 passes/epoch** | **998.845155 passes/epoch** |
+| Fitter field | `slope_per_x_unit` | `slope_per_x_unit` |
+| x axis / window | `current_epoch` / `full` | `current_epoch` / `full` |
+| rows / x span | 360 / 230.0 → 346.0 | 360 / 346.0 → 462.0 |
+| r² | 0.999931 | 0.999933 |
+
+**FLOOR-ONLY VERDICT (R8.1d).** `s_early = 998.589613 ≥ 5` ⇒ **the floor is cleared; the window is NOT
+degenerate**, so ADJ-16 clause 3's coarsened leaf is not in play. `s_late ≤ 0.5 × s_early` ⇒
+`998.845155 ≤ 499.294807` is **FALSE**, so **the decline test does NOT fire.** Ratio
+`s_late / s_early = 1.000256` — the pass rate is flat to within 0.03 % across the two halves.
+
+**SENSITIVITY at 0.4 / 0.6, with the iron no-routing rule.** `998.845155 ≤ 0.4 × s_early = 399.435845` is
+FALSE; `998.845155 ≤ 0.6 × s_early = 599.153768` is FALSE. **The verdict does not flip anywhere in the
+band, so ADJ-3's CONTESTED label does NOT attach on this leg.** The verdict at `0.5` governs, as it would
+have regardless: **CONTESTED changes exactly zero routing decisions.**
+
+**AND THE DECLINE-CONTESTED LABEL DOES NOT ATTACH EITHER.** R8.1b's label fires on *"a Step-1 or Step-2
+determination that coincides with ADJ-15's floor-only test firing"*. The floor-only test did not fire,
+and there is no Step-1 or Step-2 determination to attach it to. **No CONTESTED label is applied anywhere
+in this record.**
+
+**Per ADJ-15, no α, no standard error, no confidence interval and no "significantly below" is claimed for
+this fit.** The SE leg is REMOVED (ADJ-15 clause 2). The fitter still prints `se_per_x_unit`
+(`0.439085` early, `0.432885` late); those numbers are **printed, not used**, and carry no inferential
+weight here.
+
+**(ii) `L` statistics over the same window, with the `L ≤ B` fraction.**
+
+| Statistic | Value |
+|---|---|
+| `min(L)` | **0** |
+| **`median(L)`** — the ADJ-2 aggregator, the only one that decides | **0** |
+| `max(L)` | **1000** |
+| fraction of last-half samples with `L ≤ B` | **403 / 720 = 55.972222 %** |
+
+**`L` is exactly bimodal over this window: 403 rows read `0` and 317 rows read `1000`** — one epoch's
+refs at width 1000 — with no intermediate value. **`min(L)` is reported and does NOT decide** (ADJ-2);
+any evaluation of Step 2 or Step 3 that read it would be reading the pre-ADJ-2 predicate, and none is
+made here in any case.
+
+**R8.1b IS NOT ENGAGED, AND THE REASON IS NAMED RATHER THAN LEFT TO INFERENCE.** R8.1b's counter-anchored
+clause table is triggered by **`max(L) = 0`**. Here **`max(L) = 1000 ≠ 0`**: the repaired ADJ-7 emitter
+observed non-zero licensed backlog at 317 of 720 sample instants, so the gauge is a reading and not a
+construction. **No clause of R8.1b — neither clause 2's ELIGIBILITY-BOUND evidence nor clause 3's
+INADMISSIBLE-plus-INDETERMINATE — is taken, and this record leans neither way on a bare `max(L)`.**
+R8.1b's clause 0 and clause 1 are separately Step 0's limbs (d) and (b) and both hold. For completeness,
+because clause 2's conjuncts are cheap and their absence should be visible: **ADJ-14's named backlog
+series `Δbacklog_bytes := Δ topgun_ormap_tombstone_bytes_total − Δ topgun_or_prune_bytes_freed_total` =
+`5,349,731 − 46,000` = `+5,303,731` bytes** over the window, both counters from the same 10 s
+`prune.csv` rows; and `Δnonempty_drains = 2 ≠ 0`, which is clause 2's own disqualifying conjunct.
+
+**ADJ-7's boundary rule, observed.** `L` and `P` are **PRE-drain**, `indexed_refs` is **POST-drain**, so
+**no share is taken across that boundary anywhere in this record.** The within-snapshot share
+`L / (L + P)` over the window: **mean 0.269592, min 0.000000, max 0.761035**. `P`
+(`topgun_or_prune_ineligible_refs`, PRE-drain) moves **1031 → 537** across the window, range 314…1157 —
+a **falling**, not a growing, pinned pool. ADJ-7's prohibited ratios `P / indexed_refs` and
+`L / indexed_refs` are **never** reported here; those quantities have no referent.
+
+**(iii) `B`, with ADJ-12's provenance and its quality figure.**
+
+| | Value |
+|---|---|
+| **`B`** | **999.944741** |
+| Source (ADJ-12, and no other estimator is admissible) | the **median** over the coordinate last-half `prune.csv` rows of committed column **43**, `topgun_or_prune_drain_refs_p50` — the exporter-rendered p50 of the batch-size summary over its committed `3 × 20 s = 60 s` rolling window, **0-sentinel rows EXCLUDED** |
+| **0-sentinel EXCLUDED FRACTION (unconditional)** | **708 / 720 = 98.333333 %** |
+| Observations `B` actually rests on | **12 rows, behind exactly 2 non-empty drains** |
+| Non-sentinel values present | `999.9447405703887`, all twelve |
+
+**This is the figure that failed Step 0 limb (c)**, and it is reported here because R8.1a(iii) makes the
+fraction unconditional — a `B` published without it is incomplete even when the fraction is 0. **No `n`,
+no sd, no standard error and no t-statistic is computed by counting rows of the p50 column** (§5.4,
+restated by ADJ-12 and observed here). **`B` was never derived from `Δ_sum / Δ_count` — that estimator is
+REJECTED by ADJ-12 and MUST NOT be used for `B`.** The differenced mean is reported in §9.6 as a
+THROUGHPUT quantity only, which is the role §5.4 keeps it in.
+
+**(iv) The non-drop exit share and the PER-EXIT breakdown from the ledger.**
+
+| Exit | Δ over the window |
+|---|---|
+| `topgun_or_prune_matched_nothing_total` | **0** |
+| `topgun_or_prune_absent_total` | **0** |
+| `topgun_or_prune_restored_read_error_total` | **0** |
+| `topgun_or_prune_restored_evicted_total` | **0** |
+| `topgun_or_prune_restored_write_error_total` | **0** |
+| **non-drop numerator** | **0** |
+| `topgun_or_prune_considered_total` (denominator) | **2,000** |
+| `topgun_or_prune_dropped_total` | **2,000** (100.000000 % of considered) |
+| **non-drop exit share** | **0.000000 %** |
+
+**The denominator is stated beside the ratio because it is small and the reader must see it.** Over a
+window carrying 232,367 passes, only **2,000 refs were ever considered** — the two non-empty drains, at
+1,000 refs each. Every one of them was `Dropped`. **A zero share over a 2,000-ref denominator is a
+different object from a zero share over a large one**, and the pairing is what makes that visible on the
+record rather than inferred.
+
+**(v) ADJ-11's DIAGNOSTIC COLUMN — `Δpasses` stated ALONGSIDE the window's scrape count, unconditional.**
+
+| Quantity | Value |
+|---|---|
+| **`Δpasses` over the window** | **232,367** |
+| **window scrape count** | **720** |
+| ratio | **322.73 passes per 10 s scrape** |
+| `Δempty_drains` | 232,365 |
+| `Δnonempty_drains` | **2** |
+| `Δrestored_read_error_total` | **0** (flat) |
+| `Δrestored_write_error_total` | **0** (flat) |
+
+**The under-sampling regime is therefore VISIBLE rather than inferred**, which is this limb's whole
+purpose: at 322.73 passes per scrape a 10 s gauge sample of `L` bounds nothing about the intervening
+passes, and a reader shown both numbers can tell that from a window where the prune genuinely idled.
+
+#### §9.5.4 — What was NOT done, listed because each is named out of contract
+
+- **No ROW-INDEX split** — every window and split above is a coordinate (ADJ-17/ADJ-18).
+- **No `current_epoch`-MIDPOINT split** — slice membership is `elapsed_secs ≤ (t_lo + t_hi)/2` of the
+  window (ADJ-18 clause 1); only the **fit** axis is `current_epoch`.
+- **No `slope_mb_per_hour`** on any pass-rate figure — that field belongs to the `tombstone_bytes`
+  byte-slope fits alone. Both pass-rate slopes are reported from the field `slope_per_x_unit`, which is
+  the rename that makes a wrong-axis fit visible without further checking.
+- **No per-epoch-delta series** (ADJ-13, forbidden by name).
+- **No α, no SE-based claim, no "significantly below"** (ADJ-15 clause 2 / R8.1d).
+- **No classification leaf other than INDETERMINATE** — and the parent window carries 232 positive epoch
+  jumps, so ADJ-19 clause 1's floor was never the constraint.
+- **No whole-window INDETERMINATE reported off a degenerate pass rate** — the pass rate is not degenerate
+  here (`s_early = 998.589613`), and the INDETERMINATE this record publishes comes from ADJ-12's sentinel
+  hatch at Step 0 limb (c), which is a different mechanism with a different owner.
+
+---
+
+### §9.6 — The DUAL-USE capture (B7a): claim spans, LWM cadence, prune-batch sizes
+
+Same `long` cell, same coordinate last-half window (720 rows, 7,190 s). This capture is **dual-use** — it
+is the evidence base the `ReclamationRegistry` claim/retention model is designed against, and it is owed
+whatever the classification returns.
+
+| Quantity | Series | Δ over the window | Derived |
+|---|---|---|---|
+| **Claim span** | `claim_span_epochs_{sum,count}` | sum **0**, count **465** | **mean 0.000000 epochs** over 465 observations |
+| **Claim lag** | `claim_lag_epochs_{sum,count}` | sum **0**, count **465** | **mean 0.000000 epochs** over 465 observations |
+| **Tracked claims** | `tracked_claims` | — | **constant 1** across all 720 rows (min 1, max 1) |
+| **LWM position** | `low_water_mark` | 230 → 462 | advances in lockstep with `current_epoch` (230 → 462) |
+| **LWM advances** | `lwm_advances_total` | **232** | **cadence 30.991 s per advance** |
+| **LWM epochs advanced** | `lwm_epochs_advanced_total` | **232** | **1.000 epoch per advance** |
+| **LWM stall** | `lwm_stall_seconds` | 8 → 26 | **max 34 s** over the window |
+| **Prune batch size** | `drain_refs_{sum,count}` | sum **2,000**, count **2** | **1000.000000 refs per non-empty drain** (the `_sum`/`_count` differenced mean, §5.4's PRIMARY reading for a THROUGHPUT quantity) |
+| **Drain breadth** | `drain_epochs_{sum,count}` | sum **2**, count **2** | **1.000 epoch per drain** |
+| **Epochs drained** | `epochs_drained_total` | **2** | — |
+| **Split recomputes** | `split_recomputes_total` | **465** | 0.646 recomputes per scrape |
+
+**THE TWO FREQUENCIES, STATED SEPARATELY BECAUSE THEY ARE THE POINT OF THE TABLE.**
+
+| Frequency | Per scrape | Per pass |
+|---|---|---|
+| **LWM movement** | **0.322222 advances / scrape** | **0.000998 advances / pass** (232 in 232,367) |
+| **Non-empty drain** | **0.002778 drains / scrape** | **0.0000086 drains / pass** (2 in 232,367) |
+
+**What the table shows, reported as observation and routed nowhere.** The low-water mark **moves freely**
+— 232 advances, one epoch each, every ~31 s, tracking `current_epoch` exactly — and the tracked claim set
+is a **single claim of zero span and zero lag** for the whole window. **So the prune is not LWM-stalled
+and is not claim-pinned in this window**, while it converted 232,367 passes into 2 non-empty drains and
+freed 46,000 bytes against 5,349,731 bytes of tombstone arrival. **This is evidence, not a
+determination**: Step 0 closed upstream of the step that would have read it, and nothing here is routed
+to the registry-versus-accelerator decision. It is committed so the repeat §8.1 mandates, and TODO-634's
+design phase, inherit it rather than re-measure it. Owner: **TODO-634**.
+
+**The `w100` keeping-up contrast, for the same reason.** Over its own coordinate last-half window (90
+rows, 900 s): 29,991 passes, **216 non-empty drains**, 294 LWM advances, `B = 99.992983` at **0 %
+sentinel**, `Δbytes_freed = 651,200` against `Δtombstone_bytes = 659,802` — **a backlog delta of +8,602
+bytes, versus the `long` cell's +5,303,731.** Non-drop exit share **0.000000 %** there too. The contrast
+is committed as capture; it decides nothing here.
+
+---
+
+### §9.7 — Cell E's disposition under R8.2, and the POST-DATA records
+
+#### §9.7.1 — R8.2 applied, with the ledger numbers that ruled it
+
+**R8.2's two branches, evaluated on this run's determination and this run's ledger:**
+
+| Branch | Condition | Evaluated | Fires? |
+|---|---|---|---|
+| **RUN** | determination is **SELECTION/FRONTIER** | determination is **INDETERMINATE** | **NO** |
+| **RUN** | **or** non-`Dropped` exits **> 10 %** of considered over the `long` run's last half | **0.000000 % ≤ 10 %** (numerator 0, denominator 2,000) | **NO** |
+| **CLOSE as not needed** | determination is **THROUGHPUT** or **SCHEDULING** | determination is **INDETERMINATE** | **NO** |
+| **CLOSE as not needed** | **and** non-`Dropped` exit share **≤ 10 %** | **0.000000 % ≤ 10 %** — **satisfied** | (conjunct met, branch still not reached) |
+
+**BOTH NUMBERS ARE QUOTED, as §3 requires — the redundancy is a cross-check, not a licence to omit one.**
+The exit share is **0.000000 %** and the literal is **10 %**; the ledger numbers that ruled it are
+`Δconsidered = 2,000`, `Δdropped = 2,000`, and all five non-`Dropped` exit counters flat at **0**.
+
+**THE DISPOSITION: CELL E DOES NOT FIRE. IT IS NOT RUN.** R8.2's RUN branch is a biconditional over a
+disjunction both of whose disjuncts are false, so **not running is the rule's own answer**, not a
+judgement call. **It is equally NOT "CLOSED as not needed":** that branch's *first* conjunct requires a
+THROUGHPUT or SCHEDULING determination, and this walk produced neither. **G5 executes no cell E.**
+
+**§3's coherence argument, checked rather than assumed — and it is where the gap shows.** §3 argues the
+rule is self-consistent by construction: a THROUGHPUT/SCHEDULING determination can only be reached via
+Step 3 or Step 4, both of which require exit share ≤ 10 %, so CLOSE's second conjunct is automatically
+satisfied whenever its first is; and a SELECTION/FRONTIER determination reached via Step 1 automatically
+satisfies RUN. **Both implications hold and neither has an antecedent here.** The argument is stated over
+the four *mechanism* determinations and is silent on the **fifth outcome the same predicate can
+produce** — `INDETERMINATE`, which §2.3 Step 5 and ADJ-12's hatch both route to. Recorded as **PD-2**
+below.
+
+#### §9.7.2 — POST-DATA records: recorded, routed, acting on nothing
+
+**Every item here is a reading taken after the data boundary closed (§9.3). None alters a predicate, a
+threshold, an ordering or a conditional, and none was acted on.**
+
+**PD-1 — ADJ-20's BASENAME binding and R4.4a's replicate RENAME are in tension, and the verbatim
+checklist 18 limb (0) command REDs on the four control replicates.** ADJ-20 clause 1 writes
+`${BASE}.artifacts.sha256` *"by BASENAME, so the file verifies unchanged after the scratch-to-evidence
+copy"*; R4.4a step 5 requires each replicate to run in its own scratch `SPEC356_OUT_DIR` under the
+**un-suffixed** cell name and then be copied to the `-r1` / `-r2` committed basenames. The copy therefore
+**renames**, and the committed digest files name `spec356-ctl.csv` where the committed artifact is
+`spec356-ctl-r1.csv`. **Measured at this wave:** the verbatim loop reports `RED PROVENANCE` on all four
+control replicates on **name resolution**, while the byte check under the committed
+`spec356-control-replicate-map.txt` rename passes **28 of 28, byte-identical** — and §9.3 already records
+that G2 verified each set with `shasum -a 256 -c` **in the scratch dir, before the copy**, where the
+digest file's own basenames still resolve. **The two measurement cells `long` and `w100` are GREEN
+verbatim, with no mapping**, and the classification above reads the `long` cell. **Disposition:** the
+artifacts' bytes ARE their runs'; `RED PROVENANCE`'s own remedy — *"re-run the cell, do not re-read
+it"* — is inapplicable, because a re-run under R4.4a reproduces the rename identically. **This is a
+finding against ADJ-20 clause 1's naming construction, which a POST-DATA record may not edit.** Routed to
+**TODO-648**, which already owns checklist 18 limb (0)'s mechanics.
+
+**PD-2 — R8.2 and the `CELLE_DISPOSITION` enum are both silent on an INDETERMINATE determination.**
+R8.2's RUN and CLOSE branches are stated over SELECTION/FRONTIER, THROUGHPUT and SCHEDULING; §2.3 Step 5
+can also return `INDETERMINATE`, and under it **neither branch fires**. R5.7(e)'s closed enum for
+`CELLE_DISPOSITION` carries `CLOSED-NOT-NEEDED` | `RUN-NON-REPRODUCTION-RECORDED-AND-SPUN-OFF` |
+`RUN-REPRODUCTION-WIDENS-CLAIM` | `RUN-INDETERMINATE`, and **none of the four describes "cell E does not
+fire because the classification is INDETERMINATE"**: `CLOSED-NOT-NEEDED` is glossed as *"R8.2's CLOSE
+branch"*, whose precondition is unmet, and the three `RUN-` values presuppose the cell ran. **The
+disposition itself is unambiguous — cell E is not run — but the normative surface has no value for it.**
+Routed to **TODO-634**, as an input to the family that owns the follow-on; the slot is G5's to fill and
+this record is what it must fill against.
+
+**PD-3 — the committed driver's `B` is NOT ADJ-12's `B`, and the divergence is what suppressed
+`MEDIAN_L_OVER_B`.** ADJ-12 defines `B` as the median of column 43 with **0-sentinel rows EXCLUDED**;
+`spec356-slottruth.sh` takes the median over **all** last-half rows of that column and emits the ratio
+only when that median is `> 0`. On this window the two differ maximally: **ADJ-12's `B` = 999.944741**
+(12 non-sentinel rows), the driver's = **0** (708 of 720 rows are the sentinel), so the driver's `bb > 0`
+guard fired and the slot was not emitted. **The driver's refusal is correct in substance** — it declined
+to divide by a zero, and the predicate's answer to the identical condition is ADJ-12's hatch, which this
+walk took — but the two disagree on *which* quantity `B` is, and only one of them is the pre-registration.
+**Consequence at the grading layer, measured:** checklist 18 limb (a)'s required set names
+`MEDIAN_L_OVER_B` among eleven, so it reports `FAIL 18 -- truth file is INCOMPLETE -- 1 of 11
+re-derivable slots are MISSING and therefore UNGRADED: MEDIAN_L_OVER_B`, and checklist 19 is
+`WITHHELD` behind it. **Both are structural on this evidence set and neither can be repaired without
+editing a pinned sidecar, which this wave may not do.** Routed to **TODO-648**.
+
+**PD-4 — the exit-share denominator is small in absolute terms, and the record says so rather than
+letting the percentage stand alone.** `0.000000 %` is computed over `Δconsidered = 2,000` in a window of
+232,367 passes. R8.1e names this coupling for the degenerate-pass-rate leaf — *"a prune that barely runs
+considers barely anything"* — and although that leaf is not the outcome here, the same coupling holds and
+is reported for the same reason: the two statistics degrade together and the record must show both.
+Routed to **TODO-634** as an input to the repeat §8.1 mandates.
+
+#### §9.7.3 — Grader verdicts at this wave, stated as an intermediate state
+
+Run from the committed sidecars in the mandated `-v ev=` mode, after checklist 18 limb (0):
+
+| Item | Verdict at this commit | Why |
+|---|---|---|
+| **limb (0) provenance** | **GREEN** on `spec356-long` and `spec356-w100` (7/7 each), verbatim | the cells the classification reads |
+| **15** — template is the pinned skeleton, byte-exact modulo slots | **PASS** | the block is pasted, not retyped; only slot values moved |
+| **16** — every slot well-formed | **FAIL on ONE residual token**, `{{CELLE_DISPOSITION}}` | a wave boundary: R8.2/R8.3's slot is G5's, and PD-2 records that R8.2 supplies no enum value for this outcome |
+| **18** — re-derivation | **`SKIP` at this commit** (the grader does not attempt 18 or 19 while a `{{…}}` token stands); **`FAIL` once the residual token is filled** — `truth file is INCOMPLETE -- 1 of 11 re-derivable slots are MISSING and therefore UNGRADED: MEDIAN_L_OVER_B` | structural on this evidence set (PD-3); the driver declined the ratio and the driver is a pinned sidecar this wave may not edit |
+| **19** — reconciliation | **`SKIP` at this commit**; then **`NOT APPLICABLE` on its own terms**, reported `WITHHELD` behind item 18 | `STEP_LEAF` is `INDETERMINATE`, so limb (b) has nothing to reconcile — Step 0/5 admissibility is decided upstream of these four slots, and the escape runs in the safe direction only |
+
+**Both verdicts for 18 and 19 are stated because the grader reports the second only after the first is
+cleared, and a record that showed only `SKIP` would hide PD-3.** The `FAIL 18` / `WITHHELD 19` line above
+was produced by running the same committed grader, in the same `-v ev=` mode, over this manifest with the
+one residual token provisionally substituted — a diagnostic run against a scratch copy, changing no
+committed byte.
+
+**Recording this as a stated intermediate state is the point, exactly as it was at G2:** a block that
+graded green while carrying an ungraded classification would be the defect. **Item 19's
+`NOT APPLICABLE` is not a pass and is not claimed as one** — no comparison was performed, because
+`INDETERMINATE` reads no classification number off any run and therefore cannot launder one.
+
+---
+### §9.C — Controls and dynamics: the PINNED TEMPLATE
+
+**This block is the pinned skeleton `…/evidence/spec356-skeleton.txt` (sha256 `bfaac337…`, 46 lines,
+2,288 B), pasted rather than retyped, with numeric slots filled and no other byte edited (R5.7(b)).** The
+executor never types the mandated sentences, so they cannot be mistyped, re-wrapped or truncated.
+
+**SLOT FILLING IS A WAVE LEDGER, and it is kept current rather than restated once.** G2 filled the ten
+control-derived slots. G3 filled the six the `long` cell's measurement supplies — `EXIT_SHARE_PCT`,
+`S_RATIO`, `S_EARLY`, `S_LATE`, `S_EARLY_FIELD`, `S_LATE_FIELD` — and deliberately left
+`MEDIAN_L_OVER_B` open, because the committed driver DECLINED to emit it and a statistic a driver
+declined to compute is not zero. **G4 fills the two the R8.1 walk derives:** `STEP_LEAF` =
+`INDETERMINATE` (the walk halted at Step 0 limb (c) on ADJ-12's sentinel hatch — §9.5.1), and
+`MEDIAN_L_OVER_B` = `0.000000`, which is `median(L) = 0` over **ADJ-12's** `B` = `999.944741`, the median
+of column 43 with the 0-sentinel rows EXCLUDED as the addendum requires. The excluded fraction —
+**98.333333 %** — is reported beside it at §9.5.3(iii), unconditionally, and it is the very figure that
+failed limb (c).
+
+**G5 fills the nineteenth and last: `CELLE_DISPOSITION` = `NOT-FIRED-DETERMINATION-INDETERMINATE`.**
+That value is **deliberately OUTSIDE R5.7(e)'s four-value closed enum**, and the reason is §9.7.2's
+record **PD-2**: under an `INDETERMINATE` determination **neither R8.2 branch fires**, and none of
+`CLOSED-NOT-NEEDED` / `RUN-NON-REPRODUCTION-RECORDED-AND-SPUN-OFF` / `RUN-REPRODUCTION-WIDENS-CLAIM` /
+`RUN-INDETERMINATE` is true of this run. **All nineteen slots now carry a value; the block is complete
+and it is NOT green**, and §9.8.2 states in full which value was written, why, what it costs at
+checklist 16, and who owns the gap. **The block is therefore NOT in its graded final state:**
+checklist 15 (byte-exactness modulo slots) passes, checklist 16 FAILS on this one out-of-enum value —
+by construction, as the honest signal that the normative surface has no value for this outcome — and
+checklists 18 and 19 carry the dispositions §9.7.3 and §9.13 tabulate. Recording that as a stated,
+measured state is the point; a block that graded green while publishing a claim this run cannot prove
+would be the defect.
+
+<!-- TG356B-CTRL BEGIN v2 -->
+### 9.C — Controls and dynamics (PINNED TEMPLATE v2 — fill slots only, edit no other byte)
+
+NORMATIVITY: this block is the ONLY surface the acceptance criteria read for the controls, the
+single-arm dynamics claims and the published classification leaf. Prose elsewhere in §9 is
+NON-NORMATIVE for those claims and carries no adjudicated finding.
+
+NEUTRALITY STATEMENT 1 of 3 — R5.1 (role-swap control)
+result: NOT REJECTED
+observed pooled sd: 1076.184028
+observed pair mean: 37856.466667
+recomputed MDE: 12.232573 %
+MDE ≈ 17 %
+a smaller perturbation is NOT excluded
+role: CATASTROPHE DETECTOR; n = 6 DECLINED at ≈ 4 h
+a dynamics-only perturbation from recorder presence or activation is not excluded by any control in this protocol
+
+NEUTRALITY STATEMENT 2 of 3 — R5.2 (order control)
+result: NOT REJECTED
+observed pooled sd: 2969.921596
+observed pair mean: 36854.400000
+recomputed MDE: 34.675840 %
+MDE ≈ 17 %
+a smaller perturbation is NOT excluded
+role: CATASTROPHE DETECTOR; n = 6 DECLINED at ≈ 4 h
+a dynamics-only perturbation from recorder presence or activation is not excluded by any control in this protocol
+
+NEUTRALITY STATEMENT 3 of 3 — cell E disposition
+disposition: NOT-FIRED-DETERMINATION-INDETERMINATE
+MDE ≈ 17 %
+a smaller perturbation is NOT excluded
+role: CATASTROPHE DETECTOR; n = 6 DECLINED at ≈ 4 h
+a dynamics-only perturbation from recorder presence or activation is not excluded by any control in this protocol
+
+DECLINED n = 6 EXTENSION — COST RE-DERIVED, NOT TYPED (ADJ-10)
+8 control cells × 1800 s = 4 h
+
+SINGLE-ARM DYNAMICS OBSERVATIONS (ARMED ARM ONLY)
+non-drop exit share = 0.000000 % — NOT a comparison; no control arm exists for these
+median(L)/B = 0.000000 — NOT a comparison; no control arm exists for these
+s_late / s_early = 1.000256 — NOT a comparison; no control arm exists for these
+s_early = 998.589613 passes/epoch raw, from fitter field slope_per_x_unit — NOT a comparison; no control arm exists for these
+s_late = 998.845155 passes/epoch raw, from fitter field slope_per_x_unit — NOT a comparison; no control arm exists for these
+dynamics blind spot owner: TODO-638
+
+CLASSIFICATION LEAF PUBLISHED BY THIS RUN (R8.1's frozen ordered predicate)
+leaf: INDETERMINATE
+<!-- TG356B-CTRL END v2 -->
+
+---
+
+### §9.8 — Cell E's recorded disposition, and the nineteenth slot (G5)
+
+**PRE-DATA remains CLOSED** (§9.3). Everything in §9.8 through §9.13 is a **POST-DATA record**: it is
+recorded, it is routed to a named owner, and it acts on no predicate, no threshold, no ordering and no
+conditional.
+
+#### §9.8.1 — CELL E IS NOT RUN, AND THIS IS THE RECORD OF IT WITH THE LEDGER NUMBERS THAT RULED IT
+
+**G5 executed no cell E.** The decision is R8.2's own, taken on a rule frozen before any measurement
+existed, and it is recorded here with its numbers rather than asserted.
+
+**The ledger, RE-DERIVED at this wave rather than copied forward from §9.5.3(iv).** G5 recomputed the
+window and every counter delta directly from the committed `spec356-long.prune.csv` under ADJ-17/ADJ-18's
+coordinate rule — full ledger 1440 rows, `t_first = 10 s`, `t_last = 14,400 s`, midpoint **`7,205 s`**;
+window = the rows whose `elapsed_secs` exceeds that midpoint, **720 rows, `t_lo = 7,210 s`,
+`t_hi = 14,400 s`, span 7,190 s**; each Δ taken between the window's first and last rows. Every value
+below reproduces §9.5.3(iv) exactly.
+
+| Ledger quantity (coordinate last-half window of the `long` run) | Value |
+|---|---|
+| `topgun_or_prune_considered_total` — **Δconsidered, the denominator** | **2,000** |
+| `topgun_or_prune_dropped_total` — **Δdropped** | **2,000** (100.000000 % of considered) |
+| `topgun_or_prune_matched_nothing_total` | 0 |
+| `topgun_or_prune_absent_total` | 0 |
+| `topgun_or_prune_restored_read_error_total` | 0 |
+| `topgun_or_prune_restored_evicted_total` | 0 |
+| `topgun_or_prune_restored_write_error_total` | 0 |
+| **non-`Dropped` NUMERATOR** (the five counters above, summed) | **0** |
+| **NON-`Dropped` EXIT SHARE** | **0.000000 %** |
+| **THE PRE-REGISTERED LITERAL it is compared against** | **10 %** |
+| `Δpasses` over the same window, quoted so the denominator is read in context | 232,367 |
+
+**THE RULE WAS FROZEN BEFORE THE DATA EXISTED, and that is the whole of its value.** §3's own words:
+*"The 10 % literal is arbitrary-but-fixed. Its role is to make the decision un-chooseable after the data
+lands."* The manifest carrying it is PRE-DATA by commit order (§9.2), and §3 was never edited: the
+`10 %` above is read out of the frozen section, not chosen at this keyboard. **Both numbers are quoted,
+as §3 requires** — the share `0.000000 %` and the literal `10 %` — because §3 keeps the redundancy as a
+cross-check and calls omitting either a licence it does not grant.
+
+**R8.2 EVALUATED, LIMB BY LIMB — AND NEITHER BRANCH'S ANTECEDENT IS SATISFIED.**
+
+| R8.2 branch | Conjunct / disjunct | Evaluated at this run | Holds? |
+|---|---|---|---|
+| **RUN** | determination is **SELECTION/FRONTIER** | determination is **INDETERMINATE** (§2 Step 5, via Step 0 limb (c)) | **NO** |
+| **RUN** | **or** non-`Dropped` share **> 10 %** | **0.000000 % > 10 %** is FALSE | **NO** |
+| ⇒ | RUN fires iff either disjunct holds | both disjuncts FALSE | **RUN DOES NOT FIRE** |
+| **CLOSE-as-not-needed** | determination is **THROUGHPUT** or **SCHEDULING** | determination is **INDETERMINATE** | **NO** |
+| **CLOSE-as-not-needed** | **and** non-`Dropped` share **≤ 10 %** | **0.000000 % ≤ 10 %** is TRUE | yes — but it is the SECOND conjunct of a conjunction whose FIRST is false |
+| ⇒ | CLOSE fires iff both conjuncts hold | first conjunct FALSE | **CLOSE DOES NOT FIRE** |
+
+**SO THE DISPOSITION IS: CELL E DOES NOT FIRE, AND IT IS NOT "CLOSED AS NOT NEEDED".** Not running is
+R8.2's own answer to a disjunction both of whose disjuncts are false — it is the rule's output, not a
+judgement made at execution time. **It is emphatically not R8.2's CLOSE branch**, whose first conjunct
+requires a THROUGHPUT or SCHEDULING determination and which this walk did not produce. Calling this run
+`CLOSED-NOT-NEEDED` would assert a determination that was never reached; calling it any `RUN-` outcome
+would assert a cell that was never executed. **Neither is written anywhere in this record.**
+
+**WHAT B8 DOES AND DOES NOT GET FROM THIS, STATED PLAINLY RATHER THAN SMOOTHED OVER.** B8 enumerates
+exactly two limbs — **(a) RUN** and **(b) CLOSED as not needed** — and **this run takes NEITHER**, for
+the reasons the table above measures. What is discharged is B8's binding closing sentence: *"It must not
+lapse unrecorded, and the disposition must not be a footnote."* The disposition is recorded here, in a
+titled subsection, with the pre-registered rule, the determination, the exit share, the denominator and
+the frozen literal all quoted as numbers. **What is NOT discharged is B8's two-limb enumeration itself**,
+because the enumeration is silent on the fifth outcome the same predicate can produce. That silence is
+**PD-2** (§9.7.2), it is a finding against a normative surface a POST-DATA record may not edit, and its
+owner is **TODO-634**.
+
+**And the consequence for the carried question, so it cannot be read as answered:** the
+**2026-07-13 → 2026-07-27 interval REMAINS UN-PROBED**. Cell E's *disposition* is discharged; the
+*interval* is not, and no claim about `6c35785a` (sf-346) or `2769570f` (sf-347) is made or widened here
+in either direction. Ownership returns intact to **TODO-634**, which carried it in from SPEC-355 and
+carries it out of SPEC-356b unchanged.
+
+**R8.3b's three provenance exports were NOT set, and that is correct rather than an omission.**
+`SPEC356_PIN_SHA`, `SPEC356_PIN_CMD` and `SPEC356_PIN_WORKTREE` exist to make a cell-E `matrix.txt`
+provable. No cell E ran, so there is no `matrix.txt` to provenance, no pre-346 binary was built, no
+half-swap was performed and no `spec356-cellE.*` artifact exists in this evidence directory. **Exporting
+them would have provenanced nothing.**
+
+#### §9.8.2 — THE NINETEENTH SLOT: WHICH VALUE WAS WRITTEN, AND WHY IT IS OUT OF ENUM ON PURPOSE
+
+**Written:** `CELLE_DISPOSITION` = **`NOT-FIRED-DETERMINATION-INDETERMINATE`**.
+
+**It is NOT one of R5.7(e)'s four admissible values, and the choice is deliberate and loud.** Each of the
+four would have published something this run cannot prove:
+
+| Enum value | What writing it would have asserted | Why it is false here |
+|---|---|---|
+| `CLOSED-NOT-NEEDED` | R8.2's CLOSE branch fired | its **first conjunct** requires a THROUGHPUT or SCHEDULING determination; this walk produced **INDETERMINATE** |
+| `RUN-NON-REPRODUCTION-RECORDED-AND-SPUN-OFF` | cell E ran and did **not** reproduce | **no cell E ran** |
+| `RUN-REPRODUCTION-WIDENS-CLAIM` | cell E ran and reproduced, widening the no-regression claim to 2026-07-13 | **no cell E ran**, and no claim is widened |
+| `RUN-INDETERMINATE` | cell E ran and its result was **unreadable** | **no cell E ran**; the INDETERMINATE here is the *classification's*, produced upstream of cell E and before it could have been scheduled |
+
+**The disposition is unambiguous; the normative surface has no value for it.** That asymmetry is exactly
+**PD-2**, and the honest way to carry it onto the graded block is to write a value that **says the true
+thing and REDs**, rather than one that says a false thing and passes. `NOT-FIRED-DETERMINATION-INDETERMINATE`
+is self-describing in the enum's own shape and cannot be mistaken for a run that happened.
+
+**WHAT IT COSTS, MEASURED RATHER THAN PREDICTED.** Run from the committed sidecars in the mandated
+`-v ev=` mode, the grader reports:
+
+```
+PASS 15 -- block is the pinned skeleton, byte-exact modulo slots
+FAIL 16 -- slot CELLE_DISPOSITION = 'NOT-FIRED-DETERMINATION-INDETERMINATE' is not well-formed (grammar ENUM_CELLE)
+SKIP 18 -- not attempted: the block is not a well-formed filled skeleton
+SKIP 19 -- not attempted: the block is not a well-formed filled skeleton
+exit=1
+```
+
+**This FAIL is the signal, not the defect.** `spec356-tmplconf.awk:56-57` admits four literals and
+nothing else; the value this run must publish is not among them; so the grader's red is the normative
+surface reporting its own gap at exactly the point a reader will look. **No sidecar was edited to widen
+the enum** — `spec356-tmplconf.awk` is a pinned, digest-checked, un-editable file under this spec's
+constraints, and widening a grammar after the data lands is precisely the post-hoc adjustment the
+pre-registration exists to prevent. **No R5.7(e) byte was edited either**, for the same reason.
+
+**The counterfactual is stated because it is the tempting one and it is wrong.** Substituting
+`RUN-INDETERMINATE` makes the grader print `PASS 16 -- all 19 slots well-formed` and unblocks items 18
+and 19 — which then report `FAIL 18 … MEDIAN_L_OVER_B` and `WITHHELD 19` (PD-3, §9.13). **That green on
+item 16 would have been bought with a false claim** — that a cell ran which did not — and it would not
+have produced a green record anyway. **A green that cannot be proven is the defect; the FAIL above is the
+record being honest at the cost of its own colour.**
+
+**Owner of the gap: `TODO-634`**, which owns the cell-E question and the follow-on family. The concrete
+ask carried to it is narrow and stated so it can be actioned rather than re-derived: R8.2 needs a limb
+for the INDETERMINATE determination, and `CELLE_DISPOSITION`'s enum needs the corresponding value —
+**both are changes to a pre-registered surface, so both belong to a spec that RE-PINS, never to an
+execution.**
+
+---
+
+### §9.9 — The §8.1 REPEAT OBLIGATION: **OWED, NOT DONE**
+
+**This spec does NOT execute the repeat.** The obligation is recorded here in full, as owed, so that it
+cannot be read as discharged by the paragraph that names it.
+
+| | The obligation, as §8.1 pre-registered it before the data existed |
+|---|---|
+| **What** | **exactly one repeat** of the deciding configuration |
+| **Which cell** | the **`long`** cell — the one whose walk returned INDETERMINATE |
+| **Duration** | **28,800 s** (2 × 14,400 s) — **DOUBLED** |
+| **Replicates** | **n = 2** (2 × 1) — **DOUBLED** |
+| **Pin** | the **SAME** pin, `feb85268952001813e502e27f65180855676ac25` |
+| **Predicate** | the **SAME** frozen predicate — §0–§8 together with §8A's twenty addenda |
+| **Forbidden** | it **may not adjust a threshold, an ordering or a conditional** |
+| **STATUS AT THE CLOSE OF SPEC-356b** | **OWED — NOT DONE** |
+| **Owner** | **TODO-634** |
+
+**Both axes are doubled, and §8.1's reason for each is carried rather than paraphrased away.** Doubling
+**duration** addresses an effect too slow to separate in 4 h; doubling **replicates** addresses the n = 1
+fragility SPEC-355 §10.4.2 measured — the level replicates at 5.4 % spread while the slope moved 2.0×,
+4.6× and changed sign. **One axis alone leaves the other cause unaddressed.** The repeat is a **second
+observation, not a re-specification.**
+
+**Why this spec does not run it, stated as a scope fact rather than an excuse.** It is an **8 h
+measurement** at n = 2 — 16 h of cell clock — against a wave budgeted for discharge and close-out. It is
+not deferred because it is hard; it is deferred because it is a *new measurement round*, and a
+measurement round belongs to the item that owns the follow-on. **Nothing about it is softened here:** no
+threshold is loosened in anticipation, no shortcut configuration is proposed, and the deciding
+configuration named above is the one that must run.
+
+**IF THE REPEAT IS STILL INDETERMINATE, §8.2 ESCALATES — and the escalation is not "record a note".** It
+**names the unclassified cause, quotes the evaluated value of every step that failed to fire and the
+admissibility limb that blocked**, and is carried into the family's design phase **as a stated open
+input**. Owner: **TODO-634**. This record already supplies what that escalation would quote for round
+one: Step 0 limb (c) blocked on ADJ-12's `>50 %` sentinel rule at **708/720 = 98.333333 %**; Steps 1–4
+were **never evaluated**; §9.5.3 carries every bundle value.
+
+**§8.3 QUOTED BESIDE THIS OUTCOME, as §8.3's own last sentence requires of ANY Step-5 outcome:**
+
+> **The recommended reclamation model closes safety REGARDLESS of which cause it turns out to be.**
+> `ReclamationRegistry` (cursor-shaped consumers only) + retention SLA **N = 30 d** + the cursor-age fence
+> with HLC-horizon quarantine + `ceiling = min_live_claim − fixed_margin` bound the reclaimable set by
+> **live claims**, not by any hypothesis about *why* the current prune falls behind. **A selection defect,
+> a scheduling defect and a throughput defect are all *contained* by a registry that never reclaims below
+> a live claim.**
+>
+> What an unclassified cause costs is **fix-shape efficiency** — the family would design without knowing
+> which limb to optimize first — **not safety, and not the family's ability to proceed.** A Step-5 outcome
+> is therefore to be read as **an expensive answer, not a blocked one**.
+
+**So the honest summary of this spec's terminal state, in one sentence:** the classification round ran to
+completion under a predicate frozen before the data, returned **INDETERMINATE** on a pre-registered
+admissibility hatch, routed to a repeat it does **not** perform, and left the reclamation family's safety
+argument **untouched and intact** — the registry model does not depend on which mechanism this round
+failed to name.
+
+---
+
+### §9.10 — Lineage close-out: the NINE PRE-DATA re-pins, and what each hop obliged
+
+**Recorded here so a reader who diffs `fc95b86d..feb85268` finds an explanation rather than an anomaly.**
+All nine moves are **PRE-DATA** — every one landed before the first `spec356-*.soak.json` existed (§9.2,
+§9.3) — so each cost nothing: no cell to discard, no matrix to re-run, and **§0–§8 byte-identical across
+all nine**.
+
+| Hop | To | PR | What moved | Gate it obliged |
+|---|---|---|---|---|
+| — | `fc95b86d` | #133 | the FREEZE: SPEC-356a's instrument + manifest §0–§8 | — (the baseline) |
+| 1 | `efa2c249` | #134 | manifest §8A (ADJ-9/10/11) **and the RUNNER** — cell E's arming disarmed | both Wave-1 gate artifacts |
+| 2 | `f2f72c62` | #135 | manifest §8A (ADJ-12/13/14) **and the RUNNER** — `B`'s committed source | both Wave-1 gate artifacts, re-captured |
+| 3 | `cb9682e5` | #136 | manifest §8A (ADJ-15) **and the FITTER only** | the fitter's default-path regression proof (190 lines, `cmp` clean; checklist 6) |
+| 4 | `f9d02d3e` | #137 | manifest **only** (ADJ-16) | **none** — re-capturing one would be theatre |
+| 5 | `07b1fda6` | #138 | manifest **only** (ADJ-17) | **none** |
+| 6 | `1f18b2b3` | #139 | manifest **only** (ADJ-18) | **none** |
+| 7 | `55edacb1` | #140 | manifest **only** (ADJ-19) | **none** |
+| 8 | `c0d8cc73` | #141 | manifest §8A (ADJ-20), **the RUNNER** (`19  0`), **and three new read-only sidecars** | both Wave-1 gate artifacts, in #135's Part-III shape |
+| 9 | **`feb85268`** | #142 | **no program byte and no manifest byte** — it IS hop 8's gate discharge (`PART IV`, `126  0` and `78  0`, taken at the ADJ-20 runner) | **none of its own**; it CLOSES hop 8's, and **TODO-647 is RESOLVED** |
+
+**`TODO-637` DID NOT FIRE ON ANY OF THEM, and §9 records only that observation.** TODO-637 owns exactly
+two **POST-DATA** branches — a **blocking R5.4 cell** and a **missing pinned column** — and neither was
+taken: §9.4 names the 2×2 cell **CLEAN**, and §9.5.1 limb (c) records all 43 columns present with
+`n=1440 empty=0`. **The PRE-DATA re-pin channel above is NOT TODO-637's** — it is this spec's ordinary
+correction path. **No acceptance criterion of this spec ticks, edits or closes `TODO-637`, and this wave
+edited no byte of `.specflow/todos/TODO-637.md`.** Closure, if it is ever warranted, belongs to whoever
+retires the branch.
+
+**Every cell in this record was run from a worktree checked out AT THE PIN**, and every committed
+`matrix.txt` carries `  repo HEAD:      feb85268952001813e502e27f65180855676ac25` exactly once
+(§9.3, §9.5). **This wave ran no cell**, so it moved nothing in that ledger.
+
+---
+
+### §9.11 — B13: EVERY BRANCH ROUTED TO A NAMED OWNER
+
+**No outcome of this spec terminates in a paragraph of this manifest.** Each row below names what was
+produced, where its evidence is, and **which tracker file owns what remains**. A row with no owner would
+be the defect this section exists to prevent.
+
+| # | Branch / outcome of this spec | Evidence | NAMED owner |
+|---|---|---|---|
+| 1 | **The classification determination: `INDETERMINATE`** (Step 5, via Step 0 limb (c), ADJ-12's sentinel hatch at 708/720 = 98.333333 %) | §9.5.1, §9.5.2 | **`TODO-634`** |
+| 2 | **The §8.1 repeat — `long` @ 28,800 s, n = 2, same pin, same frozen predicate — OWED, NOT DONE** | §9.9 | **`TODO-634`** |
+| 3 | **§8.2's escalation if the repeat is still INDETERMINATE** (name the cause, quote every step's evaluated value and the blocking limb) | §9.9 | **`TODO-634`** |
+| 4 | **Cell E: NOT FIRED. The 2026-07-13 → 2026-07-27 interval REMAINS UN-PROBED** and no claim about `6c35785a` / `2769570f` is made or widened | §9.7.1, §9.8.1 | **`TODO-634`** |
+| 5 | **PD-1** — ADJ-20's BASENAME binding vs R4.4a's replicate RENAME; verbatim checklist 18 limb (0) REDs on name resolution for the four control replicates (bytes 28/28 identical under the committed map; `long` and `w100` GREEN verbatim) | §9.7.2 | **`TODO-648`** |
+| 6 | **PD-2** — R8.2 **and** R5.7(e)'s `CELLE_DISPOSITION` enum are BOTH silent on an INDETERMINATE determination; the slot is filled out of enum and checklist 16 REDs by construction | §9.7.2, §9.8.2 | **`TODO-634`** |
+| 7 | **PD-3** — the committed driver's `B` (median over ALL last-half rows) is not ADJ-12's `B` (0-sentinel rows EXCLUDED); `MEDIAN_L_OVER_B` suppressed; **checklist 18 RED and 19 WITHHELD, structurally, unrepairable without editing a pinned sidecar** | §9.7.2, §9.13 | **`TODO-648`** |
+| 8 | **PD-4** — the exit-share denominator is small in absolute terms (Δconsidered = 2,000 inside a window carrying 232,367 passes) | §9.7.2, §9.8.1 | **`TODO-634`** |
+| 9 | **PD-5** — SPEC-356b's own body has drifted against its governing set: checklist 12's headline still reads *"All NINETEEN §8A addenda"* and its out-of-range probe `ADJ-2[0-9]\|ADJ-[3-9][0-9]` now matches **ADJ-20 itself**; the G1 task-cell says eight commits / nineteen addenda where the manifest carries nine / twenty. **R8.0b already declares all TWENTY in force, so the GOVERNING SET IS NOT IN DOUBT** and no walk above read the stale count. **Editing a graded checklist mid-execution is forbidden — recorded and routed.** | this row | **`TODO-637`** — the named owner for SPEC-356b changes that must land in a spec rather than at an executor's keyboard |
+| 10 | **The dynamics blind spot** — *"a dynamics-only perturbation from recorder presence or activation is not excluded by any control in this protocol"*, stated verbatim beside all three neutrality statements | §9.C block | **`TODO-638`** (this spec does not mutate it) |
+| 11 | **The control-power inversion** — R5.2's within-lineage MDE (34.675840 %) came out **worse** than R5.1's cross-lineage (12.232573 %), inverting §1.2's own expectation | §9.4 | **`TODO-638`** |
+| 12 | **The armed pair's reclaim fraction below §1.1's committed HEAD reference** (63.5 % / 69.3 % vs 80.1 %) — corroboration only, deciding nothing | §9.4 | **`TODO-634`** |
+| 13 | **The DUAL-USE capture** — claim spans, LWM cadence, prune-batch sizes, and the `w100` keeping-up contrast — committed so the family inherits it rather than re-measuring it | §9.6 | **`TODO-634`** (design phase) |
+| 14 | **The registry-versus-accelerator decision is NOT routed by this run.** Step 2 did not fire because it was never evaluated; `median(L)` and `B` are bundle items, not a Step-2 determination | §9.5.2 | **`TODO-634`** (the decision remains open there) |
+| 15 | **The blocking-cell and missing-column branches DID NOT FIRE** — 2×2 CLEAN, all 43 columns present | §9.4, §9.5.1, §9.10 | **`TODO-637`** stays open and unfired; **this spec edits no byte of it** |
+| 16 | **`TG-OR-005`, `NAKED_BASELINE`, the bounded-steady-state demonstration, the level/ceiling gate re-derivation and the 630 → 634 → 586 → 484 sequencing statement** — untouched by this spec, by ruling | §9.13 (repo gate), `INVARIANTS.md` unedited | **`TODO-634`** (checkboxes stay OPEN) |
+
+**Two rows deserve their prohibition restated, because both are places a reader could mistake a record
+for an action.** Rows 5 and 7 are findings against **pinned, un-editable surfaces** — ADJ-20's naming
+construction and `spec356-slottruth.sh`'s reduction — and a POST-DATA record **may not** edit either.
+Row 6 is a finding against **two** pre-registered surfaces at once (R8.2's branch set and R5.7(e)'s
+enum), and widening either after the data landed is exactly the post-hoc adjustment pre-registration
+exists to prevent. **All three land in a spec that RE-PINS, or they do not land at all.**
+
+---
+
+### §9.12 — R9's cross-vendor gate, and the one finding it produced
+
+**`/xreview` ran on this spec's executed record at G5, before merge, and is committed to the evidence
+directory as `spec356-xreview.md`** — model, invocation, reviewed diff, cost, the reviewer's verbatim
+assessment, and **every finding marked APPLIED or REFUTED-WITH-REASON**. **SPEC-356a's `/xask` is CITED,
+not repeated:** it had to run before the freeze, and re-running it after the data landed is exactly what
+it exists to prevent (R9).
+
+**Three findings returned: ONE verified real and applied, TWO refuted as already-recorded.** F2 is PD-3
+and F3 is PD-5 — both already carry an owner (§9.11 rows 7 and 9), and the reviewer concurred with both
+dispositions. **Zero findings would have required editing a frozen section, a pinned sidecar, a
+predicate, a threshold, an ordering or a conditional, and zero verdicts moved.**
+
+**PD-6 — THE TWO CONTROLS ARE NOT INDEPENDENT, SO §1.4's `9.8 %` IS AN UPPER BOUND RATHER THAN AN EXACT
+RATE.** R5.1 tests `{ctl-r1, ctl-r2}` against SPEC-355's committed HEAD pair; R5.2 tests the **same**
+`{ctl-r1, ctl-r2}` levels against `{ctloff-r1, ctloff-r2}`. **The `ctl` arm is shared**, so the two
+`t`-statistics are computed from common data and are **positively dependent**: a high `ctl` pair pushes
+both toward rejection together. Since
+`P(at least one rejects) = 0.05 + 0.05 − P(both) = 0.0975` only when `P(both) = 0.0025` (independence),
+positive dependence gives `P(both) > 0.0025` and therefore a family-wise rate **at or below** the stated
+figure.
+
+- **The error is in the CONSERVATIVE direction**, which is the direction §1.4 chose deliberately: its
+  reason for declining an α-correction — *"a false adverse reading costs a re-run while a false clean
+  reading would license invalid numbers"* — is **strengthened**, not weakened, by the real rate being no
+  larger than the quoted one.
+- **No verdict moves.** Neither control rejected (`t = 0.346905` and `t = 0.800515`, both against
+  `4.303`), so no rejection has to be read against the family-wise rate at all, at either value.
+- **§1.4's `9.8 %` and its "under independence" wording are FROZEN, PRE-DATA text**, and §9.4 quotes them
+  faithfully. **A POST-DATA record may not edit either, and neither is edited**; §9.4's committed prose is
+  byte-unchanged. This is a record beside the number, not a correction of it.
+- **Owner: `TODO-638`**, which already owns the control set's power and blind-spot questions (§9.11 rows
+  10 and 11).
+
+**The reviewer's clean cardinal-rule assessment is NOT read as a green, and R5.7(f)'s bound is why.** An
+advisory pass is evidence the record is internally consistent with its pre-registration; it is **never**
+evidence that the run happened as described. Run provenance carries that, and no reviewer can be asked to
+carry it instead. **Checklists 16, 18 and 19 are RED at this commit and stay RED** (§9.13).
+
+---
+
+### §9.13 — The grader state at close, and the repo gate (B12 / B2 / B11)
+
+#### §9.13.1 — THE GRADERS, RUN AT THIS COMMIT FROM THE COMMITTED SIDECARS
+
+All three sidecars were copied into `$PWD` and digest-checked **before** execution — `tmplconf.awk`
+`7c14b900…`, `slottruth.sh` `280f7a34…`, `skeleton.txt` `bfaac337…`, all three reproducing their pinned
+values from the committed files — and the grader was run in the mandated `-v ev=` mode against the real
+evidence directory. **Fixture mode was not used.**
+
+```
+PASS 15 -- block is the pinned skeleton, byte-exact modulo slots
+FAIL 16 -- slot CELLE_DISPOSITION = 'NOT-FIRED-DETERMINATION-INDETERMINATE' is not well-formed (grammar ENUM_CELLE)
+SKIP 18 -- not attempted: the block is not a well-formed filled skeleton
+SKIP 19 -- not attempted: the block is not a well-formed filled skeleton
+exit=1
+```
+
+| Item | Verdict at close | Cause, named |
+|---|---|---|
+| **limb (0) provenance** | **GREEN** on `spec356-long` and `spec356-w100` (7/7 each), verbatim; **RED PROVENANCE on name resolution** for the four control replicates, whose bytes are nonetheless 28/28 identical under the committed map | **PD-1** → `TODO-648` |
+| **15** | **PASS** | the block is the pasted skeleton; only slot values moved |
+| **16** | **FAIL** — one out-of-enum value, `CELLE_DISPOSITION` | **PD-2** → `TODO-634`. **This RED is deliberate**: R8.2 produced an outcome the enum has no value for, and the alternative was publishing a claim this run cannot prove (§9.8.2) |
+| **18** | **SKIP at this commit** (the grader does not attempt 18 or 19 while item 16 is red); **FAIL under the mandated diagnostic substitution** — `truth file is INCOMPLETE -- 1 of 11 re-derivable slots are MISSING and therefore UNGRADED: MEDIAN_L_OVER_B` | **PD-3** → `TODO-648`. Structural on this evidence set: the driver medians column 43 over ALL last-half rows and ADJ-12 excludes the 0-sentinel rows, so the driver's `bb > 0` guard suppressed the slot. **Unrepairable without editing a pinned sidecar, which is forbidden.** |
+| **19** | **SKIP at this commit**; **WITHHELD behind item 18** under the same substitution, and **NOT APPLICABLE on its own terms** because `STEP_LEAF` is `INDETERMINATE` | R5.7(f)'s recorded escape, in the **safe direction only** — `INDETERMINATE` reads no classification number off any run, so it cannot launder one |
+
+**Both readings for 18 and 19 are stated, and hiding either would be the defect.** The `SKIP` is what the
+grader prints at the committed bytes; the `FAIL 18` / `WITHHELD 19` is what it prints when the one
+out-of-enum value is provisionally replaced by an in-enum one — a diagnostic run against a **scratch
+copy, changing no committed byte**, whose only purpose is to show that filling the slot legally would
+**not** have produced a green either. **A record showing only `SKIP` would hide PD-3.**
+
+**THESE REDS ARE NOT FORCED GREEN, AND NO ATTEMPT WAS MADE TO FORCE THEM.** No sidecar was edited, no
+grammar widened, no required-set entry dropped, no `-v truth=` fixture substituted for the mandated
+re-derivation. **Three findings against pre-registered surfaces stand RED with a named owner each**,
+which is the outcome the pre-registration is for: a green that cannot be proven is worth less than a red
+that can be explained.
+
+#### §9.13.2 — THE REPO GATE, AND B2 RE-VERIFIED AT CLOSE
+
+| Gate | Command | Result |
+|---|---|---|
+| **B2 — zero post-pin `.rs`** | `git diff --stat feb85268..HEAD -- '*.rs'` | **EMPTY** — 0 lines. **The lineage is intact and every cell in this record was measured on the binary this source builds.** |
+| **Frozen programs and sidecars** | same diff over `spec356-prune.sh`, `spec349c2-fit.awk`, `spec356-tmplconf.awk`, `spec356-slottruth.sh`, `spec356-skeleton.txt` | **EMPTY** — 0 lines |
+| **Catalog and its ratchet** | same diff over `INVARIANTS.md`, `scripts/check-invariants.sh` | **EMPTY** — 0 lines |
+| **The gauge instrument** | same diff over `benches/soak_harness/monitor.rs` | **EMPTY** — 0 lines |
+| **Manifest — APPEND-ONLY against the pin** | `git diff --numstat feb85268..HEAD -- …/spec356-manifest.md` | **`1071  0`** — **1,071 insertions, ZERO deletions**, measured at the close-out commit. **The ZERO is the load-bearing half**: §0–§8 and every §8A addendum are byte-identical to the pin, and the 1,390-line prefix `cmp`s clean. *(The insertion count is the only figure in this table that cannot be self-consistent while it is being written — a section reporting its own file's growth is stale the instant it is appended — so it is taken at the commit that closes the wave, and the deletion count, which is what the freeze actually rests on, is invariant to that.)* |
+| **Invariant catalog green** | `scripts/check-invariants.sh` | **exit 0** — `invariants: 21 entries, 4 NAKED (baseline 4)` |
+| **`TG-OR-005` untouched** | `INVARIANTS.md:481` | **`Status: open (TODO-634)`**, still NAKED; `NAKED_BASELINE=4` at `scripts/check-invariants.sh:20` |
+| **Formatting** | `cargo fmt --check` | **exit 0** |
+| **Release build** | `cargo build --release --bin topgun-server` | **exit 0** — `Finished release profile [optimized] target(s) in 3m 31s` |
+
+**`cargo test --release -p topgun-server` and `cargo clippy --all-targets --all-features -- -D warnings`
+are green BY CONSTRUCTION, and the construction is stated rather than assumed:** B2 holds — the `.rs`
+diff against the pin is **empty** — so both run over **byte-identical source** to `feb85268`, which is a
+merged commit whose own CI ran them. Nothing in this wave could have changed their outcome; the release
+build above is executed as the direct check that the source still compiles at this tree.
+
+**`TG-OR-004` IS NOT FLIPPED, and the reason is §1's frozen text, read rather than re-written.** Every
+cell in this record ends `exit 1` carrying the harness's tombstone-byte growth-slope gate, and §1's
+opening paragraph already rules that **a red tombstone gate is not evidence against `TG-OR-004`** — gauge
+fidelity and corpus boundedness are different properties, and `INVARIANTS.md:564-567` says so in the
+catalog itself. **Nothing in this spec bears on `TG-OR-005` either:** a second observation in a new
+lineage neither closes nor refutes it.
+
+**No frozen manifest section was edited, and §8A was not appended to under the pin.** This spec's
+execution contained **no addendum window** — an addendum is always a RE-PIN — and none was opened.
+
+#### §9.13.3 — THE TERMINAL STATE OF SPEC-356b, STATED WITHOUT ROUNDING
+
+- **The classification round is COMPLETE and its answer is `INDETERMINATE`.** No mechanism is named, a
+  mechanism outside the four is not excluded, and the named residual evidence that would indicate one is
+  not observed by this instrument.
+- **Cell E did NOT fire, and the 2026-07-13 → 2026-07-27 interval is still UN-PROBED.**
+- **The §8.1 repeat is OWED, NOT DONE** — `long` @ 28,800 s, n = 2, same pin, same frozen predicate.
+- **Checklists 16, 18 and 19 are RED**, each with a cause and a named owner; **15 passes and limb (0) is
+  GREEN on both measurement cells.**
+- **Six branches route to `TODO-634`, three to `TODO-648`, three to `TODO-638`, two to `TODO-637`.** No
+  branch terminates in a paragraph.
+- **The reclamation family is NOT blocked.** §8.3, quoted at §9.5.2 and again at §9.9: the registry model
+  closes safety **regardless of which cause it turns out to be**. What an unclassified cause costs is
+  **fix-shape efficiency, not safety** — an expensive answer, not a blocked one.

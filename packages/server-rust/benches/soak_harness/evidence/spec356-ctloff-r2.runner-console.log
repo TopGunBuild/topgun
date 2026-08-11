@@ -1,0 +1,154 @@
+WARNING: artifact dir overridden to /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out
+         A characterization run's artifacts belong in /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/pin-worktree/packages/server-rust/benches/soak_harness/evidence
+         (git-tracked); artifacts written elsewhere are not evidence.
+soak binary:   /Users/koristuvac/Projects/topgun/topgun/target/release/deps/soak_harness-9abf891ab72dea71
+  built:       2026-08-08T14:28:20Z
+server binary: /Users/koristuvac/Projects/topgun/topgun/target/release/topgun-server
+  built:       2026-08-08T14:29:41Z
+
+=== spec356 prune-record run: cell ctloff ===
+  repo HEAD:      feb85268952001813e502e27f65180855676ac25
+  dirty tree:     no
+  host/OS:        Darwin MacBook-Pro-koristuvac.local 25.5.0 Darwin Kernel Version 25.5.0: Tue Jun  9 22:18:58 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6000 arm64
+  lineage:        HEAD harness + HEAD server
+  cell class:     MEASUREMENT
+  data dir:       /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-data
+  csv:            /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.csv
+  prune.csv:      /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.prune.csv
+  soak.json:      /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.soak.json
+  mechanism.json: /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.mechanism.json (harness writes spec356-ctloff.soak.mechanism.json; renamed after the run)
+  progress.jsonl: /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.progress.jsonl
+  console log:    /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.harness-console.log
+  matrix:         /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.matrix.txt
+  soak binary:    /Users/koristuvac/Projects/topgun/topgun/target/release/deps/soak_harness-9abf891ab72dea71
+    built:        2026-08-08T14:28:20Z
+  server binary:  /Users/koristuvac/Projects/topgun/topgun/target/release/topgun-server
+    built:        2026-08-08T14:29:41Z
+  --- varied knobs (everything else is the spec355-width.sh literal) ---
+  TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
+  TOPGUN_PRUNE_RECORD: false (cell expects armed=no)
+  duration:            1800s
+  primary csv cadence: 60s
+  prune.csv cadence:   10s (pinned for every cell)
+  server port:         47356
+  SOAK_SERVER_BINARY:  <unset: HEAD binary, fail-closed guard not on this path>
+  --- pinned matrix (identical to spec355-width.sh) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 0;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+
+harness pid 24062; follow with: tail -f /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-data.meta/harness-console.log
+server ready: pid 24067 (t0 = server-ready)
+
+harness exited with code 1
+finished_reason:   tombstone-byte growth slope 60680.3 bytes/h exceeds 512.0 bytes/h: tombstone-byte growth slope 60680.3 bytes/h exceeds 512.0 bytes/h (total growth 57178 bytes over 360 samples, last-half window 896s)
+actual_duration:   1800s
+total_writes:      292213
+write_errors:      0
+reconnects:        1471
+resends:           48838
+confirm_apply:     confirms=865 lastEpoch=60 errors=25 (tracked client advances the low-water-mark that licenses pruning; confirms=0 with a climbing gauge = LWM never advanced)
+steady_checkpts:   5
+recovery_checkpts: 0 (crashes 0)
+memory:            first=12MB peak=919MB last=919MB slope=2090.6MB/h -> ok (backstop)
+tombstone_bytes:   first=0 peak=57178 last=44836 slope=60680.3B/h samples=360 -> FAIL (slope + blind-monitor both hard-gate) reason=tombstone-byte growth slope 60680.3 bytes/h exceeds 512.0 bytes/h (total growth 57178 bytes over 360 samples, last-half window 896s)
+tombstone_corpus_redb_scan: 48554 bytes (independent of gauge; last gauge value 44836 bytes) -> DIVERGED (positive-control cross-check, report-only)
+disk_mb:           first=1.5 peak=39.2 last=39.2 slope=53.5MB/h samples=360 -> ok (slope report-only until TODO-566; blind-monitor hard-gates)
+wrote JSON report to /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.soak.json
+
+=== OR-CHURN MECHANISM REPORT (report-only, Q1-Q4) ===
+Q1 bytes/frame:    OR early(mean=138B max=201B) late(mean=145B max=209B) max=209B | LWW mean=220B max=296B | OR/LWW=0.7x | rises=false
+OR frame census:   delta(n=14797 mean=141B max=209B total=2093371B) | snapshot(n=0 mean=0B max=0B total=0B)
+Q2 drain window:   before=6.6MB after=6.5MB delta=-0.0MB | no significant drain burst (WAL delta -0.0MB)
+Q3 RSS holder:     rss_slope=2090.6MB/h disk_slope=53.5MB/h corr=0.89 | RSS tracks disk in lockstep (r=0.89); the growing OR blobs sit in the write-behind queue / record cache — delta-framing should reduce RSS too
+Q4 not tombstone:  or_wal_bytes=2093371 tombstone_corpus=48554 gauge=44836 | growth_is_or=true
+scan:              segments=1096 or_frames=14797 lww_frames=6547 remove_frames=0
+conclusion:        REFUTED / INCONCLUSIVE: OR frame size did NOT rise late-vs-early over the retained corpus — the O(N)-per-op-frame hypothesis is not confirmed by this run. Inspect the acked-beyond-applied tail bound and write-behind retention before choosing the fix.
+sequencing:        Sequencing option for the R1 /xask gate: tail-bounding the acked-beyond-applied WAL is the lowest-risk FIRST containment (OOM/disk-full -> backpressure, zero recovery-path risk); delta-framing is the eventual O(1)-frame fix. If Q2 shows the drain burst is buffered O(N) frames, tail-bounding addresses it directly.
+wrote mechanism report to /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.soak.mechanism.json
+console log: /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.harness-console.log
+mechanism report: /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.mechanism.json
+csv rows: 30
+csv columns:
+  rss_mb                                       [NONZERO ] n=30 empty=0 nonzero=30 min=3 max=916
+  wal_mb                                       [NONZERO ] n=30 empty=0 nonzero=29 min=0 max=6
+  redb_mb                                      [NONZERO ] n=30 empty=0 nonzero=29 min=0 max=33
+  disk_total_mb                                [NONZERO ] n=30 empty=0 nonzero=29 min=0 max=38
+  tombstone_bytes n=29 empty=1 min=16610 max=46552
+
+prune.csv:      /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.prune.csv
+prune.csv rows: 179  (cadence 10s)
+prune.csv ticks SKIPPED by the scrape gate: 2
+    elapsed=0s scrape FAILED -- no row written, retrying next tick
+    elapsed=1800s scrape FAILED -- no row written, retrying next tick
+prune.csv columns:
+  (disarmed cell: NO prune-record column is checked -- the arming witness
+   requires these series to be ABSENT, and a column check on an absent
+   series is a category error)
+  progress.jsonl checkpoints: 5
+  soak.json "walFsync": "batched",
+  soak.json "epochWidth": 1000,
+  soak.json "crashes": 0,
+  soak.json "churnClients": 6,
+  soak.json "keyspace": 200,
+  soak.json "durationSecsActual": 1800,
+  mechanism.json "orDeltaFrames": 14797,
+  mechanism.json "orSnapshotFrames": 0,
+
+arming witness:
+  cell expects:        armed=no
+  TOPGUN_PRUNE_RECORD: false (on the child)
+  topgun_or_prune_ lines in the scrape: 0
+  pinned prune columns resolved:        0/41
+  topgun_ormap_tombstone_bytes present: 2 line(s)
+  => arming witness PASSED: disarmed cell, no prune-record series present.
+
+post-hoc OLS fits (see the SE caveat in spec349c2-fit.awk):
+  units: the field is named slope_mb_per_hour for every column; on the
+  tombstone_bytes row the fit is identical but the unit is BYTES/hour.
+  col=rss_mb window=full rows_used=30 n=30 skipped_empty=0 t_start_secs=0.0 t_end_secs=1740.0 span_secs=1740.0 y_first=3.062 y_last=916.203 slope_mb_per_hour=2087.011542 se_mb_per_hour=62.411770 intercept_mb=-83.035656 r2=0.975571 sxx_hours2=0.624305556 sse=68090.767527858
+  col=wal_mb window=full rows_used=30 n=30 skipped_empty=0 t_start_secs=0.0 t_end_secs=1740.0 span_secs=1740.0 y_first=0.000 y_last=5.691 slope_mb_per_hour=5.860365 se_mb_per_hour=0.717521 intercept_mb=2.029178 r2=0.704355 sxx_hours2=0.624305556 sse=8.999630672
+  col=redb_mb window=full rows_used=30 n=30 skipped_empty=0 t_start_secs=0.0 t_end_secs=1740.0 span_secs=1740.0 y_first=0.000 y_last=32.637 slope_mb_per_hour=48.157548 se_mb_per_hour=4.379512 intercept_mb=1.003759 r2=0.811972 sxx_hours2=0.624305556 sse=335.279319970
+  col=disk_total_mb window=full rows_used=30 n=30 skipped_empty=0 t_start_secs=0.0 t_end_secs=1740.0 span_secs=1740.0 y_first=0.000 y_last=38.332 slope_mb_per_hour=54.013295 se_mb_per_hour=4.562984 intercept_mb=3.032587 r2=0.833453 sxx_hours2=0.624305556 sse=363.959562453
+  col=tombstone_bytes window=full rows_used=29 n=29 skipped_empty=1 t_start_secs=60.0 t_end_secs=1740.0 span_secs=1680.0 y_first=25896.000 y_last=26598.000 slope_mb_per_hour=16478.807882 se_mb_per_hour=8663.401902 intercept_mb=25687.401478 r2=0.118167 sxx_hours2=0.563888889 sse=1142705257.443842649
+  col=rss_mb window=last_half rows_used=30 n=15 skipped_empty=0 t_start_secs=900.0 t_end_secs=1740.0 span_secs=840.0 y_first=426.203 y_last=916.203 slope_mb_per_hour=2307.355714 se_mb_per_hour=67.941310 intercept_mb=-151.865895 r2=0.988854 sxx_hours2=0.077777778 sse=4667.310720305
+  col=wal_mb window=last_half rows_used=30 n=15 skipped_empty=0 t_start_secs=900.0 t_end_secs=1740.0 span_secs=840.0 y_first=3.082 y_last=5.691 slope_mb_per_hour=10.540714 se_mb_per_hour=0.746098 intercept_mb=0.231938 r2=0.938851 sxx_hours2=0.077777778 sse=0.562846805
+  col=redb_mb window=last_half rows_used=30 n=15 skipped_empty=0 t_start_secs=900.0 t_end_secs=1740.0 span_secs=840.0 y_first=16.574 y_last=32.637 slope_mb_per_hour=44.746929 se_mb_per_hour=16.979335 intercept_mb=2.308526 r2=0.348214 sxx_hours2=0.077777778 sse=291.501131644
+  col=disk_total_mb window=last_half rows_used=30 n=15 skipped_empty=0 t_start_secs=900.0 t_end_secs=1740.0 span_secs=840.0 y_first=19.656 y_last=38.332 slope_mb_per_hour=55.282500 se_mb_per_hour=17.513553 intercept_mb=2.540417 r2=0.433893 sxx_hours2=0.077777778 sse=310.132601958
+  col=tombstone_bytes window=last_half rows_used=29 n=15 skipped_empty=1 t_start_secs=900.0 t_end_secs=1740.0 span_secs=840.0 y_first=16610.000 y_last=26598.000 slope_mb_per_hour=12969.000000 se_mb_per_hour=28502.801280 intercept_mb=27951.366667 r2=0.015676 sxx_hours2=0.077777778 sse=821436455.033333182
+
+the 8-window slice-and-fit for the 'long' cell is run post-hoc:
+  post-hoc fit invocation (spec349c2-fit.awk, UNFORKED):
+    # whole-window and last-half fits over the primary CSV
+    for w in full last_half; do
+      for c in rss_mb wal_mb redb_mb disk_total_mb tombstone_bytes; do
+        awk -v col="$c" -v window="$w" -f /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/pin-worktree/packages/server-rust/benches/soak_harness/evidence/spec349c2-fit.awk /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.csv
+      done
+    done
+    # the 8-window slice-and-fit, for the 'long' cell only
+    awk -F, 'NR==1{h=$0; next} {rows[++n]=$0}
+      END{seg=int((n+7)/8);
+          for(i=1;i<=8;i++){f=sprintf("spec356-ctloff-seg%d.csv",i); print h > f;
+            for(j=(i-1)*seg+1; j<=i*seg && j<=n; j++) print rows[j] > f; close(f)}}' /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.csv
+    for i in 1 2 3 4 5 6 7 8; do
+      awk -v col=tombstone_bytes -v window=full -f /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/pin-worktree/packages/server-rust/benches/soak_harness/evidence/spec349c2-fit.awk spec356-ctloff-seg${i}.csv
+    done
+
+artifact binding (ADJ-20): 7 artifacts digested into spec356-ctloff.artifacts.sha256
+  e2ef6b042715ed51c148ac8390d4efe3f3aede4b01c9128eb94bbf11d6ca684a  spec356-ctloff.csv
+  d71c3901346186d9e95abe746affec6596f94efb79ce9e44d46fd04ce09ae374  spec356-ctloff.prune.csv
+  53283ee48750d91c86c5db3b511adeaad85dda1ffa336df81a94db27da8d9cde  spec356-ctloff.soak.json
+  e0e4d6ce8fd4919a168e19f825c2785256555f1c459c4612c9adb2b5e8ff393c  spec356-ctloff.progress.jsonl
+  b48e6e3d4606962089b460ed8b5fb2280fb595904bc947ee20257e397e465cd5  spec356-ctloff.mechanism.json
+  4b221ab0bb25e2fcc027f7e3e6204084080a5dde222c180137524e5835dc26ed  spec356-ctloff.matrix.txt
+  c4ca30c1d559af96601c99e91c1fa982369d526031dc9784562ae734541a80ba  spec356-ctloff.harness-console.log
+RESULT: instrument sound; harness exit code 1.
+NOTE: a non-zero harness exit is NOT automatically a failed characterization.
+      The memory gate is neutralized by design for these runs, while the
+      tombstone-byte gate, both blind-monitor clauses, convergence/recovery
+      and panic capture stay armed. Read 'finishedReason' in /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6cc82263-dad7-4038-a540-4dd1e18ccaf4/scratchpad/ctloff-r2-out/spec356-ctloff.soak.json and
+      record the attribution, rather than reading the flag as a verdict.
