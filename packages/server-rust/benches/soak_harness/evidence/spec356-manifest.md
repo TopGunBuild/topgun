@@ -5174,3 +5174,601 @@ due later is the vacuous-guard failure PD-8 indicts wearing a different hat.
 would be exactly the back-dating this manifest's append-only discipline exists to prevent — and this
 GREEN is not claimed to have been true earlier than its own bytes. **The PRESENCE verdict as published in
 §10.2.1 therefore remains 11 GREEN / 2 RED (P9 and P13)**, and it is the verdict of record for that limb.
+
+---
+
+### §10.10 — THE FULL VALIDATION CHECKLIST, RUN — ALL NINETEEN ITEMS, **INCLUDING THE THREE THAT ARE RED**
+
+**ORDERING IS NORMATIVE and it was observed.** Item 1 (PRESENCE) was evaluated **first**, and is published
+at §10.2.1; items 2–5 (lineage and provenance) were evaluated before any content item. **No item below is
+reported green on the strength of an artifact item 1 found absent.**
+
+**THE HEADLINE, STATED BEFORE THE DETAIL: 16 GREEN, 3 RED — items 1, 10 and 12.** All three REDs are
+published as REDs. **A checklist that greens on a known failure is the exact defect this spec exists to not
+repeat** — PD-8's *"a checklist that cannot fail on an ABSENT table"* — and none of the three is repaired,
+because R0.3 is categorical and all three touch bytes that are frozen or pinned.
+
+| # | Item | Verdict |
+|---|---|---|
+| 1 | PRESENCE, P1…P13, evaluated FIRST | **RED** — 11 GREEN / 2 RED (**P9**, **P13**), as published in §10.2.1 |
+| 2 | frozen-path diffs, both needles, both directions | **GREEN** |
+| 3 | manifest freeze, zero deletions, both prefix `cmp`s | **GREEN** |
+| 4 | data boundary, `--diff-filter=A` ancestry | **GREEN** |
+| 5 | pin provenance, per cell | **GREEN** |
+| 6 | artifact binding 7/7, and the scratch-map residual | **GREEN** |
+| 7 | arming witness and column shapes | **GREEN** |
+| 8 | the frozen walk, per replicate | **GREEN** |
+| 9 | ADJ-3's bundle, limbs (i)–(v) | **GREEN** |
+| 10 | wrong-axis and inference greps over §10 | **RED** — one line, `2957`, PRE-DATA and at the pin |
+| 11 | the sixteen eight-window fits | **GREEN** |
+| 12 | the v1/v2 matrix and the diff's taxonomy | **RED** — the **run-3** leg; v2 refuses the repeat's cells |
+| 13 | target-builder reproduction **and** the PRE-DATA dry run | **GREEN** |
+| 14 | target/predicate separation | **GREEN**, with the reading stated and both counts published |
+| 15 | escalation form | **GREEN** |
+| 16 | tracker discipline, BY CONTENT | **GREEN** — five limbs, six transcripts |
+| 17 | catalog | **GREEN** |
+| 18 | build | **GREEN** |
+| 19 | cross-vendor | **GREEN** |
+
+---
+
+#### §10.10.1 — ITEM 1 (PRESENCE) — **RED**, RESTATED FROM §10.2.1 AND NOT RE-GRADED
+
+**Verdict of record: 11 GREEN, 2 RED — `P9` and `P13`.** It is restated, not recomputed: item 1 is
+*"evaluated FIRST"*, so its verdict is the one taken at that instant and re-running it later would replace
+a measurement with a more convenient one.
+
+- **`P9` — RED.** The five target anchors `T1.`…`T5.` occur **ZERO** times in `spec356-verdict-xask.md`;
+  the §8.3 block-quote leg is GREEN. The artifact is **not edited** to carry them and the entry is **not
+  softened** — §10.2.1 records that `T1`…`T5` is §10.0.2's own naming applied to an enumeration the source
+  artifact never carried under those labels.
+- **`P13` — RED**, on the **POST half only**, at the instant §10.2.1 was written. **§10.9 is the next
+  reading of that same limb and it is GREEN on all five** — §10.9.5 sets the two side by side, retracts
+  neither and back-dates neither. **Item 1's verdict stays RED**, because item 1 is the reading taken
+  first; item 16's verdict below is the reading taken at the tracker ledger's own bytes.
+
+---
+
+#### §10.10.2 — ITEM 2 — **GREEN.** BOTH NEEDLES, AND BOTH DIRECTIONS
+
+`git diff --stat <needle>..HEAD -- <path>`, run at **`feb85268`** (SPEC-356b's pin, checklist 2's named
+needle) **and** at **`8a60f135`** (SPEC-356c's own resolved pin):
+
+| Path | from `feb85268` | from the SPEC-356c pin |
+|---|---|---|
+| `*.rs` (repo-wide) | **EMPTY** | **EMPTY** |
+| `INVARIANTS.md` | **EMPTY** | **EMPTY** |
+| `scripts/check-invariants.sh` | **EMPTY** | **EMPTY** |
+| `…/spec349c2-fit.awk` | **EMPTY** | **EMPTY** |
+| `…/spec356-slottruth.sh` | **EMPTY** | **EMPTY** |
+| `…/spec356-tmplconf.awk` | **EMPTY** | **EMPTY** |
+| `…/spec356-skeleton.txt` | **EMPTY** | **EMPTY** |
+| `…/benches/soak_harness/monitor.rs` | **EMPTY** | **EMPTY** |
+
+**AND THE PAIR THAT MUST DIFF NON-EMPTY FROM `feb85268` AND EMPTY FROM THE PIN** — the leg that
+distinguishes *"the instrument moved PRE-DATA"* from *"the instrument moved under the pin"*, and the reason
+a single-needle check would be worthless here:
+
+| Path | `feb85268`..HEAD `--numstat` | pin..HEAD |
+|---|---|---|
+| `…/spec356-prune.sh` (the runner, R2.1's two additive arms) | **`14  0`** | **EMPTY** |
+| `…/spec356a-eager-registration.log` (gate 1, R0.2 `PART V`) | **`230  0`** | **EMPTY** |
+| `…/spec356a-step0c-fixture.log` (gate 2, R0.2 `PART V`) | **`106  0`** | **EMPTY** |
+
+**Both directions asserted, and both hold.** Every deliberate move is **additive** (`0` deletions) and
+every one of them is **behind the pin**.
+
+---
+
+#### §10.10.3 — ITEM 3 — **GREEN.** THE MANIFEST FREEZE, WITH BOTH PREFIX `cmp`s
+
+```
+$ git diff --numstat feb85268..HEAD -- …/spec356-manifest.md      ->  3786   0     (ZERO deletions)
+$ git diff --numstat 8a60f135..HEAD -- …/spec356-manifest.md      ->  1720   0     (ZERO deletions)
+$ git show feb85268:…/spec356-manifest.md > /tmp/pin.md           ->  1,390 lines
+$ head -n 1390 …/spec356-manifest.md | cmp - /tmp/pin.md          ->  SILENT
+$ git show 8a60f135:…/spec356-manifest.md > /tmp/pin356c.md       ->  3,456 lines
+$ head -n 3456 …/spec356-manifest.md | cmp - /tmp/pin356c.md      ->  SILENT
+$ grep -c '^## §10' …/spec356-manifest.md                         ->  1
+```
+
+**THE PAIR IS WHAT CLOSES IT, exactly as the item says.** `grep -c '^## §9'` in the `feb85268` copy is
+**0** — that copy has no §9 section at all (its four `§9` hits are forward references in prose) — so the
+`feb85268` leg protects §9 against **deletion** but **not against interpolation**. The second `cmp`, against
+SPEC-356c's own pin whose copy already carries §9 in full, is what closes interpolation. Everything this
+spec wrote is strictly **after** line 3,456.
+
+---
+
+#### §10.10.4 — ITEM 4 — **GREEN.** THE DATA BOUNDARY
+
+```
+$ git log --follow --diff-filter=A --format=%H --reverse -- '…/spec356c-*.soak.json' | head -1
+0b96e63e306a7e51fa04a022eeaff7762497ac1d
+  test(sf-356c): land replicate r1 of the §8.1 repeat — 28,800 s at the pin
+```
+
+| Instrument that must precede the boundary | added at | ancestor of `0b96e63e`? |
+|---|---|---|
+| §10.0 / the manifest (added `fc95b86d`, §10.0 written at `8a60f135`) | `8a60f135` | **YES** |
+| the two runner arms (`spec356-prune.sh`, `long8h_r1` / `long8h_r2`) | `8a60f135` | **YES** |
+| `spec356c-slottruth-v2.sh` | `8a60f135` | **YES** |
+| `spec356c-targets.sh` | `8a60f135` | **YES** |
+| `spec356-verdict-xask.md` | `607a3775` | **YES** |
+
+**Not one of them landed after the first `soak.json`**, so the finding item 4 exists to make — *the
+instrument was chosen with data visible* — does not arise. *(Method note, recorded because it bit during
+execution: `git log --follow --reverse | head -1` does **not** reliably name the adding commit — `--follow`
+reorders — and the honest form is `git log --diff-filter=A --format=%H -- <path> | tail -1`, which is what
+the table above uses.)*
+
+---
+
+#### §10.10.5 — ITEM 5 — **GREEN.** PIN PROVENANCE, PER CELL
+
+| Check | `spec356c-long-r1.matrix.txt` | `spec356c-long-r2.matrix.txt` |
+|---|---|---|
+| `grep -c '^  repo HEAD:      8a60f135…247f$'` | **1** | **1** |
+| `grep -c '^  repo HEAD:'` (no second, unpinned line) | **1** | **1** |
+| `grep -c '^  duration:            28800s$'` | **1** | **1** |
+| its own cell line, exactly once | `=== spec356 prune-record run: cell long8h_r1 ===` → **1** | `… cell long8h_r2 ===` → **1** |
+| any other cell header in the file | **0** | **0** |
+
+---
+
+#### §10.10.6 — ITEM 6 — **GREEN.** ARTIFACT BINDING, THEN THE DIRECTORY RESIDUAL
+
+`shasum -a 256 -c spec356c-long-r<n>.artifacts.sha256`, run in the evidence directory, **verbatim, with no
+mapping applied**: **7/7 `OK` on r1 and 7/7 `OK` on r2** (`csv`, `prune.csv`, `soak.json`,
+`progress.jsonl`, `mechanism.json`, `matrix.txt`, `harness-console.log`). No `RED PROVENANCE` on either, so
+no cell is re-run.
+
+**And the residual is checked, not assumed.** `spec356c-scratch-map.txt` carries **exactly one line per
+committed replicate**, basenames identical on both sides, and each line's scratch dir is the one that
+cell's own `matrix.txt` names:
+
+| | map line | the cell's `matrix.txt` says |
+|---|---|---|
+| **r1** | `/private/tmp/spec356c-out-r1 → …/evidence  basename spec356c-long-r1.*  data dir /private/tmp/spec356c-data-r1` | `data dir: /private/tmp/spec356c-data-r1`, `prune.csv: /private/tmp/spec356c-out-r1/spec356c-long-r1.prune.csv` |
+| **r2** | `/private/tmp/spec356c-out-r2 → …/evidence  basename spec356c-long-r2.*  data dir /private/tmp/spec356c-data-r2` | `data dir: /private/tmp/spec356c-data-r2`, `prune.csv: /private/tmp/spec356c-out-r2/spec356c-long-r2.prune.csv` |
+
+**No committed replicate is absent from the map**, so R2.3 point 5's re-run disposition does not fire.
+
+---
+
+#### §10.10.7 — ITEM 7 — **GREEN.** ARMING AND COLUMN SHAPES
+
+| Check, per `runner-console.log` | r1 | r2 |
+|---|---|---|
+| `arming witness PASSED` | **1** | **1** |
+| the disarmed literal | **0** | **0** |
+| `INSTRUMENT DEFECT` | **0** | **0** |
+| anchored `^STEP0C ADMISSIBILITY: ` | **0** | **0** |
+| unanchored `STEP0C ADMISSIBILITY` (the cross-check on the banner's own `N`) | **0** | **0** |
+
+**The anchored count is 0, so there is no occurrence whose column could be named** — the item's *"published
+with the column each occurrence named"* is discharged **vacuously in the only honest sense**: the set is
+empty and the emptiness is measured on both anchored and unanchored patterns, which is why the pair is run.
+The same 0 / 0 pair is published at §10.1.3 and reproduces here.
+
+---
+
+#### §10.10.8 — ITEM 8 — **GREEN.** THE FROZEN WALK, PER REPLICATE
+
+§10.2.2 shows, for **each** replicate, Step 0's four limbs **each with an evaluated value in the frozen
+order with limb (d) FIRST** —
+
+| order | limb | r1 | r2 |
+|---|---|---|---|
+| 1 | **(d)** ADJ-11 clause 0's conservation identity | `Δpasses 414,110 = 414,110 + 0` → **HOLDS** | `Δpasses 445,682 = 445,682 + 0` → **HOLDS** |
+| 2 | **(a)** §1.3's 2×2 | `R51_T 0.346905`, `R52_T 0.800515`, both NOT REJECTED vs 4.303 → **HOLDS** | same inherited controls → **HOLDS** |
+| 3 | **(b)** ≥ 1 split recompute | `Δ = 829 ≥ 1` → **HOLDS** | `Δ = 892 ≥ 1` → **HOLDS** |
+| 4 | **(c)** population **AND** ADJ-12 readability | leg 1 passes; **leg 2 FAILS** at `1,440/1,440 = 100.000000 %` | leg 1 passes; **leg 2 FAILS** at `1,440/1,440 = 100.000000 %` |
+
+— then **Steps 1, 2, 3, 4 each carrying `NOT EVALUATED` with its reason** (*"Step 0 is fail-closed and
+precedes every numbered step"*) and **Step 5 `FIRED ⇒ INDETERMINATE, via Step 0 limb (c)`**. **There is no
+published leaf with an unevaluated Step 0 limb**, which is the RED condition the item names.
+
+---
+
+#### §10.10.9 — ITEM 9 — **GREEN.** ADJ-3's BUNDLE, AND TWO LIMBS RE-DERIVED RATHER THAN READ
+
+All five limbs are present at §10.2.4: **(i)** the pass-rate fit, **(ii)** `min`/`median`/`max(L)` with the
+`L ≤ B` fraction, **(iii)** `B` with ADJ-12 provenance and its excluded fraction, **(iv)** the per-exit
+ledger with its denominator, **(v)** ADJ-11's `Δpasses` beside the window scrape count.
+
+**Limb (i) was re-run rather than re-read**, from the unforked pinned fitter at exactly
+`-v col=passes_total -v xaxis=current_epoch -v window=full` over **both derived coordinate slices**, and
+all four values reproduce as **RAW `slope_per_x_unit`**:
+
+| | early | late | published |
+|---|---|---|---|
+| **r1** | `998.978686` | `998.812325` | **both MATCH** |
+| **r2** | `998.875930` | `998.977301` | **both MATCH** |
+
+The `k = 0.4 / 0.5 / 0.6` sensitivity is published with no flip at any `k` on either replicate; `B` is
+`UNDEFINED (100 % sentinel, 0 non-sentinel rows)` with its excluded fraction beside it; the exit ledger
+carries its denominator; `Δpasses` is beside the scrape count. **No limb is omitted on the ground that the
+walk stopped at Step 0** — that is precisely what "unconditional" means.
+
+---
+
+#### §10.10.10 — ITEM 10 — **RED.** ONE LINE, AND IT IS A PRE-DATA BYTE AT THE PIN
+
+**The item is a PAIR and must be read as one** — *"one fails by going red on compliant text, the other by
+going green on a violation."* Both legs were run over the whole **§10 range (lines 2731 … 5176)**:
+
+**LEG A — every line containing `slope_mb_per_hour` must carry `tombstone_bytes` on the SAME line. FAILS,
+on exactly one line of four.**
+
+```
+$ awk 'NR>=2731 && /slope_mb_per_hour/ && $0 !~ /tombstone_bytes/'  …/spec356-manifest.md
+2957: per replicate**; each row names its window and carries `slope_mb_per_hour`, `se_mb_per_hour`, `r2`.
+```
+
+Total `slope_mb_per_hour` lines in range: **4**. Compliant: **3**. Offending: **1** — **line 2957**.
+
+**WHAT LINE 2957 IS.** It is inside **§10.0.4's `P1` entry** — the PRE-DATA presence pre-declaration, whose
+*previous* line reads *"the eight-window `tombstone_bytes` fit table, per replicate (16 fits)"*. So the
+entry **does** name the series; it names it on the line above, and the obligation's grep is **line-scoped**.
+The line is **byte-identical in the manifest at the pin** (`git show 8a60f135:… | sed -n '2957p'` returns
+the same bytes), i.e. it entered the record **before the data boundary `0b96e63e`**.
+
+**WHY IT IS NOT FIXED.** §0–§8, §8A, §9 and §10.0 are **byte-frozen** (AC12, checklist item 3, whose
+prefix `cmp` would break the instant this line moved), and **R0.3 forbids repairing a pre-declaration byte
+after the data boundary regardless of how small the repair is**. Editing it would trade a one-line
+imprecision for a broken freeze proof — a strictly worse record. **§10.1.6 measured and disclosed this
+line before the checklist was run**, in its own words: *"the manifest carries THREE lines containing that
+field name without `tombstone_bytes` beside it, and all three are OUTSIDE §10.1 / §10.2 — two in §9.14 …
+and one in §10.0.4's P1 entry, which is a PRE-DATA byte committed at the pin. It is NOT edited here."*
+**The checklist's job was to find it independently, and it did.**
+
+**LEG B — `significantly (below|BELOW)|α *= *0\.05|p-value` must be EMPTY over the §10 range. PASSES —
+zero matches, and no neutrality-control carve-out was needed.**
+
+```
+$ awk 'NR>=2731 && /significantly (below|BELOW)|α *= *0\.05|p-value/'  …/spec356-manifest.md
+                                                                       (no output)
+```
+
+**THE PAIR-READING, WHICH IS THE ITEM'S ACTUAL PRODUCT.** Leg A **RED on one PRE-DATA line whose neighbour
+carries the series name**; leg B **GREEN with an empty result on a genuinely inference-free record**. The
+item's own framing — one leg fails by reddening on compliant text, the other by greening on a violation —
+resolves here as: **leg A's RED is the "reddening on compliant-in-substance text" mode, and it is reported
+as a RED anyway rather than argued down**, because an item that can be talked out of its own output is the
+vacuous guard this checklist replaced. **Item 10 is RED.**
+
+*Routing:* **`TODO-634`**, design-phase input — a future spec that re-pins may write P1's assertion with
+the series name on the same line, and may consider whether a line-scoped grep is the right instrument for
+a two-line sentence. **Neither question is settled here, and no byte moves.**
+
+---
+
+#### §10.10.11 — ITEM 11 — **GREEN.** SIXTEEN FITS, ALL SIXTEEN REPRODUCED
+
+`git diff --stat 8a60f135..HEAD -- '…/spec349c2-fit.awk'` is **EMPTY**; the fitter's digest reads
+`840813461e3b1bd5c3a79291044d8ac515e09b94333ee530cd6a10de8fa0436f`, unmoved. Re-running
+`awk -v col=tombstone_bytes -v window=full -f spec349c2-fit.awk <segment>` over the sixteen committed
+`spec356c-long-r{1,2}-seg{1..8}.csv` reproduces **§10.1.6's published `slope_mb_per_hour`,
+`se_mb_per_hour` and `r2` to the printed precision on all sixteen**, together with each window's
+`rows_used` / `skipped_empty` (including `r2 W1`'s `59 / 1`).
+
+**16 / 16 EXACT. Zero discrepancies.**
+
+---
+
+#### §10.10.12 — ITEM 12 — **RED.** FOUR LEGS STAND; THE **RUN-3** LEG DOES NOT
+
+**RUN 1 — v1, UNMODIFIED, over `spec356-long`. GREEN.** `sh ./spec356-slottruth.sh .`, exit **0**.
+**PD-3 reproduced:** `EXIT_SHARE_PCT 0.000000`, **no `MEDIAN_L_OVER_B` line**, driver `B` absent.
+**v1's digest reproduces `280f7a3466a0bffc89059815bb3862bb9581cb95d7efa3fe58b1152749b8f060`.**
+
+**RUN 2 — v2, DEFAULT PARAMETERS, the SAME committed bytes. GREEN.** Exit **0**, and it emits
+**`B = 999.944741`**, **`B_SENTINEL_EXCLUDED_PCT = 98.333333`** and **`MEDIAN_L_OVER_B = 0.000000`**.
+
+**AND THE REGRESSION PROOF: `diff` of run 1 against run 2 shows ONLY the `B`-derived lines.**
+
+```
+3a4,6
+> B                        999.944741
+> B_SENTINEL_EXCLUDED_PCT  98.333333
+> MEDIAN_L_OVER_B          0.000000
+```
+
+Three added lines, **zero changed, zero deleted** — every other slot is byte-identical, which is exactly
+what R4.3's matrix exists to demonstrate.
+
+**RUN 3 — v2 over the REPEAT's cells. RED, exit 3 on both replicates.**
+
+```
+$ sh ./spec356c-slottruth-v2.sh . spec356c-long-r1 28800
+SLOTTRUTH FAIL: spec356c-long-r1.matrix.txt does not name cell long        exit=3
+$ sh ./spec356c-slottruth-v2.sh . spec356c-long-r2 28800
+SLOTTRUTH FAIL: spec356c-long-r2.matrix.txt does not name cell long        exit=3
+```
+
+**This is §10.2.6's Finding 1, reproduced independently by the checklist.** The subject's `prov` call
+parameterises the **basename** and the **duration** but left the **cell-name literal `long` hardcoded**,
+while the repeat's cells self-describe as `long8h_r1` / `long8h_r2`. **The driver is NOT edited and run 3
+is NOT re-run** — it is a digest-pinned sidecar (`a95f49fa…a348`, verified unedited *before* execution) and
+R0.3 forbids repairing an instrument after the data boundary. **So the item's own words — "Run 3 produces
+the truth file §10 is graded against" — are NOT satisfied, and the item is RED.**
+
+**THE `-U0` REGENERATION LEG — GREEN.**
+
+```
+$ diff -U0 spec356-slottruth.sh spec356c-slottruth-v2.sh          -> 55 lines
+$ grep -v '^#' spec356c-slottruth-v1-v2.diff                      -> 53 lines
+$ tail -n +3 <regenerated> | cmp - <committed body>               -> SILENT
+```
+
+The **only** two lines not present in the committed artifact are the `---` / `+++` file header, which
+carries filesystem **mtimes** and is not reproducible by construction; every remaining byte of the
+committed diff body **is** `diff -U0` output. *(The committed `.diff` interleaves `#`-prefixed annotation
+with the raw body; at `-U0` there are no context lines, so stripping `^#` isolates the body exactly. A
+changed comment line still begins `-` or `+` and survives the strip.)* Digest
+`0101a7d676b5ab4ee35e017a72e8bf92a4e8aaf513a846da24f3facf512fc42e`, matching §10.0.6.
+
+**THE TAXONOMY LEG — GREEN. Four hunks, exactly one label each, every label passing its own mechanical
+test:**
+
+| hunk | header | labels standing before it | label | its own test | result |
+|---|---|---|---|---|---|
+| 1 | `@@ -2,2 +2,8 @@` | **1** | **C** | every changed line is a comment after leading whitespace → **0 non-comment changed lines of 10** | **PASSES** |
+| 2 | `@@ -22,4 +28,4 @@` | **1** | **B** | v1 lines **22–25** ⊂ R4.2's five (`:22 :23 :24 :25 :77`), and `d == b` (4 → 4, **zero added**) | **PASSES** |
+| 3 | `@@ -77 +83 @@` | **1** | **B** | v1 line **77** ∈ the five, and `1 → 1`, **zero added** | **PASSES** |
+| 4 | `@@ -259,6 +265,23 @@` | **1** | **A** | v1 range **259–264** ⊂ the published class-A bound `:258-265` | **PASSES** |
+
+`grep -c '^@@'` = **4** and `grep -cE '^# -+ class [ABC] -+$'` = **4**. **No unlabelled, doubly-labelled or
+unlabelable hunk.**
+
+**NET: four legs GREEN, the run-3 leg RED ⇒ ITEM 12 IS RED.** *Routing:* `TODO-648` (the pinned-sidecar
+defect class) and `TODO-634` (design-phase input), identically to §10.2.6's Finding 1. **Nothing is
+repaired.**
+
+---
+
+#### §10.10.13 — ITEM 13 — **GREEN.** BOTH LIMBS: REPRODUCTION **AND** THE PRE-DATA DRY RUN
+
+**Builder digest checked BEFORE execution**, exactly as the graders are:
+`2301ca20fec26400826d3d10444b2a7fca773339d3266e29b04092d0ad33cd08`, matching §10.0.6.
+
+**LIMB 1 — the ten target CSVs, re-run from the committed builder over the committed `prune.csv` into a
+scratch directory and compared byte-for-byte:**
+
+```
+spec356c-targets.sh <scratch> spec356c-long-r1 spec356c- -r1     exit 0
+spec356c-targets.sh <scratch> spec356c-long-r2 spec356c- -r2     exit 0
+```
+
+| | T1 | T2 | T3 | T4 | T5 |
+|---|---|---|---|---|---|
+| **r1** | `cmp` OK | `cmp` OK | `cmp` OK | `cmp` OK | `cmp` OK |
+| **r2** | `cmp` OK | `cmp` OK | `cmp` OK | `cmp` OK | `cmp` OK |
+
+**10 / 10 byte-identical.**
+
+**LIMB 2 — R3.5's dry run, the limb that reproduction alone cannot supply** (*a wrong window reproduces its
+wrong table perfectly*): the five `spec356c-dryrun-*-long.csv` re-run from the **same** committed builder
+over the committed `spec356-long.prune.csv` — **5 / 5 byte-identical**, so **15 / 15 overall** — with their
+**pre-declared shapes measured, not assumed**:
+
+| Pre-declared at §10.0.8 | Observed now |
+|---|---|
+| **T3: 14 `FULL` + 1 `PARTIAL`**, the `PARTIAL` **last** | **14 `FULL`, 1 `PARTIAL`**, and the last data row's `window_kind` **is** `PARTIAL` |
+| **T4: 53 whole-run / 2 coordinate-last-half** | `SUBJECT_WHOLE_RUN` **53**, `PRIOR_ARM_WHOLE_RUN` **53**, `SUBJECT_COORD_LAST_HALF` **2**, `PRIOR_ARM_COORD_LAST_HALF` **2**; the two `COORD_LAST_HALF` rows carry `discriminant_role = THE_DISCRIMINANT`, the whole-run rows `PUBLISHED_NEVER_THE_DISCRIMINANT` |
+
+**AND THE ORDERING:** all five dry-run CSVs were added at **`8a60f135`**, a **strict ancestor** of the
+boundary `0b96e63e`. **No repeat clock started before this dry run existed**, so AC19's RED condition does
+not arise.
+
+---
+
+#### §10.10.14 — ITEM 14 — **GREEN**, WITH THE READING JUSTIFIED RATHER THAN ASSERTED
+
+**THE MEASUREMENT FIRST, THE READING SECOND.** `grep 'T1|T2|T3|T4|T5'` over the whole §10 range returns
+**61** lines. Where they fall is the entire question:
+
+| Region | matches | Item 14's status for that region |
+|---|---|---|
+| **§10.2.2 – §10.2.5 — the WALK, the DETERMINATION, the BUNDLE, the n = 2 statement** | **0** | **the assertion, and it holds absolutely** |
+| §10.3 – §10.7 — the target subsections | 17 | **carved out by the item** |
+| §10.8.6 — the escalation's routing sentence | 3 | **carved out by the item, by name** |
+| §10.0.1 / §10.0.2 / §10.0.4 / §10.0.5 / §10.0.8 / §10.0.9 — the PRE-DATA pre-declaration | 29 | frozen bytes at the pin (see below) |
+| §10.1.3 | 2 | **regex false positives** — the ISO-8601 build timestamps `2026-08-11T17:15:26Z` and `…T17:16:44Z`, in which `T1` matches the hour field. **No T-table is referred to.** |
+| **§10.2.1 — the PRESENCE limb, `P9`'s entry** | **5** | **the question the item forces; answered below** |
+
+**THE SUBSTANTIVE ASSERTION IS MET WITHOUT ARGUMENT: the walk, the determination, the bundle and the
+replication statement contain ZERO occurrences.** No limb reads a T-table, no step reads one, no slot reads
+one. That is what target/predicate separation *is*.
+
+**THE §10.2.1 QUESTION, DECIDED AND JUSTIFIED.** The five matches are `P9`'s PRESENCE entry, and every one
+of them refers to the **literal anchor strings** `T1.`…`T5.` whose occurrence count **in a different
+artifact** (`spec356-verdict-xask.md`) was measured as **ZERO**. **The reading taken here: a
+presence-grading observation about a source artifact is NOT a target citation inside a limb, a step or a
+slot.** Four reasons, offered as reasons and not as an assertion:
+
+1. **It carries no T-table value.** The item's hazard is a **T-table column** reaching a limb, step or
+   slot. `P9`'s five lines carry no column, no row and no number from any T-table — the only number they
+   carry is a **count of string occurrences in a markdown file**, and that count is `0`.
+2. **`P9` decides nothing about the round.** R6.4 makes the PRESENCE limb categorically separate: it is
+   *"evaluated FIRST"*, before any content is read, and its output is a verdict about **artifacts**. A
+   determination cannot be contaminated by a limb that runs before the walk and feeds nothing into it.
+3. **The structural check is independent of the reading.** Whatever one decides about §10.2.1, the walk's
+   own count is **0**. The separation the item protects is intact **either way** — which is why this
+   subsection publishes the region table before the argument.
+4. **The strict-literal reading is self-refuting, and that is decisive.** Read *"empty outside the target
+   subsections and the escalation's routing sentence"* with no further latitude, and the item REDs on
+   **§10.0.2 — a section whose own title is "THE FIVE TARGET DISPOSITIONS"** and which carries 15 matches
+   as **PRE-DATA bytes committed at the pin**. Under that reading item 14 **cannot be green for any
+   possible execution**, which is PD-8's vacuity defect with its sign flipped: a check that cannot pass is
+   as uninformative as one that cannot fail. **A reading that makes the item unsatisfiable by construction
+   is not the reading the item's author can have meant**, and the item's own first sentence — *"no sentence
+   in §10's **classification subsections** cites a T-table"* — names the scope that makes it satisfiable.
+
+**VERDICT: GREEN.** *Recorded and routed, not repaired:* the item's grep pattern is **unanchored and
+matches ISO-8601 hour fields** (§10.1.3's two hits), so it over-matches on any record carrying build
+timestamps. That is an **instrument** observation, POST-DATA, and it is routed to **`TODO-634`**'s design
+phase — a future spec that re-pins may anchor the pattern (`T[1-5][.: ]`) and scope it to the classification
+subsections by name. **The checklist is not patched here.**
+
+---
+
+#### §10.10.15 — ITEM 15 — **GREEN.** ESCALATION FORM
+
+The determination **is** `INDETERMINATE`, so R7.2's six items are the applicable branch, and **all six are
+present, in order**: §10.8.1 item 1 (the unclassified cause, named) · §10.8.2 item 2 (every step's evaluated
+value, per replicate, in the frozen order) · §10.8.3 item 3 (the blocking admissibility limb, named by
+letter, against its frozen threshold) · §10.8.4 item 4 (PD-4's coupling on this round's numbers) · §10.8.5
+item 5 (§8.3 quoted verbatim) · §10.8.6 item 6 (the routing sentence).
+
+**§8.3 IS VERBATIM, AND IT WAS CHECKED BY `diff` RATHER THAN BY EYE.** Extracting §8.3's source (manifest
+lines 467–478) and each block quote, stripping only the `> ` marker:
+
+```
+$ diff <§8.3 source> <§10.2.3's block quote>   -> SILENT   (adjacent to the determination)
+$ diff <§8.3 source> <§10.8.5's block quote>   -> SILENT   (escalation item 5)
+```
+
+**Byte-identical in both places.** ADJ-4's bound is quoted rather than paraphrased at §10.2.3, and the
+n = 2 replication statement is at §10.2.5 — published **in addition**, not instead, since both replicates
+returned the same determination.
+
+---
+
+#### §10.10.16 — ITEM 16 — **GREEN.** GRADED BY CONTENT, WITH FIVE LIMBS AND SIX TRANSCRIPTS
+
+**The git form of this item is structurally vacuous and was not used.** `.specflow/` is gitignored at
+`.gitignore:111`, no path under it is in the index, and `git diff <pin>..HEAD -- '.specflow/todos/'` is
+**empty for every possible execution** — it could not detect a ticked box, a moved box, or an edit to
+`TODO-637`/`638`/`648`. **The content grade is §10.9, and it is GREEN on all five limbs:**
+
+| limb | assertion | observed |
+|---|---|---|
+| **(a)** | the three unrelated digests byte-identical to §10.0.7's | **3/3 MATCH** |
+| **(b)** | `TODO-634.md`'s digest **HAS MOVED** | `555c3aa9…4f8c` → **`a1b17d97…9428`** |
+| **(c)** | tick counts still **2 / 5**, census **7 / 0**, strict anchor still matching | **all five sub-checks hold** |
+| **(d)** | before/after published side by side; after-text carries the outcome **and** the `spec356-manifest.md §10` pointer | **published at §10.9.3; both literals present** |
+| **(e)** | every changed line inside the §8.1 box | **1 hunk `@@ -233,0 +234,16 @@`, 0 hunks outside** |
+
+**BOTH DIRECTIONS ARE DEMONSTRATED, WITH ALL SIX TRANSCRIPTS ON THE RECORD** — five PRE-DATA in
+`spec356c-trackergrade-proofs.txt` (RED on (b)(d); RED on (c)(d); RED on (a); RED on (e) with (a)–(d)
+green; GREEN on all five) and the sixth, wave 5's real run, in `spec356c-trackergrade-run6.txt`
+(`VERDICT: GREEN (a, b, c, d, e)`, exit 0). **An item 16 reported green without both transcripts on the
+record would itself be RED**; both are on the record, and the grader was digest-checked (3/3 against
+§10.0.6) before it was run.
+
+**AC15's other clauses, checked directly:** `TODO-634` is **not closed, not deleted, not ticked**;
+`TODO-637`, `TODO-638` and `TODO-648` are **byte-unchanged**.
+
+---
+
+#### §10.10.17 — ITEM 17 — **GREEN.** CATALOG
+
+```
+$ scripts/check-invariants.sh
+invariants: 21 entries, 4 NAKED (baseline 4)
+$ echo $?
+0
+$ git diff --stat 8a60f135..HEAD -- INVARIANTS.md      -> EMPTY
+$ git diff --stat feb85268..HEAD -- INVARIANTS.md      -> EMPTY
+$ grep -A8 'TG-OR-005' INVARIANTS.md | grep Status
+- **Status:** `open (TODO-634)`.
+```
+
+`TG-OR-005` still reads **`open (TODO-634)`**, which is the correct state: this round produced a second
+observation, not a closure, and the tracker it names stays open.
+
+---
+
+#### §10.10.18 — ITEM 18 — **GREEN.** BUILD
+
+```
+$ cargo fmt --check                                 -> exit 0
+$ cargo build --release --bin topgun-server         -> exit 0   (Finished `release` profile)
+```
+
+This is the direct check the item exists for: AC2 makes the test and clippy outcomes identical to the pin's
+**by construction** (the `.rs` diff is empty in both directions, §10.10.2), so the build is the check that
+actually adds information about the merge tree.
+
+---
+
+#### §10.10.19 — ITEM 19 — **GREEN.** CROSS-VENDOR
+
+`spec356c-xreview.md` is committed. It names the **model** (`z-ai/glm-5.2` via OpenRouter), the **exact
+invocation**, the **reviewed diff range** (`8a60f135...HEAD`, 2,168 lines / 153,403 bytes over 6 files,
+with the excluded pathspec stated and justified), the **cost** ($0.11292806, 81,270 tokens), and the
+reviewer's **verbatim** assessment reproduced in full.
+
+**Every finding is marked: 4 findings, 0 `APPLIED`, 4 `RECORDED-AND-ROUTED`** (all four re-verified against
+the committed bytes by the executor and all four **true**; each would have required editing a frozen
+section, a pinned sidecar or a `.rs` file barred by R0.4), plus **5 attempted cardinal-rule breaks marked
+`REFUTED-WITH-REASON`**. **Zero findings were applied to a frozen surface** — which is not a happy accident
+but the reason none was applied. The artifact also states its own weakness: no HIGH and no MED finding on a
+2,168-line record is a result to be suspicious of.
+
+---
+
+#### §10.10.20 — WHAT THE THREE REDs MEAN, AND WHAT THEY DO NOT
+
+**16 GREEN, 3 RED.** The three REDs are **items 1, 10 and 12**, and they share one property that is worth
+stating plainly: **every one of them fires on a byte this spec is forbidden to touch.**
+
+| Item | The RED | The frozen byte behind it | Routed to |
+|---|---|---|---|
+| **1** | `P9` (anchors absent from `spec356-verdict-xask.md`) and `P13` (POST half absent at that instant) | a **committed sidecar** and the **ordering rule** that item 1 runs first | `TODO-634`; `P13` re-read GREEN at §10.9 |
+| **10** | one `slope_mb_per_hour` line without `tombstone_bytes` beside it | manifest **line 2957**, §10.0.4's `P1` entry, **PRE-DATA, at the pin** | `TODO-634` |
+| **12** | v2 refuses the repeat's cells, exit 3 | `spec356c-slottruth-v2.sh`, a **digest-pinned sidecar** | `TODO-648` + `TODO-634` |
+
+**WHAT THEY DO NOT MEAN.** None of the three touches the **determination**. The walk's four Step-0 limbs
+were all evaluated, in the frozen order, on both replicates, from **committed column 43 read directly** —
+not through the refused driver — and Step 0 limb (c) fails on **1,440 / 1,440 = 100.000000 %** on both.
+Items 2–9, 11 and 13–19 are green, and they are the items that carry the lineage, the pin, the artifact
+binding, the walk, the bundle, the fits and the target derivations. **`INDETERMINATE` on both replicates is
+not weakened by these three REDs, and it is not strengthened by the sixteen greens either** — it is what
+the frozen predicate returned.
+
+**AND WHAT PUBLISHING THEM COSTS, WHICH IS THE POINT.** Three REDs on a nineteen-item checklist is a worse
+headline than nineteen greens, and it is the only honest one available. **A checklist that greens on a
+known failure is the exact defect this spec exists to not repeat.** All three were known before the
+checklist ran — item 12's from §10.2.6, item 10's from §10.1.6, item 1's from §10.2.1 — and **the checklist
+found all three independently anyway**, which is the strongest evidence available that it is an instrument
+and not a formality.
+
+---
+
+#### §10.10.21 — **THE GREPS ARE NOT IDEMPOTENT UNDER PUBLICATION, AND THIS IS THE RECORD OF IT RATHER THAN A REWRITE TO HIDE IT**
+
+Items 10 and 14 are **greps over the §10 range**, and §10.10 is **part of §10**. So the act of *publishing
+what the greps found* — quoting the offending line, quoting the pattern, naming the T-tables by name —
+**changes what the greps find**. This was measured after §10.10 landed, and it is recorded here because the
+alternative is worse in a specific and disqualifying way.
+
+**MEASURED, BOTH WAYS:**
+
+| Grep | over §10.1 – §10.9 (the bytes the checklist graded) | over §10.1 – §10.10 (after this subsection's own publication) |
+|---|---|---|
+| item 10 leg A — `slope_mb_per_hour` lines lacking the series name on the same line | **1** (manifest line 2957, PRE-DATA, at the pin) | **4** — the original, plus **3 inside §10.10** |
+| item 10 leg B — the inference vocabulary | **0** | **2** — both inside §10.10, and both are the **pattern itself** being quoted in §10.10.10's report of leg B |
+| item 14 — `T1|T2|T3|T4|T5` inside the walk subsections §10.2.2 – §10.2.5 | **0** | **0** — unchanged; §10.10's own 6 matches are in the checklist report, not in a limb, step or slot |
+
+**WHICH READING THE VERDICTS REST ON, STATED EXPLICITLY: the first column.** Items 10 and 12's verdicts are
+**measurements of the record the checklist was run against**, which is §10.1 – §10.9. A grep cannot grade
+the report of its own output without regress — the report of the report would move it again — and the
+verdicts are already published as **RED** on the first column, so nothing here converts a RED into a GREEN
+or the reverse. **Item 10 is RED either way. Item 14's core assertion (0 in the walk) is GREEN either way.**
+
+**WHY THE OBVIOUS ALTERNATIVE WAS REFUSED.** §10.10.10 could have been written so its own text does not
+trip the grep — paraphrase the offending line instead of quoting it, describe the leg-B pattern instead of
+printing it. **That is writing the record to satisfy the instrument rather than to report the measurement,
+and it is the same failure class as a checklist that greens on a known failure.** A reader who cannot see
+the offending line verbatim cannot check the finding; a reader who cannot see the pattern cannot re-run the
+leg. **The quotes stay, and the arithmetic they cause is published here instead of being quietly absorbed.**
+
+**AND THE HONEST RESIDUE:** this means **item 10's grep, run naively over the whole §10 range at the merge
+tree, returns 4 rather than 1**, and a future reader who runs it will get 4. That reader should land here.
+*Routing:* **`TODO-634`**, design-phase input — a checklist grep whose subject includes its own report needs
+either an explicit exclusion of the checklist subsection or a snapshot boundary, and **which of those is
+right is not settled here**, because settling it would be patching a frozen checklist, which R0.3 forbids
+and this spec's own hard constraints bar.
