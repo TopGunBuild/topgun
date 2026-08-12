@@ -1,0 +1,88 @@
+=== SPEC-356c R4.3, RUN 3 — v2 over the repeat's two replicates ===
+date(UTC): 2026-08-12T09:49:58Z
+driver (digest-checked against manifest §10.0.6 BEFORE execution, unedited):
+a95f49fa99f7f39ad777b0789ec778eda1ffec3aa3221031d98b587b62a4f348  spec356c-slottruth-v2.sh
+expected §10.0.6 value: a95f49fa99f7f39ad777b0789ec778eda1ffec3aa3221031d98b587b62a4f348
+
+--------------------------------------------------------------------------
+RUN 3 / replicate r1 :  spec356c-slottruth-v2.sh <E> spec356c-long-r1 28800
+--------------------------------------------------------------------------
+SLOTTRUTH FAIL: spec356c-long-r1.matrix.txt does not name cell long
+exit=3
+
+--------------------------------------------------------------------------
+RUN 3 / replicate r2 :  spec356c-slottruth-v2.sh <E> spec356c-long-r2 28800
+--------------------------------------------------------------------------
+SLOTTRUTH FAIL: spec356c-long-r2.matrix.txt does not name cell long
+exit=3
+
+--------------------------------------------------------------------------
+CONTROL, SAME BYTES, SAME INVOCATION SHAPE, DEFAULT SUBJECT (R4.3 run 2):
+  spec356c-slottruth-v2.sh <E>          [subject spec356-long, 14400 s]
+--------------------------------------------------------------------------
+S_EARLY	998.589613
+S_LATE	998.845155
+EXIT_SHARE_PCT	0.000000
+B	999.944741
+B_SENTINEL_EXCLUDED_PCT	98.333333
+MEDIAN_L_OVER_B	0.000000
+R51_SD	1076.184028
+R51_MEAN	37856.466667
+R51_T	0.346905
+R51_RESULT	NOT REJECTED
+R52_SD	2969.921596
+R52_MEAN	36854.400000
+R52_T	0.800515
+R52_RESULT	NOT REJECTED
+N6_COST_CELLS	8
+exit=0
+
+==========================================================================
+EXECUTOR RECORD (not driver output) — WHAT RUN 3 MEASURED, AND WHAT IT DID NOT
+==========================================================================
+OBSERVED: v2 REFUSED TO RUN on both replicates, exit 3, at provenance limb
+(d)(i) — the matrix.txt cell-identity check — BEFORE any slot was derived.
+
+THE CAUSE, LOCALISED BY THE CONTROL ABOVE: the subject's prov() call
+parameterises the BASENAME ("${2:-spec356-long}") and the DURATION
+("${3:-14400}") but leaves the CELL-NAME literal `long` hardcoded, and no
+parameter or environment variable reaches it:
+
+    prov "${2:-spec356-long}" long "<unset: production default 1000>" \
+         "${3:-14400}" "$PR" 10
+
+The repeat's cells self-describe as `long8h_r1` / `long8h_r2` (R2.4's own
+required matrix.txt literal), so the grep -qxF for
+`=== spec356 prune-record run: cell long ===` cannot match, on any invocation
+this driver accepts. The control run on the default subject completes clean
+(exit 0) over the SAME bytes of the SAME driver, so the refusal is specific to
+that one literal and is not a defect of the subject artifacts: their duration
+(28800s) and width (<unset: production default 1000>) literals are both present
+and correct in each matrix.txt.
+
+CONSEQUENCE, STATED RATHER THAN WORKED AROUND: the driver's own doctrine is
+that "a NONZERO exit means the truth file is INCOMPLETE BY CONSTRUCTION ... so
+a driver that REFUSED TO RUN is never reported as a mere coverage hole." Run 3
+therefore produced NO re-derived slot for either replicate, and in particular
+did NOT exercise R4.6 / §10.0.3's empty-population branch on the repeat's real
+bytes. That branch remains demonstrated only where §10.0.3 already records it:
+on the synthetic fixtures of `spec356c-slottruth-v1-v2-runs.txt`.
+
+WHAT WAS NOT DONE, AND WHY: no byte of spec356c-slottruth-v2.sh was changed.
+It is a PRE-DATA sidecar, digest-pinned in §10.0.6 and reproduced above; a
+driver edited with the data visible is a driver the data chose, which is the
+whole reason the digest is pinned. The finding is POST-DATA: it is RECORDED and
+ROUTED, never applied. It moves no predicate, threshold, ordering or
+conditional, and it authors no addendum.
+
+OWNER: TODO-634 for the instrument capability; TODO-648 for the pinned-sidecar
+defect class this belongs to (the class §10.0 already uses for a defect in a
+sidecar this spec may not edit). No byte of either tracker is written here.
+
+WHAT THE WALK READ INSTEAD, AND WHERE IT IS PUBLISHED: Step 0 limb (c) needs
+ADJ-12's sentinel readability on committed column 43 over the coordinate last
+half. With the driver refusing, that fraction was re-derived directly from each
+replicate's committed prune.csv and is published, with its row counts, in §10's
+walk. B itself is UNDEFINED on both replicates — the non-sentinel population is
+EMPTY — which is exactly the state §10.0.3 pre-declares, reached by measurement
+of the committed column rather than by the driver that could not open it.
