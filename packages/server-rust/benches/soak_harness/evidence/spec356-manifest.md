@@ -4445,3 +4445,561 @@ doubled the replicates in order to see this, and at n = 1 it would have been inv
 decider, ADJ-2 is untouched, and nothing about the four pre-registered mechanisms follows from it.
 *Routing:* **`TODO-634`**, as a stated open input to the design phase — the same limitation applies as
 above: the record is the routing.
+
+---
+
+### §10.3 — T1(b): THE LWM-PASS LEDGER, PER REPLICATE — AND T1(a)'s OUT-OF-SCOPE ROW
+
+**Status, restated before a single number is read: this is an OBSERVATION (R1.3).** Nothing in this
+subsection alters a Step, a threshold, an ordering or a conditional; **no limb, step, slot or leaf of
+§10.2's walk reads any column below**, and the determination in §10.2.3 stands exactly as walked whether or
+not this table exists.
+
+**Artifacts:** `spec356c-t1-lwmpass-r1.csv` (**414** data rows) and `spec356c-t1-lwmpass-r2.csv` (**446**),
+both produced by the single committed builder `spec356c-targets.sh` (R3.4), one run per replicate, over the
+**coordinate last half** `[14,410 … 28,800]`.
+
+**THE RESOLUTION CAVEAT (C1), CARRIED HERE AND NOT ONLY IN THE CSV HEADER.** LWM advances one epoch at a
+time roughly every 31 s; the ledger scrapes every 10 s. **Every "at the moment LWM passes" reading below is
+therefore the FIRST SCRAPE AT OR AFTER the advance — a BUCKET, not an instant, with up to one full cadence
+of lag.** No row below is an event record.
+
+| Quantity | **r1** | **r2** |
+|---|---|---|
+| LWM-pass rows | **414** | **446** |
+| first / last pass bucket (`t_secs`) | 14,440 s / 28,760 s | 14,440 s / 28,790 s |
+| `lwm_before` (first) → `lwm_after` (last) | **460 → 874** | **460 → 906** |
+| `epochs_passed` | **1 on all 414 rows** (max jump 1; published, not assumed) | **1 on all 446 rows** |
+| `EVENTS_IN_BUCKET` (C3) | **1 on all 414 rows** — no multi-event bucket occurred, so nothing was smoothed | **1 on all 446 rows** |
+| `indexed_refs` (**POST-drain**) | 1,010 … 1,458 | 1,007 … 1,439 |
+| `indexed_epochs` (**POST-drain**) | **2 at every pass row** | **2 at every pass row** |
+| `refs_per_indexed_epoch` — **a MEAN over the index, NOT a per-epoch value** | 505.000000 … 729.000000 | 503.500000 … 719.500000 |
+| `eligible_refs` (`L`, **PRE-drain**) | **0 at every pass row** | **0 at every pass row** |
+| `ineligible_refs` (`P`, **PRE-drain**) | 1,001 … 1,167 | 1,001 … 1,171 |
+| Σ `d_tombstone_bytes_since_prev_pass` | **9,494,354 B** | **10,230,929 B** |
+| Σ `d_bytes_freed_since_prev_pass` | **0 B** | **0 B** |
+| Σ `d_nonempty_drains_since_prev_pass` | **0** | **0** |
+
+**Sampled rows, so the table above is checkable against the committed bytes rather than trusted** (row
+index into the CSV's data rows; columns in header order):
+
+```
+r1   1: 14440,460,461,1,461,1361,2,680.500000,0,1037,,,,1
+r1 103: 17650,562,563,1,563,1222,2,611.000000,0,1082,21275,0,0,1
+r1 207: 20990,666,667,1,667,1387,2,693.500000,0,1036,29762,0,0,1
+r1 310: 24370,769,770,1,770,1116,2,558.000000,0,1045,20424,0,0,1
+r1 414: 28760,873,874,1,874,1158,2,579.000000,0,1018,22839,0,0,1
+
+r2   1: 14440,460,461,1,461,1373,2,686.500000,0,1070,,,,1
+r2 111: 17850,570,571,1,571,1060,2,530.000000,0,1018,22701,0,0,1
+r2 223: 21410,682,683,1,683,1271,2,635.500000,0,1021,20493,0,0,1
+r2 334: 25040,793,794,1,794,1257,2,628.500000,0,1006,28129,0,0,1
+r2 446: 28790,905,906,1,906,1195,2,597.500000,0,1016,20424,0,0,1
+```
+
+*(The three empty delta fields on row 1 of each replicate are the builder's honest empty: there is no
+previous pass row to difference against. R3.4 forbids a substitute, and none was emitted.)*
+
+**WHAT THE LEDGER SAYS, IN DIRECTION ONLY.** Across the whole deciding window the LWM walked **414** epochs
+on r1 and **446** on r2 while `d_bytes_freed_since_prev_pass` was **0 at every single pass row on both
+replicates**, and `indexed_epochs` sat at **2** throughout — the index never grew a backlog of epochs
+behind the watermark, and the watermark never passed an epoch at a moment when a drain was crediting bytes.
+**This addresses hypothesis (a) in DIRECTION ONLY.** The ledger **cannot distinguish** *"epoch e's refs
+were never indexed"* from *"they were indexed and left the index earlier"*, because the two gauges it reads
+are aggregates over all indexed epochs. **A trajectory is not a membership test, and this sentence exists
+so it is not read as one.**
+
+**THE ADJ-7 BOUNDARY IS NOT CROSSED.** `eligible_refs` (`L`) and `ineligible_refs` (`P`) are **PRE-drain**;
+`indexed_refs` is **POST-drain**. They are published side by side and **never divided across that
+boundary**: `P / indexed_refs` and `L / indexed_refs` are computed nowhere in this subsection, in the
+committed CSV, or anywhere in §10.
+
+**UNITS DIFFER ON PURPOSE AND ARE NOT RECONCILED.** `indexed_refs` is a **ref count**; `tombstone_bytes` is
+**bytes**. **No bytes-per-ref constant is assumed, fitted or implied** — the two are published beside each
+other and the reader is told, here, that they are different units.
+
+#### §10.3.1 — T1(b) AND T5 ARE **ONE** OBSERVATION, NOT TWO — WITH THE IDENTITY'S MEASURED RATE (AC8)
+
+**The one sentence, stated plainly:** under the `current_epoch ≡ low_water_mark` identity, **T1(b)'s
+LWM-pass rows and T5's epoch rows are the SAME rows reached by two routes** — T5's `lwm_passed_at_t`
+degenerates to `t_last_seen` and T1(b)'s pass rows are a projection of T5's epoch rows — so **agreement
+between §10.3's table and §10.7's ledger is a RESTATEMENT, NOT CORROBORATION, and the diagnostic value is
+banked ONCE.**
+
+**The identity is NEAR-TOTAL, NOT TOTAL, and the measured rate is published per replicate so the reader
+knows which regime they are reading** — re-derived here from the committed prune ledgers (columns 22 and
+23), not carried over from the prior arm:
+
+| `current_epoch == low_water_mark` equality rate | **r1** | **r2** |
+|---|---|---|
+| full ledger | **2,779 / 2,881 = 0.964596** | **2,796 / 2,880 = 0.970833** |
+| **coordinate last half (the deciding window)** | **1,390 / 1,440 = 0.965278** | **1,401 / 1,440 = 0.972917** |
+
+**~3.5 % of rows on r1 and ~2.7 % on r2 break the identity**, so the projection is a *near*-projection: the
+row counts differ by exactly one on each replicate (414 pass rows vs 415 epoch rows on r1; 446 vs 447 on
+r2), and the extra epoch row is the window's last epoch, which the watermark had not yet passed when the
+ledger ended. **The identity did NOT break into independence** — it is a near-total identity in both
+replicates — and that is what is claimed, no more.
+
+#### §10.3.2 — **T1(a) — OUT-OF-SCOPE.** THE ROW, THE REASON, THE OWNER
+
+| Target | Disposition | Reason | Owner |
+|---|---|---|---|
+| **T1(a)** — per-epoch index membership (*"was epoch e's content EVER in the drainable index"*) | **OUT-OF-SCOPE** | The committed surface exposes `topgun_or_prune_indexed_refs` and `_indexed_epochs` as **aggregate gauges over all indexed epochs**; **no committed column, and no derivation from committed columns, can attribute a ref to an epoch.** Producing it needs a **new per-epoch labelled emission on the prune path — a `.rs` change — which R0.4 forbids CATEGORICALLY**, because taking it would destroy the **frozen-inherited build identity that is the entire point of the repeat** | **`TODO-634`** |
+
+**T1(a) IS NOT NARROWED INTO T1(b), AND T1(b) IS NOT PRESENTED AS ITS ANSWER.** §10.3's table answers
+*"what did the AGGREGATE index look like as the watermark walked past"*. It does **not** answer *"were
+epoch e's refs in the index at the moment the watermark passed e"*. That question is unanswered by this
+round, is recorded as unanswered here, and is carried to `TODO-634`'s design phase as the **single
+highest-value instrument addition the next round can make** (§10.8 item 6 routes it).
+
+---
+
+### §10.4 — T2: FULL-LEDGER ENUMERATION OF EVERY NON-EMPTY DRAIN — AND T2(exactness)'s OUT-OF-SCOPE ROW
+
+**Status: an OBSERVATION (R1.3).** No limb, step, slot or leaf reads it.
+
+**THE WINDOW IS THE FULL LEDGER, NAMED BEFORE THE NUMBERS.** T2's own words are *"FULL content enumeration
+of every non-empty drain"*, so this table spans **every row from the ledger's first `elapsed_secs` to its
+last** — **not** the coordinate last half. R3 pre-declared that the two readings differ by more than 25× on
+the prior arm; they differ here too, and §10.6 is where the last-half count does its work.
+
+**Artifacts:** `spec356c-t2-drains-r1.csv` (**39** data rows) and `spec356c-t2-drains-r2.csv` (**80**).
+
+| Quantity, over the FULL ledger | **r1** | **r2** |
+|---|---|---|
+| non-empty drain rows | **39** | **80** |
+| first / last drain bucket | 60 s / **10,470 s** | 60 s / **13,470 s** |
+| `drains_in_bucket` | **1 on all 39 rows** — every drain is separable; **no bucket carried more than one event**, so C3's non-smoothing clause never had to bite | **1 on all 80 rows** |
+| `last_drained_epoch` first-before → last-after | **0 → 332** | **2 → 428** |
+| Σ `d_drain_refs_sum` / Σ `d_drain_refs_count` — **§5.4's PRIMARY reading for a THROUGHPUT quantity** | 39,000 / 39 = **1000.000000 refs per drain**, and the per-row quotient is **exactly `1000.000000` on all 39 rows** | 80,000 / 80 = **1000.000000**, exactly `1000.000000` on all 80 rows |
+| Σ `d_drain_epochs_sum` / Σ `d_drain_epochs_count` | 39 / 39 = **1.000 epoch per drain**, **on every row** | 80 / 80 = **1.000 epoch per drain**, **on every row** |
+| Σ `d_epoch_considered_sum` | 39,000 | 80,000 |
+| Σ `d_epoch_dropped_sum` | 39,000 — **considered == dropped on every drain** | 80,000 — **considered == dropped on every drain** |
+| `d_epoch_bytes_freed_sum` per drain | 19,820 … 23,000 B | 19,819 … 23,000 B |
+| Σ `d_epoch_bytes_freed_sum` | **848,707 B** (mean 21,761.7 B/drain) | **1,810,354 B** (mean 22,629.4 B/drain) |
+| Σ `d_bytes_freed_total` | **848,707 B** | **1,810,354 B** |
+| **`bytes_freed_matches_attribution`** | **`true` on 39 / 39 rows** | **`true` on 80 / 80 rows** |
+
+**Sampled rows** (header order), so the summary is checkable:
+
+```
+r1 first: 60,1,1000,1,1000.000000,1,1,0,2,1000,1000,19820,1,19820,true
+r1  last: 10470,1,1000,1,1000.000000,1,1,331,332,1000,1000,23000,1,23000,true
+r2 first: 60,1,1000,1,1000.000000,1,1,2,2,1000,1000,19819,1,19819,true
+r2  last: 13470,1,1000,1,1000.000000,1,1,428,428,1000,1000,23000,1,23000,true
+```
+
+**THE IDENTITY COLUMN MATCHED EVERYWHERE — AND ITS BOUND IS STATED HERE RATHER THAN LEFT TO BE ASSUMED,
+BECAUSE A UNANIMOUS MATCH IS EXACTLY THE RESULT MOST EASILY OVER-READ.**
+`bytes_freed_matches_attribution` is **an INTERNAL CONSISTENCY CHECK BETWEEN TWO COMMITTED COUNTERS** —
+`Δtopgun_or_prune_bytes_freed_total` against `Δtopgun_or_prune_epoch_bytes_freed_sum`. **It CANNOT compare
+either counter against an independent ground truth of an epoch's true tombstone byte size**, because no
+committed column carries one. Therefore:
+
+- **a MISMATCH would have been evidence of an accounting gap** — and there was none, on 119 drains across
+  two replicates;
+- **the MATCH excludes ONLY the gap between those two counters.** It does **not** exclude every reclaim
+  path, it does **not** establish that the attributed bytes equal the epoch's true tombstone bytes, and it
+  is **not** a test of hypothesis (c) at exactness. It is the internal-consistency identity it is named
+  after, and it is reported as nothing more.
+
+**WHERE THE DRAINS SIT IN TIME — AN OBSERVATION, NOT A RE-DERIVATION OF ANY LIMB.** Every one of the 39
+drains on r1 (last at **10,470 s**) and every one of the 80 on r2 (last at **13,470 s**) falls **strictly
+before the coordinate last half's lower bound of 14,410 s**. §10.2.2's limb (c) was evaluated on the prune
+ledger's own committed column 43 and reads **nothing** from this table; the coincidence is noted here
+because a reader will see it, and naming it is cheaper than letting it look like a routing that happened
+off-record. **It routes nothing.**
+
+**THE STARTUP BURST IS VISIBLE IN THIS TABLE AND THE TWO REPLICATES DISAGREE ABOUT ITS SHAPE.** On r1,
+**28 of 39** drains land in the first 1,000 s window and the remaining 11 by 10,470 s. On r2, only **15 of
+80** land in the first window, with the bulk — **61 of 80** — arriving in the six windows spanning
+7,000 s … 12,990 s, i.e. **in the middle of the run rather than at its start**. **Same
+configuration, same binary, same pin — and a materially different distribution of drains in time.** That
+disagreement is reported as disagreement; §10.6 is where it disqualifies the whole-run count as a
+discriminant.
+
+#### §10.4.1 — **T2(exactness) — OUT-OF-SCOPE.** THE ROW, THE REASON, THE OWNER
+
+| Target | Disposition | Reason | Owner |
+|---|---|---|---|
+| **T2(exactness)** — *"was `bytes_freed` incremented by the EXACT tombstone size"*, against an **independent** ground truth of the epoch's true byte size | **OUT-OF-SCOPE** | **No committed column carries an independent ground truth for an epoch's true tombstone byte size.** `topgun_ormap_tombstone_bytes_total` is a **whole-store monotone total**, not a per-epoch size; `topgun_or_prune_epoch_bytes_freed_sum` is **the prune path's OWN attribution — i.e. the very quantity under suspicion.** Comparing them tests the path's internal consistency, never its correctness. An exactness claim needs an external size oracle, which is a **per-epoch byte-size emission on the tombstone path — a `.rs` change — which R0.4 forbids CATEGORICALLY** | **`TODO-634`** |
+
+**THE `bytes_freed_matches_attribution` COLUMN IS NOT PRESENTED AS THIS ROW'S ANSWER.** A stated narrowing
+that carries no row is a silent one; this row is carried so the narrowing is not silent, and the 119
+unanimous `true` values above are **not** reported as exactness anywhere in §10.
+
+---
+
+### §10.5 — T3: Δ(LWM) vs Δ(bytes_freed), WINDOWED EVERY 1,000 s, BOTH REPLICATES SIDE BY SIDE
+
+**Status: an OBSERVATION (R1.3).** No limb, step, slot or leaf reads it.
+
+**Artifacts:** `spec356c-t3-windows-r1.csv` and `spec356c-t3-windows-r2.csv`, **29 data rows each —
+28 `FULL` + 1 `PARTIAL`**, exactly the shape R3's tail rule pre-declared for a 28,800 s ledger
+(`28,800 / 1,000 = 28.8`).
+
+**ORIGIN AND TAIL, AS EXECUTED.** The builder's origin rule is a literal — `t0` := the ledger's **first
+`elapsed_secs` value** — and the two replicates resolve it differently because their ledgers begin
+differently: **r1's first scrape is `elapsed_secs = 0`** (2,881 rows) and **r2's is `elapsed_secs = 10`**
+(2,880 rows). **The rule is identical; only its resolved literal differs**, so r2's window *k* covers
+`[10 + 1000k, 10 + 1000(k+1))` and its bounds sit **+10 s** from the column printed below (which shows
+r1's). Both partitions yield **28 `FULL` windows of 100 rows each plus one marked `PARTIAL` tail** —
+81 rows on r1 (`28,000 … 28,800`), 80 on r2 (`28,010 … 28,800`).
+
+**THE `PARTIAL` ROW IS EMITTED, MARKED, AND EXCLUDED FROM EVERY RATE.** It is row `w_index = 28` below, it
+carries `window_kind = PARTIAL`, and **no per-hour rate anywhere in §10.5 or §10.6 is computed from it**
+(§10.6's `SUBJECT_WHOLE_RUN` row carries the exclusion in its own `rate_excluded_reason` column).
+
+| `w` | kind | window (r1 bounds; r2 = +10 s) | r1 ΔLWM | r1 Δfreed | r1 Δbacklog | r1 ND | r2 ΔLWM | r2 Δfreed | r2 Δbacklog | r2 ND | drains disagree? |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | `FULL` | 0–990 | 33 | 599707 | 85250 | 28 | 30 | 315354 | 333771 | 15 | **28 vs 15** |
+| 1 | `FULL` | 1000–1990 | 32 | 88000 | 604054 | 4 | 30 | 0 | 665764 | 0 | **4 vs 0** |
+| 2 | `FULL` | 2000–2990 | 31 | 0 | 685828 | 0 | 31 | 0 | 673090 | 0 | — |
+| 3 | `FULL` | 3000–3990 | 31 | 0 | 684222 | 0 | 31 | 0 | 679624 | 0 | — |
+| 4 | `FULL` | 4000–4990 | 31 | 0 | 691812 | 0 | 31 | 23000 | 677463 | 1 | **0 vs 1** |
+| 5 | `FULL` | 5000–5990 | 32 | 0 | 726202 | 0 | 32 | 0 | 734045 | 0 | — |
+| 6 | `FULL` | 6000–6990 | 31 | 0 | 726754 | 0 | 32 | 46000 | 692300 | 2 | **0 vs 2** |
+| 7 | `FULL` | 7000–7990 | 32 | 0 | 737403 | 0 | 33 | 138000 | 608281 | 6 | **0 vs 6** |
+| 8 | `FULL` | 8000–8990 | 32 | 0 | 735011 | 0 | 32 | 437000 | 311926 | 19 | **0 vs 19** |
+| 9 | `FULL` | 9000–9990 | 33 | 0 | 745039 | 0 | 33 | 207000 | 541834 | 9 | **0 vs 9** |
+| 10 | `FULL` | 10000–10990 | 32 | 161000 | 583786 | 7 | 32 | 207000 | 538614 | 9 | **7 vs 9** |
+| 11 | `FULL` | 11000–11990 | 32 | 0 | 738944 | 0 | 33 | 207000 | 544686 | 9 | **0 vs 9** |
+| 12 | `FULL` | 12000–12990 | 32 | 0 | 736690 | 0 | 32 | 207000 | 537717 | 9 | **0 vs 9** |
+| 13 | `FULL` | 13000–13990 | 32 | 0 | 739749 | 0 | 33 | 23000 | 721855 | 1 | **0 vs 1** |
+| 14 | `FULL` | 14000–14990 | 32 | 0 | 739266 | 0 | 32 | 0 | 744395 | 0 | — |
+| 15 | `FULL` | 15000–15990 | 32 | 0 | 728571 | 0 | 32 | 0 | 743429 | 0 | — |
+| 16 | `FULL` | 16000–16990 | 32 | 0 | 732320 | 0 | 32 | 0 | 734896 | 0 | — |
+| 17 | `FULL` | 17000–17990 | 31 | 0 | 720636 | 0 | 32 | 0 | 735862 | 0 | — |
+| 18 | `FULL` | 18000–18990 | 32 | 0 | 721809 | 0 | 32 | 0 | 730664 | 0 | — |
+| 19 | `FULL` | 19000–19990 | 31 | 0 | 719532 | 0 | 32 | 0 | 727766 | 0 | — |
+| 20 | `FULL` | 20000–20990 | 31 | 0 | 709941 | 0 | 31 | 0 | 720705 | 0 | — |
+| 21 | `FULL` | 21000–21990 | 30 | 0 | 702236 | 0 | 31 | 0 | 710884 | 0 | — |
+| 22 | `FULL` | 22000–22990 | 31 | 0 | 703708 | 0 | 31 | 0 | 714449 | 0 | — |
+| 23 | `FULL` | 23000–23990 | 30 | 0 | 694232 | 0 | 31 | 0 | 704444 | 0 | — |
+| 24 | `FULL` | 24000–24990 | 30 | 0 | 684043 | 0 | 30 | 0 | 686044 | 0 | — |
+| 25 | `FULL` | 25000–25990 | 28 | 0 | 639400 | 0 | 29 | 0 | 683997 | 0 | — |
+| 26 | `FULL` | 26000–26990 | 22 | 0 | 510968 | 0 | 30 | 0 | 689977 | 0 | — |
+| 27 | `FULL` | 27000–27990 | 21 | 0 | 478814 | 0 | 30 | 0 | 688666 | 0 | — |
+| 28 | `PARTIAL` | 28000–28800 | 15 | 0 | 359237 | 0 | 24 | 0 | 548343 | 0 | — |
+
+*(`ΔLWM` = `d_low_water_mark`; `Δfreed` = `d_bytes_freed_total`; **`Δbacklog` = `d_backlog_bytes`,
+ADJ-14's named series, `Δtombstone_bytes − Δbytes_freed`**; `ND` = `d_nonempty_drains`. The committed CSVs
+also carry `rows`, `d_tombstone_bytes_total`, `d_empty_drains`, `d_passes` and
+`bytes_freed_per_lwm_epoch`, which are not reproduced here only for width.)*
+
+**THE SHAPE — A DESCRIPTION OF THE PLOTTED SERIES, EXPLICITLY NOT A FITTED CLAIM.**
+**No OLS fit, no slope, no standard error, no r², no α, no t-statistic and no significance claim is
+computed on this series, on either replicate, or across the two.** With that said, and as a description
+only:
+
+- **The per-window `d_backlog_bytes` increment is essentially FLAT across the bulk of both runs** — roughly
+  **0.64 – 0.75 MB per 1,000 s** on r1 from `w2` through `w25` (excluding `w10`, the one window in that
+  span carrying drains, at 583,786 B), and roughly **0.67 – 0.74 MB** on r2 across the `FULL` windows in
+  which nothing drained. A flat per-window increment describes a **cumulative backlog that grows
+  LINEARLY**, not one that accelerates and not one that saturates. Cumulative `d_backlog_bytes` at the end
+  of the `FULL` windows reads **18,706,220 B on r1** and **18,277,148 B on r2**; adding the `PARTIAL` tail
+  gives **19,065,457 B** and **18,825,491 B**. On r1 that total equals `final tombstone_bytes − final
+  bytes_freed` **exactly** (**19,914,164 − 848,707 = 19,065,457**). On r2 the same difference reads
+  **20,642,504 − 1,810,354 = 18,832,150**, i.e. **6,659 B more than the windowed sum** — and **6,659 B is
+  precisely the `tombstone_bytes` value already standing at r2's FIRST scrape** (`t = 10 s`), which no
+  within-window delta can see because there is no earlier row to difference against. **r1's first scrape
+  reads `tombstone_bytes = 0` at `t = 0 s`, which is why its two totals coincide.** The gap is an artefact
+  of where each ledger starts, it is arithmetic rather than accounting, and it is stated rather than
+  quietly rounded away.
+- **The two final `FULL` windows on r1 (`w26`, `w27`) show a REDUCED increment** — 510,968 B and
+  478,814 B against a ~700,000 B body — and the reduction tracks a fall in the **tombstone-add rate
+  itself** (`ΔLWM` drops 31 → 22 → 21 over the same windows), **not** any reclaim: `Δfreed` is **0** in
+  both, and in the `PARTIAL` tail as well. **A falling increment that is driven by a falling input rate is
+  not saturation of the backlog process, and it is not described as such here.** r2 shows no comparable
+  fall (`ΔLWM` holds at 30 through `w27`), which is itself a disagreement between the replicates and is
+  reported as one.
+- **`bytes_freed_per_lwm_epoch` is 0.000000 in 25 of 28 `FULL` windows on r1 and in 18 of 28 on r2** — the
+  watermark advanced ~30 epochs per window while the prune credited **zero bytes** in those windows.
+
+**DISAGREEMENT IS REPORTED AS DISAGREEMENT (R2.4), NOT RECONCILED.** The two replicates are the **same
+configuration at the same pin on the same binary**, and their drain distributions do not match: the
+`drains disagree?` column above is non-empty in **11 of 29 windows**. r1 drains in `w0` (28), `w1` (4) and
+`w10` (7); r2 drains in `w0` (15), `w4`, `w6`, `w7`, `w8` (19), `w9`, `w10`, `w11`, `w12` and `w13`.
+**Whole-run totals differ 39 vs 80 — a factor of ~2.05 between two replicates of one configuration.**
+**No statistic is computed over n = 2, no replicate is preferred, and neither is averaged into the other.**
+**What the two replicates DO agree on, in every window from `w14` onward: `Δfreed = 0` and `ND = 0` on
+both.**
+
+---
+
+### §10.6 — T4: NON-EMPTY DRAIN RATE vs DURATION — THE ROUND'S MOST ACTIONABLE OBSERVATION
+
+**Status: an OBSERVATION (R1.3).** It moves no Step, no threshold, no ordering and no conditional; **no
+limb, step, slot or leaf reads it**, and the `INDETERMINATE` determination in §10.2.3 is unchanged by every
+number below.
+
+**Artifacts:** `spec356c-t4-rate-r1.csv` and `spec356c-t4-rate-r2.csv`, **34 data rows each** — 29
+per-window rows (28 `FULL` + 1 `PARTIAL`, reusing T3's windows) and 5 summary rows, each carrying the
+builder's own `discriminant_role` column.
+
+**THE BINDING, STATED IN THE SAME BREATH AS THE NUMBERS, BECAUSE THAT IS WHERE IT IS LOAD-BEARING: THE
+DISCRIMINANT IS READ *ONLY* OFF THE COORDINATE-LAST-HALF COUNT.** The whole-run and full-windows counts are
+**PUBLISHED AND ARE NEVER THE DISCRIMINANT** — the builder marks them
+`PUBLISHED_NEVER_THE_DISCRIMINANT` in its own column, pre-data.
+
+| Count | Prior arm (`spec356-long`, 14,400 s, **n = 1**) | **r1** | **r2** |
+|---|---|---|---|
+| **coordinate last half — THE DISCRIMINANT** | **2** in 7,190 s of sampled ledger (**~1 / h**) | **0** in the half `14,410 … 28,800 s` (1,440 scrapes, **0.000000 / h**) | **0** in the same half (1,440 scrapes, **0.000000 / h**) |
+| whole run — **PUBLISHED, NEVER THE DISCRIMINANT** | **53** in 14,400 s | **39** in 28,800 s | **80** in 28,800 s |
+| all `FULL` windows (rate admissible; `PARTIAL` excluded) | — | 39 in 28,000 s = **5.014286 / h** | 80 in 28,000 s = **10.285714 / h** |
+
+*(The `SUBJECT_WHOLE_RUN` rows publish no per-hour rate at all: their `rate_excluded_reason` column reads
+**"span crosses the PARTIAL tail; R3 excludes PARTIAL from every rate"**, which is R3's tail rule enforced
+by the builder rather than by the keyboard.)*
+
+**WHAT THE DISCRIMINANT READS, PLAINLY.** The pre-declared reading, fixed before the data: **a fixed-rate
+periodic trigger (~1 / h) predicts ≈ 4 non-empty drains in the repeat's doubled coordinate half; a one-time
+transient predicts a count that does not grow.** **OBSERVED: 0 on r1 and 0 on r2.** The count did not grow;
+it went to **zero**, on **both** replicates, over a half that is **twice the prior arm's duration**.
+
+**AND EQUALLY PLAINLY, WHAT THAT IS NOT.** **This is an OBSERVATION, NOT AN INFERENCE.** The prior arm is
+**n = 1** and each new arm is **n = 1**; **no test statistic is computed** — no `t`, no α, no significance
+claim, and nothing is fitted. **Neither branch of the discriminant is declared to have won:** an observed 0
+is not the ≈ 4 a fixed-rate trigger predicts and it is not the ≈ 2 a one-time transient predicts either, so
+what the round licenses is the statement *"the drain count in the doubled half did not grow; it fell to
+zero on both replicates"* — and nothing about which of the four pre-registered mechanisms produces that.
+The comparison is admissible at all **only because** the **measured binary is identical** (AC2's empty
+`.rs` diff, verified — §10.1.1) **and the runner's sampling path is untouched by the additive arms** — both
+checked, neither assumed.
+
+**THE STARTUP-BURST CONFOUND, NAMED EXPLICITLY BESIDE BOTH COUNTS — AND NOW DEMONSTRATED BY THE REPEAT
+ITSELF.** The whole-run count is disqualified as a discriminant for a **measured** reason, not a stylistic
+one: **the drain process is non-stationary.** On the prior arm it was front-loaded — **39 of 53** before
+`t = 1,860 s`, **51 of 53** before `t = 5,090 s`, leaving **2** in the last 9,310 s — so a whole-run count
+compares two startup bursts and reports the answer as a rate.
+
+**The repeat demonstrates the confound rather than merely restating it.** Two replicates of the **same
+configuration, the same pin, the same binary**:
+
+| | **r1** | **r2** | ratio |
+|---|---|---|---|
+| whole-run non-empty drains | **39** | **80** | **~2.05×** |
+| **coordinate-last-half non-empty drains** | **0** | **0** | **identical** |
+
+**The count that is NOT the discriminant differs by a factor of two between two replicates of one
+configuration; the count that IS the discriminant is identical on both.** The binding was made **PRE-DATA**
+(§10.0.2), and **n = 2 has now vindicated it** — which is the strongest thing this round says about its own
+method, and it is said about the method, not about the mechanism.
+
+**THE PRIOR-ARM ROW IS PRESENT AND READ FROM COMMITTED, UNMODIFIED BYTES.** Both replicates' T4 tables
+carry `PRIOR_ARM_WHOLE_RUN` (`spec356-long`, `10 … 14,400 s`, 0 → 53, **53**, marked
+`PUBLISHED_NEVER_THE_DISCRIMINANT` with the reason **"startup-burst confound: the count is front-loaded and
+does not scale with duration"**) and `PRIOR_ARM_COORD_LAST_HALF` (`7,210 … 14,400 s`, 51 → 53, **Δ = 2**,
+**1.000000 / h**, marked `THE_DISCRIMINANT`). Nothing about the prior arm was re-run, re-derived or edited
+to produce them.
+
+---
+
+### §10.7 — T5: THE EPOCH CONTENT FATE LEDGER — THE TARGET CARRIED IF ONLY ONE COULD BE
+
+**Status: an OBSERVATION (R1.3).** No limb, step, slot or leaf reads it.
+
+**Artifacts:** `spec356c-t5-fate-r1.csv` (**415** epoch rows) and `spec356c-t5-fate-r2.csv` (**447**), over
+the **coordinate last half** `[14,410 … 28,800]` — **the same window the §10.2.2 walk reads**, so the
+ledger and the walk describe the same rows.
+
+**THE COLUMN HEADER, CARRIED VERBATIM AS COMMITTED** (P7 grades it verbatim; it is reproduced here
+character-for-character so a rename cannot pass unnoticed):
+
+```
+epoch,t_first_seen,t_last_seen,scrapes_in_epoch,added_bytes,indexed_refs_at_lwm_pass__AGGREGATE_NOT_PER_EPOCH,was_drained_ever,bytes_freed_attributed,lwm_passed_at_t
+```
+
+| Quantity | **r1** | **r2** |
+|---|---|---|
+| epoch rows | **415** | **447** |
+| epochs observed | **460 … 874** | **460 … 906** |
+| window (`t_first_seen` … `t_last_seen`) | 14,410 s … 28,800 s | 14,410 s … 28,800 s |
+| **`scrapes_in_epoch`** — published **beside** `added_bytes` so the sampling uncertainty is VISIBLE, not inferred | **3** ×267, **4** ×104, **5** ×41, **6** ×3 | **2** ×1, **3** ×346, **4** ×100 |
+| `added_bytes` — sum / min / max / mean | 9,539,733 B / 17,089 / 31,188 / **22,987.3** | 10,267,292 B / 16,123 / 30,981 / **22,969.3** |
+| `indexed_refs_at_lwm_pass__AGGREGATE_NOT_PER_EPOCH` | 1,010 … 1,458 (**1 row empty**) | 1,007 … 1,439 (**1 row empty**) |
+| **`was_drained_ever`** | **`false` on ALL 415 rows** | **`false` on ALL 447 rows** |
+| **`bytes_freed_attributed`** | **empty on ALL 415 rows** — nothing drained, so nothing was attributed, and the builder emitted the column **empty rather than `0`** (R3.4: no substitute for a value it cannot compute) | **empty on ALL 447 rows** |
+| `lwm_passed_at_t` | present on 414 rows, **empty on 1** | present on 446 rows, **empty on 1** |
+
+**Sampled rows** (header order):
+
+```
+r1 first: 460,14410,14430,3,19412,1361,false,,14440
+r1  last: 874,28760,28800,5,21850,,false,,
+r2 first: 460,14410,14430,3,19021,1373,false,,14440
+r2  last: 906,28790,28800,2,16422,,false,,
+```
+
+**THE ONE EMPTY ROW ON EACH REPLICATE IS THE WINDOW'S LAST EPOCH** — the watermark had not passed it when
+the ledger ended, so both `indexed_refs_at_lwm_pass__…` and `lwm_passed_at_t` are legitimately empty. This
+is also **exactly why T5 carries one row more than T1(b)'s pass ledger on each replicate** (415 vs 414;
+447 vs 446).
+
+**THE SAMPLING UNCERTAINTY, STATED.** At `TOPGUN_EPOCH_WIDTH=1000` an epoch is current for ≈ 31 s ≈ **3
+scrapes**, which the measured `scrapes_in_epoch` distribution confirms (mode 3 on both replicates).
+`added_bytes` therefore carries **up to one scrape of boundary attribution at each end ⇒ ~⅓ relative
+uncertainty**, and the per-epoch `scrapes_in_epoch` is published **on the same row** so the reader can see
+that uncertainty rather than reconstruct it. The one r2 row with `scrapes_in_epoch = 2` is the final,
+truncated epoch.
+
+**`was_drained_ever` — THE INFERENCE RULE, STATED, AND WHETHER THIS ROUND EVER EXERCISED IT.** The rule:
+when a drain reports **`drain_epochs == 1`**, its epoch is exactly `last_drained_epoch` after it and the
+drained set is **EXACT**; when **`drain_epochs == k > 1`**, the drained set is inferred as the `k` epochs
+**ending at** `last_drained_epoch`, which **ASSUMES CONTIGUITY**. **This round never exercised the
+assumption.** §10.4 measures `drain_epochs` at **1.000 epoch per drain on every one of the 39 drains on r1
+and every one of the 80 on r2** — 119 drains, `k = 1` on all of them — matching what the PRE-DATA dry-run
+subject reported for that same column. **So every `was_drained_ever` value in both ledgers rests on the
+EXACT limb of the rule and none on the contiguity assumption**, and had a `k > 1` drain occurred, §10.4's
+published `d_drain_epochs_sum` / `_count` columns are where the reader would have seen it.
+
+**THE T1(b) ≡ T5 IDENTITY STATEMENT — THE MIRROR OF §10.3.1's, SO NEITHER SUBSECTION BANKS THE VALUE
+TWICE.** Under the `current_epoch ≡ low_water_mark` identity, **T5's epoch rows and T1(b)'s LWM-pass rows
+are the SAME rows reached by two routes**: `lwm_passed_at_t` degenerates to `t_last_seen`, and T1(b)'s
+ledger is a projection of this one. **Agreement between §10.7 and §10.3 is therefore a RESTATEMENT, NOT
+CORROBORATION.** The identity is **NEAR-TOTAL, NOT TOTAL** — measured at **0.965278 (1,390 / 1,440)** on r1
+and **0.972917 (1,401 / 1,440)** on r2 over the deciding window (**0.964596** and **0.970833** over the
+full ledgers) — so the two tables are near-projections of one another rather than independent observations,
+and the reader is told which regime this is rather than left to assume totality.
+
+**WHAT THE LEDGER DOES ANSWER, AND WHAT IT DOES NOT — IN ONE SENTENCE EACH, BECAUSE THIS IS THE TARGET
+WHOSE VALUE IS EASIEST TO OVER-CLAIM.**
+
+- **IT DOES ANSWER:** *which content arrived (`added_bytes`, with `scrapes_in_epoch` beside it), when the
+  watermark passed it (`lwm_passed_at_t`, a bucket — C1), whether anything ever drained it
+  (`was_drained_ever`), and what the prune attributed (`bytes_freed_attributed`).* On this round the answer
+  is uniform and stark: **9.54 MB of tombstone content on r1 and 10.27 MB on r2 arrived in the deciding
+  window, the watermark passed essentially all of it, NOTHING drained ANY of it, and the prune attributed
+  NOTHING to any of it.**
+- **IT DOES NOT ANSWER:** *whether that content was ever in the drainable index.* That is **T1(a) —
+  OUT-OF-SCOPE, reason and owner in §10.3.2, owner `TODO-634`** — and the
+  `indexed_refs_at_lwm_pass__AGGREGATE_NOT_PER_EPOCH` column **is the aggregate gauge read at the pass
+  bucket, NOT a per-epoch residency answer.** Its header carries that marker verbatim precisely so the
+  column cannot be quietly read as the answer to the question it sits next to.
+
+---
+
+### §10.8 — §8.2's ESCALATION (R7.2), SINCE THE OUTCOME **IS** `INDETERMINATE`
+
+**The determination published in §10.2.3 is `INDETERMINATE` on BOTH replicates, via Step 0 limb (c), at
+Step 5.** §8.2 therefore obliges an escalation that is **"not 'record a note'"**, and its form was fixed
+**PRE-DATA** in §10.0.5. **All SIX items follow, in that frozen order.** Nothing in §10.3 – §10.7 is a
+premise of any of them: the targets are observations, they moved nothing, and this escalation would read
+identically had none of them been derived.
+
+#### §10.8.1 — ITEM 1: THE UNCLASSIFIED CAUSE, **NAMED**
+
+> **The mechanism by which the OR tombstone prune falls behind at `TOPGUN_EPOCH_WIDTH=1000` remains
+> unclassified among SELECTION/FRONTIER, SCHEDULING/LICENSING and THROUGHPUT, and a mechanism outside
+> those four is not excluded.**
+
+That sentence **is** the object §8.2 asks for. **ADJ-4's bound is quoted, not paraphrased**: no one of the
+four pre-registered mechanisms is endorsed, no one of them is excluded, and **a fifth mechanism outside the
+four is NOT excluded either.** Nothing anywhere in §10 reads *"the best-supported mechanism is X"* on this
+outcome, because **no numbered step was evaluated at all.**
+
+#### §10.8.2 — ITEM 2: **EVERY** STEP'S EVALUATED VALUE, PER REPLICATE, IN THE FROZEN ORDER
+
+**A step left off this table is the omission §8.2 exists to prevent**, so every one is present — Step 0's
+four limbs with their numbers first (limb **(d)** first of all, R1.2 item 1), then Steps 1 – 5. *(§10.2.2
+walked these; they are restated here in the escalation's own form because the escalation must stand on its
+own page.)*
+
+| Frozen order | **r1** — evaluated value | **r2** — evaluated value |
+|---|---|---|
+| **Step 0 limb (d)** — ADJ-11 clause 0's conservation identity, **FIRST** | `Δpasses` **414,110** = `Δempty_drains` **414,110** + `Δnonempty_drains` **0** ⇒ **HOLDS** | `Δpasses` **445,682** = `Δempty_drains` **445,682** + `Δnonempty_drains` **0** ⇒ **HOLDS** |
+| **Step 0 limb (a)** — §1.3's 2×2 in CLEAN or BUILD-LINEAGE-EFFECT | `R51_T = 0.346905` NOT REJECTED, `R52_T = 0.800515` NOT REJECTED against the frozen critical value **4.303** ⇒ cell **CLEAN** ⇒ **HOLDS** | same controls over the same inherited bytes: `R51_T = 0.346905`, `R52_T = 0.800515`, both NOT REJECTED against **4.303** ⇒ **CLEAN** ⇒ **HOLDS** |
+| **Step 0 limb (b)** — ≥ 1 split recompute in the window read | `split_recomputes_total` 917 → 1,746, **Δ = 829 ≥ 1** ⇒ **HOLDS** | `split_recomputes_total` 918 → 1,810, **Δ = 892 ≥ 1** ⇒ **HOLDS** |
+| **Step 0 limb (c)** — population check **AND** ADJ-12's sentinel readability | **LEG 1 PASSES** (0 admissibility flags, 0 instrument defects, arming witness `41/41 PASSED`, 0 empty-or-NaN fields over 43 × 2,881). **LEG 2 FAILS**: 0-sentinel rows **1,440 / 1,440 = 100.000000 %**, 0 non-sentinel rows, against the frozen `> 50 %` ⇒ **FAILS (conjunction)** | **LEG 1 PASSES** (same, over 43 × 2,880). **LEG 2 FAILS**: **1,440 / 1,440 = 100.000000 %**, 0 non-sentinel rows ⇒ **FAILS (conjunction)** |
+| **Step 0 overall** — **FAIL-CLOSED**, and it precedes every numbered step | **FAILS** | **FAILS** |
+| **Step 1** — non-drop exit share > 10 % | **NOT EVALUATED — Step 0 is fail-closed and precedes every numbered step** | **NOT EVALUATED — Step 0 is fail-closed and precedes every numbered step** |
+| **Step 2** — exit share ≤ 10 % and `median(L) ≤ B` | **NOT EVALUATED — Step 0 is fail-closed and precedes every numbered step** | **NOT EVALUATED — Step 0 is fail-closed and precedes every numbered step** |
+| **Step 3** — exit share ≤ 10 %, persistent backlog, slope rejects negative | **NOT EVALUATED — Step 0 is fail-closed and precedes every numbered step** | **NOT EVALUATED — Step 0 is fail-closed and precedes every numbered step** |
+| **Step 4** — exit share ≤ 10 %, persistent backlog, slope does not reject | **NOT EVALUATED — Step 0 is fail-closed and precedes every numbered step** | **NOT EVALUATED — Step 0 is fail-closed and precedes every numbered step** |
+| **Step 5** — Step 0 fails, or the deciding columns are unreadable | **FIRED ⇒ `INDETERMINATE`, via Step 0 limb (c)** | **FIRED ⇒ `INDETERMINATE`, via Step 0 limb (c)** |
+
+#### §10.8.3 — ITEM 3: THE **BLOCKING** ADMISSIBILITY LIMB, NAMED BY LETTER, AGAINST ITS FROZEN THRESHOLD
+
+> **limb (c): sentinel fraction `1,440 / 1,440 = 100.000000 %` against the pre-registered `50 %`** — on
+> **both** replicates.
+
+The frozen literal is **`> 50 %`** and **100.000000 % is inside it**, with **0** non-sentinel rows
+available on either replicate. This is **ADJ-12's own escape hatch firing on its own pre-registered
+threshold**, reached exactly as §10.0.3 pre-declared the 100 %-sentinel case would reach it. **It is a
+PROTOCOL EXIT, not a third branch:** no threshold moved, the Step 2 / Steps 3–4 exact-complement partition
+is untouched, the evaluation order is untouched, and **no `ADJ-21` is authored.**
+
+#### §10.8.4 — ITEM 4: **PD-4's COUPLING, ON THIS ROUND'S OWN NUMBERS** — WHERE IT BITES HARDEST
+
+PD-4 couples the non-drop exit **share** to its **denominator**: the two statistics degrade together, and
+**neither is ever quoted without the other.** On this round the coupling is not a caution — **it is the
+whole reading**, because **the denominator collapsed to zero.**
+
+| Over the coordinate last half | **r1** | **r2** | Prior arm (`spec356-long`) |
+|---|---|---|---|
+| `Δconsidered` — **THE DENOMINATOR** | **0** | **0** | **2,000** |
+| `Δdropped` | **0** | **0** | 2,000 |
+| `Δmatched_nothing` | 0 | 0 | 0 |
+| `Δabsent` | 0 | 0 | 0 |
+| `Δrestored_read_error` | 0 | 0 | 0 |
+| `Δrestored_evicted` | 0 | 0 | 0 |
+| `Δrestored_write_error` | 0 | 0 | 0 |
+| **non-drop exit share** | **UNDEFINED — denominator 0** | **UNDEFINED — denominator 0** | **0.000000 % over a denominator of 2,000** |
+
+**All five non-drop exits are 0, `dropped` is 0, and `considered` is 0**, so the share on both replicates is
+**UNDEFINED, denominator 0 — it is NOT `0.000000 %`**, and writing it as `0.000000 %` would manufacture a
+measured zero out of an absence of measurement. On the prior arm the same share genuinely read
+**`0.000000 %`, over a denominator of 2,000** — a real zero over real observations. **The two are printed
+together above, and neither is quoted anywhere without the other.** This is precisely the degradation PD-4
+anticipated: **the share and its denominator failed at the same time, and the record says so.**
+
+#### §10.8.5 — ITEM 5: **§8.3, QUOTED VERBATIM AS A BLOCK QUOTE, ADJACENT TO THE DETERMINATION**
+
+§8.3's own last sentence requires this of **any** Step-5 outcome, and **P9 checks it**. It is carried in
+§10.2.3 beside the determination and it is carried again **here**, inside the escalation, because P9's text
+requires adjacency to the published determination and **the duplication is deliberate, not an editing
+slip**:
+
+> **The recommended reclamation model closes safety REGARDLESS of which cause it turns out to be.**
+> `ReclamationRegistry` (cursor-shaped consumers only) + retention SLA **N = 30 d** + the cursor-age fence
+> with HLC-horizon quarantine + `ceiling = min_live_claim − fixed_margin` bound the reclaimable set by **live
+> claims**, not by any hypothesis about *why* the current prune falls behind. **A selection defect, a
+> scheduling defect and a throughput defect are all *contained* by a registry that never reclaims below a
+> live claim.**
+>
+> What an unclassified cause costs is **fix-shape efficiency** — the family would design without knowing
+> which limb to optimize first — **not safety, and not the family's ability to proceed.** A Step-5 outcome is
+> therefore to be read as **an expensive answer, not a blocked one**, and any Step-5 outcome must be reported
+> quoting this paragraph beside it.
+
+#### §10.8.6 — ITEM 6: THE ROUTING SENTENCE
+
+**The unclassified cause is carried into `TODO-634`'s design phase as a STATED OPEN INPUT** — not as a
+closed question, not as a resolved one — **together with T1(b)'s LWM-pass ledgers, T2's drain
+enumerations, T3's windowed backlog series, T4's rate comparison, T5's epoch content fate ledgers, and
+T1(a)'s OUT-OF-SCOPE row with its reason and its owner** (and T2(exactness)'s, dispositioned identically).
+**That is what turns *"we still don't know"* into a DESIGN INPUT rather than a dead end:** the design phase
+inherits a named open question, five tables of what the instrument could see, and **two explicit statements
+of what it could not** — per-epoch index residency and per-epoch true tombstone byte size, both requiring a
+`.rs` emission this round was forbidden to make, both owned by `TODO-634`. **The §10 record IS the
+routing**; no byte of any tracker file is written by this subsection.
+
+#### §10.8.7 — R7.3: WHAT THIS ESCALATION DOES **NOT** DO
+
+1. **It does NOT block the family.** §8.3, quoted verbatim above, is the reason: the recommended
+   reclamation model bounds the reclaimable set by **live claims**, not by any hypothesis about *why* the
+   current prune falls behind, so a selection defect, a scheduling defect and a throughput defect are all
+   **contained** by it. **A Step-5 outcome is an expensive answer, not a blocked one.**
+2. **It does NOT propose a fix shape.** No design, no ceiling, no predicate, no schedule and no threshold
+   is proposed here — the observations are handed to `TODO-634`'s design phase, which is where fix shapes
+   are chosen.
+3. **It does NOT endorse any of the four mechanisms.** SELECTION/FRONTIER (exit limb), SELECTION/FRONTIER
+   (licensing limb), SCHEDULING/LICENSING and THROUGHPUT are **all** left unendorsed and **all** left
+   un-excluded, and **a mechanism outside the four is not excluded either.**
+4. **It does NOT re-run the cell hoping for a different window, and it adjusts NOTHING.** No threshold
+   moves, no window is re-sliced, no aggregator changes, no `ADJ-21` is authored, and neither replicate is
+   re-executed. §10.2.6's two POST-DATA findings are recorded and routed, **not repaired** — R0.3 is
+   categorical.
+
+**WHAT AN UNCLASSIFIED CAUSE COSTS IS FIX-SHAPE EFFICIENCY, NOT SAFETY.**
