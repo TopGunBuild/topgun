@@ -5003,3 +5003,174 @@ routing**; no byte of any tracker file is written by this subsection.
    categorical.
 
 **WHAT AN UNCLASSIFIED CAUSE COSTS IS FIX-SHAPE EFFICIENCY, NOT SAFETY.**
+
+---
+
+### §10.9 — R0.5's TRACKER-DISCIPLINE LEDGER, **THE POST SIDE** — AND THE SIXTH TRANSCRIPT
+
+**This subsection discharges the POST half of §10.0.7's ledger and of §10.0.4's `P13`.** It is a
+**measurement of file content**, not a `git diff`: `.specflow/` is gitignored at `.gitignore:111` and no
+path under it is in the index, so `git diff <pin>..HEAD -- '.specflow/todos/'` is **empty for every
+possible execution** and any check resting on it is **vacuously GREEN** — PD-8's own defect reproduced
+inside the checklist authored to replace it. Tracking `.specflow/` in git is barred by standing project
+policy and is **not** the remedy. Reading the files and asserting their content is, and that is what
+follows.
+
+#### §10.9.1 — THE FOUR POST-DIGESTS, BESIDE §10.0.7's PRE VALUES
+
+`shasum -a 256`, run on the live files after the edit:
+
+| Tracker file | PRE (§10.0.7) | POST (here) | Required | Observed |
+|---|---|---|---|---|
+| `.specflow/todos/TODO-634.md` | `555c3aa92a569c030a7fbacfafdee5933bf4beda668d79fff126f1a2c0e74f8c` | `a1b17d97ca55ae4c3e24bbf19509f0e981c5b052c1e7f4d56d734a57a0219428` | **MOVED** | **MOVED — limb (b) GREEN** |
+| `.specflow/todos/TODO-637.md` | `48a16fbdfa923770b673882ae58b7a1aa5f15e5a1d3b8a1ee36ce3142b02940f` | `48a16fbdfa923770b673882ae58b7a1aa5f15e5a1d3b8a1ee36ce3142b02940f` | **UNMOVED** | **IDENTICAL** |
+| `.specflow/todos/TODO-638.md` | `756082197b6efd7b9158fea53c859724f78c82d5a2e3684eaa38e206571825df` | `756082197b6efd7b9158fea53c859724f78c82d5a2e3684eaa38e206571825df` | **UNMOVED** | **IDENTICAL** |
+| `.specflow/todos/TODO-648.md` | `56fb3f59f7159b3acd0afa3a66f04df74e3bf9096614ae5357940d149847ef2c` | `56fb3f59f7159b3acd0afa3a66f04df74e3bf9096614ae5357940d149847ef2c` | **UNMOVED** | **IDENTICAL** |
+
+**Three unchanged, one moved — and the moved one is the one that was obliged to move.** §10.0.4's limb
+**(b)** is explicit that *"an unchanged digest means the required edit never happened and is **RED**, not a
+pass"*; the converse obligation is limb **(a)**'s, and the three unrelated files satisfy it byte for byte.
+
+#### §10.9.2 — THE POST TICK COUNTS AND THE CENSUS — **STILL 2 / 5**
+
+| Quantity | Command | PRE (§10.0.7) | POST | Verdict |
+|---|---|---|---|---|
+| ticked boxes | `grep -c '^- \[x\] '` | **2** | **2** | unchanged |
+| unticked boxes | `grep -c '^- \[ \] '` | **5** | **5** | unchanged |
+| top-level boxes (census) | `grep -c '^- \[[ x]\] '` | **7** | **7** | unchanged |
+| indented boxes (census) | `grep -c '^[ \t][ \t]*[-*+] \['` | **0** | **0** | unchanged |
+| strict anchor `- [ ] **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT:` | `grep -qF` | matches | **matches** | unchanged |
+
+**`TODO-634` IS NOT CLOSED, NOT TICKED, AND NOT DELETED.** The §8.1 box carries the round's outcome and
+stays **unticked**, which is the disposition §10.0.7's wave-5 constraint 3 pre-declared: *"the box ticks
+only when `SPEC-356c` is done, and publishing the repeat's outcome is not the same act as closing
+`TODO-634`."* Eleven of SPEC-356b's routed branches still name this item; the census figures make the two
+tick counts **exhaustive** over the file's box set, so "still 2 / 5" is a statement about **every** box the
+file has, not about the seven somebody remembered to look at.
+
+#### §10.9.3 — THE §8.1 BOX, **BEFORE AND AFTER, SIDE BY SIDE** (limb (d))
+
+**BEFORE** — `.specflow/todos/TODO-634.md:213-233` at the PRE-DATA bytes, i.e. §10.0.7's verbatim
+before-text, reproduced by the grader from the provenanced fixture:
+
+```
+- [ ] **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT: `OWED, NOT DONE`.**
+      **CARVED TO `SPEC-356c` (2026-08-11, `/sf:plan`) — carved, NOT done and NOT ticked.** That spec
+      authors ONLY this repeat increment (the `long` cell at 28,800 s × n = 2 under the frozen
+      predicate), plus PD-8's PRESENCE limb, the v2 grader sidecar carrying TODO-648's `B`-sentinel
+      fix, the stated worktree procedure, and the FIVE pre-declared observation targets that hunt the
+      **fifth mechanism** (the LWM advancing past never-freed content). **The registry family is NOT in
+      its scope**, and this box ticks only when SPEC-356c is done. Exactly **one** repeat of
+      the deciding configuration at **DOUBLED duration AND DOUBLED replicates** — the `long` cell at
+      **28,800 s with n = 2** — under the **SAME pin** `feb85268952001813e502e27f65180855676ac25` and the
+      **SAME frozen predicate** (manifest §0–§8 plus §8A's twenty addenda). **It may not adjust a
+      threshold, an ordering or a conditional**: it is a second observation, not a re-specification.
+      Both axes are doubled for different reasons — duration for an effect too slow to separate in 4 h,
+      replicates for the n = 1 fragility SPEC-355 §10.4.2 measured — and **one axis alone leaves the
+      other cause unaddressed.** **If the repeat is STILL INDETERMINATE, §8.2 escalates** the
+      unclassified cause as an explicit input to this item's design phase, naming it and quoting every
+      step's evaluated value and the admissibility limb that blocked.
+      **This does NOT block the family.** Manifest §8.3, verbatim: *"The recommended reclamation model
+      closes safety REGARDLESS of which cause it turns out to be … A selection defect, a scheduling
+      defect and a throughput defect are all contained by a registry that never reclaims below a live
+      claim."* What an unclassified cause costs is **fix-shape efficiency, not safety** — an expensive
+      answer, not a blocked one.
+```
+
+**AFTER** — `.specflow/todos/TODO-634.md:213-249` at the edited bytes. **The 21 lines above are byte-
+identical; the 16 lines below are the whole of the delta**, appended as indented continuation lines of the
+same list item (§10.0.7's wave-5 constraint 1):
+
+```
+      **OUTCOME (2026-08-12, `SPEC-356c` EXECUTED) — the repeat RAN, and the determination is
+      `INDETERMINATE` on BOTH replicates. Recorded here; this box is deliberately NOT ticked.** The
+      `long` cell ran at **28,800 s × n = 2** under the frozen predicate (manifest §0–§8 plus §8A's
+      twenty addenda, unadjusted) at the executed pin `8a60f1357f4702f4c5393538ef6b4ae6cebd247f` —
+      SPEC-356b's `feb85268…` **in substance**, the `.rs` diff between them being empty, so the
+      measured binary is the same one. Both replicates exit at **Step 0 limb (c)** on a
+      **1,440 / 1,440 = 100.000000 %** admissibility sentinel, and **Steps 1–4 are `NOT EVALUATED`**
+      on both — so this is a **concordant** `INDETERMINATE`, not a split across replicates, and
+      **no mechanism is named**: none of the four pre-registered mechanisms is endorsed and none is
+      excluded. **§8.2's escalation is published in consequence**, all six R7.2 items in order with
+      §8.3 quoted verbatim beside the determination. **This item stays OPEN.** SPEC-356c authored the
+      repeat increment only; the registry family remains outside its scope, and this box ticks when
+      that family closes — recording a second observation is not the same act as closing it.
+      Evidence: `spec356-manifest.md` §10 — §10.1 the lineage and the pin, §10.2 the PRESENCE verdict,
+      the frozen walk and the determination, §10.3–§10.7 the five observation targets, §10.8 §8.2's
+      escalation.
+```
+
+**The after-text carries the round's OUTCOME (`INDETERMINATE`, both replicates, Step 0 limb (c)) and the
+literal `spec356-manifest.md §10` pointer**, which is what limb (d) asserts. It states the outcome, the
+concordance, and the item's continuing **OPEN** status — and it names no mechanism, because §10.2.3's
+determination names none.
+
+#### §10.9.4 — THE SIXTH TRANSCRIPT, AND WHY IT IS ITS OWN FILE
+
+The grader was **digest-checked before it was run** — `spec356c-trackergrade.sh`
+`879dadb1…c42db`, `spec356c-trackergrade.ref` `e3dcd977…3577`, `spec356c-trackergrade-proofs.txt`
+`6e361bc1…ea563`, **3/3 matching §10.0.6** — and the fixture was digest-checked against §10.0.7's PRE value
+before any limb was graded, the grader **refusing** (exit 2, not a verdict) on an unprovenanced fixture.
+
+```
+$ sh …/evidence/spec356c-trackergrade.sh /private/tmp/spec356c-todo634-fixture.md .specflow/todos
+…
+VERDICT: GREEN (a, b, c, d, e)
+$ echo $?
+0
+```
+
+| # | Input | Pre-declared (§10.0.4, P13) | Observed | Where |
+|---|---|---|---|---|
+| 1 | unedited `TODO-634.md` (provenanced fixture) | **RED (b), (d)** | `RED (red limbs: b d)` | `spec356c-trackergrade-proofs.txt` |
+| 2 | §8.1 box **ticked** | **RED (c)** — and (d) | `RED (red limbs: c d)` | `spec356c-trackergrade-proofs.txt` |
+| 3 | `TODO-637.md` one byte changed | **RED (a)**, naming the file | `RED (red limbs: a)` | `spec356c-trackergrade-proofs.txt` |
+| 4 | correct §8.1 edit **plus** an unrelated paragraph rewritten | **RED (e)**, (a)–(d) green | `RED (red limbs: e)` | `spec356c-trackergrade-proofs.txt` |
+| 5 | synthetic correctly-edited copy | **GREEN on all five** | GREEN, all five | `spec356c-trackergrade-proofs.txt` |
+| **6** | **the ACTUALLY-edited `.specflow/todos/TODO-634.md`** | **GREEN on all five** | **`VERDICT: GREEN (a, b, c, d, e)`, exit 0** | **`spec356c-trackergrade-run6.txt`** |
+
+**WHY THE SIXTH TRANSCRIPT IS A NEW FILE RATHER THAN AN APPEND.** `spec356c-trackergrade-proofs.txt`'s
+`shasum -a 256` is **pinned PRE-DATA in §10.0.6**. Appending wave 5's transcript to it would **move a
+pinned sidecar digest after the data landed** — the act R0.2 forbids — and would make the five PRE-DATA
+proofs unverifiable against their own pin. The five stay byte-identical; the sixth is committed as
+`spec356c-trackergrade-run6.txt`, which also carries the digest-check preamble, the fixture provenance and
+the post-measurements above in their raw form.
+
+**THE ONE READING NOT SUPPRESSED.** §10.0.7's stated instrument limit 1 predicted that limb (d)'s
+outcome-token sub-check would be satisfied by the **PRE**-text as well, since the unedited box already
+contains `INDETERMINATE` inside *"If the repeat is STILL INDETERMINATE"*. The transcript's own evidence
+lines report exactly that — *"outcome token `INDETERMINATE` was ALREADY in the before-text"*, *"pointer
+literal is NEW in the after-text"* — so **(d)'s discrimination on this input rests on the pointer**, and a
+reader should read those two lines before believing the green. Limb (e) reports **one** hunk,
+`@@ -233,0 +234,16 @@`, **inside the §8.1 box, 0 hunks outside**: the delta is 16 added lines and **zero
+deleted**, so AC15's *"every other box in that file is unchanged"* is measured and not asserted.
+
+#### §10.9.5 — **P13's RED IN §10.2.1 IS NOT CONTRADICTED HERE. IT IS THE PREVIOUS READING OF THIS LIMB.**
+
+§10.2.1 grades `P13` **RED**, on the POST half only. That verdict stands as written and is not amended:
+**it was the reading of the record at the instant the PRESENCE limb was evaluated**, and at that instant
+`TODO-634.md`'s digest was still `555c3aa9…4f8c` — **unmoved** — the four post-digests, the post-text, the
+post tick counts and the sixth transcript were **not in the record**, and §10.0.4's limb (b) is explicit
+that an unchanged digest is **RED, not a pass**. Publishing that RED is R6.4's requirement: *"a RED entry
+is not a reason to delay publication — IT IS THE FINDING."* Item 1 of the checklist is **evaluated FIRST**;
+a limb evaluated first can only speak about the record as it stands then, and pre-crediting bytes that are
+due later is the vacuous-guard failure PD-8 indicts wearing a different hat.
+
+**§10.2.1's own P13 entry says this in advance**, and this subsection is the event it named:
+
+> *"When §10's tracker-discipline ledger lands the post-digests, the post-text, the post tick counts and
+> the sixth transcript, the POST half is graded THERE, against limbs (a)…(e), at its own bytes — a later
+> GREEN there is not a contradiction of this RED, it is the next reading of the same limb, and this entry
+> says so explicitly so that no reader has to reconcile the two by guessing."*
+
+**So the two readings are consistent by construction, and the record carries both:**
+
+| Reading | When | `TODO-634.md` digest | Verdict |
+|---|---|---|---|
+| §10.2.1's `P13` | at the PRESENCE limb, **before** the edit | `555c3aa9…4f8c` (**unmoved**) | **RED**, POST half absent |
+| §10.9's ledger (here) | at the tracker ledger, **after** the edit | `a1b17d97…9428` (**moved**) | **GREEN**, all five limbs |
+
+**Neither reading is retracted, and neither is back-dated.** §10.2.1's RED is not edited to green — that
+would be exactly the back-dating this manifest's append-only discipline exists to prevent — and this
+GREEN is not claimed to have been true earlier than its own bytes. **The PRESENCE verdict as published in
+§10.2.1 therefore remains 11 GREEN / 2 RED (P9 and P13)**, and it is the verdict of record for that limb.
