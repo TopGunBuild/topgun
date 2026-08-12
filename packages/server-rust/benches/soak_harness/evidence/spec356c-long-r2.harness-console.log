@@ -1,0 +1,539 @@
+=== TopGun soak harness (G4b / TODO-484) ===
+duration=28800s churn_clients=6 keyspace=200 crash_interval=None steady_interval=300s wal_fsync=batched or_churn=true
+starting server (port 47356, data /private/tmp/spec356c-data-r2) ...
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[   303s] steady   writes=47782 errs=0 reconnects=243 crashes=0 steady=1 recovery=0 converged=true confirms=146 lastEpoch=11 confirmErrs=4 rss=85MB(peak 85)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[   603s] steady   writes=93075 errs=0 reconnects=471 crashes=0 steady=2 recovery=0 converged=true confirms=290 lastEpoch=20 confirmErrs=8 rss=210MB(peak 210)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[   903s] steady   writes=138010 errs=0 reconnects=699 crashes=0 steady=3 recovery=0 converged=true confirms=434 lastEpoch=29 confirmErrs=12 rss=342MB(peak 342)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  1203s] steady   writes=183510 errs=0 reconnects=933 crashes=0 steady=4 recovery=0 converged=true confirms=577 lastEpoch=38 confirmErrs=17 rss=402MB(peak 402)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  1503s] steady   writes=229139 errs=0 reconnects=1166 crashes=0 steady=5 recovery=0 converged=true confirms=721 lastEpoch=47 confirmErrs=21 rss=417MB(peak 417)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  1803s] steady   writes=273950 errs=0 reconnects=1397 crashes=0 steady=6 recovery=0 converged=true confirms=865 lastEpoch=56 confirmErrs=25 rss=436MB(peak 436)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  2103s] steady   writes=319622 errs=0 reconnects=1629 crashes=0 steady=7 recovery=0 converged=true confirms=1008 lastEpoch=65 confirmErrs=30 rss=522MB(peak 522)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  2403s] steady   writes=365384 errs=0 reconnects=1862 crashes=0 steady=8 recovery=0 converged=true confirms=1152 lastEpoch=75 confirmErrs=34 rss=782MB(peak 782)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  2703s] steady   writes=411295 errs=0 reconnects=2100 crashes=0 steady=9 recovery=0 converged=true confirms=1296 lastEpoch=84 confirmErrs=38 rss=1059MB(peak 1059)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  3003s] steady   writes=457165 errs=0 reconnects=2332 crashes=0 steady=10 recovery=0 converged=true confirms=1440 lastEpoch=93 confirmErrs=42 rss=1369MB(peak 1369)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  3303s] steady   writes=503273 errs=0 reconnects=2567 crashes=0 steady=11 recovery=0 converged=true confirms=1583 lastEpoch=102 confirmErrs=47 rss=1671MB(peak 1671)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  3603s] steady   writes=549218 errs=0 reconnects=2800 crashes=0 steady=12 recovery=0 converged=true confirms=1727 lastEpoch=111 confirmErrs=51 rss=2022MB(peak 2022)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  3903s] steady   writes=596195 errs=0 reconnects=3041 crashes=0 steady=13 recovery=0 converged=true confirms=1871 lastEpoch=121 confirmErrs=55 rss=2408MB(peak 2408)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  4203s] steady   writes=643115 errs=0 reconnects=3279 crashes=0 steady=14 recovery=0 converged=true confirms=2014 lastEpoch=130 confirmErrs=60 rss=2789MB(peak 2789)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  4503s] steady   writes=690465 errs=0 reconnects=3521 crashes=0 steady=15 recovery=0 converged=true confirms=2158 lastEpoch=140 confirmErrs=64 rss=3187MB(peak 3187)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  4803s] steady   writes=738182 errs=0 reconnects=3765 crashes=0 steady=16 recovery=0 converged=true confirms=2302 lastEpoch=149 confirmErrs=68 rss=3578MB(peak 3578)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  5103s] steady   writes=785141 errs=0 reconnects=4005 crashes=0 steady=17 recovery=0 converged=true confirms=2446 lastEpoch=158 confirmErrs=72 rss=3960MB(peak 3960)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  5403s] steady   writes=833407 errs=0 reconnects=4251 crashes=0 steady=18 recovery=0 converged=true confirms=2589 lastEpoch=168 confirmErrs=77 rss=4281MB(peak 4281)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  5703s] steady   writes=880858 errs=0 reconnects=4493 crashes=0 steady=19 recovery=0 converged=true confirms=2733 lastEpoch=178 confirmErrs=81 rss=4687MB(peak 4687)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  6003s] steady   writes=928583 errs=0 reconnects=4736 crashes=0 steady=20 recovery=0 converged=true confirms=2877 lastEpoch=187 confirmErrs=85 rss=5055MB(peak 5055)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  6303s] steady   writes=977385 errs=0 reconnects=4985 crashes=0 steady=21 recovery=0 converged=true confirms=3020 lastEpoch=197 confirmErrs=90 rss=5343MB(peak 5343)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  6603s] steady   writes=1024746 errs=0 reconnects=5228 crashes=0 steady=22 recovery=0 converged=true confirms=3164 lastEpoch=206 confirmErrs=94 rss=5682MB(peak 5682)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  6903s] steady   writes=1073114 errs=0 reconnects=5472 crashes=0 steady=23 recovery=0 converged=true confirms=3308 lastEpoch=216 confirmErrs=98 rss=5960MB(peak 5960)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  7203s] steady   writes=1122234 errs=0 reconnects=5722 crashes=0 steady=24 recovery=0 converged=true confirms=3452 lastEpoch=226 confirmErrs=102 rss=6040MB(peak 6040)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  7503s] steady   writes=1170435 errs=0 reconnects=5967 crashes=0 steady=25 recovery=0 converged=true confirms=3595 lastEpoch=236 confirmErrs=107 rss=6128MB(peak 6128)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  7803s] steady   writes=1218666 errs=0 reconnects=6211 crashes=0 steady=26 recovery=0 converged=true confirms=3739 lastEpoch=245 confirmErrs=111 rss=6522MB(peak 6522)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  8103s] steady   writes=1267790 errs=0 reconnects=6459 crashes=0 steady=27 recovery=0 converged=true confirms=3883 lastEpoch=255 confirmErrs=115 rss=6562MB(peak 6562)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  8403s] steady   writes=1316856 errs=0 reconnects=6707 crashes=0 steady=28 recovery=0 converged=true confirms=4026 lastEpoch=265 confirmErrs=120 rss=6733MB(peak 6733)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  8703s] steady   writes=1365611 errs=0 reconnects=6953 crashes=0 steady=29 recovery=0 converged=true confirms=4170 lastEpoch=275 confirmErrs=124 rss=6743MB(peak 6743)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  9003s] steady   writes=1414114 errs=0 reconnects=7196 crashes=0 steady=30 recovery=0 converged=true confirms=4314 lastEpoch=284 confirmErrs=128 rss=6750MB(peak 6750)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  9303s] steady   writes=1462834 errs=0 reconnects=7446 crashes=0 steady=31 recovery=0 converged=true confirms=4458 lastEpoch=294 confirmErrs=132 rss=6772MB(peak 6772)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  9603s] steady   writes=1512305 errs=0 reconnects=7697 crashes=0 steady=32 recovery=0 converged=true confirms=4601 lastEpoch=304 confirmErrs=137 rss=6778MB(peak 6778)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[  9903s] steady   writes=1560869 errs=0 reconnects=7942 crashes=0 steady=33 recovery=0 converged=true confirms=4745 lastEpoch=314 confirmErrs=141 rss=6796MB(peak 6796)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 10203s] steady   writes=1609098 errs=0 reconnects=8187 crashes=0 steady=34 recovery=0 converged=true confirms=4889 lastEpoch=323 confirmErrs=145 rss=6806MB(peak 6806)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 10503s] steady   writes=1658490 errs=0 reconnects=8440 crashes=0 steady=35 recovery=0 converged=true confirms=5032 lastEpoch=333 confirmErrs=150 rss=6824MB(peak 6824)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 10803s] steady   writes=1707053 errs=0 reconnects=8684 crashes=0 steady=36 recovery=0 converged=true confirms=5176 lastEpoch=343 confirmErrs=154 rss=6862MB(peak 6862)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 11103s] steady   writes=1755600 errs=0 reconnects=8930 crashes=0 steady=37 recovery=0 converged=true confirms=5320 lastEpoch=353 confirmErrs=158 rss=6879MB(peak 6881)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 11403s] steady   writes=1804397 errs=0 reconnects=9177 crashes=0 steady=38 recovery=0 converged=true confirms=5464 lastEpoch=362 confirmErrs=162 rss=6915MB(peak 6915)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 11703s] steady   writes=1853888 errs=0 reconnects=9426 crashes=0 steady=39 recovery=0 converged=true confirms=5607 lastEpoch=372 confirmErrs=167 rss=6925MB(peak 6925)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 12003s] steady   writes=1902340 errs=0 reconnects=9671 crashes=0 steady=40 recovery=0 converged=true confirms=5751 lastEpoch=382 confirmErrs=171 rss=6928MB(peak 6928)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 12303s] steady   writes=1950972 errs=0 reconnects=9917 crashes=0 steady=41 recovery=0 converged=true confirms=5895 lastEpoch=392 confirmErrs=175 rss=6955MB(peak 6957)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 12603s] steady   writes=1999441 errs=0 reconnects=10164 crashes=0 steady=42 recovery=0 converged=true confirms=6038 lastEpoch=401 confirmErrs=180 rss=6959MB(peak 6959)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 12903s] steady   writes=2048102 errs=0 reconnects=10411 crashes=0 steady=43 recovery=0 converged=true confirms=6182 lastEpoch=411 confirmErrs=184 rss=6968MB(peak 6970)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 13203s] steady   writes=2097446 errs=0 reconnects=10660 crashes=0 steady=44 recovery=0 converged=true confirms=6326 lastEpoch=421 confirmErrs=188 rss=7057MB(peak 7059)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 13503s] steady   writes=2145865 errs=0 reconnects=10907 crashes=0 steady=45 recovery=0 converged=true confirms=6470 lastEpoch=431 confirmErrs=192 rss=7069MB(peak 7069)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 13803s] steady   writes=2193844 errs=0 reconnects=11152 crashes=0 steady=46 recovery=0 converged=true confirms=6613 lastEpoch=440 confirmErrs=197 rss=7171MB(peak 7171)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 14103s] steady   writes=2242821 errs=0 reconnects=11402 crashes=0 steady=47 recovery=0 converged=true confirms=6757 lastEpoch=450 confirmErrs=201 rss=7238MB(peak 7238)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 14403s] steady   writes=2290829 errs=0 reconnects=11647 crashes=0 steady=48 recovery=0 converged=true confirms=6901 lastEpoch=460 confirmErrs=205 rss=7241MB(peak 7242)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 14703s] steady   writes=2338868 errs=0 reconnects=11890 crashes=0 steady=49 recovery=0 converged=true confirms=7044 lastEpoch=469 confirmErrs=210 rss=7256MB(peak 7256)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 15003s] steady   writes=2388003 errs=0 reconnects=12141 crashes=0 steady=50 recovery=0 converged=true confirms=7188 lastEpoch=479 confirmErrs=214 rss=7259MB(peak 7259)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 15303s] steady   writes=2436308 errs=0 reconnects=12386 crashes=0 steady=51 recovery=0 converged=true confirms=7332 lastEpoch=489 confirmErrs=218 rss=7262MB(peak 7263)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 15603s] steady   writes=2484517 errs=0 reconnects=12631 crashes=0 steady=52 recovery=0 converged=true confirms=7476 lastEpoch=498 confirmErrs=222 rss=7264MB(peak 7268)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 15903s] steady   writes=2532889 errs=0 reconnects=12874 crashes=0 steady=53 recovery=0 converged=true confirms=7618 lastEpoch=508 confirmErrs=227 rss=7265MB(peak 7268)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 16203s] steady   writes=2581704 errs=0 reconnects=13122 crashes=0 steady=54 recovery=0 converged=true confirms=7762 lastEpoch=518 confirmErrs=231 rss=7270MB(peak 7270)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 16503s] steady   writes=2629522 errs=0 reconnects=13365 crashes=0 steady=55 recovery=0 converged=true confirms=7906 lastEpoch=527 confirmErrs=235 rss=7275MB(peak 7283)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 16803s] steady   writes=2678254 errs=0 reconnects=13613 crashes=0 steady=56 recovery=0 converged=true confirms=8048 lastEpoch=537 confirmErrs=240 rss=7278MB(peak 7283)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 17103s] steady   writes=2725910 errs=0 reconnects=13855 crashes=0 steady=57 recovery=0 converged=true confirms=8192 lastEpoch=547 confirmErrs=244 rss=7310MB(peak 7310)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 17403s] steady   writes=2774114 errs=0 reconnects=14104 crashes=0 steady=58 recovery=0 converged=true confirms=8336 lastEpoch=556 confirmErrs=248 rss=7317MB(peak 7325)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 17703s] steady   writes=2821836 errs=0 reconnects=14347 crashes=0 steady=59 recovery=0 converged=true confirms=8479 lastEpoch=566 confirmErrs=253 rss=7353MB(peak 7353)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 18003s] steady   writes=2869338 errs=0 reconnects=14591 crashes=0 steady=60 recovery=0 converged=true confirms=8622 lastEpoch=575 confirmErrs=257 rss=7394MB(peak 7394)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 18303s] steady   writes=2917628 errs=0 reconnects=14836 crashes=0 steady=61 recovery=0 converged=true confirms=8766 lastEpoch=585 confirmErrs=261 rss=7399MB(peak 7399)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 18603s] steady   writes=2965059 errs=0 reconnects=15079 crashes=0 steady=62 recovery=0 converged=true confirms=8910 lastEpoch=595 confirmErrs=265 rss=7415MB(peak 7417)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 18903s] steady   writes=3012925 errs=0 reconnects=15322 crashes=0 steady=63 recovery=0 converged=true confirms=9052 lastEpoch=604 confirmErrs=270 rss=7424MB(peak 7424)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 19203s] steady   writes=3060453 errs=0 reconnects=15566 crashes=0 steady=64 recovery=0 converged=true confirms=9195 lastEpoch=614 confirmErrs=274 rss=7421MB(peak 7440)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 19503s] steady   writes=3107980 errs=0 reconnects=15809 crashes=0 steady=65 recovery=0 converged=true confirms=9338 lastEpoch=623 confirmErrs=278 rss=7431MB(peak 7440)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 19803s] steady   writes=3154823 errs=0 reconnects=16047 crashes=0 steady=66 recovery=0 converged=true confirms=9481 lastEpoch=632 confirmErrs=282 rss=7435MB(peak 7446)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 20103s] steady   writes=3202549 errs=0 reconnects=16289 crashes=0 steady=67 recovery=0 converged=true confirms=9623 lastEpoch=642 confirmErrs=287 rss=7443MB(peak 7446)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 20403s] steady   writes=3249335 errs=0 reconnects=16525 crashes=0 steady=68 recovery=0 converged=true confirms=9766 lastEpoch=651 confirmErrs=291 rss=7454MB(peak 7461)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 20703s] steady   writes=3296575 errs=0 reconnects=16768 crashes=0 steady=69 recovery=0 converged=true confirms=9909 lastEpoch=661 confirmErrs=295 rss=7467MB(peak 7483)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 21003s] steady   writes=3343195 errs=0 reconnects=17004 crashes=0 steady=70 recovery=0 converged=true confirms=10051 lastEpoch=670 confirmErrs=300 rss=7516MB(peak 7519)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 21303s] steady   writes=3389542 errs=0 reconnects=17240 crashes=0 steady=71 recovery=0 converged=true confirms=10194 lastEpoch=679 confirmErrs=304 rss=7521MB(peak 7521)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 21603s] steady   writes=3436455 errs=0 reconnects=17481 crashes=0 steady=72 recovery=0 converged=true confirms=10337 lastEpoch=689 confirmErrs=308 rss=7556MB(peak 7556)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 21903s] steady   writes=3483329 errs=0 reconnects=17720 crashes=0 steady=73 recovery=0 converged=true confirms=10480 lastEpoch=698 confirmErrs=312 rss=7594MB(peak 7602)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 22203s] steady   writes=3529189 errs=0 reconnects=17954 crashes=0 steady=74 recovery=0 converged=true confirms=10622 lastEpoch=707 confirmErrs=317 rss=7628MB(peak 7628)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 22503s] steady   writes=3575730 errs=0 reconnects=18190 crashes=0 steady=75 recovery=0 converged=true confirms=10765 lastEpoch=717 confirmErrs=321 rss=7657MB(peak 7657)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 22803s] steady   writes=3622125 errs=0 reconnects=18426 crashes=0 steady=76 recovery=0 converged=true confirms=10908 lastEpoch=726 confirmErrs=325 rss=7696MB(peak 7699)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 23103s] steady   writes=3667878 errs=0 reconnects=18661 crashes=0 steady=77 recovery=0 converged=true confirms=11050 lastEpoch=735 confirmErrs=330 rss=7799MB(peak 7801)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 23403s] steady   writes=3714133 errs=0 reconnects=18896 crashes=0 steady=78 recovery=0 converged=true confirms=11193 lastEpoch=744 confirmErrs=334 rss=7903MB(peak 7933)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 23703s] steady   writes=3760252 errs=0 reconnects=19131 crashes=0 steady=79 recovery=0 converged=true confirms=11336 lastEpoch=753 confirmErrs=338 rss=7931MB(peak 7949)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 24003s] steady   writes=3806170 errs=0 reconnects=19368 crashes=0 steady=80 recovery=0 converged=true confirms=11479 lastEpoch=763 confirmErrs=342 rss=7947MB(peak 7949)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 24303s] steady   writes=3852072 errs=0 reconnects=19602 crashes=0 steady=81 recovery=0 converged=true confirms=11621 lastEpoch=772 confirmErrs=347 rss=7945MB(peak 7957)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 24603s] steady   writes=3896113 errs=0 reconnects=19826 crashes=0 steady=82 recovery=0 converged=true confirms=11764 lastEpoch=781 confirmErrs=351 rss=6415MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 24903s] steady   writes=3941013 errs=0 reconnects=20054 crashes=0 steady=83 recovery=0 converged=true confirms=11908 lastEpoch=790 confirmErrs=355 rss=4928MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 25203s] steady   writes=3984531 errs=0 reconnects=20279 crashes=0 steady=84 recovery=0 converged=true confirms=12049 lastEpoch=798 confirmErrs=360 rss=3421MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 25503s] steady   writes=4029120 errs=0 reconnects=20508 crashes=0 steady=85 recovery=0 converged=true confirms=12192 lastEpoch=807 confirmErrs=364 rss=3625MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 25803s] steady   writes=4074033 errs=0 reconnects=20737 crashes=0 steady=86 recovery=0 converged=true confirms=12335 lastEpoch=816 confirmErrs=368 rss=3717MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 26103s] steady   writes=4119325 errs=0 reconnects=20968 crashes=0 steady=87 recovery=0 converged=true confirms=12478 lastEpoch=825 confirmErrs=372 rss=3895MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 26403s] steady   writes=4164349 errs=0 reconnects=21198 crashes=0 steady=88 recovery=0 converged=true confirms=12620 lastEpoch=834 confirmErrs=377 rss=4097MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 26703s] steady   writes=4209037 errs=0 reconnects=21427 crashes=0 steady=89 recovery=0 converged=true confirms=12763 lastEpoch=843 confirmErrs=381 rss=4127MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 27003s] steady   writes=4253945 errs=0 reconnects=21655 crashes=0 steady=90 recovery=0 converged=true confirms=12906 lastEpoch=852 confirmErrs=385 rss=3965MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 27303s] steady   writes=4298763 errs=0 reconnects=21885 crashes=0 steady=91 recovery=0 converged=true confirms=13049 lastEpoch=861 confirmErrs=390 rss=4055MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 27603s] steady   writes=4343392 errs=0 reconnects=22113 crashes=0 steady=92 recovery=0 converged=true confirms=13191 lastEpoch=870 confirmErrs=394 rss=4013MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 27903s] steady   writes=4388232 errs=0 reconnects=22340 crashes=0 steady=93 recovery=0 converged=true confirms=13334 lastEpoch=879 confirmErrs=398 rss=4107MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 28203s] steady   writes=4433327 errs=0 reconnects=22570 crashes=0 steady=94 recovery=0 converged=true confirms=13477 lastEpoch=888 confirmErrs=402 rss=4062MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[ 28503s] steady   writes=4478507 errs=0 reconnects=22801 crashes=0 steady=95 recovery=0 converged=true confirms=13618 lastEpoch=897 confirmErrs=407 rss=4084MB(peak 7976)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+
+=== SOAK SUMMARY ===
+result:            FAIL
+finished_reason:   tombstone-byte growth slope 1012162.6 bytes/h exceeds 512.0 bytes/h: tombstone-byte growth slope 1012162.6 bytes/h exceeds 512.0 bytes/h (total growth 4169864 bytes over 5753 samples, last-half window 14405s)
+actual_duration:   28806s
+total_writes:      4522808
+write_errors:      0
+reconnects:        23028
+resends:           767464
+confirm_apply:     confirms=13760 lastEpoch=906 errors=411 (tracked client advances the low-water-mark that licenses pruning; confirms=0 with a climbing gauge = LWM never advanced)
+steady_checkpts:   95
+recovery_checkpts: 0 (crashes 0)
+memory:            first=12MB peak=7976MB last=4123MB slope=490.2MB/h -> ok (backstop)
+tombstone_bytes:   first=0 peak=4169864 last=4169864 slope=1012162.6B/h samples=5753 -> FAIL (slope + blind-monitor both hard-gate) reason=tombstone-byte growth slope 1012162.6 bytes/h exceeds 512.0 bytes/h (total growth 4169864 bytes over 5753 samples, last-half window 14405s)
+tombstone_corpus_redb_scan: 4146835 bytes (independent of gauge; last gauge value 4169864 bytes) -> DIVERGED (positive-control cross-check, report-only)
+disk_mb:           first=1.5 peak=1318.9 last=1318.9 slope=160.1MB/h samples=5611 -> FAIL (slope report-only until TODO-566; blind-monitor hard-gates) reason=disk growth slope 160.1MB/h exceeds 50.0MB/h (total growth 1317.4MB over 5611 samples)
+pending_gates (expected-fail, did NOT fail the run):
+  - disk growth slope 160.1 MB/h exceeds 50.0 MB/h — EXPECTED until TODO-566 bounds OR-Map tombstones (report-only, did NOT fail the run)
+wrote JSON report to /private/tmp/spec356c-out-r2/spec356c-long-r2.soak.json
+
+=== OR-CHURN MECHANISM REPORT (report-only, Q1-Q4) ===
+Q1 bytes/frame:    OR early(mean=142B max=209B) late(mean=146B max=209B) max=209B | LWW mean=220B max=305B | OR/LWW=0.7x | rises=false
+OR frame census:   delta(n=2459168 mean=144B max=209B total=354035004B) | snapshot(n=0 mean=0B max=0B total=0B)
+Q2 drain window:   before=872.3MB after=871.9MB delta=-0.4MB | no significant drain burst (WAL delta -0.4MB)
+Q3 RSS holder:     rss_slope=490.2MB/h disk_slope=160.1MB/h corr=0.47 | RSS slope 490.2MB/h, disk slope 160.1MB/h, r=0.47
+Q4 not tombstone:  or_wal_bytes=354035004 tombstone_corpus=4146835 gauge=4169864 | growth_is_or=true
+scan:              segments=168281 or_frames=2459168 lww_frames=781729 remove_frames=0
+conclusion:        REFUTED / INCONCLUSIVE: OR frame size did NOT rise late-vs-early over the retained corpus — the O(N)-per-op-frame hypothesis is not confirmed by this run. Inspect the acked-beyond-applied tail bound and write-behind retention before choosing the fix.
+sequencing:        Sequencing option for the R1 /xask gate: tail-bounding the acked-beyond-applied WAL is the lowest-risk FIRST containment (OOM/disk-full -> backpressure, zero recovery-path risk); delta-framing is the eventual O(1)-frame fix. If Q2 shows the drain burst is buffered O(N) frames, tail-bounding addresses it directly.
+wrote mechanism report to /private/tmp/spec356c-out-r2/spec356c-long-r2.soak.mechanism.json

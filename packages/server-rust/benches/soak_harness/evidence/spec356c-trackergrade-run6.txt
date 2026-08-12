@@ -1,0 +1,208 @@
+================================================================================
+spec356c-trackergrade-run6.txt -- THE SIXTH TRANSCRIPT: WAVE 5'S REAL RUN
+================================================================================
+
+WHY THIS IS A SEPARATE FILE AND NOT AN APPEND TO spec356c-trackergrade-proofs.txt.
+That file's shasum -a 256 is PINNED PRE-DATA in spec356-manifest.md §10.0.6
+(6e361bc16ea102daaf1b158d38361a7da001b8bc2f97de7a9e3335b8055ea563). Appending
+wave 5's transcript to it would MOVE a pinned sidecar digest after the data
+landed -- exactly the act R0.2 forbids, and the act that would make the five
+PRE-DATA proofs unverifiable against their own pin. The sixth transcript is
+therefore a NEW file; the five PRE-DATA transcripts stay byte-identical to the
+bytes §10.0.6 pinned. §10.0.4's P13 already assigns this transcript to wave 5.
+
+--------------------------------------------------------------------------------
+STEP 1 -- DIGEST-CHECK THE INSTRUMENT BEFORE RUNNING IT (the graders are checked
+          exactly as the builders are)
+--------------------------------------------------------------------------------
+$ shasum -a 256 spec356c-trackergrade.sh spec356c-trackergrade.ref spec356c-trackergrade-proofs.txt
+879dadb1c89eea9fdcb6a1b90292e58de50cb9e5bc00c64d7d40d92c8c6c42db  spec356c-trackergrade.sh
+e3dcd977d7a8c538245a376a019568fe635ba04be6d81be330b256f3dfb23577  spec356c-trackergrade.ref
+6e361bc16ea102daaf1b158d38361a7da001b8bc2f97de7a9e3335b8055ea563  spec356c-trackergrade-proofs.txt
+
+recorded in spec356-manifest.md §10.0.6:
+  spec356c-trackergrade.sh        879dadb1c89eea9fdcb6a1b90292e58de50cb9e5bc00c64d7d40d92c8c6c42db
+  spec356c-trackergrade.ref       e3dcd977d7a8c538245a376a019568fe635ba04be6d81be330b256f3dfb23577
+  spec356c-trackergrade-proofs.txt 6e361bc16ea102daaf1b158d38361a7da001b8bc2f97de7a9e3335b8055ea563
+=> 3/3 MATCH. The instrument is the pinned one; the grade may proceed.
+
+--------------------------------------------------------------------------------
+STEP 2 -- THE PRE-EDIT FIXTURE, TAKEN BEFORE THE EDIT AND PROVENANCED
+--------------------------------------------------------------------------------
+$ cp .specflow/todos/TODO-634.md /private/tmp/spec356c-todo634-fixture.md   # taken BEFORE the edit
+$ shasum -a 256 /private/tmp/spec356c-todo634-fixture.md
+555c3aa92a569c030a7fbacfafdee5933bf4beda668d79fff126f1a2c0e74f8c  /private/tmp/spec356c-todo634-fixture.md
+recorded §10.0.7 PRE value: 555c3aa92a569c030a7fbacfafdee5933bf4beda668d79fff126f1a2c0e74f8c
+=> MATCH. The fixture is TODO-634.md at its PRE-DATA bytes.
+
+--------------------------------------------------------------------------------
+STEP 3 -- THE POST DIGESTS AND TICK COUNTS, MEASURED ON THE LIVE FILES
+--------------------------------------------------------------------------------
+$ shasum -a 256 .specflow/todos/TODO-634.md .specflow/todos/TODO-637.md .specflow/todos/TODO-638.md .specflow/todos/TODO-648.md
+a1b17d97ca55ae4c3e24bbf19509f0e981c5b052c1e7f4d56d734a57a0219428  .specflow/todos/TODO-634.md
+48a16fbdfa923770b673882ae58b7a1aa5f15e5a1d3b8a1ee36ce3142b02940f  .specflow/todos/TODO-637.md
+756082197b6efd7b9158fea53c859724f78c82d5a2e3684eaa38e206571825df  .specflow/todos/TODO-638.md
+56fb3f59f7159b3acd0afa3a66f04df74e3bf9096614ae5357940d149847ef2c  .specflow/todos/TODO-648.md
+
+$ grep -c '^- \[x\] ' .specflow/todos/TODO-634.md
+2
+$ grep -c '^- \[ \] ' .specflow/todos/TODO-634.md
+5
+$ grep -c '^- \[[ x]\] ' .specflow/todos/TODO-634.md      # census, top-level
+7
+$ grep -c '^[ \t][ \t]*[-*+] \[' .specflow/todos/TODO-634.md    # census, indented
+0
+
+--------------------------------------------------------------------------------
+STEP 4 -- THE GRADE (transcript 6 of 6: the REAL run, against the edited file)
+--------------------------------------------------------------------------------
+$ sh packages/server-rust/benches/soak_harness/evidence/spec356c-trackergrade.sh \
+     /private/tmp/spec356c-todo634-fixture.md .specflow/todos
+
+================================================================================
+spec356c-trackergrade.sh -- tracker-discipline CONTENT grade (R0.5 / AC15 / item 16)
+================================================================================
+fixture   : /private/tmp/spec356c-todo634-fixture.md
+todos dir : .specflow/todos
+reference : packages/server-rust/benches/soak_harness/evidence/spec356c-trackergrade.ref
+date      : 2026-08-12T10:45:22Z
+
+FIXTURE PROVENANCE (checked before any limb; a mismatch REFUSES the grade)
+  recorded TODO-634.md pre-digest : 555c3aa92a569c030a7fbacfafdee5933bf4beda668d79fff126f1a2c0e74f8c
+  fixture digest                  : 555c3aa92a569c030a7fbacfafdee5933bf4beda668d79fff126f1a2c0e74f8c
+  RESULT : OK -- the fixture is provenanced.
+
+--------------------------------------------------------------------------------
+LIMB (a) UNRELATED FILES UNMOVED
+--------------------------------------------------------------------------------
+  TODO-637.md : MATCH    48a16fbdfa923770b673882ae58b7a1aa5f15e5a1d3b8a1ee36ce3142b02940f
+  TODO-638.md : MATCH    756082197b6efd7b9158fea53c859724f78c82d5a2e3684eaa38e206571825df
+  TODO-648.md : MATCH    56fb3f59f7159b3acd0afa3a66f04df74e3bf9096614ae5357940d149847ef2c
+  (a) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (b) THE REQUIRED EDIT HAPPENED
+--------------------------------------------------------------------------------
+  recorded pre-digest : 555c3aa92a569c030a7fbacfafdee5933bf4beda668d79fff126f1a2c0e74f8c
+  observed digest     : a1b17d97ca55ae4c3e24bbf19509f0e981c5b052c1e7f4d56d734a57a0219428
+  the digest HAS moved.
+  (b) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (c) NOTHING WAS TICKED AND NO BOX MOVED
+--------------------------------------------------------------------------------
+  ticked   '^- \[x\] ' : expected 2   observed 2
+  unticked '^- \[ \] ' : expected 5   observed 5
+  census, top-level boxes  : expected 7   observed 7
+  census, indented boxes   : expected 0   observed 0
+  (the census is what makes the two counts exhaustive over the file's box set)
+  strict box anchor        : MATCHES
+  (c) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (d) THE EDIT IS THE RIGHT EDIT
+--------------------------------------------------------------------------------
+  §8.1 box located by the LOOSE anchor (survives a tick, so a broken (c) does not blind (d)/(e))
+  fixture box lines   : 213-233
+  candidate box lines : 213-249
+
+  ---- BEGIN §8.1 BOX BEFORE-TEXT (fixture, lines 213-233) ----
+  | - [ ] **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT: `OWED, NOT DONE`.**
+  |       **CARVED TO `SPEC-356c` (2026-08-11, `/sf:plan`) — carved, NOT done and NOT ticked.** That spec
+  |       authors ONLY this repeat increment (the `long` cell at 28,800 s × n = 2 under the frozen
+  |       predicate), plus PD-8's PRESENCE limb, the v2 grader sidecar carrying TODO-648's `B`-sentinel
+  |       fix, the stated worktree procedure, and the FIVE pre-declared observation targets that hunt the
+  |       **fifth mechanism** (the LWM advancing past never-freed content). **The registry family is NOT in
+  |       its scope**, and this box ticks only when SPEC-356c is done. Exactly **one** repeat of
+  |       the deciding configuration at **DOUBLED duration AND DOUBLED replicates** — the `long` cell at
+  |       **28,800 s with n = 2** — under the **SAME pin** `feb85268952001813e502e27f65180855676ac25` and the
+  |       **SAME frozen predicate** (manifest §0–§8 plus §8A's twenty addenda). **It may not adjust a
+  |       threshold, an ordering or a conditional**: it is a second observation, not a re-specification.
+  |       Both axes are doubled for different reasons — duration for an effect too slow to separate in 4 h,
+  |       replicates for the n = 1 fragility SPEC-355 §10.4.2 measured — and **one axis alone leaves the
+  |       other cause unaddressed.** **If the repeat is STILL INDETERMINATE, §8.2 escalates** the
+  |       unclassified cause as an explicit input to this item's design phase, naming it and quoting every
+  |       step's evaluated value and the admissibility limb that blocked.
+  |       **This does NOT block the family.** Manifest §8.3, verbatim: *"The recommended reclamation model
+  |       closes safety REGARDLESS of which cause it turns out to be … A selection defect, a scheduling
+  |       defect and a throughput defect are all contained by a registry that never reclaims below a live
+  |       claim."* What an unclassified cause costs is **fix-shape efficiency, not safety** — an expensive
+  |       answer, not a blocked one.
+  ---- END §8.1 BOX BEFORE-TEXT ----
+
+  ---- BEGIN §8.1 BOX AFTER-TEXT (candidate, lines 213-249) ----
+  | - [ ] **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT: `OWED, NOT DONE`.**
+  |       **CARVED TO `SPEC-356c` (2026-08-11, `/sf:plan`) — carved, NOT done and NOT ticked.** That spec
+  |       authors ONLY this repeat increment (the `long` cell at 28,800 s × n = 2 under the frozen
+  |       predicate), plus PD-8's PRESENCE limb, the v2 grader sidecar carrying TODO-648's `B`-sentinel
+  |       fix, the stated worktree procedure, and the FIVE pre-declared observation targets that hunt the
+  |       **fifth mechanism** (the LWM advancing past never-freed content). **The registry family is NOT in
+  |       its scope**, and this box ticks only when SPEC-356c is done. Exactly **one** repeat of
+  |       the deciding configuration at **DOUBLED duration AND DOUBLED replicates** — the `long` cell at
+  |       **28,800 s with n = 2** — under the **SAME pin** `feb85268952001813e502e27f65180855676ac25` and the
+  |       **SAME frozen predicate** (manifest §0–§8 plus §8A's twenty addenda). **It may not adjust a
+  |       threshold, an ordering or a conditional**: it is a second observation, not a re-specification.
+  |       Both axes are doubled for different reasons — duration for an effect too slow to separate in 4 h,
+  |       replicates for the n = 1 fragility SPEC-355 §10.4.2 measured — and **one axis alone leaves the
+  |       other cause unaddressed.** **If the repeat is STILL INDETERMINATE, §8.2 escalates** the
+  |       unclassified cause as an explicit input to this item's design phase, naming it and quoting every
+  |       step's evaluated value and the admissibility limb that blocked.
+  |       **This does NOT block the family.** Manifest §8.3, verbatim: *"The recommended reclamation model
+  |       closes safety REGARDLESS of which cause it turns out to be … A selection defect, a scheduling
+  |       defect and a throughput defect are all contained by a registry that never reclaims below a live
+  |       claim."* What an unclassified cause costs is **fix-shape efficiency, not safety** — an expensive
+  |       answer, not a blocked one.
+  |       **OUTCOME (2026-08-12, `SPEC-356c` EXECUTED) — the repeat RAN, and the determination is
+  |       `INDETERMINATE` on BOTH replicates. Recorded here; this box is deliberately NOT ticked.** The
+  |       `long` cell ran at **28,800 s × n = 2** under the frozen predicate (manifest §0–§8 plus §8A's
+  |       twenty addenda, unadjusted) at the executed pin `8a60f1357f4702f4c5393538ef6b4ae6cebd247f` —
+  |       SPEC-356b's `feb85268…` **in substance**, the `.rs` diff between them being empty, so the
+  |       measured binary is the same one. Both replicates exit at **Step 0 limb (c)** on a
+  |       **1,440 / 1,440 = 100.000000 %** admissibility sentinel, and **Steps 1–4 are `NOT EVALUATED`**
+  |       on both — so this is a **concordant** `INDETERMINATE`, not a split across replicates, and
+  |       **no mechanism is named**: none of the four pre-registered mechanisms is endorsed and none is
+  |       excluded. **§8.2's escalation is published in consequence**, all six R7.2 items in order with
+  |       §8.3 quoted verbatim beside the determination. **This item stays OPEN.** SPEC-356c authored the
+  |       repeat increment only; the registry family remains outside its scope, and this box ticks when
+  |       that family closes — recording a second observation is not the same act as closing it.
+  |       Evidence: `spec356-manifest.md` §10 — §10.1 the lineage and the pin, §10.2 the PRESENCE verdict,
+  |       the frozen walk and the determination, §10.3–§10.7 the five observation targets, §10.8 §8.2's
+  |       escalation.
+  ---- END §8.1 BOX AFTER-TEXT ----
+
+  outcome token in after-text   : PRESENT (INDETERMINATE)
+  pointer literal in after-text : PRESENT ('spec356-manifest.md §10', backticks ignored)
+  [evidence] outcome token 'INDETERMINATE' was ALREADY in the before-text
+  [evidence] pointer literal is NEW in the after-text
+  (d) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (e) THE DELTA IS CONSTRAINED -- EVERY CHANGED LINE IS INSIDE THE §8.1 BOX
+--------------------------------------------------------------------------------
+  invocation: diff -U0 <fixture> <candidate>
+  fixture box 213-233   candidate box 213-249
+  hunks:
+    @@ -233,0 +234,16 @@  =>  inside the §8.1 box
+  hunks outside the §8.1 box: 0
+  (e) GREEN
+
+================================================================================
+VERDICT: GREEN (a, b, c, d, e)
+================================================================================
+$ echo $?
+0
+
+--------------------------------------------------------------------------------
+PRE-DECLARED vs OBSERVED (§10.0.4, P13, transcript row 6)
+--------------------------------------------------------------------------------
+  pre-declared : GREEN on all five limbs (a)(b)(c)(d)(e), exit 0
+  observed     : VERDICT: GREEN (a, b, c, d, e), exit 0
+  => the sixth transcript matches its pre-declaration.
+
+ONE HONEST READING, NOT SUPPRESSED. Limb (d)'s outcome-token sub-check is satisfied
+by the PRE-text too (the unedited box already says "If the repeat is STILL
+INDETERMINATE"), and the transcript's own [evidence] lines say so: the token was
+ALREADY in the before-text, and the 'spec356-manifest.md §10' pointer is NEW. So
+(d)'s discrimination on this input rests on the pointer, exactly as §10.0.7's
+stated instrument limit 1 predicted. That is the line a reader should look at
+before believing a green (d), and it is printed here rather than paraphrased.

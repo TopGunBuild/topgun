@@ -1,0 +1,126 @@
+# T2 -- NON-EMPTY DRAIN ENUMERATION (FULL LEDGER). DERIVED (R3.3).
+# BUILDER: spec356c-targets.sh -- SPEC-356c R3.4's ONE target builder, committed before the data.
+# SUBJECT: spec356c-long-r2.prune.csv    PRIOR-DURATION ARM: spec356-long.prune.csv
+# STATUS:  replicate target table (R3.3). It is an OBSERVATION accompanying the frozen
+#   classification and is read by no limb, step or slot.
+# NOT A PREDICATE: this builder computes no predicate term, reads no threshold, decides nothing
+#   and emits no verdict; it alters no Step, threshold, ordering or conditional. A column it
+#   cannot compute is emitted EMPTY and never a substitute.
+# NO FIT: no OLS fit, no slope, no standard error, no r2, no alpha, no t-statistic and no
+#   significance claim is computed on any series in this file.
+# (C1) SAMPLED, NOT EVENT-DRIVEN: the ledger scrapes every 10 s while LWM advances ~31 s apart,
+#   so every 'at the moment LWM passes' reading here is THE FIRST SCRAPE AT OR AFTER the
+#   advance -- a BUCKET, not an instant, carrying up to one cadence of lag.
+# (C2) THE ADJ-7 BOUNDARY IS NOT CROSSED: eligible_refs (L) and ineligible_refs (P) are
+#   PRE-drain; indexed_refs is POST-drain. No ratio is taken across that boundary anywhere in
+#   this file, and the prohibited ratios P/indexed_refs and L/indexed_refs appear NOWHERE.
+# (C3) MULTI-EVENT BUCKETS ARE REPORTED, NEVER SMOOTHED: a 10 s bucket carrying more than one
+#   event does not separate into its events; the per-bucket event count is published
+#   explicitly and is NEVER averaged into a per-event figure.
+# UNITS DIFFER ON PURPOSE AND ARE NOT RECONCILED: indexed_refs is a REF COUNT, tombstone_bytes
+#   is BYTES. No bytes-per-ref constant is assumed, fitted or implied anywhere in this file.
+# The first non-'#' line below is the column header; every line after it is a data row.
+# WINDOW: THE FULL LEDGER -- every row from the first elapsed_secs to the last. NOT the coordinate
+#   last half and NOT any other slice. T2's own words are "FULL content enumeration of every non-empty
+#   drain", and the two readings do not differ by a detail: on the committed prior arm they differ by
+#   more than 25x in row count (53 whole-run against 2 in the coordinate last half).
+# One record per 10 s bucket in which topgun_or_prune_nonempty_drains_total INCREASES.
+# (C3) drains_in_bucket IS THIS TABLE'S EVENTS_IN_BUCKET COUNT. A bucket carrying more than one drain
+#   does not separate into its drains; the count is published explicitly and the bucket is NEVER
+#   averaged into a per-drain figure. d_drain_refs_sum_over_count is a RATIO OF SUMS across the bucket
+#   (the throughput reading), not a mean of per-drain ratios, and it is EMPTY when the count is 0.
+# bytes_freed_matches_attribution := (d_bytes_freed_total == d_epoch_bytes_freed_sum). IT IS EMITTED
+#   ON EVERY ROW, INCLUDING WHEN EVERY DRAIN MATCHES -- a column that appears only on mismatch cannot
+#   be told apart from a column nobody computed.
+# WHAT THAT IDENTITY BOUNDS. It is an INTERNAL CONSISTENCY CHECK BETWEEN TWO COMMITTED COUNTERS. It
+#   CANNOT compare either against an independent ground truth of the epoch's true tombstone byte size,
+#   which no committed column carries. A mismatch is evidence of an accounting gap; a MATCH EXCLUDES
+#   ONLY THE GAP BETWEEN THOSE TWO COUNTERS, not every reclaim path.
+# T2(exactness) -- "was bytes_freed incremented by the EXACT tombstone size", against an INDEPENDENT
+#   ground truth -- is OUT-OF-SCOPE: topgun_ormap_tombstone_bytes_total is a whole-store monotone
+#   total and epoch_bytes_freed_sum is the prune path's OWN attribution, i.e. the very quantity under
+#   suspicion; producing the independent figure is a .rs change R0.4 forbids categorically. Owner
+#   TODO-634. THE bytes_freed_matches_attribution COLUMN IS NOT PRESENTED AS ITS ANSWER.
+# d_drain_epochs_sum is published so the reader can see whether T5's contiguity inference was ever
+#   exercised at all (SPEC-356b measured 1.000 epoch per drain, under which T5's drained set is EXACT).
+t_secs,drains_in_bucket,d_drain_refs_sum,d_drain_refs_count,d_drain_refs_sum_over_count,d_drain_epochs_sum,d_drain_epochs_count,last_drained_epoch_before,last_drained_epoch_after,d_epoch_considered_sum,d_epoch_dropped_sum,d_epoch_bytes_freed_sum,d_epoch_bytes_freed_count,d_bytes_freed_total,bytes_freed_matches_attribution
+60,1,1000,1,1000.000000,1,1,2,2,1000,1000,19819,1,19819,true
+90,1,1000,1,1000.000000,1,1,2,3,1000,1000,20535,1,20535,true
+110,1,1000,1,1000.000000,1,1,3,4,1000,1000,21000,1,21000,true
+150,1,1000,1,1000.000000,1,1,4,5,1000,1000,21000,1,21000,true
+190,1,1000,1,1000.000000,1,1,6,6,1000,1000,21000,1,21000,true
+220,1,1000,1,1000.000000,1,1,6,7,1000,1000,21000,1,21000,true
+240,1,1000,1,1000.000000,1,1,7,8,1000,1000,21000,1,21000,true
+280,1,1000,1,1000.000000,1,1,8,9,1000,1000,21000,1,21000,true
+310,1,1000,1,1000.000000,1,1,9,10,1000,1000,21000,1,21000,true
+350,1,1000,1,1000.000000,1,1,10,11,1000,1000,21000,1,21000,true
+390,1,1000,1,1000.000000,1,1,12,12,1000,1000,21000,1,21000,true
+420,1,1000,1,1000.000000,1,1,12,13,1000,1000,21000,1,21000,true
+490,1,1000,1,1000.000000,1,1,15,15,1000,1000,21000,1,21000,true
+550,1,1000,1,1000.000000,1,1,17,17,1000,1000,22000,1,22000,true
+850,1,1000,1,1000.000000,1,1,26,26,1000,1000,22000,1,22000,true
+4900,1,1000,1,1000.000000,1,1,150,151,1000,1000,23000,1,23000,true
+6190,1,1000,1,1000.000000,1,1,191,192,1000,1000,23000,1,23000,true
+6600,1,1000,1,1000.000000,1,1,205,205,1000,1000,23000,1,23000,true
+7090,1,1000,1,1000.000000,1,1,220,221,1000,1000,23000,1,23000,true
+7680,1,1000,1,1000.000000,1,1,240,240,1000,1000,23000,1,23000,true
+7720,1,1000,1,1000.000000,1,1,241,241,1000,1000,23000,1,23000,true
+7740,1,1000,1,1000.000000,1,1,241,242,1000,1000,23000,1,23000,true
+7770,1,1000,1,1000.000000,1,1,242,243,1000,1000,23000,1,23000,true
+7960,1,1000,1,1000.000000,1,1,248,249,1000,1000,23000,1,23000,true
+8060,1,1000,1,1000.000000,1,1,252,252,1000,1000,23000,1,23000,true
+8080,1,1000,1,1000.000000,1,1,252,253,1000,1000,23000,1,23000,true
+8110,1,1000,1,1000.000000,1,1,254,254,1000,1000,23000,1,23000,true
+8150,1,1000,1,1000.000000,1,1,254,255,1000,1000,23000,1,23000,true
+8291,1,1000,1,1000.000000,1,1,260,260,1000,1000,23000,1,23000,true
+8390,1,1000,1,1000.000000,1,1,262,263,1000,1000,23000,1,23000,true
+8420,1,1000,1,1000.000000,1,1,264,264,1000,1000,23000,1,23000,true
+8450,1,1000,1,1000.000000,1,1,265,265,1000,1000,23000,1,23000,true
+8490,1,1000,1,1000.000000,1,1,266,266,1000,1000,23000,1,23000,true
+8510,1,1000,1,1000.000000,1,1,266,267,1000,1000,23000,1,23000,true
+8580,1,1000,1,1000.000000,1,1,269,269,1000,1000,23000,1,23000,true
+8600,1,1000,1,1000.000000,1,1,270,270,1000,1000,23000,1,23000,true
+8660,1,1000,1,1000.000000,1,1,271,272,1000,1000,23000,1,23000,true
+8730,1,1000,1,1000.000000,1,1,274,274,1000,1000,23000,1,23000,true
+8800,1,1000,1,1000.000000,1,1,276,276,1000,1000,23000,1,23000,true
+8850,1,1000,1,1000.000000,1,1,277,278,1000,1000,23000,1,23000,true
+8880,1,1000,1,1000.000000,1,1,279,279,1000,1000,23000,1,23000,true
+8940,1,1000,1,1000.000000,1,1,280,281,1000,1000,23000,1,23000,true
+9000,1,1000,1,1000.000000,1,1,283,283,1000,1000,23000,1,23000,true
+9250,1,1000,1,1000.000000,1,1,290,291,1000,1000,23000,1,23000,true
+9310,1,1000,1,1000.000000,1,1,293,293,1000,1000,23000,1,23000,true
+9350,1,1000,1,1000.000000,1,1,294,294,1000,1000,23000,1,23000,true
+9520,1,1000,1,1000.000000,1,1,299,300,1000,1000,23000,1,23000,true
+9610,1,1000,1,1000.000000,1,1,302,303,1000,1000,23000,1,23000,true
+9650,1,1000,1,1000.000000,1,1,303,304,1000,1000,23000,1,23000,true
+9760,1,1000,1,1000.000000,1,1,307,308,1000,1000,23000,1,23000,true
+9870,1,1000,1,1000.000000,1,1,311,311,1000,1000,23000,1,23000,true
+9960,1,1000,1,1000.000000,1,1,313,314,1000,1000,23000,1,23000,true
+10490,1,1000,1,1000.000000,1,1,331,331,1000,1000,23000,1,23000,true
+10610,1,1000,1,1000.000000,1,1,335,335,1000,1000,23000,1,23000,true
+10690,1,1000,1,1000.000000,1,1,338,338,1000,1000,23000,1,23000,true
+10730,1,1000,1,1000.000000,1,1,339,339,1000,1000,23000,1,23000,true
+10820,1,1000,1,1000.000000,1,1,342,342,1000,1000,23000,1,23000,true
+10880,1,1000,1,1000.000000,1,1,343,344,1000,1000,23000,1,23000,true
+10910,1,1000,1,1000.000000,1,1,344,345,1000,1000,23000,1,23000,true
+10940,1,1000,1,1000.000000,1,1,346,346,1000,1000,23000,1,23000,true
+11000,1,1000,1,1000.000000,1,1,347,348,1000,1000,23000,1,23000,true
+11100,1,1000,1,1000.000000,1,1,351,351,1000,1000,23000,1,23000,true
+11180,1,1000,1,1000.000000,1,1,353,354,1000,1000,23000,1,23000,true
+11310,1,1000,1,1000.000000,1,1,358,358,1000,1000,23000,1,23000,true
+11500,1,1000,1,1000.000000,1,1,363,364,1000,1000,23000,1,23000,true
+11580,1,1000,1,1000.000000,1,1,366,367,1000,1000,23000,1,23000,true
+11620,1,1000,1,1000.000000,1,1,367,368,1000,1000,23000,1,23000,true
+11800,1,1000,1,1000.000000,1,1,373,374,1000,1000,23000,1,23000,true
+11860,1,1000,1,1000.000000,1,1,376,376,1000,1000,23000,1,23000,true
+11980,1,1000,1,1000.000000,1,1,379,380,1000,1000,23000,1,23000,true
+12020,1,1000,1,1000.000000,1,1,381,381,1000,1000,23000,1,23000,true
+12261,1,1000,1,1000.000000,1,1,389,389,1000,1000,23000,1,23000,true
+12510,1,1000,1,1000.000000,1,1,396,397,1000,1000,23000,1,23000,true
+12540,1,1000,1,1000.000000,1,1,398,398,1000,1000,23000,1,23000,true
+12630,1,1000,1,1000.000000,1,1,401,401,1000,1000,23000,1,23000,true
+12690,1,1000,1,1000.000000,1,1,403,403,1000,1000,23000,1,23000,true
+12750,1,1000,1,1000.000000,1,1,404,405,1000,1000,23000,1,23000,true
+12790,1,1000,1,1000.000000,1,1,405,406,1000,1000,23000,1,23000,true
+13000,1,1000,1,1000.000000,1,1,412,413,1000,1000,23000,1,23000,true
+13470,1,1000,1,1000.000000,1,1,428,428,1000,1000,23000,1,23000,true
