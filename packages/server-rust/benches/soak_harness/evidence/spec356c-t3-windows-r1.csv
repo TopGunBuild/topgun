@@ -1,0 +1,73 @@
+# T3 -- 1,000 s COORDINATE WINDOWS over the FULL LEDGER. DERIVED (R3.3).
+# BUILDER: spec356c-targets.sh -- SPEC-356c R3.4's ONE target builder, committed before the data.
+# SUBJECT: spec356c-long-r1.prune.csv    PRIOR-DURATION ARM: spec356-long.prune.csv
+# STATUS:  replicate target table (R3.3). It is an OBSERVATION accompanying the frozen
+#   classification and is read by no limb, step or slot.
+# NOT A PREDICATE: this builder computes no predicate term, reads no threshold, decides nothing
+#   and emits no verdict; it alters no Step, threshold, ordering or conditional. A column it
+#   cannot compute is emitted EMPTY and never a substitute.
+# NO FIT: no OLS fit, no slope, no standard error, no r2, no alpha, no t-statistic and no
+#   significance claim is computed on any series in this file.
+# (C1) SAMPLED, NOT EVENT-DRIVEN: the ledger scrapes every 10 s while LWM advances ~31 s apart,
+#   so every 'at the moment LWM passes' reading here is THE FIRST SCRAPE AT OR AFTER the
+#   advance -- a BUCKET, not an instant, carrying up to one cadence of lag.
+# (C2) THE ADJ-7 BOUNDARY IS NOT CROSSED: eligible_refs (L) and ineligible_refs (P) are
+#   PRE-drain; indexed_refs is POST-drain. No ratio is taken across that boundary anywhere in
+#   this file, and the prohibited ratios P/indexed_refs and L/indexed_refs appear NOWHERE.
+# (C3) MULTI-EVENT BUCKETS ARE REPORTED, NEVER SMOOTHED: a 10 s bucket carrying more than one
+#   event does not separate into its events; the per-bucket event count is published
+#   explicitly and is NEVER averaged into a per-event figure.
+# UNITS DIFFER ON PURPOSE AND ARE NOT RECONCILED: indexed_refs is a REF COUNT, tombstone_bytes
+#   is BYTES. No bytes-per-ref constant is assumed, fitted or implied anywhere in this file.
+# The first non-'#' line below is the column header; every line after it is a data row.
+# ORIGIN AND TAIL ARE LITERALS, NOT CHOICES.
+#   ORIGIN t0 := the ledger's FIRST elapsed_secs value -- which is 10, NOT 0, on every committed cell
+#     (the runner's first tick is gated). Window k covers [t0+1000k, t0+1000(k+1)), HALF-OPEN, so no
+#     row is in two windows and no row is in none. THE PARTITION IS ON THE COORDINATE, NEVER ON A ROW
+#     INDEX, so this table cannot be attacked by a row-count edit.
+#   TAIL RULE: window_kind reads FULL when the window's whole nominal width is covered by the ledger
+#     (t0+1000(k+1) <= t_last) and PARTIAL otherwise. The PARTIAL window is at most one and always
+#     last. It is EMITTED and MARKED, carries its OWN rows and t_hi, and NO RATE IS EVER COMPUTED FROM
+#     IT -- dropping the tail silently, or letting it enter a rate, is the inflation this forecloses.
+#     FULL rows and PARTIAL rows are graded SEPARATELY, so ">= 28" cannot be satisfied by a short
+#     window standing in for a full one.
+#   t_lo is the window's NOMINAL half-open lower bound; t_hi is the LAST OBSERVED elapsed_secs inside
+#     the window (for the PARTIAL window that is the ledger's own last coordinate).
+# DELTAS TELESCOPE ACROSS THE BOUNDARIES: d_X for window k is X at the window's last row minus X at
+#   the PREVIOUS window's last row; for window 0 the base is the ledger's own first row. Summed over
+#   every window this reproduces X[last] - X[first] exactly, with no row double-counted or dropped.
+# d_backlog_bytes IS ADJ-14's NAMED SERIES: d_tombstone_bytes_total - d_bytes_freed_total.
+# bytes_freed_per_lwm_epoch is emitted only when d_low_water_mark > 0, and is EMPTY otherwise.
+# NO FIT IS TAKEN ON THIS SERIES. Whether the divergence accelerates, is linear, or saturates is a
+#   DESCRIPTION OF THE PLOTTED SERIES and explicitly not a fitted claim: no slope, no SE, no r2, no
+#   alpha is computed here or downstream of here.
+w_index,window_kind,t_lo,t_hi,rows,d_low_water_mark,d_bytes_freed_total,d_tombstone_bytes_total,d_backlog_bytes,d_nonempty_drains,d_empty_drains,d_passes,bytes_freed_per_lwm_epoch
+0,FULL,0,990,100,33,599707,684957,85250,28,31844,31872,18172.939394
+1,FULL,1000,1990,100,32,88000,692054,604054,4,31426,31430,2750.000000
+2,FULL,2000,2990,100,31,0,685828,685828,0,31142,31142,0.000000
+3,FULL,3000,3990,100,31,0,684222,684222,0,31070,31070,0.000000
+4,FULL,4000,4990,100,31,0,691812,691812,0,30938,30938,0.000000
+5,FULL,5000,5990,100,32,0,726202,726202,0,31542,31542,0.000000
+6,FULL,6000,6990,100,31,0,726754,726754,0,31567,31567,0.000000
+7,FULL,7000,7990,100,32,0,737403,737403,0,32029,32029,0.000000
+8,FULL,8000,8990,100,32,0,735011,735011,0,31925,31925,0.000000
+9,FULL,9000,9990,100,33,0,745039,745039,0,32361,32361,0.000000
+10,FULL,10000,10990,100,32,161000,744786,583786,7,32349,32356,5031.250000
+11,FULL,11000,11990,100,32,0,738944,738944,0,32096,32096,0.000000
+12,FULL,12000,12990,100,32,0,736690,736690,0,31998,31998,0.000000
+13,FULL,13000,13990,100,32,0,739749,739749,0,32131,32131,0.000000
+14,FULL,14000,14990,100,32,0,739266,739266,0,32110,32110,0.000000
+15,FULL,15000,15990,100,32,0,728571,728571,0,31645,31645,0.000000
+16,FULL,16000,16990,100,32,0,732320,732320,0,31809,31809,0.000000
+17,FULL,17000,17990,100,31,0,720636,720636,0,31300,31300,0.000000
+18,FULL,18000,18990,100,32,0,721809,721809,0,31352,31352,0.000000
+19,FULL,19000,19990,100,31,0,719532,719532,0,31253,31253,0.000000
+20,FULL,20000,20990,100,31,0,709941,709941,0,30836,30836,0.000000
+21,FULL,21000,21990,100,30,0,702236,702236,0,30501,30501,0.000000
+22,FULL,22000,22990,100,31,0,703708,703708,0,30565,30565,0.000000
+23,FULL,23000,23990,100,30,0,694232,694232,0,30154,30154,0.000000
+24,FULL,24000,24990,100,30,0,684043,684043,0,29712,29712,0.000000
+25,FULL,25000,25990,100,28,0,639400,639400,0,27772,27772,0.000000
+26,FULL,26000,26990,100,22,0,510968,510968,0,22194,22194,0.000000
+27,FULL,27000,27990,100,21,0,478814,478814,0,20797,20797,0.000000
+28,PARTIAL,28000,28800,81,15,0,359237,359237,0,15603,15603,0.000000
