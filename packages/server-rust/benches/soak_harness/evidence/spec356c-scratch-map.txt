@@ -1,0 +1,42 @@
+SPEC-356c — scratch-to-evidence directory map for the §8.1 repeat (R2.3 point 5)
+
+WHAT RESIDUAL THIS EXPLAINS. Each replicate ran in its own scratch SPEC356_OUT_DIR,
+outside the tracked evidence dir, and ran UNDER ITS FINAL COMMITTED BASENAME — so the
+scratch-to-evidence step was a copy with the basename unchanged on both sides. NO RENAME
+OCCURS ANYWHERE IN THIS LINEAGE, which is why each cell's runner-written
+${BASE}.artifacts.sha256 verifies verbatim with `shasum -a 256 -c` from inside the
+evidence dir, with no mapping applied for name resolution.
+
+THE RESIDUAL IS A DIRECTORY, NOT A RENAME. Each copied matrix.txt self-describes its
+paths under the scratch OUT_DIR (spec356-prune.sh:871-877), so a reader of the committed
+matrix.txt sees directories that do not exist in the repo. THIS FILE IS THE SOLE
+EXPLANATION OF THAT SURVIVING RESIDUAL. Every directory below is quoted from the cell's
+own matrix.txt: the scratch OUT_DIR from its `prune.csv:` line, the data dir from its
+`data dir:` line.
+
+A committed replicate whose scratch dir is not in this map is unprovenanced, and R2.3
+point 5's disposition applies: it is RE-RUN, NOT ANNOTATED.
+
+  scratch OUT_DIR   [arrow]   evidence dir   ..   basename (identical on both sides)   ..   data dir
+
+/private/tmp/spec356c-out-r1 → packages/server-rust/benches/soak_harness/evidence   basename spec356c-long-r1.*   data dir /private/tmp/spec356c-data-r1
+/private/tmp/spec356c-out-r2 → packages/server-rust/benches/soak_harness/evidence   basename spec356c-long-r2.*   data dir /private/tmp/spec356c-data-r2
+
+The nine committed files per replicate, all sharing the basename stem above:
+  .csv  .prune.csv  .soak.json  .progress.jsonl  .mechanism.json  .matrix.txt
+  .harness-console.log  .runner-console.log  .artifacts.sha256
+
+Eight were copied from the scratch OUT_DIR. The ninth, .runner-console.log, is the
+runner's own stdout, which the driver captured outside the OUT_DIR — the runner does not
+write it itself, and matrix.txt's `console log:` line names the HARNESS console, not this
+one. Its capture paths were:
+
+  /private/tmp/spec356c-r1.driver.log  committed as  spec356c-long-r1.runner-console.log
+  /private/tmp/spec356c-r2.driver.log  committed as  spec356c-long-r2.runner-console.log
+
+(The two lines above are capture provenance, not map entries: the arrow character appears
+ONLY on the two map lines, so a count of it is a count of committed replicates.)
+
+Both cells ran from the run worktree /private/tmp/spec356c-runtree, checked out at the
+pin 8a60f1357f4702f4c5393538ef6b4ae6cebd247f, sequentially and never concurrently. Nothing
+was ever committed from that worktree (R5.2).
