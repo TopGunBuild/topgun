@@ -300,3 +300,140 @@ PART V -- SIX-CLASS SUMMARY TABLE
 [Segment 2 appends the TIER2 = RUN / SKIPPED-BY-GATE verdict, with R7.2's three CLEAN
 conditions and their evaluated values, directly beneath this heading. Nothing below
 this heading is written by G5 S1.]
+
+--------------------------------------------------------------------------------
+THE REPRODUCING TEST (R7.3, Q11) -- SITING DECISION AND RESULT
+--------------------------------------------------------------------------------
+
+R7.3's three siting routes read on WHERE the named mechanism reproduces, not on
+convenience: (a) the FrontierState boundary (counted file 2, no exemption needed);
+(b) the service composition (counted file 3, no exemption needed); (c) the
+interleaving-fault scenario (the shape-4 sim fn, PHASE 2, appended to the SAME fn
+Arm 3 already carries).
+
+Named mechanism: a `DrainedByPrune` exit's `bytes_freed_attributed` is EXACTLY the
+epoch's own stamped byte total -- the accounting step T2(exactness) exists to make
+observable, and the precise historical symptom SPEC-357a's Context table records
+("bytes_freed_attributed is EMPTY on ALL 415/447 epoch rows", fact #2). This
+mechanism reproduces ENTIRELY at the `FrontierState` boundary: constructing the
+scenario needs no `CrdtService` / store / key-writer composition (route (b) is not
+needed) and no concurrent-push interleaving (route (c) is not needed) -- a single
+`FrontierState`, one stamped tombstone, licensing and fencing via the same
+`confirm_apply_ack` / `set_durable_epoch_watermark` calls Arm 1's own (d)
+DRAINED-HEALTHY scenario already uses, and one `drain_prunable()` call, is
+sufficient to exhibit it end to end. R7.3(a) THEREFORE FIRES.
+
+  fn: tombstone_frontier_impl::tests::drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total
+  Sited in: packages/server-rust/src/tombstone_frontier_impl.rs, the existing inline
+  `#[cfg(test)] mod tests` -- counted file 2, slot already spent by G2, no exemption
+  engaged.
+
+This matches the SEPARATE-fn branch spec356-manifest.md section Q11 (§11.0.17)
+already pre-declared for exactly this case ("If G5 finds instead that the mechanism
+reproduces at a boundary that does not need the fault dimension (route (a) ... or
+route (b) ...), the reproducing test is a separate, additional fn inside counted
+file 2's or counted file 3's own existing inline test module, and
+spec357-tier1-transcript.txt states that second name explicitly"). No divergence
+from what G1 authored: §11.0.17's pinned name
+(`sim::tombstone_gc_proof::tests::prune_epoch_residency_discrimination_under_network_fault`)
+remains the authoritative name for the fault-dimension arm regardless; this second
+name is stated here, exactly as G1's own text anticipated, and NO manifest edit is
+required or made.
+
+Because route (a) fired, `sim/tombstone_gc_proof.rs`'s shape-4 fn carries ONLY
+PHASE 1 (Arm 3's fault-dimension arm) for the whole of this half -- PHASE 2 (the
+reproducing proof itself) is never engaged, because it is conditional on route (c),
+which did not fire. Shape 4 is held for the fault arm alone, as Arm 3's own
+PART I entry already recorded; no promotion to COUNTED 4/5 occurred.
+
+Both legs of R7.6's mutation harness are discharged; see
+`spec357-reproducer-mutation.txt` for the full transcript. Summary: Leg 1 PASSES on
+the committed tree; Leg 2 FAILS in a throwaway worktree with
+`spec357-reproducer-mutation.patch` applied, on the named assertion:
+
+  assertion `left == right` failed: a DrainedByPrune exit must attribute EXACTLY
+  the epoch's own stamped byte total, got 0
+    left: 0
+   right: 24
+
+-- not a compile error, not an unrelated panic, not a timeout. AC12 / Q12 / R7.6's
+last limb are discharged.
+
+--------------------------------------------------------------------------------
+R7.2 -- THE TIER-1 -> TIER-2 GATE, EVALUATED
+--------------------------------------------------------------------------------
+
+R7.2's three CLEAN conditions, evaluated against this half's own Tier-1 output
+(PART I-III above) and the reproducing test's mutation arm, with their EVALUATED
+VALUES quoted (not merely "met" / "not met"):
+
+  (i) O-0 holds over the harness's own scrapes/evaluation instants.
+      EVALUATED VALUE: HOLDS. PART III: 3 scrapes total, CONSISTENT = 3, TORN = 0,
+      TORN-PERSISTENT = 0, violations over CONSISTENT scrapes = 0. O-0 holds on
+      every row of the harness's own conservation ledger.
+
+  (ii) the frozen walk yields a single discriminating class at >= 95 % of the
+       harness population -- the observation is NOT ambiguous between (b) and (c).
+       EVALUATED VALUE: DOES NOT HOLD. |P| = 5, class shares: (a) 0/5 = 0.0 %,
+       (b) 1/5 = 20.0 %, (c) 1/5 = 20.0 %, (d) 1/5 = 20.0 %, (e) 1/5 = 20.0 %,
+       (f) 1/5 = 20.0 %. Restricted to |P2| = 3 (the population classes (b)/(c)/(d)
+       are drawn from, i.e. where a (b)-vs-(c) discrimination could in principle be
+       read): (b) 1/3 = 33.333 %, (c) 1/3 = 33.333 %, (d) 1/3 = 33.333 %. NO class
+       reaches 95 % under either population reading -- the walk does NOT yield a
+       single discriminating class, and (b) and (c) are tied exactly, which is the
+       AMBIGUOUS condition's own wording ("neither reaches 95 %") verbatim.
+       SEPARATELY, `Unclassified` carries 1/3 = 33.333 % of P2 (epoch 300001,
+       Arm 1's (c) scenario), which is itself >= R4.4's 5 % `INDETERMINATE-RESIDUAL`
+       threshold -- the SECOND, independent AMBIGUOUS trigger ("or >= 5 % of P2
+       carries Unclassified") also fires. THIS IS EXPECTED AND BY DESIGN: Arm 1's
+       own population is deliberately engineered to be one-of-each-class (PART I,
+       PART II), to prove every class is REACHABLE, not to approximate a real
+       cell's steady-state distribution -- an engineered one-scenario-per-class
+       population can never satisfy a 95 %-single-class band by construction, and
+       only a real 28,800 s cell (SPEC-357b, Tier 2) can produce a population where
+       a single class could plausibly dominate.
+
+  (iii) the reproducing test exists and its mutation arm FAILS (R7.6).
+        EVALUATED VALUE: HOLDS. The test
+        `tombstone_frontier_impl::tests::drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total`
+        exists, PASSES on the committed tree (Leg 1), and its mutation arm FAILS in
+        the throwaway worktree on the named assertion (Leg 2, quoted above) --
+        `spec357-reproducer-mutation.patch` / `.txt` discharge Q12 in full.
+
+CLEAN requires ALL THREE to hold. Condition (i) holds; condition (iii) holds;
+CONDITION (ii) DOES NOT HOLD. Tier 1 is therefore NOT CLEAN.
+
+Per R7.2's AMBIGUOUS definition ("the walk cannot separate (b) from (c): neither
+reaches 95 %, or the arms disagree, or >= 5 % of P2 carries Unclassified"), BOTH of
+the two disjuncts fire independently (neither class reaches 95 %, AND Unclassified
+carries 33.333 % of P2 >= 5 %). Tier 1 is AMBIGUOUS.
+
+INADMISSIBLE does not apply: condition (i) holds (O-0 is not violated over the
+harness's own scrapes), so there is no instrument defect to repair, and the
+INADMISSIBLE iteration cap (spec356-manifest.md §11.0.18) is never engaged.
+
+--------------------------------------------------------------------------------
+VERDICT: TIER2 = RUN
+--------------------------------------------------------------------------------
+
+Per R7.2's second bullet ("TIER-1 AMBIGUOUS => AND ONLY THEN, TIER 2 RUNS"), the
+two 28,800 s cells run in SPEC-357b, and the naming is read off Tier 2 under
+spec356-manifest.md §11.0.6's naming rule. This is a DECISION, recorded explicitly,
+never inferred from the absence of cells.
+
+--------------------------------------------------------------------------------
+THE ABSENCE PROOF (AC1, re-confirmed at this half's tip, both branches)
+--------------------------------------------------------------------------------
+
+  git log --follow --diff-filter=A --format=%H --reverse -- \
+    'packages/server-rust/benches/soak_harness/evidence/spec357-*.soak.json' | head -1
+
+  OUTPUT: <EMPTY>
+
+No `spec357-*.soak.json` exists at this half's tip on EITHER branch of R7.2's
+verdict -- this is the STRONGER fact SPEC-357b's own AC11a reads from (this half
+proves absence unconditionally, not conditioned on which verdict fired).
+
+================================================================================
+END OF spec357-tier1-transcript.txt -- G5 (waves 1-4) CLOSES HERE.
+================================================================================
