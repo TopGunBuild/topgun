@@ -84,7 +84,11 @@ else
             (.has_exit_row) and (.lwm_passed_at_op_seq != null) and (.fence_passed_at_op_seq != null) and
             ([.entered_at_op_seq, .lwm_passed_at_op_seq, .fence_passed_at_op_seq] | max) < .exited_at_op_seq
           ),
-          drained_healthy_kind: (.exit_kind_variant == "DrainedByPrune")
+          # `EpochExitKind` carries `#[serde(rename_all = "camelCase")]` (the type-mapping rule
+          # applies to the VARIANT names too, not only field names), so the unit variant renders
+          # as the string "drainedByPrune", never "DrainedByPrune" -- matched here in the same
+          # casing the record actually serializes, not the Rust source spelling.
+          drained_healthy_kind: (.exit_kind_variant == "drainedByPrune")
         }
       | . + {
           class_a: (if (.entered_index == false) and (.stamped_bytes > 0) then 1 else 0 end),
@@ -93,7 +97,9 @@ else
           class_c: (if (.entered_index == true) and (.has_exit_row == true) and (.triple_overlap == false) then 1 else 0 end),
           class_b: (if (.entered_index == true) and (.has_exit_row == true) and (.triple_overlap == true) and (.drained_healthy_kind == false) then 1 else 0 end),
           class_d: (if (.entered_index == true) and (.has_exit_row == true) and (.triple_overlap == true) and (.drained_healthy_kind == true) then 1 else 0 end),
-          unclassified_exit: (if .exit_kind_variant == "Unclassified" then 1 else 0 end)
+          # Same camelCase note as drained_healthy_kind above: the struct variant tag renders
+          # as "unclassified", not "Unclassified".
+          unclassified_exit: (if .exit_kind_variant == "unclassified" then 1 else 0 end)
         }
       | [.epoch, .entered_index, .stamped_bytes, .refs_at_entry, .has_exit_row,
          (.exit_kind_variant // ""), .unclassified_exit,
