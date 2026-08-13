@@ -3061,6 +3061,390 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Tier-1 deterministic discrimination — the `FrontierState` arm (R7.1/
+    // R7.1a). Five independent, engineered scenarios drive every class of the
+    // frozen §11.0 walk this boundary can reach, feed the resulting
+    // entry/residency population through the COMMITTED `spec357-classify.sh`
+    // builder (this is what makes it "the frozen walk run against harness
+    // output" rather than an eyeballed hand-classification), and assert the
+    // one-row-per-class result. Class (a) INDEX-POPULATION-GAP is not
+    // exercised here: this file's `stamp_tombstone` only ever constructs an
+    // `entered_index == false` entry row via `PruneEpochEntryRecord::default()`
+    // (control class (f)'s branch), which is `stamped_bytes == 0` by
+    // construction — (a) needs `stamped_bytes > 0` on that same branch, which
+    // this implementation cannot produce. That is not a harness gap; it is the
+    // mechanical form of R3.1's own expectation ("EXCLUDED" under the pin's
+    // weakening), and the transcript states it as such rather than leaving a
+    // silent absence.
+    // -----------------------------------------------------------------------
+
+    /// Epoch-offset an entry row so five independently-numbered scenarios (each
+    /// its own tiny frontier starting at epoch 1) can share one JSONL
+    /// population with no epoch collision. Only the JSON payload's `epoch`
+    /// field is remapped; the frontier's own internal numbering is untouched.
+    fn offset_entry(mut r: PruneEpochEntryRecord, base: Epoch) -> PruneEpochEntryRecord {
+        r.epoch += base;
+        r
+    }
+
+    /// See [`offset_entry`] — the residency-side counterpart, applied with the
+    /// SAME base as its scenario's entry row so the classify.sh join still
+    /// resolves by epoch number.
+    fn offset_residency(
+        mut r: PruneEpochResidencyRecord,
+        base: Epoch,
+    ) -> PruneEpochResidencyRecord {
+        r.epoch += base;
+        r
+    }
+
+    /// One O-0 conservation-ledger row, both renders identical (a single
+    /// `index_conservation_snapshot()` call written twice) — the accessor's own
+    /// coherence property (Checklist 6a) is what licenses this, not an
+    /// assumption.
+    fn conservation_csv_row(elapsed_secs: u64, s: IndexConservationSnapshot) -> String {
+        format!(
+            "{elapsed_secs},{a},{a},{b},{b},{c},{c},{d},{d},{e},{e},{f},{f},{g},{g},{h},{h}",
+            a = s.stamped_refs_total,
+            b = s.stamped_bytes_total,
+            c = s.drained_refs_total,
+            d = s.restored_refs_total,
+            e = s.rebuild_cleared_refs_total,
+            f = s.epochs_entered_total,
+            g = s.epochs_exited_total,
+            h = s.indexed_refs,
+        )
+    }
+
+    /// Dry-run leg 2 (R6.3) — exercises the committed `spec357-classify.sh`
+    /// builder over this Tier-1 harness's own output and asserts the frozen
+    /// walk's per-class result. `--nocapture` prints both produced CSVs
+    /// verbatim so their bytes can be transcribed into the committed
+    /// `spec357-dryrun-{class,conservation}-tier1.csv` evidence artifacts.
+    // Kept as one body deliberately: the five engineered scenarios share the
+    // `entries`/`residency` accumulators and the single classify.sh
+    // invocation they all feed, so splitting them into helper fns would move
+    // the per-class assertions away from the exact fixture that produced
+    // each row, which is the property a reviewer needs to check this test
+    // against the frozen walk at all.
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn tier1_frontierstate_arm_drives_every_reachable_class_of_the_frozen_walk() {
+        const D_BASE: Epoch = 100_000; // (d) DRAINED-HEALTHY
+        const B_BASE: Epoch = 200_000; // (b) SELECTION / SPLIT MISMATCH
+        const C_BASE: Epoch = 300_000; // (c) FRONTIER RACE (+ Unclassified)
+        const E_BASE: Epoch = 400_000; // (e) NO-EXIT-RECORD
+        const F_BASE: Epoch = 500_000; // (f) EMPTY-EPOCH
+
+        let mut entries: Vec<PruneEpochEntryRecord> = Vec::new();
+        let mut residency: Vec<PruneEpochResidencyRecord> = Vec::new();
+
+        // ---- (d) DRAINED-HEALTHY: resident, licensed, fenced, THEN actually
+        // taken by a legitimate prune drain — T(e) holds and D(e) holds.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            let e1 = {
+                let mut state = f.lock();
+                let (_epoch, rec0) = state.stamp_tombstone("m", "kd1", "TAGD1", 0);
+                assert!(rec0.is_none(), "first stamp never rolls anything over");
+                let (_epoch, rec1) = state.stamp_tombstone("m", "kd2", "TAGD2", 0);
+                rec1.expect("second stamp rolls past epoch 1")
+            };
+            f.set_durable_epoch_watermark(1);
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:tier1-d|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+            // The residency interval is HALF-OPEN, `[entered_at_op_seq,
+            // exited_at_op_seq)` (R3.2): draining in the SAME op-seq tick that
+            // licensing landed on would make `exited_at_op_seq` equal to (not
+            // strictly greater than) `lwm_passed_at_op_seq`, which is an EMPTY
+            // overlap under that definition, not a non-empty one — so one more
+            // (discarded) stamp advances the clock past the licensing instant
+            // before the drain runs, giving T(e) a genuinely non-empty window.
+            {
+                let mut state = f.lock();
+                state.stamp_tombstone("m", "kd-spacer", "TAGDX", 0);
+            }
+            let exits = {
+                let mut state = f.lock();
+                let (_drained, _split, exits) = state.drain_prunable();
+                exits
+            };
+            assert_eq!(exits.len(), 1, "only epoch 1 was eligible");
+            let exit = exits.into_iter().next().expect("checked len == 1");
+            assert!(matches!(exit.exit_kind, EpochExitKind::DrainedByPrune));
+            entries.push(offset_entry(e1, D_BASE));
+            residency.push(offset_residency(exit, D_BASE));
+        }
+
+        // ---- (b) SELECTION / SPLIT MISMATCH: licensed AND fenced, then
+        // removed by a REBUILD instead of a legitimate drain — T(e) holds,
+        // D(e) does not: "eligible and not taken by the prune" (R3.2).
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            let e1 = {
+                let mut state = f.lock();
+                let (_epoch, rec0) = state.stamp_tombstone("m", "kb1", "TAGB1", 0);
+                assert!(rec0.is_none());
+                let (_epoch, rec1) = state.stamp_tombstone("m", "kb2", "TAGB2", 0);
+                rec1.expect("second stamp rolls past epoch 1")
+            };
+            f.set_durable_epoch_watermark(1);
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:tier1-b|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+            let exits = {
+                let mut state = f.lock();
+                state.rebuild_into_epoch(100, Vec::new())
+            };
+            assert_eq!(exits.len(), 1, "only epoch 1 had an entry-emitted slot");
+            let exit = exits.into_iter().next().expect("checked len == 1");
+            assert!(matches!(exit.exit_kind, EpochExitKind::ClearedByRebuild));
+            entries.push(offset_entry(e1, B_BASE));
+            residency.push(offset_residency(exit, B_BASE));
+        }
+
+        // ---- (c) FRONTIER RACE: no licensing, no fencing at all — T(e) is
+        // empty by construction. Removed via the unenumerated bypass (same
+        // mechanism AC6a's dedicated test proves), which is ALSO how this
+        // scenario doubles as an aggregate-population `Unclassified` data
+        // point distinct from AC6a's own dedicated, single-purpose test.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            let e1 = {
+                let mut state = f.lock();
+                let (_epoch, rec0) = state.stamp_tombstone("m", "kc1", "TAGC1", 0);
+                assert!(rec0.is_none());
+                let (_epoch, rec1) = state.stamp_tombstone("m", "kc2", "TAGC2", 0);
+                rec1.expect("second stamp rolls past epoch 1")
+            };
+            let exit = {
+                let mut state = f.lock();
+                state.epoch_tags.remove(&1);
+                state.detect_epoch_exit(1, None)
+            }
+            .expect("bypassed epoch surfaces at the next detection point");
+            assert!(matches!(exit.exit_kind, EpochExitKind::Unclassified { .. }));
+            entries.push(offset_entry(e1, C_BASE));
+            residency.push(offset_residency(exit, C_BASE));
+        }
+
+        // ---- (e) NO-EXIT-RECORD: entered, then deliberately left alone — no
+        // drain, no rebuild, no detection sweep. Still resident with an entry
+        // row and no exit row at Tier-1 snapshot time.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            let e1 = {
+                let mut state = f.lock();
+                let (_epoch, rec0) = state.stamp_tombstone("m", "ke1", "TAGE1", 0);
+                assert!(rec0.is_none());
+                let (_epoch, rec1) = state.stamp_tombstone("m", "ke2", "TAGE2", 0);
+                rec1.expect("second stamp rolls past epoch 1")
+            };
+            entries.push(offset_entry(e1, E_BASE));
+        }
+
+        // ---- (f) EMPTY-EPOCH — the D3 obligation carried into this segment.
+        // A rebuild jump leaves the landing epoch with no residency slot; the
+        // next rollover past it therefore takes the
+        // `PruneEpochEntryRecord::default()` branch (R2.3a), exactly the path
+        // documented at the `stamp_tombstone` rollover site: "only reachable
+        // via an `epoch_width` change or a rebuild-induced jump, never via
+        // ordinary sequential stamping."
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            {
+                let mut state = f.lock();
+                state.rebuild_into_epoch(50, Vec::new());
+            }
+            let e_empty = {
+                let mut state = f.lock();
+                let (_epoch, rec) = state.stamp_tombstone("m", "kf1", "TAGF1", 0);
+                rec.expect("rolls past the empty landing epoch 50")
+            };
+            assert!(
+                !e_empty.entered_index,
+                "class (f): the landing epoch never entered the index"
+            );
+            assert_eq!(e_empty.stamped_bytes, 0);
+            assert_eq!(e_empty.epoch, 50);
+            entries.push(offset_entry(e_empty, F_BASE));
+        }
+
+        assert_eq!(entries.len(), 5, "one entry row per engineered scenario");
+        assert_eq!(
+            residency.len(),
+            3,
+            "(d), (b) and (c) each produced an exit row; (e) and (f) did not, by design"
+        );
+
+        // ---- O-0 conservation-ledger rows for the synthetic prune.csv, over
+        // an unrelated sixth frontier: stamp → drain → restore, each snapshot
+        // read twice into identical `_a`/`_b` renders (Checklist 6a's own
+        // coherence property licenses this).
+        let cons_rows = {
+            let f = frontier();
+            f.set_epoch_width(1);
+            let mut rows = Vec::new();
+            f.stamp_tombstone("m", "ko1", "T1");
+            f.stamp_tombstone("m", "ko2", "T2");
+            f.stamp_tombstone("m", "ko3", "T3"); // rolls past epochs 1 and 2
+            rows.push(conservation_csv_row(0, f.index_conservation_snapshot()));
+            f.set_durable_epoch_watermark(2);
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:tier1-cons|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 3, CONN_A)));
+            let drained = f.drain_prunable_tombstones();
+            assert_eq!(drained.len(), 2);
+            rows.push(conservation_csv_row(10, f.index_conservation_snapshot()));
+            let (epoch, tombstone_ref) = drained.into_iter().next().expect("a drained ref");
+            f.restore_tombstone_ref(epoch, tombstone_ref);
+            rows.push(conservation_csv_row(20, f.index_conservation_snapshot()));
+            rows
+        };
+
+        // ---- Write the harness output in the exact wire shape
+        // `spec357-classify.sh` documents, run the builder over it (this IS
+        // "the frozen walk run against harness output" — the walk lives in
+        // the committed builder, not re-derived by eye here), and assert the
+        // per-class result.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entry_path = dir.path().join("tier1.entry.jsonl");
+        let residency_path = dir.path().join("tier1.residency.jsonl");
+        let prune_path = dir.path().join("tier1.prune.csv");
+        let out_prefix = dir.path().join("tier1-dryrun");
+
+        let entry_jsonl: String = entries
+            .iter()
+            .map(|r| serde_json::to_string(r).expect("entry row serializes"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let residency_jsonl: String = residency
+            .iter()
+            .map(|r| serde_json::to_string(r).expect("residency row serializes"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&entry_path, &entry_jsonl).expect("write entry.jsonl");
+        std::fs::write(&residency_path, &residency_jsonl).expect("write residency.jsonl");
+
+        let m_refs = METRIC_PRUNE_STAMPED_REFS_TOTAL;
+        let m_bytes = METRIC_PRUNE_STAMPED_BYTES_TOTAL;
+        let m_drained = METRIC_PRUNE_DRAINED_REFS_TOTAL;
+        let m_restored = METRIC_PRUNE_RESTORED_REFS_TOTAL;
+        let m_rebuilt = METRIC_PRUNE_REBUILD_CLEARED_REFS_TOTAL;
+        let m_entered = METRIC_PRUNE_EPOCHS_ENTERED_TOTAL;
+        let m_exited = METRIC_PRUNE_EPOCHS_EXITED_TOTAL;
+        let m_indexed = METRIC_PRUNE_INDEXED_REFS;
+        let prune_header = format!(
+            "elapsed_secs,{m_refs}_a,{m_refs}_b,{m_bytes}_a,{m_bytes}_b,{m_drained}_a,{m_drained}_b,\
+             {m_restored}_a,{m_restored}_b,{m_rebuilt}_a,{m_rebuilt}_b,{m_entered}_a,{m_entered}_b,\
+             {m_exited}_a,{m_exited}_b,{m_indexed}_a,{m_indexed}_b"
+        );
+        let prune_csv = format!("{prune_header}\n{}\n", cons_rows.join("\n"));
+        std::fs::write(&prune_path, &prune_csv).expect("write prune.csv");
+
+        println!("--- TIER-1 HARNESS: entry.jsonl ---\n{entry_jsonl}");
+        println!("--- TIER-1 HARNESS: residency.jsonl ---\n{residency_jsonl}");
+        println!("--- TIER-1 HARNESS: prune.csv ---\n{prune_csv}");
+
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("benches/soak_harness/evidence/spec357-classify.sh");
+        let output = std::process::Command::new("sh")
+            .arg(&script)
+            .arg(&entry_path)
+            .arg(&residency_path)
+            .arg(&prune_path)
+            .arg(&out_prefix)
+            .output()
+            .expect("spec357-classify.sh runs");
+        println!(
+            "--- spec357-classify.sh stdout ---\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        println!(
+            "--- spec357-classify.sh stderr ---\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "spec357-classify.sh must exit 0");
+
+        let class_csv = std::fs::read_to_string(format!(
+            "{}-class.csv",
+            out_prefix.to_str().expect("utf8 path")
+        ))
+        .expect("read class.csv");
+        let cons_csv = std::fs::read_to_string(format!(
+            "{}-conservation.csv",
+            out_prefix.to_str().expect("utf8 path")
+        ))
+        .expect("read conservation.csv");
+        println!("--- TIER-1 HARNESS: spec357-*-class.csv ---\n{class_csv}");
+        println!("--- TIER-1 HARNESS: spec357-*-conservation.csv ---\n{cons_csv}");
+
+        let data_rows: Vec<&str> = class_csv
+            .lines()
+            .skip(1)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(data_rows.len(), 5, "one classification row per entry row");
+        let count_col = |idx: usize, needle: &str| -> usize {
+            data_rows
+                .iter()
+                .filter(|row| row.split(',').nth(idx) == Some(needle))
+                .count()
+        };
+        // Columns: epoch,entered_index,stamped_bytes,refs_at_entry,has_exit_row,
+        // exit_kind_variant,unclassified_exit,class_a,class_b,class_c,class_d,
+        // class_e,class_f (0-indexed 0..12).
+        assert_eq!(
+            count_col(7, "1"),
+            0,
+            "class_a: mechanically unreachable, see this test's own doc-comment"
+        );
+        assert_eq!(count_col(8, "1"), 1, "class_b: exactly the (b) scenario");
+        assert_eq!(count_col(9, "1"), 1, "class_c: exactly the (c) scenario");
+        assert_eq!(count_col(10, "1"), 1, "class_d: exactly the (d) scenario");
+        assert_eq!(count_col(11, "1"), 1, "class_e: exactly the (e) scenario");
+        assert_eq!(
+            count_col(12, "1"),
+            1,
+            "class_f: exactly the (f) scenario (D3)"
+        );
+        assert_eq!(
+            data_rows
+                .iter()
+                .filter(|row| row.split(',').nth(6) == Some("1"))
+                .count(),
+            1,
+            "unclassified_exit: exactly the (c) scenario's bypass removal"
+        );
+
+        let cons_data_rows: Vec<&str> =
+            cons_csv.lines().skip(1).filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            cons_data_rows.len(),
+            3,
+            "one conservation row per prune.csv scrape row"
+        );
+        assert!(
+            cons_data_rows.iter().all(|row| row.split(',').nth(1) == Some("CONSISTENT")),
+            "no concurrent mutation between the two synthetic renders: every row is CONSISTENT, never TORN"
+        );
+        assert!(
+            cons_data_rows
+                .iter()
+                .all(|row| row.split(',').nth(4) == Some("1")),
+            "O-0 holds on every CONSISTENT scrape of this harness run"
+        );
+    }
+
     /// A low-water-mark advance publishes the advance cadence, the eligible /
     /// ineligible split, the split's staleness marker, and the claim span.
     #[test]
