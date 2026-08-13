@@ -1,0 +1,4 @@
+elapsed_secs,render_class,identity_lhs,identity_rhs,identity_holds
+0,CONSISTENT,3,3,1
+10,CONSISTENT,1,1,1
+20,CONSISTENT,2,2,1

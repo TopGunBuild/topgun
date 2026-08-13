@@ -1,0 +1,6 @@
+epoch,entered_index,stamped_bytes,refs_at_entry,has_exit_row,exit_kind_variant,unclassified_exit,class_a,class_b,class_c,class_d,class_e,class_f
+100001,true,5,1,true,"drainedByPrune",0,0,0,0,1,0,0
+200001,true,5,1,true,"clearedByRebuild",0,0,1,0,0,0,0
+300001,true,5,1,true,"unclassified",1,0,0,1,0,0,0
+400001,true,5,1,false,"",0,0,0,0,0,1,0
+500050,false,0,0,false,"",0,0,0,0,0,0,1
