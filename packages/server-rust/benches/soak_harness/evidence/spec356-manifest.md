@@ -5859,6 +5859,120 @@ and is **complete by construction**: a column with no label REDs PRESENCE entry 
 appends the filled table into this cell as an insertion, never a rewrite of this schema. **`SPEC-357b` is
 bound by the filled table and adds no label to it.**
 
+**THE FILLED TABLE (G4, Q1), produced from `git diff 8a60f135..08a03edf -- 'packages/server-rust/src/tombstone_frontier.rs' 'packages/server-rust/src/tombstone_frontier_impl.rs' 'packages/server-rust/src/service/domain/crdt.rs'`
+— `8a60f135` is `SPEC-356c`'s own resolved pin (§10.1.1) and `08a03edf` is this half's own tip at the moment
+G2's counted-file work closed, i.e. the commit range this table is generated over. 85 rows: 60 `prune.csv`
+columns (1 sampler-local + 42 pre-existing scrape-derived + 1 `drain_refs_p50` + 17 new, columns 44-60), 11
+`entry.jsonl` fields (`PruneEpochEntryRecord`) and 14 `residency.jsonl` fields (`PruneEpochResidencyRecord`).
+No column is unlabelled.**
+
+**Methodology, stated so the labelling is mechanically checkable rather than asserted.** `service/domain/crdt.rs`'s
+diff over this range is **100 % test-only** — one additive `#[tokio::test]` fn inside the file's existing
+inline `mod tests`, zero production bytes changed — so no column's provenance traces to that file at all.
+Inside `tombstone_frontier.rs`, the only non-doc-comment change is the seven new pinned name constants plus
+the extended trait doc-contract; every one of the 33 pre-existing pinned name constants is byte-identical
+(confirmed: the diff's only `-` line against that file is the retired `15 counters, …` census sentence).
+Inside `tombstone_frontier_impl.rs`, `stamp_tombstone`, `drain_prunable` and `rebuild_into_epoch` gained new
+parameters, new locals and new per-epoch bookkeeping calls, but the specific statement that increments or
+sets each PRE-EXISTING pinned series (e.g. `self.indexed_refs += 1;`) is present in the diff as **unmodified
+context**, never as a `-`/`+` line, at every one of these three sites; `restore` is untouched entirely (no
+hunk touches it at all); and `MetricsPruneRecorder`'s `impl PruneRecordObserver` block gains exactly two new
+trailing methods (`observe_epoch_entry`, `observe_epoch_residency`) with every pre-existing method body
+present, byte-identical, outside the diff. On this evidence every one of the 33 pre-existing `prune.csv`
+columns (2-43) is `UNCHANGED_EMISSION`; `elapsed_secs` (col 1) is sampler-local and carries no `.rs` emission
+at all, so it is recorded `UNCHANGED_EMISSION` for completeness rather than left unlabelled. Every column at
+44-60 and every `entry.jsonl` / `residency.jsonl` field is `NEW_EMISSION`, introduced wholesale by this half.
+**No column is `TOUCHED_EMISSION`** — the diff shows no case of a pre-existing emission's own value-producing
+statement being edited, only new, additive statements inserted alongside it in the same enclosing function.
+
+| Column | Ledger | Label | Basis |
+|---|---|---|---|
+| `elapsed_secs` | prune.csv col 1 | UNCHANGED_EMISSION | sampler-local runner clock; not an .rs emission at all, unaffected by any diff |
+| `topgun_or_prune_passes_total` | prune.csv col 2 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_considered_total` | prune.csv col 3 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_dropped_total` | prune.csv col 4 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_matched_nothing_total` | prune.csv col 5 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_absent_total` | prune.csv col 6 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_restored_read_error_total` | prune.csv col 7 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_restored_evicted_total` | prune.csv col 8 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_restored_write_error_total` | prune.csv col 9 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_bytes_freed_total` | prune.csv col 10 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_epochs_drained_total` | prune.csv col 11 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_empty_drains_total` | prune.csv col 12 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_nonempty_drains_total` | prune.csv col 13 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_lwm_advances_total` | prune.csv col 14 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_lwm_epochs_advanced_total` | prune.csv col 15 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_split_recomputes_total` | prune.csv col 16 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_indexed_refs` | prune.csv col 17 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_indexed_epochs` | prune.csv col 18 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_eligible_refs` | prune.csv col 19 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_ineligible_refs` | prune.csv col 20 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_split_computed_epoch` | prune.csv col 21 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_current_epoch` | prune.csv col 22 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_low_water_mark` | prune.csv col 23 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_durable_epoch_watermark` | prune.csv col 24 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_last_drained_epoch` | prune.csv col 25 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_lwm_stall_seconds` | prune.csv col 26 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_tracked_claims` | prune.csv col 27 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_drain_refs_sum` | prune.csv col 28 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_drain_refs_count` | prune.csv col 29 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_drain_epochs_sum` | prune.csv col 30 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_drain_epochs_count` | prune.csv col 31 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_claim_span_epochs_sum` | prune.csv col 32 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_claim_span_epochs_count` | prune.csv col 33 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_claim_lag_epochs_sum` | prune.csv col 34 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_claim_lag_epochs_count` | prune.csv col 35 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_epoch_considered_sum` | prune.csv col 36 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_epoch_considered_count` | prune.csv col 37 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_epoch_dropped_sum` | prune.csv col 38 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_epoch_dropped_count` | prune.csv col 39 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_epoch_bytes_freed_sum` | prune.csv col 40 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_epoch_bytes_freed_count` | prune.csv col 41 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_ormap_tombstone_bytes_total` | prune.csv col 42 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_drain_refs_p50` | prune.csv col 43 | UNCHANGED_EMISSION | pinned metric name unchanged; emitting statement present as unmodified context in the diff (verified by direct read of the G1/G2 diff hunks touching stamp_tombstone/drain_prunable/rebuild_into_epoch/restore and MetricsPruneRecorder) |
+| `topgun_or_prune_stamped_refs_total_a` | prune.csv col 44 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_stamped_refs_total_b` | prune.csv col 45 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_stamped_bytes_total_a` | prune.csv col 46 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_stamped_bytes_total_b` | prune.csv col 47 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_drained_refs_total_a` | prune.csv col 48 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_drained_refs_total_b` | prune.csv col 49 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_restored_refs_total_a` | prune.csv col 50 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_restored_refs_total_b` | prune.csv col 51 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_rebuild_cleared_refs_total_a` | prune.csv col 52 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_rebuild_cleared_refs_total_b` | prune.csv col 53 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_epochs_entered_total_a` | prune.csv col 54 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_epochs_entered_total_b` | prune.csv col 55 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_epochs_exited_total_a` | prune.csv col 56 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_epochs_exited_total_b` | prune.csv col 57 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_indexed_refs_a` | prune.csv col 58 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `topgun_or_prune_indexed_refs_b` | prune.csv col 59 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `o0_tear_class` | prune.csv col 60 | NEW_EMISSION | introduced by this half (R2.1/R3.0) |
+| `epoch` | `entry.jsonl` (`PruneEpochEntryRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `entered_index` | `entry.jsonl` (`PruneEpochEntryRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `refs_at_entry` | `entry.jsonl` (`PruneEpochEntryRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `stamped_refs` | `entry.jsonl` (`PruneEpochEntryRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `stamped_bytes` | `entry.jsonl` (`PruneEpochEntryRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `entered_at_op_seq` | `entry.jsonl` (`PruneEpochEntryRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `entered_at_unix_ms` | `entry.jsonl` (`PruneEpochEntryRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `rolled_over_at_op_seq` | `entry.jsonl` (`PruneEpochEntryRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `rolled_over_at_unix_ms` | `entry.jsonl` (`PruneEpochEntryRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `current_lwm_at_rollover` | `entry.jsonl` (`PruneEpochEntryRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `durable_watermark_at_rollover` | `entry.jsonl` (`PruneEpochEntryRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `epoch` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `refs_at_entry` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `refs_at_exit` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `stamped_bytes` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `bytes_freed_attributed` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `exit_kind` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `entered_at_op_seq` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `entered_at_unix_ms` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `exited_at_op_seq` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `lwm_passed_at_op_seq` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `fence_passed_at_op_seq` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `lwm_at_exit` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `durable_watermark_at_exit` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+| `current_epoch_at_exit` | `residency.jsonl` (`PruneEpochResidencyRecord`) | NEW_EMISSION | wholly new struct, G1 |
+
 **No cross-pin numerical comparison is made anywhere in this lineage's `SPEC-357` members except where this
 table licenses it, column by column.** This single sentence is the whole of what replaces the retired
 neutrality 2×2 and `ctl` / `ctloff` series controls (R0.2): those detected a build-lineage effect between
@@ -6428,3 +6542,40 @@ honours it and pays the 16 h.
 | `spec357-tier1-transcript.txt` | the Tier-1 deterministic discrimination run, and the artifact carrying the `TIER2` gate verdict (§11.0.18) |
 | `spec356-prune.sh` (additive arms) | two new cell arms, O-0's `*_a`/`*_b` double render, the targeted residency log filter, `server-console.log` capture — authored here, run by `SPEC-357b` |
 | `spec356a-eager-registration.log` / `spec356a-step0c-fixture.log` | `PART VI` appended to each, re-capturing the full name set (including the seven new counters) at this half's pin |
+
+#### §11.0.20 — G4 execution-discovered fact: `topgun_or_prune_restored_refs_total` is an inert Prometheus mirror
+
+Recorded here rather than silently, per this half's own D1 obligation. `MetricsPruneRecorder` eagerly
+registers **all seven** new counters at construction (AC4's armed N/N census reads 7/7 either way, this
+column included), but `topgun_or_prune_restored_refs_total` specifically is **never incremented** on the
+Prometheus side. The reason is structural, not an oversight: a `restore()` call maps to no per-epoch
+entry/exit event, and the `PruneRecordObserver` trait — frozen by G1 for this half — exposes no method a
+`restore` call site could feed. The source itself documents the gap at the field's own declaration
+(`tombstone_frontier_impl.rs`, `MetricsPruneRecorder::restored_refs`):
+
+> Eagerly registered (AC4/R2.6(i)) but not incremented: a restore does not correspond to a per-epoch
+> entry/exit event, and this trait — frozen by G1 for this half — carries no method a restore call site
+> could feed. O-0's own conservation identity does not depend on this Prometheus mirror: it reads
+> `FrontierState`'s own `restored_refs_total`, incremented precisely on every `restore` (see
+> `IndexConservationSnapshot`), which is unaffected by this gap.
+
+**What this does and does not affect.**
+
+- **O-0 itself is unaffected.** The identity `stamped_refs_total + restored_refs_total − drained_refs_total
+  − rebuild_cleared_refs_total ≡ indexed_refs` (§11.0.4) is evaluated over the **consistent-snapshot
+  accessor**'s `IndexConservationSnapshot`, which reads `FrontierState`'s own internal `restored_refs_total`
+  field — incremented on every `restore()` call, independently of the Prometheus counter above. The two are
+  different quantities that happen to share a name stem: one is a `FrontierState` field the accessor reads
+  directly; the other is the `metrics::Counter` handle that mirrors it toward `/metrics`. Only the second one
+  is inert.
+- **The `prune.csv` columns this gap surfaces in** — `topgun_or_prune_restored_refs_total_a` /
+  `_b` (columns 50-51, §11.0.2's provenance table) — read a **constant 0** for the life of any run with at
+  least one restore, because they are scraped from the Prometheus mirror, not from the internal field. **This
+  is a VALUE, not an empty field**, and it does not itself RED AC5's `empty_fields=0` census (verified live:
+  the smoke capture in `spec356a-step0c-fixture.log` `PART VI` below shows these columns populated with `0`,
+  never blank). A reviewer encountering a column of all-zeros here should read this section rather than
+  conclude the instrument is dead.
+- **No fix is proposed here.** The frozen G1 trait is not reopened to add a restore-side method — that would
+  be an architectural change this half is not licensed to make unilaterally (Rule 4). The honest record is
+  the deliverable; a live restore-side Prometheus witness, if ever wanted, is `SPEC-357b`'s or `TODO-634`'s
+  to propose.
