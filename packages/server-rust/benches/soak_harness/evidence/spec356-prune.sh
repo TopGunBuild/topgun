@@ -84,6 +84,13 @@ usage: spec356-prune.sh <cell>
     long8h_r1  armed,    width 1000, 28800s, n=1  -- the repeat, replicate 1
     long8h_r2  armed,    width 1000, 28800s, n=1  -- the repeat, replicate 2
 
+  The two per-epoch-residency diagnosis cells. Same literals as long8h_r{n},
+  own basenames. AUTHORED in the PRE-DATA half; RUN only by the successor,
+  and only if the Tier-1 gate reads AMBIGUOUS:
+
+    diag_r1    armed,    width 1000, 28800s, n=1  -- diagnosis, replicate 1
+    diag_r2    armed,    width 1000, 28800s, n=1  -- diagnosis, replicate 2
+
   The two NON-MEASUREMENT cells. They exist to demonstrate the schema and the
   fail-closed witnesses, they carry basenames no SPEC-356b artifact can ever
   have, and they REFUSE to run without SPEC356_SMOKE_DURATION:
@@ -132,6 +139,16 @@ case "$CELL" in
              MEASUREMENT=yes; BASE="spec356c-long-r1" ;;
   long8h_r2) WIDTH="";   ARMED=yes; DURATION=28800; SAMPLE_INTERVAL=60; PROVENANCE=no
              MEASUREMENT=yes; BASE="spec356c-long-r2" ;;
+  # The two per-epoch-residency diagnosis cells. Every literal but the
+  # basename is the `long8h_r{n}` arms' -- same width (production default),
+  # same arming, same 28,800s duration -- because the deciding window this
+  # instrument reads is the one the repeat already located. They are AUTHORED
+  # here and RUN only in the successor half, and only if the Tier-1 gate says
+  # AMBIGUOUS (R7.2).
+  diag_r1)   WIDTH="";   ARMED=yes; DURATION=28800; SAMPLE_INTERVAL=60; PROVENANCE=no
+             MEASUREMENT=yes; BASE="spec357-diag-r1" ;;
+  diag_r2)   WIDTH="";   ARMED=yes; DURATION=28800; SAMPLE_INTERVAL=60; PROVENANCE=no
+             MEASUREMENT=yes; BASE="spec357-diag-r2" ;;
   cellE)     WIDTH="";   ARMED=no;  DURATION=1800;  SAMPLE_INTERVAL=60; PROVENANCE=yes
              MEASUREMENT=yes; BASE="spec356-cellE" ;;
   # The two NON-MEASUREMENT cells. Their basenames are deliberately outside
@@ -252,6 +269,23 @@ PRUNE_COLUMNS='
 41|topgun_or_prune_epoch_bytes_freed_count|MEASURAND|same trigger; also zero whenever drained epochs free nothing
 42|topgun_ormap_tombstone_bytes_total|INSTRUMENT|monotone ADDED-bytes counter on the OR add path; added bytes are an established input and an all-zero reading makes the reclaim fraction uncomputable. It is boot-seeded before the listener accepts connections and the scrape gate forbids a row from an incomplete scrape, so empty > 0 is unreachable here on a correct instrument
 43|topgun_or_prune_drain_refs_p50|MEASURAND|the exporter-rendered p50 of the batch-size summary over its 3x20s rolling window, sampled for ADJ-12 as the committed source of B. The summary records only NON-EMPTY drains, so a populated window renders p50 >= 1 and 0 is the RESERVED empty-window sentinel (verified against the live exposition: an expired or never-filled window renders 0, not NaN); the stall regime legitimately renders the sentinel for the whole run
+44|topgun_or_prune_stamped_refs_total_a|MEASURAND_O0|O-0 double-render leg A (R3.0): the newly-pinned stamp-path counter, read via a DEDICATED scrape independent of the primary 42-name one above, so neither can perturb the other
+45|topgun_or_prune_stamped_refs_total_b|MEASURAND_O0|O-0 double-render leg B, taken back-to-back with leg A on the same tick; a value that disagrees with leg A is what TORN means for this quantity
+46|topgun_or_prune_stamped_bytes_total_a|MEASURAND_O0|O-0 leg A: the independent per-epoch byte oracle threaded at the stamp site, aggregated (the T2(exactness) external witness)
+47|topgun_or_prune_stamped_bytes_total_b|MEASURAND_O0|O-0 leg B of the same quantity
+48|topgun_or_prune_drained_refs_total_a|MEASURAND_O0|O-0 leg A: zero drained refs IS the total-stall regime this diagnosis exists to name, not a fault
+49|topgun_or_prune_drained_refs_total_b|MEASURAND_O0|O-0 leg B of the same quantity
+50|topgun_or_prune_restored_refs_total_a|MEASURAND_O0|O-0 leg A: legitimately 0 for a whole run with no restores. This exported series never increments on the Prometheus side -- a known-inert mirror; the FrontierState-internal counter the O-0 accessor reads IS incremented on every restore call, only this exported column stays constant 0 -- see the manifest D1 note
+51|topgun_or_prune_restored_refs_total_b|MEASURAND_O0|O-0 leg B of the same quantity; the same dead-Prometheus-mirror caveat applies
+52|topgun_or_prune_rebuild_cleared_refs_total_a|MEASURAND_O0|O-0 leg A: legitimately 0 absent a rebuild
+53|topgun_or_prune_rebuild_cleared_refs_total_b|MEASURAND_O0|O-0 leg B of the same quantity
+54|topgun_or_prune_epochs_entered_total_a|MEASURAND_O0|O-0 leg A: the entry ledger independent metrics-side completeness witness (R6.4 Q3)
+55|topgun_or_prune_epochs_entered_total_b|MEASURAND_O0|O-0 leg B of the same quantity
+56|topgun_or_prune_epochs_exited_total_a|MEASURAND_O0|O-0 leg A: the exit ledger independent metrics-side completeness witness (R6.4 Q4); zero IS a strong hypothesis-(a) reading, not a fault
+57|topgun_or_prune_epochs_exited_total_b|MEASURAND_O0|O-0 leg B of the same quantity
+58|topgun_or_prune_indexed_refs_a|MEASURAND_O0|O-0 leg A of the identity right-hand side, read at the SAME instant as the other seven quantities via the dedicated octet scrape -- deliberately a fresh, independent read, never a reuse of column 17 separately-timed value
+59|topgun_or_prune_indexed_refs_b|MEASURAND_O0|O-0 leg B of the same quantity
+60|o0_tear_class|MEASURAND_O0|the per-scrape classification the runner itself assigns from the eight-quantity leg-A/leg-B comparison: CONSISTENT, TORN (before retry) or TORN-PERSISTENT (after a failed retry). Never empty on an armed cell; the conservation identity is evaluated only over CONSISTENT rows (R3.0)
 '
 
 # The scrape-derived names, in column order, space-separated: every column
@@ -260,14 +294,22 @@ PRUNE_COLUMNS='
 # sampler and the arming witness) from the labelled exposition line
 # topgun_or_prune_drain_refs{quantile="0.5"} -- the same synthesis in both
 # places, so the witness cannot demand a name the sampler cannot see.
+#
+# Columns 44-60 (the O-0 double-render octet plus its tear classification,
+# tagged MEASURAND_O0 above) are DELIBERATELY EXCLUDED from this list ($1 <=
+# 43 below): they carry _a/_b-suffixed or synthetic column names that do not
+# exist as literal exposition names, and they are populated by the dedicated
+# scrape_o0_octet()/o0_classify_pair() pair below, never by this generic
+# reader. This is the only change to this generation rule; the 43-column
+# behaviour above it is untouched.
 PRUNE_SCRAPE_NAMES="$(printf '%s\n' "$PRUNE_COLUMNS" \
-  | awk -F'|' 'NF >= 3 && $1 != 1 { printf "%s ", $2 } END { print "" }')"
+  | awk -F'|' 'NF >= 3 && $1 != 1 && $1 <= 43 { printf "%s ", $2 } END { print "" }')"
 # The header the sampler writes and the post-run check re-reads.
 PRUNE_HEADER="$(printf '%s\n' "$PRUNE_COLUMNS" \
   | awk -F'|' 'NF >= 3 { if (out == "") out = $2; else out = out "," $2 } END { print out }')"
 PRUNE_COL_COUNT="$(printf '%s\n' "$PRUNE_COLUMNS" | awk -F'|' 'NF >= 3 { n++ } END { print n + 0 }')"
-if [ "$PRUNE_COL_COUNT" != "43" ]; then
-  echo "FATAL: the selection table must govern exactly 43 columns; it governs ${PRUNE_COL_COUNT}." >&2
+if [ "$PRUNE_COL_COUNT" != "60" ]; then
+  echo "FATAL: the selection table must govern exactly 60 columns; it governs ${PRUNE_COL_COUNT}." >&2
   exit 1
 fi
 
@@ -697,8 +739,27 @@ unset TOPGUN_WRITEBEHIND_BATCH_SIZE || true
 # Unset => the child runs at RUST_LOG=warn, the pinned instrument-identity log
 # level (server-side info logging is a measurable cost on this write path).
 unset SOAK_SERVER_LOG || true
+# TARGETED re-arming, layered on the unset above rather than replacing it: the
+# per-epoch residency ledger (R2.2) needs its entry/exit lines, which only the
+# dedicated `topgun_server::tombstone_frontier::residency` target need emit at
+# `info`. This is NOT a blanket `info` level -- every other target on the
+# child stays at `warn`, because tombstone_frontier.rs:697-699 records that
+# server-side info logging is a measurable cost on this write path, and warn
+# remains the pinned instrument-identity choice for everything else.
+export SOAK_SERVER_LOG="warn,topgun_server::tombstone_frontier::residency=info"
+# Mirrors the child's stdout/stderr lines into the harness's own console
+# (prefixed "[server] "), which is how this runner captures a server-console
+# artifact distinct from the harness's own console (section 11, below) without
+# any change to the bench harness's Rust source.
+export SOAK_SERVER_LOG_PASSTHROUGH=1
 # Unset => teardown is SIGKILL, as every other soak run's is.
 unset TOPGUN_SOAK_GRACEFUL_SHUTDOWN || true
+# R2.3c's consequence, stated rather than left implicit: this runner NEVER
+# sets TOPGUN_SOAK_GRACEFUL_SHUTDOWN, on any cell, including diag_r1/diag_r2.
+# Teardown is therefore SIGKILL for every cell this runner ever executes, and
+# the per-epoch residency ledger's `StillResidentAtShutdown` exit kind is
+# reached only via that SIGKILL path -- there is no graceful-drain leg for it
+# to race in this lineage.
 # Unset => production memory ceiling and eviction water marks.
 unset TOPGUN_MAX_RAM_MB || true
 unset TOPGUN_EVICTION_HIGH_PCT || true
@@ -1255,8 +1316,110 @@ scrape_prune_series() {   # prints "COMPLETE|<missing>|<v1>,<v2>,..." or "SCRAPE
   '
 }
 
+# ---------------------------------------------------------------------------
+# 9b-2. O-0'S DOUBLE-RENDER OCTET (R3.0): the eight quantities the index
+#       conservation identity is evaluated over -- the seven new counters plus
+#       indexed_refs -- read via a DEDICATED scrape, entirely independent of
+#       scrape_prune_series() above, so a change to either can never perturb
+#       the other. Two renders are taken back-to-back on every armed tick,
+#       classified CONSISTENT or TORN by direct comparison; a TORN pair gets
+#       exactly one retry pair, replacing it if the retry agrees, else the
+#       tick is recorded TORN-PERSISTENT. Deltas and the identity itself are
+#       computed POST HOC by the classifier sidecar, never here.
+# ---------------------------------------------------------------------------
+O0_OCTET_NAMES="topgun_or_prune_stamped_refs_total topgun_or_prune_stamped_bytes_total topgun_or_prune_drained_refs_total topgun_or_prune_restored_refs_total topgun_or_prune_rebuild_cleared_refs_total topgun_or_prune_epochs_entered_total topgun_or_prune_epochs_exited_total topgun_or_prune_indexed_refs"
+
+scrape_o0_octet() {   # prints "COMPLETE|<v1>,...,<v8>" or "SCRAPE_FAIL|"
+  local body
+  body="$(curl -fsS --max-time 5 "http://127.0.0.1:${SERVER_PORT}/metrics" 2>/dev/null)" || {
+    printf 'SCRAPE_FAIL|'
+    return 0
+  }
+  printf '%s' "$body" | awk -v names="$O0_OCTET_NAMES" '
+    BEGIN { want = split(names, a, " ") }
+    /^[[:space:]]*#/ { next }
+    {
+      nm = $1
+      sub(/\{.*$/, "", nm)
+      if (!(nm in val)) val[nm] = $2
+    }
+    END {
+      out = ""; nmiss = 0
+      for (i = 1; i <= want; i++) {
+        k = a[i]
+        if (k in val) { v = val[k]; gsub(/[ \t\r]/, "", v) } else { v = ""; nmiss++ }
+        out = out "," v
+      }
+      status = (nmiss == 0) ? "COMPLETE" : "INCOMPLETE"
+      printf "%s|%s", status, substr(out, 2)
+    }
+  '
+}
+
+# Field-by-field comparison of two comma-joined 8-value octets. An empty
+# (missing) field never compares equal to anything -- including another empty
+# field -- so an INCOMPLETE render is always TORN and forces the retry leg
+# rather than being read as an agreeing pair.
+o0_classify_pair() {   # $1 = octet A values, $2 = octet B values
+  awk -v a="$1" -v b="$2" '
+    BEGIN {
+      na = split(a, av, ",")
+      nb = split(b, bv, ",")
+      if (na != nb || na != 8) { print "TORN"; exit }
+      for (i = 1; i <= na; i++) {
+        if (av[i] == "" || bv[i] == "" || av[i] != bv[i]) { print "TORN"; exit }
+      }
+      print "CONSISTENT"
+    }
+  '
+}
+
+# Renders the 17 O-0 fields (columns 44-60) for one tick: the eight leg-A/
+# leg-B pairs, interleaved in O0_OCTET_NAMES order, followed by the tear
+# class. Prints them as a single string beginning with a comma, ready to be
+# appended directly after the primary 43-column `values`.
+o0_render_fields() {
+  local raw_a raw_b status_a status_b oct_a oct_b tear
+  raw_a="$(scrape_o0_octet)"; status_a="${raw_a%%|*}"; oct_a="${raw_a#*|}"
+  raw_b="$(scrape_o0_octet)"; status_b="${raw_b%%|*}"; oct_b="${raw_b#*|}"
+  if [ "$status_a" = "COMPLETE" ] && [ "$status_b" = "COMPLETE" ]; then
+    tear="$(o0_classify_pair "$oct_a" "$oct_b")"
+  else
+    tear="TORN"
+  fi
+  if [ "$tear" != "CONSISTENT" ]; then
+    # The retry pair: two fresh renders, back-to-back. Replaces the torn pair
+    # on agreement; otherwise the tick is TORN-PERSISTENT and excluded from
+    # O-0's denominator downstream (R3.0 item 2), but the readings are still
+    # published rather than blanked, so the tear itself remains inspectable.
+    local raw_c raw_d status_c status_d oct_c oct_d
+    raw_c="$(scrape_o0_octet)"; status_c="${raw_c%%|*}"; oct_c="${raw_c#*|}"
+    raw_d="$(scrape_o0_octet)"; status_d="${raw_d%%|*}"; oct_d="${raw_d#*|}"
+    if [ "$status_c" = "COMPLETE" ] && [ "$status_d" = "COMPLETE" ] \
+       && [ "$(o0_classify_pair "$oct_c" "$oct_d")" = "CONSISTENT" ]; then
+      oct_a="$oct_c"; oct_b="$oct_d"; tear="CONSISTENT"
+    else
+      oct_a="$oct_c"; oct_b="$oct_d"; tear="TORN-PERSISTENT"
+    fi
+  fi
+  awk -v a="$oct_a" -v b="$oct_b" -v t="$tear" '
+    BEGIN {
+      na = split(a, av, ",")
+      nb = split(b, bv, ",")
+      out = ""
+      for (i = 1; i <= 8; i++) {
+        av_i = (i <= na) ? av[i] : ""
+        bv_i = (i <= nb) ? bv[i] : ""
+        out = out "," av_i "," bv_i
+      }
+      out = out "," t
+      print out
+    }
+  '
+}
+
 prune_emit_row() {
-  local now elapsed raw status missing values
+  local now elapsed raw status missing values o0_fields
   now="$(date +%s)"
   elapsed=$((now - T0))
 
@@ -1280,12 +1443,26 @@ prune_emit_row() {
     if [ ! -s "$PRUNE_FIRST_FILE" ]; then
       printf '%s' "$elapsed" > "$PRUNE_FIRST_FILE"
     fi
+    # The O-0 octet is reached only when the primary scrape was COMPLETE --
+    # exactly the branch that is about to write a row -- so it is never
+    # attempted on a tick that would otherwise be skipped.
+    o0_fields="$(o0_render_fields)"
+  else
+    # Disarmed: every O-0 field is blank too, on the same footing as the
+    # primary 42 -- the row is written, the columns are blank, and no column
+    # check reads them (run_prune_column_checks returns before either family
+    # is examined on a disarmed cell).
+    o0_fields=""
+    local _i
+    for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
+      o0_fields="${o0_fields},"
+    done
   fi
   # On a disarmed cell every prune-record field of `values` is already empty,
   # which is exactly what the adjudicated rule requires: the row is written,
   # the columns are blank, and no column check reads them.
 
-  printf '%d,%s\n' "$elapsed" "$values" >> "$PRUNE_CSV"
+  printf '%d,%s%s\n' "$elapsed" "$values" "$o0_fields" >> "$PRUNE_CSV"
 }
 
 printf '%s\n' "$PRUNE_HEADER" > "$PRUNE_CSV"
@@ -1354,6 +1531,16 @@ tail -25 "$CONSOLE_LOG" || true
 # ---------------------------------------------------------------------------
 cp -f "$CONSOLE_LOG" "$CONSOLE_OUT"
 echo "console log: $CONSOLE_OUT"
+
+# The SERVER's own console, distinct from the harness's: SOAK_SERVER_LOG_PASSTHROUGH
+# (set above) mirrors every child stdout/stderr line into the harness's own
+# console prefixed "[server] "; this extracts and unprefixes exactly those
+# lines, including the per-epoch residency entry/exit lines the targeted
+# SOAK_SERVER_LOG filter arms. No change to the bench harness's Rust source
+# was needed for this -- the mirroring is a pre-existing, opt-in capability.
+SERVER_CONSOLE_OUT="${OUT_DIR}/${BASE}.server-console.log"
+grep '^\[server\] ' "$CONSOLE_LOG" | sed 's/^\[server\] //' > "$SERVER_CONSOLE_OUT" || true
+echo "server console log: $SERVER_CONSOLE_OUT ($(wc -l < "$SERVER_CONSOLE_OUT" | tr -d ' ') lines)"
 
 if [ -f "$MECH_RAW" ]; then
   mv -f "$MECH_RAW" "$MECH_OUT"
