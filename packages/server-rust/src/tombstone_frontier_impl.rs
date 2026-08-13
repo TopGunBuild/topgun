@@ -3061,6 +3061,62 @@ mod tests {
         }
     }
 
+    /// THE REPRODUCING TEST (R7.3(a), AC12, Q11). The named mechanism: a
+    /// `DrainedByPrune` exit's `bytes_freed_attributed` is EXACTLY the epoch's
+    /// own stamped byte total — never a placeholder, never zero, never an
+    /// approximation. This is the exact accounting step T2(exactness) exists
+    /// to make observable, and reproduces the precise historical symptom the
+    /// prior lineage's committed record names: `bytes_freed_attributed` empty
+    /// on every one of 415/447 epoch rows over the deciding window. The
+    /// mechanism reproduces entirely at the `FrontierState` boundary — no
+    /// service composition and no interleaving-fault scenario is needed to
+    /// exhibit it — so R7.3(a) sites this test in counted file 2's own inline
+    /// test module. Its non-vacuity is proven by the committed mutation arm
+    /// (`spec357-reproducer-mutation.patch` / `.txt`): the production edit that
+    /// zeros `bytes_freed_attributed` unconditionally makes this exact
+    /// assertion false in a throwaway worktree.
+    #[test]
+    fn drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total() {
+        let f = frontier();
+        f.set_epoch_width(1);
+        let tag = "REPRODUCER-TOMBSTONE-TAG";
+        let expected_bytes = u64::try_from(tag.len()).expect("fits u64");
+        {
+            let mut state = f.lock();
+            let (_epoch, rec0) = state.stamp_tombstone("m", "krepro1", tag, 0);
+            assert!(rec0.is_none(), "first stamp never rolls anything over");
+            let (_epoch, rec1) = state.stamp_tombstone("m", "krepro2", "FILLER", 0);
+            assert!(rec1.is_some(), "second stamp rolls past epoch 1");
+        }
+        f.set_durable_epoch_watermark(1);
+        f.set_delivered(CONN_A, 100);
+        let c: ClientId = "a5:repro-t2|dev-1".into();
+        assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+        // The residency interval is HALF-OPEN, `[entered_at_op_seq,
+        // exited_at_op_seq)` (R3.2): one more (discarded) stamp advances the
+        // clock strictly past the licensing instant before the drain runs, so
+        // T(e) is a genuinely non-empty overlap (same reason as the (d)
+        // DRAINED-HEALTHY Tier-1 scenario below).
+        {
+            let mut state = f.lock();
+            state.stamp_tombstone("m", "krepro-spacer", "SPACERTAG", 0);
+        }
+        let exits = {
+            let mut state = f.lock();
+            let (_drained, _split, exits) = state.drain_prunable();
+            exits
+        };
+        assert_eq!(exits.len(), 1, "only epoch 1 was eligible");
+        let exit = exits.into_iter().next().expect("checked len == 1");
+        assert!(matches!(exit.exit_kind, EpochExitKind::DrainedByPrune));
+        assert_eq!(
+            exit.bytes_freed_attributed, expected_bytes,
+            "a DrainedByPrune exit must attribute EXACTLY the epoch's own \
+             stamped byte total, got {got}",
+            got = exit.bytes_freed_attributed
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Tier-1 deterministic discrimination — the `FrontierState` arm (R7.1/
     // R7.1a). Five independent, engineered scenarios drive every class of the
