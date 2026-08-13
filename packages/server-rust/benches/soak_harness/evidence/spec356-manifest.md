@@ -5772,3 +5772,659 @@ tree, returns 4 rather than 1**, and a future reader who runs it will get 4. Tha
 either an explicit exclusion of the checklist subsection or a snapshot boundary, and **which of those is
 right is not settled here**, because settling it would be patching a frozen checklist, which R0.3 forbids
 and this spec's own hard constraints bar.
+
+
+---
+
+## §11 — SPEC-357a/b: the per-epoch residency diagnosis (PRE-DATA authoring surface)
+
+**This heading and everything beneath it is APPENDED — no byte of §0–§10, §8A or `ADJ-1`…`ADJ-20` is
+touched by it.** `grep -c '^## §11'` is **1** in this file from this commit forward: `SPEC-357b` appends
+`§11.1+` beneath this same heading rather than opening a second one.
+
+### §11.0 — THE PRE-DATA PRE-DECLARATION
+
+**Authored, in full, by `SPEC-357a`. Frozen at `SPEC-357a`'s own tip — nothing beneath this heading may
+move once that half closes.** `SPEC-357b` **executes** the rules below; it does not re-derive, re-word or
+re-freeze them, and any place its own §11.1+ states a rule in different substance from what is written
+here is a carve defect, not a design choice (R0.4). Numbering (`R…`, `O-…`, `Q…`, `AC…`) below reuses the
+parent spec's own requirement numbers so a cross-reference between this section and the spec text resolves
+without translation.
+
+**Why this section exists before any cell has run.** The Context's reconciliation gap says at least one of
+four committed readings from the SPEC-356 lineage is false: the stamp count, the gauge reading, the drain
+count, or the claim that `stamp_tombstone` / `drain_prunable` / `restore` / `rebuild_into_epoch` are the
+only four `epoch_tags` mutation sites. Everything below is the pre-registered machinery that decides which,
+and separates that decision from the three competing hypotheses about WHY the prune's steady state shows
+zero non-empty drains against a steadily arriving tombstone corpus — all of it committed **before** the
+per-epoch instrument this half also builds has produced a single measured row.
+
+#### §11.0.1 — The pin (R1.1)
+
+The pin is the merge commit of this half's PRE-DATA instrument PR — the tip of `main` at the moment the run
+worktree is created. It is resolved in **G4** and recorded here, as a literal SHA, in the same shape §9.1 /
+§10.1.1 use:
+
+> **PIN (R1.1): `<resolved by G4, appended here as an insertion into this cell — not yet resolved at G1's
+> authoring instant>`.**
+
+Leaving this cell as an explicit placeholder rather than a guessed value is itself the honest reading: R1.1
+defines *when* the pin is resolved (G4, after the instrument and its gate re-capture exist), and filling it
+before that instant exists would be inventing a SHA the run worktree was never actually created from. This
+is not the vacuous-checklist defect PD-8 indicts — PD-8 is about a check that cannot fail on an absent
+*result* table; this is a single literal whose own authoring rule states its fill time, and the cell is
+filled by an append inside this same half, before any `spec357-*.soak.json` can exist.
+
+**Consequence, restated because it is a hard stop, not a caveat.** If `git rev-parse main` has moved past
+this pin when `SPEC-357b` opens its measurement wave, that wave **STOPS** rather than measuring under an
+unrecorded build. A cell whose `matrix.txt` names a different SHA is **DISCARDED, not footnoted.**
+
+#### §11.0.2 — The column-provenance table: schema, and the re-pinning channel that licenses new names (R1.4, R2.1)
+
+**Two authorities are cited by name, deliberately, so a reader of this section alone is not misled about
+which one did the work:**
+
+- `tombstone_frontier.rs:553-556` (pre-carve line numbers; see the counted-file-1 diff for the post-carve
+  positions) declares the pinned metric-name set **CLOSED** — *"Adding a name is not an executor's
+  decision."*
+- **`spec356-manifest.md` §5.3 limb (iii)** is the **sanctioned channel**: *"after the first measurement
+  artifact — it is not addable at all, and routes to a re-pinning spec."* **`SPEC-357a` is that re-pinning
+  spec.** §5.3's own frozen sentence — *"33 names, and THE SET IS CLOSED at this commit"* — stays true of
+  §5's own commit and is **not** retroactively edited; this section is where the successor total is stated
+  instead.
+
+**THE SUCCESSOR TOTAL, AS A LITERAL: `22 counters, 11 gauges, 7 histograms` = 40 pinned constants (up from
+33).** The seven added counters are `topgun_or_prune_stamped_refs_total`,
+`topgun_or_prune_stamped_bytes_total`, `topgun_or_prune_drained_refs_total`,
+`topgun_or_prune_restored_refs_total`, `topgun_or_prune_rebuild_cleared_refs_total`,
+`topgun_or_prune_epochs_entered_total` and `topgun_or_prune_epochs_exited_total`. No existing name is
+renamed, retyped or removed, and the set stays closed afterwards — a further addition routes through this
+same §5.3(iii) channel to a further re-pinning spec, never to a direct edit. `tombstone_frontier.rs:550`
+carries the same literal (`22 counters, 11 gauges, 7 histograms`), updated in the same commit that adds the
+seven constants, so the census comment and this section cannot read differently at any commit either side
+has a tip at.
+
+**The column-provenance table schema (R1.4) — this spec's replacement for the empty-`.rs`-diff freeze proof
+the categorical zero-`.rs` rule used to supply.** Per column of the new prune ledger (both CSV and the two
+`tracing`-emitted JSONL ledgers), the table published in G4 carries **exactly one** of three labels:
+
+| Label | Meaning | What it licenses |
+|---|---|---|
+| `UNCHANGED_EMISSION` | the emitting code is byte-identical to the pin `SPEC-356c` measured | **the only columns eligible for a cross-pin numerical comparison against §9 / §10 values** — every such comparison in §11.1+ names the column and this label beside it |
+| `NEW_EMISSION` | introduced by this spec | no cross-pin comparison is available or claimed |
+| `TOUCHED_EMISSION` | pre-existing series whose emitting code changed at all | a cross-pin comparison is **FORBIDDEN**, and R2.4's non-perturbation limb must additionally show the change is observationally inert (this is also O-0's second failure leg, §11.0.4 below) |
+
+**Construction.** The table is produced from `git diff <356c pin>..<this pin> -- 'packages/server-rust/src/*.rs'`
+and is **complete by construction**: a column with no label REDs PRESENCE entry **Q1** (§11.0.15). `G4`
+appends the filled table into this cell as an insertion, never a rewrite of this schema. **`SPEC-357b` is
+bound by the filled table and adds no label to it.**
+
+**No cross-pin numerical comparison is made anywhere in this lineage's `SPEC-357` members except where this
+table licenses it, column by column.** This single sentence is the whole of what replaces the retired
+neutrality 2×2 and `ctl` / `ctloff` series controls (R0.2): those detected a build-lineage effect between
+two binaries measured under an unchanged predicate, and this spec's binary is new by design, so running
+that 2×2 here would test the thing the spec is doing on purpose.
+
+#### §11.0.3 — The three pre-registered hypotheses, their discriminating observations, and O-0 first
+
+**Ground rule, carried unmodified from the family and restated here because it governs everything below
+it:** a hypothesis that no observation can discriminate is not pre-registered, it is decoration. Every
+hypothesis below carries a named column, a stated reading, and a frozen threshold, all fixed **before** any
+`spec357-*.soak.json` can exist.
+
+**O-0 (§11.0.4) is evaluated FIRST, fail-closed, before any hypothesis below is read.** A hypothesis reading
+taken while O-0 has not been shown to hold is a reading over data the instrument itself may be
+misreporting, and the walk (§11.0.6) encodes this ordering directly as Step 0.
+
+##### Hypothesis (a) — INDEX-POPULATION GAP
+
+*Tombstone content never enters `epoch_tags` for the epochs that matter.*
+
+**Weakened by the user's scope pin, and the reason is stated rather than hidden:** the index's own
+doc-contract and the stamp path's own code show the stamp path *does* feed the index. The per-epoch entry
+ledger this half builds is what converts "prima facie consistent with feeding the index" into "decided".
+
+**Discriminating observation — `O-a` (this is `T1(a)` proper).** Read from the **ENTRY** ledger
+(`PruneEpochEntryRecord`) — **never** from the exit ledger, and **never** from the absence of a record,
+because an absence is exactly the ambiguity the entry ledger exists to close.
+
+**Frozen reading, over the entry ledger's rows, every term of which is a recorded VALUE, never an
+absence:**
+
+- (a) is **ENDORSED** for epoch `e` iff `stamped_bytes(e) > 0` **and** `entered_index(e) == false`
+  (equivalently `refs_at_entry(e) == 0`, which the record also carries independently).
+- (a) is **EXCLUDED** for `e` iff `entered_index(e) == true`.
+- (a) is **NOT-APPLICABLE** for `e` iff `stamped_bytes(e) == 0` — an epoch the stamping clock passed through
+  with no tombstone stamped into it at all. These rows form the published control class **(f)
+  EMPTY-EPOCH** and are excluded from (a)'s share numerator **and** denominator, both stated (PD-4,
+  §11.0.10).
+
+**Independent completeness witness (two-sided, R6.4).** The entry ledger's own line count is cross-checked
+against `Δtopgun_or_prune_epochs_entered_total` over the same window, from the metrics transport — which no
+sidecar produces from the JSONL file itself. A mismatch beyond ±1 (a rollover straddling a scrape) means
+the **ledger** is truncated, not that the population is small, and that distinction is what keeps an
+honest small population from REDing the corresponding PRESENCE entry.
+
+*Expected under the pin's weakening: EXCLUDED.* `O-a`'s value is that it converts "prima facie consistent"
+into "decided", and its per-row `exit_kind` is what routes the population that DOES enter the index onward
+to hypothesis (b) or (c).
+
+##### Hypothesis (b) — SELECTION / SPLIT MISMATCH at `drain_prunable`
+
+*The eligible set the drain computes does not match the set that is actually removed, or the
+`watermark == 0` fast path / the `watermark >= e` conjunct silently disqualifies epochs the low-water-mark
+has already licensed.*
+
+**Discriminating observation — `O-b`: the triple-overlap window, per epoch.** Over the epoch's residency
+interval `[entered_at_op_seq, exited_at_op_seq)`, define three windows: `RESIDENT(e)` (the interval
+itself), `LICENSED(e)` (from `lwm_passed_at_op_seq`, i.e. the first op-seq at which
+`low_water_mark > e`), `FENCED(e)` (from `fence_passed_at_op_seq`, i.e. the first op-seq at which
+`durable_epoch_watermark >= e`).
+
+**Frozen reading.** (b) is **ENDORSED** for `e` iff the three-way intersection `T(e)` is **NON-EMPTY** — the
+epoch was, at some instant, simultaneously resident, licensed and fenced — **and** `exit_kind(e) !=
+DrainedByPrune`. This is precisely *"the epoch was eligible and was not taken"*, kept distinct from *"the
+epoch was never eligible"* by construction.
+
+**Totality of `T` and `D` (load-bearing for §11.0.7's exhaustiveness argument).** `T(e)` is **total** on
+every epoch with both an entry row and an exit row: an `Option` field that reads `None` contributes the
+**empty window**, not an undefined one, so the three-way intersection is always computable and always
+Boolean. `D(e) ≡ (exit_kind(e) == DrainedByPrune)` is **total** because `EpochExitKind` carries the
+`Unclassified` escape and the exit emission's own siting rule (§11.0.11) guarantees an exit row exists for
+every epoch whose slot the frontier's bookkeeping observes as absent, by whatever path — so `D` has a value
+for every exit, including one that arrives by an unenumerated path.
+
+**The durability fence is a live candidate for the disqualifying conjunct**, and it is published
+**unconditionally, whichever hypothesis fires:** `fence_passed_at_op_seq == None` over an epoch's whole
+observed residency is the column that shows it.
+
+##### Hypothesis (c) — FRONTIER RACE: the LWM ≡ epoch-clock identity consumes epochs as fast as they license
+
+*The low-water-mark advances in near-lockstep with the current epoch, so an epoch is never resident,
+licensed and fenced all at once — the exit precedes the last of the three conditions to arrive.*
+
+**FAVOURED by the user**, on three grounds it explains at once: the measured startup burst (drains
+front-loaded then stopping), the measured zero steady-state (0 non-empty drains across both doubled
+halves), and the measured `median(L)` fragility (§11.0.14). Standing evidence carried into this half: the
+measured `current_epoch ≡ low_water_mark` identity at **0.965278 / 0.972917** over `SPEC-356c`'s deciding
+window.
+
+**Discriminating observation — `O-c`: the same three windows, read for ordering rather than overlap.** (c)
+is **ENDORSED** for `e` iff the three-way intersection is **EMPTY** while `refs_at_entry(e) > 0` — the
+epoch was populated, and licensed, and fenced, but never all three at once.
+
+##### Exhaustiveness of (b) / (c) / (d) on `P₂`, argued rather than asserted
+
+`(b) = T ∧ ¬D` and `(c) = ¬T` are **not** complements on their own: `T ∧ D` — a **drained-healthy** epoch
+that was resident, licensed, fenced and then actually taken by the prune — falls in neither. Any claim of
+complementarity between (b) and (c) alone is withdrawn. The replacement, following the family's
+"argued, not asserted" pattern (`SPEC-356b` §2.4): the partition is **derived from the predicate
+definitions**, not from an expectation about the data:
+
+- **(c) FRONTIER RACE** `= ¬T`
+- **(b) SELECTION / SPLIT MISMATCH** `= T ∧ ¬D`
+- **(d) DRAINED-HEALTHY** `= T ∧ D` — the case where the prune behaved correctly on that epoch. A
+  **published control class**, never able to name a mechanism.
+
+Any element with `¬T` is in (c) and in neither other class (both require `T`). Any element with `T` has a
+Boolean `D` (totality argued above) and is therefore in exactly one of (b), (d). No element is in two
+classes and none is in none. This holds **on `P₂`** — see §11.0.7 for `P`'s full three-way split into
+`P₀` / `P₁` / `P₂`.
+
+#### §11.0.4 — O-0: the index conservation identity — Step 0, evaluated first, fail-closed
+
+**The identity, evaluated at every scrape of both replicates:**
+
+```
+stamped_refs_total + restored_refs_total − drained_refs_total − rebuild_cleared_refs_total  ≡  indexed_refs
+```
+
+with a rebuild handled as a **reset**: `rebuild_into_epoch` credits the pre-rebuild `indexed_refs` to
+`rebuild_cleared_refs_total` and the re-stamped `live.len()` to `stamped_refs_total`, so the identity stays
+continuous across a recovery rather than tearing at the boundary.
+
+**THE DOUBLE-READ SAMPLING RULE. "Exact on 100 % of scrapes" is DROPPED and appears nowhere in this frozen
+predicate.** `prune.csv` rows come from a single `curl /metrics` render at a 10 s cadence; the scrape gate
+proves completeness, not atomicity; and at the churn rate this lineage measures (~29 stamps/s) a render
+that interleaves a counter increment and its gauge update violates the identity by a small integer for no
+instrument defect at all. Frozen at 100 % exact, that would halt the round at Step 0 on ordinary traffic —
+this lineage's third consecutive `INDETERMINATE` out of a sampling artefact, not a finding. The
+replacement:
+
+1. **Two renders per scrape tick.** The runner renders `/metrics` **twice back-to-back** on the same tick.
+   Both readings are written to `prune.csv` as the paired column families `*_a` / `*_b` (both labelled
+   `NEW_EMISSION` in the provenance table, §11.0.2), and the conservation builder evaluates the identity on
+   **each**.
+2. **Per-scrape classification, by the builder, mechanically, never by eye:**
+   - the eight quantities (the seven counters plus `indexed_refs`) are **identical between renders** ⇒
+     **`CONSISTENT`** — no write interleaved, so the identity is *evaluable*, and it either **HOLDS** or
+     **VIOLATES** for that scrape.
+   - any quantity **differs** between renders ⇒ **`TORN`** — a write landed inside the render pair. The
+     runner **RETRIES** the scrape once (a third and fourth render on the same tick). If the retry pair is
+     `CONSISTENT` it replaces the torn pair. If it too is torn ⇒ **`TORN-PERSISTENT`**, and the scrape is
+     **excluded from O-0's denominator**.
+3. **Frozen reading.** O-0 **HOLDS** iff the identity is exact on **100 % of `CONSISTENT` scrapes** of
+   **both** replicates. §11.1+ publishes, per replicate: the `CONSISTENT` count, the `TORN` count, the
+   `TORN-PERSISTENT` count, and the denominator — PD-4's coupling applies (§11.0.10): no fraction without
+   its denominator, ever. A violation on a `CONSISTENT` scrape ⇒ **`INDETERMINATE-INSTRUMENT`**, cause
+   `CONSERVATION`, with the first violating scrape and **both** of its renders quoted, escalating under
+   §11.0.9.
+4. **THE STRUCTURAL PROPERTY, WRITTEN AS A CLAIM WITH ITS ARGUMENT because it is the entire point of the
+   replacement:** **a torn render is structurally incapable of producing `INDETERMINATE-INSTRUMENT`, and
+   therefore of producing this lineage's third `INDETERMINATE`.** Argument, from the definitions: tearing
+   is detected by **inter-render disagreement**, a property of the *sample*, decided *before* the identity
+   is ever evaluated against it; a torn pair is **never** an input to the identity — its only dispositions
+   are RETRY and EXCLUDE. `INDETERMINATE-INSTRUMENT` (the `CONSERVATION` cause) fires only on a scrape
+   where **both renders agree in all eight quantities** — demonstrably no write interleaved — **and the
+   identity still fails**, which is an instrument defect by construction and nothing else. The torn
+   fraction therefore cannot reach the verdict through any path: it is **REPORTED-NOT-BLOCKING**, published
+   with its own denominator, and — if it exceeds **2 %** of scrapes — routed to `TODO-634` as a sampling
+   finding **without** touching the verdict.
+5. **The one residual sampling failure, named so it is not a surprise when it happens.** If a replicate
+   yields fewer than **100 `CONSISTENT` scrapes** (of ~1,440), O-0 is evaluated over the **union** of both
+   replicates' `CONSISTENT` scrapes; if that union is still under 100, `INDETERMINATE-INSTRUMENT` fires with
+   cause **`SAMPLING`**, explicitly distinguished from cause `CONSERVATION` in every place the verdict is
+   published. This is a wholesale sampling collapse (< 3.5 % of 2,880 scrapes usable), not "a torn render",
+   and the escalation template (§11.0.9) carries the distinction as a required field.
+6. **The instrument makes the tear rare rather than merely detectable.** The eight quantities are exposed
+   through a **single consistent-snapshot accessor**, taken under the frontier's own lock, so both renders
+   read one internally-coherent tuple; the residual tear window is the exporter's, not the frontier's. This
+   accessor is a G2 deliverable and its identity (the two renders of a single snapshot agreeing by
+   construction) is unit-tested there — this half's obligation is to have authored the rule the accessor
+   must satisfy, which is the sentence above.
+
+**Second leg — the `TOUCHED_EMISSION` gate.** O-0 additionally **FAILS** if the column-provenance table
+(§11.0.2) labels any column `TOUCHED_EMISSION` **without** R2.4's non-perturbation discharge (the
+armed-vs-disarmed equality run, AC6) attached to it. A touched, unproven column is treated as an instrument
+defect for O-0's purposes, on the same footing as a `CONSERVATION` violation.
+
+**Why O-0 sits first.** At least one of the four committed lineage readings in the Context is false; O-0 is
+the observation that decides which. A diagnosis built on a mis-read gauge would name the wrong mechanism
+with full pre-registration ceremony and no way to tell.
+
+#### §11.0.5 — R4.1: the deciding population, and the pinned epoch → elapsed join
+
+**The population** is the epochs whose **first appearance** falls in the **coordinate last half** of the
+cell, `[14,410 … 28,800]` — the same window `SPEC-356c`'s §10.7 reads, so this lineage's ledger and the
+parent's describe the same rows.
+
+**LIMB TAKEN — EMIT IT.** `PruneEpochEntryRecord` carries `entered_at_unix_ms: i64` (already declared in
+counted file 1, populated in counted file 2 — no counted slot and no exemption consumed by the field
+itself). **The cost is priced, not free:** the field needs a wall-clock source, so R2.4 budgets **one
+wall-clock read per epoch rollover** (≈930 per 8 h cell, never per `OR_REMOVE`) as an explicit cost.
+
+**AND PIN THE FORMULA ANYWAY, because the emitted value alone is not the coordinate the deciding window is
+written in.** The server does not know when the cell started; `entered_at_unix_ms` is absolute. The
+conversion is frozen here as arithmetic with no free choices:
+
+```
+t_first_seen(e) = (entered_at_unix_ms(e) − cell_start_unix_ms) / 1000
+```
+
+where `cell_start_unix_ms` is the cell's own start, already recorded by the runner in `soak.json` /
+`matrix.txt`, quoted as a literal in §11.1+ for each replicate. **Resolution is milliseconds**, not the
+10 s scrape cadence.
+
+**The `prune.csv`-cadence join is FORBIDDEN as a decision source.** *"The first `prune.csv` row where
+`current_epoch == e`"* is an invention: it quantises to 10 s, silently drops any epoch skipped between two
+scrapes, and was never written down before this join. It **may** be computed as a **published
+cross-check** — §11.1+ reports the agreement rate between the two joins — but it **decides nothing**.
+
+#### §11.0.6 — R4.2 / R4.3: the frozen classification walk, and the naming rule
+
+**The walk, in its frozen evaluation order:**
+
+| Step | Evaluated over | Content |
+|---|---|---|
+| **0** | both replicates, every scrape | **O-0** (§11.0.4) — fail-closed, precedes everything. Any failure routes to `INDETERMINATE-INSTRUMENT` (§11.0.8); no later step is evaluated. |
+| **1** | `P₀` | hypothesis **(a)**, `O-a`'s frozen reading |
+| **2** | `P₂` | hypothesis **(b)**, `O-b`'s frozen reading |
+| **3** | `P₂` | hypothesis **(c)**, `O-c`'s frozen reading |
+| **3.5** | `P` | the **control classes** (d) / (e) / (f), published with their counts and their bounds — never able to name a mechanism, always able to be read |
+| **4** | — | the six `INDETERMINATE-*` limbs (§11.0.8) |
+
+**THE PER-STEP DUAL-DENOMINATOR RULE (PD-4 applied inside the walk, Audit v2 rec 4).** §11.1+ states, for
+**every** step: **both** the share of the step's own sub-population (`P₀` or `P₂`) **and** the share of
+`P`, **each with its own denominator as a literal.** This is normative, not a courtesy, because the naming
+threshold below reads `≥ 95 % of P` while the steps themselves evaluate over `P₀` / `P₂` — quoting only the
+sub-population share inside the walk would leave a reader to divide two numbers sitting in different
+sections, which is exactly the coupling defect PD-4 indicts. Publishing every sub-population size once in
+the unconditional reporting bundle does not discharge this **inside the walk**, and the walk is where the
+determination is actually read.
+
+**THE NAMING RULE, FROZEN (R4.3).** The mechanism is **NAMED** iff a single **discriminating** class — (a),
+(b) or (c) — holds **≥ 95 %** of `P` **on both replicates**, **and the two replicates name the same
+class.** A **control** class can never satisfy this rule; if one dominates instead,
+`INDETERMINATE-CONTROL-DOMINANT` fires (§11.0.8), because *"the prune was healthy on this population"* is a
+finding about the population, not a named mechanism.
+
+#### §11.0.7 — The population split: `P₀` / `P₁` / `P₂`, and the six published classes
+
+Let `P` be the epochs of the deciding window (§11.0.5) that have an **entry row**. `P` splits, by terms
+every row carries as a value:
+
+| Sub-population | Definition | Classes reachable from it |
+|---|---|---|
+| `P₀` | `entered_index == false` | **(a)** ENDORSED if `stamped_bytes > 0`; control **(f) EMPTY-EPOCH** if `stamped_bytes == 0` |
+| `P₁` | `entered_index == true` **and no exit row** | control **(e) NO-EXIT-RECORD** — bounded by the measured `indexed_epochs = 2`, so ≤ 5 per replicate is the frozen bound (a 2.5× margin); a count above 5 is published as a finding and routed, and is **not** grounds for any `INDETERMINATE-*` limb |
+| `P₂` | `entered_index == true` **and an exit row exists** | exactly one of **(b)**, **(c)**, **(d)** (§11.0.3's exhaustiveness argument) |
+
+`P₀`, `P₁`, `P₂` are pairwise disjoint and cover `P` by the excluded middle on `entered_index` and on the
+existence of an exit row — the arithmetic `|P₀| + |P₁| + |P₂| = |P|` is published and checked in §11.1+.
+
+**The six published classes, complete:**
+
+| Class | Kind | Population | Reading |
+|---|---|---|---|
+| **(a)** INDEX-POPULATION GAP | discriminating | `P₀` | tombstone content never enters the index |
+| **(b)** SELECTION / SPLIT MISMATCH | discriminating | `P₂` | eligible but never taken |
+| **(c)** FRONTIER RACE | discriminating | `P₂` | never resident+licensed+fenced at once |
+| **(d)** DRAINED-HEALTHY | control | `P₂` | the prune behaved correctly on this epoch |
+| **(e)** NO-EXIT-RECORD | control | `P₁` | the `SIGKILL` teardown / emission path, bounded ≤ 5 |
+| **(f)** EMPTY-EPOCH | control | `P₀` | the clock passed through with nothing stamped |
+
+Control classes (d), (e), (f) are **published always**, and a healthy drained epoch, a bounded
+teardown-loss epoch, and a genuinely empty epoch each have a name and a count instead of being silently
+absorbed into `INDETERMINATE-RESIDUAL`'s 5 % threshold.
+
+#### §11.0.8 — R4.4: the six `INDETERMINATE-*` limbs, enumerated and exhaustive
+
+The predicate has an explicit value for every way it can fail to decide:
+
+1. **`INDETERMINATE-INSTRUMENT`** — O-0 failed on a `CONSISTENT` scrape (cause `CONSERVATION`), **or**
+   O-0 limb 5's wholesale sampling collapse fired (cause `SAMPLING`). **A torn render can produce neither**
+   (§11.0.4 limb 4's structural property).
+2. **`INDETERMINATE-MIXED`** — no discriminating class reaches 95 % of `P` on one or both replicates.
+3. **`INDETERMINATE-DISCORDANT`** — each replicate names a discriminating class at ≥ 95 %, and they
+   differ.
+4. **`INDETERMINATE-RESIDUAL`** — O-0 holds, `P` is non-empty, and **≥ 5 % of `P₂`** carries
+   `exit_kind == Unclassified`. This is the limb that evidences the fifth mechanism the lineage's own
+   adjudication record refuses to exclude. **Its reachability is guaranteed by the exit emission's
+   detection-point siting (§11.0.11) and by nothing else** — an exit emission hooked at the three known
+   removal sites instead would make this limb structurally unfireable.
+5. **`INDETERMINATE-CONTROL-DOMINANT`** — O-0 holds, `P` is non-empty, and a **control** class ((d), (e) or
+   (f)) holds **≥ 95 %** of `P` on either replicate. Each has a distinct, published reading: **(d)** at
+   ≥ 95 % contradicts the zero-drain premise and indicts the **cell**, not the prune; **(e)** at ≥ 95 %
+   indicts the **teardown/emission path** (and would itself breach the ≤ 5-per-replicate bound by three
+   orders of magnitude, which is its own tell); **(f)** at ≥ 95 % means the workload stamped nothing and
+   indicts the **harness**.
+6. **`INDETERMINATE-EMPTY`** — the deciding population is empty (no entry row falls in the window at all).
+
+#### §11.0.9 — R4.5: the escalation template, frozen order of publication
+
+On **any** of the six limbs above firing, §11.1+ publishes, **in this order**:
+
+1. the unclassified cause, **named** — and where the limb is `INDETERMINATE-INSTRUMENT`, **which of its
+   two causes fired, `CONSERVATION` or `SAMPLING`**, since they route to different owners;
+2. **every** step's evaluated value per replicate, including steps not reached, each marked
+   `NOT EVALUATED` with the reason, and **each with both denominators** per §11.0.6's dual-denominator
+   rule;
+3. the blocking limb, named by letter/number, against its frozen threshold;
+4. PD-4's coupling restated on this round's own numbers (§11.0.10);
+5. **§8.3, quoted verbatim as a block quote, adjacent to the determination** — required whenever any
+   `INDETERMINATE-*` fires (PRESENCE **Q15**, §11.0.15), and **not required, and its absence GREEN, when
+   the mechanism is instead NAMED**;
+6. the routing sentence, naming the owner (`TODO-634` for every limb above).
+
+And the tracker bytes are written — `SPEC-357b`'s R5.7 obligation, discharged with the grader this half
+builds and PRE-DATA-proves (§11.0.15, Q14).
+
+#### §11.0.10 — R4.7 / PD-4: the standing denominator-coupling rule for every table in §11
+
+**PD-4's small-denominator caveat is a standing rule for every table §11 publishes, not a footnote.** The
+lineage has already measured a case where a `0.000000 %` exit share was computed over
+`Δconsidered = 2,000` inside a window carrying 232,367 passes — a share that reads as confident and a
+denominator that says it should not. **The rule, applied everywhere in §11 and §11.1+: the two statistics
+degrade together, and neither may be quoted without the other.** This governs, without exception, the walk's
+per-step dual-denominator rule (§11.0.6), O-0's `CONSISTENT` / `TORN` / `TORN-PERSISTENT` counts
+(§11.0.4), every PRESENCE band's count (§11.0.15), and every share the unconditional reporting bundle
+publishes.
+
+#### §11.0.11 — The exit emission's DETECTION-point siting, and why `Unclassified` is reachable (R2.3b)
+
+**Normative, restated here in the manifest's own terms because it is the single decision this half's
+reachability guarantees rest on.** The exit emission (`PruneEpochResidencyRecord`, counted file 1's type,
+counted file 2's emission) is driven by **the per-epoch slot bookkeeping observing that its own tracked
+epoch is ABSENT from `epoch_tags`** — a detection check against the frontier's own state — and **not** by
+three separate hooks placed at `drain_prunable`, `rebuild_into_epoch` and `restore` individually.
+
+**Why, argued rather than assumed.** The lineage's own reconciliation gap keeps candidate (iv) — *"the
+claim that those four are the only `epoch_tags` mutation sites"* — explicitly open, and the family's prior
+adjudication record (`ADJ-4`) refuses to exclude a fifth mechanism. Hooked at the three **known** removal
+sites, an epoch removed by an **unenumerated fifth path** — precisely the case `Unclassified` exists for —
+would emit **no exit row at all**: it would land in `P₁`, take control class **(e) NO-EXIT-RECORD**,
+breach (e)'s ≤ 5 bound, and `INDETERMINATE-RESIDUAL` — which keys on `Unclassified` carrying ≥ 5 % of
+`P₂` — would become a limb that **cannot fire**, the vacuous-limb defect this family has closed twice
+before (PD-2, PD-8).
+
+**With the detection siting instead, disappearance-by-unenumerated-path presents as
+`exit_kind == Unclassified` carrying its raw context** (`observed_refs_delta`, `observed_lwm`,
+`observed_durable_watermark`, `observed_current_epoch`, `note`), which is what the escape variant was
+authored to capture. The three named variants are assigned by the bookkeeping's own record of *how* the
+absence arose (a drain it observed, a rebuild it observed, a shutdown it is mid-teardown for); an absence
+it cannot attribute to any of the three is `Unclassified` **by construction, not by fallback.**
+
+**Mechanically checked, not merely claimed (AC6a).** The Tier-1 harness's counted-file-2 arm includes one
+epoch removed **without** going through `drain_prunable` / `rebuild_into_epoch` / `restore` (per Audit v1
+recommendation 3, sited in counted file 2's existing inline test module — no exemption engaged, its slot
+already spent). `spec357-tier1-transcript.txt` must show **exactly one** exit row for that epoch with
+`exit_kind == Unclassified` and every `observed_*` field populated — proof that
+`INDETERMINATE-RESIDUAL` is demonstrably a limb that CAN fire, not one merely asserted to be reachable.
+
+**The shutdown signal, named rather than assumed.** The two `28,800 s` cells' teardown is `SIGKILL`
+(`TOPGUN_SOAK_GRACEFUL_SHUTDOWN` stays unset, unchanged from every prior cell in the lineage) — a
+`SIGKILL` cell-end emits **nothing**: no exit record runs for epochs still resident at that instant, and
+`StillResidentAtShutdown` is expected to carry **zero** observations in a Tier-2 cell for that reason. The
+epochs affected are bounded by `indexed_epochs`, measured at **2** across `SPEC-356c`'s whole deciding
+window — i.e. at most ~2 epochs per replicate, against a ~930-epoch entry population, lose their exit row.
+Those epochs are **not** silently dropped: they carry an entry row and are assigned control class
+**(e) NO-EXIT-RECORD** (§11.0.7), whose published bound is **≤ 5 per replicate**.
+
+#### §11.0.12 — R4.6: PD-2's two normative gaps, closed here because this is the re-pinning half
+
+Both gaps are owned by `TODO-634`, and both are fixable only by a re-pinning spec — this one. **Neither
+§9 nor §10 is edited by either closure below.**
+
+**(i) `SPEC-355` §4.6's Cell E disposition rule gains its missing third limb.** The rule required either a
+SELECTION/FRONTIER determination or a > 10 % non-`Dropped` exit share to RUN Cell E, and either a
+THROUGHPUT or SCHEDULING determination to CLOSE it as not-needed — so an `INDETERMINATE` outcome satisfied
+**neither** antecedent and left the interval un-probed with no branch actually taken. **The successor
+limb, frozen PRE-DATA:**
+
+- a named **(a)- or (b)-class** mechanism ⇒ Cell E is **`RUN-PER-355-4.6`** (a selection/frontier-class
+  defect is one an interval bisection can localise);
+- a named **(c)-class** mechanism ⇒ Cell E is **`CLOSED-NOT-NEEDED`** — the race is present on every
+  binary `SPEC-355` measured, and localising it inside an earlier interval changes no conclusion and no
+  gate;
+- any **`INDETERMINATE-*`** outcome ⇒ Cell E is **`DEFERRED-PENDING-DIAGNOSIS`** — an explicit third
+  branch, **taken rather than un-taken**, with `TODO-634` as its ownership statement.
+
+**(ii) `CELLE_DISPOSITION`'s enum gains its missing values.** The successor enum is:
+
+```
+RUN-PER-355-4.6 | CLOSED-NOT-NEEDED | DEFERRED-PENDING-DIAGNOSIS | NOT-FIRED-DETERMINATION-INDETERMINATE
+```
+
+`SPEC-356b`'s out-of-enum slot value is **regularised by naming in this successor enum**, **not** by
+editing the frozen byte that recorded it. The prior checklist's by-construction RED in §9 stands as the
+record of the original gap; it is **not** retroactively greened by this closure.
+
+**`SPEC-357b` TAKES Cell E's disposition under this limb.** This half only authors the limb and the enum —
+a disposition is not a run, and this half runs no cell.
+
+#### §11.0.13 — R9.2 / R9.3: the fix-shape ruling rule, and its standing prohibition
+
+**Authored here so the ruling follows a rule frozen before the mechanism is known, rather than the ruler's
+preference wearing a ruling's name. `SPEC-357b` executes this rule; it does not restate it differently.**
+
+- a named **(a)- or (b)-class** mechanism ⇒ **STANDALONE CORRECTNESS FIX, which the `ReclamationRegistry`
+  family then builds on**;
+- a named **(c)-class** mechanism ⇒ **REGISTRY-CONSUMER**;
+- any **`INDETERMINATE-*`** ⇒ **THE RULING IS NOT WRITTEN.** §11.1+ escalates under §11.0.9's template, the
+  obligation returns to `TODO-634` with the round's observations attached, and **no fix shape is
+  proposed.** An `INDETERMINATE-*` outcome makes *"the ruling is NOT WRITTEN, because …"* the SATISFYING
+  content of PRESENCE **Q10** (§11.0.15) — not an absence.
+
+**R9.3, the standing prohibition, authored here because the reclamation-extraction synthesis already
+adjudicated it:** the ruling may propose **neither** the slope stick **nor** the `f(span, width, churn)`
+formula (both discredited — `.specflow/artifacts/extraction-reclamation-synthesis-2026-08-02.md` §7 F3).
+**The gate returns on `ceiling = min_live_claim − fixed_margin`, and nothing else.**
+
+#### §11.0.14 — R5a.5: `median(L)`'s fragility is structurally defanged here, and the successor rule
+
+`median(L)` **decides nothing anywhere in this carve.** §11's classification partitions on **per-epoch
+structural facts** — `entered_index`, the triple-overlap windows, `exit_kind` — never on the `B` /
+`median(L)` machinery §2's ordered predicate used. This is a **design** choice, not an accident: residual
+`R-5` measured `median(L)` **not replicating** across two replicates of one `SPEC-356` configuration
+(`L`'s zero-row fraction 49.930556 % on r1 vs 53.819444 % on r2 — a ~3.9-point shift that moves the median
+across the whole width of the series), so any predicate that turns on it inherits that fragility directly.
+
+**The successor rule, authored as a written standing constraint for the design phase:** *any future
+predicate that partitions on `median(L)` must first publish the zero-row fraction and RED if it lies
+within ±5 points of 50 %.* The tracker byte that routes this rule into the design phase is `SPEC-357b`'s
+(its R5.7); this half's obligation is the rule's text, above.
+
+#### §11.0.15 — R6.4: the closed PRESENCE list, `Q1…Q15`
+
+**Validation Checklist item 1.** Evaluated **FIRST**, before every reproduce-the-values limb, and **REDs on
+ABSENCE.** Non-vacuous by construction: each entry asserts an **exact-match anchor** (`grep -qxF`, or
+`test -f` plus a required header line) **AND** a band, a minimum count or an exact recorded value — never a
+tolerant pattern.
+
+**THE GOVERNING PROPERTY, NORMATIVE: NO HONEST OBSERVATION MAY RED A PRESENCE QUESTION.** A PRESENCE entry
+exists to catch a **missing or truncated artifact**, never to catch a subject that behaved in a way the
+author did not expect. A bare `>= 1` both under-specifies (passes on a 1-row truncation of a 1,440-row
+ledger) and over-specifies (REDs on an honest zero). Every entry below therefore carries **three** things,
+and an entry missing any of them is itself a defect: **(i)** the **band**; **(ii)** the **named
+honest-out-of-band branch** — which observation legitimately puts the count outside the band, **and which
+hypothesis or `INDETERMINATE-*` limb that value endorses**, stated in the band definition itself, so the
+entry is GREEN on it; **(iii)** the **independent witness** that separates *honest* from *truncated* — a
+quantity produced by a **different transport** than the artifact being checked.
+
+**The list is CLOSED at fifteen entries.** The `OWNER` column is the carve's split of **evaluation** — not
+a change to any band.
+
+| # | Artifact | Band | Honest out-of-band branch → GREEN, and what the value endorses | Independent witness | OWNER |
+|---|---|---|---|---|---|
+| **Q1** | column-provenance table (§11.0.2) | a label on **every** column, no unlabelled column | — (a table with a missing label is never honest) | the `git diff` the table is generated from | **357a** |
+| **Q2** | O-0 conservation ledger | **1,300 ≤ rows ≤ 1,500** per replicate (≈1,440 at 10 s over 28,800 s); violation count published **even when `0`**; `CONSISTENT`/`TORN`/`TORN-PERSISTENT` all present even when `0` | **NO honest-zero branch — stated rather than left implicit:** the row count is produced by the **runner's clock**, not by the subject's behaviour, so no hypothesis about the prune can make it small. Below-band ⇒ **RED**, correctly | the cell's `progress.jsonl` tick count | 357b |
+| **Q3** | entry ledger `spec357-entry-r{n}.jsonl` | **700 ≤ lines ≤ 1,200** per replicate (≈930 at ~31 s/epoch) | out-of-band is GREEN **iff** the witness agrees within ±1 — a genuinely slower/faster epoch clock is a fact about the run, not a missing artifact; the band catches **truncation** | `Δtopgun_or_prune_epochs_entered_total` over the window | 357b |
+| **Q4** | exit ledger `spec357-residency-r{n}.jsonl` | **0 ≤ lines ≤ Q3's line count** | **ZERO IS GREEN, AND WHAT IT ENDORSES IS NAMED: a strong hypothesis (a).** Zero is GREEN **iff** the entry ledger reports `entered_index == false` on ≥ 95 % of `P` — the same observation twice, from the entry side. Zero **without** that corroboration is **RED** (a lost log capture) | `Δtopgun_or_prune_epochs_exited_total` | 357b |
+| **Q5** | classification CSV `spec357-class-r{n}.csv` | **rows == Q3's line count** (total over `P`, one row per entry row); all six class columns present even when `0`; the `Unclassified` column present even when `0` | an empty `P` is GREEN and endorses **`INDETERMINATE-EMPTY`** — published as that limb, not as an absent artifact | `|P₀| + |P₁| + |P₂| = |P| = rows` | 357b |
+| **Q6** | the seven-limb unconditional reporting bundle, per replicate | each limb carrying ≥ 1 value row | an explicitly-marked `UNDEFINED`, a `0 violations over N` literal, or a `0 Unclassified exits over N` literal **SATISFIES** the limb and **MUST NOT** RED it | — | 357b |
+| **Q7** | eight-window `tombstone_bytes` fit table per replicate (16 fits) | exactly 16 fits, from the **unforked** fitter | — | `spec349c2-fit.awk`'s own `rows_used` / `skipped_empty` | 357b |
+| **Q8** | v2→v3 `-U0` diff | every hunk carrying exactly one class label, plus **all three** run transcripts | — | v2 run alongside, unmodified | 357b (runs 1–2 committed in 357a; the all-three band is met only once run 3 lands) |
+| **Q9** | `spec357-mechanism-xask.md` | **≥ 1 line matching each of `T1.`…`T5.` and each of `H-a.`/`H-b.`/`H-c.`**, **and EACH such anchor line carries one of the cross-vendor artifact's three disposition labels — `APPLIED` / `REFUTED-WITH-REASON` / `RECORDED-AND-ROUTED`** (a bare-literal anchor is satisfiable by pasting eight strings with no engagement, so the disposition label is what makes the entry non-vacuous) | — | the cross-vendor artifact's own per-finding disposition requirement | 357b |
+| **Q10** | `spec357-fixshape-ruling.md` | its rule, its antecedent and its reasoning | an `INDETERMINATE-*` outcome makes *"the ruling is NOT WRITTEN, because …"* the SATISFYING content (§11.0.13), not an absence | §11.0.13's frozen antecedent table | 357b |
+| **Q11** | the reproducing test | named in **this section** by module path and fn name (§11.0.17) | — | `cargo test` transcript | **357a** |
+| **Q12** | the mutation arm | `spec357-reproducer-mutation.patch` **and** the both-legs transcript, PASS leg and FAIL leg each quoted | — | `git apply --check` against `HEAD`; `git status --porcelain` clean | **357a** |
+| **Q13** | the two gate `PART VI` re-captures | armed **N/N**, disarmed **0/N**, `empty_fields=0`, column count as a literal | — | — | **357a** |
+| **Q14** | the tracker grader's both-directions transcripts | RED on the unedited fixture, GREEN on the edited files | — | — | 357b (the PRE-DATA fixture proof is committed in 357a) |
+| **Q15** | §8.3 quoted verbatim beside the determination | required whenever any `INDETERMINATE-*` fires | **not required when the mechanism is NAMED — its absence in that branch is GREEN** | the determination line itself | 357b |
+
+#### §11.0.16 — The Tier-2 skip case: the Tier-1 population literal and the band-scaling rule
+
+**When R7.2's gate reads `TIER2 = SKIPPED-BY-GATE`, `Q2`–`Q7`'s *per replicate* scope reads instead as
+*over the Tier-1 transcript's population*, with the bands above scaled to the harness's declared epoch
+count — stated here, as a literal, PRE-DATA.** No PRESENCE entry is dropped by the skip, and no band is
+chosen after the harness's actual count is known.
+
+**THE LITERAL, PINNED PRE-DATA: the Tier-1 deterministic harness's entry-ledger population is
+`P_tier1 = 24` synthetic epochs**, constructed to span all three sub-populations `P₀` / `P₁` / `P₂`, all
+three discriminating classes plus the drained-healthy control class within `P₂`, and — per AC6a
+(§11.0.11) — at least one `Unclassified` exit from the unenumerated-removal arm. The exact class-by-class
+allocation within `P_tier1` is the harness's own construction detail (G5's task); this half pins only the
+**total**, because the total is what the band-scaling rule below needs and nothing about the scaling rule
+depends on the internal split.
+
+**The scaling rule.** For every band above stated as an absolute row/line count over a 28,800 s cell
+(≈1,440 scrapes, ≈930 epochs), the Tier-2-skip reading is:
+
+```
+scaled_bound = ceil_or_floor( band_bound × (P_tier1 ÷ 930) )
+```
+
+— **floor** for a lower bound, **ceil** for an upper bound, so a Tier-1 count landing exactly on a scaled
+boundary is never spuriously excluded by rounding. **`Q2`'s scrape-based framing** (which has no referent
+at all in a harness with no wall-clock cadence) is read instead as **per double-render O-0 evaluation
+instant** — the harness still exercises the `*_a` / `*_b` double-render pair `dry-run leg 2` reads from,
+just not on a 10 s timer.
+
+This literal and rule are frozen here, **before the Tier-1 harness is built**, so the population size is
+never chosen after seeing whether it happens to make a band pass.
+
+#### §11.0.17 — `Q11`: the reproducing test's module path and fn name
+
+**Module path:** the existing inline `#[cfg(test)] mod tests` in
+`packages/server-rust/src/sim/tombstone_gc_proof.rs` — i.e. `topgun_server::sim::tombstone_gc_proof::tests`.
+
+**Fn name:** `prune_epoch_residency_discrimination_under_network_fault`.
+
+**Why this is the pinned answer regardless of which of R7.3's three siting routes ultimately fires.** This
+fn's identity is fixed by this half's own Delta independently of the reproducing test's eventual siting: it
+is the **single** additive fn the shape-4 exemption admits in this file, it is **unconditional** (every
+route touches this file, because the fault-dimension arm of the Tier-1 harness lives here regardless of
+which hypothesis reproduces), and R7.6's mutation-arm procedure folds the reproducing proof itself into
+this same fn **whenever route (c)** — the interleaving-fault scenario — is what R7.3 selects. **If G5 finds
+instead that the mechanism reproduces at a boundary that does not need the fault dimension** (route (a),
+the `FrontierState` boundary, or route (b), the service-composition boundary), the reproducing test is a
+**separate, additional** fn inside counted file 2's or counted file 3's own existing inline test module,
+and `spec357-tier1-transcript.txt` states that second name explicitly. **This literal remains the
+authoritative name for the fault-dimension arm of the Tier-1 harness, and for a route-(c) reproducing test,
+in every case** — it is not conditional on which route fires.
+
+#### §11.0.18 — R7.2: the Tier-1 → Tier-2 gate, pre-registered, and the INADMISSIBLE repair-loop cap
+
+**The rationale, recorded because it is a policy change for this lineage and the user ruled it.** Two
+consecutive `INDETERMINATE`s across roughly 40 h of measurement clock bought the right to stop defaulting
+into wall-clock. Tier 2's 16 h is something the round must **earn an argument for**:
+
+- **TIER-1 CLEAN ⇒ TIER 2 IS SKIPPED.** CLEAN means all three hold: **(i)** O-0 holds over the harness's
+  own scrapes/evaluation instants; **(ii)** the frozen walk yields a **single discriminating class at
+  ≥ 95 %** of the harness population — the observation is **not** ambiguous between (b) and (c); **(iii)**
+  the reproducing test exists and its mutation arm **FAILS** (the mutation harness, R7.6). §11.1+ records
+  **`TIER2 = SKIPPED-BY-GATE`** with the Tier-1 verdict and all three conditions quoted against their
+  evaluated values, and the naming is read off Tier 1 **plus** the reproducing test.
+- **TIER-1 AMBIGUOUS ⇒ AND ONLY THEN, TIER 2 RUNS.** AMBIGUOUS means the walk cannot separate (b) from
+  (c): neither reaches 95 %, or the arms disagree, or ≥ 5 % of `P₂` carries `Unclassified`. The two
+  28,800 s cells run in `SPEC-357b`, and the naming is read off Tier 2 under §11.0.6's naming rule.
+- **TIER-1 INADMISSIBLE ⇒ REPAIR, THEN RE-RUN TIER 1, WITHIN THIS HALF.** O-0 failing over harness output
+  is an instrument defect in the PRE-DATA wave, where fixing it is free. Tier 2 never runs on an
+  inadmissible instrument.
+
+**THE INADMISSIBLE ITERATION CAP, FROZEN HERE (Audit v1 recommendation 4).** Each INADMISSIBLE → repair →
+re-run cycle is recorded in `spec357-tier1-transcript.txt` as its own numbered iteration, stating what
+failed and what was repaired. **The cap is three iterations.** A repair that has not produced an admissible
+instrument after the third INADMISSIBLE reading does not loop a fourth time — it is routed to `TODO-634` as
+a design-phase input, with the same unclassified-cause / evaluated-value / blocking-limb shape §11.0.9's
+escalation template already uses, and **Tier 2 does not run.** This closes the enum gap between R7.2's
+three outcomes (CLEAN / AMBIGUOUS / INADMISSIBLE) and the two-value recorded verdict
+(`TIER2 = RUN` / `TIER2 = SKIPPED-BY-GATE`, AC11b): an INADMISSIBLE iteration is a recorded event inside
+the transcript, not a third value of the recorded verdict, and the cap is what keeps the loop from being
+open-ended in a family whose own doctrine caps rounds everywhere else.
+
+**Why Tier 1 alone may name the mechanism here, when the family's prior blanket rule forbade it.** That
+prohibition was sound when the only Tier-1 output was population statistics — a harness can construct a
+behaviour the server does not exhibit, which is a real objection to naming off a constructed distribution.
+It is answered by the mutation arm: with a reproducing test whose non-vacuity is mechanically proven, the
+harness is no longer *describing* a behaviour, it is *exhibiting* it under a stated mutation. Where the
+objection still bites — an ambiguous Tier-1, where the harness might be constructing the answer — the gate
+honours it and pays the 16 h.
+
+#### §11.0.19 — Sidecar inventory: one-line digest per artifact this half's Delta names
+
+| Artifact | Digest |
+|---|---|
+| `spec357-residency.sh` | `server-console.log` → `entry.jsonl` **and** `residency.jsonl`; computes no predicate term |
+| `spec357-classify.sh` | the single classifier builder: entry + residency + `prune.csv` → class CSV + conservation CSV; applies the frozen §11.0.6 walk, decides nothing beyond it |
+| `spec357-reproducer-mutation.patch` | the single named, minimal, repair-shaped production mutation; committed, never applied to the committed tree |
+| `spec357-reproducer-mutation.txt` | the both-legs transcript: PASS on the committed tree, FAIL in the mutated worktree, quoting the failing assertion |
+| `spec357-dryrun-conservation-356c-r1.csv` | dry-run leg 1: the conservation builder over `SPEC-356c`'s own committed `prune.csv`, with both absence markers verbatim |
+| `spec357-dryrun-{class,conservation}-tier1.csv` | dry-run leg 2: both builders over the Tier-1 harness output, which carries both emission kinds and the double render |
+| `spec357-slottruth-v3.sh` | the v3 re-derivation driver, all three provenance literals (basename, cell name, duration) parameterised, closing v2's run-3 refusal |
+| `spec357-slottruth-v2-v3.diff` | `diff -U0`, every hunk carrying exactly one of class A / B / C |
+| `spec357-slottruth-v2-v3-runs.txt` | runs 1–2 committed here; run 3 (the `R-1` discharge) is `SPEC-357b`'s, against this lineage's own cells |
+| `spec357-trackergrade.{sh,ref}` + `spec357-trackergrade-proofs.txt` | the tracker-discipline content grader, its reference ledger, and its PRE-DATA both-directions proof over a committed fixture |
+| `spec357-tier1-transcript.txt` | the Tier-1 deterministic discrimination run, and the artifact carrying the `TIER2` gate verdict (§11.0.18) |
+| `spec356-prune.sh` (additive arms) | two new cell arms, O-0's `*_a`/`*_b` double render, the targeted residency log filter, `server-console.log` capture — authored here, run by `SPEC-357b` |
+| `spec356a-eager-registration.log` / `spec356a-step0c-fixture.log` | `PART VI` appended to each, re-capturing the full name set (including the seven new counters) at this half's pin |
