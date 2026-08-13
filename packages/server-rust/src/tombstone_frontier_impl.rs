@@ -3110,7 +3110,8 @@ mod tests {
         let exit = exits.into_iter().next().expect("checked len == 1");
         assert!(matches!(exit.exit_kind, EpochExitKind::DrainedByPrune));
         assert_eq!(
-            exit.bytes_freed_attributed, expected_bytes,
+            exit.bytes_freed_attributed,
+            expected_bytes,
             "a DrainedByPrune exit must attribute EXACTLY the epoch's own \
              stamped byte total, got {got}",
             got = exit.bytes_freed_attributed
