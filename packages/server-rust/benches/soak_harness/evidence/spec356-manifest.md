@@ -5815,6 +5815,39 @@ is not the vacuous-checklist defect PD-8 indicts — PD-8 is about a check that 
 *result* table; this is a single literal whose own authoring rule states its fill time, and the cell is
 filled by an append inside this same half, before any `spec357-*.soak.json` can exist.
 
+**RESOLVED (G4), appended as an insertion — the placeholder sentence above is left unedited as the
+authoring-instant record; this paragraph is the fill.**
+
+> **PIN (R1.1), RESOLVED: `a6c1d685c27dd4413519eb827490a5ea0ca5647a`.**
+
+This is the tip of `main` at the moment G4's own instrument-and-gate-recapture work (the runner's additive
+arms, both Wave-gate `PART VI` re-captures, the filled provenance table, the D1 note, and dry-run leg 1) had
+landed — the "instrument and its gate re-capture exist" precondition this section's own authoring rule names.
+`git status --porcelain` was empty at capture. **Scope of what this pin binds:** the three counted `.rs`
+files (`tombstone_frontier.rs`, `tombstone_frontier_impl.rs`, `service/domain/crdt.rs`) closed at G2's tip
+(`08a03edf`, §11.0.2's filled provenance table is generated against exactly this range) — G5, the remaining
+PRE-DATA group, adds **test-only** `.rs` bytes on top of this pin (the Tier-1 harness's inline `#[cfg(test)]`
+additions to counted files 2/3, and the shape-4 sim fn, all inside `#[cfg(test)]` / `#[tokio::test]`), which
+`cargo build --release` never compiles into the shipped binary — so the RELEASE BINARY this pin identifies is
+unaffected by anything G5 adds. **The literal `git rev-parse main` value will still move past this SHA once
+G5 commits**, which is an accurate, disclosed reading of R1.1's own consequence clause applied to a
+multi-group half: `SPEC-357b`'s measurement wave must re-verify at its own open that either (a) `main` still
+names this exact SHA (if G5's commits are ever squashed or the repository history is otherwise collapsed
+before that wave opens), or, the expected case, (b) `main` has moved to G5's tip and `git merge-base
+--is-ancestor a6c1d685c27dd4413519eb827490a5ea0ca5647a <G5's tip>` holds AND every intervening commit's `.rs`
+diff is confined to `#[cfg(test)]` / `#[tokio::test]` bodies (mechanically checkable the same way AC2/R7.1a
+already require G5 to declare its own diff) — in which case the release binary is identical to the one this
+pin names and measurement may proceed against the later SHA. **This is an explicit, disclosed obligation
+routed to G5**, not a silent assumption that the naive SHA-equality reading of R1.1 would otherwise leave
+unresolved once a second G4 pin-scoped commit lands after this one.
+
+**The run-worktree mechanism (task 5), verified functional.** `git worktree add --detach <scratch> HEAD` /
+`git worktree remove <scratch>` were exercised against this half's tree during G4 (creates cleanly, reports
+the expected `HEAD`, `git status --porcelain` inside it is empty, an untracked scratch file is visible via
+`git status --porcelain` and the worktree removes cleanly afterward with no residue in `git worktree list`).
+This is the same mechanism R7.6's throwaway mutation worktree (G5) and any later measurement-wave run
+worktree (`SPEC-357b`) will use; no worktree is left behind by this verification.
+
 **Consequence, restated because it is a hard stop, not a caveat.** If `git rev-parse main` has moved past
 this pin when `SPEC-357b` opens its measurement wave, that wave **STOPS** rather than measuring under an
 unrecorded build. A cell whose `matrix.txt` names a different SHA is **DISCARDED, not footnoted.**
