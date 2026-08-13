@@ -4361,6 +4361,56 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // The residency ledger's independent per-epoch byte oracle — the
+    // service-composition arm: a real `OR_REMOVE` through the full write path
+    // threads `tag.len()` into the frontier's own conservation counters,
+    // independently of the pre-existing tombstone-bytes gauge at `:696`.
+    // -----------------------------------------------------------------------
+
+    /// A real `OR_REMOVE`, applied through the full service composition, feeds
+    /// `stamped_bytes_total` with EXACTLY `tag.len()` — computed independently of
+    /// `add_tombstone_bytes(tag.len() as u64)` (the pre-existing, unrelated
+    /// tombstone-bytes gauge this contract must not touch, R2.4(b)). O-0's
+    /// conservation identity holds over the resulting snapshot.
+    #[tokio::test]
+    async fn or_remove_threads_the_independent_byte_oracle_through_the_service_composition() {
+        let (svc, _factory, frontier) = make_service_with_frontier();
+        let (t1, t2) = ("TAG-ONE", "TAG-TWO-LONGER");
+
+        for (key, val, tag) in [("k1", "v1", t1), ("k2", "v2", t2)] {
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", key, val, tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", key, tag))
+                .await
+                .unwrap();
+        }
+
+        let snapshot = frontier.index_conservation_snapshot();
+        let expected_bytes = (t1.len() + t2.len()) as u64;
+        assert_eq!(
+            snapshot.stamped_bytes_total, expected_bytes,
+            "the per-epoch byte oracle must equal the tag lengths exactly, independent \
+             of the tombstone-bytes gauge's own tag.len() computation at the OR_REMOVE site"
+        );
+        assert_eq!(
+            snapshot.stamped_refs_total, 2,
+            "one stamped ref per OR_REMOVE"
+        );
+        // O-0's identity: nothing has drained or rebuilt yet, so the whole stamped
+        // total is still resident.
+        assert_eq!(
+            snapshot.stamped_refs_total + snapshot.restored_refs_total
+                - snapshot.drained_refs_total
+                - snapshot.rebuild_cleared_refs_total,
+            snapshot.indexed_refs,
+            "O-0 must hold over the service-composition path too, got {snapshot:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Where the tombstone-byte counters fire, and what the prune does with the
     // two dispositions a bare `Ok(false)` conflates
     // -----------------------------------------------------------------------
