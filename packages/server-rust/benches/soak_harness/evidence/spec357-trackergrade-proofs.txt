@@ -1,0 +1,198 @@
+spec357-trackergrade-proofs.txt
+================================
+THE PRE-DATA BOTH-DIRECTIONS PROOF (R5a.3, AC17, checklist item 13).
+
+This transcript runs spec357-trackergrade.sh TWICE, over the SAME committed pre-edit fixture,
+against the two committed fixture directories in this evidence directory:
+  <fixture-dir>/unedited/  -- TODO-634.md is byte-identical to the pre-edit fixture -- EXPECTED RED
+  <fixture-dir>/edited/    -- TODO-634.md carries the required box edit, ticks unchanged -- EXPECTED GREEN
+
+Neither directory is, or has ever been, under .specflow/todos/. Both are committed alongside this
+script: spec357-trackergrade-fixture-634.pre.md, spec357-trackergrade-fixture-634.post.md,
+spec357-trackergrade-fixture-648.md, and the two case directories spec357-trackergrade-fixture/{unedited,edited}/
+built from them. git status --porcelain .specflow/todos/ is verified empty at the end of this file.
+
+INPUT DIGESTS, for the record:
+  c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423  /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture-634.pre.md
+  a07bee2dfc0f58ebb7092fbb6260355b123671fdce3d25de91fbbaee3b59f984  /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture-634.post.md
+  f518c9b6cd985c4c495db2da7819580786c05acc0ab1c9801532591d25005080  /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture-648.md
+
+####################################################################################
+RUN 1 -- AGAINST THE UNEDITED FIXTURE DIRECTORY. EXPECTED: RED, exit 1.
+####################################################################################
+INVOCATION:
+  sh spec357-trackergrade.sh spec357-trackergrade-fixture-634.pre.md spec357-trackergrade-fixture/unedited
+
+================================================================================
+spec357-trackergrade.sh -- tracker-discipline CONTENT grade (R5a.3 / AC17 / item 13)
+================================================================================
+fixture   : /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture-634.pre.md
+todos dir : /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture/unedited
+reference : /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade.ref
+date      : 2026-08-13T12:40:17Z
+
+FIXTURE PROVENANCE (checked before any limb; a mismatch REFUSES the grade)
+  recorded TODO-634.md pre-digest : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  fixture digest                  : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  RESULT : OK -- the fixture is provenanced.
+
+--------------------------------------------------------------------------------
+LIMB (a) UNRELATED FILE UNMOVED
+--------------------------------------------------------------------------------
+  TODO-648.md : MATCH    f518c9b6cd985c4c495db2da7819580786c05acc0ab1c9801532591d25005080
+  (a) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (b) THE REQUIRED EDIT HAPPENED
+--------------------------------------------------------------------------------
+  recorded pre-digest : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  observed digest     : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  the digest has NOT moved -- the required edit never happened.
+  (b) RED
+
+--------------------------------------------------------------------------------
+LIMB (c) NOTHING WAS TICKED AND NO BOX MOVED
+--------------------------------------------------------------------------------
+  ticked   '^- \[x\] ' : expected 2   observed 2
+  unticked '^- \[ \] ' : expected 5   observed 5
+  census, top-level boxes  : expected 7   observed 7
+  census, indented boxes   : expected 0   observed 0
+  (the census is what makes the two counts exhaustive over the file's box set)
+  strict box anchor        : MATCHES
+  (c) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (d) THE EDIT IS THE RIGHT EDIT
+--------------------------------------------------------------------------------
+  graded box located by the LOOSE anchor (survives a tick, so a broken (c) does not blind (d)/(e))
+  fixture box lines   : 17-18
+  candidate box lines : 17-18
+
+  ---- BEGIN GRADED BOX BEFORE-TEXT (fixture, lines 17-18) ----
+  | - [ ] **PENDING REPEAT: awaiting the outcome of the fixture's own diagnosis round --
+  |   fill in the outcome and a pointer to the derivation once the round lands.**
+  ---- END GRADED BOX BEFORE-TEXT ----
+
+  ---- BEGIN GRADED BOX AFTER-TEXT (candidate, lines 17-18) ----
+  | - [ ] **PENDING REPEAT: awaiting the outcome of the fixture's own diagnosis round --
+  |   fill in the outcome and a pointer to the derivation once the round lands.**
+  ---- END GRADED BOX AFTER-TEXT ----
+
+  outcome token in after-text   : ABSENT  => RED (no outcome recorded)
+    accepted tokens: INDETERMINATE ENDORSED EXCLUDED
+  pointer literal in after-text : ABSENT  => RED (no 'spec357-trackergrade-fixture-manifest.md §2' pointer)
+  (d) RED
+
+--------------------------------------------------------------------------------
+LIMB (e) THE DELTA IS CONSTRAINED -- EVERY CHANGED LINE IS INSIDE THE GRADED BOX
+--------------------------------------------------------------------------------
+  invocation: diff -U0 <fixture> <candidate>
+  fixture box 17-18   candidate box 17-18
+  0 hunks -- the candidate is byte-identical to the fixture.
+  (e) is VACUOUSLY green here; 'nothing happened' is limb (b)'s finding, not (e)'s.
+  (e) GREEN
+
+================================================================================
+VERDICT: RED (red limbs: b d)
+================================================================================
+
+OBSERVED EXIT STATUS: 1
+
+####################################################################################
+RUN 2 -- AGAINST THE EDITED FIXTURE DIRECTORY. EXPECTED: GREEN, exit 0.
+####################################################################################
+INVOCATION:
+  sh spec357-trackergrade.sh spec357-trackergrade-fixture-634.pre.md spec357-trackergrade-fixture/edited
+
+================================================================================
+spec357-trackergrade.sh -- tracker-discipline CONTENT grade (R5a.3 / AC17 / item 13)
+================================================================================
+fixture   : /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture-634.pre.md
+todos dir : /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture/edited
+reference : /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade.ref
+date      : 2026-08-13T12:40:17Z
+
+FIXTURE PROVENANCE (checked before any limb; a mismatch REFUSES the grade)
+  recorded TODO-634.md pre-digest : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  fixture digest                  : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  RESULT : OK -- the fixture is provenanced.
+
+--------------------------------------------------------------------------------
+LIMB (a) UNRELATED FILE UNMOVED
+--------------------------------------------------------------------------------
+  TODO-648.md : MATCH    f518c9b6cd985c4c495db2da7819580786c05acc0ab1c9801532591d25005080
+  (a) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (b) THE REQUIRED EDIT HAPPENED
+--------------------------------------------------------------------------------
+  recorded pre-digest : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  observed digest     : a07bee2dfc0f58ebb7092fbb6260355b123671fdce3d25de91fbbaee3b59f984
+  the digest HAS moved.
+  (b) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (c) NOTHING WAS TICKED AND NO BOX MOVED
+--------------------------------------------------------------------------------
+  ticked   '^- \[x\] ' : expected 2   observed 2
+  unticked '^- \[ \] ' : expected 5   observed 5
+  census, top-level boxes  : expected 7   observed 7
+  census, indented boxes   : expected 0   observed 0
+  (the census is what makes the two counts exhaustive over the file's box set)
+  strict box anchor        : MATCHES
+  (c) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (d) THE EDIT IS THE RIGHT EDIT
+--------------------------------------------------------------------------------
+  graded box located by the LOOSE anchor (survives a tick, so a broken (c) does not blind (d)/(e))
+  fixture box lines   : 17-18
+  candidate box lines : 17-19
+
+  ---- BEGIN GRADED BOX BEFORE-TEXT (fixture, lines 17-18) ----
+  | - [ ] **PENDING REPEAT: awaiting the outcome of the fixture's own diagnosis round --
+  |   fill in the outcome and a pointer to the derivation once the round lands.**
+  ---- END GRADED BOX BEFORE-TEXT ----
+
+  ---- BEGIN GRADED BOX AFTER-TEXT (candidate, lines 17-19) ----
+  | - [ ] **PENDING REPEAT: awaiting the outcome of the fixture's own diagnosis round --
+  |   fill in the outcome and a pointer to the derivation once the round lands.
+  |   OUTCOME: INDETERMINATE. See spec357-trackergrade-fixture-manifest.md §2 for the full derivation.**
+  ---- END GRADED BOX AFTER-TEXT ----
+
+  outcome token in after-text   : PRESENT (INDETERMINATE)
+  pointer literal in after-text : PRESENT ('spec357-trackergrade-fixture-manifest.md §2', backticks ignored)
+  [evidence] outcome token 'INDETERMINATE' is NEW in the after-text
+  [evidence] pointer literal is NEW in the after-text
+  (d) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (e) THE DELTA IS CONSTRAINED -- EVERY CHANGED LINE IS INSIDE THE GRADED BOX
+--------------------------------------------------------------------------------
+  invocation: diff -U0 <fixture> <candidate>
+  fixture box 17-18   candidate box 17-19
+  hunks:
+    @@ -18 +18,2 @@  =>  inside the graded box
+  hunks outside the graded box: 0
+  (e) GREEN
+
+================================================================================
+VERDICT: GREEN (a, b, c, d, e)
+================================================================================
+
+OBSERVED EXIT STATUS: 0
+
+####################################################################################
+SUMMARY
+####################################################################################
+RUN 1 (unedited) exit: 1  (expected 1 / RED)
+RUN 2 (edited)   exit: 0  (expected 0 / GREEN)
+BOTH-DIRECTIONS PROOF: DISCHARGED.
+
+####################################################################################
+SPECFLOW/TODOS UNTOUCHED CHECK
+####################################################################################
+$ git status --porcelain .specflow/todos/
+(expected: empty output -- see the checklist note: .specflow/ is gitignored, so this is trivially
+ empty regardless; the load-bearing proof above is that TODO-634.md / TODO-648.md were never
+ opened for writing by anything this half committed.)
