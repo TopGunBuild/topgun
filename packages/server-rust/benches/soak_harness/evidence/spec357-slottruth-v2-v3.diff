@@ -1,0 +1,147 @@
+# spec357-slottruth-v2-v3.diff -- the v2 -> v3 grader diff, produced at -U0, EVERY HUNK CLASSIFIED.
+# Subject files, both committed in this directory:
+#   v2  spec356c-slottruth-v2.sh    (UNEDITED; pinned digest a95f49fa99f7f39ad777b0789ec778eda1ffec3aa3221031d98b587b62a4f348)
+#   v3  spec357-slottruth-v3.sh     (NEW sidecar)
+#
+# ================================ THE EXACT INVOCATION, VERBATIM ================================
+# Run from this directory (packages/server-rust/benches/soak_harness/evidence):
+#
+#     diff -U0 spec356c-slottruth-v2.sh spec357-slottruth-v3.sh
+#
+# -U0 means ZERO context lines, and the width is load-bearing for the same reason SPEC-356c's own
+# v1->v2 diff gives (its own committed `spec356c-slottruth-v1-v2.diff`): at any wider context the
+# header/usage comment block and the `prov()` cell-name fix could merge with an unchanged line into
+# one hunk that is simultaneously two classes, and "every hunk carries exactly one label" would be
+# unsatisfiable on correct work. NO OTHER CONTEXT WIDTH WAS USED, anywhere, at any point of producing
+# this artifact.
+#
+# ================================== RE-GENERATION CHECK ==================================
+# Every ANNOTATION line in this file begins with `#`; NO line of diff output ever does (diff -U0 emits
+# only `@@`, `+`, `-` and `\` lines once the two file-header lines are dropped). So the body is
+# recoverable mechanically and the artifact is byte-checkable:
+#
+#     diff -U0 spec356c-slottruth-v2.sh spec357-slottruth-v3.sh | tail -n +3 \
+#       | diff - "$(grep -v '^#' spec357-slottruth-v2-v3.diff > /tmp/body; echo /tmp/body)"
+#
+# must be CLEAN. `tail -n +3` drops diff's own `---` / `+++` lines: they carry FILE MTIMES, which are
+# not a property of the bytes, so including them would make the check fail on a fresh checkout for a
+# reason that says nothing about either sidecar. They are recorded here instead, for completeness:
+#     --- spec356c-slottruth-v2.sh
+#     +++ spec357-slottruth-v3.sh
+#
+# ============================= THE THREE MECHANICAL TESTS (SPEC-356c's corrected taxonomy) =============================
+# The taxonomy is CLOSED and EXHAUSTIVE-OR-RED, carried unmodified from SPEC-356c's own v1->v2 diff
+# (its Audit v2 rec 1 / rec 2 corrections). Every hunk below carries EXACTLY ONE of `class A`,
+# `class B`, `class C`. A hunk carrying none, carrying two, or failing its own test below is RED, and
+# the RED is the finding: it means v3 holds an edit that is neither the enumerated forced set, nor a
+# comment, nor a documented fix -- i.e. a fork wearing a version number.
+#
+# HOW TO READ A -U0 HUNK HEADER: a hunk header `@@ -a,b +c,d @@` gives the v2 side as `a,b` -- the
+# hunk touches v2 lines `a .. a+b-1`. `b` OMITTED means `b = 1` (exactly line `a`). `b = 0` means a
+# PURE INSERTION that touches no v2 line and lands between v2 lines `a` and `a+1`.
+#
+# CLASS A -- a genuine algorithmic fix (e.g. SPEC-356c's own ADJ-12 `B`-median repair). NOT ENGAGED
+#   in this diff: v3 makes no change to any computed statistic, fit, window or threshold. Every number
+#   v3 emits over UNCHANGED inputs is IDENTICAL to v2's (verified by RUN 2, below, over the same
+#   `spec356-long` bytes v1/v2 already used). Recorded here so a reader does not have to infer the
+#   absence from silence.
+#
+# CLASS B -- the mechanically forced cell-name parameter. v2 parameterised the subject's BASENAME
+#   and DURATION (its own class B, against v1) but left the `prov()` call's CELL-NAME argument
+#   hardcoded to the literal `long`, so v2 REFUSES to run against any cell whose `matrix.txt`
+#   self-describes under a different name -- exactly the shape `spec356c-slottruth-run3.txt` already
+#   recorded (`SLOTTRUTH FAIL: ... does not name cell long`, exit 3, against the repeat's own
+#   `long8h_r1` / `long8h_r2` cells). v3 takes the cell-name as a FOURTH PARAMETER, DEFAULTING TO v2'S
+#   OWN LITERAL (`long`), so `v3 <evidence-dir>` with no override reads EXACTLY the files v1/v2 read.
+#   TEST: the forced set is EXACTLY v2's ONE `prov()` line for the subject cell (`:83`) and no other --
+#     `:83` the subject cell's provenance triple -- basename, cell name (NOW a parameter) and duration
+#   A `class B` label on any line outside that one is RED, and so is a v3 leaving that line
+#   unparameterised. IN-PLACE ONLY, same rule SPEC-356c's own class B carries: class B is defined BY
+#   v2 LINE NUMBER, so a hunk that ADDS a line has no v2 line and is UNLABELABLE => RED on compliant
+#   work. A zero-added-line v3 is constructible with an inline `${4:-long}` default, and that is how
+#   v3 is built.
+#     => A `class B` hunk MUST add zero lines: with `@@ -a,b +c,d`, RED unless `d == b`.
+#        OBSERVED: `@@ -83 +88` (1 -> 1). TOTAL CLASS-B LINES ADDED: 0.
+#
+# CLASS C -- comment-only. TEST: a hunk is class C IFF every one of its `+` and `-` lines, after
+#   stripping leading whitespace, begins with `#`, and the hunk contains no other changed line.
+#   Nothing about purpose, docstring quality or authorial intent enters the test.
+#   LINE 1 (THE SHEBANG) IS EXCLUDED, same rule as SPEC-356c's own class C (Audit v2 rec 2): a hunk
+#   touching v2 `:1` is RED, not class C, because it would be an interpreter change.
+#     => VERIFIED: v3's shebang is byte-identical to v2's (`#!/bin/sh`); v2 `:1` appears in NO hunk
+#        below. No interpreter change is required, because `${4:-...}` is POSIX `sh` -- checked with
+#        `sh -n spec357-slottruth-v3.sh` (clean) and by running v3 under `sh`.
+#   Class C is UNAVOIDABLE for the same reason it was in v1->v2: v2's own header/usage block names the
+#   wrong subject and the wrong parameter count for v3 ("usage: spec356c-slottruth-v2.sh <evidence-dir>
+#   [cell-basename] [duration-s]"), so v3 either ships a lying docstring or emits this hunk.
+#   THE SECOND class-C hunk (`:69-72` in v2) is the residual `R-2` correction: v1's own
+#   `spec356-slottruth.sh:63-64` calls `topgun_or_prune_current_epoch` "the LWM epoch", which SPEC-356c's
+#   own v1->v2 diff explicitly declined to touch ("v1 text routed to TODO-648, and correcting it in v2
+#   would be a class-C hunk with NO forcing reason. It diffs clean below."). This spec's own Context
+#   table states `current_epoch` and `low_water_mark` as DISTINCT columns with a NEAR-TOTAL, not total,
+#   identity (0.965278 / 0.972917) -- so the phrase understates the very distinction this lineage's
+#   diagnosis depends on, which is the forcing reason v2 lacked. The corrected text names the counter
+#   as "the stamping clock's own epoch counter" and drops "LWM epoch" entirely; the die() message two
+#   lines below the corrected comment (unrelated hunk, outside `:69-72`) is NOT touched, keeping this
+#   hunk line-bounded to the comment residual R-2 actually names.
+#
+# ==================================== HUNK LEDGER ====================================
+# WHERE A HUNK'S LABEL LIVES, MECHANICALLY: a hunk's label is the UNIQUE line matching
+# `^# -+ class [ABC] -+$` standing between the end of the previous hunk and this hunk's `@@` header.
+#     grep -c '^@@'                     spec357-slottruth-v2-v3.diff   ->  3
+#     grep -c '^# -\+ class [ABC] -\+$' spec357-slottruth-v2-v3.diff   ->  3   (ONE per hunk, EXACT)
+#
+@@ -2,8 +2,13 @@
+-# slottruth-v2.sh -- RE-DERIVE every re-derivable slot from the COMMITTED artifacts.
+-# usage: spec356c-slottruth-v2.sh <evidence-dir> [cell-basename] [duration-s] > truth.tsv
+-#   defaults: cell-basename = spec356-long, duration-s = 14400 -- with NO override this driver reads
+-#   EXACTLY the files v1 reads, which is what makes the run-1 / run-2 comparison a regression test.
+-# v2 differs from spec356-slottruth.sh (v1, UNEDITED, digest 280f7a34..f060) in three admitted ways and
+-# the published `diff -U0` classifies every hunk: the B fix (ADJ-12 -- the rendered p50 column is
+-# medianed over the NON-SENTINEL rows only, and the excluded fraction is emitted unconditionally beside
+-# it), the subject parameter above, and this comment block. NOTHING ELSE MOVED.
++# slottruth-v3.sh -- RE-DERIVE every re-derivable slot from the COMMITTED artifacts.
++# usage: spec357-slottruth-v3.sh <evidence-dir> [cell-basename] [duration-s] [cell-name] > truth.tsv
++#   defaults: cell-basename = spec356-long, duration-s = 14400, cell-name = long -- with NO override
++#   this driver reads EXACTLY the files v1/v2 read, which is what keeps the run-1/run-2 regression
++#   comparison meaningful on v3 too.
++# v3 differs from spec356c-slottruth-v2.sh (v2, UNEDITED, its own digest re-verified in the runs
++# transcript) in two admitted ways, plus this comment block, and the published `diff -U0` classifies
++# every hunk: the CELL-NAME parameter above (v2 parameterised the subject's basename and duration but
++# left the `prov()` call's cell-name argument hardcoded to the literal `long`, so v2 refused to run
++# against any cell whose matrix.txt self-describes under a different name -- exactly the repeat's own
++# `long8h_r1` / `long8h_r2` cells), and the corrected wording of the epoch-axis guard comment at v2's
++# "the LWM epoch" phrase (that counter is the stamping clock's own epoch counter, not the low-water
++# mark -- a distinct series this lineage's own diagnosis depends on keeping apart). NOTHING ELSE MOVED.
+# TEST: header hunk, v2 range `:2-9` -- every changed line begins with `#` after stripping leading
+# whitespace; v2 `:1` (the shebang) does not appear in this hunk's range. PASS.
+# -------------------------------- class C --------------------------------
+@@ -69,4 +74,4 @@
+-  # x-axis, and until this limb NOTHING constrained it. `topgun_or_prune_current_epoch` is the LWM
+-  # epoch, a MONOTONE COUNTER: it cannot decrease. That is a fact about the instrument, not a bound
+-  # fitted to data, which is why it is checkable PRE-DATA. The JUMP bound (ADJ-18 clause 2) is applied
+-  # over the PARENT WINDOW, below, which is the scope ADJ-18 gives it.
++  # x-axis, and until this limb NOTHING constrained it. `topgun_or_prune_current_epoch` is the
++  # stamping clock's own epoch counter, a MONOTONE COUNTER: it cannot decrease. That is a fact about
++  # the instrument, not a bound fitted to data, which is why it is checkable PRE-DATA. The JUMP bound
++  # (ADJ-18 clause 2) is applied over the PARENT WINDOW, below, which is the scope ADJ-18 gives it.
+# TEST: comment-only hunk, v2 range `:69-72` -- every changed line begins with `#` after stripping
+# leading whitespace; this is residual R-2's correction (see the class-C prose above). PASS.
+# -------------------------------- class C --------------------------------
+@@ -83 +88 @@
+-prov "${2:-spec356-long}" long   "<unset: production default 1000>" "${3:-14400}" "$PR"     10
++prov "${2:-spec356-long}" "${4:-long}"   "<unset: production default 1000>" "${3:-14400}" "$PR"     10
+# TEST: `@@ -83 +88` -- b=1, d=1, d==b -- ZERO LINES ADDED. The changed line is v2's ONE forced line
+# (the subject cell's provenance triple, class B's enumerated set). PASS.
+# -------------------------------- class B --------------------------------
+#
+# ==================================== SUMMARY ====================================
+#   hunks total          : 3
+#   class A               : 0
+#   class B               : 1  (the cell-name parameter, in-place, 0 lines added)
+#   class C               : 2  (the header/usage block; the epoch-axis comment residual R-2 fix)
+#   RED                    : 0
+#
+# Every hunk carries exactly one label. No hunk is unlabelled. No hunk carries two labels. v1 and v2
+# are UNEDITED (their digests are re-verified in `spec357-slottruth-v2-v3-runs.txt`, alongside v1's own
+# `spec356-slottruth.sh` digest, unchanged since SPEC-356c).
