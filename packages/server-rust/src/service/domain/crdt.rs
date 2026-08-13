@@ -4411,6 +4411,83 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Tier-1 deterministic discrimination -- the service-composition arm
+    // (R7.1/R7.1a): `prune_epoch_tombstones`, driven through the FULL
+    // `CrdtService` + `RecordStoreFactory` + `KeyWriterRegistry` write path,
+    // reaches the same frozen-walk class the `FrontierState` arm reaches
+    // synthetically in `tombstone_frontier_impl.rs` -- class (d)
+    // DRAINED-HEALTHY -- but here every conjunct (`entered_index`, licensing,
+    // fencing, the actual storage drop) is produced by real writes through the
+    // real service, not constructed by hand at the frontier boundary.
+    // -----------------------------------------------------------------------
+
+    /// A real `OR_ADD` + `OR_REMOVE` through the full service composition,
+    /// followed by the real `prune_epoch_tombstones` entry point (not
+    /// `FrontierState::drain_prunable` called directly): the epoch is
+    /// licensed and fenced, THEN actually taken by the real prune sweep, and
+    /// the tag is durably gone from storage afterward -- exactly class (d)
+    /// DRAINED-HEALTHY's definition (R3.3), reached here through the real
+    /// write path the `FrontierState` arm's dry-run leg cannot exercise.
+    #[tokio::test]
+    async fn service_composition_arm_reaches_drained_healthy_through_the_real_write_path() {
+        let (svc, factory, frontier) = make_service_with_frontier();
+
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "k1", "v1", "TAGSC1"))
+            .await
+            .unwrap();
+        Arc::clone(&svc)
+            .oneshot(or_remove_op("m", "k1", "TAGSC1"))
+            .await
+            .unwrap();
+        // A second stamp rolls the clock past epoch 1 and fires its entry row
+        // (R2.3a) -- the same rollover mechanism the `FrontierState` arm
+        // exercises, reached here through the real write path instead.
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "k2", "v2", "TAGSC2"))
+            .await
+            .unwrap();
+        Arc::clone(&svc)
+            .oneshot(or_remove_op("m", "k2", "TAGSC2"))
+            .await
+            .unwrap();
+
+        open_prune_gates_past_epoch_one(&frontier).await;
+        // One more stamp advances op_seq strictly past the licensing instant
+        // (the residency interval is half-open, `[entered_at_op_seq,
+        // exited_at_op_seq)`, R3.2), so the triple-overlap window is a
+        // genuinely non-empty interval rather than a zero-width boundary case.
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "k3", "v3", "TAGSC3"))
+            .await
+            .unwrap();
+
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+        let snapshot = frontier.index_conservation_snapshot();
+        assert_eq!(
+            snapshot.drained_refs_total, 1,
+            "epoch 1 (TAGSC1) is the only licensed-and-fenced epoch"
+        );
+        assert_eq!(
+            snapshot.stamped_refs_total + snapshot.restored_refs_total
+                - snapshot.drained_refs_total
+                - snapshot.rebuild_cleared_refs_total,
+            snapshot.indexed_refs,
+            "O-0 must hold over the service-composition drain path too, got {snapshot:?}"
+        );
+
+        // The DrainedByPrune disposition is not just a counter: the tag is
+        // durably gone from storage, which is what distinguishes a real
+        // class-(d) drain from a synthetic one asserted only at the frontier.
+        let (_, tombs) = read_or_map(&factory, "m", "k1").await;
+        assert!(
+            !tombs.contains(&"TAGSC1".to_string()),
+            "the real write path must have durably dropped the drained tag"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Where the tombstone-byte counters fire, and what the prune does with the
     // two dispositions a bare `Ok(false)` conflates
     // -----------------------------------------------------------------------
