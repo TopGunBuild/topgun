@@ -1,0 +1,302 @@
+spec357-tier1-transcript.txt -- Tier-1 deterministic discrimination (R7.1), and the
+carrier of the TIER2 gate verdict (R7.2 / AC11b).
+
+Pin: dc2e5746cdff3791b91b4bf56d3ad1a0c9bf6eb5 (G4's PRE-DATA instrument PR, per
+spec356-manifest.md's G4 pin record). This half's `.rs` diff at this pin names exactly
+three files: tombstone_frontier.rs, tombstone_frontier_impl.rs, service/domain/crdt.rs.
+G5 S1 adds the fourth, unconditional, shape-4 file: sim/tombstone_gc_proof.rs.
+
+================================================================================
+PART I -- THE FOUR TIER-1 HARNESS ARMS (R7.1a), WHAT EACH EXERCISED, AND ITS RESULT
+================================================================================
+
+Arm 1 -- the FrontierState arm (counted file 2, tombstone_frontier_impl.rs, additive
+fn in the existing inline `#[cfg(test)] mod tests`, slot already spent by G2).
+
+  fn: tombstone_frontier_impl::tests::tier1_frontierstate_arm_drives_every_reachable_class_of_the_frozen_walk
+
+  Drives FIVE independently-numbered scenarios (each its own tiny `FrontierState`
+  starting at epoch 1, epoch-offset before assembly so the combined population has no
+  epoch collision), engineered to hit every class of the frozen walk this file's
+  boundary can reach, feeds the resulting entry+residency population through the
+  COMMITTED `spec357-classify.sh` builder (this is what makes this "the frozen walk run
+  against harness output" rather than an eyeballed hand-classification, R4.2), and
+  asserts the one-row-per-class result the builder assigns.
+
+  `cargo test -p topgun-server --lib tier1_frontierstate_arm_drives_every_reachable_class_of_the_frozen_walk -- --nocapture`:
+
+  --- TIER-1 HARNESS: entry.jsonl ---
+  {"epoch":100001,"enteredIndex":true,"refsAtEntry":1,"stampedRefs":1,"stampedBytes":5,"enteredAtOpSeq":1,"enteredAtUnixMs":<wall-clock>,"rolledOverAtOpSeq":2,"rolledOverAtUnixMs":<wall-clock>,"currentLwmAtRollover":0,"durableWatermarkAtRollover":0}
+  {"epoch":200001,"enteredIndex":true,"refsAtEntry":1,"stampedRefs":1,"stampedBytes":5,"enteredAtOpSeq":1,"enteredAtUnixMs":<wall-clock>,"rolledOverAtOpSeq":2,"rolledOverAtUnixMs":<wall-clock>,"currentLwmAtRollover":0,"durableWatermarkAtRollover":0}
+  {"epoch":300001,"enteredIndex":true,"refsAtEntry":1,"stampedRefs":1,"stampedBytes":5,"enteredAtOpSeq":1,"enteredAtUnixMs":<wall-clock>,"rolledOverAtOpSeq":2,"rolledOverAtUnixMs":<wall-clock>,"currentLwmAtRollover":0,"durableWatermarkAtRollover":0}
+  {"epoch":400001,"enteredIndex":true,"refsAtEntry":1,"stampedRefs":1,"stampedBytes":5,"enteredAtOpSeq":1,"enteredAtUnixMs":<wall-clock>,"rolledOverAtOpSeq":2,"rolledOverAtUnixMs":<wall-clock>,"currentLwmAtRollover":0,"durableWatermarkAtRollover":0}
+  {"epoch":500050,"enteredIndex":false,"refsAtEntry":0,"stampedRefs":0,"stampedBytes":0,"enteredAtOpSeq":0,"enteredAtUnixMs":0,"rolledOverAtOpSeq":51,"rolledOverAtUnixMs":<wall-clock>,"currentLwmAtRollover":0,"durableWatermarkAtRollover":0}
+
+  --- TIER-1 HARNESS: residency.jsonl ---
+  {"epoch":100001,"refsAtEntry":1,"refsAtExit":0,"stampedBytes":5,"bytesFreedAttributed":5,"exitKind":"drainedByPrune","enteredAtOpSeq":1,"enteredAtUnixMs":<wall-clock>,"exitedAtOpSeq":3,"lwmPassedAtOpSeq":2,"fencePassedAtOpSeq":2,"lwmAtExit":2,"durableWatermarkAtExit":1,"currentEpochAtExit":3}
+  {"epoch":200001,"refsAtEntry":1,"refsAtExit":0,"stampedBytes":5,"bytesFreedAttributed":0,"exitKind":"clearedByRebuild","enteredAtOpSeq":1,"enteredAtUnixMs":<wall-clock>,"exitedAtOpSeq":100,"lwmPassedAtOpSeq":2,"fencePassedAtOpSeq":2,"lwmAtExit":2,"durableWatermarkAtExit":0,"currentEpochAtExit":100}
+  {"epoch":300001,"refsAtEntry":1,"refsAtExit":0,"stampedBytes":5,"bytesFreedAttributed":0,"exitKind":{"unclassified":{"observed_refs_delta":-1,"observed_lwm":0,"observed_durable_watermark":0,"observed_current_epoch":2,"note":"epoch 1 absent from epoch_tags with no attributable removal path recorded at the detection point"}},"enteredAtOpSeq":1,"enteredAtUnixMs":<wall-clock>,"exitedAtOpSeq":2,"lwmAtExit":0,"durableWatermarkAtExit":0,"currentEpochAtExit":2}
+
+  --- TIER-1 HARNESS: prune.csv (synthetic O-0 conservation ledger, from a sixth,
+  unrelated frontier: stamp -> drain -> restore) ---
+  elapsed_secs,topgun_or_prune_stamped_refs_total_a,topgun_or_prune_stamped_refs_total_b,topgun_or_prune_stamped_bytes_total_a,topgun_or_prune_stamped_bytes_total_b,topgun_or_prune_drained_refs_total_a,topgun_or_prune_drained_refs_total_b,topgun_or_prune_restored_refs_total_a,topgun_or_prune_restored_refs_total_b,topgun_or_prune_rebuild_cleared_refs_total_a,topgun_or_prune_rebuild_cleared_refs_total_b,topgun_or_prune_epochs_entered_total_a,topgun_or_prune_epochs_entered_total_b,topgun_or_prune_epochs_exited_total_a,topgun_or_prune_epochs_exited_total_b,topgun_or_prune_indexed_refs_a,topgun_or_prune_indexed_refs_b
+  0,3,3,6,6,0,0,0,0,0,0,2,2,0,0,3,3
+  10,3,3,6,6,2,2,0,0,0,0,2,2,2,2,1,1
+  20,3,3,6,6,2,2,1,1,0,0,2,2,2,2,2,2
+
+  --- spec357-classify.sh stdout ---
+  spec357-classify.sh: wrote <tmp>/tier1-dryrun-class.csv -- |P|=5 |P0|=1 |P1|=1 |P2|=3 (must sum to |P|)
+  spec357-classify.sh: wrote <tmp>/tier1-dryrun-conservation.csv -- 3 scrapes: CONSISTENT=3 TORN=0 TORN-PERSISTENT=0; violations over CONSISTENT scrapes=0
+
+  --- TIER-1 HARNESS: spec357-*-class.csv (byte-identical to the committed
+  spec357-dryrun-class-tier1.csv, dry-run leg 2) ---
+  epoch,entered_index,stamped_bytes,refs_at_entry,has_exit_row,exit_kind_variant,unclassified_exit,class_a,class_b,class_c,class_d,class_e,class_f
+  100001,true,5,1,true,"drainedByPrune",0,0,0,0,1,0,0
+  200001,true,5,1,true,"clearedByRebuild",0,0,1,0,0,0,0
+  300001,true,5,1,true,"unclassified",1,0,0,1,0,0,0
+  400001,true,5,1,false,"",0,0,0,0,0,1,0
+  500050,false,0,0,false,"",0,0,0,0,0,0,1
+
+  --- TIER-1 HARNESS: spec357-*-conservation.csv (byte-identical to the committed
+  spec357-dryrun-conservation-tier1.csv, dry-run leg 2) ---
+  elapsed_secs,render_class,identity_lhs,identity_rhs,identity_holds
+  0,CONSISTENT,3,3,1
+  10,CONSISTENT,1,1,1
+  20,CONSISTENT,2,2,1
+
+  test tombstone_frontier_impl::tests::tier1_frontierstate_arm_drives_every_reachable_class_of_the_frozen_walk ... ok
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1799 filtered out
+
+  RESULT: all 5 engineered epochs classified exactly as engineered -- (d) 1, (b) 1,
+  (c) 1 (with unclassified_exit=1), (e) 1, (f) 1, (a) 0. See PART II for the full
+  class-by-class accounting including D3's (f) disposition and (a)'s reachability
+  finding.
+
+Arm 2 -- the service-composition arm (counted file 3, service/domain/crdt.rs,
+additive fn in the existing inline `#[cfg(test)] mod tests`, slot already spent by G2).
+
+  fn: service::domain::crdt::tests::service_composition_arm_reaches_drained_healthy_through_the_real_write_path
+
+  A real OR_ADD + OR_REMOVE through the full `CrdtService` + `RecordStoreFactory` +
+  `KeyWriterRegistry` composition, followed by the real `prune_epoch_tombstones` entry
+  point (not `FrontierState::drain_prunable` called directly): the epoch is licensed
+  and fenced, THEN actually taken by the real prune sweep, and the tag is durably gone
+  from storage afterward -- class (d) DRAINED-HEALTHY reached through the real write
+  path, complementing Arm 1's synthetic construction of the same class at the lower
+  boundary. Asserts `drained_refs_total == 1`, O-0's identity holds, and the tag is
+  durably absent from the store.
+
+  `cargo test -p topgun-server --lib service_composition_arm_reaches_drained_healthy_through_the_real_write_path -- --nocapture`:
+
+  test service::domain::crdt::tests::service_composition_arm_reaches_drained_healthy_through_the_real_write_path ... ok
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1800 filtered out
+
+  RESULT: PASS. The service composition reaches the same class (d) outcome the
+  FrontierState arm constructs synthetically, this time through real storage writes.
+
+Arm 3 -- the fault-dimension arm (shape-4, sim/tombstone_gc_proof.rs, the ONE
+additive `#[tokio::test]` fn this segment adds to that file, per the Delta's and the
+Constraints ledger's shape-4 rationale).
+
+  fn: sim::tombstone_gc_proof::tests::prune_epoch_residency_discrimination_under_network_fault
+
+  Drives the SAME interleaving-fault surface `interleaved_prune_during_push_never_
+  resurrects` already proves data-safe (a concurrent push racing a prune sweep,
+  serialized by the shared per-key `KeyWriterRegistry` writer, over the `SyncService` +
+  `RecordStoreFactory` composition) -- NOT a `SimNetwork` partition/delay/reorder,
+  which this file's own module doc records as unreachable (`SimCluster` has no raw
+  `ORMapPushDiff` sender). 64 rounds. Per round, asserts the per-epoch residency
+  ledger's OWN bookkeeping is unperturbed by the race: exactly one attributed
+  `DrainedByPrune` exit (`drained_refs_total` advances by exactly 1 -- never lost to a
+  race-induced `Unclassified`, never double-counted), exactly one exit row
+  (`epochs_exited_total` advances by exactly 1), and O-0's conservation identity holds
+  on the post-race snapshot -- in addition to re-checking the sibling test's own
+  no-resurrection invariant on the stored value.
+
+  `cargo test --profile ci-sim --features simulation -p topgun-server --lib -- prune_epoch_residency_discrimination_under_network_fault --nocapture`:
+
+  test sim::tombstone_gc_proof::tests::prune_epoch_residency_discrimination_under_network_fault ... ok
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1820 filtered out
+
+  RESULT: PASS across all 64 rounds. The residency instrument's classification-relevant
+  counters do not tear, lose an exit, or double-count under the interleaving fault.
+  This fn currently carries ONLY the fault-dimension arm (PHASE 1, per its own
+  doc-comment); PHASE 2 (the reproducing proof itself, engaged only if R7.3(c) fires)
+  is reserved for the next segment to ADD to this same fn's body, never as a second fn
+  -- shape 4 comfortably held for the fault arm alone; no promotion to COUNTED 4/5 was
+  needed.
+
+Arm 4 -- the unenumerated-removal arm proving `Unclassified` fires (AC6a; sited, per
+Audit v2 rec 3, in counted file 2's inline tests -- G2 already built this arm; this
+segment runs it and quotes the result rather than duplicating it, per the carried
+instruction).
+
+  fn: tombstone_frontier_impl::tests::unenumerated_epoch_removal_surfaces_as_unclassified_at_the_next_detection_point
+
+  Removes an epoch's slot directly (`state.epoch_tags.remove(&1)`), bypassing
+  `drain_prunable` / `rebuild_into_epoch` / `restore` entirely, then calls
+  `state.detect_epoch_exit(1, None)` -- the next detection point -- and asserts exactly
+  one exit row with `exit_kind == Unclassified` and every `observed_*` field populated
+  (`observed_refs_delta == -1`, `observed_lwm == 0`, `observed_durable_watermark == 0`,
+  `observed_current_epoch == 2`, `note` non-empty), matching Checklist item 6b and AC6a
+  verbatim.
+
+  `cargo test -p topgun-server --lib unenumerated_epoch_removal_surfaces_as_unclassified_at_the_next_detection_point -- --nocapture`:
+
+  test tombstone_frontier_impl::tests::unenumerated_epoch_removal_surfaces_as_unclassified_at_the_next_detection_point ... ok
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1800 filtered out
+
+  RESULT: PASS. This test already fully satisfies AC6a and Checklist 6b as built by
+  G2; this segment found it sufficient for the Tier-1 harness's needs (its assertions
+  run under the SAME `cargo test` harness/output format as every other arm here) and
+  did not extend it. Independently, Arm 1's own (c) scenario ALSO produces an
+  `Unclassified` exit row (epoch 300001, `unclassified_exit=1` in the committed
+  dry-run-leg-2 class CSV) as an aggregate-population data point, distinct from this
+  arm's dedicated, single-purpose proof.
+
+================================================================================
+PART II -- THE FROZEN CLASSIFICATION WALK (R4), APPLIED TO THE HARNESS OUTPUT
+================================================================================
+
+Applied via the committed `spec357-classify.sh` builder over Arm 1's entry.jsonl +
+residency.jsonl (dry-run leg 2, R6.3) -- see PART I, Arm 1 for the full builder
+transcript. |P|=5, |P0|=1, |P1|=1, |P2|=3 (1+1+3=5=|P|, the exhaustiveness identity
+R3.3 states).
+
+  Class (a) INDEX-POPULATION-GAP  -- 0 occurrences.
+    NOT EXERCISED, and NOT expected to be exercisable at Tier-1 with the current
+    implementation: `FrontierState::stamp_tombstone`'s ONLY branch that constructs an
+    `entered_index == false` entry row is the `PruneEpochEntryRecord::default()` branch
+    (control class (f)'s own construction), which carries `stamped_bytes == 0` by
+    construction (:180.14, tombstone_frontier_impl.rs -- there is no code path that
+    produces `entered_index == false` together with `stamped_bytes > 0`). This is not a
+    harness gap; it is the mechanical form of R3.1's own pre-registered expectation
+    under the scope pin's weakening: "Expected under the pin's weakening: EXCLUDED."
+    Arm 1's own test asserts `count_col(class_a) == 0` as a standing regression check.
+
+  Class (b) SELECTION/SPLIT MISMATCH -- 1 occurrence (epoch 200001, Arm 1's (b)
+    scenario). T(e) holds (licensed at op-seq 2, fenced at op-seq 2, exited at op-seq
+    100 -- a genuinely non-empty overlap), D(e) does not (`exitKind: clearedByRebuild`,
+    not `DrainedByPrune`). Exactly "eligible and not taken by the prune" (R3.2).
+
+  Class (c) FRONTIER RACE -- 1 occurrence (epoch 300001, Arm 1's (c) scenario). T(e) is
+    empty by construction (no licensing, no fencing at all: `lwmPassedAtOpSeq` and
+    `fencePassedAtOpSeq` both absent from the residency row). This row ALSO carries
+    `exitKind: unclassified` -- the same reachable escape Arm 4 proves dedicated to,
+    here appearing as an aggregate-population data point.
+
+  Class (d) DRAINED-HEALTHY -- 1 occurrence (epoch 100001, Arm 1's (d) scenario). T(e)
+    holds (licensed and fenced at op-seq 2, exited at op-seq 3 -- one spacer stamp
+    advances the clock strictly past the licensing instant, since the residency
+    interval is HALF-OPEN, `[entered_at_op_seq, exited_at_op_seq)`, R3.2), D(e) holds
+    (`exitKind: drainedByPrune`). Also independently reached through the REAL write
+    path by Arm 2.
+
+  Class (e) NO-EXIT-RECORD -- 1 occurrence (epoch 400001, Arm 1's (e) scenario).
+    Entered (has an entry row), deliberately left alone -- no drain, no rebuild, no
+    detection sweep -- so no exit row exists at Tier-1 snapshot time. Within R2.3c's
+    <= 5-per-replicate control bound (here: 1 of 1 in this harness's own tiny
+    population, by deliberate engineering, not a measured rate).
+
+  Class (f) EMPTY-EPOCH -- 1 occurrence (epoch 500050, Arm 1's (f) scenario). THE D3
+    OBLIGATION CARRIED INTO THIS SEGMENT: class (f) IS cheaply, deterministically
+    drivable at Tier-1. Mechanism: `FrontierState::rebuild_into_epoch(e_rec, live)`
+    sets `current_epoch = e_rec` and repositions `op_seq` so the next tombstone lands
+    at `e_rec + 1`, WITHOUT creating an `epoch_slots` entry for `e_rec` itself (the
+    rebuild only re-seeds `epoch_tags`/`epoch_max_seq`, never the residency
+    bookkeeping). The next stamp therefore rolls the clock past `e_rec` while
+    `epoch_slots.get(&e_rec)` is `None`, taking the `PruneEpochEntryRecord::default()`
+    branch: `entered_index=false`, `stamped_bytes=0` -- exactly control class (f), and
+    exactly the path the production doc-comment at the `stamp_tombstone` rollover site
+    names verbatim: "only reachable via an `epoch_width` change or a rebuild-induced
+    jump, never via ordinary sequential stamping." OBSERVED at Tier-1: one class-(f)
+    entry row, `entered_index=false`, `stamped_bytes=0`, exactly as R3.3's `P0`
+    definition requires. D3 is DISCHARGED: this class needed no deferral to SPEC-357b
+    cell-level observation.
+
+  Exhaustiveness check: |P0|=1 (epoch 500050, class f) + |P1|=1 (epoch 400001, class e)
+  + |P2|=3 (epochs 100001/200001/300001, classes d/b/c) = 5 = |P|. Every row lands in
+  exactly one class; none in two; none in none (R3.3's argued-not-asserted partition,
+  mechanically confirmed over this harness's own population).
+
+  `Unclassified` count: 1 of 3 in P2 (epoch 300001) = 33.3% of P2 -- WELL ABOVE the 5%
+  `INDETERMINATE-RESIDUAL` threshold (R4.4), but this is an ENGINEERED harness
+  population (one scenario per class, by deliberate construction, not a measured rate
+  over a real cell), so this number is NOT a finding about the mechanism and is not
+  read as one -- it is the mechanical proof, required by AC6a/Checklist 6b, that the
+  limb CAN fire, which is a different question from whether it DOES fire at rate on
+  real data (that question is SPEC-357b's, over the cells).
+
+================================================================================
+PART III -- DRY-RUN LEG 2 (R6.3) -- THE CONSISTENT/TORN/TORN-PERSISTENT COUNTS
+================================================================================
+
+Builder: `spec357-classify.sh`, run over Arm 1's synthetic prune.csv (3 scrape rows,
+from a stamp -> drain -> restore sequence on an unrelated sixth frontier, each row's
+`_a`/`_b` render pair taken from a single `index_conservation_snapshot()` call written
+twice -- Checklist 6a's own coherence property licenses this, since two renders of one
+snapshot with no intervening mutation agree BY CONSTRUCTION).
+
+  3 scrapes total.
+  CONSISTENT = 3
+  TORN = 0
+  TORN-PERSISTENT = 0
+  violations over CONSISTENT scrapes = 0 (O-0 holds on every row)
+
+Committed outputs (byte-identical to the transcript quoted in PART I, Arm 1):
+  benches/soak_harness/evidence/spec357-dryrun-class-tier1.csv
+  benches/soak_harness/evidence/spec357-dryrun-conservation-tier1.csv
+
+Both carry the residency columns and the double-render `*_a`/`*_b` pair, unlike dry-run
+leg 1 (G4's spec357-dryrun-{class,conservation}-356c-r1.csv, which carries the two
+absence markers verbatim since SPEC-356c's committed bytes predate the instrument).
+
+================================================================================
+PART IV -- A PRE-DATA BUILDER DEFECT FOUND AND FIXED (R6.3's own point)
+================================================================================
+
+While exercising dry-run leg 2, `spec357-classify.sh`'s `drained_healthy_kind` and
+`unclassified_exit` jq terms compared `exit_kind_variant` against the PascalCase Rust
+source spellings `"DrainedByPrune"` / `"Unclassified"`. `EpochExitKind` carries
+`#[serde(rename_all = "camelCase")]` (tombstone_frontier.rs), which serde applies to
+unit-variant TAGS as well as field names, so the record actually serializes those tags
+as `"drainedByPrune"` / `"unclassified"` -- confirmed empirically from Arm 1's own
+entry/residency JSONL above. Under the unfixed comparison, EVERY real `DrainedByPrune`
+exit would have been misclassified as class (c) FRONTIER RACE instead of class (d)
+DRAINED-HEALTHY (Arm 1's first run, before the fix, showed exactly this: epoch 100001
+read `class_c=1` where it should have read `class_d=1`), and `unclassified_exit` would
+never have been set at all.
+
+This is precisely the class of defect R6.3 exists to catch and R0.1's carry table
+licenses fixing HERE, "where fixing it is free": "a count outside its band is RED in
+the PRE-DATA wave, which is where a builder defect is free to fix." `spec357-
+classify.sh` is this half's own G3 artifact (not one of the pinned, no-edit sidecars
+named in the Constraints ledger), so the fix is in scope for this segment. Fixed by
+comparing against the camelCase-serialized tags instead, with a WHY-comment recording
+the reason. Re-run confirmed the correct per-class distribution (PART I, Arm 1).
+
+================================================================================
+PART V -- SIX-CLASS SUMMARY TABLE
+================================================================================
+
+  Class                          | Occurrences | Disposition
+  --------------------------------|-------------|---------------------------------
+  (a) INDEX-POPULATION-GAP        | 0           | mechanically unreachable, matches
+                                   |             | R3.1's EXCLUDED expectation
+  (b) SELECTION/SPLIT MISMATCH    | 1           | reached (Arm 1)
+  (c) FRONTIER RACE               | 1           | reached (Arm 1), + Unclassified
+  (d) DRAINED-HEALTHY             | 1           | reached (Arm 1, synthetic) AND
+                                   |             | (Arm 2, real write path)
+  (e) NO-EXIT-RECORD              | 1           | reached (Arm 1)
+  (f) EMPTY-EPOCH                 | 1           | reached (Arm 1) -- D3 DISCHARGED
+  Unclassified (cross-cutting)    | 2 (Arm 1's (c) + Arm 4's dedicated arm) | reached,
+                                   |             | AC6a / Checklist 6b mechanically
+                                   |             | proven
+
+================================================================================
+## R7.2 gate verdict — appended by Segment 2
+================================================================================
+
+[Segment 2 appends the TIER2 = RUN / SKIPPED-BY-GATE verdict, with R7.2's three CLEAN
+conditions and their evaluated values, directly beneath this heading. Nothing below
+this heading is written by G5 S1.]
