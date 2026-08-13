@@ -42,6 +42,8 @@
 //! client whose cursor is behind an epoch pins that epoch for the whole fleet. See
 //! [`PruneSafety::is_epoch_prune_eligible`].
 
+use serde::{Deserialize, Serialize};
+
 /// Server-authoritative monotonic epoch / generation counter.
 ///
 /// Owned by the single-node authority and stamped onto a tombstone at the moment the server
@@ -405,6 +407,175 @@ pub struct PruneClaimSpanRecord {
     pub tracked_claims: u64,
 }
 
+// ---------------------------------------------------------------------------
+// Per-epoch residency ledger — two emissions, NOT metrics
+// ---------------------------------------------------------------------------
+//
+// The per-epoch join — an epoch tied to its own counts tied to the frontier state in force when
+// THAT epoch entered or left the index — is not representable over the Prometheus transport, for
+// the same reason `PruneEpochRecord` above is not: a histogram loses the per-observation
+// association and a gauge is last-value at scrape granularity. These two records are therefore
+// structured `tracing::info!` lines on a dedicated target, not a metric series. See
+// [`PruneRecordObserver::observe_epoch_entry`] / [`PruneRecordObserver::observe_epoch_residency`]
+// for the emission contract and its perturbation bound.
+
+/// How an epoch's slot left the tombstone index, as the frontier's own bookkeeping attributed it.
+///
+/// The set is CLOSED at three named removal paths plus one escape variant, authored together
+/// rather than the escape being bolted on after a removal path turned up missing. A named variant
+/// is assigned only when the bookkeeping itself observed the removal happen — a drain it ran, a
+/// rebuild it ran, or a shutdown it is mid-teardown for. Any OTHER way a tracked epoch's slot can
+/// go missing — including a path nobody has enumerated yet — still has to land somewhere, and it
+/// lands here, WITH its raw observed context, rather than as a silently absent row.
+///
+/// Modelled as an enum (never a bare `String`) because the removal-path value set is known and
+/// closed; `note` inside [`EpochExitKind::Unclassified`] is a free-form diagnostic breadcrumb for
+/// the unattributed case, not a second value set — the known set stays exactly the three named
+/// variants.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EpochExitKind {
+    /// The epoch's slot was removed by an observed prune drain.
+    #[default]
+    DrainedByPrune,
+    /// The epoch's slot was cleared by an observed index rebuild.
+    ClearedByRebuild,
+    /// The process is mid-teardown and the epoch was still resident when the exit emission fired.
+    /// Expected to be rare in absolute terms — bounded by however many epochs the index can hold
+    /// resident at once, not by the epoch population the run passed through.
+    StillResidentAtShutdown,
+    /// The slot's absence was detected but could not be attributed to any of the three named
+    /// paths above. This is the escape valve that keeps the exit ledger total over every way an
+    /// epoch can leave the index, including a path nobody named at authoring time — and it is
+    /// only ever reachable because the exit emission is sited at a DETECTION point (see
+    /// [`PruneEpochResidencyRecord`]'s own doc-contract), never at the three named removal call
+    /// sites individually. Publishing it with its raw observed state, rather than silently, is
+    /// the whole point: an unattributed-absence rate that is neither zero nor explained is itself
+    /// the finding, not a defect in the record.
+    Unclassified {
+        /// `refs_at_exit − refs_at_entry` as the bookkeeping observed it at detection time.
+        /// Signed because the bookkeeping makes no assumption about which direction an
+        /// unattributed change moves.
+        observed_refs_delta: i64,
+        /// The low-water-mark the bookkeeping observed at detection time.
+        observed_lwm: Epoch,
+        /// The durable epoch watermark the bookkeeping observed at detection time.
+        observed_durable_watermark: Epoch,
+        /// The current epoch the bookkeeping observed at detection time.
+        observed_current_epoch: Epoch,
+        /// Free-form diagnostic context for the unattributed condition — a breadcrumb for
+        /// after-the-fact diagnosis, not a second closed value set.
+        note: String,
+    },
+}
+
+/// One epoch's ENTRY into the stamping clock — emitted once per epoch, at the moment the
+/// stamping clock rolls past it, WHETHER OR NOT that epoch's content ever entered the drainable
+/// index.
+///
+/// # Why an entry-side record exists at all
+///
+/// An exit-only ledger has no row whatsoever for an epoch whose content never entered the index —
+/// "never entered" collapses into "never observed", and the index-population question becomes
+/// uncomputable from the emitted data. With this record, "never entered" is the recorded VALUE
+/// `entered_index == false` on a row that EXISTS: every term the index-population question needs
+/// is a value, never an absence. `stamped_bytes` is also decomposed per epoch here, instead of
+/// being readable only as a global total.
+///
+/// `#[derive(Default)]` for symmetry with [`PruneEpochResidencyRecord`]; both are constructed
+/// field-by-field at their emission sites, never via `Default::default()` on a hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneEpochEntryRecord {
+    /// The epoch this row describes.
+    pub epoch: Epoch,
+    /// Whether this epoch's content ever entered `epoch_tags` before the stamping clock rolled
+    /// past it. `false` on a row that EXISTS is what makes the index-population-gap hypothesis
+    /// observable at all — an exit-only ledger has no way to express this value.
+    pub entered_index: bool,
+    /// Refs indexed under this epoch at the moment the clock rolled past it. Equivalent to
+    /// `entered_index == (refs_at_entry > 0)`, carried explicitly rather than left to be derived
+    /// by a consumer.
+    pub refs_at_entry: u64,
+    /// Refs stamped into this epoch over its whole lifetime.
+    pub stamped_refs: u64,
+    /// Tombstone bytes stamped into this epoch over its whole lifetime.
+    pub stamped_bytes: u64,
+    /// The op-seq at which this epoch's first ref entered the index (`0` if it never entered).
+    pub entered_at_op_seq: u64,
+    /// Wall-clock (Unix ms) at which this epoch's first ref entered the index (`0` if it never
+    /// entered).
+    pub entered_at_unix_ms: i64,
+    /// The op-seq at which the stamping clock rolled past this epoch.
+    pub rolled_over_at_op_seq: u64,
+    /// Wall-clock (Unix ms) at which the stamping clock rolled past this epoch.
+    pub rolled_over_at_unix_ms: i64,
+    /// The low-water-mark at the instant of rollover.
+    pub current_lwm_at_rollover: Epoch,
+    /// The durable epoch watermark at the instant of rollover.
+    pub durable_watermark_at_rollover: Epoch,
+}
+
+/// One epoch's EXIT from the tombstone index — emitted once per epoch, at the DETECTION point
+/// described below, never at the three named removal call sites individually.
+///
+/// # Emission site is a DETECTION point, not the union of known removal sites (HARD)
+///
+/// An implementation MUST drive this emission from the per-epoch slot bookkeeping observing that
+/// ITS OWN tracked epoch has become absent from the index — a detection check against the
+/// frontier's own state — and MUST NOT hang three separate hooks off the three named removal call
+/// sites individually. The two shapes are NOT equivalent: a removal reached by a path nobody has
+/// hooked yet is invisible to the three-hooks form (no exit row at all — a silently truncated
+/// exit ledger with no way to tell "truncated" from "healthy") but IS caught by the detection
+/// form, which observes the absence regardless of how it arose and reports it through
+/// [`EpochExitKind::Unclassified`] with its raw context. Re-siting this emission at the three
+/// known removal sites would silently delete the one escape variant this contract exists to keep
+/// reachable — that is not an implementation preference, it removes an outcome the predicate this
+/// record feeds is supposed to be able to reach.
+///
+/// `#[serde(rename_all = "camelCase")]` and `#[derive(Default)]` per this crate's Rust
+/// type-mapping rules — this struct carries two `Option<T>` fields.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneEpochResidencyRecord {
+    /// The epoch this row describes.
+    pub epoch: Epoch,
+    /// Refs indexed under this epoch when it entered (carried from the paired entry row so the
+    /// exit row is independently readable without a join).
+    pub refs_at_entry: u64,
+    /// Refs indexed under this epoch at the instant the absence was detected.
+    pub refs_at_exit: u64,
+    /// Tombstone bytes stamped into this epoch over its whole lifetime.
+    pub stamped_bytes: u64,
+    /// Tombstone bytes this epoch's removal is attributed as having freed. `0` on every exit kind
+    /// that is not an observed drain.
+    pub bytes_freed_attributed: u64,
+    /// How the epoch's slot left the index, as the detection-point bookkeeping attributed it.
+    pub exit_kind: EpochExitKind,
+    /// The op-seq at which this epoch's first ref entered the index.
+    pub entered_at_op_seq: u64,
+    /// Wall-clock (Unix ms) at which this epoch's first ref entered the index.
+    pub entered_at_unix_ms: i64,
+    /// The op-seq at which the absence was detected.
+    pub exited_at_op_seq: u64,
+    /// The first op-seq at which `low_water_mark > epoch`, i.e. the instant licensing began.
+    /// `None` if the low-water-mark never licensed this epoch over its observed residency.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub lwm_passed_at_op_seq: Option<u64>,
+    /// The first op-seq at which `durable_epoch_watermark >= epoch`, i.e. the instant the
+    /// durability fence stopped disqualifying this epoch. `None` if the fence never passed it
+    /// over its observed residency — a live candidate for the disqualifying conjunct, published
+    /// unconditionally regardless of which mechanism the residency ledger ultimately points to.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fence_passed_at_op_seq: Option<u64>,
+    /// The low-water-mark at the instant of exit.
+    pub lwm_at_exit: Epoch,
+    /// The durable epoch watermark at the instant of exit.
+    pub durable_watermark_at_exit: Epoch,
+    /// The current epoch at the instant of exit.
+    pub current_epoch_at_exit: Epoch,
+}
+
 /// Whether the prune record is recording.
 ///
 /// Read **once**, at frontier construction, from `TOPGUN_PRUNE_RECORD`, and never per pass — so the
@@ -482,6 +653,25 @@ pub enum PruneRecordArming {
 /// emit call site is a defect: binding the emitter to the constant is what makes it impossible for
 /// an emitted name to drift from the pinned one, and it makes the compiler rather than a document
 /// review the thing that enforces it.
+///
+/// # Per-epoch residency emissions — perturbation bound (HARD, `TG-OR-004` gauge-neutrality applies)
+///
+/// [`PruneRecordObserver::observe_epoch_entry`] and [`PruneRecordObserver::observe_epoch_residency`]
+/// are two additional emissions and are NOT exempt from the perturbation budget above — they
+/// extend it with three explicitly priced costs rather than absorbing them silently:
+///
+/// - the bookkeeping the two emissions read is **O(1) per stamp**: a fixed, small number of
+///   integer writes into a per-epoch slot the stamp path already touches, never an index fold;
+/// - the formatting cost of the two lines falls **only** at epoch rollover (the entry line) and
+///   at the exit DETECTION point (the exit line) — **never per `OR_REMOVE`**, and never inside the
+///   per-ref prune loop body;
+/// - a wall-clock read backs `entered_at_unix_ms` / `rolled_over_at_unix_ms` — budgeted as **one
+///   read per epoch rollover**, never per stamp.
+///
+/// Neither emission names a tombstone-byte counter or gauge (`TG-OR-004`), and an armed run and a
+/// disarmed run over the same workload MUST still produce identical tombstone byte-gauge deltas
+/// and identical dropped counts — the residency ledger is observation, not participation, exactly
+/// as the rest of this trait's gauge-neutrality contract already requires.
 pub trait PruneRecordObserver: Send + Sync {
     /// One completed prune pass.
     ///
@@ -544,10 +734,29 @@ pub trait PruneRecordObserver: Send + Sync {
         ineligible_refs: u64,
         computed_at_epoch: Epoch,
     );
+
+    /// One epoch's entry into the stamping clock (rollover), whether or not its content ever
+    /// entered the drainable index.
+    ///
+    /// Feeds [`METRIC_PRUNE_EPOCHS_ENTERED_TOTAL`] — an independent, metrics-side completeness
+    /// witness for the entry ledger's own line count, produced by a transport no sidecar reads
+    /// from. See the trait-level "Per-epoch residency emissions" section above for the
+    /// perturbation bound this call is priced under.
+    fn observe_epoch_entry(&self, record: &PruneEpochEntryRecord);
+
+    /// One epoch's exit from the index, emitted at the DETECTION point fixed by
+    /// [`PruneEpochResidencyRecord`]'s own doc-contract — never at the three named removal call
+    /// sites individually, because that siting is what keeps [`EpochExitKind::Unclassified`]
+    /// reachable.
+    ///
+    /// Feeds [`METRIC_PRUNE_EPOCHS_EXITED_TOTAL`] — the exit ledger's independent, metrics-side
+    /// completeness witness. See the trait-level "Per-epoch residency emissions" section above
+    /// for the perturbation bound this call is priced under.
+    fn observe_epoch_residency(&self, record: &PruneEpochResidencyRecord);
 }
 
 // ---------------------------------------------------------------------------
-// Pinned metric names — 15 counters, 11 gauges, 7 histograms
+// Pinned metric names — 22 counters, 11 gauges, 7 histograms
 // ---------------------------------------------------------------------------
 //
 // The name set is CLOSED. Emitting a series under this prefix that is not named here, or emitting
@@ -595,6 +804,25 @@ pub const METRIC_PRUNE_LWM_EPOCHS_ADVANCED_TOTAL: &str =
     "topgun_or_prune_lwm_epochs_advanced_total";
 /// Counter: eligible / ineligible split recomputes — the split's staleness marker.
 pub const METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL: &str = "topgun_or_prune_split_recomputes_total";
+/// Counter: refs stamped into the index — one arm of the index conservation identity.
+pub const METRIC_PRUNE_STAMPED_REFS_TOTAL: &str = "topgun_or_prune_stamped_refs_total";
+/// Counter: tombstone bytes stamped into the index alongside the refs above.
+pub const METRIC_PRUNE_STAMPED_BYTES_TOTAL: &str = "topgun_or_prune_stamped_bytes_total";
+/// Counter: refs removed from the index by an observed prune drain — the negative arm of the
+/// index conservation identity paired with [`METRIC_PRUNE_STAMPED_REFS_TOTAL`].
+pub const METRIC_PRUNE_DRAINED_REFS_TOTAL: &str = "topgun_or_prune_drained_refs_total";
+/// Counter: refs re-inserted into the index by an observed restore.
+pub const METRIC_PRUNE_RESTORED_REFS_TOTAL: &str = "topgun_or_prune_restored_refs_total";
+/// Counter: refs cleared from the index by an observed rebuild, credited as a reset rather than a
+/// drain against the index conservation identity.
+pub const METRIC_PRUNE_REBUILD_CLEARED_REFS_TOTAL: &str =
+    "topgun_or_prune_rebuild_cleared_refs_total";
+/// Counter: epochs that emitted an entry row — the entry ledger's independent, metrics-side
+/// completeness witness.
+pub const METRIC_PRUNE_EPOCHS_ENTERED_TOTAL: &str = "topgun_or_prune_epochs_entered_total";
+/// Counter: epochs that emitted an exit row — the exit ledger's independent, metrics-side
+/// completeness witness.
+pub const METRIC_PRUNE_EPOCHS_EXITED_TOTAL: &str = "topgun_or_prune_epochs_exited_total";
 
 /// Gauge: indexed tombstone refs, maintained incrementally.
 pub const METRIC_PRUNE_INDEXED_REFS: &str = "topgun_or_prune_indexed_refs";
