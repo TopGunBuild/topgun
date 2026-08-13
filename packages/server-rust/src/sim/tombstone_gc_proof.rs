@@ -595,4 +595,116 @@ mod tests {
             );
         }
     }
+
+    // ==================================================================
+    // Tier-1 deterministic discrimination — the fault-dimension arm
+    // (R7.1/R7.1a, zero-cascade exemption shape 4). The per-epoch residency
+    // ledger — not just the no-resurrection invariant `AC6` already proves —
+    // must stay CORRECT under the SAME interleaved push/prune race: exactly
+    // one attributed `DrainedByPrune` exit (never lost to a race-induced
+    // `Unclassified`, never double-counted), and O-0's conservation identity
+    // still holds. This is the fault surface the file actually reaches (see
+    // the module doc's `SimCluster` bypass note) — the interleaving-fault
+    // dimension, not a `SimNetwork` partition/delay/reorder, which this
+    // file's own scaffold cannot drive.
+    // ==================================================================
+
+    /// PHASE 1 (this segment): the fault-dimension arm of the Tier-1
+    /// harness. Under the same TOCTOU race
+    /// `interleaved_prune_during_push_never_resurrects` proves data-safe,
+    /// the residency ledger's own classification-relevant counters must be
+    /// UNPERTURBED: the raced epoch is attributed `DrainedByPrune` exactly
+    /// once, and O-0 holds over the resulting snapshot.
+    ///
+    /// PHASE 2 (reserved for a later segment, engaged only if R7.3(c)
+    /// fires): the reproducing test itself, if the mechanism's siting rule
+    /// lands it at the interleaving-fault boundary. Not present here — this
+    /// fn carries ONLY the fault-dimension arm in this segment; a second
+    /// phase, if it lands, extends THIS SAME fn's body, never a second fn
+    /// (the shape-4 bound admits exactly one additive fn in this file).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prune_epoch_residency_discrimination_under_network_fault() {
+        for round in 0..64u64 {
+            // ---- PHASE 1: fault-dimension arm --------------------------
+            let (svc, factory, frontier, registry, key_writer) = gated_sync();
+            let (conn, client) = register_device(&registry, "dev-residency-toctou").await;
+            let (map, key) = ("omap", "k1");
+
+            // Same fixture shape as the sibling TOCTOU proof: a live record R2
+            // and an old removed tag T_old (epoch 1) the sweep is eligible to
+            // drop once the fleet cursor moves strictly past it.
+            seed_or_map(&factory, map, key, &["R2"], &["T_old"]).await;
+            frontier.stamp_tombstone(map, key, "T_old"); // epoch 1 (this key)
+            frontier.stamp_tombstone(map, "other", "T2"); // epoch 2, rolls past epoch 1
+            track_client(&frontier, &client, conn, 2).await; // LWM 2 > epoch 1 -> eligible
+            frontier.set_durable_epoch_watermark(1000); // protection active
+            assert!(
+                frontier.is_epoch_prune_eligible(1),
+                "round {round}: epoch 1 is prune-eligible"
+            );
+            let before = frontier.index_conservation_snapshot();
+
+            // Race, started simultaneously, both touching THIS key's OR-Map
+            // state: (A) an admitted push unioning in a NEW tombstone R1, and
+            // (B) the prune sweep dropping T_old. The shared per-key writer
+            // serializes the two — this proof checks the RESIDENCY LEDGER'S
+            // OWN bookkeeping survives that serialization intact, not only
+            // the stored value (which the sibling test already covers).
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let push_svc = Arc::clone(&svc);
+            let bp = Arc::clone(&barrier);
+            let push = tokio::spawn(async move {
+                bp.wait();
+                push_svc
+                    .oneshot(push_entry(make_ctx_conn(conn), map, key, &["R1"], &["R1"]))
+                    .await
+                    .expect("ack");
+            });
+            let (pf, pfac, pkw, bq) = (
+                Arc::clone(&frontier),
+                Arc::clone(&factory),
+                Arc::clone(&key_writer),
+                Arc::clone(&barrier),
+            );
+            let prune = tokio::spawn(async move {
+                bq.wait();
+                prune_epoch_tombstones(&pf, &pfac, &pkw).await;
+            });
+            let _ = tokio::join!(push, prune);
+
+            let after = frontier.index_conservation_snapshot();
+            assert_eq!(
+                after.drained_refs_total,
+                before.drained_refs_total + 1,
+                "round {round}: exactly one attributed DrainedByPrune exit — \
+                 never lost to a race-induced Unclassified, never double-counted"
+            );
+            assert_eq!(
+                after.epochs_exited_total,
+                before.epochs_exited_total + 1,
+                "round {round}: exactly one exit row emitted across the race"
+            );
+            assert_eq!(
+                after.stamped_refs_total + after.restored_refs_total
+                    - after.drained_refs_total
+                    - after.rebuild_cleared_refs_total,
+                after.indexed_refs,
+                "round {round}: O-0 must hold across the interleaved fault, got {after:?}"
+            );
+
+            let (mut live, mut tombs) = stored_or_map(&factory, map, key).await;
+            live.sort();
+            tombs.sort();
+            assert_eq!(
+                live,
+                vec!["R2".to_string()],
+                "round {round}: no resurrection under the race (AC6's own invariant, re-checked here)"
+            );
+            assert_eq!(
+                tombs,
+                vec!["R1".to_string()],
+                "round {round}: T_old pruned AND the pushed union survived"
+            );
+        }
+    }
 }
