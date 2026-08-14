@@ -1,0 +1,58 @@
+SPEC-357b — CONSOLE LOG ENCODING, AND HOW TO VERIFY THE DIGEST
+==============================================================
+
+The two 28,800 s diagnosis cells (spec357-diag-r1, spec357-diag-r2) each produced a
+harness console log and a server console log of ~86-88 MB. Every prior cell in this
+lineage committed console logs of 32-64 KB. The ~1,400x difference is NOT a change in
+what the cells did: it is the WAL-watermark alarm storm that SPEC-357a's own
+SOAK_SERVER_LOG_PASSTHROUGH made visible for the first time (99 % of the bytes; see the
+POST-DATA finding record published in spec356-manifest.md §11.1+).
+
+DECISION (user ruling, 2026-08-14): committing 349 MB of near-identical repeated lines
+into a public repository's permanent history was judged not worth its cost, so the four
+full logs are committed GZIPPED and a plain-text extract of the load-bearing lines is
+committed beside them.
+
+WHAT IS COMMITTED
+-----------------
+  spec357-diag-r{1,2}.harness-console.log.gz          full, lossless, ~1.8 MB each
+  spec357-diag-r{1,2}.server-console.log.gz           full, lossless, ~1.8 MB each
+  spec357-diag-r{1,2}.server-console.residency.log    plain text, ANSI-stripped, the
+                                                      1,796 / 1,642 residency lines the
+                                                      per-epoch ledgers are built from
+
+The .artifacts.sha256 files are the RUNNER'S OWN output and are committed UNMODIFIED.
+They name the UNCOMPRESSED basenames, because that is what the runner digested. This is
+deliberate: the digest is evidence and is not rewritten to match a packaging choice.
+
+HOW TO VERIFY THE DIGEST
+------------------------
+Decompress in place and run the runner's own digest file:
+
+    gunzip -k spec357-diag-r1.harness-console.log.gz
+    shasum -a 256 -c spec357-diag-r1.artifacts.sha256
+
+Both cells were verified this way at commit time: the digest line for
+harness-console.log matches the decompressed bytes exactly, and server-console.log
+decompresses to a stream identical to the original (server-console.log is not itself a
+digest-covered artifact — the runner's ADJ-20 binding covers seven files).
+
+WHY THE EXTRACT EXISTS ALONGSIDE
+--------------------------------
+The residency lines are the load-bearing content: spec357-residency.sh consumes them to
+build the entry/exit ledgers. Keeping them in plain text means a reader can inspect the
+actual measurement without decompressing 86 MB, and keeps the diff-visible surface of
+this commit proportionate to the evidence it carries. The extract is derived, not
+primary: it is reproducible from the .gz with
+
+    gunzip -c spec357-diag-r1.server-console.log.gz \
+      | sed 's/\x1b\[[0-9;]*m//g' \
+      | grep 'topgun_server::tombstone_frontier::residency:'
+
+NOTE ON THE ANSI CODES
+----------------------
+The raw capture carries ANSI SGR sequences, which split the tracing module target from
+its trailing colon and are one half of why the pinned extractor matched zero lines on
+the raw stream. The .gz files preserve the raw bytes including those sequences; the
+extract has them stripped. See spec357b-console-normalize.sh and the POST-DATA finding
+record for the full account.
