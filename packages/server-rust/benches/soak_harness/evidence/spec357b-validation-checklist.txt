@@ -1,0 +1,410 @@
+SPEC-357b -- THE FULL VALIDATION CHECKLIST, ITEMS 1..16, AND THE REPO GATE (AC18 / AC19 / AC20)
+Executed by G9 S2, 2026-08-14, at this half's own tip. Every item carries its LITERAL result.
+===================================================================================================
+
+WHY THIS FILE AND NOT THE MANIFEST. `spec356-manifest.md` §11.1+ is G9 S1's finished, committed work
+and §11.0 is categorically frozen; this half's segment 2 writes NO byte of that file (its own numstat
+contribution to it is ZERO, proven at item 3 below). The checklist record therefore lives in this
+half's own `spec357b-*` namespace, alongside `spec357b-walk-r1r2.txt` and
+`spec357b-fits-observation.txt`, which is where this half's post-data records already live.
+
+ORDERING IS NORMATIVE. Item 1, the PRESENCE limb, is evaluated FIRST -- before every
+reproduce-the-values limb (R6.4, checklist item 1's own text) -- and it REDs on ABSENCE only.
+
+===================================================================================================
+ITEM 1 -- PRESENCE (R6.4), EVALUATED FIRST. Q2..Q10, Q14, Q15 against the bands AS DECLARED IN
+§11.0, UNMODIFIED. Q1, Q11, Q12, Q13 <- SPEC-357a, cited as inherited, not re-run.
+===================================================================================================
+
+THE GOVERNING PROPERTY, QUOTED BECAUSE ITEM 1 TURNS ON IT: "NO HONEST OBSERVATION MAY RED A PRESENCE
+QUESTION. A PRESENCE entry exists to catch a missing or truncated artifact, never to catch a subject
+that behaved in a way the author did not expect."
+
+Q1  column-provenance table .................. INHERITED <- SPEC-357a. Cited, not re-run. (§11.0.2)
+
+Q2  O-0 conservation ledger ................... GREEN, with the band's own defect published beside it
+    BAND AS DECLARED, UNMODIFIED: 1,300 <= rows <= 1,500 per replicate ("~1,440 at 10 s over
+      28,800 s"). NOT EDITED BY THIS HALF. NOT PATCHED. NOT re-derived.
+    LITERAL OBSERVATION, with its denominator (PD-4):
+      spec357-conservation-r1.csv   2,880 data rows   (of 2,880 prune.csv data rows)
+      spec357-conservation-r2.csv   2,880 data rows   (of 2,880 prune.csv data rows)
+      spec357-diag-r1.prune.csv     2,880 data rows + 1 header, first tick 10 s, last 28,800 s
+      spec357-diag-r2.prune.csv     2,880 data rows + 1 header, first tick 10 s, last 28,800 s
+    THE VERDICT, AND THE RULE IT IS TAKEN UNDER. 2,880 is ABOVE the declared band. Q2's text names
+      only a BELOW-band branch ("Below-band => RED, correctly"), so a literal reading leaves a
+      COMPLETE artifact unlimbed. Evaluated under R6.4's GOVERNING PROPERTY: the artifact is complete
+      and unbroken -- an unbroken 10 s series from the first tick to the last, the OPPOSITE of
+      truncated -- so the entry is GREEN. It is NOT read as satisfying 1,300-1,500, and the band is
+      NOT edited to make it fit.
+    THE BAND'S DEFECT, PUBLISHED AS A SEPARATE FACT (PD-F1, RECORDED-AND-ROUTED, owner TODO-634):
+      at the pinned cadence the row count is 28,800 / 10 = 2,880. The band's own parenthetical
+      computes 28,800 / 20 = 1,440 -- a 20 s cadence no cell uses (`spec356-prune.sh` pins
+      PRUNE_SAMPLE_INTERVAL=10 and the runner header prints "prune.csv cadence: 10s (pinned for every
+      cell)"). The band is arithmetically 2x too small for its own stated cadence. TWO PUBLISHED
+      FACTS, NOT ONE FUDGED ONE.
+    VIOLATION COUNT PUBLISHED EVEN WHEN 0: it is not 0 -- 2,484 over 2,484 CONSISTENT of 2,880 (r1),
+      2,458 over 2,458 of 2,880 (r2). CONSISTENT / TORN / TORN-PERSISTENT all present: yes, and both
+      renderings of the torn partition are published side by side (PD-F10).
+    INDEPENDENT WITNESS, AND ITS DECLARED LIMIT: progress.jsonl carries 95 ticks in each cell. It
+      runs at the 300 s steady-interval cadence, so it corroborates that the cell reached full
+      duration and CANNOT arbitrate 2,880-vs-1,440. Published as a limitation, not as corroboration.
+
+Q3  entry ledger spec357-entry-r{n}.jsonl ..... GREEN
+    BAND: 700 <= lines <= 1,200.  OBSERVED: r1 = 899 lines, r2 = 822 lines. IN BAND, both.
+    WITNESS: topgun_or_prune_epochs_entered_total ends at 899 (r1) / 822 (r2) -- exact agreement
+      with the ledger line counts; the window delta over the scraped series is 898 / 821 because the
+      first scrape already reads 1. Both readings agree within +/-1 as the band requires.
+
+Q4  exit ledger spec357-residency-r{n}.jsonl .. GREEN
+    BAND: 0 <= lines <= Q3's line count.  OBSERVED: r1 = 897 (<= 899), r2 = 820 (<= 822). IN BAND.
+    The honest-zero branch is NOT taken (the ledger is non-empty), so its corroboration clause does
+      not apply. WITNESS: topgun_or_prune_epochs_exited_total = 897 / 820 -- exact agreement.
+
+Q5  classification CSV spec357-class-r{n}.csv . GREEN
+    BAND: rows == Q3's line count; all six class columns present even when 0; the `Unclassified`
+      column present even when 0.
+    OBSERVED: r1 = 899 rows (== 899), r2 = 822 rows (== 822). Header, verbatim:
+      epoch,entered_index,stamped_bytes,refs_at_entry,has_exit_row,exit_kind_variant,
+      unclassified_exit,class_a,class_b,class_c,class_d,class_e,class_f
+      -- all six class columns present, `unclassified_exit` present.
+    WITNESS (the row-count identity): |P0|+|P1|+|P2| = |P| = rows, re-derived at item 8:
+      r1 whole cell 1 + 1 + 897 = 899; r2 1 + 1 + 820 = 822. Holds.
+    `P` is NOT empty, so the INDETERMINATE-EMPTY branch does not apply.
+
+Q6  R3.4's SEVEN-limb bundle, per replicate .... GREEN
+    OBSERVED: §11.8 carries limbs (i) (ii) (iii) (iv) (v) (vi) (vii) -- seven, each with >= 1 value
+      row, per replicate. The honest-satisfying literals are present and are NOT read as absences:
+      limb (i) publishes "2,484 violations over 2,484 CONSISTENT scrapes of 2,880"; limb (vi)
+      publishes the literal "0 Unclassified exits over 439 / over 357"; limb (iv) publishes an
+      exactness bound of 0 bytes WITH PD-F12's independence finding beside it.
+
+Q7  the 16 fits (OBSERVATION-ONLY) ............ GREEN, against Part B, with the incomparability
+                                                published beside it
+    BAND: exactly 16 fits, from the UNFORKED fitter.
+    OBSERVED (spec357b-fits-observation.txt, both parts committed verbatim):
+      PART A, the lineage-pinned `-v col=tombstone_bytes`: 16 of 16 exit 2 with the fitter's own
+        message "spec349c2-fit: no column named 'tombstone_bytes' in header" -- PD-F6.
+      PART B, `-v col=topgun_ormap_tombstone_bytes_total`: 16 of 16 exit 0, rows_used=360,
+        skipped_empty=0 on every one.
+    WITNESS: the fitter's own rows_used / skipped_empty, printed on all 16 -- and re-run
+      independently at item 10, where all 16 reproduce exactly.
+    THE CAVEAT PUBLISHED BESIDE THE GREEN: Part B's slopes are over the prune ledger at the 10 s
+      prune cadence and are therefore NOT numerically comparable to the lineage's earlier 16-fit
+      tables, which are over the soak ledger. OBSERVATION-ONLY: no determination, share, denominator
+      or limb moves on any of it.
+
+Q8  the v2->v3 -U0 diff ....................... GREEN
+    BAND: every hunk carrying exactly one class label, plus all three run transcripts.
+    OBSERVED: grep -c '^@@' spec357-slottruth-v2-v3.diff -> 3;
+              grep -c '^# -\+ class [ABC] -\+$' -> 3. ONE label per hunk, EXACT.
+              spec357-slottruth-v2-v3-runs.txt carries RUN 1, RUN 2 (+ RUN 2b supplementary),
+              RUN 3 / 3a / 3b, and RUN 3c / 3d (v2 alongside, unmodified).
+    WITNESS: v2 run alongside, unmodified -- exit 3 on both cells at item 11.
+
+Q9  spec357-mechanism-xask.md ................. GREEN
+    BAND: >= 1 line matching each of T1...T5 and each of H-a / H-b / H-c, EACH anchor line carrying
+      one of R8.3's three disposition labels.
+    OBSERVED, one line per anchor, each with its label on the same line:
+      T1. RECORDED-AND-ROUTED   T2. RECORDED-AND-ROUTED   T3. RECORDED-AND-ROUTED
+      T4. APPLIED               T5. RECORDED-AND-ROUTED
+      H-a. RECORDED-AND-ROUTED  H-b. RECORDED-AND-ROUTED  H-c. REFUTED-WITH-REASON
+    WITNESS: R8.3's per-finding disposition requirement -- 21 findings X1..X21, census reconciling
+      3 APPLIED + 6 REFUTED-WITH-REASON + 12 RECORDED-AND-ROUTED = 21.
+
+Q10 spec357-fixshape-ruling.md ................ GREEN
+    BAND: its rule, its antecedent and its reasoning.
+    OBSERVED: the file quotes R9.2's rule as frozen in §11.0.13, states the antecedent that fired
+      (the third branch -- any INDETERMINATE-*, here INDETERMINATE-INSTRUMENT / CONSERVATION), and
+      gives its reasoning; it proposes NO fix shape and neither prohibited estimator.
+    THE HONEST-OUT-OF-BAND BRANCH IS THE ONE IN FORCE: on an INDETERMINATE-* outcome, "the ruling is
+      NOT WRITTEN, because ..." IS the satisfying content, not an absence. GREEN on (ii).
+
+Q11 the reproducing test ...................... INHERITED <- SPEC-357a. Cited, not re-run.
+Q12 the mutation arm .......................... INHERITED <- SPEC-357a. Cited, not re-run.
+Q13 the two gate PART VI re-captures .......... INHERITED <- SPEC-357a. Cited, not re-run.
+
+Q14 the tracker grader, both directions ....... GREEN
+    BAND: RED on the unedited fixture, GREEN on the edited real tracker files.
+    OBSERVED: RED exit 1 (red limbs a, b, d) on an unedited tracker fixture; GREEN exit 0 (all five
+      limbs) on the two edited real tracker files. Both transcripts appended to
+      spec357-trackergrade-proofs.txt, append-only (722 insertions, 0 deletions; the pre-append
+      198-line prefix cmp-s silent). See item 13.
+
+Q15 §8.3 quoted verbatim beside the determination GREEN
+    REQUIRED because an INDETERMINATE-* fired. OBSERVED: §11.12.5 carries §8.3 verbatim as a block
+      quote adjacent to the determination, under the heading "Escalation item 5".
+
+ITEM 1 VERDICT: every evaluated entry GREEN (Q2..Q10, Q14, Q15); Q1, Q11, Q12, Q13 inherited. NO RED.
+  No band was edited, no checklist was patched, and Q2's above-band literal is published with the
+  band's own defect beside it rather than reconciled by silence.
+
+===================================================================================================
+ITEM 2 -- THE DATA BOUNDARY IS A DESCENDANT OF EVERY PRE-DATA HOP
+===================================================================================================
+  $ git log --follow --diff-filter=A --format=%H --reverse -- '.../spec357-*.soak.json' | head -1
+    -> 7aff5f1d8f100daabd6c9e1025ee237d8252a0ce
+       "test(sf-357b): the diag_r1 measurement cell -- 28,800 s at the pin (G6, crossing the DATA
+        BOUNDARY)"
+  $ git merge-base --is-ancestor 065f9611 7aff5f1d   -> YES  (SPEC-357a's tip)
+  $ git merge-base --is-ancestor 8a60f135 7aff5f1d   -> YES  (the G2 counted-.rs base)
+  $ git merge-base --is-ancestor a6c1d685 7aff5f1d   -> YES  (R1.1's measurement pin)
+  RESULT: GREEN on the `TIER2 = RUN` branch -- the first soak.json is a strict descendant of every
+  PRE-DATA hop, so no predicate byte can have been authored after the data existed.
+
+===================================================================================================
+ITEM 3 -- MANIFEST FREEZE (§0..§10 AND §11.0), AND THIS SEGMENT'S OWN ZERO CONTRIBUTION
+===================================================================================================
+  $ git diff --numstat 065f9611..HEAD -- '.../spec356-manifest.md'
+    -> 1075   0      INSERTIONS ONLY, ZERO DELETIONS.
+  $ git show 065f9611:.../spec356-manifest.md > /tmp/m357a.md  (6,614 lines)
+  $ head -n 6614 .../spec356-manifest.md | cmp /tmp/m357a.md -   -> SILENT
+       the file as it stood at SPEC-357a's tip is a BYTE-IDENTICAL PREFIX, so §11.0 is untouched.
+  $ grep -c '^## §11' .../spec356-manifest.md   -> 1
+  G9 S2's OWN CONTRIBUTION TO THAT FILE: ZERO. The 1,075 insertions are G9 S1's §11.1+; this segment
+  added no line and deleted none. No ADJ-21 exists; no addendum and no checklist was patched.
+
+===================================================================================================
+ITEM 4 -- THE .rs SURFACE, THE CENSUS AND THE PINNED CONSTANT COUNT
+===================================================================================================
+  $ git diff --name-only 8a60f135..HEAD -- '*.rs'
+      packages/server-rust/src/service/domain/crdt.rs
+      packages/server-rust/src/sim/tombstone_gc_proof.rs
+      packages/server-rust/src/tombstone_frontier.rs
+      packages/server-rust/src/tombstone_frontier_impl.rs
+    -> EXACTLY 4 FILES, the same four SPEC-357a declared, AND NO FIFTH. This half contributes zero
+       .rs lines. (The base is 8a60f135, NOT the R1.1 pin a6c1d685, which yields only three files.)
+  $ grep -qF '22 counters, 11 gauges, 7 histograms' packages/server-rust/src/tombstone_frontier.rs
+    -> exit 0   (the line-number-free form is the normative check, per AC2a)
+  $ pinned constants in tombstone_frontier.rs: 40
+       grep -c '^pub const ' -> 40, and the unique "topgun_*" name literals -> 40, agreeing.
+       (A bare grep for '&str = "topgun' returns 36 because four declarations wrap their literal to
+       the next line; the two agreeing counts above are the census, and it is 22 + 11 + 7 = 40.)
+
+===================================================================================================
+ITEM 5 -- <- SPEC-357a (the armed-vs-disarmed equality workload)
+===================================================================================================
+  INHERITED as discharged. THIS HALF'S LIMB: the discharge is quoted verbatim into §11.1+ at §11.10
+  (R2.4's two non-perturbation discharges). Not re-derived here.
+
+===================================================================================================
+ITEM 6 -- <- SPEC-357a (PART VI in both gate logs). THIS HALF'S LIMB: THEIR BYTES ARE UNMOVED
+===================================================================================================
+  $ git diff --numstat 065f9611..HEAD -- spec356a-eager-registration.log spec356a-step0c-fixture.log
+    -> EMPTY.  $ git status --porcelain (same two files) -> EMPTY.
+  THIS HALF RE-CAPTURES NOTHING. Their armed N/N, disarmed 0/N, empty_fields=0 and literal column
+  count are quoted into §11.1+ at §11.10.
+
+===================================================================================================
+ITEM 7 -- O-0 RE-DERIVED DIRECTLY FROM prune.csv BY awk, INDEPENDENTLY OF THE BUILDER
+===================================================================================================
+  Over the *_a / *_b render pair (columns 44-59) plus column 60, one awk pass per replicate:
+
+    r1  rows=2,880  CONSISTENT (all eight quantities agreeing between renders) = 2,484
+                    TORN (any quantity differing) = 396
+        column 60 as emitted: CONSISTENT=2,484  TORN=0  TORN-PERSISTENT=396
+        violations over CONSISTENT = 2,484      exact = 0
+        torn fraction = 396 / 2,880 = 13.750000 %
+    r2  rows=2,880  CONSISTENT = 2,458   TORN = 422
+        column 60 as emitted: CONSISTENT=2,458  TORN=0  TORN-PERSISTENT=422
+        violations over CONSISTENT = 2,458      exact = 0
+        torn fraction = 422 / 2,880 = 14.652778 %
+
+  RESULT: the published CONSISTENT / TORN / TORN-PERSISTENT counts and the violation count over
+  CONSISTENT scrapes REPRODUCE EXACTLY (§11.3.2, §11.3.3).
+  R3.0 LIMB 4's STRUCTURAL PROPERTY, CHECKED MECHANICALLY RATHER THAN TRUSTED: the re-derivation
+  evaluates the identity ONLY on rows whose two renders agree in all eight quantities, so every one
+  of the 2,484 / 2,458 published violations sits on such a row by construction of the check itself.
+  A torn render contributed to no violation.
+  The two labels over one row set (runner TORN-PERSISTENT vs builder TORN) are PD-F10; both
+  partitions exclude the same 396 / 422 rows, so the denominator is 2,484 / 2,458 either way.
+
+===================================================================================================
+ITEM 8 -- THE PER-EPOCH CLASSIFICATION RE-DERIVED FROM THE LEDGERS, INDEPENDENTLY OF classify.sh
+===================================================================================================
+  Entry JSONL left-joined to exit JSONL, classes recomputed from the frozen definitions
+  (P0 = entered_index false; P1 = entered and no exit row; P2 = entered and an exit row; within P2,
+  T = [entered_at_op_seq, exited_at_op_seq) INTERSECT LICENSED INTERSECT FENCED, half-open as frozen;
+  (c) = not T, (b) = T and not DrainedByPrune, (d) = T and DrainedByPrune):
+
+    r1 WHOLE CELL  |P|=899  |P0|=1 |P1|=1 |P2|=897  sum=899
+                   (a)0 (b)0 (c)897 (d)0 (e)1 (f)1  -> six classes sum to 899, no remainder
+    r1 WINDOW      |P|=440  |P0|=0 |P1|=1 |P2|=439  sum=440
+                   (a)0 (b)0 (c)439 (d)0 (e)1 (f)0  -> six classes sum to 440, no remainder
+    r2 WHOLE CELL  |P|=822  |P0|=1 |P1|=1 |P2|=820  sum=822
+                   (a)0 (b)0 (c)820 (d)0 (e)1 (f)1  -> six classes sum to 822, no remainder
+    r2 WINDOW      |P|=358  |P0|=0 |P1|=1 |P2|=357  sum=358
+                   (a)0 (b)0 (c)357 (d)0 (e)1 (f)0  -> six classes sum to 358, no remainder
+    Unclassified exits: 0 over 897 (r1) and 0 over 820 (r2) whole cell; 0 over 439 and 0 over 357
+    on the window's P2 -- reproducing the published literal exactly.
+
+  RESULT: the published (a)/(b)/(c)/(d)/(e)/(f) counts REPRODUCE EXACTLY, |P0|+|P1|+|P2| = |P| on
+  both replicates and both populations, and the six classes sum to |P| with no remainder.
+  ENTRY-LEDGER COMPLETENESS: 899 lines vs topgun_or_prune_epochs_entered_total = 899 (r1) and 822 vs
+  822 (r2) -- agreement within +/-1 (exact). Exit side: 897 vs 897 and 820 vs 820.
+  BOTH DENOMINATORS PER STEP (R4.2): checked against §11.6 -- every step publishes its own
+  sub-population share AND its share of P, each with its denominator as a literal, including the
+  steps marked NOT EVALUATED. No share is quoted without both.
+
+===================================================================================================
+ITEM 8a -- R4.1's PINNED JOIN, RECOMPUTED, AND THE FORBIDDEN CADENCE JOIN AS A CROSS-CHECK ONLY
+===================================================================================================
+  t_first_seen(e) = (entered_at_unix_ms(e) - cell_start_unix_ms) / 1000, recomputed for every epoch:
+    cell_start_unix_ms  r1 = 1786646065000    r2 = 1786697310000
+    (derived as soak.json's end `timestamp` minus `durationSecsActual` -- PD-F9 limb (a): neither
+    named artifact records a start literal, so it is an arithmetic of two soak.json literals at 1 s
+    resolution while the formula pins milliseconds.)
+  RESULT: the deciding population REPRODUCES EXACTLY -- |P| = 440 (r1) and 358 (r2).
+  SENSITIVITY, MEASURED RATHER THAN ASSUMED: at cell_start -1000 ms / +0 / +1000 ms the population
+  is 440 / 440 / 440 (r1) and 358 / 358 / 358 (r2). The 1 s uncertainty moves nothing.
+  THE FORBIDDEN prune.csv-CADENCE JOIN: computed as a published cross-check only (§11.6's own
+  cross-check row) and DECIDES NOTHING here -- the pinned millisecond join above is the only source
+  the population was taken from.
+
+===================================================================================================
+ITEM 9 -- THE TWO SIDECARS RE-RUN FROM THEIR COMMITTED BYTES OVER THIS HALF'S SUBJECT
+===================================================================================================
+  $ sh ./spec357b-console-normalize.sh spec357-diag-r{n}.server-console.residency.log <tmp>  -> exit 0
+  $ sh ./spec357-residency.sh <tmp> <out>                                                    -> exit 0
+      r1 entry.jsonl      BYTE-IDENTICAL to spec357-entry-r1.jsonl
+      r1 residency.jsonl  BYTE-IDENTICAL to spec357-residency-r1.jsonl
+      r2 entry.jsonl      BYTE-IDENTICAL to spec357-entry-r2.jsonl
+      r2 residency.jsonl  BYTE-IDENTICAL to spec357-residency-r2.jsonl
+  $ sh ./spec357-classify.sh <entry> <residency> <prune.csv> <out>                           -> exit 0
+      r1 class.csv         BYTE-IDENTICAL to spec357-class-r1.csv
+      r1 conservation.csv  BYTE-IDENTICAL to spec357-conservation-r1.csv
+      r2 class.csv         BYTE-IDENTICAL to spec357-class-r2.csv
+      r2 conservation.csv  BYTE-IDENTICAL to spec357-conservation-r2.csv
+  $ git diff --numstat / git status --porcelain over spec357-residency.sh, spec357-classify.sh and
+    spec357b-console-normalize.sh -> EMPTY. The sidecars' own bytes are unmoved.
+  (The normalizer is PD-F5's transport-only remediation; the PINNED extractor ran BYTE-UNCHANGED
+  over its output, which is exactly what this re-run reproduces.)
+
+===================================================================================================
+ITEM 10 -- THE SEGMENT SLICING BY THE NAMED TOOL, AND THE 16 UNFORKED FITS
+===================================================================================================
+  The committed header-preserving 8-way `awk -F,` NR-split one-liner from spec355-manifest.md
+  §10.5.2, re-run with EXACTLY the two declared literal substitutions (input spec355-w1000.csv ->
+  spec357-diag-r{n}.prune.csv; output pattern spec355-w1000-seg%d.csv ->
+  spec357-diag-r{n}-seg%d.csv) and the awk program text otherwise unchanged:
+    -> 16 of 16 segments BYTE-IDENTICAL to the committed spec357-diag-r{n}-seg{1..8}.csv,
+       0 mismatches.
+  The UNFORKED spec349c2-fit.awk re-run over all 16 committed segments:
+    PART A  -v col=tombstone_bytes                        -> 16 of 16 "no column named
+                                                             'tombstone_bytes' in header" (PD-F6)
+    PART B  -v col=topgun_ormap_tombstone_bytes_total     -> all 16 slopes, SEs, r2, rows_used=360
+                                                             and skipped_empty=0 REPRODUCE EXACTLY,
+                                                             field for field, against
+                                                             spec357b-fits-observation.txt
+  OBSERVATION-ONLY: a lineage-continuity byte-slope record, not a diagnosis input. Nothing here
+  enters the determination.
+
+===================================================================================================
+ITEM 11 -- v3's RUN 3 AGAINST THIS HALF'S SUBJECT, WITH v2 ALONGSIDE, UNMODIFIED
+===================================================================================================
+  $ sh ./spec357-slottruth-v3.sh . spec357-diag-r1 28800 diag_r1   -> EXIT 0
+  $ sh ./spec357-slottruth-v3.sh . spec357-diag-r2 28800 diag_r2   -> EXIT 0
+       stdout re-verified line-for-line against the committed RUN 3a transcript: IDENTICAL.
+  $ sh ./spec356c-slottruth-v2.sh . spec357-diag-r1 28800          -> EXIT 3
+       "SLOTTRUTH FAIL: spec357-diag-r1.matrix.txt does not name cell long"
+  $ sh ./spec356c-slottruth-v2.sh . spec357-diag-r2 28800          -> EXIT 3
+       "SLOTTRUTH FAIL: spec357-diag-r2.matrix.txt does not name cell long"
+  -> RESIDUAL R-1 DISCHARGED, on identical bytes, by the parameterisation and nothing else.
+  $ diff -U0 spec356c-slottruth-v2.sh spec357-slottruth-v3.sh | tail -n +3
+       -> 34 lines, BYTE-IDENTICAL to the committed diff body in spec357-slottruth-v2-v3.diff
+          (that file's own `#` header and its per-hunk class labels are the wrapper; the diff
+          payload matches exactly). This half edits neither script.
+  $ git status --porcelain / git diff --numstat over v1, v2 and v3 -> EMPTY. Digests unmoved.
+  RUNS 1-2 -> <- SPEC-357a.
+
+===================================================================================================
+ITEM 12 -- <- SPEC-357a (the mutation harness's two legs). THIS HALF'S LIMB, AT THIS HALF'S HEAD
+===================================================================================================
+  $ git apply --check .../spec357-reproducer-mutation.patch    -> EXIT 0
+       the patch still corresponds to the shipped source at THIS half's HEAD.
+  $ git status --porcelain                                     -> EMPTY
+  §11.1+ (§11.11) names the test by module path and fn name --
+  tombstone_frontier_impl::tests::drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total --
+  records §11.0.17's SUPERSEDED-BY-EXECUTION name, and quotes the mutation arm's BOTH legs.
+
+===================================================================================================
+ITEM 12a -- THE TIER-1 -> TIER-2 GATE VERDICT, READ AND NOT RE-DERIVED
+===================================================================================================
+  $ grep -n 'VERDICT: TIER2' spec357-tier1-transcript.txt  -> 416: "VERDICT: TIER2 = RUN"
+  All three CLEAN conditions and their evaluated values are quoted into §11.1+ at §11.2:
+    (i)   HOLDS        (ii)  DOES NOT HOLD (and separately, the Unclassified disjunct also fires)
+    (iii) HOLDS        => Tier 1 is AMBIGUOUS => TIER 2 RUNS.
+  $ git diff --numstat / git status --porcelain over spec357-tier1-transcript.txt -> EMPTY.
+  The gate was NOT re-opened. The cells exist, so the SKIPPED branch's obligations do not apply.
+
+===================================================================================================
+ITEM 13 -- THE TRACKER GRADER IN BOTH DIRECTIONS, AND TRACKER DISCIPLINE
+===================================================================================================
+  $ sh ./spec357-trackergrade.sh <scratch>/TODO-634.pre.md <scratch>/unedited
+        ./spec357b-trackergrade.ref                                    -> EXIT 1 (RED: a, b, d)
+  $ sh ./spec357-trackergrade.sh <scratch>/TODO-634.pre.md .specflow/todos
+        ./spec357b-trackergrade.ref                                    -> EXIT 0 (GREEN: a,b,c,d,e)
+  Both transcripts appended to spec357-trackergrade-proofs.txt, APPEND-ONLY:
+    $ git diff --numstat -- spec357-trackergrade-proofs.txt   -> 722   0   (zero deletions)
+    $ head -198 <file> | cmp <pre-append copy> -               -> SILENT (SPEC-357a's fixture-only
+                                                                  proof is a byte-identical prefix)
+  TRACKER DISCIPLINE, RE-VERIFIED AFTER THE RUNS:
+    TODO-634.md   ticked 2 / unticked 5 / 7 top-level boxes / 0 indented -- UNCHANGED; NOT TICKED.
+                  status: open -- NOT CLOSED.
+    TODO-648.md   status: open -- NOT CLOSED.
+    TODO-637.md / TODO-638.md -- NOT TOUCHED.
+  NOTE, RECORDED RATHER THAN HIDDEN: limb (e) REDed on this half's FIRST edit attempt and caught a
+  real delta-containment defect (a blank-line diff alignment pushed one pre-existing line outside
+  the graded box). The edit was restructured; the finding is written into the committed transcript.
+
+===================================================================================================
+ITEM 14 -- THE REPO GATE (AC18, AC19)
+===================================================================================================
+  $ sh scripts/check-invariants.sh
+      -> EXIT 0.  "invariants: 21 entries, 4 NAKED (baseline 4)"
+      -> TG-OR-005 still reads "- **Status:** `open (TODO-634)`." (INVARIANTS.md:481)
+      -> git diff --numstat 8a60f135..HEAD -- INVARIANTS.md -> EMPTY; git status -> EMPTY.
+         INVARIANTS.md IS UNEDITED, NAKED_BASELINE IS 4, TG-OR-005 IS OPEN AND NAKED.
+  $ cargo fmt --check                                              -> EXIT 0
+  $ cargo clippy --all-targets --all-features -- -D warnings       -> EXIT 0
+  $ cargo build --release                                          -> EXIT 0
+  $ SDKROOT=$(xcrun --sdk macosx --show-sdk-path) \
+    cargo test --release -p topgun-server                          -> EXIT 0
+      lib: "test result: ok. 1800 passed; 0 failed; 2 ignored", plus every integration binary ok
+      and the doc-tests ok; 0 failures anywhere in the run.
+      SPEC-357a's REPRODUCING TEST RAN AND PASSED, in its passing form, in this very run:
+        test tombstone_frontier_impl::tests::
+             drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total ... ok
+      (No tension with AC12: the deliberately-FAILING leg lived only in SPEC-357a's throwaway
+      worktree and is not part of the suite this gate measures.)
+  $ pnpm test:sim                                                  -> EXIT 0
+      33 passed, 0 failed across the simulation binaries, including
+        test sim::tombstone_gc_proof::
+             prune_epoch_residency_discrimination_under_network_fault ... ok
+  AC19-vs-AC2 BRANCH: NOT TAKEN. No gate command REDed, in the four declared .rs files or outside
+  them, so there was nothing to STOP-AND-REPORT and no fifth .rs file was touched.
+
+===================================================================================================
+ITEM 15 -- NO PROVENANCE IN CODE (AC20)
+===================================================================================================
+  $ grep -rn 'SPEC-35' packages/server-rust/src | wc -l   -> 0
+  ZERO MATCHES. This half introduced no .rs byte, so this is also a statement about the inherited
+  surface: it carries no regression on this axis.
+
+===================================================================================================
+ITEM 16 -- CELL E's DISPOSITION IS TAKEN
+===================================================================================================
+  §11.13 carries the successor CELLE_DISPOSITION enum value DEFERRED-PENDING-DIAGNOSIS, with
+  R4.6(i)'s third limb quoted as its antecedent and the antecedent as determined this round
+  (INDETERMINATE-INSTRUMENT, cause CONSERVATION) stated beside it. A VALUE IS PRESENT; the branch is
+  TAKEN, not un-taken -- explicitly NOT the fourth value NOT-FIRED-DETERMINATION-INDETERMINATE,
+  which would record an un-taken branch.
+  CELL E IS NOT RUN AND NO PRE-346 BINARY IS BUILT. The manifest's own §9 checklist 16 keeps its
+  by-construction RED and is not retroactively greened.
+  The tracker byte is written to TODO-634 (updated, not closed, not ticked).
+
+===================================================================================================
+SUMMARY
+===================================================================================================
+  Items 1, 2, 3, 4, 7, 8, 8a, 9, 10, 11, 12(limb), 12a, 13, 14, 15, 16 -- ALL GREEN AS RECORDED.
+  Items 5, 6, 12 -- <- SPEC-357a, cited as inherited with this half's own limbs discharged above.
+  NO ITEM RED. No band, threshold, limb, enum or PRESENCE entry was edited to obtain any of it.
