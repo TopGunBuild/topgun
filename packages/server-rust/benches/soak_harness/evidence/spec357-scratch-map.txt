@@ -1,0 +1,4 @@
+# SPEC-357b G6 — scratch SPEC356_OUT_DIR -> evidence dir, basenames unchanged on both sides.
+# Written by the G6 copy step. One line per replicate.
+/Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1 -> /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence
+/Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r2 -> /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence
