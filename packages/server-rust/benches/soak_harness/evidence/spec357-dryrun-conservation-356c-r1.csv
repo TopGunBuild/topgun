@@ -1,0 +1,6 @@
+# RESIDENCY_COLUMNS_ABSENT__PRE_INSTRUMENT_SUBJECT
+#   quantities present in NEITHER bare NOR *_a/*_b form: topgun_or_prune_stamped_refs_total topgun_or_prune_stamped_bytes_total topgun_or_prune_drained_refs_total topgun_or_prune_restored_refs_total topgun_or_prune_rebuild_cleared_refs_total topgun_or_prune_epochs_entered_total topgun_or_prune_epochs_exited_total
+# SINGLE_RENDER_SUBJECT__DOUBLE_READ_NOT_EXERCISABLE
+#   this subject carries at most one /metrics render per scrape tick, so O-0's double-read
+#   sampling rule (R3.0) has no pair to evaluate even where a single-render column exists
+elapsed_secs,note

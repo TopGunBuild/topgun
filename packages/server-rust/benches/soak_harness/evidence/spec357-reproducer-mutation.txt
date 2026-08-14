@@ -1,0 +1,146 @@
+spec357-reproducer-mutation.txt -- the both-legs transcript (R7.6, Q12, AC12(iii)).
+
+Reproducing test (R7.3(a), Q11):
+  fn: tombstone_frontier_impl::tests::drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total
+  Module: packages/server-rust/src/tombstone_frontier_impl.rs, existing inline
+          `#[cfg(test)] mod tests` -- counted file 2, slot already spent by G2.
+
+Named mechanism: a `DrainedByPrune` exit's `bytes_freed_attributed` is EXACTLY the
+epoch's own stamped byte total -- the accounting step T2(exactness) exists to make
+observable, and the precise historical symptom SPEC-357a's Context table records:
+`bytes_freed_attributed` EMPTY on every one of 415/447 epoch rows over the prior
+lineage's deciding window.
+
+Mutation patch: spec357-reproducer-mutation.patch -- a single, minimal, repair-shaped
+production mutation to `finalize_epoch_exit` in tombstone_frontier_impl.rs. Replaces:
+
+    let bytes_freed_attributed = if matches!(exit_kind, EpochExitKind::DrainedByPrune) {
+        slot.stamped_bytes
+    } else {
+        0
+    };
+
+with:
+
+    let bytes_freed_attributed = 0;
+
+-- removing the exact-byte-attribution mechanism the reproducing test asserts. This
+is the inverse of the mechanism (the "un-fix"): applying it reproduces, in the
+mutated worktree, the EXACT historical symptom named above. `git apply --check`
+against `HEAD` on the main tree succeeds; `git status --porcelain` on the main tree
+is empty -- the mutation is a committed artifact, never applied to the committed
+tree.
+
+================================================================================
+LEG 1 -- committed (unmutated) tree, PASS
+================================================================================
+
+Pin: b4b1dbb96df45c9f26af3dad6a5f7adff24ee39a (main tree HEAD at the time of this
+run -- the reproducing test plus its own `cargo fmt` fixup, both G5 S2 commits).
+
+Command:
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo test --release \
+    -p topgun-server --lib \
+    drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total -- --nocapture
+
+Output:
+  Finished `release` profile [optimized] target(s) in 6m 02s
+  Running unittests src/lib.rs (target/release/deps/topgun_server-b3ef059854b88584)
+
+  running 1 test
+  test tombstone_frontier_impl::tests::drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total ... ok
+
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1801 filtered out; finished in 0.00s
+
+RESULT: PASS. (Whole-suite green is confirmed separately under AC19's own full-gate
+run, `cargo test --release -p topgun-server`, recorded in this half's final
+self-check.)
+
+================================================================================
+LEG 2 -- throwaway git worktree, patch applied, FAIL
+================================================================================
+
+Worktree: created via
+  git worktree add /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/6d2f5fc4-5c16-4bb4-a6fe-05fff74b9c5c/scratchpad/spec357a-mutation-worktree HEAD
+at main-tree commit af8247f3 (the reproducing test's own commit, one commit before
+the unrelated `cargo fmt` fixup -- the mutation's target region, `finalize_epoch_exit`
+at lines 690-697, is byte-identical between af8247f3 and the later b4b1dbb9, so this
+does not affect the leg-2 result).
+
+Patch applied:
+  git apply spec357-reproducer-mutation.patch
+
+`git -C <worktree> diff --stat` (captured BEFORE `git worktree remove`):
+  packages/server-rust/src/tombstone_frontier_impl.rs | 6 +-----
+  1 file changed, 1 insertion(+), 5 deletions(-)
+
+Command (the SAME test, unchanged):
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo test --release \
+    -p topgun-server --lib \
+    drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total -- --nocapture
+
+Output:
+  Finished `release` profile [optimized] target(s) in 5m 40s
+  Running unittests src/lib.rs (.../spec357a-mutation-worktree/target/release/deps/topgun_server-b3ef059854b88584)
+
+  running 1 test
+
+  thread 'tombstone_frontier_impl::tests::drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total' (10693351) panicked at packages/server-rust/src/tombstone_frontier_impl.rs:3108:9:
+  assertion `left == right` failed: a DrainedByPrune exit must attribute EXACTLY the epoch's own stamped byte total, got 0
+    left: 0
+   right: 24
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  test tombstone_frontier_impl::tests::drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total ... FAILED
+
+  failures:
+      tombstone_frontier_impl::tests::drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total
+
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1801 filtered out; finished in 0.00s
+
+RESULT: FAIL on the named assertion (`left == right` at the exact
+`bytes_freed_attributed` comparison this test exists to check: `left: 0` is what
+the mutation produces, `right: 24` is the tag's true byte length). This is a
+genuine assertion failure on the mechanism's own signature -- NOT a compile error,
+NOT an unrelated panic, NOT a timeout. R7.6's last limb and AC12(iii) are
+discharged.
+
+================================================================================
+CLEANUP AND MAIN-TREE PROOF
+================================================================================
+
+  git worktree remove /private/tmp/.../spec357a-mutation-worktree --force
+
+`git worktree list` after removal:
+  /Users/koristuvac/Projects/topgun/topgun                                           b4b1dbb9 [main]
+  /Users/koristuvac/Projects/topgun/topgun-todo448                                   938e7825 [sf-299-ci-unit-hang]
+  /Users/koristuvac/Projects/topgun/topgun/.claude/worktrees/brave-blackwell-751fe6  44593c36 (detached HEAD)
+
+-- the throwaway worktree is gone; the two remaining entries are pre-existing,
+unrelated worktrees, not created by this segment.
+
+  git apply --check packages/server-rust/benches/soak_harness/evidence/spec357-reproducer-mutation.patch
+
+-- against HEAD on the main tree: exit 0.
+
+  git status --porcelain
+
+-- on the main tree (before committing this transcript and the patch): empty of
+any mutation-related change. The mutation was never applied to, and never
+committed on, the main tree.
+
+================================================================================
+Q12 / AC12 DISCHARGE SUMMARY
+================================================================================
+
+(i)   Committed tree carries ONLY the passing form -- no #[ignore], no
+      #[should_panic], no env-gated skip. Confirmed: Leg 1 above.
+(ii)  spec357-reproducer-mutation.patch committed, names a single minimal
+      repair-shaped production mutation, `git apply --check` against HEAD
+      succeeds, `git status --porcelain` on the main tree is clean. Confirmed
+      above.
+(iii) spec357-reproducer-mutation.txt (this file) carries both legs, PASS and
+      FAIL, with the failing assertion quoted. Confirmed above.
+
+R7.2's CLEAN condition (iii) reads this arm: "the reproducing test exists and its
+mutation arm FAILS" -- TRUE. See spec357-tier1-transcript.txt for the full R7.2
+gate evaluation and verdict.

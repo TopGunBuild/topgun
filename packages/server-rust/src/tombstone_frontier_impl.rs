@@ -59,7 +59,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
@@ -68,22 +68,25 @@ use crate::network::connection::ConnectionId;
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::RecordValue;
 use crate::tombstone_frontier::{
-    CausalFrontier, ClientId, Epoch, GateToken, PruneClaimSpanRecord, PruneEpochRecord,
-    PrunePassRecord, PruneRecordArming, PruneRecordObserver, PruneSafety,
-    METRIC_PRUNE_ABSENT_TOTAL, METRIC_PRUNE_BYTES_FREED_TOTAL, METRIC_PRUNE_CLAIM_LAG_EPOCHS,
-    METRIC_PRUNE_CLAIM_SPAN_EPOCHS, METRIC_PRUNE_CONSIDERED_TOTAL, METRIC_PRUNE_CURRENT_EPOCH,
+    CausalFrontier, ClientId, Epoch, EpochExitKind, GateToken, PruneClaimSpanRecord,
+    PruneEpochEntryRecord, PruneEpochRecord, PruneEpochResidencyRecord, PrunePassRecord,
+    PruneRecordArming, PruneRecordObserver, PruneSafety, METRIC_PRUNE_ABSENT_TOTAL,
+    METRIC_PRUNE_BYTES_FREED_TOTAL, METRIC_PRUNE_CLAIM_LAG_EPOCHS, METRIC_PRUNE_CLAIM_SPAN_EPOCHS,
+    METRIC_PRUNE_CONSIDERED_TOTAL, METRIC_PRUNE_CURRENT_EPOCH, METRIC_PRUNE_DRAINED_REFS_TOTAL,
     METRIC_PRUNE_DRAIN_EPOCHS, METRIC_PRUNE_DRAIN_REFS, METRIC_PRUNE_DROPPED_TOTAL,
     METRIC_PRUNE_DURABLE_EPOCH_WATERMARK, METRIC_PRUNE_ELIGIBLE_REFS,
     METRIC_PRUNE_EMPTY_DRAINS_TOTAL, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL,
+    METRIC_PRUNE_EPOCHS_ENTERED_TOTAL, METRIC_PRUNE_EPOCHS_EXITED_TOTAL,
     METRIC_PRUNE_EPOCH_BYTES_FREED, METRIC_PRUNE_EPOCH_CONSIDERED, METRIC_PRUNE_EPOCH_DROPPED,
     METRIC_PRUNE_INDEXED_EPOCHS, METRIC_PRUNE_INDEXED_REFS, METRIC_PRUNE_INELIGIBLE_REFS,
     METRIC_PRUNE_LAST_DRAINED_EPOCH, METRIC_PRUNE_LOW_WATER_MARK, METRIC_PRUNE_LWM_ADVANCES_TOTAL,
     METRIC_PRUNE_LWM_EPOCHS_ADVANCED_TOTAL, METRIC_PRUNE_LWM_STALL_SECONDS,
     METRIC_PRUNE_MATCHED_NOTHING_TOTAL, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL,
-    METRIC_PRUNE_PASSES_TOTAL, METRIC_PRUNE_RESTORED_EVICTED_TOTAL,
-    METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
+    METRIC_PRUNE_PASSES_TOTAL, METRIC_PRUNE_REBUILD_CLEARED_REFS_TOTAL,
+    METRIC_PRUNE_RESTORED_EVICTED_TOTAL, METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
+    METRIC_PRUNE_RESTORED_REFS_TOTAL, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
     METRIC_PRUNE_SPLIT_COMPUTED_EPOCH, METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL,
-    METRIC_PRUNE_TRACKED_CLAIMS,
+    METRIC_PRUNE_STAMPED_BYTES_TOTAL, METRIC_PRUNE_STAMPED_REFS_TOTAL, METRIC_PRUNE_TRACKED_CLAIMS,
 };
 use metrics::{Counter, Gauge, Histogram};
 use std::sync::Arc;
@@ -118,6 +121,91 @@ pub struct TombstoneRef {
     pub key: String,
     /// The observed-remove tombstone tag (`"millis:counter:nodeId"`).
     pub tag: String,
+}
+
+/// Per-epoch bookkeeping backing the residency ledger's two emissions (R2.3a / R2.3b).
+///
+/// Created on an epoch's first stamp and held until its exit row fires, at which point it is
+/// removed from [`FrontierState::epoch_slots`] — the slot's whole reason to exist is bounded,
+/// per-tracked-epoch bookkeeping, never an unbounded audit trail. The number of these alive at
+/// once is bounded by `indexed_epochs`, which stays small in practice, so this map does not
+/// grow with total tombstone volume.
+#[derive(Debug, Clone, Copy, Default)]
+struct EpochResidencySlot {
+    /// Refs stamped into this epoch over its whole lifetime so far.
+    stamped_refs: u64,
+    /// Tombstone bytes stamped into this epoch over its whole lifetime so far.
+    stamped_bytes: u64,
+    /// The op-seq at which this epoch's first ref entered the index.
+    entered_at_op_seq: u64,
+    /// Wall-clock (Unix ms) at which this epoch's first ref entered the index.
+    entered_at_unix_ms: i64,
+    /// `stamped_refs`, frozen at the instant the entry row was emitted (rollover). `0` while
+    /// the epoch is still current and this slot is still accumulating.
+    refs_at_entry: u64,
+    /// Whether the entry row has fired for this epoch yet. `false` while the epoch is still
+    /// current; once the exit row fires the slot is removed entirely, so `true` here always
+    /// means "tracked: entry emitted, exit pending".
+    entry_emitted: bool,
+    /// The first op-seq at which `low_water_mark > epoch` was observed, set the first time
+    /// [`FrontierState::refresh_epoch_licensing`] sees it become true (R3.2's LICENSED term).
+    lwm_passed_at_op_seq: Option<u64>,
+    /// The first op-seq at which `durable_epoch_watermark >= epoch` was observed (R3.2's
+    /// FENCED term).
+    fence_passed_at_op_seq: Option<u64>,
+}
+
+/// What the bookkeeping itself observed causing a tracked epoch's absence from
+/// `epoch_tags` (or, for [`FinalExitKind::StillResidentAtShutdown`], its still-resident
+/// state at teardown) — passed to [`FrontierState::detect_epoch_exit`] /
+/// [`FrontierState::force_shutdown_exits`] as a hint from the removal call site.
+///
+/// `None` at [`FrontierState::detect_epoch_exit`]'s call site means "no attributable
+/// cause on record for this particular epoch" — which is exactly
+/// [`EpochExitKind::Unclassified`]'s reachability condition (R2.3b): an absence detected
+/// with no accompanying hint is what a removal reached by an unenumerated path looks
+/// like to this bookkeeping. A one-to-one mirror of [`EpochExitKind`]'s three named
+/// variants, kept as a separate (non-`pub`) type because the fourth, `Unclassified`, is
+/// never a HINT — it is [`FrontierState::finalize_epoch_exit`]'s OWN conclusion when no
+/// hint applies, never something a caller asserts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalExitKind {
+    DrainedByPrune,
+    ClearedByRebuild,
+    StillResidentAtShutdown,
+}
+
+/// The eight quantities O-0's index-conservation identity is evaluated over
+/// (`stamped_refs_total + restored_refs_total − drained_refs_total − rebuild_cleared_refs_total
+/// ≡ indexed_refs`), read as one internally-coherent tuple under the frontier's own lock — the
+/// accessor the double-read sampling rule's two renders are taken from (R3.0 limb 6).
+///
+/// Maintained as `FrontierState`'s own fields, updated at the exact same sites that already
+/// maintain `indexed_refs` incrementally (stamp / drain / restore / rebuild), so this snapshot
+/// and `indexed_refs` can never observe two different instants of the same mutation sequence —
+/// unlike two independent Prometheus counter reads, which are two independent atomics and can
+/// tear against a concurrent mutation. Two calls to
+/// [`FrontierState::index_conservation_snapshot`] with no intervening mutation are therefore
+/// equal BY CONSTRUCTION, which is the property the identity test exercises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IndexConservationSnapshot {
+    /// Refs stamped into the index over the frontier's whole lifetime.
+    pub stamped_refs_total: u64,
+    /// Tombstone bytes stamped into the index over the frontier's whole lifetime.
+    pub stamped_bytes_total: u64,
+    /// Refs removed from the index by an observed prune drain.
+    pub drained_refs_total: u64,
+    /// Refs re-inserted into the index by an observed restore.
+    pub restored_refs_total: u64,
+    /// Refs cleared from the index by an observed rebuild, credited as a reset rather than a
+    /// drain against the conservation identity.
+    pub rebuild_cleared_refs_total: u64,
+    /// Epochs that emitted an entry row.
+    pub epochs_entered_total: u64,
+    /// Epochs that emitted an exit row.
+    pub epochs_exited_total: u64,
+    /// The carried, incrementally-maintained index size — the identity's right-hand side.
+    pub indexed_refs: u64,
 }
 
 /// Reserved redb map namespace for the durable confirmed-apply cursors.
@@ -227,6 +315,18 @@ struct FrontierState {
     /// so the stall is measured from process start rather than from the epoch (which
     /// would render a ~57-year stall until the first advance).
     last_lwm_advance_millis: u64,
+    /// Per-epoch residency bookkeeping: tracked from an epoch's first stamp until its exit
+    /// row fires (R2.3a / R2.3b). Bounded by `indexed_epochs`, never by tombstone volume.
+    epoch_slots: HashMap<Epoch, EpochResidencySlot>,
+    /// O-0's conservation-identity counters, maintained at the exact same sites that already
+    /// maintain `indexed_refs` incrementally. See [`IndexConservationSnapshot`].
+    stamped_refs_total: u64,
+    stamped_bytes_total: u64,
+    drained_refs_total: u64,
+    restored_refs_total: u64,
+    rebuild_cleared_refs_total: u64,
+    epochs_entered_total: u64,
+    epochs_exited_total: u64,
 }
 
 impl FrontierState {
@@ -246,6 +346,14 @@ impl FrontierState {
             last_drained_epoch: 0,
             observed_lwm: 0,
             last_lwm_advance_millis: now_millis(),
+            epoch_slots: HashMap::new(),
+            stamped_refs_total: 0,
+            stamped_bytes_total: 0,
+            drained_refs_total: 0,
+            restored_refs_total: 0,
+            rebuild_cleared_refs_total: 0,
+            epochs_entered_total: 0,
+            epochs_exited_total: 0,
         }
     }
 
@@ -327,8 +435,27 @@ impl FrontierState {
     /// derived from the op sequence this stamp advances — NEVER from the client
     /// tag's `millis`. Records the tombstone ref under its epoch and updates the
     /// max-seq index. Returns the stamped epoch (always `>= 1`: 0 is the reserved
-    /// "no/uncomputable epoch" sentinel and is never stamped).
-    fn stamp_tombstone(&mut self, map: &str, key: &str, tag: &str, write_seq: u64) -> Epoch {
+    /// "no/uncomputable epoch" sentinel and is never stamped) together with the
+    /// per-epoch ENTRY row (R2.3a), if this stamp rolled the clock past the
+    /// PREVIOUS epoch.
+    ///
+    /// `tag.len() as u64` is computed HERE, independently of the identical
+    /// computation `crdt.rs`'s `OR_REMOVE` apply site already performs for the
+    /// (unrelated) tombstone-bytes gauge — this is what makes `stamped_bytes`
+    /// `T2(exactness)`'s INDEPENDENT oracle rather than a value plumbed through
+    /// from that other call site (R2.4(b): this contract must not touch that
+    /// gauge at all, and it does not).
+    fn stamp_tombstone(
+        &mut self,
+        map: &str,
+        key: &str,
+        tag: &str,
+        write_seq: u64,
+    ) -> (Epoch, Option<PruneEpochEntryRecord>) {
+        // Captured BEFORE the op-seq/epoch update: this is the epoch the stamping
+        // clock is ABOUT to leave, if this stamp turns out to roll it over. 0 before
+        // the first stamp — never a real epoch, so it is excluded below.
+        let prev_epoch = self.current_epoch;
         // Pre-increment BEFORE deriving the epoch so op_seq is `>= 1` here and the
         // first stamp lands in epoch 1, never epoch 0 (R3(g-i)).
         self.op_seq += 1;
@@ -352,12 +479,77 @@ impl FrontierState {
             });
         // One ref in, one increment — the whole index-size accounting on this path.
         self.indexed_refs += 1;
+        let tag_bytes = u64::try_from(tag.len()).unwrap_or(u64::MAX);
+        // O-0's conservation counters, maintained at the SAME instant as `indexed_refs`
+        // above so the two can never observe two different instants of the same
+        // mutation (see `IndexConservationSnapshot`'s own doc).
+        self.stamped_refs_total += 1;
+        self.stamped_bytes_total += tag_bytes;
+        // Per-epoch residency bookkeeping (R2.3a): O(1) — three integer writes into a
+        // per-epoch slot this stamp already touches, never an index fold.
+        let entry_slot = self
+            .epoch_slots
+            .entry(epoch)
+            .or_insert_with(|| EpochResidencySlot {
+                entered_at_op_seq: self.op_seq,
+                entered_at_unix_ms: now_millis_i64(),
+                ..EpochResidencySlot::default()
+            });
+        entry_slot.stamped_refs += 1;
+        entry_slot.stamped_bytes += tag_bytes;
         // Record the durability bound for this epoch: the highest write sequence
         // the store had assigned at stamp time. The epoch is byte-durable only
         // once the store's flushed watermark reaches this value.
         let slot = self.epoch_max_seq.entry(epoch).or_insert(0);
         *slot = (*slot).max(write_seq);
-        epoch
+
+        // ENTRY emission: fires once, at the moment the stamping clock rolls PAST
+        // `prev_epoch` — never per stamp. `prev_epoch != 0` excludes the reserved
+        // sentinel, which is never itself stamped and never rolls over.
+        let entry_record = if epoch != prev_epoch && prev_epoch != 0 {
+            let record = match self.epoch_slots.get(&prev_epoch) {
+                Some(finished) => PruneEpochEntryRecord {
+                    epoch: prev_epoch,
+                    entered_index: true,
+                    refs_at_entry: finished.stamped_refs,
+                    stamped_refs: finished.stamped_refs,
+                    stamped_bytes: finished.stamped_bytes,
+                    entered_at_op_seq: finished.entered_at_op_seq,
+                    entered_at_unix_ms: finished.entered_at_unix_ms,
+                    rolled_over_at_op_seq: self.op_seq,
+                    rolled_over_at_unix_ms: now_millis_i64(),
+                    current_lwm_at_rollover: self.observed_lwm,
+                    durable_watermark_at_rollover: self.durable_epoch_watermark,
+                },
+                // Control class (f) EMPTY-EPOCH: the clock passed through `prev_epoch`
+                // with nothing ever stamped into it (only reachable via an
+                // `epoch_width` change or a rebuild-induced jump, never via ordinary
+                // sequential stamping). `entered_index == false` on a row that EXISTS
+                // is exactly what makes this value observable at all (R2.3a).
+                None => PruneEpochEntryRecord {
+                    epoch: prev_epoch,
+                    entered_index: false,
+                    rolled_over_at_op_seq: self.op_seq,
+                    rolled_over_at_unix_ms: now_millis_i64(),
+                    current_lwm_at_rollover: self.observed_lwm,
+                    durable_watermark_at_rollover: self.durable_epoch_watermark,
+                    ..PruneEpochEntryRecord::default()
+                },
+            };
+            // Freeze the slot's entry-side fields and mark it tracked for exit
+            // detection. A NOT-APPLICABLE (control class (f)) epoch has no slot to
+            // freeze — there is nothing to detect an exit for, since it never entered.
+            if let Some(slot) = self.epoch_slots.get_mut(&prev_epoch) {
+                slot.refs_at_entry = slot.stamped_refs;
+                slot.entry_emitted = true;
+            }
+            self.epochs_entered_total += 1;
+            Some(record)
+        } else {
+            None
+        };
+
+        (epoch, entry_record)
     }
 
     /// Epochs currently carrying tombstone refs. O(1) — `HashMap::len` is a stored
@@ -381,6 +573,10 @@ impl FrontierState {
         self.observed_lwm = lwm;
         if advanced.is_some() {
             self.last_lwm_advance_millis = now;
+            // An actual LWM ADVANCE is one of the two triggers the perturbation budget
+            // licenses index-proportional work on (R2.4); tracked-epoch count is what
+            // bounds this, not tombstone volume.
+            self.refresh_epoch_licensing();
         }
         advanced
     }
@@ -388,6 +584,149 @@ impl FrontierState {
     /// Seconds since the last low-water-mark advance.
     fn lwm_stall_seconds(&self, now: u64) -> u64 {
         now.saturating_sub(self.last_lwm_advance_millis) / 1000
+    }
+
+    /// Record the FIRST op-seq at which each tracked-but-unexited epoch's slot observes
+    /// `low_water_mark > epoch` (R3.2's LICENSED term) or `durable_epoch_watermark >=
+    /// epoch` (its FENCED term), the first time each becomes true. A no-op for a slot
+    /// where both are already set. Called only from [`Self::refresh_low_water_mark`] (on
+    /// an actual advance) and from [`Self::drain_prunable`] (already O(epochs) whenever
+    /// the drain is not dark) — the two sites the perturbation budget already licenses
+    /// index-proportional work on, so this adds no new licensed-work site.
+    fn refresh_epoch_licensing(&mut self) {
+        let lwm = self.observed_lwm;
+        let fence = self.durable_epoch_watermark;
+        let op_seq = self.op_seq;
+        for (&epoch, slot) in &mut self.epoch_slots {
+            if slot.lwm_passed_at_op_seq.is_none() && lwm > epoch {
+                slot.lwm_passed_at_op_seq = Some(op_seq);
+            }
+            if slot.fence_passed_at_op_seq.is_none() && fence >= epoch {
+                slot.fence_passed_at_op_seq = Some(op_seq);
+            }
+        }
+    }
+
+    /// Detection check (R2.3b): if `epoch`'s tracked slot has entry-emitted and is now
+    /// ABSENT from `epoch_tags`, builds and returns its exit row, attributed to
+    /// `attribution` if given or [`EpochExitKind::Unclassified`] if not — the reachable
+    /// escape for an epoch that left the index by a path this call has no recorded cause
+    /// for. A still-PRESENT epoch is left untouched (not yet an exit); an untracked or
+    /// already-exited epoch (no slot) is a no-op.
+    ///
+    /// This is the ONE shared emission site every removal path funnels through — never
+    /// three separate hooks that each independently construct an exit record — so a
+    /// removal reached by a path nobody has enumerated yet still lands here and is
+    /// still detected, exactly as R2.3b's doc-contract requires.
+    fn detect_epoch_exit(
+        &mut self,
+        epoch: Epoch,
+        attribution: Option<FinalExitKind>,
+    ) -> Option<PruneEpochResidencyRecord> {
+        if self.epoch_tags.contains_key(&epoch) {
+            return None;
+        }
+        self.finalize_epoch_exit(epoch, attribution)
+    }
+
+    /// Force an exit row for every still-tracked epoch, attributed
+    /// [`EpochExitKind::StillResidentAtShutdown`] regardless of current presence — the
+    /// one exit kind that does NOT correspond to an observed absence, because process
+    /// teardown is the only occasion this record needs to describe an epoch that never
+    /// left the index at all. A `SIGKILL` teardown (the soak lineage's own teardown
+    /// signal, R2.3c) never reaches this — it is reachable only on a graceful shutdown.
+    fn force_shutdown_exits(&mut self) -> Vec<PruneEpochResidencyRecord> {
+        let epochs: Vec<Epoch> = self.epoch_slots.keys().copied().collect();
+        epochs
+            .into_iter()
+            .filter_map(|e| {
+                self.finalize_epoch_exit(e, Some(FinalExitKind::StillResidentAtShutdown))
+            })
+            .collect()
+    }
+
+    /// Shared exit-row construction: removes `epoch`'s slot (retiring it — the ledger
+    /// carries no unbounded audit trail) and builds its [`PruneEpochResidencyRecord`].
+    fn finalize_epoch_exit(
+        &mut self,
+        epoch: Epoch,
+        kind_hint: Option<FinalExitKind>,
+    ) -> Option<PruneEpochResidencyRecord> {
+        let slot = self.epoch_slots.remove(&epoch)?;
+        if !slot.entry_emitted {
+            // The epoch is still current (never rolled over) — nothing to exit yet.
+            // Put it back; this path is not expected to be hit by any call site today
+            // but a slot must never be silently dropped.
+            self.epoch_slots.insert(epoch, slot);
+            return None;
+        }
+        let refs_at_exit = self
+            .epoch_tags
+            .get(&epoch)
+            .map_or(0, |v| u64::try_from(v.len()).unwrap_or(u64::MAX));
+        let exit_kind = match kind_hint {
+            Some(FinalExitKind::DrainedByPrune) => {
+                self.drained_refs_total += slot.refs_at_entry;
+                EpochExitKind::DrainedByPrune
+            }
+            Some(FinalExitKind::ClearedByRebuild) => EpochExitKind::ClearedByRebuild,
+            Some(FinalExitKind::StillResidentAtShutdown) => EpochExitKind::StillResidentAtShutdown,
+            None => {
+                let observed_refs_delta = i64::try_from(refs_at_exit).unwrap_or(i64::MAX)
+                    - i64::try_from(slot.refs_at_entry).unwrap_or(i64::MAX);
+                EpochExitKind::Unclassified {
+                    observed_refs_delta,
+                    observed_lwm: self.observed_lwm,
+                    observed_durable_watermark: self.durable_epoch_watermark,
+                    observed_current_epoch: self.current_epoch,
+                    note: format!(
+                        "epoch {epoch} absent from epoch_tags with no attributable \
+                         removal path recorded at the detection point"
+                    ),
+                }
+            }
+        };
+        // "Tombstone bytes this epoch's removal is attributed as having freed" (the
+        // struct's own doc): the whole epoch's stamped content leaves the RAM index
+        // atomically on a drain, so `stamped_bytes` IS the freed total; every other
+        // exit kind frees nothing.
+        let bytes_freed_attributed = if matches!(exit_kind, EpochExitKind::DrainedByPrune) {
+            slot.stamped_bytes
+        } else {
+            0
+        };
+        self.epochs_exited_total += 1;
+        Some(PruneEpochResidencyRecord {
+            epoch,
+            refs_at_entry: slot.refs_at_entry,
+            refs_at_exit,
+            stamped_bytes: slot.stamped_bytes,
+            bytes_freed_attributed,
+            exit_kind,
+            entered_at_op_seq: slot.entered_at_op_seq,
+            entered_at_unix_ms: slot.entered_at_unix_ms,
+            exited_at_op_seq: self.op_seq,
+            lwm_passed_at_op_seq: slot.lwm_passed_at_op_seq,
+            fence_passed_at_op_seq: slot.fence_passed_at_op_seq,
+            lwm_at_exit: self.observed_lwm,
+            durable_watermark_at_exit: self.durable_epoch_watermark,
+            current_epoch_at_exit: self.current_epoch,
+        })
+    }
+
+    /// O-0's eight quantities, read as one internally-coherent tuple under the caller's
+    /// lock acquisition (R3.0 limb 6). O(1) — every field is a stored counter.
+    fn index_conservation_snapshot(&self) -> IndexConservationSnapshot {
+        IndexConservationSnapshot {
+            stamped_refs_total: self.stamped_refs_total,
+            stamped_bytes_total: self.stamped_bytes_total,
+            drained_refs_total: self.drained_refs_total,
+            restored_refs_total: self.restored_refs_total,
+            rebuild_cleared_refs_total: self.rebuild_cleared_refs_total,
+            epochs_entered_total: self.epochs_entered_total,
+            epochs_exited_total: self.epochs_exited_total,
+            indexed_refs: self.indexed_refs,
+        }
     }
 
     /// The byte-durability watermark: the greatest `E` such that EVERY stamped
@@ -418,7 +757,23 @@ impl FrontierState {
     /// are already durable (WAL-replayed into the inner store before this runs),
     /// so its `epoch_max_seq` is 0 — the low-water-mark, not byte durability, is
     /// the operative gate.
-    fn rebuild_into_epoch(&mut self, e_rec: Epoch, live: Vec<TombstoneRef>) {
+    ///
+    /// O-0's conservation identity treats a rebuild as a RESET (R3.0): the pre-rebuild
+    /// `indexed_refs` is credited to `rebuild_cleared_refs_total` (a reset, not a drain)
+    /// and the re-stamped `live.len()` is credited to `stamped_refs_total`, so the
+    /// identity stays continuous across a recovery rather than reading as a fabricated
+    /// violation. Every epoch still TRACKED for residency purposes at the moment of the
+    /// clear was, by construction, resident just before it (an entry-emitted, not-yet-
+    /// exited slot means its epoch had not left `epoch_tags`) — so the wholesale clear
+    /// is unconditionally what caused each of their absences, and the returned exit rows
+    /// are attributed [`EpochExitKind::ClearedByRebuild`] with no further disambiguation
+    /// needed.
+    fn rebuild_into_epoch(
+        &mut self,
+        e_rec: Epoch,
+        live: Vec<TombstoneRef>,
+    ) -> Vec<PruneEpochResidencyRecord> {
+        self.rebuild_cleared_refs_total += self.indexed_refs;
         self.epoch_tags.clear();
         self.epoch_max_seq.clear();
         let width = self.epoch_width.max(1);
@@ -430,6 +785,7 @@ impl FrontierState {
         // The rebuild replaces the index wholesale, so the carried ref count is
         // re-seeded from the restamped set rather than adjusted.
         self.indexed_refs = u64::try_from(live.len()).unwrap_or(u64::MAX);
+        self.stamped_refs_total += self.indexed_refs;
         if !live.is_empty() {
             self.epoch_max_seq.insert(e_rec, 0);
             self.epoch_tags.insert(e_rec, live);
@@ -441,6 +797,14 @@ impl FrontierState {
         // process) and reports the whole recovered low-water mark as one advance —
         // inflating the advance counters by a phantom burst that no client earned.
         self.observed_lwm = self.low_water_mark();
+
+        // Detection point (R2.3b): every tracked epoch was resident before the clear
+        // above and is unconditionally absent now, attributed to this rebuild.
+        let tracked: Vec<Epoch> = self.epoch_slots.keys().copied().collect();
+        tracked
+            .into_iter()
+            .filter_map(|e| self.detect_epoch_exit(e, Some(FinalExitKind::ClearedByRebuild)))
+            .collect()
     }
 
     /// Drain the tombstone refs of every currently prune-eligible epoch out of the
@@ -465,15 +829,30 @@ impl FrontierState {
     /// series that cannot tell a prune that has caught up from one that is
     /// starving. Snapshotting before the loop is what makes the published series
     /// the quantity it is named for.
-    fn drain_prunable(&mut self) -> (Vec<(Epoch, TombstoneRef)>, Option<SplitObservation>) {
+    ///
+    /// Also returns every per-epoch EXIT row this pass fires (R2.3b): the detection
+    /// sweep below runs over every tracked epoch (not only this pass's own removals),
+    /// so an epoch that left the index by a path OTHER than this drain — including one
+    /// this method has never been told about — still surfaces here, as
+    /// [`EpochExitKind::Unclassified`] (`AC6a`'s reachability requirement).
+    fn drain_prunable(
+        &mut self,
+    ) -> (
+        Vec<(Epoch, TombstoneRef)>,
+        Option<SplitObservation>,
+        Vec<PruneEpochResidencyRecord>,
+    ) {
         let watermark = self.durable_epoch_watermark;
         // Fast-path: a 0 watermark (no epoch byte-durable yet, or dark before the
         // recovery rebuild) means NO stamped epoch (all `>= 1`) can pass the
         // conjunction, so skip the per-epoch low-water-mark fold entirely — this
         // runs on every OR_REMOVE and every SYNC-leaf request.
         if watermark == 0 {
-            return (Vec::new(), None);
+            return (Vec::new(), None, Vec::new());
         }
+        // One of the two sites the perturbation budget licenses index-proportional
+        // work on: this fold already runs whenever the drain is not dark.
+        self.refresh_epoch_licensing();
         let eligible: Vec<Epoch> = self
             .epoch_tags
             .keys()
@@ -487,6 +866,7 @@ impl FrontierState {
         let pre_drain_split =
             (!eligible.is_empty()).then(|| self.split_observation(self.low_water_mark()));
         let mut drained = Vec::new();
+        let mut drained_epochs: HashSet<Epoch> = HashSet::new();
         for e in eligible {
             if let Some(refs) = self.epoch_tags.remove(&e) {
                 // Decrement by what this epoch actually held, so the carried count
@@ -495,11 +875,29 @@ impl FrontierState {
                     .indexed_refs
                     .saturating_sub(u64::try_from(refs.len()).unwrap_or(u64::MAX));
                 self.last_drained_epoch = self.last_drained_epoch.max(e);
+                drained_epochs.insert(e);
                 drained.extend(refs.into_iter().map(|r| (e, r)));
             }
             self.epoch_max_seq.remove(&e);
         }
-        (drained, pre_drain_split)
+
+        // Detection point (R2.3b): sweep EVERY tracked epoch, not just this pass's own
+        // removals. An epoch this pass just drained is attributed accordingly; any
+        // OTHER tracked epoch found absent here was NOT removed by this call, so it
+        // gets no hint — Unclassified, by construction, is what an absence with no
+        // recorded cause looks like.
+        let tracked: Vec<Epoch> = self.epoch_slots.keys().copied().collect();
+        let mut exits = Vec::new();
+        for e in tracked {
+            let attribution = drained_epochs
+                .contains(&e)
+                .then_some(FinalExitKind::DrainedByPrune);
+            if let Some(record) = self.detect_epoch_exit(e, attribution) {
+                exits.push(record);
+            }
+        }
+
+        (drained, pre_drain_split, exits)
     }
 
     /// Re-insert a drained tombstone ref whose storage drop FAILED, so the tag is
@@ -508,6 +906,7 @@ impl FrontierState {
     /// RAM cache — the unclean-recovery rebuild is the authoritative
     /// recovery for any imprecision here).
     fn restore(&mut self, epoch: Epoch, tombstone_ref: TombstoneRef) {
+        self.restored_refs_total += 1;
         self.epoch_tags
             .entry(epoch)
             .or_default()
@@ -870,6 +1269,66 @@ impl TombstoneFrontier {
         self.publish_split(split);
     }
 
+    /// Publish an epoch's ENTRY row (R2.3a): the observer call (feeds the metrics-side
+    /// completeness witness) and the structured `tracing::info!` line on the dedicated
+    /// `topgun_server::tombstone_frontier::residency` target (R2.2) — never a blanket
+    /// `info`, per `spec356-prune.sh:697-699`'s measured cost finding. Both calls run
+    /// AFTER the frontier lock has dropped, exactly like every other publish helper here.
+    fn publish_epoch_entry(&self, record: &PruneEpochEntryRecord) {
+        self.prune_observer.observe_epoch_entry(record);
+        info!(
+            target: "topgun_server::tombstone_frontier::residency",
+            kind = "epoch_entry",
+            epoch = record.epoch,
+            entered_index = record.entered_index,
+            refs_at_entry = record.refs_at_entry,
+            stamped_refs = record.stamped_refs,
+            stamped_bytes = record.stamped_bytes,
+            entered_at_op_seq = record.entered_at_op_seq,
+            entered_at_unix_ms = record.entered_at_unix_ms,
+            rolled_over_at_op_seq = record.rolled_over_at_op_seq,
+            rolled_over_at_unix_ms = record.rolled_over_at_unix_ms,
+            current_lwm_at_rollover = record.current_lwm_at_rollover,
+            durable_watermark_at_rollover = record.durable_watermark_at_rollover,
+            "prune epoch entry"
+        );
+    }
+
+    /// Publish an epoch's EXIT row (R2.3b) — see [`Self::publish_epoch_entry`] for the
+    /// shared rationale. `exit_kind` is rendered with `{:?}` so `Unclassified`'s raw
+    /// context (R2.3c) is captured verbatim in the line rather than collapsed to a bare
+    /// variant name.
+    fn publish_epoch_exit(&self, record: &PruneEpochResidencyRecord) {
+        self.prune_observer.observe_epoch_residency(record);
+        info!(
+            target: "topgun_server::tombstone_frontier::residency",
+            kind = "epoch_exit",
+            epoch = record.epoch,
+            refs_at_entry = record.refs_at_entry,
+            refs_at_exit = record.refs_at_exit,
+            stamped_bytes = record.stamped_bytes,
+            bytes_freed_attributed = record.bytes_freed_attributed,
+            exit_kind = ?record.exit_kind,
+            entered_at_op_seq = record.entered_at_op_seq,
+            entered_at_unix_ms = record.entered_at_unix_ms,
+            exited_at_op_seq = record.exited_at_op_seq,
+            lwm_passed_at_op_seq = ?record.lwm_passed_at_op_seq,
+            fence_passed_at_op_seq = ?record.fence_passed_at_op_seq,
+            lwm_at_exit = record.lwm_at_exit,
+            durable_watermark_at_exit = record.durable_watermark_at_exit,
+            current_epoch_at_exit = record.current_epoch_at_exit,
+            "prune epoch exit"
+        );
+    }
+
+    /// O-0's eight-quantity conservation snapshot (R3.0 limb 6), read as one
+    /// internally-coherent tuple under a single lock acquisition. This is the accessor
+    /// the double-read sampling rule's two `/metrics`-tick renders are taken from.
+    #[must_use]
+    pub fn index_conservation_snapshot(&self) -> IndexConservationSnapshot {
+        self.lock().index_conservation_snapshot()
+    }
+
     /// Enqueue a durability message onto the worker if one is wired. Returns
     /// `false` if there is no worker (no store, or already shut down).
     fn enqueue_persist(&self, msg: PersistMsg) -> bool {
@@ -920,6 +1379,15 @@ impl TombstoneFrontier {
     /// then releases the store `Arc` the worker holds (required before reopening a
     /// redb file). Idempotent.
     pub async fn shutdown(&self) {
+        // The one occasion `StillResidentAtShutdown` fires (R2.3c): every epoch still
+        // tracked (entry-emitted, exit pending) at a GRACEFUL shutdown gets its exit
+        // row here, describing an epoch that never left the index at all. A `SIGKILL`
+        // teardown — this lineage's own soak-cell teardown signal — never reaches this
+        // method, so it emits nothing there, exactly as R2.3c states.
+        let exits = self.lock().force_shutdown_exits();
+        for record in &exits {
+            self.publish_epoch_exit(record);
+        }
         // Drop the sender to close the channel so the worker's recv loop ends.
         // Recover from a poisoned lock rather than panic — a poisoned mutex only
         // means a prior panic while holding it; the Option is still consistent.
@@ -1236,10 +1704,10 @@ impl TombstoneFrontier {
             .store
             .as_ref()
             .map_or(0, |s| s.assigned_write_sequence());
-        let (epoch, snapshot) = {
+        let (epoch, snapshot, entry_record) = {
             let mut state = self.lock();
-            let epoch = state.stamp_tombstone(map, key, tag, write_seq);
-            (epoch, state.observation_snapshot())
+            let (epoch, entry_record) = state.stamp_tombstone(map, key, tag, write_seq);
+            (epoch, state.observation_snapshot(), entry_record)
         };
         // The stamp is the ONE path that grows the index, so it is where the index
         // and epoch gauges have to be refreshed for them to mean anything. Everything
@@ -1247,6 +1715,11 @@ impl TombstoneFrontier {
         // low-water-mark), so the per-remove cost is a fixed handful of gauge stores
         // and no fold — the eligible/ineligible split deliberately does NOT run here.
         self.publish_frontier_state(&snapshot);
+        // The entry line's formatting cost falls only at rollover (R2.4) — `None` on
+        // every stamp that does not roll the clock past the PREVIOUS epoch.
+        if let Some(record) = entry_record.as_ref() {
+            self.publish_epoch_entry(record);
+        }
         epoch
     }
 
@@ -1317,15 +1790,20 @@ impl TombstoneFrontier {
 
         let live = scan_live_tombstones(store.as_ref()).await?;
         let restamped = live.len();
-        let snapshot = {
+        let (snapshot, exits) = {
             let mut state = self.lock();
-            state.rebuild_into_epoch(e_rec, live);
-            state.observation_snapshot()
+            let exits = state.rebuild_into_epoch(e_rec, live);
+            (state.observation_snapshot(), exits)
         };
         // The rebuild replaces the whole index in the pre-listener recovery window,
         // so publishing here is what stops the first post-recovery scrape reporting
         // the pre-crash index size.
         self.publish_frontier_state(&snapshot);
+        // Detection point (R2.3b): every epoch the wholesale clear above just
+        // orphaned gets its exit row, attributed to this rebuild.
+        for record in &exits {
+            self.publish_epoch_exit(record);
+        }
         debug!(
             e_rec,
             max_cursor_epoch,
@@ -1395,7 +1873,7 @@ impl TombstoneFrontier {
         // the store's watermark outside the lock keeps the frontier lock hold
         // short; the field is then updated and consumed under one lock.
         let flushed = self.store.as_ref().map(|s| s.flushed_watermark());
-        let (drained, snapshot, split, last_advance_millis) = {
+        let (drained, snapshot, split, last_advance_millis, exits) = {
             let mut state = self.lock();
             if let Some(flushed) = flushed {
                 let computed = state.compute_durable_epoch_watermark(flushed);
@@ -1408,7 +1886,7 @@ impl TombstoneFrontier {
             // marker to be readable at all. The split travels OUT of the drain because
             // it is taken before the removal: the licensed backlog only exists to be
             // read on the near side of the work that consumes it.
-            let (drained, pre_drain_split) = state.drain_prunable();
+            let (drained, pre_drain_split, exits) = state.drain_prunable();
             let split = if drained.is_empty() {
                 None
             } else {
@@ -1419,6 +1897,7 @@ impl TombstoneFrontier {
                 state.observation_snapshot(),
                 split,
                 state.last_lwm_advance_millis,
+                exits,
             )
         };
         self.publish_frontier_state(&snapshot);
@@ -1428,6 +1907,11 @@ impl TombstoneFrontier {
             // pays no syscall for a gauge the ACK path already refreshes.
             self.prune_observer
                 .observe_lwm_stall(now_millis().saturating_sub(last_advance_millis) / 1000);
+        }
+        // Detection point (R2.3b): fires whether or not this pass itself drained
+        // anything — an epoch removed by some OTHER path is still detected here.
+        for record in &exits {
+            self.publish_epoch_exit(record);
         }
         drained
     }
@@ -1793,6 +2277,20 @@ pub struct MetricsPruneRecorder {
     lwm_advances: Counter,
     lwm_epochs_advanced: Counter,
     split_recomputes: Counter,
+    stamped_refs: Counter,
+    stamped_bytes: Counter,
+    drained_refs: Counter,
+    // Eagerly registered (AC4/R2.6(i)) but not incremented: a restore does not
+    // correspond to a per-epoch entry/exit event, and this trait — frozen by G1 for
+    // this half — carries no method a restore call site could feed. O-0's own
+    // conservation identity does not depend on this Prometheus mirror: it reads
+    // FrontierState's own `restored_refs_total`, incremented precisely on every
+    // `restore` (see `IndexConservationSnapshot`), which is unaffected by this gap.
+    #[allow(dead_code)]
+    restored_refs: Counter,
+    rebuild_cleared_refs: Counter,
+    epochs_entered: Counter,
+    epochs_exited: Counter,
 
     indexed_refs: Gauge,
     indexed_epochs: Gauge,
@@ -1857,6 +2355,13 @@ impl MetricsPruneRecorder {
             lwm_advances: touched_counter(METRIC_PRUNE_LWM_ADVANCES_TOTAL),
             lwm_epochs_advanced: touched_counter(METRIC_PRUNE_LWM_EPOCHS_ADVANCED_TOTAL),
             split_recomputes: touched_counter(METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL),
+            stamped_refs: touched_counter(METRIC_PRUNE_STAMPED_REFS_TOTAL),
+            stamped_bytes: touched_counter(METRIC_PRUNE_STAMPED_BYTES_TOTAL),
+            drained_refs: touched_counter(METRIC_PRUNE_DRAINED_REFS_TOTAL),
+            restored_refs: touched_counter(METRIC_PRUNE_RESTORED_REFS_TOTAL),
+            rebuild_cleared_refs: touched_counter(METRIC_PRUNE_REBUILD_CLEARED_REFS_TOTAL),
+            epochs_entered: touched_counter(METRIC_PRUNE_EPOCHS_ENTERED_TOTAL),
+            epochs_exited: touched_counter(METRIC_PRUNE_EPOCHS_EXITED_TOTAL),
 
             indexed_refs: touched_gauge(METRIC_PRUNE_INDEXED_REFS),
             indexed_epochs: touched_gauge(METRIC_PRUNE_INDEXED_EPOCHS),
@@ -1993,6 +2498,34 @@ impl PruneRecordObserver for MetricsPruneRecorder {
         self.split_computed_epoch.set(computed_at_epoch as f64);
         self.split_recomputes.increment(1);
     }
+
+    fn observe_epoch_entry(&self, record: &PruneEpochEntryRecord) {
+        self.epochs_entered.increment(1);
+        // Batched to rollover rather than per-stamp: the entry row fires exactly once
+        // per epoch, carrying that epoch's FINAL accumulated total, so crediting the
+        // cumulative counters here (rather than per individual stamp) yields the same
+        // final total at the cost of zero extra Prometheus calls on the hot stamp path
+        // — consistent with R2.4's costing, which prices the entry line's formatting
+        // at rollover and nothing per `OR_REMOVE`. A control-class (f) EMPTY-EPOCH row
+        // (`entered_index == false`) contributes 0 to both, which is correct: nothing
+        // was ever stamped into it.
+        self.stamped_refs.increment(record.stamped_refs);
+        self.stamped_bytes.increment(record.stamped_bytes);
+    }
+
+    fn observe_epoch_residency(&self, record: &PruneEpochResidencyRecord) {
+        self.epochs_exited.increment(1);
+        // `refs_at_entry` is the epoch's whole resident set at the moment of removal —
+        // a drain or a rebuild takes it atomically, so it is exactly what left the
+        // index on that exit, never an approximation.
+        match record.exit_kind {
+            EpochExitKind::DrainedByPrune => self.drained_refs.increment(record.refs_at_entry),
+            EpochExitKind::ClearedByRebuild => {
+                self.rebuild_cleared_refs.increment(record.refs_at_entry);
+            }
+            EpochExitKind::StillResidentAtShutdown | EpochExitKind::Unclassified { .. } => {}
+        }
+    }
 }
 
 /// The disarmed prune-record observer.
@@ -2034,6 +2567,10 @@ impl PruneRecordObserver for NullPruneRecorder {
         _computed_at_epoch: Epoch,
     ) {
     }
+
+    fn observe_epoch_entry(&self, _record: &PruneEpochEntryRecord) {}
+
+    fn observe_epoch_residency(&self, _record: &PruneEpochResidencyRecord) {}
 }
 
 /// Wall-clock milliseconds since the Unix epoch (0 on a clock error).
@@ -2044,6 +2581,12 @@ fn now_millis() -> u64 {
         .ok()
         .and_then(|d| u64::try_from(d.as_millis()).ok())
         .unwrap_or(0)
+}
+
+/// Wall-clock milliseconds since the Unix epoch as `i64` (0 on a clock error), for the
+/// residency ledger's `*_unix_ms: i64` fields (PROJECT.md's timestamp row).
+fn now_millis_i64() -> i64 {
+    i64::try_from(now_millis()).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -2064,8 +2607,8 @@ mod tests {
     // Prune record — arming parse and eager registration
     // -----------------------------------------------------------------------
 
-    /// The 15 pinned counters.
-    const PRUNE_COUNTER_NAMES: [&str; 15] = [
+    /// The 22 pinned counters (15 pre-existing + the 7 this half adds, R2.1 / `AC2a`).
+    const PRUNE_COUNTER_NAMES: [&str; 22] = [
         METRIC_PRUNE_PASSES_TOTAL,
         METRIC_PRUNE_CONSIDERED_TOTAL,
         METRIC_PRUNE_DROPPED_TOTAL,
@@ -2081,6 +2624,13 @@ mod tests {
         METRIC_PRUNE_LWM_ADVANCES_TOTAL,
         METRIC_PRUNE_LWM_EPOCHS_ADVANCED_TOTAL,
         METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL,
+        METRIC_PRUNE_STAMPED_REFS_TOTAL,
+        METRIC_PRUNE_STAMPED_BYTES_TOTAL,
+        METRIC_PRUNE_DRAINED_REFS_TOTAL,
+        METRIC_PRUNE_RESTORED_REFS_TOTAL,
+        METRIC_PRUNE_REBUILD_CLEARED_REFS_TOTAL,
+        METRIC_PRUNE_EPOCHS_ENTERED_TOTAL,
+        METRIC_PRUNE_EPOCHS_EXITED_TOTAL,
     ];
 
     /// The 11 pinned gauges.
@@ -2232,6 +2782,17 @@ mod tests {
             observer.observe_index_state(9, 2);
             observer.observe_epoch_state(4, 1, 3, 2);
             observer.observe_eligibility_split(6, 1, 4);
+            observer.observe_epoch_entry(&PruneEpochEntryRecord {
+                epoch: 4,
+                entered_index: true,
+                stamped_refs: 3,
+                ..PruneEpochEntryRecord::default()
+            });
+            observer.observe_epoch_residency(&PruneEpochResidencyRecord {
+                epoch: 4,
+                exit_kind: EpochExitKind::DrainedByPrune,
+                ..PruneEpochResidencyRecord::default()
+            });
         });
 
         let rendered = handle.render();
@@ -2330,6 +2891,614 @@ mod tests {
             rendered_value(&rendered, METRIC_PRUNE_LAST_DRAINED_EPOCH),
             Some("2"),
             "render was:\n{rendered}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-epoch residency ledger — entry / exit emissions, O-0's accessor, and
+    // the `Unclassified` detection path (AC6a)
+    // -----------------------------------------------------------------------
+
+    /// The ENTRY row fires once, at ROLLOVER — never per stamp — and the EXIT row
+    /// fires once a drain actually removes the epoch, attributed
+    /// `DrainedByPrune`. Both feed their respective metrics-side completeness
+    /// counters exactly once each.
+    #[test]
+    fn epoch_entry_fires_at_rollover_and_exit_fires_on_drain() {
+        let rendered = rendered_under_a_recorder(|| {
+            let f = frontier();
+            f.set_epoch_width(1);
+            // k1 stamps epoch 1; k2's stamp is what rolls the clock PAST epoch 1 and
+            // fires its entry row. A third stamp rolls past epoch 2 too, so both
+            // entry rows exist before the drain runs.
+            f.stamp_tombstone("m", "k1", "TAG1");
+            f.stamp_tombstone("m", "k2", "TAG2");
+            f.stamp_tombstone("m", "k3", "TAG3");
+
+            // License epoch 1 for the drain: watermark >= 1 and LWM > 1.
+            f.set_durable_epoch_watermark(1);
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:alice|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+
+            let drained = f.drain_prunable_tombstones();
+            assert_eq!(drained.len(), 1, "only epoch 1 clears both conjuncts");
+        });
+
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_EPOCHS_ENTERED_TOTAL),
+            Some("2"),
+            "epochs 1 and 2 both rolled over; render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_STAMPED_REFS_TOTAL),
+            Some("2"),
+            "credited once per entry row, at rollover; render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_STAMPED_BYTES_TOTAL),
+            Some("8"),
+            "TAG1 + TAG2 = 4 + 4 bytes; render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_EPOCHS_EXITED_TOTAL),
+            Some("1"),
+            "only epoch 1 drained; render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_DRAINED_REFS_TOTAL),
+            Some("1"),
+            "epoch 1 held exactly one ref; render was:\n{rendered}"
+        );
+    }
+
+    /// O-0's accessor: the eight quantities are read as one internally-coherent
+    /// tuple (two calls with no intervening mutation agree BY CONSTRUCTION), and
+    /// the conservation identity holds across a stamp → drain → restore sequence.
+    #[test]
+    fn index_conservation_snapshot_is_coherent_and_the_identity_holds() {
+        let f = frontier();
+        f.set_epoch_width(1);
+        f.stamp_tombstone("m", "k1", "T1");
+        f.stamp_tombstone("m", "k2", "T2");
+        f.stamp_tombstone("m", "k3", "T3"); // rolls past epochs 1 and 2
+
+        // Two renders of the SAME snapshot, no mutation between them: equal by
+        // construction (a single locked struct copy, not two independent reads).
+        let a = f.index_conservation_snapshot();
+        let b = f.index_conservation_snapshot();
+        assert_eq!(
+            a, b,
+            "two renders of one snapshot must agree by construction"
+        );
+
+        f.set_durable_epoch_watermark(2);
+        f.set_delivered(CONN_A, 100);
+        let c: ClientId = "a5:alice|dev-1".into();
+        assert!(block_on(f.confirm_apply_ack(&c, 3, CONN_A)));
+        let drained = f.drain_prunable_tombstones();
+        assert_eq!(drained.len(), 2, "epochs 1 and 2 drain");
+        let (epoch, tombstone_ref) = drained.into_iter().next().expect("a drained ref");
+        f.restore_tombstone_ref(epoch, tombstone_ref);
+
+        let snap = f.index_conservation_snapshot();
+        assert_eq!(
+            snap.stamped_refs_total + snap.restored_refs_total
+                - snap.drained_refs_total
+                - snap.rebuild_cleared_refs_total,
+            snap.indexed_refs,
+            "O-0: stamped + restored - drained - rebuild_cleared == indexed_refs, got {snap:?}"
+        );
+    }
+
+    /// `AC6a` — the `Unclassified` escape is REACHABLE, not merely declared. An
+    /// epoch's slot is removed directly, bypassing `drain_prunable` /
+    /// `rebuild_into_epoch` / `restore` entirely; the next detection point (a
+    /// drain pass, even one that eligibility-drains nothing else) surfaces
+    /// exactly one exit row with `exit_kind == Unclassified` and every
+    /// `observed_*` field populated.
+    #[test]
+    fn unenumerated_epoch_removal_surfaces_as_unclassified_at_the_next_detection_point() {
+        let f = frontier();
+        f.set_epoch_width(1);
+        f.stamp_tombstone("m", "k1", "TAG1"); // epoch 1
+        f.stamp_tombstone("m", "k2", "TAG2"); // rolls past epoch 1: entry row fires
+
+        // Remove epoch 1's slot directly — NOT through drain_prunable,
+        // rebuild_into_epoch or restore. This is the unenumerated path R2.3b's
+        // escape variant exists for.
+        {
+            let mut state = f.lock();
+            assert!(
+                state.epoch_tags.remove(&1).is_some(),
+                "epoch 1 must be resident before the bypass removal"
+            );
+        }
+
+        // Any subsequent detection point picks it up. A nonzero watermark alone
+        // is enough to arm the sweep — no eligibility is required.
+        f.set_durable_epoch_watermark(1);
+        let drained = f.drain_prunable_tombstones();
+        assert!(
+            drained.is_empty(),
+            "nothing legitimately eligible this pass; epoch 1 was already gone"
+        );
+
+        // Assert on the record content directly against FrontierState, since
+        // `exit_kind`'s raw context is not representable over the metrics
+        // transport (that is the whole reason the residency ledger is a
+        // `tracing` line and not a metric, R2.2).
+        let f2 = frontier();
+        f2.set_epoch_width(1);
+        f2.stamp_tombstone("m", "k1", "TAG1");
+        f2.stamp_tombstone("m", "k2", "TAG2");
+        let record = {
+            let mut state = f2.lock();
+            state.epoch_tags.remove(&1);
+            state.detect_epoch_exit(1, None)
+        }
+        .expect("the bypassed epoch must surface an exit row at the next detection point");
+        match record.exit_kind {
+            EpochExitKind::Unclassified {
+                observed_refs_delta,
+                observed_lwm,
+                observed_durable_watermark,
+                observed_current_epoch,
+                ref note,
+            } => {
+                assert_eq!(
+                    observed_refs_delta, -1,
+                    "one ref vanished with no attributable removal"
+                );
+                // Every `observed_*` field is POPULATED (not a default sentinel
+                // masquerading as absent) — the record carries real state.
+                assert_eq!(observed_lwm, 0);
+                assert_eq!(observed_durable_watermark, 0);
+                assert_eq!(observed_current_epoch, 2);
+                assert!(!note.is_empty(), "the breadcrumb must be non-empty");
+            }
+            other => panic!("expected Unclassified, got {other:?}"),
+        }
+    }
+
+    /// THE REPRODUCING TEST (R7.3(a), AC12, Q11). The named mechanism: a
+    /// `DrainedByPrune` exit's `bytes_freed_attributed` is EXACTLY the epoch's
+    /// own stamped byte total — never a placeholder, never zero, never an
+    /// approximation. This is the exact accounting step T2(exactness) exists
+    /// to make observable, and reproduces the precise historical symptom the
+    /// prior lineage's committed record names: `bytes_freed_attributed` empty
+    /// on every one of 415/447 epoch rows over the deciding window. The
+    /// mechanism reproduces entirely at the `FrontierState` boundary — no
+    /// service composition and no interleaving-fault scenario is needed to
+    /// exhibit it — so R7.3(a) sites this test in counted file 2's own inline
+    /// test module. Its non-vacuity is proven by the committed mutation arm
+    /// (`spec357-reproducer-mutation.patch` / `.txt`): the production edit that
+    /// zeros `bytes_freed_attributed` unconditionally makes this exact
+    /// assertion false in a throwaway worktree.
+    #[test]
+    fn drained_epoch_exit_attributes_exactly_its_own_stamped_byte_total() {
+        let f = frontier();
+        f.set_epoch_width(1);
+        let tag = "REPRODUCER-TOMBSTONE-TAG";
+        let expected_bytes = u64::try_from(tag.len()).expect("fits u64");
+        {
+            let mut state = f.lock();
+            let (_epoch, rec0) = state.stamp_tombstone("m", "krepro1", tag, 0);
+            assert!(rec0.is_none(), "first stamp never rolls anything over");
+            let (_epoch, rec1) = state.stamp_tombstone("m", "krepro2", "FILLER", 0);
+            assert!(rec1.is_some(), "second stamp rolls past epoch 1");
+        }
+        f.set_durable_epoch_watermark(1);
+        f.set_delivered(CONN_A, 100);
+        let c: ClientId = "a5:repro-t2|dev-1".into();
+        assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+        // The residency interval is HALF-OPEN, `[entered_at_op_seq,
+        // exited_at_op_seq)` (R3.2): one more (discarded) stamp advances the
+        // clock strictly past the licensing instant before the drain runs, so
+        // T(e) is a genuinely non-empty overlap (same reason as the (d)
+        // DRAINED-HEALTHY Tier-1 scenario below).
+        {
+            let mut state = f.lock();
+            state.stamp_tombstone("m", "krepro-spacer", "SPACERTAG", 0);
+        }
+        let exits = {
+            let mut state = f.lock();
+            let (_drained, _split, exits) = state.drain_prunable();
+            exits
+        };
+        assert_eq!(exits.len(), 1, "only epoch 1 was eligible");
+        let exit = exits.into_iter().next().expect("checked len == 1");
+        assert!(matches!(exit.exit_kind, EpochExitKind::DrainedByPrune));
+        assert_eq!(
+            exit.bytes_freed_attributed,
+            expected_bytes,
+            "a DrainedByPrune exit must attribute EXACTLY the epoch's own \
+             stamped byte total, got {got}",
+            got = exit.bytes_freed_attributed
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tier-1 deterministic discrimination — the `FrontierState` arm (R7.1/
+    // R7.1a). Five independent, engineered scenarios drive every class of the
+    // frozen §11.0 walk this boundary can reach, feed the resulting
+    // entry/residency population through the COMMITTED `spec357-classify.sh`
+    // builder (this is what makes it "the frozen walk run against harness
+    // output" rather than an eyeballed hand-classification), and assert the
+    // one-row-per-class result. Class (a) INDEX-POPULATION-GAP is not
+    // exercised here: this file's `stamp_tombstone` only ever constructs an
+    // `entered_index == false` entry row via `PruneEpochEntryRecord::default()`
+    // (control class (f)'s branch), which is `stamped_bytes == 0` by
+    // construction — (a) needs `stamped_bytes > 0` on that same branch, which
+    // this implementation cannot produce. That is not a harness gap; it is the
+    // mechanical form of R3.1's own expectation ("EXCLUDED" under the pin's
+    // weakening), and the transcript states it as such rather than leaving a
+    // silent absence.
+    // -----------------------------------------------------------------------
+
+    /// Epoch-offset an entry row so five independently-numbered scenarios (each
+    /// its own tiny frontier starting at epoch 1) can share one JSONL
+    /// population with no epoch collision. Only the JSON payload's `epoch`
+    /// field is remapped; the frontier's own internal numbering is untouched.
+    fn offset_entry(mut r: PruneEpochEntryRecord, base: Epoch) -> PruneEpochEntryRecord {
+        r.epoch += base;
+        r
+    }
+
+    /// See [`offset_entry`] — the residency-side counterpart, applied with the
+    /// SAME base as its scenario's entry row so the classify.sh join still
+    /// resolves by epoch number.
+    fn offset_residency(
+        mut r: PruneEpochResidencyRecord,
+        base: Epoch,
+    ) -> PruneEpochResidencyRecord {
+        r.epoch += base;
+        r
+    }
+
+    /// One O-0 conservation-ledger row, both renders identical (a single
+    /// `index_conservation_snapshot()` call written twice) — the accessor's own
+    /// coherence property (Checklist 6a) is what licenses this, not an
+    /// assumption.
+    fn conservation_csv_row(elapsed_secs: u64, s: IndexConservationSnapshot) -> String {
+        format!(
+            "{elapsed_secs},{a},{a},{b},{b},{c},{c},{d},{d},{e},{e},{f},{f},{g},{g},{h},{h}",
+            a = s.stamped_refs_total,
+            b = s.stamped_bytes_total,
+            c = s.drained_refs_total,
+            d = s.restored_refs_total,
+            e = s.rebuild_cleared_refs_total,
+            f = s.epochs_entered_total,
+            g = s.epochs_exited_total,
+            h = s.indexed_refs,
+        )
+    }
+
+    /// Dry-run leg 2 (R6.3) — exercises the committed `spec357-classify.sh`
+    /// builder over this Tier-1 harness's own output and asserts the frozen
+    /// walk's per-class result. `--nocapture` prints both produced CSVs
+    /// verbatim so their bytes can be transcribed into the committed
+    /// `spec357-dryrun-{class,conservation}-tier1.csv` evidence artifacts.
+    // Kept as one body deliberately: the five engineered scenarios share the
+    // `entries`/`residency` accumulators and the single classify.sh
+    // invocation they all feed, so splitting them into helper fns would move
+    // the per-class assertions away from the exact fixture that produced
+    // each row, which is the property a reviewer needs to check this test
+    // against the frozen walk at all.
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn tier1_frontierstate_arm_drives_every_reachable_class_of_the_frozen_walk() {
+        const D_BASE: Epoch = 100_000; // (d) DRAINED-HEALTHY
+        const B_BASE: Epoch = 200_000; // (b) SELECTION / SPLIT MISMATCH
+        const C_BASE: Epoch = 300_000; // (c) FRONTIER RACE (+ Unclassified)
+        const E_BASE: Epoch = 400_000; // (e) NO-EXIT-RECORD
+        const F_BASE: Epoch = 500_000; // (f) EMPTY-EPOCH
+
+        let mut entries: Vec<PruneEpochEntryRecord> = Vec::new();
+        let mut residency: Vec<PruneEpochResidencyRecord> = Vec::new();
+
+        // ---- (d) DRAINED-HEALTHY: resident, licensed, fenced, THEN actually
+        // taken by a legitimate prune drain — T(e) holds and D(e) holds.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            let e1 = {
+                let mut state = f.lock();
+                let (_epoch, rec0) = state.stamp_tombstone("m", "kd1", "TAGD1", 0);
+                assert!(rec0.is_none(), "first stamp never rolls anything over");
+                let (_epoch, rec1) = state.stamp_tombstone("m", "kd2", "TAGD2", 0);
+                rec1.expect("second stamp rolls past epoch 1")
+            };
+            f.set_durable_epoch_watermark(1);
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:tier1-d|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+            // The residency interval is HALF-OPEN, `[entered_at_op_seq,
+            // exited_at_op_seq)` (R3.2): draining in the SAME op-seq tick that
+            // licensing landed on would make `exited_at_op_seq` equal to (not
+            // strictly greater than) `lwm_passed_at_op_seq`, which is an EMPTY
+            // overlap under that definition, not a non-empty one — so one more
+            // (discarded) stamp advances the clock past the licensing instant
+            // before the drain runs, giving T(e) a genuinely non-empty window.
+            {
+                let mut state = f.lock();
+                state.stamp_tombstone("m", "kd-spacer", "TAGDX", 0);
+            }
+            let exits = {
+                let mut state = f.lock();
+                let (_drained, _split, exits) = state.drain_prunable();
+                exits
+            };
+            assert_eq!(exits.len(), 1, "only epoch 1 was eligible");
+            let exit = exits.into_iter().next().expect("checked len == 1");
+            assert!(matches!(exit.exit_kind, EpochExitKind::DrainedByPrune));
+            entries.push(offset_entry(e1, D_BASE));
+            residency.push(offset_residency(exit, D_BASE));
+        }
+
+        // ---- (b) SELECTION / SPLIT MISMATCH: licensed AND fenced, then
+        // removed by a REBUILD instead of a legitimate drain — T(e) holds,
+        // D(e) does not: "eligible and not taken by the prune" (R3.2).
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            let e1 = {
+                let mut state = f.lock();
+                let (_epoch, rec0) = state.stamp_tombstone("m", "kb1", "TAGB1", 0);
+                assert!(rec0.is_none());
+                let (_epoch, rec1) = state.stamp_tombstone("m", "kb2", "TAGB2", 0);
+                rec1.expect("second stamp rolls past epoch 1")
+            };
+            f.set_durable_epoch_watermark(1);
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:tier1-b|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+            let exits = {
+                let mut state = f.lock();
+                state.rebuild_into_epoch(100, Vec::new())
+            };
+            assert_eq!(exits.len(), 1, "only epoch 1 had an entry-emitted slot");
+            let exit = exits.into_iter().next().expect("checked len == 1");
+            assert!(matches!(exit.exit_kind, EpochExitKind::ClearedByRebuild));
+            entries.push(offset_entry(e1, B_BASE));
+            residency.push(offset_residency(exit, B_BASE));
+        }
+
+        // ---- (c) FRONTIER RACE: no licensing, no fencing at all — T(e) is
+        // empty by construction. Removed via the unenumerated bypass (same
+        // mechanism AC6a's dedicated test proves), which is ALSO how this
+        // scenario doubles as an aggregate-population `Unclassified` data
+        // point distinct from AC6a's own dedicated, single-purpose test.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            let e1 = {
+                let mut state = f.lock();
+                let (_epoch, rec0) = state.stamp_tombstone("m", "kc1", "TAGC1", 0);
+                assert!(rec0.is_none());
+                let (_epoch, rec1) = state.stamp_tombstone("m", "kc2", "TAGC2", 0);
+                rec1.expect("second stamp rolls past epoch 1")
+            };
+            let exit = {
+                let mut state = f.lock();
+                state.epoch_tags.remove(&1);
+                state.detect_epoch_exit(1, None)
+            }
+            .expect("bypassed epoch surfaces at the next detection point");
+            assert!(matches!(exit.exit_kind, EpochExitKind::Unclassified { .. }));
+            entries.push(offset_entry(e1, C_BASE));
+            residency.push(offset_residency(exit, C_BASE));
+        }
+
+        // ---- (e) NO-EXIT-RECORD: entered, then deliberately left alone — no
+        // drain, no rebuild, no detection sweep. Still resident with an entry
+        // row and no exit row at Tier-1 snapshot time.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            let e1 = {
+                let mut state = f.lock();
+                let (_epoch, rec0) = state.stamp_tombstone("m", "ke1", "TAGE1", 0);
+                assert!(rec0.is_none());
+                let (_epoch, rec1) = state.stamp_tombstone("m", "ke2", "TAGE2", 0);
+                rec1.expect("second stamp rolls past epoch 1")
+            };
+            entries.push(offset_entry(e1, E_BASE));
+        }
+
+        // ---- (f) EMPTY-EPOCH — the D3 obligation carried into this segment.
+        // A rebuild jump leaves the landing epoch with no residency slot; the
+        // next rollover past it therefore takes the
+        // `PruneEpochEntryRecord::default()` branch (R2.3a), exactly the path
+        // documented at the `stamp_tombstone` rollover site: "only reachable
+        // via an `epoch_width` change or a rebuild-induced jump, never via
+        // ordinary sequential stamping."
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            {
+                let mut state = f.lock();
+                state.rebuild_into_epoch(50, Vec::new());
+            }
+            let e_empty = {
+                let mut state = f.lock();
+                let (_epoch, rec) = state.stamp_tombstone("m", "kf1", "TAGF1", 0);
+                rec.expect("rolls past the empty landing epoch 50")
+            };
+            assert!(
+                !e_empty.entered_index,
+                "class (f): the landing epoch never entered the index"
+            );
+            assert_eq!(e_empty.stamped_bytes, 0);
+            assert_eq!(e_empty.epoch, 50);
+            entries.push(offset_entry(e_empty, F_BASE));
+        }
+
+        assert_eq!(entries.len(), 5, "one entry row per engineered scenario");
+        assert_eq!(
+            residency.len(),
+            3,
+            "(d), (b) and (c) each produced an exit row; (e) and (f) did not, by design"
+        );
+
+        // ---- O-0 conservation-ledger rows for the synthetic prune.csv, over
+        // an unrelated sixth frontier: stamp → drain → restore, each snapshot
+        // read twice into identical `_a`/`_b` renders (Checklist 6a's own
+        // coherence property licenses this).
+        let cons_rows = {
+            let f = frontier();
+            f.set_epoch_width(1);
+            let mut rows = Vec::new();
+            f.stamp_tombstone("m", "ko1", "T1");
+            f.stamp_tombstone("m", "ko2", "T2");
+            f.stamp_tombstone("m", "ko3", "T3"); // rolls past epochs 1 and 2
+            rows.push(conservation_csv_row(0, f.index_conservation_snapshot()));
+            f.set_durable_epoch_watermark(2);
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:tier1-cons|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 3, CONN_A)));
+            let drained = f.drain_prunable_tombstones();
+            assert_eq!(drained.len(), 2);
+            rows.push(conservation_csv_row(10, f.index_conservation_snapshot()));
+            let (epoch, tombstone_ref) = drained.into_iter().next().expect("a drained ref");
+            f.restore_tombstone_ref(epoch, tombstone_ref);
+            rows.push(conservation_csv_row(20, f.index_conservation_snapshot()));
+            rows
+        };
+
+        // ---- Write the harness output in the exact wire shape
+        // `spec357-classify.sh` documents, run the builder over it (this IS
+        // "the frozen walk run against harness output" — the walk lives in
+        // the committed builder, not re-derived by eye here), and assert the
+        // per-class result.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entry_path = dir.path().join("tier1.entry.jsonl");
+        let residency_path = dir.path().join("tier1.residency.jsonl");
+        let prune_path = dir.path().join("tier1.prune.csv");
+        let out_prefix = dir.path().join("tier1-dryrun");
+
+        let entry_jsonl: String = entries
+            .iter()
+            .map(|r| serde_json::to_string(r).expect("entry row serializes"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let residency_jsonl: String = residency
+            .iter()
+            .map(|r| serde_json::to_string(r).expect("residency row serializes"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&entry_path, &entry_jsonl).expect("write entry.jsonl");
+        std::fs::write(&residency_path, &residency_jsonl).expect("write residency.jsonl");
+
+        let m_refs = METRIC_PRUNE_STAMPED_REFS_TOTAL;
+        let m_bytes = METRIC_PRUNE_STAMPED_BYTES_TOTAL;
+        let m_drained = METRIC_PRUNE_DRAINED_REFS_TOTAL;
+        let m_restored = METRIC_PRUNE_RESTORED_REFS_TOTAL;
+        let m_rebuilt = METRIC_PRUNE_REBUILD_CLEARED_REFS_TOTAL;
+        let m_entered = METRIC_PRUNE_EPOCHS_ENTERED_TOTAL;
+        let m_exited = METRIC_PRUNE_EPOCHS_EXITED_TOTAL;
+        let m_indexed = METRIC_PRUNE_INDEXED_REFS;
+        let prune_header = format!(
+            "elapsed_secs,{m_refs}_a,{m_refs}_b,{m_bytes}_a,{m_bytes}_b,{m_drained}_a,{m_drained}_b,\
+             {m_restored}_a,{m_restored}_b,{m_rebuilt}_a,{m_rebuilt}_b,{m_entered}_a,{m_entered}_b,\
+             {m_exited}_a,{m_exited}_b,{m_indexed}_a,{m_indexed}_b"
+        );
+        let prune_csv = format!("{prune_header}\n{}\n", cons_rows.join("\n"));
+        std::fs::write(&prune_path, &prune_csv).expect("write prune.csv");
+
+        println!("--- TIER-1 HARNESS: entry.jsonl ---\n{entry_jsonl}");
+        println!("--- TIER-1 HARNESS: residency.jsonl ---\n{residency_jsonl}");
+        println!("--- TIER-1 HARNESS: prune.csv ---\n{prune_csv}");
+
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("benches/soak_harness/evidence/spec357-classify.sh");
+        let output = std::process::Command::new("sh")
+            .arg(&script)
+            .arg(&entry_path)
+            .arg(&residency_path)
+            .arg(&prune_path)
+            .arg(&out_prefix)
+            .output()
+            .expect("spec357-classify.sh runs");
+        println!(
+            "--- spec357-classify.sh stdout ---\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        println!(
+            "--- spec357-classify.sh stderr ---\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "spec357-classify.sh must exit 0");
+
+        let class_csv = std::fs::read_to_string(format!(
+            "{}-class.csv",
+            out_prefix.to_str().expect("utf8 path")
+        ))
+        .expect("read class.csv");
+        let cons_csv = std::fs::read_to_string(format!(
+            "{}-conservation.csv",
+            out_prefix.to_str().expect("utf8 path")
+        ))
+        .expect("read conservation.csv");
+        println!("--- TIER-1 HARNESS: spec357-*-class.csv ---\n{class_csv}");
+        println!("--- TIER-1 HARNESS: spec357-*-conservation.csv ---\n{cons_csv}");
+
+        let data_rows: Vec<&str> = class_csv
+            .lines()
+            .skip(1)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(data_rows.len(), 5, "one classification row per entry row");
+        let count_col = |idx: usize, needle: &str| -> usize {
+            data_rows
+                .iter()
+                .filter(|row| row.split(',').nth(idx) == Some(needle))
+                .count()
+        };
+        // Columns: epoch,entered_index,stamped_bytes,refs_at_entry,has_exit_row,
+        // exit_kind_variant,unclassified_exit,class_a,class_b,class_c,class_d,
+        // class_e,class_f (0-indexed 0..12).
+        assert_eq!(
+            count_col(7, "1"),
+            0,
+            "class_a: mechanically unreachable, see this test's own doc-comment"
+        );
+        assert_eq!(count_col(8, "1"), 1, "class_b: exactly the (b) scenario");
+        assert_eq!(count_col(9, "1"), 1, "class_c: exactly the (c) scenario");
+        assert_eq!(count_col(10, "1"), 1, "class_d: exactly the (d) scenario");
+        assert_eq!(count_col(11, "1"), 1, "class_e: exactly the (e) scenario");
+        assert_eq!(
+            count_col(12, "1"),
+            1,
+            "class_f: exactly the (f) scenario (D3)"
+        );
+        assert_eq!(
+            data_rows
+                .iter()
+                .filter(|row| row.split(',').nth(6) == Some("1"))
+                .count(),
+            1,
+            "unclassified_exit: exactly the (c) scenario's bypass removal"
+        );
+
+        let cons_data_rows: Vec<&str> =
+            cons_csv.lines().skip(1).filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            cons_data_rows.len(),
+            3,
+            "one conservation row per prune.csv scrape row"
+        );
+        assert!(
+            cons_data_rows.iter().all(|row| row.split(',').nth(1) == Some("CONSISTENT")),
+            "no concurrent mutation between the two synthetic renders: every row is CONSISTENT, never TORN"
+        );
+        assert!(
+            cons_data_rows
+                .iter()
+                .all(|row| row.split(',').nth(4) == Some("1")),
+            "O-0 holds on every CONSISTENT scrape of this harness run"
         );
     }
 

@@ -1,0 +1,39 @@
+# spec357-trackergrade.ref -- the PRE-DATA reference ledger read by spec357-trackergrade.sh.
+#
+# THESE ARE THE VALUES THE GRADE IS MADE AGAINST, so they live in a committed file rather than in an
+# invocation line: a reference typed at the keyboard makes the grade as strong as the operator's
+# memory, which is an assertion and not a measurement. This file has its own digest and is the SAME
+# bytes for both proof-run directions this half commits, and for the successor's real run against the
+# actual `.specflow/todos/` files (its own reference values, unrelated to this fixture's, live in
+# whatever `.ref` `SPEC-357b` commits for that purpose -- this file grades ONLY the fixture below).
+#
+# Measured 2026-08-13, PRE-DATA, against the COMMITTED FIXTURE files
+# `spec357-trackergrade-fixture-634.pre.md` / `spec357-trackergrade-fixture-648.md` in this same
+# directory. Those two files -- NOT `.specflow/todos/TODO-634.md` / `TODO-648.md` -- are what these
+# digests describe. `.specflow/` is gitignored and is not read by anything that produced this file.
+#
+# Format: <key><single space><value>; the value is the rest of the line VERBATIM (it may contain
+# spaces, brackets and non-ASCII). Lines beginning # and empty lines are ignored.
+
+todo634_pre_sha256 c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+todo648_sha256 f518c9b6cd985c4c495db2da7819580786c05acc0ab1c9801532591d25005080
+
+# Tick counts on the fixture's TODO-634.md-shaped file, with the census that makes them exhaustive:
+# the fixture carries 7 top-level boxes and NO indented ones, so ticked + unticked covers every box
+# it has.
+ticked_count 2
+unticked_count 5
+total_boxes 7
+indented_boxes 0
+
+# The strict anchor is a line PREFIX ending at the box's opening dash, chosen so it survives the
+# required edit (which appends to the box) but breaks the instant the box is ticked. The loose anchor
+# is the same text without the checkbox marker and is used ONLY to LOCATE the box, so that a ticked
+# box still REDs limb (c) while limbs (d) and (e) stay computable.
+box_anchor - [ ] **PENDING REPEAT: awaiting the outcome of the fixture's own diagnosis round --
+box_anchor_loose **PENDING REPEAT: awaiting the outcome of the fixture's own diagnosis round --
+
+# Limb (d). The pointer literal is required verbatim in the box's after-text. The outcome tokens are
+# a small closed vocabulary; at least one must appear.
+pointer_literal spec357-trackergrade-fixture-manifest.md §2
+outcome_tokens INDETERMINATE ENDORSED EXCLUDED

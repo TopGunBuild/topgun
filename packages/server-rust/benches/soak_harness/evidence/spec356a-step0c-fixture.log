@@ -691,3 +691,115 @@ itself. Only the surrounding population figures move against Parts I-IV, because
 they are readings from a different smoke run; the emitted line itself is
 character-for-character the same, which is what makes a future drift
 mechanically visible instead of silently vacuous.
+
+================================================================================
+PART VI -- RE-CAPTURE AT THE SPEC-357a G4 RUNNER (the per-epoch residency
+           instrument, 60-column schema: 43 pre-existing + 17 new).
+================================================================================
+
+WHY. Same trigger as EG-1's PART VI: the BINARY moved (G1/G2's .rs edits) AND
+the runner gained two additive cell arms plus 17 new prune.csv columns. The
+new columns are inside this Part's own subject -- the census MUST cover them,
+not just the pre-existing 43.
+
+BUILD IDENTITY. Same rebuilt server/soak_harness pair as EG-1 PART VI, at
+repo HEAD c828fb4d7b34071edad23553e423caaec0dc4c28 (this half's G4 tip at
+capture), working tree clean.
+
+--------------------------------------------------------------------------------
+ITEM 1: THE CENSUS, `empty_fields=0` OVER ALL 60 COLUMNS, AS A LITERAL
+--------------------------------------------------------------------------------
+
+INVOCATION (verbatim, as run; scratch dirs elided to <scratch>):
+
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  SPEC356_SMOKE_DURATION=120 SPEC356_SMOKE_SAMPLE_INTERVAL=10 \
+  SPEC356_OUT_DIR=<scratch>/p6-smoke SPEC356_DATA_DIR=<scratch>/p6-smoke-data \
+    packages/server-rust/benches/soak_harness/evidence/spec356-prune.sh smoke
+
+  $ head -1 <scratch>/p6-smoke/spec356-smoke.prune.csv | tr ',' '\n' | wc -l
+  60   (MUST be 60 = 43 pre-existing + 17 new: the 8-quantity O-0 octet's
+        leg-A/leg-B pairs, columns 44-59, plus o0_tear_class, column 60)
+
+  $ awk -F, '{ for (i = 1; i <= NF; i++) if ($i == "") e++ } END { print "empty_fields=" e + 0 }' \
+      <scratch>/p6-smoke/spec356-smoke.prune.csv
+  empty_fields=0
+
+  13 data rows x 60 columns = 780 fields; 0 empty, over the ARMED cell.
+  Disarmed-side coverage (spec356-smokeoff.prune.csv, same run pair): every
+  prune-record field is blank BY DESIGN (the arming witness's own
+  requirement, checked separately in EG-1's PART VI limb (c)), so the
+  empty_fields=0 discharge is stated over the ARMED cell only, exactly as
+  Parts I-V's own census was.
+
+--------------------------------------------------------------------------------
+ITEM 2: THE GUARD-FIRE, RE-DEMONSTRATED AT THE 60-COLUMN SCHEMA
+--------------------------------------------------------------------------------
+
+Fixture re-cut from THIS Part's own fresh smoke artifact, blanking the SAME
+cell as Parts I-V: one row of column index 3, topgun_or_prune_considered_total.
+
+  $ awk -F, -v OFS=, 'NR==6 { $3 = "" } { print }' \
+      <scratch>/p6-smoke/spec356-smoke.prune.csv > <scratch>/p6-smoke/fixture-blanked.csv
+
+INVOCATION (verbatim, as run):
+
+  SPEC356_COLCHECK_FIXTURE=<scratch>/p6-smoke/fixture-blanked.csv \
+  SPEC356_SMOKE_DURATION=120 SPEC356_SMOKE_SAMPLE_INTERVAL=10 \
+  SPEC356_OUT_DIR=<scratch>/p6-smoke SPEC356_DATA_DIR=<scratch>/p6-smoke-data \
+    packages/server-rust/benches/soak_harness/evidence/spec356-prune.sh smoke
+
+  === COLUMN-CHECK FIXTURE PATH (no harness is started) ===
+    fixture header: matches the pinned schema (60 columns)
+
+  topgun_or_prune_considered_total             [POPULATN] n=12 empty=1 min=0 max=3000
+  STEP0C ADMISSIBILITY: topgun_or_prune_considered_total failed the population check (n == 0 or empty > 0 at column index 3) -- the cell STANDS;
+                        this is an admissibility failure that routes the
+                        classification predicate to INDETERMINATE. It is NOT an
+                        instrument defect and it changes no exit status.
+
+  STEP0C ADMISSIBILITY lines emitted: 1
+  INSTRUMENT_OK:                      1 (unchanged by a MEASURAND failure)
+  exit status:                        0 (the pinned fall-through, exit "$HARNESS_RC")
+
+  Line is byte-identical to Parts I-V's own emitted line (same column, same
+  index, same wording) -- confirmed: `grep '^STEP0C ADMISSIBILITY' <this
+  file> | sort -u | wc -l` reads 1 across all SIX captures now on file.
+
+  All 17 new O-0 columns (44-60) render clean (empty=0) in this same fixture
+  capture -- the synthetic blank targets column 3 only, so their own
+  population is unperturbed by the demonstration.
+
+--------------------------------------------------------------------------------
+ITEM 3: THE D1 FINDING -- `restored_refs_total_a` / `_b` READ A CONSTANT 0
+--------------------------------------------------------------------------------
+
+Columns 50-51 (`topgun_or_prune_restored_refs_total_a` / `_b`) read `min=0
+max=0` over both the plain smoke capture (Item 1) and the fixture capture
+(Item 2) above. THIS IS EXPECTED AND IS NOT AN EMPTY-FIELD DEFECT: the
+Prometheus-facing `restored_refs` counter `MetricsPruneRecorder` registers is
+eagerly touched (so it renders `0`, never absent, satisfying limb (a)'s own
+armed N/N) but is architecturally never incremented -- no `restore()` call
+site has a trait method to feed, by G1's own frozen design (the manifest's
+Sec 11.0.20 records the reason and cites the source comment verbatim). The
+column therefore reads a **VALUE of 0 on every row**, which is exactly what
+`empty_fields=0`'s own check distinguishes from a blank field, and a smoke
+run with zero `restore()` calls in its churn mix would read the identical `0`
+even on a hypothetically-fixed counter -- so this capture does not by itself
+distinguish "inert mirror" from "no restores occurred". The manifest's D1
+note is the authoritative record of WHICH of those two readings is true here
+(the inert mirror), sourced from the code comment rather than from this
+capture.
+
+================================================================================
+VERDICT: PART VI PASS (both items) AT THE SPEC-357a G4 PIN.
+================================================================================
+
+  item 1: empty_fields=0 over 60 columns x 13 rows, armed cell, literal count
+          stated (780 fields, 0 empty).
+  item 2: guard-fire re-demonstrated at the 60-column schema; STEP0C line
+          byte-identical to Parts I-V (sort -u over six captures yields ONE
+          line); instrument-defect literal count 0; exit 0.
+  item 3: the D1 finding (restored_refs_total_a/_b constant 0) is recorded
+          here and in the manifest Sec 11.0.20, not left as a silent
+          all-zero column.

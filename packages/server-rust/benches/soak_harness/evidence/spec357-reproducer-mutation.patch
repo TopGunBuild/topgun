@@ -1,0 +1,17 @@
+diff --git a/packages/server-rust/src/tombstone_frontier_impl.rs b/packages/server-rust/src/tombstone_frontier_impl.rs
+index 3fef4a6d..71956d89 100644
+--- a/packages/server-rust/src/tombstone_frontier_impl.rs
++++ b/packages/server-rust/src/tombstone_frontier_impl.rs
+@@ -690,11 +690,7 @@ impl FrontierState {
+         // struct's own doc): the whole epoch's stamped content leaves the RAM index
+         // atomically on a drain, so `stamped_bytes` IS the freed total; every other
+         // exit kind frees nothing.
+-        let bytes_freed_attributed = if matches!(exit_kind, EpochExitKind::DrainedByPrune) {
+-            slot.stamped_bytes
+-        } else {
+-            0
+-        };
++        let bytes_freed_attributed = 0;
+         self.epochs_exited_total += 1;
+         Some(PruneEpochResidencyRecord {
+             epoch,

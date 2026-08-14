@@ -1,0 +1,215 @@
+WARNING: artifact dir overridden to /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1
+         A characterization run's artifacts belong in /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence
+         (git-tracked); artifacts written elsewhere are not evidence.
+soak binary:   /Users/koristuvac/Projects/topgun/topgun/target/release/deps/soak_harness-9abf891ab72dea71
+  built:       2026-08-13T18:31:09Z
+server binary: /Users/koristuvac/Projects/topgun/topgun/target/release/topgun-server
+  built:       2026-08-13T18:32:24Z
+
+=== spec356 prune-record run: cell diag_r1 ===
+  repo HEAD:      065f9611f50d5e863aa422f10bb7204f5c1596a7
+  dirty tree:     no
+  host/OS:        Darwin MacBook-Pro-koristuvac.local 25.5.0 Darwin Kernel Version 25.5.0: Tue Jun  9 22:18:58 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6000 arm64
+  lineage:        HEAD harness + HEAD server
+  cell class:     MEASUREMENT
+  data dir:       /Users/koristuvac/Projects/topgun/topgun/target/spec356-diag_r1-data
+  csv:            /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.csv
+  prune.csv:      /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.prune.csv
+  soak.json:      /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.soak.json
+  mechanism.json: /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.mechanism.json (harness writes spec357-diag-r1.soak.mechanism.json; renamed after the run)
+  progress.jsonl: /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.progress.jsonl
+  console log:    /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.harness-console.log
+  matrix:         /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.matrix.txt
+  soak binary:    /Users/koristuvac/Projects/topgun/topgun/target/release/deps/soak_harness-9abf891ab72dea71
+    built:        2026-08-13T18:31:09Z
+  server binary:  /Users/koristuvac/Projects/topgun/topgun/target/release/topgun-server
+    built:        2026-08-13T18:32:24Z
+  --- varied knobs (everything else is the spec355-width.sh literal) ---
+  TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
+  TOPGUN_PRUNE_RECORD: true (cell expects armed=yes)
+  duration:            28800s
+  primary csv cadence: 60s
+  prune.csv cadence:   10s (pinned for every cell)
+  server port:         47356
+  SOAK_SERVER_BINARY:  <unset: HEAD binary, fail-closed guard not on this path>
+  --- pinned matrix (identical to spec355-width.sh) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 0;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+
+harness pid 14454; follow with: tail -f /Users/koristuvac/Projects/topgun/topgun/target/spec356-diag_r1-data.meta/harness-console.log
+server ready: pid 14467 (t0 = server-ready)
+
+harness exited with code 1
+total_writes:      4490609
+write_errors:      0
+reconnects:        22888
+resends:           762799
+confirm_apply:     confirms=13761 lastEpoch=900 errors=411 (tracked client advances the low-water-mark that licenses pruning; confirms=0 with a climbing gauge = LWM never advanced)
+steady_checkpts:   95
+recovery_checkpts: 0 (crashes 0)
+memory:            first=13MB peak=8226MB last=7876MB slope=975.8MB/h -> ok (backstop)
+tombstone_bytes:   first=0 peak=4687473 last=4687473 slope=1067599.6B/h samples=5755 -> FAIL (slope + blind-monitor both hard-gate) reason=tombstone-byte growth slope 1067599.6 bytes/h exceeds 512.0 bytes/h (total growth 4687473 bytes over 5755 samples, last-half window 14402s)
+tombstone_corpus_redb_scan: 4659548 bytes (independent of gauge; last gauge value 4687473 bytes) -> DIVERGED (positive-control cross-check, report-only)
+disk_mb:           first=1.5 peak=1261.8 last=1261.8 slope=158.6MB/h samples=5618 -> FAIL (slope report-only until TODO-566; blind-monitor hard-gates) reason=disk growth slope 158.6MB/h exceeds 50.0MB/h (total growth 1260.3MB over 5618 samples)
+pending_gates (expected-fail, did NOT fail the run):
+  - disk growth slope 158.6 MB/h exceeds 50.0 MB/h — EXPECTED until TODO-566 bounds OR-Map tombstones (report-only, did NOT fail the run)
+wrote JSON report to /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.soak.json
+
+=== OR-CHURN MECHANISM REPORT (report-only, Q1-Q4) ===
+Q1 bytes/frame:    OR early(mean=142B max=209B) late(mean=147B max=209B) max=209B | LWW mean=220B max=304B | OR/LWW=0.7x | rises=false
+OR frame census:   delta(n=2384484 mean=144B max=209B total=344181667B) | snapshot(n=0 mean=0B max=0B total=0B)
+Q2 drain window:   before=855.5MB after=855.4MB delta=-0.1MB | no significant drain burst (WAL delta -0.1MB)
+Q3 RSS holder:     rss_slope=975.8MB/h disk_slope=158.6MB/h corr=1.00 | RSS tracks disk in lockstep (r=1.00); the growing OR blobs sit in the write-behind queue / record cache — delta-framing should reduce RSS too
+Q4 not tombstone:  or_wal_bytes=344181667 tombstone_corpus=4659548 gauge=4687473 | growth_is_or=true
+scan:              segments=165508 or_frames=2384484 lww_frames=782038 remove_frames=0
+conclusion:        REFUTED / INCONCLUSIVE: OR frame size did NOT rise late-vs-early over the retained corpus — the O(N)-per-op-frame hypothesis is not confirmed by this run. Inspect the acked-beyond-applied tail bound and write-behind retention before choosing the fix.
+sequencing:        Sequencing option for the R1 /xask gate: tail-bounding the acked-beyond-applied WAL is the lowest-risk FIRST containment (OOM/disk-full -> backpressure, zero recovery-path risk); delta-framing is the eventual O(1)-frame fix. If Q2 shows the drain burst is buffered O(N) frames, tail-bounding addresses it directly.
+wrote mechanism report to /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.soak.mechanism.json
+console log: /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.harness-console.log
+server console log: /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.server-console.log (207969 lines)
+mechanism report: /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.mechanism.json
+csv rows: 481
+csv columns:
+  rss_mb                                       [NONZERO ] n=481 empty=0 nonzero=481 min=6 max=8169
+  wal_mb                                       [NONZERO ] n=481 empty=0 nonzero=480 min=0 max=855
+  redb_mb                                      [NONZERO ] n=481 empty=0 nonzero=481 min=2 max=407
+  disk_total_mb                                [NONZERO ] n=481 empty=0 nonzero=481 min=2 max=1262
+  tombstone_bytes n=481 empty=0 min=0 max=4689244
+
+prune.csv:      /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.prune.csv
+prune.csv rows: 2880  (cadence 10s)
+prune.csv ticks SKIPPED by the scrape gate: 4
+    elapsed=0s scrape FAILED -- no row written, retrying next tick
+    elapsed=28810s scrape FAILED -- no row written, retrying next tick
+    elapsed=28820s scrape FAILED -- no row written, retrying next tick
+    elapsed=28830s scrape FAILED -- no row written, retrying next tick
+first COMPLETE scrape at elapsed = 10s
+prune.csv columns:
+  elapsed_secs                                 [NONZERO ] n=2880 empty=0 nonzero=2880 min=10 max=28800
+  topgun_or_prune_passes_total                 [NONZERO ] n=2880 empty=0 nonzero=2880 min=386 max=897243
+  topgun_or_prune_considered_total             [POPULATN] n=2880 empty=0 min=0 max=35000
+  topgun_or_prune_dropped_total                [POPULATN] n=2880 empty=0 min=0 max=35000
+  topgun_or_prune_matched_nothing_total        [POPULATN] n=2880 empty=0 min=0 max=0
+  topgun_or_prune_absent_total                 [POPULATN] n=2880 empty=0 min=0 max=0
+  topgun_or_prune_restored_read_error_total    [POPULATN] n=2880 empty=0 min=0 max=0
+  topgun_or_prune_restored_evicted_total       [POPULATN] n=2880 empty=0 min=0 max=0
+  topgun_or_prune_restored_write_error_total   [POPULATN] n=2880 empty=0 min=0 max=0
+  topgun_or_prune_bytes_freed_total            [POPULATN] n=2880 empty=0 min=0 max=754706
+  topgun_or_prune_epochs_drained_total         [POPULATN] n=2880 empty=0 min=0 max=35
+  topgun_or_prune_empty_drains_total           [POPULATN] n=2880 empty=0 min=386 max=897208
+  topgun_or_prune_nonempty_drains_total        [POPULATN] n=2880 empty=0 min=0 max=35
+  topgun_or_prune_lwm_advances_total           [POPULATN] n=2880 empty=0 min=2 max=900
+  topgun_or_prune_lwm_epochs_advanced_total    [POPULATN] n=2880 empty=0 min=2 max=900
+  topgun_or_prune_split_recomputes_total       [POPULATN] n=2880 empty=0 min=2 max=1797
+  topgun_or_prune_indexed_refs                 [NONZERO ] n=2880 empty=0 nonzero=2880 min=298 max=2036
+  topgun_or_prune_indexed_epochs               [NONZERO ] n=2880 empty=0 nonzero=2880 min=1 max=3
+  topgun_or_prune_eligible_refs                [POPULATN] n=2880 empty=0 min=0 max=1000
+  topgun_or_prune_ineligible_refs              [POPULATN] n=2880 empty=0 min=65 max=1166
+  topgun_or_prune_split_computed_epoch         [POPULATN] n=2880 empty=0 min=2 max=900
+  topgun_or_prune_current_epoch                [NONZERO ] n=2880 empty=0 nonzero=2880 min=2 max=900
+  topgun_or_prune_low_water_mark               [POPULATN] n=2880 empty=0 min=2 max=900
+  topgun_or_prune_durable_epoch_watermark      [POPULATN] n=2880 empty=0 min=0 max=898
+  topgun_or_prune_last_drained_epoch           [POPULATN] n=2880 empty=0 min=0 max=898
+  topgun_or_prune_lwm_stall_seconds            [POPULATN] n=2880 empty=0 min=0 max=35
+  topgun_or_prune_tracked_claims               [POPULATN] n=2880 empty=0 min=1 max=1
+  topgun_or_prune_drain_refs_sum               [POPULATN] n=2880 empty=0 min=0 max=35000
+  topgun_or_prune_drain_refs_count             [POPULATN] n=2880 empty=0 min=0 max=35
+  topgun_or_prune_drain_epochs_sum             [POPULATN] n=2880 empty=0 min=0 max=35
+  topgun_or_prune_drain_epochs_count           [POPULATN] n=2880 empty=0 min=0 max=35
+  topgun_or_prune_claim_span_epochs_sum        [POPULATN] n=2880 empty=0 min=0 max=10
+  topgun_or_prune_claim_span_epochs_count      [POPULATN] n=2880 empty=0 min=2 max=1797
+  topgun_or_prune_claim_lag_epochs_sum         [POPULATN] n=2880 empty=0 min=0 max=10
+  topgun_or_prune_claim_lag_epochs_count       [POPULATN] n=2880 empty=0 min=2 max=1797
+  topgun_or_prune_epoch_considered_sum         [POPULATN] n=2880 empty=0 min=0 max=35000
+  topgun_or_prune_epoch_considered_count       [POPULATN] n=2880 empty=0 min=0 max=35
+  topgun_or_prune_epoch_dropped_sum            [POPULATN] n=2880 empty=0 min=0 max=35000
+  topgun_or_prune_epoch_dropped_count          [POPULATN] n=2880 empty=0 min=0 max=35
+  topgun_or_prune_epoch_bytes_freed_sum        [POPULATN] n=2880 empty=0 min=0 max=754706
+  topgun_or_prune_epoch_bytes_freed_count      [POPULATN] n=2880 empty=0 min=0 max=35
+  topgun_ormap_tombstone_bytes_total           [NONZERO ] n=2880 empty=0 nonzero=2880 min=7540 max=20494029
+  topgun_or_prune_drain_refs_p50               [POPULATN] n=2880 empty=0 min=0 max=1000
+  topgun_or_prune_stamped_refs_total_a         [POPULATN] n=2880 empty=0 min=0 max=898000
+  topgun_or_prune_stamped_refs_total_b         [POPULATN] n=2880 empty=0 min=0 max=898000
+  topgun_or_prune_stamped_bytes_total_a        [POPULATN] n=2880 empty=0 min=0 max=20491614
+  topgun_or_prune_stamped_bytes_total_b        [POPULATN] n=2880 empty=0 min=0 max=20491614
+  topgun_or_prune_drained_refs_total_a         [POPULATN] n=2880 empty=0 min=0 max=897000
+  topgun_or_prune_drained_refs_total_b         [POPULATN] n=2880 empty=0 min=0 max=897000
+  topgun_or_prune_restored_refs_total_a        [POPULATN] n=2880 empty=0 min=0 max=0
+  topgun_or_prune_restored_refs_total_b        [POPULATN] n=2880 empty=0 min=0 max=0
+  topgun_or_prune_rebuild_cleared_refs_total_a [POPULATN] n=2880 empty=0 min=0 max=0
+  topgun_or_prune_rebuild_cleared_refs_total_b [POPULATN] n=2880 empty=0 min=0 max=0
+  topgun_or_prune_epochs_entered_total_a       [POPULATN] n=2880 empty=0 min=1 max=899
+  topgun_or_prune_epochs_entered_total_b       [POPULATN] n=2880 empty=0 min=1 max=899
+  topgun_or_prune_epochs_exited_total_a        [POPULATN] n=2880 empty=0 min=0 max=897
+  topgun_or_prune_epochs_exited_total_b        [POPULATN] n=2880 empty=0 min=0 max=897
+  topgun_or_prune_indexed_refs_a               [POPULATN] n=2880 empty=0 min=299 max=2036
+  topgun_or_prune_indexed_refs_b               [POPULATN] n=2880 empty=0 min=299 max=2036
+  o0_tear_class                                [POPULATN] n=2880 empty=0 min=0 max=0
+  progress.jsonl checkpoints: 95
+  soak.json "walFsync": "batched",
+  soak.json "epochWidth": 1000,
+  soak.json "crashes": 0,
+  soak.json "churnClients": 6,
+  soak.json "keyspace": 200,
+  soak.json "durationSecsActual": 28802,
+  mechanism.json "orDeltaFrames": 2384484,
+  mechanism.json "orSnapshotFrames": 0,
+
+arming witness:
+  cell expects:        armed=yes
+  TOPGUN_PRUNE_RECORD: true (on the child)
+  topgun_or_prune_ lines in the scrape: 96
+  pinned prune columns resolved:        41/41
+  topgun_ormap_tombstone_bytes present: 2 line(s)
+  => arming witness PASSED: armed cell, all pinned series present.
+
+post-hoc OLS fits (see the SE caveat in spec349c2-fit.awk):
+  units: the field is named slope_mb_per_hour for every column; on the
+  tombstone_bytes row the fit is identical but the unit is BYTES/hour.
+  col=rss_mb window=full rows_used=481 n=481 skipped_empty=0 t_start_secs=0.0 t_end_secs=28800.0 span_secs=28800.0 y_first=6.172 y_last=7863.469 slope_mb_per_hour=975.281052 se_mb_per_hour=2.853903 intercept_mb=416.838268 r2=0.995915 sxx_hours2=2576.021185792 sse=10049933.971286349
+  col=wal_mb window=full rows_used=481 n=481 skipped_empty=0 t_start_secs=0.0 t_end_secs=28800.0 span_secs=28800.0 y_first=0.000 y_last=855.461 slope_mb_per_hour=114.191156 se_mb_per_hour=0.223228 intercept_mb=-58.659010 r2=0.998173 sxx_hours2=2576.021185792 sse=61486.919675644
+  col=redb_mb window=full rows_used=481 n=481 skipped_empty=0 t_start_secs=0.0 t_end_secs=28800.0 span_secs=28800.0 y_first=1.516 y_last=406.543 slope_mb_per_hour=44.442066 se_mb_per_hour=0.368681 intercept_mb=-2.907827 r2=0.968087 sxx_hours2=2576.021185792 sse=167720.977224998
+  col=disk_total_mb window=full rows_used=481 n=481 skipped_empty=0 t_start_secs=0.0 t_end_secs=28800.0 span_secs=28800.0 y_first=1.516 y_last=1262.008 slope_mb_per_hour=158.633156 se_mb_per_hour=0.438728 intercept_mb=-61.568179 r2=0.996350 sxx_hours2=2576.021185792 sse=237506.541042829
+  col=tombstone_bytes window=full rows_used=481 n=481 skipped_empty=0 t_start_secs=0.0 t_end_secs=28800.0 span_secs=28800.0 y_first=0.000 y_last=4689244.000 slope_mb_per_hour=522650.024877 se_mb_per_hour=10791.453493 intercept_mb=-759030.624342 r2=0.830421 sxx_hours2=2576.021185792 sse=143696050192019.812500000
+  col=rss_mb window=last_half rows_used=481 n=241 skipped_empty=0 t_start_secs=14400.0 t_end_secs=28800.0 span_secs=14400.0 y_first=4452.984 y_last=7863.469 slope_mb_per_hour=970.530426 se_mb_per_hour=5.015770 intercept_mb=459.303032 r2=0.993657 sxx_hours2=324.010842896 sse=1948195.832295597
+  col=wal_mb window=last_half rows_used=481 n=241 skipped_empty=0 t_start_secs=14400.0 t_end_secs=28800.0 span_secs=14400.0 y_first=397.027 y_last=855.461 slope_mb_per_hour=114.362416 se_mb_per_hour=0.063203 intercept_mb=-57.486771 r2=0.999927 sxx_hours2=324.010842896 sse=309.339810169
+  col=redb_mb window=last_half rows_used=481 n=241 skipped_empty=0 t_start_secs=14400.0 t_end_secs=28800.0 span_secs=14400.0 y_first=207.543 y_last=406.543 slope_mb_per_hour=44.913836 se_mb_per_hour=1.254072 intercept_mb=-4.003414 r2=0.842936 sxx_hours2=324.010842896 sse=121787.356170179
+  col=disk_total_mb window=last_half rows_used=481 n=241 skipped_empty=0 t_start_secs=14400.0 t_end_secs=28800.0 span_secs=14400.0 y_first=604.562 y_last=1262.008 slope_mb_per_hour=159.276927 se_mb_per_hour=1.202731 intercept_mb=-61.496100 r2=0.986555 sxx_hours2=324.010842896 sse=112019.690737221
+  col=tombstone_bytes window=last_half rows_used=481 n=241 skipped_empty=0 t_start_secs=14400.0 t_end_secs=28800.0 span_secs=14400.0 y_first=694834.000 y_last=4689244.000 slope_mb_per_hour=1067049.934245 se_mb_per_hour=9703.269150 intercept_mb=-4093845.400539 r2=0.980619 sxx_hours2=324.010842896 sse=7291109169504.734375000
+
+the 8-window slice-and-fit for the 'long' cell is run post-hoc:
+  post-hoc fit invocation (spec349c2-fit.awk, UNFORKED):
+    # whole-window and last-half fits over the primary CSV
+    for w in full last_half; do
+      for c in rss_mb wal_mb redb_mb disk_total_mb tombstone_bytes; do
+        awk -v col="$c" -v window="$w" -f /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec349c2-fit.awk /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.csv
+      done
+    done
+    # the 8-window slice-and-fit, for the 'long' cell only
+    awk -F, 'NR==1{h=$0; next} {rows[++n]=$0}
+      END{seg=int((n+7)/8);
+          for(i=1;i<=8;i++){f=sprintf("spec357-diag-r1-seg%d.csv",i); print h > f;
+            for(j=(i-1)*seg+1; j<=i*seg && j<=n; j++) print rows[j] > f; close(f)}}' /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.csv
+    for i in 1 2 3 4 5 6 7 8; do
+      awk -v col=tombstone_bytes -v window=full -f /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec349c2-fit.awk spec357-diag-r1-seg${i}.csv
+    done
+
+artifact binding (ADJ-20): 7 artifacts digested into spec357-diag-r1.artifacts.sha256
+  67fb51bf350d3320489042a041a65c2ac3a85258556e2910c549801629137dc0  spec357-diag-r1.csv
+  559559c97ff94d965cb28066373b482f85431f5bf281d98e8d1decd5ad7ae075  spec357-diag-r1.prune.csv
+  8cbad35de2eb9ef34016e488980712bd3cbafa56176a085b305d8d8e65924d60  spec357-diag-r1.soak.json
+  af30a705d772ab31dd99ddd3929f951defa941d25ac22785ccb29faa7e38c21a  spec357-diag-r1.progress.jsonl
+  792f3b8113ead16afb41979e0687e31207217d14c4c527ffe9f381a6078cfd3b  spec357-diag-r1.mechanism.json
+  055e0d2da5ffe5f86e0727cdda2083312a17644ae901b1e6ad92be3457c1fbfc  spec357-diag-r1.matrix.txt
+  264179f21bedd8957e57494260b00aa5033093469b22cc1354d7918275210242  spec357-diag-r1.harness-console.log
+RESULT: instrument sound; harness exit code 1.
+NOTE: a non-zero harness exit is NOT automatically a failed characterization.
+      The memory gate is neutralized by design for these runs, while the
+      tombstone-byte gate, both blind-monitor clauses, convergence/recovery
+      and panic capture stay armed. Read 'finishedReason' in /Users/koristuvac/Projects/topgun/topgun/target/spec357-scratch/spec357-diag-r1/spec357-diag-r1.soak.json and
+      record the attribution, rather than reading the flag as a verdict.

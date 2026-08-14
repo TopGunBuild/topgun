@@ -1,0 +1,793 @@
+================================================================================
+SPEC-357b — G7 SEGMENT 2
+THE FROZEN R4 WALK, PER REPLICATE, IN FROZEN ORDER — O-0 FIRST — R3.4's SEVEN-LIMB
+BUNDLE — THE DETERMINATION
+================================================================================
+
+WHAT THIS FILE IS.  A committed WORKING ARTIFACT.  It is the executed record G9
+transcribes into `spec356-manifest.md` §11.1+.  This segment wrote NO byte of the
+manifest, NO byte of §11.0, NO `.rs` byte, no pinned sidecar and no tracker file.
+
+THE RULE THIS FILE OBEYS, STATED ONCE.  The predicate is walked AS WRITTEN.  No
+identity is repaired, no band moved, no threshold reinterpreted, no limb widened,
+no enum touched.  Where the frozen rule yields a limb, the limb is published and
+named plainly.  Every finding surfaced after the data boundary carries exactly one
+disposition — RECORDED-AND-ROUTED — and is in PART VIII.
+
+SUBJECT.  `spec357-diag-r1` and `spec357-diag-r2`, the two 28,800 s cells committed
+by G6 at the pin, and the four derived ledgers committed by G7 S1.
+
+GATE (read, not re-derived — R7a.1).  `spec357-tier1-transcript.txt:416`:
+  "VERDICT: TIER2 = RUN"
+so the AC-scope rule reads "per replicate" against the two cells.  R7.2's three
+CLEAN conditions and their evaluated values are quoted by G9 into §11.1+; this
+segment reads the verdict and obeys it.
+
+--------------------------------------------------------------------------------
+PART I — STEP 0: O-0, THE ADMISSIBILITY LIMB, PUBLISHED FIRST AND FAIL-CLOSED
+         (R3.0 / manifest §11.0.4).  NOTHING BELOW PART I IS READ AS A HYPOTHESIS
+         RESULT.
+--------------------------------------------------------------------------------
+
+I.1  THE IDENTITY, AS FROZEN
+
+    stamped_refs_total + restored_refs_total − drained_refs_total
+        − rebuild_cleared_refs_total  ≡  indexed_refs
+
+  evaluated at EVERY scrape of both replicates, on EACH of the two renders, under
+  the double-read sampling rule.  Source artifact: `spec357-diag-r{n}.prune.csv`,
+  columns 44–59 (the `*_a` / `*_b` families) plus column 60 (`o0_tear_class`).
+
+I.2  THE DOUBLE-READ SAMPLING CENSUS (PD-4: no fraction without its denominator)
+
+  ┌─────────────────────────────────┬───────────────────┬───────────────────┐
+  │                                 │        r1         │        r2         │
+  ├─────────────────────────────────┼───────────────────┼───────────────────┤
+  │ scrapes (prune.csv data rows)   │      2,880        │      2,880        │
+  │ CONSISTENT                      │ 2,484 / 2,880     │ 2,458 / 2,880     │
+  │                                 │ = 86.250000 %     │ = 85.347222 %     │
+  │ TORN-PERSISTENT (runner label)  │   396 / 2,880     │   422 / 2,880     │
+  │                                 │ = 13.750000 %     │ = 14.652778 %     │
+  │ TORN (emitted as such)          │     0 / 2,880     │     0 / 2,880     │
+  │ O-0 DENOMINATOR (CONSISTENT)    │      2,484        │      2,458        │
+  └─────────────────────────────────┴───────────────────┴───────────────────┘
+
+  THE THREE-COUNT PUBLICATION, WITH ITS ONE HONEST COMPLICATION (see PD-F10).
+  The runner resolves every torn first pair before it writes the row: a retry pair
+  that agrees REPLACES the torn pair and the row is written `CONSISTENT`; a retry
+  pair that also disagrees is written `TORN-PERSISTENT`.  The literal value `TORN`
+  is therefore never written to `prune.csv`, and the pre-retry torn count is not
+  recoverable from the artifact.  Its only recorded lower bound is the
+  TORN-PERSISTENT count itself (396 / 422), since every TORN-PERSISTENT row was
+  torn on its first pair.  The builder `spec357-classify.sh`, which sees only the
+  emitted pair, labels those same 396 / 422 rows `TORN` and reports
+  `TORN-PERSISTENT = 0`; its own header pre-declares that degradation rather than
+  fabricating a count.  BOTH renderings partition the same 2,880 rows into the same
+  two sets, and BOTH exclude the same 396 / 422 rows from O-0's denominator, so the
+  denominator is 2,484 / 2,458 either way.  Published as two labels over one row
+  set, not reconciled by choosing one.
+
+I.3  THE VERDICT — BOTH LEGS
+
+  LEG 1 (the identity).  Violations on CONSISTENT scrapes:
+
+      r1:  2,484 violations over 2,484 CONSISTENT scrapes of 2,880  (100.000000 %)
+      r2:  2,458 violations over 2,458 CONSISTENT scrapes of 2,880  (100.000000 %)
+
+      The identity HOLDS on 0 of 2,484 (r1) and 0 of 2,458 (r2).
+
+    O-0 HOLDS iff the identity is exact on 100 % of CONSISTENT scrapes of BOTH
+    replicates (R3.0 limb 3).  It is exact on NONE of them, on EITHER replicate.
+    ⇒ **O-0 FAILS.**
+
+  LEG 2 (the `TOUCHED_EMISSION` gate).  R1.4's frozen column-provenance table
+  (`spec356-manifest.md:5918`) states as a literal:
+
+      "**No column is `TOUCHED_EMISSION`** — the diff shows no case of a
+       pre-existing emission's own value-producing statement being edited, only
+       new, additive statements inserted alongside it in the same enclosing
+       function."
+
+    Label census over the frozen table: 46 `UNCHANGED_EMISSION`, 44 `NEW_EMISSION`,
+    0 `TOUCHED_EMISSION` (the two textual hits are the label's own definition row
+    and the sentence quoted above).
+    ⇒ **LEG 2 does NOT fail.**  The failure is leg 1 and leg 1 only.
+
+I.4  THE FIRST VIOLATING SCRAPE, WITH BOTH OF ITS RENDERS (R3.0 limb 3, AC7)
+
+  r1 — `spec357-diag-r1.prune.csv`, elapsed_secs = 10 (the first data row):
+      render A: stamped_refs=0  restored_refs=0  drained_refs=0
+                rebuild_cleared_refs=0  indexed_refs=390   → LHS 0, RHS 390
+      render B: stamped_refs=0  restored_refs=0  drained_refs=0
+                rebuild_cleared_refs=0  indexed_refs=390   → LHS 0, RHS 390
+      the two renders are IDENTICAL in all eight quantities; residual = 390.
+
+  r2 — `spec357-diag-r2.prune.csv`, elapsed_secs = 10 (the first data row):
+      render A: stamped_refs=0  restored_refs=0  drained_refs=0
+                rebuild_cleared_refs=0  indexed_refs=376   → LHS 0, RHS 376
+      render B: stamped_refs=0  restored_refs=0  drained_refs=0
+                rebuild_cleared_refs=0  indexed_refs=376   → LHS 0, RHS 376
+      the two renders are IDENTICAL in all eight quantities; residual = 376.
+
+I.5  R3.0 LIMB 4's STRUCTURAL PROPERTY, RESTATED AS A CLAIM AND CHECKED
+     MECHANICALLY RATHER THAN TRUSTED
+
+  THE CLAIM (frozen): a torn render is structurally incapable of producing
+  `INDETERMINATE-INSTRUMENT`.  Tearing is detected by inter-render disagreement — a
+  property of the SAMPLE, decided BEFORE the identity is evaluated against it — so a
+  torn pair is never an input to the identity; its only dispositions are RETRY and
+  EXCLUDE.  `INDETERMINATE-INSTRUMENT` (cause `CONSERVATION`) fires only where both
+  renders agree in all eight quantities — demonstrably no write interleaved — and
+  the identity still fails.
+
+  THE CHECK (Checklist 7, second limb).  Every one of the 2,484 (r1) / 2,458 (r2)
+  published violations was tested for eight-quantity render equality independently
+  of the runner's own label:
+
+      rows labelled CONSISTENT whose eight quantities disagree:  0 of 2,484 (r1)
+                                                                 0 of 2,458 (r2)
+
+  So EVERY published violation sits on a scrape whose two renders are identical in
+  all eight quantities.  The property holds on this round's own data.  The verdict
+  is not an artefact of tearing, and the 13.75 % / 14.65 % torn fraction did not
+  reach it by any path.
+
+I.6  R3.0 LIMB 5 — THE WHOLESALE SAMPLING COLLAPSE, EVALUATED AND NOT FIRED
+
+  A replicate yielding fewer than 100 CONSISTENT scrapes would force evaluation over
+  the union, and a union under 100 would fire cause `SAMPLING`.
+
+      r1: 2,484 CONSISTENT ≥ 100      r2: 2,458 CONSISTENT ≥ 100
+
+  Neither replicate is near the collapse bound (both are >24× it).  ⇒ cause
+  `SAMPLING` does NOT fire, and the union rule is never engaged.
+
+I.7  THE CAUSE, NAMED: **`CONSERVATION`**, NOT `SAMPLING`
+
+  R4.4's first limb carries two causes that route to different owners.  The one that
+  fired is `CONSERVATION` — a violation on a CONSISTENT scrape (I.3/I.4) — and NOT
+  `SAMPLING`, because both replicates cleared the 100-CONSISTENT-scrape bound by
+  more than an order of magnitude (I.6).  Both causes are evaluated and both values
+  are published, per R4.5 item 1.
+
+I.8  WHAT THE VIOLATION IS — DERIVED, NOT GUESSED, AND RE-DERIVED HERE INDEPENDENTLY
+     OF THE BUILDER AND OF PD-F7
+
+  (a) The residual is bounded by exactly one epoch's width:
+
+        residual := indexed_refs − (stamped + restored − drained − rebuild_cleared)
+        r1: residual ∈ [1, 1000] on 2,484 of 2,484 CONSISTENT scrapes
+        r2: residual ∈ [1, 1000] on 2,458 of 2,458 CONSISTENT scrapes
+        (`TOPGUN_EPOCH_WIDTH` = 1000, `soak.json:"epochWidth":1000`, both cells)
+
+  (b) The residual is not merely bounded — it is EXACTLY the open epoch's refs:
+
+        residual == (indexed_refs mod 1000), reading a 0 remainder as 1000:
+        r1: 2,880 of 2,880 rows      r2: 2,880 of 2,880 rows
+        (all rows, CONSISTENT and TORN-PERSISTENT alike, render A)
+
+  (c) Why the left-hand side can only move in whole epochs, measured:
+
+        stamped_refs_total non-zero increments, whole cell: {1000} ×898 (r1),
+                                                            {1000} ×821 (r2)
+        drained_refs_total non-zero increments, whole cell: {1000} ×897 (r1),
+                                                            {1000} ×820 (r2)
+        restored_refs_total:        identically 0 on all 2,880 rows, both cells
+        rebuild_cleared_refs_total: identically 0 on all 2,880 rows, both cells
+        negative increments (non-monotone reads):  0, both cells
+
+  (d) THE MECHANICAL CAUSE, ESTABLISHED AT THE SOURCE (this is PD-F8, and it
+      SHARPENS PD-F7's attribution while confirming its verdict).  The eight
+      quantities the round can actually scrape are the PROMETHEUS MIRRORS, and two
+      of them are credited in whole-epoch batches at ROLLOVER:
+
+        `tombstone_frontier_impl.rs:2502-2513`, `observe_epoch_entry`:
+            self.stamped_refs.increment(record.stamped_refs);   // 1000 at rollover
+            self.stamped_bytes.increment(record.stamped_bytes);
+        with the source's own comment "Batched to rollover rather than per-stamp".
+
+      The field the FROZEN identity names is a different quantity, credited per
+      stamp:
+
+        `tombstone_frontier_impl.rs:486`:  self.stamped_refs_total += 1;
+
+      and it is read by `FrontierState::index_conservation_snapshot`
+      (`:719`, exposed at `:1328`) — which, checked across the whole crate, has NO
+      production caller at all: its only call sites are unit tests
+      (`crdt.rs:4391`, `:4467`) and the Tier-1 harness's own synthetic ledger
+      (`tombstone_frontier_impl.rs:3163`, `:3355-3365`).  The snapshot accessor is
+      never exported to `/metrics`, and `/metrics` is the only transport
+      `prune.csv` has (`spec356-prune.sh`, `curl /metrics`, cadence 10 s pinned).
+
+      Consequence, stated exactly: over the transport this round measures, the
+      identity's LHS lags its RHS by precisely the not-yet-rolled-over epoch's
+      accumulated refs, which is what (b) measures on 2,880/2,880 rows of BOTH
+      cells.  It would be satisfiable only at the instant a rollover completes with
+      an empty index — a coincidence no 10 s cadence catches.  **The gauge is not
+      mis-read; the transport carries a rollover-batched proxy of the field the
+      identity names.**
+
+  (e) WHY THE TIER-1 GATE DID NOT CATCH IT — also mechanical, not speculative.
+      R7.2's CLEAN condition (i) ("O-0 holds over the harness's own scrapes",
+      transcript lines 370-373: CONSISTENT=3, TORN=0, TORN-PERSISTENT=0, violations
+      = 0) was evaluated over rows the harness built by calling
+      `index_conservation_snapshot()` directly (transcript lines 40-45, "synthetic
+      O-0 conservation ledger, from a sixth, unrelated frontier"), i.e. over the
+      ACCESSOR — where the identity does hold — and never over a `/metrics` render.
+      The gate validated O-0 on a transport the DATA half would never use.  This is
+      the same class of gap as PD-F5 (a frozen tool never exercised against the
+      artifact it would actually meet), and it is why PD-F8 is routed as the
+      round's most actionable instrument-design output.
+
+  (f) WHAT THE VIOLATION IS NOT.  It is not a gauge that disagrees with itself and
+      not a broken counter set: all seven counters are monotone with zero decreases
+      over 2,880 rows in both cells, `restored` and `rebuild_cleared` are identically
+      0, and the two ledger censuses agree EXACTLY with the `/metrics` transport
+      (899/899, 897/897, 822/822, 820/820 — PART IV limb (vii)).
+
+I.9  STEP 0's DISPOSITION
+
+  O-0 FAILED on a CONSISTENT scrape.  Step 0 is FAIL-CLOSED and precedes everything:
+  §11.0.6's walk table states, for Step 0, "Any failure routes to
+  `INDETERMINATE-INSTRUMENT` (§11.0.8); **no later step is evaluated**."
+
+  ⇒ Steps 1, 2, 3 and 3.5 are **NOT EVALUATED**.  Their published values, with both
+    denominators each, are in PART III.  The per-epoch class counts are published in
+    PART IV as R3.4's UNCONDITIONAL bundle limb (ii) — a reporting obligation that
+    Step 0's failure does not suppress and does NOT convert into a step evaluation.
+
+--------------------------------------------------------------------------------
+PART II — R4.1's DECIDING POPULATION: THE PINNED JOIN, ITS LITERALS, ITS CROSS-CHECK
+--------------------------------------------------------------------------------
+
+II.1  THE FORMULA, AS PINNED (§11.0.5)
+
+        t_first_seen(e) = (entered_at_unix_ms(e) − cell_start_unix_ms) / 1000
+        window: [14,410 … 28,800] s, the coordinate last half; resolution ms.
+
+II.2  `cell_start_unix_ms` PER REPLICATE, QUOTED AS A LITERAL
+
+        r1:  cell_start_unix_ms = 1786646065000   (2026-08-13T18:34:25Z)
+        r2:  cell_start_unix_ms = 1786697310000   (2026-08-14T08:48:30Z)
+
+      HOW THE LITERAL IS OBTAINED, STATED HONESTLY (this is PD-F9).  R4.1 names
+      `soak.json` / `matrix.txt` as the source of "the cell's start recorded by the
+      runner".  NEITHER artifact records a start: `soak.json` carries the END
+      instant and the actual duration, and `matrix.txt` carries no wall-clock at
+      all.  The literal above is the arithmetic of two `soak.json` literals:
+
+        r1: "timestamp":"2026-08-14T02:34:27Z"  −  "durationSecsActual":28802
+        r2: "timestamp":"2026-08-14T16:48:32Z"  −  "durationSecsActual":28802
+
+      INDEPENDENT CORROBORATION.  The same value falls out of `progress.jsonl`'s
+      first tick, a different runner-written artifact, to the millisecond:
+        r1: 2026-08-13T18:39:28Z @ elapsedSecs 303 → 1786646065000  (Δ = 0 ms)
+        r2: 2026-08-14T08:53:33Z @ elapsedSecs 303 → 1786697310000  (Δ = 0 ms)
+
+      SENSITIVITY, MEASURED RATHER THAN ASSERTED.  `soak.json`'s timestamp has
+      second resolution while the formula pins milliseconds, so the literal is known
+      to ±1 s.  Re-running the join at cell_start ±1000 ms:
+        r1: |P| = 440 at −1000 / 0 / +1000 ms, class counts identical
+        r2: |P| = 358 at −1000 / 0 / +1000 ms, class counts identical
+      No epoch changes window membership and no share moves.  The gap is real and
+      routed; its blast radius on this round is ZERO, and that is measured.
+
+II.3  THE POPULATION
+
+        r1: |P| = 440   epochs 460 … 899
+            t_first_seen(460) = 14,423.101 s ; t_first_seen(899) = 28,763.134 s
+        r2: |P| = 358   epochs 465 … 822
+            t_first_seen(465) = 14,430.893 s ; t_first_seen(822) = 28,760.296 s
+
+      `P` is non-empty on both replicates, so `INDETERMINATE-EMPTY` cannot fire.
+
+II.4  THE FORBIDDEN `prune.csv`-CADENCE JOIN, COMPUTED AS A PUBLISHED CROSS-CHECK
+      AND DECIDING NOTHING (§11.0.5)
+
+      Join: the first `prune.csv` row whose `topgun_or_prune_current_epoch == e`.
+
+        r1: |P_cadence| = 440 ; symmetric difference with the pinned `P` = 0 epochs
+            agreement on window membership = 440/440 = 100.000000 %
+        r2: |P_cadence| = 358 ; symmetric difference with the pinned `P` = 0 epochs
+            agreement on window membership = 358/358 = 100.000000 %
+        offset (cadence − pinned), seconds:
+            r1 min −0.850 / median 4.475 / max 9.912
+            r2 min −0.833 / median 4.723 / max 9.805
+
+      The named defect is real and visible: the cadence join SILENTLY DROPS 1 epoch
+      of 899 (r1) and 1 of 822 (r2), which were never observed as `current_epoch` at
+      any scrape instant.  The agreement rate is published; the pinned join decides,
+      and the cross-check decides nothing.
+
+--------------------------------------------------------------------------------
+PART III — THE WALK, IN ITS FROZEN ORDER, PER REPLICATE, WITH BOTH DENOMINATORS
+           PER STEP (R4.2 / §11.0.6, Audit v2 rec 4)
+--------------------------------------------------------------------------------
+
+Sub-population sizes, published here so every step below carries both denominators
+as literals (they are re-published in PART IV limb (ii) with their arithmetic):
+
+        r1: |P| = 440   |P₀| = 0   |P₁| = 1   |P₂| = 439
+        r2: |P| = 358   |P₀| = 0   |P₁| = 1   |P₂| = 357
+
+STEP 0 — O-0, over both replicates, every scrape.
+    EVALUATED.  **FAILED.**
+    r1: 2,484 violations / 2,484 CONSISTENT ; CONSISTENT 2,484 / 2,880 scrapes
+    r2: 2,458 violations / 2,458 CONSISTENT ; CONSISTENT 2,458 / 2,880 scrapes
+    ⇒ routes to `INDETERMINATE-INSTRUMENT`, cause `CONSERVATION` (PART I).
+
+STEP 1 — hypothesis (a), over `P₀`.
+    **NOT EVALUATED.**  Reason: Step 0 is fail-closed and failed; §11.0.6 forbids
+    evaluating any later step.
+    Denominators carried regardless (R4.5 item 2):
+        r1: sub-population `P₀` = 0 ;  `P` = 440
+        r2: sub-population `P₀` = 0 ;  `P` = 358
+    Note, as a denominator fact and not as a step value: `P₀` is EMPTY on both
+    replicates, so the (a) share over its own sub-population is 0/0 = UNDEFINED and
+    is published as UNDEFINED, never as 0 % (PD-4 / R4.7).
+
+STEP 2 — hypothesis (b), over `P₂`.
+    **NOT EVALUATED.**  Reason: as Step 1.
+        r1: sub-population `P₂` = 439 ;  `P` = 440
+        r2: sub-population `P₂` = 357 ;  `P` = 358
+
+STEP 3 — hypothesis (c), over `P₂`.
+    **NOT EVALUATED.**  Reason: as Step 1.
+        r1: sub-population `P₂` = 439 ;  `P` = 440
+        r2: sub-population `P₂` = 357 ;  `P` = 358
+
+STEP 3.5 — the control classes (d) / (e) / (f), over `P`.
+    **NOT EVALUATED as a walk step.**  Reason: as Step 1.  Their COUNTS are
+    published unconditionally in PART IV limb (ii), with both denominators, because
+    R3.4 is not conditional on the walk reaching them.
+    Denominators carried regardless (these are DENOMINATORS, not counts — the
+    counts of (d)/(e)/(f) are in PART IV limb (ii)):
+        r1: (d)'s denominator `P₂` = 439 ; (e)'s `P₁` = 1 ; (f)'s `P₀` = 0 ; `P` = 440
+        r2: (d)'s denominator `P₂` = 357 ; (e)'s `P₁` = 1 ; (f)'s `P₀` = 0 ; `P` = 358
+
+STEP 4 — the six `INDETERMINATE-*` limbs.
+    REACHED BY ROUTING FROM STEP 0.  Every limb's evaluated value:
+
+    1. `INDETERMINATE-INSTRUMENT`  — **FIRED**, cause **`CONSERVATION`**.
+       (2,484/2,484 and 2,458/2,458 violations on CONSISTENT scrapes; cause
+       `SAMPLING` evaluated and not fired, I.6.)
+    2. `INDETERMINATE-MIXED`       — NOT REACHED.  Its antecedent is a class share
+       over `P`, and no hypothesis step was evaluated (Step 0 fail-closed).
+    3. `INDETERMINATE-DISCORDANT`  — NOT REACHED, same reason.
+    4. `INDETERMINATE-RESIDUAL`    — CANNOT FIRE.  Its frozen antecedent begins
+       "O-0 holds"; O-0 does not hold.  Its own threshold term is nevertheless
+       published (PART IV limb (vi)): 0 `Unclassified` exits over 439 (r1) / 357
+       (r2) `P₂` rows = 0.000000 %, against the ≥ 5 % threshold.
+    5. `INDETERMINATE-CONTROL-DOMINANT` — CANNOT FIRE.  Its frozen antecedent also
+       begins "O-0 holds".
+    6. `INDETERMINATE-EMPTY`       — DOES NOT APPLY.  `P` is non-empty on both
+       replicates (440 / 358).
+
+--------------------------------------------------------------------------------
+PART IV — R3.4's UNCONDITIONAL REPORTING BUNDLE, ALL SEVEN LIMBS, PER REPLICATE
+          "There was nothing to publish" is not an option.  Step 0's failure halts
+          the DETERMINATION; it does not suppress one limb of this bundle.
+--------------------------------------------------------------------------------
+
+(i)  O-0's CENSUS AND VIOLATIONS — see PART I.2/I.3/I.4 in full.  Restated as the
+     bundle's own row:
+        r1: CONSISTENT 2,484 / TORN-PERSISTENT 396 / TORN (emitted) 0, denominator
+            2,880 ; violations 2,484 over 2,484 CONSISTENT ; first violating scrape
+            elapsed 10 s with BOTH renders quoted (I.4).
+        r2: CONSISTENT 2,458 / TORN-PERSISTENT 422 / TORN (emitted) 0, denominator
+            2,880 ; violations 2,458 over 2,458 CONSISTENT ; first violating scrape
+            elapsed 10 s with BOTH renders quoted (I.4).
+
+(ii) THE PER-EPOCH CLASS COUNTS — ALL SIX CLASSES, OVER THE DECIDING WINDOW, WITH
+     `|P|`, `|P₀|`, `|P₁|`, `|P₂|` AND THE ARITHMETIC SHOWN
+     (published as a REPORTING obligation; no step reading is taken from it)
+
+     REPLICATE r1 — `|P| = 440`
+       ┌───────────────────────────────┬───────┬──────────────────┬──────────────┐
+       │ class                         │ count │ share of sub-pop │ share of `P` │
+       ├───────────────────────────────┼───────┼──────────────────┼──────────────┤
+       │ (a) INDEX-POPULATION GAP  [d] │   0   │ 0 / 0 UNDEFINED  │ 0/440 =      │
+       │                               │       │ (`P₀` empty)     │ 0.000000 %   │
+       │ (b) SELECTION/SPLIT MISM. [d] │   0   │ 0/439 = 0.000000%│ 0/440 =      │
+       │                               │       │                  │ 0.000000 %   │
+       │ (c) FRONTIER RACE         [d] │  439  │ 439/439 =        │ 439/440 =    │
+       │                               │       │ 100.000000 %     │ 99.772727 %  │
+       │ (d) DRAINED-HEALTHY       [c] │   0   │ 0/439 = 0.000000%│ 0/440 =      │
+       │                               │       │                  │ 0.000000 %   │
+       │ (e) NO-EXIT-RECORD        [c] │   1   │ 1/1 =            │ 1/440 =      │
+       │                               │       │ 100.000000 %     │ 0.227273 %   │
+       │ (f) EMPTY-EPOCH           [c] │   0   │ 0 / 0 UNDEFINED  │ 0/440 =      │
+       │                               │       │ (`P₀` empty)     │ 0.000000 %   │
+       └───────────────────────────────┴───────┴──────────────────┴──────────────┘
+         [d] discriminating   [c] control
+         ARITHMETIC:  |P₀| + |P₁| + |P₂| = 0 + 1 + 439 = 440 = |P|          ✔
+                      (a)+(b)+(c)+(d)+(e)+(f) = 0+0+439+0+1+0 = 440 = |P|   ✔
+
+     REPLICATE r2 — `|P| = 358`
+       ┌───────────────────────────────┬───────┬──────────────────┬──────────────┐
+       │ class                         │ count │ share of sub-pop │ share of `P` │
+       ├───────────────────────────────┼───────┼──────────────────┼──────────────┤
+       │ (a) INDEX-POPULATION GAP  [d] │   0   │ 0 / 0 UNDEFINED  │ 0/358 =      │
+       │                               │       │ (`P₀` empty)     │ 0.000000 %   │
+       │ (b) SELECTION/SPLIT MISM. [d] │   0   │ 0/357 = 0.000000%│ 0/358 =      │
+       │                               │       │                  │ 0.000000 %   │
+       │ (c) FRONTIER RACE         [d] │  357  │ 357/357 =        │ 357/358 =    │
+       │                               │       │ 100.000000 %     │ 99.720670 %  │
+       │ (d) DRAINED-HEALTHY       [c] │   0   │ 0/357 = 0.000000%│ 0/358 =      │
+       │                               │       │                  │ 0.000000 %   │
+       │ (e) NO-EXIT-RECORD        [c] │   1   │ 1/1 =            │ 1/358 =      │
+       │                               │       │ 100.000000 %     │ 0.279330 %   │
+       │ (f) EMPTY-EPOCH           [c] │   0   │ 0 / 0 UNDEFINED  │ 0/358 =      │
+       │                               │       │ (`P₀` empty)     │ 0.000000 %   │
+       └───────────────────────────────┴───────┴──────────────────┴──────────────┘
+         ARITHMETIC:  |P₀| + |P₁| + |P₂| = 0 + 1 + 357 = 358 = |P|          ✔
+                      (a)+(b)+(c)+(d)+(e)+(f) = 0+0+357+0+1+0 = 358 = |P|   ✔
+
+     (e)'s BOUND, CHECKED (AC10a).  `P₁` ≤ 5 per replicate is the frozen bound
+     (§11.0.7, a 2.5× margin over the measured `indexed_epochs = 2`).  Measured
+     1 (r1) and 1 (r2) — INSIDE the bound, no breach to publish.  In both cells the
+     single (e) row is the LAST epoch of the run (r1 epoch 899 at t = 28,763.134 s;
+     r2 epoch 822 at t = 28,760.296 s), i.e. the epoch still resident when the
+     `SIGKILL` teardown landed — exactly the residue Assumption 7b prices.
+
+     WHOLE-CELL COUNTS, for continuity with G7 S1's handoff (NOT the deciding
+     window, and not used by any share above):
+        r1: (a)0 (b)0 (c)897 (d)0 (e)1 (f)1 = 899
+        r2: (a)0 (b)0 (c)820 (d)0 (e)1 (f)1 = 822
+     The (f) row in each is epoch 1, whose `entered_at_unix_ms` is 0; see PD-F9 for
+     why it is outside `P` under the pinned join and why that costs nothing here.
+
+     INDEPENDENT RE-DERIVATION (Checklist 8).  The six-class assignment above was
+     recomputed from `spec357-entry-r{n}.jsonl` left-joined to
+     `spec357-residency-r{n}.jsonl` by a program written independently of
+     `spec357-classify.sh` (PART IX, cmd 4), applying `T = RESIDENT ∩ LICENSED ∩
+     FENCED` with a `None` `Option` contributing the EMPTY window and
+     `D ≡ (exit_kind == DrainedByPrune)`.  Result: 0 mismatches over 899 (r1) and
+     822 (r2) committed classifier rows.
+
+(iii) THE `fence_passed_at_op_seq == None` FRACTION, WITH ITS DENOMINATOR
+      (published unconditionally, whichever hypothesis fires — R3.2)
+
+        r1: 0 of 439 `P₂` exit rows = 0.000000 %   (whole cell: 0 of 897)
+        r2: 0 of 357 `P₂` exit rows = 0.000000 %   (whole cell: 0 of 820)
+        companion term, published beside it:
+        `lwm_passed_at_op_seq == None`: 0 of 439 (r1), 0 of 357 (r2)
+
+      So the durability fence — R3.2's "live candidate for the disqualifying
+      conjunct" — is NEVER the missing term in these cells: it passes every epoch.
+      RAW STRUCTURAL OBSERVATION, published as a value and not as a reading: on
+      439/439 (r1) and 357/357 (r2) window `P₂` rows,
+      `fence_passed_at_op_seq == exited_at_op_seq` EXACTLY — the fence arrives at
+      the very op-seq of the exit, and `RESIDENT = [entered, exited)` is half-open,
+      so the three-way intersection misses by exactly one op-seq.  No determination
+      is taken from this; see PD-F11 for the predicate-sensitivity note it opens.
+
+(iv)  `bytes_freed_attributed` vs `stamped_bytes` — T2(exactness), WITH ITS BOUND
+
+      THE COMPARISON AS THE BUNDLE WORDS IT:
+        r1: equal on 439 of 439 window `P₂` rows = 100.000000 % ;
+            max |deviation| = 0 bytes ; Σ stamped = Σ freed_attributed = 10,097,000 B
+            (whole cell: 897 of 897, Σ = 20,468,614 B, max |dev| 0)
+        r2: equal on 357 of 357 window `P₂` rows = 100.000000 % ;
+            max |deviation| = 0 bytes ; Σ stamped = Σ freed_attributed = 8,211,000 B
+            (whole cell: 820 of 820, Σ = 18,697,605 B, max |dev| 0)
+      EXACTNESS BOUND: 0 bytes, on every row, on both replicates.
+
+      AND THE FACT THAT MAKES THAT NUMBER MEAN LESS THAN IT LOOKS (this is PD-F12,
+      recorded rather than absorbed).  R5.3/AC9 permit calling this "exactness" ONLY
+      because the oracle is independent of the prune path's own attribution.  On the
+      `DrainedByPrune` path it is not: `tombstone_frontier_impl.rs:693-698` assigns
+
+          let bytes_freed_attributed = if matches!(exit_kind, DrainedByPrune) {
+              slot.stamped_bytes
+          } else { 0 };
+
+      so the two compared quantities are the SAME FIELD.  The 0-byte bound is exact
+      BY CONSTRUCTION, not by measurement, and carries no discriminating
+      information.  The genuinely independent quantity is the prune path's own
+      `topgun_or_prune_bytes_freed_total`, and over the deciding window it does not
+      move at all:
+
+        r1: 754,706 → 754,706 B (Δ = 0) while 10,097,000 B were "attributed freed"
+        r2: 2,219,715 → 2,219,715 B (Δ = 0) while 8,211,000 B were "attributed freed"
+
+      Both readings are published; neither is reconciled here (PART VIII, PD-F12).
+
+(v)   THE `current_epoch ≡ low_water_mark` EQUALITY RATE, RE-DERIVED ON THIS
+      ROUND'S OWN LEDGERS, OVER THE DECIDING WINDOW
+
+        r1: 1,389 of 1,440 window scrapes = 96.458333 %
+        r2: 1,407 of 1,440 window scrapes = 97.708333 %
+        (denominator = the prune.csv rows with 14,410 ≤ elapsed_secs ≤ 28,800)
+
+      For continuity only, NOT as a cross-pin claim: SPEC-356c measured
+      0.965278 (1,390/1,440) and 0.972917 (1,401/1,440) on its own cells.  The
+      columns are `UNCHANGED_EMISSION` (`topgun_or_prune_current_epoch`,
+      `topgun_or_prune_low_water_mark`), which is the label that licenses stating
+      them side by side at all (R1.4).
+
+(vi)  THE `Unclassified` EXIT COUNT — PUBLISHED EVEN AT ZERO, WITH ITS REACHABILITY
+      CITATION (R3.4 vi, AC6a, AC10a)
+
+        r1: **0 Unclassified exits over 439** (`P₂`, deciding window)
+            — whole cell: 0 Unclassified exits over 897 exit rows
+        r2: **0 Unclassified exits over 357** (`P₂`, deciding window)
+            — whole cell: 0 Unclassified exits over 820 exit rows
+        exit-kind distribution, whole cell: {drainedByPrune: 897} (r1),
+                                            {drainedByPrune: 820} (r2)
+      There is therefore NO row whose raw context (`observed_refs_delta`,
+      `observed_lwm`, `observed_durable_watermark`, `observed_current_epoch`,
+      `note`) is owed, and none is omitted.
+
+      WHY THIS ZERO IS "COULD FIRE, DID NOT" AND NOT "WAS NEVER FIREABLE" (AC6a).
+      The limb's reachability is inherited from the exit emission's DETECTION-point
+      siting (§11.0.11) and is mechanically proven, not asserted:
+        `spec357-tier1-transcript.txt:129-153`, Arm 4 —
+        fn `tombstone_frontier_impl::tests::
+            unenumerated_epoch_removal_surfaces_as_unclassified_at_the_next_detection_point`
+        removes an epoch's slot directly, bypassing `drain_prunable` /
+        `rebuild_into_epoch` / `restore`, and the next detection point emits exactly
+        one exit row with `exit_kind == Unclassified` and every `observed_*` field
+        populated; the harness's own population then carried `Unclassified` at
+        1 of 3 in `P₂` = 33.3 %, WELL ABOVE the limb's 5 % threshold
+        (transcript:222, :385).
+      So `INDETERMINATE-RESIDUAL`'s threshold term is a live, exercised term that
+      read 0.000000 % on both replicates of this round.
+      CONSEQUENTLY residual **R-7 is NOT OPENED** (R5.8), and the literal
+      "0 Unclassified exits over 439" / "over 357" is its disposition, not an
+      omission.
+
+(vii) THE ENTRY / EXIT LEDGER COMPLETENESS CROSS-CHECKS, AGAINST THE METRICS
+      TRANSPORT (which no sidecar produces)
+
+      WHOLE CELL — the strong form, exact:
+        r1: entry ledger 899 lines vs `topgun_or_prune_epochs_entered_total` 899 → Δ 0
+            exit  ledger 897 lines vs `topgun_or_prune_epochs_exited_total`  897 → Δ 0
+        r2: entry ledger 822 lines vs 822 → Δ 0 ;  exit ledger 820 vs 820 → Δ 0
+
+      DECIDING WINDOW — the form R3.1's witness words, with its ±1 tolerance:
+        r1: |P| = 440 vs Δ`epochs_entered_total` over [14,410 … 28,800] = 441 → |Δ| = 1  ✔ (≤ ±1)
+            |P₂| = 439 vs Δ`epochs_exited_total` = 440 → |Δ| = 1
+        r2: |P| = 358 vs Δ`epochs_entered_total` = 359 → |Δ| = 1  ✔ (≤ ±1)
+            |P₂| = 357 vs Δ`epochs_exited_total` = 359 → |Δ| = 2
+      The r2 exit-side |Δ| = 2 is a DEFINITIONAL difference, not a truncation, and is
+      published as such: `P` is keyed on ENTRY time, so an epoch that entered before
+      14,410 s and exited inside the window is counted by the exit-side transport and
+      is correctly absent from `P₂`.  The window-edge ±1 on the entry side is the
+      scrape quantisation R3.1 names ("a rollover straddling a scrape").  The
+      whole-cell equality above is exact on all four counts, in both cells, which is
+      the reading that answers "is the ledger truncated": it is not.
+
+--------------------------------------------------------------------------------
+PART V — THE DETERMINATION, AND R4.5's ESCALATION IN ITS FROZEN ORDER
+--------------------------------------------------------------------------------
+
+V.0  THE DETERMINATION, VERBATIM
+
+     ┌────────────────────────────────────────────────────────────────────────┐
+     │  DETERMINATION: **INDETERMINATE-INSTRUMENT**, cause **`CONSERVATION`**  │
+     │  — on BOTH replicates.  THE MECHANISM IS **NOT NAMED**.                 │
+     └────────────────────────────────────────────────────────────────────────┘
+
+     Under which frozen clause: R3.0 limb 3 / §11.0.4 limb 3 — "A violation on a
+     `CONSISTENT` scrape ⇒ `INDETERMINATE-INSTRUMENT`, cause `CONSERVATION`" — read
+     through §11.0.6's Step 0 row, "fail-closed, precedes everything … no later step
+     is evaluated", and §11.0.8 limb 1.
+
+     R4.3's naming rule was NOT reached and did NOT fire: it reads over class shares
+     of `P`, and no hypothesis step was evaluated.  R7a.2's link (naming ⇒ the
+     committed reproducing test's assertion) is therefore not exercised this round;
+     the test and its mutation arm stay committed and green as the gate inputs they
+     were, and §11.1+ records that the naming did not fire (G9).
+
+V.1  ESCALATION ITEM 1 — THE UNCLASSIFIED CAUSE, NAMED
+
+     Limb: `INDETERMINATE-INSTRUMENT`.  Of its two causes, **`CONSERVATION`** fired
+     (a violation on a CONSISTENT scrape: 2,484/2,484 on r1, 2,458/2,458 on r2).
+     **`SAMPLING` did NOT fire** (2,484 and 2,458 CONSISTENT scrapes, each > 24× the
+     100-scrape collapse bound).  The distinction is published because the two causes
+     route to different owners; both are recorded with their evaluated values.
+
+V.2  ESCALATION ITEM 2 — EVERY STEP'S EVALUATED VALUE, PER REPLICATE, INCLUDING THE
+     ONES NOT REACHED, EACH WITH BOTH DENOMINATORS
+
+     See PART III in full.  Summary, both replicates:
+       Step 0   EVALUATED — FAILED (2,484/2,484 of 2,880 ; 2,458/2,458 of 2,880)
+       Step 1   NOT EVALUATED — Step 0 fail-closed   [`P₀` 0 / `P` 440 ; 0 / 358]
+       Step 2   NOT EVALUATED — Step 0 fail-closed   [`P₂` 439 / `P` 440 ; 357 / 358]
+       Step 3   NOT EVALUATED — Step 0 fail-closed   [`P₂` 439 / `P` 440 ; 357 / 358]
+       Step 3.5 NOT EVALUATED as a step — counts published unconditionally (PART IV)
+       Step 4   REACHED BY ROUTING — limb 1 FIRED, limbs 2–6 with their values
+
+V.3  ESCALATION ITEM 3 — THE BLOCKING LIMB, NAMED, AGAINST ITS FROZEN THRESHOLD
+
+     The blocking limb is **Step 0, O-0, R3.0 limb 3**.  Its frozen threshold is
+     "exact on 100 % of CONSISTENT scrapes of BOTH replicates".  Evaluated:
+     0.000000 % exact on r1 (0 of 2,484) and 0.000000 % on r2 (0 of 2,458).
+     The threshold is missed by its entire range, on both replicates, and the
+     failure is not a marginal one.
+
+V.4  ESCALATION ITEM 4 — PD-4's COUPLING, ON THIS ROUND'S OWN NUMBERS
+
+     Where it bites this round: every 100.000000 % and every 0.000000 % above is
+     printed with the denominator that earns it.  Specifically —
+       • "(c) = 100.000000 % of `P₂`" is 439/439 and 357/357, and the SAME rows are
+         99.772727 % of 440 and 99.720670 % of 358 — the two figures a reader would
+         otherwise have to derive across sections (R4.2's whole reason);
+       • "(a) = 0" is published as 0 / 0 UNDEFINED over `P₀` and as 0/440, 0/358 over
+         `P` — never as "0 %", which would imply a denominator `P₀` does not have;
+       • "0 Unclassified" is published as 0 over 439 and 0 over 357, never bare;
+       • the O-0 verdict is 2,484 over 2,484 of 2,880 and 2,458 over 2,458 of 2,880,
+         so the reader sees both the violation rate and the sampling loss.
+     The smallest denominator anywhere in this record is `|P₁|` = 1: the (e) share of
+     "100.000000 % of `P₁`" rests on ONE row in each cell and must be read as
+     1/1, which is why its share of `P` (0.227273 % / 0.279330 %) is printed beside
+     it in the same cell of the same table.
+
+V.5  ESCALATION ITEM 5 — §8.3, QUOTED VERBATIM AS A BLOCK QUOTE, ADJACENT TO THE
+     DETERMINATION (Q15; required whenever any `INDETERMINATE-*` fires)
+
+     `spec356-manifest.md` §8.3, verbatim:
+
+     > ### §8.3 — And the family is NOT blocked by it, which is why this is a
+     > legitimate terminal branch
+     >
+     > **The recommended reclamation model closes safety REGARDLESS of which cause it
+     > turns out to be.** `ReclamationRegistry` (cursor-shaped consumers only) +
+     > retention SLA **N = 30 d** + the cursor-age fence with HLC-horizon quarantine +
+     > `ceiling = min_live_claim − fixed_margin` bound the reclaimable set by **live
+     > claims**, not by any hypothesis about *why* the current prune falls behind. **A
+     > selection defect, a scheduling defect and a throughput defect are all
+     > *contained* by a registry that never reclaims below a live claim.**
+     >
+     > What an unclassified cause costs is **fix-shape efficiency** — the family would
+     > design without knowing which limb to optimize first — **not safety, and not the
+     > family's ability to proceed.** A Step-5 outcome is therefore to be read as **an
+     > expensive answer, not a blocked one**, and any Step-5 outcome must be reported
+     > quoting this paragraph beside it.
+
+V.6  ESCALATION ITEM 6 — THE ROUTING SENTENCE
+
+     The unclassified cause `CONSERVATION`, its mechanical origin (PART I.8(d)/(e):
+     the identity's named subject `IndexConservationSnapshot` has no production
+     exporter, and the `/metrics` mirrors it is scraped through are credited in
+     whole-epoch batches at rollover), together with every POST-DATA finding in
+     PART VIII, is routed to **`TODO-634`** (the `ReclamationRegistry` family
+     umbrella) as a stated open input to its design phase, per §8.2; the torn-render
+     sampling finding (V.7) is routed to the same owner under R3.0 limb 4; and the
+     tracker bytes that carry this routing are written by G9 under R5.7 — this round
+     does not leave the routing to a manifest section.
+
+V.7  THE TORN-FRACTION SAMPLING FINDING, REPORTED-NOT-BLOCKING (R3.0 limb 4)
+
+     r1: 396 / 2,880 = **13.750000 %**    r2: 422 / 2,880 = **14.652778 %**
+     Both EXCEED the frozen 2 % threshold, so both are routed to `TODO-634` as a
+     sampling finding — **without touching the verdict**, which they structurally
+     cannot reach (I.5).  The routing is: the successor's scrape needs either an
+     atomic multi-quantity endpoint or more than one retry, because at ~29 stamps/s
+     a two-render pair tears on roughly one scrape in seven even with the retry.
+     The tracker byte is G9's (R5.7).
+
+V.8  R9.2's CONSEQUENCE, STATED HERE SO G9 INHERITS IT UNAMBIGUOUSLY
+
+     "any `INDETERMINATE-*` ⇒ **THE RULING IS NOT WRITTEN**."  The published value is
+     `INDETERMINATE-INSTRUMENT`, so `spec357-fixshape-ruling.md` records that the
+     ruling is NOT WRITTEN and why — which Q10 makes the SATISFYING content of that
+     artifact rather than an absence — and the ruling obligation returns to
+     `TODO-634` with this round's observations attached.  No fix shape is proposed.
+
+--------------------------------------------------------------------------------
+PART VI — R4.4a: `DIRECTIONAL` DOES NOT APPLY, AND WHY (checked, not skipped)
+--------------------------------------------------------------------------------
+
+R4.4a layers its REPORTING label on exactly one antecedent: "When
+`INDETERMINATE-MIXED` fires (R4.4) **and** both replicates' PLURALITY class among
+(a)/(b)/(c) is the SAME letter".  Both conjuncts are checked:
+
+  • The published value is `INDETERMINATE-INSTRUMENT`, NOT `INDETERMINATE-MIXED`.
+    The first conjunct is FALSE, so `DIRECTIONAL` does not apply.
+  • Independently, R4.4a is "evaluated only after that limb's own frozen rule has
+    already determined the outcome" — and here Step 0 halted the walk before any
+    class was read as a step value, so there is no plurality reading to take.
+
+`DIRECTIONAL` is therefore **WITHHELD**, which is the safe side by construction: the
+label is withheld rather than awarded on an antecedent that did not hold.  R4.5's
+ordinary escalation (PART V) is the whole report.  Note for the record: awarding
+`DIRECTIONAL` here on the strength of PART IV limb (ii)'s concordant (c) counts
+would be reading a bundle limb as a step evaluation — precisely the substitution
+Step 0's fail-closed rule exists to prevent.
+
+--------------------------------------------------------------------------------
+PART VII — R4.6: CELL E's DISPOSITION INPUT (the disposition is TAKEN and RECORDED
+           by G9 in §11.1+; this segment supplies the determined antecedent)
+--------------------------------------------------------------------------------
+
+R4.6(i)'s third limb, quoted: "any `INDETERMINATE-*` ⇒ cell E is
+**DEFERRED-PENDING-DIAGNOSIS**, an explicit third branch, **taken rather than
+un-taken**, with its own ownership statement."
+
+  ANTECEDENT AS DETERMINED THIS ROUND: `INDETERMINATE-INSTRUMENT`, cause
+  `CONSERVATION` (PART V.0) — an `INDETERMINATE-*`.
+  ⇒ CELL E: **DEFERRED-PENDING-DIAGNOSIS**
+  ⇒ R4.6(ii) successor enum `CELLE_DISPOSITION` value: **`DEFERRED-PENDING-DIAGNOSIS`**
+     (of `RUN-PER-355-4.6` | `CLOSED-NOT-NEEDED` | `DEFERRED-PENDING-DIAGNOSIS` |
+      `NOT-FIRED-DETERMINATION-INDETERMINATE`).
+  OWNERSHIP: `TODO-634`.  Cell E is NOT run by this half and no pre-346 binary is
+  built — a disposition is not a run.
+  NOTE on the fourth enum value: `NOT-FIRED-DETERMINATION-INDETERMINATE` is NOT the
+  value here.  R4.6(i)'s third limb fires explicitly on an `INDETERMINATE-*`, so the
+  branch was TAKEN, not left un-taken; the manifest's own §9 Checklist 16 keeps its
+  by-construction RED and is not retroactively greened.
+
+--------------------------------------------------------------------------------
+PART VIII — NEW POST-DATA FINDINGS, ALL `RECORDED-AND-ROUTED`
+            (appended to `target/spec357-scratch/POST-DATA-FINDINGS.md` as
+             PD-F8 … PD-F12; none repairs a frozen surface)
+--------------------------------------------------------------------------------
+
+PD-F8  O-0's named subject (`IndexConservationSnapshot`) has NO production exporter;
+       the scraped `stamped_refs`/`stamped_bytes` mirrors are credited in whole-epoch
+       batches at ROLLOVER, so the identity is unsatisfiable over the only transport
+       the round has, and the Tier-1 gate validated it over the accessor instead.
+       Sharpens PD-F7's attribution; confirms its verdict.  Owner `TODO-634`.
+
+PD-F9  R4.1's `cell_start_unix_ms` is recorded by NEITHER named artifact (only the
+       END instant and the duration), and `entered_at_unix_ms` is 0 on an epoch that
+       never entered the index — so the pinned join is degenerate exactly on `P₀`,
+       the sub-population Step 1 evaluates.  Zero blast radius this round (measured);
+       a latent vacuous-limb hazard under a strong hypothesis (a).  Owner `TODO-634`.
+
+PD-F10 The runner can never emit the value `TORN` its own column contract
+       enumerates; the pre-retry torn count is unrecoverable, and builder and runner
+       apply different labels to the same 396 / 422 rows.  Owner `TODO-634`.
+
+PD-F11 The (c)-vs-(d) split turns on a single op-seq at a half-open interval
+       boundary: `fence_passed_at_op_seq == exited_at_op_seq` on 439/439 and 357/357
+       window `P₂` rows.  A predicate-sensitivity note, NOT a repair.  Owner
+       `TODO-634`.
+
+PD-F12 T2(exactness)'s oracle is not independent on the `DrainedByPrune` path
+       (`bytes_freed_attributed := slot.stamped_bytes`), so limb (iv)'s 0-byte bound
+       is exact by construction; and the genuinely independent prune-path counters
+       (`considered`, `dropped`, `bytes_freed`, `epochs_drained`, `nonempty_drains`)
+       are ALL frozen over the deciding window while the exit ledger attributes
+       439 (r1) / 357 (r2) `DrainedByPrune` exits.  The round does not reconcile
+       them.  Owner `TODO-634`.
+
+Full text of each, with its measurements and its routing, is in
+`target/spec357-scratch/POST-DATA-FINDINGS.md`.
+
+--------------------------------------------------------------------------------
+PART IX — REPRODUCTION: EVERY NUMBER IN THIS FILE, BY COMMAND
+--------------------------------------------------------------------------------
+
+All commands run from
+`packages/server-rust/benches/soak_harness/evidence/`.
+
+1. O-0's census, its violations, its first violating scrape with both renders, the
+   eight-quantity render-equality check and the residual bound — one `awk` pass over
+   `spec357-diag-r{n}.prune.csv`, independent of `spec357-classify.sh`
+   (Checklist 7).  Columns: 44/45 stamped_refs, 46/47 stamped_bytes, 48/49
+   drained_refs, 50/51 restored_refs, 52/53 rebuild_cleared_refs, 54/55
+   epochs_entered, 56/57 epochs_exited, 58/59 indexed_refs, 60 o0_tear_class.
+2. The counter mechanics of I.8(c) — increments, monotonicity, the
+   `residual == indexed_refs mod 1000` identity — same `awk` transport.
+3. `cell_start_unix_ms` — `soak.json`'s `timestamp` minus `durationSecsActual`,
+   corroborated by `progress.jsonl`'s first tick minus its `elapsedSecs`.
+4. The population, the six classes, both denominators, limbs (ii)–(iv) and (vi) —
+   a Python re-derivation from `spec357-entry-r{n}.jsonl` left-joined to
+   `spec357-residency-r{n}.jsonl`, compared row-by-row against the committed
+   `spec357-class-r{n}.csv` (0 mismatches over 899 / 822).
+5. Limb (v) and limb (vii)'s window deltas — `awk` over `prune.csv` columns 22, 23,
+   54, 56 restricted to `14410 ≤ elapsed_secs ≤ 28800`.
+6. The forbidden cadence join (II.4) — first `prune.csv` row per
+   `topgun_or_prune_current_epoch`, compared against the pinned join.
+
+Every figure above was produced by one of these six and by nothing else; no number
+in this file is copied from `SPEC-356c`'s record except where it is explicitly
+labelled as lineage continuity (limb (v)) under an `UNCHANGED_EMISSION` column.
+
+================================================================================
+END — SPEC-357b G7 S2.  Determination: INDETERMINATE-INSTRUMENT, cause
+CONSERVATION, both replicates.  The mechanism is NOT NAMED.
+================================================================================

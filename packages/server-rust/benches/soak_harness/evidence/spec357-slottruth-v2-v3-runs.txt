@@ -1,0 +1,298 @@
+spec357-slottruth-v2-v3-runs.txt
+=================================
+RUNS 1 AND 2 OF THE THREE-RUN MATRIX, TRANSCRIBED IN FULL.
+
+The matrix has three runs, following the shape SPEC-356c's own `spec356c-slottruth-v1-v2-runs.txt`
+established for the v1 -> v2 comparison. Runs 1 and 2 are BOTH over the SAME committed `spec356-long`
+bytes and are the regression proof that the v2 -> v3 diff does exactly what its diff annotation claims
+and nothing else: v3, run with its parameters at their defaults, must reproduce v2's own output
+byte-for-byte. RUN 3 (v3 over this lineage's own two 28,800 s cells, `spec357-long8h-r1.*` /
+`spec357-long8h-r2.*`, exercising the cell-name parameter for real) IS NOT HERE AND WAS NOT RUN: those
+cells do not exist yet -- they are `SPEC-357b`'s own measurement wave, per R5a.1 and the
+OBLIGATION-CARRY table. Its absence is a sequencing fact, not a gap.
+
+A FOURTH, ADDITIONAL RUN is included below (marked RUN 2b) that is NOT part of the three-run matrix
+proper: it demonstrates the defect the v2 -> v3 diff's class-B hunk fixes, using a SCRATCH fixture
+built from the same `spec356-long` bytes under a renamed cell identity, and shows v2 REFUSING in
+exactly the shape `spec356c-slottruth-run3.txt` already recorded while v3 succeeds. It is recorded
+here, rather than omitted, because "the fix works" is otherwise only argued in prose in the diff
+annotation; this run is the mechanical demonstration. It reads NO byte of any spec357-* cell (none
+exist), and none of its inputs are committed anywhere -- see its own preamble below.
+
+SUBJECTS AND DRIVERS, PINNED BY DIGEST (all in packages/server-rust/benches/soak_harness/evidence):
+  v1 driver   spec356-slottruth.sh        280f7a3466a0bffc89059815bb3862bb9581cb95d7efa3fe58b1152749b8f060
+                                          ^ UNEDITED -- re-verified below, unmoved since SPEC-356c
+  v2 driver   spec356c-slottruth-v2.sh    a95f49fa99f7f39ad777b0789ec778eda1ffec3aa3221031d98b587b62a4f348
+                                          ^ UNEDITED -- re-verified below, unmoved since SPEC-356c
+  v3 driver   spec357-slottruth-v3.sh     6b4aba61f9801bc6d07d8242b536dcf243f4b23821a6de55bad29a7ba13e605f
+  the ledger  spec356-long.prune.csv      c6eee53b7db164047cf3454fc9b7d8ae7e25b22f6f137776a6e386902d3b9d64
+                                          ^ READ by both runs, IDENTICAL bytes, never rewritten
+
+---------------------------------------------------------------------------------------------------
+RUN 1 -- v2, UNMODIFIED, over spec356-long. EXPECTED: reproduces SPEC-356c's own recorded RUN 2 output.
+---------------------------------------------------------------------------------------------------
+EXACT INVOCATION (from the evidence directory):
+
+    sh ./spec356c-slottruth-v2.sh .
+
+EXIT STATUS: 0.  STDERR: empty.
+FULL STDOUT:
+
+S_EARLY	998.589613
+S_LATE	998.845155
+EXIT_SHARE_PCT	0.000000
+B	999.944741
+B_SENTINEL_EXCLUDED_PCT	98.333333
+MEDIAN_L_OVER_B	0.000000
+R51_SD	1076.184028
+R51_MEAN	37856.466667
+R51_T	0.346905
+R51_RESULT	NOT REJECTED
+R52_SD	2969.921596
+R52_MEAN	36854.400000
+R52_T	0.800515
+R52_RESULT	NOT REJECTED
+N6_COST_CELLS	8
+
+MATCHES `spec356c-slottruth-v1-v2-runs.txt`'s own RUN 2 verbatim, as expected of an unedited driver
+over unedited bytes.
+
+---------------------------------------------------------------------------------------------------
+RUN 2 -- v3, DEFAULT PARAMETERS, over the SAME spec356-long bytes.
+---------------------------------------------------------------------------------------------------
+EXACT INVOCATION (from the evidence directory; NO parameter overrides, so the defaults resolve to
+v1/v2's own subject, cell name and literals, and all three runs read the same files):
+
+    sh ./spec357-slottruth-v3.sh .
+
+EXIT STATUS: 0.  STDERR: empty.
+FULL STDOUT:
+
+S_EARLY	998.589613
+S_LATE	998.845155
+EXIT_SHARE_PCT	0.000000
+B	999.944741
+B_SENTINEL_EXCLUDED_PCT	98.333333
+MEDIAN_L_OVER_B	0.000000
+R51_SD	1076.184028
+R51_MEAN	37856.466667
+R51_T	0.346905
+R51_RESULT	NOT REJECTED
+R52_SD	2969.921596
+R52_MEAN	36854.400000
+R52_T	0.800515
+R52_RESULT	NOT REJECTED
+N6_COST_CELLS	8
+
+BYTE-IDENTICAL TO RUN 1, AS EXPECTED. v3's two admitted differences from v2 -- the fourth
+(cell-name) parameter, defaulting to v2's own literal `long`, and the corrected epoch-axis comment
+wording -- move no computed value. `diff <(run 1) <(run 2)` is empty:
+
+    $ diff /tmp/v3run2.out /tmp/v2run2.out && echo "IDENTICAL OUTPUT"
+    IDENTICAL OUTPUT
+
+---------------------------------------------------------------------------------------------------
+RUN 2b -- SUPPLEMENTARY, NOT PART OF THE THREE-RUN MATRIX: THE CLASS-B FIX, DEMONSTRATED MECHANICALLY.
+---------------------------------------------------------------------------------------------------
+WHAT THIS RUN IS AND IS NOT. `spec356c-slottruth-run3.txt` already recorded v2's refusal against the
+repeat's real `long8h_r1` / `long8h_r2` cells, which do not exist at this half's tip. To demonstrate
+the FIX without inventing cell bytes this half is not entitled to create, this run reads the SAME
+committed `spec356-long.prune.csv` / `-passrate*.csv` bytes RUN 1 and RUN 2 read, but through a
+SCRATCH matrix.txt fixture (built in $TMPDIR, never committed, never touching this directory) whose
+`cell` self-description reads `long8h_r1` instead of `long` -- reproducing the ONE fact v2's refusal
+turns on (the matrix.txt cell-identity string) without reproducing or fabricating any cell this
+lineage has not yet measured. The prune.csv bytes are the read-only committed `spec356-long` ledger,
+unmodified; only the matrix.txt string differs from the real file's.
+
+INVOCATION (paths abbreviated; the scratch directory holds a matrix.txt naming cell `long8h_r1` and
+symlinks/copies of every other file `prov()` reads, all pointing at the SAME bytes RUN 1/2 used):
+
+    sh /path/to/spec357-slottruth-v3.sh   <scratch> fixture-long8h 14400 long8h_r1
+    sh /path/to/spec356c-slottruth-v2.sh  <scratch> fixture-long8h 14400
+
+v3 RESULT, exit 0, STDOUT (identical to RUN 1/2 -- same underlying bytes, different cell-name label):
+
+S_EARLY	998.589613
+S_LATE	998.845155
+EXIT_SHARE_PCT	0.000000
+B	999.944741
+B_SENTINEL_EXCLUDED_PCT	98.333333
+MEDIAN_L_OVER_B	0.000000
+R51_SD	1076.184028
+R51_MEAN	37856.466667
+R51_T	0.346905
+R51_RESULT	NOT REJECTED
+R52_SD	2969.921596
+R52_MEAN	36854.400000
+R52_T	0.800515
+R52_RESULT	NOT REJECTED
+N6_COST_CELLS	8
+exit=0
+
+v2 RESULT, over the IDENTICAL scratch fixture (no cell-name parameter available to it):
+
+SLOTTRUTH FAIL: fixture-long8h.matrix.txt does not name cell long
+exit=3
+
+READING: v2 refuses on the renamed cell in EXACTLY the shape `spec356c-slottruth-run3.txt` already
+recorded against the real repeat cells (same message shape, same exit code, same provenance limb
+(d)(i)); v3, given the fourth parameter, reads the identical bytes successfully and reproduces RUN
+1/2's own numbers, because the underlying ledger is the same ledger under a different label. This is
+the mechanical demonstration that the class-B hunk discharges the defect it names, without measuring
+or fabricating any `spec357-*` cell.
+
+---------------------------------------------------------------------------------------------------
+DIGEST RE-VERIFICATION, AFTER ALL RUNS ABOVE.
+---------------------------------------------------------------------------------------------------
+    $ shasum -a 256 spec356-slottruth.sh spec356c-slottruth-v2.sh spec357-slottruth-v3.sh
+    280f7a3466a0bffc89059815bb3862bb9581cb95d7efa3fe58b1152749b8f060  spec356-slottruth.sh
+    a95f49fa99f7f39ad777b0789ec778eda1ffec3aa3221031d98b587b62a4f348  spec356c-slottruth-v2.sh
+    6b4aba61f9801bc6d07d8242b536dcf243f4b23821a6de55bad29a7ba13e605f  spec357-slottruth-v3.sh
+
+v1's and v2's digests are UNMOVED (they match the values pinned at the top of this file and in
+`spec356c-slottruth-v1-v2-runs.txt`). Neither run above wrote to either file; the scratch fixture in
+RUN 2b lived entirely under `$TMPDIR` and left no trace in this directory.
+
+===================================================================================================
+RUN 3 -- v3 OVER THIS LINEAGE'S OWN TWO 28,800 s CELLS. APPENDED BY SPEC-357b's G7 S1.
+THIS IS RESIDUAL R-1's DISCHARGE LEG. Runs 1, 2 and 2b above are UNTOUCHED and their bytes have not
+moved: this section is a pure append beneath them.
+===================================================================================================
+
+THE BASENAME CORRECTION, STATED RATHER THAN SLID IN. The runs 1/2 preamble above anticipated the
+cells under the basenames `spec357-long8h-r1.*` / `spec357-long8h-r2.*`. The cells SPEC-357b's G6
+actually measured and committed are `spec357-diag-r1.*` / `spec357-diag-r2.*`, self-describing in
+their own matrix.txt as cells `diag_r1` / `diag_r2` -- which is the runner's own arm naming
+(`spec356-prune.sh`'s two additive arms are `diag_r1` and `diag_r2`). The anticipated names were a
+forward reference written before the cells existed; the committed names are the measured fact. No
+byte above is edited to match -- the correction is recorded here, where it happened.
+
+SUBJECTS, PINNED BY DIGEST:
+    spec357-diag-r1.prune.csv   559559c97ff94d965cb28066373b482f85431f5bf281d98e8d1decd5ad7ae075
+    spec357-diag-r2.prune.csv   ccae909ac599513442dfc5440a263bd783760a92940f05620b734f86334ee5ac
+
+THE THREE PASSRATE CONVENIENCE COPIES, AND HOW THEY WERE MATERIALISED. v3 (like v1 and v2) derives
+the coordinate last-half parent window and the ADJ-18 elapsed-span-midpoint early/late slices itself,
+into its own $TMPDIR workspace, and then `cmp`s them against committed convenience copies
+`<basename>-passrate{,-early,-late}.csv` -- the same three files `spec356-long` and
+`spec356c-long-r{1,2}` each carry, and which manifest section 9.5.1 describes as "convenience
+copies; the driver materialised the parent and both slices itself ... and cmp-ed them clean". No such
+copies existed for the diag cells, so they were materialised FROM THE DRIVER'S OWN DERIVATION: the
+driver was run once per cell with an interposed `rm` on PATH that copies $W's parent.csv /
+early.csv / late.csv aside before the driver's EXIT trap discards them. NO BYTE OF THE DRIVER WAS
+EDITED -- the interposition is on PATH, outside the script, and is used only for that one materialising
+pass. The committed copies are therefore the driver's own bytes, and RUN 3 below (clean PATH, no
+interposition) re-derives them and `cmp`s them clean, which is the check that proves it.
+
+    spec357-diag-r1-passrate.csv        1,440 data rows + header
+    spec357-diag-r1-passrate-early.csv    720 data rows + header
+    spec357-diag-r1-passrate-late.csv     720 data rows + header
+    spec357-diag-r2-passrate.csv        1,440 data rows + header
+    spec357-diag-r2-passrate-early.csv    720 data rows + header
+    spec357-diag-r2-passrate-late.csv     720 data rows + header
+
+---------------------------------------------------------------------------------------------------
+RUN 3a -- v3, ALL THREE PROVENANCE LITERALS PARAMETERISED, over spec357-diag-r1.
+---------------------------------------------------------------------------------------------------
+EXACT INVOCATION (from the evidence directory):
+
+    sh ./spec357-slottruth-v3.sh . spec357-diag-r1 28800 diag_r1
+
+  -- basename `spec357-diag-r1`, duration `28800`, CELL NAME `diag_r1`: the third literal is the
+     one v2 hardcoded to `long`, and this is the first run in the lineage that supplies it for real
+     against a cell that is not named `long`.
+
+EXIT STATUS: 0.  STDERR: empty.
+FULL STDOUT:
+
+S_EARLY	998.964725
+S_LATE	998.927593
+B	UNDEFINED (100 % sentinel, 0 non-sentinel rows)
+B_SENTINEL_EXCLUDED_PCT	100.000000
+MEDIAN_L_OVER_B	withheld: 0 non-sentinel rows; B undefined
+R51_SD	1076.184028
+R51_MEAN	37856.466667
+R51_T	0.346905
+R51_RESULT	NOT REJECTED
+R52_SD	2969.921596
+R52_MEAN	36854.400000
+R52_T	0.800515
+R52_RESULT	NOT REJECTED
+N6_COST_CELLS	8
+
+---------------------------------------------------------------------------------------------------
+RUN 3b -- v3, ALL THREE PROVENANCE LITERALS PARAMETERISED, over spec357-diag-r2.
+---------------------------------------------------------------------------------------------------
+EXACT INVOCATION (from the evidence directory):
+
+    sh ./spec357-slottruth-v3.sh . spec357-diag-r2 28800 diag_r2
+
+EXIT STATUS: 0.  STDERR: empty.
+FULL STDOUT:
+
+S_EARLY	998.706765
+S_LATE	998.917592
+B	UNDEFINED (100 % sentinel, 0 non-sentinel rows)
+B_SENTINEL_EXCLUDED_PCT	100.000000
+MEDIAN_L_OVER_B	withheld: 0 non-sentinel rows; B undefined
+R51_SD	1076.184028
+R51_MEAN	37856.466667
+R51_T	0.346905
+R51_RESULT	NOT REJECTED
+R52_SD	2969.921596
+R52_MEAN	36854.400000
+R52_T	0.800515
+R52_RESULT	NOT REJECTED
+N6_COST_CELLS	8
+
+---------------------------------------------------------------------------------------------------
+RUN 3c / 3d -- v2, UNMODIFIED, RUN ALONGSIDE ON THE IDENTICAL BYTES AS THE KNOWN-DEFECT REFERENCE.
+---------------------------------------------------------------------------------------------------
+EXACT INVOCATIONS (v2 has no fourth parameter to give -- that IS the defect):
+
+    sh ./spec356c-slottruth-v2.sh . spec357-diag-r1 28800
+    sh ./spec356c-slottruth-v2.sh . spec357-diag-r2 28800
+
+RESULTS:
+
+    SLOTTRUTH FAIL: spec357-diag-r1.matrix.txt does not name cell long
+    exit=3
+    SLOTTRUTH FAIL: spec357-diag-r2.matrix.txt does not name cell long
+    exit=3
+
+READING -- and it is the R-1 discharge, stated as a mechanical fact rather than argued: on the SAME
+committed bytes, v2 REFUSES at provenance limb (d)(i) with the exact message shape
+`spec356c-slottruth-run3.txt` recorded against SPEC-356c's own repeat cells, because its `prov()`
+call parameterises the basename and the duration but leaves the cell-name literal `long` hardcoded;
+v3, with all THREE literals parameterised, reads the identical bytes and exits 0. The fix is shown on
+identical bytes, against a real subject, with the defective version run beside it.
+
+TWO SLOT READINGS THAT ARE RAW OBSERVATIONS, PUBLISHED HERE WITHOUT INTERPRETATION. They are recorded
+because a reader comparing RUN 3's stdout to RUN 1/2's will notice both immediately, and an
+unexplained difference invites a guess:
+
+  (1) `EXIT_SHARE_PCT` IS ABSENT FROM BOTH RUN 3 OUTPUTS. The driver emits that slot only under
+      `if (dC > 0)` -- it does not divide by a zero denominator. Measured directly from the same
+      ledgers: over the coordinate last half [14,410 ... 28,800] s,
+      `topgun_or_prune_considered_total` is 35,000 at both endpoints on r1 and 99,000 at both
+      endpoints on r2, so `dC = 0` on both, while `topgun_or_prune_passes_total` advances by
+      440,069 (r1) and 358,370 (r2) over the same window. The slot's absence is the driver declining
+      an undefined quotient, not a truncated run.
+
+  (2) `B` IS `UNDEFINED (100 % sentinel, 0 non-sentinel rows)` and
+      `MEDIAN_L_OVER_B` is withheld, on BOTH cells, with `B_SENTINEL_EXCLUDED_PCT` = 100.000000.
+      RUN 1/2's `spec356-long` subject read 98.333333 % and B = 999.944741.
+
+NEITHER READING IS INTERPRETED HERE AND NEITHER IS A DETERMINATION. G7 S1 produces artifacts and raw
+counts; the frozen walk is the only thing entitled to read them.
+
+---------------------------------------------------------------------------------------------------
+DIGEST RE-VERIFICATION, AFTER RUN 3.
+---------------------------------------------------------------------------------------------------
+    $ shasum -a 256 spec356-slottruth.sh spec356c-slottruth-v2.sh spec357-slottruth-v3.sh
+    280f7a3466a0bffc89059815bb3862bb9581cb95d7efa3fe58b1152749b8f060  spec356-slottruth.sh
+    a95f49fa99f7f39ad777b0789ec778eda1ffec3aa3221031d98b587b62a4f348  spec356c-slottruth-v2.sh
+    6b4aba61f9801bc6d07d8242b536dcf243f4b23821a6de55bad29a7ba13e605f  spec357-slottruth-v3.sh
+
+ALL THREE UNMOVED -- byte-identical to the values pinned at the top of this file and re-verified after
+runs 1/2/2b. This half edited no driver.

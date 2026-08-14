@@ -1,0 +1,920 @@
+spec357-trackergrade-proofs.txt
+================================
+THE PRE-DATA BOTH-DIRECTIONS PROOF (R5a.3, AC17, checklist item 13).
+
+This transcript runs spec357-trackergrade.sh TWICE, over the SAME committed pre-edit fixture,
+against the two committed fixture directories in this evidence directory:
+  <fixture-dir>/unedited/  -- TODO-634.md is byte-identical to the pre-edit fixture -- EXPECTED RED
+  <fixture-dir>/edited/    -- TODO-634.md carries the required box edit, ticks unchanged -- EXPECTED GREEN
+
+Neither directory is, or has ever been, under .specflow/todos/. Both are committed alongside this
+script: spec357-trackergrade-fixture-634.pre.md, spec357-trackergrade-fixture-634.post.md,
+spec357-trackergrade-fixture-648.md, and the two case directories spec357-trackergrade-fixture/{unedited,edited}/
+built from them. git status --porcelain .specflow/todos/ is verified empty at the end of this file.
+
+INPUT DIGESTS, for the record:
+  c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423  /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture-634.pre.md
+  a07bee2dfc0f58ebb7092fbb6260355b123671fdce3d25de91fbbaee3b59f984  /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture-634.post.md
+  f518c9b6cd985c4c495db2da7819580786c05acc0ab1c9801532591d25005080  /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture-648.md
+
+####################################################################################
+RUN 1 -- AGAINST THE UNEDITED FIXTURE DIRECTORY. EXPECTED: RED, exit 1.
+####################################################################################
+INVOCATION:
+  sh spec357-trackergrade.sh spec357-trackergrade-fixture-634.pre.md spec357-trackergrade-fixture/unedited
+
+================================================================================
+spec357-trackergrade.sh -- tracker-discipline CONTENT grade (R5a.3 / AC17 / item 13)
+================================================================================
+fixture   : /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture-634.pre.md
+todos dir : /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture/unedited
+reference : /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade.ref
+date      : 2026-08-13T12:40:17Z
+
+FIXTURE PROVENANCE (checked before any limb; a mismatch REFUSES the grade)
+  recorded TODO-634.md pre-digest : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  fixture digest                  : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  RESULT : OK -- the fixture is provenanced.
+
+--------------------------------------------------------------------------------
+LIMB (a) UNRELATED FILE UNMOVED
+--------------------------------------------------------------------------------
+  TODO-648.md : MATCH    f518c9b6cd985c4c495db2da7819580786c05acc0ab1c9801532591d25005080
+  (a) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (b) THE REQUIRED EDIT HAPPENED
+--------------------------------------------------------------------------------
+  recorded pre-digest : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  observed digest     : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  the digest has NOT moved -- the required edit never happened.
+  (b) RED
+
+--------------------------------------------------------------------------------
+LIMB (c) NOTHING WAS TICKED AND NO BOX MOVED
+--------------------------------------------------------------------------------
+  ticked   '^- \[x\] ' : expected 2   observed 2
+  unticked '^- \[ \] ' : expected 5   observed 5
+  census, top-level boxes  : expected 7   observed 7
+  census, indented boxes   : expected 0   observed 0
+  (the census is what makes the two counts exhaustive over the file's box set)
+  strict box anchor        : MATCHES
+  (c) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (d) THE EDIT IS THE RIGHT EDIT
+--------------------------------------------------------------------------------
+  graded box located by the LOOSE anchor (survives a tick, so a broken (c) does not blind (d)/(e))
+  fixture box lines   : 17-18
+  candidate box lines : 17-18
+
+  ---- BEGIN GRADED BOX BEFORE-TEXT (fixture, lines 17-18) ----
+  | - [ ] **PENDING REPEAT: awaiting the outcome of the fixture's own diagnosis round --
+  |   fill in the outcome and a pointer to the derivation once the round lands.**
+  ---- END GRADED BOX BEFORE-TEXT ----
+
+  ---- BEGIN GRADED BOX AFTER-TEXT (candidate, lines 17-18) ----
+  | - [ ] **PENDING REPEAT: awaiting the outcome of the fixture's own diagnosis round --
+  |   fill in the outcome and a pointer to the derivation once the round lands.**
+  ---- END GRADED BOX AFTER-TEXT ----
+
+  outcome token in after-text   : ABSENT  => RED (no outcome recorded)
+    accepted tokens: INDETERMINATE ENDORSED EXCLUDED
+  pointer literal in after-text : ABSENT  => RED (no 'spec357-trackergrade-fixture-manifest.md §2' pointer)
+  (d) RED
+
+--------------------------------------------------------------------------------
+LIMB (e) THE DELTA IS CONSTRAINED -- EVERY CHANGED LINE IS INSIDE THE GRADED BOX
+--------------------------------------------------------------------------------
+  invocation: diff -U0 <fixture> <candidate>
+  fixture box 17-18   candidate box 17-18
+  0 hunks -- the candidate is byte-identical to the fixture.
+  (e) is VACUOUSLY green here; 'nothing happened' is limb (b)'s finding, not (e)'s.
+  (e) GREEN
+
+================================================================================
+VERDICT: RED (red limbs: b d)
+================================================================================
+
+OBSERVED EXIT STATUS: 1
+
+####################################################################################
+RUN 2 -- AGAINST THE EDITED FIXTURE DIRECTORY. EXPECTED: GREEN, exit 0.
+####################################################################################
+INVOCATION:
+  sh spec357-trackergrade.sh spec357-trackergrade-fixture-634.pre.md spec357-trackergrade-fixture/edited
+
+================================================================================
+spec357-trackergrade.sh -- tracker-discipline CONTENT grade (R5a.3 / AC17 / item 13)
+================================================================================
+fixture   : /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture-634.pre.md
+todos dir : /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade-fixture/edited
+reference : /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec357-trackergrade.ref
+date      : 2026-08-13T12:40:17Z
+
+FIXTURE PROVENANCE (checked before any limb; a mismatch REFUSES the grade)
+  recorded TODO-634.md pre-digest : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  fixture digest                  : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  RESULT : OK -- the fixture is provenanced.
+
+--------------------------------------------------------------------------------
+LIMB (a) UNRELATED FILE UNMOVED
+--------------------------------------------------------------------------------
+  TODO-648.md : MATCH    f518c9b6cd985c4c495db2da7819580786c05acc0ab1c9801532591d25005080
+  (a) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (b) THE REQUIRED EDIT HAPPENED
+--------------------------------------------------------------------------------
+  recorded pre-digest : c21a8036ad145a9aa20282786902ca5fab59539796ec0174f5be4f222e185423
+  observed digest     : a07bee2dfc0f58ebb7092fbb6260355b123671fdce3d25de91fbbaee3b59f984
+  the digest HAS moved.
+  (b) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (c) NOTHING WAS TICKED AND NO BOX MOVED
+--------------------------------------------------------------------------------
+  ticked   '^- \[x\] ' : expected 2   observed 2
+  unticked '^- \[ \] ' : expected 5   observed 5
+  census, top-level boxes  : expected 7   observed 7
+  census, indented boxes   : expected 0   observed 0
+  (the census is what makes the two counts exhaustive over the file's box set)
+  strict box anchor        : MATCHES
+  (c) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (d) THE EDIT IS THE RIGHT EDIT
+--------------------------------------------------------------------------------
+  graded box located by the LOOSE anchor (survives a tick, so a broken (c) does not blind (d)/(e))
+  fixture box lines   : 17-18
+  candidate box lines : 17-19
+
+  ---- BEGIN GRADED BOX BEFORE-TEXT (fixture, lines 17-18) ----
+  | - [ ] **PENDING REPEAT: awaiting the outcome of the fixture's own diagnosis round --
+  |   fill in the outcome and a pointer to the derivation once the round lands.**
+  ---- END GRADED BOX BEFORE-TEXT ----
+
+  ---- BEGIN GRADED BOX AFTER-TEXT (candidate, lines 17-19) ----
+  | - [ ] **PENDING REPEAT: awaiting the outcome of the fixture's own diagnosis round --
+  |   fill in the outcome and a pointer to the derivation once the round lands.
+  |   OUTCOME: INDETERMINATE. See spec357-trackergrade-fixture-manifest.md §2 for the full derivation.**
+  ---- END GRADED BOX AFTER-TEXT ----
+
+  outcome token in after-text   : PRESENT (INDETERMINATE)
+  pointer literal in after-text : PRESENT ('spec357-trackergrade-fixture-manifest.md §2', backticks ignored)
+  [evidence] outcome token 'INDETERMINATE' is NEW in the after-text
+  [evidence] pointer literal is NEW in the after-text
+  (d) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (e) THE DELTA IS CONSTRAINED -- EVERY CHANGED LINE IS INSIDE THE GRADED BOX
+--------------------------------------------------------------------------------
+  invocation: diff -U0 <fixture> <candidate>
+  fixture box 17-18   candidate box 17-19
+  hunks:
+    @@ -18 +18,2 @@  =>  inside the graded box
+  hunks outside the graded box: 0
+  (e) GREEN
+
+================================================================================
+VERDICT: GREEN (a, b, c, d, e)
+================================================================================
+
+OBSERVED EXIT STATUS: 0
+
+####################################################################################
+SUMMARY
+####################################################################################
+RUN 1 (unedited) exit: 1  (expected 1 / RED)
+RUN 2 (edited)   exit: 0  (expected 0 / GREEN)
+BOTH-DIRECTIONS PROOF: DISCHARGED.
+
+####################################################################################
+SPECFLOW/TODOS UNTOUCHED CHECK
+####################################################################################
+$ git status --porcelain .specflow/todos/
+(expected: empty output -- see the checklist note: .specflow/ is gitignored, so this is trivially
+ empty regardless; the load-bearing proof above is that TODO-634.md / TODO-648.md were never
+ opened for writing by anything this half committed.)
+
+
+####################################################################################################
+####################################################################################################
+##
+##  APPENDED BY SPEC-357b's G9 S2 (2026-08-14) -- THE REAL-TARGET BOTH-DIRECTIONS PROOF.
+##  Q14 / AC17 / Validation Checklist item 13. APPEND-ONLY: every byte above this banner is
+##  SPEC-357a's committed fixture-only proof and is UNMOVED (proven by `git diff --numstat` = "N 0"
+##  on this file, and by a `cmp` of SPEC-357a's copy against this file's first 198 lines).
+##
+####################################################################################################
+####################################################################################################
+
+WHAT IS DIFFERENT ABOUT THESE TWO RUNS, AND WHY THIS HALF IS THE ONE ENTITLED TO MAKE THEM.
+The proof above ran the grader over a COMMITTED FIXTURE directory, because SPEC-357a may not read or
+copy the real tracker files at all. This half's obligation (R5.7) is to WRITE the tracker bytes, so
+this half is where the grader meets its actual subject: `.specflow/todos/TODO-634.md` and
+`.specflow/todos/TODO-648.md`, the real files.
+
+THE SCRIPT IS UNCHANGED. `spec357-trackergrade.sh` is read and run, never edited; its digest is
+unmoved. `spec357-trackergrade.ref` is likewise UNTOUCHED -- it grades ONLY the fixture, and says so
+in its own bytes. The reference for these two runs is the script's own third argument, pointed at
+`spec357b-trackergrade.ref`, a NEW committed file in this half's own namespace. That is the channel
+`spec357-trackergrade.ref` itself names: "its own reference values, unrelated to this fixture's, live
+in whatever `.ref` SPEC-357b commits for that purpose".
+
+THE PRE-EDIT FIXTURE IS A SCRATCH COPY, NOT A COMMITTED ONE. `.specflow/` is gitignored under
+standing project policy, so this half copies the REAL `TODO-634.md` at its PRE-EDIT bytes to a scratch
+path OUTSIDE the repository and pins it by digest. The digest -- not the path -- is what makes the
+grade groundable, and the grader REFUSES (exit 2) rather than grading if it does not match the
+reference.
+
+  scratch pre-edit fixture : <SCRATCH>/trackerfix/TODO-634.pre.md
+  digest                   : e0fc181a735ebb9cd520c3bc6a52a00b2ee3fc3620d65a77cda7aaa3bcb86875
+  RED-direction todos dir  : <SCRATCH>/trackerfix/unedited/   (TODO-634.md AND TODO-648.md, both at
+                             their PRE-EDIT bytes -- a genuinely unedited tracker fixture)
+  GREEN-direction todos dir: /Users/koristuvac/Projects/topgun/topgun/.specflow/todos   (the REAL files)
+
+THE REFERENCE FILE THIS HALF COMMITTED, IN FULL, so the two transcripts below can be read without
+opening a second artifact:
+
+  | # spec357b-trackergrade.ref -- the reference ledger for the REAL-TARGET run of spec357-trackergrade.sh.
+  | #
+  | # WHY THIS FILE EXISTS AT ALL, AND WHY IT IS NOT AN EDIT TO A PINNED SIDECAR. `spec357-trackergrade.ref`
+  | # (SPEC-357a's, pinned and untouched here) says so in its own bytes: it "grades ONLY the fixture below",
+  | # and the successor's "own reference values, unrelated to this fixture's, live in whatever `.ref`
+  | # SPEC-357b commits for that purpose". This is that file. `spec357-trackergrade.sh` takes the reference
+  | # path as its optional third argument precisely so the same grader can be pointed at a different subject
+  | # without moving a byte of the script or of the fixture's reference. Neither pinned file is edited by
+  | # this half; both are read.
+  | #
+  | # THE SUBJECT. The two REAL tracker files `.specflow/todos/TODO-634.md` and `.specflow/todos/TODO-648.md`,
+  | # graded for SPEC-357b's R5.7 / AC17 / Q14 obligation. `.specflow/` is gitignored, so a `git diff` over it
+  | # is empty for every possible execution and a checklist item resting on one is vacuously GREEN -- which is
+  | # the whole reason the grade is made on CONTENT, by this script, and recorded in a committed transcript.
+  | #
+  | # Measured 2026-08-14. `todo634_pre_sha256` is TODO-634.md at its PRE-EDIT bytes, taken as a scratch copy
+  | # BEFORE this half wrote anything (the copy lives outside the repository and is not committed; its digest
+  | # is what pins it, and it is quoted in `spec357-trackergrade-proofs.txt`).
+  | #
+  | # ONE DEVIATION FROM THE FIXTURE RUN'S SEMANTICS, STATED RATHER THAN LEFT TO BE INFERRED. In the fixture
+  | # proof, limb (a)'s TODO-648.md was a genuinely UNRELATED file and its digest was the pre-edit one. In
+  | # THIS half TODO-648.md is a REQUIRED edit (R5.7 writes R-1's DISCHARGED-BY-SUCCESSOR byte there), so the
+  | # value recorded below is its POST-EDIT digest and limb (a) reads as "the second tracker file is at its
+  | # recorded expected bytes" rather than "unmoved". The limb's discriminating power is unchanged in the
+  | # direction that matters: the RED run points the grader at a directory holding BOTH files at their
+  | # pre-edit bytes, and limb (a) REDs there exactly as limb (b) does.
+  | #
+  | # Format: <key><single space><value>; the value is the rest of the line VERBATIM (it may contain spaces,
+  | # brackets and non-ASCII). Lines beginning # and empty lines are ignored.
+  | 
+  | todo634_pre_sha256 e0fc181a735ebb9cd520c3bc6a52a00b2ee3fc3620d65a77cda7aaa3bcb86875
+  | todo648_sha256 b41a074b8c4dd5d9b5472aad915faa51fdfab7e670baf3cc421f195aa7ea9947
+  | 
+  | # Tick counts on the real TODO-634.md, with the census that makes them exhaustive: the file carries 7
+  | # top-level boxes and NO indented ones, so ticked + unticked covers every box it has. THE REQUIRED EDIT
+  | # MAY NOT MOVE ANY OF THESE FOUR: TODO-634 is UPDATED, NOT ticked and NOT closed.
+  | ticked_count 2
+  | unticked_count 5
+  | total_boxes 7
+  | indented_boxes 0
+  | 
+  | # The graded box is the §8.1-repeat box -- the one that carries this lineage's determinations and is the
+  | # box the diagnosis outcome belongs to. The strict anchor is a line PREFIX ending before the box's own
+  | # code span, chosen so it survives the required edit (which appends continuation lines to the box) and
+  | # breaks the instant the box is ticked. The loose anchor is the same text without the checkbox marker and
+  | # is used ONLY to LOCATE the box, so a ticked box still REDs limb (c) while limbs (d) and (e) stay
+  | # computable.
+  | box_anchor - [ ] **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT:
+  | box_anchor_loose **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT:
+  | 
+  | # Limb (d). The pointer literal is required verbatim in the box's after-text (backticks are stripped on
+  | # both sides before matching) and points at the manifest section carrying the determination and R4.5's
+  | # escalation. The outcome tokens are a small closed vocabulary; at least one must appear. The vocabulary
+  | # is deliberately STRICTER than the fixture's bare `INDETERMINATE`, which the box's pre-edit text already
+  | # contained: the token that fires here must be NEW in the after-text for the grade to mean anything, and
+  | # the grader's own [evidence] lines are what a reader checks that against.
+  | pointer_literal spec356-manifest.md §11.12
+  | outcome_tokens INDETERMINATE-INSTRUMENT ENDORSED EXCLUDED
+
+ONE DEVIATION FROM THE FIXTURE RUN'S LIMB-(a) SEMANTICS, ALREADY STATED IN THAT REFERENCE AND
+REPEATED HERE SO A READER OF THE TRANSCRIPT ALONE IS NOT MISLED. In the fixture proof, TODO-648.md was
+a genuinely UNRELATED file. In THIS half it is a REQUIRED edit -- R5.7 writes residual R-1's
+DISCHARGED-BY-SUCCESSOR byte there -- so `todo648_sha256` records its POST-EDIT digest and limb (a)
+reads "the second tracker file is at its recorded expected bytes". The limb keeps its discriminating
+power in the direction that matters: the RED run points at a directory holding BOTH files at their
+pre-edit bytes, and limb (a) REDs there exactly as limb (b) does.
+
+A NOTE ON LIMB (e), BECAUSE IT CAUGHT A REAL DEFECT IN THIS HALF'S FIRST ATTEMPT AND IS RECORDED
+RATHER THAN QUIETLY FIXED. The first version of the TODO-634 edit was written as indented PARAGRAPHS
+separated by empty lines. `diff -U0` then aligned the fixture's own trailing empty line against one of
+those interior empty lines, which split the delta into two hunks and pushed the file's pre-existing
+trailing blank into the SECOND hunk's added range -- one line outside the graded box. Limb (e) REDed,
+correctly, and the run is not reproduced here only because it was superseded: the edit was
+restructured as a single blank-line-free list (the host box's own style, which carries 37 contiguous
+non-blank lines), after which the delta is ONE hunk, entirely inside the graded box. The grader found
+a containment defect that no digest and no tick count could have found. That is the limb doing its job.
+
+####################################################################################################
+RUN A -- THE RED DIRECTION: the grader against an UNEDITED tracker fixture. EXPECTED: RED, exit 1.
+####################################################################################################
+INVOCATION (from the evidence directory):
+  sh ./spec357-trackergrade.sh <SCRATCH>/trackerfix/TODO-634.pre.md \
+                               <SCRATCH>/trackerfix/unedited \
+                               ./spec357b-trackergrade.ref
+
+================================================================================
+spec357-trackergrade.sh -- tracker-discipline CONTENT grade (R5a.3 / AC17 / item 13)
+================================================================================
+fixture   : <SCRATCH>/trackerfix/TODO-634.pre.md
+todos dir : <SCRATCH>/trackerfix/unedited
+reference : ./spec357b-trackergrade.ref
+date      : 2026-08-14T19:02:09Z
+
+FIXTURE PROVENANCE (checked before any limb; a mismatch REFUSES the grade)
+  recorded TODO-634.md pre-digest : e0fc181a735ebb9cd520c3bc6a52a00b2ee3fc3620d65a77cda7aaa3bcb86875
+  fixture digest                  : e0fc181a735ebb9cd520c3bc6a52a00b2ee3fc3620d65a77cda7aaa3bcb86875
+  RESULT : OK -- the fixture is provenanced.
+
+--------------------------------------------------------------------------------
+LIMB (a) UNRELATED FILE UNMOVED
+--------------------------------------------------------------------------------
+  TODO-648.md : MOVED    expected b41a074b8c4dd5d9b5472aad915faa51fdfab7e670baf3cc421f195aa7ea9947
+  TODO-648.md :          observed 56fb3f59f7159b3acd0afa3a66f04df74e3bf9096614ae5357940d149847ef2c  => RED (file TODO-648.md changed)
+  (a) RED
+
+--------------------------------------------------------------------------------
+LIMB (b) THE REQUIRED EDIT HAPPENED
+--------------------------------------------------------------------------------
+  recorded pre-digest : e0fc181a735ebb9cd520c3bc6a52a00b2ee3fc3620d65a77cda7aaa3bcb86875
+  observed digest     : e0fc181a735ebb9cd520c3bc6a52a00b2ee3fc3620d65a77cda7aaa3bcb86875
+  the digest has NOT moved -- the required edit never happened.
+  (b) RED
+
+--------------------------------------------------------------------------------
+LIMB (c) NOTHING WAS TICKED AND NO BOX MOVED
+--------------------------------------------------------------------------------
+  ticked   '^- \[x\] ' : expected 2   observed 2
+  unticked '^- \[ \] ' : expected 5   observed 5
+  census, top-level boxes  : expected 7   observed 7
+  census, indented boxes   : expected 0   observed 0
+  (the census is what makes the two counts exhaustive over the file's box set)
+  strict box anchor        : MATCHES
+  (c) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (d) THE EDIT IS THE RIGHT EDIT
+--------------------------------------------------------------------------------
+  graded box located by the LOOSE anchor (survives a tick, so a broken (c) does not blind (d)/(e))
+  fixture box lines   : 213-249
+  candidate box lines : 213-249
+
+  ---- BEGIN GRADED BOX BEFORE-TEXT (fixture, lines 213-249) ----
+  | - [ ] **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT: `OWED, NOT DONE`.**
+  |       **CARVED TO `SPEC-356c` (2026-08-11, `/sf:plan`) — carved, NOT done and NOT ticked.** That spec
+  |       authors ONLY this repeat increment (the `long` cell at 28,800 s × n = 2 under the frozen
+  |       predicate), plus PD-8's PRESENCE limb, the v2 grader sidecar carrying TODO-648's `B`-sentinel
+  |       fix, the stated worktree procedure, and the FIVE pre-declared observation targets that hunt the
+  |       **fifth mechanism** (the LWM advancing past never-freed content). **The registry family is NOT in
+  |       its scope**, and this box ticks only when SPEC-356c is done. Exactly **one** repeat of
+  |       the deciding configuration at **DOUBLED duration AND DOUBLED replicates** — the `long` cell at
+  |       **28,800 s with n = 2** — under the **SAME pin** `feb85268952001813e502e27f65180855676ac25` and the
+  |       **SAME frozen predicate** (manifest §0–§8 plus §8A's twenty addenda). **It may not adjust a
+  |       threshold, an ordering or a conditional**: it is a second observation, not a re-specification.
+  |       Both axes are doubled for different reasons — duration for an effect too slow to separate in 4 h,
+  |       replicates for the n = 1 fragility SPEC-355 §10.4.2 measured — and **one axis alone leaves the
+  |       other cause unaddressed.** **If the repeat is STILL INDETERMINATE, §8.2 escalates** the
+  |       unclassified cause as an explicit input to this item's design phase, naming it and quoting every
+  |       step's evaluated value and the admissibility limb that blocked.
+  |       **This does NOT block the family.** Manifest §8.3, verbatim: *"The recommended reclamation model
+  |       closes safety REGARDLESS of which cause it turns out to be … A selection defect, a scheduling
+  |       defect and a throughput defect are all contained by a registry that never reclaims below a live
+  |       claim."* What an unclassified cause costs is **fix-shape efficiency, not safety** — an expensive
+  |       answer, not a blocked one.
+  |       **OUTCOME (2026-08-12, `SPEC-356c` EXECUTED) — the repeat RAN, and the determination is
+  |       `INDETERMINATE` on BOTH replicates. Recorded here; this box is deliberately NOT ticked.** The
+  |       `long` cell ran at **28,800 s × n = 2** under the frozen predicate (manifest §0–§8 plus §8A's
+  |       twenty addenda, unadjusted) at the executed pin `8a60f1357f4702f4c5393538ef6b4ae6cebd247f` —
+  |       SPEC-356b's `feb85268…` **in substance**, the `.rs` diff between them being empty, so the
+  |       measured binary is the same one. Both replicates exit at **Step 0 limb (c)** on a
+  |       **1,440 / 1,440 = 100.000000 %** admissibility sentinel, and **Steps 1–4 are `NOT EVALUATED`**
+  |       on both — so this is a **concordant** `INDETERMINATE`, not a split across replicates, and
+  |       **no mechanism is named**: none of the four pre-registered mechanisms is endorsed and none is
+  |       excluded. **§8.2's escalation is published in consequence**, all six R7.2 items in order with
+  |       §8.3 quoted verbatim beside the determination. **This item stays OPEN.** SPEC-356c authored the
+  |       repeat increment only; the registry family remains outside its scope, and this box ticks when
+  |       that family closes — recording a second observation is not the same act as closing it.
+  |       Evidence: `spec356-manifest.md` §10 — §10.1 the lineage and the pin, §10.2 the PRESENCE verdict,
+  |       the frozen walk and the determination, §10.3–§10.7 the five observation targets, §10.8 §8.2's
+  |       escalation.
+  ---- END GRADED BOX BEFORE-TEXT ----
+
+  ---- BEGIN GRADED BOX AFTER-TEXT (candidate, lines 213-249) ----
+  | - [ ] **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT: `OWED, NOT DONE`.**
+  |       **CARVED TO `SPEC-356c` (2026-08-11, `/sf:plan`) — carved, NOT done and NOT ticked.** That spec
+  |       authors ONLY this repeat increment (the `long` cell at 28,800 s × n = 2 under the frozen
+  |       predicate), plus PD-8's PRESENCE limb, the v2 grader sidecar carrying TODO-648's `B`-sentinel
+  |       fix, the stated worktree procedure, and the FIVE pre-declared observation targets that hunt the
+  |       **fifth mechanism** (the LWM advancing past never-freed content). **The registry family is NOT in
+  |       its scope**, and this box ticks only when SPEC-356c is done. Exactly **one** repeat of
+  |       the deciding configuration at **DOUBLED duration AND DOUBLED replicates** — the `long` cell at
+  |       **28,800 s with n = 2** — under the **SAME pin** `feb85268952001813e502e27f65180855676ac25` and the
+  |       **SAME frozen predicate** (manifest §0–§8 plus §8A's twenty addenda). **It may not adjust a
+  |       threshold, an ordering or a conditional**: it is a second observation, not a re-specification.
+  |       Both axes are doubled for different reasons — duration for an effect too slow to separate in 4 h,
+  |       replicates for the n = 1 fragility SPEC-355 §10.4.2 measured — and **one axis alone leaves the
+  |       other cause unaddressed.** **If the repeat is STILL INDETERMINATE, §8.2 escalates** the
+  |       unclassified cause as an explicit input to this item's design phase, naming it and quoting every
+  |       step's evaluated value and the admissibility limb that blocked.
+  |       **This does NOT block the family.** Manifest §8.3, verbatim: *"The recommended reclamation model
+  |       closes safety REGARDLESS of which cause it turns out to be … A selection defect, a scheduling
+  |       defect and a throughput defect are all contained by a registry that never reclaims below a live
+  |       claim."* What an unclassified cause costs is **fix-shape efficiency, not safety** — an expensive
+  |       answer, not a blocked one.
+  |       **OUTCOME (2026-08-12, `SPEC-356c` EXECUTED) — the repeat RAN, and the determination is
+  |       `INDETERMINATE` on BOTH replicates. Recorded here; this box is deliberately NOT ticked.** The
+  |       `long` cell ran at **28,800 s × n = 2** under the frozen predicate (manifest §0–§8 plus §8A's
+  |       twenty addenda, unadjusted) at the executed pin `8a60f1357f4702f4c5393538ef6b4ae6cebd247f` —
+  |       SPEC-356b's `feb85268…` **in substance**, the `.rs` diff between them being empty, so the
+  |       measured binary is the same one. Both replicates exit at **Step 0 limb (c)** on a
+  |       **1,440 / 1,440 = 100.000000 %** admissibility sentinel, and **Steps 1–4 are `NOT EVALUATED`**
+  |       on both — so this is a **concordant** `INDETERMINATE`, not a split across replicates, and
+  |       **no mechanism is named**: none of the four pre-registered mechanisms is endorsed and none is
+  |       excluded. **§8.2's escalation is published in consequence**, all six R7.2 items in order with
+  |       §8.3 quoted verbatim beside the determination. **This item stays OPEN.** SPEC-356c authored the
+  |       repeat increment only; the registry family remains outside its scope, and this box ticks when
+  |       that family closes — recording a second observation is not the same act as closing it.
+  |       Evidence: `spec356-manifest.md` §10 — §10.1 the lineage and the pin, §10.2 the PRESENCE verdict,
+  |       the frozen walk and the determination, §10.3–§10.7 the five observation targets, §10.8 §8.2's
+  |       escalation.
+  ---- END GRADED BOX AFTER-TEXT ----
+
+  outcome token in after-text   : ABSENT  => RED (no outcome recorded)
+    accepted tokens: INDETERMINATE-INSTRUMENT ENDORSED EXCLUDED
+  pointer literal in after-text : ABSENT  => RED (no 'spec356-manifest.md §11.12' pointer)
+  (d) RED
+
+--------------------------------------------------------------------------------
+LIMB (e) THE DELTA IS CONSTRAINED -- EVERY CHANGED LINE IS INSIDE THE GRADED BOX
+--------------------------------------------------------------------------------
+  invocation: diff -U0 <fixture> <candidate>
+  fixture box 213-249   candidate box 213-249
+  0 hunks -- the candidate is byte-identical to the fixture.
+  (e) is VACUOUSLY green here; 'nothing happened' is limb (b)'s finding, not (e)'s.
+  (e) GREEN
+
+================================================================================
+VERDICT: RED (red limbs: a b d)
+================================================================================
+
+OBSERVED EXIT STATUS: 1   (RED limbs: a, b, d)
+READING: limb (a) REDs because TODO-648.md is still at its pre-edit bytes; limb (b) REDs because
+TODO-634.md's digest has NOT moved -- 'nothing happened' is a RED, not a pass, which is the whole
+reason this grader exists; limb (d) REDs because the unedited box carries neither the outcome
+token nor the pointer literal. Limb (c) is GREEN (nothing was ticked -- correctly, nothing was
+touched at all) and limb (e) is VACUOUSLY green on an empty diff, which its own header pre-declares.
+
+####################################################################################################
+RUN B -- THE GREEN DIRECTION: the grader against the TWO EDITED REAL TRACKER FILES. EXPECTED: GREEN, exit 0.
+####################################################################################################
+INVOCATION (from the evidence directory):
+  sh ./spec357-trackergrade.sh <SCRATCH>/trackerfix/TODO-634.pre.md \
+                               /Users/koristuvac/Projects/topgun/topgun/.specflow/todos \
+                               ./spec357b-trackergrade.ref
+
+================================================================================
+spec357-trackergrade.sh -- tracker-discipline CONTENT grade (R5a.3 / AC17 / item 13)
+================================================================================
+fixture   : <SCRATCH>/trackerfix/TODO-634.pre.md
+todos dir : /Users/koristuvac/Projects/topgun/topgun/.specflow/todos
+reference : ./spec357b-trackergrade.ref
+date      : 2026-08-14T19:02:09Z
+
+FIXTURE PROVENANCE (checked before any limb; a mismatch REFUSES the grade)
+  recorded TODO-634.md pre-digest : e0fc181a735ebb9cd520c3bc6a52a00b2ee3fc3620d65a77cda7aaa3bcb86875
+  fixture digest                  : e0fc181a735ebb9cd520c3bc6a52a00b2ee3fc3620d65a77cda7aaa3bcb86875
+  RESULT : OK -- the fixture is provenanced.
+
+--------------------------------------------------------------------------------
+LIMB (a) UNRELATED FILE UNMOVED
+--------------------------------------------------------------------------------
+  TODO-648.md : MATCH    b41a074b8c4dd5d9b5472aad915faa51fdfab7e670baf3cc421f195aa7ea9947
+  (a) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (b) THE REQUIRED EDIT HAPPENED
+--------------------------------------------------------------------------------
+  recorded pre-digest : e0fc181a735ebb9cd520c3bc6a52a00b2ee3fc3620d65a77cda7aaa3bcb86875
+  observed digest     : bbf557ad1d79e88b37cd9d8d3ee494e1b1be36a7f724f625e90082ff04892a65
+  the digest HAS moved.
+  (b) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (c) NOTHING WAS TICKED AND NO BOX MOVED
+--------------------------------------------------------------------------------
+  ticked   '^- \[x\] ' : expected 2   observed 2
+  unticked '^- \[ \] ' : expected 5   observed 5
+  census, top-level boxes  : expected 7   observed 7
+  census, indented boxes   : expected 0   observed 0
+  (the census is what makes the two counts exhaustive over the file's box set)
+  strict box anchor        : MATCHES
+  (c) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (d) THE EDIT IS THE RIGHT EDIT
+--------------------------------------------------------------------------------
+  graded box located by the LOOSE anchor (survives a tick, so a broken (c) does not blind (d)/(e))
+  fixture box lines   : 213-249
+  candidate box lines : 213-507
+
+  ---- BEGIN GRADED BOX BEFORE-TEXT (fixture, lines 213-249) ----
+  | - [ ] **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT: `OWED, NOT DONE`.**
+  |       **CARVED TO `SPEC-356c` (2026-08-11, `/sf:plan`) — carved, NOT done and NOT ticked.** That spec
+  |       authors ONLY this repeat increment (the `long` cell at 28,800 s × n = 2 under the frozen
+  |       predicate), plus PD-8's PRESENCE limb, the v2 grader sidecar carrying TODO-648's `B`-sentinel
+  |       fix, the stated worktree procedure, and the FIVE pre-declared observation targets that hunt the
+  |       **fifth mechanism** (the LWM advancing past never-freed content). **The registry family is NOT in
+  |       its scope**, and this box ticks only when SPEC-356c is done. Exactly **one** repeat of
+  |       the deciding configuration at **DOUBLED duration AND DOUBLED replicates** — the `long` cell at
+  |       **28,800 s with n = 2** — under the **SAME pin** `feb85268952001813e502e27f65180855676ac25` and the
+  |       **SAME frozen predicate** (manifest §0–§8 plus §8A's twenty addenda). **It may not adjust a
+  |       threshold, an ordering or a conditional**: it is a second observation, not a re-specification.
+  |       Both axes are doubled for different reasons — duration for an effect too slow to separate in 4 h,
+  |       replicates for the n = 1 fragility SPEC-355 §10.4.2 measured — and **one axis alone leaves the
+  |       other cause unaddressed.** **If the repeat is STILL INDETERMINATE, §8.2 escalates** the
+  |       unclassified cause as an explicit input to this item's design phase, naming it and quoting every
+  |       step's evaluated value and the admissibility limb that blocked.
+  |       **This does NOT block the family.** Manifest §8.3, verbatim: *"The recommended reclamation model
+  |       closes safety REGARDLESS of which cause it turns out to be … A selection defect, a scheduling
+  |       defect and a throughput defect are all contained by a registry that never reclaims below a live
+  |       claim."* What an unclassified cause costs is **fix-shape efficiency, not safety** — an expensive
+  |       answer, not a blocked one.
+  |       **OUTCOME (2026-08-12, `SPEC-356c` EXECUTED) — the repeat RAN, and the determination is
+  |       `INDETERMINATE` on BOTH replicates. Recorded here; this box is deliberately NOT ticked.** The
+  |       `long` cell ran at **28,800 s × n = 2** under the frozen predicate (manifest §0–§8 plus §8A's
+  |       twenty addenda, unadjusted) at the executed pin `8a60f1357f4702f4c5393538ef6b4ae6cebd247f` —
+  |       SPEC-356b's `feb85268…` **in substance**, the `.rs` diff between them being empty, so the
+  |       measured binary is the same one. Both replicates exit at **Step 0 limb (c)** on a
+  |       **1,440 / 1,440 = 100.000000 %** admissibility sentinel, and **Steps 1–4 are `NOT EVALUATED`**
+  |       on both — so this is a **concordant** `INDETERMINATE`, not a split across replicates, and
+  |       **no mechanism is named**: none of the four pre-registered mechanisms is endorsed and none is
+  |       excluded. **§8.2's escalation is published in consequence**, all six R7.2 items in order with
+  |       §8.3 quoted verbatim beside the determination. **This item stays OPEN.** SPEC-356c authored the
+  |       repeat increment only; the registry family remains outside its scope, and this box ticks when
+  |       that family closes — recording a second observation is not the same act as closing it.
+  |       Evidence: `spec356-manifest.md` §10 — §10.1 the lineage and the pin, §10.2 the PRESENCE verdict,
+  |       the frozen walk and the determination, §10.3–§10.7 the five observation targets, §10.8 §8.2's
+  |       escalation.
+  ---- END GRADED BOX BEFORE-TEXT ----
+
+  ---- BEGIN GRADED BOX AFTER-TEXT (candidate, lines 213-507) ----
+  | - [ ] **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT: `OWED, NOT DONE`.**
+  |       **CARVED TO `SPEC-356c` (2026-08-11, `/sf:plan`) — carved, NOT done and NOT ticked.** That spec
+  |       authors ONLY this repeat increment (the `long` cell at 28,800 s × n = 2 under the frozen
+  |       predicate), plus PD-8's PRESENCE limb, the v2 grader sidecar carrying TODO-648's `B`-sentinel
+  |       fix, the stated worktree procedure, and the FIVE pre-declared observation targets that hunt the
+  |       **fifth mechanism** (the LWM advancing past never-freed content). **The registry family is NOT in
+  |       its scope**, and this box ticks only when SPEC-356c is done. Exactly **one** repeat of
+  |       the deciding configuration at **DOUBLED duration AND DOUBLED replicates** — the `long` cell at
+  |       **28,800 s with n = 2** — under the **SAME pin** `feb85268952001813e502e27f65180855676ac25` and the
+  |       **SAME frozen predicate** (manifest §0–§8 plus §8A's twenty addenda). **It may not adjust a
+  |       threshold, an ordering or a conditional**: it is a second observation, not a re-specification.
+  |       Both axes are doubled for different reasons — duration for an effect too slow to separate in 4 h,
+  |       replicates for the n = 1 fragility SPEC-355 §10.4.2 measured — and **one axis alone leaves the
+  |       other cause unaddressed.** **If the repeat is STILL INDETERMINATE, §8.2 escalates** the
+  |       unclassified cause as an explicit input to this item's design phase, naming it and quoting every
+  |       step's evaluated value and the admissibility limb that blocked.
+  |       **This does NOT block the family.** Manifest §8.3, verbatim: *"The recommended reclamation model
+  |       closes safety REGARDLESS of which cause it turns out to be … A selection defect, a scheduling
+  |       defect and a throughput defect are all contained by a registry that never reclaims below a live
+  |       claim."* What an unclassified cause costs is **fix-shape efficiency, not safety** — an expensive
+  |       answer, not a blocked one.
+  |       **OUTCOME (2026-08-12, `SPEC-356c` EXECUTED) — the repeat RAN, and the determination is
+  |       `INDETERMINATE` on BOTH replicates. Recorded here; this box is deliberately NOT ticked.** The
+  |       `long` cell ran at **28,800 s × n = 2** under the frozen predicate (manifest §0–§8 plus §8A's
+  |       twenty addenda, unadjusted) at the executed pin `8a60f1357f4702f4c5393538ef6b4ae6cebd247f` —
+  |       SPEC-356b's `feb85268…` **in substance**, the `.rs` diff between them being empty, so the
+  |       measured binary is the same one. Both replicates exit at **Step 0 limb (c)** on a
+  |       **1,440 / 1,440 = 100.000000 %** admissibility sentinel, and **Steps 1–4 are `NOT EVALUATED`**
+  |       on both — so this is a **concordant** `INDETERMINATE`, not a split across replicates, and
+  |       **no mechanism is named**: none of the four pre-registered mechanisms is endorsed and none is
+  |       excluded. **§8.2's escalation is published in consequence**, all six R7.2 items in order with
+  |       §8.3 quoted verbatim beside the determination. **This item stays OPEN.** SPEC-356c authored the
+  |       repeat increment only; the registry family remains outside its scope, and this box ticks when
+  |       that family closes — recording a second observation is not the same act as closing it.
+  |       Evidence: `spec356-manifest.md` §10 — §10.1 the lineage and the pin, §10.2 the PRESENCE verdict,
+  |       the frozen walk and the determination, §10.3–§10.7 the five observation targets, §10.8 §8.2's
+  |       escalation.
+  |       - **OUTCOME (2026-08-14, the DIAGNOSIS round `SPEC-357a` + `SPEC-357b` EXECUTED) — THE MECHANISM IS
+  |         STILL NOT NAMED, AND THIS BOX STAYS DELIBERATELY UN-TICKED.** The diagnosis increment built its
+  |         per-epoch residency instrument, froze three hypotheses and an admissibility identity **before** the
+  |         data existed (`spec356-manifest.md` §11.0), and ran the two 28,800 s cells at the recorded gate
+  |         verdict `TIER2 = RUN`. The determination is **`INDETERMINATE-INSTRUMENT`, cause `CONSERVATION`, on
+  |         BOTH replicates** — the round's own Step 0 fired fail-closed, Steps 1–4 are `NOT EVALUATED`, and
+  |         **no hypothesis of (a) / (b) / (c) is endorsed and none is excluded.** This is the **third**
+  |         consecutive `INDETERMINATE` in this lineage and the first whose cause is named rather than merely
+  |         published. The executed record is `spec356-manifest.md` §11.12 (the determination and R4.5's
+  |         escalation in its frozen order), with §11.3 O-0 first, §11.6 the walk with both denominators per
+  |         step, §11.7 the total classification, §11.8 the seven-limb bundle and §11.14 the residuals and the
+  |         POST-DATA findings; the frozen walk's own transcript is `spec357b-walk-r1r2.txt`.
+  |       - **THE FIX-SHAPE RULING: NOT WRITTEN — and that is the rule firing, not an omission.** R9.2's
+  |         mapping was frozen in `spec356-manifest.md` §11.0.13 before the mechanism was known, and its third
+  |         branch reads *"any `INDETERMINATE-*` ⇒ THE RULING IS NOT WRITTEN"*. **The antecedent that fired is
+  |         `INDETERMINATE-INSTRUMENT`, cause `CONSERVATION`** — so `spec357-fixshape-ruling.md` records the
+  |         not-written status with its reasoning and proposes **NO fix shape**: neither registry-consumer (per
+  |         the synthesis §3 model) nor standalone correctness fix, and — under R9.3, which holds regardless of
+  |         the determination — **neither the slope stick nor `f(span, width, churn)`**; the gate still returns
+  |         on `ceiling = min_live_claim − fixed_margin`. **The ruling obligation returns HERE**, with this
+  |         round's observations attached in the priority the cross-vendor round argued for: **PD-F12 first**
+  |         (*is the prune removing anything at all?*), then PD-F14 / PD-F13 / PD-F11 (*is the fence stamp a
+  |         transition or a detection?*), then PD-F8 / PD-F7's O-0 repair set, then the standing rule X21 —
+  |         *every frozen surface, predicate, tool and join is validated against the exact transport the DATA
+  |         half will consume, before the boundary* — then PD-F9's latent vacuous-limb hazard, the torn-fraction
+  |         sampling finding and the n = 2 non-replication evidence.
+  |       - **CELL E: `DEFERRED-PENDING-DIAGNOSIS`** — R4.6(i)'s third limb, taken rather than un-taken, on the
+  |         `INDETERMINATE-*` antecedent above; successor `CELLE_DISPOSITION` enum value
+  |         `DEFERRED-PENDING-DIAGNOSIS`, ownership HERE. Cell E was **not** run and no pre-346 binary was
+  |         built — a disposition is not a run. The manifest's own §9 checklist 16 keeps its by-construction RED
+  |         and is **not** retroactively greened.
+  |       - **THE SIX ROUTED RESIDUALS FROM `SPEC-356c`, EACH WITH ITS DISPOSITION — the routing byte
+  |         `SPEC-356c` stated honestly it could not write:**
+  |         - **`R-1`** (the v2 grader's incomplete provenance triple: `prov` parameterised basename and
+  |           duration but hardcoded the cell-name literal `long`) — **TAKEN AND DISCHARGED.** v3 parameterises
+  |           all three literals, and **v3 run 3 against this lineage's own cells** is the proof:
+  |           `sh ./spec357-slottruth-v3.sh . spec357-diag-r1 28800 diag_r1` → **exit 0** and
+  |           `… spec357-diag-r2 28800 diag_r2` → **exit 0**, with v2 run alongside **unmodified on the
+  |           identical bytes** → `SLOTTRUTH FAIL: … does not name cell long`, **exit 3** on both. Appended to
+  |           `spec357-slottruth-v2-v3-runs.txt`; all three drivers' digests unmoved. **The tracker byte for
+  |           this one is written to `TODO-648` as `DISCHARGED-BY-SUCCESSOR`.**
+  |         - **`R-2`** (the `spec356-slottruth.sh:63-64` *"the LWM epoch"* comment) — **TAKEN, in v3 only.**
+  |           v1 and v2 are not edited and their digests do not move; the v2→v3 `-U0` diff labels the hunk
+  |           **class C (comment-only)** under 356c's corrected taxonomy including its shebang exclusion, and
+  |           the diagnosis round verified the label rather than asserting it.
+  |         - **`R-3`** (`T2(exactness)`, out of scope last round because it needed a `.rs` per-epoch byte-size
+  |           emission) — **TAKEN.** Delivered as reporting-bundle limb (iv), with §10.4.1's `OUT-OF-SCOPE` row
+  |           quoted beside it and marked **DISCHARGED** — **and with PD-F12's finding that the oracle is NOT
+  |           independent published beside the number rather than suppressed.**
+  |         - **`R-4`** (`T1(a)`, *"was epoch e's content EVER in the drainable index"*, named in §10.8.6 as
+  |           *"the single highest-value instrument addition the next round can make"*) — **TAKEN.** The
+  |           instrument was built and its answer is published **on both sides** (an ENTRY row for every epoch
+  |           the stamping clock passed through, carrying `entered_index` as a recorded VALUE, and an EXIT row
+  |           for every epoch that entered and left), with §10.3.2's `OUT-OF-SCOPE` row quoted beside it and
+  |           marked **DISCHARGED**.
+  |         - **`R-5`** (`median(L)` non-replication: zero-row fraction 49.930556 % on r1 against 53.819444 %
+  |           on r2) — **RECORDED, ROUTED AND STRUCTURALLY DEFANGED FOR THAT ROUND — NOT REPAIRED.** The §11
+  |           classification partitions on per-epoch structural facts, so `median(L)` decided nothing there and
+  |           the fragility could not propagate into the determination. **THE SUCCESSOR RULE, WHICH IS THE
+  |           DURABLE BYTE AND IS OWNED HERE:** *any future predicate that partitions on `median(L)` must first
+  |           publish the zero-row fraction and RED if it lies within ±5 points of 50 %.*
+  |         - **`R-6`** (the P9 anchor defect: 356c's P9 graded an artifact whose content an earlier round had
+  |           already fixed, and Review v1 measured **zero** occurrences of each literal anchor) — **CLOSED BY
+  |           CONSTRUCTION, with no machinery built for it.** `spec357-mechanism-xask.md` is a NEW artifact and
+  |           carries `T1.` `T2.` `T3.` `T4.` `T5.` and `H-a.` `H-b.` `H-c.` natively, **each anchor line
+  |           carrying one of the three disposition labels**, so the check grades engagement rather than eight
+  |           pasted strings. 356c's own artifact and its published RED are not edited.
+  |       - **`R-7` — THE RESIDUAL THE `Unclassified` ESCAPE WOULD HAVE OPENED: NOT OPENED, AND THAT IS A
+  |         DISPOSITION, NOT AN OMISSION.** The literal count is **`0 Unclassified exits over 439`** (r1) and
+  |         **`0 Unclassified exits over 357`** (r2) `P₂` rows — and 0 over 897 / 820 whole-cell exit rows. The
+  |         limb's reachability is mechanically proven, so the zero reads as *"the limb could fire and did
+  |         not"*, never as *"the limb was never fireable"*. `EpochExitKind` is **not** widened, no row's raw
+  |         context is owed, and any widening is a successor spec's PRE-DATA decision.
+  |       - **THE O-0 SAMPLING FINDING (REPORTED-NOT-BLOCKING, routed here because the torn fraction exceeded
+  |         the frozen 2 %).** Torn scrapes: **396 / 2,880 = 13.750000 %** on r1 and **422 / 2,880 =
+  |         14.652778 %** on r2 — **both above the 2 % routing threshold**, both published with their
+  |         denominator, and **neither able to touch the verdict** (tearing is decided by inter-render
+  |         disagreement before the identity is ever evaluated, so a torn render is structurally incapable of
+  |         producing `INDETERMINATE-INSTRUMENT`). The routing: the successor's scrape needs either an atomic
+  |         multi-quantity endpoint or more than one retry, because at ~29 stamps/s a two-render pair tears on
+  |         roughly one scrape in seven even with the retry. **The natural explanation was tested and
+  |         REFUTED:** partitioning all 2,879 scrape-to-scrape transitions by whether `stamped_refs_total`
+  |         advanced gives 145/898 = 16.147 % non-`CONSISTENT` on advancing scrapes against 251/1,981 =
+  |         12.670 % on non-advancing ones (r1), and 139/821 = 16.931 % against 283/2,058 = 13.751 % (r2) — the
+  |         **majority** of torn scrapes sit where `stamped_refs_total` did not advance at all, so rollover is
+  |         a mild contributor and not the cause.
+  |       - **THE FOURTEEN POST-DATA FINDINGS `PD-F1 … PD-F14`, EVERY ONE ROUTED HERE UNLESS OTHERWISE STATED.**
+  |         All carry the single disposition available after that round's data boundary —
+  |         **`RECORDED-AND-ROUTED`** (PD-F2 is `RECORDED` only: the runner already documents it and no routing
+  |         is owed). **None repairs a frozen surface; none is suppressed.** Full text with each finding's own
+  |         measurements is in `spec356-manifest.md` §11.14.2 and in the round's working register
+  |         `target/spec357-scratch/POST-DATA-FINDINGS.md`. **Listed with the most actionable first.**
+  |         - **PD-F12 — THE ROUND'S MOST IMPORTANT OUTPUT, AND THE SUCCESSOR'S FIRST QUESTION: `T2(exactness)`'s
+  |           oracle is not independent, and the prune-path counters CONTRADICT the exit ledger over the
+  |           deciding window.** Limb (a): `bytes_freed_attributed := slot.stamped_bytes`
+  |           (`tombstone_frontier_impl.rs:693-698`), so the 0-byte exactness bound is exact **by
+  |           construction** and carries no discriminating information — the same shape applies to
+  |           `drained_refs_total := slot.refs_at_entry` (`:669`), an entry-side quantity rather than an
+  |           observation of refs removed. Limb (b), over `[14,410 … 28,800]`: `passes_total` **+440,069 /
+  |           +358,370** and `empty_drains_total` **+440,069 / +358,370**, while `nonempty_drains_total`,
+  |           `considered_total`, `dropped_total`, `bytes_freed_total` and `epochs_drained_total` are **ALL 0**
+  |           and `ormap_tombstone_bytes_total` GREW **+10,131,707 / +8,250,744 B** — yet over the SAME window
+  |           the new per-epoch exit ledger records **439 / 357** exits, **all `DrainedByPrune`**, attributing
+  |           **10,097,000 / 8,211,000 B** freed. **Both readings cannot describe the same events.** Three
+  |           candidate readings are published and **none is picked** (picking one would be a naming, and Step 0
+  |           is fail-closed): a genuine ref-loss path; an exit attribution that is bookkeeping rather than an
+  |           observation of removed refs; or one of the two counter families not describing what its name says.
+  |           **This is the reconciliation gap this item's own Status 2026-08-12 section names — "at least one
+  |           of those four readings must be false" — measured directly, at the pin, on the new instrument.**
+  |           The successor's exit record needs a term that is an OBSERVATION of what the drain removed (the
+  |           length of the removed vector, and the bytes the store actually dropped), not a copy of the
+  |           entry-side slot.
+  |         - **PD-F8 — O-0's named subject has NO production exporter: the identity is evaluated over
+  |           rollover-batched Prometheus mirrors, and the Tier-1 gate validated it over the accessor instead.
+  |           RECORDED HERE IN ITS CORRECTED FORM.** `FrontierState.stamped_refs_total` — the field the frozen
+  |           predicate names — is credited **per stamp** (`:486`), while `topgun_or_prune_stamped_refs_total`,
+  |           the mirror `prune.csv` scrapes, is credited **per epoch ROLLOVER** by `record.stamped_refs`
+  |           (= 1000) at `:2502-2513`. The consistent-snapshot accessor the predicate pins
+  |           (`index_conservation_snapshot`) is **never exported to `/metrics`**, and `/metrics` is the only
+  |           transport `prune.csv` has; its only callers are unit tests and the Tier-1 harness, which is why
+  |           the gate's condition (i) validated O-0 where it holds and never on a real render. **THE G8
+  |           CORRECTION, WHICH IS THE FORM THAT TRAVELS:** the clause *"the defect really is in the
+  |           instrument's transport wiring, and it is not in the prune"* is **WITHDRAWN** as an over-claim. The
+  |           mirror is rollover-batched **by design** (the source says so in its own comment) and the accessor
+  |           is correct for its own per-stamp quantity — **neither side is defective in isolation.** The defect
+  |           is **predicate-authoring**: the identity was frozen without verifying that its named subject is
+  |           reachable from the round's only transport. **The determination, the measurements and the routing
+  |           are UNCHANGED**; what changes is the attribution the successor inherits, and with it the fix set —
+  |           not merely *"export the accessor"* but equally *"carry an explicit open-epoch term"* (computable
+  |           from the scraped columns today) or *"write the ledger server-side rather than scraping it"*.
+  |         - **PD-F7 — O-0's frozen identity omits the in-progress epoch and is UNSATISFIABLE by construction.**
+  |           It holds on **0 of 2,880** scrapes in each cell, torn or consistent. `stamped_refs_total` advances
+  |           only in steps of exactly 1000 (= `TOPGUN_EPOCH_WIDTH`), so the residual is the current,
+  |           not-yet-rolled-over epoch's accumulated refs — a term the identity does not carry; it lies in
+  |           [1, 1000] on 2,877/2,880 (r1) and 2,878/2,880 (r2). **NOT evidence of an instrument defect in the
+  |           prune**, which is what the cause `CONSERVATION` is worded to indict: the seven counters are
+  |           internally consistent, monotone, with zero decreases. `§11.0` may not be edited to repair the
+  |           arithmetic, so the frozen predicate was walked as written and the round published what it yields.
+  |         - **PD-F14 — the fence/exit coincidence is STRUCTURAL, and every non-empty drain in both cells is
+  |           first-half.** `drain_prunable` calls `refresh_epoch_licensing` at its top (`:855`), stamping
+  |           `fence_passed_at_op_seq = self.op_seq`, then removes the eligible tags and emits their exits with
+  |           `exited_at_op_seq = self.op_seq` (`:708`), and `op_seq` advances **only** in `stamp_tombstone`
+  |           (`:461`) — so any epoch drained in the pass in which its fence is first observed true carries the
+  |           equality **necessarily**, and with a half-open `RESIDENT` the triple overlap is empty **for that
+  |           reason alone**, which is exactly the rule that put 439/439 and 357/357 window rows in class (c).
+  |           A **predicate-sensitivity** finding: NOT a re-classification, NOT a naming, NOT an edit. Whole
+  |           cell, `considered_total` runs 0 → 35,000 (r1) / 0 → 99,000 (r2) and `nonempty_drains_total`
+  |           0 → 35 / 0 → 99, **all of it at or before 14,400 s** — so the window's Δ0 is a **transition into**
+  |           a zero-drain steady state, not a never-drained state; the **2.83× replicate spread (35 vs 99) is
+  |           a FOURTH n = 2 non-replication** in this lineage. The escape that would have made PD-F12 benign is
+  |           **closed**: `DrainedByPrune` is assigned only inside an actual `epoch_tags.remove`, and the one
+  |           insert path that could produce a present-but-empty entry (the rebuild) is measured **never
+  |           taken**. **Routed:** record the instant a licensing condition BECOMES true, or use a closed
+  |           interval, or both — and state the convention **before** freezing.
+  |         - **PD-F13 — the exit record's three residency fields.** `refs_at_exit` is **0 on 897/897 and
+  |           820/820 by construction** (read only after the exit detector has established the key is absent),
+  |           so it conflates *"key absent"* with *"key present but empty"* and cannot discriminate PD-F12's
+  |           readings; `lwm_passed == exited` on **0/897** and **0/820** with `exited − lwm_passed`
+  |           min/median/max **238 / 637 / 1,051** and **151 / 581 / 1,129**, while `fence_passed == exited` on
+  |           **897/897** and **820/820** — so the *"all three windows collapse onto one op-seq"* reading is
+  |           measured **FALSE**; and both stamps are written by the same pass-granular call, so **neither is a
+  |           transition instant**. Decides nothing. **Routed:** the successor's field design.
+  |         - **PD-F11 — the (c)-vs-(d) split turns on a single op-seq at a half-open interval boundary.**
+  |           `fence_passed_at_op_seq == exited_at_op_seq` exactly, on **439/439** (r1) and **357/357** (r2)
+  |           window `P₂` rows, so the triple overlap is empty by exactly one op-seq on every row. Published as
+  |           a raw observation; the frozen definition is **not** edited and no boundary convention is changed.
+  |         - **PD-F5 — the pinned residency extractor could not parse the emitter's wire format (BLOCKING;
+  |           remediated in TRANSPORT ONLY).** The emitter renders one tracing field per struct field with no
+  |           JSON blob, and the captured stream carries ANSI SGR codes that split the module target from its
+  |           colon: **0 raw matches against 1,796 after colour-stripping**. **The extractor behaved
+  |           CORRECTLY** — its own header pre-declares this exact failure and it reported 1,796 unrecognized
+  |           with **zero inventions**; the defect is a **mismatch between two deliverables of the same half**,
+  |           and the gate missed it because the dry-run leg exercised the classifier over harness-produced
+  |           JSONL and never over a real console log. Remediated by a normalizing transport adapter in the
+  |           successor's own namespace, after which the **pinned extractor ran BYTE-UNCHANGED**; seven
+  |           guarantees were discharged rather than asserted, including a lossless re-parse of 3,438 records by
+  |           an independently written parser with **0 mismatches**, and a hard **REFUSAL** (never a
+  |           translation) for a struct-shaped enum variant. **Routed:** the emitter/extractor wire format, the
+  |           ANSI capture defect, and the dry-run-leg gap that let both through.
+  |         - **PD-F9 — R4.1's `cell_start_unix_ms` is recorded by NEITHER named artifact, and
+  |           `entered_at_unix_ms` is 0 exactly on `P₀`.** The pinned join's literal had to be derived as an
+  |           arithmetic of two `soak.json` literals at 1 s resolution while the formula pins milliseconds
+  |           (corroborated to the millisecond against a different runner-written artifact, Δ = 0 ms on both
+  |           cells; every class count identical at `cell_start ± 1000 ms`, so **blast radius this round is
+  |           ZERO, measured**). **The hazard is latent and is the reason this is routed:** an epoch that never
+  |           entered the index carries `entered_at_unix_ms = 0`, so its `t_first_seen` falls outside every
+  |           window by construction — under a strong hypothesis (a) the **whole** of `P₀` would fall outside,
+  |           `P₀` would be empty **by construction**, and hypothesis (a) would be **unreachable**. That is the
+  |           vacuous-limb hazard this family has already closed twice, re-opened by a join rather than by an
+  |           enum. **Routed:** key the join on a field populated on every entry row, and record the cell start
+  |           as a literal.
+  |         - **PD-F1 — Q2's frozen row band is arithmetically 2× too small for its own stated cadence.** The
+  |           band reads `1,300 ≤ rows ≤ 1,500` (*"≈1,440 at 10 s over 28,800 s"*), but 28,800 ÷ 10 = **2,880**;
+  |           the parenthetical's 1,440 is 28,800 ÷ 20, a cadence no cell uses. **Measured: 2,880 data rows plus
+  |           one header, first tick 10 s, last 28,800 s — the artifact is the OPPOSITE of truncated.** Q2 names
+  |           only a BELOW-band branch, so a literal reading leaves a **complete** artifact unlimbed, colliding
+  |           with the PRESENCE limb's own GOVERNING PROPERTY (*"NO HONEST OBSERVATION MAY RED A PRESENCE
+  |           QUESTION"*). **The band was NOT edited and the checklist was NOT patched**; the entry was
+  |           evaluated under the governing property and the band's defect published beside it as a separate
+  |           fact. The declared witness (`progress.jsonl`, **95** ticks at the 300 s cadence) corroborates full
+  |           duration but **cannot** arbitrate 2,880-vs-1,440.
+  |         - **PD-F10 — the runner cannot emit the `TORN` value its own column contract enumerates.** The
+  |           contract documents `CONSISTENT` / `TORN` / `TORN-PERSISTENT`, but the renderer reassigns before
+  |           the row is written, so the literal `TORN` is unwritable: measured **0 of 2,880** in both cells.
+  |           The pre-retry torn count is therefore **unrecoverable from the artifact**, its only recorded lower
+  |           bound being the `TORN-PERSISTENT` count itself (396 / 422). Runner and builder apply **different
+  |           labels to the same rows**; the builder's header pre-declares that degradation rather than
+  |           fabricating a count, both partitions are identical as row sets, both exclude the same rows from
+  |           O-0's denominator (2,484 / 2,458), and **no published share moves**. **Routed:** emit the
+  |           pre-retry class as its own column.
+  |         - **PD-F4 — the WAL-watermark alarm storm is PRE-EXISTING and newly VISIBLE, not a new condition.**
+  |           Both cells emit a continuous `ERROR` storm (*"WAL watermark stalled inside the WAL append itself:
+  |           the disk is hung or full"*, `stall_bound_ms=60000`) — **206,171** lines in r1 — with a
+  |           **non-watermark `ERROR` count of 0** in both cells. **The alarm's stated cause is FALSE**: 266 GiB
+  |           available, 1.6 M writes, `writeErrors: 0`, `crashes: 0`; and the threshold is **not**
+  |           mis-calibrated, because the runner unsets the write-behind overrides so every documented default
+  |           is in force. **NOT a regression, on three facts:** the alarm code is byte-identical to the binary
+  |           `SPEC-356c` measured; the **capture channel is NEW** (the server's stderr was never captured in
+  |           this lineage before, so the earlier rounds' zero is uninformative); and WAL growth is unchanged
+  |           (0.0 → 855.5 MB with **0 decreases** over 480 samples, against 356c's 0.1 → 839.2 MB, likewise 0).
+  |           `NEW_EMISSION` discipline applies — **no cross-pin comparison of the alarm count is available or
+  |           claimed.** Flagged, **not folded into the naming**, as a candidate observation bearing on the
+  |           fifth mechanism `ADJ-4` refuses to exclude. **A separate, real harness gap is routed with it:** the
+  |           soak harness inspects stderr only for panic markers, so 206 k alarms cannot colour `passed` — a
+  |           cell can finish green on its own terms while the server's watchdog has fired for eight hours.
+  |         - **PD-F3 — r2's RSS slope ran ~2.5× r1's at an identical write count, and the spread DECAYS.**
+  |           Write counts agree within 2 %; the spread is 2.42× at 5,400 s, 2.40× at 9,900 s and **1.88× at
+  |           14,400 s**, with r2's fresh-window slope **1,187 MB/h** against **2,418 MB/h** early and r1's
+  |           last-half **970 MB/h**. **Characterised as a transient startup excess decaying toward parity, NOT
+  |           a sustained divergence** — the two readings support different conclusions and only the measured one
+  |           is published. A **third** n = 2 non-replication in this lineage. **Environmental confound stated
+  |           rather than hidden:** the cells ran back-to-back on one host with no page-cache or fragmentation
+  |           reset between them, and that round **cannot** separate a subject-level spread from an
+  |           environmental one. Moves no determination. **Routed:** replicate sizing.
+  |         - **PD-F6 — the 16-fit path's declared input carries no `tombstone_bytes` column.** The declared
+  |           prune ledger has 60 columns and none is so named (the series is
+  |           `topgun_ormap_tombstone_bytes_total`, column 42); the `tombstone_bytes` header lives in the
+  |           primary **soak** ledger, which the declaration does not name — and §10.1.6 adjudicated the same
+  |           question the other way, in writing, for the predecessor round. The declared subject was sliced and
+  |           fitted **unedited and unforked**, and both transcripts are committed: 16 × exit 2 at the
+  |           lineage-pinned column, 16 × exit 0 at the column the artifact actually carries. **OBSERVATION-ONLY
+  |           by the declaration's own words**, so no determination, share, denominator or limb moves on it —
+  |           but Part B's slopes are over a different ledger at a different cadence and are therefore **NOT
+  |           numerically comparable** to the lineage's earlier fit tables. **Routed:** pin the next round's fit
+  |           subject.
+  |         - **PD-F2 — the runner's non-zero exit is the measured defect, not a failed characterization.**
+  |           `diag_r1` exited **1** after a full `durationSecsActual: 28802`, with `finishedReason` =
+  |           *"tombstone-byte growth slope 1067599.6 bytes/h exceeds 512.0 bytes/h"* — the armed tombstone gate
+  |           firing, i.e. **the phenomenon under diagnosis** — and `writeErrors: 0`, `crashes: 0`, arming
+  |           witness PASSED with 41/41 pinned prune columns resolved. The exit is attributed to
+  |           `finishedReason`, not to the flag: an executor reading exit ≠ 0 as a failed cell would discard a
+  |           sound 8 h measurement. **RECORDED only; the runner already documents it and no routing is owed.**
+  |       - **WHAT THIS ITEM STILL OWES, UNCHANGED BY THE DIAGNOSIS ROUND:** the `ReclamationRegistry` family
+  |         itself, the retention SLA, the cursor-age fence, the durable quarantine and pending-op replay, the
+  |         conservative sweep, the three verification instruments, the LEVEL/ceiling gate re-derivation with
+  |         its anti-tautology bar, and `TG-OR-005`'s closure. **The diagnosis round landed no prune fix and
+  |         edited no byte of `INVARIANTS.md`:** `TG-OR-005` stays `open (TODO-634)` and NAKED,
+  |         `NAKED_BASELINE` stays **4**. This item stays **OPEN** and still blocks TODO-586 and TODO-484.
+  ---- END GRADED BOX AFTER-TEXT ----
+
+  outcome token in after-text   : PRESENT (INDETERMINATE-INSTRUMENT)
+  pointer literal in after-text : PRESENT ('spec356-manifest.md §11.12', backticks ignored)
+  [evidence] outcome token 'INDETERMINATE-INSTRUMENT' is NEW in the after-text
+  [evidence] pointer literal is NEW in the after-text
+  (d) GREEN
+
+--------------------------------------------------------------------------------
+LIMB (e) THE DELTA IS CONSTRAINED -- EVERY CHANGED LINE IS INSIDE THE GRADED BOX
+--------------------------------------------------------------------------------
+  invocation: diff -U0 <fixture> <candidate>
+  fixture box 213-249   candidate box 213-507
+  hunks:
+    @@ -249,0 +250,258 @@  =>  inside the graded box
+  hunks outside the graded box: 0
+  (e) GREEN
+
+================================================================================
+VERDICT: GREEN (a, b, c, d, e)
+================================================================================
+
+OBSERVED EXIT STATUS: 0   (GREEN on all five limbs: a, b, c, d, e)
+
+THE TWO EVIDENCE LINES A READER SHOULD CHECK BEFORE BELIEVING A GREEN (d), quoted from the transcript
+above because the script itself says they are evidence and not verdict terms:
+
+  [evidence] outcome token 'INDETERMINATE-INSTRUMENT' is NEW in the after-text
+  [evidence] pointer literal is NEW in the after-text
+
+Both are NEW, which is the strong reading. The token vocabulary in `spec357b-trackergrade.ref` was
+deliberately set STRICTER than the fixture's bare `INDETERMINATE`: the graded box's PRE-edit text
+already contained that word (SPEC-356c's own determination), so a bare token would have been satisfied
+by text this half did not write.
+
+WHAT THE TWO RUNS TOGETHER ESTABLISH, AND WHAT THEY DO NOT.
+  THEY DO establish, mechanically: the required TODO-634 edit happened; nothing was ticked and no box
+  moved (2 ticked / 5 unticked / 7 top-level / 0 indented, unchanged); the graded box's strict anchor
+  still matches as a line prefix, so the box was not ticked, moved or rewritten; the edit carries an
+  outcome token and the pointer literal, both NEW; every changed line falls inside the graded box; and
+  TODO-648.md is at its recorded expected bytes. And they establish that the grader can still FAIL --
+  the RED direction is what makes the GREEN one mean something.
+  THEY DO NOT establish that the CONTENT of the edit is correct in substance. No grader can. What the
+  content says is graded by the reader against `spec356-manifest.md` §11.12 / §11.14 / §11.15, which
+  the pointer literal is there to route to.
+
+TRACKER DISCIPLINE, RE-VERIFIED AFTER BOTH RUNS (checklist item 13's own trailing limb):
+
+  $ grep -c '^- \[x\] ' .specflow/todos/TODO-634.md      -> 2   (unchanged; TODO-634 is NOT ticked)
+  $ grep -c '^- \[ \] ' .specflow/todos/TODO-634.md      -> 5   (unchanged)
+  $ grep -n '^status:' .specflow/todos/TODO-634.md      -> 6:status: open   (NOT closed)
+  $ grep -n '^status:' .specflow/todos/TODO-648.md      -> 6:status: open   (NOT closed)
+
+APPEND-ONLY PROOF FOR THIS FILE (run after the append, quoted in the checklist record):
+  the first 198 lines of this file are byte-identical to SPEC-357a's committed copy, and
+  git diff --numstat over it shows insertions only, ZERO deletions.

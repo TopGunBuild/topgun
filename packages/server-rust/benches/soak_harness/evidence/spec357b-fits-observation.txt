@@ -1,0 +1,162 @@
+SPEC-357b — THE 16 UNFORKED FITS OVER THE EIGHT-WINDOW SEGMENTS (G7 S1)
+=======================================================================
+
+OBSERVATION-ONLY. The spec states this explicitly and it is restated here so no
+reader of this file mistakes it for a diagnosis input: these fits are a
+LINEAGE-CONTINUITY BYTE-SLOPE RECORD — the same series SPEC-355 / 356 / 356b /
+356c committed at every cell — and they are consumed by NEITHER R3/R4's
+determination NOR any Observable Truth or Acceptance Criterion in this half.
+
+SUBJECT — the committed segments spec357-diag-r{1,2}-seg{1..8}.csv, produced by
+spec355-manifest.md §10.5.2's committed header-preserving 8-way `awk -F,`
+NR-split with EXACTLY the two literals the Delta names substituted (input
+spec355-w1000.csv -> spec357-diag-r{n}.prune.csv; output basename pattern
+spec355-w1000-seg%d.csv -> spec357-diag-r{n}-seg%d.csv) and the awk program text
+otherwise unchanged. n = 2,880 data rows, seg = int((2880+7)/8) = 360, so all
+eight windows carry 360 data rows + the header, with no remainder window.
+
+FITTER — spec349c2-fit.awk, invoked UNFORKED. `git diff --numstat 065f9611..HEAD`
+over it is EMPTY.
+
+TWO INVOCATIONS ARE RECORDED BELOW, AND THE REASON IS A POST-DATA FINDING
+(PD-F6), NOT A CHOICE MADE AT THIS KEYBOARD.
+
+  PART A — the lineage-pinned invocation `-v col=tombstone_bytes -v window=full`,
+           run over all 16 declared segments. It FAILS on all 16 with exit 2:
+           the prune ledger the Delta names as the input carries no
+           `tombstone_bytes` column at all. Its tombstone byte series is named
+           `topgun_ormap_tombstone_bytes_total`. This is recorded, not repaired:
+           the declared input literal is a frozen surface and the available
+           disposition after the data boundary is RECORDED-AND-ROUTED.
+
+  PART B — the same UNFORKED fitter over the same 16 declared segments at
+           `-v col=topgun_ormap_tombstone_bytes_total -v window=full`. The
+           fitter resolves `col` by HEADER NAME by its own documented design, so
+           this is an unforked invocation over the declared subject and it is
+           what actually yields 16 fits. THE UNIT IS BYTES PER HOUR: the printed
+           field is named `slope_mb_per_hour` because every column the fitter was
+           built for is a megabyte column, and the fitter's own header directs
+           the reader to read the name as "value units per hour" for a byte
+           column.
+
+  Every line below that carries `slope_mb_per_hour` also carries a
+  `tombstone_bytes`-family column name, per the lineage's own writing obligation.
+
+CAVEAT THAT TRAVELS WITH PART B, AND IT IS THE REASON PD-F6 IS ROUTED RATHER
+THAN SHRUGGED OFF: SPEC-356c's own §10.1.6 states that the primary soak ledger
+is "the only committed artifact carrying a `tombstone_bytes` header at all", that
+"the prune ledger carries `topgun_ormap_tombstone_bytes_total` and is a different
+series on a different cadence", and that "the two are NOT interchanged anywhere".
+Part B's numbers are therefore a byte-slope record over the DECLARED subject —
+they are NOT numerically comparable to the lineage's earlier 16-fit tables, which
+were computed over the soak ledger at a different cadence. No such comparison is
+made here or licensed by this file.
+
+================================================================================
+PART A — `-v col=tombstone_bytes -v window=full`, THE PROGRAM'S OWN OUTPUT,
+         PASTED UNEDITED. 16 of 16 exit 2.
+================================================================================
+
+--- r1 W1 (spec357-diag-r1-seg1.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r1 W2 (spec357-diag-r1-seg2.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r1 W3 (spec357-diag-r1-seg3.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r1 W4 (spec357-diag-r1-seg4.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r1 W5 (spec357-diag-r1-seg5.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r1 W6 (spec357-diag-r1-seg6.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r1 W7 (spec357-diag-r1-seg7.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r1 W8 (spec357-diag-r1-seg8.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r2 W1 (spec357-diag-r2-seg1.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r2 W2 (spec357-diag-r2-seg2.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r2 W3 (spec357-diag-r2-seg3.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r2 W4 (spec357-diag-r2-seg4.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r2 W5 (spec357-diag-r2-seg5.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r2 W6 (spec357-diag-r2-seg6.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r2 W7 (spec357-diag-r2-seg7.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+--- r2 W8 (spec357-diag-r2-seg8.csv), col=tombstone_bytes ---
+spec349c2-fit: no column named 'tombstone_bytes' in header
+exit=2
+
+================================================================================
+PART B — `-v col=topgun_ormap_tombstone_bytes_total -v window=full`, THE
+         PROGRAM'S OWN OUTPUT, PASTED UNEDITED. 16 of 16 exit 0,
+         rows_used=360 and skipped_empty=0 on every one.
+================================================================================
+
+--- r1 W1 (spec357-diag-r1-seg1.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=10.0 t_end_secs=3600.0 span_secs=3590.0 y_first=7540.000 y_last=2493202.000 slope_mb_per_hour=2491849.490584 se_mb_per_hour=874.525609 intercept_mb=8734.746853 r2=0.999956 sxx_hours2=29.999722677 sse=8213822802.631799698
+exit=0
+--- r1 W2 (spec357-diag-r1-seg2.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=3610.0 t_end_secs=7200.0 span_secs=3590.0 y_first=2498482.000 y_last=5073955.000 slope_mb_per_hour=2589591.881987 se_mb_per_hour=1626.494639 intercept_mb=-119972.713527 r2=0.999859 sxx_hours2=29.999798992 sse=28412316493.259201050
+exit=0
+--- r1 W3 (spec357-diag-r1-seg3.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=7210.0 t_end_secs=10800.0 span_secs=3590.0 y_first=5076876.000 y_last=7718288.000 slope_mb_per_hour=2647369.276909 se_mb_per_hour=322.299868 intercept_mb=-227618.532116 r2=0.999995 sxx_hours2=29.999805893 sse=1115633962.158084393
+exit=0
+--- r1 W4 (spec357-diag-r1-seg4.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=10810.0 t_end_secs=14400.0 span_secs=3590.0 y_first=7720197.000 y_last=10358596.000 slope_mb_per_hour=2644379.798357 se_mb_per_hour=294.324414 intercept_mb=-219320.715219 r2=0.999996 sxx_hours2=29.999561186 sse=930358877.955232859
+exit=0
+--- r1 W5 (spec357-diag-r1-seg5.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=14410.0 t_end_secs=18000.0 span_secs=3590.0 y_first=10362322.000 y_last=12981056.000 slope_mb_per_hour=2626970.107292 se_mb_per_hour=440.744270 intercept_mb=-148233.961528 r2=0.999990 sxx_hours2=29.999654776 sse=2086280184.797197819
+exit=0
+--- r1 W6 (spec357-diag-r1-seg6.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=18010.0 t_end_secs=21600.0 span_secs=3590.0 y_first=12986760.000 y_last=15548109.000 slope_mb_per_hour=2563617.828280 se_mb_per_hour=482.776178 intercept_mb=170672.446833 r2=0.999987 sxx_hours2=30.000035647 sse=2503205253.135880470
+exit=0
+--- r1 W7 (spec357-diag-r1-seg7.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=21610.0 t_end_secs=25200.0 span_secs=3590.0 y_first=15554181.000 y_last=18045357.000 slope_mb_per_hour=2495020.767716 se_mb_per_hour=357.291637 intercept_mb=581249.388483 r2=0.999993 sxx_hours2=29.999635411 sse=1371022887.766881704
+exit=0
+--- r1 W8 (spec357-diag-r1-seg8.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=25210.0 t_end_secs=28800.0 span_secs=3590.0 y_first=18050716.000 y_last=20494029.000 slope_mb_per_hour=2447045.062435 se_mb_per_hour=437.105403 intercept_mb=921074.036720 r2=0.999989 sxx_hours2=29.999866893 sse=2051987469.792639494
+exit=0
+--- r2 W1 (spec357-diag-r2-seg1.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=10.0 t_end_secs=3600.0 span_secs=3590.0 y_first=7341.000 y_last=2514441.000 slope_mb_per_hour=2508930.230713 se_mb_per_hour=408.175321 intercept_mb=4397.246683 r2=0.999991 sxx_hours2=30.000063727 sse=1789363980.241889715
+exit=0
+--- r2 W2 (spec357-diag-r2-seg2.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=3610.0 t_end_secs=7200.0 span_secs=3590.0 y_first=2520425.000 y_last=5141428.000 slope_mb_per_hour=2637234.386695 se_mb_per_hour=864.026818 intercept_mb=-138334.651471 r2=0.999962 sxx_hours2=29.999455850 sse=8017719327.693295479
+exit=0
+--- r2 W3 (spec357-diag-r2-seg3.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=7210.0 t_end_secs=10800.0 span_secs=3590.0 y_first=5148006.000 y_last=7860488.000 slope_mb_per_hour=2726257.604981 se_mb_per_hour=432.360574 intercept_mb=-317008.398832 r2=0.999991 sxx_hours2=29.999545602 sse=2007658644.861807346
+exit=0
+--- r2 W4 (spec357-diag-r2-seg4.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=10810.0 t_end_secs=14401.0 span_secs=3591.0 y_first=7866675.000 y_last=10467929.000 slope_mb_per_hour=2625269.649709 se_mb_per_hour=2718.475223 intercept_mb=2789.889909 r2=0.999616 sxx_hours2=30.000834782 sse=79371963530.772918701
+exit=0
+--- r2 W5 (spec357-diag-r2-seg5.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=14410.0 t_end_secs=18000.0 span_secs=3590.0 y_first=10473449.000 y_last=12849878.000 slope_mb_per_hour=2423393.372648 se_mb_per_hour=2662.233337 intercept_mb=762143.161013 r2=0.999568 sxx_hours2=29.999816663 sse=76119138088.901611328
+exit=0
+--- r2 W6 (spec357-diag-r2-seg6.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=18010.0 t_end_secs=21600.0 span_secs=3590.0 y_first=12855329.000 y_last=14842575.000 slope_mb_per_hour=1961008.729628 se_mb_per_hour=5038.162720 intercept_mb=3111764.806524 r2=0.997643 sxx_hours2=29.999650843 sse=272611144913.226165771
+exit=0
+--- r2 W7 (spec357-diag-r2-seg7.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=21610.0 t_end_secs=25200.0 span_secs=3590.0 y_first=14846508.000 y_last=16805924.000 slope_mb_per_hour=2002674.513613 se_mb_per_hour=2984.018217 intercept_mb=2800922.100024 r2=0.999206 sxx_hours2=29.998237850 sse=95627259779.187301636
+exit=0
+--- r2 W8 (spec357-diag-r2-seg8.csv), col=topgun_ormap_tombstone_bytes_total ---
+col=topgun_ormap_tombstone_bytes_total window=full rows_used=360 n=360 skipped_empty=0 t_start_secs=25210.0 t_end_secs=28800.0 span_secs=3590.0 y_first=16809650.000 y_last=18724193.000 slope_mb_per_hour=1834206.154236 se_mb_per_hour=6057.897344 intercept_mb=3959201.795755 r2=0.996110 sxx_hours2=29.999404925 sse=394129993241.234375000
+exit=0

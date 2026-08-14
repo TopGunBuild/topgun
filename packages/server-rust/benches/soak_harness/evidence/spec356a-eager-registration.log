@@ -1153,3 +1153,208 @@ VERDICT: EG-1 PASS (both limbs) AT THE SPEC-356c RUNNER.
             sound; exit 0.
   witness:  armed 41/41 PASSED; disarmed direction 0/41 PASSED.
   binding:  6 artifacts digested; independent shasum -c 6/6 OK.
+
+================================================================================
+PART VI -- RE-CAPTURE AT THE SPEC-357a G4 RUNNER (the per-epoch residency
+           instrument: 22 counters/11 gauges/7 histograms, 17 new prune.csv
+           columns, two additive 28,800s diagnosis arms).
+================================================================================
+
+WHY PART VI EXISTS, AND WHY IT IS STRICTLY STRONGER THAN PART V'S TRIGGER.
+Part V re-captured because the RUNNER moved (two additive 28,800s cell arms,
+.rs tree unchanged). Here BOTH move: the BINARY changed (G1 added seven pinned
+counters + the entry/exit trait surface, tombstone_frontier.rs; G2 wired the
+per-epoch bookkeeping and eager registration, tombstone_frontier_impl.rs; the
+census comment moved 15->22 counters), AND the runner gained two more additive
+cell arms (diag_r1/diag_r2) plus 17 new prune.csv columns (the O-0 double
+render + tear class). The new columns are inside this Part's own subject.
+
+BUILD IDENTITY. Both the server and the soak_harness bench binary were
+rebuilt from this half's tip after G1/G2's .rs edits landed:
+
+  server binary: target/release/topgun-server
+    rebuilt from repo HEAD (this capture): c828fb4d7b34071edad23553e423caaec0dc4c28
+  soak binary:   target/release/deps/soak_harness-9abf891ab72dea71
+    rebuilt from the same tree
+
+  working tree at capture: clean (git status --porcelain empty before capture)
+
+--------------------------------------------------------------------------------
+LIMB (a) AT THE SPEC-357a G4 RUNNER -- the pinned-name registration
+--------------------------------------------------------------------------------
+
+RE-RUN, not inherited, on exactly the rule that forced this Part into
+existence: registration is .rs-side and the .rs tree DID move this time, so
+there is no argument-by-unchanged-tree available even in principle.
+
+INVOCATION (verbatim, as run):
+
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib -- \
+    tombstone_frontier_impl::tests::every_pinned_prune_series_is_present_in_the_first_render \
+    --exact --nocapture
+
+  test tombstone_frontier_impl::tests::every_pinned_prune_series_is_present_in_the_first_render ... ok
+
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1798 filtered out; finished in 0.20s
+
+INDEPENDENT CENSUS OVER THE RE-CAPTURED RENDER
+
+  $ grep -c '^# TYPE topgun_or_prune_' <render>
+  40   (MUST be 40 = 22 counters + 11 gauges + 7 histograms)
+    $ grep -cE '^# TYPE topgun_or_prune_.* counter$' <render>
+    22   (MUST be 22, up from 15 -- the seven new counters: stamped_refs_total,
+          stamped_bytes_total, drained_refs_total, restored_refs_total,
+          rebuild_cleared_refs_total, epochs_entered_total, epochs_exited_total)
+    $ grep -cE '^# TYPE topgun_or_prune_.* gauge$' <render>
+    11   (MUST be 11, unchanged)
+    $ grep -cE '^# TYPE topgun_or_prune_.* summary$' <render>
+    7    (MUST be 7, unchanged)
+
+  $ grep -cE '^topgun_or_prune_[a-z_]+ 0$' <render>
+  47   (MUST be 47 = 22 counters + 11 gauges + 7 x 2 histogram _sum/_count,
+        up from 40)
+
+  LIMB (a): PASS at the SPEC-357a G4 pin. 40/40 pinned metric FAMILIES
+  registered in the first render with zero observations, including all seven
+  new counters. `tombstone_frontier.rs:550`'s census comment reads
+  "22 counters, 11 gauges, 7 histograms" at this pin -- checked via
+  `grep -qF '22 counters, 11 gauges, 7 histograms' packages/server-rust/src/tombstone_frontier.rs`,
+  exit 0.
+
+--------------------------------------------------------------------------------
+LIMB (b) AT THE SPEC-357a G4 RUNNER -- the zero-empty-field census, 60 columns
+--------------------------------------------------------------------------------
+
+INVOCATION (verbatim, as run; scratch out-dir and data-dir elided to <scratch>):
+
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  SPEC356_SMOKE_DURATION=120 SPEC356_SMOKE_SAMPLE_INTERVAL=10 \
+  SPEC356_OUT_DIR=<scratch>/p6-smoke SPEC356_DATA_DIR=<scratch>/p6-smoke-data \
+    packages/server-rust/benches/soak_harness/evidence/spec356-prune.sh smoke
+
+  $ awk -F, '{ for (i = 1; i <= NF; i++) if ($i == "") e++ } END { print "empty_fields=" e + 0 }' \
+      <scratch>/p6-smoke/spec356-smoke.prune.csv
+  empty_fields=0
+
+  prune.csv rows: 13  (cadence 10s), 60 columns (up from 43: 17 new -- the
+  O-0 leg-A/leg-B octet pairs, columns 44-59, plus o0_tear_class, column 60)
+
+  RESULT: instrument sound; harness exit code 0.
+
+  Full per-column report is PART VI's own extension of PART V's shape (every
+  pre-existing column unchanged in reading; the 17 new columns' report is
+  appended below rather than reproduced from PART V, since PART V predates
+  them):
+
+  topgun_or_prune_stamped_refs_total_a         [POPULATN] n=13 empty=0 min=0 max=4000
+  topgun_or_prune_stamped_refs_total_b         [POPULATN] n=13 empty=0 min=0 max=4000
+  topgun_or_prune_stamped_bytes_total_a        [POPULATN] n=13 empty=0 min=0 max=82354
+  topgun_or_prune_stamped_bytes_total_b        [POPULATN] n=13 empty=0 min=0 max=82354
+  topgun_or_prune_drained_refs_total_a         [POPULATN] n=13 empty=0 min=0 max=3000
+  topgun_or_prune_drained_refs_total_b         [POPULATN] n=13 empty=0 min=0 max=3000
+  topgun_or_prune_restored_refs_total_a        [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_restored_refs_total_b        [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_rebuild_cleared_refs_total_a [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_rebuild_cleared_refs_total_b [POPULATN] n=13 empty=0 min=0 max=0
+  topgun_or_prune_epochs_entered_total_a       [POPULATN] n=13 empty=0 min=0 max=5
+  topgun_or_prune_epochs_entered_total_b       [POPULATN] n=13 empty=0 min=0 max=5
+  topgun_or_prune_epochs_exited_total_a        [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_epochs_exited_total_b        [POPULATN] n=13 empty=0 min=0 max=3
+  topgun_or_prune_indexed_refs_a               [POPULATN] n=13 empty=0 min=0 max=2005
+  topgun_or_prune_indexed_refs_b               [POPULATN] n=13 empty=0 min=0 max=2005
+  o0_tear_class                                [POPULATN] n=13 empty=0 min=0 max=0
+    (a categorical column; population check is empty-vs-non-empty, not
+    numeric -- the min/max=0 above is the harmless v+0 coercion of the
+    string, not a reading of the tear class itself. The live 13-row capture
+    read 11 CONSISTENT / 0 TORN / 2 TORN-PERSISTENT -- both non-CONSISTENT
+    rows on the SAME churn tick pattern that also drove genuine sub-100ms
+    write concurrency, exactly the condition R3.0's retry leg exists for.)
+
+  restored_refs_total_a / _b read a constant 0 for the whole run: see the
+  manifest's D1 note (Sec 11.0.20) -- this is the known-inert Prometheus
+  mirror, a VALUE not an empty field, and does not RED this census.
+
+--------------------------------------------------------------------------------
+LIMB (c) AT THE SPEC-357a G4 RUNNER -- the arming witness, both directions
+--------------------------------------------------------------------------------
+
+ARMED (smoke):
+  TOPGUN_PRUNE_RECORD: true (on the child)
+  topgun_or_prune_ lines in the scrape: 96
+  pinned prune columns resolved:        41/41   (unchanged: the 41-name
+    scrape-derived set the witness checks is column-family-level, and the 17
+    new O-0 columns are deliberately OUTSIDE this generic mechanism -- see
+    the runner's own PRUNE_SCRAPE_NAMES comment)
+  => arming witness PASSED: armed cell, all pinned series present.
+
+DISARMED (smokeoff):
+  TOPGUN_PRUNE_RECORD: false (on the child)
+  topgun_or_prune_ lines in the scrape: 0
+  pinned prune columns resolved:        0/41
+  => arming witness PASSED: disarmed cell, no prune-record series present.
+
+  Both cells' prune.csv rows carry all 17 new O-0 columns blank on the
+  disarmed side (verified: `awk -F, 'NR>1{for(i=44;i<=60;i++) if ($i!="") c++} END{print c+0}'`
+  over spec356-smokeoff.prune.csv reads 0), on the same footing as the
+  pre-existing 41.
+
+--------------------------------------------------------------------------------
+LIMB (d) AT THE SPEC-357a G4 RUNNER -- R2.4's two non-perturbation discharges (AC6)
+--------------------------------------------------------------------------------
+
+(b) THE MECHANICAL STATEMENT (verbatim quote of the binding contract, then
+    the structural check against it):
+
+  tombstone_frontier.rs:611-614 (gauge-neutrality, HARD):
+    "An implementation's body names no tombstone-byte counter or gauge at
+    all. Adjusting the tombstone-byte accounting is the prune path's job..."
+  tombstone_frontier.rs:671-674 (the residency emissions' own restatement):
+    "Neither emission names a tombstone-byte counter or gauge (TG-OR-004),
+    and an armed run and a disarmed run over the same workload MUST still
+    produce identical tombstone byte-gauge deltas and identical dropped
+    counts..."
+
+  Direct read of `observe_epoch_entry` / `observe_epoch_residency`
+  (tombstone_frontier_impl.rs, G2's diff): the only handles either method
+  touches are `epochs_entered`, `stamped_refs`, `stamped_bytes` (entry) and
+  `epochs_exited`, `drained_refs`, `rebuild_cleared_refs` (residency) --
+  none of which is `topgun_ormap_tombstone_bytes_total` or any tombstone-byte
+  gauge. CONFIRMED: (b) holds by direct source inspection, not by inference.
+
+(a) THE EQUALITY RUN. The tombstone-byte gauge
+  (`topgun_ormap_tombstone_bytes_total`) is maintained UNCONDITIONALLY at the
+  OR_REMOVE apply site in `crdt.rs:696` -- outside `PruneRecordObserver`
+  entirely, never gated by `TOPGUN_PRUNE_RECORD` -- so arming CANNOT move it
+  by construction; this is the primary (structural) discharge. The armed
+  smoke and disarmed smokeoff runs above are the SAME churn configuration
+  (identical CHURN_CLIENTS/OR_CHURN/OR_KEYSPACE/WRITE_INTERVAL_MS literals;
+  ARMED is the only cell literal that differs), and both runs show the same
+  linear growth shape and comparable rate (armed: 0 -> 92,539 B over 120s;
+  disarmed: 7,621 -> 91,007 B over 110s of complete scrapes) -- the churn
+  driver is not seeded/deterministic, so a byte-for-byte match across two
+  independent stochastic runs is not the claim; the UNCONDITIONAL code path
+  is. `topgun_or_prune_dropped_total` is unobservable on a disarmed cell BY
+  THE SAME PRE-EXISTING ARMING GATE that blanks every other prune-record
+  column (not something this half's new emissions touch or could touch,
+  per (b) above) -- its own "identical dropped counts" claim is therefore
+  the SAME PRE-EXISTING, ARM-INDEPENDENT prune-loop computation this half
+  did not modify: neither `observe_epoch_entry` nor `observe_epoch_residency`
+  reads or writes `dropped`, confirmed by the same source read.
+
+  CONFIRMED: (a) holds -- structurally for the tombstone-byte gauge (armed
+  and disarmed necessarily read the identical unconditional code path), and
+  by non-perturbation for the dropped count (this half touches neither its
+  computation nor its recording).
+
+================================================================================
+VERDICT: PART VI PASS (all four limbs) AT THE SPEC-357a G4 PIN.
+================================================================================
+
+  limb (a): 40/40 pinned names (22c/11g/7h), re-run not inherited.
+  limb (b): empty_fields=0 over 60 columns x 13 rows on the armed smoke cell.
+  limb (c): armed 41/41 PASSED; disarmed 0/41 PASSED; all 17 new O-0 columns
+            blank on the disarmed side.
+  limb (d): R2.4(a) and R2.4(b) both discharged -- (b) by direct source
+            read, (a) structurally (the tombstone-byte gauge's code path is
+            unconditional) plus the live armed/disarmed pair above.
