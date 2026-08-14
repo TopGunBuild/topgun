@@ -1,0 +1,58 @@
+# spec357b-trackergrade.ref -- the reference ledger for the REAL-TARGET run of spec357-trackergrade.sh.
+#
+# WHY THIS FILE EXISTS AT ALL, AND WHY IT IS NOT AN EDIT TO A PINNED SIDECAR. `spec357-trackergrade.ref`
+# (SPEC-357a's, pinned and untouched here) says so in its own bytes: it "grades ONLY the fixture below",
+# and the successor's "own reference values, unrelated to this fixture's, live in whatever `.ref`
+# SPEC-357b commits for that purpose". This is that file. `spec357-trackergrade.sh` takes the reference
+# path as its optional third argument precisely so the same grader can be pointed at a different subject
+# without moving a byte of the script or of the fixture's reference. Neither pinned file is edited by
+# this half; both are read.
+#
+# THE SUBJECT. The two REAL tracker files `.specflow/todos/TODO-634.md` and `.specflow/todos/TODO-648.md`,
+# graded for SPEC-357b's R5.7 / AC17 / Q14 obligation. `.specflow/` is gitignored, so a `git diff` over it
+# is empty for every possible execution and a checklist item resting on one is vacuously GREEN -- which is
+# the whole reason the grade is made on CONTENT, by this script, and recorded in a committed transcript.
+#
+# Measured 2026-08-14. `todo634_pre_sha256` is TODO-634.md at its PRE-EDIT bytes, taken as a scratch copy
+# BEFORE this half wrote anything (the copy lives outside the repository and is not committed; its digest
+# is what pins it, and it is quoted in `spec357-trackergrade-proofs.txt`).
+#
+# ONE DEVIATION FROM THE FIXTURE RUN'S SEMANTICS, STATED RATHER THAN LEFT TO BE INFERRED. In the fixture
+# proof, limb (a)'s TODO-648.md was a genuinely UNRELATED file and its digest was the pre-edit one. In
+# THIS half TODO-648.md is a REQUIRED edit (R5.7 writes R-1's DISCHARGED-BY-SUCCESSOR byte there), so the
+# value recorded below is its POST-EDIT digest and limb (a) reads as "the second tracker file is at its
+# recorded expected bytes" rather than "unmoved". The limb's discriminating power is unchanged in the
+# direction that matters: the RED run points the grader at a directory holding BOTH files at their
+# pre-edit bytes, and limb (a) REDs there exactly as limb (b) does.
+#
+# Format: <key><single space><value>; the value is the rest of the line VERBATIM (it may contain spaces,
+# brackets and non-ASCII). Lines beginning # and empty lines are ignored.
+
+todo634_pre_sha256 e0fc181a735ebb9cd520c3bc6a52a00b2ee3fc3620d65a77cda7aaa3bcb86875
+todo648_sha256 b41a074b8c4dd5d9b5472aad915faa51fdfab7e670baf3cc421f195aa7ea9947
+
+# Tick counts on the real TODO-634.md, with the census that makes them exhaustive: the file carries 7
+# top-level boxes and NO indented ones, so ticked + unticked covers every box it has. THE REQUIRED EDIT
+# MAY NOT MOVE ANY OF THESE FOUR: TODO-634 is UPDATED, NOT ticked and NOT closed.
+ticked_count 2
+unticked_count 5
+total_boxes 7
+indented_boxes 0
+
+# The graded box is the §8.1-repeat box -- the one that carries this lineage's determinations and is the
+# box the diagnosis outcome belongs to. The strict anchor is a line PREFIX ending before the box's own
+# code span, chosen so it survives the required edit (which appends continuation lines to the box) and
+# breaks the instant the box is ticked. The loose anchor is the same text without the checkbox marker and
+# is used ONLY to LOCATE the box, so a ticked box still REDs limb (c) while limbs (d) and (e) stay
+# computable.
+box_anchor - [ ] **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT:
+box_anchor_loose **NEW, CARRIED IN FROM SPEC-356b — the §8.1 REPEAT:
+
+# Limb (d). The pointer literal is required verbatim in the box's after-text (backticks are stripped on
+# both sides before matching) and points at the manifest section carrying the determination and R4.5's
+# escalation. The outcome tokens are a small closed vocabulary; at least one must appear. The vocabulary
+# is deliberately STRICTER than the fixture's bare `INDETERMINATE`, which the box's pre-edit text already
+# contained: the token that fires here must be NEW in the after-text for the grade to mean anything, and
+# the grader's own [evidence] lines are what a reader checks that against.
+pointer_literal spec356-manifest.md §11.12
+outcome_tokens INDETERMINATE-INSTRUMENT ENDORSED EXCLUDED
