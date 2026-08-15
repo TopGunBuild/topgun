@@ -801,8 +801,10 @@ mod tests {
     /// multi-thread runtime would observe an empty capture instead of a
     /// violation — exactly why `D4`'s race cannot be read at row
     /// granularity (C13).
-    fn capture_tracing_rows(
-    ) -> (tracing::subscriber::DefaultGuard, Arc<std::sync::Mutex<Vec<String>>>) {
+    fn capture_tracing_rows() -> (
+        tracing::subscriber::DefaultGuard,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
         use tracing_subscriber::layer::SubscriberExt as _;
         let sink: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(RowCapture(Arc::clone(&sink)));
@@ -1357,9 +1359,9 @@ mod tests {
                 );
                 i3_checked += 1;
 
-                let settlement_row = settlement_by_epoch
-                    .get(epoch)
-                    .unwrap_or_else(|| panic!("D5: epoch {epoch}'s settlement row must be present"));
+                let settlement_row = settlement_by_epoch.get(epoch).unwrap_or_else(|| {
+                    panic!("D5: epoch {epoch}'s settlement row must be present")
+                });
                 let absent = row_u64(settlement_row, "absent");
                 // P-KEYS (precondition, recorded as a VALUE, not assumed):
                 // the considered ref's key was present in the store at
@@ -1376,11 +1378,23 @@ mod tests {
             }
         }
 
-        assert_eq!(not_applicable_passes, 0, "D5 never restores: no pass should scope out");
-        assert_eq!(empty_passes, 1, "exactly the first pass (i=1) is an empty drain");
-        assert_eq!(draining_passes, N, "the remaining N passes each drain exactly one epoch");
+        assert_eq!(
+            not_applicable_passes, 0,
+            "D5 never restores: no pass should scope out"
+        );
+        assert_eq!(
+            empty_passes, 1,
+            "exactly the first pass (i=1) is an empty drain"
+        );
+        assert_eq!(
+            draining_passes, N,
+            "the remaining N passes each drain exactly one epoch"
+        );
         assert_eq!(i3_checked, N, "I3 must be checked on all N drained epochs");
-        assert_eq!(p_keys_checked, N, "P-KEYS must be checked on all N considered refs");
+        assert_eq!(
+            p_keys_checked, N,
+            "P-KEYS must be checked on all N considered refs"
+        );
 
         // ------------------------------------------------------------
         // Step 2 — the mechanical per-row Decision-Table evaluation over

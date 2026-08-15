@@ -6365,8 +6365,10 @@ mod tests {
     /// `tracing::subscriber::set_default` are both thread-local (the doc at
     /// `:6129` makes the same point for the metrics recorder), so a
     /// multi-thread runtime observes an empty capture instead of a violation.
-    fn capture_tracing_rows() -> (tracing::subscriber::DefaultGuard, Arc<std::sync::Mutex<String>>)
-    {
+    fn capture_tracing_rows() -> (
+        tracing::subscriber::DefaultGuard,
+        Arc<std::sync::Mutex<String>>,
+    ) {
         use tracing_subscriber::layer::SubscriberExt;
         let sink: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
         let subscriber = tracing_subscriber::registry().with(RowCapture(Arc::clone(&sink)));
