@@ -376,6 +376,16 @@ pub struct PruneEpochRecord {
     pub considered: u64,
     /// Refs of this epoch that left through [`PruneExit::Dropped`].
     pub dropped: u64,
+    /// Refs of this epoch that left through [`PruneExit::MatchedNothing`].
+    pub matched_nothing: u64,
+    /// Refs of this epoch that left through [`PruneExit::AbsentKey`].
+    pub absent: u64,
+    /// Refs of this epoch that left through [`PruneExit::RestoredReadError`].
+    pub restored_read_error: u64,
+    /// Refs of this epoch that left through [`PruneExit::RestoredEvicted`].
+    pub restored_evicted: u64,
+    /// Refs of this epoch that left through [`PruneExit::RestoredWriteError`].
+    pub restored_write_error: u64,
     /// Tombstone bytes this epoch freed.
     pub bytes_freed: u64,
 }
@@ -535,6 +545,25 @@ pub struct PruneEpochEntryRecord {
 ///
 /// `#[serde(rename_all = "camelCase")]` and `#[derive(Default)]` per this crate's Rust
 /// type-mapping rules — this struct carries two `Option<T>` fields.
+///
+/// # OBSERVATION vs ATTRIBUTION (HARD)
+///
+/// This struct carries two disjoint families of removal-side quantities, and the distinction is
+/// load-bearing rather than cosmetic:
+///
+/// - **ATTRIBUTIONS**, by construction: [`Self::bytes_freed_attributed`] and
+///   [`Self::refs_at_entry`] are not read from the removal itself — `bytes_freed_attributed` is
+///   `slot.stamped_bytes` copied across on a `DrainedByPrune` exit (`0` otherwise), and
+///   `refs_at_entry` is the count carried forward from the paired entry row. Both hold **by
+///   construction** of the exit-row assembly, not because anything at the removal site was
+///   inspected.
+/// - **OBSERVATIONS**, read at the removal site: [`Self::removed_refs_observed`] and
+///   [`Self::removed_bytes_observed`] are read from the vector the index removal itself returned,
+///   at the removal call site, and MUST NOT be derived from `refs_at_entry`, `stamped_bytes`,
+///   `stamped_refs` or any other entry-side quantity. An attribution and an observation of the
+///   same nominal quantity can diverge — that divergence is exactly what this pair of fields
+///   exists to make visible; deriving one from the other would erase the divergence the fields are
+///   here to observe.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PruneEpochResidencyRecord {
@@ -574,6 +603,22 @@ pub struct PruneEpochResidencyRecord {
     pub durable_watermark_at_exit: Epoch,
     /// The current epoch at the instant of exit.
     pub current_epoch_at_exit: Epoch,
+    /// Refs actually removed from the index, read from the vector the index removal itself
+    /// returned, at the removal call site. `0` for every exit kind that is not an observed drain,
+    /// and `0` for a `DrainedByPrune` exit whose epoch is absent from the carried per-epoch map —
+    /// the second case is an observable value, never a silent default. An OBSERVATION: MUST NOT be
+    /// derived from `refs_at_entry`, `stamped_bytes`, `stamped_refs` or any other entry-side
+    /// quantity. See the struct-level "OBSERVATION vs ATTRIBUTION" doc-contract above.
+    pub removed_refs_observed: u64,
+    /// Tombstone bytes actually removed from the index — `Σ tag.len()` over the same removed
+    /// vector `removed_refs_observed` is read from, at the same removal call site. This is the
+    /// same byte quantity `stamp_tombstone` credits (`tag.len()`) at the stamping site, so the two
+    /// are comparable with no unit conversion. `0` for every exit kind that is not an observed
+    /// drain, and `0` for a `DrainedByPrune` exit whose epoch is absent from the carried map. An
+    /// OBSERVATION: MUST NOT be derived from `refs_at_entry`, `stamped_bytes`, `stamped_refs` or
+    /// any other entry-side quantity. See the struct-level "OBSERVATION vs ATTRIBUTION"
+    /// doc-contract above.
+    pub removed_bytes_observed: u64,
 }
 
 /// Whether the prune record is recording.
@@ -680,7 +725,10 @@ pub trait PruneRecordObserver: Send + Sync {
     /// drain only — the refs-per-drain and epochs-per-drain distributions.
     fn observe_pass(&self, record: &PrunePassRecord);
 
-    /// One epoch drained inside a pass. Feeds the three per-drained-epoch distributions.
+    /// One epoch drained inside a pass. Feeds the three per-drained-epoch distributions and,
+    /// via the five newly-added per-epoch exit counters, the per-epoch six-exit identity
+    /// (`considered == dropped + matched_nothing + absent + restored_read_error +
+    /// restored_evicted + restored_write_error`) that previously only held per pass.
     fn observe_drained_epoch(&self, record: &PruneEpochRecord);
 
     /// The claim span at an LWM movement or a non-empty drain.
@@ -752,11 +800,16 @@ pub trait PruneRecordObserver: Send + Sync {
     /// Feeds [`METRIC_PRUNE_EPOCHS_EXITED_TOTAL`] — the exit ledger's independent, metrics-side
     /// completeness witness. See the trait-level "Per-epoch residency emissions" section above
     /// for the perturbation bound this call is priced under.
+    ///
+    /// On a `DrainedByPrune` exit, also feeds [`METRIC_PRUNE_REMOVED_REFS_OBSERVED_TOTAL`] and
+    /// [`METRIC_PRUNE_REMOVED_BYTES_OBSERVED_TOTAL`] from `record`'s `removed_refs_observed` /
+    /// `removed_bytes_observed` — the OBSERVATION series, credited on the `DrainedByPrune` arm
+    /// only, distinct from the ATTRIBUTION series the entry/exit rows already carry.
     fn observe_epoch_residency(&self, record: &PruneEpochResidencyRecord);
 }
 
 // ---------------------------------------------------------------------------
-// Pinned metric names — 22 counters, 11 gauges, 7 histograms
+// Pinned metric names — 24 counters, 11 gauges, 7 histograms
 // ---------------------------------------------------------------------------
 //
 // The name set is CLOSED. Emitting a series under this prefix that is not named here, or emitting
@@ -823,6 +876,15 @@ pub const METRIC_PRUNE_EPOCHS_ENTERED_TOTAL: &str = "topgun_or_prune_epochs_ente
 /// Counter: epochs that emitted an exit row — the exit ledger's independent, metrics-side
 /// completeness witness.
 pub const METRIC_PRUNE_EPOCHS_EXITED_TOTAL: &str = "topgun_or_prune_epochs_exited_total";
+/// Counter: refs actually removed from the index, read from the vector the index removal itself
+/// returned — the OBSERVATION counterpart to the by-construction attribution series above.
+pub const METRIC_PRUNE_REMOVED_REFS_OBSERVED_TOTAL: &str =
+    "topgun_or_prune_removed_refs_observed_total";
+/// Counter: tombstone bytes actually removed from the index, `Σ tag.len()` over the same removed
+/// vector [`METRIC_PRUNE_REMOVED_REFS_OBSERVED_TOTAL`] is read from — the same byte quantity
+/// `stamp_tombstone` credits, so the two are comparable with no unit conversion.
+pub const METRIC_PRUNE_REMOVED_BYTES_OBSERVED_TOTAL: &str =
+    "topgun_or_prune_removed_bytes_observed_total";
 
 /// Gauge: indexed tombstone refs, maintained incrementally.
 pub const METRIC_PRUNE_INDEXED_REFS: &str = "topgun_or_prune_indexed_refs";
