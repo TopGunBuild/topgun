@@ -8092,6 +8092,25 @@ Steps 1–3 are evaluated.
 - **P-KEYS**: HELD on **3000/3000** considered refs (`absent = 0` on every settlement
   row).
 
+**What `I3`'s 3000/3000 weighs, priced (added by Review v2; the figure itself is
+unchanged).** Over `D5` — and only over `D5` — `I3` is a ONE-SIDED check between two
+quantities that trace to the SAME string. Each epoch carries exactly one ref;
+`B_restored(e) ≡ 0` on every epoch (this drive never restores, so the drive asserts the
+bare `B_obs ≤ B_att`); and both `B_obs` and `B_att` are the byte length of that epoch's
+single `D5TAG{i}` tag, read off the SAME exit row. The check therefore excludes an
+OVER-count on the observation side (or an under-credit on the attribution side) and
+nothing else: a total observation failure lands `B_obs = 0`, and `0 ≤ B_att` is
+satisfied silently. That is strictly weaker than `I1`/`I2`, whose two sides are
+separately emitted quantities — §12.0 makes exactly that check for `I2` in advance
+(*"so I2 is a genuine identity between two separately emitted quantities, not a
+tautology across one"*, `:7813`) and does not make it for `I3`. It is the same class
+this manifest already names against the production ledger in the PD-F12 analysis:
+*"**The two compared quantities are the SAME FIELD.** … exact **by construction, not by
+measurement**, and **carries no discriminating information**"* (`:7020-7021`). Read
+`I3`'s 3000/3000 at that weight beside `I1`/`I2`. `I3`'s GENERAL form is not
+tautological — the `B_restored(e)` term is what makes it meaningful on a drive that
+restores (§12.0, `:7815-7819`) — so this prices `D5`, not the identity.
+
 `D5`'s universe (X21-d's per-drive record): 3000 real keyed stamps + 1 closing
 throwaway stamp = 3001 `prune_epoch_tombstones` invocations. Captured rows: **3000
 `epoch_exit`, 3000 `settlement`, 3001 `prune_pass`** — `split_into_passes` recovered
@@ -8132,7 +8151,7 @@ resolved V0 → **E-C FIRES → the diagnosis line HARD STOPS. There is no diagn
 after this one.** The `ReclamationRegistry` family (`TODO-634`) starts with the cause
 **unclassified**, justified by §8.3 above, quoted verbatim.
 
-### §12.1.f — POST-DATA findings PD-F15–PD-F19 (recorded and ROUTED to `TODO-634`; they do NOT alter the verdict)
+### §12.1.f — POST-DATA findings PD-F15–PD-F20 (recorded and ROUTED to `TODO-634`; they do NOT alter the verdict)
 
 §12.0 pre-authorizes exactly this: *"if the data suggests one, it is recorded as a
 POST-DATA finding and routed, and the table's own verdict still stands."* The
@@ -8211,6 +8230,85 @@ none is a row-1 violation reached by execution inside that universe, and none ch
   a drive whose construction can place a row in row 2's universe (the analogue of PD-F18 for
   row 1) is what would give row 2 evidentiary weight, and per X8 this round may not widen the
   frozen universe to supply it. **ROUTED to `TODO-634`.**
+  **SUPERSEDED IN PART by PD-F20 below (added by Review v2): the "unfireable over `D5` by
+  construction" characterisation of row 2 is RETRACTED — refuted by execution. The text above
+  is retained verbatim, unedited, because a retraction that erases what it retracts leaves the
+  next reader unable to check it. The routing to `TODO-634` stands; the WEIGHT it routes does
+  not.**
+
+- **POST-DATA — PD-F20 — PD-F19's "by construction" claim about D-T row 2 is RETRACTED.
+  Rows 2 AND 3 were LIVE over `D5` and both returned genuine negatives; row 1 alone was
+  unreachable.** Surfaced by Review v2 and settled by EXECUTION, not by argument.
+  - **What is retracted, quoted from PD-F19 so the retraction can be checked against it:**
+    *"D-T row 2, like row 1, was unfireable over `D5` by construction, so `V0`'s evidentiary
+    weight rests on row 3 alone"* and *"over `D5` **only row 3 was ever live**"*.
+  - **Executed refutation — row 2 IS live over `D5`.** The mutation is the minimal faithful
+    encoding of reading (ii) itself (*"the index removal is real, the store frees nothing"*):
+    in `crdt.rs`'s `prune_epoch_tombstones`, inside the drop closure, `dropped =
+    outcome.pruned > 0;` → `dropped = false;`. Nothing else changed — the drive, the seeding
+    and the frozen universe are untouched. Executed at tip `2639b38f`:
+    - unmutated: `row1(V1 REF-LOSS)=false row2(V2 BOOKKEEPING-ATTRIBUTION)=false
+      row3(V3 COUNTER-FAMILY-MISNAMING)=false`, `1 empty, 3000 draining, 0 not-applicable`,
+      P-KEYS `3000/3000`, test PASSES;
+    - mutated: `row1=false row2=`**`true`**` row3=false`, with `I1`/`I2`/`I3` still holding on
+      the same `1 empty, 3000 draining, 0 not-applicable` and P-KEYS still `3000/3000`, test
+      still PASSES (row 2 is a recorded VALUE, not an assertion).
+    Command both times, unchanged: `cargo test --profile ci-sim --features simulation -p
+    topgun-server -- sim::tombstone_gc_proof::tests::d5_sequential_regime --nocapture`.
+    Mutation reverted; `git status --porcelain` empty afterwards.
+  - **Executed check — row 3 is live in the fail-closed sense.** `empty_drain:
+    drained.is_empty()` → `empty_drain: true` in the same function's `PrunePassRecord`
+    construction makes the drive PANIC at the `I2` assertion in
+    `sim/tombstone_gc_proof.rs` — *"D5 I2 violated on a pass: empty_drain == (Σ_e R_obs(e) ==
+    0) must hold"* — i.e. a row-3 condition surfaces as the test's own failure rather than as
+    the printed `row3_condition`, exactly as §12.1's frozen-by-design note states. Reverted;
+    green.
+  - **Why PD-F19 was wrong — the standard, not the arithmetic.** PD-F19's arithmetic is
+    correct: over `D5`, `D_e ≥ 1 ∧ F_e > 0` on every epoch, so row 2 evaluates false. What it
+    got wrong is *whose property that is*. It is a JOINT property of the fixture AND the
+    subject, and the mutations above show which half carries it: hold the fixture fixed,
+    change the subject's store-side behaviour, and row 2 fires. A row is dead only when the
+    FIXTURE forecloses its condition regardless of what the subject does — which is exactly
+    the distinction §12.0 froze in advance and PD-F19 read past: `D3` is EXCLUDED from the D-T
+    because it *"produces row 2's signature by construction"* (`:7861`), while `D5`'s P-KEYS
+    clause exists so that *"a store-side zero cannot be manufactured by the fixture"*
+    (`:7850-7852`) — seeding-present is what makes row 2's negative TRUSTWORTHY, not vacuous.
+    §12.0 states the conclusion outright: *"Consequently rows 2 and 3 are not readable off the
+    source before the run over the universes they range on"* (`:7865-7866`).
+  - **How it entered the record.** PD-F19 was accepted from a review finding on prose
+    agreement, without the mutation `K2` and Step 0 require before any term may be declared
+    unable to disagree with its subject. The round applied its own discipline to the
+    instrument and not to a claim about the instrument.
+  - **Row 1's status is unchanged and carries a witness rather than an argument.** Its
+    antecedent — an `epoch_tags` entry PRESENT but holding an EMPTY vector — is constructed in
+    this tree only through an in-module bypass, which is what Step 0 leg (c) does
+    (`f.lock().drain_prunable()` on a planted empty vector); that positive control FIRES
+    unmutated and fails under the mutation arm (X21-a), so the instrument is proven able to
+    read row 1's signature when the antecedent exists. What no public writer reaches is the
+    antecedent itself (PD-F15's four-site enumeration), which is why PD-F18 names the drive
+    that would be needed. This remains a STATIC enumeration: if it is incomplete, row 1's
+    negative is *"an informative negative about the enumeration, not a null result"*, exactly
+    as §12.0 froze it.
+  - **The corrected reading, which is what `TODO-634` inherits:** *two of three readings were
+    tested over `D5` and both returned negatives; the third's antecedent (row 1) is not
+    constructible through the public API.* This is strictly MORE informative than what PD-F19
+    routed. Understating one's own evidence in a routed record is the same class of defect as
+    overstating it.
+  - **What does NOT change.** `V0` stands, unedited and unreopened — its definition is *"none
+    of rows 1–3 holds over its own universe"*, and every row was evaluated over its own
+    universe exactly as frozen. §12.0 stays BYTE-FROZEN (digest
+    `24273adf2ee87b544520cef817c826bf2be645e07cb97c8ef110ca21e59dabac` over `sed -n
+    '1,7689p'`); this entry is append-only beneath it. `E-C` has still FIRED. No `.rs`
+    production byte was changed by this finding — both mutations above were applied, read and
+    reverted.
+  - **The rule this round adopts, applied to this entry itself.** Any claim of the form *"term
+    X is unfireable / readable by construction"* entering this record MUST carry, beside it,
+    either the EXECUTED mutation that would make X fire, or an executed constructibility
+    witness for the antecedent it says is unreachable. No such claim lands on prose agreement
+    again. PD-F20 satisfies this about itself: rows 2 and 3 carry executed mutations above,
+    and row 1 carries leg (c)'s executed positive control plus the named enumeration whose
+    incompleteness is the stated way the claim could fail.
+  - **ROUTED to `TODO-634`.**
 
 ### §12.1.g — R6.3 / AC11 digest confirmation
 

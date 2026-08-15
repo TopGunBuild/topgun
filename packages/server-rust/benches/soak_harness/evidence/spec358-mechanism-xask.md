@@ -121,3 +121,28 @@ construction, exactly as PD-F15 shows row 1 to be. That point is conceded, recor
 the verdict — a row that cannot hold does not hold — but a reader who takes anchor 1 as
 having settled "was V0 structurally guaranteed?" in general would be taking it further
 than it goes.
+
+### The concession above was WRONG and is withdrawn (added by Review v2)
+
+The seeding-based structural argument conceded in the section immediately above does not
+survive execution, and the concession is withdrawn. Recorded as **PD-F20** in
+`spec356-manifest.md` §12.1.f, which supersedes PD-F19 in part; the section above is left
+verbatim so the withdrawal can be checked against what it withdraws.
+
+The refutation is a one-line mutation of the SUBJECT with the fixture, the drive and the
+frozen universe untouched: in `crdt.rs`'s `prune_epoch_tombstones` drop closure,
+`dropped = outcome.pruned > 0;` → `dropped = false;` — the minimal faithful encoding of
+reading (ii) itself, *"the index removal is real, the store frees nothing"* — flips `D5`'s
+printed `row2(V2 BOOKKEEPING-ATTRIBUTION)` from `false` to **`true`**, with `I1`/`I2`/`I3`
+and P-KEYS still holding on `3000/3000`. `D5`'s seeding does not foreclose row 2; the
+store's own correct reclamation is what makes row 2 false, which is a live predicate
+returning a genuine negative. §12.0 froze the distinction in advance: `D3` is EXCLUDED
+from the D-T because it *"produces row 2's signature by construction"*, while `D5`'s
+P-KEYS clause exists so that *"a store-side zero cannot be manufactured by the fixture"*.
+
+So anchor 1's answer to *"was `V0` structurally guaranteed?"* is narrower than the anchor
+claims only in one direction that survives: neither the transport-based form (which anchor
+1 refutes) nor the seeding-based form (which PD-F20 refutes) holds. The corrected reading
+of `V0`, which is what `TODO-634` inherits: **two of three readings were tested over `D5`
+and both returned negatives; the third's antecedent (row 1) is not constructible through
+the public API.**

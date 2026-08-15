@@ -96,7 +96,8 @@ unclassified, exactly as E-C specifies, justified by §8.3 above.
 
 ## The POST-DATA findings — routed, not a naming
 
-Five POST-DATA findings (PD-F15, PD-F16, PD-F17, PD-F18, and PD-F19 added by Review v1)
+Six POST-DATA findings (PD-F15, PD-F16, PD-F17, PD-F18, PD-F19 added by Review v1, and
+PD-F20 added by Review v2 — which retracts PD-F19's central claim, see below)
 were produced by the code audit the cross-vendor round recommended
 (`spec358-mechanism-xask.md`) and by the review that followed it. §12.0
 pre-authorizes exactly this outcome: *"A reading not on this table cannot be published
@@ -113,18 +114,36 @@ there, by construction: D5 cannot construct an empty-but-present `epoch_tags` en
 through the public API, because refs leave only via the drain, which removes the whole
 entry. PD-F15 is a STATIC, code-level observation reached by audit, not a row-1
 violation reached by execution inside D5's frozen universe. The table's own verdict
-(V0) stands unchanged. PD-F15-PD-F19 are recorded in `spec356-manifest.md` §12.1,
+(V0) stands unchanged. PD-F15-PD-F20 are recorded in `spec356-manifest.md` §12.1,
 clearly labelled POST-DATA, and routed to `TODO-634` for the `ReclamationRegistry`
 family's design phase to carry as a stated open input — they do not stand in for, and
 must not be read as, a naming that would have prevented E-C from firing.
 
-**PD-F19 qualifies how much this `V0` weighs, and the family must inherit it at that
-weight:** D-T row 2 was, like row 1, unfireable over `D5` by construction — `D5` seeds
-every key present with its own tombstone tag, so every epoch settles with `D_e ≥ 1 ∧
-F_e > 0` while row 2 requires `D_e == 0 ∧ F_e == 0` — so over `D5` only row 3 was ever
-live, and `V0` means "the one live row did not fire", not "three independent readings
-were tested and none fired". The verdict itself is untouched: a row that cannot hold by
-construction does not hold, which is exactly what `V0`'s definition reads.
+**PD-F19 qualified how much this `V0` weighs — and PD-F20 RETRACTS that qualification
+as false. What the family inherits is PD-F20's reading, not PD-F19's.** PD-F19 held
+that *"D-T row 2, like row 1, was unfireable over `D5` by construction"*, so that *"over
+`D5` only row 3 was ever live"* and `V0` meant "the one live row did not fire". Review
+v2 refuted this by execution: mutating `crdt.rs`'s `prune_epoch_tombstones` drop closure
+`dropped = outcome.pruned > 0;` → `dropped = false;` — the minimal faithful encoding of
+reading (ii) itself, with the drive, the seeding and the frozen universe untouched —
+flips `D5`'s printed row 2 from `false` to **`true`** while `I1`/`I2`/`I3` and P-KEYS
+still hold on `3000/3000`. Row 2's negative was a property of the SUBJECT's behaviour,
+not of the fixture; §12.0 says as much in advance (`D3` is excluded because it *"produces
+row 2's signature by construction"*, while `D5`'s P-KEYS clause exists precisely so that
+*"a store-side zero cannot be manufactured by the fixture"*). Row 3 is live in the
+fail-closed sense on the same standard (`empty_drain: true` makes the drive panic on its
+own `I2` assertion).
+
+**The reading `TODO-634` inherits, therefore:** *two of three readings were tested over
+`D5` and both returned negatives; the third's antecedent (row 1) is not constructible
+through the public API.* That is strictly more informative than PD-F19's phrasing, and
+it is what the `ReclamationRegistry` family must carry as its premise. The verdict itself
+is untouched either way: `V0` is defined as "none of rows 1–3 holds over its own
+universe", and none did. PD-F19 remains in `spec356-manifest.md` §12.1.f verbatim,
+marked superseded-in-part, so the retraction can be checked against what it retracts;
+PD-F20 records the executed evidence and the rule that follows from it — no claim that a
+term is "unfireable by construction" enters this record again without its executed
+mutation or an executed constructibility witness beside it.
 
 ## Two notes on how this round's own record should be read (added by Review v1)
 
