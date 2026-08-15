@@ -136,3 +136,57 @@ Row-granularity terms are NOT observable here (C13, X21-d): the prune runs in a
 tokio::spawn task on a multi_thread runtime, so the thread-local tracing capture would
 see an empty capture rather than a violation. NOT in a Decision-Table universe (Step
 2's exclusion table)."
+
+=======================================================================================
+RE-STAMP — RE-EXECUTED AT TIP 33a13c90 (Review v2 fix round)
+=======================================================================================
+
+Why this section exists: this artifact's four limbs were discharged at tip 453aeb55, and
+one of the commits since then changed X21-b's own transport helper — 887cb496 replaced
+the tracing capture sink in crdt.rs's test module (`Arc<Mutex<String>>` -> `Vec<String>`,
+`split_into_passes(&str)` -> `split_into_passes(&[String])`). A discharge record whose
+transport has been re-typed underneath it must be re-executed, not re-dated. It was.
+
+Re-executed at 33a13c90, clean tree:
+
+    cargo test --release -p topgun-server --lib                exit 0  (1811 passed)
+    cargo test --profile ci-sim --features simulation -- sim   exit 0  (26 passed)
+
+X21-a (struct transport) — `step0_leg_c_v1_positive_control_planted_ref_loss_fires_on_
+the_returned_record` PASSES unmutated at this tip, and FAILS under
+spec358-mutation-arm.patch (`left: 1, right: 0`), re-executed here. The control is still
+live.
+
+X21-b (line transport) — `S1`, `D1` and `D5` all read their terms off the rendered
+`tracing` field text and all PASS at this tip. `S1` and `D1` FAIL under the mutation arm,
+each naming `R_obs == R_ent + 1` literally, re-executed here. The sink re-typing changed
+the container the rows are accumulated in, not the transport being read: the rows are
+still the rendered `name=value` field text a `tracing::field::Visit` collector produces.
+
+X21-c (metrics transport and the join) — unchanged and re-verified by the same green lib
+run; no commit since 453aeb55 touches it.
+
+X21-d (per-drive runtime flavour, transport and captured-row counts) — the counts in the
+table above are ASSERTED BY THE DRIVES THEMSELVES before any D-T term is read (R4.6's
+per-kind capture-shape gate), so the green sim run at this tip re-discharges them
+mechanically. `D5`'s published values, re-executed at 33a13c90:
+
+    D5 SEQUENTIAL REGIME: REPRODUCED — I1/I2/I3 held on every in-scope pass (1 empty,
+      3000 draining, 0 not-applicable), P-KEYS held on 3000/3000 considered refs. D-T row
+      conditions (recorded evidence, NOT a verdict): row1(V1 REF-LOSS)=false
+      row2(V2 BOOKKEEPING-ATTRIBUTION)=false row3(V3 COUNTER-FAMILY-MISNAMING)=false.
+
+— i.e. 3000 `epoch_exit`, 3000 `settlement`, 3001 `prune_pass` rows recovered exactly as
+recorded above, with the new `Vec<String>` sink. Every figure in this artifact stands at
+the current tip.
+
+One term this artifact records but does not price, added by Review v2 and priced in
+`spec356-manifest.md` §12.1.b: over `D5` the `I3` check is ONE-SIDED — each epoch carries
+one ref, `B_restored(e) == 0`, and both `B_obs` and `B_att` trace to the byte length of
+that epoch's single `D5TAG{i}` tag, read off the same exit row. It excludes an over-count
+on the observation side and nothing else; `B_obs = 0` would satisfy it silently. Read
+`I3`'s 3000/3000 at that weight beside `I1`/`I2`.
+
+The full re-run — both Step-0 legs, all five drives, the two PD-F20 mutations and the
+whole repo gate with real exit codes — is recorded in `spec358-microdiag-transcript.txt`
+under its own RE-STAMP section at the same tip.

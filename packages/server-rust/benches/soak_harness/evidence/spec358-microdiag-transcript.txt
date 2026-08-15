@@ -251,3 +251,122 @@ Post-append boundary lines, executed exactly as instructed:
 
 This is the same text that stood at the pre-append tip when §12.0 was frozen: the
 boundary is unchanged by this group's append of §12.1.
+
+=======================================================================================
+RE-STAMP — RE-EXECUTED AT TIP 33a13c90 (Review v2 fix round)
+=======================================================================================
+
+Why this section exists: everything above was executed at tip 453aeb55 and quotes those
+runs verbatim. Two commits have changed the SUBJECT of those runs since, so a reader who
+checks out the current tip is not looking at the tree the figures above came from:
+
+  887cb496  test(sf-358)  crdt.rs's test-module capture sink String -> Vec<String>
+                          (test module only; no production byte)
+  60fc16e7  docs(sf-358)  crdt.rs test doc-comments cite the workload's prune call by
+                          name instead of by line (comment only)
+
+Everything above is therefore RE-EXECUTED here at tip 33a13c90 rather than re-dated. No
+figure below is copied from the runs above; each is the output of a command run again.
+
+--------------------------------------------------------------------------------------
+Leg (a) UNMUTATED — clean tree at 33a13c90
+--------------------------------------------------------------------------------------
+
+    $ cargo test --release -p topgun-server --lib
+    test result: ok. 1811 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 94.55s
+    exit 0
+
+    $ cargo test --profile ci-sim --features simulation -p topgun-server -- sim --nocapture
+    test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 1811 filtered out; finished in 0.67s
+    exit 0
+
+Drive values off that same run, all five, verbatim:
+
+    D1 DIVERGENCE: REPRODUCED — R_obs=3 R_ent=2 B_obs=12 B_att=8 len(extra.tag)=4
+    D2 POST-EXIT RESTORE: REPRODUCED — k=1 sum_R_obs=0
+    D3 ABSENT-KEY: REPRODUCED — D_e=0 F_e=0 B_att=4 absent=1
+    D4 TOCTOU RACE: REPRODUCED — aggregate index_conservation_snapshot() terms (exactly
+      one attributed drain, exactly one exit row, O-0) held across all 64 interleavings.
+      Row-granularity terms are NOT observable here (C13, X21-d) ... NOT in a
+      Decision-Table universe (Step 2's exclusion table).
+    D5 SEQUENTIAL REGIME: REPRODUCED — I1/I2/I3 held on every in-scope pass (1 empty,
+      3000 draining, 0 not-applicable), P-KEYS held on 3000/3000 considered refs. D-T row
+      conditions (recorded evidence, NOT a verdict): row1(V1 REF-LOSS)=false
+      row2(V2 BOOKKEEPING-ATTRIBUTION)=false row3(V3 COUNTER-FAMILY-MISNAMING)=false.
+
+Every published figure is byte-identical to the 453aeb55 record above. The capture-sink
+type change did not move a single row count, term or row value.
+
+--------------------------------------------------------------------------------------
+Leg (b) MUTATED — spec358-mutation-arm.patch applied at 33a13c90, then reverted
+--------------------------------------------------------------------------------------
+
+    $ git apply packages/server-rust/benches/soak_harness/evidence/spec358-mutation-arm.patch
+    $ cargo test --release -p topgun-server --lib
+    test result: FAILED. 1808 passed; 3 failed; 2 ignored; 0 measured; 0 filtered out
+    exit 101
+    failures:
+        tombstone_frontier_impl::tests::finalize_epoch_exit_zeroes_observation_fields_when_the_epoch_is_absent_from_the_carried_map
+        tombstone_frontier_impl::tests::s1_pre_freeze_sanity_row_diverges_through_public_entry_points_only
+        tombstone_frontier_impl::tests::step0_leg_c_v1_positive_control_planted_ref_loss_fires_on_the_returned_record
+
+    $ cargo test --profile ci-sim --features simulation -p topgun-server -- sim
+    test result: FAILED. 25 passed; 1 failed; 0 ignored; 0 measured; 1811 filtered out
+    exit 101
+    failures:
+        sim::tombstone_gc_proof::tests::d1_divergence_removed_observation_diverges_from_entry_attribution
+      panicked at sim/tombstone_gc_proof.rs:983:
+      "D1 predicate limb 1 (R_obs == R_ent + 1) must hold"
+
+    $ git apply -R .../spec358-mutation-arm.patch && git status --porcelain
+    (empty — tree clean)
+
+Same three lib failures and same one sim failure as at 453aeb55. The instrument is LIVE
+at the current tip, not merely at the tip the record above was written from.
+
+--------------------------------------------------------------------------------------
+PD-F20's two mutations, RE-EXECUTED at 33a13c90 (see spec356-manifest.md §12.1.f)
+--------------------------------------------------------------------------------------
+
+Row 2 is LIVE. In crdt.rs's prune_epoch_tombstones drop closure,
+`dropped = outcome.pruned > 0;` -> `dropped = false;`:
+
+    D5 SEQUENTIAL REGIME: REPRODUCED — I1/I2/I3 held on every in-scope pass (1 empty,
+      3000 draining, 0 not-applicable), P-KEYS held on 3000/3000 considered refs. D-T row
+      conditions: row1(V1 REF-LOSS)=false row2(V2 BOOKKEEPING-ATTRIBUTION)=true
+      row3(V3 COUNTER-FAMILY-MISNAMING)=false.
+    test sim::...::d5_sequential_regime_bridge_identities_and_p_keys_hold_over_3000_epochs ... ok
+
+Row 3 is LIVE in the fail-closed sense. `empty_drain: drained.is_empty()` ->
+`empty_drain: true` in the same function:
+
+    test sim::...::d5_sequential_regime_bridge_identities_and_p_keys_hold_over_3000_epochs ... FAILED
+    assertion `left == right` failed: D5 I2 violated on a pass: empty_drain == (Σ_e R_obs(e) == 0) must hold
+
+Both mutations reverted; `git status --porcelain` empty afterwards. These are the
+executed evidence PD-F20 rests on, re-run at this tip.
+
+--------------------------------------------------------------------------------------
+Full repo gate at 33a13c90 — every command, its real exit code
+--------------------------------------------------------------------------------------
+
+    pnpm install --frozen-lockfile                                    exit 0
+    pnpm -r build                                                     exit 0
+    pnpm lint                                                         exit 0
+    pnpm format:check                                                 exit 0
+    cargo fmt --check                                                 exit 0
+    cargo build --release                                             exit 0
+    cargo clippy --all-targets --all-features -- -D warnings          exit 0  (zero warnings)
+    cargo test --release -p topgun-server --lib                       exit 0  (1811 passed)
+    cargo test --profile ci-sim --features simulation -- sim          exit 0  (26 passed)
+    bash scripts/check-invariants.sh                                  exit 0  ("21 entries, 4 NAKED (baseline 4)")
+
+--------------------------------------------------------------------------------------
+Freeze digest, recomputed at 33a13c90
+--------------------------------------------------------------------------------------
+
+    $ sed -n '1,7689p' packages/server-rust/benches/soak_harness/evidence/spec356-manifest.md | shasum -a 256
+    24273adf2ee87b544520cef817c826bf2be645e07cb97c8ef110ca21e59dabac  -
+
+MATCH. §12.0 is byte-frozen across BOTH post-freeze appends (the §12.1 append and the
+PD-F19/PD-F20 POST-DATA appends). V0 is unchanged.
