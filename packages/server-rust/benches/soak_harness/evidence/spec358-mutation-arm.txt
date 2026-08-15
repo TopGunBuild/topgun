@@ -1,0 +1,128 @@
+SPEC-358 — Step 0 leg (b): mutation-arm captured output (all THREE legs, with exit codes)
+============================================================================================
+
+Patch applied for leg (b): `spec358-mutation-arm.patch`
+(`packages/server-rust/src/tombstone_frontier_impl.rs:718-724`):
+
+    -                observed.unwrap_or((0, 0))
+    +                (slot.refs_at_entry, slot.stamped_bytes)
+
+This substitutes the ATTRIBUTION (`refs_at_entry` / `stamped_bytes`) for the OBSERVATION
+(`observed`, which is what `removed_refs_observed` / `removed_bytes_observed` are meant
+to carry on a `DrainedByPrune` exit), so on a slot where `R_obs != R_ent` the mutated
+build reports `R_obs == R_ent` and every discriminator that asserts otherwise fails.
+
+--------------------------------------------------------------------------------------
+LEG (a) — UNMUTATED (clean tree)
+--------------------------------------------------------------------------------------
+
+`cargo test --release -p topgun-server --lib`
+Exit code: 0
+
+    test result: ok. 1811 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 102.93s
+
+`pnpm test:sim`
+Exit code: 0
+
+    test sim::tombstone_gc_proof::tests::d1_divergence_removed_observation_diverges_from_entry_attribution ... ok
+    test sim::tombstone_gc_proof::tests::d5_sequential_regime_bridge_identities_and_p_keys_hold_over_3000_epochs ... ok
+    ...
+    test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 1811 filtered out; finished in 0.66s
+
+--------------------------------------------------------------------------------------
+LEG (b) — MUTATED (`spec358-mutation-arm.patch` applied)
+--------------------------------------------------------------------------------------
+
+`cargo test --release -p topgun-server --lib`
+Exit code: 101
+
+    ---- tombstone_frontier_impl::tests::finalize_epoch_exit_zeroes_observation_fields_when_the_epoch_is_absent_from_the_carried_map stdout ----
+
+    thread 'tombstone_frontier_impl::tests::finalize_epoch_exit_zeroes_observation_fields_when_the_epoch_is_absent_from_the_carried_map' panicked at packages/server-rust/src/tombstone_frontier_impl.rs:4494:9:
+    assertion `left == right` failed: R1.5: epoch absent from the carried map: PruneEpochResidencyRecord { epoch: 1, refs_at_entry: 1, refs_at_exit: 0, stamped_bytes: 4, bytes_freed_attributed: 4, exit_kind: DrainedByPrune, entered_at_op_seq: 1, entered_at_unix_ms: 1786802620342, exited_at_op_seq: 2, lwm_passed_at_op_seq: None, fence_passed_at_op_seq: None, lwm_at_exit: 0, durable_watermark_at_exit: 0, current_epoch_at_exit: 2, removed_refs_observed: 1, removed_bytes_observed: 4 }
+      left: 1
+     right: 0
+
+    ---- tombstone_frontier_impl::tests::s1_pre_freeze_sanity_row_diverges_through_public_entry_points_only stdout ----
+
+    thread 'tombstone_frontier_impl::tests::s1_pre_freeze_sanity_row_diverges_through_public_entry_points_only' panicked at packages/server-rust/src/tombstone_frontier_impl.rs:4742:9:
+    discriminating assertion R_obs == R_ent + 1 does not hold; row: target=topgun_server::tombstone_frontier::residency message=prune epoch exit kind=epoch_exit epoch=1 refs_at_entry=1 refs_at_exit=0 stamped_bytes=4 bytes_freed_attributed=4 exit_kind=DrainedByPrune entered_at_op_seq=1 entered_at_unix_ms=1786802620718 exited_at_op_seq=2 lwm_passed_at_op_seq=Some(2) fence_passed_at_op_seq=Some(2) lwm_at_exit=2 durable_watermark_at_exit=1 current_epoch_at_exit=2 removed_refs_observed=1 removed_bytes_observed=4
+
+    ---- tombstone_frontier_impl::tests::step0_leg_c_v1_positive_control_planted_ref_loss_fires_on_the_returned_record stdout ----
+
+    thread 'tombstone_frontier_impl::tests::step0_leg_c_v1_positive_control_planted_ref_loss_fires_on_the_returned_record' panicked at packages/server-rust/src/tombstone_frontier_impl.rs:4799:9:
+    assertion `left == right` failed: R_obs must be 0: the planted vector carried nothing for drain_prunable to observe: PruneEpochResidencyRecord { epoch: 1, refs_at_entry: 1, refs_at_exit: 0, stamped_bytes: 4, bytes_freed_attributed: 4, exit_kind: DrainedByPrune, entered_at_op_seq: 1, entered_at_unix_ms: 1786802620750, exited_at_op_seq: 2, lwm_passed_at_op_seq: Some(2), fence_passed_at_op_seq: Some(2), lwm_at_exit: 2, durable_watermark_at_exit: 1, current_epoch_at_exit: 2, removed_refs_observed: 1, removed_bytes_observed: 4 }
+      left: 1
+     right: 0
+
+    failures:
+        tombstone_frontier_impl::tests::finalize_epoch_exit_zeroes_observation_fields_when_the_epoch_is_absent_from_the_carried_map
+        tombstone_frontier_impl::tests::s1_pre_freeze_sanity_row_diverges_through_public_entry_points_only
+        tombstone_frontier_impl::tests::step0_leg_c_v1_positive_control_planted_ref_loss_fires_on_the_returned_record
+
+    test result: FAILED. 1808 passed; 3 failed; 2 ignored; 0 measured; 0 filtered out; finished in 100.17s
+    error: test failed, to rerun pass `-p topgun-server --lib`
+
+`pnpm test:sim`
+Exit code: 101
+
+    ---- sim::tombstone_gc_proof::tests::d1_divergence_removed_observation_diverges_from_entry_attribution stdout ----
+
+    thread 'sim::tombstone_gc_proof::tests::d1_divergence_removed_observation_diverges_from_entry_attribution' panicked at packages/server-rust/src/sim/tombstone_gc_proof.rs:981:9:
+    assertion `left == right` failed: D1 predicate limb 1 (R_obs == R_ent + 1) must hold; row:  target=topgun_server::tombstone_frontier::residency message=prune epoch exit kind=epoch_exit epoch=1 refs_at_entry=2 refs_at_exit=0 stamped_bytes=8 bytes_freed_attributed=8 exit_kind=DrainedByPrune entered_at_op_seq=1 entered_at_unix_ms=1786802709531 exited_at_op_seq=3 lwm_passed_at_op_seq=Some(3) fence_passed_at_op_seq=Some(3) lwm_at_exit=2 durable_watermark_at_exit=1000 current_epoch_at_exit=2 removed_refs_observed=2 removed_bytes_observed=8
+      left: 2
+     right: 3
+
+    failures:
+        sim::tombstone_gc_proof::tests::d1_divergence_removed_observation_diverges_from_entry_attribution
+
+    test result: FAILED. 25 passed; 1 failed; 0 ignored; 0 measured; 1811 filtered out; finished in 0.68s
+    error: test failed, to rerun pass `-p topgun-server --lib`
+     ELIFECYCLE  Command failed with exit code 101.
+
+**Both failure sets name the discriminating assertion `R_obs == R_ent + 1` literally**:
+lib's `s1_...` says "discriminating assertion R_obs == R_ent + 1 does not hold"; sim's
+`d1_...` says "D1 predicate limb 1 (R_obs == R_ent + 1) must hold". Checklist 3 is
+satisfied by this re-run.
+
+--------------------------------------------------------------------------------------
+LEG (c) — POSITIVE CONTROL
+--------------------------------------------------------------------------------------
+
+Unmutated: `step0_leg_c_v1_positive_control_planted_ref_loss_fires_on_the_returned_record`
+passes (part of leg (a)'s 1811-passed lib run above), asserting `R_obs == 0` and
+`R_ent > 0` on the record `f.lock().drain_prunable()` returns for a planted-empty
+`epoch_tags` entry.
+
+Mutated: it FAILS (quoted above under leg (b)'s lib failures) with `left: 1, right: 0`
+on the `R_obs must be 0` assertion — the control is live under the mutation, not
+vacuous.
+
+--------------------------------------------------------------------------------------
+REVERT AND RE-VERIFY
+--------------------------------------------------------------------------------------
+
+`git checkout --` restored the clean tree.
+
+`cargo test --release -p topgun-server --lib`
+Exit code: 0
+
+    test result: ok. 1811 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 95.93s
+
+`pnpm test:sim`
+Exit code: 0 (18 `test result: ok` blocks, 26 passed in the primary `sim::` module, 0 failed)
+
+--------------------------------------------------------------------------------------
+HONESTY NOTE (verbatim in substance, quoted from the handoff)
+--------------------------------------------------------------------------------------
+
+On the FIRST mutated run, `S1`'s message printed the row but did not contain the
+literal `R_obs == R_ent + 1`, so Checklist 3's "each failure message names the
+discriminating assertion" was not yet satisfied by that run. The assertion itself
+already was the discriminating one and already failed on that first run — only its
+MESSAGE lacked the literal. Commit `453aeb55` changed only the assertion's MESSAGE to
+name `R_obs == R_ent + 1` explicitly; the asserted condition is byte-identical before
+and after that commit (no behavioral change, message-only). Legs (a) and (b) were then
+re-run end to end from a clean tree, and every figure published above and in
+`spec358-microdiag-transcript.txt` is from that re-run. `D1`'s message already named
+the literal on the first run and required no message change.

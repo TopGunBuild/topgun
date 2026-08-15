@@ -7687,3 +7687,642 @@ non-replication evidence, and X1/X2/X6's successor-predicate design inputs.
 **content** in both directions by `spec357-trackergrade.sh`.
 
 **Cell E's disposition is `DEFERRED-PENDING-DIAGNOSIS`** (§11.13) — taken, not un-taken.
+
+---
+
+## §12 — SPEC-358: the PD-F12 micro-diagnosis (frozen predicate, then the executed record)
+
+**This heading and everything beneath it is APPENDED — no byte of §0–§11 is touched by it.**
+`grep -c '^## §12'` is **1** in this file from this commit forward. §12.0 below is the **PRE-DATA
+FREEZE**: it is committed **before** any leg of Step 0 has been run and **before** any verdict
+exists. Once committed, §12.0 MUST NOT be edited — not a threshold, not an ordering, not a
+conditional (X11, X13, K4). §12.1+, appended strictly beneath §12.0 by a later group, carries the
+executed record; nothing in §12.0 anticipates it.
+
+### §12.0 — THE PRE-DATA FREEZE
+
+#### Definitions
+
+Symbols are defined per exit row / per epoch / per pass. They carry no universe of their own —
+every quantifier that ranges over drives is written on the Decision Table row that uses it, never
+here.
+
+| Symbol | Definition | Side |
+|---|---|---|
+| `R_obs` | `removed_refs_observed` — `refs.len()` of the vector `epoch_tags.remove(&e)` returned | OBSERVATION (index) |
+| `B_obs` | `removed_bytes_observed` — `Σ tag.len()` over that same vector | OBSERVATION (index) |
+| `R_ent` | `refs_at_entry` | ATTRIBUTION (by construction) |
+| `B_att` | `bytes_freed_attributed` (`:= slot.stamped_bytes`) | ATTRIBUTION (by construction) |
+| `B_restored(e)` | the byte total the DRIVER itself restored into `e` via `restore_tombstone_ref` — a driver-side quantity, `0` on a restore-free drive | driver bookkeeping |
+| `C_e` | settlement `considered` for epoch `e` | OBSERVATION (store side) |
+| `D_e` | settlement `dropped` for epoch `e` | OBSERVATION (store side) |
+| `F_e` | settlement `bytes_freed` for epoch `e` | OBSERVATION (store side) |
+| `E_p` | the pass's `empty_drain` flag | pass ledger |
+| `K_p` | the pass's `considered` | pass ledger |
+
+**Transport of the pass-ledger symbols (NORMATIVE, frozen with the rest).** `K_p` and `E_p` are
+read from the **pass row** — the `kind = "prune_pass"` emission on
+`topgun_server::tombstone_frontier::residency` emitted beside `observe_pass`
+(`crdt.rs:1696`) — and from **nothing else**. They are NOT read from the Prometheus mirror: the
+counter handles are bound at `TombstoneFrontier::new` (`:1210-1213`) via `touched_counter`
+(`:2226`), called from `MetricsPruneRecorder::new()` (`:2341`), and the sim's frontier is built
+outside any `with_local_recorder` binding, so those handles are permanent no-ops in-process. The
+pass row fires once per invocation, empty drains included, so it is also what **individuates a
+pass** on the capture.
+
+#### `S1` — the pre-freeze sanity row (executed, pasted in BEFORE the freeze)
+
+`S1` is executed and pasted in before this section is frozen because a discriminator nobody has
+shown to discriminate carries no evidentiary weight. `S1` is the instrument's sanity check — proof
+the two terms `R_obs` and `R_ent` CAN disagree at all, constructed entirely through public entry
+points on the `frontier()` fixture of `tombstone_frontier_impl.rs`'s inline tests — not a claim
+about the phenomenon PD-F12 raised.
+
+Construction, every step through a public entry point (bar the `#[cfg(test)]` watermark injector
+at step 7, which the whole file already uses):
+
+| # | Call | Site | Effect |
+|---|---|---|---|
+| 1 | `f.set_epoch_width(1)` | `:1937` | one epoch per stamp |
+| 2 | `f.stamp_tombstone("m", "k1", "TAG1")` | `:1698` | epoch 1 holds 1 ref; slot created |
+| 3 | `f.stamp_tombstone("m", "k2", "TAG2")` | `:1698` | rolls past epoch 1 → entry row fires; `slot.refs_at_entry = 1`, `entry_emitted = true` |
+| 4 | `f.restore_tombstone_ref(1, TombstoneRef { map, key, tag: "TAGX" })` | `:1923` | `epoch_tags[1]` now holds **2** refs; `epoch_slots[1]` is **untouched** |
+| 5 | `f.set_delivered(CONN_A, 100)` | `:1425` | **REQUIRED PREREQUISITE.** `advance_on_ack` clamps by `delivered.unwrap_or(0)`; with no prior `set_delivered` the bound is 0, the cursor advance returns `None`, and step 8 drains nothing |
+| 6 | `block_on(f.confirm_apply_ack(&c, 2, CONN_A))` | `:1464` | bound = `min(claimed 2, delivered 100, current_max_epoch 2) = 2`; LWM 2 > 1 → epoch 1 prune-eligible |
+| 7 | `f.set_durable_epoch_watermark(1)` | `:1839` (`#[cfg(test)]`) | second call-site conjunct satisfied |
+| 8 | `f.drain_prunable_tombstones()` | `:1870` | `epoch_tags.remove(&1)` returns 2 refs → the pass publishes one `DrainedByPrune` exit row through `publish_epoch_exit` |
+
+**How step 8's row is observed (normative, and deliberately not a returned record).**
+`drain_prunable_tombstones` returns `Vec<(Epoch, TombstoneRef)>` and no record — it consumes its
+exits internally through `publish_epoch_exit`. So `S1` reads the exit row off the **declared
+`tracing` capture** (the `:1301` emission on the `residency` target), with a thread-local capture
+layer of the `network/device_identity.rs:397-429` shape sited in this file's own inline tests. The
+returned `Vec` is asserted separately and only as a count check (`len() == 2`).
+
+**The recorded row MUST show `R_obs == 2` against `R_ent == 1` (and `B_obs == B_att +
+len("TAGX")`).** That is `R_obs != R_ent` on a genuine `DrainedByPrune` exit row constructed
+entirely through public entry points — the divergence-reachability demonstration Step 0 leg (b) is
+inadmissible without.
+
+**Executed row, pasted verbatim:**
+
+```
+target=topgun_server::tombstone_frontier::residency message=prune epoch exit kind=epoch_exit epoch=1 refs_at_entry=1 refs_at_exit=0 stamped_bytes=4 bytes_freed_attributed=4 exit_kind=DrainedByPrune entered_at_op_seq=1 entered_at_unix_ms=1786797138477 exited_at_op_seq=2 lwm_passed_at_op_seq=Some(2) fence_passed_at_op_seq=Some(2) lwm_at_exit=2 durable_watermark_at_exit=1 current_epoch_at_exit=2 removed_refs_observed=2 removed_bytes_observed=8
+```
+
+This row shows `refs_at_entry=1` (`R_ent = 1`) against `removed_refs_observed=2` (`R_obs = 2`), so
+`R_obs == R_ent + 1` holds; and `bytes_freed_attributed=4` (`B_att = 4`) against
+`removed_bytes_observed=8` (`B_obs = 8`), so `B_obs == B_att + len("TAGX")` holds (`len("TAGX")
+== 4`). The row was reached entirely through public entry points and observed on the captured
+residency emission; the returned `Vec` was asserted separately as `len() == 2`. `S1` diverges.
+
+**If `S1` had not diverged, the increment would have STOPPED at G5** and been surfaced to the user
+with the evidence, with no boundary crossed and E-C not firing. `S1` diverged, so this freeze
+proceeds.
+
+#### Step 0 — instrument identity, fail-closed, evaluated first
+
+Three legs, all required:
+
+- **leg (a) UNMUTATED** — `cargo test --release -p topgun-server --lib` and `pnpm test:sim` pass
+  at the executed tip, and this section carries the executed `S1` row (above).
+- **leg (b) MUTATED** — with `spec358-mutation-arm.patch` applied (`removed_refs_observed :=
+  slot.refs_at_entry`, `removed_bytes_observed := slot.stamped_bytes`), **both** the `S1` test
+  (lib) and drive `D1` (sim) must **FAIL**, and the failure must name the discriminating assertion
+  `R_obs == R_ent + 1`.
+- **leg (c) POSITIVE CONTROL for the V1 limb** — at `tombstone_frontier_impl.rs`'s inline-test
+  site, plant `epoch_tags.insert(e, Vec::new())` over an entry-emitted, still-tracked slot (the
+  same in-module bypass the tree already uses), then drain **in-module** via
+  `f.lock().drain_prunable()`: the `DrainedByPrune` record MUST carry `R_obs == 0` and
+  `R_ent > 0`. Leg (c) is X21-a's proof (the returned-record transport); `S1` is X21-b's. **Leg
+  (c)'s rows are EXCLUDED from every Decision Table universe** by the frozen scoping below, so the
+  control can never decide the verdict.
+
+If any leg does not hold **after** the freeze, the determination is `INDETERMINATE-INSTRUMENT`,
+Steps 1–3 are recorded `NOT EVALUATED`, and E-C fires.
+
+#### Step 1 — the bridge identity
+
+Evaluated **per pass**, over the passes of the Decision Table universe drive (`D5`); recorded as
+values for every other drive that can observe them.
+
+- **I1**: `Σ_e R_obs(e) == K_p`, both read from the SAME pass — the `R_obs` terms off that pass's
+  exit rows, `K_p` off that pass's pass row. Both on the ONE `tracing` transport.
+- **I2**: `E_p == (Σ_e R_obs(e) == 0)`, with `E_p` read off the same pass row. `E_p` is
+  `drained.is_empty()` and `Σ_e R_obs(e)` is the length of the vector `drained` was extended from,
+  so I2 is a genuine identity between two separately emitted quantities, not a tautology across
+  one.
+- **I3**: `B_obs(e) ≤ B_att(e) + B_restored(e)` per drained epoch. The unqualified form
+  `Σ B_obs ≤ Σ B_att` is FALSE and is not used: `restore_tombstone_ref` accepts an arbitrary epoch
+  and credits no `stamped_bytes`, so a restored ref makes `B_obs > B_att` legitimately — and Step
+  0 leg (b)'s own discriminator IS a restore. The `B_restored(e)` term is what makes I3 meaningful
+  in the presence of that site.
+
+**Pass individuation (frozen).** A pass is delimited by its pass row: exactly one is emitted per
+`prune_epoch_tombstones` invocation, on every path, empty drains included, and it is emitted
+**last**: the exit rows fire during the drain and the settlement rows in the `per_epoch.values()`
+loop, both before `observe_pass`. A pass is therefore the rows captured **between the previous
+pass row and its own pass row**.
+
+**Scoping (frozen).** On a pass in which any `restored_*` exit fired, I1 / I2 / I3 are recorded
+**NOT-APPLICABLE** with the pass captured verbatim: a prune-loop restore re-enters refs into an
+already-exited epoch, whose next drain emits no exit row at all, so a violation there is that
+site's derived shape, not a finding.
+
+Each identity's value is recorded per pass. A violation on an in-scope pass is a **result**, not a
+test defect: it is recorded with the offending pass captured verbatim and carried into Step 2.
+
+#### Step 2 — the Decision Table (D-T)
+
+Evaluated in this order; the FIRST row whose condition holds **over its own universe** is the
+verdict. Exactly one verdict is published.
+
+Every row carries its own universe. No row's quantifier ranges over another row's evidence, and no
+row contains a universal clause that can block a later row.
+
+| # | Verdict | Universe (FROZEN) | Condition | Reading named |
+|---|---|---|---|---|
+| 1 | **V1 — REF-LOSS** | every `DrainedByPrune` exit row recorded by `D5` | ∃ a row with `R_obs < R_ent` (`R_obs == 0 ∧ R_ent > 0` is its extreme case) | **(i)** a genuine ref-loss path: part or all of the epoch's content left the index without the drain removing it, and the exit ledger attributed its whole entry-side content as freed. The prune is **NOT** removing those refs. |
+| 2 | **V2 — BOOKKEEPING ATTRIBUTION** | every drained epoch recorded by `D5`, under precondition P-KEYS | ∃ an epoch with `R_obs > 0` **and** `D_e == 0` **and** `F_e == 0` **and** `B_att > 0` | **(ii)** the exit attribution is bookkeeping, not an observation of reclamation: the index removal is real, the store frees nothing, and `bytes_freed_attributed` describes an index event. |
+| 3 | **V3 — COUNTER-FAMILY MISNAMING** | every prune pass driven by `D5` on which no `restored_*` exit fired | I1 or I2 is VIOLATED on at least one such pass | **(iii)** one of the two counter families does not describe what its name says: the pass ledger's `considered` / `empty_drain` do not track the drain's own removals. The named family is recorded with the offending pass. |
+| 4 | **V0 — NOT REPRODUCED** | — | none of rows 1–3 holds over its own universe | No reading is named. The contradiction is not reachable by the frozen drive set. E-C fires. |
+
+**P-KEYS (precondition, recorded as a VALUE, not assumed).** Every ref `D5` actually drains has
+its key present in the store at drain time, so a store-side zero cannot be manufactured by the
+fixture. If P-KEYS fails on any considered ref, `D5` REDs the round rather than resolving row 2.
+
+**Universe scoping (FROZEN, with the reason each exclusion exists).** `D1 … D4` and Step 0 leg (c)
+are RECORDED in full but lie OUTSIDE every row's universe:
+
+| Excluded | Why — stated before the run, never after |
+|---|---|
+| `D1` | restores by design, so `R_obs > R_ent` there is the instrument's own discriminator, not evidence about the prune |
+| `D2` | produces row 3's signature by construction |
+| `D3` | produces row 2's signature by construction |
+| `D4` | its rows are not observable at all at row granularity: both in-process transports are thread-local and its prune runs in a spawned task on a `multi_thread` runtime |
+| Step 0 leg (c) | produces row 1's signature by planting it |
+
+Consequently rows 2 and 3 are not readable off the source before the run over the universes they
+range on. What `D1 … D4` contribute is CONFIRMATION (or refutation, which would itself be a
+POST-DATA finding) of the facts they were derived from and of the aggregate conservation identity.
+
+**Row 1 is the stated exception, recorded as a FACT of this design rather than as an experimental
+claim.** Over `D5` — a public-API-only drive — row 1 fires only if the mutation-site enumeration
+that fixes the four `epoch_tags` mutation sites is incomplete, which is reading (i) itself
+(`R_obs < R_ent` is not constructible through the public API given that enumeration). Its
+non-firing is therefore an **informative negative about the enumeration**, not a null result, and
+this round claims nothing stronger for it. This is why the limb is kept live by an execution —
+Step 0 leg (c) proves the predicate fires when its antecedent exists — while leg (c)'s own rows
+stay outside every universe.
+
+**No row may be added, reordered, re-thresholded or re-scoped after this section is committed** —
+the universe column is frozen with the rest (X17). A reading not on this table cannot be published
+as this round's verdict; if the data suggests one, it is recorded as a POST-DATA finding and
+routed, and the table's own verdict still stands.
+
+#### The frozen drive set `D1 … D5`
+
+Each drive records `REPRODUCED` / `NOT-REPRODUCED` plus the evaluated value of its own predicate.
+All are in-process and deterministic (no wall clock, no sleep-based synchronisation, no soak).
+
+| Drive | Site / runtime / transport | What it drives | Its OWN predicate (recorded as a VALUE) | In a D-T universe |
+|---|---|---|---|---|
+| `D1` **DIVERGENCE** | sim; `#[tokio::test]` (current-thread); `tracing` capture | stamp ×N into `e` → one more stamp to roll over → `restore_tombstone_ref(e, extra)` → tracked cursor past `e` + `set_durable_epoch_watermark` → `prune_epoch_tombstones` | `R_obs == R_ent + 1` **and** `B_obs == B_att + len(extra.tag)` on `e`'s `DrainedByPrune` exit row | NO — Step-0 discriminator; the sim-side twin of `S1` |
+| `D2` **POST-EXIT RESTORE** | sim; current-thread; `tracing` capture | drain (exit row fires, slot retired) → `restore_tombstone_ref` into that exited epoch → re-drain | the second drain removes `k > 0` refs and emits no exit row for `e`: `Σ_e R_obs == 0` while `pass.considered == k` | NO |
+| `D3` **ABSENT-KEY** | sim; current-thread; `tracing` capture | stamp tombstones for keys never written to the store → drain → every ref takes the `Ok(None)` arm | per-epoch `D_e == 0 ∧ F_e == 0` while `B_att > 0` | NO |
+| `D4` **TOCTOU RACE** | sim; `#[tokio::test(flavor = "multi_thread")]`; `N = 64`; `epoch_width = 1`; the fixture already in the file | interleaved push / prune under the shared per-key writer | the AGGREGATE terms `index_conservation_snapshot()` exposes: exactly one attributed drain, exactly one exit row, the conservation invariant holds | NO — per-row terms unobservable here |
+| `D5` **SEQUENTIAL REGIME** | sim; current-thread; `tracing` capture — exit rows, settlement rows and pass rows, all three on the ONE transport | `≥ 3000` stamps at `epoch_width = 1` (⇒ `≥ 3000` epochs), every key seeded PRESENT with its own tombstone, one tracked cursor advanced per stamp (`set_delivered(conn, 1_000_000)` before each `confirm_apply_ack`), `set_durable_epoch_watermark(1_000_000)`, one `prune_epoch_tombstones` pass per stamp | I1, I2, I3 on every pass; P-KEYS on every considered ref | YES — the D-T's sole universe |
+
+**`D5`'s durable-epoch watermark is `1_000_000`, set once before the stamp loop and never
+lowered.** The second call-site conjunct is `watermark >= e`, and the drive creates `≥ 3000`
+epochs at width 1. The file's ubiquitous `1000` literal is deliberately NOT copied: it would leave
+epochs 1001 … 3000 permanently ineligible and silently shrink the D-T's only universe by two
+thirds. `1_000_000` exceeds the highest epoch the drive can reach by more than two orders of
+magnitude (`Epoch = u64`), so every epoch `D5` creates stays inside the universe.
+
+**`D5`'s cursor is `delivered` up to `1_000_000` — the same non-constraining sentinel as the
+watermark, and for the same reason.** `advance_on_ack` clamps the cursor by
+`claimed.min(delivered).min(current_max_epoch)`; the shared `track_client` shape this drive cites
+hardcodes `set_delivered(conn, 100)`. A verbatim copy of that `100` literal would cap the cursor at
+epoch 100 for a drive that stamps `≥ 3000` epochs: passes 101 … 3000 would all be empty drains,
+silently shrinking the D-T's sole universe by roughly 97 %. `set_delivered(conn, 1_000_000)` is
+deliberately NOT the `track_client` shape's `100`: it is named once here, before the freeze, so
+`delivered` is never the binding term in the clamp.
+
+**Why `D5` alone carries the table.** It is the only drive whose per-exit and per-pass terms are
+observable in-process (current-thread ⇒ the thread-local capture works) AND whose outcome is not
+derivable from the source at authoring time. It is a **sequential single-writer regime at
+`epoch_width = 1`**; the spec does not claim it is a width-1000 regime — 3,000 epochs at width
+1000 would need 3,000,000 stamps, which is a bounded follow-up, not an in-process drive.
+
+#### R4.6 — the non-empty-capture requirement, WITH the corrected off-by-one clause
+
+**No verdict is ever read off an empty capture, and no term is ever read off a transport that does
+not carry it.** Every drive that reads rows through the `tracing` capture first asserts the
+capture is non-empty and carries the expected number of rows **of each kind it will read** —
+`epoch_exit`, `settlement` and `prune_pass` counted separately, with `prune_pass` expected exactly
+once per driven invocation.
+
+**On `D5`, the expected `epoch_exit` row count is the drive's REAL KEYED stamp count — NOT its
+total `stamp_tombstone` call count, which is larger by exactly one.** The difference is
+structural, not incidental: at `epoch_width = 1` an epoch `e` is entry-emitted, and so becomes
+drainable, only on the stamp that rolls PAST it, so the last stamped epoch stays open unless the
+drive adds a deliberate closing stamp on a throwaway key that seeds no store entry and is never
+itself drained. Any sequential rolling drive of this shape carries that off-by-one by construction,
+and a freeze that read "stamp count" as the raw call count would fail this assertion by exactly 1
+and manufacture a RED — a manufactured-verdict hazard of the exact class this freeze exists to
+prevent. It is a statement about the instrument's arithmetic, not about the data. With the count
+read correctly, a cursor that is under-powered (e.g. clamped by an insufficiently large `delivered`
+value) surfaces as this assertion failing — a RED — rather than as a silently short-universe pass
+of empty drains. A capture that is empty or short **in any of the three kinds** is a RED, never "no
+violation".
+
+#### Step 3 — the Fix-Shape Mapping (F-M), frozen before the verdict is known
+
+| Verdict | Fix shape | Why |
+|---|---|---|
+| **V1 — REF-LOSS** | STANDALONE CORRECTNESS FIX, which the `ReclamationRegistry` family then builds on | Content leaving the index unreclaimed is a selection/frontier-class defect. A registry that never reclaims below a live claim contains it but does not repair it; the refs are still lost. |
+| **V2 — BOOKKEEPING ATTRIBUTION** | STANDALONE CORRECTNESS FIX, which the registry family then builds on | The defect is on the store-side reclamation path, which the registry does not touch. Registry-gating a prune that frees nothing changes nothing. |
+| **V3 — COUNTER-FAMILY MISNAMING** | STANDALONE CORRECTNESS FIX — of the INSTRUMENT — and the ruling MUST state, in the same sentence, that the prune's own throughput mechanism remains UNCLASSIFIED | A misnamed counter family is repaired where it is emitted. It is a naming of PD-F12's contradiction, not of why the reclaim fraction falls; the ruling must not let the first pass for the second. E-C's registry-side consequence applies unchanged. |
+| **V0 — NOT REPRODUCED** | THE RULING IS NOT WRITTEN | No reading is named. E-C fires. |
+| any `INDETERMINATE-*` (Step 0 fail-closed) | THE RULING IS NOT WRITTEN | Same. E-C fires. |
+
+**Standing prohibition (unchanged, and holding regardless of verdict):** the ruling may propose
+**neither** the slope stick **nor** `f(span, width, churn)`. The gate returns on `ceiling =
+min_live_claim − fixed_margin`, and nothing else.
+
+#### E-C — the pre-registered Escalation Clause
+
+> If this increment does not name the mechanism, the diagnosis line HARD STOPS. There is no
+> diagnosis round after this one.
+>
+> "Does not name the mechanism" means exactly: the frozen table resolves to V0, **or** Step 0
+> fires fail-closed with any `INDETERMINATE-*`. Resolution to V1, V2 or V3 **is** a naming and E-C
+> does not fire — with the qualification F-M's V3 row states explicitly.
+>
+> On firing, the `ReclamationRegistry` family starts with the cause **unclassified**, justified by
+> this manifest's §8.3, quoted verbatim beside the determination:
+>
+> > "The recommended reclamation model closes safety REGARDLESS of which cause it turns out to
+> > be … A selection defect, a scheduling defect and a throughput defect are all contained by a
+> > registry that never reclaims below a live claim."
+>
+> What an unclassified cause costs is fix-shape efficiency, not safety. A Step-0 or V0 outcome is
+> to be read as an expensive answer, not a blocked one. This clause exists so it is not re-argued
+> at the boundary: it is settled here, at plan time, by the user.
+
+#### X21 — the four-limb discharge plan (NORMATIVE; explicitly not left silent)
+
+X21 reads: *every frozen surface, predicate, tool and join is validated against the exact
+transport the DATA half will consume, before the boundary.* This increment is
+in-process/deterministic, so the rule is APPLICABLE and DISCHARGED, in **four** limbs, each with
+an executed proof to be recorded in `spec358-x21-discharge.txt`:
+
+- **X21-a — the struct transport.** The two new fields are asserted on a returned record, at the
+  one site where a record is returned by value: `detect_epoch_exit` / `finalize_epoch_exit` in
+  `tombstone_frontier_impl.rs`'s inline tests. A `PruneRecordObserver` test double is NOT available
+  and is not claimed. Proof: Step 0 leg (c) alone, which drains in-module via
+  `f.lock().drain_prunable()` — the one in-crate call that returns the exit rows by value — and
+  asserts both new fields on that record. `S1` does NOT discharge this limb: its step 8 goes
+  through the public `drain_prunable_tombstones`, which returns no record, so `S1`'s record-shaped
+  assertions ride X21-b and its assertion on the return value is a count check only.
+- **X21-b — the line transport.** Every term the predicate names MUST be reachable on the exact
+  `tracing` emission it is read from: the two new fields on the exit row, all eight terms on the
+  settlement row, and `considered` / `empty_drain` on the pass row. Proof: a `tracing-subscriber`
+  capture (`set_default` + a `Layer` with a sink, shape at `network/device_identity.rs:397-429`)
+  asserts each field name appears in the **rendered field text** — the `name=value` pairs a
+  `tracing::field::Visit` collector accumulates — not against the struct. `S1` is this limb's
+  second executed proof, on the exit row.
+- **X21-c — the metrics transport and the join.** The two new pinned series MUST be present in a
+  rendered `/metrics` scrape and carry the expected values, using the shape already in the tree:
+  `PrometheusBuilder::build_recorder` + `metrics::with_local_recorder` + `rendered_counter`. The
+  proof is sited in the inline tests of a COUNTED file, not in `src/sim` (X21-d). The join key is
+  `epoch`, populated on every row of both ledgers; no wall-clock key is used anywhere.
+- **X21-d — the thread-affinity limb.** Both in-process transports the D-T's rows travel over are
+  thread-local: the `tracing` capture (`tracing::subscriber::set_default`) and the metrics recorder
+  (`metrics::with_local_recorder`). A drive that runs the prune inside `tokio::spawn` on a
+  `multi_thread` runtime observes neither, and observes them as an **empty capture**, which reads
+  exactly like "no violation". Frozen consequence: (i) every drive whose rows enter a D-T universe
+  runs on a current-thread runtime with the emission on the test's own thread; (ii) `D4`, the
+  multi-thread race, is scoped to the aggregate `index_conservation_snapshot` terms and excluded
+  from every universe; (iii) every drive that reads rows off a capture MUST first assert the
+  capture is non-empty and carries the expected row count (R4.6, above); (iv) the capture's sink
+  keeps one entry per event (a `Vec<String>`, not a single concatenated `String`), because the D-T
+  is evaluated per row and per pass and a concatenated sink individuates neither. Proof to be
+  recorded in `spec358-x21-discharge.txt`, per drive: runtime flavour, transport, captured-row
+  count by row kind (`epoch_exit` / `settlement` / `prune_pass`).
+
+#### The two pinned metric names (extending the closed set)
+
+- `METRIC_PRUNE_REMOVED_REFS_OBSERVED_TOTAL = "topgun_or_prune_removed_refs_observed_total"`
+- `METRIC_PRUNE_REMOVED_BYTES_OBSERVED_TOTAL = "topgun_or_prune_removed_bytes_observed_total"`
+
+Both are eagerly registered in `MetricsPruneRecorder::new()` via `touched_counter`, so they exist
+in the first scrape. The pinned-names banner in `tombstone_frontier.rs:759` reads **24 counters**
+once both are added, up from 22.
+
+#### R6.3 — the §0–§11 digest, recorded before this freeze was appended
+
+The span is `sed -n '1,7689p'` of this file. §11 runs from line 5779 to the pre-append EOF at line
+7689, and this §12 section is appended strictly beneath it, so the same literal span is valid
+before and after the append.
+
+```
+sed -n '1,7689p' packages/server-rust/benches/soak_harness/evidence/spec356-manifest.md | shasum -a 256
+24273adf2ee87b544520cef817c826bf2be645e07cb97c8ef110ca21e59dabac
+```
+
+Recorded here as the PRE-DATA value. The identical digest, recomputed over the same span AFTER
+this section was appended, and the post-append boundary lines (`sed -n '7690,7695p'`), are pasted
+into `spec358-microdiag-transcript.txt` by the group that executes Step 0 (R6.3, AC11). No byte of
+§0–§11 is edited by this append.
+
+---
+
+## §12.1 — SPEC-358: the executed record
+
+**Appended strictly beneath §12.0. Zero bytes of §0–§12.0 above this line are edited by
+this section.** Executed tip for every leg and drive below: `453aeb55` (branch
+`sf-358-pdf12-microdiag`). Full quoted output lives in
+`spec358-microdiag-transcript.txt`, `spec358-mutation-arm.txt` and
+`spec358-x21-discharge.txt`; this section carries the evaluated values and the
+determination.
+
+### §12.1.a — Step 0, all three legs HOLD
+
+- **leg (a) UNMUTATED**: `cargo test --release -p topgun-server --lib` → exit 0,
+  `1811 passed; 0 failed; 2 ignored`. `pnpm test:sim` → exit 0, `26 passed; 0 failed`.
+  `S1`'s executed row (already frozen into §12.0) diverges: `R_obs == R_ent + 1` holds
+  (`2 == 1 + 1`).
+- **leg (b) MUTATED** (`spec358-mutation-arm.patch` applied): `cargo test --release
+  -p topgun-server --lib` → exit **101**, `1808 passed; 3 failed`, with
+  `s1_pre_freeze_sanity_row_diverges_through_public_entry_points_only` FAILING and
+  naming the literal "discriminating assertion R_obs == R_ent + 1 does not hold".
+  `pnpm test:sim` → exit **101**, `25 passed; 1 failed`, with
+  `d1_divergence_removed_observation_diverges_from_entry_attribution` FAILING and
+  naming "D1 predicate limb 1 (R_obs == R_ent + 1) must hold". **Both halves fail, and
+  each failure names the discriminating assertion `R_obs == R_ent + 1`.** Reverted
+  (`git checkout --`) and re-verified: lib exit 0 `1811 passed`, sim exit 0
+  `26 passed`.
+- **leg (c) POSITIVE CONTROL**:
+  `step0_leg_c_v1_positive_control_planted_ref_loss_fires_on_the_returned_record`
+  passes unmutated, asserting `R_obs == 0 ∧ R_ent > 0` on the record
+  `f.lock().drain_prunable()` returns for a planted-empty `epoch_tags` entry. Under the
+  mutation it FAILS with `left: 1, right: 0` — the control is live, not vacuous.
+
+**Honesty note (recorded per the handoff, verbatim in substance):** on the FIRST
+mutated run, `S1`'s message printed the row but did not contain the literal
+`R_obs == R_ent + 1`, so Checklist 3's "each failure message names the discriminating
+assertion" was not yet satisfied on that run — the assertion itself already was the
+discriminating one and already failed. Commit `453aeb55` changed only the assertion's
+MESSAGE to name it; the asserted condition is byte-identical. Legs (a) and (b) were
+then re-run end to end from a clean tree, and every figure above is from that re-run.
+`D1`'s message already named the literal on its first run.
+
+Step 0 does NOT fire fail-closed. The determination is NOT `INDETERMINATE-INSTRUMENT`.
+Steps 1–3 are evaluated.
+
+### §12.1.b — Step 1, the bridge identities (over `D5`)
+
+- **I1** (`Σ_e R_obs(e) == K_p`): HELD on all **3001** passes, 0 violations.
+- **I2** (`E_p == (Σ_e R_obs(e) == 0)`): HELD on all **3001** passes, 0 violations.
+- **I3** (`B_obs(e) ≤ B_att(e) + B_restored(e)`): HELD on all **3000** drained epochs
+  (`B_restored = 0`; `D5` never restores).
+- NOT-APPLICABLE passes (a `restored_*` exit fired): **0**.
+- **P-KEYS**: HELD on **3000/3000** considered refs (`absent = 0` on every settlement
+  row).
+
+**What `I3`'s 3000/3000 weighs, priced (added by Review v2; the figure itself is
+unchanged).** Over `D5` — and only over `D5` — `I3` is a ONE-SIDED check between two
+quantities that trace to the SAME string. Each epoch carries exactly one ref;
+`B_restored(e) ≡ 0` on every epoch (this drive never restores, so the drive asserts the
+bare `B_obs ≤ B_att`); and both `B_obs` and `B_att` are the byte length of that epoch's
+single `D5TAG{i}` tag, read off the SAME exit row. The check therefore excludes an
+OVER-count on the observation side (or an under-credit on the attribution side) and
+nothing else: a total observation failure lands `B_obs = 0`, and `0 ≤ B_att` is
+satisfied silently. That is strictly weaker than `I1`/`I2`, whose two sides are
+separately emitted quantities — §12.0 makes exactly that check for `I2` in advance
+(*"so I2 is a genuine identity between two separately emitted quantities, not a
+tautology across one"*, `:7813`) and does not make it for `I3`. It is the same class
+this manifest already names against the production ledger in the PD-F12 analysis:
+*"**The two compared quantities are the SAME FIELD.** … exact **by construction, not by
+measurement**, and **carries no discriminating information**"* (`:7020-7021`). Read
+`I3`'s 3000/3000 at that weight beside `I1`/`I2`. `I3`'s GENERAL form is not
+tautological — the `B_restored(e)` term is what makes it meaningful on a drive that
+restores (§12.0, `:7815-7819`) — so this prices `D5`, not the identity.
+
+`D5`'s universe (X21-d's per-drive record): 3000 real keyed stamps + 1 closing
+throwaway stamp = 3001 `prune_epoch_tombstones` invocations. Captured rows: **3000
+`epoch_exit`, 3000 `settlement`, 3001 `prune_pass`** — `split_into_passes` recovered
+exactly 3001 passes, an exact 1:1 with invocations, as R4.6's corrected off-by-one
+clause requires.
+
+Every other drive's own predicate (recorded as a value, excluded from the D-T universe
+per §12.0's frozen scoping table): `D1 DIVERGENCE: REPRODUCED — R_obs=3 R_ent=2
+B_obs=12 B_att=8 len(extra.tag)=4`. `D2 POST-EXIT RESTORE: REPRODUCED — k=1
+sum_R_obs=0`. `D3 ABSENT-KEY: REPRODUCED — D_e=0 F_e=0 B_att=4 absent=1`. `D4 TOCTOU
+RACE: REPRODUCED — aggregate index_conservation_snapshot() terms held across all 64
+interleavings; row-granularity terms NOT observable (C13, X21-d); NOT in a D-T
+universe`.
+
+### §12.1.c — Step 2, the Decision Table, evaluated in frozen order
+
+| # | Verdict | Condition | Value |
+|---|---|---|---|
+| 1 | V1 — REF-LOSS | ∃ `DrainedByPrune` row of `D5` with `R_obs < R_ent` | **false** |
+| 2 | V2 — BOOKKEEPING ATTRIBUTION | ∃ epoch with `R_obs > 0 ∧ D_e == 0 ∧ F_e == 0 ∧ B_att > 0` | **false** |
+| 3 | V3 — COUNTER-FAMILY MISNAMING | I1 or I2 violated on an in-scope pass | **false** |
+| 4 | **V0 — NOT REPRODUCED** | none of rows 1–3 holds over its own universe | **HOLDS** |
+
+**VERDICT: `V0 — NOT REPRODUCED`.** Exactly one verdict, read off the frozen table in
+its frozen order.
+
+### §12.1.d — Step 3, the Fix-Shape Mapping
+
+F-M's `V0` row fires: **THE RULING IS NOT WRITTEN.** Per R7.1 the not-written status IS
+the satisfying content, not an absence. Full ruling record, with §8.3 quoted verbatim
+beside the determination, in `spec358-fixshape-ruling.md`.
+
+### §12.1.e — E-C fires
+
+E-C's own text: *"'Does not name the mechanism' means exactly: the frozen table
+resolves to V0, or Step 0 fires fail-closed with any `INDETERMINATE-*`."* The table
+resolved V0 → **E-C FIRES → the diagnosis line HARD STOPS. There is no diagnosis round
+after this one.** The `ReclamationRegistry` family (`TODO-634`) starts with the cause
+**unclassified**, justified by §8.3 above, quoted verbatim.
+
+### §12.1.f — POST-DATA findings PD-F15–PD-F20 (recorded and ROUTED to `TODO-634`; they do NOT alter the verdict)
+
+§12.0 pre-authorizes exactly this: *"if the data suggests one, it is recorded as a
+POST-DATA finding and routed, and the table's own verdict still stands."* The
+cross-vendor adversarial round (`spec358-mechanism-xask.md`) recommended a static audit
+of `publish_epoch_exit` call sites; the audit was run and produced **PD-F15 through
+PD-F18**, all four reached by source-code audit outside `D5`'s frozen universe.
+**PD-F19 and PD-F20 were added later, by review rather than by that audit, and their
+provenance differs:** PD-F19 was a Review-v1 reading reached by argument, and PD-F20 is
+the Review-v2 finding that RETRACTS it — PD-F20's evidence is an **executed mutation**,
+not a source-code reading. So the umbrella over this list is provenance-mixed by
+construction, and each entry states its own basis; do not read "reached by source-code
+audit" as covering the last two.
+
+What still holds over all six: none is a row-1 violation reached by execution inside
+`D5`'s frozen universe — PD-F20's mutations flip a row only in a deliberately MUTATED
+subject, which is what makes them a liveness proof of the instrument rather than an
+observation about the unmutated system — and none changes §12.1.c's verdict.
+
+- **POST-DATA — PD-F15** — the mechanism is code-identifiable, and it is row 1's named
+  extreme case. `drain_prunable`'s `drained_epochs.insert(e)` sits inside `if let
+  Some(refs) = epoch_tags.remove(&e)` and is **unconditional on `refs.len()`**. An
+  epoch whose `epoch_tags` entry EXISTS but holds an EMPTY vector is attributed
+  `DrainedByPrune`, given `bytes_freed_attributed = slot.stamped_bytes` (> 0 whenever
+  the slot ever stamped), observed as `R_obs = 0, B_obs = 0`, and contributes NOTHING
+  to `drained` — so the service's `PrunePassRecord` reads `considered = 0, empty_drain
+  = true, epochs_drained = 0`. This is precisely PD-F12's production signature, and
+  exactly D-T row 1's named extreme case (`R_obs == 0 ∧ R_ent > 0`), which Step 0 leg
+  (c) proves the instrument fires on when the antecedent exists. Why `D5` could not
+  reach it: through the public API an epoch's refs leave only via the drain, which
+  removes the WHOLE `epoch_tags` entry — never leaving an empty-but-present vector
+  behind — and `D5` is single-writer and sequential, so no second writer can empty the
+  vector between entry-emission and drain. §12.0 froze this in advance as row 1's
+  stated exception: its non-firing is "an informative negative about the enumeration,
+  not a null result." This round's result sharpens that negative into a named,
+  code-level antecedent. **ROUTED to `TODO-634`.**
+- **POST-DATA — PD-F16** — route (b) REFUTED from source. `EpochExitKind` carries
+  `#[default] DrainedByPrune`, which invites the hypothesis that an unattributed exit
+  silently defaults to a prune attribution. It does not: `finalize_epoch_exit` resolves
+  `kind_hint == None` to `EpochExitKind::Unclassified { .. }`, and the two non-drain
+  call sites pass explicit `ClearedByRebuild` (`:835`) and `StillResidentAtShutdown`
+  (`:651`). The `#[default]` is reachable only from `..Default::default()` in test
+  fixtures. No non-drain path stamps `DrainedByPrune`. **ROUTED to `TODO-634`.**
+- **POST-DATA — PD-F17** — the Prometheus pass family is internally coherent.
+  `MetricsPruneRecorder::observe_pass` increments `passes_total`, `considered_total`,
+  `dropped_total`, `bytes_freed_total`, `epochs_drained_total` and the empty/nonempty
+  split from the SAME `PrunePassRecord`, in the SAME call. So PD-F12's production
+  reading is not a counter-transport artefact: the divergence is between the FRONTIER
+  (which emits exit rows inside the drain) and the SERVICE (which builds the pass
+  record from the drain's RETURN VALUE) — two different components, which is what
+  PD-F15 names. **ROUTED to `TODO-634`.**
+- **POST-DATA — PD-F18** — the next drive, named concretely, **NOT run here** (X8
+  forbids widening the frozen universe, X5 forbids a fix). A deterministic in-process
+  drive that constructs the race's END STATE rather than the race: populate an epoch
+  `e`, let it roll over so `entry_emitted ∧ refs_at_entry > 0`, then empty
+  `epoch_tags[e]` in-module to a present-but-empty `Vec` (the same in-module bypass leg
+  (c) uses), then drain through the SERVICE and assert on the pass record. Predicted:
+  an exit row with `exit_kind = DrainedByPrune, bytes_freed_attributed > 0,
+  removed_refs_observed = 0`, beside a pass record with `considered = 0, empty_drain =
+  true, epochs_drained = 0`. This would place a row in D-T row 1's universe **if** such
+  a drive were inside a frozen universe — it is NOT in this round's, which is why it is
+  routed rather than run. **ROUTED to `TODO-634`.**
+
+- **POST-DATA — PD-F19** — **D-T row 2, like row 1, was unfireable over `D5` by
+  construction, so `V0`'s evidentiary weight rests on row 3 alone.** Surfaced by Review v1,
+  after the verdict, by reading the drive rather than the data. `D5` seeds every key
+  PRESENT with its own tombstone tag (`sim/tombstone_gc_proof.rs:1216`,
+  `seed_or_map(&factory, map, &key, &[], &[tag.as_str()])`) and then stamps that same tag,
+  so at drain the ref takes `crdt.rs`'s `Ok(_)` arm with `dropped == true`: the epoch
+  record is credited `dropped += 1` and `bytes_freed += tag.len()`, and `tag.len() > 0` for
+  every `D5TAG{i}`. Every epoch `D5` can produce therefore settles with `D_e ≥ 1 ∧ F_e > 0`.
+  Row 2's condition is `R_obs > 0 ∧ D_e == 0 ∧ F_e == 0 ∧ B_att > 0`, so it is FALSE over
+  `D5` **by construction** — derivable from the source before the run, exactly as row 1's
+  extreme case is (PD-F15). §12.0 nevertheless states *"Consequently rows 2 and 3 are not
+  readable off the source before the run over the universes they range on"* (`:7863`), and
+  §12.1.c together with `spec358-fixshape-ruling.md` qualify only row 1. That asymmetry is
+  the finding: the round applied its own honesty discipline to one row and not the other.
+  The consequence is evidentiary, not cosmetic — over `D5` **only row 3 was ever live**, so
+  the published `V0` means *"the one live row did not fire"*, not *"three independent
+  readings were tested and none fired"*. The `ReclamationRegistry` family (`TODO-634`),
+  which §12.1.e starts cause-unclassified, inherits `V0` as its premise and must inherit it
+  at its true weight. What does NOT change: the verdict. `V0`'s definition is *"none of rows
+  1–3 holds over its own universe"*, and a row that cannot hold by construction does not
+  hold — the table's mechanical reading is unaffected, §12.0 stays byte-frozen, and no
+  determination is reopened. The obligation this creates is on the NEXT round, not this one:
+  a drive whose construction can place a row in row 2's universe (the analogue of PD-F18 for
+  row 1) is what would give row 2 evidentiary weight, and per X8 this round may not widen the
+  frozen universe to supply it. **ROUTED to `TODO-634`.**
+  **SUPERSEDED IN PART by PD-F20 below (added by Review v2): the "unfireable over `D5` by
+  construction" characterisation of row 2 is RETRACTED — refuted by execution. The text above
+  is retained verbatim, unedited, because a retraction that erases what it retracts leaves the
+  next reader unable to check it. The routing to `TODO-634` stands; the WEIGHT it routes does
+  not.**
+
+- **POST-DATA — PD-F20 — PD-F19's "by construction" claim about D-T row 2 is RETRACTED.
+  Rows 2 AND 3 were LIVE over `D5` and both returned genuine negatives; row 1 alone was
+  unreachable.** Surfaced by Review v2 and settled by EXECUTION, not by argument.
+  - **What is retracted, quoted from PD-F19 so the retraction can be checked against it:**
+    *"D-T row 2, like row 1, was unfireable over `D5` by construction, so `V0`'s evidentiary
+    weight rests on row 3 alone"* and *"over `D5` **only row 3 was ever live**"*.
+  - **Executed refutation — row 2 IS live over `D5`.** The mutation is the minimal faithful
+    encoding of reading (ii) itself (*"the index removal is real, the store frees nothing"*):
+    in `crdt.rs`'s `prune_epoch_tombstones`, inside the drop closure, `dropped =
+    outcome.pruned > 0;` → `dropped = false;`. Nothing else changed — the drive, the seeding
+    and the frozen universe are untouched. Executed at tip `2639b38f`:
+    - unmutated: `row1(V1 REF-LOSS)=false row2(V2 BOOKKEEPING-ATTRIBUTION)=false
+      row3(V3 COUNTER-FAMILY-MISNAMING)=false`, `1 empty, 3000 draining, 0 not-applicable`,
+      P-KEYS `3000/3000`, test PASSES;
+    - mutated: `row1=false row2=`**`true`**` row3=false`, with `I1`/`I2`/`I3` still holding on
+      the same `1 empty, 3000 draining, 0 not-applicable` and P-KEYS still `3000/3000`, test
+      still PASSES (row 2 is a recorded VALUE, not an assertion).
+    Command both times, unchanged: `cargo test --profile ci-sim --features simulation -p
+    topgun-server -- sim::tombstone_gc_proof::tests::d5_sequential_regime --nocapture`.
+    Mutation reverted; `git status --porcelain` empty afterwards.
+  - **Executed check — row 3 is live in the fail-closed sense.** `empty_drain:
+    drained.is_empty()` → `empty_drain: true` in the same function's `PrunePassRecord`
+    construction makes the drive PANIC at the `I2` assertion in
+    `sim/tombstone_gc_proof.rs` — *"D5 I2 violated on a pass: empty_drain == (Σ_e R_obs(e) ==
+    0) must hold"* — i.e. a row-3 condition surfaces as the test's own failure rather than as
+    the printed `row3_condition`, exactly as §12.1's frozen-by-design note states. Reverted;
+    green.
+  - **Why PD-F19 was wrong — the standard, not the arithmetic.** PD-F19's arithmetic is
+    correct: over `D5`, `D_e ≥ 1 ∧ F_e > 0` on every epoch, so row 2 evaluates false. What it
+    got wrong is *whose property that is*. It is a JOINT property of the fixture AND the
+    subject, and the mutations above show which half carries it: hold the fixture fixed,
+    change the subject's store-side behaviour, and row 2 fires. A row is dead only when the
+    FIXTURE forecloses its condition regardless of what the subject does — which is exactly
+    the distinction §12.0 froze in advance and PD-F19 read past: `D3` is EXCLUDED from the D-T
+    because it *"produces row 2's signature by construction"* (`:7861`), while `D5`'s P-KEYS
+    clause exists so that *"a store-side zero cannot be manufactured by the fixture"*
+    (`:7850-7852`) — seeding-present is what makes row 2's negative TRUSTWORTHY, not vacuous.
+    §12.0 states the conclusion outright: *"Consequently rows 2 and 3 are not readable off the
+    source before the run over the universes they range on"* (`:7865-7866`).
+  - **How it entered the record.** PD-F19 was accepted from a review finding on prose
+    agreement, without the mutation `K2` and Step 0 require before any term may be declared
+    unable to disagree with its subject. The round applied its own discipline to the
+    instrument and not to a claim about the instrument.
+  - **Row 1's status is unchanged and carries a witness rather than an argument.** Its
+    antecedent — an `epoch_tags` entry PRESENT but holding an EMPTY vector — is constructed in
+    this tree only through an in-module bypass, which is what Step 0 leg (c) does
+    (`f.lock().drain_prunable()` on a planted empty vector); that positive control FIRES
+    unmutated and fails under the mutation arm (X21-a), so the instrument is proven able to
+    read row 1's signature when the antecedent exists. What no public writer reaches is the
+    antecedent itself (PD-F15's four-site enumeration), which is why PD-F18 names the drive
+    that would be needed. This remains a STATIC enumeration: if it is incomplete, row 1's
+    negative is *"an informative negative about the enumeration, not a null result"*, exactly
+    as §12.0 froze it.
+  - **The corrected reading, which is what `TODO-634` inherits:** *two of three readings were
+    tested over `D5` and both returned negatives; the third's antecedent (row 1) is not
+    constructible through the public API.* This is strictly MORE informative than what PD-F19
+    routed. Understating one's own evidence in a routed record is the same class of defect as
+    overstating it.
+  - **What does NOT change.** `V0` stands, unedited and unreopened — its definition is *"none
+    of rows 1–3 holds over its own universe"*, and every row was evaluated over its own
+    universe exactly as frozen. §12.0 stays BYTE-FROZEN (digest
+    `24273adf2ee87b544520cef817c826bf2be645e07cb97c8ef110ca21e59dabac` over `sed -n
+    '1,7689p'`); this entry is append-only beneath it. `E-C` has still FIRED. No `.rs`
+    production byte was changed by this finding — both mutations above were applied, read and
+    reverted.
+  - **The rule this round adopts, applied to this entry itself.** Any claim of the form *"term
+    X is unfireable / readable by construction"* entering this record MUST carry, beside it,
+    either the EXECUTED mutation that would make X fire, or an executed constructibility
+    witness for the antecedent it says is unreachable. No such claim lands on prose agreement
+    again. PD-F20 satisfies this about itself: rows 2 and 3 carry executed mutations above,
+    and row 1 carries leg (c)'s executed positive control plus the named enumeration whose
+    incompleteness is the stated way the claim could fail.
+  - **ROUTED to `TODO-634`.**
+
+### §12.1.g — R6.3 / AC11 digest confirmation
+
+`spec358-microdiag-transcript.txt` carries the executed digest pair: the PRE-DATA value
+frozen above (`24273adf2ee87b544520cef817c826bf2be645e07cb97c8ef110ca21e59dabac`)
+recomputed over the identical `sed -n '1,7689p'` span produces the same digest, and the
+post-append `sed -n '7690,7695p'` boundary lines are unchanged from the pre-append tip.
+No byte of §0–§12.0 was edited by this §12.1 append.

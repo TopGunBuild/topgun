@@ -1,0 +1,192 @@
+SPEC-358 — X21: the four-limb discharge record
+=================================================
+
+X21 reads: "every frozen surface, predicate, tool and join is validated against the
+exact transport the DATA half will consume, before the boundary." §12.0 froze this
+increment as APPLICABLE and discharged it in four limbs. This artifact records the
+executed proof for each.
+
+--------------------------------------------------------------------------------------
+X21-a — the struct transport
+--------------------------------------------------------------------------------------
+
+Frozen surface: the two new fields (`removed_refs_observed`, `removed_bytes_observed`)
+on `PruneEpochResidencyRecord`, asserted on a RETURNED RECORD.
+
+Consumer transport: the one in-crate site where a record is returned by value —
+`detect_epoch_exit` / `finalize_epoch_exit` in `tombstone_frontier_impl.rs`'s inline
+tests. There is no `PruneRecordObserver` test double in the tree, and none is claimed.
+
+Executed proof: Step 0 leg (c),
+`tombstone_frontier_impl::tests::step0_leg_c_v1_positive_control_planted_ref_loss_fires_on_the_returned_record`,
+which drains in-module via `f.lock().drain_prunable()` (the one in-crate call that
+returns the exit rows by value) and asserts both new fields on that returned record
+(`R_obs == 0`, `R_ent > 0` under the planted-empty-vector condition). PASSES unmutated;
+FAILS under the mutation arm (`left: 1, right: 0`), confirming the control is live.
+
+`S1` does NOT discharge this limb: its step 8 goes through the public
+`drain_prunable_tombstones`, which returns no record (see X21-b below), so `S1`'s
+assertion on the returned `Vec` is a count check only (`len() == 2`).
+
+--------------------------------------------------------------------------------------
+X21-b — the line transport
+--------------------------------------------------------------------------------------
+
+Frozen surface: every term the D-T predicates name, reachable on the exact `tracing`
+emission it is read from — the two new fields on the exit row, all eight terms on the
+settlement row, and `considered` / `empty_drain` on the pass row.
+
+Consumer transport: a `tracing-subscriber` capture (`set_default` + a `Layer` with a
+sink), shape sited at `network/device_identity.rs:397-429`, adapted with a
+`FieldTextVisitor` that asserts each field name appears in the RENDERED field text
+(the `name=value` pairs a `tracing::field::Visit` collector accumulates) — never
+against the struct.
+
+Executed proofs:
+- `tombstone_frontier_impl::tests::s1_pre_freeze_sanity_row_diverges_through_public_entry_points_only`
+  (`S1`) — reads the exit row off the declared `tracing` capture and asserts
+  `removed_refs_observed` / `removed_bytes_observed` in the rendered field text. PASSES
+  unmutated; FAILS under mutation naming `R_obs == R_ent + 1` literally.
+- `sim::tombstone_gc_proof::tests::d1_divergence_removed_observation_diverges_from_entry_attribution`
+  (`D1`) — the sim-side twin, same rendered-field-text read. PASSES unmutated; FAILS
+  under mutation naming `R_obs == R_ent + 1` literally.
+- `sim::tombstone_gc_proof::tests::d5_sequential_regime_bridge_identities_and_p_keys_hold_over_3000_epochs`
+  (`D5`) — reads all three row kinds (`epoch_exit`, `settlement`, `prune_pass`) off the
+  same rendered-field-text transport across 3001 passes; this is the sole
+  Decision-Table universe. PASSES.
+
+--------------------------------------------------------------------------------------
+X21-c — the metrics transport and the join
+--------------------------------------------------------------------------------------
+
+Frozen surface: the two new pinned series
+(`topgun_or_prune_removed_refs_observed_total`,
+`topgun_or_prune_removed_bytes_observed_total`) present in a rendered `/metrics` scrape
+carrying the drain's own observed totals, joined on `epoch` (no wall-clock key
+anywhere).
+
+Consumer transport: `PrometheusBuilder::build_recorder` + `metrics::with_local_recorder`
++ `rendered_counter` — the shape already in the tree. Sited in the inline tests of a
+COUNTED file (`tombstone_frontier_impl.rs`), not in `src/sim`, per X21-d (the metrics
+recorder binding is thread-local).
+
+Executed proofs:
+- `tombstone_frontier_impl::tests::removed_observation_counters_reach_the_rendered_metrics_scrape`
+  — drives `stamp_tombstone` x2 -> `confirm_apply_ack` -> `drain_prunable_tombstones`
+  through the FULL public pipeline
+  (`drain_prunable_tombstones` -> `publish_epoch_exit` -> `observe_epoch_residency`),
+  then asserts
+  `rendered_value(&rendered, METRIC_PRUNE_REMOVED_REFS_OBSERVED_TOTAL) == Some("1")` and
+  `rendered_value(&rendered, METRIC_PRUNE_REMOVED_BYTES_OBSERVED_TOTAL) == Some("4")`
+  against the rendered `/metrics` scrape text. PASSES.
+- `tombstone_frontier_impl::tests::metrics_recorder_credits_removed_observation_counters_on_the_drained_arm_only`
+  — asserts `MetricsPruneRecorder::observe_epoch_residency` credits the two new
+  OBSERVATION counters on the `DrainedByPrune` arm only: `ClearedByRebuild` and
+  `StillResidentAtShutdown` records carrying nonzero observation fields (99/999) move
+  neither counter; only the `DrainedByPrune` record's 3/12 are credited. PASSES.
+
+Pinned-names banner (`tombstone_frontier.rs:759`) now reads 24 counters, up from 22,
+consistent with both new series being eagerly registered in
+`MetricsPruneRecorder::new()` via `touched_counter`.
+
+--------------------------------------------------------------------------------------
+X21-d — the thread-affinity limb
+--------------------------------------------------------------------------------------
+
+Frozen surface: both in-process transports the D-T's rows travel over
+(`tracing::subscriber::set_default` and `metrics::with_local_recorder`) are
+thread-local. A drive that runs the prune inside `tokio::spawn` on a `multi_thread`
+runtime observes neither, reading as an empty capture that looks exactly like "no
+violation." Frozen consequence: every drive whose rows enter a D-T universe runs on a
+current-thread runtime with the emission on the test's own thread; `D4` (the
+multi-thread race) is scoped to the aggregate `index_conservation_snapshot` terms and
+excluded from every D-T universe; every drive that reads rows off a capture first
+asserts the capture is non-empty and carries the expected row count (R4.6).
+
+Per-drive record (runtime flavour, transport, captured-row count by row kind),
+executed:
+
+| Drive | Runtime flavour | Transport | `epoch_exit` rows | `settlement` rows | `prune_pass` rows | In a D-T universe |
+|---|---|---|---|---|---|---|
+| `S1` | current-thread (`#[test]`, sync) | `tracing` capture | 1 | n/a (S1 reads the exit row only) | n/a | NO — Step-0 discriminator |
+| leg (c) | current-thread (`#[test]`, sync) | in-module return value (X21-a) | 1 (returned record, not captured) | n/a | n/a | NO — excluded by frozen scoping |
+| `D1` DIVERGENCE | current-thread (`#[tokio::test]`) | `tracing` capture | 1 | n/a | n/a | NO — Step-0 discriminator (sim twin of S1) |
+| `D2` POST-EXIT RESTORE | current-thread (`#[tokio::test]`) | `tracing` capture | 1 (first drain only; second drain emits none for `e`) | n/a | n/a | NO |
+| `D3` ABSENT-KEY | current-thread (`#[tokio::test]`) | `tracing` capture | >=1 | >=1 (`D_e == 0 ∧ F_e == 0` rows) | n/a | NO |
+| `D4` TOCTOU RACE | `#[tokio::test(flavor = "multi_thread")]`, `N = 64` interleavings | aggregate `index_conservation_snapshot()` only (row-granularity NOT observable — spawned task, thread-local capture) | not observable | not observable | not observable | NO — per-row terms unobservable here (C13) |
+| `D5` SEQUENTIAL REGIME | current-thread (`#[tokio::test]`) | `tracing` capture (all three row kinds, one transport) | **3000** | **3000** | **3001** | **YES — the D-T's sole universe** |
+
+`D5`'s counts, restated per R4.6's corrected off-by-one clause: 3000 real keyed stamps
++ 1 closing throwaway stamp = 3001 `prune_epoch_tombstones` invocations. The expected
+`epoch_exit` row count is the REAL KEYED stamp count (3000), one fewer than the 3001
+raw stamp calls, because at `epoch_width = 1` the last stamped epoch stays open unless
+a deliberate closing stamp rolls past it. `split_into_passes` recovered exactly 3001
+passes — an exact 1:1 with invocations. All three row-kind counts were asserted
+non-empty and exact before any D-T term was read off the capture (R4.6).
+
+Proving test fn: `sim::tombstone_gc_proof::tests::d5_sequential_regime_bridge_identities_and_p_keys_hold_over_3000_epochs`.
+
+`D4`'s proving test fn (recorded for completeness, outside every D-T universe):
+`sim::tombstone_gc_proof::tests::interleaved_prune_during_push_never_resurrects` /
+the aggregate conservation checks driven through
+`sim::tombstone_gc_proof::tests::prune_epoch_residency_discrimination_under_network_fault`.
+D4's `--nocapture` value: "aggregate index_conservation_snapshot() terms (exactly one
+attributed drain, exactly one exit row, O-0) held across all 64 interleavings.
+Row-granularity terms are NOT observable here (C13, X21-d): the prune runs in a
+tokio::spawn task on a multi_thread runtime, so the thread-local tracing capture would
+see an empty capture rather than a violation. NOT in a Decision-Table universe (Step
+2's exclusion table)."
+
+=======================================================================================
+RE-STAMP — RE-EXECUTED AT TIP 33a13c90 (Review v2 fix round)
+=======================================================================================
+
+Why this section exists: this artifact's four limbs were discharged at tip 453aeb55, and
+one of the commits since then changed X21-b's own transport helper — 887cb496 replaced
+the tracing capture sink in crdt.rs's test module (`Arc<Mutex<String>>` -> `Vec<String>`,
+`split_into_passes(&str)` -> `split_into_passes(&[String])`). A discharge record whose
+transport has been re-typed underneath it must be re-executed, not re-dated. It was.
+
+Re-executed at 33a13c90, clean tree:
+
+    cargo test --release -p topgun-server --lib                exit 0  (1811 passed)
+    cargo test --profile ci-sim --features simulation -- sim   exit 0  (26 passed)
+
+X21-a (struct transport) — `step0_leg_c_v1_positive_control_planted_ref_loss_fires_on_
+the_returned_record` PASSES unmutated at this tip, and FAILS under
+spec358-mutation-arm.patch (`left: 1, right: 0`), re-executed here. The control is still
+live.
+
+X21-b (line transport) — `S1`, `D1` and `D5` all read their terms off the rendered
+`tracing` field text and all PASS at this tip. `S1` and `D1` FAIL under the mutation arm,
+each naming `R_obs == R_ent + 1` literally, re-executed here. The sink re-typing changed
+the container the rows are accumulated in, not the transport being read: the rows are
+still the rendered `name=value` field text a `tracing::field::Visit` collector produces.
+
+X21-c (metrics transport and the join) — unchanged and re-verified by the same green lib
+run; no commit since 453aeb55 touches it.
+
+X21-d (per-drive runtime flavour, transport and captured-row counts) — the counts in the
+table above are ASSERTED BY THE DRIVES THEMSELVES before any D-T term is read (R4.6's
+per-kind capture-shape gate), so the green sim run at this tip re-discharges them
+mechanically. `D5`'s published values, re-executed at 33a13c90:
+
+    D5 SEQUENTIAL REGIME: REPRODUCED — I1/I2/I3 held on every in-scope pass (1 empty,
+      3000 draining, 0 not-applicable), P-KEYS held on 3000/3000 considered refs. D-T row
+      conditions (recorded evidence, NOT a verdict): row1(V1 REF-LOSS)=false
+      row2(V2 BOOKKEEPING-ATTRIBUTION)=false row3(V3 COUNTER-FAMILY-MISNAMING)=false.
+
+— i.e. 3000 `epoch_exit`, 3000 `settlement`, 3001 `prune_pass` rows recovered exactly as
+recorded above, with the new `Vec<String>` sink. Every figure in this artifact stands at
+the current tip.
+
+One term this artifact records but does not price, added by Review v2 and priced in
+`spec356-manifest.md` §12.1.b: over `D5` the `I3` check is ONE-SIDED — each epoch carries
+one ref, `B_restored(e) == 0`, and both `B_obs` and `B_att` trace to the byte length of
+that epoch's single `D5TAG{i}` tag, read off the same exit row. It excludes an over-count
+on the observation side and nothing else; `B_obs = 0` would satisfy it silently. Read
+`I3`'s 3000/3000 at that weight beside `I1`/`I2`.
+
+The full re-run — both Step-0 legs, all five drives, the two PD-F20 mutations and the
+whole repo gate with real exit codes — is recorded in `spec358-microdiag-transcript.txt`
+under its own RE-STAMP section at the same tip.
