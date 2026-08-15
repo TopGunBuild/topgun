@@ -1,0 +1,26 @@
+→ openrouter z-ai/glm-5.2 answering (2 file(s) embedded)…
+
+[warn] ANSWER TRUNCATED at max_tokens (finish_reason=length). Raise OPENROUTER_MAX_TOKENS or unset it; with OPENROUTER_REASONING enabled, reasoning tokens count against the same budget.
+
+[usage] prompt=12800 completion=9000 total=21800 cost=$0.014888544
+# Skeptic's Review: The V0 Determination Is Structurally Guaranteed, Not Empirically Earned
+
+## (1) STRUCTURAL CAPABILITY — D5 Was Incapable In Principle. Three Construction Choices Did It.
+
+The production contradiction in PD-F12 is between **two transports**: Prometheus cumulative counters say "440,069 passes, every one empty, zero considered, zero dropped, zero bytes freed, zero epochs drained," while the per-epoch tracing exit ledger says "439 DrainedByPrune exits attributing 10,097,000 bytes freed." The contradiction is *inter-transport*. D5 examines *intra-transport* consistency only. It was guaranteed to resolve V0 before any data existed, by three independent construction choices, any one of which suffices:
+
+### Choice A: Prometheus is a permanent no-op in the sim.
+
+The freeze itself states this verbatim in the "Transport of the pass-ledger symbols" section:
+
+> "the counter handles are bound at `TombstoneFrontier::new` (`:1210-1213`) via `touched_counter` (`:2226`), called from `MetricsPruneRecorder::new()` (`:2341`), and the sim's frontier is built outside any `with_local_recorder` binding, so those handles are permanent no-ops in-process."
+
+So in D5, `MetricsPruneRecorder::observe_pass` calls `self.passes.increment(1)` etc., but those handles decrement into a void. The entire Prometheus family — `passes_total`, `empty_drains_total`, `nonempty_drains_total`, `considered_total`, `dropped_total`, `bytes_freed_total`, `epochs_drained_total` — produces no observable signal. D5 cannot see the Prometheus side of the contradiction at all.
+
+### Choice B: K_p and E_p are frozen to the tracing transport, not Prometheus.
+
+The freeze explicitly redirects the pass-ledger read:
+
+> "`K_p` and `E_p` are read from the **pass row** — the `kind = "prune_pass"` emission on `topgun_server::tombstone_frontier::residency`... and from **nothing else**. They are NOT read from the Prometheus mirror."
+
+This means I1 (`Σ R_obs == K_p`) and I2 (`E_p == (Σ R_obs == 0)`) compare tracing-exit-rows against tracing-pass-rows. They are *intra-tracing* identities. The production contradiction is *tracing-vs-Prometheus*.

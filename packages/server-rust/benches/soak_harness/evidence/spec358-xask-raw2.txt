@@ -1,0 +1,143 @@
+→ openrouter z-ai/glm-5.2 answering (0 file(s) embedded)…
+
+[usage] prompt=809 completion=9904 total=10713 cost=$0.02458252
+## Q1: Mechanisms and Ranking
+
+### Critical framing error in your instrumentation
+
+Before ranking routes, I need to flag something about I1 that you may have missed:
+
+**I1 does not discriminate the production bug.** I1 asserts `sum(removed_refs_observed) == considered`. In the production symptom, `considered == 0`. If every exit row in those 439 passes also had `removed_refs_observed == 0`, I1 holds trivially (0 == 0). The width=1 drive passing I1 tells you I1 is *well-formed* on the happy path, but it tells you nothing about whether the bug is reproducible, because I1 would also hold in the exact production failure mode if the exits carry zero observed refs. You proved the instrument is wired correctly; you did not prove the instrument catches the bug.
+
+The production record says `epochs_drained == 0`, not merely `considered == 0`. This is the harder constraint. The drain returned *nothing* — no epochs, no refs, no bytes — 440,069 times. Yet 439 times, exit rows appeared with DrainedByPrune attribution and ~10M bytes. So the drain's return value and the exit ledger are not just numerically inconsistent; they are *categorically* disjoint. The drain says "I touched nothing." The ledger says "something touched 439 epochs." The exit rows carry byte attributions (~23K avg), so they are not no-ops — real tombstone state was recorded as reclaimed.
+
+That constrains the mechanism significantly.
+
+---
+
+### Route (b): Exits emitted on a non-drain path that stamps DrainedByPrune
+
+**Mechanism:** `publish_epoch_exit` is called from a code path other than `drain_prunable_tombstones` — a rebuild, compaction, eviction, shutdown sweep, or a background reclamation task — but the attribution enum is set to `DrainedByPrune` (either explicitly, by default, or via a stale closure capture). These exits land in the exit ledger. The service's prune pass calls `drain_prunable_tombstones` on the frontier, gets an empty return (nothing to drain at that moment), builds a `PrunePassRecord` with all zeros, and increments `empty_drains_total`. The exit ledger and the pass record never agree because they describe different operations.
+
+**Why it fits the symptom perfectly:**
+- 439 exits over 440,069 passes is a low rate (~0.1%). This is consistent with an occasional background/triggered sweep, not a steady-state drain. A scheduled compaction or an eviction triggered by memory pressure in a long-running multi-partition system would fire sporadically.
+- The exits carry real byte attributions (~10M total), meaning real tombstone state was processed — just not through the drain return path the service instruments.
+- `epochs_drained == 0` is exact: the drain truly returned nothing. The exits came from elsewhere.
+- The width=1 sequential in-process drive would never trigger this because there are no rebuilds, no evictions, no compaction, no shutdown sweeps in a 3000-epoch sequential run.
+
+**How to verify without a drive:** Grep for every call site of `publish_epoch_exit` (or whatever the exit-emit function is). If *any* call site outside `drain_prunable_tombstones` passes `DrainedByPrune` as the attribution — or if the attribution has a `Default` impl that resolves to `DrainedByPrune` and a non-drain path constructs the row without setting it — that's your route. This is a 10-minute code audit, cheaper than any drive.
+
+**Likelihood: HIGHEST.** This is the only route that cleanly explains `epochs_drained == 0` (drain returned genuinely empty) alongside real byte-attributed exits, and it's consistent with the production regime (long-running, multi-partition — more triggers for background sweeps) and the failure to reproduce in a short sequential drive.
+
+---
+
+### Route (c): Drain returns empty vector but publishes exits for epochs whose ref vector was empty at removal time
+
+**Mechanism:** Inside `drain_prunable_tombstones`, the frontier iterates prunable epochs. For each epoch `e`, it calls `epoch_tags.remove(&e)`, which returns the ref vector. If a concurrent operation (another partition's prune, a CRDT merge, a compaction) already emptied that epoch's ref vector, `remove` returns an empty `Vec`. The frontier still publishes an exit row (the epoch *was* removed from the frontier, it *was* drained — just with zero refs to hand back). The drain's return value to the service contains nothing for that epoch (empty refs filtered out, or the epoch simply contributes zero to the returned collection). The service builds `considered == 0`.
+
+**Why it fits partially but has a problem:**
+- It explains `considered == 0` with exits present.
+- It explains why the width=1 drive didn't reproduce it (no concurrency, no pre-emption of refs).
+- **BUT:** it does not cleanly explain `epochs_drained == 0`. If the drain processed the epoch (called `remove`, published an exit), the drain should report at least 1 epoch drained. Unless `epochs_drained` is computed as `returned_refs.len()` rather than a separate count of processed epochs — which would be a secondary bug in the record construction. Or unless the drain filters out epochs with empty ref vectors from its return entirely, and the service computes `epochs_drained` from the return structure length. Both are possible but require an additional assumption about how the record is built.
+- Also: the exits attribute ~10M bytes. If the ref vectors were empty, what bytes are being attributed? The exit row must be recording epoch-level metadata (tombstone count, byte size) independent of the ref vector. This is plausible if the epoch tracks its own tombstone bytes separately from the ref vector, but it adds another assumption.
+
+**Likelihood: SECOND.** Plausible and consistent with the concurrency differential, but requires auxiliary assumptions about `epochs_drained` computation and byte attribution to fully match the symptom. The `epochs_drained == 0` constraint is the friction point.
+
+---
+
+### Route (a): More than one TombstoneFrontier instance
+
+**Mechanism:** In a multi-partition system, there are multiple `TombstoneFrontier` instances (one per partition, or a shared one plus partition-local ones, or a metrics shim wrapping a real frontier). The service's `prune_epoch_tombstones` calls `drain` on frontier A, which returns empty (A has nothing to drain). Frontier B independently drains and publishes exit rows via its own `publish_epoch_exit`. The service builds the pass record from A's empty return. The exit ledger captures B's exits.
+
+**Why it could fit:**
+- Perfectly explains `epochs_drained == 0` with real exits: different objects, genuinely independent.
+- Consistent with multi-partition production and width=1 drive not reproducing (single frontier in the drive).
+
+**Why it's less likely than (b):**
+- If partitions each have their own frontier and the service prunes per-partition with per-partition pass records, you'd expect *some* passes from the draining partition to show non-zero `considered`. You'd see a mix: most passes empty, some non-empty. The fact that **all 440,069** passes are empty is hard to explain if the service is iterating all partitions — unless the service only queries a subset, or the draining frontier is not one the service ever calls drain on.
+- If there's a shared/frontier-metrics-shim, that's a more specific architectural issue that would likely surface in other ways (the shim would be consistently wrong, not just 0.1% of the time).
+- It's possible but requires a specific architectural mismatch that (b) does not require.
+
+**Likelihood: THIRD.** Possible, but the "all passes empty" constraint makes it less parsimonious than (b). Would need the draining frontier to be one the service never calls drain on — which is really a variant of (b) (the exits come from a component the service doesn't instrument).
+
+---
+
+### Route (d): Partition-level fan-out where most partitions prune empty and one drains
+
+**Mechanism:** The service iterates partitions. 99.9% of partition-passes are empty. One partition's drain produces real exits. But the pass record is built per-partition, so the draining partition's pass has `considered > 0`.
+
+**Why it does NOT fit:**
+- You'd see *some* passes with `considered > 0`. You see zero. 440,069 passes, all empty. If the service builds one record per partition per pass, and any partition drained, that record is non-empty. The only way this fits is if the service aggregates all partitions into one record per pass AND the draining partition's contribution is lost in the aggregation — which is route (a), not (d).
+- If the service builds one record per pass (not per partition), and aggregates across partitions, then one draining partition would make the aggregate record non-empty. So (d) alone cannot produce all-empty records.
+
+**Likelihood: LOWEST standalone.** Could combine with (a) — if the draining partition's frontier is not the one the service queries — but that's (a), not (d). Fan-out alone does not explain the symptom.
+
+---
+
+### One additional route not in your list
+
+### Route (e): Deferred/asynchronous exit publication
+
+**Mechanism:** `drain_prunable_tombstones` queues exit rows for later publication (e.g., onto a channel, a batch buffer, or a background task). The drain returns immediately with the refs it collected. The service builds the pass record. Later, a background task flushes the exit queue and publishes the deferred exits with `DrainedByPrune` attribution. The exits are timestamped (or attributed) to the pass that queued them, but they land in the ledger outside the drain call. The service's pass record already committed with `considered == 0` (if the drain returned empty refs due to route (c) conditions) or with the correct `considered` (if the drain did return refs).
+
+**Why it could fit:** If the drain returns refs but the service's `considered` computation is wrong (e.g., counts something other than the returned refs), and the exits are published asynchronously, the timing mismatch would produce the symptom. But this requires the drain to both return refs (which the service ignores/miscounts) AND defer exit publication. More complex.
+
+**Likelihood: LOW.** Mentioned for completeness. It's a variant of (b) where the non-drain path is "the drain's own deferred publication."
+
+---
+
+### Ranking summary
+
+| Route | Likelihood | Key fit | Key friction |
+|-------|-----------|---------|-------------|
+| (b) Non-drain path stamps DrainedByPrune | **Highest** | Explains epochs_drained==0, real bytes, sporadic rate, drive failure | Requires a non-drain call site with wrong attribution |
+| (c) Drain returns empty, exits for empty-ref epochs | **Second** | Explains considered==0 with exits, concurrency differential | Does not cleanly explain epochs_drained==0 without auxiliary assumptions |
+| (a) Multiple frontier instances | **Third** | Explains total disjoint between exits and records | "All passes empty" is hard if service iterates all frontiers |
+| (e) Deferred async exit publication | **Low** | Timing mismatch | Requires compound failure |
+| (d) Partition fan-out | **Lowest** | — | Cannot produce all-empty records alone |
+
+---
+
+## Q2: Is V0 defensible? Should you stop or run one more drive?
+
+### The honest assessment
+
+V0 with cause unclassified is **defensible but premature by one step**, and that step is not a drive — it's a code audit that is cheaper than any drive and directly discriminates the highest-likelihood route.
+
+**What you should do before closing the diagnosis line:**
+
+A 15-minute static audit of `publish_epoch_exit` call sites. Enumerate every callsite. For each, check: (1) is it inside `drain_prunable_tombstones`? (2) if not, what attribution does it pass? (3) does the `ExitAttribution` enum have a `Default` impl, and does any non-drain callsite rely on it?
+
+This is not a drive. It's a grep-and-read. But it would either:
+- **Find route (b):** You see a `publish_epoch_exit` call in a rebuild/eviction/shutdown path with `DrainedByPrune` attribution (or defaulting to it). Root cause identified. You close the diagnosis with a classified cause and go remediate with full confidence.
+- **Clear route (b):** Every non-drain callsite uses a different attribution. You've eliminated the highest-likelihood route without a drive, and V0 becomes more defensible.
+
+If you've already done this audit and it's clean, then yes — stop and remediate. Here's why:
+
+1. **I1 is the wrong assertion and you already know it.** I1 held in production too (trivially, 0==0). A drive that asserts I1 will never reproduce the bug. You need I2: *if any DrainedByPrune exit rows are published during a pass, the pass record must have `epochs_drained > 0`.* I1 checks numerical agreement; I2 checks categorical agreement. You proved I1; you need I2.
+
+2. **The one cheap drive you are wrong to skip** (if the code audit is inconclusive):
+
+   **Drive D-preempt (discriminates route (c) deterministically):**
+
+   - **Construct:** One `TombstoneFrontier`, one service. Populate the frontier with 3 epochs (e1, e2, e3). e1 and e3 each have 2 refs. e2 has 2 refs initially, then directly mutate `epoch_tags` for e2 to remove both refs (simulating the post-state of a concurrent drain that already took e2's refs but left e2 in the frontier). This does not require actual concurrency — you manually construct the race's end-state.
+
+   - **Execute:** One prune pass through the service.
+
+   - **Assert I2:** If any `DrainedByPrune` exit rows are published for this pass, `epochs_drained > 0` in the pass record. If exits are published for e2 (which had 0 refs) but the drain return excludes e2, and the service computes `epochs_drained == 0` or `considered == 0`, the bug is reproduced via route (c).
+
+   - **Assert I3:** `removed_refs_observed` for e2's exit row == 0 (confirming the pre-empted state), AND the exit row is still published. This confirms the frontier publishes exits for empty-ref epochs.
+
+   - **Assert I4:** The byte attribution on e2's exit row is > 0 (confirming that exits carry real tombstone bytes independent of the ref vector).
+
+   - **What it discriminates:** If this drive reproduces the symptom (exits published, `epochs_drained == 0`, `considered == 0`), route (c) is confirmed and you have a deterministic reproduction. If it does NOT reproduce (either no exit for e2, or `epochs_drained > 0`), route (c) is eliminated and the cause is almost certainly (b) — you should go back to the code audit with higher confidence, or accept V0.
+
+   - **Cost:** ~30 minutes to write. Deterministic. In-process. No concurrency primitives. No multi-partition setup.
+
+   This drive is cheap because it does not attempt to *cause* the race condition — it constructs the race condition's *resulting state* directly. The frontier cannot tell the difference between "a concurrent operation drained e2's refs" and "e2's refs were never there." If the frontier's behavior differs based on that distinction, that's a different bug. If it doesn't (which is the expected case for a hash-map-backed epoch_tags), the drive faithfully simulates the production condition.
+
+3. **If D-preempt does not reproduce, stop.** At that point you've eliminated (c) deterministically, (b) via code audit, (a) would require architectural investigation that exceeds the cost of remediation, and (d) cannot explain the symptom. The remediation (reclamation registry that never reclaims below a live claim) is correct *regardless of root cause* — it makes the system safe even if the diagnosis is wrong, which is the right engineering call when diagnosis cost exceeds marginal remediation value.
+
+### Bottom line
+
+Do the 15-minute `publish_epoch_exit` callsite audit first. If it finds (b), classify the cause and close. If it clears (b), run D-preempt (30 min). If D-preempt reproduces, classify as (c) and close. If D-preempt does not reproduce, V0 is defensible — stop and remediate. You will have spent under an hour to either classify the cause or gain high confidence that it's not worth classifying further.

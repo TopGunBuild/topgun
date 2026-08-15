@@ -100,6 +100,24 @@ draw from both: anchor 1 answers the first call's Choice-A argument directly; an
 2, 5-8 draw from the second call's route ranking and code-audit recommendation; anchors
 3-4 record that the recommended code audit was in fact run and what it found.
 
-Raw files (this session's captured outputs, `xask_raw.txt` first call / truncated and
-`xask_raw2.txt` second call / complete): both are the record this artifact draws its
-anchors from.
+Raw files: `spec358-xask-raw1.txt` (first call, truncated) and `spec358-xask-raw2.txt`
+(second call, complete), both committed beside this artifact. Both are the record this
+artifact draws its anchors from. *(Review v1 correction: these were originally written
+only to a session scratchpad and named `xask_raw.txt` / `xask_raw2.txt` here. A record
+this file calls "the record" may not live somewhere that is deleted with the session, so
+the two files were copied into the evidence directory unmodified and the names above now
+point at the durable copies.)*
+
+### Anchor 1's refutation is narrower than it reads (added by Review v1)
+
+Anchor 1 refutes the claim *"V0 was structurally guaranteed because Prometheus is a no-op
+in the sim"* — and that refutation stands exactly as written, against the
+**transport-based** form of the structural argument. It does **not** dispose of every form
+of it. Review v1 raised a different structural argument that the anchor does not reach:
+`D5`'s SEEDING construction (every key seeded present with its own tombstone tag) forces
+`D_e ≥ 1 ∧ F_e > 0` on every epoch, which makes D-T row 2 unfireable over `D5` by
+construction, exactly as PD-F15 shows row 1 to be. That point is conceded, recorded as
+**PD-F19** in `spec356-manifest.md` §12.1.f and routed to `TODO-634`. It does not change
+the verdict — a row that cannot hold does not hold — but a reader who takes anchor 1 as
+having settled "was V0 structurally guaranteed?" in general would be taking it further
+than it goes.

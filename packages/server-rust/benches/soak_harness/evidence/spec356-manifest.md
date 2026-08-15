@@ -8132,7 +8132,7 @@ resolved V0 → **E-C FIRES → the diagnosis line HARD STOPS. There is no diagn
 after this one.** The `ReclamationRegistry` family (`TODO-634`) starts with the cause
 **unclassified**, justified by §8.3 above, quoted verbatim.
 
-### §12.1.f — POST-DATA findings PD-F15–PD-F18 (recorded and ROUTED to `TODO-634`; they do NOT alter the verdict)
+### §12.1.f — POST-DATA findings PD-F15–PD-F19 (recorded and ROUTED to `TODO-634`; they do NOT alter the verdict)
 
 §12.0 pre-authorizes exactly this: *"if the data suggests one, it is recorded as a
 POST-DATA finding and routed, and the table's own verdict still stands."* The
@@ -8185,6 +8185,32 @@ none is a row-1 violation reached by execution inside that universe, and none ch
   true, epochs_drained = 0`. This would place a row in D-T row 1's universe **if** such
   a drive were inside a frozen universe — it is NOT in this round's, which is why it is
   routed rather than run. **ROUTED to `TODO-634`.**
+
+- **POST-DATA — PD-F19** — **D-T row 2, like row 1, was unfireable over `D5` by
+  construction, so `V0`'s evidentiary weight rests on row 3 alone.** Surfaced by Review v1,
+  after the verdict, by reading the drive rather than the data. `D5` seeds every key
+  PRESENT with its own tombstone tag (`sim/tombstone_gc_proof.rs:1216`,
+  `seed_or_map(&factory, map, &key, &[], &[tag.as_str()])`) and then stamps that same tag,
+  so at drain the ref takes `crdt.rs`'s `Ok(_)` arm with `dropped == true`: the epoch
+  record is credited `dropped += 1` and `bytes_freed += tag.len()`, and `tag.len() > 0` for
+  every `D5TAG{i}`. Every epoch `D5` can produce therefore settles with `D_e ≥ 1 ∧ F_e > 0`.
+  Row 2's condition is `R_obs > 0 ∧ D_e == 0 ∧ F_e == 0 ∧ B_att > 0`, so it is FALSE over
+  `D5` **by construction** — derivable from the source before the run, exactly as row 1's
+  extreme case is (PD-F15). §12.0 nevertheless states *"Consequently rows 2 and 3 are not
+  readable off the source before the run over the universes they range on"* (`:7863`), and
+  §12.1.c together with `spec358-fixshape-ruling.md` qualify only row 1. That asymmetry is
+  the finding: the round applied its own honesty discipline to one row and not the other.
+  The consequence is evidentiary, not cosmetic — over `D5` **only row 3 was ever live**, so
+  the published `V0` means *"the one live row did not fire"*, not *"three independent
+  readings were tested and none fired"*. The `ReclamationRegistry` family (`TODO-634`),
+  which §12.1.e starts cause-unclassified, inherits `V0` as its premise and must inherit it
+  at its true weight. What does NOT change: the verdict. `V0`'s definition is *"none of rows
+  1–3 holds over its own universe"*, and a row that cannot hold by construction does not
+  hold — the table's mechanical reading is unaffected, §12.0 stays byte-frozen, and no
+  determination is reopened. The obligation this creates is on the NEXT round, not this one:
+  a drive whose construction can place a row in row 2's universe (the analogue of PD-F18 for
+  row 1) is what would give row 2 evidentiary weight, and per X8 this round may not widen the
+  frozen universe to supply it. **ROUTED to `TODO-634`.**
 
 ### §12.1.g — R6.3 / AC11 digest confirmation
 
