@@ -832,6 +832,13 @@ mod tests {
             .unwrap_or_else(|e| panic!("field {name} did not render a u64 in {line:?}: {e}"))
     }
 
+    /// Read one `bool`-rendered field out of a captured row.
+    fn row_bool(line: &str, name: &str) -> bool {
+        row_field(line, name)
+            .parse()
+            .unwrap_or_else(|e| panic!("field {name} did not render a bool in {line:?}: {e}"))
+    }
+
     /// Rows on `target` whose `kind` field equals `kind`.
     fn rows_of_kind<'a>(rows: &'a [String], target: &str, kind: &str) -> Vec<&'a str> {
         rows.iter()
@@ -882,6 +889,24 @@ mod tests {
             "R4.6: expected {expected_prune_pass} prune_pass row(s) — exactly once per \
              driven invocation; capture was:\n{rows:#?}"
         );
+    }
+
+    /// Split a capture into successive passes: every row strictly after the
+    /// previous pass row up to and including its own pass row (Step 1's
+    /// frozen "Pass individuation" rule — the pass row is always emitted
+    /// last). Mirrors `service/domain/crdt.rs`'s `split_into_passes`, adapted
+    /// to this file's per-event `Vec<String>` capture rather than a single
+    /// concatenated string.
+    fn split_into_passes(rows: &[String]) -> Vec<Vec<&str>> {
+        let mut passes = Vec::new();
+        let mut current = Vec::new();
+        for line in rows {
+            current.push(line.as_str());
+            if is_row(line, RESIDENCY_TARGET, "prune_pass") {
+                passes.push(std::mem::take(&mut current));
+            }
+        }
+        passes
     }
 
     // ------------------------------------------------------------------
@@ -1114,6 +1139,295 @@ mod tests {
         );
         println!(
             "D3 ABSENT-KEY: REPRODUCED — D_e={dropped} F_e={bytes_freed} B_att={b_att} absent={absent}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // `D5` SEQUENTIAL REGIME — the D-T's SOLE UNIVERSE — plus the mechanical
+    // per-row Decision-Table evaluation over its recorded rows.
+    // ------------------------------------------------------------------
+
+    /// `D5` **SEQUENTIAL REGIME** — the only drive whose rows form a D-T
+    /// universe (Step 2). `N = 3000` stamps at `epoch_width = 1` (⇒ 3000
+    /// epochs), every key seeded PRESENT with its own tombstone, one tracked
+    /// cursor advanced per stamp, one `prune_epoch_tombstones` pass per
+    /// stamp.
+    ///
+    /// **The durable-epoch watermark and the cursor's `delivered` bound are
+    /// both `1_000_000`, each set ONCE / re-set idempotently, never the
+    /// file's ubiquitous `1000` literal or `track_client`'s hardcoded
+    /// `set_delivered(conn, 100)`** (`:204-215`): either literal would clamp
+    /// the cursor or the watermark below this drive's `3000` epochs and
+    /// silently shrink the D-T's sole universe — the exact hazard the spec's
+    /// `D5` paragraphs name. `claimed` is passed as the same `1_000_000`
+    /// sentinel on every `confirm_apply_ack`: `advance_on_ack` clamps by
+    /// `claimed.min(delivered).min(current_max_epoch)`, and `current_max_\
+    /// epoch` already tracks the latest stamped epoch, so the sentinel never
+    /// binds — the cursor still advances exactly one epoch per stamp.
+    ///
+    /// **Closing stamp (deliberate, and NOT one of the N keyed refs).**
+    /// `epoch_width = 1` maps `stamp_tombstone`'s `op_seq` directly onto the
+    /// epoch number, and ENTRY emission for epoch `e` fires only on the
+    /// STAMP that rolls PAST `e` — i.e. on stamp `e + 1`. So after exactly N
+    /// keyed stamps, epochs `1 ..= N-1` have entered (and, one pass later
+    /// each, drained) but epoch N — the last key's own epoch — is still
+    /// OPEN: nothing has stamped past it yet. One additional closing stamp
+    /// (a throwaway key, seeding no store entry, never itself drained: its
+    /// own epoch stays open at the end) rolls epoch N over so its exit and
+    /// settlement rows land inside this capture window too. This is what
+    /// makes the capture's `epoch_exit` row count equal the drive's own N
+    /// keyed stamps, per R4.6's per-kind gate below — verified here, not
+    /// assumed.
+    ///
+    /// Its OWN predicate (R4.3): **I1, I2, I3 hold on every pass**; **P-KEYS
+    /// holds on every considered ref**. A violation is asserted immediately
+    /// where it is read (R4.4) — this fn does not "fix the test" on a
+    /// failure, it records the violating pass/epoch verbatim in the panic
+    /// message. This fn does **not** publish a Decision-Table verdict: it
+    /// evaluates and records each row's OWN condition as a value (R4.5),
+    /// leaving the naming step to the freeze-gated group that owns it.
+    // A single fn deliberately, over the drive's own N=3000 loop plus its
+    // closing stamp, the R4.6 capture-shape gate, the I1/I2/I3 + P-KEYS
+    // per-pass evaluation and the D-T's per-row evaluation — splitting any
+    // of these out would separate an assertion from the capture it reads,
+    // which is exactly the shape R4.4/R4.6 need kept together in one place.
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn d5_sequential_regime_bridge_identities_and_p_keys_hold_over_3000_epochs() {
+        const N: u64 = 3000;
+        let (_svc, factory, frontier, registry, key_writer) = gated_sync();
+        let (conn, client) = register_device(&registry, "dev-d5").await;
+        let map = "omap";
+
+        // Set ONCE before the stamp loop, never lowered — exceeds the
+        // highest epoch this drive can reach (N + 1) by more than two orders
+        // of magnitude.
+        frontier.set_durable_epoch_watermark(1_000_000);
+
+        let (guard, sink) = capture_tracing_rows();
+
+        for i in 1..=N {
+            let key = format!("d5-k{i}");
+            let tag = format!("D5TAG{i}");
+            // Every key seeded PRESENT with its own tombstone, before its
+            // epoch can possibly roll and drain.
+            seed_or_map(&factory, map, &key, &[], &[tag.as_str()]).await;
+            frontier.stamp_tombstone(map, &key, &tag);
+            // Before EACH confirm_apply_ack, per the drive text.
+            frontier.set_delivered(conn, 1_000_000);
+            let advanced = frontier.confirm_apply_ack(&client, 1_000_000, conn).await;
+            assert!(advanced, "D5: the tracked cursor must advance on stamp {i}");
+            // One prune_epoch_tombstones pass per stamp.
+            prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
+        }
+
+        // The closing stamp: rolls epoch N over so its own exit/settlement
+        // rows land inside this capture window (see the doc comment above).
+        frontier.stamp_tombstone(map, "d5-closing-key", "D5-CLOSE");
+        frontier.set_delivered(conn, 1_000_000);
+        let closing_advanced = frontier.confirm_apply_ack(&client, 1_000_000, conn).await;
+        assert!(
+            closing_advanced,
+            "D5: the tracked cursor must advance on the closing stamp"
+        );
+        prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
+
+        drop(guard);
+        let rows = sink.lock().unwrap().clone();
+
+        // R4.6: N draining invocations (all but the very first of the N+1
+        // total, which finds nothing yet rolled) produce N epoch_exit rows
+        // and N settlement rows (every D5 epoch has exactly one considered
+        // ref, so the exit-row/settlement-row asymmetry the Delta names
+        // never triggers here); N+1 total invocations produce N+1 pass rows
+        // — exactly once per invocation, on every path, per C1's tip-CONFIRMED
+        // fact.
+        let expected_epoch_exit = usize::try_from(N).expect("N fits in usize");
+        let expected_settlement = usize::try_from(N).expect("N fits in usize");
+        let expected_prune_pass = usize::try_from(N + 1).expect("N + 1 fits in usize");
+        assert_capture_shape(
+            &rows,
+            expected_epoch_exit,
+            expected_settlement,
+            expected_prune_pass,
+        );
+
+        // Segment (a)'s open question, verified empirically rather than
+        // assumed: does `split_into_passes` recover exactly N+1 passes —
+        // i.e. does D5's direct-call shape keep the pass-row count 1:1 with
+        // this drive's own `prune_epoch_tombstones` invocation count, the
+        // way D1–D3 already showed? (G3 separately proved the PUSH path can
+        // trigger hidden internal sweeps that break that 1:1 relationship;
+        // D5 never routes through `gated_sync()`'s `SyncService` push path,
+        // so no such hidden sweep can fire here.)
+        let passes = split_into_passes(&rows);
+        assert_eq!(
+            passes.len(),
+            expected_prune_pass,
+            "D5: split_into_passes must recover exactly N+1 passes, matching this \
+             drive's own N+1 prune_epoch_tombstones invocations 1:1; rows:\n{rows:#?}"
+        );
+
+        // Index once, by the `epoch` field's rendered text, for the I3 /
+        // P-KEYS / D-T row 2 reads below.
+        let exit_rows: Vec<&str> = rows_of_kind(&rows, RESIDENCY_TARGET, "epoch_exit");
+        let settlement_rows: Vec<&str> = rows_of_target(&rows, SETTLEMENT_TARGET);
+        let mut exit_by_epoch: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for row in &exit_rows {
+            exit_by_epoch.insert(row_field(row, "epoch"), row);
+        }
+        let mut settlement_by_epoch: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for row in &settlement_rows {
+            settlement_by_epoch.insert(row_field(row, "epoch"), row);
+        }
+
+        let mut empty_passes = 0u64;
+        let mut draining_passes = 0u64;
+        let mut i3_checked = 0u64;
+        let mut p_keys_checked = 0u64;
+        let mut not_applicable_passes = 0u64;
+
+        for pass_rows in &passes {
+            let pass_row = pass_rows
+                .last()
+                .expect("a pass's own rows always end with its pass row");
+            assert!(
+                is_row(pass_row, RESIDENCY_TARGET, "prune_pass"),
+                "D5: a pass's last row must be its own pass row: {pass_row:?}"
+            );
+            let k_p = row_u64(pass_row, "considered");
+            let e_p = row_bool(pass_row, "empty_drain");
+
+            let exit_rows_in_pass: Vec<&str> = pass_rows
+                .iter()
+                .copied()
+                .filter(|l| is_row(l, RESIDENCY_TARGET, "epoch_exit"))
+                .collect();
+
+            // Step 1's scoping: NOT-APPLICABLE on a pass where any
+            // `restored_*` exit fired. D5 never restores (no D1/D2-shaped
+            // step in this drive), so this is expected to hold vacuously
+            // over every pass — recorded as a value below, not assumed.
+            let any_restored = exit_rows_in_pass
+                .iter()
+                .any(|r| row_field(r, "exit_kind").starts_with("Restored"));
+            if any_restored {
+                not_applicable_passes += 1;
+                continue;
+            }
+
+            let r_obs_sum: u64 = exit_rows_in_pass
+                .iter()
+                .map(|r| row_u64(r, "removed_refs_observed"))
+                .sum();
+
+            // I1: Σ_e R_obs(e) == K_p, both read off this SAME pass.
+            assert_eq!(
+                r_obs_sum, k_p,
+                "D5 I1 violated on a pass: Σ_e R_obs(e) == K_p must hold; pass rows:\n{pass_rows:?}"
+            );
+            // I2: E_p == (Σ_e R_obs(e) == 0), E_p off the same pass row.
+            assert_eq!(
+                e_p,
+                r_obs_sum == 0,
+                "D5 I2 violated on a pass: empty_drain == (Σ_e R_obs(e) == 0) must hold; \
+                 pass rows:\n{pass_rows:?}"
+            );
+
+            if e_p {
+                empty_passes += 1;
+            } else {
+                draining_passes += 1;
+            }
+
+            // I3 + P-KEYS, per drained epoch in this pass.
+            for exit_row in &exit_rows_in_pass {
+                let epoch = row_field(exit_row, "epoch");
+                let b_obs = row_u64(exit_row, "removed_bytes_observed");
+                let b_att = row_u64(exit_row, "bytes_freed_attributed");
+                // I3: B_obs(e) <= B_att(e) + B_restored(e). D5's
+                // B_restored(e) is 0 on every epoch — this drive never
+                // restores.
+                assert!(
+                    b_obs <= b_att,
+                    "D5 I3 violated on epoch {epoch}: B_obs <= B_att + B_restored(0) \
+                     must hold; row: {exit_row}"
+                );
+                i3_checked += 1;
+
+                let settlement_row = settlement_by_epoch
+                    .get(epoch)
+                    .unwrap_or_else(|| panic!("D5: epoch {epoch}'s settlement row must be present"));
+                let absent = row_u64(settlement_row, "absent");
+                // P-KEYS (precondition, recorded as a VALUE, not assumed):
+                // the considered ref's key was present in the store at
+                // drain time. Every D5 key is seeded before its epoch can
+                // possibly roll, so `absent` is expected 0 on every epoch —
+                // a nonzero value here REDs the round rather than silently
+                // resolving D-T row 2.
+                assert_eq!(
+                    absent, 0,
+                    "P-KEYS violated on epoch {epoch}: the considered ref's key must be \
+                     present in the store at drain time; settlement row: {settlement_row}"
+                );
+                p_keys_checked += 1;
+            }
+        }
+
+        assert_eq!(not_applicable_passes, 0, "D5 never restores: no pass should scope out");
+        assert_eq!(empty_passes, 1, "exactly the first pass (i=1) is an empty drain");
+        assert_eq!(draining_passes, N, "the remaining N passes each drain exactly one epoch");
+        assert_eq!(i3_checked, N, "I3 must be checked on all N drained epochs");
+        assert_eq!(p_keys_checked, N, "P-KEYS must be checked on all N considered refs");
+
+        // ------------------------------------------------------------
+        // Step 2 — the mechanical per-row Decision-Table evaluation over
+        // D5, the D-T's sole universe. Each row's OWN condition is
+        // evaluated and recorded as a VALUE below. This is evidence, not a
+        // verdict: which row (if any) names this round's reading is a
+        // later, freeze-gated determination this group does not make.
+        // ------------------------------------------------------------
+
+        // Row 1 (V1 REF-LOSS). Universe: every DrainedByPrune exit row
+        // recorded by D5. Condition: exists a row with R_obs < R_ent.
+        let row1_condition = exit_rows.iter().any(|r| {
+            r.contains("exit_kind=DrainedByPrune")
+                && row_u64(r, "removed_refs_observed") < row_u64(r, "refs_at_entry")
+        });
+
+        // Row 2 (V2 BOOKKEEPING ATTRIBUTION). Universe: every drained epoch
+        // recorded by D5, under precondition P-KEYS (verified above, holding
+        // on every considered ref). Condition: exists an epoch with
+        // R_obs > 0 AND D_e == 0 AND F_e == 0 AND B_att > 0.
+        let row2_condition = settlement_rows.iter().any(|settlement_row| {
+            let epoch = row_field(settlement_row, "epoch");
+            let dropped = row_u64(settlement_row, "dropped");
+            let bytes_freed = row_u64(settlement_row, "bytes_freed");
+            let Some(exit_row) = exit_by_epoch.get(epoch) else {
+                return false;
+            };
+            let r_obs = row_u64(exit_row, "removed_refs_observed");
+            let b_att = row_u64(exit_row, "bytes_freed_attributed");
+            r_obs > 0 && dropped == 0 && bytes_freed == 0 && b_att > 0
+        });
+
+        // Row 3 (V3 COUNTER-FAMILY MISNAMING). Universe: every prune pass
+        // driven by D5 on which no restored_* exit fired. Condition: I1 or
+        // I2 is VIOLATED on at least one such pass. Both were asserted true
+        // on every in-scope pass above (R4.4: a violation surfaces as the
+        // test's own failure message rather than reaching this line), so
+        // this flag is `false` whenever execution reaches here at all.
+        let row3_condition = false;
+
+        println!(
+            "D5 SEQUENTIAL REGIME: REPRODUCED — I1/I2/I3 held on every in-scope pass \
+             ({empty_passes} empty, {draining_passes} draining, {not_applicable_passes} \
+             not-applicable), P-KEYS held on {p_keys_checked}/{N} considered refs. \
+             D-T row conditions (recorded evidence, NOT a verdict): \
+             row1(V1 REF-LOSS)={row1_condition} row2(V2 BOOKKEEPING-ATTRIBUTION)={row2_condition} \
+             row3(V3 COUNTER-FAMILY-MISNAMING)={row3_condition}."
         );
     }
 }
