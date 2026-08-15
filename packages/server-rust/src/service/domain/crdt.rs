@@ -6311,6 +6311,362 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // A thread-local `tracing` capture: the settlement and pass rows have no
+    // Prometheus mirror, so this is the only transport that can read them.
+    // -----------------------------------------------------------------------
+
+    /// Renders every field of a captured event as `name=value ` pairs, of the
+    /// `network/device_identity.rs:397-429` shape. The visitor overrides no
+    /// `record_u64` / `record_bool`, so a `u64` or `bool` field reaches
+    /// `record_debug` exactly like every other non-`&str` field — Debug and
+    /// Display agree for both, so the rendered digits/`true`/`false` are the
+    /// same either way.
+    struct RowFieldVisitor(String);
+
+    impl tracing::field::Visit for RowFieldVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={value} ", field.name());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={value:?} ", field.name());
+        }
+    }
+
+    /// Sink for [`RowFieldVisitor`]: one rendered line per event, each prefixed
+    /// with the emitting event's `target` (metadata, not a `Visit` field, so it
+    /// is written directly rather than collected by the visitor) — a single
+    /// `String`, as the reference shape's own sink is. The newline is what lets
+    /// a test recover row boundaries from one accumulated capture without
+    /// needing a `Vec<String>` sink.
+    #[derive(Clone)]
+    struct RowCapture(Arc<std::sync::Mutex<String>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RowCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut v = RowFieldVisitor(format!(" target={} ", event.metadata().target()));
+            event.record(&mut v);
+            let mut sink = self.0.lock().unwrap();
+            sink.push_str(&v.0);
+            sink.push('\n');
+        }
+    }
+
+    /// Bind a thread-local capture for the guard's lifetime. Every drive that
+    /// reads rows off it must run on a current-thread runtime with the emission
+    /// on the test's own thread: `metrics::with_local_recorder` and
+    /// `tracing::subscriber::set_default` are both thread-local (the doc at
+    /// `:6129` makes the same point for the metrics recorder), so a
+    /// multi-thread runtime observes an empty capture instead of a violation.
+    fn capture_tracing_rows() -> (tracing::subscriber::DefaultGuard, Arc<std::sync::Mutex<String>>)
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        let sink: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+        let subscriber = tracing_subscriber::registry().with(RowCapture(Arc::clone(&sink)));
+        let guard = tracing::subscriber::set_default(subscriber);
+        (guard, sink)
+    }
+
+    /// Whether `line` is a row on `target` carrying `kind = "kind"`.
+    fn is_row(line: &str, target: &str, kind: &str) -> bool {
+        line.contains(&format!(" target={target} ")) && line.contains(&format!(" kind={kind} "))
+    }
+
+    /// Read one `u64`-rendered field out of a captured row.
+    fn row_u64(line: &str, name: &str) -> u64 {
+        row_field(line, name)
+            .parse()
+            .unwrap_or_else(|e| panic!("field {name} did not render a u64 in {line:?}: {e}"))
+    }
+
+    /// Read one `bool`-rendered field out of a captured row.
+    fn row_bool(line: &str, name: &str) -> bool {
+        row_field(line, name)
+            .parse()
+            .unwrap_or_else(|e| panic!("field {name} did not render a bool in {line:?}: {e}"))
+    }
+
+    fn row_field<'a>(line: &'a str, name: &str) -> &'a str {
+        let needle = format!(" {name}=");
+        let start = line
+            .find(&needle)
+            .unwrap_or_else(|| panic!("field {name} is absent from row {line:?}"))
+            + needle.len();
+        line[start..].split(' ').next().unwrap_or("")
+    }
+
+    /// Split a capture into successive passes: every row strictly after the
+    /// previous pass row up to and including its own pass row (Step 1's frozen
+    /// "Pass individuation" rule — the pass row is always emitted last).
+    fn split_into_passes(rendered: &str) -> Vec<Vec<&str>> {
+        let mut passes = Vec::new();
+        let mut current = Vec::new();
+        for line in rendered.lines() {
+            current.push(line);
+            if is_row(
+                line,
+                "topgun_server::tombstone_frontier::residency",
+                "prune_pass",
+            ) {
+                passes.push(std::mem::take(&mut current));
+            }
+        }
+        passes
+    }
+
+    /// R2.1/R2.2/AC3: the six-exit identity holds **per epoch**, exactly as it
+    /// already holds per pass — read off the settlement row, the only transport
+    /// `PruneEpochRecord` has (it carries no Prometheus series of its own).
+    ///
+    /// The six-exit fixture drains six epochs of width 1, one ref each, so
+    /// every epoch's settlement row has `considered == 1` and exactly one of
+    /// the six exit terms `== 1` — a per-epoch identity that would read exactly
+    /// as "true" on a settlement row wired to the wrong per-epoch counter (all
+    /// zero on one side), which is why each epoch's OWN nonzero exit is also
+    /// checked below rather than only the sum.
+    #[tokio::test]
+    async fn per_epoch_six_exit_identity_holds_on_the_settlement_row() {
+        let (guard, sink) = capture_tracing_rows();
+        let fixture = build_six_exit_fixture();
+        let _outcome = run_six_exit_prune_workload(fixture).await;
+        drop(guard);
+        let rendered = sink.lock().unwrap().clone();
+
+        // The settlement row carries no `kind` field, so filter on target alone
+        // (`is_row` requires both target and kind).
+        let settlement_rows: Vec<&str> = rendered
+            .lines()
+            .filter(|l| l.contains(" target=topgun_server::tombstone_frontier::settlement "))
+            .collect();
+
+        assert_eq!(
+            settlement_rows.len(),
+            6,
+            "one settlement row per drained epoch, six epochs drained; \
+             capture was:\n{rendered}"
+        );
+
+        let mut considered_sum = 0u64;
+        let mut dropped_sum = 0u64;
+        for row in &settlement_rows {
+            let considered = row_u64(row, "considered");
+            let dropped = row_u64(row, "dropped");
+            let matched_nothing = row_u64(row, "matched_nothing");
+            let absent = row_u64(row, "absent");
+            let restored_read_error = row_u64(row, "restored_read_error");
+            let restored_evicted = row_u64(row, "restored_evicted");
+            let restored_write_error = row_u64(row, "restored_write_error");
+            assert_eq!(
+                considered,
+                dropped
+                    + matched_nothing
+                    + absent
+                    + restored_read_error
+                    + restored_evicted
+                    + restored_write_error,
+                "the per-epoch six-exit identity must hold on this settlement \
+                 row: {row:?}"
+            );
+            assert_eq!(considered, 1, "one ref per epoch at epoch width 1: {row:?}");
+            considered_sum += considered;
+            dropped_sum += dropped;
+        }
+        assert_eq!(considered_sum, 6, "six epochs, one ref each");
+        assert_eq!(
+            dropped_sum, 1,
+            "exactly one of the six epochs reclaims durably (kdrop); the other \
+             five leave their tag in place"
+        );
+    }
+
+    /// AC4a: the pass row fires on **every** `prune_epoch_tombstones`
+    /// invocation, empty drains included, on the same residency target the
+    /// entry/exit rows use, with `kind = "prune_pass"` and the right
+    /// `considered` / `empty_drain` values (R2.5, R2.5a, R2.5b).
+    ///
+    /// The six-exit workload's OWN seeding writes sweep the (still-shut) prune
+    /// gates on top of the workload's one explicit call at the end (the same
+    /// mechanism `prune_exit_ledger_sums_to_considered` pins with `empty_drains
+    /// >= 1`), so a single run of it already exercises both an empty-drain pass
+    /// and a draining one — no hand-rolled second invocation needed, and none
+    /// of the exact auto-swept row count is assumed.
+    #[tokio::test]
+    async fn pass_row_fires_on_every_invocation_including_an_empty_drain() {
+        let (guard, sink) = capture_tracing_rows();
+        let fixture = build_six_exit_fixture();
+        let _outcome = run_six_exit_prune_workload(fixture).await;
+        drop(guard);
+        let rendered = sink.lock().unwrap().clone();
+
+        let pass_rows: Vec<&str> = rendered
+            .lines()
+            .filter(|l| {
+                is_row(
+                    l,
+                    "topgun_server::tombstone_frontier::residency",
+                    "prune_pass",
+                )
+            })
+            .collect();
+
+        assert!(
+            pass_rows.len() >= 2,
+            "the workload's seeding writes sweep the shut prune gates, so more \
+             than one pass row is expected on top of the workload's own \
+             explicit call; capture was:\n{rendered}"
+        );
+        assert!(
+            pass_rows
+                .iter()
+                .any(|r| row_u64(r, "considered") == 0 && row_bool(r, "empty_drain")),
+            "at least one pass row must report an empty drain (considered=0, \
+             empty_drain=true); capture was:\n{rendered}"
+        );
+        // The workload's own explicit call (`crdt.rs:1519`) is the LAST
+        // invocation of the run, strictly after every seeding write, so it is
+        // deterministically the capture's last pass row.
+        let last = pass_rows.last().expect("at least one pass row exists");
+        assert_eq!(
+            row_u64(last, "considered"),
+            6,
+            "the workload's own explicit call is the last invocation and \
+             drains all six seeded refs: {last:?}"
+        );
+        assert!(
+            !row_bool(last, "empty_drain"),
+            "the workload's own explicit call is a non-empty drain: {last:?}"
+        );
+    }
+
+    /// Exactly one `::residency` emit site names this target in this file
+    /// (AC4a's mechanical check, `rg -n 'target: "topgun_server::tombstone_\
+    /// frontier::residency"' … crdt.rs`) — asserted here too, over this file's
+    /// own source, so a second emit site fails the lib suite and not only the
+    /// grep the human checklist runs separately.
+    #[test]
+    fn exactly_one_residency_emit_site_in_this_file() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let count = SOURCE
+            .matches("target: \"topgun_server::tombstone_frontier::residency\"")
+            .count();
+        assert_eq!(
+            count, 1,
+            "AC4a requires exactly one ::residency emit site in this file, \
+             beside the existing observe_pass call"
+        );
+    }
+
+    /// Step 1's bridge identities, evaluated over a driven pass in this file's
+    /// own fixture (the full D-T evaluation over `D5` is `sim/tombstone_gc_\
+    /// proof.rs`'s job; this is the local confirmation that both terms are
+    /// actually reachable together on the ONE `tracing` transport, which is
+    /// what makes that later evaluation possible at all):
+    ///
+    /// - **I1**: `Σ_e R_obs(e) == K_p`, `R_obs` read off each pass's `epoch_\
+    ///   exit` rows (`removed_refs_observed`), `K_p` off that SAME pass's pass
+    ///   row (`considered`).
+    /// - **I2**: `E_p == (Σ_e R_obs(e) == 0)`, `E_p` read off the same pass
+    ///   row's `empty_drain`.
+    ///
+    /// Evaluated over EVERY pass the six-exit workload's run individuates —
+    /// split by [`split_into_passes`]'s frozen rule, so each pass's own rows
+    /// are summed separately rather than pooled across the whole capture. The
+    /// workload's own seeding writes sweep the shut prune gates ahead of its
+    /// one explicit call (see the pass-row test above), so a single run
+    /// already produces both empty-drain passes and one draining pass without
+    /// a hand-rolled second invocation or an assumed exact pass count.
+    #[tokio::test]
+    async fn i1_i2_pass_identity_holds_on_an_empty_and_a_draining_pass() {
+        let (guard, sink) = capture_tracing_rows();
+        let fixture = build_six_exit_fixture();
+        let _outcome = run_six_exit_prune_workload(fixture).await;
+        drop(guard);
+        let rendered = sink.lock().unwrap().clone();
+
+        let passes = split_into_passes(&rendered);
+        assert!(
+            passes.len() >= 2,
+            "the workload's seeding writes must individuate more than one \
+             pass on top of its own explicit call; capture was:\n{rendered}"
+        );
+
+        let mut saw_empty = false;
+        let mut saw_draining = false;
+        for pass_rows in &passes {
+            let pass_row = pass_rows
+                .last()
+                .expect("a pass's own rows always end with its pass row");
+            assert!(
+                is_row(
+                    pass_row,
+                    "topgun_server::tombstone_frontier::residency",
+                    "prune_pass"
+                ),
+                "a pass's last row must be its own pass row: {pass_row:?}"
+            );
+            let k_p = row_u64(pass_row, "considered");
+            let e_p = row_bool(pass_row, "empty_drain");
+
+            let r_obs_sum: u64 = pass_rows
+                .iter()
+                .filter(|l| {
+                    is_row(
+                        l,
+                        "topgun_server::tombstone_frontier::residency",
+                        "epoch_exit",
+                    )
+                })
+                .map(|l| row_u64(l, "removed_refs_observed"))
+                .sum();
+
+            assert_eq!(
+                r_obs_sum, k_p,
+                "I1: the sum of a pass's own epoch_exit removed_refs_observed \
+                 must equal that SAME pass's considered; pass rows were:\n{pass_rows:?}"
+            );
+            assert_eq!(
+                e_p,
+                r_obs_sum == 0,
+                "I2: empty_drain must equal (Σ removed_refs_observed == 0) for \
+                 the same pass; pass rows were:\n{pass_rows:?}"
+            );
+
+            if e_p {
+                saw_empty = true;
+            } else {
+                saw_draining = true;
+            }
+        }
+
+        // Both regimes must actually appear, or I1/I2 above would hold
+        // vacuously over only one of them.
+        assert!(
+            saw_empty,
+            "at least one pass in the capture must be an empty drain; \
+             capture was:\n{rendered}"
+        );
+        assert!(
+            saw_draining,
+            "at least one pass in the capture must be a draining pass; \
+             capture was:\n{rendered}"
+        );
+        // The workload's own explicit call is the last invocation of the run
+        // (`crdt.rs:1519`), so it is deterministically the capture's last pass.
+        assert_eq!(
+            row_u64(passes.last().unwrap().last().unwrap(), "considered"),
+            6,
+            "the last pass in the capture must be the workload's own draining \
+             call over all six seeded refs"
+        );
+    }
+
     /// The prune record is INSTRUMENT-NEUTRAL: arming it moves no tombstone
     /// bytes and reclaims no differently.
     ///
