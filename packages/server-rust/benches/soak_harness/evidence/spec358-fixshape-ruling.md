@@ -145,8 +145,22 @@ PD-F20 records the executed evidence and the rule that follows from it — no cl
 term is "unfireable by construction" enters this record again without its executed
 mutation or an executed constructibility witness beside it.
 
-## Two notes on how this round's own record should be read (added by Review v1)
+## Three notes on how this round's own record should be read (notes 1–2 added by Review v1; note 3 by Review v3)
 
+- **D-T row 1's published value is fail-closed at R4.6's gate, not computed either — so of the
+  three printed values only row 2 is live.** Review v3 planted row 1's antecedent directly in the
+  subject (one line in `drain_prunable`'s `Some(refs)` arm emptying epoch 5's removed vector) and
+  the round did **not** print `row1=true`: it went RED first, at `sim/tombstone_gc_proof.rs:884`
+  with *"R4.6: expected 3000 settlement row(s)"*, because a zero-ref drain emits an exit row and
+  **no** settlement row — the asymmetry Observable Truth 2 already names. This is a
+  **strengthening, not a defect**: `D5` cannot silently miss a row-1 antecedent, it fails closed
+  on one. But it means the three printed values have three different epistemic statuses — row 2
+  computed live off the capture, row 3 asserted (a violation panics at I1/I2 above), row 1
+  fail-closed at R4.6 above — and a reader comparing them at face value would over-read rows 1
+  and 3. Recorded by execution, per this round's own rule that no reachability or deadness claim
+  is admissible without an executed witness. Consistent with and additive to PD-F20, whose row-1
+  paragraph rests on leg (c)'s returned-record witness plus PD-F15's static enumeration and
+  claims nothing about `D5`'s own expression of row 1.
 - **D-T row 3's published value is asserted, not computed.**
   `sim/tombstone_gc_proof.rs` sets `row3_condition` to the literal `false`, and the
   `--nocapture` line consequently prints `row3(V3 COUNTER-FAMILY-MISNAMING)=false` in the

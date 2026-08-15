@@ -8156,10 +8156,19 @@ after this one.** The `ReclamationRegistry` family (`TODO-634`) starts with the 
 §12.0 pre-authorizes exactly this: *"if the data suggests one, it is recorded as a
 POST-DATA finding and routed, and the table's own verdict still stands."* The
 cross-vendor adversarial round (`spec358-mechanism-xask.md`) recommended a static audit
-of `publish_epoch_exit` call sites; the audit was run and produced the following four
-POST-DATA findings, all reached by source-code audit outside `D5`'s frozen universe —
-none is a row-1 violation reached by execution inside that universe, and none changes
-§12.1.c's verdict.
+of `publish_epoch_exit` call sites; the audit was run and produced **PD-F15 through
+PD-F18**, all four reached by source-code audit outside `D5`'s frozen universe.
+**PD-F19 and PD-F20 were added later, by review rather than by that audit, and their
+provenance differs:** PD-F19 was a Review-v1 reading reached by argument, and PD-F20 is
+the Review-v2 finding that RETRACTS it — PD-F20's evidence is an **executed mutation**,
+not a source-code reading. So the umbrella over this list is provenance-mixed by
+construction, and each entry states its own basis; do not read "reached by source-code
+audit" as covering the last two.
+
+What still holds over all six: none is a row-1 violation reached by execution inside
+`D5`'s frozen universe — PD-F20's mutations flip a row only in a deliberately MUTATED
+subject, which is what makes them a liveness proof of the instrument rather than an
+observation about the unmutated system — and none changes §12.1.c's verdict.
 
 - **POST-DATA — PD-F15** — the mechanism is code-identifiable, and it is row 1's named
   extreme case. `drain_prunable`'s `drained_epochs.insert(e)` sits inside `if let
