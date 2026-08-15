@@ -50,6 +50,11 @@
 # the day it does occur is exactly the day `INDETERMINATE-RESIDUAL` turns on it.
 #
 # EXIT: 0 on a clean pass. Non-zero, with the offending line named, on ANY unparseable field.
+# Non-zero ALSO when no residency-target line is seen at all, or when fewer lines are emitted
+# than were seen -- the "drops no record" guarantee above is an assertion, not a comment, so a
+# silently-empty or silently-short ledger is a FAILURE rather than a clean pass. Without that
+# check a transport regression upstream (an ANSI strip that stops matching, a renamed target)
+# would hand the pinned extractor an empty file and report success.
 # A partial output file is never left behind on failure.
 set -euo pipefail
 
@@ -88,6 +93,7 @@ sed 's/\x1b\[[0-9;]*m//g' "$RAW" | awk -v target="$TARGET" '
 
     index($0, target ":") == 0 { next }
     {
+        seen++
         line = $0
         # Field list begins at the first `kind=` token; everything before it is tracing'"'"'s own
         # timestamp/level/target/message prefix and carries no record field.
@@ -140,6 +146,10 @@ sed 's/\x1b\[[0-9;]*m//g' "$RAW" | awk -v target="$TARGET" '
     }
     END {
         if (exit_code) exit 1
+        if (seen == 0)
+            fail("no residency-target line was seen at all -- ANSI strip or target match failed", target ":")
+        if (emitted != seen)
+            fail(sprintf("dropped %d of %d residency-target lines", seen - emitted, seen), target ":")
         printf("spec357b-console-normalize.sh: %d residency records normalized\n", emitted) > "/dev/stderr"
     }
 ' > "$TMP"
