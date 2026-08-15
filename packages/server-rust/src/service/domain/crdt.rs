@@ -1559,11 +1559,17 @@ pub(crate) async fn prune_epoch_tombstones(
             // reclaim fraction that no other instrument can see.
             Ok(None) => {
                 pass.absent += 1;
+                if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
+                    epoch_record.absent += 1;
+                }
                 continue;
             }
             Err(e) => {
                 tracing::warn!(map = %r.map, key = %r.key, epoch, "prune read failed, re-indexing tombstone for retry: {e}");
                 pass.restored_read_error += 1;
+                if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
+                    epoch_record.restored_read_error += 1;
+                }
                 frontier.restore_tombstone_ref(epoch, r);
                 continue;
             }
@@ -1667,11 +1673,17 @@ pub(crate) async fn prune_epoch_tombstones(
                         "prune found key evicted mid-write, re-indexing tombstone for retry"
                     );
                     pass.restored_evicted += 1;
+                    if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
+                        epoch_record.restored_evicted += 1;
+                    }
                     frontier.restore_tombstone_ref(epoch, r);
                 } else if !dropped {
                     // The closure ran and matched no tag; it may still have owed the
                     // shape-upgrade write above, but no tombstone was reclaimed.
                     pass.matched_nothing += 1;
+                    if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
+                        epoch_record.matched_nothing += 1;
+                    }
                 }
             }
             Err(e) => {
@@ -1679,6 +1691,9 @@ pub(crate) async fn prune_epoch_tombstones(
                 // would silently stall tombstone reclamation.
                 tracing::warn!(map = %r.map, key = %r.key, epoch, "prune update failed, re-indexing tombstone for retry: {e}");
                 pass.restored_write_error += 1;
+                if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
+                    epoch_record.restored_write_error += 1;
+                }
                 frontier.restore_tombstone_ref(epoch, r);
             }
         }
@@ -1689,11 +1704,44 @@ pub(crate) async fn prune_epoch_tombstones(
         frontier
             .prune_observer()
             .observe_drained_epoch(epoch_record);
+        // One settlement line per drained epoch, joined to that epoch's exit row by
+        // `epoch` — a field populated on every row of both ledgers, so the join needs
+        // no wall clock. This is the only place the per-epoch six-exit identity is
+        // observable end to end: `PruneEpochRecord` has no Prometheus series of its
+        // own, so without this line the per-epoch counters above would be provably
+        // correct in-process yet unreadable by anything outside it.
+        tracing::info!(
+            target: "topgun_server::tombstone_frontier::settlement",
+            epoch = epoch_record.epoch,
+            considered = epoch_record.considered,
+            dropped = epoch_record.dropped,
+            matched_nothing = epoch_record.matched_nothing,
+            absent = epoch_record.absent,
+            restored_read_error = epoch_record.restored_read_error,
+            restored_evicted = epoch_record.restored_evicted,
+            restored_write_error = epoch_record.restored_write_error,
+            bytes_freed = epoch_record.bytes_freed,
+            "prune epoch settlement"
+        );
     }
     // Exactly one pass observation per invocation, outside the loop body and on
     // every path through this function — the recorder counts the pass itself, so a
     // second or a conditional call would break the pass identity.
     frontier.prune_observer().observe_pass(&pass);
+    // The pass row: `considered` and `empty_drain` have never had a `tracing`
+    // transport before this line, so neither term was readable in-process by
+    // anything that cannot bind the (permanently no-op, outside its own recorder
+    // binding) Prometheus handles. Fires on EVERY invocation, empty drains
+    // included, unconditionally and outside the loop above — that unconditional
+    // placement is what makes this row individuate a pass on the capture: it is
+    // always the last row a pass emits.
+    tracing::info!(
+        target: "topgun_server::tombstone_frontier::residency",
+        kind = "prune_pass",
+        considered = pass.considered,
+        empty_drain = pass.empty_drain,
+        "prune pass"
+    );
 }
 
 // ---------------------------------------------------------------------------
