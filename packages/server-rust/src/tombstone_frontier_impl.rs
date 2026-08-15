@@ -4430,6 +4430,376 @@ mod tests {
         assert_eq!(retried[0].0, 1);
         assert_eq!(retried[0].1.tag, "T1");
     }
+
+    // -----------------------------------------------------------------------
+    // The two OBSERVATION fields (R1) -- unit coverage, the rendered `/metrics`
+    // proof (X21-c), the rendered-field-text proof (X21-b), the pre-freeze
+    // sanity row `S1` (R1.7, C12) and Step 0 leg (c) (R1.7, X21-a, C11).
+    // -----------------------------------------------------------------------
+
+    /// R1.5 (first case): every exit kind other than `DrainedByPrune` carries `0` in both
+    /// new fields, even though `refs_at_entry` (the attribution the observation pair exists
+    /// to be checked against) is nonzero on the same row.
+    #[test]
+    fn finalize_epoch_exit_zeroes_observation_fields_for_non_drained_exit_kinds() {
+        let f = frontier();
+        f.set_epoch_width(1);
+        f.stamp_tombstone("m", "k1", "TAG1"); // epoch 1
+        f.stamp_tombstone("m", "k2", "TAG2"); // rolls past epoch 1: refs_at_entry = 1
+
+        let exits = {
+            let mut state = f.lock();
+            state.rebuild_into_epoch(100, Vec::new())
+        };
+        assert_eq!(exits.len(), 1, "only epoch 1 had an entry-emitted slot");
+        let exit = exits.into_iter().next().expect("checked len == 1");
+
+        assert!(matches!(exit.exit_kind, EpochExitKind::ClearedByRebuild));
+        assert!(
+            exit.refs_at_entry > 0,
+            "R_ent must be > 0 for the zero below to be a meaningful check: {exit:?}"
+        );
+        assert_eq!(
+            exit.removed_refs_observed, 0,
+            "R1.5: not a DrainedByPrune exit: {exit:?}"
+        );
+        assert_eq!(
+            exit.removed_bytes_observed, 0,
+            "R1.5: not a DrainedByPrune exit: {exit:?}"
+        );
+    }
+
+    /// R1.5 (second case): a `DrainedByPrune` attribution whose epoch is absent from the
+    /// carried per-epoch map -- reachable only via a direct bypass, because
+    /// `drain_prunable`'s `Some(refs)` arm is the map's only writer (K1) and always supplies
+    /// an entry for any epoch it attributes `DrainedByPrune` to. Exercised directly here so
+    /// the branch stays observable rather than merely declared.
+    #[test]
+    fn finalize_epoch_exit_zeroes_observation_fields_when_the_epoch_is_absent_from_the_carried_map()
+    {
+        let f = frontier();
+        f.set_epoch_width(1);
+        f.stamp_tombstone("m", "k1", "TAG1"); // epoch 1
+        f.stamp_tombstone("m", "k2", "TAG2"); // rolls past epoch 1: refs_at_entry = 1
+
+        let exit = {
+            let mut state = f.lock();
+            state.epoch_tags.remove(&1);
+            state.detect_epoch_exit(1, Some(FinalExitKind::DrainedByPrune), None)
+        }
+        .expect("epoch 1 is absent from epoch_tags and must surface an exit row");
+
+        assert!(matches!(exit.exit_kind, EpochExitKind::DrainedByPrune));
+        assert!(exit.refs_at_entry > 0, "R_ent must be > 0: {exit:?}");
+        assert_eq!(
+            exit.removed_refs_observed, 0,
+            "R1.5: epoch absent from the carried map: {exit:?}"
+        );
+        assert_eq!(
+            exit.removed_bytes_observed, 0,
+            "R1.5: epoch absent from the carried map: {exit:?}"
+        );
+    }
+
+    /// AC5/X21-c -- the two new pinned counters reach a rendered `/metrics` scrape and carry
+    /// the drain's own observed totals, through the full public pipeline
+    /// (`drain_prunable_tombstones` → `publish_epoch_exit` → `observe_epoch_residency`).
+    /// Sited here, not in `src/sim`, because the metrics recorder binding is thread-local
+    /// (C13, X21-d).
+    #[test]
+    fn removed_observation_counters_reach_the_rendered_metrics_scrape() {
+        let rendered = rendered_under_a_recorder(|| {
+            let f = frontier();
+            f.set_epoch_width(1);
+            f.stamp_tombstone("m", "k1", "TAG1"); // epoch 1: 1 ref, 4 bytes
+            f.stamp_tombstone("m", "k2", "TAG2"); // rolls past epoch 1
+
+            f.set_durable_epoch_watermark(1);
+            f.set_delivered(CONN_A, 100);
+            let c: ClientId = "a5:metrics-observed|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+
+            let drained = f.drain_prunable_tombstones();
+            assert_eq!(drained.len(), 1, "only epoch 1 clears both conjuncts");
+        });
+
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_REMOVED_REFS_OBSERVED_TOTAL),
+            Some("1"),
+            "epoch 1's drain observed exactly one removed ref; render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_REMOVED_BYTES_OBSERVED_TOTAL),
+            Some("4"),
+            "TAG1 is 4 bytes; render was:\n{rendered}"
+        );
+    }
+
+    /// R1.6/R3.2 -- `MetricsPruneRecorder::observe_epoch_residency` credits the two new
+    /// OBSERVATION counters on the `DrainedByPrune` arm ONLY: every other exit kind must move
+    /// neither counter, even when the record itself carries nonzero observation fields (R1.5
+    /// guarantees that never happens in production, but the observer's own crediting arm must
+    /// not depend on that guarantee to stay correct).
+    #[test]
+    fn metrics_recorder_credits_removed_observation_counters_on_the_drained_arm_only() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let observer = MetricsPruneRecorder::new();
+            for exit_kind in [
+                EpochExitKind::ClearedByRebuild,
+                EpochExitKind::StillResidentAtShutdown,
+            ] {
+                observer.observe_epoch_residency(&PruneEpochResidencyRecord {
+                    exit_kind,
+                    removed_refs_observed: 99,
+                    removed_bytes_observed: 999,
+                    ..PruneEpochResidencyRecord::default()
+                });
+            }
+            observer.observe_epoch_residency(&PruneEpochResidencyRecord {
+                exit_kind: EpochExitKind::DrainedByPrune,
+                removed_refs_observed: 3,
+                removed_bytes_observed: 12,
+                ..PruneEpochResidencyRecord::default()
+            });
+        });
+
+        let rendered = handle.render();
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_REMOVED_REFS_OBSERVED_TOTAL),
+            Some("3"),
+            "only the DrainedByPrune row's 3 refs must be credited; render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_PRUNE_REMOVED_BYTES_OBSERVED_TOTAL),
+            Some("12"),
+            "only the DrainedByPrune row's 12 bytes must be credited; render was:\n{rendered}"
+        );
+    }
+
+    /// A thread-local `tracing` capture layer (X21-b, X21-d(iv)) -- this file's test module
+    /// carried none before this segment. One entry per captured event, never a single
+    /// concatenated `String`: both `S1` and the rendered-field-text proof below read PER-ROW
+    /// terms off a SPECIFIC exit row, and a concatenated sink cannot individuate one row from
+    /// the next.
+    ///
+    /// The `network/device_identity.rs:397-429` shape, adapted for a `Vec<String>` sink.
+    struct FieldTextVisitor(String);
+
+    impl tracing::field::Visit for FieldTextVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={value} ", field.name());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={value:?} ", field.name());
+        }
+    }
+
+    #[derive(Clone)]
+    struct EventCapture(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            // The target is metadata, not a recorded field -- prefixed by hand so a
+            // captured row stays attributable to a specific `tracing` target rather than
+            // just whatever field text it happens to carry.
+            let mut visitor = FieldTextVisitor(format!("target={} ", event.metadata().target()));
+            event.record(&mut visitor);
+            self.0.lock().unwrap().push(visitor.0);
+        }
+    }
+
+    /// Bind a fresh thread-local `tracing` capture layer, run `body`, and return every
+    /// captured event's rendered field text, one entry per event (X21-d(iv)).
+    fn captured_tracing_events(body: impl FnOnce()) -> Vec<String> {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let sink: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&sink)));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        body();
+        let events = sink.lock().unwrap().clone();
+        events
+    }
+
+    /// X21-b -- the two new fields reach the residency EXIT row's `tracing` transport BY
+    /// NAME: a capture over a real `DrainedByPrune` exit shows `removed_refs_observed=` and
+    /// `removed_bytes_observed=` in the rendered field text (the `name=value` pairs a `Visit`
+    /// collector accumulates), proven independently of whether the two terms happen to
+    /// diverge from their attribution twins -- `S1` below is this limb's SECOND executed
+    /// proof, the one that also diverges.
+    #[test]
+    fn removed_observation_fields_appear_by_name_on_the_captured_exit_row() {
+        let f = frontier();
+        f.set_epoch_width(1);
+        f.stamp_tombstone("m", "k1", "TAG1"); // epoch 1: 1 ref, 4 bytes
+        f.stamp_tombstone("m", "k2", "TAG2"); // rolls past epoch 1
+
+        f.set_durable_epoch_watermark(1);
+        f.set_delivered(CONN_A, 100);
+        let c: ClientId = "a5:field-text|dev-1".into();
+        assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+
+        let events = captured_tracing_events(|| {
+            let drained = f.drain_prunable_tombstones();
+            assert_eq!(drained.len(), 1);
+        });
+
+        let exit_row = events
+            .iter()
+            .find(|e| e.contains("kind=epoch_exit") && e.contains("epoch=1 "))
+            .unwrap_or_else(|| {
+                panic!("no epoch_exit row for epoch 1 in captured events:\n{events:#?}")
+            });
+
+        assert!(
+            exit_row.contains("removed_refs_observed=1"),
+            "row: {exit_row}"
+        );
+        assert!(
+            exit_row.contains("removed_bytes_observed=4"),
+            "row: {exit_row}"
+        );
+    }
+
+    /// `S1` -- THE PRE-FREEZE SANITY ROW (X21 applied to the PREDICATE itself, C12).
+    ///
+    /// Establishes that `removed_refs_observed` / `removed_bytes_observed` CAN diverge from
+    /// `refs_at_entry` / `bytes_freed_attributed` on a REAL `DrainedByPrune` exit row,
+    /// constructed entirely through PUBLIC entry points (bar the `#[cfg(test)]` watermark
+    /// injector every test in this file already uses) -- a discriminator nobody has shown to
+    /// discriminate is exactly the failure class Audit v1 C1 caught.
+    ///
+    /// `drain_prunable_tombstones` (the only PUBLIC drain entry point) returns
+    /// `Vec<(Epoch, TombstoneRef)>` and no record (R1.7, X21-a), so this test reads the exit
+    /// row off the declared `tracing` capture rather than off a return value; the returned
+    /// `Vec` is asserted separately, as a count check only.
+    #[test]
+    fn s1_pre_freeze_sanity_row_diverges_through_public_entry_points_only() {
+        let f = frontier();
+        // 1. one epoch per stamp.
+        f.set_epoch_width(1);
+        // 2. epoch 1 holds 1 ref; slot created.
+        f.stamp_tombstone("m", "k1", "TAG1");
+        // 3. rolls past epoch 1 -> entry row fires; slot.refs_at_entry = 1, entry_emitted =
+        // true.
+        f.stamp_tombstone("m", "k2", "TAG2");
+        // 4. epoch_tags[1] now holds 2 refs; epoch_slots[1] (and slot.refs_at_entry) is
+        // untouched -- this is C12's divergence mechanism.
+        f.restore_tombstone_ref(
+            1,
+            TombstoneRef {
+                map: "m".to_string(),
+                key: "k1".to_string(),
+                tag: "TAGX".to_string(),
+            },
+        );
+        // 5. REQUIRED PREREQUISITE: `advance_on_ack` clamps by `delivered.unwrap_or(0)`; with
+        // no prior `set_delivered` the bound is 0, step 6 returns false, and step 8 drains
+        // nothing.
+        f.set_delivered(CONN_A, 100);
+        let c: ClientId = "a5:s1-sanity|dev-1".into();
+        // 6. bound = min(claimed 2, delivered 100, current_max_epoch 2) = 2; LWM 2 > 1 ->
+        // epoch 1 prune-eligible.
+        assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+        // 7. second call-site conjunct.
+        f.set_durable_epoch_watermark(1);
+
+        // 8. drain via the PUBLIC entry point; observed off the captured exit row (X21-b).
+        let events = captured_tracing_events(|| {
+            let drained = f.drain_prunable_tombstones();
+            assert_eq!(
+                drained.len(),
+                2,
+                "epoch 1's two refs (stamped TAG1, restored TAGX) both drain"
+            );
+        });
+
+        let exit_row = events
+            .iter()
+            .find(|e| e.contains("kind=epoch_exit") && e.contains("epoch=1 "))
+            .unwrap_or_else(|| {
+                panic!("no epoch_exit row for epoch 1 in captured events:\n{events:#?}")
+            });
+
+        assert!(
+            exit_row.contains("exit_kind=DrainedByPrune"),
+            "row: {exit_row}"
+        );
+        // R_ent == 1 (only TAG1 was ever STAMPED into epoch 1 before rollover).
+        assert!(exit_row.contains("refs_at_entry=1"), "row: {exit_row}");
+        // R_obs == 2 (TAG1 stamped + TAGX restored, both resident at drain time):
+        // R_obs == R_ent + 1, the discriminating assertion (C12).
+        assert!(
+            exit_row.contains("removed_refs_observed=2"),
+            "row: {exit_row}"
+        );
+        // B_att == 4 (TAG1's own stamped bytes; TAGX was restored, never stamped).
+        assert!(
+            exit_row.contains("bytes_freed_attributed=4"),
+            "row: {exit_row}"
+        );
+        // B_obs == 8 == B_att + len("TAGX") == 4 + 4.
+        assert!(
+            exit_row.contains("removed_bytes_observed=8"),
+            "row: {exit_row}"
+        );
+    }
+
+    /// Step 0 leg (c) -- the V1 POSITIVE CONTROL (C11). `R_obs < R_ent` is not constructible
+    /// through the public API at all (C4's four-site mutation enumeration), so this plants the
+    /// antecedent directly via the same in-module `epoch_tags` bypass this file already uses
+    /// elsewhere (e.g. the tier-1 walk's class (c), the unenumerated-removal test above), then
+    /// drains IN-MODULE (`f.lock().drain_prunable()`, the one in-crate call that returns the
+    /// exit rows BY VALUE) and asserts on the RETURNED record -- X21-a's sole workable proof.
+    ///
+    /// This proves the V1 predicate FIRES when its antecedent exists; it is NOT evidence about
+    /// the prune itself, and its rows are excluded from every Decision-Table universe (the
+    /// frozen scoping in Step 0).
+    #[test]
+    fn step0_leg_c_v1_positive_control_planted_ref_loss_fires_on_the_returned_record() {
+        let f = frontier();
+        f.set_epoch_width(1);
+        f.stamp_tombstone("m", "k1", "TAG1"); // epoch 1
+        f.stamp_tombstone("m", "k2", "TAG2"); // rolls past epoch 1: refs_at_entry = 1
+        f.set_durable_epoch_watermark(1);
+        f.set_delivered(CONN_A, 100);
+        let c: ClientId = "a5:leg-c|dev-1".into();
+        assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+
+        let exits = {
+            let mut state = f.lock();
+            // Plant the V1 antecedent (C11): epoch 1's index content is replaced with an
+            // EMPTY vector -- entry-emitted and still eligible, so the drain's own eligible
+            // fold genuinely removes it (`epoch_tags.remove(&1)` returns `Some`, a real
+            // `DrainedByPrune` attribution) while observing NOTHING in the vector it
+            // removed.
+            state.epoch_tags.insert(1, Vec::new());
+            let (_drained, _split, exits) = state.drain_prunable();
+            exits
+        };
+        assert_eq!(exits.len(), 1, "only epoch 1 was eligible");
+        let exit = exits.into_iter().next().expect("checked len == 1");
+
+        assert!(
+            matches!(exit.exit_kind, EpochExitKind::DrainedByPrune),
+            "the eligible fold genuinely removed epoch 1 (an empty Vec, but Some), so this \
+             is a real DrainedByPrune exit, not Unclassified: {exit:?}"
+        );
+        assert!(exit.refs_at_entry > 0, "R_ent must be > 0: {exit:?}");
+        assert_eq!(
+            exit.removed_refs_observed, 0,
+            "R_obs must be 0: the planted vector carried nothing for drain_prunable to \
+             observe: {exit:?}"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "redb"))]
