@@ -619,9 +619,13 @@ mod tests {
     /// PHASE 2 (reserved for a later segment, engaged only if R7.3(c)
     /// fires): the reproducing test itself, if the mechanism's siting rule
     /// lands it at the interleaving-fault boundary. Not present here — this
-    /// fn carries ONLY the fault-dimension arm in this segment; a second
-    /// phase, if it lands, extends THIS SAME fn's body, never a second fn
-    /// (the shape-4 bound admits exactly one additive fn in this file).
+    /// fn carries ONLY the fault-dimension arm in this segment.
+    ///
+    /// This file's current contract permits new fns and module-scope helpers
+    /// beside this one — it is counted against the increment that governs
+    /// its scope, so a second phase, if it lands, may extend this fn's body
+    /// or add a sibling fn, whichever the reproducing test's own shape
+    /// calls for.
     #[tokio::test(flavor = "multi_thread")]
     async fn prune_epoch_residency_discrimination_under_network_fault() {
         for round in 0..64u64 {
