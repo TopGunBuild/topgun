@@ -6336,14 +6336,15 @@ mod tests {
         }
     }
 
-    /// Sink for [`RowFieldVisitor`]: one rendered line per event, each prefixed
-    /// with the emitting event's `target` (metadata, not a `Visit` field, so it
-    /// is written directly rather than collected by the visitor) — a single
-    /// `String`, as the reference shape's own sink is. The newline is what lets
-    /// a test recover row boundaries from one accumulated capture without
-    /// needing a `Vec<String>` sink.
+    /// Sink for [`RowFieldVisitor`]: one rendered line PER CAPTURED EVENT, each
+    /// prefixed with the emitting event's `target` (metadata, not a `Visit`
+    /// field, so it is written directly rather than collected by the visitor) —
+    /// a `Vec<String>`, never a single concatenated `String`. Every test below
+    /// reads a SPECIFIC row's own fields off the capture, and a concatenated
+    /// blob can only individuate rows by inventing a newline convention that
+    /// any future field rendering a newline would silently break.
     #[derive(Clone)]
-    struct RowCapture(Arc<std::sync::Mutex<String>>);
+    struct RowCapture(Arc<std::sync::Mutex<Vec<String>>>);
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RowCapture {
         fn on_event(
@@ -6353,9 +6354,7 @@ mod tests {
         ) {
             let mut v = RowFieldVisitor(format!(" target={} ", event.metadata().target()));
             event.record(&mut v);
-            let mut sink = self.0.lock().unwrap();
-            sink.push_str(&v.0);
-            sink.push('\n');
+            self.0.lock().unwrap().push(v.0);
         }
     }
 
@@ -6367,10 +6366,10 @@ mod tests {
     /// multi-thread runtime observes an empty capture instead of a violation.
     fn capture_tracing_rows() -> (
         tracing::subscriber::DefaultGuard,
-        Arc<std::sync::Mutex<String>>,
+        Arc<std::sync::Mutex<Vec<String>>>,
     ) {
         use tracing_subscriber::layer::SubscriberExt;
-        let sink: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+        let sink: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(RowCapture(Arc::clone(&sink)));
         let guard = tracing::subscriber::set_default(subscriber);
         (guard, sink)
@@ -6407,11 +6406,11 @@ mod tests {
     /// Split a capture into successive passes: every row strictly after the
     /// previous pass row up to and including its own pass row (Step 1's frozen
     /// "Pass individuation" rule — the pass row is always emitted last).
-    fn split_into_passes(rendered: &str) -> Vec<Vec<&str>> {
+    fn split_into_passes(rows: &[String]) -> Vec<Vec<&str>> {
         let mut passes = Vec::new();
         let mut current = Vec::new();
-        for line in rendered.lines() {
-            current.push(line);
+        for line in rows {
+            current.push(line.as_str());
             if is_row(
                 line,
                 "topgun_server::tombstone_frontier::residency",
@@ -6439,12 +6438,13 @@ mod tests {
         let fixture = build_six_exit_fixture();
         let _outcome = run_six_exit_prune_workload(fixture).await;
         drop(guard);
-        let rendered = sink.lock().unwrap().clone();
+        let rows = sink.lock().unwrap().clone();
 
         // The settlement row carries no `kind` field, so filter on target alone
         // (`is_row` requires both target and kind).
-        let settlement_rows: Vec<&str> = rendered
-            .lines()
+        let settlement_rows: Vec<&str> = rows
+            .iter()
+            .map(String::as_str)
             .filter(|l| l.contains(" target=topgun_server::tombstone_frontier::settlement "))
             .collect();
 
@@ -6452,7 +6452,7 @@ mod tests {
             settlement_rows.len(),
             6,
             "one settlement row per drained epoch, six epochs drained; \
-             capture was:\n{rendered}"
+             capture was:\n{rows:#?}"
         );
 
         let mut considered_sum = 0u64;
@@ -6505,10 +6505,11 @@ mod tests {
         let fixture = build_six_exit_fixture();
         let _outcome = run_six_exit_prune_workload(fixture).await;
         drop(guard);
-        let rendered = sink.lock().unwrap().clone();
+        let rows = sink.lock().unwrap().clone();
 
-        let pass_rows: Vec<&str> = rendered
-            .lines()
+        let pass_rows: Vec<&str> = rows
+            .iter()
+            .map(String::as_str)
             .filter(|l| {
                 is_row(
                     l,
@@ -6522,14 +6523,14 @@ mod tests {
             pass_rows.len() >= 2,
             "the workload's seeding writes sweep the shut prune gates, so more \
              than one pass row is expected on top of the workload's own \
-             explicit call; capture was:\n{rendered}"
+             explicit call; capture was:\n{rows:#?}"
         );
         assert!(
             pass_rows
                 .iter()
                 .any(|r| row_u64(r, "considered") == 0 && row_bool(r, "empty_drain")),
             "at least one pass row must report an empty drain (considered=0, \
-             empty_drain=true); capture was:\n{rendered}"
+             empty_drain=true); capture was:\n{rows:#?}"
         );
         // The workload's own explicit call (`crdt.rs:1519`) is the LAST
         // invocation of the run, strictly after every seeding write, so it is
@@ -6590,13 +6591,13 @@ mod tests {
         let fixture = build_six_exit_fixture();
         let _outcome = run_six_exit_prune_workload(fixture).await;
         drop(guard);
-        let rendered = sink.lock().unwrap().clone();
+        let rows = sink.lock().unwrap().clone();
 
-        let passes = split_into_passes(&rendered);
+        let passes = split_into_passes(&rows);
         assert!(
             passes.len() >= 2,
             "the workload's seeding writes must individuate more than one \
-             pass on top of its own explicit call; capture was:\n{rendered}"
+             pass on top of its own explicit call; capture was:\n{rows:#?}"
         );
 
         let mut saw_empty = false;
@@ -6652,12 +6653,12 @@ mod tests {
         assert!(
             saw_empty,
             "at least one pass in the capture must be an empty drain; \
-             capture was:\n{rendered}"
+             capture was:\n{rows:#?}"
         );
         assert!(
             saw_draining,
             "at least one pass in the capture must be a draining pass; \
-             capture was:\n{rendered}"
+             capture was:\n{rows:#?}"
         );
         // The workload's own explicit call is the last invocation of the run
         // (`crdt.rs:1519`), so it is deterministically the capture's last pass.
