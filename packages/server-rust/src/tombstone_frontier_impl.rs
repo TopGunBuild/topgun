@@ -618,15 +618,20 @@ impl FrontierState {
     /// three separate hooks that each independently construct an exit record — so a
     /// removal reached by a path nobody has enumerated yet still lands here and is
     /// still detected, exactly as R2.3b's doc-contract requires.
+    ///
+    /// `observed` is the `(refs, bytes)` pair `drain_prunable`'s `Some(refs)` arm read from
+    /// the removed vector itself (K1), keyed by `epoch`, for a caller that has one; every
+    /// other caller passes `None` because it never removed anything through that arm.
     fn detect_epoch_exit(
         &mut self,
         epoch: Epoch,
         attribution: Option<FinalExitKind>,
+        observed: Option<(u64, u64)>,
     ) -> Option<PruneEpochResidencyRecord> {
         if self.epoch_tags.contains_key(&epoch) {
             return None;
         }
-        self.finalize_epoch_exit(epoch, attribution)
+        self.finalize_epoch_exit(epoch, attribution, observed)
     }
 
     /// Force an exit row for every still-tracked epoch, attributed
@@ -640,17 +645,24 @@ impl FrontierState {
         epochs
             .into_iter()
             .filter_map(|e| {
-                self.finalize_epoch_exit(e, Some(FinalExitKind::StillResidentAtShutdown))
+                // Shutdown never removed anything through `drain_prunable`'s
+                // `Some(refs)` arm, so there is no observation to carry.
+                self.finalize_epoch_exit(e, Some(FinalExitKind::StillResidentAtShutdown), None)
             })
             .collect()
     }
 
     /// Shared exit-row construction: removes `epoch`'s slot (retiring it — the ledger
     /// carries no unbounded audit trail) and builds its [`PruneEpochResidencyRecord`].
+    ///
+    /// `observed` is the `(refs, bytes)` pair read at the removal site inside
+    /// `drain_prunable`'s `Some(refs)` arm (K1, R1.4) — the two OBSERVATION terms.
+    /// Callers other than that arm's sweep pass `None`.
     fn finalize_epoch_exit(
         &mut self,
         epoch: Epoch,
         kind_hint: Option<FinalExitKind>,
+        observed: Option<(u64, u64)>,
     ) -> Option<PruneEpochResidencyRecord> {
         let slot = self.epoch_slots.remove(&epoch)?;
         if !slot.entry_emitted {
@@ -695,6 +707,18 @@ impl FrontierState {
         } else {
             0
         };
+        // R1.5: the OBSERVATION pair. `0 / 0` for every exit kind that is not an
+        // observed drain, and `0 / 0` for a `DrainedByPrune` exit whose epoch never
+        // showed up in the carried map -- reachable only if a caller ever attributes
+        // `DrainedByPrune` without having gone through `drain_prunable`'s `Some(refs)`
+        // arm, which is this map's only writer (K1). Left as an explicit branch,
+        // rather than folded behind a default, so that possibility stays visible.
+        let (removed_refs_observed, removed_bytes_observed) =
+            if matches!(exit_kind, EpochExitKind::DrainedByPrune) {
+                observed.unwrap_or((0, 0))
+            } else {
+                (0, 0)
+            };
         self.epochs_exited_total += 1;
         Some(PruneEpochResidencyRecord {
             epoch,
@@ -711,6 +735,8 @@ impl FrontierState {
             lwm_at_exit: self.observed_lwm,
             durable_watermark_at_exit: self.durable_epoch_watermark,
             current_epoch_at_exit: self.current_epoch,
+            removed_refs_observed,
+            removed_bytes_observed,
         })
     }
 
@@ -803,7 +829,9 @@ impl FrontierState {
         let tracked: Vec<Epoch> = self.epoch_slots.keys().copied().collect();
         tracked
             .into_iter()
-            .filter_map(|e| self.detect_epoch_exit(e, Some(FinalExitKind::ClearedByRebuild)))
+            // A wholesale rebuild clear never went through `drain_prunable`'s
+            // `Some(refs)` arm, so there is no per-epoch observation to carry.
+            .filter_map(|e| self.detect_epoch_exit(e, Some(FinalExitKind::ClearedByRebuild), None))
             .collect()
     }
 
@@ -867,6 +895,12 @@ impl FrontierState {
             (!eligible.is_empty()).then(|| self.split_observation(self.low_water_mark()));
         let mut drained = Vec::new();
         let mut drained_epochs: HashSet<Epoch> = HashSet::new();
+        // K1 / R1.4: the OBSERVATION terms, keyed by epoch. Read from the vector the
+        // index removal itself returned, inside this SAME `Some(refs)` arm and
+        // strictly before `drained.extend(...)` consumes it below — this is the ONLY
+        // writer of this map, and it is never re-read from `epoch_tags` afterward
+        // (which no longer holds the epoch at that point).
+        let mut removed_observed: HashMap<Epoch, (u64, u64)> = HashMap::new();
         for e in eligible {
             if let Some(refs) = self.epoch_tags.remove(&e) {
                 // Decrement by what this epoch actually held, so the carried count
@@ -876,6 +910,15 @@ impl FrontierState {
                     .saturating_sub(u64::try_from(refs.len()).unwrap_or(u64::MAX));
                 self.last_drained_epoch = self.last_drained_epoch.max(e);
                 drained_epochs.insert(e);
+                // R1.3: `Σ tag.len()` — the same byte quantity `stamp_tombstone`
+                // credits per ref (`:482`), so the two sides are comparable with no
+                // unit conversion.
+                let removed_refs = u64::try_from(refs.len()).unwrap_or(u64::MAX);
+                let removed_bytes: u64 = refs
+                    .iter()
+                    .map(|r| u64::try_from(r.tag.len()).unwrap_or(u64::MAX))
+                    .sum();
+                removed_observed.insert(e, (removed_refs, removed_bytes));
                 drained.extend(refs.into_iter().map(|r| (e, r)));
             }
             self.epoch_max_seq.remove(&e);
@@ -892,7 +935,8 @@ impl FrontierState {
             let attribution = drained_epochs
                 .contains(&e)
                 .then_some(FinalExitKind::DrainedByPrune);
-            if let Some(record) = self.detect_epoch_exit(e, attribution) {
+            let observed = removed_observed.get(&e).copied();
+            if let Some(record) = self.detect_epoch_exit(e, attribution, observed) {
                 exits.push(record);
             }
         }
@@ -1317,6 +1361,8 @@ impl TombstoneFrontier {
             lwm_at_exit = record.lwm_at_exit,
             durable_watermark_at_exit = record.durable_watermark_at_exit,
             current_epoch_at_exit = record.current_epoch_at_exit,
+            removed_refs_observed = record.removed_refs_observed,
+            removed_bytes_observed = record.removed_bytes_observed,
             "prune epoch exit"
         );
     }
@@ -3035,7 +3081,7 @@ mod tests {
         let record = {
             let mut state = f2.lock();
             state.epoch_tags.remove(&1);
-            state.detect_epoch_exit(1, None)
+            state.detect_epoch_exit(1, None, None)
         }
         .expect("the bypassed epoch must surface an exit row at the next detection point");
         match record.exit_kind {
@@ -3282,7 +3328,7 @@ mod tests {
             let exit = {
                 let mut state = f.lock();
                 state.epoch_tags.remove(&1);
-                state.detect_epoch_exit(1, None)
+                state.detect_epoch_exit(1, None, None)
             }
             .expect("bypassed epoch surfaces at the next detection point");
             assert!(matches!(exit.exit_kind, EpochExitKind::Unclassified { .. }));
