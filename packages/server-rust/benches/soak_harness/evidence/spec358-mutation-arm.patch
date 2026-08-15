@@ -1,0 +1,13 @@
+diff --git a/packages/server-rust/src/tombstone_frontier_impl.rs b/packages/server-rust/src/tombstone_frontier_impl.rs
+index ea701a52..2ccc78f6 100644
+--- a/packages/server-rust/src/tombstone_frontier_impl.rs
++++ b/packages/server-rust/src/tombstone_frontier_impl.rs
+@@ -716,7 +716,7 @@ impl FrontierState {
+         // rather than folded behind a default, so that possibility stays visible.
+         let (removed_refs_observed, removed_bytes_observed) =
+             if matches!(exit_kind, EpochExitKind::DrainedByPrune) {
+-                observed.unwrap_or((0, 0))
++                (slot.refs_at_entry, slot.stamped_bytes)
+             } else {
+                 (0, 0)
+             };
