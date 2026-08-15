@@ -46,7 +46,7 @@ mod tests {
         CallerProvenance, ExpiryPolicy, NullDataStore, RecordStoreFactory, StorageConfig,
     };
     use crate::tombstone_frontier::ClientId;
-    use crate::tombstone_frontier_impl::TombstoneFrontier;
+    use crate::tombstone_frontier_impl::{TombstoneFrontier, TombstoneRef};
 
     // ------------------------------------------------------------------
     // Harness (mirrors the gated SyncService setup used by the sync-path
@@ -710,5 +710,381 @@ mod tests {
                 "round {round}: T_old pruned AND the pushed union survived"
             );
         }
+    }
+
+    // ==================================================================
+    // PD-F12 — the frozen drive set `D1 … D5` (segment (a): the shared
+    // `tracing` capture-layer helper plus `D1`–`D3`; `D4`, `D5` and the
+    // Decision-Table evaluation are a separate, later segment).
+    //
+    // Each drive records its outcome as a VALUE (`REPRODUCED` /
+    // `NOT-REPRODUCED`) plus the evaluated value of its OWN predicate
+    // (R4.3) — no Decision-Table row or verdict is drawn here; that
+    // evaluation ranges over the whole frozen drive set and is a separate,
+    // later step.
+    // ==================================================================
+
+    const RESIDENCY_TARGET: &str = "topgun_server::tombstone_frontier::residency";
+    const SETTLEMENT_TARGET: &str = "topgun_server::tombstone_frontier::settlement";
+
+    /// Renders one captured event's fields as `name=value` pairs, of the
+    /// `network/device_identity.rs:397-429` shape. `u64` and `bool` fields
+    /// reach `record_debug` exactly like every other non-`&str` field —
+    /// Debug and Display agree for both, so the rendered text is the same
+    /// either way.
+    struct RowFieldVisitor(String);
+
+    impl tracing::field::Visit for RowFieldVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={value} ", field.name());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={value:?} ", field.name());
+        }
+    }
+
+    /// Sink for [`RowFieldVisitor`]: one rendered line PER CAPTURED EVENT, a
+    /// `Vec<String>`, never a single concatenated `String` (X21-d(iv)) —
+    /// every drive below reads a SPECIFIC row's own fields off the capture,
+    /// which a concatenated blob cannot individuate without inventing its
+    /// own newline convention.
+    #[derive(Clone)]
+    struct RowCapture(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RowCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut v = RowFieldVisitor(format!(" target={} ", event.metadata().target()));
+            event.record(&mut v);
+            self.0.lock().unwrap().push(v.0);
+        }
+    }
+
+    /// Bind a thread-local `tracing` capture for the guard's lifetime. Every
+    /// drive that reads rows off it runs on a CURRENT-THREAD runtime (R4.2,
+    /// X21-d): `tracing::subscriber::set_default` is thread-local, so a
+    /// multi-thread runtime would observe an empty capture instead of a
+    /// violation — exactly why `D4`'s race cannot be read at row
+    /// granularity (C13).
+    fn capture_tracing_rows(
+    ) -> (tracing::subscriber::DefaultGuard, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let sink: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(RowCapture(Arc::clone(&sink)));
+        let guard = tracing::subscriber::set_default(subscriber);
+        (guard, sink)
+    }
+
+    /// Whether `line` is a row on `target` carrying `kind = "kind"`.
+    fn is_row(line: &str, target: &str, kind: &str) -> bool {
+        line.contains(&format!(" target={target} ")) && line.contains(&format!(" kind={kind} "))
+    }
+
+    /// Read one field's rendered text out of a captured row.
+    fn row_field<'a>(line: &'a str, name: &str) -> &'a str {
+        let needle = format!(" {name}=");
+        let start = line
+            .find(&needle)
+            .unwrap_or_else(|| panic!("field {name} is absent from row {line:?}"))
+            + needle.len();
+        line[start..].split(' ').next().unwrap_or("")
+    }
+
+    /// Read one `u64`-rendered field out of a captured row.
+    fn row_u64(line: &str, name: &str) -> u64 {
+        row_field(line, name)
+            .parse()
+            .unwrap_or_else(|e| panic!("field {name} did not render a u64 in {line:?}: {e}"))
+    }
+
+    /// Rows on `target` whose `kind` field equals `kind`.
+    fn rows_of_kind<'a>(rows: &'a [String], target: &str, kind: &str) -> Vec<&'a str> {
+        rows.iter()
+            .map(String::as_str)
+            .filter(|l| is_row(l, target, kind))
+            .collect()
+    }
+
+    /// Rows on `target` regardless of `kind` — for the settlement target,
+    /// which carries no `kind` field at all (it is distinguished by target
+    /// alone).
+    fn rows_of_target<'a>(rows: &'a [String], target: &str) -> Vec<&'a str> {
+        rows.iter()
+            .map(String::as_str)
+            .filter(|l| l.contains(&format!(" target={target} ")))
+            .collect()
+    }
+
+    /// R4.6: the capture must be non-empty and carry the EXPECTED count of
+    /// each row kind the caller is about to read, counted separately —
+    /// `epoch_exit`, `settlement` and `prune_pass` — never silently short in
+    /// any one kind. A drive that skipped this and read a short capture
+    /// would report "no violation" on a term it never actually read; this
+    /// turns that into a RED instead.
+    fn assert_capture_shape(
+        rows: &[String],
+        expected_epoch_exit: usize,
+        expected_settlement: usize,
+        expected_prune_pass: usize,
+    ) {
+        assert!(
+            !rows.is_empty(),
+            "R4.6: the capture must be non-empty, got an empty capture"
+        );
+        let exit = rows_of_kind(rows, RESIDENCY_TARGET, "epoch_exit").len();
+        assert_eq!(
+            exit, expected_epoch_exit,
+            "R4.6: expected {expected_epoch_exit} epoch_exit row(s); capture was:\n{rows:#?}"
+        );
+        let settlement = rows_of_target(rows, SETTLEMENT_TARGET).len();
+        assert_eq!(
+            settlement, expected_settlement,
+            "R4.6: expected {expected_settlement} settlement row(s); capture was:\n{rows:#?}"
+        );
+        let pass = rows_of_kind(rows, RESIDENCY_TARGET, "prune_pass").len();
+        assert_eq!(
+            pass, expected_prune_pass,
+            "R4.6: expected {expected_prune_pass} prune_pass row(s) — exactly once per \
+             driven invocation; capture was:\n{rows:#?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // `D1` DIVERGENCE, `D2` POST-EXIT RESTORE, `D3` ABSENT-KEY.
+    // ------------------------------------------------------------------
+
+    /// `D1` **DIVERGENCE** — the sim-side twin of the lib's `S1` sanity row
+    /// (`tombstone_frontier_impl.rs`'s
+    /// `s1_pre_freeze_sanity_row_diverges_through_public_entry_points_only`).
+    /// Stamps `N = 2` refs into epoch `e`, rolls past it, restores one EXTRA
+    /// ref into `e` (index-only — the entry-side slot is untouched), then
+    /// drives the drop through the public `prune_epoch_tombstones` entry
+    /// point. NOT in a Decision-Table universe — this IS the Step-0
+    /// discriminator (C12), not evidence about the prune.
+    ///
+    /// Its OWN predicate (R4.3): `R_obs == R_ent + 1` and
+    /// `B_obs == B_att + len(extra.tag)` on `e`'s `DrainedByPrune` exit row.
+    #[tokio::test]
+    async fn d1_divergence_removed_observation_diverges_from_entry_attribution() {
+        let (_svc, factory, frontier, registry, key_writer) = gated_sync();
+        let (conn, client) = register_device(&registry, "dev-d1").await;
+        let (map, key) = ("omap", "k1");
+        frontier.set_epoch_width(2); // N = 2 stamps land in epoch 1
+
+        frontier.stamp_tombstone(map, key, "TAG1"); // epoch 1: ref 1 of 2
+        frontier.stamp_tombstone(map, key, "TAG2"); // epoch 1: ref 2 of 2
+        frontier.stamp_tombstone(map, "k2", "TAG3"); // rolls past epoch 1: refs_at_entry = 2
+
+        let extra = TombstoneRef {
+            map: map.to_string(),
+            key: key.to_string(),
+            tag: "TAGX".to_string(),
+        };
+        // Index-only reinsert into the ALREADY-ENTRY-EMITTED epoch 1:
+        // `epoch_tags[1]` grows to 3 refs while `epoch_slots[1]` (and so
+        // `refs_at_entry`) is untouched — this IS the divergence mechanism
+        // (C12).
+        frontier.restore_tombstone_ref(1, extra.clone());
+
+        track_client(&frontier, &client, conn, 2).await; // LWM 2 > epoch 1
+        frontier.set_durable_epoch_watermark(1000);
+        seed_or_map(&factory, map, key, &[], &["TAG1", "TAG2", "TAGX"]).await;
+
+        let (guard, sink) = capture_tracing_rows();
+        prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
+        drop(guard);
+        let rows = sink.lock().unwrap().clone();
+
+        // R4.6: exactly one drained epoch (1), so exactly one exit row, one
+        // settlement row, and — a single explicit call — exactly one pass
+        // row.
+        assert_capture_shape(&rows, 1, 1, 1);
+
+        let exit_row = rows_of_kind(&rows, RESIDENCY_TARGET, "epoch_exit")
+            .into_iter()
+            .find(|r| r.contains(" epoch=1 "))
+            .expect("epoch 1's DrainedByPrune exit row must be present");
+        assert!(
+            exit_row.contains("exit_kind=DrainedByPrune"),
+            "row: {exit_row}"
+        );
+
+        let r_obs = row_u64(exit_row, "removed_refs_observed");
+        let r_ent = row_u64(exit_row, "refs_at_entry");
+        let b_obs = row_u64(exit_row, "removed_bytes_observed");
+        let b_att = row_u64(exit_row, "bytes_freed_attributed");
+        let extra_len = extra.tag.len() as u64;
+
+        // D1's OWN predicate (R4.3), recorded as a value rather than
+        // asserted blindly: a failure here is a RESULT (NOT-REPRODUCED),
+        // never a reason to weaken the assertion.
+        assert_eq!(
+            r_obs,
+            r_ent + 1,
+            "D1 predicate limb 1 (R_obs == R_ent + 1) must hold; row: {exit_row}"
+        );
+        assert_eq!(
+            b_obs,
+            b_att + extra_len,
+            "D1 predicate limb 2 (B_obs == B_att + len(extra.tag)) must hold; row: {exit_row}"
+        );
+        println!(
+            "D1 DIVERGENCE: REPRODUCED — R_obs={r_obs} R_ent={r_ent} B_obs={b_obs} \
+             B_att={b_att} len(extra.tag)={extra_len}"
+        );
+    }
+
+    /// `D2` **POST-EXIT RESTORE** — drains epoch `e` (its exit row fires,
+    /// `epoch_slots[e]` retires for good), restores an EXTRA ref into that
+    /// already-EXITED epoch, then re-drains. Confirms C10: a retired slot is
+    /// never recreated, so the second drain's detection sweep (which walks
+    /// `epoch_slots`, not `epoch_tags`) never sees `e` again, even though
+    /// `e`'s restored ref is PHYSICALLY drained a second time. NOT in a
+    /// Decision-Table universe.
+    ///
+    /// Its OWN predicate (R4.3): the SECOND drain's own pass removes
+    /// `k > 0` refs with `Σ_e R_obs == 0` (no exit row for `e`) on that SAME
+    /// pass.
+    #[tokio::test]
+    async fn d2_post_exit_restore_reappears_without_a_new_exit_row() {
+        let (_svc, factory, frontier, registry, key_writer) = gated_sync();
+        let (conn, client) = register_device(&registry, "dev-d2").await;
+        let (map, key) = ("omap", "k1");
+        frontier.set_epoch_width(1);
+        frontier.stamp_tombstone(map, key, "TAG1"); // epoch 1
+        frontier.stamp_tombstone(map, "k2", "TAG2"); // rolls past epoch 1
+
+        track_client(&frontier, &client, conn, 2).await; // LWM 2 > epoch 1
+        frontier.set_durable_epoch_watermark(1000);
+
+        // FIRST drain: epoch 1 exits — its exit row fires and its
+        // `epoch_slots` entry retires.
+        let (guard1, sink1) = capture_tracing_rows();
+        prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
+        drop(guard1);
+        let first = sink1.lock().unwrap().clone();
+        assert_capture_shape(&first, 1, 1, 1);
+        let first_exit = rows_of_kind(&first, RESIDENCY_TARGET, "epoch_exit")
+            .into_iter()
+            .find(|r| r.contains(" epoch=1 "))
+            .expect("epoch 1's first exit row must be present");
+        assert!(
+            first_exit.contains("exit_kind=DrainedByPrune"),
+            "row: {first_exit}"
+        );
+
+        // Restore an EXTRA ref into the now-EXITED epoch 1 — index-only; the
+        // retired slot is never recreated by a restore.
+        let extra = TombstoneRef {
+            map: map.to_string(),
+            key: key.to_string(),
+            tag: "TAGY".to_string(),
+        };
+        frontier.restore_tombstone_ref(1, extra);
+
+        // SECOND drain, a fresh capture window.
+        let (guard2, sink2) = capture_tracing_rows();
+        prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
+        drop(guard2);
+        let second = sink2.lock().unwrap().clone();
+
+        // R4.6: no exit row for the retired epoch — settlement still fires
+        // (it is keyed off the physically-drained refs, not off the retired
+        // `epoch_slots` tracking) — and one pass row for this single
+        // explicit call.
+        assert_capture_shape(&second, 0, 1, 1);
+
+        let pass_row = rows_of_kind(&second, RESIDENCY_TARGET, "prune_pass")
+            .into_iter()
+            .next()
+            .expect("the second call's own pass row must be present");
+        let k = row_u64(pass_row, "considered");
+        let r_obs_sum: u64 = rows_of_kind(&second, RESIDENCY_TARGET, "epoch_exit")
+            .iter()
+            .map(|r| row_u64(r, "removed_refs_observed"))
+            .sum();
+
+        // D2's OWN predicate (R4.3).
+        assert!(k > 0, "D2 predicate limb 1 (k > 0) must hold: k={k}");
+        assert_eq!(
+            r_obs_sum, 0,
+            "D2 predicate limb 2 (Σ_e R_obs == 0) must hold on the second pass; \
+             capture was:\n{second:#?}"
+        );
+        println!("D2 POST-EXIT RESTORE: REPRODUCED — k={k} sum_R_obs={r_obs_sum}");
+    }
+
+    /// `D3` **ABSENT-KEY** — stamps a tombstone for a key never written to
+    /// the store, then drains. The considered ref takes the `Ok(None)` arm
+    /// (`crdt.rs:1560-1563`): the drain is real (the index entry is gone,
+    /// the exit row's attribution is genuine) but nothing was ever resident
+    /// in storage to reclaim. Confirms C9. NOT in a Decision-Table universe.
+    ///
+    /// Its OWN predicate (R4.3): per-epoch `D_e == 0 ∧ F_e == 0` on the
+    /// settlement row while `B_att > 0` on that SAME epoch's exit row.
+    #[tokio::test]
+    async fn d3_absent_key_settlement_shows_zero_reclaim_despite_positive_attribution() {
+        let (_svc, factory, frontier, registry, key_writer) = gated_sync();
+        let (conn, client) = register_device(&registry, "dev-d3").await;
+        let (map, key) = ("omap", "never-written-k1");
+        frontier.set_epoch_width(1);
+        frontier.stamp_tombstone(map, key, "TAG1"); // epoch 1 — `key` is never seeded
+        frontier.stamp_tombstone(map, "k2", "TAG2"); // rolls past epoch 1
+
+        track_client(&frontier, &client, conn, 2).await; // LWM 2 > epoch 1
+        frontier.set_durable_epoch_watermark(1000);
+        // Deliberately no `seed_or_map` call: `key` never existed in the store.
+
+        let (guard, sink) = capture_tracing_rows();
+        prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
+        drop(guard);
+        let rows = sink.lock().unwrap().clone();
+
+        assert_capture_shape(&rows, 1, 1, 1);
+
+        let exit_row = rows_of_kind(&rows, RESIDENCY_TARGET, "epoch_exit")
+            .into_iter()
+            .find(|r| r.contains(" epoch=1 "))
+            .expect("epoch 1's DrainedByPrune exit row must be present");
+        assert!(
+            exit_row.contains("exit_kind=DrainedByPrune"),
+            "row: {exit_row}"
+        );
+        let b_att = row_u64(exit_row, "bytes_freed_attributed");
+
+        let settlement_row = rows_of_target(&rows, SETTLEMENT_TARGET)
+            .into_iter()
+            .find(|r| r.contains(" epoch=1 "))
+            .expect("epoch 1's settlement row must be present");
+        let dropped = row_u64(settlement_row, "dropped");
+        let bytes_freed = row_u64(settlement_row, "bytes_freed");
+        let absent = row_u64(settlement_row, "absent");
+
+        // D3's OWN predicate (R4.3).
+        assert_eq!(
+            dropped, 0,
+            "D3 predicate limb 1 (D_e == 0) must hold; row: {settlement_row}"
+        );
+        assert_eq!(
+            bytes_freed, 0,
+            "D3 predicate limb 2 (F_e == 0) must hold; row: {settlement_row}"
+        );
+        assert!(
+            b_att > 0,
+            "D3 predicate limb 3 (B_att > 0) must hold; row: {exit_row}"
+        );
+        assert_eq!(
+            absent, 1,
+            "the single considered ref must take the Ok(None) absent-key arm: {settlement_row}"
+        );
+        println!(
+            "D3 ABSENT-KEY: REPRODUCED — D_e={dropped} F_e={bytes_freed} B_att={b_att} absent={absent}"
+        );
     }
 }
