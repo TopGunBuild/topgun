@@ -4736,10 +4736,12 @@ mod tests {
         // R_ent == 1 (only TAG1 was ever STAMPED into epoch 1 before rollover).
         assert!(exit_row.contains("refs_at_entry=1"), "row: {exit_row}");
         // R_obs == 2 (TAG1 stamped + TAGX restored, both resident at drain time):
-        // R_obs == R_ent + 1, the discriminating assertion (C12).
+        // R_obs == R_ent + 1, the discriminating assertion (C12). The message names that
+        // assertion literally, because the mutation arm's whole proof is that THIS assertion
+        // is the one the mutation kills — a failure that did not name it would not show that.
         assert!(
             exit_row.contains("removed_refs_observed=2"),
-            "row: {exit_row}"
+            "discriminating assertion R_obs == R_ent + 1 does not hold; row: {exit_row}"
         );
         // B_att == 4 (TAG1's own stamped bytes; TAGX was restored, never stamped).
         assert!(
