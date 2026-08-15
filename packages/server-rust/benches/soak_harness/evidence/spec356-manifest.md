@@ -8036,3 +8036,160 @@ Recorded here as the PRE-DATA value. The identical digest, recomputed over the s
 this section was appended, and the post-append boundary lines (`sed -n '7690,7695p'`), are pasted
 into `spec358-microdiag-transcript.txt` by the group that executes Step 0 (R6.3, AC11). No byte of
 §0–§11 is edited by this append.
+
+---
+
+## §12.1 — SPEC-358: the executed record
+
+**Appended strictly beneath §12.0. Zero bytes of §0–§12.0 above this line are edited by
+this section.** Executed tip for every leg and drive below: `453aeb55` (branch
+`sf-358-pdf12-microdiag`). Full quoted output lives in
+`spec358-microdiag-transcript.txt`, `spec358-mutation-arm.txt` and
+`spec358-x21-discharge.txt`; this section carries the evaluated values and the
+determination.
+
+### §12.1.a — Step 0, all three legs HOLD
+
+- **leg (a) UNMUTATED**: `cargo test --release -p topgun-server --lib` → exit 0,
+  `1811 passed; 0 failed; 2 ignored`. `pnpm test:sim` → exit 0, `26 passed; 0 failed`.
+  `S1`'s executed row (already frozen into §12.0) diverges: `R_obs == R_ent + 1` holds
+  (`2 == 1 + 1`).
+- **leg (b) MUTATED** (`spec358-mutation-arm.patch` applied): `cargo test --release
+  -p topgun-server --lib` → exit **101**, `1808 passed; 3 failed`, with
+  `s1_pre_freeze_sanity_row_diverges_through_public_entry_points_only` FAILING and
+  naming the literal "discriminating assertion R_obs == R_ent + 1 does not hold".
+  `pnpm test:sim` → exit **101**, `25 passed; 1 failed`, with
+  `d1_divergence_removed_observation_diverges_from_entry_attribution` FAILING and
+  naming "D1 predicate limb 1 (R_obs == R_ent + 1) must hold". **Both halves fail, and
+  each failure names the discriminating assertion `R_obs == R_ent + 1`.** Reverted
+  (`git checkout --`) and re-verified: lib exit 0 `1811 passed`, sim exit 0
+  `26 passed`.
+- **leg (c) POSITIVE CONTROL**:
+  `step0_leg_c_v1_positive_control_planted_ref_loss_fires_on_the_returned_record`
+  passes unmutated, asserting `R_obs == 0 ∧ R_ent > 0` on the record
+  `f.lock().drain_prunable()` returns for a planted-empty `epoch_tags` entry. Under the
+  mutation it FAILS with `left: 1, right: 0` — the control is live, not vacuous.
+
+**Honesty note (recorded per the handoff, verbatim in substance):** on the FIRST
+mutated run, `S1`'s message printed the row but did not contain the literal
+`R_obs == R_ent + 1`, so Checklist 3's "each failure message names the discriminating
+assertion" was not yet satisfied on that run — the assertion itself already was the
+discriminating one and already failed. Commit `453aeb55` changed only the assertion's
+MESSAGE to name it; the asserted condition is byte-identical. Legs (a) and (b) were
+then re-run end to end from a clean tree, and every figure above is from that re-run.
+`D1`'s message already named the literal on its first run.
+
+Step 0 does NOT fire fail-closed. The determination is NOT `INDETERMINATE-INSTRUMENT`.
+Steps 1–3 are evaluated.
+
+### §12.1.b — Step 1, the bridge identities (over `D5`)
+
+- **I1** (`Σ_e R_obs(e) == K_p`): HELD on all **3001** passes, 0 violations.
+- **I2** (`E_p == (Σ_e R_obs(e) == 0)`): HELD on all **3001** passes, 0 violations.
+- **I3** (`B_obs(e) ≤ B_att(e) + B_restored(e)`): HELD on all **3000** drained epochs
+  (`B_restored = 0`; `D5` never restores).
+- NOT-APPLICABLE passes (a `restored_*` exit fired): **0**.
+- **P-KEYS**: HELD on **3000/3000** considered refs (`absent = 0` on every settlement
+  row).
+
+`D5`'s universe (X21-d's per-drive record): 3000 real keyed stamps + 1 closing
+throwaway stamp = 3001 `prune_epoch_tombstones` invocations. Captured rows: **3000
+`epoch_exit`, 3000 `settlement`, 3001 `prune_pass`** — `split_into_passes` recovered
+exactly 3001 passes, an exact 1:1 with invocations, as R4.6's corrected off-by-one
+clause requires.
+
+Every other drive's own predicate (recorded as a value, excluded from the D-T universe
+per §12.0's frozen scoping table): `D1 DIVERGENCE: REPRODUCED — R_obs=3 R_ent=2
+B_obs=12 B_att=8 len(extra.tag)=4`. `D2 POST-EXIT RESTORE: REPRODUCED — k=1
+sum_R_obs=0`. `D3 ABSENT-KEY: REPRODUCED — D_e=0 F_e=0 B_att=4 absent=1`. `D4 TOCTOU
+RACE: REPRODUCED — aggregate index_conservation_snapshot() terms held across all 64
+interleavings; row-granularity terms NOT observable (C13, X21-d); NOT in a D-T
+universe`.
+
+### §12.1.c — Step 2, the Decision Table, evaluated in frozen order
+
+| # | Verdict | Condition | Value |
+|---|---|---|---|
+| 1 | V1 — REF-LOSS | ∃ `DrainedByPrune` row of `D5` with `R_obs < R_ent` | **false** |
+| 2 | V2 — BOOKKEEPING ATTRIBUTION | ∃ epoch with `R_obs > 0 ∧ D_e == 0 ∧ F_e == 0 ∧ B_att > 0` | **false** |
+| 3 | V3 — COUNTER-FAMILY MISNAMING | I1 or I2 violated on an in-scope pass | **false** |
+| 4 | **V0 — NOT REPRODUCED** | none of rows 1–3 holds over its own universe | **HOLDS** |
+
+**VERDICT: `V0 — NOT REPRODUCED`.** Exactly one verdict, read off the frozen table in
+its frozen order.
+
+### §12.1.d — Step 3, the Fix-Shape Mapping
+
+F-M's `V0` row fires: **THE RULING IS NOT WRITTEN.** Per R7.1 the not-written status IS
+the satisfying content, not an absence. Full ruling record, with §8.3 quoted verbatim
+beside the determination, in `spec358-fixshape-ruling.md`.
+
+### §12.1.e — E-C fires
+
+E-C's own text: *"'Does not name the mechanism' means exactly: the frozen table
+resolves to V0, or Step 0 fires fail-closed with any `INDETERMINATE-*`."* The table
+resolved V0 → **E-C FIRES → the diagnosis line HARD STOPS. There is no diagnosis round
+after this one.** The `ReclamationRegistry` family (`TODO-634`) starts with the cause
+**unclassified**, justified by §8.3 above, quoted verbatim.
+
+### §12.1.f — POST-DATA findings PD-F15–PD-F18 (recorded and ROUTED to `TODO-634`; they do NOT alter the verdict)
+
+§12.0 pre-authorizes exactly this: *"if the data suggests one, it is recorded as a
+POST-DATA finding and routed, and the table's own verdict still stands."* The
+cross-vendor adversarial round (`spec358-mechanism-xask.md`) recommended a static audit
+of `publish_epoch_exit` call sites; the audit was run and produced the following four
+POST-DATA findings, all reached by source-code audit outside `D5`'s frozen universe —
+none is a row-1 violation reached by execution inside that universe, and none changes
+§12.1.c's verdict.
+
+- **POST-DATA — PD-F15** — the mechanism is code-identifiable, and it is row 1's named
+  extreme case. `drain_prunable`'s `drained_epochs.insert(e)` sits inside `if let
+  Some(refs) = epoch_tags.remove(&e)` and is **unconditional on `refs.len()`**. An
+  epoch whose `epoch_tags` entry EXISTS but holds an EMPTY vector is attributed
+  `DrainedByPrune`, given `bytes_freed_attributed = slot.stamped_bytes` (> 0 whenever
+  the slot ever stamped), observed as `R_obs = 0, B_obs = 0`, and contributes NOTHING
+  to `drained` — so the service's `PrunePassRecord` reads `considered = 0, empty_drain
+  = true, epochs_drained = 0`. This is precisely PD-F12's production signature, and
+  exactly D-T row 1's named extreme case (`R_obs == 0 ∧ R_ent > 0`), which Step 0 leg
+  (c) proves the instrument fires on when the antecedent exists. Why `D5` could not
+  reach it: through the public API an epoch's refs leave only via the drain, which
+  removes the WHOLE `epoch_tags` entry — never leaving an empty-but-present vector
+  behind — and `D5` is single-writer and sequential, so no second writer can empty the
+  vector between entry-emission and drain. §12.0 froze this in advance as row 1's
+  stated exception: its non-firing is "an informative negative about the enumeration,
+  not a null result." This round's result sharpens that negative into a named,
+  code-level antecedent. **ROUTED to `TODO-634`.**
+- **POST-DATA — PD-F16** — route (b) REFUTED from source. `EpochExitKind` carries
+  `#[default] DrainedByPrune`, which invites the hypothesis that an unattributed exit
+  silently defaults to a prune attribution. It does not: `finalize_epoch_exit` resolves
+  `kind_hint == None` to `EpochExitKind::Unclassified { .. }`, and the two non-drain
+  call sites pass explicit `ClearedByRebuild` (`:835`) and `StillResidentAtShutdown`
+  (`:651`). The `#[default]` is reachable only from `..Default::default()` in test
+  fixtures. No non-drain path stamps `DrainedByPrune`. **ROUTED to `TODO-634`.**
+- **POST-DATA — PD-F17** — the Prometheus pass family is internally coherent.
+  `MetricsPruneRecorder::observe_pass` increments `passes_total`, `considered_total`,
+  `dropped_total`, `bytes_freed_total`, `epochs_drained_total` and the empty/nonempty
+  split from the SAME `PrunePassRecord`, in the SAME call. So PD-F12's production
+  reading is not a counter-transport artefact: the divergence is between the FRONTIER
+  (which emits exit rows inside the drain) and the SERVICE (which builds the pass
+  record from the drain's RETURN VALUE) — two different components, which is what
+  PD-F15 names. **ROUTED to `TODO-634`.**
+- **POST-DATA — PD-F18** — the next drive, named concretely, **NOT run here** (X8
+  forbids widening the frozen universe, X5 forbids a fix). A deterministic in-process
+  drive that constructs the race's END STATE rather than the race: populate an epoch
+  `e`, let it roll over so `entry_emitted ∧ refs_at_entry > 0`, then empty
+  `epoch_tags[e]` in-module to a present-but-empty `Vec` (the same in-module bypass leg
+  (c) uses), then drain through the SERVICE and assert on the pass record. Predicted:
+  an exit row with `exit_kind = DrainedByPrune, bytes_freed_attributed > 0,
+  removed_refs_observed = 0`, beside a pass record with `considered = 0, empty_drain =
+  true, epochs_drained = 0`. This would place a row in D-T row 1's universe **if** such
+  a drive were inside a frozen universe — it is NOT in this round's, which is why it is
+  routed rather than run. **ROUTED to `TODO-634`.**
+
+### §12.1.g — R6.3 / AC11 digest confirmation
+
+`spec358-microdiag-transcript.txt` carries the executed digest pair: the PRE-DATA value
+frozen above (`24273adf2ee87b544520cef817c826bf2be645e07cb97c8ef110ca21e59dabac`)
+recomputed over the identical `sed -n '1,7689p'` span produces the same digest, and the
+post-append `sed -n '7690,7695p'` boundary lines are unchanged from the pre-append tip.
+No byte of §0–§12.0 was edited by this §12.1 append.
