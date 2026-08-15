@@ -83,6 +83,7 @@ use crate::tombstone_frontier::{
     METRIC_PRUNE_LWM_EPOCHS_ADVANCED_TOTAL, METRIC_PRUNE_LWM_STALL_SECONDS,
     METRIC_PRUNE_MATCHED_NOTHING_TOTAL, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL,
     METRIC_PRUNE_PASSES_TOTAL, METRIC_PRUNE_REBUILD_CLEARED_REFS_TOTAL,
+    METRIC_PRUNE_REMOVED_BYTES_OBSERVED_TOTAL, METRIC_PRUNE_REMOVED_REFS_OBSERVED_TOTAL,
     METRIC_PRUNE_RESTORED_EVICTED_TOTAL, METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
     METRIC_PRUNE_RESTORED_REFS_TOTAL, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
     METRIC_PRUNE_SPLIT_COMPUTED_EPOCH, METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL,
@@ -2337,6 +2338,11 @@ pub struct MetricsPruneRecorder {
     rebuild_cleared_refs: Counter,
     epochs_entered: Counter,
     epochs_exited: Counter,
+    // The two OBSERVATION counters (R1.1, R3): read from the vector the index removal
+    // itself returned, at the removal site -- never a copy of `refs_at_entry` /
+    // `bytes_freed_attributed`. Credited on the `DrainedByPrune` arm only (R1.6, R3.2).
+    removed_refs_observed: Counter,
+    removed_bytes_observed: Counter,
 
     indexed_refs: Gauge,
     indexed_epochs: Gauge,
@@ -2408,6 +2414,8 @@ impl MetricsPruneRecorder {
             rebuild_cleared_refs: touched_counter(METRIC_PRUNE_REBUILD_CLEARED_REFS_TOTAL),
             epochs_entered: touched_counter(METRIC_PRUNE_EPOCHS_ENTERED_TOTAL),
             epochs_exited: touched_counter(METRIC_PRUNE_EPOCHS_EXITED_TOTAL),
+            removed_refs_observed: touched_counter(METRIC_PRUNE_REMOVED_REFS_OBSERVED_TOTAL),
+            removed_bytes_observed: touched_counter(METRIC_PRUNE_REMOVED_BYTES_OBSERVED_TOTAL),
 
             indexed_refs: touched_gauge(METRIC_PRUNE_INDEXED_REFS),
             indexed_epochs: touched_gauge(METRIC_PRUNE_INDEXED_EPOCHS),
@@ -2565,7 +2573,17 @@ impl PruneRecordObserver for MetricsPruneRecorder {
         // a drain or a rebuild takes it atomically, so it is exactly what left the
         // index on that exit, never an approximation.
         match record.exit_kind {
-            EpochExitKind::DrainedByPrune => self.drained_refs.increment(record.refs_at_entry),
+            EpochExitKind::DrainedByPrune => {
+                self.drained_refs.increment(record.refs_at_entry);
+                // The two OBSERVATION counters, credited on this arm only (R1.6, R3.2):
+                // read from the vector the index removal returned, never from the
+                // by-construction attribution `refs_at_entry` this arm already credits
+                // above.
+                self.removed_refs_observed
+                    .increment(record.removed_refs_observed);
+                self.removed_bytes_observed
+                    .increment(record.removed_bytes_observed);
+            }
             EpochExitKind::ClearedByRebuild => {
                 self.rebuild_cleared_refs.increment(record.refs_at_entry);
             }
