@@ -626,6 +626,22 @@ mod tests {
     /// its scope, so a second phase, if it lands, may extend this fn's body
     /// or add a sibling fn, whichever the reproducing test's own shape
     /// calls for.
+    ///
+    /// This fn IS PD-F12's drive `D4` **TOCTOU RACE** — the fixture already in
+    /// the file the frozen drive set cites by line. Its predicate is the
+    /// AGGREGATE terms `index_conservation_snapshot()` already exposes:
+    /// exactly one attributed drain, exactly one exit row, O-0 holds — proven
+    /// on every one of the 64 interleavings below, never a lucky one (R4.2).
+    /// `D4` is recorded at AGGREGATE granularity ONLY: it runs on a
+    /// `multi_thread` runtime, and both in-process observation transports
+    /// (`tracing` capture, metrics recorder) are thread-local (C13), so a
+    /// prune spawned onto a worker thread is invisible to either — the
+    /// per-kind row-count gate R4.6 applies to (`D1`, `D2`, `D3`, `D5`) does
+    /// NOT apply here, and this fn does not pretend otherwise by attempting a
+    /// row-granularity capture. `D4` is OUTSIDE every D-T row's universe
+    /// (Step 2's exclusion table): both in-process transports are
+    /// thread-local and its prune runs in a spawned task on a `multi_thread`
+    /// runtime (C13, X21-d).
     #[tokio::test(flavor = "multi_thread")]
     async fn prune_epoch_residency_discrimination_under_network_fault() {
         for round in 0..64u64 {
@@ -710,6 +726,19 @@ mod tests {
                 "round {round}: T_old pruned AND the pushed union survived"
             );
         }
+        // D4's own predicate (R4.3), recorded as a value: every one of the 64
+        // rounds above asserted the aggregate identity holds (a violation on
+        // any round would have already panicked that round's iteration, per
+        // R4.4's "surfaced as the test's own failure message" shape) — so
+        // reaching this line at all IS the recorded outcome.
+        println!(
+            "D4 TOCTOU RACE: REPRODUCED — aggregate index_conservation_snapshot() terms \
+             (exactly one attributed drain, exactly one exit row, O-0) held across all \
+             64 interleavings. Row-granularity terms are NOT observable here (C13, \
+             X21-d): the prune runs in a tokio::spawn task on a multi_thread runtime, \
+             so the thread-local tracing capture would see an empty capture rather than \
+             a violation. NOT in a Decision-Table universe (Step 2's exclusion table)."
+        );
     }
 
     // ==================================================================
