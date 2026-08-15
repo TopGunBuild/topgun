@@ -6532,9 +6532,11 @@ mod tests {
             "at least one pass row must report an empty drain (considered=0, \
              empty_drain=true); capture was:\n{rows:#?}"
         );
-        // The workload's own explicit call (`crdt.rs:1519`) is the LAST
+        // The workload's own explicit `prune_epoch_tombstones` call is the LAST
         // invocation of the run, strictly after every seeding write, so it is
-        // deterministically the capture's last pass row.
+        // deterministically the capture's last pass row. Cited by name, not by
+        // line: a same-file line number is falsified by any insertion above it
+        // without anything failing.
         let last = pass_rows.last().expect("at least one pass row exists");
         assert_eq!(
             row_u64(last, "considered"),
@@ -6660,8 +6662,10 @@ mod tests {
             "at least one pass in the capture must be a draining pass; \
              capture was:\n{rows:#?}"
         );
-        // The workload's own explicit call is the last invocation of the run
-        // (`crdt.rs:1519`), so it is deterministically the capture's last pass.
+        // The workload's own explicit `prune_epoch_tombstones` call is the last
+        // invocation of the run, so it is deterministically the capture's last
+        // pass. Cited by name, not by line, for the reason given at the sibling
+        // assertion above.
         assert_eq!(
             row_u64(passes.last().unwrap().last().unwrap(), "considered"),
             6,
