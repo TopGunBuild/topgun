@@ -138,3 +138,24 @@ otherwise have to re-run:
     `debug_assert!(!sweep_in_progress)` on the admission path is LIVE in that run. Its 26 tests pass
     with the interleaving fault driving an ACK concurrently with a sweep — the block-during-sweep
     exclusion holding at the wired boundary, observed rather than assumed.
+
+
+================================================================================
+ELIGIBILITY-PREDICATE CONSUMERS (not corpus rows)
+================================================================================
+
+One fixture reads the re-pointed predicate WITHOUT ever draining, so it produces no
+`epochs=[…] | tags=[…]` cell and correctly appears under this heading rather than in the
+drained/dropped table above:
+
+  * `service/domain/sync.rs:4475-4478` — asserts `is_epoch_prune_eligible(1)` directly, with the
+    durable epoch watermark deliberately left at 0 ("production dark"), and then pushes an
+    unrelated key so the SYNC leaf's prune site runs. The pass it drives is dark by construction:
+    it reclaims nothing, so it contributes no decision cell to diff. What it DOES pin is the
+    predicate's answer at the boundary, which is exactly the quantity the re-point moved — and it
+    passes UNEDITED against the ceiling-folded predicate (103 `sync::` tests green at the tip,
+    `git diff` on that file empty).
+
+Recording it here is what keeps the corpus honest in both directions: a reader who found
+`is_epoch_prune_eligible` cited in `sync.rs` and no matching row in the table above would
+otherwise have to re-derive why its absence is correct rather than a missing capture.
