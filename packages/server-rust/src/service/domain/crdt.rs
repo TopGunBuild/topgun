@@ -1483,9 +1483,11 @@ pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticV
 /// so a concurrent OR write on the same key cannot flicker a pruned tag back in.
 ///
 /// The real gate is the conjunction of both call-site checks:
-/// `is_epoch_prune_eligible(E)` (derived from the low-water mark) AND
-/// `durable_epoch_watermark >= E`. Neither is a fixed constant — the low-water
-/// mark advances as tracked clients confirm-apply, and the durable watermark
+/// `is_epoch_prune_eligible(E)` (derived from the reclamation ceiling, which is
+/// the fleet MIN over live claims less the safety margin) AND
+/// `durable_epoch_watermark >= E`. Neither is a fixed constant — the ceiling is
+/// recomputed from the live claim set per query, so it rises as tracked clients
+/// confirm-apply and falls when a laggard rejoins, and the durable watermark
 /// advances as the durable backend catches up, so the drained set grows over
 /// time in production rather than staying permanently empty. Shared by the OR
 /// write path (`crdt.rs`) and the SYNC leaf (`sync.rs`).
