@@ -1551,6 +1551,10 @@ mod proptests {
 
     const MAX_MARGIN: u64 = 4;
 
+    /// The claim a forced laggard takes: above every drawable boot floor plus the widest margin,
+    /// and well below `MAX_EPOCH`, so a sweep snapshotted from it sits strictly between the two.
+    const LAGGARD_CLAIM: Epoch = 16;
+
     fn id(who: usize) -> ClaimantId {
         POOL[who].to_string()
     }
@@ -2221,6 +2225,186 @@ mod proptests {
                 in_order,
                 permuted_order,
                 "the claim set and the proposal must not depend on arrival order"
+            );
+        }
+
+        /// The fence in its STRONG form: the executed watermark never passes a live claim at ANY
+        /// instant — not merely at a sweep's snapshot — and nothing is ever recorded beneath it.
+        ///
+        /// **This property is CONDITIONED on the driven program honouring the sweep/admission
+        /// exclusion contract**, which the lowering guarantees by construction: no admission is
+        /// emitted strictly inside a sweep window. A consumer that admitted a claim concurrently
+        /// with its own running sweep could record beneath that sweep's ceiling snapshot and then
+        /// have the sweep's end fence past it, so without that condition the property would
+        /// assert more than the model claims. Stating the condition is what keeps it honest.
+        #[test]
+        fn the_watermark_never_passes_a_live_claim_at_any_instant(
+            (floor, margin, raw) in program()
+        ) {
+            drive(floor, margin, &raw, |h, _before, outcome| {
+                let executed = h.registry.executed_watermark(ClaimScope::Global);
+                // The model's TRUE minimum, not the registry's own: a broken fold feeding both
+                // the watermark and the reported minimum would be self-consistent, and this
+                // property could then never fail.
+                if let Some(min) = h.model.min_live_claim() {
+                    prop_assert!(
+                        executed <= min,
+                        "the watermark at {} passed the live claim at {}",
+                        executed,
+                        min
+                    );
+                }
+                match outcome {
+                    Outcome::Admission {
+                        registry: ClaimAdmission::Honoured { claim },
+                        ..
+                    } => {
+                        prop_assert!(
+                            claim >= executed,
+                            "recorded a claim at {} beneath the watermark at {}",
+                            claim,
+                            executed
+                        );
+                    }
+                    // The sweep-start-snapshot form is the WEAKER COROLLARY, asserted separately
+                    // so a change that broke the all-instants form while still holding at the
+                    // snapshot fires here rather than passing.
+                    Outcome::SweepBegun { granted: true, .. } => {
+                        if let Some(min) = h.model.min_live_claim() {
+                            prop_assert!(
+                                executed <= min,
+                                "at the sweep's snapshot the watermark at {} passed the live \
+                                 claim at {}",
+                                executed,
+                                min
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })?;
+        }
+
+        /// The watermark is ADVANCED, never assigned: a sweep that snapshots an empty claim set
+        /// takes the boot floor as its ceiling, and that must not drag the watermark back down
+        /// into a range already recorded as reclaimed.
+        #[test]
+        fn an_empty_claim_set_never_drags_the_watermark_down((floor, margin, raw) in program()) {
+            let mut harness = drive(floor, margin, &raw, |h, before, outcome| {
+                if matches!(outcome, Outcome::SweepEnded { .. }) {
+                    let after = h.registry.executed_watermark(ClaimScope::Global);
+                    prop_assert!(
+                        after >= before.executed,
+                        "ending a sweep moved the watermark back from {} to {}",
+                        before.executed,
+                        after
+                    );
+                }
+                Ok(())
+            })?;
+
+            // The scenario is FORCED rather than left to the draw: first a claimed sweep that
+            // lifts the watermark well above the boot floor, then a sweep over an empty claim set
+            // whose ceiling snapshot IS the boot floor.
+            harness.close_sweep();
+            harness.release_pool();
+            harness.apply(Op::Register { who: 0, epoch: MAX_EPOCH });
+            harness.apply(Op::BeginSweep);
+            harness.apply(Op::EndSweep { watermark: MAX_EPOCH });
+            let lifted = harness.registry.executed_watermark(ClaimScope::Global);
+            prop_assert!(
+                lifted > floor,
+                "the forcing sweep must lift the watermark above the boot floor: {} !> {}",
+                lifted,
+                floor
+            );
+
+            harness.release_pool();
+            prop_assert_eq!(harness.registry.live_claims(ClaimScope::Global), 0);
+            harness.apply(Op::BeginSweep);
+            prop_assert_eq!(
+                harness.token.as_ref().map(SweepToken::ceiling),
+                Some(floor),
+                "a sweep over an empty claim set snapshots the boot floor"
+            );
+            harness.apply(Op::EndSweep { watermark: MAX_EPOCH });
+            prop_assert_eq!(
+                harness.registry.executed_watermark(ClaimScope::Global),
+                lifted,
+                "a sweep over an empty claim set must not overwrite the watermark"
+            );
+
+            // The consequence an overwrite would have, named rather than left implied: a claim
+            // inside the already-reclaimed range stays refused.
+            if lifted >= 1 {
+                let below = harness.registry.register_claim(
+                    &named("resurrected"),
+                    ClaimScope::Global,
+                    lifted - 1,
+                );
+                prop_assert!(
+                    matches!(below, ClaimAdmission::BelowExecuted { .. }),
+                    "a claim beneath the retained watermark must stay refused, and it was {:?}",
+                    below
+                );
+            }
+        }
+
+        /// Ending a sweep lands the watermark on exactly the bound the pass was licensed by: the
+        /// CONSUMED token's own ceiling snapshot, clamped by the durable watermark the pass
+        /// observed, and never below where the watermark already stood.
+        ///
+        /// The clamp is what keeps a durability fence that held the pass below the ceiling from
+        /// fencing claimants against content that still physically exists.
+        #[test]
+        fn ending_a_sweep_lands_on_the_consumed_token_bound_and_no_further(
+            (floor, margin, raw) in program()
+        ) {
+            drive(floor, margin, &raw, |h, before, outcome| {
+                let Outcome::SweepEnded { token_ceiling, model_ceiling, watermark } = outcome
+                else {
+                    return Ok(());
+                };
+                prop_assert_eq!(
+                    token_ceiling,
+                    model_ceiling,
+                    "the token must carry the ceiling the sweep began on"
+                );
+                let bound = before
+                    .executed
+                    .max(token_ceiling.min(watermark.saturating_add(1)));
+                prop_assert_eq!(
+                    h.registry.executed_watermark(ClaimScope::Global),
+                    bound,
+                    "the watermark must land on the consumed token's bound"
+                );
+                Ok(())
+            })?;
+
+            // A release INSIDE the window, forced rather than drawn: it lifts the registry's
+            // CURRENT proposal above the snapshot the token carries, so a derivation that re-read
+            // the proposal instead of consuming the token lands too high.
+            // Well above every boot floor a program can draw and above the widest margin, so the
+            // snapshot the token carries is strictly below the proposal the release leaves behind.
+            let laggard_at: Epoch = LAGGARD_CLAIM;
+            let registry = ReclamationRegistry::with_margin(floor, margin);
+            let leader = registry.register_claim(&named("leader"), ClaimScope::Global, MAX_EPOCH);
+            prop_assert_eq!(leader, ClaimAdmission::Honoured { claim: MAX_EPOCH });
+            let laggard =
+                registry.register_claim(&named("laggard"), ClaimScope::Global, laggard_at);
+            prop_assert_eq!(laggard, ClaimAdmission::Honoured { claim: laggard_at });
+            let token = registry
+                .begin_sweep()
+                .expect("a fresh registry grants the first sweep");
+            prop_assert_eq!(token.ceiling(), laggard_at - margin);
+            registry.release_claim(&named("laggard"), ClaimScope::Global);
+            registry.end_sweep(token, MAX_EPOCH);
+            prop_assert_eq!(
+                registry.executed_watermark(ClaimScope::Global),
+                laggard_at - margin,
+                "the watermark must follow the consumed token, not the proposal the release \
+                 raised"
             );
         }
     }
