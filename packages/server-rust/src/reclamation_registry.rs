@@ -36,6 +36,11 @@
 //! Exactly one scope is admitted — see [`ClaimScope`], whose doc-contract states the limit and the
 //! operational fence a future second scope must honour.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use tracing::warn;
+
 use crate::tombstone_frontier::Epoch;
 
 /// The identity of a party holding a reclamation claim.
@@ -159,10 +164,20 @@ pub enum ClaimAdmission {
 pub struct SweepToken {
     // Module-private on purpose: the snapshot is the sweep's licence, and a consumer that could
     // read or rebuild it could fence the watermark from a boundary it did not obtain under the
-    // lock. No implementer exists yet — this is the trait-first contract surface, and the
-    // registry's `end_sweep` (the field's only reader) lands with the implementation.
-    #[allow(dead_code)]
+    // lock. Its only reader is `ReclamationRegistry::end_sweep`, and its only writer is
+    // `begin_sweep`, both in this module.
     ceiling_snapshot: Epoch,
+}
+
+impl SweepToken {
+    /// Mint a token over a ceiling snapshot taken under the registry lock.
+    ///
+    /// Module-private: minting outside the acquisition that took the snapshot would hand a
+    /// consumer a licence the registry never granted, which is exactly what the token exists to
+    /// make unrepresentable.
+    fn new(ceiling_snapshot: Epoch) -> Self {
+        Self { ceiling_snapshot }
+    }
 }
 
 /// The reclamation boundary protocol: register claims, reduce them, bracket sweeps.
@@ -442,3 +457,243 @@ pub const METRIC_RECLAMATION_SWEEPS_TOTAL: &str = "topgun_reclamation_sweeps_tot
 /// This is the loud signal for a leaked [`SweepToken`] — pinned at `1` with
 /// [`METRIC_RECLAMATION_SWEEPS_TOTAL`] flat.
 pub const METRIC_RECLAMATION_SWEEP_IN_PROGRESS: &str = "topgun_reclamation_sweep_in_progress";
+
+/// The registry's whole mutable state, behind one leaf mutex.
+///
+/// What this struct **does not** carry is as load-bearing as what it does:
+///
+/// - **no ceiling latch and no high-water of past proposals** — the ceiling is recomputed from
+///   the claim set on every query, so there is no retained stale proposal that could later license
+///   a watermark above the current minimum;
+/// - **no `ceiling_snapshot` slot** — a sweep's snapshot travels inside its [`SweepToken`], so
+///   there is no single field a second sweep could overwrite;
+/// - **no pending-admission queue** — sweep/admission exclusion is a caller obligation, and a
+///   queue no caller can enter would be a surface with no user.
+struct RegistryState {
+    /// Live claims, keyed by claimant and scope. Absence is *"no claim"*; a recorded value is
+    /// always `>= 1`, because a `0` claim is refused at admission.
+    claims: HashMap<(ClaimantId, ClaimScope), Epoch>,
+    /// The monotone executed watermark per scope. A missing entry reads as the boot floor.
+    executed: HashMap<ClaimScope, Epoch>,
+    /// The floor the registry starts from, for both the empty-claim-set ceiling and the
+    /// never-swept watermark.
+    boot_floor: Epoch,
+    /// Resolved once at construction, never per query, so the resolution and the arithmetic
+    /// cannot observe different answers.
+    margin_epochs: u64,
+    /// `true` between a granted `begin_sweep` and its `end_sweep`. The single-sweep guard, and
+    /// the value behind the in-progress gauge — registry state, not a calling convention.
+    sweep_in_progress: bool,
+}
+
+impl RegistryState {
+    /// The fleet MIN over live claims under `scope`, or `None` when none is recorded.
+    ///
+    /// Folded from scratch over the claim set on every call. Caching or clamping the result
+    /// against a previous one would reintroduce the first-claimant latch the two-phase split
+    /// exists to prevent.
+    fn min_live_claim(&self, scope: ClaimScope) -> Option<Epoch> {
+        self.claims
+            .iter()
+            .filter(|((_, claim_scope), _)| *claim_scope == scope)
+            .map(|(_, claim)| *claim)
+            .min()
+    }
+
+    /// The ceiling proposal under `scope`, recomputed from the current claim set.
+    ///
+    /// Saturating, so a margin wider than the minimum claim floors the proposal at `0` rather
+    /// than wrapping into a boundary near `u64::MAX`.
+    fn prune_ceiling(&self, scope: ClaimScope) -> Epoch {
+        match self.min_live_claim(scope) {
+            Some(min) => min.saturating_sub(self.margin_epochs),
+            None => self.boot_floor,
+        }
+    }
+
+    /// The executed watermark under `scope`; the boot floor on a registry that has never swept.
+    fn executed_watermark(&self, scope: ClaimScope) -> Epoch {
+        self.executed
+            .get(&scope)
+            .copied()
+            .unwrap_or(self.boot_floor)
+    }
+
+    /// The number of live claims recorded under `scope`.
+    fn live_claims(&self, scope: ClaimScope) -> usize {
+        self.claims
+            .keys()
+            .filter(|(_, claim_scope)| *claim_scope == scope)
+            .count()
+    }
+}
+
+/// The in-memory [`ReclamationBoundary`] implementation: one leaf mutex over [`RegistryState`].
+///
+/// # Locking
+///
+/// The mutex is a **leaf**: the registry acquires no other lock and never calls back into a
+/// consumer. A sweep holds it at exactly two points — `begin_sweep` (check, snapshot and flag in
+/// one acquisition) and `end_sweep` (advance and clear) — and never for the pass's duration, so a
+/// long pass cannot block an unrelated ceiling query behind it.
+pub struct ReclamationRegistry {
+    state: Mutex<RegistryState>,
+}
+
+impl ReclamationRegistry {
+    /// Build a registry over `boot_floor`, taking the default margin.
+    ///
+    /// The margin is resolved **once**, here, and never re-read per query.
+    ///
+    /// The registry is **in-memory only**: claims and the executed watermark are fresh at every
+    /// construction and survive no restart. With `boot_floor = 0` that is benign — a restarted
+    /// registry starts with no fence and licenses nothing until a claim is registered and a sweep
+    /// completes. A caller that passes a non-zero floor inherits the obligation that the floor is
+    /// non-decreasing across restarts.
+    #[must_use]
+    pub fn new(boot_floor: Epoch) -> Self {
+        Self::with_margin(boot_floor, DEFAULT_RECLAMATION_MARGIN_EPOCHS)
+    }
+
+    /// Build a registry over `boot_floor` with an explicitly resolved `margin_epochs`.
+    ///
+    /// For callers that resolve the margin themselves (and for tests that need a deterministic
+    /// one). Same once-at-construction rule as [`Self::new`]: the value is stored, never re-read.
+    #[must_use]
+    pub fn with_margin(boot_floor: Epoch, margin_epochs: u64) -> Self {
+        Self {
+            state: Mutex::new(RegistryState {
+                claims: HashMap::new(),
+                executed: HashMap::new(),
+                boot_floor,
+                margin_epochs,
+                sweep_in_progress: false,
+            }),
+        }
+    }
+
+    /// Acquire the state lock, recovering from poisoning rather than propagating a panic.
+    ///
+    /// The state is a plain claim map with no partially-applied invariant, so a guard recovered
+    /// from a panicking holder is usable; taking the server down over it would turn a bounded
+    /// failure into an outage.
+    fn lock(&self) -> MutexGuard<'_, RegistryState> {
+        self.state.lock().unwrap_or_else(|poison: PoisonError<_>| {
+            warn!("recovered a poisoned reclamation-registry mutex (a prior holder panicked)");
+            poison.into_inner()
+        })
+    }
+}
+
+impl ReclamationBoundary for ReclamationRegistry {
+    fn register_claim(
+        &self,
+        claimant: &ClaimantId,
+        scope: ClaimScope,
+        claim: Epoch,
+    ) -> ClaimAdmission {
+        let mut state = self.lock();
+
+        // An admission that lands while this registry's own sweep is in flight can record a claim
+        // below that sweep's ceiling snapshot, which `end_sweep` would then fence past — so the
+        // consumer must serialise the two, and this catches a consumer that does not. It is a
+        // `debug_assert` on purpose: the exclusion is a caller obligation rather than an
+        // invariant the registry can enforce, and aborting a release binary over a caller's
+        // scheduling would be a worse failure than the over-refusal the breach can cause.
+        debug_assert!(
+            !state.sweep_in_progress,
+            "register_claim ran concurrently with a sweep: admissions and sweeps are mutually \
+             exclusive, and the caller must serialise them"
+        );
+
+        // A 0 claim would pin the ceiling proposal at 0 for good while reading exactly like
+        // "no live claim" on the minimum-claim gauge, whose 0 is the no-claim sentinel.
+        if claim == 0 {
+            return ClaimAdmission::BelowExecuted {
+                claim,
+                executed: state.executed_watermark(scope),
+            };
+        }
+
+        let executed = state.executed_watermark(scope);
+        if claim < executed {
+            return ClaimAdmission::BelowExecuted { claim, executed };
+        }
+
+        // Monotone per claimant, and unconditional above the watermark: where the claim sits
+        // relative to the ceiling proposal or to any other claimant is not an admission input.
+        let stored = state
+            .claims
+            .entry((claimant.clone(), scope))
+            .and_modify(|existing| *existing = (*existing).max(claim))
+            .or_insert(claim);
+
+        ClaimAdmission::Honoured { claim: *stored }
+    }
+
+    fn release_claim(&self, claimant: &ClaimantId, scope: ClaimScope) {
+        let mut state = self.lock();
+        state.claims.remove(&(claimant.clone(), scope));
+    }
+
+    fn begin_sweep(&self) -> Option<SweepToken> {
+        // ONE acquisition covers the flag check, the snapshot and the flag set. Splitting them
+        // across two acquisitions opens a window in which two callers both observe the flag clear
+        // and both receive a token, and each then fences the watermark from its own snapshot.
+        let mut state = self.lock();
+
+        if state.sweep_in_progress {
+            return None;
+        }
+
+        let ceiling_snapshot = state.prune_ceiling(ClaimScope::Global);
+        state.sweep_in_progress = true;
+
+        Some(SweepToken::new(ceiling_snapshot))
+    }
+
+    fn end_sweep(&self, token: SweepToken, durable_watermark: Epoch) {
+        let mut state = self.lock();
+
+        // The pass could only reclaim epochs its filter admitted, i.e. below the ceiling AND at
+        // or below the durable watermark, so the safe claim boundary is min(ceiling, w + 1).
+        // Deriving the bare ceiling when the durability fence held the pass back would fence
+        // claimants against content that still physically exists.
+        let candidate = token
+            .ceiling_snapshot
+            .min(durable_watermark.saturating_add(1));
+
+        let boot_floor = state.boot_floor;
+        let executed = state
+            .executed
+            .entry(ClaimScope::Global)
+            .or_insert(boot_floor);
+        // `max`, never assignment: a later sweep over an empty claim set snapshots the boot floor,
+        // and assigning that would drag the watermark backwards and re-admit claims into an
+        // already-reclaimed range.
+        *executed = (*executed).max(candidate);
+
+        state.sweep_in_progress = false;
+    }
+
+    fn min_live_claim(&self, scope: ClaimScope) -> Option<Epoch> {
+        self.lock().min_live_claim(scope)
+    }
+
+    fn prune_ceiling(&self, scope: ClaimScope) -> Epoch {
+        self.lock().prune_ceiling(scope)
+    }
+
+    fn executed_watermark(&self, scope: ClaimScope) -> Epoch {
+        self.lock().executed_watermark(scope)
+    }
+
+    fn live_claims(&self, scope: ClaimScope) -> usize {
+        self.lock().live_claims(scope)
+    }
+
+    fn margin_epochs(&self) -> u64 {
+        self.lock().margin_epochs
+    }
+}
+
