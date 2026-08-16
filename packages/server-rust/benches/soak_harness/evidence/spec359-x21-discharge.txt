@@ -1,0 +1,397 @@
+SPEC-359 — W4 / X21: the reclamation registry's /metrics render
+===============================================================
+
+X21 reads: "every frozen surface, predicate, tool and join is validated against the
+exact transport the DATA half will consume, before the boundary." R4 discharges it in
+two limbs; this artifact records the executed proof for the second, which is the only
+one that needs an artifact.
+
+--------------------------------------------------------------------------------------
+Limb 1 — the struct / in-process transport
+--------------------------------------------------------------------------------------
+
+The registry's boundary surface is read in-process by its own unit tests and (in G3)
+by the proptest matrix, so for that limb surface == transport and no separate render
+is owed. Executed proof: the eighteen non-metrics tests in
+`reclamation_registry::tests`, green in debug and release.
+
+--------------------------------------------------------------------------------------
+Limb 2 — the metrics transport (W4)
+--------------------------------------------------------------------------------------
+
+Frozen surface: the THIRTEEN `topgun_reclamation_*` series (six gauges, seven
+counters), asserted on the exporter's own rendered text. An in-process accessor is
+NOT a substitute and is not used anywhere in these two tests — every assertion reads
+a `PrometheusHandle::render()` string.
+
+Consumer transport: `PrometheusBuilder::build_recorder` + `metrics::with_local_recorder`
++ `handle.render()`. The recorder is bound BEFORE the registry is constructed, because
+a metric handle resolved before a recorder is installed binds to a no-op for its whole
+lifetime; the inverted order would turn both tests into assertions about nothing.
+
+Executed proof:
+  `reclamation_registry::tests::metrics_transport::every_pinned_reclamation_series_is_present_in_the_first_render`
+  `reclamation_registry::tests::metrics_transport::the_scripted_sequence_renders_every_series_with_its_predicted_value`
+
+What each render below shows:
+
+  FIRST SCRAPE  — eager registration. The registry is constructed and NOTHING is
+                  driven; all thirteen series render at 0. This is what makes an absent
+                  series unrepresentable, so a sampler never has to distinguish "has not
+                  moved" from "does not exist".
+
+  SCRIPT 0      — construction with a NON-DEFAULT margin (3). `margin_epochs 3`
+                  discriminates the effective setting from the compiled-in default (0)
+                  instead of agreeing with it by coincidence: this is where the
+                  operator confirms TOPGUN_RECLAMATION_MARGIN_EPOCHS, since the value is
+                  deliberately not on the startup config line.
+
+  SCRIPT 1      — one claim at 20, one ceiling query. ceiling 17 (= 20 - margin 3),
+                  min_live_claim 20, live_claims 1, ceiling_queries 1, pinned 1.
+
+  SCRIPT 2      — MID-SWEEP, rendered while the SweepToken is still held:
+                  `sweep_in_progress 1` with `sweeps_total 0`. Rendering this gauge only
+                  at rest would leave the sweep protocol's one piece of state unwitnessed
+                  on the transport, which is the PD-F8 shape.
+
+  SCRIPT 3      — after a SECOND `begin_sweep()` that returned None. The single-sweep
+                  guard, observed on the transport: the refused call started no sweep, so
+                  `sweeps_total` is still 0 and the gauge is still the FIRST sweep's 1.
+
+  SCRIPT 4      — `end_sweep(token, w=100)`. executed = min(ceiling_snapshot 17, w+1 101)
+                  = 17. `sweep_in_progress` back to 0, `sweeps_total 1`,
+                  `executed_watermark 17`, `executed_epochs_advanced_total 17` (the
+                  DELTA, so a sweep that reclaims nothing leaves the counter flat).
+
+  SCRIPT 5      — the two-phase split on the wire. A claim at 10 is REFUSED below the
+                  executed watermark (`claims_rejected_below_executed_total 1`); a laggard
+                  at 18 is RECORDED and lowers the proposal, so `prune_ceiling` FELL
+                  17 -> 15 while `executed_watermark` stayed at 17. Final table:
+                  prune_ceiling 15, executed_watermark 17, min_live_claim 18,
+                  live_claims 2, margin_epochs 3, sweep_in_progress 0,
+                  claims_registered_total 3, claims_released_total 1,
+                  claims_rejected_below_executed_total 1, ceiling_queries_total 2,
+                  ceiling_pinned_queries_total 2, executed_epochs_advanced_total 17,
+                  sweeps_total 1.
+
+Absence check (Validation step 3, AC8): `topgun_reclamation_admissions_queued_total`
+appears NOWHERE below. The queue was deleted from the normative surface, and both tests
+assert the absence explicitly rather than leaving it to inspection — plus a hard count
+that exactly thirteen `topgun_reclamation_` value lines render, so a silent addition
+fails here rather than at a downstream dashboard.
+
+Not claimed by this artifact: the end-to-end env override. This test resolves the margin
+through `with_margin` for determinism, so it proves the gauge is READABLE and carries the
+effective value, not that the process read the variable. The variable's own parse is
+covered by the two `parse_margin_epochs` unit tests, and the end-to-end override is
+Validation step 3 (start the server with TOPGUN_RECLAMATION_MARGIN_EPOCHS=7 and grep the
+live /metrics endpoint).
+
+Command:
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+    cargo test --release -p topgun-server --lib \
+    reclamation_registry::tests::metrics_transport -- --nocapture --test-threads=1
+
+Tree: branch sf-359-reclamation-registry, parent commit efee72e7.
+Platform: macOS (Darwin 25.5.0), Apple M1 Max.
+
+--------------------------------------------------------------------------------------
+RAW RUN (verbatim, unedited)
+--------------------------------------------------------------------------------------
+
+    Finished `release` profile [optimized] target(s) in 0.21s
+     Running unittests src/lib.rs (target/release/deps/topgun_server-b3ef059854b88584)
+
+running 2 tests
+test reclamation_registry::tests::metrics_transport::every_pinned_reclamation_series_is_present_in_the_first_render ... --- FIRST SCRAPE (no claims, margin 0) ---
+# TYPE topgun_reclamation_executed_epochs_advanced_total counter
+topgun_reclamation_executed_epochs_advanced_total 0
+
+# TYPE topgun_reclamation_claims_registered_total counter
+topgun_reclamation_claims_registered_total 0
+
+# TYPE topgun_reclamation_ceiling_pinned_queries_total counter
+topgun_reclamation_ceiling_pinned_queries_total 0
+
+# TYPE topgun_reclamation_claims_rejected_below_executed_total counter
+topgun_reclamation_claims_rejected_below_executed_total 0
+
+# TYPE topgun_reclamation_ceiling_queries_total counter
+topgun_reclamation_ceiling_queries_total 0
+
+# TYPE topgun_reclamation_sweeps_total counter
+topgun_reclamation_sweeps_total 0
+
+# TYPE topgun_reclamation_claims_released_total counter
+topgun_reclamation_claims_released_total 0
+
+# TYPE topgun_reclamation_live_claims gauge
+topgun_reclamation_live_claims 0
+
+# TYPE topgun_reclamation_min_live_claim gauge
+topgun_reclamation_min_live_claim 0
+
+# TYPE topgun_reclamation_prune_ceiling gauge
+topgun_reclamation_prune_ceiling 0
+
+# TYPE topgun_reclamation_margin_epochs gauge
+topgun_reclamation_margin_epochs 0
+
+# TYPE topgun_reclamation_sweep_in_progress gauge
+topgun_reclamation_sweep_in_progress 0
+
+# TYPE topgun_reclamation_executed_watermark gauge
+topgun_reclamation_executed_watermark 0
+
+
+ok
+test reclamation_registry::tests::metrics_transport::the_scripted_sequence_renders_every_series_with_its_predicted_value ... --- SCRIPT 0: construction only ---
+# TYPE topgun_reclamation_claims_registered_total counter
+topgun_reclamation_claims_registered_total 0
+
+# TYPE topgun_reclamation_ceiling_queries_total counter
+topgun_reclamation_ceiling_queries_total 0
+
+# TYPE topgun_reclamation_claims_released_total counter
+topgun_reclamation_claims_released_total 0
+
+# TYPE topgun_reclamation_claims_rejected_below_executed_total counter
+topgun_reclamation_claims_rejected_below_executed_total 0
+
+# TYPE topgun_reclamation_sweeps_total counter
+topgun_reclamation_sweeps_total 0
+
+# TYPE topgun_reclamation_executed_epochs_advanced_total counter
+topgun_reclamation_executed_epochs_advanced_total 0
+
+# TYPE topgun_reclamation_ceiling_pinned_queries_total counter
+topgun_reclamation_ceiling_pinned_queries_total 0
+
+# TYPE topgun_reclamation_prune_ceiling gauge
+topgun_reclamation_prune_ceiling 0
+
+# TYPE topgun_reclamation_sweep_in_progress gauge
+topgun_reclamation_sweep_in_progress 0
+
+# TYPE topgun_reclamation_margin_epochs gauge
+topgun_reclamation_margin_epochs 3
+
+# TYPE topgun_reclamation_live_claims gauge
+topgun_reclamation_live_claims 0
+
+# TYPE topgun_reclamation_min_live_claim gauge
+topgun_reclamation_min_live_claim 0
+
+# TYPE topgun_reclamation_executed_watermark gauge
+topgun_reclamation_executed_watermark 0
+
+
+--- SCRIPT 1: one claim at 20, ceiling queried ---
+# TYPE topgun_reclamation_claims_rejected_below_executed_total counter
+topgun_reclamation_claims_rejected_below_executed_total 0
+
+# TYPE topgun_reclamation_claims_registered_total counter
+topgun_reclamation_claims_registered_total 1
+
+# TYPE topgun_reclamation_claims_released_total counter
+topgun_reclamation_claims_released_total 0
+
+# TYPE topgun_reclamation_ceiling_queries_total counter
+topgun_reclamation_ceiling_queries_total 1
+
+# TYPE topgun_reclamation_executed_epochs_advanced_total counter
+topgun_reclamation_executed_epochs_advanced_total 0
+
+# TYPE topgun_reclamation_ceiling_pinned_queries_total counter
+topgun_reclamation_ceiling_pinned_queries_total 1
+
+# TYPE topgun_reclamation_sweeps_total counter
+topgun_reclamation_sweeps_total 0
+
+# TYPE topgun_reclamation_live_claims gauge
+topgun_reclamation_live_claims 1
+
+# TYPE topgun_reclamation_min_live_claim gauge
+topgun_reclamation_min_live_claim 20
+
+# TYPE topgun_reclamation_executed_watermark gauge
+topgun_reclamation_executed_watermark 0
+
+# TYPE topgun_reclamation_margin_epochs gauge
+topgun_reclamation_margin_epochs 3
+
+# TYPE topgun_reclamation_prune_ceiling gauge
+topgun_reclamation_prune_ceiling 17
+
+# TYPE topgun_reclamation_sweep_in_progress gauge
+topgun_reclamation_sweep_in_progress 0
+
+
+--- SCRIPT 2: MID-SWEEP, token still held ---
+# TYPE topgun_reclamation_executed_epochs_advanced_total counter
+topgun_reclamation_executed_epochs_advanced_total 0
+
+# TYPE topgun_reclamation_ceiling_queries_total counter
+topgun_reclamation_ceiling_queries_total 1
+
+# TYPE topgun_reclamation_claims_rejected_below_executed_total counter
+topgun_reclamation_claims_rejected_below_executed_total 0
+
+# TYPE topgun_reclamation_claims_released_total counter
+topgun_reclamation_claims_released_total 0
+
+# TYPE topgun_reclamation_ceiling_pinned_queries_total counter
+topgun_reclamation_ceiling_pinned_queries_total 1
+
+# TYPE topgun_reclamation_sweeps_total counter
+topgun_reclamation_sweeps_total 0
+
+# TYPE topgun_reclamation_claims_registered_total counter
+topgun_reclamation_claims_registered_total 1
+
+# TYPE topgun_reclamation_min_live_claim gauge
+topgun_reclamation_min_live_claim 20
+
+# TYPE topgun_reclamation_sweep_in_progress gauge
+topgun_reclamation_sweep_in_progress 1
+
+# TYPE topgun_reclamation_executed_watermark gauge
+topgun_reclamation_executed_watermark 0
+
+# TYPE topgun_reclamation_live_claims gauge
+topgun_reclamation_live_claims 1
+
+# TYPE topgun_reclamation_prune_ceiling gauge
+topgun_reclamation_prune_ceiling 17
+
+# TYPE topgun_reclamation_margin_epochs gauge
+topgun_reclamation_margin_epochs 3
+
+
+--- SCRIPT 3: after the refused second begin_sweep ---
+# TYPE topgun_reclamation_ceiling_queries_total counter
+topgun_reclamation_ceiling_queries_total 1
+
+# TYPE topgun_reclamation_sweeps_total counter
+topgun_reclamation_sweeps_total 0
+
+# TYPE topgun_reclamation_claims_rejected_below_executed_total counter
+topgun_reclamation_claims_rejected_below_executed_total 0
+
+# TYPE topgun_reclamation_executed_epochs_advanced_total counter
+topgun_reclamation_executed_epochs_advanced_total 0
+
+# TYPE topgun_reclamation_claims_released_total counter
+topgun_reclamation_claims_released_total 0
+
+# TYPE topgun_reclamation_claims_registered_total counter
+topgun_reclamation_claims_registered_total 1
+
+# TYPE topgun_reclamation_ceiling_pinned_queries_total counter
+topgun_reclamation_ceiling_pinned_queries_total 1
+
+# TYPE topgun_reclamation_sweep_in_progress gauge
+topgun_reclamation_sweep_in_progress 1
+
+# TYPE topgun_reclamation_executed_watermark gauge
+topgun_reclamation_executed_watermark 0
+
+# TYPE topgun_reclamation_min_live_claim gauge
+topgun_reclamation_min_live_claim 20
+
+# TYPE topgun_reclamation_margin_epochs gauge
+topgun_reclamation_margin_epochs 3
+
+# TYPE topgun_reclamation_live_claims gauge
+topgun_reclamation_live_claims 1
+
+# TYPE topgun_reclamation_prune_ceiling gauge
+topgun_reclamation_prune_ceiling 17
+
+
+--- SCRIPT 4: sweep ended, watermark advanced ---
+# TYPE topgun_reclamation_claims_rejected_below_executed_total counter
+topgun_reclamation_claims_rejected_below_executed_total 0
+
+# TYPE topgun_reclamation_sweeps_total counter
+topgun_reclamation_sweeps_total 1
+
+# TYPE topgun_reclamation_claims_released_total counter
+topgun_reclamation_claims_released_total 0
+
+# TYPE topgun_reclamation_ceiling_pinned_queries_total counter
+topgun_reclamation_ceiling_pinned_queries_total 1
+
+# TYPE topgun_reclamation_executed_epochs_advanced_total counter
+topgun_reclamation_executed_epochs_advanced_total 17
+
+# TYPE topgun_reclamation_ceiling_queries_total counter
+topgun_reclamation_ceiling_queries_total 1
+
+# TYPE topgun_reclamation_claims_registered_total counter
+topgun_reclamation_claims_registered_total 1
+
+# TYPE topgun_reclamation_live_claims gauge
+topgun_reclamation_live_claims 1
+
+# TYPE topgun_reclamation_executed_watermark gauge
+topgun_reclamation_executed_watermark 17
+
+# TYPE topgun_reclamation_min_live_claim gauge
+topgun_reclamation_min_live_claim 20
+
+# TYPE topgun_reclamation_sweep_in_progress gauge
+topgun_reclamation_sweep_in_progress 0
+
+# TYPE topgun_reclamation_prune_ceiling gauge
+topgun_reclamation_prune_ceiling 17
+
+# TYPE topgun_reclamation_margin_epochs gauge
+topgun_reclamation_margin_epochs 3
+
+
+--- SCRIPT 5: proposal fallen, watermark held ---
+# TYPE topgun_reclamation_executed_epochs_advanced_total counter
+topgun_reclamation_executed_epochs_advanced_total 17
+
+# TYPE topgun_reclamation_sweeps_total counter
+topgun_reclamation_sweeps_total 1
+
+# TYPE topgun_reclamation_claims_registered_total counter
+topgun_reclamation_claims_registered_total 3
+
+# TYPE topgun_reclamation_claims_released_total counter
+topgun_reclamation_claims_released_total 1
+
+# TYPE topgun_reclamation_ceiling_pinned_queries_total counter
+topgun_reclamation_ceiling_pinned_queries_total 2
+
+# TYPE topgun_reclamation_ceiling_queries_total counter
+topgun_reclamation_ceiling_queries_total 2
+
+# TYPE topgun_reclamation_claims_rejected_below_executed_total counter
+topgun_reclamation_claims_rejected_below_executed_total 1
+
+# TYPE topgun_reclamation_margin_epochs gauge
+topgun_reclamation_margin_epochs 3
+
+# TYPE topgun_reclamation_min_live_claim gauge
+topgun_reclamation_min_live_claim 18
+
+# TYPE topgun_reclamation_prune_ceiling gauge
+topgun_reclamation_prune_ceiling 15
+
+# TYPE topgun_reclamation_sweep_in_progress gauge
+topgun_reclamation_sweep_in_progress 0
+
+# TYPE topgun_reclamation_executed_watermark gauge
+topgun_reclamation_executed_watermark 17
+
+# TYPE topgun_reclamation_live_claims gauge
+topgun_reclamation_live_claims 2
+
+
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1831 filtered out; finished in 0.20s
+
