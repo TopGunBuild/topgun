@@ -84,14 +84,57 @@ What each row discriminates (so no row is read as more than it is)
 
 
 ================================================================================
-POST-CHANGE HALF  —  appended after the re-point lands
+POST-CHANGE HALF  —  commit 70cf7f83 (the prune side folded over the ceiling)
 ================================================================================
 
-(pending)
+Re-captured with the same two commands, at margin 0 (the default), with the prune's authority moved
+off the low-water-mark fold and onto the reclamation ceiling: all four cursor writers are now claim
+sites, the non-dark drain is bracketed by begin_sweep/end_sweep and filters on the ceiling its token
+carries, and split_observation's eligible/ineligible predicate reads the same ceiling.
+
+--- (1) default profile, `cargo test --release -p topgun-server --lib` ---------
+
+PRUNE-DECISION | one_behind_client_pins_epoch_fleet_wide | epochs=[1,2] | tags=[0:0:n,1:0:n]
+PRUNE-DECISION | lwm_past_but_watermark_behind_keeps_epoch_unpruned | epochs=[1,2] | tags=[0:0:n,1:0:n]
+PRUNE-DECISION | dark_by_construction_no_prune_with_zero_watermark | epochs=[] | tags=[]
+PRUNE-DECISION | eligibility_is_strictly_past_not_inclusive | epochs=[1] | tags=[0:0:n]
+PRUNE-DECISION | restore_tombstone_ref_round_trips_through_drain | epochs=[1] | tags=[T1]
+PRUNE-DECISION | restore_tombstone_ref_round_trips_through_drain#after_restore | epochs=[1] | tags=[T1]
+PRUNE-DECISION | reconnect_rehydrates_before_ack_does_not_advance_lwm | epochs=[1,2,3,4] | tags=[0:0:n,1:0:n,2:0:n,3:0:n]
+PRUNE-DECISION | forget_client_deletes_durable_cursor_so_rehydrate_is_noop | epochs=[] | tags=[]
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1833 filtered out; finished in 0.14s
+
+--- (2) sim profile, `cargo test --profile ci-sim --features simulation` -------
+
+PRUNE-DECISION | interleaved_prune_during_push_never_resurrects | epochs=[64 exits/64 rounds] | tags=[T_old dropped in 64/64]
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 1833 filtered out; finished in 0.63s
 
 
 ================================================================================
 DIFF
 ================================================================================
 
-(pending)
+    $ diff pre-change.txt post-change.txt
+    (no output)
+
+All NINE corpus rows are byte-identical across the two halves: same fixtures, same epoch sets, same
+tag sets, on both capture commands. The margin-0 identity claim is therefore MEASURED, not argued.
+
+The one divergence N9 admits — a claimant strictly below the executed watermark being refused where
+the pre-change tree would have tracked it — is NOT exercised by any row, and no row diverges for any
+other reason. That is the expected outcome and it is mechanically explained rather than lucky: the
+refusal needs a non-zero executed watermark, which needs a completed non-dark sweep, and every
+corpus fixture either runs dark or runs its first and only sweep with the executed watermark still
+at the boot floor of 0. A fixture that DID exercise the refusal would have to be named here with its
+before/after decision; none does.
+
+Two collateral observations from the same runs, recorded because they are the checks a reader would
+otherwise have to re-run:
+
+  * The full `--lib` suite is green at 1833 passed / 0 failed, with every pre-existing prune fixture
+    UNEDITED. The prune-decision corpus is not the only consumer of the re-pointed predicate, and
+    the suite passing unedited is the wider form of the same measurement.
+  * The sim suite runs under `ci-sim`, which sets `debug-assertions = true`, so the registry's
+    `debug_assert!(!sweep_in_progress)` on the admission path is LIVE in that run. Its 26 tests pass
+    with the interleaving fault driving an ACK concurrently with a sweep — the block-during-sweep
+    exclusion holding at the wired boundary, observed rather than assumed.
