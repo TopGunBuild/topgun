@@ -39,6 +39,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use metrics::{Counter, Gauge};
 use tracing::warn;
 
 use crate::tombstone_frontier::Epoch;
@@ -398,6 +399,48 @@ pub trait ReclamationBoundary: Send + Sync {
 /// choosing one on evidence is deferred and owned by TODO-634.
 pub const DEFAULT_RECLAMATION_MARGIN_EPOCHS: u64 = 0;
 
+/// Environment variable carrying the operator-chosen reclamation margin, in epochs.
+const ENV_RECLAMATION_MARGIN_EPOCHS: &str = "TOPGUN_RECLAMATION_MARGIN_EPOCHS";
+
+/// Resolve the effective margin from the environment, **once**, at registry construction.
+///
+/// Never per query: a per-query read would let the parse and the ceiling arithmetic observe
+/// different answers within one pass, so the boundary a sweep snapshotted and the boundary its
+/// `end_sweep` fenced from could disagree for no reason a consumer could see.
+///
+/// An absent variable takes the default silently. Anything else is routed through
+/// [`parse_margin_epochs`], which never panics — this runs inside every `TombstoneFrontier`
+/// construction, including every test's, so aborting over a typo in one variable would take down
+/// far more than the knob it describes.
+fn resolve_margin_epochs() -> u64 {
+    match std::env::var(ENV_RECLAMATION_MARGIN_EPOCHS) {
+        Ok(raw) => parse_margin_epochs(&raw),
+        Err(_) => DEFAULT_RECLAMATION_MARGIN_EPOCHS,
+    }
+}
+
+/// Parse one raw margin value, falling back to the default **loudly**.
+///
+/// A silent fallback would leave an operator who set a value believing it took effect, so an
+/// unparseable value warns with the rejected text rather than disappearing.
+///
+/// `0` is VALID here and means *no margin* — it is this increment's default. That is the one
+/// place this parse deliberately differs from `TOPGUN_EPOCH_WIDTH`'s, which rejects `0` because a
+/// zero-width epoch is meaningless; a zero-width margin is merely the absence of slack.
+fn parse_margin_epochs(raw: &str) -> u64 {
+    if let Ok(margin) = raw.trim().parse::<u64>() {
+        return margin;
+    }
+
+    warn!(
+        rejected_value = %raw,
+        default = DEFAULT_RECLAMATION_MARGIN_EPOCHS,
+        "invalid TOPGUN_RECLAMATION_MARGIN_EPOCHS (expected a non-negative integer); \
+         using the default"
+    );
+    DEFAULT_RECLAMATION_MARGIN_EPOCHS
+}
+
 /// Gauge: the last ceiling **proposal** published by [`ReclamationBoundary::prune_ceiling`]. MAY
 /// FALL — it is not a ratchet.
 pub const METRIC_RECLAMATION_PRUNE_CEILING: &str = "topgun_reclamation_prune_ceiling";
@@ -457,6 +500,91 @@ pub const METRIC_RECLAMATION_SWEEPS_TOTAL: &str = "topgun_reclamation_sweeps_tot
 /// This is the loud signal for a leaked [`SweepToken`] — pinned at `1` with
 /// [`METRIC_RECLAMATION_SWEEPS_TOTAL`] flat.
 pub const METRIC_RECLAMATION_SWEEP_IN_PROGRESS: &str = "topgun_reclamation_sweep_in_progress";
+
+/// Resolve a counter handle and touch it, so the series is registered before any observation.
+fn touched_counter(name: &'static str) -> Counter {
+    let handle = metrics::counter!(name);
+    // An `increment(0)` is what puts the series in the exporter's registry; merely resolving the
+    // handle does not. Without it the series is absent until its first real observation, and a
+    // downstream sampler cannot tell an absent series from a stalled one.
+    handle.increment(0);
+    handle
+}
+
+/// Resolve a gauge handle and touch it, so the series is registered before any observation.
+fn touched_gauge(name: &'static str) -> Gauge {
+    let handle = metrics::gauge!(name);
+    handle.set(0.0);
+    handle
+}
+
+/// One cached handle per pinned registry series — six gauges and seven counters, **thirteen**.
+///
+/// Handles are resolved once, at registry construction, and never re-resolved: a `counter!` /
+/// `gauge!` macro invocation at an emit site performs a registry lookup by name, and the ceiling
+/// query sits on the prune path.
+///
+/// Every field is emitted through its pinned name constant. A string literal at an emit site is a
+/// defect: binding the emitter to the constant is what makes the compiler, rather than a document
+/// review, the thing that stops an emitted name drifting from the pinned one.
+///
+/// # Construction-order precondition (depended on, not established here)
+///
+/// A handle resolved **before** a recorder is installed binds to a no-op for that handle's whole
+/// lifetime — it never re-resolves. Caching at construction is therefore only sound if the
+/// recorder is installed first, at every production site and in every test that renders.
+///
+/// Registration is eager rather than lazy-on-first-use, so every pinned series exists in the
+/// FIRST scrape and *"has not moved"* is never confusable with *"does not exist"*.
+struct RegistryMetrics {
+    prune_ceiling: Gauge,
+    executed_watermark: Gauge,
+    min_live_claim: Gauge,
+    live_claims: Gauge,
+    margin_epochs: Gauge,
+    sweep_in_progress: Gauge,
+    claims_registered: Counter,
+    claims_released: Counter,
+    claims_rejected_below_executed: Counter,
+    ceiling_queries: Counter,
+    ceiling_pinned_queries: Counter,
+    executed_epochs_advanced: Counter,
+    sweeps: Counter,
+}
+
+impl RegistryMetrics {
+    /// Resolve and touch all thirteen series, then publish the effective margin.
+    ///
+    /// The margin is published here and nowhere else: it is fixed for the registry's lifetime, so
+    /// a re-publish on any later path could only ever restate the same number.
+    #[allow(clippy::cast_precision_loss)]
+    fn new(margin_epochs: u64) -> Self {
+        let metrics = Self {
+            prune_ceiling: touched_gauge(METRIC_RECLAMATION_PRUNE_CEILING),
+            executed_watermark: touched_gauge(METRIC_RECLAMATION_EXECUTED_WATERMARK),
+            min_live_claim: touched_gauge(METRIC_RECLAMATION_MIN_LIVE_CLAIM),
+            live_claims: touched_gauge(METRIC_RECLAMATION_LIVE_CLAIMS),
+            margin_epochs: touched_gauge(METRIC_RECLAMATION_MARGIN_EPOCHS),
+            sweep_in_progress: touched_gauge(METRIC_RECLAMATION_SWEEP_IN_PROGRESS),
+
+            claims_registered: touched_counter(METRIC_RECLAMATION_CLAIMS_REGISTERED_TOTAL),
+            claims_released: touched_counter(METRIC_RECLAMATION_CLAIMS_RELEASED_TOTAL),
+            claims_rejected_below_executed: touched_counter(
+                METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL,
+            ),
+            ceiling_queries: touched_counter(METRIC_RECLAMATION_CEILING_QUERIES_TOTAL),
+            ceiling_pinned_queries: touched_counter(
+                METRIC_RECLAMATION_CEILING_PINNED_QUERIES_TOTAL,
+            ),
+            executed_epochs_advanced: touched_counter(
+                METRIC_RECLAMATION_EXECUTED_EPOCHS_ADVANCED_TOTAL,
+            ),
+            sweeps: touched_counter(METRIC_RECLAMATION_SWEEPS_TOTAL),
+        };
+        metrics.margin_epochs.set(margin_epochs as f64);
+        metrics
+    }
+}
 
 /// The registry's whole mutable state, behind one leaf mutex.
 ///
@@ -536,14 +664,26 @@ impl RegistryState {
 /// consumer. A sweep holds it at exactly two points — `begin_sweep` (check, snapshot and flag in
 /// one acquisition) and `end_sweep` (advance and clear) — and never for the pass's duration, so a
 /// long pass cannot block an unrelated ceiling query behind it.
+///
+/// # Metrics
+///
+/// The metric handles live beside the mutex rather than inside the state, because they are
+/// immutable after construction and therefore need no lock of their own. That siting is
+/// load-bearing: an emit from inside a critical section stays a plain atomic increment, and a
+/// helper that publishes a gauge takes the already-held guard by reference instead of re-entering
+/// a non-reentrant `std::sync::Mutex`.
 pub struct ReclamationRegistry {
     state: Mutex<RegistryState>,
+    metrics: RegistryMetrics,
 }
 
 impl ReclamationRegistry {
-    /// Build a registry over `boot_floor`, taking the default margin.
+    /// Build a registry over `boot_floor`, resolving the margin from the environment.
     ///
-    /// The margin is resolved **once**, here, and never re-read per query.
+    /// `TOPGUN_RECLAMATION_MARGIN_EPOCHS` is read **once**, here, and never re-read per query; an
+    /// unparseable value warns and takes the default rather than panicking. The effective value is
+    /// then published as a gauge, so it is confirmable on a `/metrics` scrape rather than only on
+    /// a boot line.
     ///
     /// The registry is **in-memory only**: claims and the executed watermark are fresh at every
     /// construction and survive no restart. With `boot_floor = 0` that is benign — a restarted
@@ -552,13 +692,17 @@ impl ReclamationRegistry {
     /// non-decreasing across restarts.
     #[must_use]
     pub fn new(boot_floor: Epoch) -> Self {
-        Self::with_margin(boot_floor, DEFAULT_RECLAMATION_MARGIN_EPOCHS)
+        Self::with_margin(boot_floor, resolve_margin_epochs())
     }
 
     /// Build a registry over `boot_floor` with an explicitly resolved `margin_epochs`.
     ///
     /// For callers that resolve the margin themselves (and for tests that need a deterministic
     /// one). Same once-at-construction rule as [`Self::new`]: the value is stored, never re-read.
+    ///
+    /// All thirteen metric series are resolved and touched here, so the first scrape after
+    /// construction renders every one of them at zero. A caller that constructs a registry before
+    /// installing its recorder gets thirteen no-op handles for the process's lifetime.
     #[must_use]
     pub fn with_margin(boot_floor: Epoch, margin_epochs: u64) -> Self {
         Self {
@@ -569,6 +713,7 @@ impl ReclamationRegistry {
                 margin_epochs,
                 sweep_in_progress: false,
             }),
+            metrics: RegistryMetrics::new(margin_epochs),
         }
     }
 
@@ -582,6 +727,25 @@ impl ReclamationRegistry {
             warn!("recovered a poisoned reclamation-registry mutex (a prior holder panicked)");
             poison.into_inner()
         })
+    }
+
+    /// Publish the claim-set gauges from an ALREADY-HELD guard.
+    ///
+    /// Takes the state by reference rather than re-locking. Re-entering the registry mutex from
+    /// inside a critical section would self-deadlock on a non-reentrant `std::sync::Mutex`, and
+    /// re-reading it after releasing the guard would publish a claim set that a concurrent writer
+    /// may already have moved past the one the caller acted on.
+    #[allow(clippy::cast_precision_loss)]
+    fn publish_claim_gauges(&self, state: &RegistryState, scope: ClaimScope) {
+        // The `0` published for an empty claim set is the no-claim sentinel, and it is unambiguous
+        // only because a `0` claim is refused at admission — no recorded claim can collide with
+        // it.
+        self.metrics
+            .min_live_claim
+            .set(state.min_live_claim(scope).map_or(0.0, |min| min as f64));
+        self.metrics
+            .live_claims
+            .set(state.live_claims(scope) as f64);
     }
 }
 
@@ -609,6 +773,10 @@ impl ReclamationBoundary for ReclamationRegistry {
         // A 0 claim would pin the ceiling proposal at 0 for good while reading exactly like
         // "no live claim" on the minimum-claim gauge, whose 0 is the no-claim sentinel.
         if claim == 0 {
+            // Both refusal exits bump the same skip counter. Counting only the watermark exit
+            // would under-report the zero guard, and the two are indistinguishable to an operator
+            // reading the returned `BelowExecuted` anyway.
+            self.metrics.claims_rejected_below_executed.increment(1);
             return ClaimAdmission::BelowExecuted {
                 claim,
                 executed: state.executed_watermark(scope),
@@ -617,23 +785,35 @@ impl ReclamationBoundary for ReclamationRegistry {
 
         let executed = state.executed_watermark(scope);
         if claim < executed {
+            self.metrics.claims_rejected_below_executed.increment(1);
             return ClaimAdmission::BelowExecuted { claim, executed };
         }
 
         // Monotone per claimant, and unconditional above the watermark: where the claim sits
         // relative to the ceiling proposal or to any other claimant is not an admission input.
-        let stored = state
+        let stored = *state
             .claims
             .entry((claimant.clone(), scope))
             .and_modify(|existing| *existing = (*existing).max(claim))
             .or_insert(claim);
 
-        ClaimAdmission::Honoured { claim: *stored }
+        self.metrics.claims_registered.increment(1);
+        self.publish_claim_gauges(&state, scope);
+
+        ClaimAdmission::Honoured { claim: stored }
     }
 
     fn release_claim(&self, claimant: &ClaimantId, scope: ClaimScope) {
         let mut state = self.lock();
-        state.claims.remove(&(claimant.clone(), scope));
+        let removed = state.claims.remove(&(claimant.clone(), scope)).is_some();
+
+        // Counted only when a live claim actually left the fold. Releasing a claimant that never
+        // held one is the frontier's ordinary `forget_client` for a device that never claimed, and
+        // counting it would report claim churn that never happened.
+        if removed {
+            self.metrics.claims_released.increment(1);
+        }
+        self.publish_claim_gauges(&state, scope);
     }
 
     fn begin_sweep(&self) -> Option<SweepToken> {
@@ -646,12 +826,25 @@ impl ReclamationBoundary for ReclamationRegistry {
             return None;
         }
 
+        // The inherent helper, NOT the trait method: the trait method takes the lock, and calling
+        // it from inside this critical section would self-deadlock.
         let ceiling_snapshot = state.prune_ceiling(ClaimScope::Global);
         state.sweep_in_progress = true;
+
+        // Set on the granted path only. A refused `begin_sweep` starts no sweep, so moving the
+        // gauge there would report a second sweep running that never began — and the gauge would
+        // then be pinned at `1` by the very call the guard turned away.
+        //
+        // Deliberately does NOT move the ceiling gauge or bump the ceiling-query counters: both
+        // are pinned to `prune_ceiling` CALLS, and folding this internal snapshot into them would
+        // make an operator's query rate report sweeps as consumer queries. The snapshot is still
+        // observable — it is what `end_sweep` advances the executed watermark from.
+        self.metrics.sweep_in_progress.set(1.0);
 
         Some(SweepToken::new(ceiling_snapshot))
     }
 
+    #[allow(clippy::cast_precision_loss)]
     fn end_sweep(&self, token: SweepToken, durable_watermark: Epoch) {
         let mut state = self.lock();
 
@@ -671,17 +864,45 @@ impl ReclamationBoundary for ReclamationRegistry {
         // `max`, never assignment: a later sweep over an empty claim set snapshots the boot floor,
         // and assigning that would drag the watermark backwards and re-admit claims into an
         // already-reclaimed range.
-        *executed = (*executed).max(candidate);
+        let previous = *executed;
+        *executed = previous.max(candidate);
+        let advanced = *executed - previous;
+        let watermark = *executed;
 
         state.sweep_in_progress = false;
+        drop(state);
+
+        self.metrics.sweeps.increment(1);
+        self.metrics.sweep_in_progress.set(0.0);
+        // The DELTA, not the new value: a sweep that advanced nothing must leave this counter
+        // flat, which is what lets an operator separate "sweeps are running" from "sweeps are
+        // reclaiming".
+        self.metrics.executed_epochs_advanced.increment(advanced);
+        self.metrics.executed_watermark.set(watermark as f64);
     }
 
     fn min_live_claim(&self, scope: ClaimScope) -> Option<Epoch> {
         self.lock().min_live_claim(scope)
     }
 
+    #[allow(clippy::cast_precision_loss)]
     fn prune_ceiling(&self, scope: ClaimScope) -> Epoch {
-        self.lock().prune_ceiling(scope)
+        let state = self.lock();
+        let ceiling = state.prune_ceiling(scope);
+        // A live claim, rather than the boot floor, determined the proposal.
+        let pinned = state.min_live_claim(scope).is_some();
+        self.publish_claim_gauges(&state, scope);
+        drop(state);
+
+        // Observation only — this query moves no boundary state. Every emit below is a metric
+        // handle; a boundary write here would make reading the ceiling change the ceiling.
+        self.metrics.ceiling_queries.increment(1);
+        if pinned {
+            self.metrics.ceiling_pinned_queries.increment(1);
+        }
+        self.metrics.prune_ceiling.set(ceiling as f64);
+
+        ceiling
     }
 
     fn executed_watermark(&self, scope: ClaimScope) -> Epoch {
@@ -1011,5 +1232,274 @@ mod tests {
         }
 
         assert_eq!(registry.executed_watermark(ClaimScope::Global), 32);
+    }
+
+    /// A well-formed value is taken verbatim, and `0` is a VALUE rather than an unset-like
+    /// sentinel — it is this increment's default and means *no margin*.
+    #[test]
+    fn a_well_formed_margin_is_taken_verbatim_including_zero() {
+        for (raw, expected) in [("0", 0), ("1", 1), ("7", 7), ("  12  ", 12)] {
+            assert_eq!(
+                parse_margin_epochs(raw),
+                expected,
+                "{raw:?} is a well-formed margin and must parse to {expected}"
+            );
+        }
+    }
+
+    /// Anything unparseable falls back to the default instead of panicking: this parse runs inside
+    /// every `TombstoneFrontier` construction, so a panic would take down every test in the tree
+    /// over a typo in one variable.
+    #[test]
+    fn an_unparseable_margin_falls_back_to_the_default_without_panicking() {
+        for raw in ["", "   ", "banana", "-1", "1.5", "7epochs", "0x10"] {
+            assert_eq!(
+                parse_margin_epochs(raw),
+                DEFAULT_RECLAMATION_MARGIN_EPOCHS,
+                "{raw:?} is unparseable and must take the default"
+            );
+        }
+    }
+
+    /// With no override in the environment, the constructor resolves the compiled-in default.
+    #[test]
+    fn a_registry_built_without_the_override_takes_the_default_margin() {
+        if std::env::var(ENV_RECLAMATION_MARGIN_EPOCHS).is_ok() {
+            // An operator-set variable in the test process would make this an assertion about
+            // their shell rather than about the default. The end-to-end override is proven on a
+            // real server start instead, and the effective value is readable on `/metrics`.
+            return;
+        }
+        assert_eq!(
+            ReclamationRegistry::new(0).margin_epochs(),
+            DEFAULT_RECLAMATION_MARGIN_EPOCHS
+        );
+    }
+
+    mod metrics_transport {
+        use super::*;
+        use metrics_exporter_prometheus::PrometheusBuilder;
+
+        const RECLAMATION_GAUGE_NAMES: [&str; 6] = [
+            METRIC_RECLAMATION_PRUNE_CEILING,
+            METRIC_RECLAMATION_EXECUTED_WATERMARK,
+            METRIC_RECLAMATION_MIN_LIVE_CLAIM,
+            METRIC_RECLAMATION_LIVE_CLAIMS,
+            METRIC_RECLAMATION_MARGIN_EPOCHS,
+            METRIC_RECLAMATION_SWEEP_IN_PROGRESS,
+        ];
+
+        const RECLAMATION_COUNTER_NAMES: [&str; 7] = [
+            METRIC_RECLAMATION_CLAIMS_REGISTERED_TOTAL,
+            METRIC_RECLAMATION_CLAIMS_RELEASED_TOTAL,
+            METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL,
+            METRIC_RECLAMATION_CEILING_QUERIES_TOTAL,
+            METRIC_RECLAMATION_CEILING_PINNED_QUERIES_TOTAL,
+            METRIC_RECLAMATION_EXECUTED_EPOCHS_ADVANCED_TOTAL,
+            METRIC_RECLAMATION_SWEEPS_TOTAL,
+        ];
+
+        /// The series name the queue would have carried. It has no name constant on purpose —
+        /// this literal exists so its ABSENCE from a render is asserted rather than assumed.
+        const DELETED_QUEUE_SERIES: &str = "topgun_reclamation_admissions_queued_total";
+
+        fn rendered_value<'a>(rendered: &'a str, name: &str) -> Option<&'a str> {
+            rendered.lines().find_map(|line| {
+                line.strip_prefix(name)
+                    .and_then(|rest| rest.strip_prefix(' '))
+            })
+        }
+
+        fn assert_series(rendered: &str, name: &str, expected: &str) {
+            assert_eq!(
+                rendered_value(rendered, name),
+                Some(expected),
+                "{name} must render {expected}; render was:\n{rendered}"
+            );
+        }
+
+        /// Value lines (not `# HELP` / `# TYPE`) under the registry's prefix.
+        fn reclamation_value_lines(rendered: &str) -> Vec<&str> {
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("topgun_reclamation_"))
+                .collect()
+        }
+
+        /// The count is frozen at thirteen, so both a silent addition and a silent deletion fail
+        /// here rather than at a downstream dashboard.
+        fn assert_exactly_thirteen_series(rendered: &str) {
+            let lines = reclamation_value_lines(rendered);
+            assert_eq!(
+                lines.len(),
+                13,
+                "exactly thirteen reclamation series must render; got {lines:#?}\n\
+                 render was:\n{rendered}"
+            );
+            assert!(
+                rendered_value(rendered, DELETED_QUEUE_SERIES).is_none(),
+                "{DELETED_QUEUE_SERIES} was deleted with the queue and must not render; \
+                 render was:\n{rendered}"
+            );
+        }
+
+        /// Eager registration: constructing the registry is enough for all thirteen series to
+        /// render, so a sampler never has to tell *"has not moved"* from *"does not exist"*.
+        #[test]
+        fn every_pinned_reclamation_series_is_present_in_the_first_render() {
+            let recorder = PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            // Bind the recorder BEFORE resolving a single handle. A handle resolved first binds
+            // to a no-op for its whole lifetime, and the inverted order would quietly turn this
+            // into an assertion about nothing.
+            metrics::with_local_recorder(&recorder, || {
+                let _registry = ReclamationRegistry::with_margin(0, 0);
+                // Deliberately nothing driven.
+            });
+
+            let rendered = handle.render();
+            println!("--- FIRST SCRAPE (no claims, margin 0) ---\n{rendered}");
+
+            for name in RECLAMATION_GAUGE_NAMES {
+                assert_series(&rendered, name, "0");
+            }
+            for name in RECLAMATION_COUNTER_NAMES {
+                assert_series(&rendered, name, "0");
+            }
+            assert_exactly_thirteen_series(&rendered);
+        }
+
+        /// The scripted sequence, read off the exporter's own text rather than off an in-process
+        /// accessor — an accessor would prove the field moved, not that a consumer can see it.
+        ///
+        /// Three things the sequence exists to exhibit:
+        /// (i) a laggard lowering the proposal, so the ceiling is observed FALLING while the
+        ///     executed watermark beside it does not;
+        /// (ii) one refusal below the executed watermark, so the skip counter is non-zero;
+        /// (iii) the sweep leg rendered MID-SWEEP, while the token is still held, with a second
+        ///     `begin_sweep` observed to return `None` on the transport rather than only
+        ///     in-process.
+        #[test]
+        fn the_scripted_sequence_renders_every_series_with_its_predicted_value() {
+            let recorder = PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+
+            metrics::with_local_recorder(&recorder, || {
+                // A non-default margin, so the rendered value discriminates the effective setting
+                // instead of agreeing with the compiled-in default by coincidence.
+                let registry = ReclamationRegistry::with_margin(0, 3);
+
+                let first = handle.render();
+                println!("--- SCRIPT 0: construction only ---\n{first}");
+                assert_series(&first, METRIC_RECLAMATION_MARGIN_EPOCHS, "3");
+                assert_exactly_thirteen_series(&first);
+
+                assert_eq!(
+                    registry.register_claim(&claimant("ahead"), ClaimScope::Global, 20),
+                    ClaimAdmission::Honoured { claim: 20 }
+                );
+                let high_ceiling = registry.prune_ceiling(ClaimScope::Global);
+                assert_eq!(high_ceiling, 17);
+
+                let armed = handle.render();
+                println!("--- SCRIPT 1: one claim at 20, ceiling queried ---\n{armed}");
+                assert_series(&armed, METRIC_RECLAMATION_PRUNE_CEILING, "17");
+                assert_series(&armed, METRIC_RECLAMATION_MIN_LIVE_CLAIM, "20");
+                assert_series(&armed, METRIC_RECLAMATION_LIVE_CLAIMS, "1");
+                assert_series(&armed, METRIC_RECLAMATION_CLAIMS_REGISTERED_TOTAL, "1");
+                assert_series(&armed, METRIC_RECLAMATION_CEILING_QUERIES_TOTAL, "1");
+                assert_series(&armed, METRIC_RECLAMATION_CEILING_PINNED_QUERIES_TOTAL, "1");
+                assert_series(&armed, METRIC_RECLAMATION_EXECUTED_WATERMARK, "0");
+                assert_series(&armed, METRIC_RECLAMATION_SWEEP_IN_PROGRESS, "0");
+
+                let token = registry
+                    .begin_sweep()
+                    .expect("the first sweep on an idle registry is granted");
+
+                let mid = handle.render();
+                println!("--- SCRIPT 2: MID-SWEEP, token still held ---\n{mid}");
+                assert_series(&mid, METRIC_RECLAMATION_SWEEP_IN_PROGRESS, "1");
+                assert_series(&mid, METRIC_RECLAMATION_SWEEPS_TOTAL, "0");
+
+                assert!(
+                    registry.begin_sweep().is_none(),
+                    "a second begin_sweep with a token outstanding must be refused"
+                );
+
+                let refused = handle.render();
+                println!("--- SCRIPT 3: after the refused second begin_sweep ---\n{refused}");
+                // The refused call started no sweep, so it neither counts nor re-arms the gauge.
+                assert_series(&refused, METRIC_RECLAMATION_SWEEP_IN_PROGRESS, "1");
+                assert_series(&refused, METRIC_RECLAMATION_SWEEPS_TOTAL, "0");
+
+                registry.end_sweep(token, 100);
+
+                let swept = handle.render();
+                println!("--- SCRIPT 4: sweep ended, watermark advanced ---\n{swept}");
+                assert_series(&swept, METRIC_RECLAMATION_SWEEP_IN_PROGRESS, "0");
+                assert_series(&swept, METRIC_RECLAMATION_SWEEPS_TOTAL, "1");
+                assert_series(&swept, METRIC_RECLAMATION_EXECUTED_WATERMARK, "17");
+                assert_series(
+                    &swept,
+                    METRIC_RECLAMATION_EXECUTED_EPOCHS_ADVANCED_TOTAL,
+                    "17",
+                );
+
+                // A claimant strictly below already-reclaimed content is refused, and the refusal
+                // is what the skip counter counts.
+                assert_eq!(
+                    registry.register_claim(&claimant("laggard"), ClaimScope::Global, 10),
+                    ClaimAdmission::BelowExecuted {
+                        claim: 10,
+                        executed: 17
+                    }
+                );
+
+                // A laggard ABOVE the watermark is recorded and LOWERS the proposal.
+                assert_eq!(
+                    registry.register_claim(&claimant("behind"), ClaimScope::Global, 18),
+                    ClaimAdmission::Honoured { claim: 18 }
+                );
+                assert_eq!(
+                    registry.register_claim(&claimant("spare"), ClaimScope::Global, 25),
+                    ClaimAdmission::Honoured { claim: 25 }
+                );
+                // Released above the minimum, so the release counter moves without disturbing the
+                // minimum this render also asserts.
+                registry.release_claim(&claimant("spare"), ClaimScope::Global);
+
+                let low_ceiling = registry.prune_ceiling(ClaimScope::Global);
+                assert!(
+                    low_ceiling < high_ceiling,
+                    "the proposal must be observed falling: {low_ceiling} !< {high_ceiling}"
+                );
+
+                let last = handle.render();
+                println!("--- SCRIPT 5: proposal fallen, watermark held ---\n{last}");
+                assert_series(&last, METRIC_RECLAMATION_PRUNE_CEILING, "15");
+                // Fell from 17 to 15 while THIS did not move: the two-phase split, on the wire.
+                assert_series(&last, METRIC_RECLAMATION_EXECUTED_WATERMARK, "17");
+                assert_series(&last, METRIC_RECLAMATION_MIN_LIVE_CLAIM, "18");
+                assert_series(&last, METRIC_RECLAMATION_LIVE_CLAIMS, "2");
+                assert_series(&last, METRIC_RECLAMATION_MARGIN_EPOCHS, "3");
+                assert_series(&last, METRIC_RECLAMATION_SWEEP_IN_PROGRESS, "0");
+                assert_series(&last, METRIC_RECLAMATION_CLAIMS_REGISTERED_TOTAL, "3");
+                assert_series(&last, METRIC_RECLAMATION_CLAIMS_RELEASED_TOTAL, "1");
+                assert_series(
+                    &last,
+                    METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL,
+                    "1",
+                );
+                assert_series(&last, METRIC_RECLAMATION_CEILING_QUERIES_TOTAL, "2");
+                assert_series(&last, METRIC_RECLAMATION_CEILING_PINNED_QUERIES_TOTAL, "2");
+                assert_series(
+                    &last,
+                    METRIC_RECLAMATION_EXECUTED_EPOCHS_ADVANCED_TOTAL,
+                    "17",
+                );
+                assert_series(&last, METRIC_RECLAMATION_SWEEPS_TOTAL, "1");
+                assert_exactly_thirteen_series(&last);
+            });
+        }
     }
 }
