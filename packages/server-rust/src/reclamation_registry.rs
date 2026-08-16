@@ -179,6 +179,24 @@ impl SweepToken {
     fn new(ceiling_snapshot: Epoch) -> Self {
         Self { ceiling_snapshot }
     }
+
+    /// The ceiling this sweep is licensed by: the proposal as it stood in the acquisition that
+    /// admitted the sweep.
+    ///
+    /// A sweep MUST filter on THIS value and not on a fresh [`ReclamationBoundary::prune_ceiling`]
+    /// query, for two reasons. First, a re-query is a different number the moment the sweep's
+    /// bracket stops excluding admissions, and reclaiming above the snapshot the watermark is later
+    /// fenced from is the fence-past-a-live-claim hazard the token exists to prevent. Second,
+    /// `prune_ceiling` is an OBSERVING call — it counts the query and republishes the gauges — so
+    /// re-querying it per epoch would inflate operator-visible counters with the sweep's own
+    /// internal arithmetic.
+    ///
+    /// Reading the licence is safe where minting one is not: this hands back the number the
+    /// registry already granted, and no number can be turned back into a token.
+    #[must_use]
+    pub fn ceiling(&self) -> Epoch {
+        self.ceiling_snapshot
+    }
 }
 
 /// The reclamation boundary protocol: register claims, reduce them, bracket sweeps.
