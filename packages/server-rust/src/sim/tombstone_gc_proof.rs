@@ -533,6 +533,13 @@ mod tests {
     /// push's gate→commit span against the prune drain.
     #[tokio::test(flavor = "multi_thread")]
     async fn interleaved_prune_during_push_never_resurrects() {
+        // Decision-neutral capture of what this round's sweep DECIDED, aggregated across the
+        // rounds and printed once at the end as `fixture | epochs drained | tags dropped`. This
+        // fixture is reachable from no test outside this file (the whole `sim` tree is behind the
+        // `simulation` feature), so it renders its own corpus row rather than being re-run by a
+        // shared capture helper. It reads and counts — it changes no prune decision.
+        let mut epoch_exits = 0u64;
+        let mut old_tag_dropped = 0u64;
         for round in 0..64u64 {
             let (svc, factory, frontier, registry, key_writer) = gated_sync();
             let (conn, client) = register_device(&registry, "dev-toctou").await;
@@ -583,6 +590,12 @@ mod tests {
             let (mut live, mut tombs) = stored_or_map(&factory, map, key).await;
             live.sort();
             tombs.sort();
+            // Read the decision BEFORE the assertions, so the captured cells describe what the
+            // sweep did rather than what this round was expected to do.
+            epoch_exits += frontier.index_conservation_snapshot().epochs_exited_total;
+            if !tombs.iter().any(|t| t == "T_old") {
+                old_tag_dropped += 1;
+            }
             assert_eq!(
                 live,
                 vec!["R2".to_string()],
@@ -594,6 +607,10 @@ mod tests {
                 "round {round}: per-key writer serialized commit vs prune — T_old pruned AND the pushed union survived (no lost update)"
             );
         }
+        println!(
+            "PRUNE-DECISION | interleaved_prune_during_push_never_resurrects | \
+             epochs=[{epoch_exits} exits/64 rounds] | tags=[T_old dropped in {old_tag_dropped}/64]"
+        );
     }
 
     // ==================================================================

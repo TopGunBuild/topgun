@@ -2653,6 +2653,30 @@ fn now_millis_i64() -> i64 {
     i64::try_from(now_millis()).unwrap_or(i64::MAX)
 }
 
+/// Render one prune-decision corpus row as `fixture | epochs drained | tags dropped`.
+///
+/// The corpus fixtures assert their own outcomes in prose-shaped `assert_eq!` messages, which
+/// cannot be compared mechanically between two builds of the tree. This renders the same outcome
+/// as one stable, sorted, machine-readable line so a prune-authority change can be shown to move
+/// no decision. It READS the drained vector and formats it — it decides nothing.
+#[cfg(test)]
+fn prune_decision_line(fixture: &str, drained: &[(Epoch, TombstoneRef)]) -> String {
+    let mut epochs: Vec<Epoch> = drained.iter().map(|(e, _)| *e).collect();
+    epochs.sort_unstable();
+    epochs.dedup();
+    let mut tags: Vec<&str> = drained.iter().map(|(_, r)| r.tag.as_str()).collect();
+    tags.sort_unstable();
+    let epochs = epochs
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "PRUNE-DECISION | {fixture} | epochs=[{epochs}] | tags=[{}]",
+        tags.join(",")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4431,6 +4455,124 @@ mod tests {
         assert_eq!(retried[0].1.tag, "T1");
     }
 
+    /// Capture the prune-decision corpus as machine-readable lines, one per fixture.
+    ///
+    /// This is a DECISION-NEUTRAL probe: it re-runs the store-less prune fixtures' scenarios and
+    /// prints what the drain decided (`fixture | epochs drained | tags dropped`). It asserts
+    /// nothing and re-points no predicate, so running it on two builds of the tree and diffing the
+    /// two outputs is a direct measurement of whether a change to the prune's authority moved any
+    /// prune decision. Run it with `-- --nocapture` to read the lines.
+    ///
+    /// The store-backed rows of the same corpus — the rehydrate and forget fixtures — need a redb
+    /// store, so they are captured by `persistence_tests::capture_prune_decision_corpus_durable`
+    /// in the same line format.
+    #[tokio::test]
+    async fn capture_prune_decision_corpus() {
+        // The two-device fleet-MIN case: the behind device pins epochs at and above its cursor.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 0..5 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            let ahead: ClientId = "a5:alice|dev-ahead".into();
+            let behind: ClientId = "a5:alice|dev-behind".into();
+            f.set_delivered(CONN_A, 100);
+            f.set_delivered(CONN_B, 100);
+            let _ = f.confirm_apply_ack(&ahead, 5, CONN_A).await;
+            let _ = f.confirm_apply_ack(&behind, 3, CONN_B).await;
+            f.set_durable_epoch_watermark(1000);
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line("one_behind_client_pins_epoch_fleet_wide", &drained)
+            );
+        }
+        // The durability fence held below the claim boundary: the fence is the binding conjunct.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 0..5 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            let c: ClientId = "a5:alice|dev-1".into();
+            f.set_delivered(CONN_A, 100);
+            let _ = f.confirm_apply_ack(&c, 5, CONN_A).await;
+            f.set_durable_epoch_watermark(2);
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line(
+                    "lwm_past_but_watermark_behind_keeps_epoch_unpruned",
+                    &drained
+                )
+            );
+        }
+        // Dark by construction: a 0 watermark takes the fast path and decides nothing.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 0..5 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            let c: ClientId = "a5:alice|dev-1".into();
+            f.set_delivered(CONN_A, 100);
+            let _ = f.confirm_apply_ack(&c, 100, CONN_A).await;
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line(
+                    "dark_by_construction_no_prune_with_zero_watermark",
+                    &drained
+                )
+            );
+        }
+        // Strict, not inclusive: a cursor AT an epoch does not license draining that epoch.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 0..3 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            let c: ClientId = "a5:alice|dev-1".into();
+            f.set_delivered(CONN_A, 100);
+            let _ = f.confirm_apply_ack(&c, 2, CONN_A).await;
+            f.set_durable_epoch_watermark(1000);
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line("eligibility_is_strictly_past_not_inclusive", &drained)
+            );
+        }
+        // A restored ref is re-decided by the next pass rather than orphaned.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            f.stamp_tombstone("m", "k1", "T1");
+            f.stamp_tombstone("m", "k2", "T2");
+            let c: ClientId = "a5:alice|dev-1".into();
+            f.set_delivered(CONN_A, 100);
+            let _ = f.confirm_apply_ack(&c, 2, CONN_A).await;
+            f.set_durable_epoch_watermark(1000);
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line("restore_tombstone_ref_round_trips_through_drain", &drained)
+            );
+            for (epoch, r) in drained {
+                f.restore_tombstone_ref(epoch, r);
+            }
+            let retried = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line(
+                    "restore_tombstone_ref_round_trips_through_drain#after_restore",
+                    &retried
+                )
+            );
+        }
+    }
+
     // -----------------------------------------------------------------------
     // The two OBSERVATION fields (R1) -- unit coverage, the rendered `/metrics`
     // proof (X21-c), the rendered-field-text proof (X21-b), the pre-freeze
@@ -4922,6 +5064,74 @@ mod persistence_tests {
             "durable cursor deleted on forget → rehydrate cannot re-track the stale cursor"
         );
         assert_eq!(f.cursor(&c), None, "no stale cursor resurrected");
+    }
+
+    /// Capture the STORE-BACKED half of the prune-decision corpus, in the same line format as
+    /// `tests::capture_prune_decision_corpus`: `fixture | epochs drained | tags dropped`.
+    ///
+    /// Both rows are cursor-writer fixtures whose own assertions stop at the cursor, so each one
+    /// is followed here by the prune decision that cursor state licenses — that is the cell a
+    /// change to the prune's authority could move. DECISION-NEUTRAL: it asserts nothing and
+    /// re-points no predicate. Run with `-- --nocapture` to read the lines.
+    #[tokio::test]
+    async fn capture_prune_decision_corpus_durable() {
+        // A rehydrated laggard must keep pinning the epochs it has not applied.
+        {
+            let (path, _dir) = temp_store();
+            let lagging: ClientId = "a5:alice|dev-lag".into();
+            let ahead: ClientId = "a5:alice|dev-ahead".into();
+            {
+                let store = Arc::new(RedbDataStore::new(&path).expect("open"));
+                let f = TombstoneFrontier::new(Some(store));
+                f.set_delivered(CONN_A, 1000);
+                let _ = f.confirm_apply_ack(&lagging, 5, CONN_A).await;
+                let _ = f.confirm_apply_ack(&ahead, 500, CONN_A).await;
+                f.shutdown().await;
+            }
+            let store = Arc::new(RedbDataStore::new(&path).expect("reopen"));
+            let f = TombstoneFrontier::new(Some(store));
+            f.rehydrate(&lagging).await;
+            // Stamp AFTER the rehydrate so the laggard's position is the only thing gating.
+            f.set_epoch_width(1);
+            for i in 0..7 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            f.set_durable_epoch_watermark(1000);
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line(
+                    "reconnect_rehydrates_before_ack_does_not_advance_lwm",
+                    &drained
+                )
+            );
+            f.shutdown().await;
+        }
+        // A forgotten client releases its pin, and an empty fold prunes NOTHING (vacuous case).
+        {
+            let (path, _dir) = temp_store();
+            let c: ClientId = "a5:alice|dev-1".into();
+            let store = Arc::new(RedbDataStore::new(&path).expect("open"));
+            let f = TombstoneFrontier::new(Some(store));
+            f.set_delivered(CONN_A, 100);
+            let _ = f.confirm_apply_ack(&c, 50, CONN_A).await;
+            f.forget_client(&c).await;
+            f.rehydrate(&c).await;
+            f.set_epoch_width(1);
+            for i in 0..7 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            f.set_durable_epoch_watermark(1000);
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line(
+                    "forget_client_deletes_durable_cursor_so_rehydrate_is_noop",
+                    &drained
+                )
+            );
+            f.shutdown().await;
+        }
     }
 
     /// The worker is ALIVE and processes the forget, but its `store.remove` FAILS
