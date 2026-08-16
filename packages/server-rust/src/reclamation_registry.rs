@@ -1521,3 +1521,754 @@ mod tests {
         }
     }
 }
+
+/// Property checks of the registry against a straightforward reference model.
+///
+/// The model is deliberately naive — a sorted map, a saturating subtraction and a `max` — so a
+/// disagreement points at the registry rather than at a second implementation of the same
+/// cleverness. The driver applies one op to both and the named properties assert; the driver
+/// itself asserts NOTHING, so every failure names the property it falsified rather than a shared
+/// helper.
+#[cfg(test)]
+mod proptests {
+    use super::*;
+
+    use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
+    use std::collections::BTreeMap;
+
+    /// The claimant pool. Small on purpose: with four names a forty-op program collides
+    /// registrations on the same claimant often enough to exercise the per-claimant `max`.
+    const POOL: [&str; 4] = ["a", "b", "c", "d"];
+
+    /// Claim and watermark draws span this range. It INCLUDES 0 so the zero guard's refusal is
+    /// exercised rather than assumed away, and a watermark of `MAX_EPOCH` clamps at `MAX_EPOCH + 1`
+    /// — above every claim a program can hold, which is the far-above end of the clamp.
+    const MAX_EPOCH: Epoch = 64;
+
+    /// Boot floors stay well below `MAX_EPOCH` so a drawn claim can sit on either side of one.
+    const MAX_BOOT_FLOOR: Epoch = 8;
+
+    const MAX_MARGIN: u64 = 4;
+
+    fn id(who: usize) -> ClaimantId {
+        POOL[who].to_string()
+    }
+
+    fn named(name: &str) -> ClaimantId {
+        name.to_string()
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The model
+    // ---------------------------------------------------------------------------------------
+
+    /// The reference the registry is checked against.
+    #[derive(Debug, Clone)]
+    struct Model {
+        claims: BTreeMap<&'static str, Epoch>,
+        executed: Epoch,
+        boot_floor: Epoch,
+        margin: u64,
+        /// The ceiling snapshot of the sweep currently outstanding, if any. The model keeps its
+        /// OWN snapshot rather than reading the token's, so a registry that derived the advance
+        /// from the wrong number has something to disagree with.
+        open_sweep: Option<Epoch>,
+    }
+
+    impl Model {
+        fn new(boot_floor: Epoch, margin: u64) -> Self {
+            Self {
+                claims: BTreeMap::new(),
+                executed: boot_floor,
+                boot_floor,
+                margin,
+                open_sweep: None,
+            }
+        }
+
+        fn min_live_claim(&self) -> Option<Epoch> {
+            self.claims.values().copied().min()
+        }
+
+        fn prune_ceiling(&self) -> Epoch {
+            match self.min_live_claim() {
+                Some(min) => min.saturating_sub(self.margin),
+                None => self.boot_floor,
+            }
+        }
+
+        fn register(&mut self, who: &'static str, claim: Epoch) -> ClaimAdmission {
+            if claim == 0 || claim < self.executed {
+                return ClaimAdmission::BelowExecuted {
+                    claim,
+                    executed: self.executed,
+                };
+            }
+            let stored = self
+                .claims
+                .entry(who)
+                .and_modify(|existing| *existing = (*existing).max(claim))
+                .or_insert(claim);
+            ClaimAdmission::Honoured { claim: *stored }
+        }
+
+        fn release(&mut self, who: &'static str) {
+            self.claims.remove(who);
+        }
+
+        fn begin_sweep(&mut self) -> Option<Epoch> {
+            if self.open_sweep.is_some() {
+                return None;
+            }
+            let snapshot = self.prune_ceiling();
+            self.open_sweep = Some(snapshot);
+            Some(snapshot)
+        }
+
+        fn end_sweep(&mut self, watermark: Epoch) {
+            if let Some(snapshot) = self.open_sweep.take() {
+                self.executed = self.executed.max(snapshot.min(watermark.saturating_add(1)));
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The generator
+    // ---------------------------------------------------------------------------------------
+
+    /// A drawn op, before lowering.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RawOp {
+        Register {
+            who: usize,
+            epoch: Epoch,
+        },
+        Release {
+            who: usize,
+        },
+        /// Releases every claimant in the pool, so the empty-claim-set shape — and a sweep that
+        /// snapshots the boot floor because of it — is drawn rather than stumbled into.
+        ReleaseAll,
+        Query,
+        BeginSweep,
+        /// Two begins back to back, so the guard's refusal is GENERATED on every program that
+        /// draws one instead of depending on two begins happening to land without an end between.
+        BeginSweepTwice,
+        EndSweep {
+            watermark: Epoch,
+        },
+    }
+
+    /// An op as actually applied.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Op {
+        Register { who: usize, epoch: Epoch },
+        Release { who: usize },
+        Query,
+        BeginSweep,
+        EndSweep { watermark: Epoch },
+    }
+
+    /// Lower a drawn program to the ops actually applied, honouring the sweep/admission exclusion
+    /// contract BY CONSTRUCTION.
+    ///
+    /// Two lowerings carry that contract. A `Register` drawn while a sweep is outstanding is
+    /// DROPPED — never re-ordered into the window — because admissions and sweeps are mutually
+    /// exclusive by contract, so a consumer that could interleave them is not a consumer this
+    /// model describes; asserting over such a sequence would assert more than the model claims.
+    /// A `Release` drawn inside the window is kept, deliberately: the contract covers admission
+    /// only, a release can only RAISE the minimum, and a claim set that moves under a running
+    /// sweep is the shape that separates a token-carried snapshot from a re-read one.
+    ///
+    /// An `EndSweep` drawn with no sweep outstanding is dropped too: there is no token to consume,
+    /// and the signature makes that call unwritable in the first place.
+    fn lower(raw: &[RawOp]) -> Vec<Op> {
+        let mut ops = Vec::new();
+        let mut sweeping = false;
+        for op in raw {
+            match *op {
+                RawOp::Register { who, epoch } => {
+                    if !sweeping {
+                        ops.push(Op::Register { who, epoch });
+                    }
+                }
+                RawOp::Release { who } => ops.push(Op::Release { who }),
+                RawOp::ReleaseAll => {
+                    for who in 0..POOL.len() {
+                        ops.push(Op::Release { who });
+                    }
+                }
+                RawOp::Query => ops.push(Op::Query),
+                RawOp::BeginSweep => {
+                    ops.push(Op::BeginSweep);
+                    sweeping = true;
+                }
+                RawOp::BeginSweepTwice => {
+                    ops.push(Op::BeginSweep);
+                    ops.push(Op::BeginSweep);
+                    sweeping = true;
+                }
+                RawOp::EndSweep { watermark } => {
+                    if sweeping {
+                        ops.push(Op::EndSweep { watermark });
+                        sweeping = false;
+                    }
+                }
+            }
+        }
+        ops
+    }
+
+    fn raw_op() -> impl Strategy<Value = RawOp> {
+        prop_oneof![
+            6 => (0..POOL.len(), 0..=MAX_EPOCH)
+                .prop_map(|(who, epoch)| RawOp::Register { who, epoch }),
+            3 => (0..POOL.len()).prop_map(|who| RawOp::Release { who }),
+            1 => Just(RawOp::ReleaseAll),
+            2 => Just(RawOp::Query),
+            3 => Just(RawOp::BeginSweep),
+            1 => Just(RawOp::BeginSweepTwice),
+            3 => (0..=MAX_EPOCH).prop_map(|watermark| RawOp::EndSweep { watermark }),
+        ]
+    }
+
+    /// `(boot_floor, margin, program)`.
+    fn program() -> impl Strategy<Value = (Epoch, u64, Vec<RawOp>)> {
+        (
+            0..=MAX_BOOT_FLOOR,
+            0..=MAX_MARGIN,
+            prop::collection::vec(raw_op(), 1..40),
+        )
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The driver
+    // ---------------------------------------------------------------------------------------
+
+    /// Everything a consumer can observe about the claim set through the frozen surface.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Observation {
+        min_live_claim: Option<Epoch>,
+        live_claims: usize,
+        prune_ceiling: Epoch,
+        executed: Epoch,
+    }
+
+    fn observe(registry: &ReclamationRegistry) -> Observation {
+        Observation {
+            min_live_claim: registry.min_live_claim(ClaimScope::Global),
+            live_claims: registry.live_claims(ClaimScope::Global),
+            prune_ceiling: registry.prune_ceiling(ClaimScope::Global),
+            executed: registry.executed_watermark(ClaimScope::Global),
+        }
+    }
+
+    /// What an applied op did, for the properties that assert at the op's own site.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Outcome {
+        Admission {
+            requested: Epoch,
+            registry: ClaimAdmission,
+            model: ClaimAdmission,
+        },
+        SweepBegun {
+            granted: bool,
+            model_granted: bool,
+            token_ceiling: Option<Epoch>,
+            model_ceiling: Option<Epoch>,
+        },
+        SweepEnded {
+            token_ceiling: Epoch,
+            model_ceiling: Epoch,
+            watermark: Epoch,
+        },
+        Nothing,
+    }
+
+    /// Runs the registry and the model in lockstep.
+    struct Harness {
+        registry: ReclamationRegistry,
+        model: Model,
+        token: Option<SweepToken>,
+    }
+
+    impl Harness {
+        fn new(boot_floor: Epoch, margin: u64) -> Self {
+            Self {
+                registry: ReclamationRegistry::with_margin(boot_floor, margin),
+                model: Model::new(boot_floor, margin),
+                token: None,
+            }
+        }
+
+        fn apply(&mut self, op: Op) -> Outcome {
+            match op {
+                Op::Register { who, epoch } => {
+                    let registry =
+                        self.registry
+                            .register_claim(&id(who), ClaimScope::Global, epoch);
+                    let model = self.model.register(POOL[who], epoch);
+                    Outcome::Admission {
+                        requested: epoch,
+                        registry,
+                        model,
+                    }
+                }
+                Op::Release { who } => {
+                    self.registry.release_claim(&id(who), ClaimScope::Global);
+                    self.model.release(POOL[who]);
+                    Outcome::Nothing
+                }
+                Op::Query => {
+                    observe(&self.registry);
+                    Outcome::Nothing
+                }
+                Op::BeginSweep => {
+                    let model_ceiling = self.model.begin_sweep();
+                    let issued = self.registry.begin_sweep();
+                    let token_ceiling = issued.as_ref().map(SweepToken::ceiling);
+                    let granted = issued.is_some();
+                    if let Some(token) = issued {
+                        self.token = Some(token);
+                    }
+                    Outcome::SweepBegun {
+                        granted,
+                        model_granted: model_ceiling.is_some(),
+                        token_ceiling,
+                        model_ceiling,
+                    }
+                }
+                Op::EndSweep { watermark } => {
+                    let token = self
+                        .token
+                        .take()
+                        .expect("the lowering only emits an end for an outstanding sweep");
+                    let token_ceiling = token.ceiling();
+                    let model_ceiling = self.model.open_sweep.unwrap_or(token_ceiling);
+                    self.registry.end_sweep(token, watermark);
+                    self.model.end_sweep(watermark);
+                    Outcome::SweepEnded {
+                        token_ceiling,
+                        model_ceiling,
+                        watermark,
+                    }
+                }
+            }
+        }
+
+        /// Close any sweep still outstanding, so an epilogue may register without breaching the
+        /// exclusion contract the program itself honours.
+        fn close_sweep(&mut self) {
+            if self.token.is_some() {
+                self.apply(Op::EndSweep {
+                    watermark: MAX_EPOCH,
+                });
+            }
+        }
+
+        fn release_pool(&mut self) {
+            for who in 0..POOL.len() {
+                self.apply(Op::Release { who });
+            }
+        }
+    }
+
+    /// Apply a lowered program, handing each step to `check`.
+    fn drive<F>(
+        boot_floor: Epoch,
+        margin: u64,
+        raw: &[RawOp],
+        mut check: F,
+    ) -> Result<Harness, TestCaseError>
+    where
+        F: FnMut(&Harness, Observation, Outcome) -> Result<(), TestCaseError>,
+    {
+        let mut harness = Harness::new(boot_floor, margin);
+        for op in lower(raw) {
+            let before = observe(&harness.registry);
+            let outcome = harness.apply(op);
+            check(&harness, before, outcome)?;
+        }
+        Ok(harness)
+    }
+
+    /// Register in the given order, then tear the claim set down in a CANONICAL order, recording
+    /// what the frozen surface exposes at every step.
+    ///
+    /// The teardown is what turns four accessors into a probe of the whole claim map: releasing a
+    /// claimant reveals the position it was holding through the minimum that survives it, so two
+    /// maps that differ anywhere differ somewhere in this trace.
+    fn registration_trace(
+        boot_floor: Epoch,
+        margin: u64,
+        regs: &[(usize, Epoch)],
+    ) -> Vec<Observation> {
+        let registry = ReclamationRegistry::with_margin(boot_floor, margin);
+        for (who, epoch) in regs {
+            registry.register_claim(&id(*who), ClaimScope::Global, *epoch);
+        }
+        let mut trace = vec![observe(&registry)];
+        for who in 0..POOL.len() {
+            registry.release_claim(&id(who), ClaimScope::Global);
+            trace.push(observe(&registry));
+        }
+        trace
+    }
+
+    /// `(boot_floor, margin, registrations, the same registrations permuted)`, every claim at or
+    /// above the executed watermark a fresh registry starts on.
+    #[allow(clippy::type_complexity)]
+    fn permuted_registrations(
+    ) -> impl Strategy<Value = (Epoch, u64, Vec<(usize, Epoch)>, Vec<(usize, Epoch)>)> {
+        (0..=MAX_BOOT_FLOOR, 0..=MAX_MARGIN).prop_flat_map(|(boot_floor, margin)| {
+            let floor = boot_floor.max(1);
+            prop::collection::vec((0..POOL.len(), floor..=MAX_EPOCH), 1..=8).prop_flat_map(
+                move |regs| {
+                    (
+                        Just(boot_floor),
+                        Just(margin),
+                        Just(regs.clone()),
+                        Just(regs).prop_shuffle(),
+                    )
+                },
+            )
+        })
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The properties
+    // ---------------------------------------------------------------------------------------
+
+    proptest! {
+        /// The published minimum is the fold over every live claim, and the claim count agrees.
+        #[test]
+        fn the_minimum_is_the_fold_over_every_live_claim((floor, margin, raw) in program()) {
+            drive(floor, margin, &raw, |h, _before, _outcome| {
+                prop_assert_eq!(
+                    h.registry.min_live_claim(ClaimScope::Global),
+                    h.model.min_live_claim(),
+                    "the published minimum must be the fold over the live claim set"
+                );
+                prop_assert_eq!(
+                    h.registry.live_claims(ClaimScope::Global),
+                    h.model.claims.len(),
+                    "the claim count must be the size of the live claim set"
+                );
+                Ok(())
+            })?;
+        }
+
+        /// The watermark never falls, and the proposal tracks the fleet minimum EXACTLY — falls
+        /// included. A run in which the proposal is clamped upward fails here.
+        #[test]
+        fn the_watermark_never_falls_while_the_proposal_tracks_the_minimum(
+            (floor, margin, raw) in program()
+        ) {
+            let mut previous = floor;
+            let mut harness = drive(floor, margin, &raw, |h, _before, _outcome| {
+                let executed = h.registry.executed_watermark(ClaimScope::Global);
+                prop_assert!(
+                    executed >= previous,
+                    "the executed watermark fell from {} to {}",
+                    previous,
+                    executed
+                );
+                previous = executed;
+                // Exact agreement, not `>=`: a falling proposal is CORRECT — it is how a
+                // rejoining laggard regains protection — so anything that held the proposal up
+                // at a previously published value must fail here rather than pass as "at least
+                // as high as before".
+                prop_assert_eq!(
+                    h.registry.prune_ceiling(ClaimScope::Global),
+                    h.model.prune_ceiling(),
+                    "the proposal must equal the fleet minimum less the margin, falls included"
+                );
+                Ok(())
+            })?;
+
+            // A fall is then FORCED rather than left to the draw: a leader at the top of the
+            // range, then a laggard beneath it.
+            harness.close_sweep();
+            harness.release_pool();
+            let executed = harness.registry.executed_watermark(ClaimScope::Global);
+            let leader = harness
+                .registry
+                .register_claim(&named("leader"), ClaimScope::Global, MAX_EPOCH);
+            prop_assert_eq!(leader, ClaimAdmission::Honoured { claim: MAX_EPOCH });
+            let high = harness.registry.prune_ceiling(ClaimScope::Global);
+            let laggard_at = executed.max(1);
+            let laggard = harness
+                .registry
+                .register_claim(&named("laggard"), ClaimScope::Global, laggard_at);
+            prop_assert_eq!(laggard, ClaimAdmission::Honoured { claim: laggard_at });
+            let low = harness.registry.prune_ceiling(ClaimScope::Global);
+            prop_assert_eq!(low, laggard_at.saturating_sub(margin));
+            if laggard_at < MAX_EPOCH {
+                prop_assert!(
+                    low < high,
+                    "the proposal must FALL to the rejoining laggard: {} !< {}",
+                    low,
+                    high
+                );
+            }
+        }
+
+        /// The proposal never reaches a live claim.
+        #[test]
+        fn the_proposal_never_reaches_a_live_claim((floor, margin, raw) in program()) {
+            drive(floor, margin, &raw, |h, _before, _outcome| {
+                // Measured against the model's TRUE minimum rather than the registry's own: a
+                // broken fold that both the proposal and the reported minimum were derived from
+                // would be self-consistent, and this property could then never fail.
+                if let Some(min) = h.model.min_live_claim() {
+                    let ceiling = h.registry.prune_ceiling(ClaimScope::Global);
+                    prop_assert!(
+                        ceiling <= min,
+                        "the proposal {} reaches the live claim at {}",
+                        ceiling,
+                        min
+                    );
+                }
+                Ok(())
+            })?;
+        }
+
+        /// A registry that never held a claim and never swept sits on its boot floor.
+        #[test]
+        fn a_registry_that_never_claimed_and_never_swept_sits_on_its_boot_floor(
+            floor in 0..=MAX_BOOT_FLOOR,
+            margin in 0..=MAX_MARGIN,
+        ) {
+            let registry = ReclamationRegistry::with_margin(floor, margin);
+            prop_assert_eq!(registry.min_live_claim(ClaimScope::Global), None);
+            prop_assert_eq!(registry.prune_ceiling(ClaimScope::Global), floor);
+            prop_assert_eq!(registry.executed_watermark(ClaimScope::Global), floor);
+        }
+
+        /// Releasing everything returns the proposal to the boot floor, whatever it had fallen to.
+        #[test]
+        fn releasing_everything_returns_the_proposal_to_the_boot_floor(
+            (floor, margin, raw) in program()
+        ) {
+            let mut harness = drive(floor, margin, &raw, |_, _, _| Ok(()))?;
+            harness.release_pool();
+
+            prop_assert_eq!(harness.registry.live_claims(ClaimScope::Global), 0);
+            let ceiling = harness.registry.prune_ceiling(ClaimScope::Global);
+            prop_assert!(
+                ceiling >= floor,
+                "the proposal {} sank below the boot floor {}",
+                ceiling,
+                floor
+            );
+            // The floor is not merely a lower bound on the empty claim set — it IS the proposal,
+            // so a proposal retained from the claims that just left fails here.
+            prop_assert_eq!(ceiling, floor);
+        }
+
+        /// With a live claim set the proposal is the minimum less the margin, unconditionally.
+        #[test]
+        fn the_proposal_is_the_minimum_less_the_margin_with_no_exception(
+            (floor, margin, raw) in program()
+        ) {
+            let harness = drive(floor, margin, &raw, |h, _before, _outcome| {
+                // The registry's OWN minimum on purpose: this property owns the margin
+                // subtraction and nothing else, so a broken fold reds where the fold lives
+                // instead of reding everywhere.
+                if let Some(min) = h.registry.min_live_claim(ClaimScope::Global) {
+                    prop_assert_eq!(
+                        h.registry.prune_ceiling(ClaimScope::Global),
+                        min.saturating_sub(h.model.margin),
+                        "the margin must apply to every live claim set, with no exception"
+                    );
+                }
+                Ok(())
+            })?;
+            prop_assert_eq!(harness.registry.margin_epochs(), margin);
+        }
+
+        /// One sweep at a time, and nothing is ever recorded below the executed watermark.
+        #[test]
+        fn one_sweep_at_a_time_and_no_admission_below_the_watermark(
+            (floor, margin, raw) in program()
+        ) {
+            let mut refused_a_begin = false;
+            drive(floor, margin, &raw, |h, _before, outcome| {
+                match outcome {
+                    Outcome::SweepBegun { granted, model_granted, .. } => {
+                        prop_assert_eq!(
+                            granted,
+                            model_granted,
+                            "a begin issued while a sweep is outstanding must be refused"
+                        );
+                        if !granted {
+                            refused_a_begin = true;
+                        }
+                    }
+                    Outcome::Admission { registry, .. } => {
+                        if let ClaimAdmission::Honoured { claim } = registry {
+                            let executed = h.registry.executed_watermark(ClaimScope::Global);
+                            prop_assert!(
+                                claim >= executed,
+                                "recorded a claim at {} below the watermark at {}",
+                                claim,
+                                executed
+                            );
+                        }
+                    }
+                    Outcome::SweepEnded { .. } | Outcome::Nothing => {}
+                }
+                Ok(())
+            })?;
+
+            // The refusal branch is GENERATED, not stumbled into: every drawn double-begin owes
+            // this run one refusal, whichever of the pair the guard turned away.
+            if raw.contains(&RawOp::BeginSweepTwice) {
+                prop_assert!(
+                    refused_a_begin,
+                    "a drawn double begin must produce the guard's refusal"
+                );
+            }
+        }
+
+        /// Every admission resolves to exactly one verdict, at once; a refusal records nothing;
+        /// and a claim at or above the watermark is recorded however far below the proposal it
+        /// sits.
+        #[test]
+        fn every_admission_resolves_to_one_verdict_and_records_unconditionally(
+            (floor, margin, raw) in program()
+        ) {
+            let mut harness = drive(floor, margin, &raw, |h, before, outcome| {
+                let Outcome::Admission { requested, registry, model } = outcome else {
+                    return Ok(());
+                };
+                // One verdict, returned by the call itself — never deferred, never in limbo.
+                prop_assert_eq!(registry, model, "the verdict must be the model's verdict");
+
+                let after = observe(&h.registry);
+                if requested == 0 {
+                    prop_assert!(
+                        matches!(registry, ClaimAdmission::BelowExecuted { claim: 0, .. }),
+                        "a zero claim must always be refused, and it was {:?}",
+                        registry
+                    );
+                }
+                if requested >= 1 && requested >= before.executed {
+                    prop_assert!(
+                        matches!(registry, ClaimAdmission::Honoured { .. }),
+                        "a claim at {} sits at or above the watermark at {} and must be \
+                         recorded, and it was {:?}",
+                        requested,
+                        before.executed,
+                        registry
+                    );
+                }
+                match registry {
+                    ClaimAdmission::BelowExecuted { claim, executed } => {
+                        prop_assert!(claim == 0 || claim < executed);
+                        prop_assert_eq!(
+                            after,
+                            before,
+                            "a refusal must leave the claim set byte-identical"
+                        );
+                    }
+                    ClaimAdmission::Honoured { claim } => {
+                        // Monotone per claimant: a claim never moves a claimant backwards.
+                        prop_assert!(claim >= requested);
+                        prop_assert_eq!(after.min_live_claim.is_some(), true);
+                    }
+                }
+                Ok(())
+            })?;
+
+            // The far-below-the-proposal admission, drawn deliberately: a leader at the top of
+            // the range puts the proposal near it, and the laggard registers well beneath.
+            harness.close_sweep();
+            harness.release_pool();
+            let executed = harness.registry.executed_watermark(ClaimScope::Global);
+            let leader = harness
+                .registry
+                .register_claim(&named("leader"), ClaimScope::Global, MAX_EPOCH);
+            prop_assert_eq!(leader, ClaimAdmission::Honoured { claim: MAX_EPOCH });
+            let proposal = harness.registry.prune_ceiling(ClaimScope::Global);
+            let laggard_at = executed.max(1);
+            let laggard = harness
+                .registry
+                .register_claim(&named("laggard"), ClaimScope::Global, laggard_at);
+            prop_assert_eq!(
+                laggard,
+                ClaimAdmission::Honoured { claim: laggard_at },
+                "being behind another claimant is never a refusal reason"
+            );
+            if laggard_at < proposal {
+                prop_assert_eq!(
+                    harness.registry.prune_ceiling(ClaimScope::Global),
+                    laggard_at.saturating_sub(margin),
+                    "the proposal follows the laggard down instead of refusing it"
+                );
+            }
+        }
+
+        /// Arrival order changes nothing about the claim set or the proposal.
+        #[test]
+        fn arrival_order_changes_nothing(
+            (floor, margin, forward, permuted) in permuted_registrations()
+        ) {
+            let in_order = registration_trace(floor, margin, &forward);
+            let permuted_order = registration_trace(floor, margin, &permuted);
+            prop_assert_eq!(
+                in_order,
+                permuted_order,
+                "the claim set and the proposal must not depend on arrival order"
+            );
+        }
+    }
+
+    /// The lowering's exclusion contract, checked on the lowering itself rather than assumed:
+    /// no admission is ever emitted strictly inside a sweep window, and releases ARE.
+    #[test]
+    fn the_lowering_emits_no_admission_inside_a_sweep_window() {
+        let raw = vec![
+            RawOp::Register { who: 0, epoch: 9 },
+            RawOp::BeginSweep,
+            RawOp::Register { who: 1, epoch: 3 },
+            RawOp::Release { who: 0 },
+            RawOp::BeginSweepTwice,
+            RawOp::EndSweep { watermark: 7 },
+            RawOp::Register { who: 2, epoch: 5 },
+        ];
+        let ops = lower(&raw);
+
+        let mut sweeping = false;
+        let mut releases_inside = 0_usize;
+        for op in &ops {
+            match op {
+                Op::BeginSweep => sweeping = true,
+                Op::EndSweep { .. } => sweeping = false,
+                Op::Register { .. } => assert!(
+                    !sweeping,
+                    "an admission was emitted inside a sweep window: {ops:?}"
+                ),
+                Op::Release { .. } => {
+                    if sweeping {
+                        releases_inside += 1;
+                    }
+                }
+                Op::Query => {}
+            }
+        }
+        assert!(
+            releases_inside > 0,
+            "releases inside a sweep window are the discriminating shape and must survive \
+             lowering: {ops:?}"
+        );
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, Op::Register { .. }))
+                .count(),
+            2,
+            "the admission drawn inside the window is dropped, the two outside it survive"
+        );
+    }
+}
