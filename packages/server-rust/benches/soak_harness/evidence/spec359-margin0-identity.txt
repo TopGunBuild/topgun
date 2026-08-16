@@ -1,0 +1,97 @@
+SPEC-359 — margin-0 byte-identity witness (W7)
+==============================================
+
+The claim under test: at TOPGUN_RECLAMATION_MARGIN_EPOCHS = 0 the reclamation registry's ceiling
+is arithmetically the same fleet MIN the low-water-mark fold already computes, so re-pointing the
+prune's authority onto the ceiling moves NO prune decision. This file is the measurement, not the
+argument: for every fixture in the prune-decision corpus, the set of epochs drained and the set of
+tags dropped are captured before and after the re-point and diffed.
+
+Capture instrument
+------------------
+Three decision-neutral prints, all landed in ONE commit that carries no re-point hunk (that commit
+is the "parent commit" this file's pre-change half is captured on):
+
+  * tombstone_frontier_impl.rs, mod tests:              capture_prune_decision_corpus
+  * tombstone_frontier_impl.rs, mod persistence_tests:  capture_prune_decision_corpus_durable
+  * sim/tombstone_gc_proof.rs:                          the aggregate print inside
+                                                        interleaved_prune_during_push_never_resurrects
+
+The sim row has its own print because the `sim` tree is behind `#[cfg(feature = "simulation")]`,
+so no helper outside that file can compile against its harness. The row is kept rather than
+demoted because that fixture really drains: its cells CAN differ, so the row can fail.
+
+Line format:  PRUNE-DECISION | <fixture> | epochs=[...] | tags=[...]
+
+Capture commands
+----------------
+(1) default profile — the tombstone_frontier_impl.rs corpus (both test modules):
+
+    SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+      cargo test --release -p topgun-server --lib capture_prune_decision_corpus -- --nocapture
+
+(2) sim profile — the interleaving row:
+
+    cargo test --profile ci-sim --features simulation -p topgun-server \
+      -- sim interleaved_prune_during_push_never_resurrects --nocapture
+
+
+================================================================================
+PRE-CHANGE HALF  —  parent commit b3e2cb58 (capture pair only, no re-point hunk)
+================================================================================
+
+--- (1) default profile, `cargo test --release -p topgun-server --lib` ---------
+
+running 2 tests
+PRUNE-DECISION | one_behind_client_pins_epoch_fleet_wide | epochs=[1,2] | tags=[0:0:n,1:0:n]
+PRUNE-DECISION | lwm_past_but_watermark_behind_keeps_epoch_unpruned | epochs=[1,2] | tags=[0:0:n,1:0:n]
+PRUNE-DECISION | dark_by_construction_no_prune_with_zero_watermark | epochs=[] | tags=[]
+PRUNE-DECISION | eligibility_is_strictly_past_not_inclusive | epochs=[1] | tags=[0:0:n]
+PRUNE-DECISION | restore_tombstone_ref_round_trips_through_drain | epochs=[1] | tags=[T1]
+PRUNE-DECISION | restore_tombstone_ref_round_trips_through_drain#after_restore | epochs=[1] | tags=[T1]
+PRUNE-DECISION | reconnect_rehydrates_before_ack_does_not_advance_lwm | epochs=[1,2,3,4] | tags=[0:0:n,1:0:n,2:0:n,3:0:n]
+PRUNE-DECISION | forget_client_deletes_durable_cursor_so_rehydrate_is_noop | epochs=[] | tags=[]
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1833 filtered out; finished in 0.12s
+
+--- (2) sim profile, `cargo test --profile ci-sim --features simulation` -------
+
+running 26 tests
+PRUNE-DECISION | interleaved_prune_during_push_never_resurrects | epochs=[64 exits/64 rounds] | tags=[T_old dropped in 64/64]
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 1833 filtered out; finished in 0.68s
+
+What each row discriminates (so no row is read as more than it is)
+------------------------------------------------------------------
+  one_behind_client_pins_epoch_fleet_wide        the fleet MIN: the behind device at 3 must still
+                                                 hold epochs 3..=5 back.
+  lwm_past_but_watermark_behind_keeps_epoch_...  the durability fence is the second conjunct and
+                                                 stays binding independently of the authority.
+  dark_by_construction_no_prune_with_zero_...    the watermark==0 fast path stays strictly first
+                                                 and decides nothing.
+  eligibility_is_strictly_past_not_inclusive     strict `>`: a cursor AT an epoch does not license
+                                                 draining that epoch.
+  restore_tombstone_ref_round_trips_through_...  a restored ref is re-decided, not orphaned; the
+                                                 `#after_restore` row is the retry pass.
+  reconnect_rehydrates_before_ack_does_not_...   the rehydrate claim site. If rehydrate were NOT a
+                                                 registration site, the empty registry would hold
+                                                 the ceiling at the boot floor and this row would
+                                                 collapse to epochs=[] — the row that makes the
+                                                 ACK-path-only implementation visible.
+  forget_client_deletes_durable_cursor_so_...    the release site plus the vacuous fold. If forget
+                                                 did NOT release, the stale claim at 50 would
+                                                 license epochs 1..=7 and this row would fill.
+  interleaved_prune_during_push_never_resurr...  the sweep under the interleaving fault, driven
+                                                 through the real prune entry point.
+
+
+================================================================================
+POST-CHANGE HALF  —  appended after the re-point lands
+================================================================================
+
+(pending)
+
+
+================================================================================
+DIFF
+================================================================================
+
+(pending)
