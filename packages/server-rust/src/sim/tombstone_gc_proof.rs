@@ -31,9 +31,15 @@ mod tests {
     use topgun_core::types::Value;
     use topgun_core::{hash_to_partition, ORMapRecord as WireOrRecord};
 
+    use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle, PrometheusRecorder};
+
     use crate::network::config::ConnectionConfig;
     use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionRegistry};
     use crate::network::device_identity::frontier_client_id;
+    use crate::reclamation_registry::{
+        ClaimScope, ReclamationBoundary, ReclamationRegistry,
+        METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL,
+    };
     use crate::service::domain::crdt::prune_epoch_tombstones;
     use crate::service::domain::key_writer::KeyWriterRegistry;
     use crate::service::domain::sync::SyncService;
@@ -45,7 +51,7 @@ mod tests {
     use crate::storage::{
         CallerProvenance, ExpiryPolicy, NullDataStore, RecordStoreFactory, StorageConfig,
     };
-    use crate::tombstone_frontier::ClientId;
+    use crate::tombstone_frontier::{ClientId, Epoch};
     use crate::tombstone_frontier_impl::{TombstoneFrontier, TombstoneRef};
 
     // ------------------------------------------------------------------
@@ -1459,6 +1465,440 @@ mod tests {
              D-T row conditions (recorded evidence, NOT a verdict): \
              row1(V1 REF-LOSS)={row1_condition} row2(V2 BOOKKEEPING-ATTRIBUTION)={row2_condition} \
              row3(V3 COUNTER-FAMILY-MISNAMING)={row3_condition}."
+        );
+    }
+
+    // ==================================================================
+    // The reclamation boundary under the interleaving fault: a prune sweep and a
+    // second device's cursor ACK released together from a barrier. This is the
+    // fault surface this file's scaffold can actually drive (see the module doc's
+    // `SimCluster` bypass note) — the interleaving dimension, not a `SimNetwork`
+    // partition/delay/reorder.
+    //
+    // The frontier mutex scopes the whole drain and every claim site takes that
+    // same mutex first, so each round takes exactly ONE of two orderings: the ACK
+    // completes before the sweep takes its ceiling snapshot, or it begins after the
+    // sweep has published its executed watermark. There is no inside-the-sweep
+    // ordering, so each round reads which branch it took and asserts THAT branch's
+    // consequences rather than a disjunction that both branches would satisfy.
+    // ==================================================================
+
+    /// The map/key the reclamation arms drive.
+    const RECLAIM_MAP: &str = "omap";
+    const RECLAIM_KEY: &str = "k1";
+    /// How many epoch-stamped tombstones the fixture puts on that one key: `T1`
+    /// lands in epoch 1, `T2` in epoch 2, and so on, one per epoch.
+    const RECLAIM_TOMBSTONES: Epoch = 5;
+    /// The device tracked before the race starts. Its cursor is the ceiling the
+    /// sweep takes if it wins the barrier.
+    const DEVICE_A_CURSOR: Epoch = 6;
+    /// The racing device's cursor for the boundary arm: strictly below
+    /// `DEVICE_A_CURSOR`, so a sweep that won the barrier has already reclaimed
+    /// epochs this device still needs.
+    const DEVICE_B_BELOW: Epoch = 3;
+    /// The racing device's cursor for the complementary arm: strictly above the
+    /// ceiling the sweep's snapshot would take, so it is admitted on both orderings.
+    const DEVICE_B_ABOVE: Epoch = 9;
+    /// Server epoch the fixture rolls to, so neither cursor is clamped by the
+    /// current max stamped epoch.
+    const FIXTURE_HEAD_EPOCH: Epoch = 10;
+    /// The series whose per-round delta names which side of the barrier a round
+    /// landed on: it moves once, and only once, on a refused claim.
+    const SKIP_COUNTER: &str = METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL;
+
+    /// One round's fixture.
+    struct ReclamationArm {
+        factory: Arc<RecordStoreFactory>,
+        frontier: Arc<TombstoneFrontier>,
+        key_writer: Arc<KeyWriterRegistry>,
+        client_b: ClientId,
+        conn_b: ConnectionId,
+    }
+
+    /// Builds one round's fixture: an OR-Map key holding a live record `R2` beside
+    /// tombstones `T1..T5` stamped one per epoch, the server epoch rolled clear of
+    /// both cursors, the durability fence opened wide so the pass is non-dark, and
+    /// device A tracked at `DEVICE_A_CURSOR`. Device B is connected but holds no
+    /// claim yet — its ACK is what races the sweep.
+    ///
+    /// The frontier is built INSIDE `recorder`'s binding on purpose: the registry
+    /// resolves its metric handles once, at construction, so a frontier built
+    /// outside it would increment handles this render never sees and every counter
+    /// assertion below would be asserting about nothing.
+    async fn reclamation_arm(recorder: &PrometheusRecorder) -> ReclamationArm {
+        let (_svc, factory, frontier, conns, key_writer) =
+            metrics::with_local_recorder(recorder, gated_sync);
+        let (conn_a, client_a) = register_device(&conns, "dev-sweeper").await;
+        let (conn_b, client_b) = register_device(&conns, "dev-claimant").await;
+
+        let tags: Vec<String> = (1..=RECLAIM_TOMBSTONES).map(|e| format!("T{e}")).collect();
+        let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+        seed_or_map(&factory, RECLAIM_MAP, RECLAIM_KEY, &["R2"], &tag_refs).await;
+        for tag in &tags {
+            frontier.stamp_tombstone(RECLAIM_MAP, RECLAIM_KEY, tag);
+        }
+        // Roll the server epoch clear of every stamped tombstone, so an ACK above
+        // device A's cursor is bounded by the registry rather than by the clamp.
+        for epoch in RECLAIM_TOMBSTONES + 1..=FIXTURE_HEAD_EPOCH {
+            frontier.stamp_tombstone(RECLAIM_MAP, "filler", &format!("F{epoch}"));
+        }
+        frontier.set_durable_epoch_watermark(1000);
+        track_client(&frontier, &client_a, conn_a, DEVICE_A_CURSOR).await;
+        frontier.set_delivered(conn_b, 100);
+
+        ReclamationArm {
+            factory,
+            frontier,
+            key_writer,
+            client_b,
+            conn_b,
+        }
+    }
+
+    /// The margin the fixture's cursor arithmetic is valid under.
+    ///
+    /// The refusal branch exists only while the margin is narrower than the gap
+    /// between the two device cursors; a wider one is a fixture precondition
+    /// failure, not a defect in the boundary, so it is surfaced as one.
+    fn checked_margin(registry: &ReclamationRegistry) -> Epoch {
+        let margin = registry.margin_epochs();
+        assert!(
+            margin < DEVICE_A_CURSOR - DEVICE_B_BELOW,
+            "these arms need a margin narrower than the gap between the two device cursors \
+             for the refusal branch to exist at all; got {margin}"
+        );
+        margin
+    }
+
+    /// The tombstones a pass licensed by `ceiling` must leave behind: every stamped
+    /// tag at or above the ceiling and nothing below it. Pinning BOTH directions is
+    /// what makes the drained-set assertion falsifiable — a pass that reclaimed
+    /// nothing at all would satisfy the "nothing above the ceiling" half alone.
+    fn surviving_tombstones(ceiling: Epoch) -> Vec<String> {
+        (1..=RECLAIM_TOMBSTONES)
+            .filter(|epoch| *epoch >= ceiling)
+            .map(|epoch| format!("T{epoch}"))
+            .collect()
+    }
+
+    /// Spawns device B's ACK at `cursor`, blocked on `barrier`.
+    fn spawn_ack(
+        arm: &ReclamationArm,
+        cursor: Epoch,
+        barrier: &Arc<std::sync::Barrier>,
+    ) -> tokio::task::JoinHandle<bool> {
+        let (frontier, barrier, client, conn) = (
+            Arc::clone(&arm.frontier),
+            Arc::clone(barrier),
+            arm.client_b.clone(),
+            arm.conn_b,
+        );
+        tokio::spawn(async move {
+            barrier.wait();
+            frontier.confirm_apply_ack(&client, cursor, conn).await
+        })
+    }
+
+    /// Spawns a full prune pass, blocked on `barrier`.
+    fn spawn_sweep(
+        arm: &ReclamationArm,
+        barrier: &Arc<std::sync::Barrier>,
+    ) -> tokio::task::JoinHandle<()> {
+        let (frontier, factory, writer, barrier) = (
+            Arc::clone(&arm.frontier),
+            Arc::clone(&arm.factory),
+            Arc::clone(&arm.key_writer),
+            Arc::clone(barrier),
+        );
+        tokio::spawn(async move {
+            barrier.wait();
+            prune_epoch_tombstones(&frontier, &factory, &writer).await;
+        })
+    }
+
+    /// Releases device B's ACK at `cursor` and a full prune pass from a shared
+    /// barrier, and reports whether the ACK advanced a cursor.
+    ///
+    /// `ack_head_start` applies scheduling pressure and nothing else: it decides
+    /// which of the two tasks is spawned LAST, and a `Barrier`'s last arrival
+    /// proceeds immediately while the earlier one has to be woken. Without that
+    /// alternation a run collapses onto whichever ordering the wake-up cost happens
+    /// to favour and leaves the other branch unexercised. Both tasks are still
+    /// runnable at the same instant and still contend for the real frontier mutex,
+    /// and every round READS the branch it actually took off the skip counter rather
+    /// than assuming the nudge worked.
+    async fn race_ack_against_sweep(
+        arm: &ReclamationArm,
+        cursor: Epoch,
+        ack_head_start: bool,
+    ) -> bool {
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (ack, sweep) = if ack_head_start {
+            let sweep = spawn_sweep(arm, &barrier);
+            (spawn_ack(arm, cursor, &barrier), sweep)
+        } else {
+            let ack = spawn_ack(arm, cursor, &barrier);
+            (ack, spawn_sweep(arm, &barrier))
+        };
+        let (advanced, swept) = tokio::join!(ack, sweep);
+        swept.expect("sweep task");
+        advanced.expect("ack task")
+    }
+
+    /// Reads a rendered counter out of a Prometheus render. An absent series is a
+    /// hard error rather than a zero: the registry touches every series at
+    /// construction, so an absent one means this render is not observing the
+    /// registry under test and every delta read off it would be meaningless.
+    fn rendered_counter(rendered: &str, name: &str) -> u64 {
+        rendered
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+            .unwrap_or_else(|| panic!("series {name} is absent from the render:\n{rendered}"))
+            .parse()
+            .unwrap_or_else(|e| panic!("series {name} did not render a u64: {e}"))
+    }
+
+    /// Asserts the stored value a pass licensed by `ceiling` must leave behind:
+    /// exactly the tombstones at or above it, and the live record untouched.
+    async fn assert_drained_set(arm: &ReclamationArm, ceiling: Epoch, round: &str) {
+        let (live, mut tombstones) = stored_or_map(&arm.factory, RECLAIM_MAP, RECLAIM_KEY).await;
+        tombstones.sort();
+        assert_eq!(
+            tombstones,
+            surviving_tombstones(ceiling),
+            "{round}: the pass reclaimed exactly the epochs below its ceiling {ceiling}"
+        );
+        assert_eq!(
+            live,
+            vec!["R2".to_string()],
+            "{round}: the live record is untouched — no resurrection"
+        );
+    }
+
+    /// One round of the boundary arm: the racing cursor is pinned strictly BELOW
+    /// the ceiling the sweep would take from the tracked device alone, and the
+    /// round asserts the consequences of the branch it actually took. Reports
+    /// whether that round refused the claim.
+    async fn boundary_arm_round(
+        recorder: &PrometheusRecorder,
+        render: &PrometheusHandle,
+        round: u64,
+    ) -> bool {
+        let arm = reclamation_arm(recorder).await;
+        let registry = Arc::clone(arm.frontier.reclamation());
+        let margin = checked_margin(&registry);
+        let executed_before = registry.executed_watermark(ClaimScope::Global);
+        let skipped_before = rendered_counter(&render.render(), SKIP_COUNTER);
+
+        let advanced = race_ack_against_sweep(&arm, DEVICE_B_BELOW, round % 2 == 1).await;
+
+        let executed_after = registry.executed_watermark(ClaimScope::Global);
+        let skipped_after = rendered_counter(&render.render(), SKIP_COUNTER);
+
+        // Which ordering this round took, READ rather than guessed: the racing ACK
+        // is the only claim in flight, so a single increment of the skip counter IS
+        // the refusal branch.
+        let refused = skipped_after == skipped_before + 1;
+        assert!(
+            refused || skipped_after == skipped_before,
+            "round {round}: one ACK can be refused at most once, \
+             got {skipped_before} -> {skipped_after}"
+        );
+        assert_eq!(
+            advanced, !refused,
+            "round {round}: the ACK's own verdict and the skip counter must agree"
+        );
+
+        // The executed watermark never walks backwards under churn. The ceiling
+        // proposal is deliberately NOT asserted monotone: it legitimately falls when
+        // the laggard's claim lands.
+        assert!(
+            executed_after >= executed_before,
+            "round {round}: executed watermark went backwards, \
+             {executed_before} -> {executed_after}"
+        );
+
+        // The ceiling the pass was actually licensed by: the racing device's cursor
+        // when its claim was inside the snapshot, the tracked device's otherwise.
+        let ceiling_snapshot = if refused {
+            DEVICE_A_CURSOR - margin
+        } else {
+            DEVICE_B_BELOW - margin
+        };
+        assert_eq!(
+            registry.prune_ceiling(ClaimScope::Global),
+            ceiling_snapshot,
+            "round {round}: the published ceiling after the race"
+        );
+        if refused {
+            assert!(
+                !arm.frontier.is_tracked(&arm.client_b),
+                "round {round}: a refused claim records nothing"
+            );
+            assert!(
+                arm.frontier.is_forgotten(&arm.client_b),
+                "round {round}: the refused device takes the full-resync path"
+            );
+        } else {
+            assert!(
+                arm.frontier.is_tracked(&arm.client_b),
+                "round {round}: a claim inside the sweep's snapshot is recorded"
+            );
+        }
+
+        // Exactly those two orderings and never a third. First half: nothing is left
+        // recorded below the watermark the sweep published, measured AFTER the sweep
+        // closed. Second half — that no claim was admitted WHILE the sweep held its
+        // token — is enforced by the debug assertion at the top of the registry's
+        // admission path, which the `ci-sim` profile compiles in: a breaching
+        // interleaving aborts this test instead of passing silently.
+        assert!(
+            registry
+                .min_live_claim(ClaimScope::Global)
+                .is_none_or(|min| min >= executed_after),
+            "round {round}: a claim survives below the executed watermark {executed_after}"
+        );
+
+        assert_drained_set(&arm, ceiling_snapshot, &format!("round {round}")).await;
+        refused
+    }
+
+    /// One round of the complementary arm: the racing cursor is pinned strictly
+    /// ABOVE the ceiling the sweep's snapshot would take, so it is admitted on both
+    /// orderings. Without this arm the boundary arm alone could not tell a correct
+    /// fence from a registry that refuses everything.
+    async fn above_boundary_arm_round(
+        recorder: &PrometheusRecorder,
+        render: &PrometheusHandle,
+        round: u64,
+    ) {
+        let arm = reclamation_arm(recorder).await;
+        let registry = Arc::clone(arm.frontier.reclamation());
+        let margin = checked_margin(&registry);
+        let executed_before = registry.executed_watermark(ClaimScope::Global);
+        let skipped_before = rendered_counter(&render.render(), SKIP_COUNTER);
+
+        let advanced = race_ack_against_sweep(&arm, DEVICE_B_ABOVE, round % 2 == 1).await;
+
+        let executed_after = registry.executed_watermark(ClaimScope::Global);
+        assert_eq!(
+            rendered_counter(&render.render(), SKIP_COUNTER),
+            skipped_before,
+            "round {round}: a claim above the sweep's ceiling is admitted on BOTH orderings"
+        );
+        assert!(
+            advanced,
+            "round {round}: the ACK above the ceiling advances a cursor"
+        );
+        assert!(
+            arm.frontier.is_tracked(&arm.client_b),
+            "round {round}: the device above the ceiling stays tracked"
+        );
+        assert!(
+            executed_after >= executed_before,
+            "round {round}: executed watermark went backwards, \
+             {executed_before} -> {executed_after}"
+        );
+
+        // The claim sits above the tracked device's cursor, so it never lowers the
+        // fleet MIN: the licensed ceiling is the same on both orderings.
+        let ceiling_snapshot = DEVICE_A_CURSOR - margin;
+        assert_eq!(
+            registry.prune_ceiling(ClaimScope::Global),
+            ceiling_snapshot,
+            "round {round}: a claim above the MIN does not move the ceiling"
+        );
+        assert_drained_set(&arm, ceiling_snapshot, &format!("round {round}")).await;
+    }
+
+    /// The deterministic control: the sweep completes first, THEN the second device
+    /// claims strictly below the resulting executed watermark. This is the boundary
+    /// arm's refusal branch without the barrier, so a round distribution that
+    /// happened to favour one ordering cannot leave the refusal path unexercised.
+    async fn deterministic_control_arm(recorder: &PrometheusRecorder, render: &PrometheusHandle) {
+        let arm = reclamation_arm(recorder).await;
+        let registry = Arc::clone(arm.frontier.reclamation());
+        let margin = checked_margin(&registry);
+        prune_epoch_tombstones(&arm.frontier, &arm.factory, &arm.key_writer).await;
+
+        let executed = registry.executed_watermark(ClaimScope::Global);
+        assert_eq!(
+            executed,
+            DEVICE_A_CURSOR - margin,
+            "the completed sweep publishes the ceiling it consumed as executed"
+        );
+        let skipped_before = rendered_counter(&render.render(), SKIP_COUNTER);
+        let advanced = arm
+            .frontier
+            .confirm_apply_ack(&arm.client_b, DEVICE_B_BELOW, arm.conn_b)
+            .await;
+
+        assert!(
+            !advanced,
+            "a claim strictly below the executed watermark is refused"
+        );
+        assert_eq!(
+            rendered_counter(&render.render(), SKIP_COUNTER),
+            skipped_before + 1,
+            "the refusal is counted exactly once"
+        );
+        assert!(
+            !arm.frontier.is_tracked(&arm.client_b),
+            "the refused device records nothing"
+        );
+        assert!(
+            arm.frontier.is_forgotten(&arm.client_b),
+            "the refused device takes the full-resync path"
+        );
+        assert_eq!(
+            registry.executed_watermark(ClaimScope::Global),
+            executed,
+            "a refusal moves no watermark"
+        );
+        assert_eq!(
+            registry.prune_ceiling(ClaimScope::Global),
+            DEVICE_A_CURSOR - margin,
+            "a refusal leaves the claim set, and therefore the ceiling, as it found it"
+        );
+        assert_drained_set(&arm, DEVICE_A_CURSOR - margin, "control").await;
+    }
+
+    /// A prune sweep raced against a second device's cursor ACK, over three arms.
+    ///
+    /// The boundary arm pins the racing cursor strictly BELOW the ceiling the sweep
+    /// would take from the tracked device alone and asserts branch-split: the claim
+    /// is recorded when it reached the registry before the snapshot, and is REFUSED
+    /// when the drain won — the refusal is the correct answer there, because the pass
+    /// really did reclaim epochs that device still needs, and a resync fence is the
+    /// honest reply. The complementary arm pins it strictly ABOVE that ceiling and
+    /// asserts admission on both orderings, which is what makes the watermark a
+    /// boundary rather than a blanket refusal. The control removes the barrier
+    /// entirely so the refusal path is exercised deterministically rather than by
+    /// luck of the scheduler.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reclamation_boundary_holds_when_a_sweep_races_a_second_devices_ack() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let render = recorder.handle();
+
+        let mut refused_rounds = 0u32;
+        for round in 0..64u64 {
+            if boundary_arm_round(&recorder, &render, round).await {
+                refused_rounds += 1;
+            }
+        }
+        for round in 0..64u64 {
+            above_boundary_arm_round(&recorder, &render, round).await;
+        }
+        deterministic_control_arm(&recorder, &render).await;
+
+        // Decision-neutral: which side of the barrier the raced arm actually landed
+        // on, per round, so a run whose distribution collapsed onto one branch is
+        // visible in the transcript rather than silently under-exercised. It reads
+        // counters the assertions above already consumed; it decides nothing.
+        let recorded_rounds = 64 - refused_rounds;
+        println!(
+            "RECLAMATION RACE | boundary arm 64 rounds: {recorded_rounds} recorded / \
+             {refused_rounds} refused | complementary arm: 64/64 admitted | control: refused"
         );
     }
 }
