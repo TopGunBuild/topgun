@@ -1903,6 +1903,14 @@ mod proptests {
     /// The teardown is what turns four accessors into a probe of the whole claim map: releasing a
     /// claimant reveals the position it was holding through the minimum that survives it, so two
     /// maps that differ anywhere differ somewhere in this trace.
+    ///
+    /// Each registration is FOLLOWED by a proposal query, and the queries are not part of the
+    /// recorded trace. They are the consumer traffic a latch would feed on: a proposal that
+    /// clamped itself against a previously published value would leave the arrival order visible
+    /// in the FINAL state, which is the state this trace compares. Registering the whole set in
+    /// silence and only then looking hides a latch entirely — it never gets a value to clamp
+    /// against — so a trace without these queries could not fail under the latch it exists to
+    /// refute.
     fn registration_trace(
         boot_floor: Epoch,
         margin: u64,
@@ -1911,6 +1919,7 @@ mod proptests {
         let registry = ReclamationRegistry::with_margin(boot_floor, margin);
         for (who, epoch) in regs {
             registry.register_claim(&id(*who), ClaimScope::Global, *epoch);
+            let _ = registry.prune_ceiling(ClaimScope::Global);
         }
         let mut trace = vec![observe(&registry)];
         for who in 0..POOL.len() {
