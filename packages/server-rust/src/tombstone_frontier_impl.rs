@@ -4595,6 +4595,274 @@ mod tests {
         assert_eq!(retried[0].1.tag, "T1");
     }
 
+    /// With no device tracked, the boundary is the BOOT FLOOR and never the head epoch: a pass
+    /// that runs over five stamped epochs reclaims none of them.
+    ///
+    /// The pinned watermark is what makes this measurable instead of vacuous. At watermark 0 the
+    /// drain takes its dark fast path and returns before it ever consults the boundary, so an
+    /// empty drain there would say nothing about where the boundary sits — the completed-sweep
+    /// counter asserted below is the proof that the pass actually reached it. With the pass live,
+    /// a boundary derived from the head epoch — or from anything above the floor — drains every
+    /// stamped epoch here.
+    #[test]
+    fn an_untracked_fleet_reclaims_nothing_on_a_pass_that_really_runs() {
+        use crate::reclamation_registry::METRIC_RECLAMATION_SWEEPS_TOTAL;
+
+        let rendered = rendered_under_a_recorder(|| {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 0..5 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            assert_eq!(f.current_epoch(), 5, "the counter is far past the floor");
+            // Wide open, so the durability conjunct cannot be what holds the drain empty.
+            f.set_durable_epoch_watermark(1000);
+
+            let registry = f.reclamation();
+            assert_eq!(registry.live_claims(ClaimScope::Global), 0);
+            assert_eq!(
+                registry.min_live_claim(ClaimScope::Global),
+                None,
+                "no device has claimed anything"
+            );
+            assert_eq!(
+                registry.prune_ceiling(ClaimScope::Global),
+                0,
+                "an unclaimed fleet proposes the boot floor, not the epoch the server reached"
+            );
+            assert!(
+                !f.is_epoch_prune_eligible(1),
+                "not even the oldest stamped epoch is eligible under an unclaimed boundary"
+            );
+            assert!(
+                f.drain_prunable_tombstones().is_empty(),
+                "a live pass over an unclaimed fleet must reclaim nothing"
+            );
+            assert_eq!(
+                registry.executed_watermark(ClaimScope::Global),
+                0,
+                "a pass that reclaimed nothing must fence nothing"
+            );
+        });
+
+        assert_eq!(
+            rendered_value(&rendered, METRIC_RECLAMATION_SWEEPS_TOTAL),
+            Some("1"),
+            "the drain must have reached the boundary protocol — an empty drain that never \
+             began a sweep would prove nothing; render was:\n{rendered}"
+        );
+    }
+
+    /// The boundary is the fleet MIN and a laggard LOWERS it: two devices ACK at 5 and at 3, BOTH
+    /// claims are recorded, and the pass reclaims exactly the epochs strictly below the laggard.
+    ///
+    /// Being behind another device is never a reason to refuse a claim — only sitting below
+    /// content already recorded as reclaimed is — so neither device is fenced and the rejection
+    /// counter stays flat. The same two ACKs then run in the REVERSE order and must land on an
+    /// identical end state: a claim leaves the fold by an explicit release and by nothing else,
+    /// least of all by the order the devices happened to arrive in.
+    #[test]
+    fn a_laggard_lowers_the_boundary_and_is_recorded_in_either_ack_order() {
+        use crate::reclamation_registry::METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL;
+
+        fn two_devices_ack(behind_first: bool) -> (Vec<Epoch>, String) {
+            let mut drained_epochs = Vec::new();
+            let rendered = rendered_under_a_recorder(|| {
+                let f = frontier();
+                f.set_epoch_width(1);
+                for i in 0..5 {
+                    f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+                }
+                let ahead: ClientId = "a5:alice|dev-ahead".into();
+                let behind: ClientId = "a5:alice|dev-behind".into();
+                f.set_delivered(CONN_A, 100);
+                f.set_delivered(CONN_B, 100);
+                let mut acks = vec![(&ahead, 5, CONN_A), (&behind, 3, CONN_B)];
+                if behind_first {
+                    acks.reverse();
+                }
+                for (client, claim, conn) in acks {
+                    assert!(
+                        block_on(f.confirm_apply_ack(client, claim, conn)),
+                        "both ACKs advance a cursor: neither device is behind reclaimed content"
+                    );
+                }
+
+                let registry = f.reclamation();
+                let margin = registry.margin_epochs();
+                assert_eq!(
+                    registry.live_claims(ClaimScope::Global),
+                    2,
+                    "both devices hold a claim: the trailing one is recorded, not displaced"
+                );
+                assert_eq!(registry.min_live_claim(ClaimScope::Global), Some(3));
+                assert_eq!(
+                    registry.prune_ceiling(ClaimScope::Global),
+                    3 - margin,
+                    "the proposal is the fleet MIN less the margin"
+                );
+                assert!(
+                    f.is_tracked(&ahead) && f.is_tracked(&behind),
+                    "neither device is fenced"
+                );
+                assert_eq!(f.low_water_mark(), 3);
+
+                f.set_durable_epoch_watermark(1000);
+                drained_epochs = f
+                    .drain_prunable_tombstones()
+                    .iter()
+                    .map(|(e, _)| *e)
+                    .collect();
+                drained_epochs.sort_unstable();
+            });
+            (drained_epochs, rendered)
+        }
+
+        let (forward, forward_render) = two_devices_ack(false);
+        let (reverse, reverse_render) = two_devices_ack(true);
+
+        assert_eq!(
+            forward,
+            vec![1, 2],
+            "only the epochs strictly below the trailing device's cursor are reclaimed"
+        );
+        assert_eq!(
+            reverse, forward,
+            "ACK order must not change which epochs a pass reclaims"
+        );
+        for rendered in [&forward_render, &reverse_render] {
+            assert_eq!(
+                rendered_value(
+                    rendered,
+                    METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL
+                ),
+                Some("0"),
+                "a device that is merely behind another is never refused; render was:\n{rendered}"
+            );
+        }
+    }
+
+    /// The executed watermark fences a device below content the pass recorded as reclaimed, and
+    /// only one sweep runs at a time.
+    ///
+    /// The pair is what makes the fence a boundary rather than a latch: a device arriving one
+    /// epoch below the watermark is refused and left untracked (nothing the boundary can move
+    /// would serve it, so the conservative re-admission path is the honest answer), while a device
+    /// arriving AT the watermark is recorded normally. The refusal must leave the claim map
+    /// exactly as it found it — a refusal that half-recorded would pin the boundary on a device
+    /// nothing is tracking.
+    #[test]
+    fn the_watermark_fences_below_reclaimed_content_and_one_sweep_runs_at_a_time() {
+        use crate::reclamation_registry::{
+            METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL,
+            METRIC_RECLAMATION_SWEEPS_TOTAL, METRIC_RECLAMATION_SWEEP_IN_PROGRESS,
+        };
+
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 0..5 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            let pinned: ClientId = "a5:alice|dev-pinned".into();
+            f.set_delivered(CONN_A, 100);
+            assert!(block_on(f.confirm_apply_ack(&pinned, 5, CONN_A)));
+
+            let registry = f.reclamation();
+            assert_eq!(registry.prune_ceiling(ClaimScope::Global), 5);
+
+            let token = registry.begin_sweep().expect("the first sweep is granted");
+            assert_eq!(
+                token.ceiling(),
+                5,
+                "the token carries the fleet MIN taken at sweep start"
+            );
+
+            // Single-sweep guard: the second call is refused while the token is outstanding, and
+            // refusing it must issue no snapshot and move neither the in-progress gauge nor the
+            // completed-sweep counter.
+            let mid_sweep = handle.render();
+            assert!(
+                registry.begin_sweep().is_none(),
+                "a second sweep must be refused while a token is outstanding"
+            );
+            let after_refusal = handle.render();
+            for rendered in [&mid_sweep, &after_refusal] {
+                assert_eq!(
+                    rendered_value(rendered, METRIC_RECLAMATION_SWEEP_IN_PROGRESS),
+                    Some("1"),
+                    "exactly one sweep is in progress across the refusal; render:\n{rendered}"
+                );
+            }
+            assert_eq!(
+                rendered_value(&mid_sweep, METRIC_RECLAMATION_SWEEPS_TOTAL),
+                rendered_value(&after_refusal, METRIC_RECLAMATION_SWEEPS_TOTAL),
+                "a refused sweep completes nothing and must not be counted as one"
+            );
+
+            // The pass observed a durable watermark BELOW the ceiling, so what it could actually
+            // have reclaimed — and therefore what it may fence against — is min(5, 4 + 1).
+            registry.end_sweep(token, 4);
+            assert_eq!(registry.executed_watermark(ClaimScope::Global), 5);
+
+            let next = registry
+                .begin_sweep()
+                .expect("the guard clears when the sweep ends");
+            registry.end_sweep(next, 4);
+            assert_eq!(
+                registry.executed_watermark(ClaimScope::Global),
+                5,
+                "a second pass over the same content advances the fence no further"
+            );
+
+            let claims_before = registry.live_claims(ClaimScope::Global);
+            let min_before = registry.min_live_claim(ClaimScope::Global);
+            let fenced: ClientId = "a5:alice|dev-fenced".into();
+            f.set_delivered(CONN_B, 100);
+            assert!(
+                !block_on(f.confirm_apply_ack(&fenced, 4, CONN_B)),
+                "a device below reclaimed content is refused, so its cursor is not written"
+            );
+            assert!(
+                !f.is_tracked(&fenced),
+                "the refused device stays untracked and takes the full-resync path"
+            );
+            assert_eq!(
+                (
+                    registry.live_claims(ClaimScope::Global),
+                    registry.min_live_claim(ClaimScope::Global)
+                ),
+                (claims_before, min_before),
+                "a refusal records nothing: the claim map is exactly what it was"
+            );
+
+            let at_boundary: ClientId = "a5:alice|dev-at-boundary".into();
+            assert!(
+                block_on(f.confirm_apply_ack(&at_boundary, 5, CONN_B)),
+                "a device AT the watermark is above reclaimed content and is recorded"
+            );
+            assert!(f.is_tracked(&at_boundary));
+            assert_eq!(registry.live_claims(ClaimScope::Global), claims_before + 1);
+        });
+
+        let rendered = handle.render();
+        assert_eq!(
+            rendered_value(
+                &rendered,
+                METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL
+            ),
+            Some("1"),
+            "exactly the one device below the watermark is refused; render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_RECLAMATION_SWEEPS_TOTAL),
+            Some("2"),
+            "two sweeps completed and the refused one is not among them; render:\n{rendered}"
+        );
+    }
+
     /// Capture the prune-decision corpus as machine-readable lines, one per fixture.
     ///
     /// This is a DECISION-NEUTRAL probe: it re-runs the store-less prune fixtures' scenarios and
