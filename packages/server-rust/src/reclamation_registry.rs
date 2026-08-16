@@ -697,3 +697,319 @@ impl ReclamationBoundary for ReclamationRegistry {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    fn claimant(name: &str) -> ClaimantId {
+        name.to_string()
+    }
+
+    #[test]
+    fn empty_claim_set_proposes_the_boot_floor_and_reports_no_minimum() {
+        let registry = ReclamationRegistry::new(7);
+
+        assert_eq!(registry.min_live_claim(ClaimScope::Global), None);
+        assert_eq!(registry.prune_ceiling(ClaimScope::Global), 7);
+        assert_eq!(registry.executed_watermark(ClaimScope::Global), 7);
+        assert_eq!(registry.live_claims(ClaimScope::Global), 0);
+    }
+
+    #[test]
+    fn the_proposal_is_the_fleet_min_over_every_live_claim() {
+        let registry = ReclamationRegistry::new(0);
+
+        registry.register_claim(&claimant("a"), ClaimScope::Global, 40);
+        registry.register_claim(&claimant("b"), ClaimScope::Global, 12);
+        registry.register_claim(&claimant("c"), ClaimScope::Global, 25);
+
+        assert_eq!(registry.min_live_claim(ClaimScope::Global), Some(12));
+        assert_eq!(registry.prune_ceiling(ClaimScope::Global), 12);
+        assert_eq!(registry.live_claims(ClaimScope::Global), 3);
+    }
+
+    #[test]
+    fn a_rejoining_laggard_lowers_the_proposal_and_is_recorded() {
+        let registry = ReclamationRegistry::new(0);
+
+        registry.register_claim(&claimant("leader"), ClaimScope::Global, 50);
+        assert_eq!(registry.prune_ceiling(ClaimScope::Global), 50);
+
+        let verdict = registry.register_claim(&claimant("laggard"), ClaimScope::Global, 9);
+
+        assert_eq!(verdict, ClaimAdmission::Honoured { claim: 9 });
+        assert_eq!(
+            registry.prune_ceiling(ClaimScope::Global),
+            9,
+            "the proposal is a fleet MIN and must fall when a laggard rejoins the fold"
+        );
+    }
+
+    #[test]
+    fn the_proposal_does_not_depend_on_registration_order() {
+        let forward = ReclamationRegistry::new(0);
+        forward.register_claim(&claimant("a"), ClaimScope::Global, 5);
+        forward.register_claim(&claimant("b"), ClaimScope::Global, 30);
+
+        let reverse = ReclamationRegistry::new(0);
+        reverse.register_claim(&claimant("b"), ClaimScope::Global, 30);
+        reverse.register_claim(&claimant("a"), ClaimScope::Global, 5);
+
+        assert_eq!(
+            forward.prune_ceiling(ClaimScope::Global),
+            reverse.prune_ceiling(ClaimScope::Global)
+        );
+        assert_eq!(forward.prune_ceiling(ClaimScope::Global), 5);
+    }
+
+    #[test]
+    fn a_claim_is_monotone_per_claimant() {
+        let registry = ReclamationRegistry::new(0);
+
+        registry.register_claim(&claimant("a"), ClaimScope::Global, 30);
+        let verdict = registry.register_claim(&claimant("a"), ClaimScope::Global, 11);
+
+        assert_eq!(
+            verdict,
+            ClaimAdmission::Honoured { claim: 30 },
+            "a claimant never walks its own claim backwards"
+        );
+        assert_eq!(registry.min_live_claim(ClaimScope::Global), Some(30));
+        assert_eq!(registry.live_claims(ClaimScope::Global), 1);
+    }
+
+    #[test]
+    fn a_release_removes_the_claim_and_raises_the_minimum() {
+        let registry = ReclamationRegistry::new(0);
+
+        registry.register_claim(&claimant("a"), ClaimScope::Global, 4);
+        registry.register_claim(&claimant("b"), ClaimScope::Global, 20);
+        assert_eq!(registry.prune_ceiling(ClaimScope::Global), 4);
+
+        registry.release_claim(&claimant("a"), ClaimScope::Global);
+
+        assert_eq!(registry.live_claims(ClaimScope::Global), 1);
+        assert_eq!(registry.prune_ceiling(ClaimScope::Global), 20);
+    }
+
+    #[test]
+    fn the_margin_is_subtracted_and_saturates_at_zero() {
+        let registry = ReclamationRegistry::with_margin(0, 5);
+        registry.register_claim(&claimant("a"), ClaimScope::Global, 12);
+        assert_eq!(registry.margin_epochs(), 5);
+        assert_eq!(registry.prune_ceiling(ClaimScope::Global), 7);
+
+        let narrow = ReclamationRegistry::with_margin(0, 100);
+        narrow.register_claim(&claimant("a"), ClaimScope::Global, 3);
+        assert_eq!(
+            narrow.prune_ceiling(ClaimScope::Global),
+            0,
+            "a margin wider than the minimum claim floors the proposal, never wraps it"
+        );
+    }
+
+    #[test]
+    fn a_zero_claim_is_always_refused_and_records_nothing() {
+        let registry = ReclamationRegistry::new(0);
+
+        let verdict = registry.register_claim(&claimant("a"), ClaimScope::Global, 0);
+
+        assert_eq!(
+            verdict,
+            ClaimAdmission::BelowExecuted {
+                claim: 0,
+                executed: 0
+            }
+        );
+        assert_eq!(registry.live_claims(ClaimScope::Global), 0);
+        assert_eq!(registry.min_live_claim(ClaimScope::Global), None);
+    }
+
+    #[test]
+    fn the_refusal_boundary_is_the_executed_watermark_not_the_ceiling() {
+        let registry = ReclamationRegistry::new(0);
+        registry.register_claim(&claimant("a"), ClaimScope::Global, 10);
+        let token = registry.begin_sweep().expect("first sweep is granted");
+        registry.end_sweep(token, 100);
+        assert_eq!(registry.executed_watermark(ClaimScope::Global), 10);
+
+        // At the watermark: admitted. One below it: refused.
+        assert_eq!(
+            registry.register_claim(&claimant("at"), ClaimScope::Global, 10),
+            ClaimAdmission::Honoured { claim: 10 }
+        );
+        assert_eq!(
+            registry.register_claim(&claimant("under"), ClaimScope::Global, 9),
+            ClaimAdmission::BelowExecuted {
+                claim: 9,
+                executed: 10
+            }
+        );
+        assert_eq!(registry.live_claims(ClaimScope::Global), 2);
+
+        // Behind another claimant, but at or above the watermark, is not a refusal reason.
+        assert_eq!(
+            registry.register_claim(&claimant("behind"), ClaimScope::Global, 11),
+            ClaimAdmission::Honoured { claim: 11 }
+        );
+        assert_eq!(registry.prune_ceiling(ClaimScope::Global), 10);
+    }
+
+    #[test]
+    fn end_sweep_clamps_the_snapshot_by_the_reported_durable_watermark() {
+        let registry = ReclamationRegistry::new(0);
+        registry.register_claim(&claimant("a"), ClaimScope::Global, 40);
+
+        let token = registry.begin_sweep().expect("first sweep is granted");
+        registry.end_sweep(token, 6);
+
+        assert_eq!(
+            registry.executed_watermark(ClaimScope::Global),
+            7,
+            "a pass held below the ceiling by the durability fence must not fence past what it \
+             could have reclaimed"
+        );
+    }
+
+    #[test]
+    fn end_sweep_advances_with_max_and_never_overwrites() {
+        let registry = ReclamationRegistry::new(0);
+        registry.register_claim(&claimant("a"), ClaimScope::Global, 30);
+
+        let token = registry.begin_sweep().expect("first sweep is granted");
+        registry.end_sweep(token, 100);
+        assert_eq!(registry.executed_watermark(ClaimScope::Global), 30);
+
+        // An empty claim set snapshots the boot floor; an assignment would drag the watermark
+        // back to 0 and re-admit claims into the reclaimed range.
+        registry.release_claim(&claimant("a"), ClaimScope::Global);
+        let token = registry.begin_sweep().expect("second sweep is granted");
+        registry.end_sweep(token, 100);
+
+        assert_eq!(registry.executed_watermark(ClaimScope::Global), 30);
+        assert_eq!(registry.prune_ceiling(ClaimScope::Global), 0);
+    }
+
+    #[test]
+    fn a_lower_later_sweep_cannot_lower_the_watermark() {
+        let registry = ReclamationRegistry::new(0);
+        registry.register_claim(&claimant("a"), ClaimScope::Global, 50);
+
+        let token = registry.begin_sweep().expect("first sweep is granted");
+        registry.end_sweep(token, 100);
+        assert_eq!(registry.executed_watermark(ClaimScope::Global), 50);
+
+        let token = registry.begin_sweep().expect("second sweep is granted");
+        registry.end_sweep(token, 3);
+
+        assert_eq!(registry.executed_watermark(ClaimScope::Global), 50);
+    }
+
+    #[test]
+    fn a_second_sweep_is_refused_while_one_is_in_progress() {
+        let registry = ReclamationRegistry::new(0);
+        registry.register_claim(&claimant("a"), ClaimScope::Global, 20);
+
+        let token = registry.begin_sweep().expect("first sweep is granted");
+        assert!(
+            registry.begin_sweep().is_none(),
+            "a second concurrent sweep is refused, not serialised"
+        );
+
+        registry.end_sweep(token, 100);
+
+        let token = registry
+            .begin_sweep()
+            .expect("a sweep is grantable again once ended");
+        registry.end_sweep(token, 100);
+    }
+
+    #[test]
+    fn a_release_during_a_sweep_cannot_drop_the_minimum_below_the_watermark() {
+        let registry = ReclamationRegistry::new(0);
+        registry.register_claim(&claimant("low"), ClaimScope::Global, 10);
+        registry.register_claim(&claimant("high"), ClaimScope::Global, 60);
+
+        let token = registry.begin_sweep().expect("first sweep is granted");
+        registry.release_claim(&claimant("low"), ClaimScope::Global);
+        registry.end_sweep(token, 100);
+
+        let min = registry
+            .min_live_claim(ClaimScope::Global)
+            .expect("one claim survives the release");
+        assert!(
+            registry.executed_watermark(ClaimScope::Global) <= min,
+            "the watermark must stay at or below the minimum live claim at all times"
+        );
+        assert_eq!(registry.executed_watermark(ClaimScope::Global), 10);
+    }
+
+    /// Two threads released from a barrier into `begin_sweep`: exactly one may win.
+    ///
+    /// A sequential driver cannot discriminate a check-then-set split across two lock
+    /// acquisitions — the flag is set by the time the first call returns either way, so a later
+    /// sequential call still sees it. Only concurrency reaches the window, which is why this
+    /// probe exists alongside the sequential coverage.
+    #[test]
+    fn concurrent_begin_sweep_calls_yield_exactly_one_token() {
+        const ITERATIONS: usize = 1_000;
+
+        let registry = Arc::new(ReclamationRegistry::new(0));
+        registry.register_claim(&claimant("a"), ClaimScope::Global, 32);
+
+        // Both workers live for the whole run and the driver joins their barriers, so every round
+        // releases two ALREADY-RUNNING threads into the call at once. Spawning a fresh pair per
+        // round instead staggers them by the spawn cost — far wider than the window under test —
+        // and the probe then passes over a registry that grants two tokens.
+        let round_start = Arc::new(Barrier::new(3));
+        let round_end = Arc::new(Barrier::new(3));
+        let granted: Arc<Mutex<Vec<SweepToken>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let registry = Arc::clone(&registry);
+                let round_start = Arc::clone(&round_start);
+                let round_end = Arc::clone(&round_end);
+                let granted = Arc::clone(&granted);
+                thread::spawn(move || {
+                    for _ in 0..ITERATIONS {
+                        round_start.wait();
+                        if let Some(token) = registry.begin_sweep() {
+                            granted.lock().expect("granted-token mutex").push(token);
+                        }
+                        round_end.wait();
+                    }
+                })
+            })
+            .collect();
+
+        for round in 0..ITERATIONS {
+            round_start.wait();
+            round_end.wait();
+
+            // Taken out of the shared vector before the assertion, so a failing round reports the
+            // count instead of poisoning the workers' mutex first.
+            let mut tokens = std::mem::take(&mut *granted.lock().expect("granted-token mutex"));
+
+            assert_eq!(
+                tokens.len(),
+                1,
+                "exactly one of two concurrent begin_sweep calls may be granted a token \
+                 (round {round})"
+            );
+
+            let token = tokens
+                .pop()
+                .expect("the winning token was just asserted present");
+            registry.end_sweep(token, 100);
+        }
+
+        for worker in workers {
+            worker.join().expect("a probe thread panicked");
+        }
+
+        assert_eq!(registry.executed_watermark(ClaimScope::Global), 32);
+    }
+}
