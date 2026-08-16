@@ -4444,6 +4444,11 @@ mod tests {
         assert!(f.confirm_apply_ack(&ahead, 5, CONN_A).await);
         assert!(f.confirm_apply_ack(&behind, 3, CONN_B).await);
         assert_eq!(f.low_water_mark(), 3, "the behind client pins the LWM at 3");
+        assert_eq!(
+            f.reclamation().prune_ceiling(ClaimScope::Global),
+            3,
+            "the reclamation boundary the drain folds over is pinned at 3 as well"
+        );
         // Open the durability watermark fully so ONLY the LWM half gates.
         f.set_durable_epoch_watermark(1000);
         assert!(
@@ -4553,6 +4558,15 @@ mod tests {
         f.set_delivered(CONN_A, 100);
         assert!(f.confirm_apply_ack(&c, 2, CONN_A).await);
         assert_eq!(f.low_water_mark(), 2);
+        // Eligibility folds over the reclamation boundary, so the strictness under test is that
+        // boundary's: asserting only the mark would leave the fixture green on a tree where the
+        // two had drifted apart.
+        assert_eq!(
+            f.reclamation().min_live_claim(ClaimScope::Global),
+            Some(2),
+            "the ACK is recorded as a claim at the cursor it established"
+        );
+        assert_eq!(f.reclamation().prune_ceiling(ClaimScope::Global), 2);
         assert!(
             !f.is_epoch_prune_eligible(2),
             "LWM == epoch is NOT eligible (strict)"
@@ -5441,6 +5455,19 @@ mod persistence_tests {
             f.is_tracked(&lagging),
             "the reconnecting known device is tracked"
         );
+        // A rehydrate is a claim site, not merely a cursor writer: a reconnecting laggard that
+        // held the mark down while contributing no claim would leave the boundary free to walk
+        // past the epochs it has not applied.
+        assert_eq!(
+            f.reclamation().live_claims(ClaimScope::Global),
+            1,
+            "the rehydrated device contributes a claim"
+        );
+        assert_eq!(
+            f.reclamation().prune_ceiling(ClaimScope::Global),
+            5,
+            "and the claim sits at its rehydrated position, so the boundary is pinned there"
+        );
     }
 
     /// A forget is DURABLE: `forget_client` deletes the persisted cursor, so a later
@@ -5463,6 +5490,14 @@ mod persistence_tests {
         // and durable state.
         f.forget_client(&c).await;
         assert!(!f.is_tracked(&c), "forgotten client untracked in memory");
+        // The claim leaves the fold in the same act: a forget that dropped the cursor but kept
+        // the claim would pin the boundary on a device nothing tracks any more.
+        assert_eq!(f.reclamation().live_claims(ClaimScope::Global), 0);
+        assert_eq!(
+            f.reclamation().min_live_claim(ClaimScope::Global),
+            None,
+            "the forgotten device's claim is released, not merely orphaned"
+        );
 
         // Rehydrate must be a no-op — the durable row is gone, so the client does NOT
         // resurrect at its stale cursor.
@@ -5472,6 +5507,75 @@ mod persistence_tests {
             "durable cursor deleted on forget → rehydrate cannot re-track the stale cursor"
         );
         assert_eq!(f.cursor(&c), None, "no stale cursor resurrected");
+    }
+
+    /// With no margin configured, the reclamation boundary and the fleet low-water mark decide
+    /// every epoch identically — over the sequence where a boundary that did not track every
+    /// cursor writer would part company with the mark.
+    ///
+    /// The steps are chosen for the cases that can break the agreement rather than the cases that
+    /// cannot: a device joining BELOW the current proposal, a rehydrate re-admitting a laggard
+    /// below it, and forgets raising it again. A cursor writer that recorded no claim would leave
+    /// its device holding the mark down while the boundary walked past it, and the per-epoch
+    /// comparison reds on every epoch between the two; a boundary that latched at its highest
+    /// past value would red on every step where the mark falls.
+    #[tokio::test]
+    async fn boundary_and_low_water_mark_decide_every_epoch_alike_with_no_margin() {
+        let (path, _dir) = temp_store();
+        let laggard: ClientId = "a5:alice|dev-laggard".into();
+        let middle: ClientId = "a5:alice|dev-middle".into();
+        let leader: ClientId = "a5:alice|dev-leader".into();
+
+        // Persist the laggard's cursor first, so the fresh frontier below has something to
+        // rehydrate FROM — a rehydrate is the reconnect path and it is one of the claim sites
+        // this agreement depends on.
+        {
+            let store = Arc::new(RedbDataStore::new(&path).expect("open"));
+            let f = TombstoneFrontier::new(Some(store));
+            f.set_delivered(CONN_A, 1000);
+            assert!(f.confirm_apply_ack(&laggard, 5, CONN_A).await);
+            f.shutdown().await;
+        }
+
+        let store = Arc::new(RedbDataStore::new(&path).expect("reopen"));
+        let f = TombstoneFrontier::new(Some(store));
+        f.set_delivered(CONN_A, 1000);
+        assert_eq!(
+            f.reclamation().margin_epochs(),
+            0,
+            "the agreement is an identity claim only while no margin is configured"
+        );
+
+        let agree = |step: &str, expected: Epoch| {
+            // Hoisted: reading the ceiling is an observing call that republishes gauges, so a
+            // per-epoch re-read would report one query per epoch compared.
+            let ceiling = f.reclamation().prune_ceiling(ClaimScope::Global);
+            let lwm = f.low_water_mark();
+            assert_eq!(
+                (ceiling, lwm),
+                (expected, expected),
+                "both boundaries must sit at {expected} after {step}"
+            );
+            for epoch in 0..=60 {
+                assert_eq!(
+                    ceiling > epoch,
+                    lwm > epoch,
+                    "the two boundaries disagree about epoch {epoch} after {step}"
+                );
+            }
+        };
+
+        agree("no device has reconnected yet", 0);
+        assert!(f.confirm_apply_ack(&leader, 50, CONN_A).await);
+        agree("the leading device ACKed", 50);
+        assert!(f.confirm_apply_ack(&middle, 20, CONN_A).await);
+        agree("a second device joined below the proposal", 20);
+        f.rehydrate(&laggard).await;
+        agree("a rehydrated laggard rejoined below the proposal", 5);
+        f.forget_client(&laggard).await;
+        agree("the rehydrated laggard was forgotten", 20);
+        f.forget_client(&middle).await;
+        agree("only the leading device is left", 50);
     }
 
     /// Capture the STORE-BACKED half of the prune-decision corpus, in the same line format as
