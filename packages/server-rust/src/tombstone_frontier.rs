@@ -34,13 +34,26 @@
 //!
 //! # Prune-side safety condition (HARD — all tracked clients, never per-client)
 //!
-//! A tombstone / epoch is prune-eligible **ONLY** once the *low-water-mark* — the **minimum**
-//! per-client high-water-mark taken across **ALL tracked (non-forgotten) clients** — has advanced
-//! past it. This is distinct from the per-client *advancement*-safety condition (which governs
-//! WHEN one client's cursor moves): the prune-safety condition governs WHOSE confirmation licenses
-//! reclamation. It is **NEVER** a per-creating-client or single-client frontier — a single tracked
-//! client whose cursor is behind an epoch pins that epoch for the whole fleet. See
-//! [`PruneSafety::is_epoch_prune_eligible`].
+//! A tombstone / epoch is prune-eligible **ONLY** once the *reclamation ceiling* — the boundary
+//! published by [`crate::reclamation_registry::ReclamationBoundary::prune_ceiling`] — has advanced
+//! past it. The ceiling's claim set is fed **exclusively** by the same per-client tracked cursors
+//! the low-water-mark folds over: every site that inserts, raises or removes a cursor entry
+//! registers or releases the matching claim, and the ceiling is the **minimum** over all live
+//! claims (less a fixed margin). The fleet-wide-MIN property is therefore preserved
+//! **transitively** — the ceiling *is* the minimum per-client high-water-mark taken across **ALL
+//! tracked (non-forgotten) clients**, reached through the registry rather than through a direct
+//! fold at the prune site. This is distinct from the per-client *advancement*-safety condition
+//! (which governs WHEN one client's cursor moves): the prune-safety condition governs WHOSE
+//! confirmation licenses reclamation. It is **NEVER** a per-creating-client or single-client
+//! frontier — a single tracked client whose cursor is behind an epoch pins that epoch for the
+//! whole fleet. See [`PruneSafety::is_epoch_prune_eligible`].
+//!
+//! The ceiling — exactly like the low-water-mark it replaces at this boundary — **MAY FALL**: a
+//! reconnecting laggard rejoins the fold, lowers the minimum and so lowers the ceiling, which is
+//! the mechanism by which that laggard regains protection. Monotonicity is carried instead by the
+//! registry's *executed watermark*, advanced only when a sweep completes and never assigned
+//! backwards. A caller that caches the ceiling as a ratchet has reintroduced the first-claimant
+//! latch this split exists to forbid.
 
 use serde::{Deserialize, Serialize};
 
@@ -231,14 +244,19 @@ pub trait PruneSafety: CausalFrontier {
     /// Returns `true` **iff** `epoch` is prune-eligible.
     ///
     /// # Contract (HARD — reviewer-checkable, NOT type-enforced)
-    /// An implementation MUST compute eligibility as a fold over
-    /// [`CausalFrontier::low_water_mark`] — i.e. eligible **only** once the low-water-mark across
-    /// **ALL tracked (non-forgotten) clients** has advanced past `epoch`. **NEVER** license pruning
+    /// An implementation MUST compute eligibility as a fold over the **reclamation ceiling**
+    /// ([`crate::reclamation_registry::ReclamationBoundary::prune_ceiling`]) — i.e. eligible
+    /// **only** once that ceiling has advanced past `epoch`. The ceiling is the minimum over all
+    /// live claims (less a fixed margin), and its claim set is fed exclusively by the same tracked
+    /// cursors this frontier records, so eligibility still rests on the minimum across **ALL
+    /// tracked (non-forgotten) clients** — transitively, through the registry, rather than by a
+    /// second fold computed here. **NEVER** license pruning
     /// from a single client's cursor, a subset of clients, or the creating client's frontier — a
     /// single tracked client behind `epoch` MUST keep it un-prunable for the whole fleet. The
     /// [`CausalFrontier`] supertrait only *exposes* `low_water_mark`; it does not, and in a
     /// types-only surface cannot, *enforce* the fleet-wide fold — a reviewer MUST mechanically
-    /// confirm the impl reads the fleet-wide MIN and never a subset.
+    /// confirm the impl reads the ceiling, never a subset-MIN and never a boundary it folded
+    /// itself.
     fn is_epoch_prune_eligible(&self, epoch: Epoch) -> bool;
 
     /// Returns `true` **iff** the not-forgotten decision certified by `token` at gate time still

@@ -10,6 +10,7 @@ pub mod cluster;
 pub mod dag;
 pub mod network;
 pub mod query;
+pub mod reclamation_registry;
 pub mod service;
 pub mod storage;
 pub mod tombstone_frontier;

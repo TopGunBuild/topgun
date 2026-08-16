@@ -65,6 +65,9 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
 use crate::network::connection::ConnectionId;
+use crate::reclamation_registry::{
+    ClaimAdmission, ClaimScope, ReclamationBoundary, ReclamationRegistry,
+};
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::RecordValue;
 use crate::tombstone_frontier::{
@@ -328,10 +331,15 @@ struct FrontierState {
     rebuild_cleared_refs_total: u64,
     epochs_entered_total: u64,
     epochs_exited_total: u64,
+    /// The reclamation boundary this frontier's prune side folds over, shared with the
+    /// [`TombstoneFrontier`] wrapper that owns it. Every cursor writer here is also a claim site
+    /// on it, so the claim set and the cursor map move together; the prune side then reads the
+    /// ceiling from this ONE authority instead of re-deriving a boundary of its own.
+    registry: Arc<ReclamationRegistry>,
 }
 
 impl FrontierState {
-    fn new() -> Self {
+    fn new(registry: Arc<ReclamationRegistry>) -> Self {
         Self {
             cursors: HashMap::new(),
             delivered: HashMap::new(),
@@ -355,7 +363,28 @@ impl FrontierState {
             rebuild_cleared_refs_total: 0,
             epochs_entered_total: 0,
             epochs_exited_total: 0,
+            registry,
         }
+    }
+
+    /// The reclamation ceiling: the fleet boundary the prune side is licensed to reclaim strictly
+    /// below.
+    ///
+    /// This is an OBSERVING call — the registry counts the query and republishes its gauges — so
+    /// callers hoist it into a local and reuse it rather than calling it once per epoch, which
+    /// would report the prune's own internal arithmetic as operator-visible query volume.
+    fn reclamation_ceiling(&self) -> Epoch {
+        self.registry.prune_ceiling(ClaimScope::Global)
+    }
+
+    /// Record a claim for `client` at `epoch` on the reclamation boundary.
+    ///
+    /// Every caller sits AFTER its own zero guard: a 0 cursor pins nothing and is never stored, so
+    /// offering one here would record a claim that pins the ceiling at 0 forever while rendering
+    /// indistinguishably from "no claim at all" on the fleet-min gauge.
+    fn register_claim(&self, client: &ClientId, epoch: Epoch) -> ClaimAdmission {
+        self.registry
+            .register_claim(client, ClaimScope::Global, epoch)
     }
 
     /// Whether `client` is FORGOTTEN for re-admission-gate purposes: either
@@ -402,10 +431,21 @@ impl FrontierState {
         match stored {
             // Replay / reorder / clamp: cursor did not move forward.
             Some(s) if new <= s => None,
-            _ => {
-                self.cursors.insert(client.clone(), new);
-                Some(new)
-            }
+            _ => match self.register_claim(client, new) {
+                // The cursor is written at the frontier's OWN bounded value, never at the position
+                // the registry echoes back: the two are the same max over the same sequence, and
+                // taking the registry's would be the one direction that could raise a cursor above
+                // what the connection actually delivered.
+                ClaimAdmission::Honoured { .. } => {
+                    self.cursors.insert(client.clone(), new);
+                    Some(new)
+                }
+                // The claim sits below content already recorded as reclaimed, so no boundary
+                // movement can serve it. Leave the client UNTRACKED: "unknown == forgotten" then
+                // routes it through the existing conservative re-admission gate, which is the same
+                // direction a resync fence will later formalise.
+                ClaimAdmission::BelowExecuted { .. } => None,
+            },
         }
     }
 
@@ -423,8 +463,19 @@ impl FrontierState {
     /// Rehydrate a persisted cursor for a KNOWN identity into the in-memory frontier
     /// (the reconnect/restart tracking trigger). Monotone: never lowers an existing
     /// tracked cursor. A 0 is ignored (pins nothing).
+    ///
+    /// This is a CLAIM SITE, not merely a cursor writer, and that is load-bearing: a rehydrated
+    /// laggard must contribute a claim at its rehydrated position. Registering only on the ACK path
+    /// would leave the laggard sitting in the cursor map holding the fleet MIN down while
+    /// contributing no claim, so the reclamation ceiling would advance straight past the epochs it
+    /// has not applied — the fleet-wide-MIN regression this module exists to prevent.
     fn rehydrate(&mut self, client: &ClientId, epoch: Epoch) {
         if epoch == 0 {
+            return;
+        }
+        if let ClaimAdmission::BelowExecuted { .. } = self.register_claim(client, epoch) {
+            // Below already-reclaimed content: leave the client untracked so the re-admission gate
+            // treats it as forgotten and it takes the full-resync path.
             return;
         }
         let entry = self.cursors.entry(client.clone()).or_insert(0);
@@ -838,7 +889,10 @@ impl FrontierState {
 
     /// Drain the tombstone refs of every currently prune-eligible epoch out of the
     /// RAM index for the caller to drop from storage, under the FULL call-site
-    /// conjunction `is_epoch_prune_eligible(E) && durable_epoch_watermark >= E`.
+    /// conjunction `ceiling > E && durable_epoch_watermark >= E` (with epoch 0
+    /// rejected), where `ceiling` is the reclamation ceiling the sweep was licensed
+    /// by — the SAME predicate [`PruneSafety::is_epoch_prune_eligible`] applies, read
+    /// once from the sweep token instead of re-queried per epoch.
     /// Each ref is returned WITH its epoch so a caller whose storage drop fails
     /// can re-insert it via [`Self::restore`] — a drained-but-not-dropped tag must
     /// never lose its index entry (that would orphan it un-prunable forever).
@@ -864,6 +918,12 @@ impl FrontierState {
     /// so an epoch that left the index by a path OTHER than this drain — including one
     /// this method has never been told about — still surfaces here, as
     /// [`EpochExitKind::Unclassified`] (`AC6a`'s reachability requirement).
+    ///
+    /// A non-dark pass is BRACKETED by the sweep protocol: it opens with `begin_sweep`, filters on
+    /// the ceiling the returned token carries, and hands the token back to `end_sweep` with the
+    /// durable watermark it OBSERVED — it proposes no boundary of its own. A refused `begin_sweep`
+    /// holds no token, so it runs no pass and ends no sweep; it returns exactly what the dark path
+    /// returns rather than proceeding on an unlicensed boundary.
     fn drain_prunable(
         &mut self,
     ) -> (
@@ -874,11 +934,23 @@ impl FrontierState {
         let watermark = self.durable_epoch_watermark;
         // Fast-path: a 0 watermark (no epoch byte-durable yet, or dark before the
         // recovery rebuild) means NO stamped epoch (all `>= 1`) can pass the
-        // conjunction, so skip the per-epoch low-water-mark fold entirely — this
-        // runs on every OR_REMOVE and every SYNC-leaf request.
+        // conjunction, so skip the per-epoch fold entirely — this runs on every
+        // OR_REMOVE and every SYNC-leaf request. Strictly FIRST, so the dark path
+        // touches the reclamation registry not at all: it takes no lock, opens no
+        // sweep and reports no boundary.
         if watermark == 0 {
             return (Vec::new(), None, Vec::new());
         }
+        // A second sweep cannot be in flight in this tree — the whole pass runs inside one
+        // acquisition of the frontier lock — but a consumer without that lock could try, and it
+        // must get a pass that does not run rather than one licensed by a boundary it never
+        // obtained.
+        let Some(token) = self.registry.begin_sweep() else {
+            return (Vec::new(), None, Vec::new());
+        };
+        // Hoisted once: the eligibility filter, the split and the whole pass see ONE ceiling, and
+        // it is the licence the token carries rather than a fresh query whose answer can differ.
+        let ceiling = token.ceiling();
         // One of the two sites the perturbation budget licenses index-proportional
         // work on: this fold already runs whenever the drain is not dark.
         self.refresh_epoch_licensing();
@@ -886,14 +958,15 @@ impl FrontierState {
             .epoch_tags
             .keys()
             .copied()
-            // Cheap watermark conjunct first so it short-circuits the LWM fold.
-            .filter(|&e| watermark >= e && self.is_epoch_prune_eligible(e))
+            // Cheap watermark conjunct first so it short-circuits the rest. Epoch 0 is rejected
+            // here for the same belt-and-suspenders reason the trait predicate rejects it.
+            .filter(|&e| watermark >= e && e != 0 && ceiling > e)
             .collect();
         // Gated on a non-empty eligible set, so the per-remove path — where the
         // drain finds nothing — still pays no index-proportional fold. This is the
         // same budget the post-loop recompute honoured; only the INSTANT moves.
         let pre_drain_split =
-            (!eligible.is_empty()).then(|| self.split_observation(self.low_water_mark()));
+            (!eligible.is_empty()).then(|| self.split_observation(self.low_water_mark(), ceiling));
         let mut drained = Vec::new();
         let mut drained_epochs: HashSet<Epoch> = HashSet::new();
         // K1 / R1.4: the OBSERVATION terms, keyed by epoch. Read from the vector the
@@ -942,6 +1015,14 @@ impl FrontierState {
             }
         }
 
+        // Close the bracket on the ONLY exit path that holds a token, handing back the SAME
+        // watermark local the filter applied rather than re-reading the field — the two are equal
+        // while the whole pass runs under one frontier-lock acquisition, and they diverge the
+        // moment it does not, at which point a re-read would fence claimants above what this pass
+        // could actually have reclaimed. The registry derives the boundary from the token's
+        // ceiling and this observed watermark; nothing here proposes one.
+        self.registry.end_sweep(token, watermark);
+
         (drained, pre_drain_split, exits)
     }
 
@@ -983,14 +1064,16 @@ impl FrontierState {
     ///
     /// O(indexed epochs + tracked claims), which the perturbation budget permits
     /// ONLY on the low-water-mark-movement path and on non-empty drains — never per
-    /// `OR_REMOVE`. The cursor fold is hoisted out of the epoch loop: calling
-    /// `is_epoch_prune_eligible` per epoch would re-fold the cursor map once per
-    /// epoch and turn this into O(epochs × claims) for an identical answer.
-    /// `lwm` is passed in rather than re-folded: the LWM-movement callers have just
-    /// computed it in `refresh_low_water_mark`, and folding the cursor map a second
-    /// time under the same lock would triple the hold time in the cursor-count
-    /// dimension for an identical answer.
-    fn split_observation(&self, lwm: Epoch) -> SplitObservation {
+    /// `OR_REMOVE`. Both boundaries are hoisted out of the epoch loop: calling
+    /// `is_epoch_prune_eligible` per epoch would re-query the reclamation ceiling once
+    /// per epoch — an OBSERVING call that counts every query — for an identical answer.
+    /// `ceiling` and `lwm` are therefore passed in rather than re-read here. A drain
+    /// passes the ceiling its own sweep token carries, so the split is computed under
+    /// exactly the boundary that pass was licensed by rather than under a fresher one;
+    /// the cursor-movement callers have just folded `lwm` in `refresh_low_water_mark`,
+    /// and folding it again under the same lock would lengthen the hold in the
+    /// cursor-count dimension for an identical answer.
+    fn split_observation(&self, lwm: Epoch, ceiling: Epoch) -> SplitObservation {
         let watermark = self.durable_epoch_watermark;
         let current_epoch = self.current_epoch;
         let mut eligible_refs = 0u64;
@@ -1000,8 +1083,9 @@ impl FrontierState {
             // The FULL call-site conjunction the drain applies, with epoch 0 rejected
             // for the same belt-and-suspenders reason: a split computed under a weaker
             // predicate than the drain's would report refs as eligible that no pass
-            // would ever take.
-            if epoch != 0 && watermark >= epoch && lwm > epoch {
+            // would ever take. The claim-span record below keeps carrying the LWM, which
+            // is a different quantity and is not what licenses reclamation.
+            if epoch != 0 && watermark >= epoch && ceiling > epoch {
                 eligible_refs += held;
             } else {
                 ineligible_refs += held;
@@ -1064,8 +1148,8 @@ struct SplitObservation {
 
 impl PruneSafety for FrontierState {
     fn is_epoch_prune_eligible(&self, epoch: Epoch) -> bool {
-        // The 342a contract: fold over the low-water-mark ONLY. The durability fence
-        // is the CALL-SITE second conjunct (`drain_prunable`), NEVER here. Epoch 0 is
+        // Fold over the reclamation ceiling ONLY. The durability fence is the
+        // CALL-SITE second conjunct (`drain_prunable`), NEVER here. Epoch 0 is
         // the reserved "no/uncomputable epoch" sentinel — reject it at the trait
         // level too (belt-and-suspenders per R3(g)) so a future consumer that
         // bypasses the call-site conjunction cannot prune the sentinel.
@@ -1077,8 +1161,8 @@ impl PruneSafety for FrontierState {
         // tombstones (width > 1) — a cursor AT epoch E therefore proves delivery
         // complete only through E-1. Inclusive `>=` would let a still-open epoch be
         // pruned after a new tombstone lands in it post-ACK. Pruning N requires the
-        // fleet-wide MIN cursor >= N+1, i.e. every tracked client applied all of N.
-        self.low_water_mark() > epoch
+        // ceiling >= N+1, i.e. every claimant in the fold applied all of N.
+        self.reclamation_ceiling() > epoch
     }
 
     fn gate_decision_holds_at_commit(&self, token: GateToken) -> bool {
@@ -1100,6 +1184,12 @@ impl CausalFrontier for FrontierState {
         // `advance_on_ack`; this is the underlying monotone primitive it and
         // rehydration share. A 0 is never tracked.
         if epoch == 0 {
+            return;
+        }
+        // Gated on the reclamation boundary like every other cursor writer, even though nothing in
+        // the tree calls this primitive today: a later wiring that reached for it must not be able
+        // to establish a cursor the boundary never admitted.
+        if let ClaimAdmission::BelowExecuted { .. } = self.register_claim(client, epoch) {
             return;
         }
         let entry = self.cursors.entry(client.clone()).or_insert(0);
@@ -1125,6 +1215,10 @@ impl CausalFrontier for FrontierState {
 
     fn forget_client(&mut self, client: &ClientId) {
         self.cursors.remove(client);
+        // Release in the same act that drops the cursor: an explicit release is one of only two
+        // ways a claim ever leaves the fold, so a forget that dropped the cursor but kept the claim
+        // would pin the ceiling on a client nothing is tracking any more.
+        self.registry.release_claim(client, ClaimScope::Global);
     }
 }
 
@@ -1154,6 +1248,11 @@ pub struct TombstoneFrontier {
     /// kill-switch. Held as a trait object so the disarmed path is a null
     /// implementation rather than a branch at every observation call site.
     prune_observer: Box<dyn PruneRecordObserver>,
+    /// The reclamation boundary the prune side folds over, shared with the guarded
+    /// [`FrontierState`] so the claim sites and the ceiling read see one authority. Held here
+    /// as well so it is readable without taking the frontier lock, and so the lock order stays
+    /// one-way: frontier lock, then registry lock, never the reverse.
+    registry: Arc<ReclamationRegistry>,
 }
 
 /// A unit of work for the background cursor-persistence worker.
@@ -1256,13 +1355,32 @@ impl TombstoneFrontier {
             PruneRecordArming::Armed => Box::new(MetricsPruneRecorder::new()),
             PruneRecordArming::Disarmed => Box::new(NullPruneRecorder),
         };
+        // Boot floor 0, never a head: no durable prune checkpoint exists in this tree, and seeding
+        // the floor from any recovered high-water would license reclamation up to nearly head right
+        // after a recovery — the one direction that resurrects. A consumer that starts persisting a
+        // checkpoint passes it here instead. The registry reads its margin from the environment
+        // once, at this construction, so the parse and the arithmetic cannot disagree later.
+        let registry = Arc::new(ReclamationRegistry::new(0));
         Self {
-            state: Mutex::new(FrontierState::new()),
+            state: Mutex::new(FrontierState::new(Arc::clone(&registry))),
             store,
             persist_tx,
             persist_worker,
             prune_observer,
+            registry,
         }
+    }
+
+    /// The reclamation boundary this frontier registers its claims on and folds its prune
+    /// eligibility over.
+    ///
+    /// Exposed so a consumer can read the boundary — the ceiling, the executed watermark, the live
+    /// claim count — without taking the frontier lock. It is the SINGLE authority: a consumer that
+    /// computed a second boundary of its own would be free to disagree with the one the drain
+    /// actually applies.
+    #[must_use]
+    pub fn reclamation(&self) -> &Arc<ReclamationRegistry> {
+        &self.registry
     }
 
     /// The frontier's prune-record sink.
@@ -1551,7 +1669,13 @@ impl TombstoneFrontier {
             let movement = advanced
                 .and_then(|_| state.refresh_low_water_mark(now))
                 .map(|epochs_advanced| {
-                    (epochs_advanced, state.split_observation(state.observed_lwm))
+                    // Read the ceiling ONCE for this observation: it is an observing call, so a
+                    // second read would report the split's own arithmetic as query volume.
+                    let ceiling = state.reclamation_ceiling();
+                    (
+                        epochs_advanced,
+                        state.split_observation(state.observed_lwm, ceiling),
+                    )
                 });
             // Refreshed on EVERY ack, advance or not: the regime worth seeing is the
             // one where the low-water-mark is not moving, and a stall gauge that only
@@ -1595,7 +1719,11 @@ impl TombstoneFrontier {
                     let mut state = self.lock();
                     state.rehydrate(client, epoch);
                     state.refresh_low_water_mark(now).map(|epochs_advanced| {
-                        (epochs_advanced, state.split_observation(state.observed_lwm))
+                        let ceiling = state.reclamation_ceiling();
+                        (
+                            epochs_advanced,
+                            state.split_observation(state.observed_lwm, ceiling),
+                        )
                     })
                 };
                 if let Some((epochs_advanced, split)) = movement {
@@ -1686,7 +1814,11 @@ impl TombstoneFrontier {
             // hole in the advance cadence exactly where the retention ceiling gets
             // its headroom.
             let movement = state.refresh_low_water_mark(now).map(|epochs_advanced| {
-                (epochs_advanced, state.split_observation(state.observed_lwm))
+                let ceiling = state.reclamation_ceiling();
+                (
+                    epochs_advanced,
+                    state.split_observation(state.observed_lwm, ceiling),
+                )
             });
             let (done_tx, done_rx) = oneshot::channel();
             let rx = if self.enqueue_persist(PersistMsg::Forget {
@@ -1887,8 +2019,11 @@ impl TombstoneFrontier {
         self.lock().durable_epoch_watermark = watermark;
     }
 
-    /// Whether `epoch` is prune-eligible under the low-water-mark fold ONLY (the
-    /// 342a contract — STRICT: eligible once the LWM advanced PAST `epoch`). The
+    /// Whether `epoch` is prune-eligible under the reclamation ceiling ONLY (STRICT:
+    /// eligible once the ceiling has advanced PAST `epoch`). The ceiling is the fleet
+    /// MIN over the registered claims, less the configured margin, and — like the
+    /// low-water mark it replaces — it may FALL when a laggard rejoins the fold;
+    /// monotonicity lives on the registry's executed watermark, not here. The
     /// durability fence is the SECOND call-site conjunct in
     /// [`Self::drain_prunable_tombstones`], never here.
     #[must_use]
@@ -1908,11 +2043,16 @@ impl TombstoneFrontier {
     }
 
     /// Drain every currently prune-eligible epoch's tombstone refs (BOTH call-site
-    /// conjuncts) out of the RAM index, tagged with their epoch, for the caller to
-    /// drop from storage (RAM + redb) under the per-key writer. A ref whose storage
+    /// conjuncts — the reclamation ceiling AND the durability watermark) out of the RAM
+    /// index, tagged with their epoch, for the caller to drop from storage (RAM + redb)
+    /// under the per-key writer. A ref whose storage
     /// drop fails MUST be handed back via [`Self::restore_tombstone_ref`] so it is
     /// retried later rather than orphaned un-prunable. DARK by construction:
-    /// returns empty in production (`durable_epoch_watermark == 0`).
+    /// returns empty in production (`durable_epoch_watermark == 0`), and the dark path
+    /// returns before the sweep protocol is entered at all. A non-dark pass is bracketed
+    /// by that protocol: it filters on the ceiling its sweep token carries and reports the
+    /// watermark it observed, so the boundary is derived by the registry rather than
+    /// proposed here.
     #[must_use]
     pub fn drain_prunable_tombstones(&self) -> Vec<(Epoch, TombstoneRef)> {
         // Refresh the cached byte-durability watermark from the store's live
@@ -2651,6 +2791,30 @@ fn now_millis() -> u64 {
 /// residency ledger's `*_unix_ms: i64` fields (PROJECT.md's timestamp row).
 fn now_millis_i64() -> i64 {
     i64::try_from(now_millis()).unwrap_or(i64::MAX)
+}
+
+/// Render one prune-decision corpus row as `fixture | epochs drained | tags dropped`.
+///
+/// The corpus fixtures assert their own outcomes in prose-shaped `assert_eq!` messages, which
+/// cannot be compared mechanically between two builds of the tree. This renders the same outcome
+/// as one stable, sorted, machine-readable line so a prune-authority change can be shown to move
+/// no decision. It READS the drained vector and formats it — it decides nothing.
+#[cfg(test)]
+fn prune_decision_line(fixture: &str, drained: &[(Epoch, TombstoneRef)]) -> String {
+    let mut epochs: Vec<Epoch> = drained.iter().map(|(e, _)| *e).collect();
+    epochs.sort_unstable();
+    epochs.dedup();
+    let mut tags: Vec<&str> = drained.iter().map(|(_, r)| r.tag.as_str()).collect();
+    tags.sort_unstable();
+    let epochs = epochs
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "PRUNE-DECISION | {fixture} | epochs=[{epochs}] | tags=[{}]",
+        tags.join(",")
+    )
 }
 
 #[cfg(test)]
@@ -4280,6 +4444,11 @@ mod tests {
         assert!(f.confirm_apply_ack(&ahead, 5, CONN_A).await);
         assert!(f.confirm_apply_ack(&behind, 3, CONN_B).await);
         assert_eq!(f.low_water_mark(), 3, "the behind client pins the LWM at 3");
+        assert_eq!(
+            f.reclamation().prune_ceiling(ClaimScope::Global),
+            3,
+            "the reclamation boundary the drain folds over is pinned at 3 as well"
+        );
         // Open the durability watermark fully so ONLY the LWM half gates.
         f.set_durable_epoch_watermark(1000);
         assert!(
@@ -4389,6 +4558,15 @@ mod tests {
         f.set_delivered(CONN_A, 100);
         assert!(f.confirm_apply_ack(&c, 2, CONN_A).await);
         assert_eq!(f.low_water_mark(), 2);
+        // Eligibility folds over the reclamation boundary, so the strictness under test is that
+        // boundary's: asserting only the mark would leave the fixture green on a tree where the
+        // two had drifted apart.
+        assert_eq!(
+            f.reclamation().min_live_claim(ClaimScope::Global),
+            Some(2),
+            "the ACK is recorded as a claim at the cursor it established"
+        );
+        assert_eq!(f.reclamation().prune_ceiling(ClaimScope::Global), 2);
         assert!(
             !f.is_epoch_prune_eligible(2),
             "LWM == epoch is NOT eligible (strict)"
@@ -4429,6 +4607,392 @@ mod tests {
         assert_eq!(retried.len(), 1);
         assert_eq!(retried[0].0, 1);
         assert_eq!(retried[0].1.tag, "T1");
+    }
+
+    /// With no device tracked, the boundary is the BOOT FLOOR and never the head epoch: a pass
+    /// that runs over five stamped epochs reclaims none of them.
+    ///
+    /// The pinned watermark is what makes this measurable instead of vacuous. At watermark 0 the
+    /// drain takes its dark fast path and returns before it ever consults the boundary, so an
+    /// empty drain there would say nothing about where the boundary sits — the completed-sweep
+    /// counter asserted below is the proof that the pass actually reached it. With the pass live,
+    /// a boundary derived from the head epoch — or from anything above the floor — drains every
+    /// stamped epoch here.
+    #[test]
+    fn an_untracked_fleet_reclaims_nothing_on_a_pass_that_really_runs() {
+        use crate::reclamation_registry::METRIC_RECLAMATION_SWEEPS_TOTAL;
+
+        let rendered = rendered_under_a_recorder(|| {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 0..5 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            assert_eq!(f.current_epoch(), 5, "the counter is far past the floor");
+            // Wide open, so the durability conjunct cannot be what holds the drain empty.
+            f.set_durable_epoch_watermark(1000);
+
+            let registry = f.reclamation();
+            assert_eq!(registry.live_claims(ClaimScope::Global), 0);
+            assert_eq!(
+                registry.min_live_claim(ClaimScope::Global),
+                None,
+                "no device has claimed anything"
+            );
+            assert_eq!(
+                registry.prune_ceiling(ClaimScope::Global),
+                0,
+                "an unclaimed fleet proposes the boot floor, not the epoch the server reached"
+            );
+            assert!(
+                !f.is_epoch_prune_eligible(1),
+                "not even the oldest stamped epoch is eligible under an unclaimed boundary"
+            );
+            assert!(
+                f.drain_prunable_tombstones().is_empty(),
+                "a live pass over an unclaimed fleet must reclaim nothing"
+            );
+            assert_eq!(
+                registry.executed_watermark(ClaimScope::Global),
+                0,
+                "a pass that reclaimed nothing must fence nothing"
+            );
+        });
+
+        assert_eq!(
+            rendered_value(&rendered, METRIC_RECLAMATION_SWEEPS_TOTAL),
+            Some("1"),
+            "the drain must have reached the boundary protocol — an empty drain that never \
+             began a sweep would prove nothing; render was:\n{rendered}"
+        );
+    }
+
+    /// The boundary is the fleet MIN and a laggard LOWERS it: two devices ACK at 5 and at 3, BOTH
+    /// claims are recorded, and the pass reclaims exactly the epochs strictly below the laggard.
+    ///
+    /// Being behind another device is never a reason to refuse a claim — only sitting below
+    /// content already recorded as reclaimed is — so neither device is fenced and the rejection
+    /// counter stays flat. The same two ACKs then run in the REVERSE order and must land on an
+    /// identical end state: a claim leaves the fold by an explicit release and by nothing else,
+    /// least of all by the order the devices happened to arrive in.
+    #[test]
+    fn a_laggard_lowers_the_boundary_and_is_recorded_in_either_ack_order() {
+        use crate::reclamation_registry::METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL;
+
+        fn two_devices_ack(behind_first: bool) -> (Vec<Epoch>, String) {
+            let mut drained_epochs = Vec::new();
+            let rendered = rendered_under_a_recorder(|| {
+                let f = frontier();
+                f.set_epoch_width(1);
+                for i in 0..5 {
+                    f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+                }
+                let ahead: ClientId = "a5:alice|dev-ahead".into();
+                let behind: ClientId = "a5:alice|dev-behind".into();
+                f.set_delivered(CONN_A, 100);
+                f.set_delivered(CONN_B, 100);
+                let mut acks = vec![(&ahead, 5, CONN_A), (&behind, 3, CONN_B)];
+                if behind_first {
+                    acks.reverse();
+                }
+                for (client, claim, conn) in acks {
+                    assert!(
+                        block_on(f.confirm_apply_ack(client, claim, conn)),
+                        "both ACKs advance a cursor: neither device is behind reclaimed content"
+                    );
+                }
+
+                let registry = f.reclamation();
+                let margin = registry.margin_epochs();
+                assert_eq!(
+                    registry.live_claims(ClaimScope::Global),
+                    2,
+                    "both devices hold a claim: the trailing one is recorded, not displaced"
+                );
+                assert_eq!(registry.min_live_claim(ClaimScope::Global), Some(3));
+                assert_eq!(
+                    registry.prune_ceiling(ClaimScope::Global),
+                    3 - margin,
+                    "the proposal is the fleet MIN less the margin"
+                );
+                assert!(
+                    f.is_tracked(&ahead) && f.is_tracked(&behind),
+                    "neither device is fenced"
+                );
+                assert_eq!(f.low_water_mark(), 3);
+
+                f.set_durable_epoch_watermark(1000);
+                drained_epochs = f
+                    .drain_prunable_tombstones()
+                    .iter()
+                    .map(|(e, _)| *e)
+                    .collect();
+                drained_epochs.sort_unstable();
+            });
+            (drained_epochs, rendered)
+        }
+
+        let (forward, forward_render) = two_devices_ack(false);
+        let (reverse, reverse_render) = two_devices_ack(true);
+
+        assert_eq!(
+            forward,
+            vec![1, 2],
+            "only the epochs strictly below the trailing device's cursor are reclaimed"
+        );
+        assert_eq!(
+            reverse, forward,
+            "ACK order must not change which epochs a pass reclaims"
+        );
+        for rendered in [&forward_render, &reverse_render] {
+            assert_eq!(
+                rendered_value(
+                    rendered,
+                    METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL
+                ),
+                Some("0"),
+                "a device that is merely behind another is never refused; render was:\n{rendered}"
+            );
+        }
+    }
+
+    /// The executed watermark fences a device below content the pass recorded as reclaimed, and
+    /// only one sweep runs at a time.
+    ///
+    /// The pair is what makes the fence a boundary rather than a latch: a device arriving one
+    /// epoch below the watermark is refused and left untracked (nothing the boundary can move
+    /// would serve it, so the conservative re-admission path is the honest answer), while a device
+    /// arriving AT the watermark is recorded normally. The refusal must leave the claim map
+    /// exactly as it found it — a refusal that half-recorded would pin the boundary on a device
+    /// nothing is tracking.
+    #[test]
+    fn the_watermark_fences_below_reclaimed_content_and_one_sweep_runs_at_a_time() {
+        use crate::reclamation_registry::{
+            METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL,
+            METRIC_RECLAMATION_SWEEPS_TOTAL, METRIC_RECLAMATION_SWEEP_IN_PROGRESS,
+        };
+
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 0..5 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            let pinned: ClientId = "a5:alice|dev-pinned".into();
+            f.set_delivered(CONN_A, 100);
+            assert!(block_on(f.confirm_apply_ack(&pinned, 5, CONN_A)));
+
+            let registry = f.reclamation();
+            assert_eq!(registry.prune_ceiling(ClaimScope::Global), 5);
+
+            let token = registry.begin_sweep().expect("the first sweep is granted");
+            assert_eq!(
+                token.ceiling(),
+                5,
+                "the token carries the fleet MIN taken at sweep start"
+            );
+
+            // Single-sweep guard: the second call is refused while the token is outstanding, and
+            // refusing it must issue no snapshot and move neither the in-progress gauge nor the
+            // completed-sweep counter.
+            let mid_sweep = handle.render();
+            assert!(
+                registry.begin_sweep().is_none(),
+                "a second sweep must be refused while a token is outstanding"
+            );
+            let after_refusal = handle.render();
+            for rendered in [&mid_sweep, &after_refusal] {
+                assert_eq!(
+                    rendered_value(rendered, METRIC_RECLAMATION_SWEEP_IN_PROGRESS),
+                    Some("1"),
+                    "exactly one sweep is in progress across the refusal; render:\n{rendered}"
+                );
+            }
+            assert_eq!(
+                rendered_value(&mid_sweep, METRIC_RECLAMATION_SWEEPS_TOTAL),
+                rendered_value(&after_refusal, METRIC_RECLAMATION_SWEEPS_TOTAL),
+                "a refused sweep completes nothing and must not be counted as one"
+            );
+
+            // The pass observed a durable watermark BELOW the ceiling, so what it could actually
+            // have reclaimed — and therefore what it may fence against — is min(5, 4 + 1).
+            registry.end_sweep(token, 4);
+            assert_eq!(registry.executed_watermark(ClaimScope::Global), 5);
+
+            let next = registry
+                .begin_sweep()
+                .expect("the guard clears when the sweep ends");
+            registry.end_sweep(next, 4);
+            assert_eq!(
+                registry.executed_watermark(ClaimScope::Global),
+                5,
+                "a second pass over the same content advances the fence no further"
+            );
+
+            let claims_before = registry.live_claims(ClaimScope::Global);
+            let min_before = registry.min_live_claim(ClaimScope::Global);
+            let fenced: ClientId = "a5:alice|dev-fenced".into();
+            f.set_delivered(CONN_B, 100);
+            assert!(
+                !block_on(f.confirm_apply_ack(&fenced, 4, CONN_B)),
+                "a device below reclaimed content is refused, so its cursor is not written"
+            );
+            assert!(
+                !f.is_tracked(&fenced),
+                "the refused device stays untracked and takes the full-resync path"
+            );
+            assert_eq!(
+                (
+                    registry.live_claims(ClaimScope::Global),
+                    registry.min_live_claim(ClaimScope::Global)
+                ),
+                (claims_before, min_before),
+                "a refusal records nothing: the claim map is exactly what it was"
+            );
+
+            let at_boundary: ClientId = "a5:alice|dev-at-boundary".into();
+            assert!(
+                block_on(f.confirm_apply_ack(&at_boundary, 5, CONN_B)),
+                "a device AT the watermark is above reclaimed content and is recorded"
+            );
+            assert!(f.is_tracked(&at_boundary));
+            assert_eq!(registry.live_claims(ClaimScope::Global), claims_before + 1);
+        });
+
+        let rendered = handle.render();
+        assert_eq!(
+            rendered_value(
+                &rendered,
+                METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL
+            ),
+            Some("1"),
+            "exactly the one device below the watermark is refused; render was:\n{rendered}"
+        );
+        assert_eq!(
+            rendered_value(&rendered, METRIC_RECLAMATION_SWEEPS_TOTAL),
+            Some("2"),
+            "two sweeps completed and the refused one is not among them; render:\n{rendered}"
+        );
+    }
+
+    /// Capture the prune-decision corpus as machine-readable lines, one per fixture.
+    ///
+    /// This is a DECISION-NEUTRAL probe: it re-runs the store-less prune fixtures' scenarios and
+    /// prints what the drain decided (`fixture | epochs drained | tags dropped`). It asserts
+    /// nothing and re-points no predicate, so running it on two builds of the tree and diffing the
+    /// two outputs is a direct measurement of whether a change to the prune's authority moved any
+    /// prune decision. Run it with `-- --nocapture` to read the lines.
+    ///
+    /// The store-backed rows of the same corpus — the rehydrate and forget fixtures — need a redb
+    /// store, so they are captured by `persistence_tests::capture_prune_decision_corpus_durable`
+    /// in the same line format.
+    #[tokio::test]
+    async fn capture_prune_decision_corpus() {
+        // The two-device fleet-MIN case: the behind device pins epochs at and above its cursor.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 0..5 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            let ahead: ClientId = "a5:alice|dev-ahead".into();
+            let behind: ClientId = "a5:alice|dev-behind".into();
+            f.set_delivered(CONN_A, 100);
+            f.set_delivered(CONN_B, 100);
+            let _ = f.confirm_apply_ack(&ahead, 5, CONN_A).await;
+            let _ = f.confirm_apply_ack(&behind, 3, CONN_B).await;
+            f.set_durable_epoch_watermark(1000);
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line("one_behind_client_pins_epoch_fleet_wide", &drained)
+            );
+        }
+        // The durability fence held below the claim boundary: the fence is the binding conjunct.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 0..5 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            let c: ClientId = "a5:alice|dev-1".into();
+            f.set_delivered(CONN_A, 100);
+            let _ = f.confirm_apply_ack(&c, 5, CONN_A).await;
+            f.set_durable_epoch_watermark(2);
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line(
+                    "lwm_past_but_watermark_behind_keeps_epoch_unpruned",
+                    &drained
+                )
+            );
+        }
+        // Dark by construction: a 0 watermark takes the fast path and decides nothing.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 0..5 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            let c: ClientId = "a5:alice|dev-1".into();
+            f.set_delivered(CONN_A, 100);
+            let _ = f.confirm_apply_ack(&c, 100, CONN_A).await;
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line(
+                    "dark_by_construction_no_prune_with_zero_watermark",
+                    &drained
+                )
+            );
+        }
+        // Strict, not inclusive: a cursor AT an epoch does not license draining that epoch.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 0..3 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            let c: ClientId = "a5:alice|dev-1".into();
+            f.set_delivered(CONN_A, 100);
+            let _ = f.confirm_apply_ack(&c, 2, CONN_A).await;
+            f.set_durable_epoch_watermark(1000);
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line("eligibility_is_strictly_past_not_inclusive", &drained)
+            );
+        }
+        // A restored ref is re-decided by the next pass rather than orphaned.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            f.stamp_tombstone("m", "k1", "T1");
+            f.stamp_tombstone("m", "k2", "T2");
+            let c: ClientId = "a5:alice|dev-1".into();
+            f.set_delivered(CONN_A, 100);
+            let _ = f.confirm_apply_ack(&c, 2, CONN_A).await;
+            f.set_durable_epoch_watermark(1000);
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line("restore_tombstone_ref_round_trips_through_drain", &drained)
+            );
+            for (epoch, r) in drained {
+                f.restore_tombstone_ref(epoch, r);
+            }
+            let retried = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line(
+                    "restore_tombstone_ref_round_trips_through_drain#after_restore",
+                    &retried
+                )
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4891,6 +5455,19 @@ mod persistence_tests {
             f.is_tracked(&lagging),
             "the reconnecting known device is tracked"
         );
+        // A rehydrate is a claim site, not merely a cursor writer: a reconnecting laggard that
+        // held the mark down while contributing no claim would leave the boundary free to walk
+        // past the epochs it has not applied.
+        assert_eq!(
+            f.reclamation().live_claims(ClaimScope::Global),
+            1,
+            "the rehydrated device contributes a claim"
+        );
+        assert_eq!(
+            f.reclamation().prune_ceiling(ClaimScope::Global),
+            5,
+            "and the claim sits at its rehydrated position, so the boundary is pinned there"
+        );
     }
 
     /// A forget is DURABLE: `forget_client` deletes the persisted cursor, so a later
@@ -4913,6 +5490,14 @@ mod persistence_tests {
         // and durable state.
         f.forget_client(&c).await;
         assert!(!f.is_tracked(&c), "forgotten client untracked in memory");
+        // The claim leaves the fold in the same act: a forget that dropped the cursor but kept
+        // the claim would pin the boundary on a device nothing tracks any more.
+        assert_eq!(f.reclamation().live_claims(ClaimScope::Global), 0);
+        assert_eq!(
+            f.reclamation().min_live_claim(ClaimScope::Global),
+            None,
+            "the forgotten device's claim is released, not merely orphaned"
+        );
 
         // Rehydrate must be a no-op — the durable row is gone, so the client does NOT
         // resurrect at its stale cursor.
@@ -4922,6 +5507,143 @@ mod persistence_tests {
             "durable cursor deleted on forget → rehydrate cannot re-track the stale cursor"
         );
         assert_eq!(f.cursor(&c), None, "no stale cursor resurrected");
+    }
+
+    /// With no margin configured, the reclamation boundary and the fleet low-water mark decide
+    /// every epoch identically — over the sequence where a boundary that did not track every
+    /// cursor writer would part company with the mark.
+    ///
+    /// The steps are chosen for the cases that can break the agreement rather than the cases that
+    /// cannot: a device joining BELOW the current proposal, a rehydrate re-admitting a laggard
+    /// below it, and forgets raising it again. A cursor writer that recorded no claim would leave
+    /// its device holding the mark down while the boundary walked past it, and the per-epoch
+    /// comparison reds on every epoch between the two; a boundary that latched at its highest
+    /// past value would red on every step where the mark falls.
+    #[tokio::test]
+    async fn boundary_and_low_water_mark_decide_every_epoch_alike_with_no_margin() {
+        let (path, _dir) = temp_store();
+        let laggard: ClientId = "a5:alice|dev-laggard".into();
+        let middle: ClientId = "a5:alice|dev-middle".into();
+        let leader: ClientId = "a5:alice|dev-leader".into();
+
+        // Persist the laggard's cursor first, so the fresh frontier below has something to
+        // rehydrate FROM — a rehydrate is the reconnect path and it is one of the claim sites
+        // this agreement depends on.
+        {
+            let store = Arc::new(RedbDataStore::new(&path).expect("open"));
+            let f = TombstoneFrontier::new(Some(store));
+            f.set_delivered(CONN_A, 1000);
+            assert!(f.confirm_apply_ack(&laggard, 5, CONN_A).await);
+            f.shutdown().await;
+        }
+
+        let store = Arc::new(RedbDataStore::new(&path).expect("reopen"));
+        let f = TombstoneFrontier::new(Some(store));
+        f.set_delivered(CONN_A, 1000);
+        assert_eq!(
+            f.reclamation().margin_epochs(),
+            0,
+            "the agreement is an identity claim only while no margin is configured"
+        );
+
+        let agree = |step: &str, expected: Epoch| {
+            // Hoisted: reading the ceiling is an observing call that republishes gauges, so a
+            // per-epoch re-read would report one query per epoch compared.
+            let ceiling = f.reclamation().prune_ceiling(ClaimScope::Global);
+            let lwm = f.low_water_mark();
+            assert_eq!(
+                (ceiling, lwm),
+                (expected, expected),
+                "both boundaries must sit at {expected} after {step}"
+            );
+            for epoch in 0..=60 {
+                assert_eq!(
+                    ceiling > epoch,
+                    lwm > epoch,
+                    "the two boundaries disagree about epoch {epoch} after {step}"
+                );
+            }
+        };
+
+        agree("no device has reconnected yet", 0);
+        assert!(f.confirm_apply_ack(&leader, 50, CONN_A).await);
+        agree("the leading device ACKed", 50);
+        assert!(f.confirm_apply_ack(&middle, 20, CONN_A).await);
+        agree("a second device joined below the proposal", 20);
+        f.rehydrate(&laggard).await;
+        agree("a rehydrated laggard rejoined below the proposal", 5);
+        f.forget_client(&laggard).await;
+        agree("the rehydrated laggard was forgotten", 20);
+        f.forget_client(&middle).await;
+        agree("only the leading device is left", 50);
+    }
+
+    /// Capture the STORE-BACKED half of the prune-decision corpus, in the same line format as
+    /// `tests::capture_prune_decision_corpus`: `fixture | epochs drained | tags dropped`.
+    ///
+    /// Both rows are cursor-writer fixtures whose own assertions stop at the cursor, so each one
+    /// is followed here by the prune decision that cursor state licenses — that is the cell a
+    /// change to the prune's authority could move. DECISION-NEUTRAL: it asserts nothing and
+    /// re-points no predicate. Run with `-- --nocapture` to read the lines.
+    #[tokio::test]
+    async fn capture_prune_decision_corpus_durable() {
+        // A rehydrated laggard must keep pinning the epochs it has not applied.
+        {
+            let (path, _dir) = temp_store();
+            let lagging: ClientId = "a5:alice|dev-lag".into();
+            let ahead: ClientId = "a5:alice|dev-ahead".into();
+            {
+                let store = Arc::new(RedbDataStore::new(&path).expect("open"));
+                let f = TombstoneFrontier::new(Some(store));
+                f.set_delivered(CONN_A, 1000);
+                let _ = f.confirm_apply_ack(&lagging, 5, CONN_A).await;
+                let _ = f.confirm_apply_ack(&ahead, 500, CONN_A).await;
+                f.shutdown().await;
+            }
+            let store = Arc::new(RedbDataStore::new(&path).expect("reopen"));
+            let f = TombstoneFrontier::new(Some(store));
+            f.rehydrate(&lagging).await;
+            // Stamp AFTER the rehydrate so the laggard's position is the only thing gating.
+            f.set_epoch_width(1);
+            for i in 0..7 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            f.set_durable_epoch_watermark(1000);
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line(
+                    "reconnect_rehydrates_before_ack_does_not_advance_lwm",
+                    &drained
+                )
+            );
+            f.shutdown().await;
+        }
+        // A forgotten client releases its pin, and an empty fold prunes NOTHING (vacuous case).
+        {
+            let (path, _dir) = temp_store();
+            let c: ClientId = "a5:alice|dev-1".into();
+            let store = Arc::new(RedbDataStore::new(&path).expect("open"));
+            let f = TombstoneFrontier::new(Some(store));
+            f.set_delivered(CONN_A, 100);
+            let _ = f.confirm_apply_ack(&c, 50, CONN_A).await;
+            f.forget_client(&c).await;
+            f.rehydrate(&c).await;
+            f.set_epoch_width(1);
+            for i in 0..7 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+            }
+            f.set_durable_epoch_watermark(1000);
+            let drained = f.drain_prunable_tombstones();
+            println!(
+                "{}",
+                prune_decision_line(
+                    "forget_client_deletes_durable_cursor_so_rehydrate_is_noop",
+                    &drained
+                )
+            );
+            f.shutdown().await;
+        }
     }
 
     /// The worker is ALIVE and processes the forget, but its `store.remove` FAILS

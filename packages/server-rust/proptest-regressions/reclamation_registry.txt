@@ -1,0 +1,23 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+#
+# The seeds below came from a falsifiability audit rather than from a real
+# defect: each property's discriminating branch was temporarily inverted, and
+# the case proptest shrank to is the minimal program that reaches that branch
+# (a claim set with a distinct maximum above its minimum, a non-zero margin
+# with live claims, a refusal landing on a non-empty claim set, an admission
+# taken while the watermark sits above the boot floor, a proposal that has
+# sunk below the boot floor, and a genuinely permuted multi-registration set).
+# They are kept because replaying them costs nothing and pins exactly the
+# shapes these properties would be vacuous without.
+cc 2a8dfe257b20200f1df057f5d6779109b89109433f63222a50d2c1c285368bbd # shrinks to (floor, margin, raw) = (0, 0, [Register { who: 0, epoch: 0 }])
+cc b0e1fd15567eb2ed3b783b6845ca07470f2a71faacda93d17c92f9d5927b22c6 # shrinks to (floor, margin, raw) = (0, 1, [Register { who: 0, epoch: 1 }])
+cc 2966d7e7cb0781966f27cda01483fcfee207357a76efb71b24d09e8097ccb49e # shrinks to (floor, margin, raw) = (0, 0, [Register { who: 0, epoch: 1 }, BeginSweep, EndSweep { watermark: 0 }, Register { who: 0, epoch: 1 }])
+cc 41af48ceece3de9f5cb370dc26fd791dd6d9c3c1effde0d4f629ae6572bfdd68 # shrinks to (floor, margin, raw) = (0, 0, [Register { who: 0, epoch: 1 }, Register { who: 1, epoch: 2 }])
+cc abb6f0001d0bb913d8e36849c40ac1233aa25a3e796dbf6403b48e70ac1f3e94 # shrinks to (floor, margin, raw) = (0, 0, [Register { who: 0, epoch: 7 }, BeginSweep, EndSweep { watermark: 6 }, Register { who: 0, epoch: 0 }])
+cc 136039723f7c8cc2d1bf8d5c887f23a45351113a5d7817366fd2dfa984688b63 # shrinks to (floor, margin, raw) = (8, 4, [Register { who: 0, epoch: 8 }])
+cc 4c702ed4d4264145b3d9d6dd064d402eaafd00245928854d3ef86232cc48d23d # shrinks to (floor, margin, forward, permuted) = (1, 4, [(2, 9), (1, 26)], [(1, 26), (2, 9)])
