@@ -1,0 +1,374 @@
+SPEC-359 W5 — the mutation arm (earned positive control)
+========================================================
+
+Run date          : 2026-08-16
+Branch            : sf-359-reclamation-registry
+Tree at arm start : ccb6d87e ("let the order-independence property see a proposal a latch
+                    could clamp"), working tree clean, 1850 lib tests green.
+Host              : macOS (darwin 25.5.0), Apple silicon.
+Mutated file      : packages/server-rust/src/reclamation_registry.rs (counted file 1/5)
+
+Command used for every mutation, verbatim and identical across all five:
+
+    SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+        cargo test --release -p topgun-server --lib
+
+The FULL lib suite is run rather than a `reclamation` filter on purpose: collateral reds in
+tombstone_frontier_impl.rs's witnesses are part of what an honest arm has to report, and a
+filtered run would not have seen them.
+
+Each mutation was applied on its own, run, captured, and reverted with
+`git checkout packages/server-rust/src/reclamation_registry.rs` before the next was applied.
+`packages/server-rust/proptest-regressions/reclamation_registry.txt` was restored the same way
+after every run, so no seed for a defect that no longer exists survives the arm.
+
+Property -> test-name map (the arm's failures are quoted by test name)
+---------------------------------------------------------------------
+P1  the_minimum_is_the_fold_over_every_live_claim
+P2  the_watermark_never_falls_while_the_proposal_tracks_the_minimum
+P3  the_proposal_never_reaches_a_live_claim
+P4  a_registry_that_never_claimed_and_never_swept_sits_on_its_boot_floor
+    releasing_everything_returns_the_proposal_to_the_boot_floor
+P5  the_proposal_is_the_minimum_less_the_margin_with_no_exception
+P6  one_sweep_at_a_time_and_no_admission_below_the_watermark        (conjunct (b))
+P6a tests::concurrent_begin_sweep_calls_yield_exactly_one_token     (conjunct (a), 2 threads)
+P7  every_admission_resolves_to_one_verdict_and_records_unconditionally
+P8  arrival_order_changes_nothing
+P9  the_watermark_never_passes_a_live_claim_at_any_instant
+P10 an_empty_claim_set_never_drags_the_watermark_down
+P11 ending_a_sweep_lands_on_the_consumed_token_bound_and_no_further
+
+Summary
+-------
+mutation | required reds        | observed | verdict
+---------+----------------------+----------+---------------------------------------------
+(i)      | P1, P3               | both     | PASS (13 collateral reds, listed below)
+(ii)     | P2, P8               | both     | PASS after P8 was strengthened; see FINDING 1
+(iii)    | P2, P10              | both     | PASS (5 collateral reds)
+(iv)     | P11                  | yes      | PASS (5 collateral reds)
+(v)      | P6a, and NOT the     | yes      | PASS — P6a was the ONLY red in 1850 tests
+         | sequential matrix    |          |
+
+All five turn their named properties red. After the arm, `git diff --stat` on `.rs` is EMPTY.
+
+
+FINDING 1 — P8 could not fail under the mutation it exists to refute (fixed before the arm)
+===========================================================================================
+On the FIRST application of mutation (ii), P8 (`arrival_order_changes_nothing`) stayed GREEN.
+
+Cause: `registration_trace` registered the whole set in silence and only then queried the
+proposal. A ceiling that clamps itself against a previously published value therefore never had
+a published value to clamp against, and the two arrival orders produced identical traces. The
+property was un-falsifiable by the first-claimant latch — the exact shape Constraint 12 forbids
+("a witness that cannot fail is not a witness").
+
+Fix, committed as ccb6d87e BEFORE the recorded arm: `registration_trace` now queries the
+proposal after every registration, outside the recorded trace, so the latch leaves the arrival
+order visible in the FINAL state the trace compares. The observations themselves are unchanged,
+so the property stays TRUE for the correct implementation (verified: full lib suite green at
+ccb6d87e).
+
+Both the pre-fix (green) and post-fix (red) mutation-(ii) runs are recorded below.
+
+
+(i) min -> max in the min-reduction fold
+========================================
+Source change, RegistryState::min_live_claim:
+
+        .map(|(_, claim)| *claim)
+-       .min()
++       .max()
+
+Result: FAILED. 1834 passed; 16 failed. Required reds P1 and P3 both fired.
+
+---- P1 the_minimum_is_the_fold_over_every_live_claim ----
+Test failed: assertion failed: `(left == right)`
+  left: `Some(2)`,
+ right: `Some(1)`: the published minimum must be the fold over the live claim set at
+ packages/server-rust/src/reclamation_registry.rs:1952.
+minimal failing input: (floor, margin, raw) = (
+    0, 0,
+    [Register { who: 0, epoch: 1 }, Query, EndSweep { watermark: 0 },
+     Register { who: 1, epoch: 2 }],
+)
+
+---- P3 the_proposal_never_reaches_a_live_claim ----
+Test failed: the proposal 2 reaches the live claim at 1 at
+ packages/server-rust/src/reclamation_registry.rs:2030.
+minimal failing input: (floor, margin, raw) = (
+    0, 0,
+    [Register { who: 0, epoch: 1 }, Query, EndSweep { watermark: 0 },
+     Register { who: 1, epoch: 2 }],
+)
+
+Collateral reds (expected; recorded, not treated as new failures):
+  P2  the_watermark_never_falls_while_the_proposal_tracks_the_minimum
+  P7  every_admission_resolves_to_one_verdict_and_records_unconditionally
+  P9  the_watermark_never_passes_a_live_claim_at_any_instant
+        "the watermark at 2 passed the live claim at 1" — P9 measures against the MODEL's true
+        minimum on purpose, so a broken fold cannot be self-consistent with it.
+  P11 ending_a_sweep_lands_on_the_consumed_token_bound_and_no_further
+  tests::a_rejoining_laggard_lowers_the_proposal_and_is_recorded
+  tests::a_release_during_a_sweep_cannot_drop_the_minimum_below_the_watermark
+  tests::a_release_removes_the_claim_and_raises_the_minimum
+  tests::the_proposal_does_not_depend_on_registration_order
+  tests::the_proposal_is_the_fleet_min_over_every_live_claim
+  tests::the_refusal_boundary_is_the_executed_watermark_not_the_ceiling
+  tests::metrics_transport::the_scripted_sequence_renders_every_series_with_its_predicted_value
+  tombstone_frontier_impl::tests::a_laggard_lowers_the_boundary_and_is_recorded_in_either_ack_order   (W2)
+  tombstone_frontier_impl::tests::one_behind_client_pins_epoch_fleet_wide                             (W3)
+  tombstone_frontier_impl::persistence_tests::boundary_and_low_water_mark_decide_every_epoch_alike_with_no_margin
+P5 stayed GREEN by design: it measures the margin subtraction against the registry's OWN
+minimum, so a broken fold reds where the fold lives instead of reding everywhere.
+
+Reverted. `git diff --stat` empty.
+
+
+(ii) re-introduce a ceiling latch
+=================================
+Source change, RegistryState::prune_ceiling plus the field it needs:
+
+     fn prune_ceiling(&self, scope: ClaimScope) -> Epoch {
+-        match self.min_live_claim(scope) {
+-            Some(min) => min.saturating_sub(self.margin_epochs),
+-            None => self.boot_floor,
+-        }
++        let candidate = match self.min_live_claim(scope) {
++            Some(min) => min.saturating_sub(self.margin_epochs),
++            None => self.boot_floor,
++        };
++        let latched = candidate.max(self.latched_ceiling.get());
++        self.latched_ceiling.set(latched);
++        latched
+     }
+
+  struct RegistryState { ... sweep_in_progress: bool,
++     latched_ceiling: std::cell::Cell<Epoch>, }
+  with_margin(): + latched_ceiling: std::cell::Cell::new(boot_floor),
+
+The latch is per-registry (a Cell inside the mutex-guarded state), not process-global, so it
+models the first-claimant latch rather than cross-test interference.
+
+FIRST RUN (before FINDING 1's fix): FAILED. 1835 passed; 15 failed.
+  P2 red as required. **P8 GREEN** — see FINDING 1.
+
+RECORDED RUN (at ccb6d87e, P8 strengthened): FAILED. 1834 passed; 16 failed.
+Required reds P2 and P8 both fired.
+
+---- P2 the_watermark_never_falls_while_the_proposal_tracks_the_minimum ----
+Test failed: assertion failed: `(left == right)`
+  left: `64`,
+ right: `1` at packages/server-rust/src/reclamation_registry.rs:2024.
+minimal failing input: (floor, margin, raw) = (0, 0, [Register { who: 0, epoch: 0 }])
+(The forced-fall epilogue: the laggard's arrival must pull the proposal DOWN to 1 and the latch
+holds it at the leader's 64.)
+
+---- P8 arrival_order_changes_nothing ----
+Test failed: assertion failed: `(left == right)`
+  left: `[Observation { min_live_claim: Some(8), live_claims: 2, prune_ceiling: 8, executed: 8 },
+          Observation { min_live_claim: Some(8), live_claims: 1, prune_ceiling: 8, executed: 8 },
+          Observation { min_live_claim: Some(8), live_claims: 1, prune_ceiling: 8, executed: 8 },
+          Observation { min_live_claim: None,    live_claims: 0, prune_ceiling: 8, executed: 8 },
+          Observation { min_live_claim: None,    live_claims: 0, prune_ceiling: 8, executed: 8 }]`,
+ right: `[Observation { min_live_claim: Some(8), live_claims: 2, prune_ceiling: 11, executed: 8 },
+          ... prune_ceiling: 11 ...]`: the claim set and the proposal must not depend on arrival
+ order at packages/server-rust/src/reclamation_registry.rs:2238.
+minimal failing input: (floor, margin, forward, permuted) = (8, 4, [(2, 8), (0, 15)], ...)
+
+Collateral reds:
+  P1, P3, P4 (releasing_everything...), P5, P7, P9, P10, P11
+  — the latch inflates the sweep snapshot, which inflates `executed`, which then refuses claims
+    the model honours, so the claim SETS diverge and the fold-level properties follow.
+  tests::a_rejoining_laggard_lowers_the_proposal_and_is_recorded
+  tests::end_sweep_advances_with_max_and_never_overwrites
+  tests::metrics_transport::the_scripted_sequence_renders_every_series_with_its_predicted_value
+  tombstone_frontier_impl::tests::a_laggard_lowers_the_boundary_and_is_recorded_in_either_ack_order   (W2)
+  tombstone_frontier_impl::tests::one_behind_client_pins_epoch_fleet_wide                             (W3)
+  tombstone_frontier_impl::persistence_tests::boundary_and_low_water_mark_decide_every_epoch_alike_with_no_margin
+
+Reverted. `git diff --stat` empty.
+
+
+(iii) executed := value instead of max(executed, value)
+=======================================================
+Source change, ReclamationRegistry::end_sweep:
+
+-        *executed = previous.max(candidate);
++        *executed = candidate;
+
+Result: FAILED. 1843 passed; 7 failed. Required reds P2 and P10 both fired.
+
+---- P2 the_watermark_never_falls_while_the_proposal_tracks_the_minimum ----
+Test failed: the executed watermark fell from 8 to 1 at
+ packages/server-rust/src/reclamation_registry.rs:1984.
+minimal failing input: (floor, margin, raw) = (8, 4, [Register { who: 0, epoch: 8 },
+    BeginSweep, EndSweep { watermark: 0 }, ...])
+
+---- P10 an_empty_claim_set_never_drags_the_watermark_down ----
+Test failed: assertion failed: `(left == right)`
+  left: `0`,
+ right: `64`: a sweep over an empty claim set must not overwrite the watermark at
+ packages/server-rust/src/reclamation_registry.rs:2341.
+minimal failing input: (floor, margin, raw) = (0, 0, [Register { who: 0, ... }])
+(The FORCED epilogue: a claimed sweep lifts the watermark to 64, everything is released, and the
+next sweep's boot-floor snapshot of 0 overwrites it. This is the resurrection bug N4 clause 1
+names, reached deterministically rather than by draw.)
+
+Note on `advanced`: `let advanced = *executed - previous;` underflows under this mutation. The
+release profile has overflow-checks off, so it wraps into the counter rather than panicking and
+the failure is still attributable to the property that named it. Under a debug-assertions
+profile this mutation would abort in the metric line instead.
+
+Collateral reds:
+  P1, P7, P11
+  tests::a_lower_later_sweep_cannot_lower_the_watermark
+  tests::end_sweep_advances_with_max_and_never_overwrites
+No tombstone_frontier_impl witness reds under this mutation.
+
+Reverted. `git diff --stat` empty.
+
+
+(iv) end_sweep derives from the CURRENT prune_ceiling, not the consumed token
+=============================================================================
+Source change, ReclamationRegistry::end_sweep:
+
+-        let candidate = token
+-            .ceiling_snapshot
+-            .min(durable_watermark.saturating_add(1));
++        let candidate = state
++            .prune_ceiling(ClaimScope::Global)
++            .min(durable_watermark.saturating_add(1));
++        let _ = token;
+
+Result: FAILED. 1844 passed; 6 failed. Required red P11 fired.
+
+---- P11 ending_a_sweep_lands_on_the_consumed_token_bound_and_no_further ----
+Test failed: assertion failed: `(left == right)`
+  left: `64`,
+ right: `16`: the watermark must follow the consumed token, not the proposal the release raised
+ at packages/server-rust/src/reclamation_registry.rs:2413.
+minimal failing input: (floor, margin, raw) = (0, 0, [Register { who: 0, epoch: 0 }])
+(The FORCED release-inside-the-window epilogue: leader at 64, laggard at 16, begin_sweep
+snapshots 16 - margin, the laggard is released inside the window, and the mutation re-reads the
+proposal the release raised to 64 - margin. The per-step bound also fires on drawn programs that
+happen to release inside a window — e.g. the shrunk case
+[Register { who: 0, epoch: 5 }, BeginSweep, Release { who: 0 }, ...].)
+
+Collateral reds:
+  P1, P2, P7, P9
+  tests::a_release_during_a_sweep_cannot_drop_the_minimum_below_the_watermark
+No tombstone_frontier_impl witness reds under this mutation.
+
+Reverted. `git diff --stat` empty.
+
+
+(v) sweep_in_progress set OUTSIDE the lock that took the ceiling snapshot (the TOCTOU)
+======================================================================================
+Source change, ReclamationRegistry::begin_sweep — one acquisition split into two:
+
+-        let mut state = self.lock();
+-
+-        if state.sweep_in_progress {
+-            return None;
+-        }
+-
+-        let ceiling_snapshot = state.prune_ceiling(ClaimScope::Global);
+-        state.sweep_in_progress = true;
++        let ceiling_snapshot = {
++            let state = self.lock();
++
++            if state.sweep_in_progress {
++                return None;
++            }
++
++            state.prune_ceiling(ClaimScope::Global)
++        };
++
++        let mut state = self.lock();
++        state.sweep_in_progress = true;
+
+Result: FAILED. 1849 passed; 1 failed.
+
+---- P6a tests::concurrent_begin_sweep_calls_yield_exactly_one_token ----
+assertion `left == right` failed: exactly one of two concurrent begin_sweep calls may be granted
+a token (round 163)
+  left: 2
+ right: 1
+  at packages/server-rust/src/reclamation_registry.rs:1237:13
+
+P6a was the ONLY red in the whole 1850-test suite. The sequential matrix — including P6
+(`one_sweep_at_a_time_and_no_admission_below_the_watermark`) and its generated double-begin
+refusal — stayed GREEN, which is exactly what R5 and AC3 predict: a sequentially-driven
+begin_sweep still finds the flag set on its next call even under this mutation, so only two
+threads through the barrier discriminate the two-acquisition window. This is the executable
+confirmation that AC3 is NOT dischargeable by the sequential matrix alone.
+
+No collateral reds.
+
+Reverted. `git diff --stat` empty.
+
+
+AFTER THE ARM
+=============
+    $ git diff --stat -- '*.rs'
+    (empty)
+    $ git status --short
+    (empty)
+    $ git diff --stat -- packages/server-rust/proptest-regressions/
+    (empty)
+
+`packages/server-rust/proptest-regressions/reclamation_registry.txt` was restored with
+`git checkout` after every mutation, so the only seeds it carries are the ones committed at
+3c1d173d for defects that exist in the property set, not in a mutation that no longer exists.
+
+
+VALIDATION STEP 2b — the type-level check, which is a build and not a mutation
+==============================================================================
+Scratch test inserted into reclamation_registry.rs's inline `mod tests`:
+
+    #[test]
+    fn scratch_end_sweep_without_a_token() {
+        let registry = ReclamationRegistry::new(0);
+        let _ = registry.end_sweep(/* no token */ 100);
+    }
+
+The bare build, which is what the step must NOT rely on:
+
+    $ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo build -p topgun-server
+        Finished `dev` profile [unoptimized + debuginfo] target(s) in 23.76s
+    build exit=0
+
+It passes GREEN over a scratch test it never compiled — the Audit v4 rec 5 hazard, reproduced
+here rather than argued: a bare `cargo build` does not compile `#[cfg(test)]` items, so it
+would have reported a green build while proving nothing.
+
+The command the step actually specifies:
+
+    $ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo test --no-run -p topgun-server
+    error[E0061]: this method takes 2 arguments but 1 argument was supplied
+        --> packages/server-rust/src/reclamation_registry.rs:1197:26
+         |
+    1197 |         let _ = registry.end_sweep(/* no token */ 100);
+         |                          ^^^^^^^^^                --- argument #1 of type
+         |                          `reclamation_registry::SweepToken` is missing
+         |
+    note: method defined here
+        --> packages/server-rust/src/reclamation_registry.rs:353:8
+         |
+     353 |     fn end_sweep(&self, token: SweepToken, durable_watermark: Epoch);
+         |        ^^^^^^^^^        -----
+    help: provide the argument
+         |
+    1197 -         let _ = registry.end_sweep(/* no token */ 100);
+    1197 + let _ = registry.end_sweep(/* reclamation_registry::SweepToken */, 100);
+         |
+
+    For more information about this error, try `rustc --explain E0061`.
+    error: could not compile `topgun-server` (lib test) due to 1 previous error
+    no-run exit=101
+
+REJECTED, as N1 clause 6 / AC2 require: `end_sweep` consumes a `SweepToken` by value, and a
+consumer whose `begin_sweep` returned `None` holds none, so "end a sweep you did not begin"
+cannot be written. The misuse does not compile, which is why it carries no runtime property.
+
+Scratch deleted; tree clean.
