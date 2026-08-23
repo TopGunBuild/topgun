@@ -1349,5 +1349,143 @@ capture the same way is the known-good remedy. Whether to apply it there is that
 group's call, since it is that group's file.
 
 ================================================================================
+W6 — THE FAULT LEG, ON THE INTERLEAVING DIMENSION  (PRIMARY arm, as selected)
+================================================================================
+
+Owner group : G6
+Sited in    : packages/server-rust/src/sim/tombstone_gc_proof.rs   (counted 4/5)
+Test        : sim::tombstone_gc_proof::tests::
+              the_removal_line_holds_its_shape_when_a_sweep_races_a_second_devices_ack
+
+ARM TAKEN. PRIMARY, exactly as G5 selected and recorded in the ruling artifact's
+post-block 1 §1.5. The spawned drain future carries the capture subscriber with
+it (`fut.with_subscriber(dispatch)`), and the sim leg asserts the branch's
+RENDERED LINE. The runtime flavour (`#[tokio::test(flavor = "multi_thread")]`)
+and the scaffold's thread model are UNCHANGED — the wrapper is the only
+difference between `spawn_sweep` and `spawn_sweep_with_subscriber`.
+
+Because PRIMARY was taken, the FALLBACK's second mandatory half — the paired
+single-thread in-process rendered-line witness in `tombstone_frontier_impl.rs` —
+is NOT owed and was not written.
+
+WHAT IT PROVES. That the removal line emits with the same rendered shape and the
+same field values under a raced drain as it does quiescently, and that it is
+observable at ROW granularity across a spawn.
+
+THE FAULT. Interleaving, not a network edge: a prune sweep and a second device's
+cursor ACK released together from a shared 2-party barrier, both spawned, both
+contending for the real frontier mutex. `ack_head_start` alternates which task is
+spawned last, so both barrier orderings are exercised rather than whichever the
+wake-up cost happens to favour. NO `SimNetwork` partition / delay / reorder leg
+exists: a directly-driven drain crosses no registered inter-node edge, so such a
+criterion would be satisfied vacuously — the class this spec guards against.
+
+BRANCH READING, NOT A DISJUNCTION. Each round reads which ordering it took off
+`topgun_reclamation_claims_rejected_below_executed_total` (the racing ACK is the
+only claim in flight, so exactly one increment IS the refusal branch), then
+asserts THAT branch's consequences:
+
+    refused  branch -> ceiling 6 -> removal lines for epochs {1,2,3,4,5}
+    admitted branch -> ceiling 3 -> removal lines for epochs {1,2}
+
+The two sets are disjoint in their tails, so neither branch's assertion is
+satisfied by the other branch's outcome. Each line's own `ceiling` field is
+asserted equal to the ceiling that branch licensed. The round's transcript
+reports the split, so a run that collapsed onto one ordering would be visible:
+
+    REMOVAL LINE UNDER INTERLEAVING | 32 raced rounds: 16 refused / 16 admitted \
+    | quiescent reference: 5 epoch(s) | rows read across the spawn via with_subscriber
+
+NON-EMPTINESS GATE, FIRST. Before any term is read the leg asserts the capture is
+non-empty and carries exactly one `prune_pass` row for the driven sweep, and it
+asserts one removal row per epoch with duplicates a hard error. An empty capture
+is a RED — the message says so literally ("the spawned sweep's rows did not reach
+the sink, so every term below would be read off nothing") — never a pass.
+
+QUIESCENT COMPARISON. A reference drain of the same fixture, unraced and driven
+inline on the capturing thread, is captured first. Every raced line is compared,
+as TEXT, against the quiescent line for the SAME epoch, with exactly two terms
+excluded: `ts` (wall clock, display only, never a join key) and `ceiling` (the
+licence the round's own ordering handed the sweep, asserted separately against
+that branch). Target, message and every other field with its value must match
+verbatim.
+
+THE FALSIFIABILITY PLANT — why this leg can detect the observation mutation at
+all. On the stock reclamation fixture every epoch holds exactly one ref, so
+`refs_returned` and `refs_at_entry` render the same digits and no assertion on
+the term could tell an observation from a copy of the slot. So the fixture pushes
+one extra tag back into epoch 1's index entry through `restore_tombstone_ref`
+AFTER that epoch's slot froze at rollover — the way a failed storage drop puts it
+there. Epoch 1's removal then returns TWO refs while its slot still records ONE:
+
+    refs_returned=2  refs_at_entry=1  bytes_returned=4
+
+BASELINE (unmutated), verbatim:
+
+    running 1 test
+    REMOVAL LINE UNDER INTERLEAVING | 32 raced rounds: 16 refused / 16 admitted | quiescent reference: 5 epoch(s) | rows read across the spawn via with_subscriber
+    test sim::tombstone_gc_proof::tests::the_removal_line_holds_its_shape_when_a_sweep_races_a_second_devices_ack ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1889 filtered out; finished in 0.22s
+
+Whole sim suite, unmutated: `pnpm test:sim` -> 28 passed (27 at HEAD + this one).
+Re-run 8x back to back: 28/28 green on every run, no flake.
+
+MUTATION APPLIED — W5's, verbatim, in `drain_prunable`'s `Some(refs)` arm:
+
+    -                    refs_returned = removed_refs,
+    +                    refs_returned = self.epoch_slots.get(&e).map_or(0, |s| s.refs_at_entry),
+
+OUTPUT UNDER THE MUTATION (1) — the leg REDs, naming its assertion:
+
+    thread 'sim::tombstone_gc_proof::tests::the_removal_line_holds_its_shape_when_a_sweep_races_a_second_devices_ack' panicked at packages/server-rust/src/sim/tombstone_gc_proof.rs:2090:9:
+    assertion `left == right` failed: quiescent leg: OBSERVATION ARM — `refs_returned != refs.len()`. Epoch 1 had one ref when its slot froze and TWO when the index removal ran, so a line reporting the entry-side count here is a second copy of the slot, not an observation of the removal:  target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787510974595 op_seq=10 epoch=1 refs_returned=1 refs_at_entry=1 bytes_returned=4 watermark=1000 ceiling=6
+      left: 1
+     right: 2
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1889 filtered out; finished in 0.20s
+
+That RED fires on the leg's own quiescent reference, which runs first. To show
+the RACED rounds carry the same discriminating assertion — and not merely inherit
+a failure from the reference — a THROWAWAY PROBE suppressed the quiescent gate
+(the per-epoch term call in `quiescent_removal_rows` replaced by a no-op), with
+the mutation still applied.
+
+OUTPUT UNDER THE MUTATION (2), probe applied — the RACED round REDs, by name, on
+the admitted branch:
+
+    thread 'sim::tombstone_gc_proof::tests::the_removal_line_holds_its_shape_when_a_sweep_races_a_second_devices_ack' panicked at packages/server-rust/src/sim/tombstone_gc_proof.rs:2090:9:
+    assertion `left == right` failed: round 0 (admitted): OBSERVATION ARM — `refs_returned != refs.len()`. Epoch 1 had one ref when its slot froze and TWO when the index removal ran, so a line reporting the entry-side count here is a second copy of the slot, not an observation of the removal:  target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787511004689 op_seq=10 epoch=1 refs_returned=1 refs_at_entry=1 bytes_returned=4 watermark=1000 ceiling=3
+      left: 1
+     right: 2
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1889 filtered out; finished in 0.21s
+
+Note the `ceiling=3` on that row: the round read the ADMITTED branch and was
+asserting that branch's own consequences when the mutated term failed.
+
+REVERTED. Both the probe and the mutation were reverted; `git diff` against the
+commit is empty for `tombstone_frontier_impl.rs`, and the sim suite is green
+again (28 passed, split 16 refused / 16 admitted).
+
+THE CAPTURE RACE HANDED FORWARD BY G5 — DISPOSITION. G5 warned that this file's
+`capture_tracing_rows` carries the same concurrent-capture race it fixed in the
+frontier file, and that it would surface here as the instrument appearing not to
+emit. It did NOT bite: 8 consecutive `-- sim` runs and repeated full-lib runs are
+green with no missing rows. The leg is nevertheless built to keep the window as
+narrow as it can: ONE capture is installed for the WHOLE test and the sink is
+drained between rounds, instead of installing and dropping a subscriber 33 times.
+Since installing or dropping a subscriber is what rebuilds the process-wide
+callsite-interest cache, that reduces this leg's contribution to the hazard from
+33 rebuild windows to one. G5's serialisation remedy was therefore NOT applied to
+this file — it was not needed, and applying it would have meant holding a
+`std::sync::Mutex` guard across `.await` points in a `multi_thread` test, which
+the lint gate rejects. The residual remains open for the file's other captures
+and is carried in the artifact's routing, not silently closed here.
+
+RENDERED FORM CONSUMED. This file's visitor emits a LEADING SPACE before
+`target=` (` target=topgun_server::…`), unlike the frontier file's. The sim-side
+reader consumes the leading-space form, per the frozen contract §5.3. The rows
+above show it.
+
+================================================================================
 (next witness section appends below this line)
 ================================================================================
