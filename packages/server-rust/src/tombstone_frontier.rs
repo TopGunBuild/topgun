@@ -596,6 +596,19 @@ pub struct PruneEpochResidencyRecord {
     pub stamped_bytes: u64,
     /// Tombstone bytes this epoch's removal is attributed as having freed. `0` on every exit kind
     /// that is not an observed drain.
+    ///
+    /// **ENTRY-SIDE, and the name overstates what it knows.** On a `DrainedByPrune` exit this is
+    /// `slot.stamped_bytes` copied across — the bytes the epoch was stamped WITH, not bytes any
+    /// removal was seen to return. It is therefore `> 0` even when the index removal returned an
+    /// EMPTY vector, which is a real state this ledger reaches: the epoch's entry is removed, the
+    /// exit is attributed as a drain, and this field reports the entry-side total while
+    /// [`Self::removed_bytes_observed`] reports `0`. Read the two together; this one alone can
+    /// never contradict the stamp it was copied from.
+    ///
+    /// The field's VALUE and meaning are deliberately unchanged — re-pointing it at the observed
+    /// total mid-lineage would break comparability with every measurement round already recorded
+    /// against it. Making the accounting itself honest (rather than merely labelled) is deferred
+    /// and tracked in `TODO-634`.
     pub bytes_freed_attributed: u64,
     /// How the epoch's slot left the index, as the detection-point bookkeeping attributed it.
     pub exit_kind: EpochExitKind,
@@ -881,6 +894,17 @@ pub const METRIC_PRUNE_STAMPED_REFS_TOTAL: &str = "topgun_or_prune_stamped_refs_
 pub const METRIC_PRUNE_STAMPED_BYTES_TOTAL: &str = "topgun_or_prune_stamped_bytes_total";
 /// Counter: refs removed from the index by an observed prune drain — the negative arm of the
 /// index conservation identity paired with [`METRIC_PRUNE_STAMPED_REFS_TOTAL`].
+///
+/// **ENTRY-SIDE, like [`PruneEpochResidencyRecord::bytes_freed_attributed`].** Each drained exit
+/// credits this counter with `slot.refs_at_entry` — the count carried forward from the paired
+/// entry row — and never with the length of the vector the index removal actually returned. So a
+/// removal that returned nothing still advances this series by whatever the epoch entered holding.
+/// "Drained" here means *the epoch's entry left the index*, not *this many refs were observed
+/// leaving with it*; the observed count lives on the exit row as
+/// [`PruneEpochResidencyRecord::removed_refs_observed`] and on the removal-site line.
+///
+/// The series' VALUE and meaning are deliberately unchanged, for the comparability reason recorded
+/// on that field. Closing the gap is deferred and tracked in `TODO-634`.
 pub const METRIC_PRUNE_DRAINED_REFS_TOTAL: &str = "topgun_or_prune_drained_refs_total";
 /// Counter: refs re-inserted into the index by an observed restore.
 pub const METRIC_PRUNE_RESTORED_REFS_TOTAL: &str = "topgun_or_prune_restored_refs_total";
