@@ -19,6 +19,7 @@ Section index (filled in as each group lands its witness):
   W4  — the instrument's NEGATIVE control, both paths           [below]
   W5  — the instrument's OBSERVATION arm                        [below]
   W6  — ARM SELECTION only; implementation is G6's              [below]
+  HARNESS NOTE — a capture race found and fixed; residual for G6 [below]
 
 ================================================================================
 W7 — ENUMERATION COMPLETENESS (MECHANICAL SOURCE TEST)
@@ -1288,6 +1289,64 @@ WHAT G6 STILL OWES ON THIS ARM (the selection does not discharge the witness):
 
 Result: PRIMARY SELECTED, empirically, both directions. Probe removed; sim file
 byte-unedited.
+
+================================================================================
+HARNESS NOTE — A CAPTURE RACE FOUND AND FIXED WHILE EXECUTING THE ABOVE.
+      READ THIS BEFORE ADDING ANOTHER `tracing` CAPTURE ANYWHERE.
+================================================================================
+
+Owner group : G5
+Not a witness arm. Recorded here because it produced a RED that looked exactly
+like an emitter defect and was not one, and because the same hazard is live in
+at least two other files.
+
+SYMPTOM. The consequence drive intermittently failed with the `epoch_exit` row
+MISSING from its capture while the removal row and the pass row — emitted before
+and after it, in the same call — were both present. Roughly 1 run in 8; under
+deliberate CPU contention, 3 runs in 10.
+
+WHAT IT WAS NOT. The drain is deterministic and single-frontier: epoch width is
+counted in ops, the reclamation registry is owned per-frontier, and there is no
+background prune task. Running the failing test ALONE never reproduced it — 12
+consecutive runs under the same contention were green. Running the whole
+filtered suite with `--test-threads=1` never reproduced it either — 5 for 5
+green. So the exit row was EMITTED and NOT CAPTURED, and the interference came
+from other tests in the same process.
+
+WHAT IT WAS. Installing or dropping a `tracing` subscriber rebuilds the
+PROCESS-WIDE callsite-interest cache. A callsite evaluated DURING that rebuild is
+transiently read as uninteresting, so an event emitted in that window is dropped
+— on every thread, including one holding a perfectly good thread-local capture.
+Several tests in this module bind captures concurrently, so each was silently
+punching holes in the others' sinks.
+
+FIX APPLIED. Every capture in this module's test code now takes a module-wide
+serialising guard, held for the WHOLE body — the subscriber DROP is half of what
+races, so a guard released before the body ends would not close the window.
+
+VERIFICATION. 12 of 12 green under exactly the CPU contention that previously
+produced 3 failures in 10. Full library suite green (1862 passed).
+
+ONE FIX THAT DID **NOT** WORK, recorded so it is not retried. Making the capture
+layer return `Interest::sometimes()` from `register_callsite` — the textbook
+remedy for a thread-locally-bound layer whose interest must not be cached
+globally — did NOT close it: measured 3 failures in 10 with it applied. The
+transient during a rebuild is not something a layer's own interest can override.
+That change was reverted rather than shipped unproven.
+
+RESIDUAL, HANDED FORWARD — THIS MATTERS TO THE FAULT LEG. The equivalent capture
+helper in `sim/tombstone_gc_proof.rs`, and the variant in `service/domain/crdt.rs`,
+carry the SAME hazard and were NOT fixed here: both files are outside `G5`'s write
+scope and `sim/tombstone_gc_proof.rs` is byte-unedited at handoff by instruction.
+
+The group implementing the interleaving fault leg should assume this race exists
+in the sim file's helper. It is especially relevant there: that leg runs under a
+multi-threaded runtime and carries a subscriber into a spawned task, so any other
+concurrently-running capture in the same process can steal rows out of its sink
+and produce a RED that looks like the instrument failing to emit. If the leg
+proves flaky, this is the first thing to check — and serialising that file's
+capture the same way is the known-good remedy. Whether to apply it there is that
+group's call, since it is that group's file.
 
 ================================================================================
 (next witness section appends below this line)
