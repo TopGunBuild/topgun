@@ -5931,7 +5931,11 @@ mod tests {
             0,
             "{METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL} must not move"
         );
-        epochs_drained_after - epochs_drained_before
+        let delta = epochs_drained_after - epochs_drained_before;
+        println!(
+            "CONSEQUENCE-DRIVE | pass family | {METRIC_PRUNE_EPOCHS_DRAINED_TOTAL} delta={delta}"
+        );
+        delta
     }
 
     /// Obligation A, driven through the SERVICE: an epoch whose `epoch_tags` entry is
@@ -6012,9 +6016,13 @@ mod tests {
         println!("CONSEQUENCE-DRIVE | exit row | {exit_row}");
         println!("CONSEQUENCE-DRIVE | pass row | {pass_row}");
 
+        // The metrics limb is read FIRST, and prints what it read. It is the one limb the
+        // exit-row mutation arm is NOT expected to move, so grading it ahead of the
+        // discriminating exit-row assertion is what lets a single mutated run witness both
+        // halves at once: this family green, the exit row red.
+        let epochs_drained_delta = assert_pass_counter_family_deltas(&before, &after);
         let (bytes_freed_attributed, removed_refs_observed) = assert_divergent_exit_row(exit_row);
         let (considered, empty_drain) = assert_empty_pass_row(pass_row);
-        let epochs_drained_delta = assert_pass_counter_family_deltas(&before, &after);
 
         // -- the class, COMPUTED from the reconstructed pair -----------------
         // `exit_kind` is set to the variant the rendered text was just asserted to carry; every
