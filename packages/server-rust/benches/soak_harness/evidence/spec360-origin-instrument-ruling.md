@@ -1,0 +1,605 @@
+# The removal-site ORIGIN instrument — frozen ruling surface
+
+**Subject.** The `Some(vec![])` state of `TombstoneFrontier::epoch_tags`: an epoch whose
+`epoch_tags` entry EXISTS but holds an EMPTY vector. Its reachability is SETTLED AFFIRMATIVELY by the
+2026-08-17 cross-vendor §C ruling (committed verbatim beside this file as
+`spec360-xask-answer-3.txt`, sha256
+`79a8e8b23a64d387edd92cc0bdb1d1369907738712f00051529bf1c39f5cd7d8`) and may not be re-asked. What is
+open is the state's **ORIGIN**, and the instrument this artifact freezes the contract for is the one
+deliverable that can resolve it.
+
+**Two layers, and the distinction is load-bearing.**
+
+1. The **FROZEN** layer — everything above the `<!-- FROZEN-LAYER-END -->` marker. It carries the
+   Decision Table (`DT`), the Fix-Shape Mapping (`FS`), the instrument's extractor CONTRACT, the
+   writer record and its reconciliation, both horns of the origin paradox, `X21`'s three limbs, the
+   join key, and the pre-registered dispositions. It is digest-recorded **before** the first drive or
+   emission exists in the tree, and the commit that adds it **precedes** every commit that adds a
+   drive or the instrument.
+2. The **APPEND-ONLY post-section** — beneath the marker at the foot of this file, written but empty
+   at freeze time, carrying its OWN separate digest once it is written.
+
+**Nothing above the freeze marker is edited after the freezing commit. Appends beneath the
+post-section marker are the only writes this artifact accepts.** A defect discovered in the frozen
+layer afterwards is published in the post-section as a separate fact, and the table is walked as
+written. This is the two-layer shape `spec356-manifest.md` §12.0 / §12.1 established in this
+lineage; predecessors in the evidence chain are `spec356-manifest.md`, `spec357b-trackergrade.ref`
+and this directory's `spec359-*` records.
+
+**A framing this artifact is bound by and does not contradict anywhere.** The 95 % → 33 % "falling
+reclaim fraction" is a ratio over the counted path's share — an instrument-derived quantity — and is
+**not** evidence that total reclamation degrades with width. Nothing here asserts, implies or builds
+on a claim in either direction about whether reclamation plateaus; that question is **not established
+either way** and its re-measurement from the durable layer (RSS + redb file size + WAL segment
+retention + a store-level live-vs-dead tombstone census, ignoring every registry counter) belongs to
+the measurement increment `TODO-654`.
+
+---
+
+## 1. The writer record — Fact A's mechanical basis, re-verified at HEAD
+
+Re-read at HEAD (`packages/server-rust/src/tombstone_frontier_impl.rs`) while freezing this artifact.
+**Every one of the five sites and every line number below was confirmed unchanged; no drift was
+found.**
+
+| Variant | Site (verified at HEAD) | Post-state | §C's four-item form |
+|---|---|---|---|
+| `Stamp` | `:524-531` `self.epoch_tags.entry(epoch).or_default().push(TombstoneRef { … })` | `len >= 1` | "pushed at stamp (`:524`)" |
+| `Restore` | `:1036-1039` `self.epoch_tags.entry(epoch).or_default().push(tombstone_ref)` | `len >= 1` | "pushed at … restore (`:1036`)" |
+| `RebuildClear` | `:855` `self.epoch_tags.clear()` | entry **absent** | "cleared by rebuild (`:855`)" |
+| `RebuildInsert` | `:867-870` `if !live.is_empty() { self.epoch_max_seq.insert(e_rec, 0); self.epoch_tags.insert(e_rec, live); }` | guarded; `len >= 1` | folded into "rebuild" |
+| `DrainRemove` | `:979` `self.epoch_tags.remove(&e)` | whole entry removed | "removed by drain (`:979`)" |
+
+**Reconciliation with §C.** §C enumerates four items — pushed at stamp (`:524`) and restore
+(`:1036`), cleared by rebuild (`:855`), removed by drain (`:979`) — and concludes *"all pushes are
+non-empty"*. This record splits §C's single "rebuild" item into `RebuildClear` and `RebuildInsert`
+because the two sites have **different post-states** (absent vs guarded-non-empty) and must therefore
+be witnessed separately. **The two enumerations describe the same set of mutations**; the
+five-variant form is the one this artifact keeps.
+
+**This record is NOT a verdict.** It is Fact A of the origin paradox. It is guarded mechanically by
+`W7` rather than asserted, and it is offered as an INPUT, never as an answer to the origin question —
+a static enumeration cannot answer that question, which is precisely why the instrument exists.
+
+Supporting anchors re-verified at HEAD in the same read: `drained_epochs.insert(e)` at `:986`
+(unconditional on `refs.len()`); `let removed_refs = …` at `:990`; `removed_observed.insert(e, …)` at
+`:995`; `drained.extend(…)` at `:996`; `let watermark = self.durable_epoch_watermark;` at `:934`;
+`let ceiling = token.ceiling();` at `:953`.
+
+---
+
+## 2. The ORIGIN PARADOX — both horns, named
+
+Two established facts are in direct tension, and **at least one of them must be incomplete**.
+
+**Fact A.** No enumerated writer of `epoch_tags` at HEAD leaves an entry present-and-empty. `Stamp`
+and `Restore` push after `or_default()` (`len >= 1`); `RebuildInsert` is guarded by
+`if !live.is_empty()`; `RebuildClear` and `DrainRemove` leave the entry **absent**, not empty.
+
+**Fact B.** The 8 h data entails that the state IS reached in production. The chain, each conjunct
+independently citable at HEAD:
+
+1. `considered` increments **once per ref the drain RETURNED** (`service/domain/crdt.rs:1539`, inside
+   `for (epoch, r) in drained`), so `considered Δ = 0` means `drained` was empty on every pass in the
+   window.
+2. `DrainedByPrune` is assigned **only** where `drained_epochs.contains(&e)`
+   (`tombstone_frontier_impl.rs:1009-1011`), and `drained_epochs` is written **only** inside the
+   `Some(refs)` arm (`:986`). The one route that could have manufactured the attribution without a
+   removal — `EpochExitKind`'s `#[default] DrainedByPrune` — is refuted at source:
+   `finalize_epoch_exit` resolves `kind_hint == None` to `Unclassified` (`:738-751`), and the
+   `#[default]` is reachable only from `..Default::default()` in test fixtures.
+3. `drain_prunable_tombstones` has exactly **ONE** production caller (`crdt.rs:1521`), so no exit row
+   can be emitted by a drain that no pass record wraps.
+
+Given 1–3, 440 `DrainedByPrune` exits with `considered Δ = 0` entail 440 removals that returned
+`Some(refs)` with `refs.len() == 0`.
+
+**The horns.**
+
+- **`H-origin-1`** — the writer enumeration is incomplete in a way a static read cannot see: a route
+  that empties a vector without being one of the five enumerated mutation expressions, or an
+  interleaving that produces the state without any single writer producing it.
+- **`H-origin-2`** — the inference chain is pin-specific. The 8 h cells ran on SPEC-357-era binaries
+  (`feb85268…` / `8a60f135…`); SPEC-359 has since rewritten the drain's bracket
+  (`begin_sweep` / `end_sweep`, the hoisted `ceiling`, `prune_ceiling()` as the boundary authority).
+  The instrument lands at **HEAD** and will be read at **HEAD**. If the origin was pin-specific, the
+  instrument may observe nothing — **which is an informative result, not an instrument failure**, and
+  is pre-registered as such in §8 so the measurement increment cannot misread silence.
+
+**Neither horn is chosen here.** Choosing one would be a naming, and no data in this increment's
+scope can support one.
+
+---
+
+## 3. `DT` — the DECISION TABLE (frozen)
+
+Evaluated in **this order**. `R4` is first and fail-closed.
+
+| Row | Antecedent (frozen) | Verdict | Consequence |
+|---|---|---|---|
+| **R4** | Step 0 fails on any leg: an unmutated suite is not green, **or** a mutation arm does not RED **against the assertion the witness set sites it on** — `W2` → **the EXIT ROW**; `W5` → **the rendered `refs_returned`**; `W6` → **its selected arm's rendered line (PRIMARY) or its arm's render (FALLBACK)**; and **NO mutation arm is graded against `X21-c`'s Δ** — **or** the planted positive control does not fire, **or** the negative control does not show the line absent | `INDETERMINATE-INSTRUMENT` | **Fail-closed.** `R1`–`R3` are `NOT EVALUATED`. No verdict, no fix, no armed instrument shipped. The failed leg is named and routed to `TODO-634` by id. |
+| **R1** | Obligation **A** holds — the planted antecedent reproduces `AttributedWithoutObservation` **through the SERVICE**, with **each term read over the transport that carries it**: `considered = 0 ∧ empty_drain = true` off the **rendered pass row** (`crdt.rs:1740-1746`, `X21-b`) **and** `epochs_drained` contributing **Δ = 0** to `topgun_or_prune_epochs_drained_total` off the **Prometheus render** (`X21-c`), because that field has **no `tracing` transport at HEAD** and this increment adds none — **AND** obligation **B** holds (the instrument is delivered at the adopted siting with the adopted field set, and its emission is **proven correct over the rendered transport**, including `W5`'s observation arm, `W4`'s negative control, `W8`'s positive control and `W6`'s interleaving leg **on whichever of its two pre-registered arms `G5` selected**) | `CONFIRMED-AND-ARMED` | Publish. Land `FS` row `R1` — the two doc-contracts and nothing else. **Route the ORIGIN question, with the instrument armed, to the measurement increment — `TODO-654`, by id** — carrying both horns of the origin paradox, the `NOT-OBSERVED-AT-HEAD` pre-registration and the null-read disposition (§8). |
+| **R2** | Obligation **A** holds **AND** obligation **B** does not (the line cannot be proven to emit correctly over the rendered transport) | `ARMED-UNPROVEN ⇒ NOT ARMED` | The instrument is **NOT shipped**. An emitter whose rendered form is unproven is exactly the class where a wire format defeats its own extractor, and shipping one would hand the measurement increment a transport that may silently produce nothing. Land no fix; publish what is and is not established; route both halves. |
+| **R3** | Obligation **A** does **not** hold | `NOT-REPRODUCED` | The fix is **NOT WRITTEN** — the rule firing, not an omission. **AND — this row's principal content:** §C's inference chain (conjuncts 1–3 in §2) *predicts* exactly this pair, so a non-reproduction **contradicts the chain**, and that contradiction is published as this increment's headline finding, with the failing conjunct identified if identifiable. Route to the **conservative sweep** (extraction synthesis §7 F5, the RisingWave `start_full_gc` shape), pre-registered here so it is not decided at execution. |
+
+**`DT` is not editable after this digest is recorded.** Every row this increment prints is computed
+live through `classify_drain_attribution` (`packages/server-rust/src/tombstone_frontier.rs`) rather
+than asserted in prose.
+
+**The classifier's reading, frozen with the table.** Attribution side =
+`exit.bytes_freed_attributed > 0`. Observation side = the **disjunction**
+`exit.removed_refs_observed > 0 || pass.considered > 0 || !pass.empty_drain`. The four classes are
+the 2×2 fold of those two booleans: `(true, true) → ObservedAndCounted`,
+`(true, false) → AttributedWithoutObservation`, `(false, true) → ObservedWithoutAttribution`,
+`(false, false) → Silent`. The observation side is a disjunction deliberately, so the divergent
+verdict may only be named when **every** channel through which an observation could have surfaced is
+silent — which makes `AttributedWithoutObservation` fail-closed rather than merely likely.
+
+---
+
+## 4. `FS` — the FIX-SHAPE MAPPING (frozen)
+
+The distinction it turns on, stated normatively because the whole hazard lives here.
+
+- **Defect (i) — ATTRIBUTION.** An empty removal is reported as a **successful drain**:
+  `bytes_freed_attributed = slot.stamped_bytes` (`tombstone_frontier_impl.rs:757-758`) and
+  `drained_refs_total += slot.refs_at_entry` (`:733`) are **entry-side** quantities — §C calls the
+  attribution *"tautological (same field as stamped bytes) … perfectly self-consistent and perfectly
+  misleading"* — while on the service side `PrunePassRecord` cannot distinguish *"no epoch was
+  eligible"* from *"an eligible epoch was removed and returned zero refs"*. Fixing (i) makes the
+  **instrument honest**. **It frees zero bytes.**
+- **Defect (ii) — RECLAMATION.** Whether the **store content** behind those refs is ever dropped.
+  Under the antecedent the refs leave the index before reaching `prune_epoch_tombstones`, so their
+  durable tombstones are never dropped. Fixing (ii) frees bytes.
+
+**Normative anti-suppression clause.** The candidate fix is **NOT** making `drained_epochs.insert(e)`
+at `:986` conditional on `!refs.is_empty()`. That relabels the exit and **suppresses the signal**
+rather than fixing the reclamation: the refs are still gone from the index, the durable content is
+still un-dropped, and the ledger simply stops saying so — and it would delete the very rows the new
+instrument exists to explain. **Any implementation whose whole content is that conditional FAILS.**
+
+| Row | (i) attribution | (ii) reclamation |
+|---|---|---|
+| `R1` | **PARTIALLY DELIVERED, and the verdict says exactly that.** The observation terms already exist — `removed_refs_observed` / `removed_bytes_observed` landed earlier in this lineage — so the residual (i) gap is **service-side blindness** and **naming**. Delivered as: the removal-site line (obligation B's deliverable, which closes the blindness at the frontier), plus two doc-contracts naming `bytes_freed_attributed` / `drained_refs_total` as entry-side and `considered` / `empty_drain` / `epochs_drained` as unable to discriminate. **NO existing metric series' value or meaning changes.** | **NOT DELIVERED. ROUTED.** The origin is unknown; a reclamation fix without a named origin is exactly the wrong-shaped fix this family exists to avoid. Routed to the measurement increment (`TODO-654`) and thence to a fix carve. The **conservative sweep** remains the backstop shape and is out of scope. |
+| `R2` | **NOT DELIVERED.** | **NOT DELIVERED.** |
+| `R3` | **NOT WRITTEN.** | **NOT WRITTEN.** Route to the conservative sweep. |
+| `R4` | **NOT WRITTEN.** | **NOT WRITTEN.** |
+
+**No existing metric series' value or meaning is changed by any row.** The measurement increment must
+be able to compare its reads against this lineage's existing rounds; silently re-pointing
+`bytes_freed_attributed` at the observed total mid-lineage would break that comparability. The
+honesty repair is a **doc-contract plus a new line**, never a mutated series.
+
+---
+
+## 5. The instrument's extractor CONTRACT (frozen)
+
+This section is the contract a later reader — and the measurement increment's extractor — is entitled
+to rely on. It closes, **at source**, the class where an emitter's wire format defeats its own
+extractor.
+
+### 5.1 Target
+
+The instrument emits under its **own** `tracing` target, distinct from every existing one, so the
+line is selectable **without** a `kind` discriminant field — a siting choice that avoids widening the
+field set:
+
+```
+topgun_server::tombstone_frontier::removal
+```
+
+Existing neighbouring targets it must not be confused with, both in use at HEAD:
+`topgun_server::tombstone_frontier::residency` (the epoch entry row, the epoch exit row, and the
+pass row at `crdt.rs:1740-1746`) and `topgun_server::tombstone_frontier::settlement` (the per-epoch
+settlement row at `crdt.rs:1715-1727`).
+
+### 5.2 The eight fields, by NAME, in order
+
+**There is NO JSON blob. One `tracing` field per struct field.** The count is not asserted; the
+**names** are.
+
+| # | Field name | Type | Source at the site | Note |
+|---|---|---|---|---|
+| 1 | `ts` | see §5.4 | subscriber stamp **or** explicit `i64` Unix ms | **Display only. NEVER a join key.** |
+| 2 | `op_seq` | `u64` | `self.op_seq` | secondary ordering term |
+| 3 | `epoch` | `Epoch` = `u64` | `e` | **the join key**, populated on every row |
+| 4 | `refs_returned` | `u64` | `removed_refs` (`= refs.len()`) | **the OBSERVATION** |
+| 5 | `refs_at_entry` | `u64` | `self.epoch_slots.get(&e).map_or(0, \|s\| s.refs_at_entry)` | the **entry-side** term, carried beside the observation so the divergence is visible on one line |
+| 6 | `bytes_returned` | `u64` | `removed_bytes` | the observed byte total |
+| 7 | `watermark` | `Epoch` = `u64` | the `watermark` local (`:934`) | |
+| 8 | `ceiling` | `Epoch` = `u64` | the `ceiling` local (`:953`) | the licence the sweep token carried |
+
+**No field is `f64`.** Every numeric field is an unsigned integer count, byte total or epoch id; the
+only signed type admitted anywhere in the set is `ts` in its explicit rendering, which follows the
+tree's existing `entered_at_unix_ms: i64` convention. The field set is **§C's** and may **NOT** be
+widened, narrowed or relocated. No `kind` field is added; the target does that work.
+
+### 5.3 The separator rule, and the row's rendered shape
+
+The sited reader is the capture already living in `tombstone_frontier_impl.rs`'s test module —
+`FieldTextVisitor` (`:5152-5163`), `EventCapture` (`:5167-5182`), `captured_tracing_events`
+(`:5186-5194`). Its rendering is:
+
+- Each recorded field is appended as **`name=value` followed by exactly one ASCII space** — the
+  visitor writes `"{name}={value} "` for strings and `"{name}={value:?} "` for everything else, so a
+  `u64` renders as bare decimal digits.
+- Fields accumulate **in the order the emitting macro declares them**, i.e. the order of §5.2.
+- The row is **prefixed** with the target, and this is where the two in-tree visitors differ:
+
+| Visitor | Prefix format | Rendered row begins |
+|---|---|---|
+| `tombstone_frontier_impl.rs:5178` | `format!("target={} ", …)` — **NO leading space** | `target=topgun_server::tombstone_frontier::removal ts=…` |
+| `sim/tombstone_gc_proof.rs:815` | `format!(" target={} ", …)` — **WITH one leading space** | ` target=topgun_server::tombstone_frontier::removal ts=…` |
+
+**PINNED: the sited reader for obligation A's drive and for the instrument's rendered-text proofs is
+`tombstone_frontier_impl.rs`'s visitor, so the form consumed there is the NO-leading-space form.** A
+reader that matches `" target="` will not match a row captured by that visitor. On `W6`'s PRIMARY
+arm, where the assertion lives in `sim/tombstone_gc_proof.rs`, the **leading-space** form is the one
+consumed. This is a rendered-form difference of exactly the class this contract exists to pin, and
+neither form is "the" form — the reader's own visitor decides.
+
+**Field-boundary reading rule.** A term is read from a row that has **already been selected by its
+`target=` prefix**, and a match is made against `name=value` **including its trailing space**, with
+the field's start anchored at the row start or at a preceding space. Matching a bare substring
+without those anchors admits prefix collisions across fields and across rows and is not a compliant
+read.
+
+**No JSON blob, restated because it is the load-bearing half of this section:** every field above is
+an individual `tracing` field. Nothing on this line is a serialized structure, and no consumer should
+attempt to parse one.
+
+### 5.4 `ts` — BOTH permitted renderings, pre-registered
+
+Both of the following are compliant, and **both are pre-registered here, before the instrument
+exists**:
+
+- **(a) Subscriber stamp** — `ts` is not a recorded field at all; the configured subscriber renders
+  its own timestamp. Under this rendering the line carries **seven explicit fields** and the capture
+  above (which records only fields, not subscriber-formatted metadata) will show seven `name=value`
+  pairs and **no `ts=` pair**. This is compliant.
+- **(b) Explicit field** — `ts` is recorded as an explicit `i64` Unix-ms field, rendered
+  `ts=<digits> ` like any other. Used when the configured subscriber does not render one.
+
+The remaining **seven** fields are **always explicit** under both renderings. **Which of the two
+shipped is recorded in the append-only post-section** once the instrument renders, because that is
+exactly the kind of rendered-form detail this contract exists to make non-ambiguous.
+
+**`ts` is NEVER a join key under either rendering.**
+
+### 5.5 The slot-absent reading, pinned so it is not ambiguous at read time
+
+A restored-then-re-drained epoch has **no slot** — its slot was retired by `finalize_epoch_exit` on
+the first exit — so `refs_at_entry` renders `0` for it. Therefore:
+
+- **`refs_returned > 0 ∧ refs_at_entry == 0`** — the signature of a **restored-then-re-drained**
+  epoch. **Not** an origin observation.
+- **`refs_returned == 0 ∧ refs_at_entry > 0`** — **THE ORIGIN SIGNATURE**: the removal returned an
+  empty vector for an epoch that entered the index holding refs.
+
+**No extra field is added to disambiguate.** The field set is §C's and is not widened; the
+disambiguation is this reading rule.
+
+### 5.6 The instrument's siting and arming, frozen with the contract
+
+- **Exactly one emission site**, inside `drain_prunable`'s `Some(refs)` arm (`:979`–`:996`), adjacent
+  to the existing `removed_refs` / `removed_bytes` computation (`:990-994`) and **strictly before**
+  `drained.extend(…)` consumes the vector at `:996`. **No second site anywhere.**
+- It **reuses** `removed_refs` and `removed_bytes`, recomputes nothing, and introduces no new
+  index-proportional fold.
+- It fires only for **eligible** epochs (`:963`) — never on the dark fast path (`:941`), never on a
+  refused `begin_sweep` (`:948`).
+- **Unconditional. No new env knob.** An arming switch would create a mode in which the measurement
+  increment reads nothing and cannot tell why, which is the failure this instrument exists to
+  prevent.
+- **NOT registered with the metrics registry.** §C deliberately routed it to the log sink and away
+  from the metrics registry. No `counter!` / `gauge!` / `histogram!` / `describe_*` is added for it,
+  and `PruneRecordObserver` gains no method.
+
+### 5.7 The FULL rendered Prometheus series names `X21-c` reads
+
+Named in **full rendered form**, because the in-tree readers key on the exact series name and an
+absent series is a **hard error** rather than a zero (`rendered_counter`,
+`sim/tombstone_gc_proof.rs:1652-1659`; `rendered_value` returns `Option<&str>`,
+`tombstone_frontier_impl.rs:2895-2900`):
+
+```
+topgun_or_prune_considered_total
+topgun_or_prune_empty_drains_total
+topgun_or_prune_nonempty_drains_total
+topgun_or_prune_epochs_drained_total
+```
+
+(Constants `METRIC_PRUNE_CONSIDERED_TOTAL`, `METRIC_PRUNE_EMPTY_DRAINS_TOTAL`,
+`METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL`, `METRIC_PRUNE_EPOCHS_DRAINED_TOTAL`, all in
+`tombstone_frontier.rs`.)
+
+**The `Some("…")`-never-`None` reading rule.** Every assertion over these series must be written
+against `Some("…")`. `rendered_value` returns `None` for an absent series, and an assertion that
+tolerates `None` reads an absent series as a zero — which is precisely how a recorder bound in the
+wrong order passes vacuously. **An absent series must RED.**
+
+### 5.8 `W7`'s pinned `include_str!` scan surface, and the gap it does not close
+
+`include_str!` takes **literal paths resolved relative to the including file**, so the
+enumeration-completeness source test can only see the files it names. The pinned list, each path
+relative to `packages/server-rust/src/tombstone_frontier_impl.rs`:
+
+```rust
+include_str!("tombstone_frontier_impl.rs")   // every `self.epoch_tags` mutation lives here
+include_str!("service/domain/crdt.rs")       // the one production caller lives here
+```
+
+**The claim, at exactly the strength the mechanism supports.** `W7` REDs when a **sixth**
+`self.epoch_tags` writer appears **in `tombstone_frontier_impl.rs`**, or when a **second**
+non-`#[cfg(test)]` caller of `drain_prunable_tombstones` appears **in either scanned file**. It is
+**not** a whole-crate guarantee.
+
+**The named gap.** A production caller added in a **third, unscanned file would NOT RED.** That gap
+is named here rather than papered over. Closing it — a `std::fs` walk of `src/` from
+`CARGO_MANIFEST_DIR`, or an include list asserted against a directory listing — is **out of scope**
+for this increment and is routed **to `TODO-634`, BY ID** (not to `TODO-654`): a source-scan
+completeness guard is a **family** concern, not part of `TODO-654`'s durable-layer read. The routing
+is recorded in the append-only post-section, by id, without editing the tracker.
+
+Two facts hold the scope honest at HEAD, both re-verified while freezing this artifact:
+`self.epoch_tags` has exactly **five** mutating production sites, **all** in
+`tombstone_frontier_impl.rs`; and `drain_prunable_tombstones` has exactly **one** production caller,
+`crdt.rs:1521`, every other hit being inside `#[cfg(test)]`.
+
+---
+
+## 6. `X21`'s three limbs, and the join key
+
+### `X21-a` — record transport. RE-SITED, and its epistemic status changes with it
+
+The premise that obligation A's drive can hold the `PruneEpochResidencyRecord` and the
+`PrunePassRecord` **in-process** is **FALSE on the service path at HEAD** and is **withdrawn**:
+`prune_epoch_tombstones` returns `()` and never yields its `PrunePassRecord` local;
+`drain_prunable_tombstones` (`:2057`) returns `Vec<(Epoch, TombstoneRef)>` and consumes the exit
+records internally via `publish_epoch_exit` (`:2100-2102`); the only observer seam is
+`prune_observer`, a `Box<dyn PruneRecordObserver>` selected from `TOPGUN_PRUNE_RECORD` inside
+`TombstoneFrontier::new` (`:1329`, `:1354-1357`), with **no injection constructor**.
+
+Therefore **the record-shaped assertions bind to the RENDERED transport.** Both records are
+**reconstructed from the rendered `tracing` rows** — the exit row and the pass row
+(`crdt.rs:1740-1746`) — captured in-test, exactly as the in-tree precedent at
+`sim/tombstone_gc_proof.rs:978-982` does for a service-path drive. **NO injection constructor and no
+capturing-observer seam is added to `TombstoneFrontier`**, and no `pub` surface is added to make the
+drive possible: that would be a surface change whose only consumer is a test. **Surface ≢ transport
+here**, and the classifier is fed **reconstructed** values, so `X21-a` is a **rendered-transport**
+limb, not a struct-transport one.
+
+**Its rendered-row scope is bounded by what the rows actually render, and one term falls outside
+it.** The pass row carries exactly `kind`, `considered`, `empty_drain` — and **not**
+`epochs_drained`, which `crdt.rs:1704` sends only to `observe_pass` and thence to the Prometheus
+counter. `epochs_drained` is therefore **re-attributed to `X21-c`** and is **not** among the terms
+`X21-a` reconstructs. Reading it off a row would panic in the in-tree reader (`row_field`: *"field
+{name} is absent from row"*, `sim/tombstone_gc_proof.rs:844-851`), and adding it to the row is a
+production edit this increment forbids: **the rendered pass row is NOT widened on any row of `DT`.**
+
+### `X21-b` — line transport. THE LOAD-BEARING LIMB
+
+Assertions written against the **RENDERED** `tracing` text for (a) the new removal line, (b) the pass
+row (`crdt.rs:1740-1746`) and (c) the settlement row (`crdt.rs:1715-1727`). The extractor CONTRACT of
+§5 is the **frozen** half of this limb; the **exact rendered SAMPLE** is the append-only
+post-section's. This closes the extractor-defeat class **at source**, never by a downstream adapter,
+which is the whole reason §C routed the instrument to the log sink. `W4`'s negative control and
+`W8`'s positive control are part of this limb.
+
+### `X21-c` — metrics transport. REASONED N/A for the NEW LINE; LOAD-BEARING for `epochs_drained`
+
+Two **disjoint** scopes, and conflating them is an error this section exists to prevent.
+
+- **The new instrument has NO metrics transport — reasoned N/A.** §C deliberately routed it to the
+  log sink and away from the metrics registry, so asserting a metrics transport for it would
+  fabricate a consumer that does not exist. No `counter!` / `gauge!` / `histogram!` / `describe_*` is
+  added for it.
+- **`epochs_drained` IS read here, and ONLY here — LOAD-BEARING.** The limb is retained for
+  **obligation A**, over the **existing, unchanged** pass-counter family named in full in §5.7.
+- **WHY the Prometheus transport is readable for this witness.** The in-process drive binds its local
+  recorder **BEFORE** the frontier is constructed, and `MetricsPruneRecorder` resolves its handles
+  **once, at construction** (`:2443-2447`), touching each series with `increment(0)` so it renders
+  from the first scrape (`:2413-2421`). The recorder-binding gap that makes `tracing`'s
+  `set_default` a thread-local-only transport therefore **does not apply here** — the same asymmetry
+  SPEC-359's `R7` exploits when it reads `rendered_counter` off a spawned, `multi_thread` sweep
+  (`sim/tombstone_gc_proof.rs:1878-1892`).
+- **What makes this limb RED — at exactly the strength the mechanism supports.** The asserted
+  **Δ = 0** on `topgun_or_prune_epochs_drained_total` fails when:
+  1. **the plant did not take** — no eligible epoch was removed as planted; or
+  2. **the drain returned refs** — either of (1) or (2) moves the series; or
+  3. **the series renders ABSENT** under an inverted recorder binding, so `rendered_value` returns
+     `None` and the `Some("…")` reading rule of §5.7 fails on it.
+
+  Neither failure mode is silent.
+
+  **`W2`'s mutation is NOT a RED trigger for this limb, and the limb does not claim it is.** `W2`
+  gates `drained_epochs.insert(e)` at `:986`, and `drained_epochs` feeds **only** the exit
+  attribution (`:1009-1011`); the returned `drained` vector is built independently at `:996` from the
+  removed `refs` and is what `per_epoch` — hence `pass.epochs_drained` (`crdt.rs:1536-1541`, `:1704`)
+  — derives from. So under the planted antecedent `drained` is empty **with or without** `W2`, and
+  this limb's Δ stays 0 either way. **`W2`'s discriminating assertion is the EXIT ROW**, which is
+  where it REDs.
+
+### The join key
+
+**`epoch`** — populated on every removal line, every exit row and every settlement row — with
+**`op_seq` as secondary ordering**. **No wall-clock key anywhere. `ts` is a display field only and is
+explicitly NON-joinable.**
+
+---
+
+## 7. `KL-1` — recorder-before-frontier, and the two consequences that rest on it
+
+`MetricsPruneRecorder` resolves **every** metric handle **ONCE, at construction**
+(`tombstone_frontier_impl.rs:2443-2447`; `touched_counter` `:2413-2421` even `increment(0)`s each
+series so it renders from the first scrape), and `observe_pass` then increments those
+already-resolved handles (`:2609` for `epochs_drained`). `TombstoneFrontier::new`'s
+construction-order doc-contract (`:1308-1327`) binds every `/metrics` assertion in this increment.
+
+- **`KL-1(a)`** — **if the ordering is inverted**, every handle binds to a **no-op** for its whole
+  lifetime and the render assertion passes **vacuously**. This is why the recorder is bound **before**
+  the frontier is constructed (`metrics::with_local_recorder`; in-tree shapes at
+  `tombstone_frontier_impl.rs:3050-3055` and `sim/tombstone_gc_proof.rs:1524-1530`), and why §5.7's
+  `Some("…")` rule exists as its detector.
+- **`KL-1(b)`** — **because the handles resolve at construction, an increment issued from a SPAWNED
+  task still lands on the recorder that was bound when the frontier was built.** The recorder-binding
+  gap that makes `tracing`'s thread-local `set_default` unreadable across a spawn does **not** apply
+  to metrics. This is exactly why SPEC-359's `R7` can read `rendered_counter` off a `multi_thread`,
+  spawned-sweep race and get a real number rather than an empty capture. `X21-c`'s readability and
+  `W6`'s fallback arm both rest on `KL-1(b)` and on nothing else.
+
+---
+
+## 8. Dispositions pre-registered here rather than decided at execution
+
+### 8.1 The null-read disposition
+
+This increment's payoff is conditional on `H-origin-2` being false, so the null branch is decided
+**here**.
+
+- **If the `Some(vec![])` state is NOT reproducible in-process, the instrument STILL SHIPS** (subject
+  to `DT`), and the ORIGIN question routes to `TODO-654`'s pre-registered readings.
+- **`NOT-OBSERVED-AT-HEAD` is informative, not a failure.** If the instrument observes no
+  `refs_returned == 0 ∧ refs_at_entry > 0` line at HEAD, that bears on horn `H-origin-2`
+  (pin-specificity). `W4`'s **negative control** is what licenses that reading — it proves the line is
+  **absent** when the arm is not reached, so silence is meaningful rather than ambiguous — and `W8`'s
+  **positive control** is what rules out the third reading, a window that never exercised a non-dark
+  eligible drain.
+- **This increment does NOT extend into diagnosis under ANY outcome:** no second drive, no soak cell,
+  no new hypothesis round, no re-derivation of the 8 h entailment. **A null read ROUTES; it does not
+  stall, and it does not reopen the diagnosis line the escalation clause hard-stopped.**
+
+### 8.2 Routing, by id, without editing any tracker
+
+- **The ORIGIN question, with the instrument armed → `TODO-654`** (the measurement increment,
+  *"Plateau re-measurement from the DURABLE layer…"*, `depends_on: TODO-634`), carrying both horns,
+  the `NOT-OBSERVED-AT-HEAD` pre-registration and §8.1's null-read disposition. `TODO-654` already
+  carries this instrument's production read with three pre-registered readings (a) / (b) / (c).
+  **Reading the instrument under production or soak load is `TODO-654`'s job, not this increment's.**
+- **`W7`'s unscanned-third-file residual (§5.8) → `TODO-634`**, by id, because a source-scan
+  completeness guard is a family concern.
+- **Any `R4` failed leg → `TODO-634`**, by id.
+
+**All routing is BY ID. `.specflow/todos/TODO-634.md` is byte-unedited by this increment, as are
+`INVARIANTS.md` and `scripts/check-invariants.sh`.** This increment's execution creates **no new
+tracker**: the hand-off is a citation of an existing id.
+
+### 8.3 The simulation-test rule position, stated explicitly rather than left implicit
+
+`CLAUDE.md`'s rule is that changes to domain services under `packages/server-rust/src/service/domain/`
+be accompanied by a simulation test exercising the **changed behaviour** under at least one fault
+scenario. **This increment's only `service/domain/` touch is a verdict-conditional DOC-CONTRACT on
+`crdt.rs` (`FS` row `R1`) — zero behaviour change, provable by diff.** The rule therefore has **no
+changed behaviour as its subject** here, and to the extent it names *"network partition or node
+failure"* specifically, **that clause is claimed EXEMPT, explicitly and on the record.**
+
+**A simulation witness is nevertheless supplied**, because the instrument is a concurrency
+observation and deserves one: `W6`, sited in this family's existing sim home
+(`sim/tombstone_gc_proof.rs`), under the **interleaving** fault dimension that file's scaffold can
+actually drive — concurrent stamps and cursor ACKs released from a barrier across the drain. **There
+is NO `SimNetwork` partition / delay / reorder leg**, because that file's own in-tree contract
+records that its scaffold drives the interleaving dimension and not a `SimNetwork` partition, and
+asserting a fault the file cannot inject grades vacuously. **A sim leg exists on BOTH of `W6`'s
+pre-registered arms** — the PRIMARY grades the rendered line there, the FALLBACK grades the
+`topgun_or_prune_*` render there — so the simulation obligation is discharged in
+`sim/tombstone_gc_proof.rs` **either way**, and only the *granularity* of the sim assertion differs.
+**There is no silent third option.**
+
+### 8.4 The pre-shaped but UNRUN long cell
+
+**No soak cell, no width-1000 matrix, no run of one hour or longer, no `soak_harness` runner
+invocation, and no new measurement lineage anywhere on this branch.** If a long cell ever looks
+unavoidable, it is **PRE-SHAPED and ROUTED BACK to `TODO-634`, never run here**.
+
+**The pre-shaped cell, described and LEFT UNRUN:**
+
+```
+duration : 28,800 s   (8 h)
+n        : 1          (one cell; no matrix, no sweep, no second arm)
+purpose  : observe, over a window comparable to the one whose data
+           entails Fact B, whether the removal-site instrument at HEAD
+           emits any line matching the origin signature
+           (refs_returned == 0 AND refs_at_entry > 0), and thereby bear
+           on horn H-origin-2 (pin-specificity).
+status   : NOT RUN by this increment. Routed to TODO-634 by id, and its
+           production read belongs to TODO-654.
+```
+
+It is described here so that a later reader can see the shape that was declined, and so that the
+decision not to run it is a recorded fact rather than an omission.
+
+---
+
+## 9. Rust type-mapping record
+
+`PROJECT.md`'s Rust type-mapping rules, discharged item by item against `DrainAttributionClass`:
+
+- **Enums over strings for known value sets** — satisfied; the classification is an `enum`, never a
+  `String`.
+- **No `f64` for integer-semantic fields** — no subject; the enum carries no numeric field. The
+  instrument's own fields are `u64` counts, byte totals and epoch ids (plus `ts` as `i64` Unix ms in
+  its explicit rendering) — **never `f64`**.
+- **No `type` / `r#type` field on message structs** — satisfied; the enum has no fields.
+- **`Default` on payload structs with 2+ optional fields** — no subject; it is not a payload struct
+  and derives no `Default` (there is no defensible default class, and a defaulted classification
+  would be exactly the silent-misread hazard this lineage keeps finding).
+- **`serde` / `rename_all` / `skip_serializing_if` / `to_vec_named()`** — **no subject.**
+  `DrainAttributionClass` **does not cross the MsgPack wire**; it is in-process only, so **no `serde`
+  derive is added**. **If any later implementation adds a `Serialize`, the full `PROJECT.md`
+  checklist applies in the same commit.**
+
+The instrument emits `tracing` fields, not a serialized struct.
+
+---
+
+## 10. What this frozen layer does NOT contain
+
+Deliberately, and each is the append-only post-section's:
+
+- the **exact rendered SAMPLE** of the instrument's line;
+- **which of `ts`'s two renderings shipped**;
+- **which arm `W6` took** (PRIMARY or DECLARED FALLBACK) and the capture-helper choice that went with
+  it;
+- the **published verdict** and the one-sentence `FS` (i)/(ii) statement;
+- the executed routings by id.
+
+The sample is explicitly **NOT** under this layer's digest.
+
+<!-- FROZEN-LAYER-END -->
+
+## Frozen-layer digest
+
+**Convention, stated so a later reader can reproduce it exactly.** The digest is the **sha256 of
+every byte of this file strictly ABOVE the `<!-- FROZEN-LAYER-END -->` marker line** — that is, from
+the first byte of the file up to and including the newline that terminates the line immediately
+preceding the marker. The marker line itself, this digest block, and everything below are
+**excluded**, which is what makes the digest computable before the digest block was written and
+stable after it was.
+
+**Reproduce it with exactly this command, run from the repository root:**
+
+```sh
+sed -n '1,/^<!-- FROZEN-LAYER-END -->$/p' \
+  packages/server-rust/benches/soak_harness/evidence/spec360-origin-instrument-ruling.md \
+  | sed '$d' | shasum -a 256
+```
+
+```
+sha256 = 3efa6d963ee67564b629279f7ea96c727a91850343978fc4986696920ed0e55c
+```
+
+<!-- APPEND-ONLY POST-SECTION -->
+
+## Append-only post-section
+
+**EMPTY AT FREEZE TIME. Intentionally so.**
+
+**Appends beneath this marker are the ONLY writes this artifact accepts.** Nothing above
+`<!-- FROZEN-LAYER-END -->` may be edited after the commit that froze it; a defect found in the
+frozen layer afterwards is published **here**, as a separate fact, and the frozen table is walked as
+written.
+
+This post-section carries its **OWN separate digest**, computed over its own bytes and recorded here
+by the group that writes it. That digest does not exist yet, because this section does not yet have
+content.
+
