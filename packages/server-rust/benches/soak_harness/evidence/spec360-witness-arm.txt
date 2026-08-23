@@ -14,6 +14,11 @@ Section index (filled in as each group lands its witness):
   W1  — unmutated baseline                                      [below]
   W3  — planted positive control for the classifier             [below]
   W2  — RECIPE ONLY, execution deferred to G4                   [below]
+  ORIGIN SIGNATURE — the planted antecedent's own removal line   [below]
+  W8  — the instrument's POSITIVE control                       [below]
+  W4  — the instrument's NEGATIVE control, both paths           [below]
+  W5  — the instrument's OBSERVATION arm                        [below]
+  W6  — ARM SELECTION only; implementation is G6's              [below]
 
 ================================================================================
 W7 — ENUMERATION COMPLETENESS (MECHANICAL SOURCE TEST)
@@ -1019,6 +1024,270 @@ installed. Under the planted antecedent the capture holds exactly TWO rows: one
 settlement row is emitted per DRAINED epoch, and the drain returned none). The
 non-vacuity gate asserts non-empty plus that per-kind census before any term is
 read.
+
+================================================================================
+THE ORIGIN SIGNATURE — the planted antecedent's own removal line
+================================================================================
+
+Owner group : G5
+Branch      : sf-360-origin-instrument
+Test        : tombstone_frontier_impl::tests::
+              the_removal_line_carries_the_origin_signature_for_a_present_but_empty_entry
+
+Not a mutation arm. This is the reading the instrument exists to make visible,
+recorded here because the three readings only mean something as a SET.
+
+The fixture is the one G4's drive already uses: epoch 1 rolls over holding one
+ref (so its slot records `refs_at_entry = 1`), and its `epoch_tags` entry is then
+replaced, through the in-module lock bypass, with a PRESENT-BUT-EMPTY vector. The
+drive goes through the production prune service, with the capture wrapping the
+service entry point and nothing else.
+
+COMMAND
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+    cargo test --release -p topgun-server --lib removal_line -- --nocapture
+
+RENDERED LINE (verbatim; `ts` varies per run, every other term is fixed by the
+fixture; note the single TRAILING space — the visitor writes `name=value ` per
+pair and never trims):
+
+target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787505799565 op_seq=2 epoch=1 refs_returned=0 refs_at_entry=1 bytes_returned=0 watermark=1 ceiling=2 
+
+READING: `refs_returned = 0` beside `refs_at_entry = 1`. The removal returned an
+EMPTY vector for an epoch that entered the index holding refs. That pair on ONE
+line is the origin signature the frozen extractor contract pins, and it is now
+visible without a reader having to join two rows.
+
+The line is selected by TARGET ALONE. It carries no `kind` discriminant, because
+its own target does that work — which is what keeps the field set at exactly the
+eight it was adopted with rather than widening it for the reader's convenience.
+
+Result: PASS.
+
+
+================================================================================
+W8 — THE INSTRUMENT'S POSITIVE CONTROL
+================================================================================
+
+Owner group : G5
+Test        : tombstone_frontier_impl::tests::
+              the_removal_line_reports_a_genuinely_non_empty_removal_as_positive
+
+The same one-epoch fixture, UNPLANTED, driven through the same production prune
+service. Epoch 1's index entry holds its one genuine ref, so the removal returns
+a non-empty vector.
+
+RENDERED LINE (verbatim):
+
+target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787505799565 op_seq=2 epoch=1 refs_returned=1 refs_at_entry=1 bytes_returned=4 watermark=1 ceiling=2 
+
+ASSERTED, on the rendered text, BY FIELD NAME: `refs_returned > 0` AND
+`refs_at_entry > 0` AND `bytes_returned > 0`.
+
+WHY THIS ARM EXISTS. Without it, a downstream reader of a window containing no
+zero-returned lines could not tell "the arm was reached and always returned refs"
+from "this instrument cannot report a positive at all". With it, and with the
+negative control below, all THREE readings the instrument can produce — silent,
+zero-returned, positive — are exercised before it ships.
+
+Result: PASS.
+
+
+================================================================================
+W4 — THE INSTRUMENT'S NEGATIVE CONTROL, ON BOTH PATHS THAT SKIP THE ARM
+================================================================================
+
+Owner group : G5
+Test        : tombstone_frontier_impl::tests::
+              the_removal_line_is_absent_on_both_paths_that_skip_the_removal_arm
+
+This is the arm that makes SILENCE from the instrument meaningful rather than
+ambiguous. Both paths that reach the drain without reaching the removal site are
+covered, and they are covered separately because they are different mechanisms.
+
+ARM (a) — NO ELIGIBLE EPOCH, with the watermark NOT zero.
+  The unplanted fixture is driven twice through the prune service. The FIRST pass
+  removes epoch 1 — and the test ASSERTS that it emitted exactly one removal
+  line, so the arm's premise (there is nothing left to remove) is ESTABLISHED
+  rather than assumed. The SECOND pass finds an empty eligible set while the
+  durable watermark is still 1, so the silence is attributable to ELIGIBILITY and
+  not to the dark fast path.
+  Observed: ZERO rows on the removal target; the capture itself NON-EMPTY.
+
+ARM (b) — THE DARK FAST PATH.
+  A frontier whose durable watermark is left at 0. The drain returns before it
+  opens a sweep at all, so no epoch is even considered.
+  Observed: ZERO rows on the removal target; the capture itself NON-EMPTY.
+
+THE NON-VACUITY GATE, on both arms. Each arm asserts its capture is NON-EMPTY
+BEFORE reading an absence off it. A drive whose transport produced nothing would
+therefore RED rather than pass as "no removal lines" — an absence read off an
+empty capture is not evidence of anything.
+
+Result: PASS, both arms.
+
+
+================================================================================
+W5 — THE INSTRUMENT'S OBSERVATION ARM  (the most important witness here)
+================================================================================
+
+Owner group : G5
+
+WHAT IT PROVES. That `refs_returned` is an OBSERVATION — read from the vector the
+index removal itself returned — and not a second copy of the entry-side slot. If
+both terms came from the slot, the line would reproduce, in a new place, exactly
+the tautology this family has been trying to escape: a self-consistent and
+perfectly misleading pair of numbers that can never disagree.
+
+MUTATION APPLIED, verbatim (in `drain_prunable`'s `Some(refs)` arm):
+
+    -                    refs_returned = removed_refs,
+    +                    refs_returned = self.epoch_slots.get(&e).map_or(0, |s| s.refs_at_entry),
+                         refs_at_entry = self.epoch_slots.get(&e).map_or(0, |s| s.refs_at_entry),
+
+This is the MINIMAL faithful encoding of the tautology: one expression swapped
+for the one beside it, nothing else touched.
+
+OUTPUT, verbatim:
+
+  ORIGIN-INSTRUMENT | planted removal row | target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506117445 op_seq=2 epoch=1 refs_returned=1 refs_at_entry=1 bytes_returned=0 watermark=1 ceiling=2 
+  ORIGIN-INSTRUMENT | positive removal row | target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506117445 op_seq=2 epoch=1 refs_returned=1 refs_at_entry=1 bytes_returned=4 watermark=1 ceiling=2 
+
+  thread 'tombstone_frontier_impl::tests::the_removal_line_carries_the_origin_signature_for_a_present_but_empty_entry' (3291926) panicked at packages/server-rust/src/tombstone_frontier_impl.rs:6192:9:
+  assertion `left == right` failed: OBSERVATION ARM — `refs_returned != refs.len()`: the line must report what the index removal actually returned (an EMPTY vector here), not the entry-side `refs_at_entry` the slot still carries. A line on which refs_returned mirrors refs_at_entry is a second copy of the slot, not an observation: target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506117445 op_seq=2 epoch=1 refs_returned=1 refs_at_entry=1 bytes_returned=0 watermark=1 ceiling=2 
+    left: 1
+   right: 0
+
+  test tombstone_frontier_impl::tests::the_removal_line_is_absent_on_both_paths_that_skip_the_removal_arm ... ok
+  test tombstone_frontier_impl::tests::the_removal_line_reports_a_genuinely_non_empty_removal_as_positive ... ok
+  test tombstone_frontier_impl::tests::the_removal_line_carries_the_origin_signature_for_a_present_but_empty_entry ... FAILED
+
+  test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 1861 filtered out
+
+THE DISCRIMINATING ASSERTION IS NAMED IN THE FAILURE TEXT, verbatim:
+`refs_returned != refs.len()`.
+
+WHICH ARM DISCRIMINATES, recorded because it is informative rather than
+incidental: the POSITIVE control stayed GREEN under this mutation. In that arm
+`refs.len()` and `refs_at_entry` are both 1, so the swap is invisible there. Only
+the ORIGIN-SIGNATURE arm — where the observation is 0 and the slot says 1 —
+discriminates. A witness set that carried only a positive control would have
+graded this mutation green and shipped a tautology believing it was an
+observation.
+
+REVERT
+  git checkout packages/server-rust/src/tombstone_frontier_impl.rs
+
+RE-RUN AFTER REVERT (verbatim):
+
+  ORIGIN-INSTRUMENT | positive removal row | target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787505799565 op_seq=2 epoch=1 refs_returned=1 refs_at_entry=1 bytes_returned=4 watermark=1 ceiling=2 
+  ORIGIN-INSTRUMENT | planted removal row | target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787505799565 op_seq=2 epoch=1 refs_returned=0 refs_at_entry=1 bytes_returned=0 watermark=1 ceiling=2 
+  test tombstone_frontier_impl::tests::the_removal_line_reports_a_genuinely_non_empty_removal_as_positive ... ok
+  test tombstone_frontier_impl::tests::the_removal_line_is_absent_on_both_paths_that_skip_the_removal_arm ... ok
+  test tombstone_frontier_impl::tests::the_removal_line_carries_the_origin_signature_for_a_present_but_empty_entry ... ok
+
+  test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1861 filtered out
+
+Result: RED under the mutation, naming its discriminating assertion; GREEN after
+revert. EARNED.
+
+
+================================================================================
+W6 — ARM SELECTION.  IMPLEMENTATION IS G6's; THIS SECTION RECORDS THE DECISION
+      AND THE EMPIRICAL EVIDENCE BEHIND IT.
+================================================================================
+
+Owner group : G5 (selection only)
+
+SELECTED: **PRIMARY** — the spawned drain future carries the capture subscriber
+with it, and the sim leg asserts the branch's RENDERED LINE.
+
+The selection was made EMPIRICALLY, not by reading. A throwaway probe was
+inserted into the sim file, compiled, run in BOTH directions, and then removed;
+the sim file is byte-unedited at handoff (its blob hash is unchanged from the
+base commit, verified with `git rev-parse HEAD:<path>`).
+
+PRECONDITIONS VERIFIED FIRST
+  - `tracing` resolves to 0.1.44 in Cargo.lock, so
+    `tracing::instrument::WithSubscriber` is available.        CONFIRMED
+  - Uses of `with_subscriber` / `WithSubscriber` anywhere under
+    packages/server-rust/src: ZERO. This is a new-to-the-tree
+    construct and is called out as one.                        CONFIRMED
+
+THE PROBE. The existing race scaffold was used unchanged in shape: a shared
+2-party barrier, a spawned cursor ACK and a spawned prune pass released together,
+under the existing `#[tokio::test(flavor = "multi_thread")]` flavour. The only
+change was the one the PRIMARY arm calls for:
+
+    let subscriber = tracing_subscriber::registry().with(RowCapture(sink.clone()));
+    let dispatch   = tracing::Dispatch::new(subscriber);
+    let _guard     = tracing::dispatcher::set_default(&dispatch);   // the test thread
+    ...
+    let sweep = tokio::spawn(
+        async move { barrier.wait(); prune_epoch_tombstones(..).await; }
+            .with_subscriber(dispatch.clone()),                     // the spawned task
+    );
+
+  — i.e. the `Dispatch` is built ONCE, a reference goes to the test thread via
+  `tracing::dispatcher::set_default`, and a CLONE travels with the spawned
+  future. The runtime flavour and the scaffold's thread model are UNCHANGED.
+
+COMMAND
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+    cargo test --profile ci-sim --features simulation -p topgun-server --lib \
+    -- probe_primary_arm --nocapture
+
+DIRECTION 1 — WITH `.with_subscriber(dispatch)` (output verbatim):
+
+  PROBE | total rows 16 | removal rows 5
+  PROBE |  target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506278401 op_seq=10 epoch=1 refs_returned=1 refs_at_entry=1 bytes_returned=2 watermark=1000 ceiling=6 
+  PROBE |  target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506278401 op_seq=10 epoch=3 refs_returned=1 refs_at_entry=1 bytes_returned=2 watermark=1000 ceiling=6 
+  PROBE |  target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506278401 op_seq=10 epoch=2 refs_returned=1 refs_at_entry=1 bytes_returned=2 watermark=1000 ceiling=6 
+  PROBE |  target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506278401 op_seq=10 epoch=4 refs_returned=1 refs_at_entry=1 bytes_returned=2 watermark=1000 ceiling=6 
+  PROBE |  target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506278401 op_seq=10 epoch=5 refs_returned=1 refs_at_entry=1 bytes_returned=2 watermark=1000 ceiling=6 
+  test sim::tombstone_gc_proof::tests::probe_primary_arm_with_subscriber ... ok
+
+DIRECTION 2 — THE SAME PROBE WITHOUT `.with_subscriber(...)`, everything else
+identical (output verbatim):
+
+  PROBE | total rows 0 | removal rows 0
+
+  (the assertion was inverted for this direction so the run would report rather
+  than abort; the number that matters is the ZERO.)
+
+WHAT THE TWO DIRECTIONS ESTABLISH TOGETHER. The rendered line is observable
+across the spawn IF AND ONLY IF the subscriber travels with the future. Direction
+2 reproduces exactly the empty capture the sim file's own doc-contract predicts
+for a thread-local `set_default` under a multi-threaded runtime — so a sim leg
+that asserted a rendered line over a spawned drain WITHOUT carrying the
+subscriber would be reading an empty capture and passing vacuously. Direction 1
+shows the mechanism closes that gap. The selection is therefore evidenced in both
+directions, not merely in the one that succeeds.
+
+Note the rendered form in the probe output: rows captured by the SIM file's
+visitor begin with a LEADING SPACE before `target=`, unlike the frontier file's
+visitor. G6's sim-side reader must consume the leading-space form.
+
+WHY PRIMARY RATHER THAN THE FALLBACK. The instruction is explicit that there is
+no silent third option and that if PRIMARY is selectable it is selected. It is
+selectable: the adaptation is confined to the already-counted sim file, needs no
+production edit, no new counted file, no change of runtime flavour and no change
+to the scaffold's thread model — and it grades the sim leg at LINE granularity,
+which is strictly stronger than the fallback's metrics granularity for an
+instrument whose whole deliverable is a rendered line.
+
+WHAT G6 STILL OWES ON THIS ARM (the selection does not discharge the witness):
+  - the leg proper: read which of the two barrier orderings the round took and
+    assert THAT branch's consequences, never a disjunction both branches satisfy;
+  - the non-emptiness gate BEFORE any term is read, so an unobserved transport
+    REDs instead of passing;
+  - the mutation arm: with the observation mutation applied, this leg must RED
+    too;
+  - the module doc-contract re-wording the arm entails (recorded in the ruling
+    artifact's post-section).
+
+Result: PRIMARY SELECTED, empirically, both directions. Probe removed; sim file
+byte-unedited.
 
 ================================================================================
 (next witness section appends below this line)
