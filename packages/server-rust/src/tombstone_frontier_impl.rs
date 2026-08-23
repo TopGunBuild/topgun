@@ -6077,6 +6077,248 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // The removal-site ORIGIN instrument, read over the transport its consumer
+    // will actually read: the rendered `tracing` line, never an in-process struct.
+    // -----------------------------------------------------------------------
+
+    /// The `tracing` target the removal line is published on. It is distinct from the
+    /// residency target, which is what lets the line be selected by TARGET ALONE — no `kind`
+    /// discriminant field is added to it, and none is needed.
+    const REMOVAL_TARGET: &str = "topgun_server::tombstone_frontier::removal";
+
+    /// The instrument's field set, by NAME and in the order the emitting macro declares them.
+    /// The COUNT is not what is asserted; the names are.
+    const REMOVAL_FIELDS: [&str; 8] = [
+        "ts",
+        "op_seq",
+        "epoch",
+        "refs_returned",
+        "refs_at_entry",
+        "bytes_returned",
+        "watermark",
+        "ceiling",
+    ];
+
+    /// Every captured row published on `target`, selected by TARGET ALONE.
+    ///
+    /// [`rows_of_kind`] needs a `kind=` discriminant; the removal line deliberately carries
+    /// none, because its own target does that work without widening the field set.
+    fn rows_of_target<'a>(rows: &'a [String], target: &str) -> Vec<&'a str> {
+        let target_tok = format!("target={target}");
+        rows.iter()
+            .map(String::as_str)
+            .filter(|row| {
+                row.split_whitespace()
+                    .any(|tok| tok == target_tok.as_str())
+            })
+            .collect()
+    }
+
+    fn null_prune_deps() -> (RecordStoreFactory, KeyWriterRegistry) {
+        (
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            ),
+            KeyWriterRegistry::new(),
+        )
+    }
+
+    /// Drive a frontier through the PRODUCTION prune service with a `tracing` capture
+    /// installed, and hand back every rendered row the drive produced.
+    ///
+    /// The capture wraps the service entry point and nothing else, so the fixture's own stamp
+    /// and rollover rows are not counted among the drive's output.
+    fn captured_rows_over_service_drive(
+        f: &TombstoneFrontier,
+        factory: &RecordStoreFactory,
+        key_writer: &KeyWriterRegistry,
+    ) -> Vec<String> {
+        captured_tracing_events(|| {
+            block_on(crate::service::domain::crdt::prune_epoch_tombstones(
+                f, factory, key_writer,
+            ));
+        })
+    }
+
+    /// Assert the instrument's eight fields are all present on `row` BY NAME, and hand the row
+    /// back. [`row_field`] panics naming the absent field, so a narrowed or relocated field set
+    /// REDs here rather than surfacing as a puzzling parse further down.
+    fn assert_removal_row_field_set(row: &str) {
+        for name in REMOVAL_FIELDS {
+            let _ = row_field(row, name);
+        }
+    }
+
+    /// THE ORIGIN SIGNATURE, on the rendered line: a removal that returned an EMPTY vector for
+    /// an epoch that entered the index holding refs.
+    ///
+    /// This is the reading the whole instrument exists to make visible. `refs_returned` is the
+    /// OBSERVATION — it is read from the vector `epoch_tags.remove` itself returned — while
+    /// `refs_at_entry` is read from the slot. A line on which the two are the same number by
+    /// construction would reproduce the tautology this lineage is trying to escape, in a new
+    /// place; the mutation arm that swaps one for the other is what proves they are not.
+    #[test]
+    fn the_removal_line_carries_the_origin_signature_for_a_present_but_empty_entry() {
+        let f = one_epoch_frontier(true);
+        let (factory, key_writer) = null_prune_deps();
+        let rows = captured_rows_over_service_drive(&f, &factory, &key_writer);
+
+        // Non-vacuity gate: the terms below are read off a capture that is asserted to exist
+        // first, so a drive whose transport produced nothing REDs rather than reporting a
+        // reading it never took.
+        assert!(
+            !rows.is_empty(),
+            "the tracing capture is EMPTY — the drive rendered no rows at all"
+        );
+        let removal_rows = rows_of_target(&rows, REMOVAL_TARGET);
+        assert_eq!(
+            removal_rows.len(),
+            1,
+            "exactly one epoch clears both eligibility conjuncts, so the instrument must fire \
+             exactly once; captured: {rows:?}"
+        );
+        let row = removal_rows[0];
+        println!("ORIGIN-INSTRUMENT | planted removal row | {row}");
+        assert_removal_row_field_set(row);
+
+        assert_eq!(
+            row_u64(row, "epoch"),
+            1,
+            "the join key must carry the removed epoch: {row}"
+        );
+        assert_eq!(
+            row_u64(row, "refs_returned"),
+            0,
+            "OBSERVATION ARM — `refs_returned != refs.len()`: the line must report what the \
+             index removal actually returned (an EMPTY vector here), not the entry-side \
+             `refs_at_entry` the slot still carries. A line on which refs_returned mirrors \
+             refs_at_entry is a second copy of the slot, not an observation: {row}"
+        );
+        assert_eq!(
+            row_u64(row, "refs_at_entry"),
+            1,
+            "the entry-side term must carry what the slot recorded at rollover, so the \
+             divergence is visible on ONE line: {row}"
+        );
+        assert_eq!(
+            row_u64(row, "bytes_returned"),
+            0,
+            "an empty removed vector has no observed bytes: {row}"
+        );
+        assert_eq!(
+            row_u64(row, "watermark"),
+            1,
+            "the durable watermark the pass ran under: {row}"
+        );
+        assert!(
+            row_u64(row, "ceiling") > row_u64(row, "epoch"),
+            "the epoch was removed under a ceiling that licensed it: {row}"
+        );
+    }
+
+    /// The instrument's POSITIVE control: a genuinely non-empty removal renders
+    /// `refs_returned > 0` beside `refs_at_entry > 0`.
+    ///
+    /// Read together with the origin-signature arm above and the negative control below, this
+    /// exercises ALL THREE readings the instrument can produce — silent, zero-returned,
+    /// positive — before it ships, so a downstream reader of a silent window can tell "the arm
+    /// was never reached" from "the arm was reached and returned zero" rather than guess.
+    #[test]
+    fn the_removal_line_reports_a_genuinely_non_empty_removal_as_positive() {
+        let f = one_epoch_frontier(false);
+        let (factory, key_writer) = null_prune_deps();
+        let rows = captured_rows_over_service_drive(&f, &factory, &key_writer);
+
+        assert!(
+            !rows.is_empty(),
+            "the tracing capture is EMPTY — the drive rendered no rows at all"
+        );
+        let removal_rows = rows_of_target(&rows, REMOVAL_TARGET);
+        assert_eq!(
+            removal_rows.len(),
+            1,
+            "the same one-epoch fixture, unplanted, removes exactly one epoch; captured: \
+             {rows:?}"
+        );
+        let row = removal_rows[0];
+        println!("ORIGIN-INSTRUMENT | positive removal row | {row}");
+        assert_removal_row_field_set(row);
+
+        assert_eq!(row_u64(row, "epoch"), 1, "the join key: {row}");
+        assert!(
+            row_u64(row, "refs_returned") > 0,
+            "POSITIVE CONTROL — a non-empty removal must render `refs_returned > 0`, or a \
+             silent-or-zero read downstream could never be distinguished from an instrument \
+             that cannot report a positive at all: {row}"
+        );
+        assert!(
+            row_u64(row, "refs_at_entry") > 0,
+            "POSITIVE CONTROL — the slot entered holding refs, so the entry-side term must be \
+             positive too: {row}"
+        );
+        assert!(
+            row_u64(row, "bytes_returned") > 0,
+            "a non-empty removal observed bytes: {row}"
+        );
+    }
+
+    /// The instrument's NEGATIVE control, on BOTH paths that skip the removal arm. This is what
+    /// makes silence from the instrument MEANINGFUL rather than ambiguous.
+    ///
+    /// Arm (a) — no eligible epoch, with the watermark NOT zero, so the silence is attributable
+    /// to eligibility and not to the dark fast path. The arm's premise (the fixture's one epoch
+    /// really is gone) is ESTABLISHED by asserting the preceding pass emitted the line, never
+    /// assumed.
+    ///
+    /// Arm (b) — the dark fast path: a zero watermark returns before the registry is touched at
+    /// all, so no epoch is even considered.
+    ///
+    /// Both arms assert the capture is NON-EMPTY before reading an absence off it, so a drive
+    /// whose transport produced nothing REDs instead of passing as "no lines".
+    #[test]
+    fn the_removal_line_is_absent_on_both_paths_that_skip_the_removal_arm() {
+        let (factory, key_writer) = null_prune_deps();
+
+        // -- (a) no eligible epoch -------------------------------------------
+        let f = one_epoch_frontier(false);
+        let first = captured_rows_over_service_drive(&f, &factory, &key_writer);
+        assert_eq!(
+            rows_of_target(&first, REMOVAL_TARGET).len(),
+            1,
+            "PREMISE of arm (a): the first pass must actually remove the fixture's one epoch, \
+             or the silence asserted below would be silence about nothing; captured: {first:?}"
+        );
+        let second = captured_rows_over_service_drive(&f, &factory, &key_writer);
+        assert!(
+            !second.is_empty(),
+            "the second pass's capture is EMPTY — the absence below would be read off nothing"
+        );
+        assert!(
+            rows_of_target(&second, REMOVAL_TARGET).is_empty(),
+            "NEGATIVE CONTROL (a) — no epoch is eligible on the second pass, so the removal arm \
+             is never entered and the instrument must be SILENT; captured: {second:?}"
+        );
+
+        // -- (b) the dark fast path ------------------------------------------
+        // The watermark is left at 0, so `drain_prunable` returns before it opens a sweep.
+        let dark = frontier();
+        dark.set_epoch_width(1);
+        dark.stamp_tombstone("m", "k1", "TAG1");
+        dark.stamp_tombstone("m", "k2", "TAG2");
+        let dark_rows = captured_rows_over_service_drive(&dark, &factory, &key_writer);
+        assert!(
+            !dark_rows.is_empty(),
+            "the dark-path capture is EMPTY — the absence below would be read off nothing"
+        );
+        assert!(
+            rows_of_target(&dark_rows, REMOVAL_TARGET).is_empty(),
+            "NEGATIVE CONTROL (b) — a zero watermark takes the dark fast path, which never \
+             reaches the removal arm, so the instrument must be SILENT; captured: {dark_rows:?}"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "redb"))]
