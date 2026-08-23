@@ -1,0 +1,293 @@
+================================================================================
+THE X21 DISCHARGE — three limbs, each bound to the transport that actually
+carries its terms
+================================================================================
+
+Standing rule X21 asks, of every assertion this increment makes, WHICH transport
+carries the term being asserted. This file discharges it limb by limb, records
+the executed evidence for the load-bearing limb, and states the join key.
+
+The three limbs are disjoint by transport, not by subject matter: the same
+epoch's story is told across all three, and the join between them is stated in
+§4 rather than left implicit.
+
+--------------------------------------------------------------------------------
+0. THE ORDERING PREMISE EVERY METRICS ASSERTION HERE RESTS ON
+--------------------------------------------------------------------------------
+
+The Prometheus recorder is bound FIRST and the frontier is constructed INSIDE
+that binding — `metrics::with_local_recorder(&recorder, || { let f =
+one_epoch_frontier(...); ... })`.
+
+This is not a stylistic preference. `MetricsPruneRecorder` resolves EVERY metric
+handle ONCE, at construction, and touches each series with `increment(0)` so it
+renders from the first scrape. Two consequences follow, and both are load-bearing
+below:
+
+  (a) INVERT the order and every handle binds to a no-op for its whole lifetime.
+      The series then never appears in the render, and a reader that treated an
+      absent series as a zero would pass VACUOUSLY. This is why the reader used
+      here panics on an absent series (see §3) instead of defaulting.
+
+  (b) BECAUSE the handles resolve at construction, an increment issued from a
+      SPAWNED task still lands on the recorder that was bound when the frontier
+      was built. The recorder-binding gap that makes `tracing`'s thread-local
+      `set_default` unreadable across a spawn DOES NOT APPLY to metrics. This is
+      the single fact that makes limb (c) readable at all, and it is also the
+      fact the `W6` fallback arm would have rested on had it been selected.
+
+--------------------------------------------------------------------------------
+1. LIMB (a) — RECORD TRANSPORT: RENDERED-ROW RECONSTRUCTION, STATED AS SUCH
+--------------------------------------------------------------------------------
+
+STATUS: discharged as a RENDERED-TRANSPORT limb. It is NOT a struct-transport
+limb, and the earlier premise that it was is withdrawn on the record.
+
+WHY THE STRUCT PREMISE IS FALSE AT HEAD, in the tree's own terms:
+
+  - `prune_epoch_tombstones` returns `()`. Its `PrunePassRecord` local is built,
+    handed to the observer, and dropped. It is never yielded to a caller.
+  - `drain_prunable_tombstones` returns `Vec<(Epoch, TombstoneRef)>` and consumes
+    its `PruneEpochResidencyRecord`s INTERNALLY via `publish_epoch_exit`.
+  - The only observer seam is `prune_observer`, a `Box<dyn PruneRecordObserver>`
+    selected from an environment variable inside `TombstoneFrontier::new`. There
+    is NO injection constructor and no setter.
+
+SURFACE IS NOT TRANSPORT. The obvious way to make the two records reachable
+in-process would be to add an injection constructor or a capturing-observer seam
+to `TombstoneFrontier`. That would be a production API surface whose only
+consumer is a test, and it is forbidden: no injection constructor, no
+capturing-observer seam, and no test-only `pub`/`pub(crate)` surface is added to
+`TombstoneFrontier` by this increment. `git diff` on `tombstone_frontier.rs` and
+`tombstone_frontier_impl.rs` shows no new constructor or observer-setter
+signature.
+
+HOW THE RECORDS ARE OBTAINED INSTEAD: both are RECONSTRUCTED, field by field,
+from the rendered `tracing` rows the production code already emits — the exit row
+and the pass row — captured in-test by a thread-local capture layer. The
+reconstructed values are then fed to the classifier. The in-tree precedent for
+exactly this reconstruction over a service-path drive already existed before this
+increment and is followed rather than invented.
+
+ITS EPISTEMIC STATUS CHANGES WITH THE RE-SITING, and this is stated rather than
+glossed: the classifier is fed values that came off a WIRE FORMAT, so the
+correctness of the reconstruction is itself part of what is being asserted. That
+is precisely why limb (b) — the rendered-text limb — is the load-bearing one and
+why the extractor contract was frozen BEFORE anything rendered.
+
+THE LIMB'S SCOPE IS BOUNDED BY WHAT THE ROWS ACTUALLY RENDER, and one term falls
+outside it: the pass row carries `kind`, `considered` and `empty_drain` and
+NOTHING ELSE. `epochs_drained` is sent only to the pass observer. It is therefore
+NOT among the terms this limb reconstructs; it is re-attributed to limb (c).
+Reading it off a row would PANIC in the reader ("field is absent from the
+rendered row"), and widening the row to carry it would be a production emission
+change whose only consumer is one test — forbidden.
+
+--------------------------------------------------------------------------------
+2. LIMB (b) — LINE TRANSPORT. THE LOAD-BEARING LIMB.
+--------------------------------------------------------------------------------
+
+STATUS: discharged, with executed evidence.
+
+SUBJECT: assertions written against the RENDERED `tracing` text of
+  (i)   the NEW removal line,
+  (ii)  the pass row,
+  (iii) the settlement row.
+
+WHY THIS LIMB IS THE LOAD-BEARING ONE. The failure class this increment exists to
+close is an emitter whose wire format defeats its own extractor: a downstream
+reader keyed on a form the emitter never produced, scoring zero matches against
+thousands of rows and reporting the zero as a finding. That class is closed AT
+SOURCE here — by freezing the extractor contract before the emitter exists and
+then asserting on rendered text — never by a downstream adapter.
+
+THE EXTRACTOR CONTRACT (frozen before this increment rendered anything; the
+frozen layer of the ruling artifact is the authority, this is a restatement for
+the reader of this file):
+
+  TARGET      topgun_server::tombstone_frontier::removal
+              — its OWN target, distinct from the residency target and from the
+                settlement target, which is what makes the line selectable
+                WITHOUT a `kind` discriminant field. No `kind` field is added;
+                the target does that work, and the field set stays exactly the
+                eight it was adopted with.
+
+  FIELDS      ts, op_seq, epoch, refs_returned, refs_at_entry, bytes_returned,
+              watermark, ceiling — by NAME, in the order the emitting macro
+              declares them. The COUNT is not asserted; the NAMES are.
+
+  TYPES       op_seq, epoch, refs_returned, refs_at_entry, bytes_returned,
+              watermark, ceiling are all unsigned integers rendered as bare
+              decimal digits. `ts` in its explicit rendering is a signed Unix-ms
+              integer, following the tree's existing convention. NO field is a
+              float.
+
+  SEPARATOR   one `name=value` pair per field, each followed by exactly ONE
+              ASCII space. The row is prefixed with its target as a pair of the
+              same shape. The two in-tree visitors differ by a leading space
+              before `target=`, and which form a reader consumes is decided by
+              that reader's own visitor.
+
+  NO JSON     there is no JSON blob anywhere on this line. Every field is an
+              individual `tracing` field. No consumer should attempt to parse a
+              serialized structure out of it.
+
+  ts          BOTH renderings were pre-registered as compliant: (a) the
+              subscriber's own stamp, with `ts` not a recorded field at all; and
+              (b) an explicit signed Unix-ms field. WHICH SHIPPED: (b), the
+              EXPLICIT field. Recorded in the ruling artifact's post-section.
+
+EXECUTED EVIDENCE — the rendered rows, verbatim from the drive's own transcript.
+Note the single TRAILING space on each: the visitor writes `name=value ` per pair
+and never trims. `ts` varies per run; every other term is fixed by the fixture.
+
+  ORIGIN SIGNATURE (the planted present-but-empty entry, driven through the
+  production prune service):
+
+target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787505799565 op_seq=2 epoch=1 refs_returned=0 refs_at_entry=1 bytes_returned=0 watermark=1 ceiling=2 
+
+  POSITIVE CONTROL (the same fixture, unplanted — a genuinely non-empty removal):
+
+target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787505799565 op_seq=2 epoch=1 refs_returned=1 refs_at_entry=1 bytes_returned=4 watermark=1 ceiling=2 
+
+  NEGATIVE CONTROL: on both paths that skip the removal arm — no eligible epoch
+  (with a NON-zero watermark, so the silence is attributable to eligibility and
+  not to the dark path) and the dark fast path itself — the capture contains
+  ZERO rows on this target while remaining NON-EMPTY overall. Silence from this
+  instrument is therefore MEANINGFUL rather than ambiguous.
+
+WHAT MAKES THIS LIMB RED. The observation arm: emit `refs_at_entry` in place of
+`refs.len()` for `refs_returned` — the minimal faithful encoding of the tautology
+this whole lineage is trying to escape — and the rendered-text assertion FAILS,
+naming `refs_returned != refs.len()`. Executed; transcript in the witness file.
+That arm is what proves the line is an OBSERVATION and not a second copy of the
+slot: `refs_returned` is read from the vector the index removal itself returned,
+`refs_at_entry` is read from the slot, and the two are not the same expression.
+
+Note which arm the mutation REDs on, because it is informative: the POSITIVE
+control stays GREEN under it (there `refs.len()` and `refs_at_entry` are both 1,
+so the swap is invisible), and only the ORIGIN-SIGNATURE arm discriminates. A
+witness set containing only a positive control would have graded this mutation
+green — which is the whole reason all three readings are exercised.
+
+--------------------------------------------------------------------------------
+3. LIMB (c) — METRICS TRANSPORT. TWO DISJOINT SCOPES.
+--------------------------------------------------------------------------------
+
+Conflating these two scopes is a known error class, so they are separated
+explicitly.
+
+3.1 — REASONED N/A FOR THE NEW LINE
+-----------------------------------
+
+STATUS: N/A, and the reason is a reason rather than an omission.
+
+THE NEW INSTRUMENT HAS NO METRICS TRANSPORT. It was deliberately routed to the
+LOG SINK and AWAY FROM THE METRICS REGISTRY. Asserting a metrics transport for it
+would FABRICATE A CONSUMER THAT DOES NOT EXIST — the vacuous-assertion class in
+reverse, and exactly the failure this discharge exists to prevent.
+
+Concretely, and decidably:
+
+  - NO `counter!`, `gauge!`, `histogram!` or `describe_*` is added for it. The
+    pinned grep over `tombstone_frontier_impl.rs` returns 6 at the base and still
+    returns 6 on the branch.
+  - `PruneRecordObserver` gains NO method. No new observer-method signature
+    appears in the branch diff.
+
+This is a REASONED N/A. The limb is not silently skipped for this subject; it is
+declared inapplicable, with the mechanism that makes it inapplicable named.
+
+3.2 — LOAD-BEARING FOR `epochs_drained`
+---------------------------------------
+
+STATUS: discharged, and this is the ONLY place `epochs_drained` is read.
+
+WHY IT LIVES HERE AND NOT IN LIMB (a). The rendered pass row does not carry
+`epochs_drained`. It is sent only to the pass observer, and from there to a
+Prometheus counter. The row is NOT widened to carry it — that would be a
+production emission change whose only consumer is one test.
+
+THE FULL RENDERED SERIES NAMES, given in full because the in-tree readers key on
+the EXACT name and a short name is a RED rather than a soft miss:
+
+    topgun_or_prune_considered_total
+    topgun_or_prune_empty_drains_total
+    topgun_or_prune_nonempty_drains_total
+    topgun_or_prune_epochs_drained_total        <- the term this limb carries
+
+THE READING RULE: the assertion must read `Some("...")` and NEVER `None`. The
+in-tree reader returns an `Option` and the wrapper used by the drive PANICS on
+`None`, naming the absent series. An absent series is a HARD ERROR and never a
+zero — because the frontier touches every counter with `increment(0)` at
+construction, so a series missing from a render means the handles were resolved
+OUTSIDE the binding that render came from, which would make the whole comparison
+vacuous.
+
+WHY THE PROMETHEUS TRANSPORT IS READABLE FOR THIS WITNESS: because the handles
+resolve at construction (§0(b)), an increment issued from a spawned task still
+lands on the recorder bound when the frontier was built. The recorder-binding gap
+that makes `tracing`'s `set_default` thread-local and unreadable across a spawn
+DOES NOT APPLY to metrics. This is the same asymmetry an earlier increment in
+this family already exploits to read a rendered counter off a spawned,
+multi-threaded sweep and get a real number rather than an empty capture.
+
+WHAT MAKES THIS LIMB RED — stated at exactly the strength the mechanism supports,
+and no stronger:
+
+  (i)  the asserted delta of 0 on `topgun_or_prune_epochs_drained_total` MOVES,
+       which happens when the plant did not take (no eligible epoch was removed
+       as planted) or when the drain RETURNED REFS; or
+  (ii) the series renders ABSENT under an inverted recorder/frontier binding, so
+       the reader returns `None` and the `Some("...")` reading rule fails.
+
+  Neither failure mode is silent.
+
+WHAT DOES *NOT* MAKE THIS LIMB RED, stated because the limb does not claim it:
+the `:986` exit-attribution mutation is NOT a RED trigger here, and this limb
+does not detect it. That mutation gates `drained_epochs.insert(e)`, and
+`drained_epochs` feeds ONLY the exit attribution; the RETURNED `drained` vector
+is built independently from the removed refs, and it is what the pass folds into
+`epochs_drained`. Under the planted antecedent `drained` is empty WITH OR WITHOUT
+that mutation, so this limb's delta stays 0 either way. That mutation's
+discriminating assertion is the EXIT ROW, in limb (b), and that is where it REDs.
+
+--------------------------------------------------------------------------------
+4. THE JOIN KEY
+--------------------------------------------------------------------------------
+
+  PRIMARY KEY        `epoch`.
+                     Populated on EVERY removal line, EVERY exit row and EVERY
+                     settlement row. One epoch's story across all three limbs is
+                     assembled on this and nothing else.
+
+  SECONDARY ORDER    `op_seq`.
+                     An ordering term, used to sequence rows that share an
+                     epoch. It orders; it does not identify.
+
+  `ts` IS NEVER A JOIN KEY.
+                     Under EITHER of its two permitted renderings. It is a
+                     DISPLAY field and is explicitly NON-JOINABLE. There is no
+                     wall-clock key anywhere in this increment. Joining on a
+                     wall clock across rows emitted by different components — or
+                     worse, across hosts — manufactures correlations that the
+                     data does not contain, and this family has already paid for
+                     that lesson once.
+
+--------------------------------------------------------------------------------
+5. WHAT IS AND IS NOT DISCHARGED
+--------------------------------------------------------------------------------
+
+  DISCHARGED  limb (a) as a rendered-row reconstruction, with the struct premise
+              withdrawn on the record and no seam added;
+              limb (b) with executed rendered samples for all three readings the
+              instrument can produce — silent, zero-returned, positive — plus the
+              observation mutation arm;
+              limb (c) as a reasoned N/A for the new line and as a load-bearing
+              read for `epochs_drained` over the existing, unchanged counter.
+
+  NOT CLAIMED This file records that the instrument EMITS CORRECTLY over the
+              transport its consumer will read. It says NOTHING about what that
+              instrument will observe under production or soak load. Reading it
+              under load is a separate increment's job, and no reading of it is
+              attempted, implied or pre-empted here.
