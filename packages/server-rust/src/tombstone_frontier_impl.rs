@@ -4019,6 +4019,221 @@ mod tests {
         }
     }
 
+    /// The half of a scanned file the compiler builds into a NON-test binary:
+    /// everything above the first column-0 `#[cfg(test)]` attribute.
+    ///
+    /// Cutting there is what lets the tallies below be exact rather than
+    /// approximate. This file's own test module reaches into `state.epoch_tags`
+    /// a dozen times and calls the drain three dozen more, and `crdt.rs`'s test
+    /// module calls the drain four more times; counting those would drown the
+    /// production sites the enumeration is about. The cut is also why the needles
+    /// below may be spelled literally: they live in the test module, below the
+    /// cut, so a scan that spells the thing it counts cannot count itself.
+    fn production_prefix(source: &str) -> &str {
+        source
+            .find("\n#[cfg(test)]\n")
+            .map_or(source, |at| &source[..at])
+    }
+
+    /// Source text with every whitespace run collapsed to one space and ` .`
+    /// rejoined to `.`, so a method chain broken across lines reads the same as
+    /// one written inline.
+    ///
+    /// Without this, a writer spelled `self\n    .epoch_tags\n    .insert(..)`
+    /// would slip past a scan for `self.epoch_tags.insert(` — and two of the
+    /// non-mutating reads in this file are already written in exactly that
+    /// broken-chain form, so the hazard is live rather than hypothetical.
+    fn flattened(source: &str) -> String {
+        source
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace(" .", ".")
+    }
+
+    /// The method name immediately following an occurrence, or `""` when the
+    /// occurrence is not a method receiver at all (a whole-map borrow).
+    fn verb_after(rest: &str) -> &str {
+        let Some(tail) = rest.strip_prefix('.') else {
+            return "";
+        };
+        let end = tail
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(tail.len());
+        &tail[..end]
+    }
+
+    /// Fact A of the origin paradox, guarded mechanically instead of asserted:
+    /// `self.epoch_tags` is mutated at exactly five production sites, and the
+    /// drain has exactly one production caller.
+    ///
+    /// The five sites and their post-states: `Stamp` and `Restore` both
+    /// `entry(..).or_default().push(..)`, so both leave `len >= 1`;
+    /// `RebuildInsert` is guarded by `if !live.is_empty()`; `RebuildClear` and
+    /// `DrainRemove` leave the entry ABSENT rather than empty. No enumerated
+    /// writer therefore leaves an entry present-and-empty — which is the whole
+    /// reason a present-and-empty entry is worth an instrument. A static
+    /// enumeration cannot say where that state comes from; it can only keep
+    /// saying, after the fact, that no writer in this file produces it. That is
+    /// what this test is for, and it is why it keeps earning its place after the
+    /// origin is named.
+    ///
+    /// The one-caller half is the durable form of the refutation of "a separate
+    /// rollover-time removal path": there is no second production route into the
+    /// drain, so no exit row can be emitted by a drain that no pass record wraps.
+    ///
+    /// SCOPE — this is NOT a whole-crate guarantee, and the residual is named
+    /// rather than papered over. `include_str!` resolves literal paths relative
+    /// to the including file, so this test sees exactly two files:
+    /// `tombstone_frontier_impl.rs` (where every `self.epoch_tags` mutation
+    /// lives) and `service/domain/crdt.rs` (where the one production caller
+    /// lives). It REDs when a sixth `self.epoch_tags` writer appears in
+    /// `tombstone_frontier_impl.rs`, or when a second non-`#[cfg(test)]` caller
+    /// of `drain_prunable_tombstones` appears in EITHER scanned file. **A
+    /// production caller added in a third, unscanned file would NOT RED.**
+    /// Closing that gap — a `std::fs` walk of `src/` from `CARGO_MANIFEST_DIR`,
+    /// or an include list asserted against a directory listing — is deferred and
+    /// tracked in `TODO-634`.
+    #[test]
+    fn epoch_tags_has_five_production_writers_and_the_drain_has_one_caller() {
+        const IMPL_SOURCE: &str = include_str!("tombstone_frontier_impl.rs");
+        const CRDT_SOURCE: &str = include_str!("service/domain/crdt.rs");
+
+        let impl_src = flattened(production_prefix(IMPL_SOURCE));
+        let crdt_src = flattened(production_prefix(CRDT_SOURCE));
+
+        assert_five_production_tag_writers(&impl_src);
+        assert_one_production_drain_caller(&impl_src, &crdt_src);
+    }
+
+    /// Half one of the enumeration guard: the five mutating sites, and nothing
+    /// else, in the already-flattened production half of this file.
+    fn assert_five_production_tag_writers(impl_src: &str) {
+        let needle = format!("self.{}", "epoch_tags");
+        let mut tally: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        let mut mutating = 0usize;
+        let mut at = 0usize;
+        while let Some(hit) = impl_src[at..].find(&needle) {
+            let start = at + hit;
+            let rest = &impl_src[start + needle.len()..];
+            let verb = verb_after(rest);
+            match verb {
+                "entry" | "clear" | "insert" | "remove" => mutating += 1,
+                // The non-mutating reads: index size, presence, refs-at-exit,
+                // the eligibility key scan, and the split's whole-map borrow.
+                "len" | "contains_key" | "get" | "keys" | "" => {}
+                other => panic!(
+                    "unclassified `{needle}` access `.{other}(` — this scan only knows the \
+                     five enumerated mutations and the five enumerated reads, so a new \
+                     access shape must be classified here before it can be counted. \
+                     Context was:\n{}",
+                    rest.chars().take(160).collect::<String>()
+                ),
+            }
+            *tally.entry(verb).or_default() += 1;
+            at = start + needle.len();
+        }
+
+        let expected: std::collections::BTreeMap<&str, usize> = [
+            // mutations
+            ("entry", 2),  // Stamp + Restore
+            ("clear", 1),  // RebuildClear
+            ("insert", 1), // RebuildInsert
+            ("remove", 1), // DrainRemove
+            // reads
+            ("len", 1),
+            ("contains_key", 1),
+            ("get", 1),
+            ("keys", 1),
+            ("", 1),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            tally, expected,
+            "`{needle}`'s production access shapes moved. The enumeration this file's \
+             origin reasoning rests on is: Stamp and Restore push (`entry`), \
+             RebuildClear clears, RebuildInsert inserts, DrainRemove removes — five \
+             mutations — beside five non-mutating reads. Re-verify the writer record \
+             before re-baselining this map."
+        );
+        assert_eq!(
+            mutating, 5,
+            "`{needle}` must be mutated at exactly the five enumerated production \
+             sites; a sixth writer invalidates Fact A of the origin paradox, which is \
+             that no enumerated writer leaves an entry present-and-empty"
+        );
+
+        // Both push sites must stay non-empty pushes: `entry(..).or_default()`
+        // alone would insert an EMPTY vector, which is precisely the state under
+        // investigation, so the `.push(..)` that follows it is load-bearing.
+        let mut pushes = 0usize;
+        let mut at = 0usize;
+        let entry_needle = format!("{needle}.entry(");
+        while let Some(hit) = impl_src[at..].find(&entry_needle) {
+            let start = at + hit;
+            let rest = &impl_src[start..];
+            let stmt = &rest[..rest.find(';').map_or(rest.len(), |e| e + 1)];
+            assert!(
+                stmt.contains(".or_default().push("),
+                "an `{entry_needle}` site must push in the same statement: \
+                 `or_default()` on its own inserts an EMPTY vector, the exact state \
+                 the removal-site instrument exists to explain. Statement was:\n{stmt}"
+            );
+            pushes += 1;
+            at = start + entry_needle.len();
+        }
+        assert_eq!(pushes, 2, "exactly two push sites: Stamp and Restore");
+    }
+
+    /// Half two of the enumeration guard: exactly one production call site
+    /// across the two already-flattened production halves.
+    fn assert_one_production_drain_caller(impl_src: &str, crdt_src: &str) {
+        let drain = format!("drain_prunable{}", "_tombstones");
+        let mut callers: Vec<(&str, String)> = Vec::new();
+        for (file, source) in [
+            ("tombstone_frontier_impl.rs", impl_src),
+            ("service/domain/crdt.rs", crdt_src),
+        ] {
+            let mut at = 0usize;
+            while let Some(hit) = source[at..].find(&drain) {
+                let start = at + hit;
+                let before = &source[..start];
+                let after = &source[start + drain.len()..];
+                at = start + drain.len();
+                // The definition itself and intra-doc links are not call sites.
+                if before.ends_with("fn ") || after.starts_with('`') {
+                    continue;
+                }
+                // Taken by CHARACTER so a multi-byte glyph upstream cannot make
+                // this slice panic on a non-boundary byte index.
+                let mut lead: Vec<char> = before.chars().rev().take(48).collect();
+                lead.reverse();
+                let lead: String = lead.into_iter().collect();
+                callers.push((file, format!("{lead}{drain}")));
+            }
+        }
+        assert_eq!(
+            callers.len(),
+            1,
+            "`{drain}` must have exactly ONE production caller across the two scanned \
+             files. A second production route into the drain would mean an exit row \
+             could be emitted by a drain that no pass record wraps, which is the \
+             premise the divergence reasoning rests on. Found:\n{callers:#?}"
+        );
+        assert_eq!(
+            callers[0].0, "service/domain/crdt.rs",
+            "the one production caller lives in the pruning service"
+        );
+        assert!(
+            callers[0]
+                .1
+                .ends_with(&format!("let drained = frontier.{drain}")),
+            "the one production caller is the pruning pass's own drain. Found:\n{:?}",
+            callers[0].1
+        );
+    }
+
     /// The two writers of `current_epoch` / `low_water_mark` agree BY CONSTRUCTION,
     /// and this is what asserts it.
     ///
