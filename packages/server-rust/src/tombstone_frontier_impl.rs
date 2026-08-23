@@ -993,6 +993,29 @@ impl FrontierState {
                     .map(|r| u64::try_from(r.tag.len()).unwrap_or(u64::MAX))
                     .sum();
                 removed_observed.insert(e, (removed_refs, removed_bytes));
+                // The removal-site OBSERVATION. `refs_returned` is read from the vector
+                // the index removal itself just returned; `refs_at_entry` is read from
+                // the slot. Carrying both on ONE line is the whole point: a removal that
+                // returns nothing for an epoch that entered the index holding refs is
+                // then a single visible fact rather than something a reader has to join
+                // two rows to see. It reuses the locals computed just above, so it
+                // recomputes nothing and adds no index-proportional fold.
+                //
+                // Its own target keeps the line selectable without a `kind` discriminant
+                // field, and it is unconditional so that a window with no such line means
+                // this arm was never reached — not that a switch was off.
+                info!(
+                    target: "topgun_server::tombstone_frontier::removal",
+                    ts = now_millis_i64(),
+                    op_seq = self.op_seq,
+                    epoch = e,
+                    refs_returned = removed_refs,
+                    refs_at_entry = self.epoch_slots.get(&e).map_or(0, |s| s.refs_at_entry),
+                    bytes_returned = removed_bytes,
+                    watermark = watermark,
+                    ceiling = ceiling,
+                    "prune removal observed"
+                );
                 drained.extend(refs.into_iter().map(|r| (e, r)));
             }
             self.epoch_max_seq.remove(&e);
@@ -6053,6 +6076,7 @@ mod tests {
              exit={exit:?} pass={pass:?}"
         );
     }
+
 }
 
 #[cfg(all(test, feature = "redb"))]
