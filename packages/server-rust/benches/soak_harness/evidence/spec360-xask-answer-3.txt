@@ -1,0 +1,69 @@
+## Framing correction first
+
+SPEC-355's "reclaim fraction falls with width" was measured **through the prune path's own counters** (`bytes_freed_total / tombstone_bytes_added`). That ratio does not measure "how much garbage was reclaimed"; it measures "**what share of reclamation was routed through the counted path**." Once you accept that, the anomaly stops looking like degrading memory behavior and starts looking like a **routing problem**: an uncounted removal path whose share of work grows with epoch lifetime. Everything below follows from taking that seriously.
+
+## Ranked hypotheses
+
+### H1 (primary): The real drain is fused into the rollover/exit critical section; the periodic prune structurally always loses the race
+
+This is a sharpened version of your "two distinct removal paths" option, and it is the only single mechanism I see that explains all four facts without residue:
+
+- **(i) Index bounded at one epoch:** refs are evicted wholesale inside the frontier mutex *at rollover*, before control returns. The fence evidence is the smoking gun: `fence_passed_at_op_seq == exited_at_op_seq` exactly on every row means durability fencing fires in the *same pass* as exit — the drain is part of the exit transaction, not a follow-on sweep.
+- **(ii) Prune counters frozen:** the prune's low-water-mark tracks epoch advance with ~zero lag precisely because the prune merely *observes* rollovers; by the time any sweep looks at a closed epoch, it has been emptied. 232,365 EMPTY drains out of 232,367 passes is not a stuck counter — it is an honest counter reporting that there is genuinely nothing to do. PD-F12 dissolves: the frontier ledger and the prune counters are both telling the truth about *different paths*. The ledger's "DrainedByPrune" class and byte attribution are tautological (same field as stamped bytes), which is why they can be perfectly self-consistent and perfectly misleading.
+- **(iv) In-process reproduction moves counters:** the deterministic harness serializes operations through the public API, which routes teardown through the counted drain synchronously — no concurrent orchestrator tick exists to win the race. This is exactly why the third reading is "not constructible through the public API": you cannot manufacture the rollover-vs-sweep interleaving deterministically from outside. The two negative results ("counters not wired," "attribution wrong") are correctly refuted *and* fully compatible with H1.
+- The 2 non-empty drains in 356c/b and the startup burst (39 vs 80) are the transient where the race occasionally resolves the other way, before steady-state throughput makes epoch lifetime ≫ sweep period.
+
+**Kill observation:** the per-exit log line proposed in §3. If exits show `caller="rollover"`, `live_refs_at_entry > 0`, `live_refs_at_commit == 0`, H1 is confirmed and H3/H4 die with it. If exits show nothing unusual, H1 dies.
+
+### H2 (complementary, not competing): The bytes live in the durable layer — redb + WAL + write-behind — because store-level deletion rides the starving counted path
+
+This answers "*where do the bytes go*," which H1 alone doesn't. RAM holds refs, not payloads; the index staying bounded means RAM is not the growth site. Growth must be dead versions accumulating in redb pages, WAL segments, and the write-behind buffer (which at ~29 stamps/s underfills its batch-100 target and flushes on the ~1 s timer regardless). Embedded stores typically do not return pages without explicit compaction/delete-issuance — and if the only component that issues store-level deletes is the counted prune, and that prune finds empty epochs forever, then **nothing ever deletes anything below the RAM layer**. That is why the RSS plateau is unreachable at width 1000 via resident churn: the resident set is fine; the file behind it is not.
+
+Note H2 is a *consequence* of H1, not an alternative to it. Together they cover (iii).
+
+**Kill/confirm observation:** redb statistics (live-key count vs. total/dead entries) or plain store-file-size delta regressed against tombstone bytes added. A ~1:1 tracking confirms H2; a flat store size with growing tombstone count refutes it and points back at a hidden compaction path.
+
+### H3: Startup-only counted burst (subsumed by H1)
+
+Explains 356c (39 vs 80 whole-run drains, zero in the deciding half) and the 2 non-empty drains. Under H1's race model this is just the transient regime where epoch lifetimes are short or irregular relative to the sweep. It also contaminates SPEC-355: a 4 h run's numerator includes the startup burst, inflating the 33 % figure versus the true steady-state 0.86 %. Not independently viable — it cannot explain (iv) or the width dependence by itself.
+
+### H4: Recorder-instance / handle-binding mismatch in the long-run binary
+
+I rank this low, and I want to be explicit about why: it survives PD-F12 superficially, but it (a) cannot generate the width dependence at all, (b) sits awkwardly with the 2 non-empty drains and the startup burst (a dead handle shouldn't move *ever*), and (c) the clean armed-vs-disarmed level controls suggest the exporter is scraping a live registry. Possible, but it explains the least and requires the most coincidence.
+
+**Kill observation:** write a sentinel value through the *same handle object* mid-run and scrape it; or better, sidestep Prometheus entirely with the log line in §3, which is immune to registry-scrape mismatches by construction.
+
+### H5: Rebuild-path clearance or a genuine leak elsewhere
+
+Pinned out: the conservation-identity failure decomposes exactly as a stamping-mirror aliasing problem (residual ≡ indexed_refs mod 1000 on 2880/2880 rows), so the identity failure is an instrument artifact, not evidence of a missing sink. Nothing else needs this hypothesis.
+
+## Q2: What specifically produces the width dependence
+
+H1 (+H3), quantitatively. The counted path's share ≈ P(a 1 s sweep tick lands on a populated, closed, not-yet-evicted epoch) ≈ **tick_interval / epoch_lifetime ∝ 1/width**. At width 100 and ~29 stamps/s, epochs turn every ~3.4 s — comparable to the tick, so the sweep frequently wins → 95 %+ counted reclaim. At width 1000, epochs live ~34 s and rollover eviction pre-empts → counted share collapses toward 0.86 %. The intermediate 33 % from SPEC-355 is the steady-state collapse *plus* the startup burst in the numerator. Sanity check that corroborates the model: 356b advanced 232 epochs in 2 h ≈ one per 31 s ≈ width 1000 at ~29–32 ops/s. The numbers hang together.
+
+## Q3: The one cheapest discriminating observation
+
+**One structured log line at every epoch exit, inside the frontier mutex scope, written to the log sink (not the metrics registry):**
+
+```
+{ts, op_seq, epoch_id, caller: rollover|prune|rebuild, live_refs_at_entry, live_refs_at_commit, payload_bytes_released}
+```
+
+Cost: one line per epoch (~232 lines / 2 h at width 1000 — negligible). This single line simultaneously: confirms/kills H1 (nonzero entry refs with `caller="rollover"`), kills H4 (registry-independent), dates H3 (burst confined to early epochs?), and — via `payload_bytes_released` — tells you whether the exit path releases *only* RAM refs or also enqueues store deletions, which is the pivotal unknown for H2 and Q4.
+
+## Q4: Is SPEC-355 an instrument artifact end-to-end?
+
+**Yes for the ratio; open for the plateau.** Be precise about the split:
+
+- The 95→33 % "degradation" is almost certainly an artifact of metering a path that carries vanishing steady-state traffic. There is no evidence that total reclamation degrades with width; there is evidence that *visibility* does.
+- The plateau, however, is **not** established either way by that artifact verdict. If the rollover path releases only RAM refs and store-level deletion belongs exclusively to the starved prune, the durable-layer growth is *physically real* and the plateau is genuinely unreachable at width 1000 (H2). If the exit-fused path does commit deletions down to redb, the plateau may exist and merely have been measured in the wrong place all along.
+
+Therefore: yes, re-measure the plateau exclusively from RSS + redb file size + WAL segment retention + a store-level live-vs-dead key census, ignoring every registry counter. Do not, however, retroactively declare the plateau real or absent — the current data supports "RAM is bounded, durable layer is suspect," nothing stronger.
+
+## Stated uncertainties
+
+- I have not seen the source; "rollover-time eviction" is inferred from the fence/exit fusion, the atomic whole-epoch ledger drains, and the EMPTY-dominance pattern — it is the best-fit mechanism, not an observed one. The unreadable third reading in 358 could name a different internal path (rebuild-time clearance, a background compactor).
+- The 232,367-passes-in-2 h figure implies ~32 passes/s, not one per second-scale tick — so "prune pass" evidently counts per-epoch considerations within sweeps. I've assumed that; if instead the tick truly fires 32×/s, the race math changes magnitude but not sign.
+- The 33 %-at-width-1000 figure and the 0.86 % figure come from different run lengths and regimes; I treated the gap as startup-burst contamination, which is plausible but unproven.
+
+Bottom line: one mechanism (exit-fused drain racing a vestigial sweep) plus its durable-layer consequence explains every hard number you have, and one log line per epoch rollover will settle it.
