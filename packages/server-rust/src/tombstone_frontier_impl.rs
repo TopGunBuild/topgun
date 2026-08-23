@@ -5428,6 +5428,18 @@ mod tests {
     /// captured event's rendered field text, one entry per event (X21-d(iv)).
     fn captured_tracing_events(body: impl FnOnce()) -> Vec<String> {
         use tracing_subscriber::layer::SubscriberExt as _;
+        // Installing or dropping a `tracing` subscriber rebuilds the process-wide
+        // callsite-interest cache, and a callsite evaluated DURING that rebuild is
+        // transiently read as uninteresting -- so a second capture running on another
+        // thread loses whichever rows happen to fall in the window. The result is a row
+        // that is present when its test runs alone and missing when it runs beside
+        // another capturing test, which reads as an emitter defect rather than a harness
+        // one. Serialising every capture in this module removes the window; the guard is
+        // held for the WHOLE body, because the drop is half of what races.
+        static CAPTURE_SERIAL: Mutex<()> = Mutex::new(());
+        let _serial = CAPTURE_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let sink: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&sink)));
         let _guard = tracing::subscriber::set_default(subscriber);
