@@ -11,6 +11,9 @@ re-order sections already present; append your own beneath the last one.
 
 Section index (filled in as each group lands its witness):
   W7  — enumeration completeness, mechanical                    [below]
+  W1  — unmutated baseline                                      [below]
+  W3  — planted positive control for the classifier             [below]
+  W2  — RECIPE ONLY, execution deferred to G4                   [below]
 
 ================================================================================
 W7 — ENUMERATION COMPLETENESS (MECHANICAL SOURCE TEST)
@@ -264,6 +267,493 @@ production caller in the other scanned file (B). It returns green on the
 unmutated tree. The claim it earns is scoped to the two pinned files and no
 wider; the third-unscanned-file residual is named in the test's doc-contract
 and routed to TODO-634.
+
+
+================================================================================
+W1 — UNMUTATED BASELINE
+================================================================================
+
+Owner group : G2
+Branch      : sf-360-origin-instrument
+Tree state  : commit e99635de (G1 + G3 landed; no mutation applied, no W3 yet)
+
+W1 is the only witness in this file that carries NO mutation. Its whole content
+is the assertion the other witnesses are read against: the three suites are
+green BEFORE anything is planted, mutated or instrumented. A mutation arm that
+REDs against a tree that was already red proves nothing about the mutation.
+
+--------------------------------------------------------------------------------
+W1 — LEG 1: the tombstone_frontier suite
+--------------------------------------------------------------------------------
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib tombstone_frontier
+
+    Finished `release` profile [optimized] target(s)
+     Running unittests src/lib.rs (target/release/deps/topgun_server-b3ef059854b88584)
+
+running 71 tests
+...
+test tombstone_frontier_impl::tests::step0_leg_c_v1_positive_control_planted_ref_loss_fires_on_the_returned_record ... ok
+test tombstone_frontier_impl::tests::epoch_tags_has_five_production_writers_and_the_drain_has_one_caller ... ok
+test tombstone_frontier_impl::tests::tier1_frontierstate_arm_drives_every_reachable_class_of_the_frozen_walk ... ok
+test tombstone_frontier_impl::persistence_tests::concurrent_confirm_then_forget_never_resurrects_durable_cursor ... ok
+
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 1788 filtered out; finished in 10.60s
+
+--------------------------------------------------------------------------------
+W1 — LEG 2: the crdt suite
+--------------------------------------------------------------------------------
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib crdt
+
+running 90 tests
+...
+test service::domain::crdt::tests::prune_exit_ledger_sums_to_considered ... ok
+test service::domain::crdt::tests::prune_record_armed_disarmed_gauge_neutral ... ok
+test service::domain::crdt::tests::the_witness_methods_reach_exactly_one_production_implementor ... ok
+
+test result: ok. 90 passed; 0 failed; 0 ignored; 0 measured; 1769 filtered out; finished in 0.22s
+
+--------------------------------------------------------------------------------
+W1 — LEG 3: the sim suite, AND THE RUN-COUNT RECONCILIATION
+--------------------------------------------------------------------------------
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) pnpm test:sim
+  (= cargo test --profile ci-sim --features simulation -p topgun-server -- sim)
+
+The lib target reports:
+
+  running 27 tests
+  test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 1857 filtered out
+
+TWENTY-SEVEN, NOT TWENTY-FIVE — and that is NOT a failed check. `sim` is a
+SUBSTRING filter over test paths, not a module selector, so it catches two
+tests that have nothing to do with the simulation harness. Enumerated in full
+so the reconciliation is checkable rather than asserted:
+
+  src/sim/* attributes .......................................... 25
+    sim::cluster::tests                                           10
+      live_top_n_negative_control_membership_stays_two
+      live_top_n_window_holds_under_fault
+      sim_query_filter_sort_limit_under_node_failure
+      dag_execute_roundtrip_resolves_completion
+      single_node_cursor_roundtrip_has_more_flips_at_exhaustion
+      query_under_partition_returns_alive_node_results
+      query_filter_sort_limit_routes_through_dag
+      distributed_merge_global_sort_and_limit_under_partition
+      distributed_keyset_cursor_under_partition
+      paged_ws_query_under_partition_emits_cursor_and_correct_follow_up
+    sim::tombstone_gc_proof::tests                                12
+      d1_divergence_removed_observation_diverges_from_entry_attribution
+      d2_post_exit_restore_reappears_without_a_new_exit_row
+      d3_absent_key_settlement_shows_zero_reclaim_despite_positive_attribution
+      d5_sequential_regime_bridge_identities_and_p_keys_hold_over_3000_epochs
+      forgotten_client_resurrects_dark_gate_blocks_armed
+      lagging_known_replica_repush_suppressed_union_admitted
+      merkle_roundtrip_does_not_advance_gated_delivered_push_still_rejected
+      merkle_roundtrip_is_readonly_wrt_or_value_state
+      reused_connection_regressed_then_stale_push_rejected
+      interleaved_prune_during_push_never_resurrects
+      prune_epoch_residency_discrimination_under_network_fault
+      reclamation_boundary_holds_when_a_sweep_races_a_second_devices_ack
+    sim::or_churn_inplace::tests                                   1
+      or_churn_across_partition_converges_inplace
+    sim::or_delta_recovery::tests                                  2
+      or_churn_recovers_to_the_partition_converged_state
+      or_recovery_is_invariant_under_the_framing_switch
+  caught by the `sim` SUBSTRING, unrelated to the harness ......... 2
+      dag::converter::tests::convert_simple_query_single_node
+      service::domain::predicate::tests::predicate_regex_simple_match
+        Both match because libtest's filter is a plain substring test over the
+        FULL test path, and `sim` occurs inside `sim`ple. Neither test touches
+        the simulation harness.
+                                                                  --
+  total                                                           27
+
+OBSERVED NUMBER: 27. EXPECTED NUMBER: 27. Reconciled.
+
+Two further targets in the same invocation are NOT part of the 27 and are
+recorded so a future reader does not mistake a different total for drift:
+
+  Running tests/sim_cluster.rs      : running 7 tests   — 7 passed
+  Running tests/proptest_sim.rs     : running 4 tests   — 4 passed
+  Doc-tests topgun_server           : src/sim/mod.rs (line 15) ... ignored
+  (nine further test binaries report `running 0 tests` — everything filtered)
+
+Whole-invocation total: 27 + 7 + 4 = 38 passed, 0 failed.
+
+--------------------------------------------------------------------------------
+W1 — VERDICT
+--------------------------------------------------------------------------------
+
+GREEN on all three legs with no mutation applied. The baseline every arm below
+is read against is established.
+
+================================================================================
+W3 — PLANTED POSITIVE CONTROL FOR THE CLASSIFIER
+================================================================================
+
+Owner group : G2
+Branch      : sf-360-origin-instrument
+Test        : tombstone_frontier_impl::tests::
+              a_planted_empty_tag_vector_is_the_only_arm_that_attributes_without_observation
+Landed in   : packages/server-rust/src/tombstone_frontier_impl.rs  (counted 2/5)
+Commit      : 4974b63d
+
+WHAT THIS WITNESS CLAIMS, AND WHAT IT DOES NOT.
+It claims that `classify_drain_attribution` returns `AttributedWithoutObservation`
+on a record pair a REAL drain produced from a planted antecedent, and does NOT
+return it on an unplanted drain over the SAME fixture. It is a classifier
+control. It is NOT the service-level consequence: the drive through
+`prune_epoch_tombstones`, with both records reconstructed off the rendered
+transport, is a separate obligation and is deliberately not pre-empted here.
+The classifier's pure-input totality tests live beside its definition in
+`tombstone_frontier.rs` and are a third, different thing.
+
+--------------------------------------------------------------------------------
+W3 — HOW THE ANTECEDENT IS PLANTED
+--------------------------------------------------------------------------------
+
+Two private helpers in this file's existing `#[cfg(test)]` module, plus the
+test itself. No injection constructor, no capturing-observer seam, no test-only
+`pub` / `pub(crate)` surface was added to `TombstoneFrontier`; the diff is a
+pure insertion into the test module (165 added lines, 0 removed).
+
+  fn pass_record_from_drained(&[(Epoch, TombstoneRef)]) -> PrunePassRecord
+      Mirrors the service's own construction off the drain's RETURN VALUE:
+      `considered` = one per returned ref, `epochs_drained` = distinct epochs,
+      `empty_drain` = `drained.is_empty()`. Derived, never hand-written, so the
+      pass half of the pair stays a function of what the drain returned.
+
+  fn drain_one_epoch_fixture(plant_empty_tag_vector: bool)
+        -> (Vec<PruneEpochResidencyRecord>, Vec<(Epoch, TombstoneRef)>)
+      width 1; stamp k1/TAG1 into epoch 1; stamp k2/TAG2 to roll epoch 1 over
+      (so its slot has `entry_emitted == true` and `refs_at_entry == 1`);
+      `set_durable_epoch_watermark(1)`; `set_delivered(CONN_A, 100)`;
+      `confirm_apply_ack("a5:drain-attribution|dev-1", 2, CONN_A)`.
+      Then, under the in-module bypass:
+
+          let mut state = f.lock();                       // :5634
+          if plant_empty_tag_vector {
+              state.epoch_tags.insert(1, Vec::new());     // :5636
+          }
+          let (drained, _split, exits) = state.drain_prunable();
+          (exits, drained)
+
+      The plant replaces epoch 1's entry with a PRESENT-BUT-EMPTY `Vec`, so the
+      drain's `epoch_tags.remove(&1)` still returns `Some` — a genuine
+      `DrainedByPrune` attribution against a slot whose entry-side bytes are
+      nonzero — while the removed vector carries nothing to observe.
+
+      This is the same `f.lock()` shape the SPEC-358 Step 0 leg (c) control
+      already uses at :5560 / :5566; the anchors the spec records as :5344 /
+      :5350 have drifted to those lines at HEAD.
+
+--------------------------------------------------------------------------------
+W3 — GREEN BASELINE (unmutated tree, at commit 4974b63d)
+--------------------------------------------------------------------------------
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib a_planted_empty_tag_vector
+
+running 1 test
+test tombstone_frontier_impl::tests::a_planted_empty_tag_vector_is_the_only_arm_that_attributes_without_observation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1859 filtered out; finished in 0.00s
+
+The values the two arms actually carried (read off the arm-A and arm-C failure
+output below, which prints both records in full):
+
+  PLANTED   exit: epoch 1, refs_at_entry 1, refs_at_exit 0, stamped_bytes 4,
+                  bytes_freed_attributed 4, exit_kind DrainedByPrune,
+                  removed_refs_observed 0, removed_bytes_observed 0
+            pass: considered 0, epochs_drained 0, empty_drain true
+            class: AttributedWithoutObservation
+
+  CONTROL   exit: epoch 1, refs_at_entry 1, refs_at_exit 0, stamped_bytes 4,
+                  bytes_freed_attributed 4, exit_kind DrainedByPrune,
+                  removed_refs_observed 1, removed_bytes_observed 4
+            pass: considered 1, epochs_drained 1, empty_drain false
+            class: ObservedAndCounted
+
+Same epoch, same exit kind, same attributed bytes. The ONLY thing that differs
+is whether anything was observed — which is exactly the discrimination the
+class is supposed to make.
+
+--------------------------------------------------------------------------------
+W3 — ARM A: REMOVE THE PLANT (does the antecedent do the work?)
+--------------------------------------------------------------------------------
+
+If the fixture produced the divergent class on its own, the plant would be
+decoration. This arm makes the planted branch a no-op while leaving every
+assertion intact.
+
+MUTATION APPLIED — packages/server-rust/src/tombstone_frontier_impl.rs, inside
+`drain_one_epoch_fixture`:
+
+        if plant_empty_tag_vector {
+    -       state.epoch_tags.insert(1, Vec::new());
+    +       let _ = 1;
+        }
+
+OUTPUT — RED:
+
+running 1 test
+test tombstone_frontier_impl::tests::a_planted_empty_tag_vector_is_the_only_arm_that_attributes_without_observation ... FAILED
+
+thread '...' panicked at packages/server-rust/src/tombstone_frontier_impl.rs:5680:9:
+assertion `left == right` failed: the planted vector carried nothing for the removal site to observe: PruneEpochResidencyRecord { epoch: 1, refs_at_entry: 1, refs_at_exit: 0, stamped_bytes: 4, bytes_freed_attributed: 4, exit_kind: DrainedByPrune, entered_at_op_seq: 1, entered_at_unix_ms: 1787501061498, exited_at_op_seq: 2, lwm_passed_at_op_seq: Some(2), fence_passed_at_op_seq: Some(2), lwm_at_exit: 2, durable_watermark_at_exit: 1, current_epoch_at_exit: 2, removed_refs_observed: 1, removed_bytes_observed: 4 }
+  left: 1
+ right: 0
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1859 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p topgun-server --lib`
+
+It REDs on the ANTECEDENT itself (`removed_refs_observed == 0`), before the
+class is ever computed, and prints the whole record. Without the plant the same
+fixture observes its one real ref — so the antecedent is what produces the
+state, not the fixture.
+
+REVERT:
+
+    (the `state.epoch_tags.insert(1, Vec::new());` line restored)
+
+--------------------------------------------------------------------------------
+W3 — ARM B: HARD-WIRE THE PASS HALF TO THE EMPTY READING
+--------------------------------------------------------------------------------
+
+The pass half is DERIVED from the drain's return value on purpose. This arm
+replaces the derivation with the constant the planted arm expects, which is the
+shape a control that hand-wrote its pass record would have shipped.
+
+MUTATION APPLIED — packages/server-rust/src/tombstone_frontier_impl.rs, inside
+`pass_record_from_drained`:
+
+    -   considered: u64::try_from(drained.len()).unwrap_or(u64::MAX),
+    +   considered: 0,
+        epochs_drained: u64::try_from(distinct.len()).unwrap_or(u64::MAX),
+    -   empty_drain: drained.is_empty(),
+    +   empty_drain: true,
+
+OUTPUT — RED:
+
+running 1 test
+test tombstone_frontier_impl::tests::a_planted_empty_tag_vector_is_the_only_arm_that_attributes_without_observation ... FAILED
+
+thread '...' panicked at packages/server-rust/src/tombstone_frontier_impl.rs:5722:9:
+assertion `left == right` failed: pass: PrunePassRecord { considered: 0, dropped: 0, matched_nothing: 0, absent: 0, restored_read_error: 0, restored_evicted: 0, restored_write_error: 0, bytes_freed: 0, epochs_drained: 1, empty_drain: true }
+  left: 0
+ right: 1
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1859 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p topgun-server --lib`
+
+RECORDED HONESTLY: this arm REDs on the CONTROL's pass-shape guard
+(`considered == 1`), which sits ABOVE the class comparison — so it proves the
+pass half is really derived, but it does NOT reach the discriminating
+`assert_ne!`. Arm C exists because of that gap.
+
+REVERT:
+
+    (the two derived expressions restored)
+
+--------------------------------------------------------------------------------
+W3 — ARM C: COLLAPSE THE CLASSIFIER'S OBSERVATION SIDE
+--------------------------------------------------------------------------------
+
+The one arm that reaches the discriminating assertion. A classifier that named
+the divergent class unconditionally would satisfy the planted arm and every
+guard; only the unplanted control can catch it.
+
+MUTATION APPLIED — packages/server-rust/src/tombstone_frontier.rs, inside
+`classify_drain_attribution` (transient; the file is byte-restored below and is
+NOT modified by this group):
+
+    -   let observed = exit.removed_refs_observed > 0 || pass.considered > 0 || !pass.empty_drain;
+    +   let observed = false;
+
+OUTPUT — RED:
+
+running 1 test
+test tombstone_frontier_impl::tests::a_planted_empty_tag_vector_is_the_only_arm_that_attributes_without_observation ... FAILED
+
+thread '...' panicked at packages/server-rust/src/tombstone_frontier_impl.rs:5730:9:
+assertion `left != right` failed: unplanted control must NOT read as the divergent class; exit PruneEpochResidencyRecord { epoch: 1, refs_at_entry: 1, refs_at_exit: 0, stamped_bytes: 4, bytes_freed_attributed: 4, exit_kind: DrainedByPrune, entered_at_op_seq: 1, entered_at_unix_ms: 1787501677865, exited_at_op_seq: 2, lwm_passed_at_op_seq: Some(2), fence_passed_at_op_seq: Some(2), lwm_at_exit: 2, durable_watermark_at_exit: 1, current_epoch_at_exit: 2, removed_refs_observed: 1, removed_bytes_observed: 4 }, pass PrunePassRecord { considered: 1, dropped: 0, matched_nothing: 0, absent: 0, restored_read_error: 0, restored_evicted: 0, restored_write_error: 0, bytes_freed: 0, epochs_drained: 1, empty_drain: false }
+  left: AttributedWithoutObservation
+ right: AttributedWithoutObservation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1859 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p topgun-server --lib`
+
+The planted arm still PASSED under this mutation — which is the whole point.
+Only the `assert_ne!` on the unplanted control caught it, and its message
+prints both records so the reader can see that a pair with
+`removed_refs_observed = 1`, `considered = 1`, `empty_drain = false` was
+nonetheless named `AttributedWithoutObservation`.
+
+REVERT:
+
+    $ git checkout -- packages/server-rust/src/tombstone_frontier.rs
+    $ git status --porcelain
+     M packages/server-rust/src/tombstone_frontier_impl.rs     (W3 itself)
+
+--------------------------------------------------------------------------------
+W3 — GREEN RE-RUN AFTER ALL THREE REVERTS
+--------------------------------------------------------------------------------
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib tombstone_frontier
+
+running 72 tests
+...
+test tombstone_frontier_impl::tests::a_planted_empty_tag_vector_is_the_only_arm_that_attributes_without_observation ... ok
+test tombstone_frontier_impl::tests::tier1_frontierstate_arm_drives_every_reachable_class_of_the_frozen_walk ... ok
+test tombstone_frontier_impl::persistence_tests::concurrent_confirm_then_forget_never_resurrects_durable_cursor ... ok
+
+test result: ok. 72 passed; 0 failed; 0 ignored; 0 measured; 1788 filtered out; finished in 11.57s
+
+(71 at W1's baseline, 72 with W3 added.)
+
+--------------------------------------------------------------------------------
+W3 — VERDICT
+--------------------------------------------------------------------------------
+
+EARNED. The control REDs when the antecedent is removed (A), when the pass half
+stops being derived from the drain (B), and when the classifier's observation
+side is collapsed so the divergent class is named unconditionally (C) — and C
+is caught by the unplanted arm alone, which is what makes the second arm
+load-bearing rather than decorative. It returns green on the unmutated tree.
+
+================================================================================
+W2 — RECIPE (EXECUTION DEFERRED TO G4)
+================================================================================
+
+Owner group : recipe by G2; EXECUTED TRANSCRIPT OWED BY G4
+Branch      : sf-360-origin-instrument
+Status      : NOT EXECUTED. This section is a recipe, not a witness.
+
+WHY THIS SECTION IS A RECIPE AND NOT A TRANSCRIPT.
+W2's arm grades the CONSEQUENCE DRIVE — the planted antecedent driven through
+`prune_epoch_tombstones` with both records read off the rendered transport. That
+drive is G4's deliverable and does not exist in the tree yet. An arm cannot be
+run against a test that has not been written, and running it against some other
+test would be grading a different object. So the recipe is recorded here, at the
+point where its claims were verified against the tree, and G4 appends the
+executed transcript — mutation, output, revert, green re-run — beneath it.
+
+Everything below was re-verified against the tree at commit 4974b63d before it
+was written down. Line numbers are the ones in that tree.
+
+--------------------------------------------------------------------------------
+W2 — THE EXACT MUTATION
+--------------------------------------------------------------------------------
+
+FILE: packages/server-rust/src/tombstone_frontier_impl.rs
+SITE: :986, inside `drain_prunable`'s `if let Some(refs) = self.epoch_tags.remove(&e)`
+      arm (the arm opens at :979).
+
+VERIFIED AT HEAD:
+
+    $ sed -n '986p' packages/server-rust/src/tombstone_frontier_impl.rs
+                    drained_epochs.insert(e);
+
+Unconditional on `refs.len()` — which is the antecedent's whole consequence.
+The mutation gates it:
+
+    -               drained_epochs.insert(e);
+    +               if !refs.is_empty() {
+    +                   drained_epochs.insert(e);
+    +               }
+
+Nothing else changes. `refs` is still owned by this arm at :986 (the borrow of
+`epoch_tags` ended when `remove` returned), and `refs.len()` is read three lines
+later at :990, so the gate introduces no borrow-checker cascade and no second
+fold over the vector.
+
+--------------------------------------------------------------------------------
+W2 — THE EXACT DISCRIMINATING ASSERTION IT MUST RED
+--------------------------------------------------------------------------------
+
+READ OFF THE EXIT ROW, and off nothing else.
+
+The assertion: **a `DrainedByPrune` exit whose `bytes_freed_attributed > 0`
+while nothing was observed** — i.e. the drive's exit-row terms
+
+    exit_kind              = DrainedByPrune
+    bytes_freed_attributed > 0
+    removed_refs_observed  = 0
+
+WHY THE MUTATION KILLS EXACTLY THAT AND NOTHING ELSE, verified at HEAD:
+
+  * `DrainedByPrune` is assigned ONLY where `drained_epochs.contains(&e)`:
+
+      $ sed -n '1009,1011p' packages/server-rust/src/tombstone_frontier_impl.rs
+                  let attribution = drained_epochs
+                      .contains(&e)
+                      .then_some(FinalExitKind::DrainedByPrune);
+
+  * `drained_epochs` is written ONLY at :986. Under the planted antecedent
+    `refs` is empty, so the gate suppresses the insert, epoch 1 reaches the
+    detection sweep with `attribution == None`, and `finalize_epoch_exit`
+    resolves a `None` hint to `Unclassified`.
+
+  * Therefore the exit row's `exit_kind` flips DrainedByPrune -> Unclassified,
+    and the drive's exit-row assertion fails BY NAME.
+
+G4's failure message MUST name this assertion. A message that merely reports a
+mismatched enum without stating that the discriminating property is "attributed
+without observation, on the exit row" does not satisfy the arm.
+
+--------------------------------------------------------------------------------
+W2 — W2 DOES NOT MOVE `topgun_or_prune_epochs_drained_total`. NEVER GRADE IT THERE.
+--------------------------------------------------------------------------------
+
+This is the correction carried from Response v3, and it is recorded here because
+grading W2 against the metrics limb would either fail the spec closed on an
+authoring error or push an executor to weaken the metrics assertion until it
+REDs.
+
+`drained_epochs` feeds ONLY the exit attribution at :1009-1011. The vector the
+drain RETURNS is built independently, at :996, from the removed `refs`:
+
+    $ sed -n '996p' packages/server-rust/src/tombstone_frontier_impl.rs
+                    drained.extend(refs.into_iter().map(|r| (e, r)));
+
+and the service's per-epoch map — hence `pass.epochs_drained` — derives from
+that returned vector alone:
+
+    $ sed -n '1539p' packages/server-rust/src/service/domain/crdt.rs
+            pass.considered += 1;
+    $ sed -n '1704p' packages/server-rust/src/service/domain/crdt.rs
+        pass.epochs_drained = per_epoch.len() as u64;
+
+(:1539 sits inside `for (epoch, r) in drained`, and `per_epoch` is populated
+only inside that same loop.)
+
+Under the planted antecedent `refs` is EMPTY, so `drained` is empty WITH OR
+WITHOUT the mutation, `per_epoch` stays empty either way, `pass.epochs_drained`
+is 0 either way, and the asserted Δ = 0 on
+`topgun_or_prune_epochs_drained_total` stays GREEN under W2.
+
+CONSEQUENCE, stated as a rule: **W2 must never be graded against
+`topgun_or_prune_epochs_drained_total`.** That series' own RED conditions are a
+plant that did not take, a drain that returned refs, or an absent series under
+an inverted recorder binding — none of which is W2. W2's discriminating
+assertion is the EXIT ROW, and that is where it REDs.
+
+--------------------------------------------------------------------------------
+W2 — WHAT G4 OWES
+--------------------------------------------------------------------------------
+
+  1. Apply the :986 gate verbatim as printed above.
+  2. Run the consequence drive; transcribe the REAL failure output.
+  3. Confirm the message NAMES the exit-row discriminating assertion.
+  4. Revert the gate; re-run; transcribe the green.
+  5. Confirm — and record — that the `topgun_or_prune_epochs_drained_total`
+     assertion stayed GREEN throughout, which is the positive check that this
+     section's non-movement claim held in practice.
 
 ================================================================================
 (next witness section appends below this line)
