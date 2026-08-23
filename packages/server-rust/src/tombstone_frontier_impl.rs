@@ -2820,6 +2820,10 @@ fn prune_decision_line(fixture: &str, drained: &[(Epoch, TombstoneRef)]) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::domain::key_writer::KeyWriterRegistry;
+    use crate::storage::datastores::NullDataStore;
+    use crate::storage::factory::RecordStoreFactory;
+    use crate::storage::impls::StorageConfig;
     use crate::tombstone_frontier::{classify_drain_attribution, DrainAttributionClass};
     use metrics_exporter_prometheus::PrometheusBuilder;
 
@@ -5622,6 +5626,22 @@ mod tests {
     fn drain_one_epoch_fixture(
         plant_empty_tag_vector: bool,
     ) -> (Vec<PruneEpochResidencyRecord>, Vec<(Epoch, TombstoneRef)>) {
+        let f = one_epoch_frontier(plant_empty_tag_vector);
+        let mut state = f.lock();
+        let (drained, _split, exits) = state.drain_prunable();
+        (exits, drained)
+    }
+
+    /// The same one-epoch fixture, built and optionally planted but NOT drained, handed back
+    /// so a caller can drive it through a PRODUCTION entry point instead of the in-module
+    /// drain.
+    ///
+    /// Split out of [`drain_one_epoch_fixture`] for two reasons a fused helper cannot serve.
+    /// The frontier has to OUTLIVE the plant for a service-level drive to have anything left
+    /// to drain; and it has to be CONSTRUCTED inside the caller's own recorder binding,
+    /// because the frontier resolves every metric handle once at construction and a frontier
+    /// built outside a binding renders nothing for the rest of its life.
+    fn one_epoch_frontier(plant_empty_tag_vector: bool) -> TombstoneFrontier {
         let f = frontier();
         f.set_epoch_width(1);
         f.stamp_tombstone("m", "k1", "TAG1"); // epoch 1: one ref, four stamped bytes
@@ -5631,12 +5651,13 @@ mod tests {
         let c: ClientId = "a5:drain-attribution|dev-1".into();
         assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
 
-        let mut state = f.lock();
-        if plant_empty_tag_vector {
-            state.epoch_tags.insert(1, Vec::new());
+        {
+            let mut state = f.lock();
+            if plant_empty_tag_vector {
+                state.epoch_tags.insert(1, Vec::new());
+            }
         }
-        let (drained, _split, exits) = state.drain_prunable();
-        (exits, drained)
+        f
     }
 
     /// The classifier's PLANTED positive control, read against the unplanted drain over the
@@ -5744,6 +5765,284 @@ mod tests {
             DrainAttributionClass::ObservedAndCounted,
             "attributed and observed on both channels; exit {control_exit:?}, pass \
              {control_pass:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The SERVICE-level consequence of a present-but-empty `epoch_tags` entry:
+    // both records reconstructed from the transports that actually carry them.
+    // -----------------------------------------------------------------------
+
+    /// The `tracing` target both rows of the residency ledger are published on.
+    const RESIDENCY_TARGET: &str = "topgun_server::tombstone_frontier::residency";
+
+    /// The value of the `name=` pair on a captured row.
+    ///
+    /// `FieldTextVisitor` writes one `name=value ` pair per recorded field and prefixes the
+    /// target as a pair of the same shape with NO leading space, so a whitespace split sees a
+    /// row as a flat sequence of pairs. Anchoring the prefix at a TOKEN boundary is what stops
+    /// `kind` from matching `exit_kind` and `epoch` from matching `epochs_drained`.
+    ///
+    /// Panics rather than returning an `Option`: a term read off a row that does not carry it
+    /// is a broken reader, and reading it as a default would let an assertion pass on evidence
+    /// that was never captured.
+    fn row_field<'a>(row: &'a str, name: &str) -> &'a str {
+        let needle = format!("{name}=");
+        row.split_whitespace()
+            .find_map(|tok| tok.strip_prefix(needle.as_str()))
+            .unwrap_or_else(|| panic!("field `{name}` is absent from the rendered row: {row}"))
+    }
+
+    fn row_u64(row: &str, name: &str) -> u64 {
+        let raw = row_field(row, name);
+        raw.parse()
+            .unwrap_or_else(|e| panic!("field `{name}` = `{raw}` is not a u64 ({e}): {row}"))
+    }
+
+    fn row_bool(row: &str, name: &str) -> bool {
+        let raw = row_field(row, name);
+        raw.parse()
+            .unwrap_or_else(|e| panic!("field `{name}` = `{raw}` is not a bool ({e}): {row}"))
+    }
+
+    /// Every captured row published on `target` and carrying `kind=<kind>`.
+    fn rows_of_kind<'a>(rows: &'a [String], target: &str, kind: &str) -> Vec<&'a str> {
+        let target_tok = format!("target={target}");
+        let kind_tok = format!("kind={kind}");
+        rows.iter()
+            .map(String::as_str)
+            .filter(|row| {
+                let mut has_target = false;
+                let mut has_kind = false;
+                for tok in row.split_whitespace() {
+                    has_target |= tok == target_tok.as_str();
+                    has_kind |= tok == kind_tok.as_str();
+                }
+                has_target && has_kind
+            })
+            .collect()
+    }
+
+    /// The counter's rendered value, or a panic naming the absent series.
+    ///
+    /// An absent series is a HARD error and never a zero: the frontier touches every counter
+    /// with `increment(0)` at construction, so a series missing from the render means the
+    /// handles were resolved outside the binding this render came from — exactly the failure
+    /// that would otherwise make the whole comparison vacuous.
+    fn rendered_counter_u64(rendered: &str, name: &str, when: &str) -> u64 {
+        let raw = rendered_value(rendered, name).unwrap_or_else(|| {
+            panic!("series `{name}` is ABSENT from the {when} render:\n{rendered}")
+        });
+        raw.parse()
+            .unwrap_or_else(|e| panic!("series `{name}` = `{raw}` is not a u64 ({e})"))
+    }
+
+    /// The ATTRIBUTION half of the divergent pair, read off the exit row and returned as
+    /// `(bytes_freed_attributed, removed_refs_observed)` for the classifier to consume.
+    ///
+    /// This is the DISCRIMINATING trio the consequence drive turns on; it lives in its own
+    /// function so the three terms fail with their own messages rather than as one opaque
+    /// composite predicate.
+    fn assert_divergent_exit_row(exit_row: &str) -> (u64, u64) {
+        assert_eq!(
+            row_field(exit_row, "exit_kind"),
+            "DrainedByPrune",
+            "DISCRIMINATING ASSERTION (first term) — the drive must observe a DrainedByPrune \
+         exit whose bytes_freed_attributed > 0 while removed_refs_observed = 0. Removing a \
+         present-but-empty vector is still a removal, so the exit must be attributed to the \
+         prune and not resolved to Unclassified. exit row: {exit_row}"
+        );
+        let bytes_freed_attributed = row_u64(exit_row, "bytes_freed_attributed");
+        assert!(
+            bytes_freed_attributed > 0,
+            "DISCRIMINATING ASSERTION (second term) — a DrainedByPrune exit with \
+         bytes_freed_attributed > 0 while removed_refs_observed = 0. The attribution side \
+         is entry-side stamped bytes credited to the removal and must be nonzero, or there \
+         is no divergence to observe. exit row: {exit_row}"
+        );
+        let removed_refs_observed = row_u64(exit_row, "removed_refs_observed");
+        assert_eq!(
+            removed_refs_observed, 0,
+            "DISCRIMINATING ASSERTION (third term) — a DrainedByPrune exit with \
+         bytes_freed_attributed > 0 while removed_refs_observed = 0. The planted vector \
+         carried nothing for the removal site to observe. exit row: {exit_row}"
+        );
+        assert!(
+            row_u64(exit_row, "refs_at_entry") > 0,
+            "the slot must have entered with refs, or the attribution above would be \
+         attributing nothing: {exit_row}"
+        );
+        (bytes_freed_attributed, removed_refs_observed)
+    }
+
+    /// The OBSERVATION half, read off the pass row the SERVICE emits, returned as
+    /// `(considered, empty_drain)`.
+    fn assert_empty_pass_row(pass_row: &str) -> (u64, bool) {
+        let considered = row_u64(pass_row, "considered");
+        assert_eq!(
+            considered, 0,
+            "`considered` increments once per ref the drain RETURNED, and an empty removed \
+         vector returns none: {pass_row}"
+        );
+        let empty_drain = row_bool(pass_row, "empty_drain");
+        assert!(
+            empty_drain,
+            "the pass reads its own drain as empty even though an epoch was removed: \
+         {pass_row}"
+        );
+        (considered, empty_drain)
+    }
+
+    /// The pass-counter family across one pass, returning `epochs_drained`'s delta.
+    ///
+    /// The pass row does not carry `epochs_drained`; `crdt.rs` sends it only to the pass
+    /// observer, and this drive does not widen that row to make one test readable. So the term
+    /// is read over the transport that already carries it.
+    fn assert_pass_counter_family_deltas(before: &str, after: &str) -> u64 {
+        let epochs_drained_before =
+            rendered_counter_u64(before, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL, "pre-drive");
+        let epochs_drained_after =
+            rendered_counter_u64(after, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL, "post-drive");
+        assert_eq!(
+            epochs_drained_after - epochs_drained_before,
+            0,
+            "{METRIC_PRUNE_EPOCHS_DRAINED_TOTAL} must not move: the returned vector is what \
+         the service folds into `epochs_drained`, and the removed vector was empty. \
+         before={epochs_drained_before} after={epochs_drained_after}"
+        );
+        assert_eq!(
+            rendered_counter_u64(after, METRIC_PRUNE_CONSIDERED_TOTAL, "post-drive")
+                - rendered_counter_u64(before, METRIC_PRUNE_CONSIDERED_TOTAL, "pre-drive"),
+            0,
+            "{METRIC_PRUNE_CONSIDERED_TOTAL} must not move — the metrics transport must agree \
+         with the pass row's own `considered = 0`"
+        );
+        assert_eq!(
+            rendered_counter_u64(after, METRIC_PRUNE_EMPTY_DRAINS_TOTAL, "post-drive")
+                - rendered_counter_u64(before, METRIC_PRUNE_EMPTY_DRAINS_TOTAL, "pre-drive"),
+            1,
+            "{METRIC_PRUNE_EMPTY_DRAINS_TOTAL} must move by exactly one — this pass really did \
+         run and really did read its drain as empty, which is what makes the zeroes above \
+         observations rather than a pass that never happened"
+        );
+        assert_eq!(
+            rendered_counter_u64(after, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL, "post-drive")
+                - rendered_counter_u64(before, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL, "pre-drive"),
+            0,
+            "{METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL} must not move"
+        );
+        epochs_drained_after - epochs_drained_before
+    }
+
+    /// Obligation A, driven through the SERVICE: an epoch whose `epoch_tags` entry is
+    /// PRESENT-BUT-EMPTY is attributed a `DrainedByPrune` exit carrying nonzero freed bytes
+    /// while the pass that wrapped that very drain records nothing considered and an empty
+    /// drain. Attribution and observation disagree, and the two halves are produced by
+    /// different components.
+    ///
+    /// Every term is read over the transport that actually carries it. The exit record and the
+    /// pass record are RECONSTRUCTED from the rendered `tracing` rows: on the service path
+    /// neither is reachable in-process — `prune_epoch_tombstones` returns `()` and never yields
+    /// its pass local, and the public drain consumes its exit rows internally — and adding a
+    /// seam to reach them would be a production surface whose only consumer is this test.
+    /// `epochs_drained` has no `tracing` transport at all (the pass row carries `kind`,
+    /// `considered` and `empty_drain` and nothing else), so it is read off the Prometheus
+    /// render rather than asserted on a row that would panic the reader.
+    #[test]
+    fn a_planted_empty_tag_vector_diverges_attribution_from_observation_through_the_service() {
+        // The recorder is bound FIRST and the frontier is constructed INSIDE the binding. The
+        // frontier resolves its metric handles once, at construction; the inverted order binds
+        // every handle to a no-op for its whole lifetime and turns each render assertion below
+        // into an assertion about nothing.
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut before = String::new();
+        let mut after = String::new();
+        let mut rows: Vec<String> = Vec::new();
+
+        metrics::with_local_recorder(&recorder, || {
+            let f = one_epoch_frontier(true);
+            let factory = RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            );
+            let key_writer = KeyWriterRegistry::new();
+
+            // Read the pass family BEFORE the drive so the assertion below is a delta across
+            // this one pass rather than a claim about an absolute the fixture also moved.
+            before = handle.render();
+            // The capture wraps the SERVICE entry point and nothing else: the fixture's own
+            // stamps already fired their entry rows, and including them would make the row
+            // census below count rows this drive did not produce.
+            rows = captured_tracing_events(|| {
+                block_on(crate::service::domain::crdt::prune_epoch_tombstones(
+                    &f,
+                    &factory,
+                    &key_writer,
+                ));
+            });
+            after = handle.render();
+        });
+
+        // Non-vacuity gate: the shape of the capture is asserted before any per-row term is
+        // read off it. A drive whose transport produced nothing must RED here rather than
+        // report "no violation" on a term it never read.
+        assert!(
+            !rows.is_empty(),
+            "the tracing capture is EMPTY — the drive rendered no rows at all, so every term \
+             below would be read off nothing"
+        );
+        let exit_rows = rows_of_kind(&rows, RESIDENCY_TARGET, "epoch_exit");
+        let pass_rows = rows_of_kind(&rows, RESIDENCY_TARGET, "prune_pass");
+        assert_eq!(
+            exit_rows.len(),
+            1,
+            "expected exactly one epoch_exit row (epoch 1 is the only epoch clearing both \
+             eligibility conjuncts), captured: {rows:?}"
+        );
+        assert_eq!(
+            pass_rows.len(),
+            1,
+            "the pass row fires once per invocation, unconditionally and outside the loop, \
+             captured: {rows:?}"
+        );
+        let exit_row = exit_rows[0];
+        let pass_row = pass_rows[0];
+        println!("CONSEQUENCE-DRIVE | exit row | {exit_row}");
+        println!("CONSEQUENCE-DRIVE | pass row | {pass_row}");
+
+        let (bytes_freed_attributed, removed_refs_observed) = assert_divergent_exit_row(exit_row);
+        let (considered, empty_drain) = assert_empty_pass_row(pass_row);
+        let epochs_drained_delta = assert_pass_counter_family_deltas(&before, &after);
+
+        // -- the class, COMPUTED from the reconstructed pair -----------------
+        // `exit_kind` is set to the variant the rendered text was just asserted to carry; every
+        // other term comes straight off the transport.
+        let exit = PruneEpochResidencyRecord {
+            epoch: row_u64(exit_row, "epoch"),
+            refs_at_entry: row_u64(exit_row, "refs_at_entry"),
+            refs_at_exit: row_u64(exit_row, "refs_at_exit"),
+            stamped_bytes: row_u64(exit_row, "stamped_bytes"),
+            bytes_freed_attributed,
+            exit_kind: EpochExitKind::DrainedByPrune,
+            removed_refs_observed,
+            removed_bytes_observed: row_u64(exit_row, "removed_bytes_observed"),
+            ..PruneEpochResidencyRecord::default()
+        };
+        let pass = PrunePassRecord {
+            considered,
+            epochs_drained: epochs_drained_delta,
+            empty_drain,
+            ..PrunePassRecord::default()
+        };
+        let class = classify_drain_attribution(&exit, &pass);
+        println!("CONSEQUENCE-DRIVE | class | {class:?}");
+        assert_eq!(
+            class,
+            DrainAttributionClass::AttributedWithoutObservation,
+            "the service-level pair must classify as attribution without observation: \
+             exit={exit:?} pass={pass:?}"
         );
     }
 }
