@@ -756,5 +756,270 @@ W2 — WHAT G4 OWES
      section's non-movement claim held in practice.
 
 ================================================================================
+W2 — EXECUTED TRANSCRIPT
+================================================================================
+
+Owner group : G4 (recipe by G2)
+Branch      : sf-360-origin-instrument
+Tree        : 463471bc (drive at abe9dd40, limb order at 463471bc)
+Status      : EXECUTED. Mutation applied, run, output transcribed, reverted,
+              re-run green.
+
+THE OBJECT UNDER TEST
+  packages/server-rust/src/tombstone_frontier_impl.rs
+  tests::a_planted_empty_tag_vector_diverges_attribution_from_observation_through_the_service
+
+  The consequence drive: a present-but-empty `epoch_tags` entry planted through
+  the in-module `f.lock()` bypass, then driven through the SERVICE
+  (`crate::service::domain::crdt::prune_epoch_tombstones`) with a Prometheus
+  recorder bound BEFORE the frontier is constructed and a `tracing` capture
+  installed for the duration of the drive.
+
+--------------------------------------------------------------------------------
+STEP 1 — THE MUTATION, APPLIED VERBATIM
+--------------------------------------------------------------------------------
+
+    $ sed -n '984,989p' packages/server-rust/src/tombstone_frontier_impl.rs
+                        .saturating_sub(u64::try_from(refs.len()).unwrap_or(u64::MAX));
+                    self.last_drained_epoch = self.last_drained_epoch.max(e);
+                    if !refs.is_empty() {
+                        drained_epochs.insert(e);
+                    }
+                    // R1.3: `Σ tag.len()` — the same byte quantity `stamp_tombstone`
+
+Nothing else changed. `git diff --stat` over the source file showed the gate and
+nothing besides it.
+
+--------------------------------------------------------------------------------
+STEP 2 — THE RUN, AND ITS REAL OUTPUT
+--------------------------------------------------------------------------------
+
+    $ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo test --release \
+        -p topgun-server --lib \
+        a_planted_empty_tag_vector_diverges_attribution_from_observation_through_the_service \
+        -- --nocapture
+    exit=101
+
+    running 1 test
+    CONSEQUENCE-DRIVE | exit row | target=topgun_server::tombstone_frontier::residency message=prune epoch exit kind=epoch_exit epoch=1 refs_at_entry=1 refs_at_exit=0 stamped_bytes=4 bytes_freed_attributed=0 exit_kind=Unclassified { observed_refs_delta: -1, observed_lwm: 2, observed_durable_watermark: 1, observed_current_epoch: 2, note: "epoch 1 absent from epoch_tags with no attributable removal path recorded at the detection point" } entered_at_op_seq=1 entered_at_unix_ms=1787504496087 exited_at_op_seq=2 lwm_passed_at_op_seq=Some(2) fence_passed_at_op_seq=Some(2) lwm_at_exit=2 durable_watermark_at_exit=1 current_epoch_at_exit=2 removed_refs_observed=0 removed_bytes_observed=0
+    CONSEQUENCE-DRIVE | pass row | target=topgun_server::tombstone_frontier::residency message=prune pass kind=prune_pass considered=0 empty_drain=true
+    CONSEQUENCE-DRIVE | pass family | topgun_or_prune_epochs_drained_total delta=0
+
+    thread '...::a_planted_empty_tag_vector_diverges_attribution_from_observation_through_the_service'
+    panicked at packages/server-rust/src/tombstone_frontier_impl.rs:5849:9:
+    assertion `left == right` failed: DISCRIMINATING ASSERTION (first term) — the
+    drive must observe a DrainedByPrune exit whose bytes_freed_attributed > 0 while
+    removed_refs_observed = 0. Removing a present-but-empty vector is still a
+    removal, so the exit must be attributed to the prune and not resolved to
+    Unclassified. exit row: target=topgun_server::tombstone_frontier::residency
+    message=prune epoch exit kind=epoch_exit epoch=1 refs_at_entry=1 refs_at_exit=0
+    stamped_bytes=4 bytes_freed_attributed=0 exit_kind=Unclassified { ... } ...
+    removed_refs_observed=0 removed_bytes_observed=0
+      left: "Unclassified"
+     right: "DrainedByPrune"
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured;
+    1860 filtered out; finished in 0.20s
+
+--------------------------------------------------------------------------------
+STEP 3 — THE MESSAGE NAMES THE DISCRIMINATING ASSERTION
+--------------------------------------------------------------------------------
+
+CONFIRMED, and off the EXIT ROW specifically.
+
+The panic text is literally
+
+    DISCRIMINATING ASSERTION (first term) — the drive must observe a
+    DrainedByPrune exit whose bytes_freed_attributed > 0 while
+    removed_refs_observed = 0
+
+so the arm does not merely fail: it says WHICH claim it is failing, states the
+claim in the three-term form G2's recipe pinned, and prints the whole rendered
+exit row it read the term off. The rendered row is its own corroboration —
+
+    bytes_freed_attributed=0
+    exit_kind=Unclassified { observed_refs_delta: -1, ... note: "epoch 1 absent
+              from epoch_tags with no attributable removal path recorded at the
+              detection point" }
+
+which is exactly the mechanism G2's recipe predicted from source: the gate
+suppresses `drained_epochs.insert(e)` for an empty `refs`, epoch 1 reaches the
+detection sweep with `attribution == None`, and `finalize_epoch_exit` resolves a
+`None` hint to `Unclassified` — carrying, in the variant's own `note`, the raw
+observed state rather than a silent default.
+
+Two of the three terms move together, and the transcript records both: the
+attribution collapses from `DrainedByPrune` to `Unclassified` AND
+`bytes_freed_attributed` collapses from 4 to 0. The first term is what the
+assertion trips on because it is asserted first; the second is visible on the
+same printed row.
+
+--------------------------------------------------------------------------------
+STEP 4 — X21-c STAYED GREEN UNDER THE MUTATION
+--------------------------------------------------------------------------------
+
+This is the positive check G2's recipe item 5 owed, and it is witnessed in the
+SAME mutated run rather than argued.
+
+The drive grades the pass-counter family BEFORE the exit row, so the mutated run
+had to get past all four series' deltas to reach the panic. It did, and it
+printed what it read:
+
+    CONSEQUENCE-DRIVE | pass family | topgun_or_prune_epochs_drained_total delta=0
+
+Asserted in that helper, all green under the mutation:
+
+    topgun_or_prune_epochs_drained_total    delta = 0
+    topgun_or_prune_considered_total        delta = 0
+    topgun_or_prune_empty_drains_total      delta = 1
+    topgun_or_prune_nonempty_drains_total   delta = 0
+
+each read as `Some("…")` off both the pre-drive and the post-drive render — an
+absent series is a hard error in this reader, never a zero.
+
+So the non-movement claim held IN PRACTICE, not only on paper: W2 gates
+`drained_epochs.insert(e)`, `drained_epochs` feeds only the exit attribution,
+and `pass.epochs_drained` derives from the independently-built returned vector,
+which is empty with or without the gate. W2 is NOT a RED trigger for X21-c, and
+the run proves it by passing that limb and failing the next one.
+
+The `empty_drains` delta of 1 is the run's own non-vacuity evidence: the pass
+really executed and really read its drain as empty, so the three zeroes beside
+it are observations rather than the silence of a pass that never happened.
+
+--------------------------------------------------------------------------------
+STEP 5 — REVERT, AND THE GREEN RE-RUN
+--------------------------------------------------------------------------------
+
+    $ sed -n '984,987p' packages/server-rust/src/tombstone_frontier_impl.rs
+                        .saturating_sub(u64::try_from(refs.len()).unwrap_or(u64::MAX));
+                    self.last_drained_epoch = self.last_drained_epoch.max(e);
+                    drained_epochs.insert(e);
+                    // R1.3: `Σ tag.len()` — the same byte quantity `stamp_tombstone`
+
+    $ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo test --release \
+        -p topgun-server --lib \
+        a_planted_empty_tag_vector_diverges_attribution_from_observation_through_the_service \
+        -- --nocapture
+    exit=0
+
+    running 1 test
+    CONSEQUENCE-DRIVE | exit row | target=topgun_server::tombstone_frontier::residency message=prune epoch exit kind=epoch_exit epoch=1 refs_at_entry=1 refs_at_exit=0 stamped_bytes=4 bytes_freed_attributed=4 exit_kind=DrainedByPrune entered_at_op_seq=1 entered_at_unix_ms=1787504793906 exited_at_op_seq=2 lwm_passed_at_op_seq=Some(2) fence_passed_at_op_seq=Some(2) lwm_at_exit=2 durable_watermark_at_exit=1 current_epoch_at_exit=2 removed_refs_observed=0 removed_bytes_observed=0
+    CONSEQUENCE-DRIVE | pass row | target=topgun_server::tombstone_frontier::residency message=prune pass kind=prune_pass considered=0 empty_drain=true
+    CONSEQUENCE-DRIVE | pass family | topgun_or_prune_epochs_drained_total delta=0
+    CONSEQUENCE-DRIVE | class | AttributedWithoutObservation
+    test ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;
+    1860 filtered out; finished in 0.20s
+
+And the whole suite, unmutated:
+
+    $ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo test --release \
+        -p topgun-server --lib tombstone_frontier
+    test result: ok. 73 passed; 0 failed; 0 ignored; 0 measured;
+    1788 filtered out; finished in 11.19s
+
+--------------------------------------------------------------------------------
+W2 — VERDICT
+--------------------------------------------------------------------------------
+
+EARNED. The consequence drive REDs when `:986`'s unconditional insert is gated
+on `!refs.is_empty()`, its failure message NAMES the exit-row discriminating
+assertion in the three-term form, and the same run shows the
+`topgun_or_prune_epochs_drained_total` limb passing with delta 0 — so the arm
+discriminates exactly the claim it was written to discriminate and nothing
+adjacent to it. Reverted; green.
+
+WHAT THIS ARM DOES NOT CLAIM. It is a mutation arm on a CONTROL, not a
+discovery. Reachability of the `Some(vec![])` state was settled elsewhere; what
+the drive and this arm establish is that WHEN the state is reached, the service
+path really does produce the divergent pair, and that the drive would notice if
+it stopped doing so.
+
+--------------------------------------------------------------------------------
+G4 — THE CONSEQUENCE DRIVE'S OWN RECORD (inputs G5 and G6 need)
+--------------------------------------------------------------------------------
+
+CAPTURE / EXTRACTION HELPER CHOICE — `row_field`-SHAPED, ADDED IN-FILE.
+
+Of the two options the Delta ledgered, G4 took the SECOND: field-extraction
+helpers of the `row_field` shape, added inside `tombstone_frontier_impl.rs`'s
+own test module, rather than the `captured_tracing_events` +
+`contains("name=value")` idiom. Four helpers, all `#[cfg(test)]`-module-private,
+consuming no additional counted `.rs`:
+
+    fn row_field<'a>(row: &'a str, name: &str) -> &'a str
+    fn row_u64(row: &str, name: &str) -> u64
+    fn row_bool(row: &str, name: &str) -> bool
+    fn rows_of_kind<'a>(rows: &'a [String], target: &str, kind: &str) -> Vec<&'a str>
+    fn rendered_counter_u64(rendered: &str, name: &str, when: &str) -> u64
+
+WHY, in one line: a `contains("exit_kind=DrainedByPrune")` miss cannot say WHICH
+value it found, and the mutation arm above is graded on its message naming the
+discriminating assertion — a substring reader would have produced "assertion
+failed: row.contains(...)" and nothing more.
+
+The two cross-module variants (`sim/tombstone_gc_proof.rs:827-873` and the one
+in `service/domain/crdt.rs`) are `#[cfg(test)]`-module-private and are NOT
+importable here; none was moved, re-exported or otherwise made reachable.
+
+THE RENDERED FORM THESE HELPERS CONSUME — three properties, all verified
+against the real capture above:
+
+  1. TARGET PREFIX, NO LEADING SPACE. This file's `FieldTextVisitor` seeds its
+     buffer with `format!("target={} ", target)`, so `target=…` is the row's
+     FIRST token and is shaped like any other pair. (The sim file's visitor
+     prefixes `" target={} "` WITH a leading space; the helpers here consume
+     this file's form.)
+
+  2. PAIRS ARE WHITESPACE-SEPARATED AND THE PREFIX IS ANCHORED AT A TOKEN
+     BOUNDARY. `row_field` splits on whitespace and strips `"{name}="` from each
+     token, so `kind` cannot match `exit_kind` and `epoch` cannot match
+     `epochs_drained` — both near-misses are live on the exit row.
+
+  3. THE `message` FIELD CONTAINS SPACES, AND THAT IS SAFE HERE BUT IS A HAZARD
+     TO KNOW. Every captured row begins
+     `target=… message=prune epoch exit kind=epoch_exit …`, so the message's
+     words (`prune`, `epoch`, `exit`) appear as BARE tokens with no `=`. They
+     cannot be mistaken for a pair — but a future field whose name collides with
+     a word in some message, or a message word carrying an `=`, would defeat
+     this reader. G5's new removal line should keep its message free of `=`.
+
+     `exit_kind`'s `Unclassified { … }` rendering ALSO contains spaces (see the
+     mutated run above). `row_field(row, "exit_kind")` returns just
+     `Unclassified` in that case, which is exactly enough for the assertion to
+     fail informatively, and every pair after it on the row is still intact.
+
+WHAT G4 CHANGED IN THE SHARED FIXTURE. `drain_one_epoch_fixture` was SPLIT: the
+prelude and the `f.lock()` plant now live in `one_epoch_frontier(plant) ->
+TombstoneFrontier`, and `drain_one_epoch_fixture` calls it and then drains. Two
+reasons a fused helper cannot serve — the frontier must OUTLIVE the plant for a
+service-level drive, and it must be CONSTRUCTED inside the caller's own recorder
+binding, because metric handles resolve once at construction. W3's expected
+values are unchanged and W3 is green on the split fixture.
+
+THE VERBATIM ROWS G5 AND G6 NEED (unmutated tree, green run above):
+
+  exit row:
+    target=topgun_server::tombstone_frontier::residency message=prune epoch exit kind=epoch_exit epoch=1 refs_at_entry=1 refs_at_exit=0 stamped_bytes=4 bytes_freed_attributed=4 exit_kind=DrainedByPrune entered_at_op_seq=1 entered_at_unix_ms=1787504793906 exited_at_op_seq=2 lwm_passed_at_op_seq=Some(2) fence_passed_at_op_seq=Some(2) lwm_at_exit=2 durable_watermark_at_exit=1 current_epoch_at_exit=2 removed_refs_observed=0 removed_bytes_observed=0
+
+  pass row:
+    target=topgun_server::tombstone_frontier::residency message=prune pass kind=prune_pass considered=0 empty_drain=true
+
+  (both rows end with a single trailing space — the visitor writes `name=value `
+  per pair and never trims.)
+
+  class printed: AttributedWithoutObservation
+
+CAPTURE CENSUS. The drive's capture wraps `prune_epoch_tombstones` and NOTHING
+else — the fixture's own stamps fire their entry rows before the capture is
+installed. Under the planted antecedent the capture holds exactly TWO rows: one
+`kind=epoch_exit` and one `kind=prune_pass`, and zero settlement rows (the
+settlement row is emitted per DRAINED epoch, and the drain returned none). The
+non-vacuity gate asserts non-empty plus that per-kind census before any term is
+read.
+
+================================================================================
 (next witness section appends below this line)
 ================================================================================
