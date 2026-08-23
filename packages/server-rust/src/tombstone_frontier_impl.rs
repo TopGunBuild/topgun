@@ -6108,10 +6108,7 @@ mod tests {
         let target_tok = format!("target={target}");
         rows.iter()
             .map(String::as_str)
-            .filter(|row| {
-                row.split_whitespace()
-                    .any(|tok| tok == target_tok.as_str())
-            })
+            .filter(|row| row.split_whitespace().any(|tok| tok == target_tok.as_str()))
             .collect()
     }
 
