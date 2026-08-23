@@ -655,16 +655,33 @@ mod tests {
     /// AGGREGATE terms `index_conservation_snapshot()` already exposes:
     /// exactly one attributed drain, exactly one exit row, O-0 holds — proven
     /// on every one of the 64 interleavings below, never a lucky one (R4.2).
-    /// `D4` is recorded at AGGREGATE granularity ONLY: it runs on a
-    /// `multi_thread` runtime, and both in-process observation transports
-    /// (`tracing` capture, metrics recorder) are thread-local (C13), so a
-    /// prune spawned onto a worker thread is invisible to either — the
-    /// per-kind row-count gate R4.6 applies to (`D1`, `D2`, `D3`, `D5`) does
-    /// NOT apply here, and this fn does not pretend otherwise by attempting a
-    /// row-granularity capture. `D4` is OUTSIDE every D-T row's universe
-    /// (Step 2's exclusion table): both in-process transports are
-    /// thread-local and its prune runs in a spawned task on a `multi_thread`
-    /// runtime (C13, X21-d).
+    /// `D4` is recorded at AGGREGATE granularity ONLY, and the reason is
+    /// narrower than "both transports are thread-local" (C13) — that flat
+    /// reading is wrong on the metrics half:
+    ///
+    /// - The `tracing` capture's BINDING is thread-local
+    ///   (`subscriber::set_default`), so a prune spawned onto a worker thread
+    ///   is invisible to it UNLESS that task's future carries the subscriber
+    ///   with it (`with_subscriber`). `D4` does not carry one, and stays at
+    ///   AGGREGATE granularity for exactly that reason; a leg that DOES carry
+    ///   one reads the spawned drain's rows at line granularity.
+    /// - The RECORDER binding is thread-local too, but `MetricsPruneRecorder`
+    ///   resolves every metric handle ONCE, at construction, so an increment
+    ///   issued from a spawned task still lands on the recorder that was bound
+    ///   when the frontier was built. Metrics are therefore READABLE across a
+    ///   spawn — which is why the raced-sweep arms below read a rendered
+    ///   counter under a `multi_thread` runtime and get a real number rather
+    ///   than an empty render.
+    ///
+    /// So the per-kind row-count gate R4.6 applies to (`D1`, `D2`, `D3`, `D5`)
+    /// does NOT apply here, and this fn does not pretend otherwise by
+    /// attempting a row-granularity capture it never arranged for. `D4` is
+    /// OUTSIDE every D-T row's universe (Step 2's exclusion table): its prune
+    /// runs in a spawned task on a `multi_thread` runtime carrying no
+    /// subscriber, so its rows are unobservable here (C13, X21-d). The
+    /// aggregate granularity is `D4`'s own terms — its predicate IS the
+    /// aggregate conservation snapshot — not a consequence of metrics being
+    /// unreadable.
     #[tokio::test(flavor = "multi_thread")]
     async fn prune_epoch_residency_discrimination_under_network_fault() {
         for round in 0..64u64 {
