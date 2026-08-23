@@ -1,0 +1,270 @@
+================================================================================
+SPEC-360 — EXECUTED WITNESS ARMS
+================================================================================
+
+One section per witness. Each section records: the mutation applied verbatim,
+the exact output it produced, the revert, and the re-run that returned green.
+A green test without its arm is an UNEXERCISED negative, not an EARNED one.
+
+Sections are appended by the group that owns the witness. Do NOT reformat or
+re-order sections already present; append your own beneath the last one.
+
+Section index (filled in as each group lands its witness):
+  W7  — enumeration completeness, mechanical                    [below]
+
+================================================================================
+W7 — ENUMERATION COMPLETENESS (MECHANICAL SOURCE TEST)
+================================================================================
+
+Owner group : G3
+Branch      : sf-360-origin-instrument
+Test        : tombstone_frontier_impl::tests::
+              epoch_tags_has_five_production_writers_and_the_drain_has_one_caller
+Landed in   : packages/server-rust/src/tombstone_frontier_impl.rs  (counted 2/5)
+Commit      : fd157593
+Scan surface (pinned, and the ONLY thing the claim covers):
+    include_str!("tombstone_frontier_impl.rs")
+    include_str!("service/domain/crdt.rs")
+
+Named residual, carried in the test's own doc-contract: a production caller
+added in a THIRD, UNSCANNED file would NOT RED. Closing that gap is deferred
+and tracked in TODO-634.
+
+--------------------------------------------------------------------------------
+W7 — HOW #[cfg(test)] CODE WAS SCOPED OUT, VERIFIED EMPIRICALLY
+--------------------------------------------------------------------------------
+
+The file's test module DOES touch the map, so the scoping is load-bearing
+rather than decorative. Verified at HEAD before the test was written and
+re-verified at commit fd157593 after it landed (line numbers below are the
+post-landing ones; none of the production sites moved):
+
+  $ grep -n 'epoch_tags' packages/server-rust/src/tombstone_frontier_impl.rs
+
+  production receiver is `self.` at    : 524 611 683 728 855 869 958 979 1036 1081
+  test-module receiver is `state.` at  : 3099 3241 3265 3512 5266 5565
+  this test's own doc-comment mentions : 4026 4043 4067 4088 4090
+  doc-comment / field-decl mentions    : 163 273 303 350 663 747 845 975 (+ test module)
+
+  $ grep -n '^#\[cfg(test)\]' packages/server-rust/src/tombstone_frontier_impl.rs
+  2802
+  2820
+  $ grep -n '^#\[cfg(test)\]' packages/server-rust/src/service/domain/crdt.rs
+  1753
+
+SCOPING RULE ADOPTED: each scanned file is cut at the FIRST column-0
+`#[cfg(test)]` attribute (`production_prefix`), and only the prefix is scanned.
+For tombstone_frontier_impl.rs that cut is line 2802 — above every `state.`
+access and above every test-module drain call. For crdt.rs it is line 1753 —
+above the four test-module drain calls at :5387, :5846, :5893, :6149.
+
+Two consequences relied on:
+  (a) The scan does not have to distinguish `self.` from `state.` receivers by
+      hand; the cut already removed every test access. Receiver-token filtering
+      alone would have been fragile, because a future test could write `self.`
+      inside an `impl` block in the test module.
+  (b) The scanning literals may be spelled out. They live in the test module,
+      BELOW the cut, so a scan that spells the thing it counts cannot count
+      itself — the hazard this file's neighbouring structural test
+      guards at :4252 by composing its needle instead.
+
+The non-mutating reads are NOT miscounted as writers. Two of them are written
+as broken method chains (`self` on one line, `.epoch_tags` on the next):
+:727-728 `.get(&epoch)` and :956-958 `.keys()`. A naive scan for the literal
+`self.epoch_tags` would have MISSED them entirely, and a scan for `epoch_tags.`
+would have counted them as unclassified. Hence `flattened()`, which collapses
+whitespace runs and rejoins ` .` to `.` before scanning. All five reads are then
+classified by the verb that follows: `len` (:611), `contains_key` (:683),
+`get` (:728), `keys` (:958), and the empty verb — the whole-map borrow at :1081,
+`for (&epoch, refs) in &self.epoch_tags`.
+
+--------------------------------------------------------------------------------
+W7 — GREEN BASELINE (unmutated tree, at commit fd157593)
+--------------------------------------------------------------------------------
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib tombstone_frontier
+
+    Finished `release` profile [optimized] target(s)
+     Running unittests src/lib.rs (target/release/deps/topgun_server-b3ef059854b88584)
+
+running 71 tests
+...
+test tombstone_frontier_impl::tests::epoch_tags_has_five_production_writers_and_the_drain_has_one_caller ... ok
+...
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 1788 filtered out; finished in 10.74s
+
+--------------------------------------------------------------------------------
+W7 — ARM A1: A SIXTH WRITER WITH AN ALREADY-ENUMERATED VERB
+--------------------------------------------------------------------------------
+
+MUTATION APPLIED — packages/server-rust/src/tombstone_frontier_impl.rs, inserted
+after :855 (`self.epoch_tags.clear();`), inside the rebuild path:
+
+    $ sed -i '' '855a\
+            self.epoch_tags.remove(&0);
+    ' packages/server-rust/src/tombstone_frontier_impl.rs
+
+    854         self.rebuild_cleared_refs_total += self.indexed_refs;
+    855         self.epoch_tags.clear();
+    856 +       self.epoch_tags.remove(&0);
+    857         self.epoch_max_seq.clear();
+
+OUTPUT — RED:
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib epoch_tags_has_five
+
+running 1 test
+test tombstone_frontier_impl::tests::epoch_tags_has_five_production_writers_and_the_drain_has_one_caller ... FAILED
+
+---- tombstone_frontier_impl::tests::epoch_tags_has_five_production_writers_and_the_drain_has_one_caller stdout ----
+
+thread '...' panicked at packages/server-rust/src/tombstone_frontier_impl.rs:4153:9:
+assertion `left == right` failed: `self.epoch_tags`'s production access shapes moved. The enumeration this file's origin reasoning rests on is: Stamp and Restore push (`entry`), RebuildClear clears, RebuildInsert inserts, DrainRemove removes — five mutations — beside five non-mutating reads. Re-verify the writer record before re-baselining this map.
+  left: {"": 1, "clear": 1, "contains_key": 1, "entry": 2, "get": 1, "insert": 1, "keys": 1, "len": 1, "remove": 2}
+ right: {"": 1, "clear": 1, "contains_key": 1, "entry": 2, "get": 1, "insert": 1, "keys": 1, "len": 1, "remove": 1}
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1858 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p topgun-server --lib`
+
+The failure NAMES the moved shape: `remove` went 1 -> 2. The per-verb tally, not
+a bare total, is what makes the message diagnostic.
+
+REVERT:
+
+    $ git checkout -- packages/server-rust/src/tombstone_frontier_impl.rs
+
+--------------------------------------------------------------------------------
+W7 — ARM A2: A SIXTH WRITER WITH AN UNENUMERATED VERB (THE FAIL-CLOSED ARM)
+--------------------------------------------------------------------------------
+
+Arm A1 only proves the test notices a writer whose SHAPE it already knows. The
+harder case — and the one a real sixth writer is likelier to take — is a shape
+nobody enumerated. A scan that silently skips what it does not recognise would
+report green on exactly the mutation it exists to catch.
+
+MUTATION APPLIED — same insertion point, a `retain` this time. It is also the
+only enumerated-or-not shape that can leave an entry PRESENT-AND-EMPTY's dual
+(it removes empties), which makes it a fair stand-in for an unenumerated writer
+with real semantics:
+
+    $ sed -i '' '855a\
+            self.epoch_tags.retain(|_, v| !v.is_empty());
+    ' packages/server-rust/src/tombstone_frontier_impl.rs
+
+    855         self.epoch_tags.clear();
+    856 +       self.epoch_tags.retain(|_, v| !v.is_empty());
+    857         self.epoch_max_seq.clear();
+
+OUTPUT — RED:
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib epoch_tags_has_five
+
+running 1 test
+test tombstone_frontier_impl::tests::epoch_tags_has_five_production_writers_and_the_drain_has_one_caller ... FAILED
+
+---- tombstone_frontier_impl::tests::epoch_tags_has_five_production_writers_and_the_drain_has_one_caller stdout ----
+
+thread '...' panicked at packages/server-rust/src/tombstone_frontier_impl.rs:4126:26:
+unclassified `self.epoch_tags` access `.retain(` — this scan only knows the five enumerated mutations and the five enumerated reads, so a new access shape must be classified here before it can be counted. Context was:
+.retain(|_, v| !v.is_empty()); self.epoch_max_seq.clear(); let width = self.epoch_width.max(1); self.current_epoch = e_rec; self.current_max_epoch = e_rec; // P
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1858 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p topgun-server --lib`
+
+The classifier is CLOSED, not open: an access shape outside the table panics by
+name and prints its context rather than falling through as "not a writer".
+
+REVERT:
+
+    $ git checkout -- packages/server-rust/src/tombstone_frontier_impl.rs
+
+--------------------------------------------------------------------------------
+W7 — ARM B: A SECOND PRODUCTION CALLER OF THE DRAIN
+--------------------------------------------------------------------------------
+
+MUTATION APPLIED — packages/server-rust/src/service/domain/crdt.rs, inserted
+after :1521, i.e. a second production route into the drain inside
+`prune_epoch_tombstones` itself:
+
+    $ sed -i '' '1521a\
+        let _second_route = frontier.drain_prunable_tombstones();
+    ' packages/server-rust/src/service/domain/crdt.rs
+
+    1521    let drained = frontier.drain_prunable_tombstones();
+    1522 +  let _second_route = frontier.drain_prunable_tombstones();
+    1523    // One record per invocation, empty drains included: ...
+
+Note this mutation is in the OTHER scanned file and touches no line of
+tombstone_frontier_impl.rs. The test still recompiled and still RED'd, because
+`include_str!` makes the scanned file a build dependency of the scanning test —
+so the guard cannot go stale against an unchanged scanner.
+
+OUTPUT — RED:
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib epoch_tags_has_five
+
+running 1 test
+test tombstone_frontier_impl::tests::epoch_tags_has_five_production_writers_and_the_drain_has_one_caller ... FAILED
+
+---- tombstone_frontier_impl::tests::epoch_tags_has_five_production_writers_and_the_drain_has_one_caller stdout ----
+
+thread '...' panicked at packages/server-rust/src/tombstone_frontier_impl.rs:4216:9:
+assertion `left == right` failed: `drain_prunable_tombstones` must have exactly ONE production caller across the two scanned files. A second production route into the drain would mean an exit row could be emitted by a drain that no pass record wraps, which is the premise the divergence reasoning rests on. Found:
+[
+    (
+        "service/domain/crdt.rs",
+        " &KeyWriterRegistry, ) { let drained = frontier.drain_prunable_tombstones",
+    ),
+    (
+        "service/domain/crdt.rs",
+        "able_tombstones(); let _second_route = frontier.drain_prunable_tombstones",
+    ),
+]
+  left: 2
+ right: 1
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1858 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p topgun-server --lib`
+
+The failure prints each call site with its lead-in text, so the second route is
+identifiable from the message alone.
+
+REVERT:
+
+    $ git checkout -- packages/server-rust/src/service/domain/crdt.rs
+    $ git status --porcelain
+    (clean)
+
+--------------------------------------------------------------------------------
+W7 — GREEN RE-RUN AFTER ALL THREE REVERTS
+--------------------------------------------------------------------------------
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib tombstone_frontier
+
+running 71 tests
+...
+test tombstone_frontier_impl::tests::epoch_tags_has_five_production_writers_and_the_drain_has_one_caller ... ok
+test tombstone_frontier_impl::tests::tier1_frontierstate_arm_drives_every_reachable_class_of_the_frozen_walk ... ok
+test tombstone_frontier_impl::persistence_tests::concurrent_confirm_then_forget_never_resurrects_durable_cursor ... ok
+
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 1788 filtered out; finished in 10.80s
+
+--------------------------------------------------------------------------------
+W7 — VERDICT
+--------------------------------------------------------------------------------
+
+EARNED. The guard REDs on a sixth writer whose verb it already knows (A1), on a
+sixth writer whose verb it does not (A2, fail-closed), and on a second
+production caller in the other scanned file (B). It returns green on the
+unmutated tree. The claim it earns is scoped to the two pinned files and no
+wider; the third-unscanned-file residual is named in the test's doc-contract
+and routed to TODO-634.
+
+================================================================================
+(next witness section appends below this line)
+================================================================================
