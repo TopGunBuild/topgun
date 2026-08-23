@@ -603,3 +603,220 @@ This post-section carries its **OWN separate digest**, computed over its own byt
 by the group that writes it. That digest does not exist yet, because this section does not yet have
 content.
 
+
+---
+
+<!-- POST-BLOCK-BEGIN: G5-RENDERED-SAMPLE -->
+
+## Post-block 1 — the rendered sample, the shipped choices, and the selected fault arm
+
+**Written by `G5`, after the instrument rendered. Nothing above `<!-- FROZEN-LAYER-END -->` was
+touched; the frozen-layer digest reproduces unchanged.**
+
+### 1.1 Per-block digest convention — stated here because it must COMPOSE
+
+This post-section will carry **more than one block**. `G6` will append a further block (the verdict,
+the `FS` ruling and the routings) beneath this one, carrying its **own** digest. So the convention
+cannot be *"the digest of everything below the post-section marker"* — that would be invalidated by
+the next append and would make every earlier digest unverifiable.
+
+**The convention is therefore PER BLOCK, and each block digests only its own bytes:**
+
+> A block begins at its `<!-- POST-BLOCK-BEGIN: <id> -->` line and ends at its
+> `<!-- POST-BLOCK-END: <id> -->` line. The digest is the **sha256 of every byte strictly BETWEEN
+> those two marker lines** — from the first byte of the line after `BEGIN` up to and including the
+> newline terminating the line before `END`. Both marker lines are excluded, and so is the digest
+> block that follows `END`, which is what makes the digest computable before it is written and
+> stable after it is.
+
+This composes: appending block *n+1* cannot change block *n*'s bytes, so every earlier digest stays
+reproducible forever. Each block records its own reproducing command with its own id substituted.
+
+### 1.2 The EXACT rendered sample of the new removal line
+
+Captured from the in-process drive through the production prune service, by the capture layer living
+in `tombstone_frontier_impl.rs`'s own test module — so this is the **NO-leading-space** target-prefix
+form the frozen contract §5.3 pins for that reader.
+
+**Every row below ends with a single TRAILING space.** The visitor writes `name=value ` per pair and
+never trims. A reader that trims the row and then matches `name=value ` including its trailing space
+will fail on the last field.
+
+**(i) THE ORIGIN SIGNATURE — the planted present-but-empty entry:**
+
+```
+target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787505799565 op_seq=2 epoch=1 refs_returned=0 refs_at_entry=1 bytes_returned=0 watermark=1 ceiling=2 
+```
+
+**(ii) THE POSITIVE CONTROL — the same fixture, unplanted, a genuinely non-empty removal:**
+
+```
+target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787505799565 op_seq=2 epoch=1 refs_returned=1 refs_at_entry=1 bytes_returned=4 watermark=1 ceiling=2 
+```
+
+**PER-RUN-VARYING TERMS, marked as such so a later reader does not pin a fixture artefact:**
+
+| Term | Varies? | Note |
+|---|---|---|
+| `ts` | **VARIES EVERY RUN** | wall-clock Unix ms at emission. Display only; **never** a join key. |
+| `op_seq` | fixture-fixed here (`2`) | a real workload's value is arbitrary. |
+| `epoch`, `refs_returned`, `refs_at_entry`, `bytes_returned`, `watermark`, `ceiling` | fixture-fixed | fixed by *this* fixture, not by the instrument. |
+| `message=prune removal observed` | **INVARIANT** | the message carries **no `=` character**, deliberately: the visitor renders the message as a bare `message=<words>` pair, and an `=` inside those words would break a whitespace-token field reader. |
+| `target=…` | **INVARIANT** | the frozen target, exactly. |
+
+**Field order, as rendered, matches frozen §5.2 exactly:** `ts`, `op_seq`, `epoch`, `refs_returned`,
+`refs_at_entry`, `bytes_returned`, `watermark`, `ceiling`. **No JSON blob**, as contracted — one
+`tracing` field per value.
+
+### 1.3 WHICH OF `ts`'s TWO PERMITTED RENDERINGS SHIPPED
+
+**Rendering (b) — the EXPLICIT field — shipped.**
+
+`ts` is recorded as an explicit signed Unix-ms `tracing` field, rendering `ts=<digits> ` like any
+other pair, so the line carries **eight explicit fields**. Frozen §5.4 pre-registered both renderings
+as compliant; this records which one the tree got.
+
+**Why (b) rather than (a).** Under rendering (a) the subscriber supplies the stamp and `ts` is not a
+recorded field at all — which means it is **invisible to any capture that records fields rather than
+subscriber-formatted metadata**, including the two in-tree captures this increment reads through. An
+explicit field is observable over every transport the term will actually cross, and it follows the
+tree's existing signed-Unix-ms convention for the residency rows' own timestamp fields. **`ts` is
+still NEVER a join key** — the rendering choice does not touch that.
+
+### 1.4 WHICH CAPTURE / EXTRACTION HELPER CHOICE THE FRONTIER-FILE DRIVE TOOK
+
+**Option 2 — new `row_field`-shaped helpers inside `tombstone_frontier_impl.rs`'s OWN test module**,
+not the bare `contains("name=value")` idiom the file previously used, and **not** an import from
+another module's helpers (both existing sets are `#[cfg(test)]`-module-private and neither is
+importable across a module boundary).
+
+The helpers now living in that file's test module: `row_field` (panics naming an absent field —
+never reads it as a default), `row_u64`, `row_bool`, `rows_of_kind`, and `rendered_counter_u64`
+(panics naming an absent series — never reads it as a zero).
+
+`G5` added one more beside them, because the removal line needed a selector the existing set could
+not express: **`rows_of_target`**, which selects rows **by TARGET ALONE**. `rows_of_kind` requires a
+`kind=` discriminant, and the removal line deliberately carries none — its own target does that work,
+which is exactly what keeps the field set at the frozen eight instead of widening it for a reader's
+convenience.
+
+**All of this is inside a file the ledger already counts.** No new counted `.rs`. The reserve slot
+(5/5) was **not** used, and no exemption is claimed.
+
+### 1.5 WHICH OF `W6`'s TWO ARMS `G5` SELECTED
+
+> ### **SELECTED: PRIMARY.**
+> The spawned drain future carries the capture subscriber with it, and the sim leg asserts the
+> branch's **RENDERED LINE**.
+
+**THE EVIDENCE — empirical, in BOTH directions, not a reading.** A throwaway probe was inserted into
+the sim file, compiled, run both ways and then removed. The sim file is **byte-unedited at `G5`'s
+handoff** (blob hash unchanged from the base commit, verified with `git rev-parse HEAD:<path>`).
+
+*Preconditions, verified first:* `tracing` resolves to **0.1.44** in `Cargo.lock`, so
+`tracing::instrument::WithSubscriber` is available — **CONFIRMED**; uses of
+`with_subscriber` / `WithSubscriber` anywhere under `packages/server-rust/src`: **ZERO** — a
+new-to-the-tree construct, **CONFIRMED** and called out as one.
+
+*The probe* used the existing race scaffold unchanged in shape — a shared 2-party barrier, a spawned
+cursor ACK and a spawned prune pass released together, under the existing
+`#[tokio::test(flavor = "multi_thread")]` flavour. The only change was the one the PRIMARY arm calls
+for: build a `tracing::Dispatch` **once**, hand `tracing::dispatcher::set_default(&dispatch)` to the
+test thread and `dispatch.clone()` to the spawned future via `fut.with_subscriber(...)`.
+
+| Direction | Change | Rows captured | Removal rows |
+|---|---|---|---|
+| 1 | **with** `.with_subscriber(dispatch)` | **16** | **5** |
+| 2 | **without** it, everything else identical | **0** | **0** |
+
+Direction 1's captured rows, verbatim (note the **LEADING space** before `target=` — the sim file's
+visitor uses the other prefix form, per frozen §5.3):
+
+```
+ target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506278401 op_seq=10 epoch=1 refs_returned=1 refs_at_entry=1 bytes_returned=2 watermark=1000 ceiling=6 
+ target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506278401 op_seq=10 epoch=3 refs_returned=1 refs_at_entry=1 bytes_returned=2 watermark=1000 ceiling=6 
+ target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506278401 op_seq=10 epoch=2 refs_returned=1 refs_at_entry=1 bytes_returned=2 watermark=1000 ceiling=6 
+ target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506278401 op_seq=10 epoch=4 refs_returned=1 refs_at_entry=1 bytes_returned=2 watermark=1000 ceiling=6 
+ target=topgun_server::tombstone_frontier::removal message=prune removal observed ts=1787506278401 op_seq=10 epoch=5 refs_returned=1 refs_at_entry=1 bytes_returned=2 watermark=1000 ceiling=6 
+```
+
+**What the two directions establish TOGETHER, which neither establishes alone.** The rendered line is
+observable across the spawn **if and only if** the subscriber travels with the future. Direction 2
+reproduces exactly the empty capture the sim file's own doc-contract predicts for a thread-local
+`set_default` under a multi-threaded runtime — so a sim leg asserting a rendered line over a spawned
+drain **without** carrying the subscriber would be reading an empty capture and passing **vacuously**.
+Direction 1 shows the mechanism closes that gap.
+
+**THE REASON.** PRIMARY is selectable, so PRIMARY is selected — there is no silent third option. The
+adaptation is confined to the already-counted sim file; it needs no production edit, no new counted
+`.rs`, no change of runtime flavour and no change to the scaffold's thread model. And it grades the
+sim leg at **LINE** granularity, which is strictly stronger than the fallback's **metrics**
+granularity for an instrument whose entire deliverable *is* a rendered line.
+
+**Consequences of the selection, for `G6`:**
+
+- The **paired single-thread in-process rendered-line witness** in `tombstone_frontier_impl.rs` — the
+  fallback's second, mandatory half — is **NOT owed**, because the fallback was not taken.
+- The sim leg must still: read which of the two barrier orderings the round took and assert **that**
+  branch's consequences (never a disjunction both branches satisfy); gate on a **non-empty** capture
+  before reading any term; and carry its own mutation arm, REDing when the observation mutation is
+  applied.
+- The sim-side reader must consume the **LEADING-space** target-prefix form.
+
+### 1.6 THE `C13` MODULE-DOC RE-WORDING THE SELECTED ARM ENTAILS — the wording `G6` must apply
+
+The sim file's module doc currently asserts **flatly** that on that scaffold **both** in-process
+transports — the `tracing` capture and the metrics recorder — are thread-local, and that the aggregate
+leg is therefore recorded at aggregate granularity **only**. Two corrections are owed, and they are
+owed on **different terms**:
+
+**(A) THE METRICS CLAUSE — owed on BOTH arms, NOT arm-conditional.** The flat "both transports are
+thread-local" assertion is refuted by the tree independently of which arm ships, and a doc-contract
+the code contradicts is a false-invariant hazard. Correct it to say:
+
+> The **recorder BINDING** is thread-local, but `MetricsPruneRecorder` resolves every metric handle
+> **once, at construction**, so an increment issued from a **spawned** task still lands on the
+> recorder that was bound when the frontier was built. Metrics are therefore **readable across a
+> spawn**, which is why the raced-sweep leg can read a rendered counter under a `multi_thread`
+> runtime and get a real number rather than an empty render. The aggregate leg stays at **AGGREGATE**
+> granularity **on its own terms** — its predicate *is* the aggregate conservation snapshot — and
+> **not** because metrics are unreadable.
+
+**(B) THE *TRACING* CLAUSE — NARROWED, NOT DELETED. Owed on the PRIMARY arm, which is the arm
+selected.** Correct it to say:
+
+> A capture bound by `tracing::subscriber::set_default` is **thread-local**, and is therefore
+> **invisible to a spawned task UNLESS that task's future carries the subscriber with it**
+> (`with_subscriber`). The aggregate leg does **not** carry one, and stays at AGGREGATE granularity
+> for exactly that reason. A leg that *does* carry one observes the spawned drain's rows at **line**
+> granularity.
+
+**The aggregate leg's own recorded granularity does NOT change** under either correction. Both edits
+are confined to that file's doc comment, change **no behaviour**, add **no** provenance marker, and
+consume **no** additional counted `.rs` and **no** exemption shape — the file is already counted and
+the cap is not exceeded.
+
+### 1.7 What this block does NOT contain, and who owes it
+
+**`G6` will append a further block** beneath this one — the **verdict**, the **`FS` ruling** with its
+one-sentence statement of which of defect (i) and defect (ii) was delivered, and the **routings by
+id** — and that block will carry **its own digest** under the per-block convention of §1.1. This
+block makes **no** verdict claim, walks **no** row of the Decision Table, and routes nothing.
+
+Nothing in this block asserts, implies or builds on a plateau claim in either direction.
+
+<!-- POST-BLOCK-END: G5-RENDERED-SAMPLE -->
+
+### Post-block 1 digest
+
+**Reproduce it with exactly this command, run from the repository root:**
+
+```sh
+sed -n '/^<!-- POST-BLOCK-BEGIN: G5-RENDERED-SAMPLE -->$/,/^<!-- POST-BLOCK-END: G5-RENDERED-SAMPLE -->$/p' \
+  packages/server-rust/benches/soak_harness/evidence/spec360-origin-instrument-ruling.md \
+  | sed '1d;$d' | shasum -a 256
+```
+
+```
+sha256 = 4bfd62e3740f00a0c30de65938f407720a1d51575113cc86c2d164257de017d0
+```
