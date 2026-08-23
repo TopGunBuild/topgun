@@ -820,3 +820,362 @@ sed -n '/^<!-- POST-BLOCK-BEGIN: G5-RENDERED-SAMPLE -->$/,/^<!-- POST-BLOCK-END:
 ```
 sha256 = 4bfd62e3740f00a0c30de65938f407720a1d51575113cc86c2d164257de017d0
 ```
+
+
+---
+
+<!-- POST-BLOCK-BEGIN: G6-VERDICT -->
+
+## Post-block 2 — the Decision-Table walk, the published verdict, the `FS` ruling and the routings
+
+**Written by `G6`, after the interleaving fault leg executed. Nothing above
+`<!-- FROZEN-LAYER-END -->` was touched; the frozen-layer digest reproduces unchanged
+(`3efa6d963ee67564b629279f7ea96c727a91850343978fc4986696920ed0e55c`), and post-block 1's bytes are
+untouched, so its own digest reproduces unchanged too. This block carries its own digest under the
+per-block convention post-block 1 §1.1 states.**
+
+### 2.1 THE DECISION TABLE, WALKED IN ITS FROZEN ORDER
+
+The table is walked **as written**. It was not edited, and no row's antecedent was re-worded to fit
+what execution found.
+
+---
+
+#### ROW `R4` — evaluated FIRST, fail-closed. **ANTECEDENT DOES NOT HOLD. R4 DOES NOT FIRE.**
+
+`R4`'s antecedent is a **disjunction of four failure legs**. Each is stated and answered:
+
+**(a) "an unmutated suite is not green."** FALSE — every suite is green on the branch tip:
+
+| Suite | Result |
+|---|---|
+| `cargo test --release -p topgun-server` (whole crate, 18 targets) | **0 failed**; lib alone 1862 passed / 0 failed / 2 ignored |
+| `pnpm test:sim` | **28 passed**, 0 failed (27 at HEAD + the one test this group added) |
+| doc tests | 0 passed / 0 failed / 5 ignored |
+
+**(b) "a mutation arm does not RED against the assertion `N10` sites it on."** FALSE — all three
+arms RED, each against its own sited assertion, and each names it:
+
+| Arm | `N10` sites it on | Executed outcome |
+|---|---|---|
+| `W2` (gate `:986` on `!refs.is_empty()`) | the **EXIT ROW** | RED, naming the three-term exit-row assertion. The same run shows `topgun_or_prune_epochs_drained_total` **passing at Δ = 0** under the mutation — the limb `N6` `X21-c` says this arm does not move, and it did not. |
+| `W5` (emit `slot.refs_at_entry` for `refs_returned`) | the **rendered `refs_returned`** | RED, naming `refs_returned != refs.len()`. |
+| `W6` (same mutation, interleaving leg) | **its arm's rendered LINE** | RED, naming `refs_returned != refs.len()`, on the sim file's own rendered row. Shown twice: on the leg's quiescent reference (which runs first) and — with the quiescent gate suppressed by a throwaway probe — on **round 0 of the raced leg itself**, at `ceiling=3`, i.e. while that round was asserting the **admitted** branch's own consequences. |
+
+**No mutation arm is graded against `X21-c`'s Δ.** This was checked, not assumed: `W2`'s transcript
+records the Δ = 0 limb *passing* under the mutation, and the arm's RED is the exit row.
+
+**(c) "the planted positive control did not fire."** FALSE, on both readings of "positive control":
+`W3`'s planted classifier control returns `AttributedWithoutObservation` on the planted record and
+does **not** return it on the unplanted twin over the same fixture; `W8`'s instrument positive
+control emits a removal line with `refs_returned = 1`, `refs_at_entry = 1`, `bytes_returned = 4`,
+asserted on rendered text by field name.
+
+**(d) "the negative control did not show the line absent."** FALSE — `W4` shows **zero** removal
+rows on **both** paths that skip the arm (no-eligible-epoch with the watermark non-zero, and the
+dark fast path at `watermark == 0`), each arm gating on a **non-empty** capture first, so the
+absence is read off a transport that demonstrably worked.
+
+**Every leg of `R4`'s disjunction is false ⇒ `R4` does not fire. The walk proceeds.**
+
+---
+
+#### ROW `R1` — **ANTECEDENT HOLDS. `R1` FIRES.**
+
+`R1` is a conjunction of obligation **A** and obligation **B**.
+
+**Obligation A — HOLDS.** The planted present-but-empty `epoch_tags` entry, driven **through the
+SERVICE** (`prune_epoch_tombstones`), reproduces `AttributedWithoutObservation` with the class
+**computed live** by `classify_drain_attribution`, every term read over the transport that carries
+it:
+
+- **rendered exit row** — `exit_kind = DrainedByPrune`, `bytes_freed_attributed = 4` (> 0),
+  `removed_refs_observed = 0`;
+- **rendered pass row** (`kind = "prune_pass"`) — `considered = 0`, `empty_drain = true`;
+- **Prometheus render** — `topgun_or_prune_epochs_drained_total` **Δ = 0** across the drive, read as
+  `Some("…")` and never `None`;
+- **non-vacuity gate first** — the capture is asserted non-empty and of the expected per-kind row
+  count before any term is read.
+
+**Obligation B — HOLDS.** The instrument is delivered at the adopted siting (exactly one
+`tracing::info!` inside the `Some(refs)` arm, adjacent to the existing `removed_refs` /
+`removed_bytes` locals and strictly before `drained.extend(...)`), with §C's field set by name, on
+its own target, unconditional, not registered with the metrics registry — and its emission is
+**proven correct over the rendered transport**:
+
+| Reading | Witness | Outcome |
+|---|---|---|
+| zero-returned (the origin signature) | the planted drive | rendered line captured verbatim (post-block 1 §1.2(i)) |
+| positive | `W8` | rendered line captured verbatim (post-block 1 §1.2(ii)) |
+| silent | `W4`, both paths | zero removal rows off a non-empty capture |
+| observation, not a copy | `W5` | REDs by name under the mutation |
+| under the **interleaving** fault | `W6`, **PRIMARY arm** | rendered LINE asserted across a spawn; branch read, not disjoined; REDs by name under the mutation |
+
+**⇒ `DT` row `R1` FIRES.**
+
+---
+
+#### ROWS `R2` and `R3` — **NOT REACHED.**
+
+The table is evaluated in its frozen order and `R1` fired, so `R2` (A holds ∧ B does not) and `R3`
+(A does not hold) are not reached. Recorded for completeness: `R2`'s antecedent is **false** because
+B holds, and `R3`'s is **false** because A holds. §C's inference chain therefore is **not**
+contradicted by this spec's control — the miniature reproduces exactly the pair the chain predicts.
+
+### 2.2 THE PUBLISHED VERDICT
+
+> # **CONFIRMED-AND-ARMED**
+>
+> `DT` row `R1`. The `PD-F18` consequence holds when driven through the service, and §C's adopted
+> removal-site origin instrument is landed and proven to emit correctly over the transport its
+> consumer will actually read — including under the interleaving fault, at rendered-line
+> granularity, across a spawn.
+
+### 2.3 THE `FS` RULING — the one-sentence (i)/(ii) statement, claiming no more
+
+> **This spec PARTIALLY DELIVERED defect (i), attribution — the removal-site observation line plus
+> two doc-contracts naming `bytes_freed_attributed` / `drained_refs_total` as entry-side and
+> `considered` / `empty_drain` / `epochs_drained` as unable to discriminate — and did NOT deliver
+> defect (ii), reclamation, which is ROUTED because a reclamation fix without a named origin is
+> exactly the wrong-shaped fix this umbrella exists to avoid.**
+
+**What "partially delivered" means here, in `FS` row `R1`'s own terms and no further.** The
+observation terms already existed; the residual (i) gap was **service-side blindness** and
+**naming**, and that is what was closed — the blindness at the frontier by the line, the naming by
+the contracts. **It frees zero bytes.** **No existing metric series' value or meaning changed**, and
+that is deliberate: re-pointing one mid-lineage would break comparability with every round already
+measured against it.
+
+**`FS` row `R1`'s fix, as landed — two doc-contracts and nothing else:**
+
+1. `packages/server-rust/src/tombstone_frontier.rs` — on `PruneEpochResidencyRecord::bytes_freed_attributed`
+   and on `METRIC_PRUNE_DRAINED_REFS_TOTAL`, naming both **entry-side**, with the `TODO-634` tracker
+   pointer `CLAUDE.md` sanctions for a deferred property.
+2. `packages/server-rust/src/service/domain/crdt.rs` — on `prune_epoch_tombstones`, recording that
+   `considered` / `empty_drain` / `epochs_drained` **cannot distinguish** *"no epoch was eligible"*
+   from *"an eligible epoch was removed and returned zero refs"*, with the same pointer.
+
+**What was NOT done, explicitly.** The anti-suppression clause was honoured: `drained_epochs.insert(e)`
+was **not** gated on `!refs.is_empty()`. That change would relabel the exit and suppress the very
+rows the new instrument exists to explain, while the refs would still be gone from the index and the
+durable content still un-dropped. **The rendered pass row was not widened** — it carries exactly
+`kind`, `considered`, `empty_drain` on the branch, as at `main`.
+
+### 2.4 ROUTING — `C9` / `C9a` handed to `TODO-654`, BY ID
+
+**Routed by id in this artifact only. No tracker file was edited by this spec.**
+
+**To `TODO-654`** (*"Plateau re-measurement from the DURABLE layer…"*, `depends_on: TODO-634,
+SPEC-360`) — the **ORIGIN question, with the instrument armed**, carrying:
+
+- **BOTH horns of the origin paradox, neither chosen:**
+  - **`H-origin-1`** — the writer enumeration is incomplete in a way a static read cannot see: a
+    route that empties a vector without being one of the five enumerated mutation expressions, or an
+    interleaving that produces the state without any single writer producing it.
+  - **`H-origin-2`** — the inference chain is **pin-specific**. The 8 h cells ran on `SPEC-357`-era
+    binaries; the drain's bracket has since been rewritten. The instrument lands at HEAD and will be
+    read at HEAD.
+- **The `NOT-OBSERVED-AT-HEAD` pre-registration.** If the instrument observes no
+  `refs_returned == 0 ∧ refs_at_entry > 0` line at HEAD, that is an **informative result** bearing on
+  `H-origin-2`, **NOT** an instrument failure. `W4`'s negative control is what licenses that reading
+  (silence means the arm was not reached, because the line is unconditional and provably absent only
+  when the arm is skipped), and `W8`'s positive control is what rules out the third reading (a window
+  that never exercised a non-dark eligible drain). All three readings the instrument can produce —
+  **silent / zero-returned / positive** — were exercised before it shipped.
+- **The null-read disposition (`C9a`), normative.** The instrument **SHIPS** regardless; a null read
+  **routes**, it does not stall and it does not reopen the diagnosis line `SPEC-358`'s `E-C`
+  hard-stopped. `TODO-654`'s pre-registered readings (b) *"every line
+  `refs_returned == refs_at_entry`"* and (c) *"no lines at all while epochs exit"* are exactly the two
+  null shapes and each already carries its routing there.
+- **Reading the instrument under load is `TODO-654`'s job, not this spec's.** `SPEC-360` landed the
+  instrument and proved it emits correctly; it did **not** read it under production or soak load.
+
+**The extractor contract this hand-off depends on is the FROZEN layer above**, and the exact rendered
+samples are post-block 1 §1.2. A consumer must note two rendered-form facts: rows end with a **single
+trailing space**, and the **target prefix differs by a leading space** between the two in-tree
+capture visitors (§5.3).
+
+### 2.5 ROUTING — `W7`'s unscanned-third-file residual handed to `TODO-634`, BY ID
+
+**To `TODO-634`** — explicitly **NOT** to `TODO-654` — the **source-scan completeness gap** in `W7`:
+
+`W7` reads its scan surface through `include_str!`, which resolves literal paths relative to the
+including file, so its claim is scoped to exactly the two files it names
+(`tombstone_frontier_impl.rs`, `service/domain/crdt.rs`). It REDs when a **sixth** `self.epoch_tags`
+writer appears in `tombstone_frontier_impl.rs`, or when a **second** non-`#[cfg(test)]` caller of
+`drain_prunable_tombstones` appears in **either** scanned file. **A production caller added in a
+third, unscanned file would NOT RED.** Closing that (a `std::fs` walk of `src/` from
+`CARGO_MANIFEST_DIR`, or an include list asserted against a directory listing) is out of scope here.
+
+**The reason it goes to the umbrella and not to the measurement increment:** a source-scan
+completeness guard is a **FAMILY** concern — it protects Fact A of the origin paradox for every
+carve that comes after this one — and is **no part of `TODO-654`'s durable-layer plateau read**,
+whose object is RSS, redb file size, WAL segment retention and a store-level live-vs-dead tombstone
+census. Filing it against `TODO-654` would attach a static-analysis guard to a measurement cell that
+has no use for it.
+
+**Both routings are by ID, in this post-section, and no tracker file was edited.** `TODO-634.md`,
+`INVARIANTS.md` and `scripts/check-invariants.sh` are byte-unedited on this branch, provable by
+`git diff --stat main...HEAD` over those three paths returning empty output.
+
+### 2.6 `AC20` — THE LOAD HARNESS, RUN ONCE, GRADED TWICE
+
+**The cell:** `cargo bench --bench load_harness -- --connections 200 --duration 30` — fire-and-wait
+at the harness defaults, **the same cell `SPEC-359` ran**. A 15 s cell would not be comparable and
+was not run.
+
+**Raw output, verbatim:**
+
+```
+Running scenario: throughput
+Connections: 200, Duration: 30s
+
+operation                           count     p50 µs     p95 µs     p99 µs   p99.9 µs     max µs
+--------------------------------------------------------------------------------------------
+write_latency                      112487       1657       6343      12423      26447      37375
+
+ops/sec: 37495
+PASS [throughput_assertion]
+```
+
+**GRADING 1 — against `SPEC-359`'s number on the same host**
+(`.specflow/archive/SPEC-359.md:3676-3683` — *"fire-and-wait, defaults (200 connections, 30 s)"*:
+113 263 ops, 37 754 ops/s, p50 1 479 µs):
+
+| Term | `SPEC-359` | `SPEC-360` | Δ | Verdict vs the 20 % tolerance |
+|---|---|---|---|---|
+| ops | 113 263 | 112 487 | **−0.69 %** | PASS |
+| ops/s | 37 754 | 37 495 | **−0.69 %** | PASS |
+| p50 | 1 479 µs | 1 657 µs | **+12.0 %** | PASS (inside 20 %, investigated below) |
+
+**The p50 movement, stated rather than absorbed.** +12 % on p50 with throughput flat to within 0.7 %
+is not the shape a per-operation cost regression takes — a real added per-write cost would depress
+ops/s in step. The instrument this spec added fires **once per eligible epoch removed**, never on the
+write path and never on the dark path, and the harness scenario stamps no tombstones and drives no
+prune pass, so **zero** removal lines are emitted during the measured window. Both runs are
+single-shot cells on a shared developer host with no repetition and no confidence interval; a 178 µs
+move on a p50 of that magnitude is within the run-to-run spread such a cell carries. It is recorded
+here so it is visible rather than filed as noise, and both absolute floors pass with large margin.
+
+**GRADING 2 — against `benches/load_harness/baseline.json`'s absolute `fire_and_wait` floors:**
+
+| Floor | Threshold | Measured | Verdict |
+|---|---|---|---|
+| `min_ops_per_sec` | 30 000 | **37 495** | **PASS** (+25.0 % over the floor) |
+| `max_p50_us` | 5 000 | **1 657** | **PASS** (66.9 % under the ceiling) |
+
+The harness's own gate printed `PASS [throughput_assertion]`.
+
+**This is the standing hot-path gate `CLAUDE.md` already requires, not a measurement cell.** It ran
+once, in well under an hour, and it carries Observable Truth 9: the instrument's stated cost is now a
+**measured fact** rather than the assumption it was.
+
+### 2.7 `N11` — THE `CLAUDE.md` SIMULATION-RULE POSITION, RESTATED WITH `W6`'s ARM NOW KNOWN
+
+Recorded explicitly rather than left to pass silently.
+
+**The exemption claim, unchanged.** `CLAUDE.md`'s rule is that changes to domain services under
+`packages/server-rust/src/service/domain/` be accompanied by a simulation test exercising the
+**changed behaviour** under at least one fault scenario. This spec's **only** `service/domain/` touch
+is the verdict-conditional **doc-contract** on `crdt.rs` — **zero behaviour change, provable by
+diff**. The rule therefore has **no changed behaviour as its subject** here, and to the extent it
+names *"network partition or node failure"* specifically, that clause is claimed **EXEMPT, explicitly
+and on the record**.
+
+**What was supplied anyway, and it is stronger than the exemption.** `W6` is a real simulation
+witness in this family's existing sim home, under the **interleaving** fault dimension that file's
+scaffold can actually drive — and **on the PRIMARY arm** it grades at **rendered-LINE** granularity,
+the strongest transport available for an instrument whose entire deliverable *is* a rendered line:
+
+- a prune sweep and a second device's cursor ACK released together from a shared barrier, both
+  spawned, both contending for the real frontier mutex, 32 rounds with the spawn order alternating;
+- the round **reads** which of the two barrier orderings it took (off the refusal counter) and
+  asserts **that** branch's removal-line set — refused ⇒ epochs {1,2,3,4,5} at ceiling 6, admitted ⇒
+  epochs {1,2} at ceiling 3 — never a disjunction both branches satisfy;
+- observed split on the recorded run: **16 refused / 16 admitted**, printed in the transcript so a
+  collapsed distribution would be visible;
+- the capture is gated **non-empty** before any field is read, and the rows are read **across a
+  spawn** only because the sweep's future carries the subscriber with it;
+- every raced line is compared as text against the **quiescent** drain's line for the same epoch,
+  `ts` and the round's own `ceiling` apart.
+
+**There is NO `SimNetwork` partition / delay / reorder leg, and that is deliberate.** `SimNetwork`'s
+fault injection affects routing between nodes registered with the harness; a directly-driven drain
+crosses no such edge, so such a criterion would be unsatisfiable in the sited file or satisfied
+**vacuously**. The file's own in-tree contract says so, and asserting a fault a scaffold cannot inject
+is precisely the class this spec guards against everywhere else.
+
+**The `C13` doc-contract correction post-block 1 §1.6 specified was applied**, in the sim file's doc
+comments only, changing no behaviour and adding no provenance marker:
+
+- **(A) the metrics clause — corrected, as owed on BOTH arms.** The flat "both in-process transports
+  are thread-local" assertion is refuted by the tree independently of the arm: the recorder BINDING is
+  thread-local, but `MetricsPruneRecorder` resolves every handle **once, at construction**, so an
+  increment from a spawned task still lands on the recorder bound when the frontier was built.
+  Metrics are therefore **readable across a spawn** — which is why the raced-sweep arms in that file
+  read rendered counters under a `multi_thread` runtime and get real numbers. **The aggregate leg's
+  own recorded granularity does NOT change**: it stays AGGREGATE on its own terms, because its
+  predicate *is* the aggregate conservation snapshot, and not because metrics are unreadable.
+- **(B) the tracing clause — NARROWED, not deleted, as owed on the PRIMARY arm.** A capture bound by
+  `set_default` is thread-local and therefore invisible to a spawned task **unless that task's future
+  carries the subscriber with it**; the aggregate leg does not carry one and stays at AGGREGATE
+  granularity for exactly that reason, while a leg that does carry one reads at line granularity.
+
+### 2.8 THE CAPTURE-RACE RESIDUAL, DISPOSED OF RATHER THAN LEFT SILENT
+
+The predecessor group recorded that the sim file's capture helper carries the same
+callsite-interest-rebuild race it fixed in the frontier file, and warned it would surface here as
+*the instrument appearing not to emit*. **It did not bite**: 8 consecutive filtered sim runs and
+repeated full-lib release runs are green with no missing rows.
+
+The leg is nevertheless built to keep the window narrow: **one** capture is installed for the whole
+test and the sink is drained between rounds, rather than installing and dropping a subscriber 33
+times — reducing this leg's contribution from 33 rebuild windows to one. The predecessor's
+serialisation remedy was **not** applied to this file: it was not needed, and it would have required
+holding a `std::sync::Mutex` guard across `.await` points in a `multi_thread` test, which the lint
+gate rejects. The residual therefore remains **open for that file's other captures** and is recorded
+here rather than quietly closed.
+
+### 2.9 WHAT THIS BLOCK DOES NOT CLAIM
+
+- **No plateau claim, in either direction, anywhere.** Nothing in this block asserts, implies or
+  builds on one, and nothing treats a falling reclaim fraction as evidence that total reclamation
+  degrades with width. The plateau is **not established either way**, and re-measuring it belongs to
+  the measurement increment.
+- **No origin naming.** Neither horn is chosen. This spec makes no prediction about which one the
+  origin falls on, and nothing here should be read as evidence for either.
+- **No measurement leg.** No soak cell, no width-1000 matrix, no run of one hour or longer, no
+  `soak_harness` invocation, no new measurement lineage. The pre-shaped long cell described in the
+  frozen layer remains **UNRUN**.
+- **No reclamation fix.** Defect (ii) is routed, not delivered, and the conservative sweep remains the
+  backstop shape and remains out of scope.
+
+### 2.10 THE COUNTED `.rs` LEDGER, FINAL
+
+| Slot | File | Status |
+|---|---|---|
+| 1/5 | `packages/server-rust/src/tombstone_frontier.rs` | taken |
+| 2/5 | `packages/server-rust/src/tombstone_frontier_impl.rs` | taken |
+| 3/5 | `packages/server-rust/src/service/domain/crdt.rs` | taken — **only** by `FS` row `R1`'s doc-contract, as the Delta held it |
+| 4/5 | `packages/server-rust/src/sim/tombstone_gc_proof.rs` | taken |
+| 5/5 | — | **HELD IN RESERVE, UNUSED** |
+
+**4 counted `.rs`, 1 in reserve, 0 exemptions.** The exemption ledger is **EMPTY**; no `PROJECT.md`
+sanctioned shape was invoked. `git diff --name-only main...HEAD -- '*.rs'` lists exactly those four
+paths, each named in this spec's Delta.
+
+<!-- POST-BLOCK-END: G6-VERDICT -->
+
+### Post-block 2 digest
+
+**Reproduce it with exactly this command, run from the repository root:**
+
+```sh
+sed -n '/^<!-- POST-BLOCK-BEGIN: G6-VERDICT -->$/,/^<!-- POST-BLOCK-END: G6-VERDICT -->$/p' \
+  packages/server-rust/benches/soak_harness/evidence/spec360-origin-instrument-ruling.md \
+  | sed '1d;$d' | shasum -a 256
+```
+
+```
+sha256 = d3d1442282d6a48559534017e7a858b5a6a1c22df3e9350cfa5289f83737d716
+```
