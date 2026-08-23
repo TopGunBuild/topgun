@@ -2820,6 +2820,7 @@ fn prune_decision_line(fixture: &str, drained: &[(Epoch, TombstoneRef)]) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tombstone_frontier::{classify_drain_attribution, DrainAttributionClass};
     use metrics_exporter_prometheus::PrometheusBuilder;
 
     const CONN_A: ConnectionId = ConnectionId(1);
@@ -5579,6 +5580,170 @@ mod tests {
             exit.removed_refs_observed, 0,
             "R_obs must be 0: the planted vector carried nothing for drain_prunable to \
              observe: {exit:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Drain attribution -- the planted positive control and its unplanted twin
+    // -----------------------------------------------------------------------
+
+    /// The pass record a pruning pass would have built from this drain's RETURN VALUE,
+    /// reconstructed by the same rule the service uses: `empty_drain` off `drained.is_empty()`,
+    /// one `considered` per returned ref, `epochs_drained` off the number of DISTINCT epochs
+    /// those refs came from.
+    ///
+    /// The classifier reads a pair whose two halves are produced by different components, so a
+    /// control that hand-wrote the pass half would grade the classifier against an assumption
+    /// rather than against the drain. Deriving it mechanically from `drained` keeps the pass
+    /// half a function of what the drain actually returned.
+    fn pass_record_from_drained(drained: &[(Epoch, TombstoneRef)]) -> PrunePassRecord {
+        let distinct: std::collections::BTreeSet<Epoch> = drained.iter().map(|(e, _)| *e).collect();
+        PrunePassRecord {
+            considered: u64::try_from(drained.len()).unwrap_or(u64::MAX),
+            epochs_drained: u64::try_from(distinct.len()).unwrap_or(u64::MAX),
+            empty_drain: drained.is_empty(),
+            ..PrunePassRecord::default()
+        }
+    }
+
+    /// Build the one-epoch fixture both arms below share, drain it IN-MODULE, and return the
+    /// exit rows beside the drain's return value.
+    ///
+    /// `plant_empty_tag_vector` selects the arm. When set, epoch 1's index entry is replaced --
+    /// through the same in-module `f.lock()` bypass this file already uses elsewhere -- with a
+    /// PRESENT-BUT-EMPTY vector, so the drain's `epoch_tags.remove(&1)` still returns `Some`
+    /// (a genuine `DrainedByPrune` attribution against a slot whose entry-side bytes are
+    /// nonzero) while the vector it removed carries nothing to observe. When clear, the same
+    /// fixture drains its one genuine ref, and that is the control the planted arm is read
+    /// against.
+    ///
+    /// `drain_prunable` is the one in-crate call that hands the exit rows back BY VALUE; the
+    /// public entry point consumes them internally. Nothing here adds a seam to the frontier.
+    fn drain_one_epoch_fixture(
+        plant_empty_tag_vector: bool,
+    ) -> (Vec<PruneEpochResidencyRecord>, Vec<(Epoch, TombstoneRef)>) {
+        let f = frontier();
+        f.set_epoch_width(1);
+        f.stamp_tombstone("m", "k1", "TAG1"); // epoch 1: one ref, four stamped bytes
+        f.stamp_tombstone("m", "k2", "TAG2"); // rolls past epoch 1: refs_at_entry = 1
+        f.set_durable_epoch_watermark(1);
+        f.set_delivered(CONN_A, 100);
+        let c: ClientId = "a5:drain-attribution|dev-1".into();
+        assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+
+        let mut state = f.lock();
+        if plant_empty_tag_vector {
+            state.epoch_tags.insert(1, Vec::new());
+        }
+        let (drained, _split, exits) = state.drain_prunable();
+        (exits, drained)
+    }
+
+    /// The classifier's PLANTED positive control, read against the unplanted drain over the
+    /// same fixture.
+    ///
+    /// `AttributedWithoutObservation` is the class the divergence argument turns on, so it has
+    /// to be shown FIRING on a pair a real drain produced -- the classifier's pure-input
+    /// totality tests, which live beside its definition, are a different obligation -- and
+    /// shown NOT firing when the same fixture's removal is genuine. Without the second arm the
+    /// first proves only that the classifier can say the word.
+    ///
+    /// The drive is the frontier's own drain. The SERVICE-level consequence -- the same planted
+    /// antecedent driven through `prune_epoch_tombstones` with both records read off the
+    /// rendered transport -- is a separate obligation and is not what this control claims.
+    #[test]
+    fn a_planted_empty_tag_vector_is_the_only_arm_that_attributes_without_observation() {
+        // -- planted arm ----------------------------------------------------
+        let (planted_exits, planted_drained) = drain_one_epoch_fixture(true);
+        assert_eq!(
+            planted_exits.len(),
+            1,
+            "only epoch 1 clears both eligibility conjuncts: {planted_exits:?}"
+        );
+        let planted_exit = planted_exits.into_iter().next().expect("checked len == 1");
+        assert_eq!(
+            planted_exit.epoch, 1,
+            "exit row is epoch 1's: {planted_exit:?}"
+        );
+        assert!(
+            matches!(planted_exit.exit_kind, EpochExitKind::DrainedByPrune),
+            "the eligible fold removed epoch 1 (an empty Vec, but Some), so the attribution is \
+             a real DrainedByPrune and not Unclassified: {planted_exit:?}"
+        );
+        assert!(
+            planted_exit.refs_at_entry > 0,
+            "the slot must have entered with refs, or there would be nothing to attribute: \
+             {planted_exit:?}"
+        );
+        assert!(
+            planted_exit.bytes_freed_attributed > 0,
+            "the attribution side of the pair -- entry-side stamped bytes credited to the \
+             removal: {planted_exit:?}"
+        );
+        assert_eq!(
+            planted_exit.removed_refs_observed, 0,
+            "the planted vector carried nothing for the removal site to observe: \
+             {planted_exit:?}"
+        );
+        assert!(
+            planted_drained.is_empty(),
+            "an empty removed vector contributes no refs to the drain's return value: \
+             {planted_drained:?}"
+        );
+
+        let planted_pass = pass_record_from_drained(&planted_drained);
+        assert_eq!(planted_pass.considered, 0, "pass: {planted_pass:?}");
+        assert!(planted_pass.empty_drain, "pass: {planted_pass:?}");
+
+        assert_eq!(
+            classify_drain_attribution(&planted_exit, &planted_pass),
+            DrainAttributionClass::AttributedWithoutObservation,
+            "planted arm must classify as the divergent class; exit {planted_exit:?}, pass \
+             {planted_pass:?}"
+        );
+
+        // -- unplanted control ----------------------------------------------
+        let (control_exits, control_drained) = drain_one_epoch_fixture(false);
+        assert_eq!(
+            control_exits.len(),
+            1,
+            "the control drains the same single eligible epoch: {control_exits:?}"
+        );
+        let control_exit = control_exits.into_iter().next().expect("checked len == 1");
+        assert_eq!(
+            control_exit.epoch, 1,
+            "exit row is epoch 1's: {control_exit:?}"
+        );
+        assert_eq!(
+            control_drained.len(),
+            1,
+            "the unplanted fixture returns TAG1: {control_drained:?}"
+        );
+        assert_eq!(
+            control_exit.removed_refs_observed, 1,
+            "the genuine removal observed its one ref: {control_exit:?}"
+        );
+
+        let control_pass = pass_record_from_drained(&control_drained);
+        assert_eq!(control_pass.considered, 1, "pass: {control_pass:?}");
+        assert!(!control_pass.empty_drain, "pass: {control_pass:?}");
+
+        // The discriminating assertion: the same fixture, the same eligible epoch, the same
+        // attributed bytes -- and the class must not be the divergent one once the removal is
+        // real. A control that only checked the planted arm would pass on a classifier that
+        // returned the divergent class unconditionally.
+        let control_class = classify_drain_attribution(&control_exit, &control_pass);
+        assert_ne!(
+            control_class,
+            DrainAttributionClass::AttributedWithoutObservation,
+            "unplanted control must NOT read as the divergent class; exit {control_exit:?}, \
+             pass {control_pass:?}"
+        );
+        assert_eq!(
+            control_class,
+            DrainAttributionClass::ObservedAndCounted,
+            "attributed and observed on both channels; exit {control_exit:?}, pass \
+             {control_pass:?}"
         );
     }
 }
