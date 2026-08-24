@@ -1508,6 +1508,34 @@ pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticV
 /// decrement stays where it already was — in the post-write success arm, behind
 /// `dropped` — because a decrement moved to follow the ledger would credit bytes the
 /// durable write never actually freed.
+///
+/// # WHAT THIS PASS RECORD CANNOT TELL YOU (read before drawing a conclusion from it)
+///
+/// The pass's own terms are built from the drain's RETURN VALUE, so all three of
+/// `considered`, `empty_drain` and `epochs_drained` are blind to a distinction that
+/// matters:
+///
+/// - `considered` increments once per ref the drain RETURNED, inside the loop below.
+/// - `empty_drain` is `drained.is_empty()`, over that same returned vector.
+/// - `epochs_drained` is the size of the per-epoch map, which only the same loop fills.
+///
+/// So `considered = 0`, `empty_drain = true`, `epochs_drained = 0` is what this pass
+/// reports for BOTH of these, and it CANNOT DISTINGUISH THEM:
+///
+/// 1. no epoch was eligible, so nothing was removed at all; and
+/// 2. an eligible epoch WAS removed from the index and returned zero refs.
+///
+/// Case 2 is not hypothetical — the frontier attributes that removal as a completed
+/// drain and reports entry-side bytes for it, while this record reports the pass as
+/// having done nothing. The two components are each internally coherent and disagree
+/// with each other, because one emits at the removal site and the other reads the
+/// return value.
+///
+/// Nothing here is widened to close that: the discriminating fact is emitted at the
+/// removal site itself, on its own `tracing` target, carrying what the removal
+/// returned beside what the slot recorded at entry. Read that line when this record
+/// says a pass did nothing. Reconciling the two ledgers is deferred and tracked in
+/// `TODO-634`.
 // Kept as one body deliberately: splitting the loop out would move the exit
 // counters and the tombstone-byte decrement into a helper, where neither the
 // summing identity nor the "exactly one decrement, in the post-write arm behind

@@ -655,16 +655,33 @@ mod tests {
     /// AGGREGATE terms `index_conservation_snapshot()` already exposes:
     /// exactly one attributed drain, exactly one exit row, O-0 holds — proven
     /// on every one of the 64 interleavings below, never a lucky one (R4.2).
-    /// `D4` is recorded at AGGREGATE granularity ONLY: it runs on a
-    /// `multi_thread` runtime, and both in-process observation transports
-    /// (`tracing` capture, metrics recorder) are thread-local (C13), so a
-    /// prune spawned onto a worker thread is invisible to either — the
-    /// per-kind row-count gate R4.6 applies to (`D1`, `D2`, `D3`, `D5`) does
-    /// NOT apply here, and this fn does not pretend otherwise by attempting a
-    /// row-granularity capture. `D4` is OUTSIDE every D-T row's universe
-    /// (Step 2's exclusion table): both in-process transports are
-    /// thread-local and its prune runs in a spawned task on a `multi_thread`
-    /// runtime (C13, X21-d).
+    /// `D4` is recorded at AGGREGATE granularity ONLY, and the reason is
+    /// narrower than "both transports are thread-local" (C13) — that flat
+    /// reading is wrong on the metrics half:
+    ///
+    /// - The `tracing` capture's BINDING is thread-local
+    ///   (`subscriber::set_default`), so a prune spawned onto a worker thread
+    ///   is invisible to it UNLESS that task's future carries the subscriber
+    ///   with it (`with_subscriber`). `D4` does not carry one, and stays at
+    ///   AGGREGATE granularity for exactly that reason; a leg that DOES carry
+    ///   one reads the spawned drain's rows at line granularity.
+    /// - The RECORDER binding is thread-local too, but `MetricsPruneRecorder`
+    ///   resolves every metric handle ONCE, at construction, so an increment
+    ///   issued from a spawned task still lands on the recorder that was bound
+    ///   when the frontier was built. Metrics are therefore READABLE across a
+    ///   spawn — which is why the raced-sweep arms below read a rendered
+    ///   counter under a `multi_thread` runtime and get a real number rather
+    ///   than an empty render.
+    ///
+    /// So the per-kind row-count gate R4.6 applies to (`D1`, `D2`, `D3`, `D5`)
+    /// does NOT apply here, and this fn does not pretend otherwise by
+    /// attempting a row-granularity capture it never arranged for. `D4` is
+    /// OUTSIDE every D-T row's universe (Step 2's exclusion table): its prune
+    /// runs in a spawned task on a `multi_thread` runtime carrying no
+    /// subscriber, so its rows are unobservable here (C13, X21-d). The
+    /// aggregate granularity is `D4`'s own terms — its predicate IS the
+    /// aggregate conservation snapshot — not a consequence of metrics being
+    /// unreadable.
     #[tokio::test(flavor = "multi_thread")]
     async fn prune_epoch_residency_discrimination_under_network_fault() {
         for round in 0..64u64 {
@@ -818,20 +835,37 @@ mod tests {
         }
     }
 
-    /// Bind a thread-local `tracing` capture for the guard's lifetime. Every
-    /// drive that reads rows off it runs on a CURRENT-THREAD runtime (R4.2,
-    /// X21-d): `tracing::subscriber::set_default` is thread-local, so a
-    /// multi-thread runtime would observe an empty capture instead of a
-    /// violation — exactly why `D4`'s race cannot be read at row
-    /// granularity (C13).
-    fn capture_tracing_rows() -> (
+    /// Bind a `tracing` capture for the guard's lifetime and ALSO hand back the
+    /// `Dispatch` it was built from, so the same sink can be carried into a
+    /// spawned task.
+    ///
+    /// The binding `set_default` installs is **thread-local**, so a drive that
+    /// reads rows off the guard alone must run on the capturing thread: a task
+    /// spawned onto another worker is invisible to it, and a row-granularity
+    /// assertion over such a task would read an empty capture instead of a
+    /// violation (C13). Carrying the returned `Dispatch` into the spawned future
+    /// with `WithSubscriber::with_subscriber` is what closes that gap — the
+    /// subscriber travels with the task, and its rows reach this same sink.
+    fn capture_tracing_rows_with_dispatch() -> (
         tracing::subscriber::DefaultGuard,
+        tracing::Dispatch,
         Arc<std::sync::Mutex<Vec<String>>>,
     ) {
         use tracing_subscriber::layer::SubscriberExt as _;
         let sink: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(RowCapture(Arc::clone(&sink)));
-        let guard = tracing::subscriber::set_default(subscriber);
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let guard = tracing::dispatcher::set_default(&dispatch);
+        (guard, dispatch, sink)
+    }
+
+    /// The thread-local half alone, for drives that run their prune on the
+    /// capturing thread and therefore need no `Dispatch` to carry anywhere.
+    fn capture_tracing_rows() -> (
+        tracing::subscriber::DefaultGuard,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let (guard, _dispatch, sink) = capture_tracing_rows_with_dispatch();
         (guard, sink)
     }
 
@@ -1502,6 +1536,8 @@ mod tests {
     /// Server epoch the fixture rolls to, so neither cursor is clamped by the
     /// current max stamped epoch.
     const FIXTURE_HEAD_EPOCH: Epoch = 10;
+    /// Durability fence the fixture opens, wide enough that no pass is dark.
+    const FIXTURE_DURABLE_WATERMARK: Epoch = 1000;
     /// The series whose per-round delta names which side of the barrier a round
     /// landed on: it moves once, and only once, on a refused claim.
     const SKIP_COUNTER: &str = METRIC_RECLAMATION_CLAIMS_REJECTED_BELOW_EXECUTED_TOTAL;
@@ -1542,7 +1578,7 @@ mod tests {
         for epoch in RECLAIM_TOMBSTONES + 1..=FIXTURE_HEAD_EPOCH {
             frontier.stamp_tombstone(RECLAIM_MAP, "filler", &format!("F{epoch}"));
         }
-        frontier.set_durable_epoch_watermark(1000);
+        frontier.set_durable_epoch_watermark(FIXTURE_DURABLE_WATERMARK);
         track_client(&frontier, &client_a, conn_a, DEVICE_A_CURSOR).await;
         frontier.set_delivered(conn_b, 100);
 
@@ -1899,6 +1935,368 @@ mod tests {
         println!(
             "RECLAMATION RACE | boundary arm 64 rounds: {recorded_rounds} recorded / \
              {refused_rounds} refused | complementary arm: 64/64 admitted | control: refused"
+        );
+    }
+
+    // ==================================================================
+    // The removal-site OBSERVATION line, read at ROW granularity across a spawn,
+    // under the same interleaving fault the arms above drive: a prune sweep and a
+    // second device's cursor ACK released together from a barrier.
+    //
+    // The capture binding is thread-local, so the spawned sweep's rows reach this
+    // leg's sink only because the sweep's future carries the subscriber with it. A
+    // leg that spawned the drain WITHOUT carrying it would read an EMPTY capture
+    // and then "pass" on terms it never read, so every round gates on a non-empty
+    // capture before touching a field.
+    //
+    // Each round takes exactly one of the two barrier orderings, reads WHICH one
+    // off the skip counter, and asserts that branch's consequences — the licensed
+    // ceiling decides which epochs the sweep was allowed to remove, so the two
+    // branches predict DIFFERENT removal-line sets and neither satisfies the
+    // other's assertion.
+    // ==================================================================
+
+    /// The removal line's own `tracing` target. It carries no `kind`
+    /// discriminant — its target does that work — so rows are selected by target
+    /// alone.
+    const REMOVAL_TARGET: &str = "topgun_server::tombstone_frontier::removal";
+
+    /// The line's field set, in rendered order. Read by name on every round, so a
+    /// field that stopped rendering REDs here rather than being silently skipped.
+    const REMOVAL_FIELDS: [&str; 8] = [
+        "ts",
+        "op_seq",
+        "epoch",
+        "refs_returned",
+        "refs_at_entry",
+        "bytes_returned",
+        "watermark",
+        "ceiling",
+    ];
+
+    /// How many raced rounds the leg drives. Each builds its own fixture, so the
+    /// count buys interleavings rather than repetitions of one schedule.
+    const ORIGIN_LINE_ROUNDS: u64 = 32;
+
+    /// A tag pushed back into epoch 1's index entry the way a failed storage drop
+    /// puts it there — AFTER that epoch's slot was frozen by rollover.
+    ///
+    /// This is what makes the line's `refs_returned` term falsifiable. On a
+    /// fixture where every epoch holds exactly one ref, a `refs_returned` copied
+    /// from the entry-side slot and a `refs_returned` read from the removal render
+    /// the same digits, so no assertion on it could tell an observation from a
+    /// copy. A restore moves the removal's count without moving the slot's, and
+    /// the two terms then disagree on one line.
+    const RESTORED_TAG: &str = "TX";
+
+    /// Epoch 1's terms after the restore: the removal returns both `T1` and
+    /// `RESTORED_TAG`, while the slot still records the one ref that was stamped
+    /// before rollover.
+    const RESTORED_EPOCH: Epoch = 1;
+    const RESTORED_REFS_RETURNED: u64 = 2;
+    const RESTORED_REFS_AT_ENTRY: u64 = 1;
+    /// Both tags are two bytes wide, so the observed byte total is 4.
+    const RESTORED_BYTES_RETURNED: u64 = 4;
+
+    /// One round's fixture: the reclamation arm above, plus `RESTORED_TAG` put
+    /// back into epoch 1's index entry and into the stored value, so the store and
+    /// the index agree about what is there to drop.
+    async fn origin_line_arm(recorder: &PrometheusRecorder) -> ReclamationArm {
+        let arm = reclamation_arm(recorder).await;
+        let tags: Vec<String> = (1..=RECLAIM_TOMBSTONES)
+            .map(|epoch| format!("T{epoch}"))
+            .chain(std::iter::once(RESTORED_TAG.to_string()))
+            .collect();
+        let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+        seed_or_map(&arm.factory, RECLAIM_MAP, RECLAIM_KEY, &["R2"], &tag_refs).await;
+        arm.frontier.restore_tombstone_ref(
+            RESTORED_EPOCH,
+            TombstoneRef {
+                map: RECLAIM_MAP.to_string(),
+                key: RECLAIM_KEY.to_string(),
+                tag: RESTORED_TAG.to_string(),
+            },
+        );
+        arm
+    }
+
+    /// Spawns a full prune pass blocked on `barrier`, with `dispatch` carried INTO
+    /// the spawned future so the pass's rows reach the capture that built it.
+    /// Same thread model and same runtime flavour as `spawn_sweep`; the wrapper is
+    /// the only difference.
+    fn spawn_sweep_with_subscriber(
+        arm: &ReclamationArm,
+        barrier: &Arc<std::sync::Barrier>,
+        dispatch: tracing::Dispatch,
+    ) -> tokio::task::JoinHandle<()> {
+        use tracing::instrument::WithSubscriber as _;
+        let (frontier, factory, writer, barrier) = (
+            Arc::clone(&arm.frontier),
+            Arc::clone(&arm.factory),
+            Arc::clone(&arm.key_writer),
+            Arc::clone(barrier),
+        );
+        tokio::spawn(
+            async move {
+                barrier.wait();
+                prune_epoch_tombstones(&frontier, &factory, &writer).await;
+            }
+            .with_subscriber(dispatch),
+        )
+    }
+
+    /// Empties the shared sink and returns what was in it, so successive rounds
+    /// read their own rows and never a predecessor's.
+    fn take_rows(sink: &Arc<std::sync::Mutex<Vec<String>>>) -> Vec<String> {
+        std::mem::take(&mut *sink.lock().unwrap())
+    }
+
+    /// Removal rows indexed by the epoch each one removed. A duplicate epoch is a
+    /// hard error: the site fires once per removed epoch, so two rows for one
+    /// epoch would mean the drain removed it twice.
+    fn removal_rows_by_epoch(rows: &[String]) -> std::collections::BTreeMap<Epoch, String> {
+        let mut by_epoch = std::collections::BTreeMap::new();
+        for row in rows_of_target(rows, REMOVAL_TARGET) {
+            let epoch = row_u64(row, "epoch");
+            assert!(
+                by_epoch.insert(epoch, row.to_string()).is_none(),
+                "two removal rows for epoch {epoch}: {rows:#?}"
+            );
+        }
+        by_epoch
+    }
+
+    /// A removal row stripped of the two terms that legitimately differ between
+    /// two drains of the same removal: `ts`, which is wall-clock and is never a
+    /// join key, and `ceiling`, which is the licence the round's own barrier
+    /// ordering handed the sweep and is asserted separately against that branch.
+    /// Everything else — target, message, and every remaining field with its
+    /// value — must match the quiescent drain's line verbatim.
+    fn removal_signature(row: &str) -> String {
+        row.split_whitespace()
+            .filter(|token| !token.starts_with("ts=") && !token.starts_with("ceiling="))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Asserts the frozen field set renders by name, and that the restored epoch's
+    /// line reports what the REMOVAL returned rather than what the slot recorded.
+    fn assert_removal_line_terms(row: &str, epoch: Epoch, ceiling: Epoch, round: &str) {
+        for field in REMOVAL_FIELDS {
+            row_field(row, field);
+        }
+        assert_eq!(
+            row_u64(row, "epoch"),
+            epoch,
+            "{round}: the join key must carry the removed epoch: {row}"
+        );
+        assert_eq!(
+            row_u64(row, "ceiling"),
+            ceiling,
+            "{round}: the line must carry the licence THIS round's ordering handed \
+             the sweep: {row}"
+        );
+        assert_eq!(
+            row_u64(row, "watermark"),
+            FIXTURE_DURABLE_WATERMARK,
+            "{round}: the line must carry the durability watermark the pass ran under: {row}"
+        );
+        if epoch != RESTORED_EPOCH {
+            return;
+        }
+        assert_eq!(
+            row_u64(row, "refs_returned"),
+            RESTORED_REFS_RETURNED,
+            "{round}: OBSERVATION ARM — `refs_returned != refs.len()`. Epoch \
+             {RESTORED_EPOCH} had one ref when its slot froze and TWO when the index \
+             removal ran, so a line reporting the entry-side count here is a second \
+             copy of the slot, not an observation of the removal: {row}"
+        );
+        assert_eq!(
+            row_u64(row, "refs_at_entry"),
+            RESTORED_REFS_AT_ENTRY,
+            "{round}: the entry-side term must still carry what the slot recorded at \
+             rollover, so the divergence is visible on ONE line: {row}"
+        );
+        assert_eq!(
+            row_u64(row, "bytes_returned"),
+            RESTORED_BYTES_RETURNED,
+            "{round}: the observed byte total must cover both removed refs: {row}"
+        );
+    }
+
+    /// The quiescent reference drain: the same fixture, nothing racing it, driven
+    /// inline on the capturing thread. Every raced round compares its own line for
+    /// an epoch against the line this produced for that same epoch.
+    async fn quiescent_removal_rows(
+        recorder: &PrometheusRecorder,
+        sink: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> std::collections::BTreeMap<Epoch, String> {
+        let arm = origin_line_arm(recorder).await;
+        let registry = Arc::clone(arm.frontier.reclamation());
+        let ceiling = DEVICE_A_CURSOR - checked_margin(&registry);
+        drop(take_rows(sink));
+
+        prune_epoch_tombstones(&arm.frontier, &arm.factory, &arm.key_writer).await;
+
+        let rows = take_rows(sink);
+        assert!(
+            !rows.is_empty(),
+            "quiescent leg: the capture is EMPTY — nothing below could have been read"
+        );
+        let by_epoch = removal_rows_by_epoch(&rows);
+        assert_eq!(
+            by_epoch.keys().copied().collect::<Vec<_>>(),
+            (1..ceiling).collect::<Vec<_>>(),
+            "quiescent leg: an unraced pass licensed by ceiling {ceiling} removes exactly \
+             the epochs below it; capture was:\n{rows:#?}"
+        );
+        for (epoch, row) in &by_epoch {
+            assert_removal_line_terms(row, *epoch, ceiling, "quiescent leg");
+        }
+        assert_drained_set(&arm, ceiling, "quiescent leg").await;
+        by_epoch
+    }
+
+    /// One raced round. Reports whether the racing claim was refused — that is,
+    /// which of the two barrier orderings this round took.
+    async fn origin_line_round(
+        recorder: &PrometheusRecorder,
+        render: &PrometheusHandle,
+        dispatch: &tracing::Dispatch,
+        sink: &Arc<std::sync::Mutex<Vec<String>>>,
+        quiescent: &std::collections::BTreeMap<Epoch, String>,
+        round: u64,
+    ) -> bool {
+        let arm = origin_line_arm(recorder).await;
+        let registry = Arc::clone(arm.frontier.reclamation());
+        let margin = checked_margin(&registry);
+        let skipped_before = rendered_counter(&render.render(), SKIP_COUNTER);
+        drop(take_rows(sink));
+
+        // Same alternation the sibling arms use: which task is spawned LAST decides
+        // which side of the barrier proceeds without a wake-up, so both orderings get
+        // exercised instead of whichever the scheduler happens to favour.
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (ack, sweep) = if round % 2 == 1 {
+            let sweep = spawn_sweep_with_subscriber(&arm, &barrier, dispatch.clone());
+            (spawn_ack(&arm, DEVICE_B_BELOW, &barrier), sweep)
+        } else {
+            let ack = spawn_ack(&arm, DEVICE_B_BELOW, &barrier);
+            (
+                ack,
+                spawn_sweep_with_subscriber(&arm, &barrier, dispatch.clone()),
+            )
+        };
+        let (advanced, swept) = tokio::join!(ack, sweep);
+        swept.expect("sweep task");
+        let advanced = advanced.expect("ack task");
+
+        // Which ordering this round took, READ rather than guessed: the racing ACK is
+        // the only claim in flight, so a single increment of the skip counter IS the
+        // refusal branch.
+        let skipped_after = rendered_counter(&render.render(), SKIP_COUNTER);
+        let refused = skipped_after == skipped_before + 1;
+        assert!(
+            refused || skipped_after == skipped_before,
+            "round {round}: one ACK can be refused at most once, \
+             got {skipped_before} -> {skipped_after}"
+        );
+        assert_eq!(
+            advanced, !refused,
+            "round {round}: the ACK's own verdict and the skip counter must agree"
+        );
+        let ceiling = if refused {
+            DEVICE_A_CURSOR - margin
+        } else {
+            DEVICE_B_BELOW - margin
+        };
+
+        // NON-EMPTINESS GATE, before any term is read. An empty capture here means the
+        // spawned sweep's rows never reached this sink, which is a RED — not a round
+        // that observed no violation.
+        let rows = take_rows(sink);
+        assert!(
+            !rows.is_empty(),
+            "round {round}: the capture is EMPTY — the spawned sweep's rows did not reach \
+             the sink, so every term below would be read off nothing"
+        );
+        assert_eq!(
+            rows_of_kind(&rows, RESIDENCY_TARGET, "prune_pass").len(),
+            1,
+            "round {round}: exactly one pass row per driven sweep; capture was:\n{rows:#?}"
+        );
+
+        // The branch's own consequence, never a disjunction both branches satisfy: the
+        // licensed ceiling decides which epochs were removable at all, so the two
+        // orderings predict different removal-line sets.
+        let observed = removal_rows_by_epoch(&rows);
+        let branch = if refused { "refused" } else { "admitted" };
+        assert_eq!(
+            observed.keys().copied().collect::<Vec<_>>(),
+            (1..ceiling).collect::<Vec<_>>(),
+            "round {round} ({branch} branch): a pass licensed by ceiling {ceiling} emits one \
+             removal line per epoch below it and none at or above it; capture was:\n{rows:#?}"
+        );
+
+        for (epoch, row) in &observed {
+            assert_removal_line_terms(row, *epoch, ceiling, &format!("round {round} ({branch})"));
+            let reference = quiescent.get(epoch).unwrap_or_else(|| {
+                panic!("round {round}: the quiescent leg emitted no line for epoch {epoch}")
+            });
+            assert_eq!(
+                removal_signature(row),
+                removal_signature(reference),
+                "round {round} ({branch} branch): the raced removal of epoch {epoch} must render \
+                 the SAME shape and the SAME field values as the quiescent drain of that same \
+                 epoch, `ts` and the round's own `ceiling` apart"
+            );
+        }
+
+        assert_drained_set(&arm, ceiling, &format!("round {round}")).await;
+        refused
+    }
+
+    /// The removal-site observation line, proven correct under the interleaving
+    /// fault: a prune sweep and a second device's cursor ACK released together
+    /// from a barrier, with the sweep spawned onto a worker thread.
+    ///
+    /// The line is read at ROW granularity across that spawn because the sweep's
+    /// future carries the capture subscriber with it. Each round reads which of
+    /// the two barrier orderings it took off the skip counter and asserts THAT
+    /// branch's removal-line set, and every line is compared against the quiescent
+    /// drain's line for the same epoch, so a raced removal that rendered a
+    /// different shape or a different value would fail rather than be absorbed
+    /// into a disjunction.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_removal_line_holds_its_shape_when_a_sweep_races_a_second_devices_ack() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let render = recorder.handle();
+        // One capture for the whole leg: installing and dropping a subscriber
+        // rebuilds the process-wide callsite-interest cache, so doing it per round
+        // would widen a window in which this leg's own callsites read as
+        // uninteresting and rows go missing.
+        let (_capture, dispatch, sink) = capture_tracing_rows_with_dispatch();
+
+        let quiescent = quiescent_removal_rows(&recorder, &sink).await;
+
+        let mut refused_rounds = 0u32;
+        for round in 0..ORIGIN_LINE_ROUNDS {
+            if origin_line_round(&recorder, &render, &dispatch, &sink, &quiescent, round).await {
+                refused_rounds += 1;
+            }
+        }
+
+        // Decision-neutral: which side of the barrier each round landed on, so a run
+        // whose distribution collapsed onto one ordering is visible in the transcript
+        // rather than silently under-exercised. It decides nothing.
+        let admitted_rounds =
+            u32::try_from(ORIGIN_LINE_ROUNDS).unwrap_or(u32::MAX) - refused_rounds;
+        println!(
+            "REMOVAL LINE UNDER INTERLEAVING | {ORIGIN_LINE_ROUNDS} raced rounds: \
+             {refused_rounds} refused / {admitted_rounds} admitted | quiescent reference: \
+             {} epoch(s) | rows read across the spawn via with_subscriber",
+            quiescent.len()
         );
     }
 }

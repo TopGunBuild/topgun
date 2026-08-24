@@ -596,6 +596,19 @@ pub struct PruneEpochResidencyRecord {
     pub stamped_bytes: u64,
     /// Tombstone bytes this epoch's removal is attributed as having freed. `0` on every exit kind
     /// that is not an observed drain.
+    ///
+    /// **ENTRY-SIDE, and the name overstates what it knows.** On a `DrainedByPrune` exit this is
+    /// `slot.stamped_bytes` copied across — the bytes the epoch was stamped WITH, not bytes any
+    /// removal was seen to return. It is therefore `> 0` even when the index removal returned an
+    /// EMPTY vector, which is a real state this ledger reaches: the epoch's entry is removed, the
+    /// exit is attributed as a drain, and this field reports the entry-side total while
+    /// [`Self::removed_bytes_observed`] reports `0`. Read the two together; this one alone can
+    /// never contradict the stamp it was copied from.
+    ///
+    /// The field's VALUE and meaning are deliberately unchanged — re-pointing it at the observed
+    /// total mid-lineage would break comparability with every measurement round already recorded
+    /// against it. Making the accounting itself honest (rather than merely labelled) is deferred
+    /// and tracked in `TODO-634`.
     pub bytes_freed_attributed: u64,
     /// How the epoch's slot left the index, as the detection-point bookkeeping attributed it.
     pub exit_kind: EpochExitKind,
@@ -881,6 +894,17 @@ pub const METRIC_PRUNE_STAMPED_REFS_TOTAL: &str = "topgun_or_prune_stamped_refs_
 pub const METRIC_PRUNE_STAMPED_BYTES_TOTAL: &str = "topgun_or_prune_stamped_bytes_total";
 /// Counter: refs removed from the index by an observed prune drain — the negative arm of the
 /// index conservation identity paired with [`METRIC_PRUNE_STAMPED_REFS_TOTAL`].
+///
+/// **ENTRY-SIDE, like [`PruneEpochResidencyRecord::bytes_freed_attributed`].** Each drained exit
+/// credits this counter with `slot.refs_at_entry` — the count carried forward from the paired
+/// entry row — and never with the length of the vector the index removal actually returned. So a
+/// removal that returned nothing still advances this series by whatever the epoch entered holding.
+/// "Drained" here means *the epoch's entry left the index*, not *this many refs were observed
+/// leaving with it*; the observed count lives on the exit row as
+/// [`PruneEpochResidencyRecord::removed_refs_observed`] and on the removal-site line.
+///
+/// The series' VALUE and meaning are deliberately unchanged, for the comparability reason recorded
+/// on that field. Closing the gap is deferred and tracked in `TODO-634`.
 pub const METRIC_PRUNE_DRAINED_REFS_TOTAL: &str = "topgun_or_prune_drained_refs_total";
 /// Counter: refs re-inserted into the index by an observed restore.
 pub const METRIC_PRUNE_RESTORED_REFS_TOTAL: &str = "topgun_or_prune_restored_refs_total";
@@ -941,3 +965,193 @@ pub const METRIC_PRUNE_EPOCH_CONSIDERED: &str = "topgun_or_prune_epoch_considere
 pub const METRIC_PRUNE_EPOCH_DROPPED: &str = "topgun_or_prune_epoch_dropped";
 /// Histogram: tombstone bytes freed, per drained epoch.
 pub const METRIC_PRUNE_EPOCH_BYTES_FREED: &str = "topgun_or_prune_epoch_bytes_freed";
+
+// ---------------------------------------------------------------------------
+// Drain attribution classification
+// ---------------------------------------------------------------------------
+
+/// How a drained epoch's exit row and its pass's own record agree — or fail to.
+///
+/// The two sides are produced by different components and by different means: the exit row is
+/// emitted **inside** the drain, from the frontier's own detection-point bookkeeping, while the
+/// pass record is built by the pruning service from the drain's **return value**. They can
+/// therefore disagree, and this enum names the four ways the pair can read.
+///
+/// Classification is a fold of two booleans — "did the exit row attribute anything?" and "did
+/// either side observe anything?" — so it is total by construction over every pair of records
+/// that can be built, including pairs no code path currently produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainAttributionClass {
+    /// The exit row attributes freed bytes AND the pass counted refs. Coherent.
+    ObservedAndCounted,
+    /// The exit row attributes freed bytes while the drain observed no refs and the
+    /// pass counted nothing. The divergent class this control exists to construct.
+    AttributedWithoutObservation,
+    /// Refs were observed but the exit row attributes nothing.
+    ObservedWithoutAttribution,
+    /// Neither side reports anything.
+    Silent,
+}
+
+/// Classify one drained epoch's exit row against the pass record that wrapped its drain.
+///
+/// # How the two sides are read
+///
+/// - **Attribution side** — [`PruneEpochResidencyRecord::bytes_freed_attributed`]. This is an
+///   *entry-side* quantity: it is what the exit-row assembly credits the removal with having
+///   freed, not what the removal was observed to free.
+/// - **Observation side** — the disjunction of every term either component could have used to
+///   report that something actually came back:
+///   [`PruneEpochResidencyRecord::removed_refs_observed`] (read at the removal site, from the
+///   vector the index removal itself returned), [`PrunePassRecord::considered`] (incremented once
+///   per ref the drain RETURNED) and the negation of [`PrunePassRecord::empty_drain`].
+///
+/// The observation side is a **disjunction** deliberately: the divergent class is the one where
+/// an attribution stands alone, so it may only be named when *every* channel through which an
+/// observation could have surfaced is silent. Any single non-silent channel is enough to keep the
+/// pair out of [`DrainAttributionClass::AttributedWithoutObservation`], which makes that verdict
+/// fail-closed rather than merely likely.
+///
+/// Total over its inputs: no panic path, no interior mutability, no I/O, no side effects.
+#[must_use]
+pub fn classify_drain_attribution(
+    exit: &PruneEpochResidencyRecord,
+    pass: &PrunePassRecord,
+) -> DrainAttributionClass {
+    let attributed = exit.bytes_freed_attributed > 0;
+    let observed = exit.removed_refs_observed > 0 || pass.considered > 0 || !pass.empty_drain;
+
+    match (attributed, observed) {
+        (true, true) => DrainAttributionClass::ObservedAndCounted,
+        (true, false) => DrainAttributionClass::AttributedWithoutObservation,
+        (false, true) => DrainAttributionClass::ObservedWithoutAttribution,
+        (false, false) => DrainAttributionClass::Silent,
+    }
+}
+
+#[cfg(test)]
+mod drain_attribution_tests {
+    use super::{
+        classify_drain_attribution, DrainAttributionClass, EpochExitKind,
+        PruneEpochResidencyRecord, PrunePassRecord,
+    };
+
+    /// An exit row with the two terms the classifier reads set explicitly; every other field
+    /// keeps its default, because no other field participates in the classification.
+    fn exit_row(
+        bytes_freed_attributed: u64,
+        removed_refs_observed: u64,
+    ) -> PruneEpochResidencyRecord {
+        PruneEpochResidencyRecord {
+            epoch: 7,
+            exit_kind: EpochExitKind::DrainedByPrune,
+            bytes_freed_attributed,
+            removed_refs_observed,
+            ..PruneEpochResidencyRecord::default()
+        }
+    }
+
+    /// A pass record with the two terms the classifier reads set explicitly. `empty_drain`
+    /// defaults to `false` on [`PrunePassRecord`], so it is always passed here rather than
+    /// left implicit.
+    fn pass_record(considered: u64, empty_drain: bool) -> PrunePassRecord {
+        PrunePassRecord {
+            considered,
+            empty_drain,
+            ..PrunePassRecord::default()
+        }
+    }
+
+    #[test]
+    fn attribution_with_observation_on_both_sides_is_coherent() {
+        let exit = exit_row(4096, 12);
+        let pass = pass_record(12, false);
+        assert_eq!(
+            classify_drain_attribution(&exit, &pass),
+            DrainAttributionClass::ObservedAndCounted
+        );
+    }
+
+    #[test]
+    fn attribution_with_every_observation_channel_silent_is_the_divergent_class() {
+        let exit = exit_row(4096, 0);
+        let pass = pass_record(0, true);
+        assert_eq!(
+            classify_drain_attribution(&exit, &pass),
+            DrainAttributionClass::AttributedWithoutObservation
+        );
+    }
+
+    #[test]
+    fn observation_without_any_attributed_bytes_is_the_inverse_divergence() {
+        let exit = exit_row(0, 12);
+        let pass = pass_record(12, false);
+        assert_eq!(
+            classify_drain_attribution(&exit, &pass),
+            DrainAttributionClass::ObservedWithoutAttribution
+        );
+    }
+
+    #[test]
+    fn neither_side_reporting_anything_is_silent() {
+        let exit = exit_row(0, 0);
+        let pass = pass_record(0, true);
+        assert_eq!(
+            classify_drain_attribution(&exit, &pass),
+            DrainAttributionClass::Silent
+        );
+    }
+
+    /// A single non-silent observation channel is enough to keep the pair out of the
+    /// divergent class — the property that makes that verdict fail-closed.
+    #[test]
+    fn any_single_observation_channel_defeats_the_divergent_class() {
+        let attributed_only_via_pass_considered =
+            classify_drain_attribution(&exit_row(4096, 0), &pass_record(3, true));
+        assert_eq!(
+            attributed_only_via_pass_considered,
+            DrainAttributionClass::ObservedAndCounted
+        );
+
+        let attributed_only_via_non_empty_drain =
+            classify_drain_attribution(&exit_row(4096, 0), &pass_record(0, false));
+        assert_eq!(
+            attributed_only_via_non_empty_drain,
+            DrainAttributionClass::ObservedAndCounted
+        );
+
+        let attributed_only_via_removal_site =
+            classify_drain_attribution(&exit_row(4096, 5), &pass_record(0, true));
+        assert_eq!(
+            attributed_only_via_removal_site,
+            DrainAttributionClass::ObservedAndCounted
+        );
+    }
+
+    /// Every reachable combination of the three observation channels and the attribution
+    /// term resolves to exactly one variant — the totality property, exercised rather than
+    /// asserted in prose.
+    #[test]
+    fn classification_is_total_over_the_terms_it_reads() {
+        for bytes in [0_u64, 1] {
+            for removed in [0_u64, 1] {
+                for considered in [0_u64, 1] {
+                    for empty_drain in [true, false] {
+                        let class = classify_drain_attribution(
+                            &exit_row(bytes, removed),
+                            &pass_record(considered, empty_drain),
+                        );
+                        let observed = removed > 0 || considered > 0 || !empty_drain;
+                        let expected = match (bytes > 0, observed) {
+                            (true, true) => DrainAttributionClass::ObservedAndCounted,
+                            (true, false) => DrainAttributionClass::AttributedWithoutObservation,
+                            (false, true) => DrainAttributionClass::ObservedWithoutAttribution,
+                            (false, false) => DrainAttributionClass::Silent,
+                        };
+                        assert_eq!(class, expected);
+                    }
+                }
+            }
+        }
+    }
+}

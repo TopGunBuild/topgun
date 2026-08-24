@@ -993,6 +993,29 @@ impl FrontierState {
                     .map(|r| u64::try_from(r.tag.len()).unwrap_or(u64::MAX))
                     .sum();
                 removed_observed.insert(e, (removed_refs, removed_bytes));
+                // The removal-site OBSERVATION. `refs_returned` is read from the vector
+                // the index removal itself just returned; `refs_at_entry` is read from
+                // the slot. Carrying both on ONE line is the whole point: a removal that
+                // returns nothing for an epoch that entered the index holding refs is
+                // then a single visible fact rather than something a reader has to join
+                // two rows to see. It reuses the locals computed just above, so it
+                // recomputes nothing and adds no index-proportional fold.
+                //
+                // Its own target keeps the line selectable without a `kind` discriminant
+                // field, and it is unconditional so that a window with no such line means
+                // this arm was never reached — not that a switch was off.
+                info!(
+                    target: "topgun_server::tombstone_frontier::removal",
+                    ts = now_millis_i64(),
+                    op_seq = self.op_seq,
+                    epoch = e,
+                    refs_returned = removed_refs,
+                    refs_at_entry = self.epoch_slots.get(&e).map_or(0, |s| s.refs_at_entry),
+                    bytes_returned = removed_bytes,
+                    watermark = watermark,
+                    ceiling = ceiling,
+                    "prune removal observed"
+                );
                 drained.extend(refs.into_iter().map(|r| (e, r)));
             }
             self.epoch_max_seq.remove(&e);
@@ -2820,6 +2843,11 @@ fn prune_decision_line(fixture: &str, drained: &[(Epoch, TombstoneRef)]) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::domain::key_writer::KeyWriterRegistry;
+    use crate::storage::datastores::NullDataStore;
+    use crate::storage::factory::RecordStoreFactory;
+    use crate::storage::impls::StorageConfig;
+    use crate::tombstone_frontier::{classify_drain_attribution, DrainAttributionClass};
     use metrics_exporter_prometheus::PrometheusBuilder;
 
     const CONN_A: ConnectionId = ConnectionId(1);
@@ -4019,6 +4047,221 @@ mod tests {
         }
     }
 
+    /// The half of a scanned file the compiler builds into a NON-test binary:
+    /// everything above the first column-0 `#[cfg(test)]` attribute.
+    ///
+    /// Cutting there is what lets the tallies below be exact rather than
+    /// approximate. This file's own test module reaches into `state.epoch_tags`
+    /// a dozen times and calls the drain three dozen more, and `crdt.rs`'s test
+    /// module calls the drain four more times; counting those would drown the
+    /// production sites the enumeration is about. The cut is also why the needles
+    /// below may be spelled literally: they live in the test module, below the
+    /// cut, so a scan that spells the thing it counts cannot count itself.
+    fn production_prefix(source: &str) -> &str {
+        source
+            .find("\n#[cfg(test)]\n")
+            .map_or(source, |at| &source[..at])
+    }
+
+    /// Source text with every whitespace run collapsed to one space and ` .`
+    /// rejoined to `.`, so a method chain broken across lines reads the same as
+    /// one written inline.
+    ///
+    /// Without this, a writer spelled `self\n    .epoch_tags\n    .insert(..)`
+    /// would slip past a scan for `self.epoch_tags.insert(` — and two of the
+    /// non-mutating reads in this file are already written in exactly that
+    /// broken-chain form, so the hazard is live rather than hypothetical.
+    fn flattened(source: &str) -> String {
+        source
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace(" .", ".")
+    }
+
+    /// The method name immediately following an occurrence, or `""` when the
+    /// occurrence is not a method receiver at all (a whole-map borrow).
+    fn verb_after(rest: &str) -> &str {
+        let Some(tail) = rest.strip_prefix('.') else {
+            return "";
+        };
+        let end = tail
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(tail.len());
+        &tail[..end]
+    }
+
+    /// Fact A of the origin paradox, guarded mechanically instead of asserted:
+    /// `self.epoch_tags` is mutated at exactly five production sites, and the
+    /// drain has exactly one production caller.
+    ///
+    /// The five sites and their post-states: `Stamp` and `Restore` both
+    /// `entry(..).or_default().push(..)`, so both leave `len >= 1`;
+    /// `RebuildInsert` is guarded by `if !live.is_empty()`; `RebuildClear` and
+    /// `DrainRemove` leave the entry ABSENT rather than empty. No enumerated
+    /// writer therefore leaves an entry present-and-empty — which is the whole
+    /// reason a present-and-empty entry is worth an instrument. A static
+    /// enumeration cannot say where that state comes from; it can only keep
+    /// saying, after the fact, that no writer in this file produces it. That is
+    /// what this test is for, and it is why it keeps earning its place after the
+    /// origin is named.
+    ///
+    /// The one-caller half is the durable form of the refutation of "a separate
+    /// rollover-time removal path": there is no second production route into the
+    /// drain, so no exit row can be emitted by a drain that no pass record wraps.
+    ///
+    /// SCOPE — this is NOT a whole-crate guarantee, and the residual is named
+    /// rather than papered over. `include_str!` resolves literal paths relative
+    /// to the including file, so this test sees exactly two files:
+    /// `tombstone_frontier_impl.rs` (where every `self.epoch_tags` mutation
+    /// lives) and `service/domain/crdt.rs` (where the one production caller
+    /// lives). It REDs when a sixth `self.epoch_tags` writer appears in
+    /// `tombstone_frontier_impl.rs`, or when a second non-`#[cfg(test)]` caller
+    /// of `drain_prunable_tombstones` appears in EITHER scanned file. **A
+    /// production caller added in a third, unscanned file would NOT RED.**
+    /// Closing that gap — a `std::fs` walk of `src/` from `CARGO_MANIFEST_DIR`,
+    /// or an include list asserted against a directory listing — is deferred and
+    /// tracked in `TODO-634`.
+    #[test]
+    fn epoch_tags_has_five_production_writers_and_the_drain_has_one_caller() {
+        const IMPL_SOURCE: &str = include_str!("tombstone_frontier_impl.rs");
+        const CRDT_SOURCE: &str = include_str!("service/domain/crdt.rs");
+
+        let impl_src = flattened(production_prefix(IMPL_SOURCE));
+        let crdt_src = flattened(production_prefix(CRDT_SOURCE));
+
+        assert_five_production_tag_writers(&impl_src);
+        assert_one_production_drain_caller(&impl_src, &crdt_src);
+    }
+
+    /// Half one of the enumeration guard: the five mutating sites, and nothing
+    /// else, in the already-flattened production half of this file.
+    fn assert_five_production_tag_writers(impl_src: &str) {
+        let needle = format!("self.{}", "epoch_tags");
+        let mut tally: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        let mut mutating = 0usize;
+        let mut at = 0usize;
+        while let Some(hit) = impl_src[at..].find(&needle) {
+            let start = at + hit;
+            let rest = &impl_src[start + needle.len()..];
+            let verb = verb_after(rest);
+            match verb {
+                "entry" | "clear" | "insert" | "remove" => mutating += 1,
+                // The non-mutating reads: index size, presence, refs-at-exit,
+                // the eligibility key scan, and the split's whole-map borrow.
+                "len" | "contains_key" | "get" | "keys" | "" => {}
+                other => panic!(
+                    "unclassified `{needle}` access `.{other}(` — this scan only knows the \
+                     five enumerated mutations and the five enumerated reads, so a new \
+                     access shape must be classified here before it can be counted. \
+                     Context was:\n{}",
+                    rest.chars().take(160).collect::<String>()
+                ),
+            }
+            *tally.entry(verb).or_default() += 1;
+            at = start + needle.len();
+        }
+
+        let expected: std::collections::BTreeMap<&str, usize> = [
+            // mutations
+            ("entry", 2),  // Stamp + Restore
+            ("clear", 1),  // RebuildClear
+            ("insert", 1), // RebuildInsert
+            ("remove", 1), // DrainRemove
+            // reads
+            ("len", 1),
+            ("contains_key", 1),
+            ("get", 1),
+            ("keys", 1),
+            ("", 1),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            tally, expected,
+            "`{needle}`'s production access shapes moved. The enumeration this file's \
+             origin reasoning rests on is: Stamp and Restore push (`entry`), \
+             RebuildClear clears, RebuildInsert inserts, DrainRemove removes — five \
+             mutations — beside five non-mutating reads. Re-verify the writer record \
+             before re-baselining this map."
+        );
+        assert_eq!(
+            mutating, 5,
+            "`{needle}` must be mutated at exactly the five enumerated production \
+             sites; a sixth writer invalidates Fact A of the origin paradox, which is \
+             that no enumerated writer leaves an entry present-and-empty"
+        );
+
+        // Both push sites must stay non-empty pushes: `entry(..).or_default()`
+        // alone would insert an EMPTY vector, which is precisely the state under
+        // investigation, so the `.push(..)` that follows it is load-bearing.
+        let mut pushes = 0usize;
+        let mut at = 0usize;
+        let entry_needle = format!("{needle}.entry(");
+        while let Some(hit) = impl_src[at..].find(&entry_needle) {
+            let start = at + hit;
+            let rest = &impl_src[start..];
+            let stmt = &rest[..rest.find(';').map_or(rest.len(), |e| e + 1)];
+            assert!(
+                stmt.contains(".or_default().push("),
+                "an `{entry_needle}` site must push in the same statement: \
+                 `or_default()` on its own inserts an EMPTY vector, the exact state \
+                 the removal-site instrument exists to explain. Statement was:\n{stmt}"
+            );
+            pushes += 1;
+            at = start + entry_needle.len();
+        }
+        assert_eq!(pushes, 2, "exactly two push sites: Stamp and Restore");
+    }
+
+    /// Half two of the enumeration guard: exactly one production call site
+    /// across the two already-flattened production halves.
+    fn assert_one_production_drain_caller(impl_src: &str, crdt_src: &str) {
+        let drain = format!("drain_prunable{}", "_tombstones");
+        let mut callers: Vec<(&str, String)> = Vec::new();
+        for (file, source) in [
+            ("tombstone_frontier_impl.rs", impl_src),
+            ("service/domain/crdt.rs", crdt_src),
+        ] {
+            let mut at = 0usize;
+            while let Some(hit) = source[at..].find(&drain) {
+                let start = at + hit;
+                let before = &source[..start];
+                let after = &source[start + drain.len()..];
+                at = start + drain.len();
+                // The definition itself and intra-doc links are not call sites.
+                if before.ends_with("fn ") || after.starts_with('`') {
+                    continue;
+                }
+                // Taken by CHARACTER so a multi-byte glyph upstream cannot make
+                // this slice panic on a non-boundary byte index.
+                let mut lead: Vec<char> = before.chars().rev().take(48).collect();
+                lead.reverse();
+                let lead: String = lead.into_iter().collect();
+                callers.push((file, format!("{lead}{drain}")));
+            }
+        }
+        assert_eq!(
+            callers.len(),
+            1,
+            "`{drain}` must have exactly ONE production caller across the two scanned \
+             files. A second production route into the drain would mean an exit row \
+             could be emitted by a drain that no pass record wraps, which is the \
+             premise the divergence reasoning rests on. Found:\n{callers:#?}"
+        );
+        assert_eq!(
+            callers[0].0, "service/domain/crdt.rs",
+            "the one production caller lives in the pruning service"
+        );
+        assert!(
+            callers[0]
+                .1
+                .ends_with(&format!("let drained = frontier.{drain}")),
+            "the one production caller is the pruning pass's own drain. Found:\n{:?}",
+            callers[0].1
+        );
+    }
+
     /// The two writers of `current_epoch` / `low_water_mark` agree BY CONSTRUCTION,
     /// and this is what asserts it.
     ///
@@ -5185,6 +5428,18 @@ mod tests {
     /// captured event's rendered field text, one entry per event (X21-d(iv)).
     fn captured_tracing_events(body: impl FnOnce()) -> Vec<String> {
         use tracing_subscriber::layer::SubscriberExt as _;
+        // Installing or dropping a `tracing` subscriber rebuilds the process-wide
+        // callsite-interest cache, and a callsite evaluated DURING that rebuild is
+        // transiently read as uninteresting -- so a second capture running on another
+        // thread loses whichever rows happen to fall in the window. The result is a row
+        // that is present when its test runs alone and missing when it runs beside
+        // another capturing test, which reads as an emitter defect rather than a harness
+        // one. Serialising every capture in this module removes the window; the guard is
+        // held for the WHOLE body, because the drop is half of what races.
+        static CAPTURE_SERIAL: Mutex<()> = Mutex::new(());
+        let _serial = CAPTURE_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let sink: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&sink)));
         let _guard = tracing::subscriber::set_default(subscriber);
@@ -5364,6 +5619,713 @@ mod tests {
             exit.removed_refs_observed, 0,
             "R_obs must be 0: the planted vector carried nothing for drain_prunable to \
              observe: {exit:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Drain attribution -- the planted positive control and its unplanted twin
+    // -----------------------------------------------------------------------
+
+    /// The pass record a pruning pass would have built from this drain's RETURN VALUE,
+    /// reconstructed by the same rule the service uses: `empty_drain` off `drained.is_empty()`,
+    /// one `considered` per returned ref, `epochs_drained` off the number of DISTINCT epochs
+    /// those refs came from.
+    ///
+    /// The classifier reads a pair whose two halves are produced by different components, so a
+    /// control that hand-wrote the pass half would grade the classifier against an assumption
+    /// rather than against the drain. Deriving it mechanically from `drained` keeps the pass
+    /// half a function of what the drain actually returned.
+    fn pass_record_from_drained(drained: &[(Epoch, TombstoneRef)]) -> PrunePassRecord {
+        let distinct: std::collections::BTreeSet<Epoch> = drained.iter().map(|(e, _)| *e).collect();
+        PrunePassRecord {
+            considered: u64::try_from(drained.len()).unwrap_or(u64::MAX),
+            epochs_drained: u64::try_from(distinct.len()).unwrap_or(u64::MAX),
+            empty_drain: drained.is_empty(),
+            ..PrunePassRecord::default()
+        }
+    }
+
+    /// Build the one-epoch fixture both arms below share, drain it IN-MODULE, and return the
+    /// exit rows beside the drain's return value.
+    ///
+    /// `plant_empty_tag_vector` selects the arm. When set, epoch 1's index entry is replaced --
+    /// through the same in-module `f.lock()` bypass this file already uses elsewhere -- with a
+    /// PRESENT-BUT-EMPTY vector, so the drain's `epoch_tags.remove(&1)` still returns `Some`
+    /// (a genuine `DrainedByPrune` attribution against a slot whose entry-side bytes are
+    /// nonzero) while the vector it removed carries nothing to observe. When clear, the same
+    /// fixture drains its one genuine ref, and that is the control the planted arm is read
+    /// against.
+    ///
+    /// `drain_prunable` is the one in-crate call that hands the exit rows back BY VALUE; the
+    /// public entry point consumes them internally. Nothing here adds a seam to the frontier.
+    fn drain_one_epoch_fixture(
+        plant_empty_tag_vector: bool,
+    ) -> (Vec<PruneEpochResidencyRecord>, Vec<(Epoch, TombstoneRef)>) {
+        let f = one_epoch_frontier(plant_empty_tag_vector);
+        let mut state = f.lock();
+        let (drained, _split, exits) = state.drain_prunable();
+        (exits, drained)
+    }
+
+    /// The same one-epoch fixture, built and optionally planted but NOT drained, handed back
+    /// so a caller can drive it through a PRODUCTION entry point instead of the in-module
+    /// drain.
+    ///
+    /// Split out of [`drain_one_epoch_fixture`] for two reasons a fused helper cannot serve.
+    /// The frontier has to OUTLIVE the plant for a service-level drive to have anything left
+    /// to drain; and it has to be CONSTRUCTED inside the caller's own recorder binding,
+    /// because the frontier resolves every metric handle once at construction and a frontier
+    /// built outside a binding renders nothing for the rest of its life.
+    fn one_epoch_frontier(plant_empty_tag_vector: bool) -> TombstoneFrontier {
+        let f = frontier();
+        f.set_epoch_width(1);
+        f.stamp_tombstone("m", "k1", "TAG1"); // epoch 1: one ref, four stamped bytes
+        f.stamp_tombstone("m", "k2", "TAG2"); // rolls past epoch 1: refs_at_entry = 1
+        f.set_durable_epoch_watermark(1);
+        f.set_delivered(CONN_A, 100);
+        let c: ClientId = "a5:drain-attribution|dev-1".into();
+        assert!(block_on(f.confirm_apply_ack(&c, 2, CONN_A)));
+
+        {
+            let mut state = f.lock();
+            if plant_empty_tag_vector {
+                state.epoch_tags.insert(1, Vec::new());
+            }
+        }
+        f
+    }
+
+    /// The classifier's PLANTED positive control, read against the unplanted drain over the
+    /// same fixture.
+    ///
+    /// `AttributedWithoutObservation` is the class the divergence argument turns on, so it has
+    /// to be shown FIRING on a pair a real drain produced -- the classifier's pure-input
+    /// totality tests, which live beside its definition, are a different obligation -- and
+    /// shown NOT firing when the same fixture's removal is genuine. Without the second arm the
+    /// first proves only that the classifier can say the word.
+    ///
+    /// The drive is the frontier's own drain. The SERVICE-level consequence -- the same planted
+    /// antecedent driven through `prune_epoch_tombstones` with both records read off the
+    /// rendered transport -- is a separate obligation and is not what this control claims.
+    #[test]
+    fn a_planted_empty_tag_vector_is_the_only_arm_that_attributes_without_observation() {
+        // -- planted arm ----------------------------------------------------
+        let (planted_exits, planted_drained) = drain_one_epoch_fixture(true);
+        assert_eq!(
+            planted_exits.len(),
+            1,
+            "only epoch 1 clears both eligibility conjuncts: {planted_exits:?}"
+        );
+        let planted_exit = planted_exits.into_iter().next().expect("checked len == 1");
+        assert_eq!(
+            planted_exit.epoch, 1,
+            "exit row is epoch 1's: {planted_exit:?}"
+        );
+        assert!(
+            matches!(planted_exit.exit_kind, EpochExitKind::DrainedByPrune),
+            "the eligible fold removed epoch 1 (an empty Vec, but Some), so the attribution is \
+             a real DrainedByPrune and not Unclassified: {planted_exit:?}"
+        );
+        assert!(
+            planted_exit.refs_at_entry > 0,
+            "the slot must have entered with refs, or there would be nothing to attribute: \
+             {planted_exit:?}"
+        );
+        assert!(
+            planted_exit.bytes_freed_attributed > 0,
+            "the attribution side of the pair -- entry-side stamped bytes credited to the \
+             removal: {planted_exit:?}"
+        );
+        assert_eq!(
+            planted_exit.removed_refs_observed, 0,
+            "the planted vector carried nothing for the removal site to observe: \
+             {planted_exit:?}"
+        );
+        assert!(
+            planted_drained.is_empty(),
+            "an empty removed vector contributes no refs to the drain's return value: \
+             {planted_drained:?}"
+        );
+
+        let planted_pass = pass_record_from_drained(&planted_drained);
+        assert_eq!(planted_pass.considered, 0, "pass: {planted_pass:?}");
+        assert!(planted_pass.empty_drain, "pass: {planted_pass:?}");
+
+        assert_eq!(
+            classify_drain_attribution(&planted_exit, &planted_pass),
+            DrainAttributionClass::AttributedWithoutObservation,
+            "planted arm must classify as the divergent class; exit {planted_exit:?}, pass \
+             {planted_pass:?}"
+        );
+
+        // -- unplanted control ----------------------------------------------
+        let (control_exits, control_drained) = drain_one_epoch_fixture(false);
+        assert_eq!(
+            control_exits.len(),
+            1,
+            "the control drains the same single eligible epoch: {control_exits:?}"
+        );
+        let control_exit = control_exits.into_iter().next().expect("checked len == 1");
+        assert_eq!(
+            control_exit.epoch, 1,
+            "exit row is epoch 1's: {control_exit:?}"
+        );
+        assert_eq!(
+            control_drained.len(),
+            1,
+            "the unplanted fixture returns TAG1: {control_drained:?}"
+        );
+        assert_eq!(
+            control_exit.removed_refs_observed, 1,
+            "the genuine removal observed its one ref: {control_exit:?}"
+        );
+
+        let control_pass = pass_record_from_drained(&control_drained);
+        assert_eq!(control_pass.considered, 1, "pass: {control_pass:?}");
+        assert!(!control_pass.empty_drain, "pass: {control_pass:?}");
+
+        // The discriminating assertion: the same fixture, the same eligible epoch, the same
+        // attributed bytes -- and the class must not be the divergent one once the removal is
+        // real. A control that only checked the planted arm would pass on a classifier that
+        // returned the divergent class unconditionally.
+        let control_class = classify_drain_attribution(&control_exit, &control_pass);
+        assert_ne!(
+            control_class,
+            DrainAttributionClass::AttributedWithoutObservation,
+            "unplanted control must NOT read as the divergent class; exit {control_exit:?}, \
+             pass {control_pass:?}"
+        );
+        assert_eq!(
+            control_class,
+            DrainAttributionClass::ObservedAndCounted,
+            "attributed and observed on both channels; exit {control_exit:?}, pass \
+             {control_pass:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The SERVICE-level consequence of a present-but-empty `epoch_tags` entry:
+    // both records reconstructed from the transports that actually carry them.
+    // -----------------------------------------------------------------------
+
+    /// The `tracing` target both rows of the residency ledger are published on.
+    const RESIDENCY_TARGET: &str = "topgun_server::tombstone_frontier::residency";
+
+    /// The value of the `name=` pair on a captured row.
+    ///
+    /// `FieldTextVisitor` writes one `name=value ` pair per recorded field and prefixes the
+    /// target as a pair of the same shape with NO leading space, so a whitespace split sees a
+    /// row as a flat sequence of pairs. Anchoring the prefix at a TOKEN boundary is what stops
+    /// `kind` from matching `exit_kind` and `epoch` from matching `epochs_drained`.
+    ///
+    /// Panics rather than returning an `Option`: a term read off a row that does not carry it
+    /// is a broken reader, and reading it as a default would let an assertion pass on evidence
+    /// that was never captured.
+    fn row_field<'a>(row: &'a str, name: &str) -> &'a str {
+        let needle = format!("{name}=");
+        row.split_whitespace()
+            .find_map(|tok| tok.strip_prefix(needle.as_str()))
+            .unwrap_or_else(|| panic!("field `{name}` is absent from the rendered row: {row}"))
+    }
+
+    fn row_u64(row: &str, name: &str) -> u64 {
+        let raw = row_field(row, name);
+        raw.parse()
+            .unwrap_or_else(|e| panic!("field `{name}` = `{raw}` is not a u64 ({e}): {row}"))
+    }
+
+    fn row_bool(row: &str, name: &str) -> bool {
+        let raw = row_field(row, name);
+        raw.parse()
+            .unwrap_or_else(|e| panic!("field `{name}` = `{raw}` is not a bool ({e}): {row}"))
+    }
+
+    /// Every captured row published on `target` and carrying `kind=<kind>`.
+    fn rows_of_kind<'a>(rows: &'a [String], target: &str, kind: &str) -> Vec<&'a str> {
+        let target_tok = format!("target={target}");
+        let kind_tok = format!("kind={kind}");
+        rows.iter()
+            .map(String::as_str)
+            .filter(|row| {
+                let mut has_target = false;
+                let mut has_kind = false;
+                for tok in row.split_whitespace() {
+                    has_target |= tok == target_tok.as_str();
+                    has_kind |= tok == kind_tok.as_str();
+                }
+                has_target && has_kind
+            })
+            .collect()
+    }
+
+    /// The counter's rendered value, or a panic naming the absent series.
+    ///
+    /// An absent series is a HARD error and never a zero: the frontier touches every counter
+    /// with `increment(0)` at construction, so a series missing from the render means the
+    /// handles were resolved outside the binding this render came from — exactly the failure
+    /// that would otherwise make the whole comparison vacuous.
+    fn rendered_counter_u64(rendered: &str, name: &str, when: &str) -> u64 {
+        let raw = rendered_value(rendered, name).unwrap_or_else(|| {
+            panic!("series `{name}` is ABSENT from the {when} render:\n{rendered}")
+        });
+        raw.parse()
+            .unwrap_or_else(|e| panic!("series `{name}` = `{raw}` is not a u64 ({e})"))
+    }
+
+    /// The ATTRIBUTION half of the divergent pair, read off the exit row and returned as
+    /// `(bytes_freed_attributed, removed_refs_observed)` for the classifier to consume.
+    ///
+    /// This is the DISCRIMINATING trio the consequence drive turns on; it lives in its own
+    /// function so the three terms fail with their own messages rather than as one opaque
+    /// composite predicate.
+    fn assert_divergent_exit_row(exit_row: &str) -> (u64, u64) {
+        assert_eq!(
+            row_field(exit_row, "exit_kind"),
+            "DrainedByPrune",
+            "DISCRIMINATING ASSERTION (first term) — the drive must observe a DrainedByPrune \
+         exit whose bytes_freed_attributed > 0 while removed_refs_observed = 0. Removing a \
+         present-but-empty vector is still a removal, so the exit must be attributed to the \
+         prune and not resolved to Unclassified. exit row: {exit_row}"
+        );
+        let bytes_freed_attributed = row_u64(exit_row, "bytes_freed_attributed");
+        assert!(
+            bytes_freed_attributed > 0,
+            "DISCRIMINATING ASSERTION (second term) — a DrainedByPrune exit with \
+         bytes_freed_attributed > 0 while removed_refs_observed = 0. The attribution side \
+         is entry-side stamped bytes credited to the removal and must be nonzero, or there \
+         is no divergence to observe. exit row: {exit_row}"
+        );
+        let removed_refs_observed = row_u64(exit_row, "removed_refs_observed");
+        assert_eq!(
+            removed_refs_observed, 0,
+            "DISCRIMINATING ASSERTION (third term) — a DrainedByPrune exit with \
+         bytes_freed_attributed > 0 while removed_refs_observed = 0. The planted vector \
+         carried nothing for the removal site to observe. exit row: {exit_row}"
+        );
+        assert!(
+            row_u64(exit_row, "refs_at_entry") > 0,
+            "the slot must have entered with refs, or the attribution above would be \
+         attributing nothing: {exit_row}"
+        );
+        (bytes_freed_attributed, removed_refs_observed)
+    }
+
+    /// The OBSERVATION half, read off the pass row the SERVICE emits, returned as
+    /// `(considered, empty_drain)`.
+    fn assert_empty_pass_row(pass_row: &str) -> (u64, bool) {
+        let considered = row_u64(pass_row, "considered");
+        assert_eq!(
+            considered, 0,
+            "`considered` increments once per ref the drain RETURNED, and an empty removed \
+         vector returns none: {pass_row}"
+        );
+        let empty_drain = row_bool(pass_row, "empty_drain");
+        assert!(
+            empty_drain,
+            "the pass reads its own drain as empty even though an epoch was removed: \
+         {pass_row}"
+        );
+        (considered, empty_drain)
+    }
+
+    /// The pass-counter family across one pass, returning `epochs_drained`'s delta.
+    ///
+    /// The pass row does not carry `epochs_drained`; `crdt.rs` sends it only to the pass
+    /// observer, and this drive does not widen that row to make one test readable. So the term
+    /// is read over the transport that already carries it.
+    fn assert_pass_counter_family_deltas(before: &str, after: &str) -> u64 {
+        let epochs_drained_before =
+            rendered_counter_u64(before, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL, "pre-drive");
+        let epochs_drained_after =
+            rendered_counter_u64(after, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL, "post-drive");
+        assert_eq!(
+            epochs_drained_after - epochs_drained_before,
+            0,
+            "{METRIC_PRUNE_EPOCHS_DRAINED_TOTAL} must not move: the returned vector is what \
+         the service folds into `epochs_drained`, and the removed vector was empty. \
+         before={epochs_drained_before} after={epochs_drained_after}"
+        );
+        assert_eq!(
+            rendered_counter_u64(after, METRIC_PRUNE_CONSIDERED_TOTAL, "post-drive")
+                - rendered_counter_u64(before, METRIC_PRUNE_CONSIDERED_TOTAL, "pre-drive"),
+            0,
+            "{METRIC_PRUNE_CONSIDERED_TOTAL} must not move — the metrics transport must agree \
+         with the pass row's own `considered = 0`"
+        );
+        assert_eq!(
+            rendered_counter_u64(after, METRIC_PRUNE_EMPTY_DRAINS_TOTAL, "post-drive")
+                - rendered_counter_u64(before, METRIC_PRUNE_EMPTY_DRAINS_TOTAL, "pre-drive"),
+            1,
+            "{METRIC_PRUNE_EMPTY_DRAINS_TOTAL} must move by exactly one — this pass really did \
+         run and really did read its drain as empty, which is what makes the zeroes above \
+         observations rather than a pass that never happened"
+        );
+        assert_eq!(
+            rendered_counter_u64(after, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL, "post-drive")
+                - rendered_counter_u64(before, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL, "pre-drive"),
+            0,
+            "{METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL} must not move"
+        );
+        let delta = epochs_drained_after - epochs_drained_before;
+        println!(
+            "CONSEQUENCE-DRIVE | pass family | {METRIC_PRUNE_EPOCHS_DRAINED_TOTAL} delta={delta}"
+        );
+        delta
+    }
+
+    /// Obligation A, driven through the SERVICE: an epoch whose `epoch_tags` entry is
+    /// PRESENT-BUT-EMPTY is attributed a `DrainedByPrune` exit carrying nonzero freed bytes
+    /// while the pass that wrapped that very drain records nothing considered and an empty
+    /// drain. Attribution and observation disagree, and the two halves are produced by
+    /// different components.
+    ///
+    /// Every term is read over the transport that actually carries it. The exit record and the
+    /// pass record are RECONSTRUCTED from the rendered `tracing` rows: on the service path
+    /// neither is reachable in-process — `prune_epoch_tombstones` returns `()` and never yields
+    /// its pass local, and the public drain consumes its exit rows internally — and adding a
+    /// seam to reach them would be a production surface whose only consumer is this test.
+    /// `epochs_drained` has no `tracing` transport at all (the pass row carries `kind`,
+    /// `considered` and `empty_drain` and nothing else), so it is read off the Prometheus
+    /// render rather than asserted on a row that would panic the reader.
+    #[test]
+    fn a_planted_empty_tag_vector_diverges_attribution_from_observation_through_the_service() {
+        // The recorder is bound FIRST and the frontier is constructed INSIDE the binding. The
+        // frontier resolves its metric handles once, at construction; the inverted order binds
+        // every handle to a no-op for its whole lifetime and turns each render assertion below
+        // into an assertion about nothing.
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut before = String::new();
+        let mut after = String::new();
+        let mut rows: Vec<String> = Vec::new();
+
+        metrics::with_local_recorder(&recorder, || {
+            let f = one_epoch_frontier(true);
+            let factory = RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            );
+            let key_writer = KeyWriterRegistry::new();
+
+            // Read the pass family BEFORE the drive so the assertion below is a delta across
+            // this one pass rather than a claim about an absolute the fixture also moved.
+            before = handle.render();
+            // The capture wraps the SERVICE entry point and nothing else: the fixture's own
+            // stamps already fired their entry rows, and including them would make the row
+            // census below count rows this drive did not produce.
+            rows = captured_tracing_events(|| {
+                block_on(crate::service::domain::crdt::prune_epoch_tombstones(
+                    &f,
+                    &factory,
+                    &key_writer,
+                ));
+            });
+            after = handle.render();
+        });
+
+        // Non-vacuity gate: the shape of the capture is asserted before any per-row term is
+        // read off it. A drive whose transport produced nothing must RED here rather than
+        // report "no violation" on a term it never read.
+        assert!(
+            !rows.is_empty(),
+            "the tracing capture is EMPTY — the drive rendered no rows at all, so every term \
+             below would be read off nothing"
+        );
+        let exit_rows = rows_of_kind(&rows, RESIDENCY_TARGET, "epoch_exit");
+        let pass_rows = rows_of_kind(&rows, RESIDENCY_TARGET, "prune_pass");
+        assert_eq!(
+            exit_rows.len(),
+            1,
+            "expected exactly one epoch_exit row (epoch 1 is the only epoch clearing both \
+             eligibility conjuncts), captured: {rows:?}"
+        );
+        assert_eq!(
+            pass_rows.len(),
+            1,
+            "the pass row fires once per invocation, unconditionally and outside the loop, \
+             captured: {rows:?}"
+        );
+        let exit_row = exit_rows[0];
+        let pass_row = pass_rows[0];
+        println!("CONSEQUENCE-DRIVE | exit row | {exit_row}");
+        println!("CONSEQUENCE-DRIVE | pass row | {pass_row}");
+
+        // The metrics limb is read FIRST, and prints what it read. It is the one limb the
+        // exit-row mutation arm is NOT expected to move, so grading it ahead of the
+        // discriminating exit-row assertion is what lets a single mutated run witness both
+        // halves at once: this family green, the exit row red.
+        let epochs_drained_delta = assert_pass_counter_family_deltas(&before, &after);
+        let (bytes_freed_attributed, removed_refs_observed) = assert_divergent_exit_row(exit_row);
+        let (considered, empty_drain) = assert_empty_pass_row(pass_row);
+
+        // -- the class, COMPUTED from the reconstructed pair -----------------
+        // `exit_kind` is set to the variant the rendered text was just asserted to carry; every
+        // other term comes straight off the transport.
+        let exit = PruneEpochResidencyRecord {
+            epoch: row_u64(exit_row, "epoch"),
+            refs_at_entry: row_u64(exit_row, "refs_at_entry"),
+            refs_at_exit: row_u64(exit_row, "refs_at_exit"),
+            stamped_bytes: row_u64(exit_row, "stamped_bytes"),
+            bytes_freed_attributed,
+            exit_kind: EpochExitKind::DrainedByPrune,
+            removed_refs_observed,
+            removed_bytes_observed: row_u64(exit_row, "removed_bytes_observed"),
+            ..PruneEpochResidencyRecord::default()
+        };
+        let pass = PrunePassRecord {
+            considered,
+            epochs_drained: epochs_drained_delta,
+            empty_drain,
+            ..PrunePassRecord::default()
+        };
+        let class = classify_drain_attribution(&exit, &pass);
+        println!("CONSEQUENCE-DRIVE | class | {class:?}");
+        assert_eq!(
+            class,
+            DrainAttributionClass::AttributedWithoutObservation,
+            "the service-level pair must classify as attribution without observation: \
+             exit={exit:?} pass={pass:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The removal-site ORIGIN instrument, read over the transport its consumer
+    // will actually read: the rendered `tracing` line, never an in-process struct.
+    // -----------------------------------------------------------------------
+
+    /// The `tracing` target the removal line is published on. It is distinct from the
+    /// residency target, which is what lets the line be selected by TARGET ALONE — no `kind`
+    /// discriminant field is added to it, and none is needed.
+    const REMOVAL_TARGET: &str = "topgun_server::tombstone_frontier::removal";
+
+    /// The instrument's field set, by NAME and in the order the emitting macro declares them.
+    /// The COUNT is not what is asserted; the names are.
+    const REMOVAL_FIELDS: [&str; 8] = [
+        "ts",
+        "op_seq",
+        "epoch",
+        "refs_returned",
+        "refs_at_entry",
+        "bytes_returned",
+        "watermark",
+        "ceiling",
+    ];
+
+    /// Every captured row published on `target`, selected by TARGET ALONE.
+    ///
+    /// [`rows_of_kind`] needs a `kind=` discriminant; the removal line deliberately carries
+    /// none, because its own target does that work without widening the field set.
+    fn rows_of_target<'a>(rows: &'a [String], target: &str) -> Vec<&'a str> {
+        let target_tok = format!("target={target}");
+        rows.iter()
+            .map(String::as_str)
+            .filter(|row| row.split_whitespace().any(|tok| tok == target_tok.as_str()))
+            .collect()
+    }
+
+    fn null_prune_deps() -> (RecordStoreFactory, KeyWriterRegistry) {
+        (
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            ),
+            KeyWriterRegistry::new(),
+        )
+    }
+
+    /// Drive a frontier through the PRODUCTION prune service with a `tracing` capture
+    /// installed, and hand back every rendered row the drive produced.
+    ///
+    /// The capture wraps the service entry point and nothing else, so the fixture's own stamp
+    /// and rollover rows are not counted among the drive's output.
+    fn captured_rows_over_service_drive(
+        f: &TombstoneFrontier,
+        factory: &RecordStoreFactory,
+        key_writer: &KeyWriterRegistry,
+    ) -> Vec<String> {
+        captured_tracing_events(|| {
+            block_on(crate::service::domain::crdt::prune_epoch_tombstones(
+                f, factory, key_writer,
+            ));
+        })
+    }
+
+    /// Assert the instrument's eight fields are all present on `row` BY NAME, and hand the row
+    /// back. [`row_field`] panics naming the absent field, so a narrowed or relocated field set
+    /// REDs here rather than surfacing as a puzzling parse further down.
+    fn assert_removal_row_field_set(row: &str) {
+        for name in REMOVAL_FIELDS {
+            let _ = row_field(row, name);
+        }
+    }
+
+    /// THE ORIGIN SIGNATURE, on the rendered line: a removal that returned an EMPTY vector for
+    /// an epoch that entered the index holding refs.
+    ///
+    /// This is the reading the whole instrument exists to make visible. `refs_returned` is the
+    /// OBSERVATION — it is read from the vector `epoch_tags.remove` itself returned — while
+    /// `refs_at_entry` is read from the slot. A line on which the two are the same number by
+    /// construction would reproduce the tautology this lineage is trying to escape, in a new
+    /// place; the mutation arm that swaps one for the other is what proves they are not.
+    #[test]
+    fn the_removal_line_carries_the_origin_signature_for_a_present_but_empty_entry() {
+        let f = one_epoch_frontier(true);
+        let (factory, key_writer) = null_prune_deps();
+        let rows = captured_rows_over_service_drive(&f, &factory, &key_writer);
+
+        // Non-vacuity gate: the terms below are read off a capture that is asserted to exist
+        // first, so a drive whose transport produced nothing REDs rather than reporting a
+        // reading it never took.
+        assert!(
+            !rows.is_empty(),
+            "the tracing capture is EMPTY — the drive rendered no rows at all"
+        );
+        let removal_rows = rows_of_target(&rows, REMOVAL_TARGET);
+        assert_eq!(
+            removal_rows.len(),
+            1,
+            "exactly one epoch clears both eligibility conjuncts, so the instrument must fire \
+             exactly once; captured: {rows:?}"
+        );
+        let row = removal_rows[0];
+        println!("ORIGIN-INSTRUMENT | planted removal row | {row}");
+        assert_removal_row_field_set(row);
+
+        assert_eq!(
+            row_u64(row, "epoch"),
+            1,
+            "the join key must carry the removed epoch: {row}"
+        );
+        assert_eq!(
+            row_u64(row, "refs_returned"),
+            0,
+            "OBSERVATION ARM — `refs_returned != refs.len()`: the line must report what the \
+             index removal actually returned (an EMPTY vector here), not the entry-side \
+             `refs_at_entry` the slot still carries. A line on which refs_returned mirrors \
+             refs_at_entry is a second copy of the slot, not an observation: {row}"
+        );
+        assert_eq!(
+            row_u64(row, "refs_at_entry"),
+            1,
+            "the entry-side term must carry what the slot recorded at rollover, so the \
+             divergence is visible on ONE line: {row}"
+        );
+        assert_eq!(
+            row_u64(row, "bytes_returned"),
+            0,
+            "an empty removed vector has no observed bytes: {row}"
+        );
+        assert_eq!(
+            row_u64(row, "watermark"),
+            1,
+            "the durable watermark the pass ran under: {row}"
+        );
+        assert!(
+            row_u64(row, "ceiling") > row_u64(row, "epoch"),
+            "the epoch was removed under a ceiling that licensed it: {row}"
+        );
+    }
+
+    /// The instrument's POSITIVE control: a genuinely non-empty removal renders
+    /// `refs_returned > 0` beside `refs_at_entry > 0`.
+    ///
+    /// Read together with the origin-signature arm above and the negative control below, this
+    /// exercises ALL THREE readings the instrument can produce — silent, zero-returned,
+    /// positive — before it ships, so a downstream reader of a silent window can tell "the arm
+    /// was never reached" from "the arm was reached and returned zero" rather than guess.
+    #[test]
+    fn the_removal_line_reports_a_genuinely_non_empty_removal_as_positive() {
+        let f = one_epoch_frontier(false);
+        let (factory, key_writer) = null_prune_deps();
+        let rows = captured_rows_over_service_drive(&f, &factory, &key_writer);
+
+        assert!(
+            !rows.is_empty(),
+            "the tracing capture is EMPTY — the drive rendered no rows at all"
+        );
+        let removal_rows = rows_of_target(&rows, REMOVAL_TARGET);
+        assert_eq!(
+            removal_rows.len(),
+            1,
+            "the same one-epoch fixture, unplanted, removes exactly one epoch; captured: \
+             {rows:?}"
+        );
+        let row = removal_rows[0];
+        println!("ORIGIN-INSTRUMENT | positive removal row | {row}");
+        assert_removal_row_field_set(row);
+
+        assert_eq!(row_u64(row, "epoch"), 1, "the join key: {row}");
+        assert!(
+            row_u64(row, "refs_returned") > 0,
+            "POSITIVE CONTROL — a non-empty removal must render `refs_returned > 0`, or a \
+             silent-or-zero read downstream could never be distinguished from an instrument \
+             that cannot report a positive at all: {row}"
+        );
+        assert!(
+            row_u64(row, "refs_at_entry") > 0,
+            "POSITIVE CONTROL — the slot entered holding refs, so the entry-side term must be \
+             positive too: {row}"
+        );
+        assert!(
+            row_u64(row, "bytes_returned") > 0,
+            "a non-empty removal observed bytes: {row}"
+        );
+    }
+
+    /// The instrument's NEGATIVE control, on BOTH paths that skip the removal arm. This is what
+    /// makes silence from the instrument MEANINGFUL rather than ambiguous.
+    ///
+    /// Arm (a) — no eligible epoch, with the watermark NOT zero, so the silence is attributable
+    /// to eligibility and not to the dark fast path. The arm's premise (the fixture's one epoch
+    /// really is gone) is ESTABLISHED by asserting the preceding pass emitted the line, never
+    /// assumed.
+    ///
+    /// Arm (b) — the dark fast path: a zero watermark returns before the registry is touched at
+    /// all, so no epoch is even considered.
+    ///
+    /// Both arms assert the capture is NON-EMPTY before reading an absence off it, so a drive
+    /// whose transport produced nothing REDs instead of passing as "no lines".
+    #[test]
+    fn the_removal_line_is_absent_on_both_paths_that_skip_the_removal_arm() {
+        let (factory, key_writer) = null_prune_deps();
+
+        // -- (a) no eligible epoch -------------------------------------------
+        let f = one_epoch_frontier(false);
+        let first = captured_rows_over_service_drive(&f, &factory, &key_writer);
+        assert_eq!(
+            rows_of_target(&first, REMOVAL_TARGET).len(),
+            1,
+            "PREMISE of arm (a): the first pass must actually remove the fixture's one epoch, \
+             or the silence asserted below would be silence about nothing; captured: {first:?}"
+        );
+        let second = captured_rows_over_service_drive(&f, &factory, &key_writer);
+        assert!(
+            !second.is_empty(),
+            "the second pass's capture is EMPTY — the absence below would be read off nothing"
+        );
+        assert!(
+            rows_of_target(&second, REMOVAL_TARGET).is_empty(),
+            "NEGATIVE CONTROL (a) — no epoch is eligible on the second pass, so the removal arm \
+             is never entered and the instrument must be SILENT; captured: {second:?}"
+        );
+
+        // -- (b) the dark fast path ------------------------------------------
+        // The watermark is left at 0, so `drain_prunable` returns before it opens a sweep.
+        let dark = frontier();
+        dark.set_epoch_width(1);
+        dark.stamp_tombstone("m", "k1", "TAG1");
+        dark.stamp_tombstone("m", "k2", "TAG2");
+        let dark_rows = captured_rows_over_service_drive(&dark, &factory, &key_writer);
+        assert!(
+            !dark_rows.is_empty(),
+            "the dark-path capture is EMPTY — the absence below would be read off nothing"
+        );
+        assert!(
+            rows_of_target(&dark_rows, REMOVAL_TARGET).is_empty(),
+            "NEGATIVE CONTROL (b) — a zero watermark takes the dark fast path, which never \
+             reaches the removal arm, so the instrument must be SILENT; captured: {dark_rows:?}"
         );
     }
 }
