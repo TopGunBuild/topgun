@@ -29,7 +29,7 @@ one is denominated in and the reason it does not collapse into the other two.
   (durability is the WAL fsync policy and the write-behind drain) and it is **not** the fix for
   min-pinning (an abandoned laggard that never releases pins the boundary regardless of the margin;
   the fix is the cursor-age retention fence, listed as deferred above). Its hedge is also **narrow**
-  by construction: `packages/server-rust/src/tombstone_frontier_impl.rs:420` clamps every ACK to
+  by construction: `packages/server-rust/src/tombstone_frontier_impl.rs:428` clamps every ACK to
   `claimed.min(delivered).min(current_max_epoch)`, so a client cannot claim above the highest epoch
   its connection was actually delivered. The margin covers only a claim over-reported *within* that
   delivered range.
@@ -45,7 +45,7 @@ as a whole and must be argued as such.
 **(b) A derived margin sits on top of a boundary that already retains one epoch, and must not
 re-add it.** A client cursor at epoch `e` means *applied through `e` inclusive*, while the
 eligibility conjunct the sweep filters on is strictly-below (`ceiling > e`,
-`packages/server-rust/src/tombstone_frontier_impl.rs:963`). The newest epoch the fleet has confirmed
+`packages/server-rust/src/tombstone_frontier_impl.rs:971`). The newest epoch the fleet has confirmed
 is therefore already retained: a reclamation margin of `0` is **not** zero conservatism. Any future
 rule that derives the margin from observed client lag — the `ceil(p99.9) + 1` shape sketched for the
 lag-telemetry work — is stated **relative to that already-retained epoch**. Adding `+ 1` on top of

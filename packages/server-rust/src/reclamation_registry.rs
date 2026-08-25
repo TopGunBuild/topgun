@@ -436,7 +436,7 @@ pub trait ReclamationBoundary: Send + Sync {
 /// # Why the hedge is NARROW
 ///
 /// A claim cannot exceed what the claimant's connection was actually delivered:
-/// `tombstone_frontier_impl.rs:420` bounds every ACK by
+/// `tombstone_frontier_impl.rs:428` bounds every ACK by
 /// `claimed.min(delivered).min(current_max_epoch)`. Over-reporting is therefore already capped by
 /// the server's own delivery record, and this margin covers only the residue — a claim
 /// over-reported *within* the delivered range.
@@ -465,7 +465,7 @@ pub const DEFAULT_RECLAMATION_MARGIN_EPOCHS: u64 = 0;
 /// - **The unit is EPOCHS,** never wall-clock time. The retention SLA is denominated in days, and
 ///   neither converts to the other without a churn rate; both are tabulated in
 ///   `packages/server-rust/docs/RECOVERY_ENVELOPE.md`.
-/// - **The hedge is narrow,** because `tombstone_frontier_impl.rs:420` already clamps every claim to
+/// - **The hedge is narrow,** because `tombstone_frontier_impl.rs:428` already clamps every claim to
 ///   the highest epoch that connection was delivered.
 const ENV_RECLAMATION_MARGIN_EPOCHS: &str = "TOPGUN_RECLAMATION_MARGIN_EPOCHS";
 
