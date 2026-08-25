@@ -410,14 +410,63 @@ pub trait ReclamationBoundary: Send + Sync {
 /// Default reclamation margin, in **epochs**, subtracted from the minimum live claim to form the
 /// ceiling proposal. Overridden by `TOPGUN_RECLAMATION_MARGIN_EPOCHS`.
 ///
+/// # What this knob is: the assumed claim-channel trust level
+///
+/// Its honest name is the **assumed claim-channel trust level**. It hedges exactly one hazard — a
+/// client that reports progress it has not made, an **over-reported claim** — and nothing else.
+///
+/// - It is **not a durability mechanism.** Durability belongs to the WAL fsync policy and to the
+///   write-behind drain. A margin subtracted from a claim moves a reclamation boundary; it persists
+///   nothing.
+/// - It is **not the fix for min-pinning.** An abandoned laggard that is never released pins the
+///   boundary regardless of the margin — see *How a claim leaves the fold* on
+///   [`ReclamationBoundary`]. The fix is the cursor-age retention fence, which is deferred and owned
+///   by TODO-634.
+///
+/// Code reaching for this knob to solve durability or min-pinning has mis-diagnosed its problem.
+///
+/// # The unit is EPOCHS, and epochs do not convert to wall clock
+///
+/// The hazard is epoch-denominated: an over-reported claim is wrong by some number of **epochs**.
+/// The retention SLA hedges a different hazard — *how long a device may be offline* — so its unit is
+/// **wall-clock days**. Neither quantity derives from the other without a churn rate, so these are
+/// two parameters and not one. They are tabulated together, with the clock-skew tolerance, in
+/// `packages/server-rust/docs/RECOVERY_ENVELOPE.md`, which exists so the three cannot drift apart.
+///
+/// # Why the hedge is NARROW
+///
+/// A claim cannot exceed what the claimant's connection was actually delivered:
+/// `tombstone_frontier_impl.rs:420` bounds every ACK by
+/// `claimed.min(delivered).min(current_max_epoch)`. Over-reporting is therefore already capped by
+/// the server's own delivery record, and this margin covers only the residue — a claim
+/// over-reported *within* the delivered range.
+///
+/// # Why the default is `0`
+///
 /// `0` is a valid value meaning *no margin*, and it is the default deliberately: at margin `0` the
 /// ceiling is arithmetically the same fleet MIN the pre-registry fold already computed, so
 /// introducing the registry moves the **authority** over the boundary without moving the boundary
-/// itself. A non-zero margin is a behavioural change and belongs with the consumer that needs it;
-/// choosing one on evidence is deferred and owned by TODO-634.
+/// itself. Read as policy, `0` asserts *the claim channel is trusted not to over-report* — a choice
+/// with a stated rationale, not an unexamined default. The knob's cost is continuous (every epoch of
+/// margin is retention nobody asked for, on every sweep, forever) while its benefit is contingent
+/// (it pays only if the channel actually lies), which is why the burden of proof sits on moving it
+/// up rather than on leaving it where it is. Choosing a non-zero value on evidence is deferred and
+/// owned by TODO-634; it is a behavioural change, never a keyboard adjustment.
 pub const DEFAULT_RECLAMATION_MARGIN_EPOCHS: u64 = 0;
 
 /// Environment variable carrying the operator-chosen reclamation margin, in epochs.
+///
+/// Operator-facing restatement of [`DEFAULT_RECLAMATION_MARGIN_EPOCHS`]'s contract, because this is
+/// the name an operator types and therefore the doc they are most likely to reach for:
+///
+/// - **Over-reported claims only.** Not a durability mechanism — that is the WAL fsync policy and
+///   the write-behind drain — and not the fix for min-pinning, which is the deferred cursor-age
+///   retention fence owned by TODO-634.
+/// - **The unit is EPOCHS,** never wall-clock time. The retention SLA is denominated in days, and
+///   neither converts to the other without a churn rate; both are tabulated in
+///   `packages/server-rust/docs/RECOVERY_ENVELOPE.md`.
+/// - **The hedge is narrow,** because `tombstone_frontier_impl.rs:420` already clamps every claim to
+///   the highest epoch that connection was delivered.
 const ENV_RECLAMATION_MARGIN_EPOCHS: &str = "TOPGUN_RECLAMATION_MARGIN_EPOCHS";
 
 /// Resolve the effective margin from the environment, **once**, at registry construction.
