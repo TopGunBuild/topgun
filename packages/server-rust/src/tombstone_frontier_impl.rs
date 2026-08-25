@@ -410,6 +410,14 @@ impl FrontierState {
     /// ACK). A delivered-nothing connection (`delivered_conn == 0`) can never
     /// establish or advance a cursor: the bound is 0, so a fresh device stays
     /// untracked.
+    ///
+    /// One epoch is retained implicitly, and a derived margin must not re-add it: a cursor at `e`
+    /// means *applied through `e` inclusive*, while the eligibility conjunct the sweep filters on is
+    /// strictly-below — `ceiling > e`, this file `:963` — so the newest epoch the fleet has
+    /// confirmed is itself retained. A reclamation margin of `0` is therefore not zero
+    /// conservatism, and any margin derived from observed client lag (the `p99.9`-based rule
+    /// deferred to TODO-634) must be stated relative to that already-retained epoch, or it
+    /// double-counts by one.
     fn advance_on_ack(
         &mut self,
         client: &ClientId,
