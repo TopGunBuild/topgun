@@ -4828,6 +4828,137 @@ mod tests {
         );
     }
 
+    /// A margin of `0` is NOT zero conservatism: the boundary already retains one epoch
+    /// implicitly, and an over-claiming ACK cannot push it past what the connection was actually
+    /// delivered.
+    ///
+    /// Three facts, read as one:
+    ///
+    /// 1. a fleet delivered and confirmed through epoch `D` puts the boundary AT `D`;
+    /// 2. the sweep's eligibility is strictly BELOW that boundary, so epoch `D` itself is
+    ///    RETAINED while `D − 1` is reclaimed — one epoch of implicit retention. Read off the
+    ///    SET the sweep hands back, not off the standalone predicate: the set is what the sweep
+    ///    acts on, and the predicate's strictness is a separate expression that could agree with
+    ///    the sweep by coincidence;
+    /// 3. an ACK claiming `D + k` on a connection delivered only through `D` leaves the boundary
+    ///    exactly where it was, because the advance rule clamps the claim against the delivery
+    ///    record before it ever reaches the boundary.
+    ///
+    /// **Fact 3 is the new one.** Facts 1 and 2 are already executed by
+    /// `eligibility_is_strictly_past_not_inclusive` and `one_behind_client_pins_epoch_fleet_wide`;
+    /// they are carried here so the retained epoch reads as one coherent fact and so the clamp is
+    /// read against a boundary whose position was ESTABLISHED rather than assumed.
+    ///
+    /// Consequence for a lag-derived margin: the epoch retained here is retained ALREADY, so any
+    /// margin computed from observed client lag must be stated relative to it or it double-counts
+    /// by one (deferred, TODO-634).
+    #[tokio::test]
+    async fn margin_zero_retains_the_confirmed_epoch_and_delivery_bounds_an_over_claim() {
+        let f = frontier();
+        f.set_epoch_width(1);
+
+        // The epoch the fleet confirms, and how far beyond it the over-claim reaches.
+        let d: Epoch = 3;
+        let k: Epoch = 2;
+
+        // Stamp through `D + k`, so an epoch above the confirmed one exists to be over-claimed
+        // and the server's global bound is not itself the term that rejects the over-claim.
+        for i in 1..=(d + k) {
+            f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+        }
+        // Injected AFTER the last stamp on purpose: stamping WRITES the global max epoch, so an
+        // injection placed earlier is silently overwritten and the clamp would then face a global
+        // bound equal to the delivery record instead of strictly above it.
+        f.set_current_max_epoch(d + k);
+        // Delivered only through `D`: the delivery record, not the global bound, must bind.
+        f.set_delivered(CONN_A, d);
+
+        let c: ClientId = "a5:alice|dev-1".into();
+        assert!(
+            f.confirm_apply_ack(&c, d, CONN_A).await,
+            "the honest ACK through {d} establishes the fleet cursor"
+        );
+
+        // Fact 1, inherited: the boundary the sweep folds over sits AT the confirmed epoch.
+        assert_eq!(
+            f.reclamation().margin_epochs(),
+            0,
+            "the retained-epoch reading is a margin-0 statement, so margin 0 is asserted here \
+             rather than assumed"
+        );
+        assert_eq!(
+            f.reclamation().prune_ceiling(ClaimScope::Global),
+            d,
+            "a fleet confirmed through {d} puts the boundary at {d}, not past it"
+        );
+
+        // Open the durability fence well past every stamped epoch: it must not be the term that
+        // decides `D`'s fate, and a zero watermark would return the sweep dark before it folds.
+        f.set_durable_epoch_watermark(1000);
+
+        // The decisiveness pins for fact 2, asserted immediately before the sweep. The
+        // eligibility test is a three-way conjunction; unless the other two terms are pinned
+        // non-deciding at `D`, `D` can be retained for a reason that has nothing to do with the
+        // strictness under test, and the fact goes vacuously green.
+        assert!(
+            f.durable_epoch_watermark() >= d,
+            "the durability conjunct must be SATISFIED at {d}, or {d} is retained by the fence \
+             instead of by the boundary"
+        );
+        assert!(
+            d != 0,
+            "the zero-epoch conjunct must be visibly non-deciding at the probe epoch"
+        );
+        assert_eq!(
+            f.reclamation().prune_ceiling(ClaimScope::Global),
+            d,
+            "the boundary must be EXACTLY at {d} when the sweep runs: at exactly {d} the \
+             strictly-below term is what decides {d}, which is the whole point of the read below"
+        );
+
+        let drained = f.drain_prunable_tombstones();
+        let epochs: Vec<Epoch> = drained.iter().map(|(e, _)| *e).collect();
+
+        // Fact 2, inherited: one epoch of implicit retention, read off the set the sweep returns.
+        assert!(
+            !epochs.contains(&d),
+            "epoch {d} is confirmed THROUGH, not past — it must survive the sweep, got {epochs:?}"
+        );
+        assert!(
+            epochs.contains(&(d - 1)),
+            "epoch {} is strictly below the boundary and must be reclaimed, got {epochs:?}",
+            d - 1
+        );
+
+        // The precondition fact 3 owes, asserted immediately before the over-claiming ACK. The
+        // clamp is three-way; the delivery record binds only while it is strictly below the
+        // global bound, which was injected at `D + k` above. There is no getter for that bound,
+        // so it is pinned by the injected value plus the record that does read back.
+        assert!(
+            f.delivered(CONN_A) < d + k,
+            "the delivery record must sit strictly below the global bound, or dropping the \
+             delivered term changes nothing and the clamp is not under test"
+        );
+
+        // Fact 3, the new one: the over-claim the margin exists to hedge is already bounded.
+        assert!(
+            !f.confirm_apply_ack(&c, d + k, CONN_A).await,
+            "an ACK claiming {} on a connection delivered through {d} must not advance anything",
+            d + k
+        );
+        assert_eq!(
+            f.cursor(&c),
+            Some(d),
+            "the cursor stays at the delivery record, never at the claimed value"
+        );
+        assert_eq!(
+            f.reclamation().prune_ceiling(ClaimScope::Global),
+            d,
+            "the boundary is unmoved by the over-claim: the delivery record bounds it, so a \
+             margin is not what stands between an over-claiming client and reclaimed data"
+        );
+    }
+
     /// A drained ref whose storage drop failed is handed back via
     /// `restore_tombstone_ref` and re-drained on the next sweep — a
     /// drained-but-not-dropped tag must never lose its index entry (that would
