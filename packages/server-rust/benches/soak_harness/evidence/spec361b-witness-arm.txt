@@ -1,0 +1,807 @@
+================================================================================
+SPEC-361b — EXECUTED WITNESS ARMS (THIS HALF ONLY)
+================================================================================
+
+BASE_SHA = 20edabde2381d2efde9ee150501031eddc83a866
+
+THE ARITHMETIC, JOINT FIRST SO THE PARTIAL COUNT IS NEVER READ AS THE TOTAL.
+
+  joint total across BOTH halves ...... 9 arms / 18 legs / 9 transcripts
+    SPEC-361a owns and executes ....... 6 arms / 12 legs / 6 transcripts
+                                        (W1-W5 one arm each, plus W9's one;
+                                        recorded in spec361a-witness-arm.txt)
+    SPEC-361b owns and executes ....... 3 arms /  6 legs /  3 transcripts
+                                        (W6 (a), W6 (b), W7 (b) — THIS FILE)
+
+  3 + 6 = 9 arms.  6 + 12 = 18 legs.  3 + 6 = 9 transcripts.
+
+THIS FILE HOLDS THREE TRANSCRIPTS AND THAT IS THE CORRECT NUMBER, NOT A
+SHORTFALL. W7's former arm (a) — `None => self.boot_floor` -> `None =>
+Epoch::MAX` — is RETIRED: its named obligation (P3, the empty case) is coverage
+the tree already has at `a_registry_that_never_claimed_and_never_swept_sits_on_
+its_boot_floor` and `releasing_everything_returns_the_proposal_to_the_boot_
+floor`, so an arm pointed at it would prove nothing this half owns. It survives
+only as m5 in the refuted table under the W7 (b) transcript below. W7 therefore
+has exactly ONE arm. W8 has no arm in either half (it is SPEC-361a's neutral
+control run). The struck figure "fourteen" (7 x 2) is not this register's count
+and appears nowhere here.
+
+A transcript is ONE ARM carrying BOTH its legs — the applied mutation with the
+RED set it produced, and the revert. Three transcripts, six legs.
+
+THE COLLATERAL SET IN EACH TRANSCRIPT IS EXECUTED, NEVER AUTHORED. Each set
+below is what the run PRINTED, transcribed by test name and by failing-assertion
+line. Where the spec's seed rows and the executed set disagree, the EXECUTED set
+is what is recorded and the disagreement is called out in the open rather than
+pruned to match. No test was edited to make an arm RED or green, and no mutation
+survives: the tree is byte-identical to BASE_SHA + the four committed changes
+before and after every arm.
+
+Section index:
+  BASELINE   — the unmutated green every arm below is read against
+  W7 (b)     — the order-inverting boot-floor read            [transcript 1/3]
+  W6 (a)     — the drain's strictly-below eligibility conjunct[transcript 2/3]
+  W6 (b)     — the delivery clamp                             [transcript 3/3]
+  POST-ARM   — the tree after all three reverts, and the full gate
+
+================================================================================
+BASELINE — THE UNMUTATED TREE
+================================================================================
+
+Owner group : G6
+Branch      : spec-361b-carve7-halfb
+Tree        : 892bf6ab (G3a's four doc-contract commits + G3b's two witnesses;
+              no mutation applied)
+
+An arm that REDs against a tree that was already red proves nothing about the
+arm. This is the run the three RED sets below are differences against.
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib
+
+    test result: ok. 1864 passed; 0 failed; 2 ignored; 0 measured;
+    0 filtered out; finished in 89.67s
+
+1864 / 0 / 2. Every count below is stated against those numbers.
+
+================================================================================
+TRANSCRIPT 1/3 — W7 (b): THE ORDER-INVERTING BOOT-FLOOR READ
+================================================================================
+
+Owner group : G6 (test authored by G3b at commit a70168dc)
+Test under  : reclamation_registry::proptests::
+              a_staler_boot_floor_can_only_lower_the_boundary
+              (packages/server-rust/src/reclamation_registry.rs:2516)
+
+--------------------------------------------------------------------------------
+W7 (b) — NAMED OBLIGATION
+--------------------------------------------------------------------------------
+
+P2, AND NOTHING ELSE IS CLAIMED OF THIS ARM. For any `floor' <= floor`,
+`ceiling(floor') <= ceiling(floor)` and `executed(floor') <= executed(floor)`
+under an identical claim/sweep sequence — the formalization of "the persisted
+minimum can only UNDER-state the true minimum", i.e. that a staler checkpoint is
+always the SAFE direction and can never license MORE reclamation.
+
+P1 (safety: the proposal never reaches a live claim) and P3 (the empty case: the
+proposal is the boot floor) are RESTATED inherited coverage carried in the same
+fixture for coherence. They carry NO registered arm and this arm is not graded
+on them.
+
+--------------------------------------------------------------------------------
+W7 (b) — ASSERTED DECISIVENESS PRECONDITION (KL-E)
+--------------------------------------------------------------------------------
+
+Two terms must be pinned non-deciding at the read point or the arm can go
+quietly green. BOTH are asserted in the fixture BEFORE the ceiling comparison,
+and both are quoted here verbatim from the test.
+
+(1) The floor-INDEPENDENT `Some` arm is not the one taken. `prune_ceiling`'s
+    `Some(min) => min.saturating_sub(self.margin_epochs)` (:704) consults the
+    floor not at all, so a pair compared only in that state agrees for a reason
+    unrelated to the floor. Asserted on BOTH registries at :2581 and :2587:
+
+        prop_assert_eq!(
+            staler.registry.live_claims(ClaimScope::Global),
+            0,
+            "the staler registry must reach the empty claim set for the read to \
+             be about the floor"
+        );
+        prop_assert_eq!(
+            fresher.registry.live_claims(ClaimScope::Global),
+            0,
+            "the fresher registry must reach the empty claim set for the read to \
+             be about the floor"
+        );
+
+(2) `floor' < floor` STRICTLY. At equality the inverting mutant yields
+    `MAX - floor' == MAX - floor`, the order still holds, and the arm does NOT
+    RED — the exact silent-loss shape KL-E exists to forbid. The strict pair is
+    FORCED in the strategy, not left to the draw, and re-asserted at :2521:
+
+        prop_assert!(
+            stale < fresh,
+            "the floors must be STRICTLY ordered: {} !< {}",
+            stale,
+            fresh
+        );
+
+    with the drawable-range pin immediately after at :2527:
+
+        prop_assert!(
+            stale <= MAX_BOOT_FLOOR && fresh <= MAX_BOOT_FLOOR,
+            "both floors must stay inside the drawable range: {} / {}",
+            stale,
+            fresh
+        );
+
+--------------------------------------------------------------------------------
+W7 (b) — LEG 1: THE MUTATION, APPLIED TO THE PRODUCTION EXPRESSION
+--------------------------------------------------------------------------------
+
+FILE: packages/server-rust/src/reclamation_registry.rs
+SITE: :705, the `None` arm of `fn prune_ceiling(&self, scope: ClaimScope)`.
+
+    fn prune_ceiling(&self, scope: ClaimScope) -> Epoch {
+        match self.min_live_claim(scope) {
+            Some(min) => min.saturating_sub(self.margin_epochs),
+    -       None => self.boot_floor,
+    +       None => Epoch::MAX.saturating_sub(self.boot_floor),
+        }
+    }
+
+    $ git diff --stat packages/server-rust/src/reclamation_registry.rs
+     packages/server-rust/src/reclamation_registry.rs | 2 +-
+     1 file changed, 1 insertion(+), 1 deletion(-)
+
+THE PRODUCTION SITE, AND ONLY IT. The same text appears at :1650 inside the
+inline `mod proptests` reference model (`fn prune_ceiling(&self)` on the test
+double, mirror at :1647-1652 beside the `min_live_claim` mirror at :1643-1645).
+That is a TEST DOUBLE and is NEVER an arm site — mutating it would move the
+oracle rather than the object, which proves nothing. It was verified untouched
+after the edit:
+
+    $ sed -n '1650p' packages/server-rust/src/reclamation_registry.rs
+                    None => self.boot_floor,
+
+WHY THIS MUTANT FALSIFIES P2: for `floor' < floor` the mutated ceiling gives
+`MAX - floor' > MAX - floor` — the STALER checkpoint licenses MORE reclamation,
+exactly the direction P2 forbids.
+
+--------------------------------------------------------------------------------
+W7 (b) — THE RECORDED RED SET (EXECUTED, VERBATIM)
+--------------------------------------------------------------------------------
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib
+  exit=101
+
+    test result: FAILED. 1849 passed; 15 failed; 2 ignored; 0 measured;
+    0 filtered out; finished in 102.17s
+
+FIFTEEN REDs. All fifteen, by test name and by the line of the assertion that
+failed. (The proptest harness reports the panic at its own runner line
+`reclamation_registry.rs:2026`; the line recorded below is the one the harness
+NAMES in `Test failed: ... at <file>:<line>`, which is the failing assertion.)
+
+  *** THE NAMED OBLIGATION — this is the RED the arm is owed ***
+
+   1. reclamation_registry::proptests::a_staler_boot_floor_can_only_lower_the_boundary
+      failing assertion: reclamation_registry.rs:2596
+      Test failed: the staler floor 0 licensed MORE reclamation than the fresher
+      floor 1: 18446744073709551615 > 18446744073709551614
+
+      It fires on the `stale_ceiling <= fresh_ceiling` comparison, by
+      construction the first read after the two decisiveness pins, and its
+      message prints the two floors AND the two ceilings, so the inverted
+      direction is legible from the failure alone. Both `live_claims == 0` pins
+      (:2581, :2587) and the strict-order pin (:2521) PASSED under the mutation
+      — the arm reached the comparison rather than tripping a precondition.
+
+  COLLATERAL, INSIDE reclamation_registry.rs:
+
+   2. reclamation_registry::proptests::a_registry_that_never_claimed_and_never_swept_sits_on_its_boot_floor
+      failing assertion: reclamation_registry.rs:2128
+      Test failed: assertion failed: `(left == right)`  right: `0`
+
+   3. reclamation_registry::proptests::an_empty_claim_set_never_drags_the_watermark_down
+      failing assertion: reclamation_registry.rs:2405
+      Test failed: assertion failed: `(left == right)`  right: `Some(0)`:
+      a sweep over an empty claim set snapshots the boot floor
+
+   4. reclamation_registry::proptests::ending_a_sweep_lands_on_the_consumed_token_bound_and_no_further
+      failing assertion: reclamation_registry.rs:2448
+      Test failed: assertion failed: `(left == right)`  right: `0`:
+      the token must carry the ceiling the sweep began on
+
+   5. reclamation_registry::proptests::releasing_everything_returns_the_proposal_to_the_boot_floor
+      failing assertion: reclamation_registry.rs:2150
+      Test failed: assertion failed: `(left == right)`  right: `0`
+
+   6. reclamation_registry::proptests::every_admission_resolves_to_one_verdict_and_records_unconditionally
+      failing assertion: reclamation_registry.rs:2276
+      Test failed: assertion failed: `(left == right)`  right: `Honoured { claim: 64 }`
+
+   7. reclamation_registry::proptests::the_minimum_is_the_fold_over_every_live_claim
+      failing assertion: reclamation_registry.rs:2031
+      Test failed: assertion failed: `(left == right)`  right: `Some(1)`:
+      the published minimum must be the fold over the live claim set
+
+   8. reclamation_registry::proptests::the_watermark_never_falls_while_the_proposal_tracks_the_minimum
+      failing assertion: reclamation_registry.rs:2065
+      Test failed: assertion failed: `(left == right)`  right: `0`:
+      the proposal must equal the fleet minimum less the margin, falls included
+
+   9. reclamation_registry::proptests::the_proposal_never_reaches_a_live_claim
+      failing assertion: reclamation_registry.rs:2109
+      Test failed: the proposal 18446744073709551615 reaches the live claim at 1
+
+  10. reclamation_registry::proptests::the_watermark_never_passes_a_live_claim_at_any_instant
+      failing assertion: reclamation_registry.rs:2329
+      Test failed: the watermark at 3 passed the live claim at 1
+
+  11. reclamation_registry::tests::empty_claim_set_proposes_the_boot_floor_and_reports_no_minimum
+      failing assertion: reclamation_registry.rs:1003
+      assertion `left == right` failed
+        left: 18446744073709551608
+       right: 7
+
+  12. reclamation_registry::tests::end_sweep_advances_with_max_and_never_overwrites
+      failing assertion: reclamation_registry.rs:1179
+      assertion `left == right` failed
+        left: 101
+       right: 30
+
+  COLLATERAL, REACHED THROUGH THE FRONTIER THAT OWNS THE REGISTRY:
+
+  13. tombstone_frontier_impl::persistence_tests::ac3d_kill9_recovery_rebuilds_into_maximally_lagging_e_rec
+      failing assertion: tombstone_frontier_impl.rs:6928
+      nothing prunable until every tracked client re-confirms past E_rec
+
+  14. tombstone_frontier_impl::persistence_tests::boundary_and_low_water_mark_decide_every_epoch_alike_with_no_margin
+      failing assertion: tombstone_frontier_impl.rs:6655
+      assertion `left == right` failed: both boundaries must sit at 0 after no
+      device has reconnected yet
+        left: (18446744073709551615, 0)
+       right: (0, 0)
+
+  15. tombstone_frontier_impl::tests::an_untracked_fleet_reclaims_nothing_on_a_pass_that_really_runs
+      failing assertion: tombstone_frontier_impl.rs:5024
+      assertion `left == right` failed: an unclaimed fleet proposes the boot
+      floor, not the epoch the server reached
+        left: 18446744073709551615
+       right: 0
+
+--------------------------------------------------------------------------------
+W7 (b) — WHERE THE EXECUTED SET AND THE SPEC'S SEED ROWS DISAGREE
+--------------------------------------------------------------------------------
+
+Recorded in the open, because the procedure is authoritative over the seeds and
+a silent reconciliation would be exactly the authored-list failure Checklist 2
+exists to prevent.
+
+ONE SEED ROW CARRIED AN EXPLICIT NEGATIVE CLAIM THAT THE RUN REFUTES.
+The spec's seed table states, parenthetically:
+
+    "(`the_proposal_never_reaches_a_live_claim` (`:2032`) does NOT RED: it
+     asserts only when the model's minimum is `Some`.)"
+
+IT DOES RED — item 9 above, at :2109, with the message "the proposal
+18446744073709551615 reaches the live claim at 1". The reasoning behind the
+seed's claim is sound as far as it goes (the assertion is guarded on a `Some`
+minimum) but incomplete: the guard only requires a live claim to exist at the
+INSTANT of the check, and the mutated `None` arm still reaches the comparison
+through a state the program passes through, at which point the proposal — now
+near `u64::MAX` — sits far above that minimum. This is a normal outcome of the
+procedure, is IN the recorded set, and is NOT a checklist failure under criterion
+(iii); it is recorded so the spec's parenthetical is not carried forward as
+established.
+
+TEN MEMBERS THE SEEDS DID NOT NAME. Items 4, 6, 7, 10, 13, 14, 15 (and, as line
+drift rather than new members, 2, 3, 5, 11, 12) came out of the run. All are
+recorded; none was pruned. The seeds are explicitly "known members entered now,
+not the whole set", so a wider executed set is the procedure working.
+
+LINE DRIFT AGAINST THE SPEC'S ANCHORS IS EXPECTED AND IS NOT A FINDING. The
+spec's anchors were taken before this branch's four doc-contract commits and two
+witness commits landed. Observed-versus-spec, for the seeds that name a line:
+`empty_claim_set_proposes_the_boot_floor_and_reports_no_minimum` spec :950 ->
+observed panic :1003; `end_sweep_advances_with_max_and_never_overwrites` spec
+:1116 (REDs at :1130/:1131) -> observed panic :1179;
+`an_empty_claim_set_never_drags_the_watermark_down` spec :2302 (:2335-2339) ->
+observed :2405; `the_watermark_never_falls_while_the_proposal_tracks_the_minimum`
+spec :1978 (:1995-1999) -> observed :2065;
+`a_registry_that_never_claimed_and_never_swept_sits_on_its_boot_floor` spec :2052
+-> observed :2128; `releasing_everything_returns_the_proposal_to_the_boot_floor`
+spec :2064 -> observed :2150. Every observed line above is a line in the tree as
+it stands at 892bf6ab.
+
+--------------------------------------------------------------------------------
+W7 (b) — THE MUTANTS N11 ATTEMPTED AND REFUTED (m1-m6)
+--------------------------------------------------------------------------------
+
+Carried here because a claim that a property is hard to falsify is worth nothing
+without the attempts. Six mutants were attempted against P2 and all six were
+REFUTED — none of them can falsify it — which is what makes the seventh, the
+order-inverting read above, the arm. Site column gives the spec's anchor and,
+after the arrow, the same site in the tree as it stands (the branch's earlier
+commits shifted the file).
+
+ #  | Mutant                                     | Site           | Why it CANNOT falsify P2
+----+--------------------------------------------+----------------+--------------------------
+ m1 | the fold's `min` -> `max`                  | :646 -> :695   | RETIRED BY RULING (Audit v2 critical 2). Touches no floor term: with claims the ceiling stays floor-INDEPENDENT, with none both sides return their own floors. It does RED P1 — see the residual below.
+ m2 | `boot_floor` -> `0` in the constructor     | :730 -> :779   | FLOOR-COLLAPSING: both sides become 0, so the order is preserved (weakly) and P2 holds.
+ m3 | `.or_insert(boot_floor)` -> `.or_insert(0)`| :881 -> :930   | Floor-collapsing on the `executed` conjunct: both sides seed at 0.
+ m4 | `previous.max(candidate)` -> `candidate`   | :886 -> :935   | Both sides take the same claim-derived candidate => equal => monotone.
+ m5 | `None => self.boot_floor` -> `None => Epoch::MAX` | :656 -> :705 | FLOOR-CONSTANT: both sides return `Epoch::MAX`, so the order is preserved. This was W7's former ARM (a); it REDs P3, which is INHERITED coverage, and that is precisely why it is RETIRED as an arm (Audit v3 critical 2, ruled) and appears here only as a refuted mutant.
+ m6 | `.unwrap_or(self.boot_floor)` -> `.unwrap_or(0)` | :665 -> :714 | Floor-collapsing on `executed`.
+
+WHY THE RULED INSTRUCTION COULD NOT BE FOLLOWED LITERALLY, RECORDED RATHER THAN
+ASSERTED. Audit v2's ruling asked for a mutation of "the `.max(persisted...)`
+fold, or the persist step itself". Neither exists in this tree:
+`reclamation_registry.rs` is IN-MEMORY ONLY (claims and the executed watermark
+are fresh at every construction and survive no restart), the non-decreasing-floor
+obligation is explicitly the CALLER's, the sole production call site passes a
+literal (`ReclamationRegistry::new(0)` in `tombstone_frontier_impl.rs`, whose doc
+says no durable prune checkpoint exists in this tree), and `prune_ceiling`
+contains NO `.max(boot_floor)` fold at all — its `Some` arm ignores the floor
+entirely, so there is no max-fold whose removal could let the ceiling fall below
+the floor. The floor is a constructor parameter with exactly four production
+reads (:705, :714, :930, :935 at HEAD). m1-m6 are the attempts that stood in for
+the site the ruling named.
+
+RESIDUAL, DISCLOSED RATHER THAN ABSORBED. P1 carries NO registered arm, and
+after Audit v3's critical 2 that is the CORRECT outcome and not a budget
+casualty: P1's coverage is inherited from `the_proposal_never_reaches_a_live_
+claim` and the strictly stronger `the_proposal_is_the_minimum_less_the_margin_
+with_no_exception`. The mutant that would RED it is m1, recorded above as an
+UNREGISTERED, UNEXECUTED candidate. ITS ROUTING IS SPEC-TEXT-ONLY: it is named
+in SPEC-361b's text and in that spec's AC23 and nowhere else.
+`.specflow/todos/TODO-634.md` is byte-frozen and contains no mention of m1, NO
+standalone TODO is opened for it, and once the spec is archived the item is
+knowingly discoverable only through the archive. That is the accepted cost of the
+freeze, stated so a later auditor does not read it as an untracked deferral. It
+is NOT a deferred audit finding and opens no tracker file.
+
+--------------------------------------------------------------------------------
+W7 (b) — LEG 2: THE REVERT
+--------------------------------------------------------------------------------
+
+    $ git checkout -- packages/server-rust/src/reclamation_registry.rs
+    $ git status --porcelain
+    (empty)
+    $ sed -n '705p' packages/server-rust/src/reclamation_registry.rs
+                None => self.boot_floor,
+
+Tree byte-identical to the BASELINE tree above. The executed green re-run is
+recorded once, under POST-ARM, after the last revert.
+
+--------------------------------------------------------------------------------
+W7 (b) — VERDICT
+--------------------------------------------------------------------------------
+
+EARNED. P2 REDs on the order-inverting boot-floor read, with both decisiveness
+preconditions asserted before the arm and both PASSING under it, so the arm
+reached the property rather than tripping a guard. The failure names the
+direction P2 forbids and prints the floors and the ceilings that show it.
+Reverted; nothing survives.
+
+================================================================================
+TRANSCRIPT 2/3 — W6 (a): THE DRAIN'S STRICTLY-BELOW ELIGIBILITY CONJUNCT
+================================================================================
+
+Owner group : G6 (test authored by G3b at commit 892bf6ab)
+Test under  : tombstone_frontier_impl::tests::
+              margin_zero_retains_the_confirmed_epoch_and_delivery_bounds_an_over_claim
+              (packages/server-rust/src/tombstone_frontier_impl.rs:4856)
+
+--------------------------------------------------------------------------------
+W6 (a) — NAMED OBLIGATION
+--------------------------------------------------------------------------------
+
+ASSERTION 2 ONLY — the D-retained / (D-1)-drained read OF THE DRAINED SET. A
+fleet confirmed through epoch D leaves epoch D RETAINED by the drain (a cursor at
+`e` means applied through `e` INCLUSIVE, while the eligibility conjunct is
+strictly-below), while D-1 IS drained. One epoch of implicit retention, executed.
+
+IT IS NOT REQUIRED, AND IS NOT REPORTED, TO RED ASSERTION 1. Assertion 1
+(`prune_ceiling() == D`) is computed upstream in the registry and the drain
+filters on a ceiling the SweepToken snapshotted before it ran, so no mutation at
+this site can move it. That is KL-D, and the run below confirms it: the test
+reached :4923 (assertion 2) with assertion 1 at :4889 having PASSED.
+
+The siting rule is load-bearing and was honoured: the RED-carrying read is
+`drain_prunable_tombstones()`, NOT `is_epoch_prune_eligible`, whose strictness is
+a separate expression elsewhere in the file. An assertion 2 written against the
+predicate would leave this arm unable to RED it.
+
+--------------------------------------------------------------------------------
+W6 (a) — ASSERTED DECISIVENESS PRECONDITION (KL-E)
+--------------------------------------------------------------------------------
+
+The eligibility filter is a THREE-WAY conjunction, and the whole drain returns
+dark when the durable watermark is 0. Assertion 2's green form ("D retained, D-1
+drained") is satisfied by any watermark in [D-1, inf), INCLUDING exactly D-1 —
+under which epoch D is ineligible on the WATERMARK conjunct alone, under both the
+production and the mutated expression, and the arm goes quietly green with the
+leg silently lost. All three conjuncts plus the dark-path guard are therefore
+pinned IMMEDIATELY BEFORE the drain. Quoted verbatim from the fixture:
+
+    :4903  assert!(
+               f.durable_epoch_watermark() >= d,
+               "the durability conjunct must be SATISFIED at {d}, or {d} is \
+                retained by the fence instead of by the boundary"
+           );
+    :4908  assert!(
+               d != 0,
+               "the zero-epoch conjunct must be visibly non-deciding at the \
+                probe epoch"
+           );
+    :4912  assert_eq!(
+               f.reclamation().prune_ceiling(ClaimScope::Global),
+               d,
+               "the boundary must be EXACTLY at {d} when the sweep runs: at \
+                exactly {d} the strictly-below term is what decides {d}, which \
+                is the whole point of the read below"
+           );
+
+The watermark is opened to 1000 at :4897 (well past every stamped epoch), which
+also discharges the dark-path return since a non-zero watermark is what lets the
+drain fold at all. `ceiling == D` is the exact mechanical form of decisiveness:
+at `ceiling == D` the production term `ceiling > D` is FALSE while the mutated
+term `ceiling >= D` is TRUE, so flipping `>` to `>=` — and nothing else on the
+path — is what moves D into the drained set. A fixture pinning only
+`ceiling >= D` or only `ceiling > D-1` has not pinned decisiveness.
+
+--------------------------------------------------------------------------------
+W6 (a) — LEG 1: THE MUTATION
+--------------------------------------------------------------------------------
+
+FILE: packages/server-rust/src/tombstone_frontier_impl.rs
+SITE: :971, the eligibility filter inside the drain.
+
+    -           .filter(|&e| watermark >= e && e != 0 && ceiling > e)
+    +           .filter(|&e| watermark >= e && e != 0 && ceiling >= e)
+
+    $ git diff --stat packages/server-rust/src/tombstone_frontier_impl.rs
+     packages/server-rust/src/tombstone_frontier_impl.rs | 2 +-
+     1 file changed, 1 insertion(+), 1 deletion(-)
+
+--------------------------------------------------------------------------------
+W6 (a) — THE RECORDED RED SET (EXECUTED, VERBATIM)
+--------------------------------------------------------------------------------
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib
+  exit=101
+
+    test result: FAILED. 1849 passed; 15 failed; 2 ignored; 0 measured;
+    0 filtered out; finished in 86.39s
+
+FIFTEEN REDs, all fifteen recorded.
+
+  *** THE NAMED OBLIGATION — this is the RED the arm is owed ***
+
+   1. tombstone_frontier_impl::tests::margin_zero_retains_the_confirmed_epoch_and_delivery_bounds_an_over_claim
+      failing assertion: tombstone_frontier_impl.rs:4923
+      epoch 3 is confirmed THROUGH, not past — it must survive the sweep,
+      got [2, 3, 1]
+
+      That is assertion 2's `!epochs.contains(&d)` read of the DRAINED SET, and
+      the message prints the set the sweep actually returned, with epoch 3 in it.
+      The three decisiveness pins (:4903, :4908, :4912) and assertion 1 (:4889)
+      all PASSED under the mutation — the test reached the drained-set read
+      rather than tripping earlier, which is what makes the leg valid.
+
+  COLLATERAL, IN tombstone_frontier_impl.rs:
+
+   2. tombstone_frontier_impl::tests::a_laggard_lowers_the_boundary_and_is_recorded_in_either_ack_order
+      failing assertion: tombstone_frontier_impl.rs:5120
+      assertion `left == right` failed: only the epochs strictly below the
+      trailing device's cursor are reclaimed
+        left: [1, 2, 3]
+       right: [1, 2]
+
+   3. tombstone_frontier_impl::tests::one_behind_client_pins_epoch_fleet_wide
+      failing assertion: tombstone_frontier_impl.rs:4715
+      assertion `left == right` failed: only epochs 1..=2 (strictly below the
+      LWM) drained; 3..=5 pinned fleet-wide
+        left: 3
+       right: 2
+
+   4. tombstone_frontier_impl::tests::a_split_frozen_at_its_last_recompute_is_detectable_from_the_recompute_counter
+      failing assertion: tombstone_frontier_impl.rs:3851
+      assertion failed: f.drain_prunable_tombstones().is_empty()
+
+   5. tombstone_frontier_impl::tests::restore_tombstone_ref_round_trips_through_drain
+      failing assertion: tombstone_frontier_impl.rs:4978
+      assertion `left == right` failed: epoch 1's ref drained
+        left: 2
+       right: 1
+
+   6. tombstone_frontier_impl::persistence_tests::ac3e_activation_end_to_end_prune_fires_with_real_watermark
+      failing assertion: tombstone_frontier_impl.rs:7020
+      assertion `left == right` failed: epoch 1 (strictly below LWM 2,
+      byte-durable) actually prunes with the real watermark
+        left: 2
+       right: 1
+
+  COLLATERAL, IN service/domain/crdt.rs — THE SERVICE THAT CALLS THE DRAIN:
+
+   7. service::domain::crdt::tests::ac4_prune_wired_into_or_write_path
+      failing assertion: service/domain/crdt.rs:4361
+      epoch-2 tombstone still pinned (LWM 2 not strictly past epoch 2)
+
+   8. service::domain::crdt::tests::or_prune_decrements_gauge_on_real_prune_path
+      failing assertion: service/domain/crdt.rs:4425
+      epoch-2 tombstone still pinned (LWM 2 not strictly past epoch 2)
+
+   9. service::domain::crdt::tests::service_composition_arm_reaches_drained_healthy_through_the_real_write_path
+      failing assertion: service/domain/crdt.rs:4550
+      assertion `left == right` failed: O-0 must hold over the
+      service-composition drain path too, got IndexConservationSnapshot {
+      stamped_refs_total: 2, stamped_bytes_total: 12, drained_refs_total: 1,
+      restored_refs_total: 0, ... }
+        left: 1
+       right: 0
+
+  10. service::domain::crdt::tests::prune_leaves_tombstone_bytes_unmoved_when_the_durable_write_fails
+      failing assertion: service/domain/crdt.rs:5820
+      assertion `left == right` failed: both OR_REMOVE charges stand and the
+      failed prune returns nothing: a decrement from inside the mutate closure
+      would credit back bytes that are still durable
+        left: 2
+       right: 4
+
+  11. service::domain::crdt::tests::prune_exit_ledger_sums_to_considered
+      failing assertion: service/domain/crdt.rs:6295
+      assertion `left == right` failed: the workload must drive
+      topgun_or_prune_absent_total exactly once, or the exhaustiveness identity
+      asserts nothing about that exit
+
+  12. service::domain::crdt::tests::per_epoch_six_exit_identity_holds_on_the_settlement_row
+      failing assertion: service/domain/crdt.rs:6481
+      assertion `left == right` failed: one settlement row per drained epoch,
+      six epochs drained
+
+  13. service::domain::crdt::tests::pass_row_fires_on_every_invocation_including_an_empty_drain
+      failing assertion: service/domain/crdt.rs:6571
+      assertion `left == right` failed: the workload's own explicit call is the
+      last invocation and drains all six seeded refs
+        left: 7
+       right: 6
+
+  14. service::domain::crdt::tests::i1_i2_pass_identity_holds_on_an_empty_and_a_draining_pass
+      failing assertion: service/domain/crdt.rs:6664
+      assertion `left == right` failed: I1: the sum of a pass's own epoch_exit
+      removed_refs_observed must equal that SAME pass's considered
+        left: 6
+       right: 7
+
+  15. service::domain::crdt::tests::prune_record_armed_disarmed_gauge_neutral
+      failing assertion: service/domain/crdt.rs:6733
+      assertion `left == right` failed: the armed run must write its
+      prune-record series, populated
+
+--------------------------------------------------------------------------------
+W6 (a) — THE EXECUTED SET AGAINST THE SPEC'S SEED ROWS
+--------------------------------------------------------------------------------
+
+BOTH SEEDS CAME OUT, AND THE ONE EXPLICIT NON-MEMBER STAYED OUT.
+
+  seed `one_behind_client_pins_epoch_fleet_wide` .......... item 3, observed
+        at :4715 (spec anchor :4677 — line drift, same test)
+  seed `a_laggard_lowers_the_boundary_and_is_recorded_in_either_ack_order` ...
+        item 2, observed at :5120 (spec anchor :4922, REDs at :4981 — drift),
+        and it REDs exactly as the spec predicted: `assert_eq!(forward,
+        vec![1, 2])` fails with `left: [1, 2, 3]`, because its watermark is open
+        and its ceiling is pinned at 3, so `ceiling >= e` admits epoch 3.
+  NON-MEMBER `eligibility_is_strictly_past_not_inclusive` ... CONFIRMED ABSENT
+        from the RED set. It reads `is_epoch_prune_eligible`, whose `>` is a
+        SEPARATE expression from the mutated one, so the arm cannot reach it —
+        exactly as the spec states, and now executed rather than argued.
+
+THIRTEEN MEMBERS THE SEEDS DID NOT NAME (items 4-15). All are drain-path or
+drain-accounting tests reached through the same filter; none was pruned, and a
+wider executed set is the procedure working rather than a checklist failure.
+
+--------------------------------------------------------------------------------
+W6 (a) — LEG 2: THE REVERT
+--------------------------------------------------------------------------------
+
+    $ git checkout -- packages/server-rust/src/tombstone_frontier_impl.rs
+    $ git status --porcelain
+    (empty)
+    $ sed -n '971p' packages/server-rust/src/tombstone_frontier_impl.rs
+                .filter(|&e| watermark >= e && e != 0 && ceiling > e)
+
+--------------------------------------------------------------------------------
+W6 (a) — VERDICT
+--------------------------------------------------------------------------------
+
+EARNED. Assertion 2 REDs when the drain's strictly-below conjunct is relaxed to
+inclusive, with all three decisiveness pins asserted before the drain and all
+three PASSING under the arm. Assertion 1 stayed green, as KL-D requires and as
+this transcript reports rather than claims otherwise. Reverted; nothing survives.
+
+================================================================================
+TRANSCRIPT 3/3 — W6 (b): THE DELIVERY CLAMP
+================================================================================
+
+Owner group : G6 (test authored by G3b at commit 892bf6ab)
+Test under  : tombstone_frontier_impl::tests::
+              margin_zero_retains_the_confirmed_epoch_and_delivery_bounds_an_over_claim
+              (packages/server-rust/src/tombstone_frontier_impl.rs:4856)
+
+--------------------------------------------------------------------------------
+W6 (b) — NAMED OBLIGATION
+--------------------------------------------------------------------------------
+
+ASSERTION 3 — the same-ceiling-under-over-claim read, and the only assertion W6
+is genuinely owed for. An ACK claiming D+k for k >= 1, on a connection delivered
+only through D, produces the SAME ceiling D, because the advance rule clamps to
+the delivery record. The over-claim a reclamation margin exists to hedge is
+therefore ALREADY bounded by the delivery record, which is the substantive fact
+this half contributes: a margin is not what stands between an over-claiming
+client and reclaimed data.
+
+--------------------------------------------------------------------------------
+W6 (b) — ASSERTED DECISIVENESS PRECONDITION (KL-E)
+--------------------------------------------------------------------------------
+
+`bound = claimed.min(delivered).min(self.current_max_epoch)` is a THREE-WAY
+clamp. In the obvious fixture — stamp through D, deliver D — stamping ITSELF
+writes `current_max_epoch = D`, so `current_max_epoch == delivered == D` and
+dropping `.min(delivered)` still yields `min(D+k, D) = D`: the arm would not RED
+and the leg would be silently lost. The fixture must pin
+`current_max_epoch > delivered`.
+
+CONSTRUCTION, AND THE ORDER IS LOAD-BEARING. It stamps through D+k, THEN injects
+the global bound, THEN sets the delivery record — because `stamp_tombstone`
+WRITES `current_max_epoch`, so an injection placed before the last stamp is
+silently overwritten:
+
+    :4866  for i in 1..=(d + k) { f.stamp_tombstone(...); }
+    :4872  f.set_current_max_epoch(d + k);
+    :4874  f.set_delivered(CONN_A, d);
+
+There is no getter for `current_max_epoch`, so the precondition is asserted
+through the injected value plus the getter that does exist, sited IMMEDIATELY
+BEFORE the over-claiming ACK, at :4937:
+
+    assert!(
+        f.delivered(CONN_A) < d + k,
+        "the delivery record must sit strictly below the global bound, or \
+         dropping the delivered term changes nothing and the clamp is not \
+         under test"
+    );
+
+--------------------------------------------------------------------------------
+W6 (b) — LEG 1: THE MUTATION
+--------------------------------------------------------------------------------
+
+FILE: packages/server-rust/src/tombstone_frontier_impl.rs
+SITE: :428, the bound computation inside `advance_on_ack`.
+
+    -       let bound = claimed.min(delivered).min(self.current_max_epoch);
+    +       let bound = claimed.min(self.current_max_epoch);
+
+    $ git diff --stat packages/server-rust/src/tombstone_frontier_impl.rs
+     packages/server-rust/src/tombstone_frontier_impl.rs | 2 +-
+     1 file changed, 1 insertion(+), 1 deletion(-)
+
+The build emitted one warning under the mutation, recorded rather than
+suppressed, because dropping the term leaves its binding unread:
+
+    warning: unused variable: `delivered`
+    warning: `topgun-server` (lib test) generated 1 warning
+
+That warning is an artifact of the arm and disappears with the revert; the
+unmutated tree builds warning-free under `clippy -D warnings` (see POST-ARM).
+
+--------------------------------------------------------------------------------
+W6 (b) — THE RECORDED RED SET (EXECUTED, VERBATIM)
+--------------------------------------------------------------------------------
+
+$ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+  cargo test --release -p topgun-server --lib
+  exit=101
+
+    test result: FAILED. 1862 passed; 2 failed; 2 ignored; 0 measured;
+    0 filtered out; finished in 88.44s
+
+TWO REDs, and that is the whole set.
+
+  *** THE NAMED OBLIGATION — this is the RED the arm is owed ***
+
+   1. tombstone_frontier_impl::tests::margin_zero_retains_the_confirmed_epoch_and_delivery_bounds_an_over_claim
+      failing assertion: tombstone_frontier_impl.rs:4944
+      an ACK claiming 5 on a connection delivered through 3 must not advance
+      anything
+
+      That is assertion 3's `!f.confirm_apply_ack(&c, d + k, CONN_A)` read. The
+      precondition pin at :4937 PASSED under the mutation, so the delivery record
+      really was strictly below the global bound and the clamp really was the
+      term under test. Assertions 1 and 2 (:4883-:4889, :4923-:4928) and all
+      three of arm (a)'s decisiveness pins stayed GREEN — the test ran the whole
+      retention half before reaching the over-claim, which is the positive check
+      that this arm discriminates assertion 3 and nothing adjacent to it. The
+      ceiling re-read at :4954 was never reached, because :4944 fires first.
+
+  COLLATERAL:
+
+   2. tombstone_frontier_impl::tests::delivered_clamp_fresh_device_ack_high_stays_untracked
+      failing assertion: tombstone_frontier_impl.rs:4486
+      delivered-nothing ACK cannot advance
+
+--------------------------------------------------------------------------------
+W6 (b) — THE EXECUTED SET AGAINST THE SPEC'S SEED ROW
+--------------------------------------------------------------------------------
+
+EXACT MATCH, AND THE ONLY ARM OF THE THREE WHERE THE SEEDS AND THE EXECUTION
+COINCIDE COMPLETELY. The single seed —
+`delivered_clamp_fresh_device_ack_high_stays_untracked` (spec anchor :4474,
+observed at :4486, line drift only) — is the single collateral member, and the
+executed set adds nothing to it. Its mechanism is exactly as seeded: with
+`delivered == 0` the delivery term is the binding one, so removing it lets the
+ACK advance a cursor that must stay untracked.
+
+--------------------------------------------------------------------------------
+W6 (b) — LEG 2: THE REVERT
+--------------------------------------------------------------------------------
+
+    $ git checkout -- packages/server-rust/src/tombstone_frontier_impl.rs
+    $ git status --porcelain
+    (empty)
+    $ sed -n '428p' packages/server-rust/src/tombstone_frontier_impl.rs
+            let bound = claimed.min(delivered).min(self.current_max_epoch);
+
+--------------------------------------------------------------------------------
+W6 (b) — VERDICT
+--------------------------------------------------------------------------------
+
+EARNED. Assertion 3 REDs when the delivery term is dropped from the clamp, with
+its precondition asserted before the arm and PASSING under it, and with
+assertions 1 and 2 green throughout the mutated run. Reverted; nothing survives,
+including the unused-variable warning the arm introduced.
+
+================================================================================
+POST-ARM — THE TREE AFTER ALL THREE REVERTS
+================================================================================
+
+Each arm's revert was a `git checkout --` of the single mutated file, verified
+BYTE-IDENTICAL to the tree that produced the BASELINE green at the top of this
+file, with `git status --porcelain` empty before the next arm was applied. The
+executed green re-run is recorded ONCE here rather than three times, because the
+three reverted trees are the same tree: this is the same convention the sibling
+artifact spec360-witness-arm.txt uses for its "green re-run after all three
+reverts", and the gate run below is strictly broader than the per-arm `--lib`
+runs it stands in for.
+
+    $ git status --porcelain
+    (empty)
+
+THE EXECUTED GREEN RE-RUN, as the workspace gate rather than a narrowed one:
+
+    $ SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+      cargo test --release --all-targets
+      exit=0
+
+    (lib target)
+    test result: ok. 1864 passed; 0 failed; 2 ignored; 0 measured;
+    0 filtered out; finished in 101.39s
+
+1864 / 0 / 2 — the BASELINE numbers at the top of this file, recovered exactly.
+Every other target in the workspace run reported ok with 0 failed. The three
+arms produced 15, 15 and 2 REDs respectively and left none of them behind.
+
+    $ git diff --stat 20edabde2381d2efde9ee150501031eddc83a866
+     packages/server-rust/docs/RECOVERY_ENVELOPE.md     |  67 +++++
+     packages/server-rust/src/reclamation_registry.rs   | 221 +++++++++++++--
+     packages/server-rust/src/tombstone_frontier_impl.rs| 139 +++++++++
+     (this transcript adds the fourth path; exactly TWO of the four are .rs)
+
+The full gate — workspace tests, clippy with warnings denied, fmt, the invariant
+catalog check, the diff shape against BASE_SHA, the value-unchanged diffs, both
+pinned provenance counts and the census test — is recorded in G6's result rather
+than duplicated here; this file's job is the six legs.
