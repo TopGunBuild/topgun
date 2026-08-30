@@ -66,8 +66,12 @@
 //!
 //! Note on gating responsibility: [`assess_tombstone_bytes`] *computes* the byte
 //! verdict (including its `passed` flag), but whether that verdict gates the run
-//! is decided in `main.rs`, not here. The byte **slope** is now a HARD gate
-//! there. The gauge is restart-survivable (`reconcile_tombstone_bytes` in
+//! is decided in `main.rs`, not here. The byte **slope** is a HARD gate there
+//! only in the run class where the durable-corpus level clause did not decide:
+//! when that clause is evaluable it decides the tombstone property and the
+//! slope becomes report-only, and when it is not, the slope gates exactly as it
+//! always did — so no run configuration is left with neither.
+//! The gauge is restart-survivable (`reconcile_tombstone_bytes` in
 //! `storage/record.rs` re-seeds it via `set_tombstone_bytes` at boot) AND
 //! decrementable within a process life: every tombstone-add increments it and
 //! a successful prune-drop decrements it (`sub_tombstone_bytes`, wired on the
@@ -78,8 +82,9 @@
 //! one client actually runs the confirm-apply protocol. `main.rs` therefore
 //! also drives a tracked-and-ACKing client (`SoakClient::connect_tracked` +
 //! `confirm_apply`) alongside the churn clients for the run's duration, which
-//! is what makes the gauge's plateau — and thus the hard gate — reachable in
-//! practice rather than merely possible in principle. `main.rs`'s `--no-ack`
+//! is what makes the gauge's plateau — and thus the hard gate, in the run
+//! class where the slope still decides — reachable in practice rather than
+//! merely possible in principle. `main.rs`'s `--no-ack`
 //! and `--inject-slow-leak` modes are the negative/slow-leak controls that
 //! exercise this: disabling the tracked client's ack loop pins the
 //! low-water-mark at 0 and must trip the gate, and a deliberately
@@ -89,9 +94,10 @@
 //! `/metrics` scrape is a harness defect regardless of leak magnitude). The
 //! RSS gate above remains a coarse, non-tombstone backstop. (This module's
 //! `passed: bool` on [`TombstoneAssessment`] drives both the hard-gate
-//! decision in `main.rs` and the calibration tests below — the assessment
-//! itself does not know or care whether its caller treats a breach as
-//! report-only or hard-gating.)
+//! decision in `main.rs` — which now applies only when the durable-corpus
+//! level clause was suppressed or its instrument was blind — and the
+//! calibration tests below; the assessment itself does not know or care
+//! whether its caller treats a breach as report-only or hard-gating.)
 //!
 //! ## Boot-recompute-gap exclusion
 //!
@@ -334,12 +340,16 @@ fn last_half_window_span_secs(points: &[(f64, f64)]) -> f64 {
 /// [`assess_tombstone_bytes`] with this threshold alongside the RSS `assess`) and
 /// by the `soak_monitor_calibration` integration target's tests — the harness
 /// wiring has landed, so no `allow(dead_code)` is needed here. The slope this
-/// threshold measures is a HARD gate in `main.rs`: the decrementable gauge is
+/// threshold measures is a HARD gate in `main.rs` in the run class where the
+/// durable-corpus level clause did not decide; where that clause did decide,
+/// the slope is still computed, printed and serialized exactly as before, but
+/// it no longer gates. Either way the decrementable gauge is
 /// expected to plateau under sustained churn now that a tracked-and-ACKing
 /// client drives the server's low-water-mark forward (see the module-level
 /// "Tombstone-byte gate" doc above), subject to the min-window-span guard and
 /// boot-gap exclusion. The blind-monitor zero-sample clause is a second,
-/// independent hard gate. RSS above is the coarse backstop.
+/// independent hard gate, and that one is unconditional: it asserts harness
+/// health, not the tombstone property. RSS above is the coarse backstop.
 pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 
 /// Absolute-growth guard (bytes) for the tombstone-byte slope clause.
@@ -354,7 +364,14 @@ pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
 
 /// Minimum wall-clock span (seconds) of the last-half fit window before the
-/// per-hour slope clause is allowed to hard-gate the run.
+/// per-hour slope clause is allowed to hard-gate the run in the class where it
+/// still decides.
+///
+/// This floor governs the slope clause alone. Its counterpart on the
+/// durable-corpus level clause — that clause's own sample and span guards — is
+/// what selects the fallback class: when the level clause cannot decide, the
+/// slope clause is the one that still decides the run, so between the two no
+/// run configuration is left ungated.
 ///
 /// The slope is a per-hour EXTRAPOLATION (bytes/sec × 3600). Over a sub-minute
 /// window the `3600 / span_secs` amplification is enormous: a healthy short run
@@ -364,8 +381,9 @@ pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
 /// Below this floor the slope carries no plateau signal — a leak and a
 /// not-yet-plateaued healthy run are indistinguishable — so the clause is
 /// suppressed (no breach is emitted for it) and the assessment passes on the
-/// blind-monitor + absolute-growth clauses alone. (The slope is now a HARD gate
-/// once the window clears this floor — see [`DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR`];
+/// blind-monitor + absolute-growth clauses alone. (The slope is a HARD gate
+/// once the window clears this floor AND the durable-corpus level clause did
+/// not decide — see [`DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR`];
 /// this floor is what keeps that hard gate from crying wolf on a short run.)
 ///
 /// 120s sits well above the smoke run's ~10-15s last-half span (suppressed) and
@@ -1377,8 +1395,9 @@ mod tests {
     /// and never flattens — the grow-then-flatten shape the plateau statistic
     /// looks for cannot occur. This test feeds exactly that monotone shape (well
     /// past the min-window floor) and asserts the assessment reports NOT-passed
-    /// — which is precisely the hard-gate failure `main.rs` now asserts on for
-    /// this scenario (see the module doc's "Tombstone-byte gate" section).
+    /// — which is precisely the hard-gate failure `main.rs` asserts on for this
+    /// scenario whenever the durable-corpus level clause did not decide the run
+    /// (see the module doc's "Tombstone-byte gate" section).
     #[test]
     fn calibration_additive_only_gauge_never_plateaus() {
         // ~6h of steady creation at 5000 B/h — a multi-hour last-half window
@@ -1395,7 +1414,8 @@ mod tests {
             !a.passed,
             "an unbounded monotone-growth shape (no low-water-mark driver) must \
              NOT be reported as a plateau — this is the hard-gate FAIL `main.rs` \
-             now asserts on; slope={:.1} reason={:?}",
+             asserts on when the durable-corpus level clause did not decide; \
+             slope={:.1} reason={:?}",
             a.slope_bytes_per_hour, a.reason
         );
     }
