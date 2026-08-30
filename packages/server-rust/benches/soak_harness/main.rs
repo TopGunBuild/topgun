@@ -206,6 +206,14 @@ struct Config {
     /// This is the assertion mode that proves acked == durable on `kill -9` under
     /// load: it does NOT depend on a pre-kill flush masking a durability gap.
     no_pre_kill_drain: bool,
+    /// Slack, in bytes, the durable-corpus LEVEL clause allows the recent half
+    /// of the corpus series to sit above the earlier half by before it breaches.
+    /// Exposed so a measurement round can retune the clause without a rebuild.
+    tombstone_corpus_headroom_bytes: u64,
+    /// Absolute durable-corpus ceiling, in bytes. `None` leaves the ceiling
+    /// clause DISARMED, which is the default: arming it honestly needs a
+    /// validated number, and this flag is how a run supplies one.
+    tombstone_corpus_ceiling_bytes: Option<u64>,
     /// Opt-in measurement mode: after the run, scan the retained WAL segment
     /// files and emit a structured mechanism report (Q1-Q4) attributing the
     /// OR-churn WAL+RSS growth. REPORT-ONLY — never affects `passed`, so it
@@ -260,6 +268,8 @@ impl Default for Config {
             no_ack: false,
             inject_slow_leak: false,
             no_pre_kill_drain: false,
+            tombstone_corpus_headroom_bytes: DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
+            tombstone_corpus_ceiling_bytes: DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES,
             mechanism_report: false,
             mode_requested: false,
         }
@@ -899,10 +909,10 @@ async fn run_soak(config: &Config) -> i32 {
         &corpus_snapshot.samples,
         corpus_snapshot.scans_attempted,
         corpus_snapshot.scans_failed,
-        DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
+        config.tombstone_corpus_headroom_bytes,
         DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
         DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
-        DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES,
+        config.tombstone_corpus_ceiling_bytes,
     );
 
     // --- Assess disk growth (durable-dir footprint; catches leaks RSS cannot
@@ -1112,7 +1122,14 @@ async fn run_soak(config: &Config) -> i32 {
         timestamp: utc_timestamp_now(),
     };
 
-    print_summary(&report, &tombstones, &disk, &corpus, redb_tombstone_scan);
+    print_summary(
+        &report,
+        &tombstones,
+        &disk,
+        &corpus,
+        config.tombstone_corpus_headroom_bytes,
+        redb_tombstone_scan,
+    );
     if let Some(path) = &config.json_output {
         write_report(path, &report);
         println!("wrote JSON report to {}", path.display());
@@ -1170,6 +1187,7 @@ fn print_summary(
     tombstones: &TombstoneAssessment,
     disk: &DiskAssessment,
     corpus: &TombstoneCorpusAssessment,
+    corpus_headroom_bytes: u64,
     redb_tombstone_scan: Option<u64>,
 ) {
     println!("\n=== SOAK SUMMARY ===");
@@ -1269,7 +1287,7 @@ fn print_summary(
         corpus.span_secs,
         corpus.scans_attempted.saturating_sub(corpus.scans_failed),
         corpus.scans_failed,
-        DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
+        corpus_headroom_bytes,
         corpus_ceiling,
         corpus_disposition,
         if corpus.passed { "ok" } else { "FAIL" },
@@ -2771,11 +2789,17 @@ const KNOWN_FLAGS: &[&str] = &[
     "--no-ack",
     "--inject-slow-leak",
     "--no-pre-kill-drain",
+    "--tombstone-corpus-headroom-bytes",
+    "--tombstone-corpus-ceiling-bytes",
     "--mechanism-report",
     "--smoke",
 ];
 
 fn print_usage() {
+    // The two durable-corpus knobs are spelled out with their effect, because
+    // an operator arming a gate needs to know what each one moves:
+    //   --tombstone-corpus-headroom-bytes <n>  slack the LEVEL clause allows
+    //   --tombstone-corpus-ceiling-bytes <n>  arm L2's absolute HARD gate ceiling
     println!(
         "TopGun soak harness (G4b / TODO-484)\n\n\
          Drives the real out-of-process topgun-server against an on-disk redb + WAL,\n\
@@ -2792,6 +2816,9 @@ fn print_usage() {
          \x20 soak_harness --inject-panic\n\
          \x20 soak_harness --no-ack --duration 3600  # tombstone hard-gate must FAIL\n\
          \x20 soak_harness --inject-slow-leak --duration 3600  # slope detection-floor calibration\n\
+         \x20 # durable-corpus gate knobs (default: headroom 65536 bytes, ceiling disarmed)\n\
+         \x20 soak_harness --tombstone-corpus-headroom-bytes 262144 \\\n\
+         \x20              --tombstone-corpus-ceiling-bytes 8388608\n\
          \x20 # OR-churn WAL/RSS growth mechanism report (Q1-Q4), report-only\n\
          \x20 soak_harness --mechanism-report --or-churn true --or-keyspace 48 \\\n\
          \x20              --crash-interval 0 --duration 3600 --data-dir ./soak-data\n\n\
@@ -2939,6 +2966,19 @@ fn parse_args() -> Config {
             "--no-pre-kill-drain" => {
                 c.no_pre_kill_drain = true;
                 i += 1;
+            }
+            "--tombstone-corpus-headroom-bytes" => {
+                c.tombstone_corpus_headroom_bytes =
+                    parse_u64(&need(i, &args, "--tombstone-corpus-headroom-bytes"));
+                i += 2;
+            }
+            "--tombstone-corpus-ceiling-bytes" => {
+                c.tombstone_corpus_ceiling_bytes = Some(parse_u64(&need(
+                    i,
+                    &args,
+                    "--tombstone-corpus-ceiling-bytes",
+                )));
+                i += 2;
             }
             "--mechanism-report" => {
                 c.mechanism_report = true;
