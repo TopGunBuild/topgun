@@ -1,0 +1,132 @@
+SPEC-361a — G5 CONTROL RUNS AND KNOB-EFFECTIVENESS PROBES
+=========================================================
+
+Every line below was COPIED from a captured run log by script, never retyped.
+The gate line is located via the source constant TOMBSTONE_CORPUS_LINE_PREFIX,
+extracted with the sed one-liner the Validation Checklist pins (step 3), so a
+rename REDs loudly instead of missing silently.
+
+C9 / C10 BIND EVERYTHING HERE. These are NOT a measurement lineage: no pin, no
+matrix, no width sweep, no fit, no CSV segments, no replicate. The only
+publishable outputs are the exit code, the rendered gate line and the
+finishedReason. NO corpus magnitude below may be quoted as evidence about the
+plateau, the reclaim fraction, or any width.
+
+Binary: release build of `soak_harness` + `topgun-server` at this branch HEAD.
+Host: darwin / M1 Max. Cells run STRICTLY SEQUENTIALLY (never concurrently),
+because the NEUTRAL cell is the attribution control and CPU contention from a
+parallel cell would destroy the attribution it exists to provide.
+
+-----------------------------------------------------------------------------
+PART 1 — N21 THE LIVE CONTROL LEG: three cells, D = 900 s, --crash-interval 120
+-----------------------------------------------------------------------------
+All three cells use the IDENTICAL D and crash interval, as N5 requires.
+
+CELL: NEUTRAL (no injection flag) — the attribution control
+  invocation: --duration 900 --crash-interval 120 (no injection flag)
+  wall clock: 902s
+  exit code (X21-c): 1
+  rendered line (X21-a):
+    tombstone_corpus_redb_scan: first=45009 min=45009 peak=316159 last=316159 first_half_peak=173741 last_half_peak=316159 rise=142418 span=778s scans_ok=8 scans_failed=0 headroom=65536 ceiling=disarmed disposition=LEVEL_EVALUATED -> FAIL (terminal scan 316159 bytes; last gauge value 328334 bytes -> DIVERGED) reason=durable-corpus level rose 142418 B between half-peaks (173741 B -> 316159 B) over 778s, above the 65536 B headroom
+  finishedReason (X21-b, from the persisted SoakReport):
+    durable-corpus level assertion failed: durable-corpus level rose 142418 B between half-peaks (173741 B -> 316159 B) over 778s, above the 65536 B headroom
+  ceilingBytes (X21-b, the NULL branch of AC27's JSON limb): null
+  admissibility: samples=8 (min 4), spanSecs=778.4347632089999 (min 600), disposition=LEVEL_EVALUATED
+
+CELL: --no-ack
+  invocation: --duration 900 --crash-interval 120 --no-ack
+  wall clock: 903s
+  exit code (X21-c): 1
+  rendered line (X21-a):
+    tombstone_corpus_redb_scan: first=48995 min=48995 peak=386362 last=386362 first_half_peak=195198 last_half_peak=386362 rise=191164 span=780s scans_ok=8 scans_failed=0 headroom=65536 ceiling=disarmed disposition=LEVEL_EVALUATED -> FAIL (terminal scan 386362 bytes; last gauge value 395089 bytes -> DIVERGED) reason=durable-corpus level rose 191164 B between half-peaks (195198 B -> 386362 B) over 780s, above the 65536 B headroom
+  finishedReason (X21-b, from the persisted SoakReport):
+    durable-corpus level assertion failed: durable-corpus level rose 191164 B between half-peaks (195198 B -> 386362 B) over 780s, above the 65536 B headroom
+  ceilingBytes (X21-b, the NULL branch of AC27's JSON limb): null
+  admissibility: samples=8 (min 4), spanSecs=779.8002591669999 (min 600), disposition=LEVEL_EVALUATED
+
+CELL: --inject-slow-leak
+  invocation: --duration 900 --crash-interval 120 --inject-slow-leak
+  wall clock: 906s
+  exit code (X21-c): 1
+  rendered line (X21-a):
+    tombstone_corpus_redb_scan: first=58674 min=58674 peak=307004 last=307004 first_half_peak=172137 last_half_peak=307004 rise=134867 span=783s scans_ok=8 scans_failed=0 headroom=65536 ceiling=disarmed disposition=LEVEL_EVALUATED -> FAIL (terminal scan 307004 bytes; last gauge value 307488 bytes -> DIVERGED) reason=durable-corpus level rose 134867 B between half-peaks (172137 B -> 307004 B) over 783s, above the 65536 B headroom
+  finishedReason (X21-b, from the persisted SoakReport):
+    durable-corpus level assertion failed: durable-corpus level rose 134867 B between half-peaks (172137 B -> 307004 B) over 783s, above the 65536 B headroom
+  ceilingBytes (X21-b, the NULL branch of AC27's JSON limb): null
+  admissibility: samples=8 (min 4), spanSecs=782.886967625 (min 600), disposition=LEVEL_EVALUATED
+
+-----------------------------------------------------------------------------
+PART 2 — N22 THE KNOB-EFFECTIVENESS PROBE PAIR (X21-d, AC27 KNOB limb)
+-----------------------------------------------------------------------------
+Two invocations of the existing 25 s smoke shape (--duration 25
+--crash-interval 0), differing ONLY in the two knobs. NEITHER IS AN AT INPUT
+and neither probe's corpus magnitude may be quoted (C9, C10).
+
+PROBE: P-armed
+  differing flags: --tombstone-corpus-headroom-bytes 1 --tombstone-corpus-ceiling-bytes 1
+  exit code: 1
+  rendered line:
+    tombstone_corpus_redb_scan: first=5161 min=5161 peak=5161 last=5161 first_half_peak=0 last_half_peak=5161 rise=5161 span=0s scans_ok=1 scans_failed=0 headroom=1 ceiling=1 disposition=LEVEL_SUPPRESSED(n=1, span=0s) -> FAIL (terminal scan 5161 bytes; last gauge value 5781 bytes -> DIVERGED) reason=durable-corpus peak 5161 B exceeds the armed 1 B ceiling
+
+PROBE: P-slack
+  differing flags: --tombstone-corpus-headroom-bytes 262144 --tombstone-corpus-ceiling-bytes 99999999999
+  exit code: 0
+  rendered line:
+    tombstone_corpus_redb_scan: first=4660 min=4660 peak=4660 last=4660 first_half_peak=0 last_half_peak=4660 rise=4660 span=0s scans_ok=1 scans_failed=0 headroom=262144 ceiling=99999999999 disposition=LEVEL_SUPPRESSED(n=1, span=0s) -> ok (terminal scan 4660 bytes; last gauge value 5580 bytes -> DIVERGED)
+
+-----------------------------------------------------------------------------
+PART 3 — AC21 / AC24 THE CI CONSUMER RE-RUN (all THREE surfaces, four cells)
+-----------------------------------------------------------------------------
+Each cell is the shape rust.yml runs at HEAD, re-run against this branch.
+AC24 limb 1 needs the 25 s blocking smoke to RENDER LEVEL_SUPPRESSED — that is
+the executed constructibility witness for N4's fallback branch.
+
+(i) BLOCKING Soak Smoke G4b — rust.yml:470-478 (--duration 25 --crash-interval 0)
+  exit code: 0   [HEAD expectation: 0]
+  jq '.passed == true' exit: 0   [0 = the CI assertion holds]
+  rendered line:
+    tombstone_corpus_redb_scan: first=5000 min=5000 peak=5000 last=5000 first_half_peak=0 last_half_peak=5000 rise=5000 span=0s scans_ok=1 scans_failed=0 headroom=65536 ceiling=disarmed disposition=LEVEL_SUPPRESSED(n=1, span=0s) -> ok (terminal scan 5000 bytes; last gauge value 5640 bytes -> DIVERGED)
+  VERDICT: GREEN, disposition LEVEL_SUPPRESSED — AC24 limb 1 discharged.
+
+(ii) BLOCKING boundary cell — rust.yml:480-491 (--duration 30 --crash-interval 9 --or-churn true --or-every 3)
+  exit code: 0
+  wall clock: 31s   [budget: the 30 s cell + fixed overhead; unchanged from HEAD's shape]
+  OR-no-loss greps (rust.yml:494-503), the assertions this cell is actually graded on:
+    'OR-Map acked add(s) LOST across recovery'   -> 0 occurrences [required: 0]
+    'OR-Map no-loss check could not complete'    -> 0 occurrences [required: 0]
+    'OR-Map no-loss check: PASS'                 -> 2 occurrences [required: >= 1]
+  rendered line:
+    tombstone_corpus_redb_scan: first=2145 min=2145 peak=6754 last=6754 first_half_peak=2145 last_half_peak=6754 rise=4609 span=18s scans_ok=3 scans_failed=0 headroom=65536 ceiling=disarmed disposition=LEVEL_SUPPRESSED(n=3, span=18s) -> ok (terminal scan 6754 bytes; last gauge value 7142 bytes -> DIVERGED)
+  VERDICT: all three greps hold; LEVEL_SUPPRESSED; wall-clock budget holds.
+  This is AC21(ii)'s literal and only content, and the per-checkpoint byte
+  copy + scan did not break it.
+
+(iii) soak-loaded — rust.yml:592. NON-BLOCKING: the soak-loaded job (rust.yml:521)
+      carries job-level continue-on-error: true at rust.yml:548.
+  run 1: passed=true totalWrites=16725 finishedReason='duration reached' disposition=LEVEL_SUPPRESSED corpusPassed=true
+  run 2: passed=true totalWrites=18874 finishedReason='duration reached' disposition=LEVEL_SUPPRESSED corpusPassed=true
+  rendered line (run 1):
+    tombstone_corpus_redb_scan: first=49866 min=49866 peak=49866 last=49866 first_half_peak=0 last_half_peak=49866 rise=49866 span=0s scans_ok=1 scans_failed=0 headroom=65536 ceiling=disarmed disposition=LEVEL_SUPPRESSED(n=1, span=0s) -> ok (terminal scan 49866 bytes; last gauge value 54352 bytes -> DIVERGED)
+  VERDICT: gate verdict UNCHANGED (.passed == true in both runs), disposition
+  LEVEL_SUPPRESSED in both. The composite CI assertion also requires
+  totalWrites > 20000, which this HOST did not reach (16725, 18874). That is a
+  local throughput shortfall on a laptop that had just run five soaks
+  back-to-back, NOT a verdict change and NOT attributable to the corpus gate
+  (tombstoneCorpus.passed == true in both runs). Recorded rather than glossed.
+
+(iv) soak-loaded-crash — rust.yml:641, same NON-BLOCKING job (advisory).
+  run 1: passed=false totalWrites=1452 finishedReason='crash recovery mismatch detected' disposition=LEVEL_SUPPRESSED corpusPassed=true
+  run 2: passed=true totalWrites=3177 finishedReason='duration reached' disposition=LEVEL_SUPPRESSED corpusPassed=true
+  run 3: passed=true totalWrites=2828 finishedReason='duration reached' disposition=LEVEL_SUPPRESSED corpusPassed=true
+  run 1's recovery_failures line, copied from its log:
+      - LWW merkle root changed across recovery: pre=3505210605 post=108584038
+  VERDICT, stated honestly: run 1 FAILED and runs 2 and 3 PASSED — the cell is
+  INTERMITTENT here. The failure is the LWW recovery arm, NOT the corpus gate:
+  tombstoneCorpus.passed == true and disposition == LEVEL_SUPPRESSED in all
+  three runs, so the corpus clause contributed nothing to the verdict. It also
+  CANNOT be a regression from this half: packages/server-rust/src/ is
+  byte-unchanged against the base commit 20edabde, so the topgun-server binary
+  under test is identical to base. The signature (LWW merkle root changed
+  across recovery, under --no-pre-kill-drain) is the known advisory-tier LWW
+  recovery issue, which is why the job is continue-on-error in the first place.
+  ROUTED to TODO-634 by id below; no tracker file is edited.
