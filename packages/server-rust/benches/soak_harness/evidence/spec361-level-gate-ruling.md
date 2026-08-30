@@ -1131,6 +1131,154 @@ When `G5` completes, this section carries: the executed control-run transcripts'
 recorded divergence between a pre-registered text (§F7 Table 2) or fixture magnitude (§F9) and what
 was delivered, with its reason.
 
-*(no entries yet)*
+### G5 EXECUTION RECORD — the live control leg, the probe pair, and the promotion decision
+
+Executed on this branch at HEAD, release build, all cells run **strictly sequentially**. Every
+rendered line and exit code below was copied from a captured log **by script**, never retyped; the
+full transcripts are in `spec361-control-runs.txt`. `C9`/`C10` bind all of it: no magnitude here may
+be quoted as evidence about the plateau, the reclaim fraction, or any width.
+
+#### 1. `AT` GRADED IN ITS FROZEN ORDER — the verdict is `AT-3`, `ANTI-TAUTOLOGY-FAILED`
+
+Graded **conjunctively over `X21-a` (rendered `disposition`) + `X21-b` (`finishedReason`) +
+`X21-c` (exit code)**, `AT-0` first and fail-closed.
+
+| Cell (`D = 900 s`, `--crash-interval 120`) | exit (`X21-c`) | rendered `disposition` (`X21-a`) | `finishedReason` names (`X21-b`) | three transports agree? | `L1` outcome |
+|---|---|---|---|---|---|
+| **NEUTRAL** (attribution control) | `1` | `LEVEL_EVALUATED` | the **level** clause | yes | **FAILS on `L1`** |
+| `--no-ack` | `1` | `LEVEL_EVALUATED` | the **level** clause | yes | **FAILS on `L1`** |
+| `--inject-slow-leak` | `1` | `LEVEL_EVALUATED` | the **level** clause | yes | **FAILS on `L1`** |
+
+**`AT-0` — DOES NOT FIRE.** Every cell is admissible: `samples = 8` against `min_samples = 4`, and
+`span_secs` of **778.4 / 779.8 / 782.9 s** against `min_span_secs = 600` — all three within a second
+or two of §F2's predicted `≈ 780 s`, with `scans_ok = 8` and `scans_failed = 0` everywhere, so `L0`
+passed and the instrument was never blind. No cell was suppressed and no harness failure unrelated
+to the gate occurred. **The single permitted re-run is therefore NOT spent, and must not be** — there
+is no guard shortfall for it to repair.
+
+**`AT-1` — NOT MET.** It requires `NEUTRAL` **PASSES**. `NEUTRAL` failed.
+
+**`AT-2` — NOT MET.** It also requires `NEUTRAL` **PASSES**, and additionally `--inject-slow-leak`
+**PASSES**; neither holds. Conjunct (a) is therefore never reached and is not evaluated.
+
+**`AT-3` — FIRES.** Its antecedent is *"`--no-ack` **PASSES**, **or** NEUTRAL **FAILS**"*. The second
+disjunct is satisfied: **the neutral cell, with no injection flag applied at all, breached `L1`**
+(rise `142418 B` between half-peaks against the `65536 B` headroom). This is exactly the condition
+§F8 pre-registered as destroying attribution: *"it means the cell fails without any control applied."*
+A `--no-ack` FAIL cannot be attributed to `--no-ack` when the neutral cell of identical duration and
+crash interval fails the same way.
+
+> **Verdict: `ANTI-TAUTOLOGY-FAILED`. The bar was NOT met live.**
+
+**This is the pre-registered negative outcome, not a surprise and not a judgement call.** §F8 was
+frozen — and its digest recorded — before any calibration test was written and before any control
+run was executed, precisely so this could not be decided at the keyboard. It is recorded as it fell.
+
+#### 2. THE THREE RENDERED LINES (`X21-a`), copied verbatim
+
+```
+NEUTRAL:
+tombstone_corpus_redb_scan: first=45009 min=45009 peak=316159 last=316159 first_half_peak=173741 last_half_peak=316159 rise=142418 span=778s scans_ok=8 scans_failed=0 headroom=65536 ceiling=disarmed disposition=LEVEL_EVALUATED -> FAIL (terminal scan 316159 bytes; last gauge value 328334 bytes -> DIVERGED) reason=durable-corpus level rose 142418 B between half-peaks (173741 B -> 316159 B) over 778s, above the 65536 B headroom
+
+--no-ack:
+tombstone_corpus_redb_scan: first=48995 min=48995 peak=386362 last=386362 first_half_peak=195198 last_half_peak=386362 rise=191164 span=780s scans_ok=8 scans_failed=0 headroom=65536 ceiling=disarmed disposition=LEVEL_EVALUATED -> FAIL (terminal scan 386362 bytes; last gauge value 395089 bytes -> DIVERGED) reason=durable-corpus level rose 191164 B between half-peaks (195198 B -> 386362 B) over 780s, above the 65536 B headroom
+
+--inject-slow-leak:
+tombstone_corpus_redb_scan: first=58674 min=58674 peak=307004 last=307004 first_half_peak=172137 last_half_peak=307004 rise=134867 span=783s scans_ok=8 scans_failed=0 headroom=65536 ceiling=disarmed disposition=LEVEL_EVALUATED -> FAIL (terminal scan 307004 bytes; last gauge value 307488 bytes -> DIVERGED) reason=durable-corpus level rose 134867 B between half-peaks (172137 B -> 307004 B) over 783s, above the 65536 B headroom
+```
+
+All three persisted `"ceilingBytes": null` — the **`null` branch** of `AC27`'s JSON limb, reached
+over the real transport, as `X21-b` requires. (The non-`null` branch is the census-target fixture's.)
+
+#### 3. THE TWO PROBE LINES AND THEIR EXIT CODES (`N22`, `X21-d`, `AC27` KNOB limb)
+
+```
+P-armed  (--tombstone-corpus-headroom-bytes 1 --tombstone-corpus-ceiling-bytes 1)       exit = 1
+tombstone_corpus_redb_scan: first=5161 min=5161 peak=5161 last=5161 first_half_peak=0 last_half_peak=5161 rise=5161 span=0s scans_ok=1 scans_failed=0 headroom=1 ceiling=1 disposition=LEVEL_SUPPRESSED(n=1, span=0s) -> FAIL (terminal scan 5161 bytes; last gauge value 5781 bytes -> DIVERGED) reason=durable-corpus peak 5161 B exceeds the armed 1 B ceiling
+
+P-slack  (--tombstone-corpus-headroom-bytes 262144 --tombstone-corpus-ceiling-bytes 99999999999)  exit = 0
+tombstone_corpus_redb_scan: first=4660 min=4660 peak=4660 last=4660 first_half_peak=0 last_half_peak=4660 rise=4660 span=0s scans_ok=1 scans_failed=0 headroom=262144 ceiling=99999999999 disposition=LEVEL_SUPPRESSED(n=1, span=0s) -> ok (terminal scan 4660 bytes; last gauge value 5580 bytes -> DIVERGED)
+```
+
+`X21-d` is **DISCHARGED, exactly as pre-registered**: both knobs are individually attributable on the
+rendered line (`headroom=1` vs `headroom=262144`; `ceiling=1` vs `ceiling=99999999999` — different
+values for **both** tokens), and the **exit code flips `1 → 0`**. Both probes render
+`LEVEL_SUPPRESSED(n=1, span=0s)`, so `L1` decided nothing in either and **the flip is attributable to
+the ceiling knob alone** — the headroom knob has no subject here, and its discharge is the rendered
+token, not the verdict, precisely as §F13 states. **Neither probe is an `AT` input**, and neither
+probe's magnitude is quoted as evidence about anything (`C9`, `C10`).
+
+#### 4. THE PROMOTION DECISION — **NO PROMOTION**
+
+Per `AT-3`, and taken as the frozen table dictates rather than at the keyboard:
+
+- **`L1` does NOT ship as the hard gate.** The estimator ships **REPORT-ONLY**.
+- **The slope clause stays hard UNCONDITIONALLY** at `main.rs`'s fallback conjunct — the conditional
+  demotion is withdrawn, so `tombstones.passed` is ANDed with **no `slope_clause_stays_hard(...)`
+  guard in front of it**. The helper itself **stays**, unused by the gate but still asserted by its
+  test, so `N4b`'s exhaustiveness proof (and `AC24` limb 2's compile-time falsifier) is not lost.
+- **NO parameter is retuned.** `headroom_bytes` stays at `65536` and no cell duration or crash
+  interval is changed. Retuning to make the neutral control pass is the mirror image of retuning to
+  make a cell fail, and `C11`/`KL-4` forbid both. **This is the single most important line in this
+  record.**
+- The failure is published here with all three rendered lines, as `AT-3` requires.
+
+> **CARRIED OBLIGATION — `G5` COULD NOT AND DID NOT IMPLEMENT THIS.** `AT-3`'s consequence is a
+> **source change** to `main.rs`'s fallback conjunct, and `G5` is a run-and-record group: this half's
+> counted `.rs` ledger is **FULL at 4 counted / 0 exemptions**, and `G5` is forbidden from editing
+> any `.rs` file. The decision above is **recorded and routed**, not applied. **The demotion to
+> REPORT-ONLY is an open obligation for the orchestrator to site**, and until it is applied the tree
+> still carries `L1` as a deciding clause. It is called out here rather than left to be discovered.
+
+**What the leg actually established, stated without inflation.** The wiring works end-to-end: the
+sampler took 8 clean samples per cell across `kill -9` recovery checkpoints with zero scan failures,
+the estimator evaluated, and all three transports agreed in all three cells. What was NOT established
+is that `L1` **discriminates** — at this headroom, duration and workload it fires on everything,
+including the untreated control. A gate that fires on the control is not a gate.
+
+**A pre-registration observation, recorded rather than glossed.** §F3 derived `headroom_bytes =
+65536` expecting the neutral cell to sit below it. The neutral cell rose `142418 B` — roughly `2.2×`
+the headroom — over a `≈ 390 s` rise window. The three cells' rises (`142418` / `191164` / `134867 B`)
+are of the **same order**, with the neutral cell neither lowest nor separated from the treated ones.
+That is the substance of the `AT-3` finding and the material fact the routing below carries. **No
+conclusion about the plateau or any width is drawn from these numbers** (`C10`).
+
+#### 5. `AC23` ROUTINGS — BY ID, AND NO TRACKER FILE IS EDITED
+
+| Item | Routed to |
+|---|---|
+| `L2`'s production **arming** (it stays `None`/disarmed here; armed only in the probe and in `W9`) | **`TODO-654`** |
+| The **durable-corpus headroom revision** — `65536 B` is refuted as a discriminating threshold at this duration and workload by the neutral cell above | **`TODO-654`** |
+| **The `AT-3` cause itself**: why the untreated neutral cell accrues a corpus rise of the same order as the treated cells, and what a discriminating level clause would have to key on instead | **`TODO-634`** |
+| The width-1000 **plateau demonstration** | **`TODO-634`** |
+| **`TG-OR-005`**'s closure | **`TODO-634`** |
+| **`NAKED_BASELINE`** 4 → 3 | **`TODO-634`** |
+| The **bounded-but-elevated-plateau** question (`AT-2`'s conditional routing) | **not routed — `AT-2` did not fire**, so its conditional routing has no antecedent. Recorded so its absence is deliberate rather than an omission. |
+| The intermittent `soak-loaded-crash` **LWW merkle-root divergence** across recovery observed in `Part 3(iv)` — not this half's subject and not caused by it (`src/` is byte-unchanged, so the server binary is identical to base) | **`TODO-634`** |
+
+**No tracker file is edited by this routing** (`C1`, `AC20`); the routing lives here, by id.
+
+#### 6. `AC21` / `AC24` CONSUMER RE-RUN — SUMMARY (full detail in `spec361-control-runs.txt` Part 3)
+
+| Surface | Blocking? | `disposition` | Verdict |
+|---|---|---|---|
+| 25 s Soak Smoke G4b (`rust.yml:470-478`) | **BLOCKING** | `LEVEL_SUPPRESSED` | exit `0`, `.passed == true` — **unchanged from HEAD**. `AC24` limb 1's executed constructibility witness. |
+| boundary cell (`rust.yml:480-491`) | **BLOCKING** | `LEVEL_SUPPRESSED` | all three OR-no-loss greps hold; wall-clock budget holds. `AC21`(ii) satisfied. |
+| `soak-loaded` (`rust.yml:592`) | non-blocking (`:548`) | `LEVEL_SUPPRESSED` | `.passed == true` in both runs — verdict unchanged. The CI conjunct `totalWrites > 20000` was not reached **on this host** (`16725`, `18874`); a local throughput shortfall, not a verdict change, and not attributable to the corpus gate. |
+| `soak-loaded-crash` (`rust.yml:641`) | non-blocking (`:548`) | `LEVEL_SUPPRESSED` | **intermittent**: FAILED once (LWW merkle root changed across recovery), PASSED on two repeats. `tombstoneCorpus.passed == true` in all three, so the corpus clause contributed nothing. Cannot be a regression from this half — `src/` is byte-unchanged against base `20edabde`. |
+
+**No cell's corpus clause decided any consumer verdict**: every one of the four rendered
+`LEVEL_SUPPRESSED`, so `N4`'s fallback conjunct was live throughout and the slope clause hard-gated
+them exactly as at HEAD.
+
+#### 7. DIVERGENCES FROM PRE-REGISTRATION
+
+- **§F7 Table 2 texts and §F9 fixture magnitudes:** authored in earlier waves, **not** re-authored
+  here; `G5` observed no divergence in its own scope and changed neither.
+- **The `AT` outcome is not a divergence** — `AT-3` is one of the four pre-registered rows, and it
+  fired on its stated antecedent.
+- **The one substantive divergence** is the §F3 parameter expectation recorded in §4 above: the
+  neutral control was expected to sit below `65536 B` and did not. Its reason is unknown and is
+  **routed to `TODO-634`, not patched over by retuning** (`C11`).
 
 <!-- POST-SECTION-END -->
