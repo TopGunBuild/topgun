@@ -278,9 +278,21 @@ fn least_squares_slope_per_hour(points: &[(f64, f64)]) -> f64 {
 /// [`assess_tombstone_bytes`] MUST agree on which samples make up the "recent
 /// half" — otherwise the guard could clear a window the slope was actually fit
 /// over (or vice versa) — so both derive it from [`last_half_window`].
+/// The index at which a sample series splits into its first and last halves.
+///
+/// The last-half window is `&points[last_half_split_index(points.len())..]`, so
+/// an ODD count puts the middle sample in the RECENT half. Every consumer that
+/// partitions a series — the slope statistic, its span guard and the
+/// durable-corpus level clause — derives the split from here, so the partitions
+/// are provably identical and a reader comparing two of them is comparing like
+/// with like. It takes a length rather than a slice so a series of counted
+/// BYTE totals can share it without any of them becoming an `f64`.
+const fn last_half_split_index(len: usize) -> usize {
+    len / 2
+}
+
 fn last_half_window(points: &[(f64, f64)]) -> &[(f64, f64)] {
-    let half = points.len() / 2;
-    &points[half..]
+    &points[last_half_split_index(points.len())..]
 }
 
 fn last_half_window_slope_per_hour(points: &[(f64, f64)]) -> f64 {
@@ -692,7 +704,7 @@ pub struct TombstoneCorpusAssessment {
 /// dependency beyond `std` — this file is `#[path]`-included by an integration
 /// target that includes no sibling module.
 #[must_use]
-#[allow(dead_code, unused_variables, clippy::unimplemented)]
+#[allow(dead_code)]
 pub fn assess_tombstone_corpus_level(
     samples: &[CorpusSample],
     scans_attempted: usize,
@@ -702,10 +714,105 @@ pub fn assess_tombstone_corpus_level(
     min_samples: usize,
     ceiling_bytes: Option<u64>,
 ) -> TombstoneCorpusAssessment {
-    // The signature and its doc-contract above are frozen ahead of the body so
-    // the calibration fixtures and the report/console transports can be written
-    // against a surface that cannot drift; the clause arithmetic lands next.
-    unimplemented!("corpus level estimator body")
+    // The series aggregates are DESCRIPTIVE: deriving them is not evaluating a
+    // clause, so they are filled in on every path — including the blind one —
+    // and the rendered line stays informative even when no clause decided.
+    // They are also the ONLY shape in which the series reaches a consumer, so
+    // every downstream predicate has to be statable over exactly these.
+    let span_secs = match (samples.first(), samples.last()) {
+        (Some(first), Some(last)) => last.elapsed_secs - first.elapsed_secs,
+        _ => 0.0,
+    };
+    let first_bytes = samples.first().map_or(0, |s| s.bytes);
+    let last_bytes = samples.last().map_or(0, |s| s.bytes);
+    let min_bytes = samples.iter().map(|s| s.bytes).min().unwrap_or(0);
+    let peak_bytes = samples.iter().map(|s| s.bytes).max().unwrap_or(0);
+    // The same split index the slope clause partitions on, applied to counted
+    // byte totals directly: no total is ever routed through an `f64`.
+    let (first_half, last_half) = samples.split_at(last_half_split_index(samples.len()));
+    let first_half_peak_bytes = first_half.iter().map(|s| s.bytes).max().unwrap_or(0);
+    let last_half_peak_bytes = last_half.iter().map(|s| s.bytes).max().unwrap_or(0);
+    // Saturating: a FALLING corpus yields a rise of zero and passes, which is
+    // the correct answer for a ceiling test.
+    let rise_bytes = last_half_peak_bytes.saturating_sub(first_half_peak_bytes);
+
+    // L0 — INSTRUMENT, evaluated FIRST and fail-closed. A blind instrument
+    // returns here, so neither L1 nor L2 is evaluated at all: a gate whose
+    // instrument could not obtain the state must not report bounded growth.
+    if scans_failed > 0 || samples.is_empty() {
+        return TombstoneCorpusAssessment {
+            scans_attempted,
+            scans_failed,
+            samples: samples.len(),
+            first_bytes,
+            min_bytes,
+            peak_bytes,
+            last_bytes,
+            first_half_peak_bytes,
+            last_half_peak_bytes,
+            rise_bytes,
+            span_secs,
+            disposition: CorpusLevelDisposition::InstrumentFailed,
+            ceiling_bytes,
+            passed: false,
+            reason: Some(format!(
+                "durable-corpus instrument blind: {} of {} scans failed, {} usable samples",
+                scans_failed,
+                scans_attempted,
+                samples.len()
+            )),
+        };
+    }
+
+    let mut breaches: Vec<String> = Vec::new();
+
+    // L1 — LEVEL / FLATNESS. Decided only when BOTH guards are met; otherwise
+    // it contributes nothing to the verdict and the suppression is rendered
+    // with its two numbers rather than as a pass.
+    let level_evaluated = samples.len() >= min_samples && span_secs >= min_span_secs;
+    if level_evaluated && rise_bytes > headroom_bytes {
+        breaches.push(format!(
+            "durable-corpus level rose {rise_bytes} B between half-peaks \
+             ({first_half_peak_bytes} B -> {last_half_peak_bytes} B) over \
+             {span_secs:.0}s, above the {headroom_bytes} B headroom"
+        ));
+    }
+
+    // L2 — ABSOLUTE CEILING, an ENVELOPE test on the PEAK. Its only guard is
+    // being armed, so a series too short for L1 is still held to a ceiling.
+    if let Some(ceiling) = ceiling_bytes {
+        if peak_bytes > ceiling {
+            breaches.push(format!(
+                "durable-corpus peak {peak_bytes} B exceeds the armed {ceiling} B ceiling"
+            ));
+        }
+    }
+
+    TombstoneCorpusAssessment {
+        scans_attempted,
+        scans_failed,
+        samples: samples.len(),
+        first_bytes,
+        min_bytes,
+        peak_bytes,
+        last_bytes,
+        first_half_peak_bytes,
+        last_half_peak_bytes,
+        rise_bytes,
+        span_secs,
+        disposition: if level_evaluated {
+            CorpusLevelDisposition::LevelEvaluated
+        } else {
+            CorpusLevelDisposition::LevelSuppressed
+        },
+        ceiling_bytes,
+        passed: breaches.is_empty(),
+        reason: if breaches.is_empty() {
+            None
+        } else {
+            Some(breaches.join("; "))
+        },
+    }
 }
 
 /// Whether the tombstone-byte SLOPE clause still hard-gates a run that
