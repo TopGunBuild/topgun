@@ -17,6 +17,8 @@ use std::path::Path;
 
 use serde::Serialize;
 use topgun_server::storage::record::RecordValue;
+
+use crate::monitor::CorpusLevelDisposition;
 use topgun_server::storage::wal::format::{self, FrameDecodeResult};
 use topgun_server::storage::wal::{WalOp, WalStorePayload};
 
@@ -39,6 +41,13 @@ pub struct MemoryReport {
 /// verdict: a run that fails here and persists only `passed: false` leaves no
 /// consumer able to say *why* from the committed artifact, and the console the
 /// numbers used to live in is a scratch file under `target/`.
+///
+/// Its `passed` is ANDed CONDITIONALLY, not unconditionally: the durable-corpus
+/// level clause decides the verdict wherever it could be evaluated, and this
+/// slope clause hard-gates exactly the run class where it could not. So it is
+/// neither an unconditional hard gate nor flat report-only, and
+/// [`TombstoneCorpusReport::disposition`] is what says which of the two a given
+/// run got.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TombstoneReport {
@@ -48,6 +57,64 @@ pub struct TombstoneReport {
     pub last_bytes: u64,
     pub slope_bytes_per_hour: f64,
     pub passed: bool,
+    pub reason: Option<String>,
+}
+
+/// Emit a disposition as its single rendered token.
+///
+/// The enum lives in the `std`-only monitor module and therefore derives no
+/// serde; reaching it through a serializer here keeps the dependency on this
+/// side of that boundary while the field stays enum-typed rather than a
+/// stringly-typed downgrade.
+// Takes the disposition by reference because serde's `serialize_with` contract
+// fixes the signature; the type is Copy and the reference is free.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn serialize_disposition<S>(
+    value: &CorpusLevelDisposition,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(value.as_str())
+}
+
+/// Durable-corpus section of the final report.
+///
+/// Persisted for the same reason as [`TombstoneReport`], and for one more: this
+/// verdict is ANDed into `passed` unconditionally, and which of its clauses
+/// decided the run is only recoverable from `disposition`. A consumer holding
+/// this file alone can therefore say both that the run failed here and which
+/// clause failed it.
+///
+/// Derives no `Default` on purpose. A defaulted instance would carry a
+/// disposition nobody constructed, i.e. claim something about a gate that
+/// decided nothing; every instance is built explicitly from an assessment.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TombstoneCorpusReport {
+    pub scans_attempted: usize,
+    pub scans_failed: usize,
+    pub samples: usize,
+    pub first_bytes: u64,
+    pub min_bytes: u64,
+    pub peak_bytes: u64,
+    pub last_bytes: u64,
+    pub first_half_peak_bytes: u64,
+    pub last_half_peak_bytes: u64,
+    pub rise_bytes: u64,
+    pub span_secs: f64,
+    /// Serialized as an explicit string, never omitted. Typed as the ENUM, not
+    /// a `String`, so the console token and the JSON token come from one place.
+    #[serde(serialize_with = "serialize_disposition")]
+    pub disposition: CorpusLevelDisposition,
+    /// `null` when the absolute ceiling is DISARMED. Explicit, with no
+    /// `skip_serializing_if`: an absent key would make "disarmed"
+    /// indistinguishable from "this report predates the field".
+    pub ceiling_bytes: Option<u64>,
+    pub passed: bool,
+    /// `null` when the assessment named no reason. Explicit, for the same
+    /// reason `ceiling_bytes` is.
     pub reason: Option<String>,
 }
 
@@ -128,6 +195,9 @@ pub struct SoakReport {
     /// invariant this upholds: a consumer holding only this file can name the
     /// clause that failed the run without access to the process's stdout.
     pub tombstones: TombstoneReport,
+    /// The durable-layer verdict, beside the gauge-layer one above. Both are
+    /// ANDed into `passed`, so both have to survive into the artifact.
+    pub tombstone_corpus: TombstoneCorpusReport,
     pub disk: DiskReport,
     pub confirm_apply: ConfirmApplyReport,
     pub panic_report: Option<String>,

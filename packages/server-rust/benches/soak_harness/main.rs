@@ -117,8 +117,8 @@ use or_noloss::{missing_acked_adds, OrLedger};
 use process::{resolve_server_binary, ServerConfig, ServerSupervisor};
 use report::{
     append_progress, effective_epoch_width, scan_wal_frame_sizes, utc_timestamp_now, write_report,
-    ConfirmApplyReport, DiskReport, MemoryReport, ProgressSnapshot, SoakReport, TombstoneReport,
-    WalFrameStats,
+    ConfirmApplyReport, DiskReport, MemoryReport, ProgressSnapshot, SoakReport,
+    TombstoneCorpusReport, TombstoneReport, WalFrameStats,
 };
 use topgun_server::storage::record::RecordValue;
 
@@ -1074,6 +1074,23 @@ async fn run_soak(config: &Config) -> i32 {
             slope_bytes_per_hour: tombstones.slope_bytes_per_hour,
             passed: tombstones.passed,
             reason: tombstones.reason.clone(),
+        },
+        tombstone_corpus: TombstoneCorpusReport {
+            scans_attempted: corpus.scans_attempted,
+            scans_failed: corpus.scans_failed,
+            samples: corpus.samples,
+            first_bytes: corpus.first_bytes,
+            min_bytes: corpus.min_bytes,
+            peak_bytes: corpus.peak_bytes,
+            last_bytes: corpus.last_bytes,
+            first_half_peak_bytes: corpus.first_half_peak_bytes,
+            last_half_peak_bytes: corpus.last_half_peak_bytes,
+            rise_bytes: corpus.rise_bytes,
+            span_secs: corpus.span_secs,
+            disposition: corpus.disposition,
+            ceiling_bytes: corpus.ceiling_bytes,
+            passed: corpus.passed,
+            reason: corpus.reason.clone(),
         },
         disk: DiskReport {
             samples: disk.samples,
