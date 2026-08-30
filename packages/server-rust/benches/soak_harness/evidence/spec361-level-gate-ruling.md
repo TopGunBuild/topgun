@@ -1400,3 +1400,51 @@ the bounded-plateau question and the width-1000 plateau demonstration to
 **`TODO-634`**. This section edits no tracker file.
 
 <!-- SITING-SECTION-END -->
+
+<!-- CORRECTION-SECTION-BEGIN -->
+
+## CORRECTION RECORD — appended after Review v1, under its OWN digest
+
+This section is OUTSIDE the frozen layer, OUTSIDE `G5`'s post-section and
+OUTSIDE `G6`'s siting record. It edits none of them: all three earlier digests
+re-verify as reproducing unchanged at the moment this was written, which is what
+makes this an append rather than a revision.
+
+### What it corrects
+
+The SITING RECORD states, of the `N4a` census sweep:
+
+> The lines were therefore re-pointed to the **unconditional** role.
+
+Read as a claim about *every* line, that is **19 of 21, not 21 of 21**. A
+fresh-context implementation review found two in-scope census sites in
+`monitor.rs` — the doc-comment and the assert message of
+`calibration_additive_only_gauge_never_plateaus`, the pair `N4a` Table 1
+classifies as one row — still carrying the **conditional** qualifier *"whenever
+/ when the durable-corpus level clause did not decide the run"*. `G6`'s sweep
+missed them.
+
+Both were re-pointed to the unconditional role in the Review-v1 fix pass. The
+corrected claim is therefore: **19 of 21 lines were re-pointed by `G6`; the
+remaining 2 were re-pointed after Review v1.** The end state the SITING RECORD
+describes is now true of all 21; the process claim it made was not.
+
+### Why the census could not catch it by itself
+
+Each of the two lines is a *continuation* line. The pinned phrase (`hard-gate`)
+sits on the line above; the false qualifier sits on the line below it, which the
+pinned grep never matches. The census's mechanics were therefore all satisfied —
+count **36**, split 15 / 21, `demoted = 0`, every hit classified — while the
+substantive property the census exists to protect was violated. **A
+phrase-pinned line census bounds where a false contract may hide; it does not
+eliminate it.** This is a residual of the instrument, recorded here so the next
+spec in this lineage inherits the limitation rather than rediscovering it.
+
+### What did NOT change
+
+No verdict logic, no assertion, no fixture, no parameter, no constant. The
+`AT-3` grading, the demotion and its siting stand exactly as recorded above. The
+post-fix census still returns **36** (`monitor.rs` 15 + `main.rs` 21) with
+nothing demoted.
+
+<!-- CORRECTION-SECTION-END -->
