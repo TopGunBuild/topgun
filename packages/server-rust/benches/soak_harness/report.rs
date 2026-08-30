@@ -42,12 +42,11 @@ pub struct MemoryReport {
 /// consumer able to say *why* from the committed artifact, and the console the
 /// numbers used to live in is a scratch file under `target/`.
 ///
-/// Its `passed` is ANDed CONDITIONALLY, not unconditionally: the durable-corpus
-/// level clause decides the verdict wherever it could be evaluated, and this
-/// slope clause hard-gates exactly the run class where it could not. So it is
-/// neither an unconditional hard gate nor flat report-only, and
-/// [`TombstoneCorpusReport::disposition`] is what says which of the two a given
-/// run got.
+/// Its `passed` is ANDed in every run class: the durable-corpus clauses beside
+/// it are report-only, so they take no class over from it. It is therefore an
+/// unconditional hard gate and not report-only, and
+/// [`TombstoneCorpusReport::disposition`] says which durable-corpus clause was
+/// live on a given run without changing that.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TombstoneReport {
@@ -82,10 +81,10 @@ where
 /// Durable-corpus section of the final report.
 ///
 /// Persisted for the same reason as [`TombstoneReport`], and for one more: this
-/// verdict is ANDed into `passed` unconditionally, and which of its clauses
-/// decided the run is only recoverable from `disposition`. A consumer holding
-/// this file alone can therefore say both that the run failed here and which
-/// clause failed it.
+/// verdict is REPORT-ONLY — it is not ANDed into `passed` — so the artifact is
+/// the only place a consumer can see it at all, and which clause it came from
+/// is only recoverable from `disposition`. A consumer holding this file alone
+/// can therefore say both that the corpus breached and which clause saw it.
 ///
 /// Derives no `Default` on purpose. A defaulted instance would carry a
 /// disposition nobody constructed, i.e. claim something about a gate that
@@ -195,8 +194,9 @@ pub struct SoakReport {
     /// invariant this upholds: a consumer holding only this file can name the
     /// clause that failed the run without access to the process's stdout.
     pub tombstones: TombstoneReport,
-    /// The durable-layer verdict, beside the gauge-layer one above. Both are
-    /// ANDed into `passed`, so both have to survive into the artifact.
+    /// The durable-layer verdict, beside the gauge-layer one above. This one
+    /// is report-only rather than ANDed into `passed`, which is exactly why it
+    /// has to survive into the artifact: nothing else records it.
     pub tombstone_corpus: TombstoneCorpusReport,
     pub disk: DiskReport,
     pub confirm_apply: ConfirmApplyReport,

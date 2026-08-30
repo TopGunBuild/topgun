@@ -67,10 +67,10 @@
 //! Note on gating responsibility: [`assess_tombstone_bytes`] *computes* the byte
 //! verdict (including its `passed` flag), but whether that verdict gates the run
 //! is decided in `main.rs`, not here. The byte **slope** is a HARD gate there
-//! only in the run class where the durable-corpus level clause did not decide:
-//! when that clause is evaluable it decides the tombstone property and the
-//! slope becomes report-only, and when it is not, the slope gates exactly as it
-//! always did — so no run configuration is left with neither.
+//! in every run class. The durable-corpus level clause beside it is
+//! report-only: a control cell that injected no fault at all breached it, so it
+//! is recorded and rendered but decides no verdict, and the slope gates exactly
+//! as it always did — so no run configuration is left with neither.
 //! The gauge is restart-survivable (`reconcile_tombstone_bytes` in
 //! `storage/record.rs` re-seeds it via `set_tombstone_bytes` at boot) AND
 //! decrementable within a process life: every tombstone-add increments it and
@@ -82,9 +82,8 @@
 //! one client actually runs the confirm-apply protocol. `main.rs` therefore
 //! also drives a tracked-and-ACKing client (`SoakClient::connect_tracked` +
 //! `confirm_apply`) alongside the churn clients for the run's duration, which
-//! is what makes the gauge's plateau — and thus the hard gate, in the run
-//! class where the slope still decides — reachable in practice rather than
-//! merely possible in principle. `main.rs`'s `--no-ack`
+//! is what makes the gauge's plateau — and thus the hard gate — reachable in
+//! practice rather than merely possible in principle. `main.rs`'s `--no-ack`
 //! and `--inject-slow-leak` modes are the negative/slow-leak controls that
 //! exercise this: disabling the tracked client's ack loop pins the
 //! low-water-mark at 0 and must trip the gate, and a deliberately
@@ -94,8 +93,7 @@
 //! `/metrics` scrape is a harness defect regardless of leak magnitude). The
 //! RSS gate above remains a coarse, non-tombstone backstop. (This module's
 //! `passed: bool` on [`TombstoneAssessment`] drives both the hard-gate
-//! decision in `main.rs` — which now applies only when the durable-corpus
-//! level clause was suppressed or its instrument was blind — and the
+//! decision in `main.rs` — which applies in every run class — and the
 //! calibration tests below; the assessment itself does not know or care
 //! whether its caller treats a breach as report-only or hard-gating.)
 //!
@@ -340,15 +338,14 @@ fn last_half_window_span_secs(points: &[(f64, f64)]) -> f64 {
 /// [`assess_tombstone_bytes`] with this threshold alongside the RSS `assess`) and
 /// by the `soak_monitor_calibration` integration target's tests — the harness
 /// wiring has landed, so no `allow(dead_code)` is needed here. The slope this
-/// threshold measures is a HARD gate in `main.rs` in the run class where the
-/// durable-corpus level clause did not decide; where that clause did decide,
-/// the slope is still computed, printed and serialized exactly as before, but
-/// it no longer gates. Either way the decrementable gauge is
+/// threshold measures is a HARD gate in `main.rs` in every run class; the
+/// durable-corpus level clause beside it is report-only and takes none of
+/// them over. The decrementable gauge is
 /// expected to plateau under sustained churn now that a tracked-and-ACKing
 /// client drives the server's low-water-mark forward (see the module-level
 /// "Tombstone-byte gate" doc above), subject to the min-window-span guard and
 /// boot-gap exclusion. The blind-monitor zero-sample clause is a second,
-/// independent hard gate, and that one is unconditional: it asserts harness
+/// independent hard gate, and it too is unconditional: it asserts harness
 /// health, not the tombstone property. RSS above is the coarse backstop.
 pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 
@@ -364,14 +361,11 @@ pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
 
 /// Minimum wall-clock span (seconds) of the last-half fit window before the
-/// per-hour slope clause is allowed to hard-gate the run in the class where it
-/// still decides.
+/// per-hour slope clause is allowed to hard-gate the run.
 ///
-/// This floor governs the slope clause alone. Its counterpart on the
-/// durable-corpus level clause — that clause's own sample and span guards — is
-/// what selects the fallback class: when the level clause cannot decide, the
-/// slope clause is the one that still decides the run, so between the two no
-/// run configuration is left ungated.
+/// This floor governs the slope clause alone. The durable-corpus level clause
+/// selects no run class away from it: that clause is report-only, so the slope
+/// decides every run, and no run configuration is left ungated.
 ///
 /// The slope is a per-hour EXTRAPOLATION (bytes/sec × 3600). Over a sub-minute
 /// window the `3600 / span_secs` amplification is enormous: a healthy short run
@@ -382,8 +376,8 @@ pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
 /// not-yet-plateaued healthy run are indistinguishable — so the clause is
 /// suppressed (no breach is emitted for it) and the assessment passes on the
 /// blind-monitor + absolute-growth clauses alone. (The slope is a HARD gate
-/// once the window clears this floor AND the durable-corpus level clause did
-/// not decide — see [`DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR`];
+/// once the window clears this floor — see
+/// [`DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR`];
 /// this floor is what keeps that hard gate from crying wolf on a short run.)
 ///
 /// 120s sits well above the smoke run's ~10-15s last-half span (suppressed) and
@@ -622,7 +616,7 @@ pub struct CorpusSample {
 pub enum CorpusLevelDisposition {
     /// L1 was evaluated and decided.
     LevelEvaluated,
-    /// L1 was NOT evaluated, so the slope clause hard-gates instead. Never "ok".
+    /// L1 was NOT evaluated. The slope clause hard-gates regardless. Never "ok".
     LevelSuppressed,
     /// L0 failed. L1 and L2 are NOT EVALUATED (fail-closed order).
     InstrumentFailed,
@@ -671,7 +665,9 @@ pub struct TombstoneCorpusAssessment {
     pub reason: Option<String>,
 }
 
-/// L0 and L1 are HARD gate clauses; L1 only when its two guards are met.
+/// L0 and L1 are REPORT-ONLY, not HARD gate clauses: a control cell with no
+/// fault injected breached L1 on its own, so `main.rs` renders and persists
+/// this verdict without folding it into the run's.
 ///
 /// The three clauses are evaluated in this order, and the order is fail-closed:
 ///
@@ -824,11 +820,14 @@ pub fn assess_tombstone_corpus_level(
     }
 }
 
-/// Whether the tombstone-byte SLOPE clause still hard-gates a run that
-/// produced this disposition. EXHAUSTIVE BY CONSTRUCTION: a fourth variant
-/// does not compile here, which is what makes the no-ungated-window coverage
-/// argument structural rather than a source-read. `main.rs`'s verdict
-/// expression consumes this and re-types no comparison of its own.
+/// Whether the tombstone-byte SLOPE clause would be the only hard-gate left on
+/// a run that produced this disposition — equivalently, whether the
+/// durable-corpus level clause decided. EXHAUSTIVE BY CONSTRUCTION: a fourth
+/// variant does not compile here, which is what makes the no-ungated-window
+/// coverage argument structural rather than a source-read. The slope now
+/// decides every run class, so the verdict expression does not consult this;
+/// `main.rs` uses it to name which corpus clause a report-only breach came
+/// from, and re-types no comparison of its own.
 #[must_use]
 // One arm per variant, deliberately not merged into a single `|` pattern: the
 // point of the enumeration is that every variant is classified in its own

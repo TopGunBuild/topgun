@@ -403,7 +403,10 @@ fn sample_report(wal_fsync: &str, epoch_width: u64) -> SoakReport {
 }
 
 /// Every verdict that the run's `passed` is hard-ANDed with must reach the JSON
-/// report, under the exact keys a consumer reads, carrying its own input.
+/// report, under the exact keys a consumer reads, carrying its own input -- and
+/// so must the durable-corpus verdict, which is report-only precisely because a
+/// control cell with no fault injected breached it, and which therefore reaches
+/// no other durable transport at all.
 ///
 /// This exists because the opposite was true and cost a real diagnosis: a run
 /// could persist `passed: false` while the slope that failed it, and the
