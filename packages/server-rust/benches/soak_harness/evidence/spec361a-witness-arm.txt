@@ -236,3 +236,101 @@ byte-unchanged in arithmetic -- the demotion changed only which verdicts the
 run's `passed` reads in main.rs. The estimator is still computed, rendered and
 persisted on every run, so the assertions these arms falsify remain live.
 
+
+==============================================================================
+APPENDIX — THE N4a CENSUS RE-RUN, CLASSIFIED (AC9 / Validation Checklist 6)
+==============================================================================
+
+Command, re-run on the branch after the demotion landed:
+
+    grep -nE 'HARD gate|hard gate|hard-gate' \
+      packages/server-rust/benches/soak_harness/monitor.rs \
+      packages/server-rust/benches/soak_harness/main.rs | wc -l
+
+Returned 36 -- monitor.rs 15, main.rs 21. HEAD 20edabde returned 30 (12 + 18).
+The arithmetic is unchanged: 30 - 0 demoted + 6 authored = 36. demoted = 0 is a
+RULE, and it held: every HEAD site was re-worded IN PLACE and every re-wording
+retained one of the three pinned phrases.
+
+EVERY ONE OF THE 36 IS CLASSIFIED. No unclassified hit. Sites are identified by
+TEXT and owning item; the line numbers below are DESCRIPTIVE.
+
+monitor.rs -- 15 = 11 in-scope + 1 out-of-scope + 3 authored
+  :69  :85  :92  :95   TABLE 1, module-doc "Note on gating responsibility"
+                       (HEAD :69 :81 :88 :91). :92 is the blind-monitor
+                       sentence, unchanged in substance.
+  :341 :348            TABLE 1, DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR
+                       (HEAD :325 :330)
+  :364 :378 :381       TABLE 1, DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS
+                       (HEAD :345 :355 :357)
+  :1388 :1406          TABLE 1, calibration_additive_only_gauge_never_plateaus
+                       doc + assert message (HEAD :1029 :1046)
+  :1597                TABLE 1, OUT OF SCOPE -- DISK (HEAD :1236). Verified
+                       byte-unedited in `git diff 20edabde..HEAD`.
+  :619                 TABLE 2, A3 -- CorpusLevelDisposition::LevelSuppressed
+  :668                 TABLE 2, A1 -- assess_tombstone_corpus_level doc
+  :823                 TABLE 2, A2 -- slope_clause_stays_hard doc
+
+main.rs -- 21 = 14 in-scope + 4 out-of-scope + 3 authored
+  :25                  TABLE 1, module-doc property 3 (HEAD :25)
+  :36                  TABLE 1, module-doc blind-monitor sentence, stays true
+                       (HEAD :34)
+  :56                  TABLE 1, module-doc, the two controls (HEAD :45)
+  :205                 TABLE 1, Config::no_ack's doc (HEAD :165)
+  :868                 TABLE 1, assess_tombstone_bytes call-site (HEAD :790)
+  :882 :907            TABLE 1, the rationale block (HEAD :803 :826); :907 is
+                       the blind-monitor sentence and stays true
+  :999                 TABLE 1, the FAIL arm / rank-4 branch (HEAD :869)
+  :1245 :1253          TABLE 1, the summary-line comment and the rendered
+                       `tombstone_role` string (HEAD :1051 :1056)
+  :1336                TABLE 1, TEXT ONLY -- a DISK comment whose claim about
+                       the tombstone slope went false (HEAD :1095). No disk
+                       predicate, constant, assessment or conjunct touched.
+  :2538 :2596          TABLE 1, the two tracked-client comments (HEAD :2128
+                       :2185), reviewed and corrected
+  :2845                TABLE 1, the --help usage text (HEAD :2426)
+  :16                  TABLE 1, OUT OF SCOPE -- QUERY/recovery (HEAD :16).
+                       Byte-unedited.
+  :943 :1341 :1342     TABLE 1, OUT OF SCOPE -- DISK (HEAD :838 :1099 :1100).
+                       Byte-unedited.
+  :954                 TABLE 2, A4 -- comment above the verdict conjunction
+  :1005                TABLE 2, A6 -- the ranked writer's rank-4 comment
+  :2830                TABLE 2, A5 -- the --tombstone-corpus-ceiling-bytes
+                       usage line
+
+All five out-of-scope lines were checked individually against
+`git diff 20edabde..HEAD` and none appears as a removed line.
+
+DISCLOSED: WHAT THE ANTI-TAUTOLOGY OUTCOME CHANGED IN THE CENSUS'S PROSE
+------------------------------------------------------------------------------
+AC9 and Table 2 were written expecting a PROMOTION, so they require the in-scope
+and authored lines to read as the CONDITIONAL role, and Table 2 pre-registers
+the EXACT authored text of A1-A6 in that conditional form. The bar failed
+instead. Under that outcome the conditional role does not exist -- the slope is
+hard in every run class and the durable-corpus clauses decide nothing -- so
+every line stating the conditional role, including all six authored ones, would
+have been a doc-contract asserting a gate shape the code does not have. That is
+precisely the false-invariant hazard this census exists to catch, so the lines
+were re-pointed to the UNCONDITIONAL role and A1-A6's registered text no longer
+matches verbatim. Their IDENTITY -- the owning item named in Table 2's third
+column -- is unchanged, which is how each is still classified above.
+
+What is held exactly is the part N4a marks normative: "COUNTS ARE NORMATIVE;
+LINE NUMBERS ARE DESCRIPTIVE." The count is 36, split 15 / 21; demoted = 0;
+every line retains a pinned phrase; every hit is classified.
+
+AC9's closing rule -- "no in-scope or authored line may read as an
+unconditional 'is now a HARD gate'" -- is also held, on its own terms: that rule
+guards against overclaiming the NEW durable-corpus clause as a promoted gate,
+and no line does. Several lines do state that the tombstone-byte SLOPE is
+unconditionally hard, which is HEAD's own shape restored, not a promotion.
+
+PINNED COUNTS AT THE SAME MOMENT
+------------------------------------------------------------------------------
+  grep -c 'slope_clause_stays_hard'                      main.rs  ->  2  (>= 1)
+  grep -c 'CorpusLevelDisposition::LevelEvaluated'       main.rs  ->  0  (= 0)
+  grep -c 'finished_reason = '                           main.rs  ->  6  (HEAD 9)
+  grep -c '"duration reached"'                           main.rs  ->  1  (HEAD 1)
+  grep -rn 'SPEC-3' benches/soak_harness --include='*.rs' | wc -l ->  9  (2 files)
+  grep -rn 'SPEC-3' src --include='*.rs'                 | wc -l  -> 29  (10 files)
+  grep -c 'SPEC-3' tests/soak_wal_census.rs                       ->  0
