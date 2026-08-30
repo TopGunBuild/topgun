@@ -977,23 +977,31 @@ async fn run_soak(config: &Config) -> i32 {
                 tombstones.reason.clone().unwrap_or_default()
             ))
         } else if !corpus.passed {
-            // Rank 3, switched on the disposition so the reason names the
-            // clause that actually fired rather than the gate as a whole.
-            Some(match corpus.disposition {
-                CorpusLevelDisposition::InstrumentFailed => format!(
-                    "durable-corpus instrument failed: {}",
-                    corpus.reason.clone().unwrap_or_default()
-                ),
-                CorpusLevelDisposition::LevelEvaluated => format!(
+            // Rank 3, switched so the reason names the clause that actually
+            // fired rather than the gate as a whole. The level / not-level
+            // split is taken from the same exhaustive predicate the verdict
+            // conjunction above uses, so the verdict and the reason cannot
+            // disagree about which clause was live.
+            Some(if slope_clause_stays_hard(corpus.disposition) {
+                // The level clause did not decide. Either the instrument was
+                // blind, or - the instrument being sound - the absolute
+                // ceiling is the only clause left that can have breached.
+                if corpus.disposition == CorpusLevelDisposition::InstrumentFailed {
+                    format!(
+                        "durable-corpus instrument failed: {}",
+                        corpus.reason.clone().unwrap_or_default()
+                    )
+                } else {
+                    format!(
+                        "durable-corpus ceiling assertion failed: {}",
+                        corpus.reason.clone().unwrap_or_default()
+                    )
+                }
+            } else {
+                format!(
                     "durable-corpus level assertion failed: {}",
                     corpus.reason.clone().unwrap_or_default()
-                ),
-                // The level clause did not decide here, so the absolute
-                // ceiling is the only clause that can have breached.
-                CorpusLevelDisposition::LevelSuppressed => format!(
-                    "durable-corpus ceiling assertion failed: {}",
-                    corpus.reason.clone().unwrap_or_default()
-                ),
+                )
             })
         } else if slope_clause_stays_hard(corpus.disposition) && !tombstones.passed {
             // HARD gate (promoted from report-only): with the tracked-and-ACKing
@@ -1261,9 +1269,10 @@ fn print_summary(
             corpus.samples,
             corpus.span_secs
         ),
-        CorpusLevelDisposition::LevelEvaluated | CorpusLevelDisposition::InstrumentFailed => {
-            corpus.disposition.as_str().to_string()
-        }
+        // Every other disposition renders its bare token, taken from the same
+        // `as_str` the JSON report serializes through so the console and the
+        // artifact cannot disagree.
+        _ => corpus.disposition.as_str().to_string(),
     };
     // A disarmed ceiling renders as the word, never as an absent token:
     // "disarmed" and "armed at n" have to be distinguishable on the line.
