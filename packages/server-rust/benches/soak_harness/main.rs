@@ -1608,11 +1608,11 @@ fn sample_durable_corpus_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
 ///
 /// Returns `None` on any failure (file missing, corrupt header, table absent)
 /// — best-effort, mirroring `sample_rss_mb`/`sample_disk_mb`'s None-on-failure
-/// contract. That `None` is no longer a report-only "could not scan" skip: it
-/// is the durable-corpus gate's INSTRUMENT-clause FAIL input, and at a live
-/// checkpoint a failed COPY reaches the same clause by the same path, so a
-/// blind instrument fails the run instead of reading as bounded growth. An
-/// honest `Some(0)` from a never-written table stays distinguishable from it.
+/// contract. That `None` is the durable-corpus INSTRUMENT clause's breach
+/// input, and at a live checkpoint a failed COPY reaches the same clause by the
+/// same path. The clause is report-only, so a blind instrument is recorded on
+/// `pending_gates` rather than failing the run. An honest `Some(0)` from a
+/// never-written table stays distinguishable from it.
 fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Option<u64> {
     let db_path = data_dir.join("topgun.redb");
     if !db_path.exists() {

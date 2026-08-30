@@ -1386,8 +1386,8 @@ mod tests {
     /// looks for cannot occur. This test feeds exactly that monotone shape (well
     /// past the min-window floor) and asserts the assessment reports NOT-passed
     /// — which is precisely the hard-gate failure `main.rs` asserts on for this
-    /// scenario whenever the durable-corpus level clause did not decide the run
-    /// (see the module doc's "Tombstone-byte gate" section).
+    /// scenario in every run class; the durable-corpus level clause beside it is
+    /// report-only (see the module doc's "Tombstone-byte gate" section).
     #[test]
     fn calibration_additive_only_gauge_never_plateaus() {
         // ~6h of steady creation at 5000 B/h — a multi-hour last-half window
@@ -1404,7 +1404,7 @@ mod tests {
             !a.passed,
             "an unbounded monotone-growth shape (no low-water-mark driver) must \
              NOT be reported as a plateau — this is the hard-gate FAIL `main.rs` \
-             asserts on when the durable-corpus level clause did not decide; \
+             asserts on in every run class; \
              slope={:.1} reason={:?}",
             a.slope_bytes_per_hour, a.reason
         );
@@ -1759,7 +1759,8 @@ mod tests {
         assert_eq!(a.disposition, CorpusLevelDisposition::InstrumentFailed);
         assert!(
             !a.passed,
-            "a blind scan must fail the run closed; reason={:?}",
+            "a blind scan must be assessed NOT-passed and typed InstrumentFailed; \
+             the clause itself is report-only. reason={:?}",
             a.reason
         );
     }
