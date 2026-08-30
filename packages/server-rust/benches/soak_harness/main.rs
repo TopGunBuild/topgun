@@ -22,7 +22,9 @@
 //!    (last-half-window OLS, boot-recompute-gap samples excluded — see
 //!    `monitor.rs`) is computed against a tight per-hour threshold — a direct,
 //!    residency-independent leak signal with no allocator/cache noise floor.
-//!    The slope is a HARD gate: a tracked-and-ACKing client
+//!    The slope is a HARD gate in every run class. The durable-corpus level
+//!    clause below is report-only and takes no run class over from it.
+//!    A tracked-and-ACKing client
 //!    (`SoakClient::connect_tracked` + `confirm_apply`) is driven alongside the
 //!    churn clients for the run's duration so the server's per-device causal
 //!    frontier — and therefore its low-water-mark — actually advances, which is
@@ -31,7 +33,16 @@
 //!    guard (`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`) keeps a
 //!    too-short-to-plateau run (e.g. the 25s blocking smoke) from false-REDing
 //!    on a not-yet-flattened ramp, and the blind-monitor (zero-sample) clause
-//!    hard-gates independently of the slope. Server RSS is sampled in parallel
+//!    hard-gates independently of the slope. Beside the gauge, the DURABLE
+//!    corpus itself is sampled from a byte copy of the datastore at every
+//!    recovery checkpoint: a blind sampler, a recent half peaking more than
+//!    the configured headroom above the earlier half, and a peak above an
+//!    armed ceiling are each recorded and rendered. All three are REPORT-ONLY,
+//!    because a control cell with no fault injected at all breached the
+//!    headroom clause on its own — an instrument that fires on an unperturbed
+//!    run cannot yet tell a leak from ordinary growth, so it decides no
+//!    verdict and takes nothing over from the gauge slope above.
+//!    Server RSS is sampled in parallel
 //!    and asserted against a looser slope as a coarse, non-tombstone backstop
 //!    gate. The on-disk data-dir slope (below) remains REPORT-ONLY — bounding
 //!    it is a separate, not-yet-landed follow-up.
@@ -41,18 +52,25 @@
 //! Two **negative controls** prove the harness can actually fail:
 //! `--inject-divergence` makes the convergence check go red, and
 //! `--inject-panic` makes the panic capture go red. A soak that cannot fail
-//! proves nothing. Two more MODES exist specifically to prove the promoted
-//! tombstone-byte hard gate above is honest: `--no-ack` disables the tracked
+//! proves nothing. Two more MODES exist specifically to prove the
+//! durable-corpus instrument and the tombstone-byte hard gate above are
+//! honest: `--no-ack` disables the tracked
 //! client's confirm-apply loop (the low-water-mark then never advances, prune
 //! never fires, and the gate must FAIL under sustained churn), and
 //! `--inject-slow-leak` adds a second, deliberately slow-acking tracked client
 //! whose stale cursor repeatedly caps the fleet-wide low-water-mark — a bounded
 //! ramp-then-catch-up pattern used to calibrate the OLS slope's detection floor
 //! against a small, non-instantaneous leak rather than only total blockage.
-//! Independently of the gauge, `scan_redb_tombstone_corpus` opens the server's
-//! own redb file after it exits and sums the real on-disk tombstone corpus —
-//! the positive control's cross-check against a gauge/corpus divergence (e.g. a
-//! legacy `OrTombstones` blob the hot-path gauge never counted on add).
+//! Independently of the gauge, `scan_redb_tombstone_corpus` sums the real
+//! on-disk tombstone corpus. It runs once per recovery checkpoint — between
+//! the `kill -9` and the restart, over a BYTE COPY on a scratch path outside
+//! the data dir, because opening a redb file that closed uncleanly repairs and
+//! commits it and the instrument must not run the server's recovery ahead of
+//! the server — and once terminally after the process exits, where it reads
+//! the data dir directly because nothing boots after it. The resulting series
+//! feeds the durable-corpus level/ceiling assessment, and its terminal value
+//! still cross-checks the gauge for a gauge/corpus divergence (e.g. a legacy
+//! `OrTombstones` blob the hot-path gauge never counted on add).
 //!
 //! See `benches/soak_harness/README.md` for usage and the Hetzner 72h runner.
 
@@ -74,6 +92,12 @@ mod client;
 mod model;
 mod monitor;
 mod or_noloss;
+// The recovery checkpoint expanded `ServerSupervisor::restart` in place — it
+// has to take a corpus sample between the kill and the start — so no caller
+// inside this binary is left. `restart` itself is deliberately kept: its
+// contract is unchanged and `tests/soak_tombstone_restart.rs`, which includes
+// this same module, still calls it.
+#[allow(dead_code)]
 mod process;
 mod report;
 
@@ -91,18 +115,22 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use client::SoakClient;
 use model::{compare, next_stamp, Model};
 use monitor::{
-    assess, assess_disk, assess_tombstone_bytes, exclude_boot_gap_samples, sample_disk_mb,
-    sample_rss_mb, BootGap, DiskAssessment, DiskSample, MemSample, TombstoneAssessment,
-    TombstoneSample, DEFAULT_DISK_CEILING_MB, DEFAULT_DISK_MIN_GROWTH_MB,
-    DEFAULT_DISK_THRESHOLD_MB_PER_HOUR, DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-    DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS, DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+    assess, assess_disk, assess_tombstone_bytes, assess_tombstone_corpus_level,
+    exclude_boot_gap_samples, sample_disk_mb, sample_rss_mb, slope_clause_stays_hard, BootGap,
+    CorpusLevelDisposition, CorpusSample, DiskAssessment, DiskSample, MemSample,
+    TombstoneAssessment, TombstoneCorpusAssessment, TombstoneSample, DEFAULT_DISK_CEILING_MB,
+    DEFAULT_DISK_MIN_GROWTH_MB, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
+    DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH, DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+    DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR, DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES,
+    DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES, DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
+    DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
 };
 use or_noloss::{missing_acked_adds, OrLedger};
 use process::{resolve_server_binary, ServerConfig, ServerSupervisor};
 use report::{
     append_progress, effective_epoch_width, scan_wal_frame_sizes, utc_timestamp_now, write_report,
-    ConfirmApplyReport, DiskReport, MemoryReport, ProgressSnapshot, SoakReport, TombstoneReport,
-    WalFrameStats,
+    ConfirmApplyReport, DiskReport, MemoryReport, ProgressSnapshot, SoakReport,
+    TombstoneCorpusReport, TombstoneReport, WalFrameStats,
 };
 use topgun_server::storage::record::RecordValue;
 
@@ -127,6 +155,18 @@ const SLOW_LEAK_ACK_INTERVAL: Duration = Duration::from_secs(90);
 
 const LWW_MAP: &str = "soak_lww";
 const OR_MAP: &str = "soak_or";
+
+/// The rendered prefix of the durable-corpus gate's verdict line. Single
+/// source of truth: both `println!` sites and every assertion take it from
+/// here, so a rename REDs loudly instead of missing silently.
+const TOMBSTONE_CORPUS_LINE_PREFIX: &str = "tombstone_corpus_redb_scan:";
+
+/// The `finished_reason` a run carries when nothing wrote a breach reason.
+/// Single source of truth: the initialiser and the ranked verdict writer's
+/// rank-0 guard both take it from here, so rewording the default cannot
+/// silently disable rank 0 and let the verdict block overwrite an
+/// earlier-phase reason.
+const FINISHED_REASON_DURATION_REACHED: &str = "duration reached";
 
 /// Parsed CLI configuration.
 struct Config {
@@ -161,8 +201,9 @@ struct Config {
     confirm_interval: Duration,
     /// Negative control: disables the tracked client's confirm-apply loop
     /// entirely. With no client ever confirming, the low-water-mark stays 0,
-    /// prune never fires, and sustained OR churn must trip the promoted
-    /// tombstone-byte hard gate.
+    /// prune never fires, and sustained OR churn must trip the tombstone-byte
+    /// hard gate — with the report-only durable-corpus instrument recording
+    /// the same growth alongside it.
     no_ack: bool,
     /// Adds a second tracked client (`SLOW_LEAK_TRACKER_IDX`) that ACKs on a
     /// much slower cadence than the primary tracker. Because the low-water-mark
@@ -178,6 +219,14 @@ struct Config {
     /// This is the assertion mode that proves acked == durable on `kill -9` under
     /// load: it does NOT depend on a pre-kill flush masking a durability gap.
     no_pre_kill_drain: bool,
+    /// Slack, in bytes, the durable-corpus LEVEL clause allows the recent half
+    /// of the corpus series to sit above the earlier half by before it breaches.
+    /// Exposed so a measurement round can retune the clause without a rebuild.
+    tombstone_corpus_headroom_bytes: u64,
+    /// Absolute durable-corpus ceiling, in bytes. `None` leaves the ceiling
+    /// clause DISARMED, which is the default: arming it honestly needs a
+    /// validated number, and this flag is how a run supplies one.
+    tombstone_corpus_ceiling_bytes: Option<u64>,
     /// Opt-in measurement mode: after the run, scan the retained WAL segment
     /// files and emit a structured mechanism report (Q1-Q4) attributing the
     /// OR-churn WAL+RSS growth. REPORT-ONLY — never affects `passed`, so it
@@ -232,6 +281,8 @@ impl Default for Config {
             no_ack: false,
             inject_slow_leak: false,
             no_pre_kill_drain: false,
+            tombstone_corpus_headroom_bytes: DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
+            tombstone_corpus_ceiling_bytes: DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES,
             mechanism_report: false,
             mode_requested: false,
         }
@@ -379,6 +430,20 @@ async fn run_soak(config: &Config) -> i32 {
                 return 2;
             }
         },
+    };
+
+    // Scratch root for the durable-corpus sampler's byte copies. Created ONCE
+    // and OUTSIDE `data_dir`, because the disk gate's input is `du -sk` over
+    // `data_dir` and a copy written inside it would step that gate's own
+    // measurement. The guard removes the whole tree when the run returns, on
+    // the pass path and the fail path alike, so a failing run leaves nothing
+    // behind; each sample already deletes its own copy long before that.
+    let (corpus_scratch, _corpus_scratch_guard) = match tempfile::tempdir() {
+        Ok(td) => (td.path().to_path_buf(), td),
+        Err(e) => {
+            eprintln!("FATAL: cannot create corpus scratch dir: {e}");
+            return 2;
+        }
     };
 
     let port = if config.server_port == 0 {
@@ -598,6 +663,11 @@ async fn run_soak(config: &Config) -> i32 {
         boot_gaps: Arc::clone(&boot_gaps),
     };
 
+    // Durable-corpus series: one sample per recovery checkpoint (taken from a
+    // byte copy while the child is reaped) plus the terminal scan, all on the
+    // same `sampler_start` clock as the RSS/tombstone-byte/disk series.
+    let corpus_sampler = CorpusSampler::new(data_dir.clone(), corpus_scratch);
+
     // --- Orchestration loop ---
     let start = Instant::now();
     let deadline = start + config.duration;
@@ -615,7 +685,7 @@ async fn run_soak(config: &Config) -> i32 {
     // reported, and never fails the run on this (322a) branch.
     let mut pending_gates: Vec<String> = Vec::new();
     let mut last_convergence_ok = true;
-    let mut finished_reason = "duration reached".to_string();
+    let mut finished_reason = FINISHED_REASON_DURATION_REACHED.to_string();
 
     loop {
         let now = Instant::now();
@@ -646,6 +716,7 @@ async fn run_soak(config: &Config) -> i32 {
                 config,
                 &paused,
                 &boot_gap_clock,
+                &corpus_sampler,
             )
             .await
             {
@@ -769,13 +840,20 @@ async fn run_soak(config: &Config) -> i32 {
         None
     };
 
-    // Positive-control independent corpus assertion (R5): the server process
-    // has just been reaped, so its redb handle is released and this scan can
-    // safely open the same file. REPORT-ONLY (printed in the console summary,
-    // never asserted into `passed`) — see `scan_redb_tombstone_corpus`'s doc
-    // for why a divergence from the gauge's `last_bytes` below is exactly the
-    // failure mode this exists to catch.
+    // The TERMINAL corpus scan: the server process has just been reaped, so its
+    // redb handle is released and this scan can safely open the same file
+    // directly — no copy, because nothing boots after it. It contributes the
+    // final sample of the durable-corpus series, which feeds the instrument,
+    // level and ceiling clauses rendered below. Its cross-check against the
+    // gauge's
+    // `last_bytes` survives on the same rendered line — see
+    // `scan_redb_tombstone_corpus`'s doc for why a divergence there is exactly
+    // the failure mode this exists to catch.
     let redb_tombstone_scan = scan_redb_tombstone_corpus(&data_dir, OR_MAP);
+    corpus_sampler.record_terminal_scan(
+        boot_gap_clock.sampler_start.elapsed().as_secs_f64(),
+        redb_tombstone_scan,
+    );
 
     // --- Assess memory (secondary/backstop gate) ---
     let mem_samples = samples.lock().clone();
@@ -787,8 +865,9 @@ async fn run_soak(config: &Config) -> i32 {
     );
 
     // --- Assess tombstone-byte growth (direct residency-independent leak
-    // instrument, the bounded-plateau signal — a HARD gate, see the promotion
-    // note below). Coexists with the RSS gate above as a coarse non-tombstone
+    // instrument, the bounded-plateau signal — a HARD gate in every run
+    // class, see the note below).
+    // Coexists with the RSS gate above as a coarse non-tombstone
     // backstop — neither replaces the other. The sampling loop already
     // excluded boot-recompute-gap samples (R9(c)), so this series is safe to
     // fit directly.
@@ -800,8 +879,10 @@ async fn run_soak(config: &Config) -> i32 {
         DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
     );
 
-    // The tombstone-byte SLOPE clause is now a HARD gate (promoted from
-    // report-only): the tracked-and-ACKing client spawned above
+    // The tombstone-byte SLOPE clause is an UNCONDITIONAL HARD gate: it
+    // decides the verdict in every run class, and the durable-corpus level
+    // clause below takes none of them over, because that clause is
+    // report-only. The tracked-and-ACKing client spawned above
     // (`run_tracked_confirm_client` / `TRACKER_IDX`) drives the server's
     // per-device causal frontier forward every `confirm_interval`, so the
     // fleet-wide low-water-mark actually advances and the epoch-scoped prune
@@ -829,6 +910,30 @@ async fn run_soak(config: &Config) -> i32 {
     // nothing must not pass.
     let blind_monitor = tombstones.samples == 0;
 
+    // --- Assess the DURABLE tombstone corpus: the level/ceiling instrument
+    // that reads the on-disk corpus itself rather than the exported gauge.
+    // Its clauses are REPORT-ONLY and none of them is ANDed into the run
+    // verdict below. The INSTRUMENT clause flags a run whose sampler could not
+    // obtain the state at some checkpoint — a blind instrument must never be
+    // read as bounded growth. The LEVEL clause compares the peak of the
+    // series' recent half against the peak of its earlier half, and decides
+    // only on a series long enough for that comparison to mean anything (the
+    // sample and span guards). A live control cell with no fault injected
+    // breached the level clause on its own, so the clause is not yet able to
+    // separate a leak from ordinary growth and must not fail honest runs; the
+    // byte slope above therefore keeps gating every run class, and no run
+    // configuration is left ungated.
+    let corpus_snapshot = corpus_sampler.snapshot();
+    let corpus = assess_tombstone_corpus_level(
+        &corpus_snapshot.samples,
+        corpus_snapshot.scans_attempted,
+        corpus_snapshot.scans_failed,
+        config.tombstone_corpus_headroom_bytes,
+        DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
+        DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
+        config.tombstone_corpus_ceiling_bytes,
+    );
+
     // --- Assess disk growth (durable-dir footprint; catches leaks RSS cannot
     // see, e.g. lazy-loaded records that never touch the in-memory cache).
     // Mirrors the tombstone-byte gate exactly: the SLOPE is report-only (the
@@ -846,6 +951,14 @@ async fn run_soak(config: &Config) -> i32 {
     let disk_blind_monitor = disk.samples == 0;
 
     let panic_report = panic_watch.report();
+    // The tombstone-byte slope is the HARD gate, in every run class and with
+    // no guard in front of it. The durable-corpus verdict is deliberately
+    // absent from this conjunction: the control cell that injected no fault at
+    // all breached the level clause on its own, which destroys attribution —
+    // an instrument that reds an unperturbed run would fail honest runs rather
+    // than leaking ones. It is still computed, still rendered and still
+    // serialized on every run, and a breach is recorded on `pending_gates`
+    // below, so demoting it hides nothing and gates nothing.
     let passed = convergence_failures.is_empty()
         && recovery_failures.is_empty()
         && mem.passed
@@ -854,40 +967,95 @@ async fn run_soak(config: &Config) -> i32 {
         && !disk_blind_monitor
         && panic_report.is_none();
 
-    if !mem.passed {
-        finished_reason = format!(
-            "memory growth assertion failed: {}",
-            mem.reason.clone().unwrap_or_default()
-        );
+    // ONE ranked writer for `finished_reason`, in place of four independent
+    // assignments whose last one happened to win. The precedence is decided
+    // here rather than by source order: a cause unrelated to the tombstone
+    // gates outranks a gate verdict, so a broken run can never read as a clean
+    // gate demonstration. On a run with a single failure the
+    // string is what it was before; only multi-failure runs re-order, and they
+    // re-order toward the unrelated cause. Rank 3 — the durable-corpus arm —
+    // writes no reason at all now that those clauses are report-only: a run
+    // they cannot fail must not be handed a reason saying they failed it.
+    //
+    // Rank 0: an earlier phase — convergence divergence, crash-recovery
+    // mismatch, server panic — already wrote a reason, so this writer does not
+    // fire at all and that reason survives. The sentinel it switches on comes
+    // from the source constant, never a retyped literal.
+    if finished_reason == FINISHED_REASON_DURATION_REACHED {
+        let ranked = if !mem.passed {
+            // Rank 1.
+            Some(format!(
+                "memory growth assertion failed: {}",
+                mem.reason.clone().unwrap_or_default()
+            ))
+        } else if blind_monitor {
+            // Rank 2: the scrape was dead, which is a harness defect
+            // independent of any leak magnitude.
+            Some(format!(
+                "tombstone-byte monitoring blind: {}",
+                tombstones.reason.clone().unwrap_or_default()
+            ))
+        } else if !tombstones.passed {
+            // An UNCONDITIONAL HARD gate: with the tracked-and-ACKing
+            // client driving the low-water-mark, a sustained slope breach past the
+            // min-window-guarded threshold means the epoch-scoped prune is not
+            // keeping up with (or has stopped) bounding tombstone growth — a real
+            // regression, not an expected/known gap. AND it into `passed`.
+            //
+            // Rank 4: the slope clause, which hard-gates every run class. The
+            // guard is exactly the verdict's own term above, so the verdict and
+            // the reason cannot disagree, and a passing run cannot carry a
+            // failure reason.
+            Some(format!(
+                "tombstone-byte growth slope {:.1} bytes/h exceeds {:.1} bytes/h: {}",
+                tombstones.slope_bytes_per_hour,
+                DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+                tombstones.reason.clone().unwrap_or_default()
+            ))
+        } else if disk_blind_monitor {
+            // Rank 5.
+            Some(format!(
+                "disk monitoring blind: {}",
+                disk.reason.clone().unwrap_or_default()
+            ))
+        } else {
+            // Ranks 6-8 write no reason: the disk slope is report-only, the
+            // panic report travels on its own two transports, and a run with
+            // nothing to report keeps the default.
+            None
+        };
+        if let Some(reason) = ranked {
+            finished_reason = reason;
+        }
     }
-    if blind_monitor {
-        finished_reason = format!(
-            "tombstone-byte monitoring blind: {}",
-            tombstones.reason.clone().unwrap_or_default()
-        );
-    } else if !tombstones.passed {
-        // HARD gate (promoted from report-only): with the tracked-and-ACKing
-        // client driving the low-water-mark, a sustained slope breach past the
-        // min-window-guarded threshold means the epoch-scoped prune is not
-        // keeping up with (or has stopped) bounding tombstone growth — a real
-        // regression, not an expected/known gap. AND it into `passed`.
-        finished_reason = format!(
-            "tombstone-byte growth slope {:.1} bytes/h exceeds {:.1} bytes/h: {}",
-            tombstones.slope_bytes_per_hour,
-            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-            tombstones.reason.clone().unwrap_or_default()
-        );
+    if !corpus.passed {
+        // The durable-corpus clauses decide nothing, so a breach is recorded
+        // here instead of failing the run — the same channel the disk slope
+        // below uses for an observation that is real but not yet gate-worthy.
+        // Which clause to name comes from the exhaustive disposition predicate,
+        // so a future fourth disposition cannot land silently on either side of
+        // the split, and this block re-types no comparison of its own.
+        let clause = if slope_clause_stays_hard(corpus.disposition) {
+            if corpus.disposition == CorpusLevelDisposition::InstrumentFailed {
+                "instrument failed"
+            } else {
+                "ceiling assertion failed"
+            }
+        } else {
+            "level assertion failed"
+        };
+        pending_gates.push(format!(
+            "durable-corpus {clause}: {} (report-only, did NOT fail the run)",
+            corpus.reason.clone().unwrap_or_default()
+        ));
     }
-    if disk_blind_monitor {
-        finished_reason = format!(
-            "disk monitoring blind: {}",
-            disk.reason.clone().unwrap_or_default()
-        );
-    } else if !disk.passed {
+    if !disk_blind_monitor && !disk.passed {
         // Report-only, same rationale as the tombstone-byte slope above: the
         // pre-566 OR churn grows the durable dir linearly by design, so this is
         // the EXPECTED honest signal, not a regression. Do NOT AND this into
-        // `passed`.
+        // `passed`. Rank 6 of the precedence above, and deliberately NOT a
+        // reason writer: it appends to `pending_gates` and nothing else, as at
+        // HEAD.
         pending_gates.push(format!(
             "disk growth slope {:.1} MB/h exceeds {:.1} MB/h — EXPECTED until \
              TODO-566 bounds OR-Map tombstones (report-only, did NOT fail the run)",
@@ -937,6 +1105,23 @@ async fn run_soak(config: &Config) -> i32 {
             passed: tombstones.passed,
             reason: tombstones.reason.clone(),
         },
+        tombstone_corpus: TombstoneCorpusReport {
+            scans_attempted: corpus.scans_attempted,
+            scans_failed: corpus.scans_failed,
+            samples: corpus.samples,
+            first_bytes: corpus.first_bytes,
+            min_bytes: corpus.min_bytes,
+            peak_bytes: corpus.peak_bytes,
+            last_bytes: corpus.last_bytes,
+            first_half_peak_bytes: corpus.first_half_peak_bytes,
+            last_half_peak_bytes: corpus.last_half_peak_bytes,
+            rise_bytes: corpus.rise_bytes,
+            span_secs: corpus.span_secs,
+            disposition: corpus.disposition,
+            ceiling_bytes: corpus.ceiling_bytes,
+            passed: corpus.passed,
+            reason: corpus.reason.clone(),
+        },
         disk: DiskReport {
             samples: disk.samples,
             first_mb: disk.first_mb,
@@ -957,7 +1142,14 @@ async fn run_soak(config: &Config) -> i32 {
         timestamp: utc_timestamp_now(),
     };
 
-    print_summary(&report, &tombstones, &disk, redb_tombstone_scan);
+    print_summary(
+        &report,
+        &tombstones,
+        &disk,
+        &corpus,
+        config.tombstone_corpus_headroom_bytes,
+        redb_tombstone_scan,
+    );
     if let Some(path) = &config.json_output {
         write_report(path, &report);
         println!("wrote JSON report to {}", path.display());
@@ -1014,6 +1206,8 @@ fn print_summary(
     r: &SoakReport,
     tombstones: &TombstoneAssessment,
     disk: &DiskAssessment,
+    corpus: &TombstoneCorpusAssessment,
+    corpus_headroom_bytes: u64,
     redb_tombstone_scan: Option<u64>,
 ) {
     println!("\n=== SOAK SUMMARY ===");
@@ -1048,12 +1242,15 @@ fn print_summary(
         r.memory.slope_mb_per_hour,
         if r.memory.passed { "ok" } else { "FAIL" }
     );
-    // The byte SLOPE is now a HARD gate: the tracked-and-ACKing client drives
+    // The byte SLOPE is a HARD gate in every run class; the durable-corpus
+    // level clause beside it is report-only and takes none of them over. The
+    // tracked-and-ACKing client drives
     // the low-water-mark forward, so the epoch-scoped prune actually fires and
     // the gauge is expected to plateau under sustained churn (subject to the
     // min-window-span guard and boot-gap exclusion). See the run-end verdict
     // rationale.
-    let tombstone_role = "slope + blind-monitor both hard-gate";
+    let tombstone_role =
+        "slope + blind-monitor both hard-gate; durable-corpus clauses are report-only";
     println!(
         "tombstone_bytes:   first={} peak={} last={} slope={:.1}B/h samples={} -> {} ({}){}",
         tombstones.first_bytes,
@@ -1068,31 +1265,76 @@ fn print_summary(
             .as_ref()
             .map_or_else(String::new, |r| format!(" reason={r}")),
     );
-    // Positive-control cross-check (R5): an independent, gauge-free scan of the
-    // real on-disk tombstone corpus, taken after the server process exited. A
-    // large divergence from `tombstones.last_bytes` above means the exported
-    // gauge is not tracking the true corpus (e.g. an un-migrated legacy
-    // `OrTombstones` blob the hot-path gauge never added on read) — REPORT-ONLY,
-    // never asserted into `passed`.
+    // The durable-corpus gate's own verdict line, rendered under the single
+    // prefix constant so no site retypes it. Its content and meaning changed
+    // with the gate: it was a report-only positive-control cross-check against
+    // the gauge, and it now carries the gate's verdict, the clause that decided
+    // it, the pre-registered series aggregates and both knob values. The
+    // gauge cross-check rides along on the same line — a divergence from
+    // `tombstones.last_bytes` still means the exported gauge is not tracking
+    // the true corpus (e.g. an un-migrated legacy `OrTombstones` blob the
+    // hot-path gauge never added on read).
+    let corpus_disposition = match corpus.disposition {
+        // A suppressed clause is rendered WITH the two numbers that suppressed
+        // it, never as a pass: a clause that did not decide must not be
+        // indistinguishable from one that decided and was satisfied.
+        CorpusLevelDisposition::LevelSuppressed => format!(
+            "{}(n={}, span={:.0}s)",
+            corpus.disposition.as_str(),
+            corpus.samples,
+            corpus.span_secs
+        ),
+        // Every other disposition renders its bare token, taken from the same
+        // `as_str` the JSON report serializes through so the console and the
+        // artifact cannot disagree.
+        _ => corpus.disposition.as_str().to_string(),
+    };
+    // A disarmed ceiling renders as the word, never as an absent token:
+    // "disarmed" and "armed at n" have to be distinguishable on the line.
+    let corpus_ceiling = corpus
+        .ceiling_bytes
+        .map_or_else(|| "disarmed".to_string(), |c| c.to_string());
+    let corpus_reason = corpus
+        .reason
+        .as_ref()
+        .map_or_else(String::new, |r| format!(" reason={r}"));
+    let corpus_tokens = format!(
+        "first={} min={} peak={} last={} first_half_peak={} last_half_peak={} rise={} \
+         span={:.0}s scans_ok={} scans_failed={} headroom={} ceiling={} disposition={} -> {}",
+        corpus.first_bytes,
+        corpus.min_bytes,
+        corpus.peak_bytes,
+        corpus.last_bytes,
+        corpus.first_half_peak_bytes,
+        corpus.last_half_peak_bytes,
+        corpus.rise_bytes,
+        corpus.span_secs,
+        corpus.scans_attempted.saturating_sub(corpus.scans_failed),
+        corpus.scans_failed,
+        corpus_headroom_bytes,
+        corpus_ceiling,
+        corpus_disposition,
+        if corpus.passed { "ok" } else { "FAIL" },
+    );
     match redb_tombstone_scan {
         Some(scanned_bytes) => {
             let gauge_bytes = tombstones.last_bytes;
             let diverged = scanned_bytes != gauge_bytes;
             println!(
-                "tombstone_corpus_redb_scan: {scanned_bytes} bytes (independent of gauge; last \
-                 gauge value {gauge_bytes} bytes) -> {} (positive-control cross-check, \
-                 report-only)",
+                "{TOMBSTONE_CORPUS_LINE_PREFIX} {corpus_tokens} (terminal scan {scanned_bytes} \
+                 bytes; last gauge value {gauge_bytes} bytes -> {}){corpus_reason}",
                 if diverged { "DIVERGED" } else { "match" }
             );
         }
         None => {
             println!(
-                "tombstone_corpus_redb_scan: could not scan (missing/corrupt redb file or \
-                 table) — positive-control cross-check skipped, report-only"
+                "{TOMBSTONE_CORPUS_LINE_PREFIX} {corpus_tokens} (terminal scan could not read the \
+                 durable corpus — counted as a failed scan){corpus_reason}"
             );
         }
     }
-    // Unlike the tombstone-byte slope above (now a hard gate), the disk slope
+    // Unlike the tombstone-byte slope above (a hard gate in every run
+    // class), the disk slope
     // stays REPORT-ONLY: it is EXPECTED to breach pre-TODO-566 under default
     // OR-churn (linear durable-dir growth by design, independent of the
     // tombstone prune this spec drives); only the blind-monitor (zero-sample)
@@ -1195,6 +1437,133 @@ fn parse_tombstone_bytes_gauge(body: &str) -> Option<u64> {
     None
 }
 
+/// Durable-corpus series accumulated across a run, plus the two scan counters
+/// the instrument clause is decided on.
+///
+/// `scans_attempted` is incremented ONCE per checkpoint. A checkpoint that
+/// could not obtain the state — whether the byte copy failed or the scan
+/// itself returned `None` — increments `scans_failed` and pushes no sample:
+/// an instrument that was blind is blind whichever step failed, and there is
+/// no third outcome and no silent skip.
+#[derive(Debug, Default, Clone)]
+struct CorpusScanTally {
+    samples: Vec<CorpusSample>,
+    scans_attempted: usize,
+    scans_failed: usize,
+}
+
+/// The durable-corpus sampler's per-run state, bundled the way the boot-gap
+/// clock above is: the recovery checkpoint takes one parameter for it instead
+/// of three. It holds the server's data dir (the copy's SOURCE), the scratch
+/// root the copies are written to — deliberately OUTSIDE the data dir — and
+/// the shared sink the samples and counters land in.
+struct CorpusSampler {
+    data_dir: PathBuf,
+    scratch_root: PathBuf,
+    tally: Mutex<CorpusScanTally>,
+}
+
+impl CorpusSampler {
+    fn new(data_dir: PathBuf, scratch_root: PathBuf) -> Self {
+        Self {
+            data_dir,
+            scratch_root,
+            tally: Mutex::new(CorpusScanTally::default()),
+        }
+    }
+
+    /// The accumulated series and counters, as the estimator consumes them.
+    fn snapshot(&self) -> CorpusScanTally {
+        self.tally.lock().clone()
+    }
+
+    /// Fold the TERMINAL scan onto the same two counters as the checkpoint
+    /// samples. That scan is the one siting that reads the data dir directly
+    /// and takes no copy: it runs post-teardown, nothing boots after it, so
+    /// there is nothing left for the instrument to stay neutral toward.
+    fn record_terminal_scan(&self, elapsed_secs: f64, scanned: Option<u64>) {
+        let mut t = self.tally.lock();
+        t.scans_attempted += 1;
+        match scanned {
+            Some(bytes) => t.samples.push(CorpusSample {
+                elapsed_secs,
+                bytes,
+            }),
+            None => t.scans_failed += 1,
+        }
+    }
+}
+
+/// Take one durable-corpus sample while the server process is dead, WITHOUT
+/// letting the instrument touch the file the server is about to recover from.
+///
+/// The server's redb file is byte-copied to a per-checkpoint scratch directory
+/// outside the data dir, the COPY is scanned, and the copy is deleted before
+/// the caller restarts the server. `redb::Database::open` repairs and commits
+/// an uncleanly-closed file, so scanning the original here would run the
+/// server's own recovery ahead of the server and perturb the input of the
+/// crash-recovery gate; scanning a copy leaves that gate measuring exactly
+/// what it measured before this sampler existed. The scratch directory also
+/// lives outside the data dir because the disk gate's input is `du -sk` over
+/// the data dir, and a copy written inside it would step that gate too.
+///
+/// The scratch path carries the checkpoint ordinal, so two samples can never
+/// alias and a delete that failed cannot leave a previous sample's bytes to be
+/// re-scanned as this one's. A failed DELETE is not a scan failure — the
+/// sample was obtained — so it is logged and the run continues; the teardown
+/// sweep removes the residue.
+fn sample_durable_corpus_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
+    // One attempt per checkpoint, counted before anything can fail, so a
+    // failure can never go unattributed.
+    let ordinal = {
+        let mut t = sampler.tally.lock();
+        t.scans_attempted += 1;
+        t.scans_attempted
+    };
+    let copy_dir = sampler.scratch_root.join(format!("corpus-{ordinal}"));
+    // The scan resolves `topgun.redb` under the directory it is given, so the
+    // ordinal is carried by the directory and the copy keeps the name the scan
+    // looks for.
+    let copy_path = copy_dir.join("topgun.redb");
+    if let Err(e) = std::fs::create_dir_all(&copy_dir) {
+        eprintln!(
+            "durable-corpus sample {ordinal}: cannot create scratch dir {}: {e}",
+            copy_dir.display()
+        );
+        sampler.tally.lock().scans_failed += 1;
+        return;
+    }
+    // `std::fs::copy` truncates an existing destination, so even an aliasing
+    // bug could not produce a partial-overwrite hybrid.
+    if let Err(e) = std::fs::copy(sampler.data_dir.join("topgun.redb"), &copy_path) {
+        eprintln!("durable-corpus sample {ordinal}: cannot copy redb file: {e}");
+        sampler.tally.lock().scans_failed += 1;
+        return;
+    }
+
+    // The scan owns and drops its redb handle inside its own body, so the
+    // handle is released before the delete below and before the caller
+    // restarts the server. No handle may be hoisted out of it.
+    let scanned = scan_redb_tombstone_corpus(&copy_dir, OR_MAP);
+
+    if let Err(e) = std::fs::remove_dir_all(&copy_dir) {
+        eprintln!(
+            "durable-corpus sample {ordinal}: scratch copy left behind at {} ({e}) — sample \
+             still counted; teardown sweeps the residue",
+            copy_dir.display()
+        );
+    }
+
+    let mut t = sampler.tally.lock();
+    match scanned {
+        Some(bytes) => t.samples.push(CorpusSample {
+            elapsed_secs,
+            bytes,
+        }),
+        None => t.scans_failed += 1,
+    }
+}
+
 /// Independent, gauge-free scan of the OR-Map's on-disk tombstone corpus: the
 /// positive control's cross-check that `topgun_ormap_tombstone_bytes` is
 /// actually tracking the real durable byte total, not merely plateauing
@@ -1214,14 +1583,36 @@ fn parse_tombstone_bytes_gauge(body: &str) -> Option<u64> {
 /// remain resident. Comparing this scan's total against the gauge's last
 /// sampled value is exactly what catches that divergence.
 ///
-/// MUST run only after `ServerSupervisor::shutdown` has reaped the child
-/// process: redb is single-writer, so the server's own handle on the file must
-/// already be released before this process can open it. This is therefore a
-/// post-teardown assertion, not a live sampler alongside RSS/tombstone-bytes/
-/// disk above. Returns `None` on any failure (file missing, corrupt header,
-/// table absent) — best-effort, mirroring `sample_rss_mb`/`sample_disk_mb`'s
-/// None-on-failure contract — so a scan failure is reported as "could not
-/// scan", never mistaken for a genuinely empty (zero-byte) corpus.
+/// PRECONDITION: THE CHILD PROCESS HAS BEEN REAPED. redb is single-writer, so
+/// the server's own handle on the file must already be released before this
+/// process can open it. `kill9` satisfies that exactly as `shutdown` does —
+/// both await `child.wait()` — so this IS a live sampler: it is called once
+/// per recovery checkpoint, in the window between the `kill -9` and the
+/// restart, and once more terminally after teardown. What it reads is the
+/// PRE-RECOVERY on-disk state, because at both sites no recovery has run yet.
+///
+/// CALLER OBLIGATION AT A LIVE CHECKPOINT: PASS A DIRECTORY HOLDING A BYTE
+/// COPY, NEVER THE SERVER'S OWN DATA DIR. This function OPENS a redb database,
+/// and `redb::Database::open` on an uncleanly-closed file REPAIRS AND COMMITS
+/// it — a write. Opening the server's own file between the kill and the
+/// restart would make this harness perform the server's own crash recovery,
+/// and the server's crash recovery is precisely what the run's
+/// `recovery_failures` gate measures; an instrument may not mutate what
+/// another gate measures. So a checkpoint caller copies
+/// `{data_dir}/topgun.redb` to a scratch path outside the data dir and hands
+/// this function the directory holding that copy — any repair redb performs
+/// happens on the copy, which is deleted immediately afterwards, and the
+/// server stays the FIRST opener of the original. The terminal call is the one
+/// exception, and it is stated as such: it runs post-teardown, nothing boots
+/// after it, so it reads the data dir directly.
+///
+/// Returns `None` on any failure (file missing, corrupt header, table absent)
+/// — best-effort, mirroring `sample_rss_mb`/`sample_disk_mb`'s None-on-failure
+/// contract. That `None` is the durable-corpus INSTRUMENT clause's breach
+/// input, and at a live checkpoint a failed COPY reaches the same clause by the
+/// same path. The clause is report-only, so a blind instrument is recorded on
+/// `pending_gates` rather than failing the run. An honest `Some(0)` from a
+/// never-written table stays distinguishable from it.
 fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Option<u64> {
     let db_path = data_dir.join("topgun.redb");
     if !db_path.exists() {
@@ -1666,6 +2057,11 @@ struct RecoveryOutcome {
 /// verify the recovered state is byte-for-byte the pre-crash state. This tests
 /// crash recovery in isolation: no client writes occur across the boundary, so
 /// any post != pre is a recovery defect, not a lost-in-flight write.
+// One parameter over the threshold, and deliberately so: the alternative is a
+// wrapper struct whose only job is to carry the boot-gap clock and the corpus
+// sampler together, which would hide two independent instruments behind one
+// name for no gain. The corpus sampler already bundles its own three fields.
+#[allow(clippy::too_many_arguments)]
 async fn recovery_checkpoint(
     supervisor: &Arc<ServerSupervisor>,
     model: &Arc<Model>,
@@ -1674,6 +2070,7 @@ async fn recovery_checkpoint(
     config: &Config,
     paused: &Arc<AtomicBool>,
     boot_gap_clock: &BootGapClock,
+    corpus_sampler: &CorpusSampler,
 ) -> Result<RecoveryOutcome> {
     paused.store(true, Ordering::SeqCst);
     // Pause new client writes, then choose the pre-kill behavior:
@@ -1742,7 +2139,20 @@ async fn recovery_checkpoint(
         start_secs: gap_start_secs,
         end_secs: f64::INFINITY,
     });
-    if let Err(e) = supervisor.restart(config.ready_timeout).await {
+    // Expanded in place from the single `supervisor.restart(...)` this used to
+    // call: the durable-corpus sample has to be taken while the child is
+    // reaped and BEFORE the server re-opens its file, because opening it is
+    // what runs recovery. `restart`'s 250 ms socket-release gap and its
+    // failed-start handling are kept verbatim below, and `restart` itself
+    // stays in use by its other call sites.
+    supervisor.kill9().await;
+    sample_durable_corpus_via_copy(
+        corpus_sampler,
+        boot_gap_clock.sampler_start.elapsed().as_secs_f64(),
+    );
+    // Brief gap so the OS releases the listening socket before rebind.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    if let Err(e) = supervisor.start(config.ready_timeout).await {
         out.hard
             .push(format!("server failed to restart after kill -9: {e}"));
         paused.store(false, Ordering::SeqCst);
@@ -2125,7 +2535,8 @@ struct TrackerConfig {
 /// the ack) — the connection still exists so the harness's other assertions
 /// keep exercising it, but the server never sees an `ORMAP_SYNC_INIT` from this
 /// replica, so it is never tracked and the low-water-mark stays at its vacuous
-/// 0 for the whole run: the negative control for the promoted hard gate.
+/// 0 for the whole run: the negative control for the tombstone-byte hard gate,
+/// with the report-only durable-corpus instrument recording it alongside.
 async fn run_tracked_confirm_client(cfg: TrackerConfig) {
     let mut device_token: Option<String> = None;
     // Persisted across reconnects alongside `device_token`: the replica's
@@ -2182,7 +2593,8 @@ async fn run_tracked_confirm_client(cfg: TrackerConfig) {
                         // Surface the failure rather than reconnect-looping
                         // silently: a swallowed confirm error looks identical to
                         // a server tombstone leak (LWM never advances → gauge
-                        // climbs → hard gate REDs), so an invisible plumbing bug
+                        // climbs → the tombstone-byte hard gate REDs), so an
+                        // invisible plumbing bug
                         // would masquerade as the very defect this gate hunts.
                         cfg.metrics.confirm_errors.fetch_add(1, Ordering::Relaxed);
                         eprintln!("[tracker {}] confirm_apply error: {e:#}", cfg.idx);
@@ -2404,11 +2816,18 @@ const KNOWN_FLAGS: &[&str] = &[
     "--no-ack",
     "--inject-slow-leak",
     "--no-pre-kill-drain",
+    "--tombstone-corpus-headroom-bytes",
+    "--tombstone-corpus-ceiling-bytes",
     "--mechanism-report",
     "--smoke",
 ];
 
 fn print_usage() {
+    // The two durable-corpus knobs are spelled out with their effect, because
+    // an operator arming a gate needs to know what each one moves:
+    //   --tombstone-corpus-headroom-bytes <n>  slack the LEVEL clause allows
+    //   --tombstone-corpus-ceiling-bytes <n>  arm L2's absolute ceiling — a
+    //       reported bound, not a HARD gate ceiling
     println!(
         "TopGun soak harness (G4b / TODO-484)\n\n\
          Drives the real out-of-process topgun-server against an on-disk redb + WAL,\n\
@@ -2423,8 +2842,11 @@ fn print_usage() {
          \x20 # negative controls (must exit non-zero == assertion RED)\n\
          \x20 soak_harness --inject-divergence\n\
          \x20 soak_harness --inject-panic\n\
-         \x20 soak_harness --no-ack --duration 3600  # tombstone hard-gate must FAIL\n\
+         \x20 soak_harness --no-ack --duration 3600  # slope hard-gate must FAIL\n\
          \x20 soak_harness --inject-slow-leak --duration 3600  # slope detection-floor calibration\n\
+         \x20 # durable-corpus knobs (default: headroom 65536 bytes, ceiling disarmed)\n\
+         \x20 soak_harness --tombstone-corpus-headroom-bytes 262144 \\\n\
+         \x20              --tombstone-corpus-ceiling-bytes 8388608\n\
          \x20 # OR-churn WAL/RSS growth mechanism report (Q1-Q4), report-only\n\
          \x20 soak_harness --mechanism-report --or-churn true --or-keyspace 48 \\\n\
          \x20              --crash-interval 0 --duration 3600 --data-dir ./soak-data\n\n\
@@ -2572,6 +2994,19 @@ fn parse_args() -> Config {
             "--no-pre-kill-drain" => {
                 c.no_pre_kill_drain = true;
                 i += 1;
+            }
+            "--tombstone-corpus-headroom-bytes" => {
+                c.tombstone_corpus_headroom_bytes =
+                    parse_u64(&need(i, &args, "--tombstone-corpus-headroom-bytes"));
+                i += 2;
+            }
+            "--tombstone-corpus-ceiling-bytes" => {
+                c.tombstone_corpus_ceiling_bytes = Some(parse_u64(&need(
+                    i,
+                    &args,
+                    "--tombstone-corpus-ceiling-bytes",
+                )));
+                i += 2;
             }
             "--mechanism-report" => {
                 c.mechanism_report = true;

@@ -1,0 +1,23 @@
+# Digest of the POST-SECTION of spec361-level-gate-ruling.md, written by G5.
+#
+# The post-section is SEPARATE from the frozen layer and carries its OWN
+# digest, which is what lets a reader confirm the decision surface (SF8's AT
+# table, SF3's parameters) was frozen BEFORE the runs while the verdict was
+# appended AFTER them. It is delimited by the POST-SECTION-BEGIN /
+# POST-SECTION-END sentinels, so this digest is stable under line-number
+# shifts. A file cannot contain its own digest, which is why the value lives
+# here.
+#
+# Re-verify with:
+#
+#   awk '/^<!-- POST-SECTION-BEGIN -->$/{f=1;next} /^<!-- POST-SECTION-END -->$/{f=0} f' \
+#     packages/server-rust/benches/soak_harness/evidence/spec361-level-gate-ruling.md \
+#     | shasum -a 256
+#
+# The FROZEN layer's digest is in the sibling .frozen.sha256 and was
+# RE-VERIFIED as still reproducing at the moment this post-section was
+# appended:
+#   57416926748add87129708d0c0c4d11e0ade85b2e30898684a649f5b1af4e07f
+#
+post-section   e8feaed53cb081ab9d57ae313e483241ec3e586bff8541a08c646c17eac9d006
+control-runs   41f84485f4d14fa377b234f4078f3896734a9c8af503d6e9a3d89c6621293665   (spec361-control-runs.txt)

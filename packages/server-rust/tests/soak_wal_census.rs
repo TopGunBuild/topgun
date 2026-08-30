@@ -40,6 +40,10 @@
     clippy::doc_markdown
 )]
 
+#[path = "../benches/soak_harness/monitor.rs"]
+#[allow(dead_code)]
+mod monitor;
+
 #[path = "../benches/soak_harness/report.rs"]
 #[allow(dead_code)]
 mod report;
@@ -54,9 +58,10 @@ use topgun_server::storage::wal::format;
 use topgun_server::storage::wal::{OrDelta, WalEntry, WalOp, WalStorePayload};
 use topgun_server::tombstone_frontier_impl::DEFAULT_EPOCH_WIDTH;
 
+use monitor::CorpusLevelDisposition;
 use report::{
     effective_epoch_width, scan_wal_frame_sizes, ConfirmApplyReport, DiskReport, MemoryReport,
-    SoakReport, TombstoneReport,
+    SoakReport, TombstoneCorpusReport, TombstoneReport,
 };
 
 fn stamp(millis: u64) -> Timestamp {
@@ -356,6 +361,26 @@ fn sample_report(wal_fsync: &str, epoch_width: u64) -> SoakReport {
             passed: false,
             reason: Some("tombstone slope exceeded".to_string()),
         },
+        // The ceiling is ARMED here on purpose. It is disarmed by default, so
+        // the serialized non-null branch reaches no transport anywhere else,
+        // and a null-only fixture would leave half the field untested.
+        tombstone_corpus: TombstoneCorpusReport {
+            scans_attempted: 41,
+            scans_failed: 7,
+            samples: 34,
+            first_bytes: 101,
+            min_bytes: 97,
+            peak_bytes: 8_311,
+            last_bytes: 4_213,
+            first_half_peak_bytes: 1_777,
+            last_half_peak_bytes: 8_311,
+            rise_bytes: 6_534,
+            span_secs: 781.5,
+            disposition: CorpusLevelDisposition::LevelEvaluated,
+            ceiling_bytes: Some(262_144),
+            passed: false,
+            reason: Some("durable corpus level rose past its headroom".to_string()),
+        },
         disk: DiskReport {
             samples: 60,
             first_mb: 1.5,
@@ -378,7 +403,10 @@ fn sample_report(wal_fsync: &str, epoch_width: u64) -> SoakReport {
 }
 
 /// Every verdict that the run's `passed` is hard-ANDed with must reach the JSON
-/// report, under the exact keys a consumer reads, carrying its own input.
+/// report, under the exact keys a consumer reads, carrying its own input -- and
+/// so must the durable-corpus verdict, which is report-only precisely because a
+/// control cell with no fault injected breached it, and which therefore reaches
+/// no other durable transport at all.
 ///
 /// This exists because the opposite was true and cost a real diagnosis: a run
 /// could persist `passed: false` while the slope that failed it, and the
@@ -423,6 +451,78 @@ fn soak_report_emits_every_hard_anded_verdict_tracking_its_input() {
     assert_eq!(
         t.get("reason").and_then(serde_json::Value::as_str),
         Some("tombstone slope exceeded")
+    );
+
+    let tc = json
+        .get("tombstoneCorpus")
+        .expect("report carries a tombstoneCorpus section");
+    assert_eq!(
+        tc.get("scansAttempted").and_then(serde_json::Value::as_u64),
+        Some(41)
+    );
+    assert_eq!(
+        tc.get("scansFailed").and_then(serde_json::Value::as_u64),
+        Some(7)
+    );
+    assert_eq!(
+        tc.get("samples").and_then(serde_json::Value::as_u64),
+        Some(34)
+    );
+    assert_eq!(
+        tc.get("firstBytes").and_then(serde_json::Value::as_u64),
+        Some(101)
+    );
+    assert_eq!(
+        tc.get("minBytes").and_then(serde_json::Value::as_u64),
+        Some(97)
+    );
+    assert_eq!(
+        tc.get("peakBytes").and_then(serde_json::Value::as_u64),
+        Some(8_311)
+    );
+    assert_eq!(
+        tc.get("lastBytes").and_then(serde_json::Value::as_u64),
+        Some(4_213)
+    );
+    assert_eq!(
+        tc.get("firstHalfPeakBytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(1_777)
+    );
+    assert_eq!(
+        tc.get("lastHalfPeakBytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(8_311)
+    );
+    assert_eq!(
+        tc.get("riseBytes").and_then(serde_json::Value::as_u64),
+        Some(6_534)
+    );
+    assert_eq!(
+        tc.get("spanSecs").and_then(serde_json::Value::as_f64),
+        Some(781.5)
+    );
+    // The clause that decided is what separates a verdict this section could
+    // make from one it could not, so it travels as its own rendered token
+    // rather than being inferred from `passed`.
+    assert_eq!(
+        tc.get("disposition").and_then(serde_json::Value::as_str),
+        Some("LEVEL_EVALUATED")
+    );
+    // An ARMED ceiling must serialize as its number; the disarmed case is a
+    // present `null` and never an absent key, which is why no field here may
+    // carry `skip_serializing_if`.
+    assert_eq!(
+        tc.get("ceilingBytes").and_then(serde_json::Value::as_u64),
+        Some(262_144)
+    );
+    assert_eq!(
+        tc.get("passed").and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        tc.get("reason").and_then(serde_json::Value::as_str),
+        Some("durable corpus level rose past its headroom")
     );
 
     let d = json.get("disk").expect("report carries a disk section");

@@ -1,0 +1,17 @@
+# Digest of the FROZEN layer of spec361-level-gate-ruling.md.
+#
+# The frozen layer is delimited by the FROZEN-LAYER-BEGIN / FROZEN-LAYER-END
+# sentinels, so this digest is stable under any later append to the
+# post-section and under any line-number shift. A file cannot contain its own
+# digest, which is why the value lives here.
+#
+# Recorded BEFORE any calibration test was written and BEFORE any control run
+# was executed. Re-verify with:
+#
+#   awk '/^<!-- FROZEN-LAYER-BEGIN -->$/{f=1;next} /^<!-- FROZEN-LAYER-END -->$/{f=0} f' \
+#     packages/server-rust/benches/soak_harness/evidence/spec361-level-gate-ruling.md \
+#     | shasum -a 256
+#
+# A mismatch means the frozen layer moved after its freeze, which is a RED.
+#
+frozen-layer  57416926748add87129708d0c0c4d11e0ade85b2e30898684a649f5b1af4e07f

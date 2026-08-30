@@ -66,8 +66,12 @@
 //!
 //! Note on gating responsibility: [`assess_tombstone_bytes`] *computes* the byte
 //! verdict (including its `passed` flag), but whether that verdict gates the run
-//! is decided in `main.rs`, not here. The byte **slope** is now a HARD gate
-//! there. The gauge is restart-survivable (`reconcile_tombstone_bytes` in
+//! is decided in `main.rs`, not here. The byte **slope** is a HARD gate there
+//! in every run class. The durable-corpus level clause beside it is
+//! report-only: a control cell that injected no fault at all breached it, so it
+//! is recorded and rendered but decides no verdict, and the slope gates exactly
+//! as it always did — so no run configuration is left with neither.
+//! The gauge is restart-survivable (`reconcile_tombstone_bytes` in
 //! `storage/record.rs` re-seeds it via `set_tombstone_bytes` at boot) AND
 //! decrementable within a process life: every tombstone-add increments it and
 //! a successful prune-drop decrements it (`sub_tombstone_bytes`, wired on the
@@ -89,9 +93,9 @@
 //! `/metrics` scrape is a harness defect regardless of leak magnitude). The
 //! RSS gate above remains a coarse, non-tombstone backstop. (This module's
 //! `passed: bool` on [`TombstoneAssessment`] drives both the hard-gate
-//! decision in `main.rs` and the calibration tests below — the assessment
-//! itself does not know or care whether its caller treats a breach as
-//! report-only or hard-gating.)
+//! decision in `main.rs` — which applies in every run class — and the
+//! calibration tests below; the assessment itself does not know or care
+//! whether its caller treats a breach as report-only or hard-gating.)
 //!
 //! ## Boot-recompute-gap exclusion
 //!
@@ -278,9 +282,21 @@ fn least_squares_slope_per_hour(points: &[(f64, f64)]) -> f64 {
 /// [`assess_tombstone_bytes`] MUST agree on which samples make up the "recent
 /// half" — otherwise the guard could clear a window the slope was actually fit
 /// over (or vice versa) — so both derive it from [`last_half_window`].
+/// The index at which a sample series splits into its first and last halves.
+///
+/// The last-half window is `&points[last_half_split_index(points.len())..]`, so
+/// an ODD count puts the middle sample in the RECENT half. Every consumer that
+/// partitions a series — the slope statistic, its span guard and the
+/// durable-corpus level clause — derives the split from here, so the partitions
+/// are provably identical and a reader comparing two of them is comparing like
+/// with like. It takes a length rather than a slice so a series of counted
+/// BYTE totals can share it without any of them becoming an `f64`.
+const fn last_half_split_index(len: usize) -> usize {
+    len / 2
+}
+
 fn last_half_window(points: &[(f64, f64)]) -> &[(f64, f64)] {
-    let half = points.len() / 2;
-    &points[half..]
+    &points[last_half_split_index(points.len())..]
 }
 
 fn last_half_window_slope_per_hour(points: &[(f64, f64)]) -> f64 {
@@ -322,12 +338,15 @@ fn last_half_window_span_secs(points: &[(f64, f64)]) -> f64 {
 /// [`assess_tombstone_bytes`] with this threshold alongside the RSS `assess`) and
 /// by the `soak_monitor_calibration` integration target's tests — the harness
 /// wiring has landed, so no `allow(dead_code)` is needed here. The slope this
-/// threshold measures is a HARD gate in `main.rs`: the decrementable gauge is
+/// threshold measures is a HARD gate in `main.rs` in every run class; the
+/// durable-corpus level clause beside it is report-only and takes none of
+/// them over. The decrementable gauge is
 /// expected to plateau under sustained churn now that a tracked-and-ACKing
 /// client drives the server's low-water-mark forward (see the module-level
 /// "Tombstone-byte gate" doc above), subject to the min-window-span guard and
 /// boot-gap exclusion. The blind-monitor zero-sample clause is a second,
-/// independent hard gate. RSS above is the coarse backstop.
+/// independent hard gate, and it too is unconditional: it asserts harness
+/// health, not the tombstone property. RSS above is the coarse backstop.
 pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 
 /// Absolute-growth guard (bytes) for the tombstone-byte slope clause.
@@ -344,6 +363,10 @@ pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
 /// Minimum wall-clock span (seconds) of the last-half fit window before the
 /// per-hour slope clause is allowed to hard-gate the run.
 ///
+/// This floor governs the slope clause alone. The durable-corpus level clause
+/// selects no run class away from it: that clause is report-only, so the slope
+/// decides every run, and no run configuration is left ungated.
+///
 /// The slope is a per-hour EXTRAPOLATION (bytes/sec × 3600). Over a sub-minute
 /// window the `3600 / span_secs` amplification is enormous: a healthy short run
 /// that has simply not yet had time to plateau (e.g. the 25s blocking CI "Short
@@ -352,8 +375,9 @@ pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
 /// Below this floor the slope carries no plateau signal — a leak and a
 /// not-yet-plateaued healthy run are indistinguishable — so the clause is
 /// suppressed (no breach is emitted for it) and the assessment passes on the
-/// blind-monitor + absolute-growth clauses alone. (The slope is now a HARD gate
-/// once the window clears this floor — see [`DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR`];
+/// blind-monitor + absolute-growth clauses alone. (The slope is a HARD gate
+/// once the window clears this floor — see
+/// [`DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR`];
 /// this floor is what keeps that hard gate from crying wolf on a short run.)
 ///
 /// 120s sits well above the smoke run's ~10-15s last-half span (suppressed) and
@@ -480,6 +504,341 @@ pub fn assess_tombstone_bytes(
         } else {
             Some(reasons.join("; "))
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Durable-layer OR tombstone corpus: level/ceiling estimator.
+//
+// The items below are the estimator's frozen surface. They are `allow`ed for
+// dead code because the soak binary does not reference them until the sampler
+// and the verdict re-point are wired; the calibration integration target
+// already includes this module under its own `allow(dead_code)`.
+// ---------------------------------------------------------------------------
+
+/// Level headroom (bytes) between the first-half and last-half corpus peaks.
+///
+/// Derived, not chosen, and every number below is either quoted from a
+/// committed source with its `file:line` or computed from two such numbers with
+/// the arithmetic shown. All three steps are normalised to the SAME window: the
+/// control cells run 900 s at `--crash-interval 120`, so the corpus series
+/// spans ≈ 780 s (terminal scan minus FIRST checkpoint) and its last half
+/// covers ≈ 390 s = 0.108333 h.
+///
+/// 1. NOISE, EXPRESSED AS A LEVEL RATHER THAN A RATE. The recorded width-100
+///    spread of 8,756 B/h was fitted over a 900 s = 0.25 h last-half window
+///    (`spec356-manifest.md:1634`, `:1961-1962`), so the primitive noise
+///    magnitude is a LEVEL of `8,756 × 0.25 = 2,189 B`; renormalised to the
+///    390 s window it is `8,756 × 0.108333 = 948.6 B`. 65,536 sits 29.9× above
+///    the as-measured figure and 69.1× above the normalised one.
+/// 2. ABOVE THE HEALTHY SIGNAL. The width-100 keeping-up cell recorded a
+///    backlog delta of +8,602 B over its own coordinate last-half window of 90
+///    rows / 900 s (`spec356-manifest.md:1961-1964`). Pro-rated to 390 s that
+///    is `8,602 × 390 / 900 = 3,727.5 B`, so the headroom sits 17.6× above it.
+/// 3. BELOW THE UNHEALTHY SIGNAL. The `long` cell's coordinate last-half window
+///    carried +5,303,731 B of backlog growth over a span of 7,190 s
+///    (`spec356-manifest.md:1660-1661`), i.e. 2,655,565 B/h; over the 390 s
+///    window that is 287,686 B, which is 4.4× this headroom.
+///
+/// Healthy ≈ 3,727.5 B, headroom 65,536 B, unhealthy ≈ 287,686 B — roughly one
+/// order of magnitude of margin on each side, with a 77× total separation
+/// (`287,686 / 3,727.5`). That separation is window-INVARIANT: it is a ratio of
+/// two quantities pro-rated by the same factor. No claim of two orders of
+/// magnitude is made, because the arithmetic does not support one.
+///
+/// THE PROXY IS DISCLOSED, NOT GLOSSED. Every magnitude above is a gauge or
+/// counter figure; no durable-corpus noise floor has ever been measured. What
+/// the committed evidence DOES bound is the substitution error of deriving a
+/// byte headroom from gauge magnitudes and applying it to corpus magnitudes:
+/// the 29 terminal `tombstone_corpus_redb_scan:` lines under
+/// `benches/soak_harness/evidence/` (29 files, 21 distinct runs) each render the
+/// scanned corpus beside the last gauge value, and across all of them the
+/// ABSOLUTE gap never exceeds 27,925 B, so `65,536 / 27,925 = 2.3×`. The bound
+/// is stated in bytes and not as a percentage because the relative gap is not
+/// uniform (0.5–3 % on the ≥ 400 KB cells, tens of percent on the ~20–50 KB
+/// ones) and an absolute bound is what this clause actually consumes. Those
+/// lines are single terminal scalars, one per run: they are NOT a noise floor
+/// and NOT a retune input. Revising this constant on measured durable-corpus
+/// data is a recorded revision, never a keyboard retune.
+pub const DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES: u64 = 65_536;
+
+/// Minimum wall-clock span (seconds) of the corpus series before L1 may decide.
+///
+/// Five times [`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`]: far above the 25 s
+/// blocking smoke, far below any real soak.
+///
+/// It is also the BINDING guard on a control cell's duration, which is why the
+/// admissible range is derived here rather than chosen at the keyboard. At
+/// `--crash-interval 120` a cell of duration `D` puts its first checkpoint at
+/// ≈ 120 s and its terminal scan at ≈ `D`, so
+/// `span_secs ≈ D − 120` (terminal minus FIRST checkpoint, not minus `t = 0`)
+/// and `samples = floor(D / 120) + 1`. The sample guard `samples >= 4` binds at
+/// `D >= 360`; this span guard binds at `D − 120 >= 600`, i.e. `D >= 720`, and
+/// is therefore the binding one. The admissible range is
+/// `730 s <= D <= 900 s` — the 730 s lower bound carries a 10 s cushion over
+/// the derived 720 s for the strict comparison and for a first checkpoint that
+/// fires marginally late, and 900 s is the top of the range. A cell shorter
+/// than 730 s is inadmissible by construction.
+pub const DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS: f64 = 600.0;
+
+/// Minimum corpus samples before L1 may decide (at least 2 per half).
+///
+/// Two per half, so neither half-peak is a single point — the degenerate case
+/// [`last_half_window_span_secs`]'s own guard excludes for the same reason. At
+/// `--crash-interval 120` a 900 s cell yields 8 samples (7 checkpoints plus the
+/// terminal scan), clearing this guard with margin.
+pub const DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES: usize = 4;
+
+/// L2's absolute ceiling in bytes. `None` = DISARMED, and that is the default.
+///
+/// Arming it honestly requires a validated ceiling, and validating one requires
+/// a plateau demonstration that is out of scope here — so the clause ships
+/// implemented, unit-tested, rendered and armable from the CLI, and a later
+/// measurement round can arm it without a code change. `None` renders as
+/// `ceiling=disarmed` on the report line and as an EXPLICIT `null` in the JSON
+/// report, never as an omitted key: omitting it would make "L2 disarmed"
+/// indistinguishable from "this report predates the field", which is the
+/// invisible-suppression defect this estimator exists to refuse.
+pub const DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES: Option<u64> = None;
+
+/// One durable-layer OR tombstone corpus scan, taken while the server process is
+/// DEAD (redb is single-writer, so its file lock must be free) and therefore
+/// reading the PRE-RECOVERY on-disk state.
+#[derive(Debug, Clone, Copy)]
+pub struct CorpusSample {
+    pub elapsed_secs: f64,
+    pub bytes: u64,
+}
+
+/// Which clause actually decided a corpus assessment. Rendered verbatim, so a
+/// clause that did not fire is visible rather than indistinguishable from a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorpusLevelDisposition {
+    /// L1 was evaluated and decided.
+    LevelEvaluated,
+    /// L1 was NOT evaluated. The slope clause hard-gates regardless. Never "ok".
+    LevelSuppressed,
+    /// L0 failed. L1 and L2 are NOT EVALUATED (fail-closed order).
+    InstrumentFailed,
+}
+
+impl CorpusLevelDisposition {
+    /// The single rendered token for this disposition. Consumed BOTH by the
+    /// console line in `main.rs` and by the JSON serializer in `report.rs`, so
+    /// the two transports can never disagree and no site retypes a literal.
+    /// Deliberately hand-written rather than serde-derived: this file is
+    /// `#[path]`-included by an integration target and must stay `std`-only.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LevelEvaluated => "LEVEL_EVALUATED",
+            Self::LevelSuppressed => "LEVEL_SUPPRESSED",
+            Self::InstrumentFailed => "INSTRUMENT_FAILED",
+        }
+    }
+}
+
+/// Verdict of a durable-layer corpus assessment.
+#[derive(Debug, Clone)]
+pub struct TombstoneCorpusAssessment {
+    pub scans_attempted: usize,
+    pub scans_failed: usize,
+    pub samples: usize,
+    /// PRE-REGISTERED AGGREGATES of the corpus series. These four — count
+    /// (`samples`), min, max (`peak_bytes`) and last — are the ONLY shape in
+    /// which the series reaches a consumer: publishing the per-sample series is
+    /// forbidden, so every predicate any downstream grading rests on must be
+    /// statable over exactly these.
+    pub first_bytes: u64,
+    pub min_bytes: u64,
+    pub peak_bytes: u64,
+    pub last_bytes: u64,
+    pub first_half_peak_bytes: u64,
+    pub last_half_peak_bytes: u64,
+    pub rise_bytes: u64,
+    pub span_secs: f64,
+    pub disposition: CorpusLevelDisposition,
+    /// `None` = L2 DISARMED. Serialized EXPLICITLY as `null` by the report
+    /// layer — absence must never be indistinguishable from suppression.
+    pub ceiling_bytes: Option<u64>,
+    pub passed: bool,
+    pub reason: Option<String>,
+}
+
+/// L0 and L1 are REPORT-ONLY, not HARD gate clauses: a control cell with no
+/// fault injected breached L1 on its own, so `main.rs` renders and persists
+/// this verdict without folding it into the run's.
+///
+/// The three clauses are evaluated in this order, and the order is fail-closed:
+///
+/// * `L0` — INSTRUMENT. Breaches when `scans_failed > 0` OR `samples == 0`,
+///   yielding `passed = false`, [`CorpusLevelDisposition::InstrumentFailed`],
+///   a named reason, and NO evaluation of L1 or L2. A scan that could not
+///   obtain the state — missing file, corrupt header, a table-open error, or a
+///   failed byte copy — is a BLIND instrument, and a gate whose instrument was
+///   blind must not report bounded growth. An honest `Some(0)` from a
+///   never-written table is not a breach and must stay distinguishable from a
+///   blind `None`.
+/// * `L1` — LEVEL / FLATNESS. Evaluated only when `samples >= min_samples` AND
+///   `span_secs >= min_span_secs`; breaches when
+///   `last_half_peak_bytes.saturating_sub(first_half_peak_bytes) >
+///   headroom_bytes`, yielding [`CorpusLevelDisposition::LevelEvaluated`]. The
+///   `saturating_sub` is deliberate: a FALLING corpus yields `rise = 0` and
+///   passes, which is the correct answer for a ceiling test. When either guard
+///   is unmet the disposition is
+///   [`CorpusLevelDisposition::LevelSuppressed`], this clause contributes
+///   nothing to `passed`, and the suppression is rendered with BOTH numbers so
+///   it can never be read as a pass.
+/// * `L2` — ABSOLUTE CEILING. Evaluated only when `ceiling_bytes` is `Some(c)`;
+///   breaches when `peak_bytes > c`. It is an ENVELOPE test — the peak, not the
+///   last sample — because prune legitimately produces large downward
+///   excursions and a level-vs-final test would let a rising envelope hide
+///   behind one of them. Disarmed by default; see
+///   [`DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES`].
+///
+/// The peak is also why neither the mean nor the median is used anywhere here:
+/// a ceiling is an UPPER ENVELOPE, and those same downward excursions would
+/// drag a mean or a median and hide a rising envelope. Nothing in this clause
+/// is fitted; it compares bytes to bytes, so no `1/span` amplification can
+/// re-import a rate spread as if it were an independent noise source.
+///
+/// The window partition is the same split index [`last_half_window`] uses, so
+/// this clause and the slope clause split any series identically and a reader
+/// comparing the two is comparing like with like.
+///
+/// Total over its inputs: no panic path, no interior mutability, no I/O, and no
+/// dependency beyond `std` — this file is `#[path]`-included by an integration
+/// target that includes no sibling module.
+#[must_use]
+pub fn assess_tombstone_corpus_level(
+    samples: &[CorpusSample],
+    scans_attempted: usize,
+    scans_failed: usize,
+    headroom_bytes: u64,
+    min_span_secs: f64,
+    min_samples: usize,
+    ceiling_bytes: Option<u64>,
+) -> TombstoneCorpusAssessment {
+    // The series aggregates are DESCRIPTIVE: deriving them is not evaluating a
+    // clause, so they are filled in on every path — including the blind one —
+    // and the rendered line stays informative even when no clause decided.
+    // They are also the ONLY shape in which the series reaches a consumer, so
+    // every downstream predicate has to be statable over exactly these.
+    let span_secs = match (samples.first(), samples.last()) {
+        (Some(first), Some(last)) => last.elapsed_secs - first.elapsed_secs,
+        _ => 0.0,
+    };
+    let first_bytes = samples.first().map_or(0, |s| s.bytes);
+    let last_bytes = samples.last().map_or(0, |s| s.bytes);
+    let min_bytes = samples.iter().map(|s| s.bytes).min().unwrap_or(0);
+    let peak_bytes = samples.iter().map(|s| s.bytes).max().unwrap_or(0);
+    // The same split index the slope clause partitions on, applied to counted
+    // byte totals directly: no total is ever routed through an `f64`.
+    let (first_half, last_half) = samples.split_at(last_half_split_index(samples.len()));
+    let first_half_peak_bytes = first_half.iter().map(|s| s.bytes).max().unwrap_or(0);
+    let last_half_peak_bytes = last_half.iter().map(|s| s.bytes).max().unwrap_or(0);
+    // Saturating: a FALLING corpus yields a rise of zero and passes, which is
+    // the correct answer for a ceiling test.
+    let rise_bytes = last_half_peak_bytes.saturating_sub(first_half_peak_bytes);
+
+    // L0 — INSTRUMENT, evaluated FIRST and fail-closed. A blind instrument
+    // returns here, so neither L1 nor L2 is evaluated at all: a gate whose
+    // instrument could not obtain the state must not report bounded growth.
+    if scans_failed > 0 || samples.is_empty() {
+        return TombstoneCorpusAssessment {
+            scans_attempted,
+            scans_failed,
+            samples: samples.len(),
+            first_bytes,
+            min_bytes,
+            peak_bytes,
+            last_bytes,
+            first_half_peak_bytes,
+            last_half_peak_bytes,
+            rise_bytes,
+            span_secs,
+            disposition: CorpusLevelDisposition::InstrumentFailed,
+            ceiling_bytes,
+            passed: false,
+            reason: Some(format!(
+                "durable-corpus instrument blind: {} of {} scans failed, {} usable samples",
+                scans_failed,
+                scans_attempted,
+                samples.len()
+            )),
+        };
+    }
+
+    let mut breaches: Vec<String> = Vec::new();
+
+    // L1 — LEVEL / FLATNESS. Decided only when BOTH guards are met; otherwise
+    // it contributes nothing to the verdict and the suppression is rendered
+    // with its two numbers rather than as a pass.
+    let level_evaluated = samples.len() >= min_samples && span_secs >= min_span_secs;
+    if level_evaluated && rise_bytes > headroom_bytes {
+        breaches.push(format!(
+            "durable-corpus level rose {rise_bytes} B between half-peaks \
+             ({first_half_peak_bytes} B -> {last_half_peak_bytes} B) over \
+             {span_secs:.0}s, above the {headroom_bytes} B headroom"
+        ));
+    }
+
+    // L2 — ABSOLUTE CEILING, an ENVELOPE test on the PEAK. Its only guard is
+    // being armed, so a series too short for L1 is still held to a ceiling.
+    if let Some(ceiling) = ceiling_bytes {
+        if peak_bytes > ceiling {
+            breaches.push(format!(
+                "durable-corpus peak {peak_bytes} B exceeds the armed {ceiling} B ceiling"
+            ));
+        }
+    }
+
+    TombstoneCorpusAssessment {
+        scans_attempted,
+        scans_failed,
+        samples: samples.len(),
+        first_bytes,
+        min_bytes,
+        peak_bytes,
+        last_bytes,
+        first_half_peak_bytes,
+        last_half_peak_bytes,
+        rise_bytes,
+        span_secs,
+        disposition: if level_evaluated {
+            CorpusLevelDisposition::LevelEvaluated
+        } else {
+            CorpusLevelDisposition::LevelSuppressed
+        },
+        ceiling_bytes,
+        passed: breaches.is_empty(),
+        reason: if breaches.is_empty() {
+            None
+        } else {
+            Some(breaches.join("; "))
+        },
+    }
+}
+
+/// Whether the tombstone-byte SLOPE clause would be the only hard-gate left on
+/// a run that produced this disposition — equivalently, whether the
+/// durable-corpus level clause decided. EXHAUSTIVE BY CONSTRUCTION: a fourth
+/// variant does not compile here, which is what makes the no-ungated-window
+/// coverage argument structural rather than a source-read. The slope now
+/// decides every run class, so the verdict expression does not consult this;
+/// `main.rs` uses it to name which corpus clause a report-only breach came
+/// from, and re-types no comparison of its own.
+#[must_use]
+// One arm per variant, deliberately not merged into a single `|` pattern: the
+// point of the enumeration is that every variant is classified in its own
+// right, so a fourth variant has to be given an explicit answer here rather
+// than being absorbed into an existing pattern.
+#[allow(clippy::match_same_arms)]
+pub const fn slope_clause_stays_hard(disposition: CorpusLevelDisposition) -> bool {
+    match disposition {
+        CorpusLevelDisposition::LevelEvaluated => false,
+        CorpusLevelDisposition::LevelSuppressed => true,
+        CorpusLevelDisposition::InstrumentFailed => true,
     }
 }
 
@@ -1026,8 +1385,9 @@ mod tests {
     /// and never flattens — the grow-then-flatten shape the plateau statistic
     /// looks for cannot occur. This test feeds exactly that monotone shape (well
     /// past the min-window floor) and asserts the assessment reports NOT-passed
-    /// — which is precisely the hard-gate failure `main.rs` now asserts on for
-    /// this scenario (see the module doc's "Tombstone-byte gate" section).
+    /// — which is precisely the hard-gate failure `main.rs` asserts on for this
+    /// scenario in every run class; the durable-corpus level clause beside it is
+    /// report-only (see the module doc's "Tombstone-byte gate" section).
     #[test]
     fn calibration_additive_only_gauge_never_plateaus() {
         // ~6h of steady creation at 5000 B/h — a multi-hour last-half window
@@ -1044,7 +1404,8 @@ mod tests {
             !a.passed,
             "an unbounded monotone-growth shape (no low-water-mark driver) must \
              NOT be reported as a plateau — this is the hard-gate FAIL `main.rs` \
-             now asserts on; slope={:.1} reason={:?}",
+             asserts on in every run class; \
+             slope={:.1} reason={:?}",
             a.slope_bytes_per_hour, a.reason
         );
     }
@@ -1283,5 +1644,245 @@ mod tests {
             a.slope_mb_per_hour, a.reason
         );
         assert!(a.slope_mb_per_hour > DEFAULT_DISK_THRESHOLD_MB_PER_HOUR);
+    }
+
+    /// Build a durable-corpus series from explicit byte totals, sampled at a
+    /// fixed interval on the harness's elapsed-seconds clock. The totals stay
+    /// `u64` end to end — no counted byte total is routed through an `f64`.
+    fn corpus_series(interval_secs: f64, totals: &[u64]) -> Vec<CorpusSample> {
+        totals
+            .iter()
+            .enumerate()
+            .map(|(index, &bytes)| CorpusSample {
+                elapsed_secs: f64::from(u32::try_from(index).unwrap_or(u32::MAX)) * interval_secs,
+                bytes,
+            })
+            .collect()
+    }
+
+    /// Assess a corpus series under the calibrated defaults, leaving only the
+    /// scan counters and the ceiling to the caller.
+    fn assess_corpus_defaults(
+        samples: &[CorpusSample],
+        scans_attempted: usize,
+        scans_failed: usize,
+        ceiling_bytes: Option<u64>,
+    ) -> TombstoneCorpusAssessment {
+        assess_tombstone_corpus_level(
+            samples,
+            scans_attempted,
+            scans_failed,
+            DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
+            DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
+            DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
+            ceiling_bytes,
+        )
+    }
+
+    /// A LINEAR durable-corpus leak MUST fail the level clause: the last-half
+    /// peak stands far above the first-half peak, which is precisely the
+    /// unbounded-growth shape the clause exists to discriminate. A comparison
+    /// that could not see the difference between the two half-peaks would let
+    /// this series through.
+    #[test]
+    fn calibration_fails_linear_corpus_level() {
+        let samples = corpus_series(
+            90.0,
+            &[
+                0, 100_000, 200_000, 300_000, 400_000, 500_000, 600_000, 700_000,
+            ],
+        );
+        let a = assess_corpus_defaults(&samples, samples.len(), 0, None);
+        assert_eq!(a.disposition, CorpusLevelDisposition::LevelEvaluated);
+        assert_eq!(a.first_half_peak_bytes, 300_000);
+        assert_eq!(a.last_half_peak_bytes, 700_000);
+        assert_eq!(a.rise_bytes, 400_000);
+        assert!(
+            !a.passed,
+            "a linear corpus leak must breach the level clause; rise={} B reason={:?}",
+            a.rise_bytes, a.reason
+        );
+    }
+
+    /// FROZEN FIXTURE: 8 samples 90s apart; first sample 10,000 B; the series
+    /// ramps to 300,000 B by sample 4 and then plateaus FLAT at 300,000 B for
+    /// samples 5-8.
+    ///
+    /// Frozen relationship: the ramp's height above the FIRST sample exceeds
+    /// the headroom (290,000 B > 65,536 B) while the half-to-half rise is
+    /// exactly zero. A genuine ramp-then-plateau is the healthy shape and must
+    /// NOT false-RED; a level test taken against the series' ORIGIN instead of
+    /// its first-half peak would condemn it.
+    #[test]
+    fn calibration_passes_plateau_after_ramp() {
+        let samples = corpus_series(
+            90.0,
+            &[
+                10_000, 110_000, 210_000, 300_000, 300_000, 300_000, 300_000, 300_000,
+            ],
+        );
+        let a = assess_corpus_defaults(&samples, samples.len(), 0, None);
+        assert_eq!(a.disposition, CorpusLevelDisposition::LevelEvaluated);
+        assert!(a.span_secs >= DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS);
+        assert_eq!(a.first_half_peak_bytes, 300_000);
+        assert_eq!(a.last_half_peak_bytes, 300_000);
+        assert_eq!(a.rise_bytes, 0);
+        assert!(
+            a.peak_bytes - a.first_bytes > DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
+            "the fixture's ramp must clear the headroom measured from the origin, \
+             or a level-vs-origin comparison would agree with the correct one"
+        );
+        assert!(
+            a.passed,
+            "a ramp that plateaus must pass; rise={} B reason={:?}",
+            a.rise_bytes, a.reason
+        );
+    }
+
+    /// FROZEN FIXTURE: 5 scans attempted, 1 FAILED, 4 usable samples 210s apart
+    /// on a flat series (span 630s).
+    ///
+    /// Frozen relationship: the surviving samples clear BOTH level-clause
+    /// guards and the series is flat, so an instrument clause that ignored the
+    /// failed scan would evaluate the level clause and PASS. A fixture in which
+    /// every scan failed would be decided by the zero-sample disjunct instead
+    /// and would prove nothing about the failed-scan one.
+    #[test]
+    fn calibration_fails_on_failed_scan() {
+        let samples = corpus_series(210.0, &[120_000; 4]);
+        let a = assess_corpus_defaults(&samples, 5, 1, None);
+        assert_eq!(a.samples, 4);
+        assert_eq!(a.scans_failed, 1);
+        assert!(a.samples >= DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES);
+        assert!(a.span_secs >= DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS);
+        assert_eq!(a.rise_bytes, 0);
+        assert_eq!(a.disposition, CorpusLevelDisposition::InstrumentFailed);
+        assert!(
+            !a.passed,
+            "a blind scan must be assessed NOT-passed and typed InstrumentFailed; \
+             the clause itself is report-only. reason={:?}",
+            a.reason
+        );
+    }
+
+    /// A scan that read a never-written table and reported zero bytes is an
+    /// honest measurement, not a blindness: a whole series of them MUST pass,
+    /// and must stay distinguishable from a scan that could not read the state
+    /// at all. Treating a zero total as a failed scan would fail an empty but
+    /// perfectly healthy corpus.
+    #[test]
+    fn calibration_passes_honest_empty_corpus() {
+        let samples = corpus_series(90.0, &[0; 8]);
+        let a = assess_corpus_defaults(&samples, samples.len(), 0, None);
+        assert_eq!(a.scans_failed, 0);
+        assert_eq!(a.min_bytes, 0);
+        assert_eq!(a.peak_bytes, 0);
+        assert_eq!(a.rise_bytes, 0);
+        assert_eq!(a.disposition, CorpusLevelDisposition::LevelEvaluated);
+        assert!(
+            a.passed,
+            "an all-zero corpus is an honest empty one and must pass; reason={:?}",
+            a.reason
+        );
+    }
+
+    /// A SLOW unbounded leak must still be caught once enough duration has been
+    /// modelled: 16 samples 120s apart growing 9,000 B per sample. No single
+    /// step comes anywhere near the headroom, so the breach exists only in the
+    /// accumulated half-to-half level — which is the property that lets the
+    /// level clause discriminate a leak the per-hour slope statistic would
+    /// report as a small, unremarkable rate.
+    #[test]
+    fn calibration_fails_slow_unbounded_ramp() {
+        let totals: Vec<u64> = (0..16).map(|i| 50_000 + i * 9_000).collect();
+        let samples = corpus_series(120.0, &totals);
+        let a = assess_corpus_defaults(&samples, samples.len(), 0, None);
+        assert_eq!(a.disposition, CorpusLevelDisposition::LevelEvaluated);
+        let widest_step = samples
+            .windows(2)
+            .map(|pair| pair[1].bytes.saturating_sub(pair[0].bytes))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            widest_step < DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
+            "no single step may reach the headroom, or the ramp is not slow; \
+             widest step={widest_step} B"
+        );
+        assert_eq!(a.rise_bytes, 72_000);
+        assert!(a.rise_bytes > DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES);
+        assert!(
+            !a.passed,
+            "a slow but unbounded ramp must breach once the modelled duration is \
+             long enough; rise={} B reason={:?}",
+            a.rise_bytes, a.reason
+        );
+    }
+
+    /// FROZEN FIXTURE: 8 samples 90s apart with the ceiling ARMED at 100,000 B;
+    /// the series peaks at 200,000 B inside the FIRST half and decreases
+    /// monotonically to 50,000 B at the last sample.
+    ///
+    /// Frozen relationship: `peak > ceiling >= last`, and the half-to-half rise
+    /// is zero. So the level clause PASSES and the failure is attributable to
+    /// the absolute ceiling alone — and a ceiling compared against the LAST
+    /// sample rather than the peak would not fire at all. The ceiling is an
+    /// ENVELOPE test, because prune legitimately produces large downward
+    /// excursions a rising envelope could otherwise hide behind.
+    #[test]
+    fn calibration_fails_armed_ceiling() {
+        let samples = corpus_series(
+            90.0,
+            &[
+                200_000, 175_000, 150_000, 125_000, 100_000, 85_000, 70_000, 50_000,
+            ],
+        );
+        let a = assess_corpus_defaults(&samples, samples.len(), 0, Some(100_000));
+        assert_eq!(a.disposition, CorpusLevelDisposition::LevelEvaluated);
+        assert_eq!(
+            a.rise_bytes, 0,
+            "the level clause must pass, so the verdict is attributable to the ceiling"
+        );
+        assert_eq!(a.peak_bytes, 200_000);
+        assert_eq!(a.last_bytes, 50_000);
+        assert_eq!(a.ceiling_bytes, Some(100_000));
+        assert!(a.peak_bytes > 100_000 && a.last_bytes <= 100_000);
+        assert!(
+            !a.passed,
+            "an armed ceiling must breach on the PEAK even though the last sample \
+             sits below it; reason={:?}",
+            a.reason
+        );
+    }
+
+    /// Whenever the level clause did NOT decide, the slope clause must still
+    /// decide — otherwise a run could pass through a window no clause held.
+    /// The enumeration lives on the type: a fourth disposition fails to compile
+    /// inside the predicate, so what this asserts is the CLASSIFICATION of each
+    /// variant, not the exhaustiveness (the compiler owns that).
+    ///
+    /// The blind-instrument variant is checked a second way: such an assessment
+    /// already carries `passed == false`, so it fails through the first
+    /// conjunct and never depends on the fallback to rescue it.
+    #[test]
+    fn calibration_slope_clause_hard_for_every_non_evaluated_disposition() {
+        for (disposition, stays_hard) in [
+            (CorpusLevelDisposition::LevelEvaluated, false),
+            (CorpusLevelDisposition::LevelSuppressed, true),
+            (CorpusLevelDisposition::InstrumentFailed, true),
+        ] {
+            assert_eq!(
+                slope_clause_stays_hard(disposition),
+                stays_hard,
+                "{} is classified wrongly",
+                disposition.as_str()
+            );
+        }
+
+        let blind = assess_corpus_defaults(&[], 1, 1, None);
+        assert_eq!(blind.disposition, CorpusLevelDisposition::InstrumentFailed);
+        assert!(
+            !blind.passed,
+            "a blind instrument must already fail through the first conjunct"
+        );
     }
 }
