@@ -1,0 +1,22 @@
+# Digest of the SITING SECTION of spec361-level-gate-ruling.md, written by G6.
+#
+# The siting section is OUTSIDE both the frozen layer and G5's post-section and
+# carries its OWN digest, so the three surfaces stay independently verifiable:
+# the decision surface frozen BEFORE the runs, the verdict appended AFTER them,
+# and the record that the verdict's consequence was sited in the code appended
+# after that. It is delimited by the SITING-SECTION-BEGIN / SITING-SECTION-END
+# sentinels, so this digest is stable under line-number shifts. A file cannot
+# contain its own digest, which is why the value lives here.
+#
+# Re-verify with:
+#
+#   awk '/^<!-- SITING-SECTION-BEGIN -->$/{f=1;next} /^<!-- SITING-SECTION-END -->$/{f=0} f' \
+#     packages/server-rust/benches/soak_harness/evidence/spec361-level-gate-ruling.md \
+#     | shasum -a 256
+#
+# BOTH earlier digests were RE-VERIFIED as still reproducing at the moment this
+# section was appended, which is what proves the append disturbed neither:
+#   frozen-layer   57416926748add87129708d0c0c4d11e0ade85b2e30898684a649f5b1af4e07f
+#   post-section   e8feaed53cb081ab9d57ae313e483241ec3e586bff8541a08c646c17eac9d006
+#
+siting-section eba6592e97ec08c92ada8bef0c72b04f073678a1b697b6e2afcc9c8fc3a855a8

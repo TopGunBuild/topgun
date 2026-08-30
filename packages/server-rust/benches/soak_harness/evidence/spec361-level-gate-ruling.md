@@ -1282,3 +1282,121 @@ them exactly as at HEAD.
   **routed to `TODO-634`, not patched over by retuning** (`C11`).
 
 <!-- POST-SECTION-END -->
+
+<!-- SITING-SECTION-BEGIN -->
+
+## SITING RECORD — appended by G6, AFTER the post-section, under its OWN digest
+
+**This section is NOT part of the frozen layer and NOT part of G5's post-section.**
+It sits outside both sentinel pairs, so both earlier digests reproduce unchanged
+and can be re-verified against `.frozen.sha256` and `.post.sha256` after reading
+this. Its own digest is in `spec361-level-gate-ruling.siting.sha256`.
+
+It records one thing: that the consequence `AT-3` and `AC12` attach to the
+recorded verdict was actually **sited in the code**, and how.
+
+### What fired, restated from the post-section rather than re-decided here
+
+`AT-3` fired. Verdict `ANTI-TAUTOLOGY-FAILED`. Decision: **NO PROMOTION**. The
+disjunct that fired is the second one: the **NEUTRAL** attribution control — no
+injection flag at all — breached `L1` on its own (rise `142418 B` against the
+`65536 B` headroom, `disposition=LEVEL_EVALUATED`, exit 1). `AT-0` did not fire:
+all three 900 s cells at `--crash-interval 120` were admissible (`samples = 8`,
+span 778–783 s, `scans_failed = 0`) and the single permitted re-run is unspent.
+
+### What `AC12` and the `AT-3` row require, and what was done
+
+Both texts agree on the consequence and were read together before editing:
+
+- `AC12`: *"`L1` ships **REPORT-ONLY** and the slope clause stays hard
+  **UNCONDITIONALLY** at `main.rs:853` (the `slope_clause_stays_hard(...)` guard
+  is dropped, not the clause; the helper and its test survive)"*.
+- The `AT-3` row: *"The estimator ships **REPORT-ONLY** … the `N4` fallback
+  conjunct becomes the only form, i.e. `tombstones.passed` is ANDed with **no
+  `slope_clause_stays_hard(...)` guard in front of it**"*.
+
+Taken together these are two changes to one expression, and both were made:
+
+1. **`corpus.passed` is no longer ANDed into the run verdict.** The `AT-3` row
+   says *the estimator* ships report-only, not merely `L1`, and the row's own
+   gloss — *"the branch is a strict addition and the gate is not weakened in any
+   run class"* — is only true if the estimator adds no gating at all. Retaining
+   `L0` alone as a hard clause was considered and rejected: the assessment
+   exposes one `passed` folding `L0`/`L1`/`L2`, so splitting it would mean
+   editing the `N1` types the frozen layer above closes under `C11`.
+2. **The `slope_clause_stays_hard(...)` guard is dropped from in front of
+   `tombstones.passed`,** which is therefore ANDed in every run class.
+
+The resulting verdict expression is exactly `HEAD`'s tombstone gating:
+
+```
+convergence ∧ recovery ∧ mem ∧ ¬blind_monitor
+  ∧ tombstones.passed          ← the OLD hard clause, now with no guard
+  ∧ ¬disk_blind_monitor ∧ ¬panic
+```
+
+**NO-UNGATED-WINDOW (`N4`) holds, and by the simplest possible route:** the
+slope clause gates *every* run configuration, so there is no run class in which
+neither it nor a live `L1` decides. The rule was never at risk under `AT-3`; it
+is at risk only under a promotion that removes the fallback.
+
+**`C11` was not touched.** No headroom, no ceiling, no `min_samples`, no
+`min_span_secs`, no duration and no crash interval was changed in either
+direction. The demotion is a change to which verdicts `passed` reads, and to the
+doc-contracts that describe it — nothing else.
+
+### Three consequential details, recorded because they are judgement calls
+
+- **The estimator still runs on every run.** It is computed, rendered on the
+  `tombstone_corpus_redb_scan:` line with its full aggregate transport, and
+  persisted as `tombstoneCorpus` in the JSON report. REPORT-ONLY means it
+  decides nothing, not that it is switched off.
+- **A corpus breach is recorded on `pending_gates`,** the harness's existing
+  report-only channel (the disk slope already uses it, with the same *"did NOT
+  fail the run"* phrasing). Without this the demotion would have made a breach
+  invisible to anyone reading only the run's verdict.
+- **The ranked `finished_reason` writer's rank-3 corpus arm no longer writes a
+  reason.** A clause that cannot fail a run must not hand that run a reason
+  saying it failed — which is the rule `N18b`'s own rank-4 doc already states.
+  Rank 3 therefore joins ranks 6–8 as non-reason-producing. The rank numbers
+  themselves are left as `N18b` froze them; nothing was renumbered.
+
+`slope_clause_stays_hard` survives in `monitor.rs` with its exhaustive `match`
+and its calibration test, so `N4b`'s compile-time falsifier (`E0004` on a fourth
+variant) is intact, exactly as `AC12` requires. `main.rs` still calls it — to
+name *which* corpus clause a report-only breach came from — and still re-types
+no disposition comparison of its own.
+
+### Pinned counts, re-verified AFTER the siting edit
+
+| Pin | Required | Observed |
+|---|---|---|
+| `N4a` census, `monitor.rs` + `main.rs` | 36 (15 + 21) | **36** (15 + 21) |
+| `grep -c slope_clause_stays_hard main.rs` | ≥ 1 | **2** |
+| `grep -c 'CorpusLevelDisposition::LevelEvaluated' main.rs` | 0 | **0** |
+| `grep -c 'finished_reason = ' main.rs` | 6 | **6** |
+| `grep -c '"duration reached"' main.rs` | 1 | **1** |
+
+### One `AC` whose PROSE the demotion outruns, disclosed rather than absorbed
+
+`AC9` requires the census's in-scope and authored lines to *"read as the
+CONDITIONAL role `N4` gives the slope clause"*. Under `AT-3` that role does not
+exist: the slope is unconditional. Leaving those lines asserting a conditional
+gate would have been a false doc-contract in the one spec whose census exists to
+stop exactly that. The lines were therefore re-pointed to the **unconditional**
+role. `AC9`'s **normative** element — *"the POST-EDIT COUNT is NORMATIVE while
+every LINE NUMBER is DESCRIPTIVE"* — is held exactly: **36**, split 15 / 21,
+every line still carrying one of the three pinned phrases and still classified
+by Table 1 or Table 2. The same applies to the rendered role string, which now
+reads `slope + blind-monitor both hard-gate; durable-corpus clauses are
+report-only`.
+
+### Routings, by id, no tracker edited
+
+Unchanged from the post-section: the cause of the NEUTRAL breach — an estimator
+that fires on an unperturbed run — and the durable-corpus headroom revision that
+would have to precede any future promotion attempt are routed to **`TODO-654`**;
+the bounded-plateau question and the width-1000 plateau demonstration to
+**`TODO-634`**. This section edits no tracker file.
+
+<!-- SITING-SECTION-END -->

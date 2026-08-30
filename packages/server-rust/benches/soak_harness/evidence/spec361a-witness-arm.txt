@@ -1,0 +1,238 @@
+SPEC-361a — WITNESS MUTATION ARMS, THIS HALF'S SIX
+==============================================================================
+
+WHAT THIS FILE IS AND IS NOT — READ THE SPLIT, NOT THE TOTALS.
+
+The W1-W9 witness register is JOINT across the two halves carved from SPEC-361.
+Its live figure is:
+
+    9 witnesses / 9 mutation arms / 18 legs / 9 transcripts
+
+split 6 + 3 = 9 arms, 12 + 6 = 18 legs, 6 + 3 = 9 transcripts.
+
+THIS FILE HOLDS ONLY THIS HALF'S SIX: 6 arms, 12 legs, 6 transcripts.
+SPEC-361a owns and executes W1-W5 (one arm each) plus W9's one arm.
+SPEC-361b owns and executes the other three -- W6 (a) and (b), and W7 (b) --
+and records them in spec361b-witness-arm.txt. W8 carries no arm in either
+half: it is the NEUTRAL control run itself, which is this half's, and its
+non-firing is the arm (see spec361-control-runs.txt).
+
+The count below is therefore PARTIAL BY CONSTRUCTION. Six transcripts here is
+the correct and complete result for SPEC-361a; it is not the register's total,
+and neither half may report the joint figure as its own. The figures
+'fourteen', the 5+4 / 10+8 and 4+5 / 8+10 splits, and the interim 8/16/8 are
+STRUCK everywhere in both halves.
+
+A 'transcript' is ONE ARM and contains BOTH its legs: the applied mutation
+with its RED output, and the revert with its green re-run. 6 arms x 2 legs =
+12 legs.
+
+PROTOCOL AND PROVENANCE
+------------------------------------------------------------------------------
+Every line under [APPLY] and [REVERT] below was copied from real captured
+output of the command:
+
+    SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) \
+      cargo test --release -p topgun-server \
+        --test soak_monitor_calibration --test soak_wal_census
+
+run once per leg, 12 times in total. Both including targets are run because
+monitor.rs is #[path]-included by each, so every calibration test appears
+TWICE in the output -- the accepted duplication, not a second proof. That is
+why each leg reports two 'test result:' lines.
+
+Executed at HEAD 9bffbb04ed4b97e0c3f00d56d8ab15fa656ceadd (this half's branch, after the AT-3 demotion landed).
+The mutations are applied to the working tree and reverted in the same step;
+nothing here is committed in its mutated form, and `git status --porcelain`
+was empty after the last revert.
+
+ON COLLATERAL REDs, DISCLOSED RATHER THAN TRIMMED
+------------------------------------------------------------------------------
+N13 names ONE sited assertion per arm and requires that it go RED. Two arms
+(W1 and W2) mutate `rise_bytes`, which every corpus fixture reads, so they
+also RED assertions in sibling tests that pin a rise value; W4's L0 widening
+also catches a sibling fixture whose series opens at 0 B. Those extra REDs are
+listed in full under each leg rather than filtered out. They do not weaken the
+arm -- the sited assertion RED is the graded event -- but a transcript that
+silently showed only the named failure would be a doctored one.
+
+==============================================================================
+
+TRANSCRIPT 1 of 6 -- W1
+------------------------------------------------------------------------------
+sited assertion (must RED): calibration_fails_linear_corpus_level
+mutation: replace `last_half_peak - first_half_peak` with `last_half_peak - last_half_peak` (identically 0)
+site: packages/server-rust/benches/soak_harness/monitor.rs
+
+  - let rise_bytes = last_half_peak_bytes.saturating_sub(first_half_peak_bytes);
+  + let rise_bytes = last_half_peak_bytes.saturating_sub(last_half_peak_bytes);
+
+LEG 1 -- MUTATION APPLIED.  process exit = 101
+    test result: FAILED. 25 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  failing tests:
+    monitor::tests::calibration_fails_linear_corpus_level
+    monitor::tests::calibration_fails_slow_unbounded_ramp
+  captured failure at the sited assertion:
+    thread 'monitor::tests::calibration_fails_linear_corpus_level' (9463831) panicked at packages/server-rust/tests/../benches/soak_harness/monitor.rs:1699:9:
+    assertion `left == right` failed
+      left: 0
+     right: 400000
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  SITED ASSERTION RED: YES
+
+LEG 2 -- MUTATION REVERTED.  process exit = 0
+    test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  failing tests: (none)
+  GREEN AGAIN: YES
+
+TRANSCRIPT 2 of 6 -- W2
+------------------------------------------------------------------------------
+sited assertion (must RED): calibration_passes_plateau_after_ramp
+mutation: compare `last_half_peak` against the series' FIRST sample instead of the first-half peak
+site: packages/server-rust/benches/soak_harness/monitor.rs
+
+  - let rise_bytes = last_half_peak_bytes.saturating_sub(first_half_peak_bytes);
+  + let rise_bytes = last_half_peak_bytes.saturating_sub(first_bytes);
+
+LEG 1 -- MUTATION APPLIED.  process exit = 101
+    test result: FAILED. 24 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  failing tests:
+    monitor::tests::calibration_fails_linear_corpus_level
+    monitor::tests::calibration_fails_slow_unbounded_ramp
+    monitor::tests::calibration_passes_plateau_after_ramp
+  captured failure at the sited assertion:
+    thread 'monitor::tests::calibration_passes_plateau_after_ramp' (9464381) panicked at packages/server-rust/tests/../benches/soak_harness/monitor.rs:1729:9:
+    assertion `left == right` failed
+      left: 290000
+     right: 0
+  SITED ASSERTION RED: YES
+
+LEG 2 -- MUTATION REVERTED.  process exit = 0
+    test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  failing tests: (none)
+  GREEN AGAIN: YES
+
+TRANSCRIPT 3 of 6 -- W3
+------------------------------------------------------------------------------
+sited assertion (must RED): calibration_fails_on_failed_scan
+mutation: replace the `scans_failed > 0` disjunct with `false`
+site: packages/server-rust/benches/soak_harness/monitor.rs
+
+  - if scans_failed > 0 || samples.is_empty() {
+  + if false || samples.is_empty() {
+
+LEG 1 -- MUTATION APPLIED.  process exit = 101
+    test result: FAILED. 26 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  failing tests:
+    monitor::tests::calibration_fails_on_failed_scan
+  captured failure at the sited assertion:
+    thread 'monitor::tests::calibration_fails_on_failed_scan' (9465056) panicked at packages/server-rust/tests/../benches/soak_harness/monitor.rs:1759:9:
+    assertion `left == right` failed
+      left: LevelEvaluated
+     right: InstrumentFailed
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  SITED ASSERTION RED: YES
+
+LEG 2 -- MUTATION REVERTED.  process exit = 0
+    test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  failing tests: (none)
+  GREEN AGAIN: YES
+
+TRANSCRIPT 4 of 6 -- W4
+------------------------------------------------------------------------------
+sited assertion (must RED): calibration_passes_honest_empty_corpus
+mutation: treat a `bytes == 0` sample as a failed scan
+site: packages/server-rust/benches/soak_harness/monitor.rs
+
+  - if scans_failed > 0 || samples.is_empty() {
+  + if scans_failed > 0 || samples.is_empty() || samples.iter().any(|s| s.bytes == 0) {
+
+LEG 1 -- MUTATION APPLIED.  process exit = 101
+    test result: FAILED. 25 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  failing tests:
+    monitor::tests::calibration_fails_linear_corpus_level
+    monitor::tests::calibration_passes_honest_empty_corpus
+  captured failure at the sited assertion:
+    thread 'monitor::tests::calibration_passes_honest_empty_corpus' (9466026) panicked at packages/server-rust/tests/../benches/soak_harness/monitor.rs:1780:9:
+    assertion `left == right` failed
+      left: InstrumentFailed
+     right: LevelEvaluated
+  SITED ASSERTION RED: YES
+
+LEG 2 -- MUTATION REVERTED.  process exit = 0
+    test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  failing tests: (none)
+  GREEN AGAIN: YES
+
+TRANSCRIPT 5 of 6 -- W5
+------------------------------------------------------------------------------
+sited assertion (must RED): calibration_fails_slow_unbounded_ramp
+mutation: shorten the modelled run so the series' rise falls under the headroom (16 -> 12 samples)
+site: packages/server-rust/benches/soak_harness/monitor.rs
+
+  - let totals: Vec<u64> = (0..16).map(|i| 50_000 + i * 9_000).collect();
+  + let totals: Vec<u64> = (0..12).map(|i| 50_000 + i * 9_000).collect();
+
+LEG 1 -- MUTATION APPLIED.  process exit = 101
+    test result: FAILED. 26 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  failing tests:
+    monitor::tests::calibration_fails_slow_unbounded_ramp
+  captured failure at the sited assertion:
+    thread 'monitor::tests::calibration_fails_slow_unbounded_ramp' (9466937) panicked at packages/server-rust/tests/../benches/soak_harness/monitor.rs:1810:9:
+    assertion `left == right` failed
+      left: 54000
+     right: 72000
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  SITED ASSERTION RED: YES
+
+LEG 2 -- MUTATION REVERTED.  process exit = 0
+    test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  failing tests: (none)
+  GREEN AGAIN: YES
+
+TRANSCRIPT 6 of 6 -- W9
+------------------------------------------------------------------------------
+sited assertion (must RED): calibration_fails_armed_ceiling
+mutation: replace L2's breach predicate `peak_bytes > c` with `last_bytes > c` (level-vs-final, not envelope)
+site: packages/server-rust/benches/soak_harness/monitor.rs
+
+  - if peak_bytes > ceiling {
+  + if last_bytes > ceiling {
+
+LEG 1 -- MUTATION APPLIED.  process exit = 101
+    test result: FAILED. 26 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  failing tests:
+    monitor::tests::calibration_fails_armed_ceiling
+  captured failure at the sited assertion:
+    thread 'monitor::tests::calibration_fails_armed_ceiling' (9467618) panicked at packages/server-rust/tests/../benches/soak_harness/monitor.rs:1848:9:
+    an armed ceiling must breach on the PEAK even though the last sample sits below it; reason=None
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  SITED ASSERTION RED: YES
+
+LEG 2 -- MUTATION REVERTED.  process exit = 0
+    test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+  failing tests: (none)
+  GREEN AGAIN: YES
+
+==============================================================================
+RESULT
+------------------------------------------------------------------------------
+6 arms executed, 12 legs, 6 transcripts. Every sited assertion went RED under
+its arm and green again after the revert; every apply leg exited 101 and every
+revert leg exited 0. No arm was skipped, reconstructed or extrapolated.
+
+The register's remaining 3 arms / 6 legs / 3 transcripts belong to SPEC-361b
+and are not executed here.
+
+BEARING OF THE AT-3 DEMOTION ON THESE ARMS: none. All six are sited on the
+estimator and its calibration fixtures in monitor.rs, which the demotion left
+byte-unchanged in arithmetic -- the demotion changed only which verdicts the
+run's `passed` reads in main.rs. The estimator is still computed, rendered and
+persisted on every run, so the assertions these arms falsify remain live.
+
