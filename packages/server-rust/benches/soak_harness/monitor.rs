@@ -483,6 +483,250 @@ pub fn assess_tombstone_bytes(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Durable-layer OR tombstone corpus: level/ceiling estimator.
+//
+// The items below are the estimator's frozen surface. They are `allow`ed for
+// dead code because the soak binary does not reference them until the sampler
+// and the verdict re-point are wired; the calibration integration target
+// already includes this module under its own `allow(dead_code)`.
+// ---------------------------------------------------------------------------
+
+/// Level headroom (bytes) between the first-half and last-half corpus peaks.
+///
+/// Derived, not chosen, and every number below is either quoted from a
+/// committed source with its `file:line` or computed from two such numbers with
+/// the arithmetic shown. All three steps are normalised to the SAME window: the
+/// control cells run 900 s at `--crash-interval 120`, so the corpus series
+/// spans ≈ 780 s (terminal scan minus FIRST checkpoint) and its last half
+/// covers ≈ 390 s = 0.108333 h.
+///
+/// 1. NOISE, EXPRESSED AS A LEVEL RATHER THAN A RATE. The recorded width-100
+///    spread of 8,756 B/h was fitted over a 900 s = 0.25 h last-half window
+///    (`spec356-manifest.md:1634`, `:1961-1962`), so the primitive noise
+///    magnitude is a LEVEL of `8,756 × 0.25 = 2,189 B`; renormalised to the
+///    390 s window it is `8,756 × 0.108333 = 948.6 B`. 65,536 sits 29.9× above
+///    the as-measured figure and 69.1× above the normalised one.
+/// 2. ABOVE THE HEALTHY SIGNAL. The width-100 keeping-up cell recorded a
+///    backlog delta of +8,602 B over its own coordinate last-half window of 90
+///    rows / 900 s (`spec356-manifest.md:1961-1964`). Pro-rated to 390 s that
+///    is `8,602 × 390 / 900 = 3,727.5 B`, so the headroom sits 17.6× above it.
+/// 3. BELOW THE UNHEALTHY SIGNAL. The `long` cell's coordinate last-half window
+///    carried +5,303,731 B of backlog growth over a span of 7,190 s
+///    (`spec356-manifest.md:1660-1661`), i.e. 2,655,565 B/h; over the 390 s
+///    window that is 287,686 B, which is 4.4× this headroom.
+///
+/// Healthy ≈ 3,727.5 B, headroom 65,536 B, unhealthy ≈ 287,686 B — roughly one
+/// order of magnitude of margin on each side, with a 77× total separation
+/// (`287,686 / 3,727.5`). That separation is window-INVARIANT: it is a ratio of
+/// two quantities pro-rated by the same factor. No claim of two orders of
+/// magnitude is made, because the arithmetic does not support one.
+///
+/// THE PROXY IS DISCLOSED, NOT GLOSSED. Every magnitude above is a gauge or
+/// counter figure; no durable-corpus noise floor has ever been measured. What
+/// the committed evidence DOES bound is the substitution error of deriving a
+/// byte headroom from gauge magnitudes and applying it to corpus magnitudes:
+/// the 29 terminal `tombstone_corpus_redb_scan:` lines under
+/// `benches/soak_harness/evidence/` (29 files, 21 distinct runs) each render the
+/// scanned corpus beside the last gauge value, and across all of them the
+/// ABSOLUTE gap never exceeds 27,925 B, so `65,536 / 27,925 = 2.3×`. The bound
+/// is stated in bytes and not as a percentage because the relative gap is not
+/// uniform (0.5–3 % on the ≥ 400 KB cells, tens of percent on the ~20–50 KB
+/// ones) and an absolute bound is what this clause actually consumes. Those
+/// lines are single terminal scalars, one per run: they are NOT a noise floor
+/// and NOT a retune input. Revising this constant on measured durable-corpus
+/// data is a recorded revision, never a keyboard retune.
+#[allow(dead_code)]
+pub const DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES: u64 = 65_536;
+
+/// Minimum wall-clock span (seconds) of the corpus series before L1 may decide.
+///
+/// Five times [`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`]: far above the 25 s
+/// blocking smoke, far below any real soak.
+///
+/// It is also the BINDING guard on a control cell's duration, which is why the
+/// admissible range is derived here rather than chosen at the keyboard. At
+/// `--crash-interval 120` a cell of duration `D` puts its first checkpoint at
+/// ≈ 120 s and its terminal scan at ≈ `D`, so
+/// `span_secs ≈ D − 120` (terminal minus FIRST checkpoint, not minus `t = 0`)
+/// and `samples = floor(D / 120) + 1`. The sample guard `samples >= 4` binds at
+/// `D >= 360`; this span guard binds at `D − 120 >= 600`, i.e. `D >= 720`, and
+/// is therefore the binding one. The admissible range is
+/// `730 s <= D <= 900 s` — the 730 s lower bound carries a 10 s cushion over
+/// the derived 720 s for the strict comparison and for a first checkpoint that
+/// fires marginally late, and 900 s is the top of the range. A cell shorter
+/// than 730 s is inadmissible by construction.
+#[allow(dead_code)]
+pub const DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS: f64 = 600.0;
+
+/// Minimum corpus samples before L1 may decide (at least 2 per half).
+///
+/// Two per half, so neither half-peak is a single point — the degenerate case
+/// [`last_half_window_span_secs`]'s own guard excludes for the same reason. At
+/// `--crash-interval 120` a 900 s cell yields 8 samples (7 checkpoints plus the
+/// terminal scan), clearing this guard with margin.
+#[allow(dead_code)]
+pub const DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES: usize = 4;
+
+/// L2's absolute ceiling in bytes. `None` = DISARMED, and that is the default.
+///
+/// Arming it honestly requires a validated ceiling, and validating one requires
+/// a plateau demonstration that is out of scope here — so the clause ships
+/// implemented, unit-tested, rendered and armable from the CLI, and a later
+/// measurement round can arm it without a code change. `None` renders as
+/// `ceiling=disarmed` on the report line and as an EXPLICIT `null` in the JSON
+/// report, never as an omitted key: omitting it would make "L2 disarmed"
+/// indistinguishable from "this report predates the field", which is the
+/// invisible-suppression defect this estimator exists to refuse.
+#[allow(dead_code)]
+pub const DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES: Option<u64> = None;
+
+/// One durable-layer OR tombstone corpus scan, taken while the server process is
+/// DEAD (redb is single-writer, so its file lock must be free) and therefore
+/// reading the PRE-RECOVERY on-disk state.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct CorpusSample {
+    pub elapsed_secs: f64,
+    pub bytes: u64,
+}
+
+/// Which clause actually decided a corpus assessment. Rendered verbatim, so a
+/// clause that did not fire is visible rather than indistinguishable from a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum CorpusLevelDisposition {
+    /// L1 was evaluated and decided.
+    LevelEvaluated,
+    /// L1 was NOT evaluated, so the slope clause hard-gates instead. Never "ok".
+    LevelSuppressed,
+    /// L0 failed. L1 and L2 are NOT EVALUATED (fail-closed order).
+    InstrumentFailed,
+}
+
+impl CorpusLevelDisposition {
+    /// The single rendered token for this disposition. Consumed BOTH by the
+    /// console line in `main.rs` and by the JSON serializer in `report.rs`, so
+    /// the two transports can never disagree and no site retypes a literal.
+    /// Deliberately hand-written rather than serde-derived: this file is
+    /// `#[path]`-included by an integration target and must stay `std`-only.
+    #[must_use]
+    #[allow(dead_code)]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LevelEvaluated => "LEVEL_EVALUATED",
+            Self::LevelSuppressed => "LEVEL_SUPPRESSED",
+            Self::InstrumentFailed => "INSTRUMENT_FAILED",
+        }
+    }
+}
+
+/// Verdict of a durable-layer corpus assessment.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct TombstoneCorpusAssessment {
+    pub scans_attempted: usize,
+    pub scans_failed: usize,
+    pub samples: usize,
+    /// PRE-REGISTERED AGGREGATES of the corpus series. These four — count
+    /// (`samples`), min, max (`peak_bytes`) and last — are the ONLY shape in
+    /// which the series reaches a consumer: publishing the per-sample series is
+    /// forbidden, so every predicate any downstream grading rests on must be
+    /// statable over exactly these.
+    pub first_bytes: u64,
+    pub min_bytes: u64,
+    pub peak_bytes: u64,
+    pub last_bytes: u64,
+    pub first_half_peak_bytes: u64,
+    pub last_half_peak_bytes: u64,
+    pub rise_bytes: u64,
+    pub span_secs: f64,
+    pub disposition: CorpusLevelDisposition,
+    /// `None` = L2 DISARMED. Serialized EXPLICITLY as `null` by the report
+    /// layer — absence must never be indistinguishable from suppression.
+    pub ceiling_bytes: Option<u64>,
+    pub passed: bool,
+    pub reason: Option<String>,
+}
+
+/// L0 and L1 are HARD gate clauses; L1 only when its two guards are met.
+///
+/// The three clauses are evaluated in this order, and the order is fail-closed:
+///
+/// * `L0` — INSTRUMENT. Breaches when `scans_failed > 0` OR `samples == 0`,
+///   yielding `passed = false`, [`CorpusLevelDisposition::InstrumentFailed`],
+///   a named reason, and NO evaluation of L1 or L2. A scan that could not
+///   obtain the state — missing file, corrupt header, a table-open error, or a
+///   failed byte copy — is a BLIND instrument, and a gate whose instrument was
+///   blind must not report bounded growth. An honest `Some(0)` from a
+///   never-written table is not a breach and must stay distinguishable from a
+///   blind `None`.
+/// * `L1` — LEVEL / FLATNESS. Evaluated only when `samples >= min_samples` AND
+///   `span_secs >= min_span_secs`; breaches when
+///   `last_half_peak_bytes.saturating_sub(first_half_peak_bytes) >
+///   headroom_bytes`, yielding [`CorpusLevelDisposition::LevelEvaluated`]. The
+///   `saturating_sub` is deliberate: a FALLING corpus yields `rise = 0` and
+///   passes, which is the correct answer for a ceiling test. When either guard
+///   is unmet the disposition is
+///   [`CorpusLevelDisposition::LevelSuppressed`], this clause contributes
+///   nothing to `passed`, and the suppression is rendered with BOTH numbers so
+///   it can never be read as a pass.
+/// * `L2` — ABSOLUTE CEILING. Evaluated only when `ceiling_bytes` is `Some(c)`;
+///   breaches when `peak_bytes > c`. It is an ENVELOPE test — the peak, not the
+///   last sample — because prune legitimately produces large downward
+///   excursions and a level-vs-final test would let a rising envelope hide
+///   behind one of them. Disarmed by default; see
+///   [`DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES`].
+///
+/// The peak is also why neither the mean nor the median is used anywhere here:
+/// a ceiling is an UPPER ENVELOPE, and those same downward excursions would
+/// drag a mean or a median and hide a rising envelope. Nothing in this clause
+/// is fitted; it compares bytes to bytes, so no `1/span` amplification can
+/// re-import a rate spread as if it were an independent noise source.
+///
+/// The window partition is the same split index [`last_half_window`] uses, so
+/// this clause and the slope clause split any series identically and a reader
+/// comparing the two is comparing like with like.
+///
+/// Total over its inputs: no panic path, no interior mutability, no I/O, and no
+/// dependency beyond `std` — this file is `#[path]`-included by an integration
+/// target that includes no sibling module.
+#[must_use]
+#[allow(dead_code, unused_variables, clippy::unimplemented)]
+pub fn assess_tombstone_corpus_level(
+    samples: &[CorpusSample],
+    scans_attempted: usize,
+    scans_failed: usize,
+    headroom_bytes: u64,
+    min_span_secs: f64,
+    min_samples: usize,
+    ceiling_bytes: Option<u64>,
+) -> TombstoneCorpusAssessment {
+    // The signature and its doc-contract above are frozen ahead of the body so
+    // the calibration fixtures and the report/console transports can be written
+    // against a surface that cannot drift; the clause arithmetic lands next.
+    unimplemented!("corpus level estimator body")
+}
+
+/// Whether the tombstone-byte SLOPE clause still hard-gates a run that
+/// produced this disposition. EXHAUSTIVE BY CONSTRUCTION: a fourth variant
+/// does not compile here, which is what makes the no-ungated-window coverage
+/// argument structural rather than a source-read. `main.rs`'s verdict
+/// expression consumes this and re-types no comparison of its own.
+#[must_use]
+// One arm per variant, deliberately not merged into a single `|` pattern: the
+// point of the enumeration is that every variant is classified in its own
+// right, so a fourth variant has to be given an explicit answer here rather
+// than being absorbed into an existing pattern.
+#[allow(dead_code, clippy::match_same_arms)]
+pub const fn slope_clause_stays_hard(disposition: CorpusLevelDisposition) -> bool {
+    match disposition {
+        CorpusLevelDisposition::LevelEvaluated => false,
+        CorpusLevelDisposition::LevelSuppressed => true,
+        CorpusLevelDisposition::InstrumentFailed => true,
+    }
+}
+
 /// One boot-recompute-gap window: the span (on the `elapsed_secs` clock shared
 /// with [`TombstoneSample`]) between a `kill -9` and the restarted process's
 /// health-ready signal, during which the tombstone-bytes gauge for the new
