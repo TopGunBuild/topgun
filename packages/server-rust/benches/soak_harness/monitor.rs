@@ -1635,4 +1635,243 @@ mod tests {
         );
         assert!(a.slope_mb_per_hour > DEFAULT_DISK_THRESHOLD_MB_PER_HOUR);
     }
+
+    /// Build a durable-corpus series from explicit byte totals, sampled at a
+    /// fixed interval on the harness's elapsed-seconds clock. The totals stay
+    /// `u64` end to end — no counted byte total is routed through an `f64`.
+    fn corpus_series(interval_secs: f64, totals: &[u64]) -> Vec<CorpusSample> {
+        totals
+            .iter()
+            .enumerate()
+            .map(|(index, &bytes)| CorpusSample {
+                elapsed_secs: f64::from(u32::try_from(index).unwrap_or(u32::MAX)) * interval_secs,
+                bytes,
+            })
+            .collect()
+    }
+
+    /// Assess a corpus series under the calibrated defaults, leaving only the
+    /// scan counters and the ceiling to the caller.
+    fn assess_corpus_defaults(
+        samples: &[CorpusSample],
+        scans_attempted: usize,
+        scans_failed: usize,
+        ceiling_bytes: Option<u64>,
+    ) -> TombstoneCorpusAssessment {
+        assess_tombstone_corpus_level(
+            samples,
+            scans_attempted,
+            scans_failed,
+            DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
+            DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
+            DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
+            ceiling_bytes,
+        )
+    }
+
+    /// A LINEAR durable-corpus leak MUST fail the level clause: the last-half
+    /// peak stands far above the first-half peak, which is precisely the
+    /// unbounded-growth shape the clause exists to discriminate. A comparison
+    /// that could not see the difference between the two half-peaks would let
+    /// this series through.
+    #[test]
+    fn calibration_fails_linear_corpus_level() {
+        let samples = corpus_series(
+            90.0,
+            &[
+                0, 100_000, 200_000, 300_000, 400_000, 500_000, 600_000, 700_000,
+            ],
+        );
+        let a = assess_corpus_defaults(&samples, samples.len(), 0, None);
+        assert_eq!(a.disposition, CorpusLevelDisposition::LevelEvaluated);
+        assert_eq!(a.first_half_peak_bytes, 300_000);
+        assert_eq!(a.last_half_peak_bytes, 700_000);
+        assert_eq!(a.rise_bytes, 400_000);
+        assert!(
+            !a.passed,
+            "a linear corpus leak must breach the level clause; rise={} B reason={:?}",
+            a.rise_bytes, a.reason
+        );
+    }
+
+    /// FROZEN FIXTURE: 8 samples 90s apart; first sample 10,000 B; the series
+    /// ramps to 300,000 B by sample 4 and then plateaus FLAT at 300,000 B for
+    /// samples 5-8.
+    ///
+    /// Frozen relationship: the ramp's height above the FIRST sample exceeds
+    /// the headroom (290,000 B > 65,536 B) while the half-to-half rise is
+    /// exactly zero. A genuine ramp-then-plateau is the healthy shape and must
+    /// NOT false-RED; a level test taken against the series' ORIGIN instead of
+    /// its first-half peak would condemn it.
+    #[test]
+    fn calibration_passes_plateau_after_ramp() {
+        let samples = corpus_series(
+            90.0,
+            &[
+                10_000, 110_000, 210_000, 300_000, 300_000, 300_000, 300_000, 300_000,
+            ],
+        );
+        let a = assess_corpus_defaults(&samples, samples.len(), 0, None);
+        assert_eq!(a.disposition, CorpusLevelDisposition::LevelEvaluated);
+        assert!(a.span_secs >= DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS);
+        assert_eq!(a.first_half_peak_bytes, 300_000);
+        assert_eq!(a.last_half_peak_bytes, 300_000);
+        assert_eq!(a.rise_bytes, 0);
+        assert!(
+            a.peak_bytes - a.first_bytes > DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
+            "the fixture's ramp must clear the headroom measured from the origin, \
+             or a level-vs-origin comparison would agree with the correct one"
+        );
+        assert!(
+            a.passed,
+            "a ramp that plateaus must pass; rise={} B reason={:?}",
+            a.rise_bytes, a.reason
+        );
+    }
+
+    /// FROZEN FIXTURE: 5 scans attempted, 1 FAILED, 4 usable samples 210s apart
+    /// on a flat series (span 630s).
+    ///
+    /// Frozen relationship: the surviving samples clear BOTH level-clause
+    /// guards and the series is flat, so an instrument clause that ignored the
+    /// failed scan would evaluate the level clause and PASS. A fixture in which
+    /// every scan failed would be decided by the zero-sample disjunct instead
+    /// and would prove nothing about the failed-scan one.
+    #[test]
+    fn calibration_fails_on_failed_scan() {
+        let samples = corpus_series(210.0, &[120_000; 4]);
+        let a = assess_corpus_defaults(&samples, 5, 1, None);
+        assert_eq!(a.samples, 4);
+        assert_eq!(a.scans_failed, 1);
+        assert!(a.samples >= DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES);
+        assert!(a.span_secs >= DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS);
+        assert_eq!(a.rise_bytes, 0);
+        assert_eq!(a.disposition, CorpusLevelDisposition::InstrumentFailed);
+        assert!(
+            !a.passed,
+            "a blind scan must fail the run closed; reason={:?}",
+            a.reason
+        );
+    }
+
+    /// A scan that read a never-written table and reported zero bytes is an
+    /// honest measurement, not a blindness: a whole series of them MUST pass,
+    /// and must stay distinguishable from a scan that could not read the state
+    /// at all. Treating a zero total as a failed scan would fail an empty but
+    /// perfectly healthy corpus.
+    #[test]
+    fn calibration_passes_honest_empty_corpus() {
+        let samples = corpus_series(90.0, &[0; 8]);
+        let a = assess_corpus_defaults(&samples, samples.len(), 0, None);
+        assert_eq!(a.scans_failed, 0);
+        assert_eq!(a.min_bytes, 0);
+        assert_eq!(a.peak_bytes, 0);
+        assert_eq!(a.rise_bytes, 0);
+        assert_eq!(a.disposition, CorpusLevelDisposition::LevelEvaluated);
+        assert!(
+            a.passed,
+            "an all-zero corpus is an honest empty one and must pass; reason={:?}",
+            a.reason
+        );
+    }
+
+    /// A SLOW unbounded leak must still be caught once enough duration has been
+    /// modelled: 16 samples 120s apart growing 9,000 B per sample. No single
+    /// step comes anywhere near the headroom, so the breach exists only in the
+    /// accumulated half-to-half level — which is the property that lets the
+    /// level clause discriminate a leak the per-hour slope statistic would
+    /// report as a small, unremarkable rate.
+    #[test]
+    fn calibration_fails_slow_unbounded_ramp() {
+        let totals: Vec<u64> = (0..16).map(|i| 50_000 + i * 9_000).collect();
+        let samples = corpus_series(120.0, &totals);
+        let a = assess_corpus_defaults(&samples, samples.len(), 0, None);
+        assert_eq!(a.disposition, CorpusLevelDisposition::LevelEvaluated);
+        let widest_step = samples
+            .windows(2)
+            .map(|pair| pair[1].bytes.saturating_sub(pair[0].bytes))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            widest_step < DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
+            "no single step may reach the headroom, or the ramp is not slow; \
+             widest step={widest_step} B"
+        );
+        assert_eq!(a.rise_bytes, 72_000);
+        assert!(a.rise_bytes > DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES);
+        assert!(
+            !a.passed,
+            "a slow but unbounded ramp must breach once the modelled duration is \
+             long enough; rise={} B reason={:?}",
+            a.rise_bytes, a.reason
+        );
+    }
+
+    /// FROZEN FIXTURE: 8 samples 90s apart with the ceiling ARMED at 100,000 B;
+    /// the series peaks at 200,000 B inside the FIRST half and decreases
+    /// monotonically to 50,000 B at the last sample.
+    ///
+    /// Frozen relationship: `peak > ceiling >= last`, and the half-to-half rise
+    /// is zero. So the level clause PASSES and the failure is attributable to
+    /// the absolute ceiling alone — and a ceiling compared against the LAST
+    /// sample rather than the peak would not fire at all. The ceiling is an
+    /// ENVELOPE test, because prune legitimately produces large downward
+    /// excursions a rising envelope could otherwise hide behind.
+    #[test]
+    fn calibration_fails_armed_ceiling() {
+        let samples = corpus_series(
+            90.0,
+            &[
+                200_000, 175_000, 150_000, 125_000, 100_000, 85_000, 70_000, 50_000,
+            ],
+        );
+        let a = assess_corpus_defaults(&samples, samples.len(), 0, Some(100_000));
+        assert_eq!(a.disposition, CorpusLevelDisposition::LevelEvaluated);
+        assert_eq!(
+            a.rise_bytes, 0,
+            "the level clause must pass, so the verdict is attributable to the ceiling"
+        );
+        assert_eq!(a.peak_bytes, 200_000);
+        assert_eq!(a.last_bytes, 50_000);
+        assert_eq!(a.ceiling_bytes, Some(100_000));
+        assert!(a.peak_bytes > 100_000 && a.last_bytes <= 100_000);
+        assert!(
+            !a.passed,
+            "an armed ceiling must breach on the PEAK even though the last sample \
+             sits below it; reason={:?}",
+            a.reason
+        );
+    }
+
+    /// Whenever the level clause did NOT decide, the slope clause must still
+    /// decide — otherwise a run could pass through a window no clause held.
+    /// The enumeration lives on the type: a fourth disposition fails to compile
+    /// inside the predicate, so what this asserts is the CLASSIFICATION of each
+    /// variant, not the exhaustiveness (the compiler owns that).
+    ///
+    /// The blind-instrument variant is checked a second way: such an assessment
+    /// already carries `passed == false`, so it fails through the first
+    /// conjunct and never depends on the fallback to rescue it.
+    #[test]
+    fn calibration_slope_clause_hard_for_every_non_evaluated_disposition() {
+        for (disposition, stays_hard) in [
+            (CorpusLevelDisposition::LevelEvaluated, false),
+            (CorpusLevelDisposition::LevelSuppressed, true),
+            (CorpusLevelDisposition::InstrumentFailed, true),
+        ] {
+            assert_eq!(
+                slope_clause_stays_hard(disposition),
+                stays_hard,
+                "{} is classified wrongly",
+                disposition.as_str()
+            );
+        }
+
+        let blind = assess_corpus_defaults(&[], 1, 1, None);
+        assert_eq!(blind.disposition, CorpusLevelDisposition::InstrumentFailed);
+        assert!(
+            !blind.passed,
+            "a blind instrument must already fail through the first conjunct"
+        );
+    }
 }
