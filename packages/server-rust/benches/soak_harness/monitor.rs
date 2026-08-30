@@ -566,7 +566,6 @@ pub fn assess_tombstone_bytes(
 /// lines are single terminal scalars, one per run: they are NOT a noise floor
 /// and NOT a retune input. Revising this constant on measured durable-corpus
 /// data is a recorded revision, never a keyboard retune.
-#[allow(dead_code)]
 pub const DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES: u64 = 65_536;
 
 /// Minimum wall-clock span (seconds) of the corpus series before L1 may decide.
@@ -586,7 +585,6 @@ pub const DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES: u64 = 65_536;
 /// the derived 720 s for the strict comparison and for a first checkpoint that
 /// fires marginally late, and 900 s is the top of the range. A cell shorter
 /// than 730 s is inadmissible by construction.
-#[allow(dead_code)]
 pub const DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS: f64 = 600.0;
 
 /// Minimum corpus samples before L1 may decide (at least 2 per half).
@@ -595,7 +593,6 @@ pub const DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS: f64 = 600.0;
 /// [`last_half_window_span_secs`]'s own guard excludes for the same reason. At
 /// `--crash-interval 120` a 900 s cell yields 8 samples (7 checkpoints plus the
 /// terminal scan), clearing this guard with margin.
-#[allow(dead_code)]
 pub const DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES: usize = 4;
 
 /// L2's absolute ceiling in bytes. `None` = DISARMED, and that is the default.
@@ -608,14 +605,12 @@ pub const DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES: usize = 4;
 /// report, never as an omitted key: omitting it would make "L2 disarmed"
 /// indistinguishable from "this report predates the field", which is the
 /// invisible-suppression defect this estimator exists to refuse.
-#[allow(dead_code)]
 pub const DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES: Option<u64> = None;
 
 /// One durable-layer OR tombstone corpus scan, taken while the server process is
 /// DEAD (redb is single-writer, so its file lock must be free) and therefore
 /// reading the PRE-RECOVERY on-disk state.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct CorpusSample {
     pub elapsed_secs: f64,
     pub bytes: u64,
@@ -624,7 +619,6 @@ pub struct CorpusSample {
 /// Which clause actually decided a corpus assessment. Rendered verbatim, so a
 /// clause that did not fire is visible rather than indistinguishable from a pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum CorpusLevelDisposition {
     /// L1 was evaluated and decided.
     LevelEvaluated,
@@ -641,7 +635,6 @@ impl CorpusLevelDisposition {
     /// Deliberately hand-written rather than serde-derived: this file is
     /// `#[path]`-included by an integration target and must stay `std`-only.
     #[must_use]
-    #[allow(dead_code)]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::LevelEvaluated => "LEVEL_EVALUATED",
@@ -653,7 +646,6 @@ impl CorpusLevelDisposition {
 
 /// Verdict of a durable-layer corpus assessment.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TombstoneCorpusAssessment {
     pub scans_attempted: usize,
     pub scans_failed: usize,
@@ -722,7 +714,6 @@ pub struct TombstoneCorpusAssessment {
 /// dependency beyond `std` — this file is `#[path]`-included by an integration
 /// target that includes no sibling module.
 #[must_use]
-#[allow(dead_code)]
 pub fn assess_tombstone_corpus_level(
     samples: &[CorpusSample],
     scans_attempted: usize,
@@ -843,7 +834,7 @@ pub fn assess_tombstone_corpus_level(
 // point of the enumeration is that every variant is classified in its own
 // right, so a fourth variant has to be given an explicit answer here rather
 // than being absorbed into an existing pattern.
-#[allow(dead_code, clippy::match_same_arms)]
+#[allow(clippy::match_same_arms)]
 pub const fn slope_clause_stays_hard(disposition: CorpusLevelDisposition) -> bool {
     match disposition {
         CorpusLevelDisposition::LevelEvaluated => false,
