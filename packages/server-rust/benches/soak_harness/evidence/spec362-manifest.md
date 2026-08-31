@@ -1001,3 +1001,270 @@ is a value):
   above the 5.4 % spread.
 
 *(No entries yet. Written empty at G1.)*
+
+<!-- BATCH-1 BEGIN -->
+
+---
+
+## Batch 1 — G5 completion record (`P1`–`P5`)
+
+Appended at G5/segment 2, the final segment of this spec. This batch discharges all five entries the
+frozen §6.6 checklist names. It **appends**; it edits nothing above the marker. The frozen-sections
+digest was re-verified as still reproducing at the moment of this append (see the footer).
+
+### `P1` — null characterization of `DURABLE-SHAPE-RULE v1`
+
+Transcribed verbatim from the printed block of `null_characterization_stationary_exchangeable`
+(`packages/server-rust/benches/soak_harness/monitor.rs`), the test §2.6 obliges.
+
+```
+rule_version    = DURABLE-SHAPE-RULE v1
+prng            = SplitMix64 (in-tree, std-only, hand-written in the test module)
+seed            = 0x243F6A8885A308D3   (CONSTANT, frozen in the test source)
+permutation     = Fisher-Yates, driven by the same seeded stream
+base_multisets  = 1  (exactly one, permuted)
+fixtures        = 2000
+fixture_len     = 2880
+cadence_secs    = 5
+span_secs       = 14395
+retained_samples= 2700   (after the frozen 1/16 warmup exclusion)
+value_range     = [0, 1000000000000)   u64, tie-rare
+fired           = 889
+total           = 2000
+indeterminate   = 0
+P(MonotoneRising) = 0.444500
+compound bound  = <= 4 x per-series rate (union bound; series independence explicitly NOT claimed)
+assertions about the rate: NONE — printed only, compared against nothing
+```
+
+**The finding that travels WITH the number and may not be dropped from it: the rate is LARGE and the
+compound bound is therefore VACUOUS.** Under exchangeability with equal-sized retained windows the
+peak envelope fires exactly when the global maximum lands in the last quarter (p = 1/4) and the floor
+envelope exactly when the global minimum does (p = 1/4), so the analytic value is
+`1/4 + 1/4 − P(both) ≈ 0.4375`; the measured `0.4445` sits about 0.6 sd from it. **Consequently the
+pinned `≤ 4 ×` union bound evaluates to `≤ 1.778`, i.e. `≥ 1`, and carries NO INFORMATION at the
+compound level.**
+
+The freeze is **not** contradicted by this: §2.6 anticipated the DIRECTION — the rule's error is
+deliberately placed on the `PlateauNotMet` side — and forbids gating on the number. But the MAGNITUDE
+is recorded plainly rather than as a bare decimal, because it means a `PlateauNotMet` verdict from
+`SPEC-362b`'s cell is close to uninformative against a stationary null **on its own**.
+
+### `P2` — pricing control record
+
+Both statistics come from the **single channel §6.2 names**: the `rss_kib` row of that arm's
+`*.soak.durable.json`, fields `lastHalfPeak` / `lastHalfMean` — the 5 s durable series. Neither number
+is taken from the 60 s CSV `rss_mb` column, which stays the independent cross-check.
+
+```
+logctl-on  (ARMED):  lastHalfPeak 368560 KiB   lastHalfMean 225798 KiB
+logctl-off (UNSET):  lastHalfPeak 294608 KiB   lastHalfMean 189394 KiB
+difference:          peak +25.10 %             mean +19.22 %   (ARMED higher on both)
+SPEC-355 recorded run-to-run spread: 5.4 %  ⇒  AT OR ABOVE
+```
+
+**Disposition, per §6.2: this is a RECORDED FINDING routed to `TODO-634` by id** (see `P5`, item 4),
+and per §0(d) it is grounds for a **re-pinning spec** — **never** grounds for retuning the departure
+until the control passes. **No arm was re-run.**
+
+Three caveats travel with it. The first two are the frozen §6.2 clauses, quoted verbatim:
+
+> With n = 1 per arm this control has **no** inferential power against a small perturbation; it can
+> only surface a gross one.
+
+This IS the gross case the control was designed to catch.
+
+> These controls bound only a **SHIFT IN THE LEVEL** of RSS, not a **DISTORTION OF THE GROWTH SHAPE**.
+> A log sink's allocator behaviour over 4 h is not observable in a ≤ 900 s arm, so a departure that
+> leaves the level alone while bending the slope would pass this control unseen.
+
+The third is an **UNCONTROLLED ORDER CONFOUND** that execution surfaced rather than resolved: the two
+arms ran back-to-back on the same machine in a fixed order — armed first at 18:22Z, unset at 18:37Z —
+so machine-state drift is **not** separated from the departure by this design. It is recorded as an
+accepted residual of the executed design, not argued away.
+
+### `P3` — control arm shape sets
+
+All three arms' four `SeriesShape` values, with the firing envelope named, and each arm's resulting
+`DurableReading`. Read off the three `*.soak.durable.json` artifacts.
+
+**The frozen §6.5 caveat, quoted verbatim and stated WITH the data rather than after it:**
+
+> The controls carry a **real** load and therefore real growth, so a `MonotoneRising` or a
+> `PlateauNotMet` observed on a control arm is **NOT per se a false positive** and may not be quoted
+> as one.
+
+These are verdicts about the **INSTRUMENT** only (C6) and may **never** be quoted about the plateau.
+The rule's **null** side is `P1`'s seeded fixtures — a different instrument for a different question —
+and **neither substitutes for the other**.
+
+```
+spec362-logctl-on   reading = PLATEAU_NOT_MET
+  reason  = series rss_kib rose and was still rising at the end; firing envelope BOTH
+  rss_kib            MONOTONE_RISING       envelope BOTH
+  redb_bytes         MONOTONE_RISING       envelope PEAKS
+  wal_bytes          RISING_DECELERATING   envelope none
+  wal_segment_files  MONOTONE_RISING       envelope BOTH
+
+spec362-logctl-off  reading = PLATEAU_NOT_MET
+  reason  = series rss_kib rose and was still rising at the end; firing envelope BOTH
+  rss_kib            MONOTONE_RISING       envelope BOTH
+  redb_bytes         MONOTONE_RISING       envelope PEAKS
+  wal_bytes          LEVELLED              envelope none
+  wal_segment_files  MONOTONE_RISING       envelope BOTH
+
+spec362-crashctl    reading = PLATEAU_NOT_MET
+  reason  = series rss_kib rose and was still rising at the end; firing envelope BOTH
+  rss_kib            MONOTONE_RISING       envelope BOTH
+  redb_bytes         RISING_DECELERATING   envelope none
+  wal_bytes          MONOTONE_RISING       envelope BOTH
+  wal_segment_files  MONOTONE_RISING       envelope BOTH
+```
+
+**The arming witness, in BOTH directions (§6.3), decisive and mechanical:**
+
+```
+logctl-on   originMatched 28   originUnparsed 0   originDropped 0   armed true
+logctl-off  originMatched 0    originUnparsed 0   originDropped 0   armed false
+            originReading INDETERMINATE_INSTRUMENT
+            originReason  "the origin log filter was not armed for this run"
+```
+
+The capture path is live, and a zero count under the ARMED filter is therefore a real null read rather
+than a dark instrument.
+
+### `P4` — crash control double witness
+
+`spec362-crashctl`, run with `--crash-interval` non-zero and the directive **ARMED**, produced both
+witnesses §6.4 pre-registered:
+
+```
+census records with source == "CHECKPOINT"  : 2   (census sources in order: CHECKPOINT, CHECKPOINT, TERMINAL)
+originReading                                : INDETERMINATE_INSTRUMENT
+restarts (root level)                        : 2
+originReason (verbatim, names the restart)   :
+  "the server restarted 2 time(s) during the run, so the epochs_exited qualifier reset and would be misread"
+```
+
+So the census's `Checkpoint` copy-then-scan branch **ran** rather than shipping unexecuted, and the
+`restarts > 0 ⇒ IndeterminateInstrument` guard was observed **live** with its reason naming the
+restart and with the root-level `restarts` count giving that reason provenance in the artifact. The
+arm ran ARMED (`originMatched 26`, `originUnparsed 0`), which isolates the restart guard from the
+filter and from a drop. **Its verdict is about the INSTRUMENT only.**
+
+### `P5` — routing record
+
+Routing is **BY IDENTIFIER ONLY**, here, in this post-section. **No tracker file was created, edited
+or deleted by this spec** (C1 / AC21 / AC24).
+
+1. **`TODO-654` — reading.** This spec's **INSTRUMENT half is complete**; the deciding cell is **NOT
+   run** and no reading about the plateau exists or is claimed here.
+2. **`SPEC-362b` — obligations.** Resolve the PIN-1 hash from `git log main` as its **first** action;
+   execute the frozen 4 h cell; record into this manifest's own `§9`; introduce **ZERO** `.rs` bytes.
+3. **`writebehind_lag_max` demotion to an observation column** — fixated **HERE**, in this routing
+   record, and never by editing `TODO-654.md` (C1, PIN 7). It is an observation column, not a
+   deciding series, and no verdict may be taken from it.
+4. **`TODO-634` ← the pricing finding** of `P2`: +25.10 % last-half peak and +19.22 % last-half mean,
+   **at or above** SPEC-355's recorded 5.4 % run-to-run spread. Recorded, not retuned.
+5. **`TODO-634` ← the vacuous-compound-bound finding** of `P1`: the pinned `≤ 4 ×` union bound
+   evaluates to `≤ 1.778`, i.e. `≥ 1`, and carries no information at the compound level.
+6. **`TODO-634` ← the ANSI-colour finding.** The server emits ANSI SGR on **every** log line
+   regardless of tty: `src/service/middleware/observability.rs:150` builds `fmt::layer()` with no
+   `.with_ansi(false)` and no tty probe, unlike `src/bin/topgun_server.rs:2110`. The harness reads the
+   child through a **PIPE**, so the frozen manifest's assumption that the rendered line is
+   `key=value`-scannable is **FALSE as shipped**. It was normalized at the **harness boundary**
+   (`main.rs::strip_ansi`) and **not** by touching the server (PIN 2). R7's `unset TOPGUN_LOG_FORMAT`
+   discipline guards JSON rendering but **not** colour, so the frozen §6/§7 clause is **incomplete on
+   its own terms**; `tracing-subscriber` does not honour `NO_COLOR`, so no environment variable closes
+   it.
+7. **`TODO-634` ← AC7's unexecutable test (AC7 is PARTIAL).** Its `#[test]` **cannot execute** where
+   the spec sites it: `[[bench]] soak_harness` is `harness = false` (`Cargo.toml:107-110`), so rustc
+   receives `--cfg test` but **not** `--test` and **strips every `#[test]` item**. This was proved by
+   injecting a deliberate type error inside the `#[test]` fn and observing **zero** diagnostics. The
+   assertion is now **COMPILE**-checked — the body moved into an uncalled `#[cfg(test)]` fn that
+   `cargo clippy --all-targets` builds — but it is **never EXECUTED**. Its only executable home is a
+   `packages/server-rust/tests/*.rs` target, which **AC3 forbids** and which would be a **FOURTH**
+   counted `.rs` — a **C5 SPLIT TRIGGER**, to be surfaced to the user and never absorbed silently.
+   Compensating evidence: a live armed run took **6** live-copy censuses while
+   `CorpusScanTally.scans_attempted` stayed at **3** and `scans_failed` at **0**. Three options are
+   named and none is chosen here: (i) accept compiled-but-unexecuted; (ii) an explicit ledger
+   amendment authorising a fourth counted `.rs`; (iii) re-site the tally types into the
+   already-counted `monitor.rs`.
+8. **`TODO-634` ← the `epochs_exited` absent-vs-zero ambiguity.** It is a plain `AtomicU64` running
+   max and `OriginAggregate.epochs_exited` is typed `u64`, so an **ABSENT** metric and a **genuine
+   zero** are indistinguishable. If R5's "while epochs exit" qualifier needs that distinction, it has
+   **no producer today**.
+9. **`TODO-634` ← `logctl-on`'s `NOT_REACHED_EQUAL_REFS` origin reading** — `originReason` verbatim:
+   "all 28 parsed line(s) returned exactly the refs held at entry". **C9 HARD-STOPS the diagnosis
+   line: this ROUTES and is NOT EXPLAINED here.**
+
+### Execution record — the two places this spec did not literally meet its own checklist
+
+Recorded plainly rather than smoothed over.
+
+**(a) Validation Checklist steps 2 and 2a literally require `exit 0`; `spec362-logctl-off` and
+`spec362-crashctl` both exited `1`.** Attribution, verified: the **pre-existing SHIPPED tombstone-byte
+slope hard gate** fired on uncontrolled 900 s physics — 2,967.8 B/h and 116,287.8 B/h against the
+512 B/h bound. The harness console states that **`durable-corpus clauses are report-only`**, so
+**this spec's durable reading did NOT contribute** to either failure: C3/C7 held and the reading was
+never ANDed into `passed`. The runner's own verdict was `RESULT: instrument sound` on all three arms
+and every AC-level `jq` assertion passes. **Neither arm was re-run** — re-running until the physics
+cooperates is precisely what R7/§6.2 forbids. Status: **substance met, literal `exit 0` NOT met,
+attributed.**
+
+**(b) AC7 is PARTIAL,** as recorded in `P5` item 7: compile-checked, never executed, routed to
+`TODO-634` with three named options and a C5 split trigger surfaced rather than absorbed.
+
+### Gate and re-verification, recorded at this append
+
+```
+cargo fmt --check                                     PASS
+cargo clippy --all-targets --all-features -p topgun-server -- -D warnings   PASS (0 warnings)
+AC1  src bytes touched under packages/{server,core}-rust/src  = 0
+AC2  changed .rs files = main.rs, monitor.rs, process.rs (exactly three)
+AC3  packages/server-rust/tests changed files = 0; name-set superset holds for all three targets
+AC4  report.rs byte-unchanged (git diff --quiet exit 0)
+AC18 manifest's first commit is a strict ancestor of the first spec362-*.csv commit
+AC19 frozen-sections digest reproduces: c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+AC20 INVARIANTS.md and scripts/check-invariants.sh byte-unedited; TG-OR-005 still `open (TODO-634)`
+     and still NAKED; NAKED_BASELINE still 4; check-invariants.sh reports 21 entries / 4 NAKED, exit 0
+AC21 TODO-634.md 127ad250bcd468c10368dea371b29cbbedf3536d8a1be8f41cefda8261293e07 (unchanged)
+     TODO-654.md 19ff3419ade1eda7b43f2588dd32a6460498c34c93aaf6c611c23363b9140e0a (unchanged)
+     TODO-634 checkbox census unchanged: 7 top-level / 2 ticked / 5 unticked / 0 indented
+AC23 the only added SPEC-/TODO- token in .rs is the sanctioned TODO-566 pointer inside the census
+     doc-contract; no other provenance marker was introduced
+```
+
+**The allow contract, reported literally.** `git diff BASE..HEAD -- '*.rs' | grep '^+.*allow(dead_code)'`
+is **NOT** empty, and that is the correct outcome. The non-weakenable discriminator —
+`grep '^+.*allow(dead_code).*wired in G4'` — **IS** empty: all **35** `wired in G4` placeholder allows
+were removed. **Two** load-bearing allows survive, neither a placeholder, both required because the
+bench target is `harness = false`:
+
+- `process.rs` — module-scoped on `#[cfg(test)] mod tests`, a property of the two compile modes;
+- `main.rs` — on `assert_live_copy_census_never_contaminates_the_corpus_tally`, the deliberately
+  uncalled body of `P5` item 7.
+
+The AC was neither edited nor relaxed.
+<!-- BATCH-1 END -->
+
+**Digest of Batch 1.** The digested range is the batch body **between** the two markers,
+exclusive of both marker lines and of this footer, so recording the digest cannot change what it
+digests. Reproduce with:
+
+```
+awk '/^<!-- BATCH-1 BEGIN -->$/{p=1;next} /^<!-- BATCH-1 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-1          575bd28e76380b8501561abe050b62b865ae7bed3dcd8f8279f8a3febf5eca3d
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
