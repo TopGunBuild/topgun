@@ -44,8 +44,7 @@ const LOG_RING_CAPACITY: usize = 400;
 ///
 /// The target is what makes the line selectable without a discriminant field,
 /// so the capture matches on it rather than on message text. Declared here
-/// beside the capture that consumes it; wired in G4.
-#[allow(dead_code)] // wired in G4
+/// beside the capture that consumes it.
 pub const ORIGIN_TARGET: &str = "topgun_server::tombstone_frontier::removal";
 
 /// Maximum origin lines retained by [`OriginCapture`].
@@ -55,17 +54,13 @@ pub const ORIGIN_TARGET: &str = "topgun_server::tombstone_frontier::removal";
 /// never silent: lines beyond this bound increment the capture's drop counter,
 /// and a non-zero drop count forces the fail-closed origin reading. Retention
 /// is in the HARNESS process, whose resident set nothing in this run measures.
-#[allow(dead_code)] // wired in G4
 pub const ORIGIN_CAPTURE_CAPACITY: usize = 50_000;
 
 /// Bounded sink for the removal-site observation lines, fed from the same
 /// per-line reader that drives the panic watch.
 ///
-/// Declaration only at this wave: the tap, the accessor and the counting
-/// behaviour are wired later. The counters are carried beside the retained
-/// lines so a reader never has to infer how many lines were seen from how many
-/// were kept.
-#[allow(dead_code)] // wired in G4
+/// The counters are carried beside the retained lines so a reader never has to
+/// infer how many lines were seen from how many were kept.
 pub struct OriginCapture {
     /// Retained lines, capped at [`ORIGIN_CAPTURE_CAPACITY`].
     lines: Mutex<Vec<String>>,
@@ -116,7 +111,6 @@ impl OriginCapture {
     ///
     /// The counters travel WITH the lines so a reader never has to infer how
     /// many lines were seen from how many were kept.
-    #[allow(dead_code)] // wired in G4
     pub fn snapshot(&self) -> OriginCaptureSnapshot {
         let lines = self.lines.lock();
         OriginCaptureSnapshot {
@@ -132,8 +126,7 @@ impl OriginCapture {
 ///
 /// A named struct rather than a tuple because the two counters are not
 /// interchangeable — `dropped` is fail-closed evidence, and a transposition at
-/// the wiring site would turn a discarded line into a matched one. Wired in G4.
-#[allow(dead_code)] // wired in G4
+/// the wiring site would turn a discarded line into a matched one.
 pub struct OriginCaptureSnapshot {
     /// The retained lines, in arrival order, capped at
     /// [`ORIGIN_CAPTURE_CAPACITY`].
@@ -278,7 +271,6 @@ impl ServerSupervisor {
     }
 
     /// The origin-line sink fed by every child generation's output readers.
-    #[allow(dead_code)] // wired in G4
     pub fn origin_capture(&self) -> Arc<OriginCapture> {
         Arc::clone(&self.origin_capture)
     }
@@ -574,9 +566,11 @@ pub fn effective_server_log_filter() -> String {
 // integration target `tests/soak_tombstone_restart.rs` — which re-includes this
 // module under the standard harness — is what actually runs them. The bench
 // target compiles this module in test mode WITHOUT libtest, so the `#[test]`
-// items are stripped there and their helpers read as unreferenced; the
-// module-scoped `allow(dead_code)` keeps that compile warning-free. It is a
-// property of the two compile modes, not a placeholder, so it stays.
+// items are stripped there and their fixture helper reads as unreferenced; the
+// module-scoped dead-code exemption below keeps that compile warning-free. It
+// is a property of the two compile modes, not a placeholder, so it stays — the
+// alternative is inlining the fixture into every test that needs it, which
+// buys a tidier lint surface with two copies of one literal that can drift.
 #[cfg(test)]
 #[allow(dead_code)]
 mod tests {

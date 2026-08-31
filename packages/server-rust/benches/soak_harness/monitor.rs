@@ -1035,12 +1035,11 @@ pub fn assess_disk(
 // ---------------------------------------------------------------------------
 // Durable-layer instrument: census, series shapes and the origin reading.
 //
-// Declarations only at this wave. Every item below carries its own item-scoped
-// dead-code allow because `main.rs` declares `mod monitor;` with no
-// module-level one, so an unwired declaration would fail `-D warnings` at the
-// wave boundary. Each allow expires when the item is wired in G4, and a blanket
-// module-level allow is deliberately NOT used: it would also silence the lint
-// for this module's existing items, permanently.
+// Pure and `std`-only, like everything else in this file: all the arithmetic
+// lives here so it is unit-tested in isolation, and the harness only samples
+// and dispatches. Nothing below carries a dead-code exemption — every item has
+// a real caller in the harness, which is what keeps the lint able to catch a
+// declaration nobody wired.
 // ---------------------------------------------------------------------------
 
 /// A store-level live/dead census of the durable OR corpus.
@@ -1061,7 +1060,6 @@ pub fn assess_disk(
 ///
 /// All thirteen fields are counts or byte totals and therefore `u64`;
 /// `Default` zero-initialises every one so a fold starts from an empty census.
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DurableCensus {
     /// Rows iterated.
@@ -1100,7 +1098,6 @@ pub struct DurableCensus {
 /// The two variants share every tombstone fold — a tombstone is a tombstone in
 /// either — and differ only in which variant-share counter they bump, which is
 /// why the fold takes this rather than duplicating the arithmetic per variant.
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrVariant {
     /// The unified OR-Map variant: live records plus tombstones.
@@ -1118,7 +1115,6 @@ pub enum OrVariant {
 /// and are never added to the corpus-scan tally, which is what keeps the
 /// durable-corpus estimator's input identical whether the live sampler is armed
 /// or not.
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CensusSource {
     /// Taken at a recovery checkpoint, with the server process DEAD.
@@ -1135,7 +1131,6 @@ impl CensusSource {
     /// disagree and no site retypes a literal. Deliberately hand-written rather
     /// than serde-derived: this file is `#[path]`-included by two integration
     /// targets and must stay `std`-only.
-    #[allow(dead_code)] // wired in G4
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -1147,7 +1142,6 @@ impl CensusSource {
 }
 
 /// One census, tagged with when it was taken and from what.
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CensusRecord {
     pub elapsed_secs: f64,
@@ -1160,7 +1154,6 @@ pub struct CensusRecord {
 /// The value is `u64` for every deciding series — all four are counts or byte
 /// totals — so the shape rule's strict comparisons are exact and no series
 /// becomes an `f64` on the way through.
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SeriesPoint {
     pub elapsed_secs: f64,
@@ -1172,7 +1165,6 @@ pub struct SeriesPoint {
 /// Evaluated in declaration order, fail-closed first. The rule reads
 /// **envelopes, not rates**: peaks and troughs over halves and quarters, with
 /// strict `>` comparisons and no headroom constant anywhere.
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeriesShape {
     /// Too few retained samples, too short a retained span, or no samples at
@@ -1191,7 +1183,6 @@ impl SeriesShape {
     /// The single rendered token for this shape. Consumed BOTH by the console
     /// renderer and by the JSON serializer, so the two transports can never
     /// disagree and no site retypes a literal.
-    #[allow(dead_code)] // wired in G4
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -1218,7 +1209,6 @@ impl Default for SeriesShape {
 /// The per-shape numbers are carried on the reading rather than recomputed
 /// downstream so that the rendered row and the verdict provably come from the
 /// same arithmetic over the same retained series.
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SeriesShapeReading {
     /// Which deciding series this is — one of [`DECIDING_SERIES`]. Carried as a
@@ -1265,11 +1255,9 @@ pub struct SeriesShapeReading {
 /// durable consequence is already carried by the two WAL series, and under a
 /// peak rule a single late stall would decide the whole run. It is recorded,
 /// rendered and serialized as an observation column instead.
-#[allow(dead_code)] // wired in G4
 pub const DECIDING_SERIES: [&str; 4] = ["rss_kib", "redb_bytes", "wal_bytes", "wal_segment_files"];
 
 /// The reading over all four deciding series, evaluated in declaration order.
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurableReading {
     /// ANY deciding series is [`SeriesShape::Indeterminate`]. Fail-closed, with
@@ -1289,7 +1277,6 @@ impl DurableReading {
     /// The single rendered token for this reading. Consumed BOTH by the console
     /// renderer and by the JSON serializer, so the two transports can never
     /// disagree and no site retypes a literal.
-    #[allow(dead_code)] // wired in G4
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -1306,7 +1293,6 @@ impl DurableReading {
 /// scan rather than by format position, so the parser is not coupled to the log
 /// formatter's field or message order. A line yields a value only when all
 /// eight parse.
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OriginLine {
     /// Wall-clock milliseconds since the epoch, as the emitter wrote it.
@@ -1327,7 +1313,6 @@ pub struct OriginLine {
 /// No classifier input is inferred: the restart count, the armed flag and the
 /// exited-epoch count are threaded in by their producers and read from here, so
 /// a reading can never rest on a quantity nobody produced.
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OriginAggregate {
     /// Lines the capture matched on the origin target.
@@ -1362,7 +1347,6 @@ pub struct OriginAggregate {
 ///
 /// Every variant ROUTES; none is diagnosed here. The diagnosis line is
 /// hard-stopped, and this instrument ships regardless of which way it reads.
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OriginReading {
     /// The filter was not armed, OR a line was dropped, OR a line was
@@ -1392,7 +1376,6 @@ impl OriginReading {
     /// The single rendered token for this reading. Consumed BOTH by the console
     /// renderer and by the JSON serializer, so the two transports can never
     /// disagree and no site retypes a literal.
-    #[allow(dead_code)] // wired in G4
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -1410,7 +1393,6 @@ impl OriginReading {
 ///
 /// Both are read from filesystem metadata only — no segment file is ever
 /// opened — so sampling them cannot perturb the process being measured.
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WalRetention {
     /// Σ length of the retained segment files, in bytes.
@@ -1433,7 +1415,6 @@ pub struct WalRetention {
 /// only**: the distinct count is taken over this key's own vector and no
 /// cross-key set is ever built, so the fold's memory is bounded by the widest
 /// single key rather than by the corpus.
-#[allow(dead_code)] // wired in G4
 pub fn fold_or_key(
     census: &mut DurableCensus,
     variant: OrVariant,
@@ -1483,7 +1464,6 @@ pub fn fold_or_key(
 /// else. Folding it through its own entry point — rather than letting the scan
 /// site skip it — is what keeps `keys_scanned` equal to the rows actually
 /// iterated.
-#[allow(dead_code)] // wired in G4
 pub fn fold_lww_key(census: &mut DurableCensus) {
     census.keys_scanned = census.keys_scanned.saturating_add(1);
     census.lww_keys = census.lww_keys.saturating_add(1);
@@ -1494,7 +1474,6 @@ pub fn fold_lww_key(census: &mut DurableCensus) {
 /// The row is COUNTED rather than silently skipped: an undecodable row is a
 /// visible gap in the census, and a census that hid it would report a smaller
 /// corpus than the store actually holds without saying so.
-#[allow(dead_code)] // wired in G4
 pub fn fold_undecodable_key(census: &mut DurableCensus) {
     census.keys_scanned = census.keys_scanned.saturating_add(1);
     census.keys_undecodable = census.keys_undecodable.saturating_add(1);
@@ -1570,7 +1549,6 @@ fn warmup_exclusion_index(points: &[SeriesPoint]) -> usize {
 /// check the retained sample count and the retained span ONLY — never the
 /// number of distinct values. A perfectly constant series is therefore a
 /// healthy levelled one, not an instrument failure.
-#[allow(dead_code)] // wired in G4
 #[must_use]
 pub fn classify_series_shape(
     name: &'static str,
@@ -1711,7 +1689,6 @@ fn window_mean_floor(window: &[SeriesPoint]) -> u64 {
 /// The name set is checked FIRST: a caller that hands over a set which is not
 /// exactly the frozen deciding series gets the fail-closed reading, so a fifth
 /// series cannot be smuggled into a verdict through the classifier.
-#[allow(dead_code)] // wired in G4
 #[must_use]
 pub fn classify_durable_reading(
     readings: &[SeriesShapeReading],
@@ -1780,7 +1757,6 @@ fn names_are_exactly_deciding(readings: &[SeriesShapeReading]) -> bool {
 /// A malformed value for a recognised key also yields `None` — fail-closed,
 /// because a line that was emitted but could not be read is exactly what the
 /// aggregate's `unparsed` counter exists to make visible.
-#[allow(dead_code)] // wired in G4
 #[must_use]
 pub fn parse_origin_line(line: &str) -> Option<OriginLine> {
     let mut ts: Option<i64> = None;
@@ -1839,7 +1815,6 @@ fn set_field<T>(slot: &mut Option<T>, parsed: Option<T>) -> Option<()> {
 /// counter and from nothing else, `armed` from the effective child log filter,
 /// and `epochs_exited` from the scrape. None of the four is inferred from a log
 /// line, so a reading can never rest on a quantity nobody produced.
-#[allow(dead_code)] // wired in G4
 #[must_use]
 pub fn aggregate_origin_lines(
     captured: &[String],
@@ -1873,7 +1848,6 @@ pub fn aggregate_origin_lines(
 /// Returns the reading together with its NAMED reason — the reason the
 /// aggregate carries and the serializer emits beside the counters it was
 /// derived from. Every variant ROUTES; none is diagnosed here.
-#[allow(dead_code)] // wired in G4
 #[must_use]
 pub fn classify_origin_reading(aggregate: &OriginAggregate) -> (OriginReading, Option<String>) {
     if !aggregate.armed {
@@ -1970,7 +1944,6 @@ pub fn classify_origin_reading(aggregate: &OriginAggregate) -> (OriginReading, O
 /// Returned as a named pair rather than a positional one so a caller cannot
 /// silently transpose the two. `None` from [`parse_labelled_gauge`] — never a
 /// zero here — is what carries "the metric was absent from the body".
-#[allow(dead_code)] // wired in G4
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LabelledGauge {
     /// The largest value across the metric's label sets.
@@ -1988,7 +1961,6 @@ pub struct LabelledGauge {
 /// Returns `None` when the metric does not appear in the body at all: an
 /// absence is a visible gap, and reporting it as a zero would let a silent
 /// absence masquerade as a flat series.
-#[allow(dead_code)] // wired in G4
 #[must_use]
 pub fn parse_labelled_gauge(body: &str, metric: &str) -> Option<LabelledGauge> {
     let mut seen = false;
@@ -2028,7 +2000,6 @@ pub fn parse_labelled_gauge(body: &str, metric: &str) -> Option<LabelledGauge> {
 /// only — the file is never opened, so sampling cannot perturb the process
 /// being measured. `None` on any failure, mirroring [`sample_rss_mb`]'s
 /// `None`-on-failure contract.
-#[allow(dead_code)] // wired in G4
 #[must_use]
 pub fn sample_redb_bytes(data_dir: &Path) -> Option<u64> {
     let meta = std::fs::metadata(data_dir.join("topgun.redb")).ok()?;
@@ -2041,7 +2012,6 @@ pub fn sample_redb_bytes(data_dir: &Path) -> Option<u64> {
 /// `None` when the WAL directory cannot be read at all. A directory that reads
 /// but holds no segment yields `Some` zeros: an honest empty retention, which
 /// must stay distinguishable from a blind sampler.
-#[allow(dead_code)] // wired in G4
 #[must_use]
 pub fn sample_wal_retention(data_dir: &Path) -> Option<WalRetention> {
     let entries = std::fs::read_dir(data_dir.join("wal")).ok()?;
