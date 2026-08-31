@@ -2916,4 +2916,1104 @@ mod tests {
             "a blind instrument must already fail through the first conjunct"
         );
     }
+
+    // =====================================================================
+    // Durable-layer instrument
+    // =====================================================================
+
+    /// Build a deciding-series fixture on a uniform time axis: sample `i` sits
+    /// at `i * step_secs` seconds.
+    fn series(step_secs: f64, values: &[u64]) -> Vec<SeriesPoint> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, &value)| SeriesPoint {
+                elapsed_secs: f64::from(u32::try_from(index).unwrap_or(u32::MAX)) * step_secs,
+                value,
+            })
+            .collect()
+    }
+
+    /// Classify under the FROZEN guards — the two corpus constants, inherited
+    /// deliberately and NEVER relaxed to make a fixture come out.
+    fn classify_default(name: &'static str, points: &[SeriesPoint]) -> SeriesShapeReading {
+        classify_series_shape(
+            name,
+            points,
+            DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
+            DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
+        )
+    }
+
+    /// A reading set over EXACTLY the four deciding series, one entry each.
+    fn deciding_set(entries: [(SeriesShape, Option<&'static str>); 4]) -> Vec<SeriesShapeReading> {
+        DECIDING_SERIES
+            .iter()
+            .zip(entries)
+            .map(|(&name, (shape, firing_envelope))| SeriesShapeReading {
+                name,
+                shape,
+                firing_envelope,
+                reason: (shape == SeriesShape::Indeterminate).then(|| "fixture guard".to_string()),
+                ..SeriesShapeReading::default()
+            })
+            .collect()
+    }
+
+    // ---------------------------------------------------------------------
+    // The census folds
+    // ---------------------------------------------------------------------
+
+    /// ONE fixture, folded ONCE, asserting an exact expected value for every
+    /// one of the census's thirteen fields, so no field ships unasserted.
+    ///
+    /// The fixture carries a unified OR key with live entries AND tombstones, a
+    /// second unified key with NO live records and a non-empty tombstone vector
+    /// (the all-dead shape), a key whose tombstone vector repeats a tag (the
+    /// within-key duplicate), a legacy tombstones-only key, an LWW key and a row
+    /// that failed to decode.
+    #[test]
+    fn census_folds_every_one_of_the_thirteen_fields() {
+        let mut census = DurableCensus::default();
+
+        // A — unified OR key, live entries AND tombstones.
+        fold_or_key(
+            &mut census,
+            OrVariant::OrMap,
+            &["l1", "live2"],
+            &["t1", "t2"],
+        );
+        // B — unified OR key with no live records and a non-empty tombstone
+        // vector: the all-dead shape.
+        fold_or_key(&mut census, OrVariant::OrMap, &[], &["dead1"]);
+        // C — a tombstone vector that repeats a tag. The duplicate is counted
+        // WITHIN this key and never against any other key's tags.
+        fold_or_key(
+            &mut census,
+            OrVariant::OrMap,
+            &["x"],
+            &["dup", "dup", "other"],
+        );
+        // D — the legacy tombstones-only variant. It holds no live records by
+        // construction, so it is all-dead too, and it carries the widest
+        // tombstone vector in the fixture.
+        fold_or_key(
+            &mut census,
+            OrVariant::OrTombstones,
+            &[],
+            &["lt1", "lt2", "lt3", "lt4"],
+        );
+        // E — an LWW key: variant share and scanned-row count, nothing else.
+        fold_lww_key(&mut census);
+        // F — a row whose record value failed to decode.
+        fold_undecodable_key(&mut census);
+
+        assert_eq!(census.keys_scanned, 6);
+        assert_eq!(census.keys_undecodable, 1);
+        assert_eq!(census.or_map_keys, 3);
+        assert_eq!(census.or_tombstones_keys, 1);
+        assert_eq!(census.lww_keys, 1);
+        assert_eq!(census.live_entries, 3);
+        assert_eq!(census.live_tag_bytes, 8);
+        // The direct read on the store-level-delete question, written out
+        // rather than derived: 2 + 1 + 3 + 4 tombstone tags across both
+        // variants.
+        assert_eq!(census.tombstone_entries, 10);
+        assert_eq!(census.tombstone_bytes, 32);
+        assert_eq!(census.tombstone_dup_entries, 1);
+        assert_eq!(census.keys_with_tombstones, 4);
+        assert_eq!(census.keys_all_dead, 2);
+        assert_eq!(census.max_tombstones_per_key, 4);
+
+        // The no-drift-versus-today clause: the byte total is Σ tag.len()
+        // across BOTH variants and nothing else, recomputed here from the
+        // fixture's own tags rather than restated as a magic number.
+        let expected_bytes: usize = ["t1", "t2"]
+            .iter()
+            .chain(["dead1"].iter())
+            .chain(["dup", "dup", "other"].iter())
+            .chain(["lt1", "lt2", "lt3", "lt4"].iter())
+            .map(|tag| tag.len())
+            .sum();
+        assert_eq!(census.tombstone_bytes, len_as_u64(expected_bytes));
+    }
+
+    /// A row that fails to decode is COUNTED, not silently skipped — the
+    /// behaviour the scan used to have and which made an undecodable row
+    /// invisible in the totals.
+    #[test]
+    fn census_counts_an_undecodable_row_rather_than_skipping_it() {
+        let mut census = DurableCensus::default();
+        fold_lww_key(&mut census);
+        fold_undecodable_key(&mut census);
+
+        assert_eq!(census.keys_scanned, 2, "both rows were iterated");
+        assert_eq!(census.keys_undecodable, 1);
+        assert_eq!(
+            census.or_map_keys + census.or_tombstones_keys + census.lww_keys,
+            1,
+            "an undecodable row belongs to no variant share"
+        );
+    }
+
+    /// Duplicates are counted within a key only: two keys that happen to share
+    /// a tag contribute no duplicate, while a key that repeats its own tag
+    /// does.
+    #[test]
+    fn census_counts_tombstone_duplicates_within_a_key_only() {
+        let mut across = DurableCensus::default();
+        fold_or_key(&mut across, OrVariant::OrMap, &[], &["same"]);
+        fold_or_key(&mut across, OrVariant::OrMap, &[], &["same"]);
+        assert_eq!(across.tombstone_dup_entries, 0);
+
+        let mut within = DurableCensus::default();
+        fold_or_key(&mut within, OrVariant::OrMap, &[], &["same", "same"]);
+        assert_eq!(within.tombstone_dup_entries, 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // The exclusion clause
+    // ---------------------------------------------------------------------
+
+    /// The exclusion clause, mechanically enforced.
+    ///
+    /// No metric whose name begins `topgun_or_prune_` or
+    /// `topgun_reclamation_`, and nothing derived from one, may enter any
+    /// plateau predicate. **This test and this comment are the ONLY places in
+    /// this file where either literal appears** — the origin layer names its
+    /// qualifier by the `epochs_exited` PARAMETER instead, and the metric
+    /// literals live where the scrape that reads them lives. The demotion of
+    /// write-behind occupancy is asserted here too, not merely described.
+    #[test]
+    fn deciding_series_exclude_prune_and_reclamation_metrics() {
+        assert_eq!(DECIDING_SERIES.len(), 4, "the deciding set is FOUR series");
+        for name in DECIDING_SERIES {
+            assert!(
+                !name.starts_with("topgun_or_prune_"),
+                "{name} is an observation-only series and may not decide"
+            );
+            assert!(
+                !name.starts_with("topgun_reclamation_"),
+                "{name} is an observation-only series and may not decide"
+            );
+        }
+        assert!(
+            !DECIDING_SERIES.contains(&"writebehind_lag_max"),
+            "write-behind occupancy is demoted to an observation column"
+        );
+
+        // A caller cannot smuggle a fifth series back in through the
+        // classifier: a set whose names are not EXACTLY the deciding four is
+        // fail-closed, whatever shapes it carries.
+        let mut smuggled = deciding_set([
+            (SeriesShape::Levelled, None),
+            (SeriesShape::Levelled, None),
+            (SeriesShape::Levelled, None),
+            (SeriesShape::Levelled, None),
+        ]);
+        smuggled[3].name = "writebehind_lag_max";
+        let (reading, reason) = classify_durable_reading(&smuggled);
+        assert_eq!(reading, DurableReading::IndeterminateInstrument);
+        assert!(reason.is_some(), "the rejection must be named");
+
+        let mut widened = deciding_set([
+            (SeriesShape::Levelled, None),
+            (SeriesShape::Levelled, None),
+            (SeriesShape::Levelled, None),
+            (SeriesShape::Levelled, None),
+        ]);
+        widened.push(SeriesShapeReading {
+            name: "writebehind_lag_max",
+            shape: SeriesShape::Levelled,
+            ..SeriesShapeReading::default()
+        });
+        assert_eq!(
+            classify_durable_reading(&widened).0,
+            DurableReading::IndeterminateInstrument
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The series-shape rule
+    // ---------------------------------------------------------------------
+
+    /// A sampler that recorded nothing is INDETERMINATE, never "ok".
+    #[test]
+    fn shape_empty_series_is_indeterminate() {
+        let reading = classify_default("rss_kib", &[]);
+        assert_eq!(reading.shape, SeriesShape::Indeterminate);
+        assert_eq!(reading.samples, 0);
+        assert!(reading.reason.is_some(), "the reason must be named");
+        assert!(reading.firing_envelope.is_none());
+    }
+
+    /// Guards unmet — too few retained samples, or too short a retained span —
+    /// is INDETERMINATE and never levelled.
+    #[test]
+    fn shape_unmet_guards_are_indeterminate_never_levelled() {
+        let too_few = series(400.0, &[10, 20, 30]);
+        let reading = classify_default("redb_bytes", &too_few);
+        assert_eq!(reading.shape, SeriesShape::Indeterminate);
+        assert!(reading.reason.is_some());
+
+        // 40 samples, 5 s apart: plenty of samples, retained span far under the
+        // 600 s floor.
+        let too_short: Vec<u64> = (0..40).map(|i| 100 + i).collect();
+        let reading = classify_default("wal_bytes", &series(5.0, &too_short));
+        assert_eq!(reading.shape, SeriesShape::Indeterminate);
+        assert!(reading.span_secs < DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS);
+        assert!(reading.reason.is_some());
+    }
+
+    /// A strictly rising ramp rises on BOTH envelopes and is still rising at
+    /// the end.
+    #[test]
+    fn shape_strictly_rising_ramp_is_monotone_rising() {
+        let values: Vec<u64> = (0..160u64).map(|i| i * 10).collect();
+        let reading = classify_default("redb_bytes", &series(5.0, &values));
+        assert_eq!(reading.shape, SeriesShape::MonotoneRising);
+        assert_eq!(reading.firing_envelope, Some("BOTH"));
+    }
+
+    /// Something rose across the run but was no longer rising at the end.
+    #[test]
+    fn shape_hump_is_rising_decelerating() {
+        let values: Vec<u64> = (0..160u64)
+            .map(|i| if i <= 90 { i * 10 } else { 900 - (i - 90) * 10 })
+            .collect();
+        let reading = classify_default("wal_bytes", &series(5.0, &values));
+        assert!(
+            reading.last_half_peak > reading.first_half_peak,
+            "something must have risen across the run"
+        );
+        assert!(
+            reading.last_quarter_peak <= reading.third_quarter_peak,
+            "and it must not still be rising at the end"
+        );
+        assert_eq!(reading.shape, SeriesShape::RisingDecelerating);
+        assert_eq!(reading.firing_envelope, None);
+    }
+
+    /// A falling series is levelled: neither envelope rose across the run.
+    #[test]
+    fn shape_falling_series_is_levelled() {
+        let values: Vec<u64> = (0..160u64).map(|i| 1_000 - i * 5).collect();
+        let reading = classify_default("rss_kib", &series(5.0, &values));
+        assert_eq!(reading.shape, SeriesShape::Levelled);
+        assert_eq!(reading.firing_envelope, None);
+    }
+
+    /// Peaks AND troughs both FELL across the run, so the series is levelled
+    /// even though its last-quarter peak rose: the tail conjunct alone decides
+    /// nothing.
+    #[test]
+    fn shape_falling_with_a_late_bump_is_still_levelled() {
+        let values: Vec<u64> = (0..160u64)
+            .map(|i| {
+                let base = 1_000 - i * 5;
+                if i == 150 {
+                    600
+                } else {
+                    base
+                }
+            })
+            .collect();
+        let reading = classify_default("redb_bytes", &series(5.0, &values));
+        assert!(
+            reading.last_quarter_peak > reading.third_quarter_peak,
+            "the late bump must actually raise the last-quarter peak"
+        );
+        assert!(reading.last_half_peak <= reading.first_half_peak);
+        assert!(reading.last_half_trough <= reading.first_half_trough);
+        assert_eq!(reading.shape, SeriesShape::Levelled);
+    }
+
+    /// The known reference series — rising across the run and ENDING AT ITS
+    /// MAXIMUM, with prune's downward excursions along the way — classifies
+    /// unambiguously. Pre-registering a rule the reference decides cleanly is
+    /// the point.
+    #[test]
+    fn shape_reference_series_ending_at_its_maximum_is_monotone_rising() {
+        let values: Vec<u64> = (0..160u64)
+            .map(|i| {
+                let base = 400_000 + i * 1_500;
+                if i % 10 == 0 && i > 0 {
+                    base - 50_000
+                } else {
+                    base
+                }
+            })
+            .collect();
+        let last = *values.last().expect("fixture is non-empty");
+        assert_eq!(
+            last,
+            *values.iter().max().expect("fixture is non-empty"),
+            "the reference series ends at its maximum"
+        );
+        let reading = classify_default("redb_bytes", &series(5.0, &values));
+        assert_eq!(reading.shape, SeriesShape::MonotoneRising);
+    }
+
+    /// TROUGH MIRROR, POSITIVE. A sawtooth whose PEAKS stand still while its
+    /// FLOOR climbs, and is still climbing in the last quarter, is
+    /// monotone-rising and the FLOOR is named as the firing envelope. Under a
+    /// peaks-only rule this series read levelled — that is the blindness the
+    /// mirror exists to close.
+    #[test]
+    fn shape_sawtooth_with_a_rising_floor_fires_on_the_floor() {
+        let values: Vec<u64> = (0..160u64)
+            .map(|i| if i % 2 == 0 { 100 + i } else { 10_000 })
+            .collect();
+        let reading = classify_default("rss_kib", &series(5.0, &values));
+        assert_eq!(
+            reading.first_half_peak, reading.last_half_peak,
+            "the peaks must stand still, or this is not the sawtooth case"
+        );
+        assert!(reading.last_half_trough > reading.first_half_trough);
+        assert!(reading.last_quarter_trough > reading.third_quarter_trough);
+        assert_eq!(reading.shape, SeriesShape::MonotoneRising);
+        assert_eq!(reading.firing_envelope, Some("FLOOR"));
+    }
+
+    /// TROUGH MIRROR, NEGATIVE. A genuine shelf — a series that rose and then
+    /// went flat, so its last-quarter trough equals its third-quarter trough —
+    /// is NOT monotone-rising. The mirror adds no false alarm on a shelf.
+    #[test]
+    fn shape_shelf_is_not_monotone_rising() {
+        let values: Vec<u64> = (0..160u64)
+            .map(|i| if i < 85 { i * 10 } else { 840 })
+            .collect();
+        let reading = classify_default("wal_bytes", &series(5.0, &values));
+        assert_eq!(
+            reading.last_quarter_trough, reading.third_quarter_trough,
+            "a shelf's tail floor does not move"
+        );
+        assert_ne!(reading.shape, SeriesShape::MonotoneRising);
+        assert_eq!(reading.firing_envelope, None);
+    }
+
+    /// An entirely CONSTANT series with sufficient samples and span is a
+    /// healthy levelled one, never indeterminate: the guards check the sample
+    /// count and the span ONLY and never the number of distinct values. A
+    /// guard that fired on low variance would convert the very outcome the
+    /// instrument looks for into an instrument failure.
+    #[test]
+    fn shape_constant_series_is_levelled_never_indeterminate() {
+        let values = [42u64; 160];
+        let reading = classify_default("wal_segment_files", &series(5.0, &values));
+        assert!(reading.samples >= len_as_u64(DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES));
+        assert!(reading.span_secs >= DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS);
+        assert_eq!(reading.shape, SeriesShape::Levelled);
+        assert_eq!(reading.last_half_mean, 42);
+    }
+
+    /// The frozen 1/16-of-raw-span warmup exclusion is LOAD-BEARING, not
+    /// decorative: a large early spike followed by a late rise in the peaks
+    /// classifies monotone-rising once the warmup window is dropped, while the
+    /// SAME values without the drop leave neither envelope rising across the
+    /// run — which is rule 4, levelled. The retained-sample count is asserted
+    /// so the fraction cannot silently drift.
+    #[test]
+    fn shape_warmup_exclusion_is_load_bearing() {
+        // 320 samples 5 s apart: raw span 1,595 s, so the drop cutoff is
+        // 99.6875 s and exactly the first 20 samples — the spike — are dropped.
+        let values: Vec<u64> = (0..320u64)
+            .map(|i| {
+                if i < 20 {
+                    10_000
+                } else if i % 2 == 0 {
+                    100
+                } else {
+                    100 + (i - 20)
+                }
+            })
+            .collect();
+        let points = series(5.0, &values);
+
+        let reading = classify_default("rss_kib", &points);
+        assert_eq!(reading.samples, 300, "the frozen fraction drops 20 of 320");
+        assert_eq!(reading.shape, SeriesShape::MonotoneRising);
+        assert_eq!(reading.firing_envelope, Some("PEAKS"));
+
+        // The same values WITHOUT the drop: the spike inflates the first-half
+        // peak and the floor is flat, so neither envelope rises across the run
+        // and the un-excluded series is levelled. Computed over the SAME split
+        // function the rule uses, so this is the rule's own arithmetic on the
+        // un-excluded series and not a re-derivation.
+        let half = last_half_split_index(values.len());
+        let first_half_peak = values[..half].iter().max().copied().unwrap_or(0);
+        let last_half_peak = values[half..].iter().max().copied().unwrap_or(0);
+        let first_half_trough = values[..half].iter().min().copied().unwrap_or(0);
+        let last_half_trough = values[half..].iter().min().copied().unwrap_or(0);
+        assert!(
+            last_half_peak <= first_half_peak,
+            "without the drop the warm-up spike owns the first-half peak"
+        );
+        assert!(
+            last_half_trough <= first_half_trough,
+            "and the floor does not rise either, so the un-excluded series is levelled"
+        );
+    }
+
+    /// TWO DISTINCT VALUES AT A FULL SAMPLE COUNT. A 2,880-sample fixture on
+    /// the deciding cell's own axis that holds one value and takes a SINGLE
+    /// late upward step — the step landing between the third-quarter and
+    /// last-quarter split points — classifies monotone-rising on its PEAKS.
+    /// This is CORRECT fail-closed behaviour: the file really did grow. The
+    /// guards are NOT relaxed for it, and the retained-sample count is asserted
+    /// so the fixture cannot drift below them and pass for the wrong reason.
+    #[test]
+    fn shape_two_distinct_values_at_full_sample_count_is_monotone_rising() {
+        let values: Vec<u64> = (0..2_880u64)
+            .map(|i| if i < 2_400 { 1_000_000 } else { 1_000_064 })
+            .collect();
+        let distinct = {
+            let mut seen: Vec<u64> = values.clone();
+            seen.sort_unstable();
+            seen.dedup();
+            seen.len()
+        };
+        assert_eq!(distinct, 2, "the fixture holds exactly two distinct values");
+
+        let reading = classify_default("redb_bytes", &series(5.0, &values));
+        assert_eq!(reading.samples, 2_700, "2,880 less the 1/16-of-span warmup");
+        assert!(reading.samples >= len_as_u64(DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES));
+        assert!(reading.span_secs >= DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS);
+        assert_eq!(reading.shape, SeriesShape::MonotoneRising);
+        assert_eq!(reading.firing_envelope, Some("PEAKS"));
+    }
+
+    /// A 2-SAMPLE SERIES is indeterminate under the frozen `min_samples` of 4 —
+    /// which is NOT relaxed to make the fixture above work — and a deciding set
+    /// containing it yields the OTHER terminal state, the fail-closed
+    /// instrument reading, on a different route from the monotone-rising one.
+    /// The two must never be conflated.
+    #[test]
+    fn shape_two_sample_series_is_indeterminate_and_routes_to_the_instrument() {
+        assert_eq!(
+            DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES, 4,
+            "the guard is the frozen one, unrelaxed"
+        );
+        let points = series(1_000.0, &[10, 20]);
+        let short = classify_default("wal_segment_files", &points);
+        assert_eq!(short.shape, SeriesShape::Indeterminate);
+        assert!(short.reason.is_some());
+
+        let mut set = deciding_set([
+            (SeriesShape::Levelled, None),
+            (SeriesShape::Levelled, None),
+            (SeriesShape::Levelled, None),
+            (SeriesShape::Levelled, None),
+        ]);
+        set[3] = SeriesShapeReading {
+            name: "wal_segment_files",
+            ..short
+        };
+        let (reading, reason) = classify_durable_reading(&set);
+        assert_eq!(reading, DurableReading::IndeterminateInstrument);
+        assert!(
+            reason.unwrap_or_default().contains("wal_segment_files"),
+            "the offending series must be NAMED"
+        );
+    }
+
+    /// `firing_envelope` is a `&'static str`, so nothing in the type system
+    /// pins its token set. This test is what replaces that guarantee: every
+    /// value the classifier can emit is one of exactly `PEAKS`, `FLOOR` or
+    /// `BOTH`, or `None`. All three tokens are shown to be reachable, so the
+    /// assertion is not vacuous.
+    #[test]
+    fn firing_envelope_is_always_one_of_the_three_frozen_tokens() {
+        const ALLOWED: [&str; 3] = ["PEAKS", "FLOOR", "BOTH"];
+        let mut observed: Vec<&'static str> = Vec::new();
+
+        let named: Vec<Vec<u64>> = vec![
+            // peaks only: flat floor, climbing peaks.
+            (0..160u64)
+                .map(|i| if i % 2 == 0 { 100 } else { 100 + i })
+                .collect(),
+            // floor only: flat peaks, climbing floor.
+            (0..160u64)
+                .map(|i| if i % 2 == 0 { 100 + i } else { 10_000 })
+                .collect(),
+            // both: a strictly rising ramp.
+            (0..160u64).map(|i| i * 10).collect(),
+            // neither: a falling series.
+            (0..160u64).map(|i| 1_000 - i * 5).collect(),
+        ];
+        for values in &named {
+            let reading = classify_default("rss_kib", &series(5.0, values));
+            if let Some(token) = reading.firing_envelope {
+                assert!(ALLOWED.contains(&token), "unfrozen envelope token {token}");
+                observed.push(token);
+            }
+        }
+
+        // A randomized sweep, so the assertion is not limited to the shapes
+        // this test happened to think of.
+        let mut rng = SplitMix64::new(0x0BAD_C0DE_1234_5678);
+        let mut points = series(5.0, &[0u64; 200]);
+        for _ in 0..500 {
+            for point in &mut points {
+                point.value = rng.next_below(64);
+            }
+            let reading = classify_default("wal_bytes", &points);
+            if let Some(token) = reading.firing_envelope {
+                assert!(ALLOWED.contains(&token), "unfrozen envelope token {token}");
+                assert_eq!(reading.shape, SeriesShape::MonotoneRising);
+                observed.push(token);
+            } else {
+                assert_ne!(reading.shape, SeriesShape::MonotoneRising);
+            }
+        }
+
+        for token in ALLOWED {
+            assert!(
+                observed.contains(&token),
+                "{token} was never produced, so the membership assertion is vacuous for it"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // The reading over the four deciding series
+    // ---------------------------------------------------------------------
+
+    /// ANY indeterminate deciding series makes the whole reading fail-closed —
+    /// even when another series is monotone-rising, because the fail-closed
+    /// rule is evaluated FIRST.
+    #[test]
+    fn durable_reading_any_indeterminate_is_fail_closed_first() {
+        let set = deciding_set([
+            (SeriesShape::MonotoneRising, Some("PEAKS")),
+            (SeriesShape::Indeterminate, None),
+            (SeriesShape::Levelled, None),
+            (SeriesShape::Levelled, None),
+        ]);
+        let (reading, reason) = classify_durable_reading(&set);
+        assert_eq!(reading, DurableReading::IndeterminateInstrument);
+        assert!(
+            reason.unwrap_or_default().contains(DECIDING_SERIES[1]),
+            "the offending series must be NAMED in the reason"
+        );
+    }
+
+    /// Any monotone-rising series with no indeterminate one is the routing
+    /// reading — INCLUDING when the only rising series fired on its trough
+    /// FLOOR rather than its peaks.
+    #[test]
+    fn durable_reading_monotone_rising_on_the_floor_still_routes() {
+        let set = deciding_set([
+            (SeriesShape::Levelled, None),
+            (SeriesShape::RisingDecelerating, None),
+            (SeriesShape::MonotoneRising, Some("FLOOR")),
+            (SeriesShape::Levelled, None),
+        ]);
+        let (reading, reason) = classify_durable_reading(&set);
+        assert_eq!(reading, DurableReading::PlateauNotMet);
+        let reason = reason.unwrap_or_default();
+        assert!(reason.contains(DECIDING_SERIES[2]));
+        assert!(
+            reason.contains("FLOOR"),
+            "the firing envelope must be NAMED"
+        );
+    }
+
+    /// Every series levelled or rising-decelerating is the weakest reading the
+    /// instrument may emit.
+    #[test]
+    fn durable_reading_all_non_rising_is_the_weak_reading() {
+        let set = deciding_set([
+            (SeriesShape::Levelled, None),
+            (SeriesShape::RisingDecelerating, None),
+            (SeriesShape::Levelled, None),
+            (SeriesShape::RisingDecelerating, None),
+        ]);
+        assert_eq!(
+            classify_durable_reading(&set).0,
+            DurableReading::NoRisingEnvelopeObserved
+        );
+    }
+
+    /// The rendered tokens are asserted verbatim, for both enumerations, so
+    /// the console renderer and the JSON serializer can never disagree with
+    /// what this file emits.
+    #[test]
+    fn durable_and_series_tokens_are_verbatim() {
+        assert_eq!(
+            DurableReading::IndeterminateInstrument.as_str(),
+            "INDETERMINATE_INSTRUMENT"
+        );
+        assert_eq!(DurableReading::PlateauNotMet.as_str(), "PLATEAU_NOT_MET");
+        assert_eq!(
+            DurableReading::NoRisingEnvelopeObserved.as_str(),
+            "NO_RISING_ENVELOPE_OBSERVED"
+        );
+        assert_eq!(SeriesShape::Indeterminate.as_str(), "INDETERMINATE");
+        assert_eq!(SeriesShape::MonotoneRising.as_str(), "MONOTONE_RISING");
+        assert_eq!(
+            SeriesShape::RisingDecelerating.as_str(),
+            "RISING_DECELERATING"
+        );
+        assert_eq!(SeriesShape::Levelled.as_str(), "LEVELLED");
+        assert_eq!(SeriesShape::default(), SeriesShape::Indeterminate);
+        assert_eq!(CensusSource::Checkpoint.as_str(), "CHECKPOINT");
+        assert_eq!(CensusSource::Terminal.as_str(), "TERMINAL");
+        assert_eq!(CensusSource::LiveCopy.as_str(), "LIVE_COPY");
+    }
+
+    // ---------------------------------------------------------------------
+    // The origin instrument
+    // ---------------------------------------------------------------------
+
+    /// A verbatim rendered line, exactly as the log formatter emits it, with
+    /// all eight fields.
+    const RENDERED_ORIGIN_LINE: &str = "2026-08-31T09:14:02.481932Z  INFO topgun_server::tombstone_frontier::removal: prune removal observed ts=1756631642481 op_seq=918273 epoch=42 refs_returned=0 refs_at_entry=7 bytes_returned=0 watermark=39 ceiling=41";
+
+    #[test]
+    fn origin_parser_round_trips_a_rendered_line() {
+        let parsed = parse_origin_line(RENDERED_ORIGIN_LINE).expect("all eight fields parse");
+        assert_eq!(parsed.ts, 1_756_631_642_481);
+        assert_eq!(parsed.op_seq, 918_273);
+        assert_eq!(parsed.epoch, 42);
+        assert_eq!(parsed.refs_returned, 0);
+        assert_eq!(parsed.refs_at_entry, 7);
+        assert_eq!(parsed.bytes_returned, 0);
+        assert_eq!(parsed.watermark, 39);
+        assert_eq!(parsed.ceiling, 41);
+    }
+
+    /// A half-read line is never turned into a partially-populated one: drop
+    /// any ONE of the eight fields and the parser yields nothing.
+    #[test]
+    fn origin_parser_rejects_a_line_missing_any_one_field() {
+        for field in [
+            "ts",
+            "op_seq",
+            "epoch",
+            "refs_returned",
+            "refs_at_entry",
+            "bytes_returned",
+            "watermark",
+            "ceiling",
+        ] {
+            let pruned: String = RENDERED_ORIGIN_LINE
+                .split_whitespace()
+                .filter(|token| token.split_once('=').is_none_or(|(key, _)| key != field))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                parse_origin_line(&pruned).is_none(),
+                "a line without {field} must not parse"
+            );
+        }
+    }
+
+    /// A line from a different target carries none of the eight fields and
+    /// therefore yields nothing — the parser reads fields, not positions.
+    #[test]
+    fn origin_parser_rejects_a_line_from_another_target() {
+        let other = "2026-08-31T09:14:02.481932Z  WARN topgun_server::storage::wal: \
+                     segment rotated partition=3 sequence=91827 bytes=4096";
+        assert!(parse_origin_line(other).is_none());
+    }
+
+    /// Build a parsed line with the ref pair the classifier reads.
+    fn origin_line(refs_returned: u64, refs_at_entry: u64) -> OriginLine {
+        OriginLine {
+            ts: 1_756_631_642_481,
+            op_seq: 1,
+            epoch: 42,
+            refs_returned,
+            refs_at_entry,
+            bytes_returned: 0,
+            watermark: 39,
+            ceiling: 41,
+        }
+    }
+
+    /// Build an aggregate with every classifier input as a TYPED field.
+    fn origin_aggregate(
+        lines: Vec<OriginLine>,
+        armed: bool,
+        epochs_exited: u64,
+    ) -> OriginAggregate {
+        OriginAggregate {
+            matched: len_as_u64(lines.len()),
+            unparsed: 0,
+            dropped: 0,
+            lines,
+            restarts: 0,
+            armed,
+            epochs_exited,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn origin_aggregate_counts_unparsed_lines_without_silence() {
+        let captured = vec![
+            RENDERED_ORIGIN_LINE.to_string(),
+            "…  INFO topgun_server::tombstone_frontier::removal: prune removal observed ts=1 \
+             op_seq=2 epoch=3"
+                .to_string(),
+        ];
+        let aggregate = aggregate_origin_lines(&captured, 0, 0, true, 5);
+        assert_eq!(aggregate.matched, 2);
+        assert_eq!(aggregate.unparsed, 1);
+        assert_eq!(aggregate.lines.len(), 1);
+        assert!(aggregate.armed);
+        assert_eq!(aggregate.epochs_exited, 5);
+        assert_eq!(
+            classify_origin_reading(&aggregate).0,
+            OriginReading::IndeterminateInstrument,
+            "an unparsed line is never silent"
+        );
+    }
+
+    /// The two guards that are typed fields with named producers: a dropped
+    /// line and a restart both force the fail-closed reading, and the restart
+    /// is read from the aggregate's own counter and from nothing else.
+    #[test]
+    fn origin_dropped_and_restart_guards_are_fail_closed() {
+        let mut dropped = origin_aggregate(vec![origin_line(0, 7)], true, 3);
+        dropped.dropped = 1;
+        assert_eq!(
+            classify_origin_reading(&dropped).0,
+            OriginReading::IndeterminateInstrument
+        );
+
+        let mut restarted = origin_aggregate(vec![origin_line(0, 7)], true, 3);
+        restarted.restarts = 1;
+        let (reading, reason) = classify_origin_reading(&restarted);
+        assert_eq!(reading, OriginReading::IndeterminateInstrument);
+        assert!(
+            reason.unwrap_or_default().contains("restarted"),
+            "the restart must be NAMED as the reason"
+        );
+    }
+
+    /// All six variants, and the tokens they render as.
+    #[test]
+    fn origin_reading_covers_all_six_variants() {
+        let mut unarmed = origin_aggregate(vec![], false, 0);
+        unarmed.restarts = 0;
+        assert_eq!(
+            classify_origin_reading(&unarmed).0,
+            OriginReading::IndeterminateInstrument
+        );
+        assert_eq!(
+            classify_origin_reading(&origin_aggregate(vec![origin_line(0, 7)], true, 3)).0,
+            OriginReading::ReachedInProduction
+        );
+        assert_eq!(
+            classify_origin_reading(&origin_aggregate(vec![origin_line(2, 7)], true, 3)).0,
+            OriginReading::PartialDivergence
+        );
+        assert_eq!(
+            classify_origin_reading(&origin_aggregate(vec![origin_line(7, 7)], true, 3)).0,
+            OriginReading::NotReachedEqualRefs
+        );
+        assert_eq!(
+            classify_origin_reading(&origin_aggregate(vec![], true, 3)).0,
+            OriginReading::NoLinesWhileEpochsExited
+        );
+        assert_eq!(
+            classify_origin_reading(&origin_aggregate(vec![], true, 0)).0,
+            OriginReading::NotObservedAtHead
+        );
+
+        assert_eq!(
+            OriginReading::IndeterminateInstrument.as_str(),
+            "INDETERMINATE_INSTRUMENT"
+        );
+        assert_eq!(
+            OriginReading::ReachedInProduction.as_str(),
+            "REACHED_IN_PRODUCTION"
+        );
+        assert_eq!(
+            OriginReading::PartialDivergence.as_str(),
+            "PARTIAL_DIVERGENCE"
+        );
+        assert_eq!(
+            OriginReading::NotReachedEqualRefs.as_str(),
+            "NOT_REACHED_EQUAL_REFS"
+        );
+        assert_eq!(
+            OriginReading::NoLinesWhileEpochsExited.as_str(),
+            "NO_LINES_WHILE_EPOCHS_EXITED"
+        );
+        assert_eq!(
+            OriginReading::NotObservedAtHead.as_str(),
+            "NOT_OBSERVED_AT_HEAD"
+        );
+    }
+
+    /// The classification's input space, enumerated: every cell of
+    /// `{no lines, all-equal, some-partial, some-zero-return}` ×
+    /// `{armed, unarmed}` × `{epochs_exited 0, > 0}` maps to exactly one
+    /// variant. Both the arming and the exited-epoch axes are read from the
+    /// aggregate's own TYPED fields — never inferred from a log line, and never
+    /// from a metric literal in this file.
+    #[test]
+    fn origin_reading_enumerates_its_whole_input_space() {
+        let shapes: [(&str, Vec<OriginLine>); 4] = [
+            ("no lines", vec![]),
+            ("all-equal", vec![origin_line(7, 7), origin_line(3, 3)]),
+            ("some-partial", vec![origin_line(7, 7), origin_line(2, 7)]),
+            (
+                "some-zero-return",
+                vec![origin_line(7, 7), origin_line(0, 7)],
+            ),
+        ];
+        let mut cells = 0;
+        for (shape, lines) in shapes {
+            for armed in [false, true] {
+                for epochs_exited in [0u64, 4] {
+                    let aggregate = origin_aggregate(lines.clone(), armed, epochs_exited);
+                    let (reading, reason) = classify_origin_reading(&aggregate);
+                    let expected = if armed {
+                        match shape {
+                            "no lines" => {
+                                if epochs_exited > 0 {
+                                    OriginReading::NoLinesWhileEpochsExited
+                                } else {
+                                    OriginReading::NotObservedAtHead
+                                }
+                            }
+                            "all-equal" => OriginReading::NotReachedEqualRefs,
+                            "some-partial" => OriginReading::PartialDivergence,
+                            _ => OriginReading::ReachedInProduction,
+                        }
+                    } else {
+                        OriginReading::IndeterminateInstrument
+                    };
+                    assert_eq!(
+                        reading, expected,
+                        "cell ({shape}, armed={armed}, epochs_exited={epochs_exited})"
+                    );
+                    assert!(reason.is_some(), "every reading names its reason");
+                    cells += 1;
+                }
+            }
+        }
+        assert_eq!(cells, 16, "the enumeration must be complete");
+    }
+
+    // ---------------------------------------------------------------------
+    // The sampling helpers
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn labelled_gauge_folds_label_sets_into_a_max_and_a_sum() {
+        let body = "\
+# HELP some_gauge help text
+# TYPE some_gauge gauge
+some_gauge{partition=\"0\"} 12
+some_gauge{partition=\"1\"} 30
+some_gauge_total 999
+other_gauge 7
+";
+        let gauge = parse_labelled_gauge(body, "some_gauge").expect("the metric is present");
+        assert_eq!(gauge.max, 30);
+        assert_eq!(
+            gauge.sum, 42,
+            "the co-resident _total counter must not be folded in"
+        );
+
+        // An ABSENCE is a visible gap, never a zero: reporting it as zero would
+        // let a silent absence masquerade as a flat series.
+        assert!(parse_labelled_gauge(body, "absent_gauge").is_none());
+
+        // An unlabelled single sample folds to itself on both statistics.
+        let bare = parse_labelled_gauge(body, "other_gauge").expect("present");
+        assert_eq!(bare.max, 7);
+        assert_eq!(bare.sum, 7);
+    }
+
+    /// A scratch directory for the filesystem samplers, named from the process
+    /// id and a caller-supplied tag so concurrent test binaries cannot collide.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("tg-soak-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn redb_and_wal_samplers_read_metadata_only() {
+        let dir = scratch_dir("fs-samplers");
+
+        // Nothing there yet: both samplers are honest about the absence.
+        assert!(sample_redb_bytes(&dir).is_none());
+        assert!(sample_wal_retention(&dir).is_none());
+
+        std::fs::write(dir.join("topgun.redb"), vec![0u8; 4_096]).expect("store file");
+        assert_eq!(sample_redb_bytes(&dir), Some(4_096));
+
+        let wal = dir.join("wal");
+        std::fs::create_dir_all(&wal).expect("wal dir");
+        // A readable but empty WAL dir is an HONEST zero retention, which must
+        // stay distinguishable from a blind sampler.
+        assert_eq!(sample_wal_retention(&dir), Some(WalRetention::default()));
+
+        std::fs::write(wal.join("000001.log"), vec![0u8; 100]).expect("segment");
+        std::fs::write(wal.join("000002.log"), vec![0u8; 250]).expect("segment");
+        // A non-segment file in the same directory is not retention.
+        std::fs::write(wal.join("manifest.json"), b"{}").expect("manifest");
+        assert_eq!(
+            sample_wal_retention(&dir),
+            Some(WalRetention {
+                bytes: 350,
+                segment_files: 2
+            })
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------------------------------------------------------------
+    // The null characterization
+    // ---------------------------------------------------------------------
+
+    /// `SplitMix64` — the in-tree, `std`-only PRNG the null characterization
+    /// runs on. Its seed is a CONSTANT frozen in this source, never time-,
+    /// environment- or run-derived, so the measured number reproduces
+    /// byte-for-byte on re-run and the test is not flaky by construction.
+    struct SplitMix64 {
+        state: u64,
+    }
+
+    impl SplitMix64 {
+        const fn new(seed: u64) -> Self {
+            Self { state: seed }
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        /// A draw in `[0, bound)`. The modulo bias is negligible at the ranges
+        /// used here and cannot move a strict-comparison rate.
+        fn next_below(&mut self, bound: u64) -> u64 {
+            self.next_u64() % bound
+        }
+    }
+
+    /// Fisher-Yates, driven by the same seeded stream, so each fixture is a
+    /// PERMUTATION of the one base multiset and differs from every other only
+    /// in ORDER.
+    fn permute(values: &mut [u64], rng: &mut SplitMix64) {
+        for index in (1..values.len()).rev() {
+            let pick = usize::try_from(rng.next_below(len_as_u64(index) + 1)).unwrap_or(0);
+            values.swap(index, pick);
+        }
+    }
+
+    /// The null side of the frozen rule, CHARACTERIZED rather than assumed.
+    ///
+    /// Measures `P(MonotoneRising)` for `DURABLE-SHAPE-RULE v1` exactly as
+    /// frozen — trough mirror included, warmup exclusion included, the same
+    /// guards, the same splits — over stationary EXCHANGEABLE fixtures: one
+    /// base multiset, permuted, so every fixture shares identical order
+    /// statistics and "the rule fired on ORDER alone" is the thing measured.
+    ///
+    /// It asserts NOTHING about the rate. There is no pass threshold, no bound
+    /// and no margin: inventing one would be the fabricated constant this
+    /// lineage refused by name. The one thing it does assert is that the
+    /// instrument was pointed at something — every fixture must clear the
+    /// indeterminate guards, and a fixture that does not is a GENERATOR DEFECT,
+    /// not a measurement to be reported.
+    ///
+    /// The printed block is transcribed verbatim into the pre-registration's
+    /// append-only post-section, which is where measurements live.
+    #[test]
+    fn null_characterization_stationary_exchangeable() {
+        // The rule this number characterizes. A number measured against a
+        // peaks-only rule, or against five deciding series, does not satisfy
+        // the obligation.
+        const RULE_VERSION: &str = "DURABLE-SHAPE-RULE v1";
+        // PINNED: the deciding cell's nominal sample count, its 5 s cadence and
+        // its 14,395 s span.
+        const FIXTURE_LEN: usize = 2_880;
+        const STEP_SECS: f64 = 5.0;
+        const EXPECTED_SPAN_SECS: f64 = 14_395.0;
+        // FREE above the pinned floor of 1,000: the count only buys resolution.
+        const FIXTURES: u64 = 2_000;
+        // FREE, subject to being wide enough for tie-rare. Every rising clause
+        // is a strict `>`, so ties make a clause FAIL and a tie-rare null fires
+        // the rule at least as often as the tie-heavy series really do — which
+        // makes the measured number an UPPER per-series characterization.
+        const VALUE_LOW: u64 = 0;
+        const VALUE_HIGH_EXCLUSIVE: u64 = 1_000_000_000_000;
+        // FREE in value, obligatory in kind: constant, in-tree, `std`-only.
+        const SEED: u64 = 0x243F_6A88_85A3_08D3;
+
+        let mut rng = SplitMix64::new(SEED);
+        // EXACTLY ONE base multiset, drawn once.
+        let mut values: Vec<u64> = (0..FIXTURE_LEN)
+            .map(|_| VALUE_LOW + rng.next_below(VALUE_HIGH_EXCLUSIVE - VALUE_LOW))
+            .collect();
+        let mut points = series(STEP_SECS, &values);
+        let span = points
+            .last()
+            .zip(points.first())
+            .map_or(0.0, |(last, first)| last.elapsed_secs - first.elapsed_secs);
+        assert!(
+            (span - EXPECTED_SPAN_SECS).abs() < 1e-9,
+            "the pinned time axis must be the deciding cell's: got {span}s"
+        );
+
+        let mut fired: u64 = 0;
+        let mut indeterminate: u64 = 0;
+        let mut retained_samples: u64 = 0;
+        for _ in 0..FIXTURES {
+            permute(&mut values, &mut rng);
+            for (point, &value) in points.iter_mut().zip(values.iter()) {
+                point.value = value;
+            }
+            let reading = classify_default("null", &points);
+            retained_samples = reading.samples;
+            match reading.shape {
+                SeriesShape::Indeterminate => indeterminate += 1,
+                SeriesShape::MonotoneRising => fired += 1,
+                SeriesShape::RisingDecelerating | SeriesShape::Levelled => {}
+            }
+        }
+
+        // NON-VACUITY, not a threshold: it asserts the instrument was pointed
+        // at something. An all-indeterminate run would otherwise report 0.000
+        // as this rule's declared false-alarm character.
+        assert_eq!(
+            indeterminate, 0,
+            "every fixture must clear the indeterminate guards; a non-zero count \
+             is a GENERATOR DEFECT, not a measurement"
+        );
+
+        #[allow(clippy::cast_precision_loss)] // report-only, printed to 6 dp
+        let rate = fired as f64 / FIXTURES as f64;
+        println!("--- null characterization ({RULE_VERSION}) ---");
+        println!("rule_version         = {RULE_VERSION}");
+        println!("prng                 = SplitMix64 (in-tree, std-only)");
+        println!("seed                 = 0x{SEED:016X}");
+        println!("fixtures             = {FIXTURES}");
+        println!("fixture_len          = {FIXTURE_LEN}");
+        println!("cadence_secs         = {STEP_SECS}");
+        println!("span_secs            = {span}");
+        println!("retained_samples     = {retained_samples}");
+        println!("value_range          = [{VALUE_LOW}, {VALUE_HIGH_EXCLUSIVE})");
+        println!("fired                = {fired}");
+        println!("total                = {FIXTURES}");
+        println!("indeterminate        = {indeterminate}");
+        println!("P(MonotoneRising)    = {rate:.6}");
+        println!(
+            "compound bound       = <= 4 x per-series rate (union bound, no independence claimed)"
+        );
+        // Nothing above is compared against anything. The rate is reported, not
+        // gated.
+    }
 }
