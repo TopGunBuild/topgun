@@ -75,6 +75,75 @@ pub struct OriginCapture {
     dropped: std::sync::atomic::AtomicU64,
 }
 
+impl OriginCapture {
+    /// Construct an empty capture. Private because the supervisor is the only
+    /// producer of one; the inline tests reach it from inside this module.
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            lines: Mutex::new(Vec::new()),
+            matched: std::sync::atomic::AtomicU64::new(0),
+            dropped: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// Record one child output line, retaining it when it carries the origin
+    /// target and the retention cap has not been reached.
+    ///
+    /// Matching is on the TARGET substring rather than on message text, which
+    /// is what lets the line be selected without a discriminant field. A match
+    /// arriving once the cap is full is COUNTED as a drop and never silently
+    /// discarded: the drop counter is the evidence that the captured set is
+    /// incomplete, and it is what forces the fail-closed reading downstream. A
+    /// capture that discarded quietly would let a truncated run be read as a
+    /// complete one.
+    pub fn record_line(&self, line: &str) {
+        if !line.contains(ORIGIN_TARGET) {
+            return;
+        }
+        // Both counters move under the same lock the retained lines do, so a
+        // snapshot can never observe a matched line that is neither retained
+        // nor counted as dropped.
+        let mut lines = self.lines.lock();
+        self.matched.fetch_add(1, Ordering::SeqCst);
+        if lines.len() >= ORIGIN_CAPTURE_CAPACITY {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+
+    /// One consistent view of the retained lines and both counters.
+    ///
+    /// The counters travel WITH the lines so a reader never has to infer how
+    /// many lines were seen from how many were kept.
+    #[allow(dead_code)] // wired in G4
+    pub fn snapshot(&self) -> OriginCaptureSnapshot {
+        let lines = self.lines.lock();
+        OriginCaptureSnapshot {
+            lines: lines.clone(),
+            matched: self.matched.load(Ordering::SeqCst),
+            dropped: self.dropped.load(Ordering::SeqCst),
+        }
+    }
+}
+
+/// A consistent view of an [`OriginCapture`]: the retained lines plus the two
+/// counters, all taken under one lock.
+///
+/// A named struct rather than a tuple because the two counters are not
+/// interchangeable — `dropped` is fail-closed evidence, and a transposition at
+/// the wiring site would turn a discarded line into a matched one. Wired in G4.
+#[allow(dead_code)] // wired in G4
+pub struct OriginCaptureSnapshot {
+    /// The retained lines, in arrival order, capped at
+    /// [`ORIGIN_CAPTURE_CAPACITY`].
+    pub lines: Vec<String>,
+    /// Lines that matched [`ORIGIN_TARGET`], retained or not.
+    pub matched: u64,
+    /// Matched lines refused because the retention cap was reached.
+    pub dropped: u64,
+}
+
 /// Configuration for launching the server child.
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -180,6 +249,11 @@ pub struct ServerSupervisor {
     /// not misreport our own `kill -9` as a crash.
     intentional_kill: Arc<AtomicBool>,
     panic_watch: Arc<PanicWatch>,
+    /// Bounded sink for the removal-site observation lines, shared by the
+    /// readers of every child generation so a restart does not reset it. Built
+    /// here rather than passed in, which is what keeps `ServerConfig`'s fields
+    /// and this supervisor's constructor signature unchanged.
+    origin_capture: Arc<OriginCapture>,
 }
 
 impl ServerSupervisor {
@@ -190,6 +264,7 @@ impl ServerSupervisor {
             child: Mutex::new(None),
             intentional_kill: Arc::new(AtomicBool::new(false)),
             panic_watch: PanicWatch::new(),
+            origin_capture: OriginCapture::new(),
         })
     }
 
@@ -200,6 +275,12 @@ impl ServerSupervisor {
 
     pub fn panic_watch(&self) -> Arc<PanicWatch> {
         Arc::clone(&self.panic_watch)
+    }
+
+    /// The origin-line sink fed by every child generation's output readers.
+    #[allow(dead_code)] // wired in G4
+    pub fn origin_capture(&self) -> Arc<OriginCapture> {
+        Arc::clone(&self.origin_capture)
     }
 
     /// PID of the currently running child, if any. Changes across restarts, so
@@ -260,10 +341,7 @@ impl ServerSupervisor {
             .env("TOPGUN_JOURNAL_ENABLED", "true")
             .env("RUST_BACKTRACE", "1")
             // Quiet the server's own logs unless the operator opts in.
-            .env(
-                "RUST_LOG",
-                std::env::var("SOAK_SERVER_LOG").unwrap_or_else(|_| "warn".to_string()),
-            )
+            .env("RUST_LOG", effective_server_log_filter())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -284,8 +362,18 @@ impl ServerSupervisor {
         let (ready_tx, ready_rx) = oneshot::channel::<()>();
         let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
 
-        spawn_line_reader(stdout, Arc::clone(&self.panic_watch), Some(ready_tx));
-        spawn_line_reader(stderr, Arc::clone(&self.panic_watch), None);
+        spawn_line_reader(
+            stdout,
+            Arc::clone(&self.panic_watch),
+            Arc::clone(&self.origin_capture),
+            Some(ready_tx),
+        );
+        spawn_line_reader(
+            stderr,
+            Arc::clone(&self.panic_watch),
+            Arc::clone(&self.origin_capture),
+            None,
+        );
 
         // Reset the intentional-kill flag for the new child generation.
         self.intentional_kill.store(false, Ordering::SeqCst);
@@ -421,10 +509,17 @@ enum ChildOutcome {
 }
 
 /// Spawn a task that reads `reader` line-by-line, mirroring each line into the
-/// panic watch and (for stdout) signalling readiness on the first `PORT=` line.
+/// panic watch and the origin capture and (for stdout) signalling readiness on
+/// the first `PORT=` line.
+///
+/// The origin capture is taken as a parameter rather than reached through the
+/// supervisor because this reader is spawned before the child is stored, and
+/// because the function is PRIVATE to this module — widening it moves no call
+/// site outside the file.
 fn spawn_line_reader<R>(
     reader: R,
     panic_watch: Arc<PanicWatch>,
+    origin_capture: Arc<OriginCapture>,
     ready_tx: Option<Arc<Mutex<Option<oneshot::Sender<()>>>>>,
 ) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -434,6 +529,7 @@ fn spawn_line_reader<R>(
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             panic_watch.record_line(&line);
+            origin_capture.record_line(&line);
             // Opt-in diagnostic: mirror server log lines to the harness's stderr so
             // an operator can confirm server-side behavior (e.g. eviction firing)
             // from the run output. Off by default — keeps CI / 72h runs quiet.
@@ -459,4 +555,91 @@ pub fn resolve_server_binary() -> PathBuf {
         return PathBuf::from(p);
     }
     PathBuf::from(env!("CARGO_BIN_EXE_topgun-server"))
+}
+
+/// The log filter handed to the child as `RUST_LOG`, read from
+/// `SOAK_SERVER_LOG` and defaulting to `warn`.
+///
+/// Single source on purpose: the harness both SETS this on the child and
+/// REPORTS which filter a run used, and those two must be the same string. A
+/// second environment read at the reporting site could disagree with the one
+/// the child was launched with, and a run reported as armed while the child was
+/// in fact quiet is exactly the false witness the origin reading must never
+/// produce.
+pub fn effective_server_log_filter() -> String {
+    std::env::var("SOAK_SERVER_LOG").unwrap_or_else(|_| "warn".to_string())
+}
+
+// These tests are the executable half of the capture contract, and the
+// integration target `tests/soak_tombstone_restart.rs` — which re-includes this
+// module under the standard harness — is what actually runs them. The bench
+// target compiles this module in test mode WITHOUT libtest, so the `#[test]`
+// items are stripped there and their helpers read as unreferenced; the
+// module-scoped `allow(dead_code)` keeps that compile warning-free. It is a
+// property of the two compile modes, not a placeholder, so it stays.
+#[cfg(test)]
+#[allow(dead_code)]
+mod tests {
+    use super::*;
+
+    /// A line shaped like the rendered removal-site observation. The capture
+    /// selects on the target alone, so the field payload is deliberately not
+    /// what these tests turn on.
+    fn origin_line(op_seq: usize) -> String {
+        format!(
+            "2026-08-31T12:00:00.000000Z  INFO {ORIGIN_TARGET}: ts=1 op_seq={op_seq} epoch=3 \
+             refs_returned=0 refs_at_entry=2 bytes_returned=0 watermark=9 ceiling=9"
+        )
+    }
+
+    #[test]
+    fn retains_lines_carrying_the_origin_target() {
+        let capture = OriginCapture::new();
+        capture.record_line(&origin_line(1));
+
+        let snap = capture.snapshot();
+        assert_eq!(snap.matched, 1);
+        assert_eq!(snap.dropped, 0);
+        assert_eq!(snap.lines.len(), 1);
+        assert!(snap.lines[0].contains(ORIGIN_TARGET));
+    }
+
+    #[test]
+    fn ignores_lines_without_the_origin_target() {
+        let capture = OriginCapture::new();
+        capture.record_line(
+            "2026-08-31T12:00:00.000000Z  WARN topgun_server::storage::wal: segment rotated",
+        );
+        capture.record_line("PORT=7300");
+
+        let snap = capture.snapshot();
+        assert_eq!(snap.matched, 0);
+        assert_eq!(snap.dropped, 0);
+        assert!(snap.lines.is_empty());
+    }
+
+    /// Overflow must be OBSERVABLE. A dropped line means the captured set is
+    /// incomplete, which forces the fail-closed reading downstream; a capture
+    /// that discarded quietly would let a truncated run be read as a complete
+    /// one.
+    #[test]
+    fn overflow_beyond_capacity_counts_drops_and_is_never_silent() {
+        let capture = OriginCapture::new();
+        let overflow = 3_usize;
+        for seq in 0..(ORIGIN_CAPTURE_CAPACITY + overflow) {
+            capture.record_line(&origin_line(seq));
+        }
+
+        let snap = capture.snapshot();
+        assert_eq!(snap.lines.len(), ORIGIN_CAPTURE_CAPACITY);
+        assert!(
+            snap.dropped > 0,
+            "a capture beyond the cap must report drops, never discard silently"
+        );
+        assert_eq!(snap.dropped, u64::try_from(overflow).unwrap());
+        assert_eq!(
+            snap.matched,
+            u64::try_from(ORIGIN_CAPTURE_CAPACITY + overflow).unwrap()
+        );
+    }
 }
