@@ -1032,6 +1032,393 @@ pub fn assess_disk(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Durable-layer instrument: census, series shapes and the origin reading.
+//
+// Declarations only at this wave. Every item below carries its own item-scoped
+// dead-code allow because `main.rs` declares `mod monitor;` with no
+// module-level one, so an unwired declaration would fail `-D warnings` at the
+// wave boundary. Each allow expires when the item is wired in G4, and a blanket
+// module-level allow is deliberately NOT used: it would also silence the lint
+// for this module's existing items, permanently.
+// ---------------------------------------------------------------------------
+
+/// A store-level live/dead census of the durable OR corpus.
+///
+/// Every field is answerable **by the durable store alone**: the scan decodes
+/// each row and folds counters, and joins nothing against server-side state.
+///
+/// # Caller contract — what this census may and may not be read as
+///
+/// The durable tombstone blob is a bare tag list with **no epoch attribution**
+/// (the epoch association is server-side metadata that is not persisted), so
+/// *"dead = below the reclamation ceiling"* is **NOT computable** from durable
+/// state and this census does not claim it. Migrating durable blobs to an
+/// epoch-indexed form is TODO-566's obligation and has not landed; until it
+/// does, a caller that wants an epoch-attributed reading must get it from the
+/// in-memory index, and such a join is an OBSERVATION that may never enter a
+/// predicate — importing it would import the very instrument under suspicion.
+///
+/// All thirteen fields are counts or byte totals and therefore `u64`;
+/// `Default` zero-initialises every one so a fold starts from an empty census.
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DurableCensus {
+    /// Rows iterated.
+    pub keys_scanned: u64,
+    /// Rows whose record value failed to decode. Counted rather than skipped
+    /// silently, so an undecodable row is visible instead of invisible.
+    pub keys_undecodable: u64,
+    /// Keys decoded as the unified OR-Map variant.
+    pub or_map_keys: u64,
+    /// Keys decoded as the legacy, read-only tombstones-only variant.
+    pub or_tombstones_keys: u64,
+    /// Keys decoded as the LWW variant.
+    pub lww_keys: u64,
+    /// Σ live record count across scanned keys.
+    pub live_entries: u64,
+    /// Σ live tag length — the SAME unit as [`DurableCensus::tombstone_bytes`],
+    /// so live and dead are comparable without conversion.
+    pub live_tag_bytes: u64,
+    /// Σ tombstone tags across BOTH OR variants.
+    pub tombstone_entries: u64,
+    /// Σ tombstone tag length across BOTH OR variants.
+    pub tombstone_bytes: u64,
+    /// Σ per-key (`len` − distinct). Duplicates are counted **within a key**,
+    /// never across keys, so no cross-key set is ever built.
+    pub tombstone_dup_entries: u64,
+    /// Keys with a non-empty tombstone vector.
+    pub keys_with_tombstones: u64,
+    /// Keys whose live records are empty **and** whose tombstones are not.
+    pub keys_all_dead: u64,
+    /// The per-key maximum tombstone count.
+    pub max_tombstones_per_key: u64,
+}
+
+/// Which OR record variant a scanned key decoded as.
+///
+/// The two variants share every tombstone fold — a tombstone is a tombstone in
+/// either — and differ only in which variant-share counter they bump, which is
+/// why the fold takes this rather than duplicating the arithmetic per variant.
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrVariant {
+    /// The unified OR-Map variant: live records plus tombstones.
+    OrMap,
+    /// The legacy, read-only tombstones-only variant.
+    OrTombstones,
+}
+
+/// Where a census record was taken, and therefore what it may decide.
+///
+/// The observation fence is a TYPED property of the record, not a convention:
+/// [`CensusSource::LiveCopy`] records are taken from a byte copy of a **live**
+/// store file, which is a smeared image, so they are best-effort by
+/// construction and may not enter any predicate. They land in their own tally
+/// and are never added to the corpus-scan tally, which is what keeps the
+/// durable-corpus estimator's input identical whether the live sampler is armed
+/// or not.
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CensusSource {
+    /// Taken at a recovery checkpoint, with the server process DEAD.
+    Checkpoint,
+    /// Taken after the run, with the server process DEAD.
+    Terminal,
+    /// Taken from a byte copy of the LIVE store file. OBSERVATION ONLY.
+    LiveCopy,
+}
+
+impl CensusSource {
+    /// The single rendered token for this source. Consumed BOTH by the console
+    /// renderer and by the JSON serializer, so the two transports can never
+    /// disagree and no site retypes a literal. Deliberately hand-written rather
+    /// than serde-derived: this file is `#[path]`-included by two integration
+    /// targets and must stay `std`-only.
+    #[allow(dead_code)] // wired in G4
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Checkpoint => "CHECKPOINT",
+            Self::Terminal => "TERMINAL",
+            Self::LiveCopy => "LIVE_COPY",
+        }
+    }
+}
+
+/// One census, tagged with when it was taken and from what.
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CensusRecord {
+    pub elapsed_secs: f64,
+    pub source: CensusSource,
+    pub census: DurableCensus,
+}
+
+/// One sample of a deciding series.
+///
+/// The value is `u64` for every deciding series — all four are counts or byte
+/// totals — so the shape rule's strict comparisons are exact and no series
+/// becomes an `f64` on the way through.
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SeriesPoint {
+    pub elapsed_secs: f64,
+    pub value: u64,
+}
+
+/// The shape of one deciding series under the frozen, threshold-free rule.
+///
+/// Evaluated in declaration order, fail-closed first. The rule reads
+/// **envelopes, not rates**: peaks and troughs over halves and quarters, with
+/// strict `>` comparisons and no headroom constant anywhere.
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeriesShape {
+    /// Too few retained samples, too short a retained span, or no samples at
+    /// all. Carries a named reason. Never "ok".
+    Indeterminate,
+    /// An envelope — the peak envelope or the trough floor — rose across the
+    /// run **and was still rising at the end**.
+    MonotoneRising,
+    /// Something rose across the run but was no longer rising at the end.
+    RisingDecelerating,
+    /// Neither the peak envelope nor the trough floor rose across the run.
+    Levelled,
+}
+
+impl SeriesShape {
+    /// The single rendered token for this shape. Consumed BOTH by the console
+    /// renderer and by the JSON serializer, so the two transports can never
+    /// disagree and no site retypes a literal.
+    #[allow(dead_code)] // wired in G4
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Indeterminate => "INDETERMINATE",
+            Self::MonotoneRising => "MONOTONE_RISING",
+            Self::RisingDecelerating => "RISING_DECELERATING",
+            Self::Levelled => "LEVELLED",
+        }
+    }
+}
+
+impl Default for SeriesShape {
+    /// Fail-closed: an unset shape is [`SeriesShape::Indeterminate`], never a
+    /// levelled one. A `Default` that read as "ok" would let a partially built
+    /// reading pass for a measured one.
+    fn default() -> Self {
+        Self::Indeterminate
+    }
+}
+
+/// The classification of one deciding series, with every number the verdict
+/// was computed from.
+///
+/// The per-shape numbers are carried on the reading rather than recomputed
+/// downstream so that the rendered row and the verdict provably come from the
+/// same arithmetic over the same retained series.
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SeriesShapeReading {
+    /// Which deciding series this is — one of [`DECIDING_SERIES`]. Carried as a
+    /// typed field so the reading over all four can NAME the offending series
+    /// instead of inferring it from position.
+    pub name: &'static str,
+    pub shape: SeriesShape,
+    /// WHICH envelope fired, so the culprit is named and never inferred.
+    /// Exactly one of `"PEAKS"`, `"FLOOR"` or `"BOTH"`, and `None` when no
+    /// envelope fired. Meaningful only under [`SeriesShape::MonotoneRising`],
+    /// which `shape` already states, so its absence carries no disposition.
+    pub firing_envelope: Option<&'static str>,
+    /// Retained (post-warmup-exclusion) sample count.
+    pub samples: u64,
+    /// Retained span in seconds.
+    pub span_secs: f64,
+    pub first_half_peak: u64,
+    pub last_half_peak: u64,
+    pub third_quarter_peak: u64,
+    pub last_quarter_peak: u64,
+    pub first_half_trough: u64,
+    pub last_half_trough: u64,
+    pub third_quarter_trough: u64,
+    pub last_quarter_trough: u64,
+    /// Arithmetic mean of the retained series' LAST HALF, over the same split
+    /// index the peaks and troughs use and from the SAME series they come from,
+    /// so a peak and a mean are never read off two different cadences.
+    /// Integer FLOOR of the mean: every deciding series is integer-valued and
+    /// every integer-semantic field here is `u64`.
+    pub last_half_mean: u64,
+    /// Why the shape is what it is when the guards decided it. Disposition
+    /// bearing: it always serializes, as an explicit null where it has no
+    /// value, so "no reason" is never confused with "this artifact predates the
+    /// field".
+    pub reason: Option<String>,
+}
+
+/// The four deciding series, frozen.
+///
+/// All four are durable-layer and **externally observable** — each is read by
+/// the harness from `ps` or filesystem metadata, none is the measured process's
+/// own self-report. Write-behind occupancy is deliberately NOT among them: it
+/// is the only candidate read from the server's own metrics endpoint, its
+/// durable consequence is already carried by the two WAL series, and under a
+/// peak rule a single late stall would decide the whole run. It is recorded,
+/// rendered and serialized as an observation column instead.
+#[allow(dead_code)] // wired in G4
+pub const DECIDING_SERIES: [&str; 4] = ["rss_kib", "redb_bytes", "wal_bytes", "wal_segment_files"];
+
+/// The reading over all four deciding series, evaluated in declaration order.
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableReading {
+    /// ANY deciding series is [`SeriesShape::Indeterminate`]. Fail-closed, with
+    /// the offending series named in the reason.
+    IndeterminateInstrument,
+    /// ANY deciding series is [`SeriesShape::MonotoneRising`].
+    PlateauNotMet,
+    /// Every deciding series is levelled or rising-decelerating.
+    ///
+    /// Deliberately weak, and the strongest reading this instrument may emit: a
+    /// non-rising verdict over a bounded horizon means *this horizon did not
+    /// show it*, never *there is nothing to show*.
+    NoRisingEnvelopeObserved,
+}
+
+impl DurableReading {
+    /// The single rendered token for this reading. Consumed BOTH by the console
+    /// renderer and by the JSON serializer, so the two transports can never
+    /// disagree and no site retypes a literal.
+    #[allow(dead_code)] // wired in G4
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IndeterminateInstrument => "INDETERMINATE_INSTRUMENT",
+            Self::PlateauNotMet => "PLATEAU_NOT_MET",
+            Self::NoRisingEnvelopeObserved => "NO_RISING_ENVELOPE_OBSERVED",
+        }
+    }
+}
+
+/// One parsed removal-site observation line.
+///
+/// The eight fields are extracted from the RENDERED line by whitespace-token
+/// scan rather than by format position, so the parser is not coupled to the log
+/// formatter's field or message order. A line yields a value only when all
+/// eight parse.
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OriginLine {
+    /// Wall-clock milliseconds since the epoch, as the emitter wrote it.
+    pub ts: i64,
+    pub op_seq: u64,
+    pub epoch: u64,
+    /// References the index removal itself returned.
+    pub refs_returned: u64,
+    /// References the slot held when the epoch entered the index.
+    pub refs_at_entry: u64,
+    pub bytes_returned: u64,
+    pub watermark: u64,
+    pub ceiling: u64,
+}
+
+/// Everything the origin classifier reads, as TYPED fields.
+///
+/// No classifier input is inferred: the restart count, the armed flag and the
+/// exited-epoch count are threaded in by their producers and read from here, so
+/// a reading can never rest on a quantity nobody produced.
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OriginAggregate {
+    /// Lines the capture matched on the origin target.
+    pub matched: u64,
+    /// Matched lines that did NOT yield all eight fields. Never silent: any
+    /// unparsed line forces the fail-closed reading.
+    pub unparsed: u64,
+    /// Matched lines dropped because the capture was full. Never silent: any
+    /// drop forces the fail-closed reading.
+    pub dropped: u64,
+    /// The successfully parsed lines.
+    pub lines: Vec<OriginLine>,
+    /// Server restarts during the run, threaded in from the recovery-checkpoint
+    /// counter and from NOTHING else — the `epochs_exited` qualifier resets on
+    /// restart and would be misread.
+    pub restarts: u64,
+    /// Whether the log filter actually selected the origin target for this run.
+    pub armed: bool,
+    /// The exited-epoch qualifier, named BY PARAMETER here and never by metric
+    /// literal: the literal belongs where the scrape that reads it lives. Used
+    /// ONLY as the origin reading's qualifier and never as a plateau predicate
+    /// input.
+    pub epochs_exited: u64,
+    /// The named reason for the classified reading, carried here so the
+    /// serializer emits it beside the counters it was derived from. Distinct
+    /// from the durable reading's own reason. Disposition-bearing: it always
+    /// serializes, as an explicit null where it has no value.
+    pub reason: Option<String>,
+}
+
+/// The origin reading, evaluated in declaration order — fail-closed first.
+///
+/// Every variant ROUTES; none is diagnosed here. The diagnosis line is
+/// hard-stopped, and this instrument ships regardless of which way it reads.
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginReading {
+    /// The filter was not armed, OR a line was dropped, OR a line was
+    /// unparsed, OR the server restarted during the run.
+    IndeterminateInstrument,
+    /// At least one line had `refs_returned == 0 && refs_at_entry > 0`: the
+    /// empty-return state is reached in production, and the origin question
+    /// becomes a code-level fix spec.
+    ReachedInProduction,
+    /// At least one line had `refs_returned != refs_at_entry`, none of them of
+    /// the reached-in-production shape. A fourth physical state the two
+    /// pre-registered readings do not cover; naming it is what stops it being
+    /// folded silently into the equal-refs reading.
+    PartialDivergence,
+    /// At least one line, and EVERY line had `refs_returned == refs_at_entry`:
+    /// not reached under this load.
+    NotReachedEqualRefs,
+    /// Zero lines, filter armed, and epochs did exit: the drain arm is not
+    /// reached — a dark path or a gate.
+    NoLinesWhileEpochsExited,
+    /// Zero lines, filter armed, and no epoch exited: nothing exited, so the
+    /// arm could not have been reached.
+    NotObservedAtHead,
+}
+
+impl OriginReading {
+    /// The single rendered token for this reading. Consumed BOTH by the console
+    /// renderer and by the JSON serializer, so the two transports can never
+    /// disagree and no site retypes a literal.
+    #[allow(dead_code)] // wired in G4
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IndeterminateInstrument => "INDETERMINATE_INSTRUMENT",
+            Self::ReachedInProduction => "REACHED_IN_PRODUCTION",
+            Self::PartialDivergence => "PARTIAL_DIVERGENCE",
+            Self::NotReachedEqualRefs => "NOT_REACHED_EQUAL_REFS",
+            Self::NoLinesWhileEpochsExited => "NO_LINES_WHILE_EPOCHS_EXITED",
+            Self::NotObservedAtHead => "NOT_OBSERVED_AT_HEAD",
+        }
+    }
+}
+
+/// One sample of WAL retention: the two deciding series that share a sampler.
+///
+/// Both are read from filesystem metadata only — no segment file is ever
+/// opened — so sampling them cannot perturb the process being measured.
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WalRetention {
+    /// Σ length of the retained segment files, in bytes.
+    pub bytes: u64,
+    /// Number of retained segment files.
+    pub segment_files: u64,
+}
+
 // This bench target is `harness = false` (it owns `main`), so these `#[test]`
 // functions do NOT run under `cargo test --bench soak_harness` — libtest never
 // drives them. They are executed as a real CI gate by the integration target

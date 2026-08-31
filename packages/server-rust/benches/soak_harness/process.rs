@@ -39,6 +39,42 @@ const PANIC_MARKERS: &[&str] = &[
 /// Number of recent log lines retained for crash-context reporting.
 const LOG_RING_CAPACITY: usize = 400;
 
+/// The log target of the removal-site observation line the origin instrument
+/// reads.
+///
+/// The target is what makes the line selectable without a discriminant field,
+/// so the capture matches on it rather than on message text. Declared here
+/// beside the capture that consumes it; wired in G4.
+#[allow(dead_code)] // wired in G4
+pub const ORIGIN_TARGET: &str = "topgun_server::tombstone_frontier::removal";
+
+/// Maximum origin lines retained by [`OriginCapture`].
+///
+/// Roughly two orders of magnitude above the per-run line cadence the existing
+/// data implies, so overflow is not expected — and if it happens anyway it is
+/// never silent: lines beyond this bound increment the capture's drop counter,
+/// and a non-zero drop count forces the fail-closed origin reading. Retention
+/// is in the HARNESS process, whose resident set nothing in this run measures.
+#[allow(dead_code)] // wired in G4
+pub const ORIGIN_CAPTURE_CAPACITY: usize = 50_000;
+
+/// Bounded sink for the removal-site observation lines, fed from the same
+/// per-line reader that drives the panic watch.
+///
+/// Declaration only at this wave: the tap, the accessor and the counting
+/// behaviour are wired later. The counters are carried beside the retained
+/// lines so a reader never has to infer how many lines were seen from how many
+/// were kept.
+#[allow(dead_code)] // wired in G4
+pub struct OriginCapture {
+    /// Retained lines, capped at [`ORIGIN_CAPTURE_CAPACITY`].
+    lines: Mutex<Vec<String>>,
+    /// Lines that matched [`ORIGIN_TARGET`], retained or not.
+    matched: std::sync::atomic::AtomicU64,
+    /// Matched lines refused because the retention cap was reached.
+    dropped: std::sync::atomic::AtomicU64,
+}
+
 /// Configuration for launching the server child.
 #[derive(Clone)]
 pub struct ServerConfig {
