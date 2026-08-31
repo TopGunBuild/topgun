@@ -115,20 +115,22 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use client::SoakClient;
 use model::{compare, next_stamp, Model};
 use monitor::{
-    assess, assess_disk, assess_tombstone_bytes, assess_tombstone_corpus_level,
-    exclude_boot_gap_samples, fold_lww_key, fold_or_key, fold_undecodable_key,
-    parse_labelled_gauge, sample_disk_mb, sample_redb_bytes, sample_rss_mb, sample_wal_retention,
-    slope_clause_stays_hard, BootGap, CensusRecord, CensusSource, CorpusLevelDisposition,
-    CorpusSample, DiskAssessment, DiskSample, DurableCensus, MemSample, OrVariant, SeriesPoint,
-    TombstoneAssessment, TombstoneCorpusAssessment, TombstoneSample, DEFAULT_DISK_CEILING_MB,
-    DEFAULT_DISK_MIN_GROWTH_MB, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
+    aggregate_origin_lines, assess, assess_disk, assess_tombstone_bytes,
+    assess_tombstone_corpus_level, classify_durable_reading, classify_origin_reading,
+    classify_series_shape, exclude_boot_gap_samples, fold_lww_key, fold_or_key,
+    fold_undecodable_key, parse_labelled_gauge, sample_disk_mb, sample_redb_bytes, sample_rss_mb,
+    sample_wal_retention, slope_clause_stays_hard, BootGap, CensusRecord, CensusSource,
+    CorpusLevelDisposition, CorpusSample, DiskAssessment, DiskSample, DurableCensus,
+    DurableReading, MemSample, OrVariant, OriginLine, SeriesPoint, SeriesShapeReading,
+    TombstoneAssessment, TombstoneCorpusAssessment, TombstoneSample, DECIDING_SERIES,
+    DEFAULT_DISK_CEILING_MB, DEFAULT_DISK_MIN_GROWTH_MB, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
     DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH, DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
     DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR, DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES,
     DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES, DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
     DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
 };
 use or_noloss::{missing_acked_adds, OrLedger};
-use process::{resolve_server_binary, ServerConfig, ServerSupervisor};
+use process::{resolve_server_binary, OriginCaptureSnapshot, ServerConfig, ServerSupervisor};
 use report::{
     append_progress, effective_epoch_width, scan_wal_frame_sizes, utc_timestamp_now, write_report,
     ConfirmApplyReport, DiskReport, MemoryReport, ProgressSnapshot, SoakReport,
@@ -1279,6 +1281,40 @@ async fn run_soak(config: &Config) -> i32 {
         eprintln!("PANIC CONTEXT:\n{pr}");
     }
 
+    // --- Durable-layer reading (report-only) ---
+    // Assembled BEFORE the report literal because `pending_gates` is the ONLY
+    // channel this reading has: nothing it produces is ANDed into `passed`, and
+    // `report.rs` is deliberately given no field for it, so the durable reading
+    // ships as a sibling artifact instead. Armed runs only — an unflagged run
+    // builds nothing here and writes no sibling file.
+    let durable_report = if config.durable_reading {
+        // ONE read of the effective child log filter, reused for both the
+        // reported value and the arming derivation, so the filter an artifact
+        // reports and the filter its `armed` flag was derived from cannot
+        // disagree.
+        let log_filter = process::effective_server_log_filter();
+        // Checkpoint and terminal censuses, plus the observation-only live-copy
+        // records, in clock order. The live records travel in their own tally
+        // right up to this point, so the durable-corpus estimator's input above
+        // is identical whether the live sampler was armed or not.
+        let mut census_records = corpus_snapshot.censuses.clone();
+        census_records.extend(corpus_sampler.live_tally.lock().censuses.iter().copied());
+        census_records.sort_by(|a, b| a.elapsed_secs.total_cmp(&b.elapsed_secs));
+        let origin_snapshot = supervisor.origin_capture().snapshot();
+        let (reading, built) =
+            build_durable_reading_report(&durable, &census_records, &origin_snapshot, &log_filter);
+        if reading == DurableReading::IndeterminateInstrument {
+            pending_gates.push(format!(
+                "durable reading {}: {} (report-only, did NOT fail the run)",
+                reading.as_str(),
+                built.reason.clone().unwrap_or_default()
+            ));
+        }
+        Some(built)
+    } else {
+        None
+    };
+
     let report = SoakReport {
         mode: "soak".to_string(),
         duration_secs_target: config.duration.as_secs(),
@@ -1407,6 +1443,32 @@ async fn run_soak(config: &Config) -> i32 {
                 "mechanism report requested but WAL dir {} could not be scanned",
                 wal_dir.display()
             );
+        }
+    }
+
+    // --- Durable-layer reading artifact (report-only) ---
+    // A SIBLING of the primary JSON report, written the way the mechanism
+    // report already is, because adding a field to `SoakReport` would cascade
+    // into the struct literal the WAL-census integration target builds.
+    if let Some(durable_report) = &durable_report {
+        print_durable_reading_report(durable_report);
+        if let Some(path) = &config.json_output {
+            let durable_path = path.with_extension("durable.json");
+            match std::fs::File::create(&durable_path) {
+                Ok(f) => {
+                    if let Err(e) = serde_json::to_writer_pretty(f, durable_report) {
+                        eprintln!("durable reading write failed: {e}");
+                    } else {
+                        println!("wrote durable reading to {}", durable_path.display());
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "durable reading create failed for {}: {e}",
+                        durable_path.display()
+                    );
+                }
+            }
         }
     }
     i32::from(!passed)
@@ -2331,6 +2393,444 @@ fn print_mechanism_report(r: &MechanismReport) {
 }
 
 // ---------------------------------------------------------------------------
+// Durable-layer reading (report-only)
+// ---------------------------------------------------------------------------
+
+/// One deciding series' classified shape, mirrored for serialization.
+///
+/// A mirror rather than a `Serialize` on the classifier's own type: `monitor.rs`
+/// is `#[path]`-included by two integration targets with no sibling module, so
+/// it stays `std`-only and every derive lives here — the same split
+/// `MechanismReport` already uses.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SeriesShapeRow {
+    /// One of the frozen deciding-series names, carried so a row names its own
+    /// series instead of being identified by position.
+    name: String,
+    /// Rendered through the classifier's own `as_str`, so the console and the
+    /// artifact can never disagree about a shape.
+    shape: String,
+    /// Which envelope fired — `PEAKS`, `FLOOR` or `BOTH`. Meaningful only under
+    /// a rising shape, which `shape` already states, so its absence carries no
+    /// disposition and it keeps the default skip.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    firing_envelope: Option<String>,
+    /// Retained (post-warmup-exclusion) sample count.
+    samples: u64,
+    /// Retained span in seconds.
+    span_secs: f64,
+    first_half_peak: u64,
+    last_half_peak: u64,
+    third_quarter_peak: u64,
+    last_quarter_peak: u64,
+    first_half_trough: u64,
+    last_half_trough: u64,
+    third_quarter_trough: u64,
+    last_quarter_trough: u64,
+    /// Integer floor of the retained last half's mean, taken off the SAME
+    /// series and the SAME split index the peaks above come from — so a peak
+    /// and a mean are never read across two cadences.
+    last_half_mean: u64,
+}
+
+/// One census, mirrored for serialization: where it was taken, when, and all
+/// thirteen counted fields.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CensusRow {
+    /// `CHECKPOINT`, `TERMINAL` or `LIVE_COPY`, rendered through the source's
+    /// own `as_str`. A `LIVE_COPY` row is taken from a smeared image of a live
+    /// store file and is OBSERVATION ONLY — the token is what fences it.
+    source: String,
+    elapsed_secs: f64,
+    keys_scanned: u64,
+    keys_undecodable: u64,
+    or_map_keys: u64,
+    or_tombstones_keys: u64,
+    lww_keys: u64,
+    live_entries: u64,
+    live_tag_bytes: u64,
+    tombstone_entries: u64,
+    tombstone_bytes: u64,
+    tombstone_dup_entries: u64,
+    keys_with_tombstones: u64,
+    keys_all_dead: u64,
+    max_tombstones_per_key: u64,
+}
+
+/// The origin reading and every typed counter it was classified from.
+///
+/// Flattened onto [`DurableReadingReport`], so all of these are ROOT-level keys
+/// in the artifact rather than nested under an object — which is what the
+/// checks over this instrument read.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OriginReport {
+    /// Lines the capture matched on the origin target and retained. Taken from
+    /// the aggregate the classifier itself read, never from a second counter:
+    /// a report whose numbers came from two sources could disagree with the
+    /// reading it prints beside them.
+    origin_matched: u64,
+    /// Matched lines that did not yield all eight fields.
+    origin_unparsed: u64,
+    /// Matched lines refused because the capture was full.
+    origin_dropped: u64,
+    /// Rendered through the reading's own `as_str`.
+    origin_reading: String,
+    /// The origin reading's NAMED reason — distinct from the durable reading's
+    /// own `reason`, and given its own key so no reader has to work out which
+    /// one an artifact is showing.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    origin_reason: Option<String>,
+    /// Whether the effective child log filter actually selected the origin
+    /// target for this run.
+    armed: bool,
+    /// The exited-epoch qualifier. Observation only: it qualifies the origin
+    /// reading and never enters a plateau predicate.
+    epochs_exited: u64,
+    /// Server restarts during the run, from the recovery checkpoint and from
+    /// nothing else.
+    restarts: u64,
+    /// The first parsed line that returned zero references while holding some
+    /// at entry, rendered back to its eight fields.
+    ///
+    /// Disposition-bearing: it always serializes, as an explicit null where
+    /// there was no such line, so "no line of that shape" is never confused
+    /// with "this artifact predates the field".
+    first_zero_return_line: Option<String>,
+}
+
+/// The durable-layer reading over the four deciding series, plus the census and
+/// origin columns it is read beside.
+///
+/// REPORT-ONLY, without exception: nothing here is ANDed into the run verdict,
+/// and an instrument-blind reading is surfaced on `pending_gates` and nowhere
+/// else. A non-rising reading means *this horizon did not show it*, never
+/// *there is nothing to show*.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DurableReadingReport {
+    /// Rendered through the reading's own `as_str`.
+    reading: String,
+    /// The reading's NAMED reason.
+    ///
+    /// Disposition-bearing: it always serializes, as an explicit null where it
+    /// has no value.
+    reason: Option<String>,
+    /// The four frozen deciding series, one row each.
+    deciding_series: Vec<SeriesShapeRow>,
+    /// Every census taken during the run, checkpoint, terminal and live-copy
+    /// alike, in clock order.
+    censuses: Vec<CensusRow>,
+    /// The last census taken with the server process DEAD after the run.
+    ///
+    /// Disposition-bearing: it always serializes, as an explicit null where the
+    /// terminal scan produced nothing, because a missing terminal census is a
+    /// visible gap in the instrument rather than an absent field.
+    census_terminal: Option<CensusRow>,
+    /// Largest write-behind watermark lag seen across the run.
+    ///
+    /// An OBSERVATION column, never a deciding series. Disposition-bearing: it
+    /// always serializes, as an explicit null where the metric was absent from
+    /// every scraped body, so a silent absence can never masquerade as a zero.
+    writebehind_lag_max: Option<u64>,
+    /// The effective child log filter for this run — the one string that both
+    /// launched the child and derived `armed`.
+    log_filter: String,
+    #[serde(flatten)]
+    origin: OriginReport,
+}
+
+/// Strip ANSI SGR escape sequences from one captured child line.
+///
+/// The child's log formatter emits colour UNCONDITIONALLY — it never tests
+/// whether its output is a terminal — and the harness always reads that output
+/// through a pipe. Colour turns `ts=1756…` into an escape-interleaved token
+/// whose `key=value` split finds neither the key nor the value, so every origin
+/// line would read as unparsed and the reading would fail closed on a run where
+/// the emitter was in fact working perfectly. Normalizing HERE, at the harness
+/// boundary that owns the child's output, is what keeps the parser
+/// formatter-agnostic and `std`-only and keeps this instrument out of the
+/// server it measures.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(esc) = rest.find('\u{1b}') {
+        out.push_str(&rest[..esc]);
+        let tail = &rest[esc..];
+        let Some(after) = tail.strip_prefix("\u{1b}[") else {
+            // A lone escape that is not a CSI introducer: drop the escape alone,
+            // so no payload character is ever swallowed by mistake.
+            rest = &tail['\u{1b}'.len_utf8()..];
+            continue;
+        };
+        match after
+            .char_indices()
+            .find(|(_, c)| ('\u{40}'..='\u{7e}').contains(c))
+        {
+            // A complete CSI sequence: drop it up to and including its final byte.
+            Some((idx, c)) => rest = &after[idx + c.len_utf8()..],
+            // Unterminated: there is no final byte, so nothing after it is payload.
+            None => rest = "",
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Render one parsed origin line back to its eight fields.
+///
+/// Rendered rather than mirrored as a struct so the artifact carries the
+/// evidence in the same `key=value` shape the parser read it in, and so every
+/// one of the eight parsed fields has a reader — a parsed field nobody reads is
+/// a field that can rot without anything noticing.
+fn render_origin_line(line: &OriginLine) -> String {
+    format!(
+        "ts={} op_seq={} epoch={} refs_returned={} refs_at_entry={} \
+         bytes_returned={} watermark={} ceiling={}",
+        line.ts,
+        line.op_seq,
+        line.epoch,
+        line.refs_returned,
+        line.refs_at_entry,
+        line.bytes_returned,
+        line.watermark,
+        line.ceiling
+    )
+}
+
+fn census_row(record: &CensusRecord) -> CensusRow {
+    let c = record.census;
+    CensusRow {
+        source: record.source.as_str().to_string(),
+        elapsed_secs: record.elapsed_secs,
+        keys_scanned: c.keys_scanned,
+        keys_undecodable: c.keys_undecodable,
+        or_map_keys: c.or_map_keys,
+        or_tombstones_keys: c.or_tombstones_keys,
+        lww_keys: c.lww_keys,
+        live_entries: c.live_entries,
+        live_tag_bytes: c.live_tag_bytes,
+        tombstone_entries: c.tombstone_entries,
+        tombstone_bytes: c.tombstone_bytes,
+        tombstone_dup_entries: c.tombstone_dup_entries,
+        keys_with_tombstones: c.keys_with_tombstones,
+        keys_all_dead: c.keys_all_dead,
+        max_tombstones_per_key: c.max_tombstones_per_key,
+    }
+}
+
+fn shape_row(reading: &SeriesShapeReading) -> SeriesShapeRow {
+    SeriesShapeRow {
+        name: reading.name.to_string(),
+        shape: reading.shape.as_str().to_string(),
+        firing_envelope: reading.firing_envelope.map(ToString::to_string),
+        samples: reading.samples,
+        span_secs: reading.span_secs,
+        first_half_peak: reading.first_half_peak,
+        last_half_peak: reading.last_half_peak,
+        third_quarter_peak: reading.third_quarter_peak,
+        last_quarter_peak: reading.last_quarter_peak,
+        first_half_trough: reading.first_half_trough,
+        last_half_trough: reading.last_half_trough,
+        third_quarter_trough: reading.third_quarter_trough,
+        last_quarter_trough: reading.last_quarter_trough,
+        last_half_mean: reading.last_half_mean,
+    }
+}
+
+/// Assemble the durable-layer reading from the run's observations.
+///
+/// Returns the typed reading alongside its serializable mirror so the caller
+/// decides on the ENUM rather than on a rendered token — a disposition read
+/// back out of a string is a disposition that a renaming can silently break.
+///
+/// Every series is snapshotted into a local under its own lock before any row
+/// is built: the guards are not reentrant, so two reads of one series meeting
+/// inside a single expression would deadlock the run at its very last step.
+fn build_durable_reading_report(
+    durable: &DurableObservations,
+    censuses: &[CensusRecord],
+    origin: &OriginCaptureSnapshot,
+    log_filter: &str,
+) -> (DurableReading, DurableReadingReport) {
+    let rss_kib = durable.rss_kib.lock().clone();
+    let redb_bytes = durable.redb_bytes.lock().clone();
+    let wal_bytes = durable.wal_bytes.lock().clone();
+    let wal_segment_files = durable.wal_segment_files.lock().clone();
+    let writebehind_lag_max = *durable.writebehind_lag_max.lock();
+    let restarts = durable.restarts.load(Ordering::Relaxed);
+    let epochs_exited = durable.epochs_exited.load(Ordering::Relaxed);
+
+    // The four series are paired with the frozen names by construction, so the
+    // classifier's name-set check cannot be satisfied by a set this site
+    // assembled loosely.
+    let series: [(&'static str, &[SeriesPoint]); 4] = [
+        (DECIDING_SERIES[0], &rss_kib),
+        (DECIDING_SERIES[1], &redb_bytes),
+        (DECIDING_SERIES[2], &wal_bytes),
+        (DECIDING_SERIES[3], &wal_segment_files),
+    ];
+    let readings: Vec<SeriesShapeReading> = series
+        .iter()
+        .map(|(name, points)| {
+            classify_series_shape(
+                name,
+                points,
+                DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
+                DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
+            )
+        })
+        .collect();
+    let (reading, reason) = classify_durable_reading(&readings);
+
+    // The filter that launched the child is the same string the arming flag is
+    // derived from, so a run cannot be reported as armed while the child was in
+    // fact quiet.
+    let armed = log_filter.contains(process::ORIGIN_TARGET);
+    let captured: Vec<String> = origin.lines.iter().map(|l| strip_ansi(l)).collect();
+    let aggregate =
+        aggregate_origin_lines(&captured, origin.dropped, restarts, armed, epochs_exited);
+    let (origin_reading, origin_reason) = classify_origin_reading(&aggregate);
+    let first_zero_return_line = aggregate
+        .lines
+        .iter()
+        .find(|l| l.refs_returned == 0 && l.refs_at_entry > 0)
+        .map(render_origin_line);
+
+    let census_terminal = censuses
+        .iter()
+        .rev()
+        .find(|r| r.source == CensusSource::Terminal)
+        .map(census_row);
+
+    let report = DurableReadingReport {
+        reading: reading.as_str().to_string(),
+        reason,
+        deciding_series: readings.iter().map(shape_row).collect(),
+        censuses: censuses.iter().map(census_row).collect(),
+        census_terminal,
+        writebehind_lag_max,
+        log_filter: log_filter.to_string(),
+        origin: OriginReport {
+            origin_matched: aggregate.matched,
+            origin_unparsed: aggregate.unparsed,
+            origin_dropped: aggregate.dropped,
+            origin_reading: origin_reading.as_str().to_string(),
+            origin_reason,
+            armed: aggregate.armed,
+            epochs_exited: aggregate.epochs_exited,
+            restarts: aggregate.restarts,
+            first_zero_return_line,
+        },
+    };
+    (reading, report)
+}
+
+/// Render the durable-layer reading to the console.
+///
+/// Every number the artifact carries is printed here too, so a console log is a
+/// complete record of the reading and a reader never has to open the JSON to
+/// find out which envelope fired or what the terminal census counted.
+fn print_durable_reading_report(r: &DurableReadingReport) {
+    println!("\n=== DURABLE-LAYER READING (report-only, decides nothing) ===");
+    println!("reading:           {}", r.reading);
+    println!(
+        "reason:            {}",
+        r.reason.as_deref().unwrap_or("(none)")
+    );
+    println!("log filter:        {}", r.log_filter);
+    for row in &r.deciding_series {
+        println!(
+            "  {:<18} shape={} envelope={} samples={} span={:.1}s",
+            row.name,
+            row.shape,
+            row.firing_envelope.as_deref().unwrap_or("-"),
+            row.samples,
+            row.span_secs
+        );
+        println!(
+            "  {:<18} peaks  h1={} h2={} q3={} q4={} last_half_mean={}",
+            "",
+            row.first_half_peak,
+            row.last_half_peak,
+            row.third_quarter_peak,
+            row.last_quarter_peak,
+            row.last_half_mean
+        );
+        println!(
+            "  {:<18} floor  h1={} h2={} q3={} q4={}",
+            "",
+            row.first_half_trough,
+            row.last_half_trough,
+            row.third_quarter_trough,
+            row.last_quarter_trough
+        );
+    }
+    println!(
+        "writebehind lag:   {} (observation only)",
+        r.writebehind_lag_max
+            .map_or_else(|| "absent".to_string(), |v| v.to_string())
+    );
+    println!("censuses:          {}", r.censuses.len());
+    for row in &r.censuses {
+        println!(
+            "  {:<10} t={:.1}s keys={} undecodable={} or_map={} or_tomb={} lww={} \
+             live={} live_tag_bytes={} tombstones={} tombstone_bytes={} dups={} \
+             keys_with_tombstones={} keys_all_dead={} max_per_key={}",
+            row.source,
+            row.elapsed_secs,
+            row.keys_scanned,
+            row.keys_undecodable,
+            row.or_map_keys,
+            row.or_tombstones_keys,
+            row.lww_keys,
+            row.live_entries,
+            row.live_tag_bytes,
+            row.tombstone_entries,
+            row.tombstone_bytes,
+            row.tombstone_dup_entries,
+            row.keys_with_tombstones,
+            row.keys_all_dead,
+            row.max_tombstones_per_key
+        );
+    }
+    println!(
+        "terminal census:   {}",
+        r.census_terminal.as_ref().map_or_else(
+            || "absent".to_string(),
+            |t| format!(
+                "keys={} tombstone_bytes={}",
+                t.keys_scanned, t.tombstone_bytes
+            )
+        )
+    );
+    println!(
+        "origin:            reading={} matched={} unparsed={} dropped={} armed={} \
+         epochs_exited={} restarts={}",
+        r.origin.origin_reading,
+        r.origin.origin_matched,
+        r.origin.origin_unparsed,
+        r.origin.origin_dropped,
+        r.origin.armed,
+        r.origin.epochs_exited,
+        r.origin.restarts
+    );
+    println!(
+        "origin reason:     {}",
+        r.origin.origin_reason.as_deref().unwrap_or("(none)")
+    );
+    println!(
+        "first zero-return: {}",
+        r.origin
+            .first_zero_return_line
+            .as_deref()
+            .unwrap_or("(none)")
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Checkpoints
 // ---------------------------------------------------------------------------
 
@@ -3184,6 +3684,9 @@ const KNOWN_FLAGS: &[&str] = &[
     "--tombstone-corpus-headroom-bytes",
     "--tombstone-corpus-ceiling-bytes",
     "--mechanism-report",
+    "--durable-reading",
+    "--live-census-interval",
+    "--sampler-jitter-seed",
     "--smoke",
 ];
 
@@ -3214,7 +3717,16 @@ fn print_usage() {
          \x20              --tombstone-corpus-ceiling-bytes 8388608\n\
          \x20 # OR-churn WAL/RSS growth mechanism report (Q1-Q4), report-only\n\
          \x20 soak_harness --mechanism-report --or-churn true --or-keyspace 48 \\\n\
-         \x20              --crash-interval 0 --duration 3600 --data-dir ./soak-data\n\n\
+         \x20              --crash-interval 0 --duration 3600 --data-dir ./soak-data\n\
+         \x20 # durable-layer reading (report-only): arms the filesystem samplers and\n\
+         \x20 # writes <json-output>.durable.json beside the primary report\n\
+         \x20 soak_harness --durable-reading --json-output soak.json --data-dir ./soak-data\n\
+         \x20 # live-copy census sampler (seconds; 0 = DISARMED, the default).\n\
+         \x20 # Observation only: a census off a live store file is a smeared image\n\
+         \x20 soak_harness --durable-reading --live-census-interval 60\n\
+         \x20 # seed for the filesystem samplers\' cadence jitter. Runner-supplied,\n\
+         \x20 # never derived in the binary, so the recorded seed IS the seed used\n\
+         \x20 soak_harness --durable-reading --sampler-jitter-seed 20260831\n\n\
          See packages/server-rust/benches/soak_harness/README.md for the full flag list\n\
          and the Hetzner 72h runner."
     );
@@ -3376,6 +3888,18 @@ fn parse_args() -> Config {
             "--mechanism-report" => {
                 c.mechanism_report = true;
                 i += 1;
+            }
+            "--durable-reading" => {
+                c.durable_reading = true;
+                i += 1;
+            }
+            "--live-census-interval" => {
+                c.live_census_interval_secs = parse_u64(&need(i, &args, "--live-census-interval"));
+                i += 2;
+            }
+            "--sampler-jitter-seed" => {
+                c.sampler_jitter_seed = parse_u64(&need(i, &args, "--sampler-jitter-seed"));
+                i += 2;
             }
             "--smoke" => {
                 // Convenience preset: short but full-feature (used by CI + local).
