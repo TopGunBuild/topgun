@@ -1,0 +1,41 @@
+
+=== spec362 durable run: cell crashctl ===
+  repo HEAD:      7410069aacade1978b7e52ee10941f4da8cdd9a4
+  dirty tree:     yes
+  host/OS:        Darwin MacBook-Pro-koristuvac.local 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:18:49 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6000 arm64
+  lineage:        HEAD harness + HEAD server
+  data dir:       /Users/koristuvac/Projects/topgun/topgun/target/spec362-crashctl-data
+  csv:            /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362-crashctl.csv
+  soak.json:      /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362-crashctl.soak.json
+  mechanism.json: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362-crashctl.mechanism.json (harness writes spec362-crashctl.soak.mechanism.json; renamed after the run)
+  durable.json:   /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362-crashctl.soak.durable.json (raw basename: NOT renamed, by design)
+  progress.jsonl: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362-crashctl.progress.jsonl
+  console log:    /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362-crashctl.harness-console.log
+  matrix:         /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362-crashctl.matrix.txt
+  soak binary:    /Users/koristuvac/Projects/topgun/topgun/target/release/deps/soak_harness-9abf891ab72dea71
+    built:        2026-08-31T18:03:42Z
+  server binary:  /Users/koristuvac/Projects/topgun/topgun/target/release/topgun-server
+    built:        2026-08-31T16:55:57Z
+  --- varied knobs (AC16's enumerated list; everything else is the
+      spec355-width.sh literal) ---
+  TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
+  duration:            900s
+  csv cadence:         60s
+  extra harness flags: <none>
+  --durable-reading:   ARMED (every cell in this table)
+  --live-census-interval: 0 (DISARMED)
+  --sampler-jitter-seed:  20260831
+  SOAK_SERVER_LOG:     warn,topgun_server::tombstone_frontier::removal=info
+  TOPGUN_LOG_FORMAT:   <unset: human fmt, which is what the origin parser reads>
+  server port:         47355
+  SOAK_SERVER_BINARY:  <unset: HEAD binary, fail-closed guard not on this path>
+  --- pinned matrix (identical to spec355-width.sh; crash-interval is
+      per-cell and is non-zero on crashctl ALONE) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 300;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+

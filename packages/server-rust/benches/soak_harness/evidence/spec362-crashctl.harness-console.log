@@ -1,0 +1,76 @@
+=== TopGun soak harness (G4b / TODO-484) ===
+duration=900s churn_clients=6 keyspace=200 crash_interval=Some(300) steady_interval=300s wal_fsync=batched or_churn=true
+starting server (port 47355, data /Users/koristuvac/Projects/topgun/topgun/target/spec362-crashctl-data) ...
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+OR-Map no-loss check: PASS — 200 acked add(s) verified across recovery
+[   325s] recovery writes=50518 errs=0 reconnects=256 crashes=1 steady=0 recovery=1 converged=true confirms=146 lastEpoch=12 confirmErrs=4 rss=16MB(peak 89)
+[   328s] steady   writes=50518 errs=0 reconnects=256 crashes=1 steady=1 recovery=1 converged=true confirms=146 lastEpoch=12 confirmErrs=4 rss=34MB(peak 89)
+[tracker 2000000] confirm_apply error: ws error while waiting for ORMAP_SYNC_RESP_ROOT: WebSocket protocol error: Connection reset without closing handshake
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+OR-Map no-loss check: PASS — 200 acked add(s) verified across recovery
+[   624s] recovery writes=93942 errs=6 reconnects=476 crashes=2 steady=1 recovery=2 converged=true confirms=278 lastEpoch=22 confirmErrs=8 rss=23MB(peak 131)
+[tracker 2000000] confirm_apply error: ws error while waiting for ORMAP_SYNC_RESP_ROOT: WebSocket protocol error: Connection reset without closing handshake
+[   628s] steady   writes=94071 errs=12 reconnects=482 crashes=2 steady=2 recovery=2 converged=true confirms=278 lastEpoch=22 confirmErrs=9 rss=51MB(peak 131)
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+[tracker 2000000] confirm_apply error: server closed connection while waiting for ORMAP_SYNC_RESP_ROOT
+
+=== SOAK SUMMARY ===
+result:            FAIL
+finished_reason:   tombstone-byte growth slope 116287.8 bytes/h exceeds 512.0 bytes/h: tombstone-byte growth slope 116287.8 bytes/h exceeds 512.0 bytes/h (total growth 49346 bytes over 173 samples, last-half window 449s)
+actual_duration:   901s
+total_writes:      134126
+write_errors:      12
+reconnects:        682
+resends:           22534
+confirm_apply:     confirms=411 lastEpoch=32 errors=12 (tracked client advances the low-water-mark that licenses pruning; confirms=0 with a climbing gauge = LWM never advanced)
+steady_checkpts:   2
+recovery_checkpts: 2 (crashes 2)
+memory:            first=13MB peak=145MB last=145MB slope=350.1MB/h -> ok (backstop)
+tombstone_bytes:   first=0 peak=49346 last=37818 slope=116287.8B/h samples=173 -> FAIL (slope + blind-monitor both hard-gate; durable-corpus clauses are report-only) reason=tombstone-byte growth slope 116287.8 bytes/h exceeds 512.0 bytes/h (total growth 49346 bytes over 173 samples, last-half window 449s)
+tombstone_corpus_redb_scan: first=34104 min=32538 peak=45826 last=45826 first_half_peak=34104 last_half_peak=45826 rise=11722 span=598s scans_ok=3 scans_failed=0 headroom=65536 ceiling=disarmed disposition=LEVEL_SUPPRESSED(n=3, span=598s) -> ok (terminal scan 45826 bytes; last gauge value 37818 bytes -> DIVERGED)
+disk_mb:           first=1.5 peak=12.0 last=11.9 slope=36.8MB/h samples=180 -> ok (slope report-only until TODO-566; blind-monitor hard-gates)
+wrote JSON report to /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362-crashctl.soak.json
+
+=== OR-CHURN MECHANISM REPORT (report-only, Q1-Q4) ===
+Q1 bytes/frame:    OR early(mean=155B max=209B) late(mean=143B max=209B) max=209B | LWW mean=220B max=298B | OR/LWW=0.7x | rises=false
+OR frame census:   delta(n=3607 mean=149B max=209B total=537212B) | snapshot(n=0 mean=0B max=0B total=0B)
+Q2 drain window:   before=3.3MB after=3.2MB delta=-0.1MB | no significant drain burst (WAL delta -0.1MB)
+Q3 RSS holder:     rss_slope=350.1MB/h disk_slope=36.8MB/h corr=0.77 | RSS slope 350.1MB/h, disk slope 36.8MB/h, r=0.77
+Q4 not tombstone:  or_wal_bytes=537212 tombstone_corpus=45826 gauge=37818 | growth_is_or=false
+scan:              segments=552 or_frames=3607 lww_frames=3493 remove_frames=0
+conclusion:        REFUTED / INCONCLUSIVE: OR frame size did NOT rise late-vs-early over the retained corpus — the O(N)-per-op-frame hypothesis is not confirmed by this run. Inspect the acked-beyond-applied tail bound and write-behind retention before choosing the fix.
+sequencing:        Sequencing option for the R1 /xask gate: tail-bounding the acked-beyond-applied WAL is the lowest-risk FIRST containment (OOM/disk-full -> backpressure, zero recovery-path risk); delta-framing is the eventual O(1)-frame fix. If Q2 shows the drain burst is buffered O(N) frames, tail-bounding addresses it directly.
+wrote mechanism report to /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362-crashctl.soak.mechanism.json
+
+=== DURABLE-LAYER READING (report-only, decides nothing) ===
+reading:           PLATEAU_NOT_MET
+reason:            series rss_kib rose and was still rising at the end; firing envelope BOTH
+log filter:        warn,topgun_server::tombstone_frontier::removal=info
+  rss_kib            shape=MONOTONE_RISING envelope=BOTH samples=168 span=836.9s
+                     peaks  h1=91360 h2=148848 q3=133680 q4=148848 last_half_mean=106636
+                     floor  h1=14480 h2=18720 q3=18720 q4=92144
+  redb_bytes         shape=RISING_DECELERATING envelope=- samples=170 span=842.0s
+                     peaks  h1=8957952 h2=8957952 q3=8957952 q4=8957952 last_half_mean=8957952
+                     floor  h1=1589248 h2=8957952 q3=8957952 q4=8957952
+  wal_bytes          shape=MONOTONE_RISING envelope=BOTH samples=170 span=842.0s
+                     peaks  h1=1420072 h2=1540434 q3=1444459 q4=1540434 last_half_mean=1146150
+                     floor  h1=63056 h2=87503 q3=87503 q4=880542
+  wal_segment_files  shape=MONOTONE_RISING envelope=BOTH samples=170 span=842.0s
+                     peaks  h1=511 h2=576 q3=549 q4=576 last_half_mean=485
+                     floor  h1=240 h2=270 q3=270 q4=437
+writebehind lag:   51023 (observation only)
+censuses:          3
+  CHECKPOINT t=303.0s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=19452 live_tag_bytes=661368 tombstones=1624 tombstone_bytes=34104 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=44
+  CHECKPOINT t=603.0s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=37061 live_tag_bytes=1260075 tombstones=1479 tombstone_bytes=32538 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=38
+  TERMINAL   t=901.2s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=52760 live_tag_bytes=1793841 tombstones=2083 tombstone_bytes=45826 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=57
+terminal census:   keys=96 tombstone_bytes=45826
+origin:            reading=INDETERMINATE_INSTRUMENT matched=26 unparsed=0 dropped=0 armed=true epochs_exited=9 restarts=2
+origin reason:     the server restarted 2 time(s) during the run, so the epochs_exited qualifier reset and would be misread
+first zero-return: (none)
+wrote durable reading to /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362-crashctl.soak.durable.json
