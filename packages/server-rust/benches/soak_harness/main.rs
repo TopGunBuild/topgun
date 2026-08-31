@@ -116,8 +116,10 @@ use client::SoakClient;
 use model::{compare, next_stamp, Model};
 use monitor::{
     assess, assess_disk, assess_tombstone_bytes, assess_tombstone_corpus_level,
-    exclude_boot_gap_samples, sample_disk_mb, sample_rss_mb, slope_clause_stays_hard, BootGap,
-    CorpusLevelDisposition, CorpusSample, DiskAssessment, DiskSample, MemSample,
+    exclude_boot_gap_samples, fold_lww_key, fold_or_key, fold_undecodable_key,
+    parse_labelled_gauge, sample_disk_mb, sample_redb_bytes, sample_rss_mb, sample_wal_retention,
+    slope_clause_stays_hard, BootGap, CensusRecord, CensusSource, CorpusLevelDisposition,
+    CorpusSample, DiskAssessment, DiskSample, DurableCensus, MemSample, OrVariant, SeriesPoint,
     TombstoneAssessment, TombstoneCorpusAssessment, TombstoneSample, DEFAULT_DISK_CEILING_MB,
     DEFAULT_DISK_MIN_GROWTH_MB, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
     DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH, DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
@@ -235,6 +237,25 @@ struct Config {
     /// dir's on-disk size immediately before stop and immediately after the
     /// shutdown drain so the Q2 drain-window burst can be attributed.
     mechanism_report: bool,
+    /// Opt-in durable-layer reading: arms the filesystem samplers, the widened
+    /// observation columns and the sibling durable artifact. REPORT-ONLY —
+    /// nothing it produces is ANDed into `passed`. An unflagged run spawns no
+    /// extra sampler task at all, so its sampling behaviour is exactly what it
+    /// was before this mode existed.
+    durable_reading: bool,
+    /// How often, in seconds, to take a store-level census from a byte COPY of
+    /// the LIVE store file. `0` DISARMS it, and that is the default: a copy of
+    /// a live store file is a smeared image, so the census it yields is
+    /// best-effort by construction and OBSERVATION ONLY — it may not enter any
+    /// predicate, and an armed run also pays a full file copy per sample.
+    live_census_interval_secs: u64,
+    /// Seed for the filesystem samplers' bounded cadence jitter. SUPPLIED BY
+    /// THE RUNNER and never derived inside this binary: the runner echoes the
+    /// same shell variable into its matrix record, so the seed on the record
+    /// and the seed the sampler actually used have ONE source and cannot
+    /// drift — and the seed is provably fixed before the run produces any data,
+    /// which a run-time-derived seed reported afterwards could not be.
+    sampler_jitter_seed: u64,
     /// True once any soak-controlling flag is parsed. A bare invocation (or one
     /// carrying only foreign libtest args, as `cargo test --all-targets` passes)
     /// leaves this false so the harness prints usage and exits 0 instead of
@@ -284,6 +305,9 @@ impl Default for Config {
             tombstone_corpus_headroom_bytes: DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
             tombstone_corpus_ceiling_bytes: DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES,
             mechanism_report: false,
+            durable_reading: false,
+            live_census_interval_secs: 0,
+            sampler_jitter_seed: 0,
             mode_requested: false,
         }
     }
@@ -296,6 +320,63 @@ impl Default for Config {
 struct BootGapClock {
     sampler_start: Instant,
     boot_gaps: Arc<Mutex<Vec<BootGap>>>,
+}
+
+/// Everything the durable-layer reading observes while the run is live.
+///
+/// One shared sink, so every sampler task and the metrics scrape write to the
+/// same place and the reading is assembled from one value rather than from
+/// several loosely-related locals. EVERY field here is an OBSERVATION: none of
+/// them is ANDed into the run verdict, and the durable-corpus estimator reads
+/// none of them — which is what keeps the estimator's input identical whether
+/// this mode is armed or not.
+#[derive(Default)]
+struct DurableObservations {
+    /// Resident-set series in KiB, derived from the memory sampler's own
+    /// stream so the durable reading and the memory gate provably read the
+    /// SAME series on the SAME cadence.
+    rss_kib: Mutex<Vec<SeriesPoint>>,
+    /// Apparent size of the store file, in bytes.
+    redb_bytes: Mutex<Vec<SeriesPoint>>,
+    /// Sum of the retained WAL segments' apparent sizes, in bytes.
+    wal_bytes: Mutex<Vec<SeriesPoint>>,
+    /// Number of retained WAL segment files.
+    wal_segment_files: Mutex<Vec<SeriesPoint>>,
+    /// Largest write-behind watermark lag seen across the run, across label
+    /// sets. `None` means the metric was never present in a scraped body — a
+    /// visible gap, deliberately NOT recorded as a zero, because a silent
+    /// absence must never be able to masquerade as a flat series.
+    writebehind_lag_max: Mutex<Option<u64>>,
+    /// Largest exited-epoch total seen across the run. A maximum rather than a
+    /// last value, because the counter restarts with the process.
+    epochs_exited: AtomicU64,
+    /// Server restarts during the run. The recovery checkpoint is the ONLY
+    /// producer of this count; nothing infers it from a log line.
+    restarts: AtomicU64,
+}
+
+/// One bounded, deterministic sleep for the filesystem samplers: the nominal
+/// interval plus a seeded offset uniform over +/-1 s.
+///
+/// The jitter exists against ALIASING. The write-behind flush period divides
+/// the nominal sampling interval exactly, and file sizes step at flush
+/// boundaries, so a sampler in fixed phase with the flush cycle can capture the
+/// same phase of every cycle for the whole run. Only the filesystem series
+/// carry it; the RSS cadence is deliberately left alone.
+///
+/// SplitMix64, written out here rather than pulled in, because the sampler
+/// needs exactly one property: the same seed reproduces the same cadence on a
+/// re-run. The result saturates at zero, so a nominal interval shorter than the
+/// jitter bound can never ask for a negative sleep.
+fn jittered_interval(state: &mut u64, nominal: Duration) -> Duration {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    let offset_ms = i64::try_from(z % 2001).unwrap_or(1000) - 1000;
+    let nominal_ms = i64::try_from(nominal.as_millis()).unwrap_or(i64::MAX);
+    Duration::from_millis(u64::try_from(nominal_ms.saturating_add(offset_ms)).unwrap_or(0))
 }
 
 /// Shared atomic counters mutated by churn clients.
@@ -546,6 +627,10 @@ async fn run_soak(config: &Config) -> i32 {
     // exactly (required for a fair side-by-side slope comparison in the
     // summary/report).
     let sampler_start = Instant::now();
+    // The durable-layer observation sink. Created unconditionally because the
+    // restart counter and the widened `/metrics` columns below feed it on every
+    // run; only the extra SAMPLER TASKS are gated on `--durable-reading`.
+    let durable = Arc::new(DurableObservations::default());
     let samples: Arc<Mutex<Vec<MemSample>>> = Arc::new(Mutex::new(Vec::new()));
     let peak_rss = Arc::new(Mutex::new(0.0_f64));
     {
@@ -595,6 +680,7 @@ async fn run_soak(config: &Config) -> i32 {
         let samples = Arc::clone(&tombstone_samples);
         let boot_gaps = Arc::clone(&boot_gaps);
         let stop = Arc::clone(&stop);
+        let durable = Arc::clone(&durable);
         let interval = config.mem_sample_interval;
         let start = sampler_start;
         let http = reqwest::Client::new();
@@ -603,23 +689,43 @@ async fn run_soak(config: &Config) -> i32 {
                 if stop.load(Ordering::SeqCst) {
                     return;
                 }
-                if let Some(bytes) = scrape_tombstone_bytes(&http, port).await {
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let candidate = TombstoneSample {
-                        elapsed_secs: elapsed,
-                        bytes,
-                    };
-                    // The exclusion predicate is a pure, retain-style helper in
-                    // `monitor.rs` (unit-tested directly by the calibration
-                    // target's synthetic boot-gap sequence, AC11) — this loop
-                    // only calls it, so the filtering logic is never
-                    // duplicated or buried here, and the tested path is the
-                    // production path.
-                    let gaps_snapshot = boot_gaps.lock().clone();
-                    if !exclude_boot_gap_samples(std::slice::from_ref(&candidate), &gaps_snapshot)
+                if let Some(scraped) = scrape_tombstone_bytes(&http, port).await {
+                    // OBSERVATION-ONLY columns, taken off the SAME response body
+                    // the gauge came from so they cost no extra request and an
+                    // unflagged run's traffic is unchanged. Neither may enter any
+                    // predicate: the lag is the only candidate that would be a
+                    // self-report by the very process under measurement, and its
+                    // durable consequence is already carried by the WAL retention
+                    // series; the exited-epoch total is only ever the origin
+                    // reading's qualifier.
+                    if let Some(lag) = scraped.writebehind_lag_max {
+                        let mut seen = durable.writebehind_lag_max.lock();
+                        *seen = Some(seen.map_or(lag, |prev| prev.max(lag)));
+                    }
+                    if let Some(exited) = scraped.epochs_exited_total {
+                        durable.epochs_exited.fetch_max(exited, Ordering::Relaxed);
+                    }
+                    if let Some(bytes) = scraped.tombstone_bytes {
+                        let elapsed = start.elapsed().as_secs_f64();
+                        let candidate = TombstoneSample {
+                            elapsed_secs: elapsed,
+                            bytes,
+                        };
+                        // The exclusion predicate is a pure, retain-style helper in
+                        // `monitor.rs` (unit-tested directly by the calibration
+                        // target's synthetic boot-gap sequence, AC11) — this loop
+                        // only calls it, so the filtering logic is never
+                        // duplicated or buried here, and the tested path is the
+                        // production path.
+                        let gaps_snapshot = boot_gaps.lock().clone();
+                        if !exclude_boot_gap_samples(
+                            std::slice::from_ref(&candidate),
+                            &gaps_snapshot,
+                        )
                         .is_empty()
-                    {
-                        samples.lock().push(candidate);
+                        {
+                            samples.lock().push(candidate);
+                        }
                     }
                 }
                 tokio::time::sleep(interval).await;
@@ -658,6 +764,56 @@ async fn run_soak(config: &Config) -> i32 {
         });
     }
 
+    // Durable-layer filesystem samplers, ARMED ONLY under `--durable-reading`:
+    // an unflagged run spawns no task here at all, so its sampling behaviour is
+    // byte-identical to what it was before this mode existed. Filesystem
+    // METADATA only — no store or segment file is ever opened — so sampling
+    // these cannot perturb the process being measured.
+    //
+    // The cadence carries the seeded jitter, and these three series are the ONLY
+    // ones that carry it (see `jittered_interval` for the aliasing hazard it
+    // exists against). The RSS series above is deliberately left un-jittered:
+    // the resident set moves continuously rather than stepping at flush
+    // boundaries, so there is no phase for a fixed-phase sampler to lock onto,
+    // and it is the same series the memory gate of EVERY run reads — changing
+    // its cadence would change that gate's input on flagged and unflagged runs
+    // alike.
+    if config.durable_reading {
+        let durable = Arc::clone(&durable);
+        let stop = Arc::clone(&stop);
+        let interval = config.mem_sample_interval;
+        let start = sampler_start;
+        let dir = data_dir.clone();
+        let mut jitter_state = config.sampler_jitter_seed;
+        tokio::spawn(async move {
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                let elapsed = start.elapsed().as_secs_f64();
+                if let Some(bytes) = sample_redb_bytes(&dir) {
+                    durable.redb_bytes.lock().push(SeriesPoint {
+                        elapsed_secs: elapsed,
+                        value: bytes,
+                    });
+                }
+                // One retention read feeds both WAL series, so the two can never
+                // disagree about which set of segments they describe.
+                if let Some(retention) = sample_wal_retention(&dir) {
+                    durable.wal_bytes.lock().push(SeriesPoint {
+                        elapsed_secs: elapsed,
+                        value: retention.bytes,
+                    });
+                    durable.wal_segment_files.lock().push(SeriesPoint {
+                        elapsed_secs: elapsed,
+                        value: retention.segment_files,
+                    });
+                }
+                tokio::time::sleep(jittered_interval(&mut jitter_state, interval)).await;
+            }
+        });
+    }
+
     let boot_gap_clock = BootGapClock {
         sampler_start,
         boot_gaps: Arc::clone(&boot_gaps),
@@ -666,7 +822,40 @@ async fn run_soak(config: &Config) -> i32 {
     // Durable-corpus series: one sample per recovery checkpoint (taken from a
     // byte copy while the child is reaped) plus the terminal scan, all on the
     // same `sampler_start` clock as the RSS/tombstone-byte/disk series.
-    let corpus_sampler = CorpusSampler::new(data_dir.clone(), corpus_scratch);
+    let corpus_sampler = Arc::new(CorpusSampler::new(data_dir.clone(), corpus_scratch));
+
+    // Live-copy census sampler: DISARMED by default (interval 0), and armed
+    // only by an explicit positive interval. Its records are OBSERVATION ONLY
+    // and land in their own tally — see `sample_live_census_via_copy` for why a
+    // census taken off a live store file may not decide anything.
+    if config.live_census_interval_secs > 0 {
+        let sampler = Arc::clone(&corpus_sampler);
+        let stop = Arc::clone(&stop);
+        let interval = Duration::from_secs(config.live_census_interval_secs);
+        let start = sampler_start;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                let elapsed = start.elapsed().as_secs_f64();
+                let sampler = Arc::clone(&sampler);
+                // A whole-file copy is genuinely blocking work; keeping it off
+                // the async workers is what stops an observation-only sampler
+                // from stalling the churn clients whose write rate defines the
+                // workload under measurement.
+                if tokio::task::spawn_blocking(move || {
+                    sample_live_census_via_copy(&sampler, elapsed);
+                })
+                .await
+                .is_err()
+                {
+                    return;
+                }
+            }
+        });
+    }
 
     // --- Orchestration loop ---
     let start = Instant::now();
@@ -717,6 +906,7 @@ async fn run_soak(config: &Config) -> i32 {
                 &paused,
                 &boot_gap_clock,
                 &corpus_sampler,
+                &durable.restarts,
             )
             .await
             {
@@ -849,14 +1039,34 @@ async fn run_soak(config: &Config) -> i32 {
     // `last_bytes` survives on the same rendered line — see
     // `scan_redb_tombstone_corpus`'s doc for why a divergence there is exactly
     // the failure mode this exists to catch.
-    let redb_tombstone_scan = scan_redb_tombstone_corpus(&data_dir, OR_MAP);
+    let redb_tombstone_census = scan_redb_tombstone_corpus(&data_dir, OR_MAP);
+    // The summary line, the estimator and the mechanism report all consume the
+    // same byte total they consumed before the census existed: the census is
+    // strictly additive to what this scan returns, and this adapter is the whole
+    // of the difference.
+    let redb_tombstone_scan = redb_tombstone_census.map(|c| c.tombstone_bytes);
     corpus_sampler.record_terminal_scan(
         boot_gap_clock.sampler_start.elapsed().as_secs_f64(),
-        redb_tombstone_scan,
+        redb_tombstone_census,
     );
 
     // --- Assess memory (secondary/backstop gate) ---
     let mem_samples = samples.lock().clone();
+    // The durable reading's RSS series, derived from the memory gate's OWN
+    // stream. The round trip is EXACT: `ps` reports integer KiB and the sampler
+    // divided it by 1024, so multiplying back moves the exponent and leaves the
+    // mantissa alone. Deriving it here — rather than teaching the sampler to
+    // keep KiB — is what makes "the durable reading's RSS series IS the memory
+    // gate's series" a structural fact instead of an intention.
+    if config.durable_reading {
+        durable
+            .rss_kib
+            .lock()
+            .extend(mem_samples.iter().map(|s| SeriesPoint {
+                elapsed_secs: s.elapsed_secs,
+                value: (s.rss_mb * 1024.0) as u64,
+            }));
+    }
     let mem = assess(
         &mem_samples,
         config.mem_threshold_mb_per_hour,
@@ -1392,14 +1602,38 @@ fn print_summary(
 /// present — so the caller skips the sample instead of recording a bogus
 /// point. This mirrors `sample_rss_mb`'s `None`-on-gone-process contract in
 /// `monitor.rs`.
-async fn scrape_tombstone_bytes(http: &reqwest::Client, port: u16) -> Option<u64> {
+async fn scrape_tombstone_bytes(http: &reqwest::Client, port: u16) -> Option<MetricsScrape> {
+    const WRITEBEHIND_LAG_METRIC: &str = "topgun_wal_applied_watermark_lag";
+    const EPOCHS_EXITED_METRIC: &str = "topgun_or_prune_epochs_exited_total";
+
     let url = format!("http://127.0.0.1:{port}/metrics");
     let resp = http.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
     let body = resp.text().await.ok()?;
-    parse_tombstone_bytes_gauge(&body)
+    Some(MetricsScrape {
+        tombstone_bytes: parse_tombstone_bytes_gauge(&body),
+        // `max` across label sets: the lag is per-partition, and the observation
+        // this column carries is how far the WORST partition fell behind.
+        writebehind_lag_max: parse_labelled_gauge(&body, WRITEBEHIND_LAG_METRIC).map(|g| g.max),
+        // `sum` across label sets: this is a total, and an unlabelled series
+        // sums to its own single value.
+        epochs_exited_total: parse_labelled_gauge(&body, EPOCHS_EXITED_METRIC).map(|g| g.sum),
+    })
+}
+
+/// The three quantities one `/metrics` response body yields.
+///
+/// Read from ONE body rather than from three requests, so the widening costs no
+/// extra traffic and the three values describe the same instant. Each field is
+/// its own `Option`: a metric absent from the body is `None`, never a zero, so a
+/// silent absence can never masquerade as a real reading. Only
+/// `tombstone_bytes` feeds a gate; the other two are OBSERVATION ONLY.
+struct MetricsScrape {
+    tombstone_bytes: Option<u64>,
+    writebehind_lag_max: Option<u64>,
+    epochs_exited_total: Option<u64>,
 }
 
 /// Parse the `topgun_ormap_tombstone_bytes` (decrementable gauge) sample value
@@ -1450,6 +1684,28 @@ struct CorpusScanTally {
     samples: Vec<CorpusSample>,
     scans_attempted: usize,
     scans_failed: usize,
+    /// The census taken at each of those same scans. Strictly ADDITIVE: it is
+    /// derived from the scan the three fields above were already counting, and
+    /// it never changes which scans are attempted or which of them failed, so
+    /// the estimator's input is unchanged in value as well as in type.
+    censuses: Vec<CensusRecord>,
+}
+
+/// The live-copy census sampler's own tally, deliberately SEPARATE from
+/// [`CorpusScanTally`].
+///
+/// A byte copy of a LIVE store file is a smeared image, so the census it yields
+/// is best-effort by construction and OBSERVATION ONLY. Keeping those records
+/// here — never on the corpus-scan tally's `samples` / `scans_attempted` /
+/// `scans_failed` — is what makes the durable-corpus estimator's input
+/// identical whether this sampler is armed or not, rather than merely intended
+/// to be. The fence is a typed property of the record, not a convention: every
+/// record carries its own source.
+#[derive(Debug, Default, Clone)]
+struct LiveCensusTally {
+    censuses: Vec<CensusRecord>,
+    scans_attempted: usize,
+    scans_failed: usize,
 }
 
 /// The durable-corpus sampler's per-run state, bundled the way the boot-gap
@@ -1461,6 +1717,10 @@ struct CorpusSampler {
     data_dir: PathBuf,
     scratch_root: PathBuf,
     tally: Mutex<CorpusScanTally>,
+    /// The observation-only sink the live-copy sampler folds into. A second
+    /// tally rather than a flag on the first one, so no code path can add a
+    /// smeared-image record to the series a gate's estimator reads.
+    live_tally: Mutex<LiveCensusTally>,
 }
 
 impl CorpusSampler {
@@ -1469,6 +1729,7 @@ impl CorpusSampler {
             data_dir,
             scratch_root,
             tally: Mutex::new(CorpusScanTally::default()),
+            live_tally: Mutex::new(LiveCensusTally::default()),
         }
     }
 
@@ -1481,10 +1742,20 @@ impl CorpusSampler {
     /// samples. That scan is the one siting that reads the data dir directly
     /// and takes no copy: it runs post-teardown, nothing boots after it, so
     /// there is nothing left for the instrument to stay neutral toward.
-    fn record_terminal_scan(&self, elapsed_secs: f64, scanned: Option<u64>) {
+    fn record_terminal_scan(&self, elapsed_secs: f64, scanned: Option<DurableCensus>) {
         let mut t = self.tally.lock();
         t.scans_attempted += 1;
-        match scanned {
+        if let Some(census) = scanned {
+            t.censuses.push(CensusRecord {
+                elapsed_secs,
+                source: CensusSource::Terminal,
+                census,
+            });
+        }
+        // The estimator keeps consuming the same summation over the same two
+        // variants it consumed before the census existed; this adapter is the
+        // whole of the difference.
+        match scanned.map(|c| c.tombstone_bytes) {
             Some(bytes) => t.samples.push(CorpusSample {
                 elapsed_secs,
                 bytes,
@@ -1520,25 +1791,100 @@ fn sample_durable_corpus_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
         t.scans_attempted += 1;
         t.scans_attempted
     };
-    let copy_dir = sampler.scratch_root.join(format!("corpus-{ordinal}"));
+    let scanned = copy_and_scan_census(sampler, "durable-corpus", ordinal);
+
+    let mut t = sampler.tally.lock();
+    if let Some(census) = scanned {
+        t.censuses.push(CensusRecord {
+            elapsed_secs,
+            source: CensusSource::Checkpoint,
+            census,
+        });
+    }
+    // The estimator keeps consuming the same summation over the same two
+    // variants it consumed before the census existed; this adapter is the whole
+    // of the difference.
+    match scanned.map(|c| c.tombstone_bytes) {
+        Some(bytes) => t.samples.push(CorpusSample {
+            elapsed_secs,
+            bytes,
+        }),
+        None => t.scans_failed += 1,
+    }
+}
+
+/// Take one OBSERVATION-ONLY census from a byte copy of the LIVE store file.
+///
+/// The copy-then-scan discipline is the checkpoint sampler's, for the same two
+/// reasons: the copy lives outside the data dir so the disk gate's `du -sk`
+/// input is not stepped, and the ORIGINAL is never opened, so this harness
+/// never runs the server's own recovery ahead of the server.
+///
+/// What differs is what the result may DECIDE. The server is running here, so
+/// the copy is a smeared image of a file being written underneath it and the
+/// census it yields is best-effort by construction. It therefore lands in the
+/// live tally and NEVER on the corpus-scan tally the durable-corpus estimator
+/// reads — including its `scans_attempted` / `scans_failed` counters, so an
+/// armed live sampler cannot even move that estimator's instrument clause.
+fn sample_live_census_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
+    let ordinal = {
+        let mut t = sampler.live_tally.lock();
+        t.scans_attempted += 1;
+        t.scans_attempted
+    };
+    let scanned = copy_and_scan_census(sampler, "live-census", ordinal);
+
+    let mut t = sampler.live_tally.lock();
+    match scanned {
+        Some(census) => t.censuses.push(CensusRecord {
+            elapsed_secs,
+            source: CensusSource::LiveCopy,
+            census,
+        }),
+        None => t.scans_failed += 1,
+    }
+}
+
+/// Byte-copy the server's store file into an ordinal-scoped scratch directory,
+/// scan the COPY, delete it, and return the census. `None` if the copy or the
+/// scan failed — the caller owns what a failure means for its own tally.
+///
+/// A COPY, never the original: `redb::Database::open` repairs and commits an
+/// uncleanly-closed file, so opening the server's own file here would make this
+/// harness perform the server's crash recovery ahead of the server — and the
+/// server's crash recovery is precisely what the run's recovery gate measures.
+/// The scratch root also lives outside the data dir, because the disk gate's
+/// input is `du -sk` over that dir and a copy written inside it would step that
+/// gate too.
+///
+/// `label` names the sampler in both the scratch path and the diagnostics, so
+/// two samplers running concurrently can never alias each other's copies, and a
+/// delete that failed cannot leave one sampler's bytes to be re-scanned as the
+/// other's. A failed DELETE is NOT a scan failure — the census was obtained —
+/// so it is logged and the run continues; the teardown sweep removes the
+/// residue.
+fn copy_and_scan_census(
+    sampler: &CorpusSampler,
+    label: &str,
+    ordinal: usize,
+) -> Option<DurableCensus> {
+    let copy_dir = sampler.scratch_root.join(format!("{label}-{ordinal}"));
     // The scan resolves `topgun.redb` under the directory it is given, so the
     // ordinal is carried by the directory and the copy keeps the name the scan
     // looks for.
     let copy_path = copy_dir.join("topgun.redb");
     if let Err(e) = std::fs::create_dir_all(&copy_dir) {
         eprintln!(
-            "durable-corpus sample {ordinal}: cannot create scratch dir {}: {e}",
+            "{label} sample {ordinal}: cannot create scratch dir {}: {e}",
             copy_dir.display()
         );
-        sampler.tally.lock().scans_failed += 1;
-        return;
+        return None;
     }
     // `std::fs::copy` truncates an existing destination, so even an aliasing
     // bug could not produce a partial-overwrite hybrid.
     if let Err(e) = std::fs::copy(sampler.data_dir.join("topgun.redb"), &copy_path) {
-        eprintln!("durable-corpus sample {ordinal}: cannot copy redb file: {e}");
-        sampler.tally.lock().scans_failed += 1;
-        return;
+        eprintln!("{label} sample {ordinal}: cannot copy redb file: {e}");
+        return None;
     }
 
     // The scan owns and drops its redb handle inside its own body, so the
@@ -1548,26 +1894,29 @@ fn sample_durable_corpus_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
 
     if let Err(e) = std::fs::remove_dir_all(&copy_dir) {
         eprintln!(
-            "durable-corpus sample {ordinal}: scratch copy left behind at {} ({e}) — sample \
+            "{label} sample {ordinal}: scratch copy left behind at {} ({e}) — sample \
              still counted; teardown sweeps the residue",
             copy_dir.display()
         );
     }
 
-    let mut t = sampler.tally.lock();
-    match scanned {
-        Some(bytes) => t.samples.push(CorpusSample {
-            elapsed_secs,
-            bytes,
-        }),
-        None => t.scans_failed += 1,
-    }
+    scanned
 }
 
-/// Independent, gauge-free scan of the OR-Map's on-disk tombstone corpus: the
-/// positive control's cross-check that `topgun_ormap_tombstone_bytes` is
-/// actually tracking the real durable byte total, not merely plateauing
-/// because it drifted out of sync with it.
+/// Independent, gauge-free census of the OR-Map's on-disk state: the positive
+/// control's cross-check that `topgun_ormap_tombstone_bytes` is actually
+/// tracking the real durable byte total, not merely plateauing because it
+/// drifted out of sync with it.
+///
+/// Returns the whole store-level census; its `tombstone_bytes` field is the
+/// byte total this scan returned before the census existed, computed by the
+/// same summation over the same two variants, so every caller that wants only
+/// that total takes it and is unchanged in value as well as in type.
+///
+/// EVERY row folds through exactly ONE entry point — including a row that fails
+/// to decode, which is COUNTED rather than silently skipped — which is what
+/// makes `keys_scanned` equal the number of rows iterated. All the arithmetic
+/// lives in the fold functions, so this site only decodes and dispatches.
 ///
 /// Opens the server's own redb file directly (`{data_dir}/topgun.redb`, the
 /// same layout `RedbDataStore` writes: table `map__{map}`, msgpack-encoded
@@ -1613,7 +1962,7 @@ fn sample_durable_corpus_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
 /// same path. The clause is report-only, so a blind instrument is recorded on
 /// `pending_gates` rather than failing the run. An honest `Some(0)` from a
 /// never-written table stays distinguishable from it.
-fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Option<u64> {
+fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Option<DurableCensus> {
     let db_path = data_dir.join("topgun.redb");
     if !db_path.exists() {
         return None;
@@ -1624,34 +1973,44 @@ fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Option<u64> {
     let table_def: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new(&table_name);
     let table = match read_txn.open_table(table_def) {
         Ok(t) => t,
-        // Never-written table (e.g. no OR-Map write ever landed) contributes 0
-        // tombstone bytes — a real, honest answer, not a scan failure.
-        Err(redb::TableError::TableDoesNotExist(_)) => return Some(0),
+        // Never-written table (e.g. no OR-Map write ever landed) contributes an
+        // EMPTY census — a real, honest answer, not a scan failure.
+        Err(redb::TableError::TableDoesNotExist(_)) => return Some(DurableCensus::default()),
         Err(_) => return None,
     };
 
-    let mut total_bytes: u64 = 0;
+    let mut census = DurableCensus::default();
     let iter = table.iter().ok()?;
     for entry in iter {
         let (_key_guard, val_guard) = entry.ok()?;
         let Ok(value) = rmp_serde::from_slice::<RecordValue>(val_guard.value()) else {
-            // An undecodable value is a corrupt/foreign row, not part of this
-            // scan's remit — skip it rather than aborting the whole scan.
+            // A corrupt/foreign row is COUNTED rather than silently skipped: a
+            // row the instrument could not read must be visible in the census,
+            // not invisible in it.
+            fold_undecodable_key(&mut census);
             continue;
         };
         match value {
-            RecordValue::OrMap { tombstones, .. } => {
-                total_bytes += tombstones.iter().map(|t| t.len() as u64).sum::<u64>();
+            RecordValue::OrMap {
+                records,
+                tombstones,
+            } => {
+                let live_tags: Vec<&str> = records.iter().map(|e| e.tag.as_str()).collect();
+                let tombstone_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
+                fold_or_key(&mut census, OrVariant::OrMap, &live_tags, &tombstone_tags);
             }
             // Legacy pre-migration shape — see the function doc's divergence
-            // rationale for why this is exactly what the gauge can miss.
+            // rationale for why this is exactly what the gauge can miss. The
+            // variant carries no live side at all, which is why it folds with an
+            // empty one.
             RecordValue::OrTombstones { tags } => {
-                total_bytes += tags.iter().map(|t| t.len() as u64).sum::<u64>();
+                let tombstone_tags: Vec<&str> = tags.iter().map(String::as_str).collect();
+                fold_or_key(&mut census, OrVariant::OrTombstones, &[], &tombstone_tags);
             }
-            RecordValue::Lww { .. } => {}
+            RecordValue::Lww { .. } => fold_lww_key(&mut census),
         }
     }
-    Some(total_bytes)
+    Some(census)
 }
 
 // ---------------------------------------------------------------------------
@@ -2071,6 +2430,7 @@ async fn recovery_checkpoint(
     paused: &Arc<AtomicBool>,
     boot_gap_clock: &BootGapClock,
     corpus_sampler: &CorpusSampler,
+    restarts: &AtomicU64,
 ) -> Result<RecoveryOutcome> {
     paused.store(true, Ordering::SeqCst);
     // Pause new client writes, then choose the pre-kill behavior:
@@ -2146,6 +2506,11 @@ async fn recovery_checkpoint(
     // failed-start handling are kept verbatim below, and `restart` itself
     // stays in use by its other call sites.
     supervisor.kill9().await;
+    // The ONLY producer of the restart count, and it counts the KILL rather
+    // than a successful start: what the count exists to witness is that the
+    // process boundary was crossed, and the per-process counters a reading may
+    // qualify on reset there whether or not the new life comes up healthy.
+    restarts.fetch_add(1, Ordering::Relaxed);
     sample_durable_corpus_via_copy(
         corpus_sampler,
         boot_gap_clock.sampler_start.elapsed().as_secs_f64(),
@@ -3061,4 +3426,114 @@ fn parse_f64(s: &str) -> f64 {
         eprintln!("expected a number, got '{s}'");
         std::process::exit(2);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    /// The observation fence, asserted rather than assumed: folding live-copy
+    /// censuses must leave the durable-corpus estimator's ENTIRE input alone —
+    /// its series and both of its scan counters — so an armed live sampler
+    /// cannot move a gate's instrument clause, let alone its level clause.
+    ///
+    /// Everything this proof needs is nested inside it, so the whole fixture
+    /// travels with the assertion it exists for and nothing else in this module
+    /// can name it.
+    #[test]
+    fn live_copy_census_never_contaminates_the_corpus_tally() {
+        assert_live_copy_census_never_contaminates_the_corpus_tally();
+    }
+
+    /// The assertion body, and it is uncalled ON PURPOSE.
+    ///
+    /// This bench target is declared `harness = false`, so rustc strips every
+    /// `#[test]` item from it: the wrapper above is removed before type-checking
+    /// and takes its only call to this function with it. Siting the body here
+    /// instead is what keeps it COMPILED — `cargo clippy --all-targets` builds
+    /// this module — so it cannot rot silently while the code it asserts over
+    /// moves underneath it. EXECUTING it needs a target with a test harness,
+    /// which this harness's file ledger does not have.
+    #[allow(dead_code)]
+    fn assert_live_copy_census_never_contaminates_the_corpus_tally() {
+        use super::*;
+        use topgun_core::hlc::Timestamp;
+        use topgun_core::types::Value;
+        use topgun_server::storage::record::OrMapEntry;
+
+        /// Write one OR-Map row — live entries plus tombstones — into a real
+        /// store file under `dir`, in the same table and encoding the scan
+        /// reads. A real file rather than a stub, so the path under test is the
+        /// whole path: copy, open, iterate, fold.
+        fn write_or_fixture(dir: &Path) {
+            let db = redb::Database::create(dir.join("topgun.redb")).expect("create store file");
+            let table_name = format!("map__{OR_MAP}");
+            let table_def: redb::TableDefinition<&str, &[u8]> =
+                redb::TableDefinition::new(&table_name);
+            let value = RecordValue::OrMap {
+                records: vec![OrMapEntry {
+                    value: Value::String("alive".to_string()),
+                    tag: "live-tag".to_string(),
+                    timestamp: Timestamp {
+                        millis: 1,
+                        counter: 0,
+                        node_id: "live-census-fixture".to_string(),
+                    },
+                }],
+                tombstones: vec!["dead-tag-a".to_string(), "dead-tag-b".to_string()],
+            };
+            let encoded = rmp_serde::to_vec_named(&value).expect("encode record");
+            let write_txn = db.begin_write().expect("begin write");
+            {
+                let mut table = write_txn.open_table(table_def).expect("open table");
+                table
+                    .insert("ork-1", encoded.as_slice())
+                    .expect("insert row");
+            }
+            write_txn.commit().expect("commit");
+        }
+
+        let data = tempfile::tempdir().expect("data dir");
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        write_or_fixture(data.path());
+        let sampler = CorpusSampler::new(data.path().to_path_buf(), scratch.path().to_path_buf());
+
+        for i in 0..3 {
+            sample_live_census_via_copy(&sampler, f64::from(i));
+        }
+
+        let corpus = sampler.tally.lock().clone();
+        assert!(
+            corpus.samples.is_empty(),
+            "live-copy censuses must never reach the estimator's series"
+        );
+        assert_eq!(
+            corpus.scans_attempted, 0,
+            "live-copy censuses must never be counted as corpus scan attempts"
+        );
+        assert_eq!(
+            corpus.scans_failed, 0,
+            "live-copy censuses must never be counted as corpus scan failures"
+        );
+        assert!(
+            corpus.censuses.is_empty(),
+            "live-copy censuses must never reach the corpus tally's census list"
+        );
+
+        let live = sampler.live_tally.lock().clone();
+        assert_eq!(live.scans_attempted, 3);
+        assert_eq!(live.scans_failed, 0);
+        assert_eq!(live.censuses.len(), 3);
+        assert!(
+            live.censuses
+                .iter()
+                .all(|r| r.source == CensusSource::LiveCopy),
+            "every record from this sampler carries the live-copy source"
+        );
+        // The census is really taken, not merely recorded as an empty shell:
+        // one row, one live entry, two tombstones.
+        let first = live.censuses[0].census;
+        assert_eq!(first.keys_scanned, 1);
+        assert_eq!(first.or_map_keys, 1);
+        assert_eq!(first.live_entries, 1);
+        assert_eq!(first.tombstone_entries, 2);
+    }
 }
