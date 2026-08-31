@@ -1419,6 +1419,650 @@ pub struct WalRetention {
     pub segment_files: u64,
 }
 
+/// Fold ONE scanned OR key into `census`.
+///
+/// All census arithmetic lives here rather than at the scan site so that it is
+/// unit-testable in isolation and the scan only decodes and dispatches. The two
+/// OR variants share every tombstone clause — a tombstone is a tombstone in
+/// either — and differ only in which variant-share counter they bump, which is
+/// what `variant` selects.
+///
+/// `live_tags` carries the live records' tags (empty for the legacy
+/// tombstones-only variant) and `tombstone_tags` the key's tombstone vector, in
+/// the order the store returned them. Duplicates are counted **within this key
+/// only**: the distinct count is taken over this key's own vector and no
+/// cross-key set is ever built, so the fold's memory is bounded by the widest
+/// single key rather than by the corpus.
+#[allow(dead_code)] // wired in G4
+pub fn fold_or_key(
+    census: &mut DurableCensus,
+    variant: OrVariant,
+    live_tags: &[&str],
+    tombstone_tags: &[&str],
+) {
+    census.keys_scanned = census.keys_scanned.saturating_add(1);
+    match variant {
+        OrVariant::OrMap => census.or_map_keys = census.or_map_keys.saturating_add(1),
+        OrVariant::OrTombstones => {
+            census.or_tombstones_keys = census.or_tombstones_keys.saturating_add(1);
+        }
+    }
+
+    census.live_entries = census
+        .live_entries
+        .saturating_add(len_as_u64(live_tags.len()));
+    for tag in live_tags {
+        census.live_tag_bytes = census.live_tag_bytes.saturating_add(len_as_u64(tag.len()));
+    }
+
+    let tombstones = len_as_u64(tombstone_tags.len());
+    census.tombstone_entries = census.tombstone_entries.saturating_add(tombstones);
+    for tag in tombstone_tags {
+        census.tombstone_bytes = census.tombstone_bytes.saturating_add(len_as_u64(tag.len()));
+    }
+
+    if !tombstone_tags.is_empty() {
+        census.keys_with_tombstones = census.keys_with_tombstones.saturating_add(1);
+        if live_tags.is_empty() {
+            census.keys_all_dead = census.keys_all_dead.saturating_add(1);
+        }
+    }
+
+    let distinct = distinct_count_within_key(tombstone_tags);
+    census.tombstone_dup_entries = census
+        .tombstone_dup_entries
+        .saturating_add(tombstones.saturating_sub(distinct));
+
+    census.max_tombstones_per_key = census.max_tombstones_per_key.max(tombstones);
+}
+
+/// Fold ONE scanned LWW key into `census`.
+///
+/// An LWW row carries neither an OR entry list nor a tombstone vector, so it
+/// contributes to the variant share and to the scanned-row count and to nothing
+/// else. Folding it through its own entry point — rather than letting the scan
+/// site skip it — is what keeps `keys_scanned` equal to the rows actually
+/// iterated.
+#[allow(dead_code)] // wired in G4
+pub fn fold_lww_key(census: &mut DurableCensus) {
+    census.keys_scanned = census.keys_scanned.saturating_add(1);
+    census.lww_keys = census.lww_keys.saturating_add(1);
+}
+
+/// Fold ONE row whose record value failed to decode.
+///
+/// The row is COUNTED rather than silently skipped: an undecodable row is a
+/// visible gap in the census, and a census that hid it would report a smaller
+/// corpus than the store actually holds without saying so.
+#[allow(dead_code)] // wired in G4
+pub fn fold_undecodable_key(census: &mut DurableCensus) {
+    census.keys_scanned = census.keys_scanned.saturating_add(1);
+    census.keys_undecodable = census.keys_undecodable.saturating_add(1);
+}
+
+/// Distinct tag count **within one key's own tombstone vector**.
+///
+/// Quadratic in the key's tombstone count on purpose: it needs no allocation
+/// and no hashing, and the alternative — a set — is the cross-key structure the
+/// census contract forbids. The per-key vectors this runs over are small
+/// relative to the corpus, so the corpus-scale cost stays linear in rows.
+fn distinct_count_within_key(tags: &[&str]) -> u64 {
+    let mut distinct: u64 = 0;
+    for (index, tag) in tags.iter().enumerate() {
+        if !tags[..index].contains(tag) {
+            distinct = distinct.saturating_add(1);
+        }
+    }
+    distinct
+}
+
+/// Widen a length to the census's `u64` field type without a lossy cast.
+const fn len_as_u64(len: usize) -> u64 {
+    len as u64
+}
+
+/// The index at which a series splits into its third and fourth quarters.
+///
+/// Derived by applying [`last_half_split_index`] TWICE — once to the whole
+/// series and once to what remains after the first half — so halves and
+/// quarters partition identically to every other consumer of the split and a
+/// reader comparing two of them is comparing like with like.
+const fn quarter_split_index(len: usize) -> usize {
+    let half = last_half_split_index(len);
+    half + last_half_split_index(len - half)
+}
+
+/// The index of the first sample RETAINED after the frozen warmup exclusion:
+/// the first 1/16 of the series' RAW span is dropped.
+///
+/// A process's warm-up peak lands in the first half and can make a genuinely
+/// late-rising series read as levelled by inflating the first-half peak. The
+/// fraction is frozen pre-data at a coarse binary fraction, chosen for being
+/// one rather than for anything it does to a number.
+///
+/// This is a SEPARATE mechanism from [`exclude_boot_gap_samples`], which is
+/// restart-oriented; neither may stand in for the other.
+fn warmup_exclusion_index(points: &[SeriesPoint]) -> usize {
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return 0;
+    };
+    let span = last.elapsed_secs - first.elapsed_secs;
+    if !span.is_finite() || span <= 0.0 {
+        return 0;
+    }
+    let cutoff = first.elapsed_secs + span / 16.0;
+    points
+        .iter()
+        .position(|p| p.elapsed_secs >= cutoff)
+        .unwrap_or(points.len())
+}
+
+/// Classify one deciding series under the frozen, threshold-free shape rule.
+///
+/// The rule reads ENVELOPES, not rates: peaks and troughs over halves and
+/// quarters, strict `>` throughout, and no headroom constant anywhere. The
+/// trough clauses are the exact mirror of the peak clauses and exist because a
+/// peaks-only rule is blind to a saw whose FLOOR climbs while its peaks stand
+/// still — which is a leak's signature.
+///
+/// `min_samples` and `min_span_secs` are GUARDS, not thresholds: they decide
+/// whether the clauses are evaluated, never which side they fall on, and they
+/// check the retained sample count and the retained span ONLY — never the
+/// number of distinct values. A perfectly constant series is therefore a
+/// healthy levelled one, not an instrument failure.
+#[allow(dead_code)] // wired in G4
+#[must_use]
+pub fn classify_series_shape(
+    name: &'static str,
+    points: &[SeriesPoint],
+    min_samples: usize,
+    min_span_secs: f64,
+) -> SeriesShapeReading {
+    if points.is_empty() {
+        return SeriesShapeReading {
+            name,
+            shape: SeriesShape::Indeterminate,
+            reason: Some("the sampler recorded zero samples".to_string()),
+            ..SeriesShapeReading::default()
+        };
+    }
+
+    let retained = &points[warmup_exclusion_index(points)..];
+    let samples = len_as_u64(retained.len());
+    let span_secs = match (retained.first(), retained.last()) {
+        (Some(first), Some(last)) => last.elapsed_secs - first.elapsed_secs,
+        _ => 0.0,
+    };
+
+    if retained.len() < min_samples {
+        return SeriesShapeReading {
+            name,
+            shape: SeriesShape::Indeterminate,
+            samples,
+            span_secs,
+            reason: Some(format!(
+                "retained samples {} below the minimum {min_samples}",
+                retained.len()
+            )),
+            ..SeriesShapeReading::default()
+        };
+    }
+    if span_secs < min_span_secs {
+        return SeriesShapeReading {
+            name,
+            shape: SeriesShape::Indeterminate,
+            samples,
+            span_secs,
+            reason: Some(format!(
+                "retained span {span_secs:.1}s below the minimum {min_span_secs:.1}s"
+            )),
+            ..SeriesShapeReading::default()
+        };
+    }
+
+    let half = last_half_split_index(retained.len());
+    let quarter = quarter_split_index(retained.len());
+
+    let first_half_peak = window_peak(&retained[..half]);
+    let last_half_peak = window_peak(&retained[half..]);
+    let third_quarter_peak = window_peak(&retained[half..quarter]);
+    let last_quarter_peak = window_peak(&retained[quarter..]);
+    let first_half_trough = window_trough(&retained[..half]);
+    let last_half_trough = window_trough(&retained[half..]);
+    let third_quarter_trough = window_trough(&retained[half..quarter]);
+    let last_quarter_trough = window_trough(&retained[quarter..]);
+
+    let rising_peaks_full = last_half_peak > first_half_peak;
+    let rising_peaks_tail = last_quarter_peak > third_quarter_peak;
+    let rising_floor_full = last_half_trough > first_half_trough;
+    let rising_floor_tail = last_quarter_trough > third_quarter_trough;
+
+    let peaks_fired = rising_peaks_full && rising_peaks_tail;
+    let floor_fired = rising_floor_full && rising_floor_tail;
+
+    let (shape, firing_envelope) = match (peaks_fired, floor_fired) {
+        (true, true) => (SeriesShape::MonotoneRising, Some(ENVELOPE_BOTH)),
+        (true, false) => (SeriesShape::MonotoneRising, Some(ENVELOPE_PEAKS)),
+        (false, true) => (SeriesShape::MonotoneRising, Some(ENVELOPE_FLOOR)),
+        (false, false) if rising_peaks_full || rising_floor_full => {
+            (SeriesShape::RisingDecelerating, None)
+        }
+        (false, false) => (SeriesShape::Levelled, None),
+    };
+
+    SeriesShapeReading {
+        name,
+        shape,
+        firing_envelope,
+        samples,
+        span_secs,
+        first_half_peak,
+        last_half_peak,
+        third_quarter_peak,
+        last_quarter_peak,
+        first_half_trough,
+        last_half_trough,
+        third_quarter_trough,
+        last_quarter_trough,
+        last_half_mean: window_mean_floor(&retained[half..]),
+        reason: None,
+    }
+}
+
+/// The three tokens a fired envelope may be named by. They are the ONLY values
+/// [`SeriesShapeReading::firing_envelope`] ever carries, and they are consumed
+/// verbatim by both transports so neither retypes a literal.
+const ENVELOPE_PEAKS: &str = "PEAKS";
+const ENVELOPE_FLOOR: &str = "FLOOR";
+const ENVELOPE_BOTH: &str = "BOTH";
+
+fn window_peak(window: &[SeriesPoint]) -> u64 {
+    window.iter().map(|p| p.value).max().unwrap_or(0)
+}
+
+fn window_trough(window: &[SeriesPoint]) -> u64 {
+    window.iter().map(|p| p.value).min().unwrap_or(0)
+}
+
+/// Integer FLOOR of the arithmetic mean over `window`.
+///
+/// Every deciding series is integer-valued and every integer-semantic field on
+/// the reading is `u64`, so the mean is floored rather than routed through an
+/// `f64`. It is computed over the SAME retained series, on the SAME split, that
+/// the peaks and troughs come from, so a peak and a mean are never read off two
+/// different cadences.
+fn window_mean_floor(window: &[SeriesPoint]) -> u64 {
+    let count = len_as_u64(window.len());
+    if count == 0 {
+        return 0;
+    }
+    let sum = window
+        .iter()
+        .fold(0u64, |acc, p| acc.saturating_add(p.value));
+    sum / count
+}
+
+/// The reading over the four deciding series, evaluated fail-closed first.
+///
+/// Returns the reading together with its NAMED reason, so the offending series
+/// — and, when an envelope fired, which envelope it was — is always named and
+/// never inferred from position.
+///
+/// The name set is checked FIRST: a caller that hands over a set which is not
+/// exactly the frozen deciding series gets the fail-closed reading, so a fifth
+/// series cannot be smuggled into a verdict through the classifier.
+#[allow(dead_code)] // wired in G4
+#[must_use]
+pub fn classify_durable_reading(
+    readings: &[SeriesShapeReading],
+) -> (DurableReading, Option<String>) {
+    if !names_are_exactly_deciding(readings) {
+        let observed: Vec<&str> = readings.iter().map(|r| r.name).collect();
+        return (
+            DurableReading::IndeterminateInstrument,
+            Some(format!(
+                "reading set {observed:?} is not exactly the frozen deciding series {DECIDING_SERIES:?}"
+            )),
+        );
+    }
+
+    if let Some(offender) = readings
+        .iter()
+        .find(|r| r.shape == SeriesShape::Indeterminate)
+    {
+        let why = offender.reason.as_deref().unwrap_or("no reason recorded");
+        return (
+            DurableReading::IndeterminateInstrument,
+            Some(format!("series {} is indeterminate: {why}", offender.name)),
+        );
+    }
+
+    if let Some(offender) = readings
+        .iter()
+        .find(|r| r.shape == SeriesShape::MonotoneRising)
+    {
+        let envelope = offender.firing_envelope.unwrap_or("UNNAMED");
+        return (
+            DurableReading::PlateauNotMet,
+            Some(format!(
+                "series {} rose and was still rising at the end; firing envelope {envelope}",
+                offender.name
+            )),
+        );
+    }
+
+    (
+        DurableReading::NoRisingEnvelopeObserved,
+        Some(
+            "no deciding series showed a rising envelope over this horizon; \
+             this horizon did not show it, which is not the same as there being nothing to show"
+                .to_string(),
+        ),
+    )
+}
+
+/// Whether `readings` names exactly the frozen deciding series — same count,
+/// every name present, none repeated. Order is not constrained, because the
+/// reading ORs over the set and no clause reads a position.
+fn names_are_exactly_deciding(readings: &[SeriesShapeReading]) -> bool {
+    readings.len() == DECIDING_SERIES.len()
+        && DECIDING_SERIES
+            .iter()
+            .all(|expected| readings.iter().filter(|r| r.name == *expected).count() == 1)
+}
+
+/// Parse one RENDERED removal-site observation line into its eight fields.
+///
+/// The scan is over whitespace-separated `key=value` tokens rather than over
+/// format positions, so the parser is not coupled to the log formatter's field
+/// or message order. Returns `None` unless ALL eight fields are present and
+/// parse: a half-read line is never turned into a partially-populated one.
+/// A malformed value for a recognised key also yields `None` — fail-closed,
+/// because a line that was emitted but could not be read is exactly what the
+/// aggregate's `unparsed` counter exists to make visible.
+#[allow(dead_code)] // wired in G4
+#[must_use]
+pub fn parse_origin_line(line: &str) -> Option<OriginLine> {
+    let mut ts: Option<i64> = None;
+    let mut op_seq: Option<u64> = None;
+    let mut epoch: Option<u64> = None;
+    let mut refs_returned: Option<u64> = None;
+    let mut refs_at_entry: Option<u64> = None;
+    let mut bytes_returned: Option<u64> = None;
+    let mut watermark: Option<u64> = None;
+    let mut ceiling: Option<u64> = None;
+
+    for token in line.split_whitespace() {
+        let Some((key, raw)) = token.split_once('=') else {
+            continue;
+        };
+        match key {
+            "ts" => set_field(&mut ts, raw.parse::<i64>().ok())?,
+            "op_seq" => set_field(&mut op_seq, raw.parse::<u64>().ok())?,
+            "epoch" => set_field(&mut epoch, raw.parse::<u64>().ok())?,
+            "refs_returned" => set_field(&mut refs_returned, raw.parse::<u64>().ok())?,
+            "refs_at_entry" => set_field(&mut refs_at_entry, raw.parse::<u64>().ok())?,
+            "bytes_returned" => set_field(&mut bytes_returned, raw.parse::<u64>().ok())?,
+            "watermark" => set_field(&mut watermark, raw.parse::<u64>().ok())?,
+            "ceiling" => set_field(&mut ceiling, raw.parse::<u64>().ok())?,
+            _ => {}
+        }
+    }
+
+    Some(OriginLine {
+        ts: ts?,
+        op_seq: op_seq?,
+        epoch: epoch?,
+        refs_returned: refs_returned?,
+        refs_at_entry: refs_at_entry?,
+        bytes_returned: bytes_returned?,
+        watermark: watermark?,
+        ceiling: ceiling?,
+    })
+}
+
+/// Record the FIRST occurrence of a recognised field, and fail closed on a
+/// value that did not parse. Returns `None` — which the caller propagates — so
+/// a malformed recognised key can never be mistaken for an absent one.
+fn set_field<T>(slot: &mut Option<T>, parsed: Option<T>) -> Option<()> {
+    let value = parsed?;
+    if slot.is_none() {
+        *slot = Some(value);
+    }
+    Some(())
+}
+
+/// Fold captured origin lines into the aggregate the classifier reads.
+///
+/// Every classifier input is a TYPED field here: `dropped` comes from the
+/// capture's own overflow counter, `restarts` from the recovery-checkpoint
+/// counter and from nothing else, `armed` from the effective child log filter,
+/// and `epochs_exited` from the scrape. None of the four is inferred from a log
+/// line, so a reading can never rest on a quantity nobody produced.
+#[allow(dead_code)] // wired in G4
+#[must_use]
+pub fn aggregate_origin_lines(
+    captured: &[String],
+    dropped: u64,
+    restarts: u64,
+    armed: bool,
+    epochs_exited: u64,
+) -> OriginAggregate {
+    let mut lines = Vec::with_capacity(captured.len());
+    let mut unparsed: u64 = 0;
+    for raw in captured {
+        match parse_origin_line(raw) {
+            Some(parsed) => lines.push(parsed),
+            None => unparsed = unparsed.saturating_add(1),
+        }
+    }
+    OriginAggregate {
+        matched: len_as_u64(captured.len()),
+        unparsed,
+        dropped,
+        lines,
+        restarts,
+        armed,
+        epochs_exited,
+        reason: None,
+    }
+}
+
+/// Classify the origin reading, evaluated fail-closed first.
+///
+/// Returns the reading together with its NAMED reason — the reason the
+/// aggregate carries and the serializer emits beside the counters it was
+/// derived from. Every variant ROUTES; none is diagnosed here.
+#[allow(dead_code)] // wired in G4
+#[must_use]
+pub fn classify_origin_reading(aggregate: &OriginAggregate) -> (OriginReading, Option<String>) {
+    if !aggregate.armed {
+        return (
+            OriginReading::IndeterminateInstrument,
+            Some("the origin log filter was not armed for this run".to_string()),
+        );
+    }
+    if aggregate.dropped > 0 {
+        return (
+            OriginReading::IndeterminateInstrument,
+            Some(format!(
+                "{} captured line(s) were dropped, so the window is incomplete",
+                aggregate.dropped
+            )),
+        );
+    }
+    if aggregate.unparsed > 0 {
+        return (
+            OriginReading::IndeterminateInstrument,
+            Some(format!(
+                "{} matched line(s) did not yield all eight fields",
+                aggregate.unparsed
+            )),
+        );
+    }
+    if aggregate.restarts > 0 {
+        return (
+            OriginReading::IndeterminateInstrument,
+            Some(format!(
+                "the server restarted {} time(s) during the run, so the epochs_exited \
+                 qualifier reset and would be misread",
+                aggregate.restarts
+            )),
+        );
+    }
+
+    if let Some(line) = aggregate
+        .lines
+        .iter()
+        .find(|l| l.refs_returned == 0 && l.refs_at_entry > 0)
+    {
+        return (
+            OriginReading::ReachedInProduction,
+            Some(format!(
+                "epoch {} returned 0 refs while holding {} at entry",
+                line.epoch, line.refs_at_entry
+            )),
+        );
+    }
+
+    if let Some(line) = aggregate
+        .lines
+        .iter()
+        .find(|l| l.refs_returned != l.refs_at_entry)
+    {
+        return (
+            OriginReading::PartialDivergence,
+            Some(format!(
+                "epoch {} returned {} refs against {} at entry",
+                line.epoch, line.refs_returned, line.refs_at_entry
+            )),
+        );
+    }
+
+    if !aggregate.lines.is_empty() {
+        return (
+            OriginReading::NotReachedEqualRefs,
+            Some(format!(
+                "all {} parsed line(s) returned exactly the refs held at entry",
+                aggregate.lines.len()
+            )),
+        );
+    }
+
+    if aggregate.epochs_exited > 0 {
+        return (
+            OriginReading::NoLinesWhileEpochsExited,
+            Some(format!(
+                "no line was captured while epochs_exited reached {}",
+                aggregate.epochs_exited
+            )),
+        );
+    }
+
+    (
+        OriginReading::NotObservedAtHead,
+        Some("no line was captured and epochs_exited stayed at 0".to_string()),
+    )
+}
+
+/// The `max` and the `sum` of one labelled gauge, taken over its label sets.
+///
+/// Returned as a named pair rather than a positional one so a caller cannot
+/// silently transpose the two. `None` from [`parse_labelled_gauge`] — never a
+/// zero here — is what carries "the metric was absent from the body".
+#[allow(dead_code)] // wired in G4
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LabelledGauge {
+    /// The largest value across the metric's label sets.
+    pub max: u64,
+    /// The sum across the metric's label sets.
+    pub sum: u64,
+}
+
+/// Parse a labelled gauge out of a Prometheus text exposition body, folding its
+/// label sets into a max and a sum.
+///
+/// Comment lines (`# HELP` / `# TYPE`) and blanks are skipped, and the name is
+/// matched EXACTLY — either bare or immediately followed by `{` — so a metric
+/// is never confused with a co-resident one that merely shares its prefix.
+/// Returns `None` when the metric does not appear in the body at all: an
+/// absence is a visible gap, and reporting it as a zero would let a silent
+/// absence masquerade as a flat series.
+#[allow(dead_code)] // wired in G4
+#[must_use]
+pub fn parse_labelled_gauge(body: &str, metric: &str) -> Option<LabelledGauge> {
+    let mut seen = false;
+    let mut gauge = LabelledGauge::default();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((head, raw_value)) = line.rsplit_once(char::is_whitespace) else {
+            continue;
+        };
+        let head = head.trim();
+        let matches =
+            head == metric || (head.starts_with(metric) && head[metric.len()..].starts_with('{'));
+        if !matches {
+            continue;
+        }
+        // Gauge samples are rendered as decimals by some exporters; the durable
+        // instrument's own quantities are integer-semantic, so a fractional
+        // sample is floored rather than routed through an `f64` field.
+        let value: u64 = match raw_value.trim().parse::<u64>() {
+            Ok(v) => v,
+            Err(_) => match raw_value.trim().split_once('.') {
+                Some((whole, _)) => whole.parse::<u64>().ok()?,
+                None => continue,
+            },
+        };
+        seen = true;
+        gauge.max = gauge.max.max(value);
+        gauge.sum = gauge.sum.saturating_add(value);
+    }
+    seen.then_some(gauge)
+}
+
+/// The embedded store file's apparent size in bytes, from filesystem METADATA
+/// only — the file is never opened, so sampling cannot perturb the process
+/// being measured. `None` on any failure, mirroring [`sample_rss_mb`]'s
+/// `None`-on-failure contract.
+#[allow(dead_code)] // wired in G4
+#[must_use]
+pub fn sample_redb_bytes(data_dir: &Path) -> Option<u64> {
+    let meta = std::fs::metadata(data_dir.join("topgun.redb")).ok()?;
+    meta.is_file().then_some(meta.len())
+}
+
+/// WAL retention: the summed apparent size and the count of the retained `.log`
+/// segments, both from directory metadata only — no segment file is opened.
+///
+/// `None` when the WAL directory cannot be read at all. A directory that reads
+/// but holds no segment yields `Some` zeros: an honest empty retention, which
+/// must stay distinguishable from a blind sampler.
+#[allow(dead_code)] // wired in G4
+#[must_use]
+pub fn sample_wal_retention(data_dir: &Path) -> Option<WalRetention> {
+    let entries = std::fs::read_dir(data_dir.join("wal")).ok()?;
+    let mut retention = WalRetention::default();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("log") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        retention.bytes = retention.bytes.saturating_add(meta.len());
+        retention.segment_files = retention.segment_files.saturating_add(1);
+    }
+    Some(retention)
+}
+
 // This bench target is `harness = false` (it owns `main`), so these `#[test]`
 // functions do NOT run under `cargo test --bench soak_harness` — libtest never
 // drives them. They are executed as a real CI gate by the integration target
