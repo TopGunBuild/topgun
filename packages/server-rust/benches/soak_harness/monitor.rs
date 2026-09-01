@@ -110,6 +110,7 @@
 //! directly by `tests::calibration_boot_gap_exclusion_does_not_trip_gate` with
 //! a fully synthetic sequence — no real process required.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
@@ -1501,14 +1502,20 @@ pub fn fold_undecodable_key(census: &mut DurableCensus) {
 
 /// Distinct tag count **within one key's own tombstone vector**.
 ///
-/// Quadratic in the key's tombstone count on purpose: it needs no allocation
-/// and no hashing, and the alternative — a set — is the cross-key structure the
-/// census contract forbids. The per-key vectors this runs over are small
-/// relative to the corpus, so the corpus-scale cost stays linear in rows.
+/// The set is built per key and dropped when the call returns, so it is NOT the
+/// cross-key structure the census contract forbids: nothing observed under one
+/// key can ever be seen while counting another. Within that boundary a set is
+/// simply the right shape — the scan it replaces re-walked the prefix for every
+/// tag, so one pathological key with a long tombstone vector cost quadratic
+/// time in a fold whose corpus-scale cost is supposed to be linear in rows.
+///
+/// The counter is incremented on first insertion rather than read off the set's
+/// length, which keeps the saturating widening to `u64` exactly where it was.
 fn distinct_count_within_key(tags: &[&str]) -> u64 {
+    let mut seen: HashSet<&str> = HashSet::with_capacity(tags.len());
     let mut distinct: u64 = 0;
-    for (index, tag) in tags.iter().enumerate() {
-        if !tags[..index].contains(tag) {
+    for &tag in tags {
+        if seen.insert(tag) {
             distinct = distinct.saturating_add(1);
         }
     }
