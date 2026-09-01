@@ -562,6 +562,25 @@ pub fn effective_server_log_filter() -> String {
     std::env::var("SOAK_SERVER_LOG").unwrap_or_else(|_| "warn".to_string())
 }
 
+/// Strip ANSI SGR escape sequences from one captured child line.
+///
+/// Sited HERE, in the module that owns the child's output, because the capture
+/// boundary is the only place a line can be normalized exactly ONCE: the origin
+/// match and the line the capture retains then see the same bytes, and no
+/// downstream consumer has to re-derive whether what it holds was stripped. The
+/// panic watch deliberately keeps reading the RAW line — it matches on payload
+/// text, not on structured fields, and a strip there could only lose signal.
+///
+/// PLACEHOLDER(g1): signature only. The body lands with the strip-then-match
+/// rewiring of the capture, so nothing calls this yet and it must not be wired
+/// up before then — a stub that quietly returned the line unchanged would read,
+/// from the outside, exactly like a working strip on a colourless line.
+#[must_use]
+#[allow(dead_code)]
+pub fn strip_ansi(line: &str) -> String {
+    panic!("strip_ansi has no body yet; it lands with the capture-boundary strip: {line}")
+}
+
 // These tests are the executable half of the capture contract, and the
 // integration target `tests/soak_tombstone_restart.rs` — which re-includes this
 // module under the standard harness — is what actually runs them. The bench
