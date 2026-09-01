@@ -2665,43 +2665,6 @@ struct DurableReadingReport {
     origin: OriginReport,
 }
 
-/// Strip ANSI SGR escape sequences from one captured child line.
-///
-/// The child's log formatter emits colour UNCONDITIONALLY — it never tests
-/// whether its output is a terminal — and the harness always reads that output
-/// through a pipe. Colour turns `ts=1756…` into an escape-interleaved token
-/// whose `key=value` split finds neither the key nor the value, so every origin
-/// line would read as unparsed and the reading would fail closed on a run where
-/// the emitter was in fact working perfectly. Normalizing HERE, at the harness
-/// boundary that owns the child's output, is what keeps the parser
-/// formatter-agnostic and `std`-only and keeps this instrument out of the
-/// server it measures.
-fn strip_ansi(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut rest = line;
-    while let Some(esc) = rest.find('\u{1b}') {
-        out.push_str(&rest[..esc]);
-        let tail = &rest[esc..];
-        let Some(after) = tail.strip_prefix("\u{1b}[") else {
-            // A lone escape that is not a CSI introducer: drop the escape alone,
-            // so no payload character is ever swallowed by mistake.
-            rest = &tail['\u{1b}'.len_utf8()..];
-            continue;
-        };
-        match after
-            .char_indices()
-            .find(|(_, c)| ('\u{40}'..='\u{7e}').contains(c))
-        {
-            // A complete CSI sequence: drop it up to and including its final byte.
-            Some((idx, c)) => rest = &after[idx + c.len_utf8()..],
-            // Unterminated: there is no final byte, so nothing after it is payload.
-            None => rest = "",
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Render one parsed origin line back to its eight fields.
 ///
 /// Rendered rather than mirrored as a struct so the artifact carries the
@@ -2813,12 +2776,15 @@ fn build_durable_reading_report(
     // derived from, so a run cannot be reported as armed while the child was in
     // fact quiet.
     let armed = log_filter.contains(process::ORIGIN_TARGET);
-    let captured: Vec<String> = origin.lines.iter().map(|l| strip_ansi(l)).collect();
+    // The retained lines arrive ANSI-free: the capture strips at the boundary
+    // that owns the child's output, so exactly one strip happens per line and a
+    // second one here could only ever be a no-op that hides where the real one
+    // lives.
     // The qualifier crosses this hop as the `Option` the fold produced. Nothing
     // here may supply a stand-in value: an absence that arrives as a number is
     // an absence the classifier can no longer refuse to classify from.
     let aggregate = aggregate_origin_lines(
-        &captured,
+        &origin.lines,
         origin.dropped,
         restarts,
         armed,
