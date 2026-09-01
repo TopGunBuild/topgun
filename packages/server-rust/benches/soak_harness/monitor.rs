@@ -2042,7 +2042,6 @@ pub struct LabelledGauge {
 /// faults, and folding either into a zero is the absence masquerade this
 /// reading exists to refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // PLACEHOLDER(g1): `Unreadable` is constructed by the grammar rewrite.
 pub enum GaugeReading {
     /// The metric's name never matched a head in the body.
     Absent,
@@ -2058,7 +2057,13 @@ impl GaugeReading {
     /// renderer and by the JSON serializer, so the two transports can never
     /// disagree and no site retypes a literal.
     #[must_use]
-    #[allow(dead_code)] // PLACEHOLDER(g1): the renderers land with the scrape fold.
+    // No consumer inside this instrument's scope: a run's scrapes are folded
+    // into a `GaugeObservation` and it is the FOLD's disposition, not any single
+    // scrape's reading, that the artifact and the console render. The method
+    // exists anyway so the three-outcome type carries its own token beside
+    // `EpochsExitedAbsence`'s, rather than leaving a future renderer of a
+    // per-scrape reading to invent a fourth spelling of ABSENT at the call site.
+    #[allow(dead_code)]
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Absent => "ABSENT",
@@ -2075,7 +2080,6 @@ impl GaugeReading {
 /// never by substring match. The same mirror pattern [`OriginReading`],
 /// [`SeriesShape`] and [`CensusSource`] already use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // PLACEHOLDER(g1): constructed by the scrape fold.
 pub enum EpochsExitedAbsence {
     /// The metric never appeared in any scraped body.
     Absent,
@@ -2088,7 +2092,6 @@ impl EpochsExitedAbsence {
     /// console renderer and by the JSON serializer, so the two transports can
     /// never disagree and no site retypes a literal.
     #[must_use]
-    #[allow(dead_code)] // PLACEHOLDER(g1): the renderers land with the scrape fold.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Absent => "ABSENT",
@@ -2112,7 +2115,6 @@ impl EpochsExitedAbsence {
 /// The two sample-scoped counters are outside that identity: they count
 /// samples, not scrapes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[allow(dead_code)] // PLACEHOLDER(g1): folded and rendered downstream.
 pub struct GaugeObservation {
     /// The folded observation, `None` where no scrape ever read the metric.
     /// Never a zero standing in for an absence.
@@ -2141,9 +2143,6 @@ pub struct GaugeObservation {
 /// site, so swapping a `max` column for a `sum` one has to be written out loud
 /// instead of slipping in as a one-character edit to a closure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// The scrape fold is this token's only production caller and has not landed
-// yet, so the bench binary's own compile still sees it unreferenced.
-#[allow(dead_code)]
 pub enum GaugeFold {
     /// The largest value across the metric's label sets.
     Max,
@@ -2162,9 +2161,6 @@ impl GaugeObservation {
     /// identity fail instead of restating itself. The per-scrape value is
     /// returned rather than stored because how a run's scrapes combine into one
     /// observation is the caller's decision, while how they are COUNTED is not.
-    // The scrape fold is this method's only production caller and has not
-    // landed yet, so the bench binary's own compile still sees it unreferenced.
-    #[allow(dead_code)]
     pub fn record(&mut self, reading: &GaugeReading, fold: GaugeFold) -> Option<u64> {
         self.scrapes_total = self.scrapes_total.saturating_add(1);
         match reading {
