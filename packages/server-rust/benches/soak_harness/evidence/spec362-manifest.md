@@ -1268,3 +1268,203 @@ recorded in this post-section's header — it still reproduces, so no frozen byt
 ```
 frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
 ```
+
+<!-- BATCH-2 BEGIN -->
+
+---
+
+## Batch 2 — Review v1 disposition record (`P6`)
+
+Appended after `/sf:review` Review v1 (APPROVED — 0 critical, 0 major, 4 minor) and before
+`/sf:done`. This batch **appends**; it edits nothing above the marker and it edits no existing
+post-section entry (§8.2 item 1). The frozen-sections digest was re-verified as still reproducing at
+the moment of this append (see the footer). Review v1's four minors were write-up completeness only —
+**no code changed under this batch, and no arm was re-run**.
+
+### `P6` — routing record, continued
+
+Routing remains **BY IDENTIFIER ONLY**, here. **No tracker file was created, edited or deleted**
+(C1 / AC21 / AC24).
+
+10. **`TODO-634` ← control-artifact binary provenance is not commit-pinned.** `spec362-durable.sh`
+    does **not build**; it selects the newest `target/release/deps/soak_harness-*` by **mtime**
+    (`:396-398`), and all three `matrix.txt` record `dirty tree: yes`. The committed artifacts are
+    therefore tied to a binary path plus build time, **not to a commit**. This is **inherited, not
+    introduced here**: the `dirty tree` line comes verbatim from the parent (`spec355-width.sh:471`),
+    and **AC16's CLOSED runner diff list would reject adding a build step** — so it sits inside the
+    frozen design and is routed rather than fixed. Mitigating evidence recorded at review time: the
+    artifacts' root key set matches HEAD's `DurableReadingReport` / `OriginReport` fields exactly, and
+    the three runs begin **12 s** after the runner commit `7410069a`. **Consequence for `SPEC-362b`:**
+    the 4 h cell's artifacts inherit this same weakness unless `§8.1` is discharged with an explicit
+    build-and-record step; this entry is the notice, not a licence to edit `§8`.
+
+### Disposition of Review v1's three write-up minors
+
+Recorded here so the ledger the manifest points at and the ledger in the spec agree.
+
+1. **Minor 1 — the Deviations ledger read as closed when it was not.** `MetricsScrape`
+   (`main.rs:1695`, the return type of the Delta-named widened `scrape_tombstone_bytes`),
+   `DurableObservations` and `LiveCensusTally` are the same class as the two already-recorded
+   unenumerated types and are now listed under the same rationale. **No ledger impact:** all live in
+   already-counted `main.rs`; the counted `.rs` ledger stays **3/5** and **zero** PROJECT.md
+   exemption shapes are claimed.
+2. **Minor 2 — `main.rs::strip_ansi`.** Disclosed all along as `P5` item 6 (a *finding*), but never
+   cross-referenced as a *Delta deviation*. Now filed in both places. Same already-counted file, no
+   ledger impact.
+3. **Minor 3 — the G5 allow-verification step is LITERALLY UNMET and was under-placed.** The plan's
+   `grep '^+.*allow(dead_code)'` returns **2**, not 0. It was disclosed only here and under
+   Deviations; it is now recorded beside the other self-declared non-met criteria, so the spec's
+   count reads **three**, not two. The substance is unchanged and was re-verified at review: the
+   non-weakenable discriminator `grep '^+.*allow(dead_code).*wired in G4'` **is** empty (all 35
+   placeholders removed); both survivors are `harness = false` consequences (`main.rs:3979` on the
+   AC7 helper, `process.rs:575` on `#[cfg(test)] mod tests`); and `monitor.rs`'s `mod tests` allow is
+   **pre-existing at BASE** (`5b240448:monitor.rs:1042`), correctly outside the count. The AC was
+   neither edited nor relaxed.
+
+### What Review v1 independently reproduced
+
+Recorded because a pre-registration whose freeze only its own author can reproduce is worth less than
+one a second reader has re-derived. Review v1 re-derived, from commands rather than from this
+manifest's assertions: **PIN 2** (0 changed `.rs` bytes under `packages/server-rust/src` /
+`packages/core-rust/src`); **PIN 1**, **PIN 3**, **PIN 4**, **PIN 7**; **AC18** ordering via
+`git merge-base --is-ancestor`; **AC19**, including the stronger result that the **same digest comes
+from the G1 blob** and that the frozen-range G1-vs-HEAD `diff` is **empty**, so C12 append-only is
+**proven** rather than asserted; **AC25**'s null rate (`fired=889 total=2000 P=0.444500
+indeterminate=0`); and the full gate (`fmt` clean, `clippy -D warnings` **0 warnings**,
+**2052 passed / 0 failed / 3 ignored**). It also proved the two honesty claims **in code**: `passed`
+is bound **once, immutably**, before the durable block begins, so the durable reading is structurally
+incapable of reaching the verdict; and the `harness = false` `#[test]` strip was demonstrated from
+the **real rustc invocation**.
+
+<!-- BATCH-2 END -->
+
+**Digest of Batch 2.** Same convention as Batch 1: the digested range is the batch body **between**
+the two markers, exclusive of both marker lines and of this footer, so recording the digest cannot
+change what it digests. Reproduce with:
+
+```
+awk '/^<!-- BATCH-2 BEGIN -->$/{p=1;next} /^<!-- BATCH-2 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-2          467a9d80c06eec02a061c712a35b16a70ffef5791d0c9596805f4ac22ca7d38f
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
+
+<!-- BATCH-3 BEGIN -->
+
+---
+
+## Batch 3 — cross-vendor review disposition (`P7`)
+
+Appended after an independent cross-vendor adversarial review (`z-ai/glm-5.3`, reasoning=high) of
+`5b240448..HEAD` scoped to the three counted `.rs` files, run before `/sf:done` under the project's
+standing cross-vendor rule. This batch **appends**; it edits nothing above the marker and no existing
+post-section entry. **No `.rs` byte changed under this batch and no arm was re-run.**
+
+### The cardinal invariant, confirmed by a SECOND independent reviewer
+
+The vendor traced every consumer of `DurableReading`, `SeriesShapeReading`, `DurableCensus`,
+`CensusRecord`, `OriginReading`, `OriginAggregate`, `MetricsScrape` and `DurableObservations` and
+found **no path to `passed` or to the process exit code** — all terminate in `pending_gates`, the
+sibling JSON artifact, or console output. It separately confirmed that the tombstone byte-slope
+gate's input is **value-identical** to the pre-change `total_bytes`, that the live-copy census is
+fenced from the gate's tally, and that `SeriesShape` / `DurableReading` / `OriginReading` /
+`CensusSource` are total and fail-closed. C3 / C7 / PIN 4 therefore rest on **two independent
+confirmations**, not one.
+
+### `P7` — routing record, continued
+
+Routing remains **BY IDENTIFIER ONLY**. **No tracker file was created, edited or deleted**
+(C1 / AC21 / AC24).
+
+11. **`TODO-634` ← `parse_labelled_gauge` aborts the whole metric on one bad sample (the material
+    finding).** At `monitor.rs:1988` the decimal fallback is `whole.parse::<u64>().ok()?` — the `?`
+    returns `None` from the **entire function**, not from the line. One sample that is negative or
+    otherwise unparseable therefore reports a **PRESENT** metric as **ABSENT**, discarding every
+    sample already folded. This inverts the function's own stated contract that an absence can never
+    masquerade as a reading. Affects `writebehind_lag_max` (PIN 7 observation-only) and
+    `epochs_exited` (the origin classifier's qualifier, already routed at `P5` item 8). **It did NOT
+    fire in the three committed arms** — all three returned real integers (`writebehindLagMax`
+    11326 / 63453 / 51023, `epochsExited` 28 / 28 / 9), never `null`. The one-token remedy is
+    `continue` in place of `?`. **Not applied here: see the §0(d) ruling below.**
+12. **`TODO-634` ← the origin capture matches BEFORE ANSI stripping (latent).**
+    `OriginCapture::record_line` tests `line.contains(ORIGIN_TARGET)` on the **RAW** line
+    (`process.rs:95`), while `strip_ansi` is applied only to lines already captured
+    (`main.rs:2692`). If a formatter ever styles the target itself, the match fails **silently** and
+    the run reports a non-fail-closed `NotObservedAtHead` while the instrument was simply deaf —
+    which is the precise failure mode `P5` item 6 was raised to prevent, one layer earlier.
+    **Empirically not firing**: the armed arms matched **28** and **26** lines on raw text. The
+    remedy is to strip at the line-reader boundary, before dispatch.
+13. **`TODO-634` ← scientific-notation truncation.** `1.5e3` splits to `("1","5e3")` and folds as
+    **1**. Improbable against a Rust exporter (Rust's `{}` for `f64` does not emit scientific
+    notation) but silent if it ever occurs. Same call site as item 11 and fixed by the same change.
+14. **`TODO-634` ← `distinct_count_within_key` is O(n²) per key** (`monitor.rs:1491`,
+    `tags[..index].contains(tag)`). This matters *because* the soak's purpose is unbounded tombstone
+    growth: a single hot key with many tags makes each census scan super-linear, delaying the
+    recovery checkpoint and the terminal scan. A per-key `HashSet` is permitted — the census contract
+    forbids **cross-key** sets, not per-key ones.
+15. **`TODO-634` ← live-census timestamps are copy-INITIATION times.** `elapsed` is captured at
+    `main.rs:844`, *before* the `spawn_blocking` whole-file copy, so a slow copy makes a record
+    appear to have been taken earlier than it was. Observation-only and fenced from the tally, but it
+    can mis-order live-copy records against checkpoint records in a merged view.
+
+**Rejected, with the reason recorded** (a routed finding that is not real would corrupt this record
+as surely as a missed one): the vendor's `restarts`-misses-a-supervisor-restart finding is
+**REJECTED** — the premise does not exist in this harness. `recovery_checkpoint` (`main.rs:2924`) is
+the **only** restart path, exactly as `main.rs:355-357` documents, and there is no other
+spawn/respawn site. A `jittered_interval` modulo-bias observation (~1 in 10^16, cadence only, never a
+predicate input) is acknowledged with **no action**, as the vendor itself proposed.
+
+### The §0(d) ruling: these are ROUTED, never absorbed
+
+Frozen §0(d) states that *"any post-pin `.rs` change invalidates every run taken before it"* and that
+*"if an instrument defect is discovered after this spec's own merge, the remedy is a NEW SPEC THAT
+RE-PINS — never an edit absorbed under the pin."* Patching `monitor.rs` for item 11 now would either
+invalidate the three committed control arms or force a re-run, and **re-running an arm is precisely
+what R7/§6.2 forbids**. The findings are therefore recorded here and fixed nowhere in this spec.
+
+**Consequence for `SPEC-362b`, stated plainly:** §8.1 binds it to **ZERO `.rs` bytes**, so it
+**cannot** carry these fixes either. Item 11 should be closed by a **re-pinning spec BEFORE** any
+successor takes a reading that quotes `epochs_exited`; until then a successor quoting that qualifier
+is quoting a value that a single malformed sample can silently blank. This entry is that notice — it
+is **not** a licence to edit `§0(d)` or `§8`.
+
+### What this does NOT put in doubt
+
+The confirmed findings touch `parse_labelled_gauge` (items 11, 13), the origin match (item 12) and
+two performance/precision paths (items 14, 15). **None of them is a deciding series** —
+`DECIDING_SERIES` remains `rss_kib` / `redb_bytes` / `wal_bytes` / `wal_segment_files` — **none can
+reach the gate**, and items 11 and 12 are shown above **not to have fired** in the committed runs.
+The three control arms remain valid for everything they are quoted for, and every `PLATEAU_NOT_MET` /
+`INDETERMINATE_INSTRUMENT` verdict stands exactly as recorded, under §6.5's caveat.
+
+<!-- BATCH-3 END -->
+
+**Digest of Batch 3.** Same convention as Batches 1 and 2: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-3 BEGIN -->$/{p=1;next} /^<!-- BATCH-3 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-3          a8a0ab833ada09a529aeb630aa5a666c572fc158763ca93fd302bca076d04ad3
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
