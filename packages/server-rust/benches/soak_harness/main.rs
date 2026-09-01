@@ -864,7 +864,7 @@ async fn run_soak(config: &Config) -> i32 {
                 // from stalling the churn clients whose write rate defines the
                 // workload under measurement.
                 if tokio::task::spawn_blocking(move || {
-                    sample_live_census_via_copy(&sampler, elapsed);
+                    sample_live_census_via_copy(&sampler, start, elapsed);
                 })
                 .await
                 .is_err()
@@ -1858,9 +1858,12 @@ impl CorpusSampler {
         if let Some(census) = scanned {
             t.censuses.push(CensusRecord {
                 elapsed_secs,
-                // PLACEHOLDER(g1): which instant fills this is decided where the
-                // copy window is actually measured. The terminal scan takes no
-                // copy at all, so an honest value here may well stay `None`.
+                // This scan takes NO copy -- it reads the data dir directly
+                // once the child is gone -- so there is no copy window to
+                // report and `None` is the honest value, not a missing one.
+                // Rendering it as an explicit null is what keeps "this producer
+                // never copied" distinguishable from "this artifact predates
+                // the field".
                 copy_completed_secs: None,
                 source: CensusSource::Terminal,
                 census,
@@ -1897,7 +1900,11 @@ impl CorpusSampler {
 /// re-scanned as this one's. A failed DELETE is not a scan failure — the
 /// sample was obtained — so it is logged and the run continues; the teardown
 /// sweep removes the residue.
-fn sample_durable_corpus_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
+fn sample_durable_corpus_via_copy(
+    sampler: &CorpusSampler,
+    sampler_start: Instant,
+    elapsed_secs: f64,
+) {
     // One attempt per checkpoint, counted before anything can fail, so a
     // failure can never go unattributed.
     let ordinal = {
@@ -1906,13 +1913,17 @@ fn sample_durable_corpus_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
         t.scans_attempted
     };
     let scanned = copy_and_scan_census(sampler, "durable-corpus", ordinal);
+    // The window's FAR edge, read off the same run clock the caller stamped the
+    // near edge on, and read HERE because here is the only place that knows the
+    // copy and the scan are done. Taken unconditionally, before the tally lock,
+    // so a slow lock cannot be charged to the copy.
+    let copy_completed_secs = sampler_start.elapsed().as_secs_f64();
 
     let mut t = sampler.tally.lock();
     if let Some(census) = scanned {
         t.censuses.push(CensusRecord {
             elapsed_secs,
-            // PLACEHOLDER(g1): the copy window is measured where the copy runs.
-            copy_completed_secs: None,
+            copy_completed_secs: Some(copy_completed_secs),
             source: CensusSource::Checkpoint,
             census,
         });
@@ -1942,20 +1953,24 @@ fn sample_durable_corpus_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
 /// live tally and NEVER on the corpus-scan tally the durable-corpus estimator
 /// reads — including its `scans_attempted` / `scans_failed` counters, so an
 /// armed live sampler cannot even move that estimator's instrument clause.
-fn sample_live_census_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
+fn sample_live_census_via_copy(sampler: &CorpusSampler, sampler_start: Instant, elapsed_secs: f64) {
     let ordinal = {
         let mut t = sampler.live_tally.lock();
         t.scans_attempted += 1;
         t.scans_attempted
     };
     let scanned = copy_and_scan_census(sampler, "live-census", ordinal);
+    // The window's FAR edge, on the same run clock as the near edge. This is
+    // the producer the smear question is actually asked of: the server is
+    // writing underneath this copy, so how wide the window was is the whole of
+    // what tells a reader how much the image could have smeared.
+    let copy_completed_secs = sampler_start.elapsed().as_secs_f64();
 
     let mut t = sampler.live_tally.lock();
     match scanned {
         Some(census) => t.censuses.push(CensusRecord {
             elapsed_secs,
-            // PLACEHOLDER(g1): the copy window is measured where the copy runs.
-            copy_completed_secs: None,
+            copy_completed_secs: Some(copy_completed_secs),
             source: CensusSource::LiveCopy,
             census,
         }),
@@ -3218,6 +3233,7 @@ async fn recovery_checkpoint(
     restarts.fetch_add(1, Ordering::Relaxed);
     sample_durable_corpus_via_copy(
         corpus_sampler,
+        boot_gap_clock.sampler_start,
         boot_gap_clock.sampler_start.elapsed().as_secs_f64(),
     );
     // Brief gap so the OS releases the listening socket before rebind.
@@ -4225,8 +4241,11 @@ mod tests {
         write_or_fixture(data.path());
         let sampler = CorpusSampler::new(data.path().to_path_buf(), scratch.path().to_path_buf());
 
+        // The initiation stamps are synthetic here; the completion instants are
+        // measured off this clock, so the records carry a real copy window.
+        let sampler_start = Instant::now();
         for i in 0..3 {
-            sample_live_census_via_copy(&sampler, f64::from(i));
+            sample_live_census_via_copy(&sampler, sampler_start, f64::from(i));
         }
 
         let corpus = sampler.tally.lock().clone();
