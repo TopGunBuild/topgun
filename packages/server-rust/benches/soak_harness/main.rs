@@ -1964,6 +1964,13 @@ fn sample_live_census_via_copy(sampler: &CorpusSampler, sampler_start: Instant, 
     // the producer the smear question is actually asked of: the server is
     // writing underneath this copy, so how wide the window was is the whole of
     // what tells a reader how much the image could have smeared.
+    //
+    // The stamp lands after the copy AND the scan, because that is the only
+    // point that knows both are done. Smearing accrues only while files are
+    // being copied — the scan reads an already-frozen image — so the far edge
+    // is an UPPER BOUND on the smear window, not the window itself. Read it as
+    // a bound: a reader who takes the difference from the near edge gets a
+    // number that cannot understate how much the image could have moved.
     let copy_completed_secs = sampler_start.elapsed().as_secs_f64();
 
     let mut t = sampler.live_tally.lock();

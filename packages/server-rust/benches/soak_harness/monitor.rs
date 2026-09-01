@@ -2223,8 +2223,19 @@ pub fn parse_labelled_gauge(body: &str, metric: &str) -> GaugeReading {
         // that is what keeps an unreadable body legible as unreadable instead
         // of letting it masquerade as an absence.
         appeared = true;
-        let mut tokens = line[head_len..].split_whitespace();
+        let rest = &line[head_len..];
+        // The value has to be SEPARATED from the head. A bare name already
+        // cannot reach here unseparated — `x0` is a different metric, not this
+        // one — but a label block ends the name unambiguously, so `x{p="0"}0`
+        // IS this metric with its value jammed against the brace. Tokenizing
+        // that would read the jammed digits as a sample, turning one corrupt
+        // line into an observed zero: a value manufactured from no evidence,
+        // landing on the most reassuring reading in the set. The line appeared,
+        // so it counts as a malformed sample rather than as an absence.
+        let separated = rest.is_empty() || rest.starts_with(char::is_whitespace);
+        let mut tokens = rest.split_whitespace();
         let value = match (tokens.next(), tokens.next(), tokens.next()) {
+            _ if !separated => None,
             // `name{labels} value`.
             (Some(value), None, _) => read_gauge_value(value),
             // `name{labels} value timestamp`: the timestamp is IGNORED, never
@@ -4519,6 +4530,38 @@ topgun_x{a=\"3\"} NaN
             GaugeReading::Unreadable {
                 malformed_samples: 3
             }
+        );
+    }
+
+    #[test]
+    fn a_value_jammed_against_the_label_block_is_malformed_not_an_observed_zero() {
+        // A label block ends the name unambiguously, so this IS the metric —
+        // with its value jammed against the closing brace. Reading the jammed
+        // digits would manufacture an observed value from a corrupt line, and
+        // for the qualifier an observed ZERO is the most reassuring reading in
+        // the whole set, reachable here from no evidence at all.
+        for body in ["topgun_x{p=\"0\"}0\n", "topgun_x{p=\"0\"}9\n"] {
+            assert_eq!(
+                parse_labelled_gauge(body, GRAMMAR_METRIC),
+                GaugeReading::Unreadable {
+                    malformed_samples: 1
+                },
+                "jammed body {body:?} must not read a value"
+            );
+        }
+        // A separated value on the same shape of line still reads, so the rule
+        // rejects the jamming and not the label block.
+        let GaugeReading::Read(gauge) =
+            parse_labelled_gauge("topgun_x{p=\"0\"} 9\n", GRAMMAR_METRIC)
+        else {
+            panic!("a separated labelled sample must still read");
+        };
+        assert_eq!(gauge.max, 9);
+        // A bare name jammed against digits is a DIFFERENT metric, so it stays
+        // an absence — the two rules are distinct and both are asserted.
+        assert_eq!(
+            parse_labelled_gauge("topgun_x0 5\n", GRAMMAR_METRIC),
+            GaugeReading::Absent
         );
     }
 
