@@ -1793,3 +1793,447 @@ recorded in this post-section's header — it still reproduces, so no frozen byt
 ```
 frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
 ```
+
+<!-- BATCH-5 BEGIN -->
+
+---
+
+## Batch 5 — `SPEC-363` completion record
+
+Appended by `SPEC-363` after all three re-witness arms ran and were committed. This batch
+**APPENDS**: §0–§8 gain and lose zero bytes, no existing post-section entry — Batch 4's included —
+is edited, and every line of it sits below the `## POST-SECTION (append-only)` marker.
+
+`Batch 4` was the pre-registration; this is the report against it. Nothing here retunes anything
+`Batch 4` fixed before the data.
+
+### 1. The completion record — three arms, in the pre-registered order
+
+All three ran at ≤ 900 s, in the order `Batch 4` fixed, with the full 7-artifact set per arm
+committed (21 artifacts). No fourth arm, no combined-budget allowance, no 4 h cell. No arm was
+re-run.
+
+```
+#  arm                   directive  crash  live   commit    exit  verdict
+1  spec363-logctl-off    UNSET      0      0      522dff68  0     RESULT: instrument sound
+2  spec363-logctl-on     ARMED      0      0      a1134e1d  1     RESULT: instrument sound
+3  spec363-crashctl      ARMED      300    300    f3e01be8  0     RESULT: instrument sound
+```
+
+`finishedReason`, verbatim from each arm's `*.soak.json`:
+
+```
+1  logctl-off  duration reached
+2  logctl-on   tombstone-byte growth slope 852.8 bytes/h exceeds 512.0 bytes/h: tombstone-byte
+               growth slope 852.8 bytes/h exceeds 512.0 bytes/h (total growth 44022 bytes over
+               180 samples, last-half window 445s)
+3  crashctl    duration reached
+```
+
+**Arm 2's non-zero exit is the pre-existing SHIPPED tombstone byte-slope hard gate firing on
+uncontrolled ≤ 900 s physics**, exactly as it did on two `spec362-*` arms. It is attributed, never
+re-run, and **nothing this spec added contributes to it**: the gate reads the corpus-scan tombstone
+samples alone, and `parse_tombstone_bytes_gauge` and the tombstone-sample fold are byte-unchanged
+under this pin. The verdict line each arm prints — `RESULT: instrument sound` — is about the
+INSTRUMENT, which is the only thing these arms witness.
+
+**The arming witness (§6.3), closed two-directionally on the arms themselves:**
+
+```
+1  logctl-off (UNSET)  matched  0
+2  logctl-on  (ARMED)  matched 30   unparsed 0   dropped 0
+3  crashctl   (ARMED)  matched 28   unparsed 0   dropped 0
+```
+
+**The live-copy row count on `crashctl` is 2** — the *expected* cell of `Batch 4`'s pre-registered
+2 / 1 / 0 scale, i.e. the nominal 900 s / 300 s schedule with neither live copy consumed by a crash
+window. Goal-Backward truth 5 is therefore **witnessed on a committed artifact**, not fallen back to
+the by-construction reading, and the zero-row finding `Batch 4` pre-registered **did not have to be
+filed**.
+
+### 2. The shape sets, under §6.5's caveat carried VERBATIM
+
+**The frozen §6.5 caveat, quoted verbatim and stated WITH the data rather than after it:**
+
+> The controls carry a **real** load and therefore real growth, so a `MonotoneRising` or a
+> `PlateauNotMet` observed on a control arm is **NOT per se a false positive** and may not be quoted
+> as one.
+
+**This spec concludes NOTHING about the plateau.** Every verdict in this batch is about the
+**INSTRUMENT**. The rows below are recorded because §6.5 obliges the shape set for all three arms,
+not because any of them is read as evidence for or against a plateau.
+
+```
+arm          DurableReading    rss_kib          redb_bytes       wal_bytes            wal_segment_files
+logctl-off   PLATEAU_NOT_MET   MONOTONE_RISING  MONOTONE_RISING  LEVELLED             RISING_DECELERATING
+logctl-on    PLATEAU_NOT_MET   MONOTONE_RISING  MONOTONE_RISING  LEVELLED             MONOTONE_RISING
+crashctl     PLATEAU_NOT_MET   MONOTONE_RISING  MONOTONE_RISING  MONOTONE_RISING      MONOTONE_RISING
+
+firing envelope, per series
+logctl-off   rss_kib BOTH   redb_bytes PEAKS   wal_bytes (none)  wal_segment_files (none)
+logctl-on    rss_kib BOTH   redb_bytes PEAKS   wal_bytes (none)  wal_segment_files BOTH
+crashctl     rss_kib BOTH   redb_bytes PEAKS   wal_bytes FLOOR   wal_segment_files FLOOR
+```
+
+All three arms read `PLATEAU_NOT_MET` with `rss_kib` `MONOTONE_RISING` and its firing envelope
+**BOTH**. Under the caveat above, that is not per se a false positive and is not quoted as one.
+
+### 3. `AC23` — the order-confound data point (a SECOND observation, never a correction)
+
+`Batch 4` adopted the reversed order — UNSET first this time — and pre-registered the disposition
+before the data. The numbers, both taken off the **single 5 s durable channel** §6.2 names: the
+`rss_kib` row of each arm's `*.soak.durable.json`, fields `lastHalfPeak` / `lastHalfMean`. **Neither
+number is taken from the 60 s CSV `rss_mb` column.**
+
+```
+run order: logctl-off FIRST, logctl-on SECOND   (reversed vs. the committed pair)
+
+logctl-on  (ARMED):  lastHalfPeak 890896 KiB   lastHalfMean 609606 KiB
+logctl-off (UNSET):  lastHalfPeak 845040 KiB   lastHalfMean 573885 KiB
+difference:          peak +5.43 %              mean +6.22 %    (ARMED higher on both)
+SPEC-355 recorded run-to-run spread: 5.4 %  ⇒  AT OR ABOVE
+```
+
+**Disposition, exactly as pre-registered in `Batch 4`: a difference at or above the 5.4 % spread is
+a RECORDED FINDING routed to `TODO-634` by id** (item (vi) of §9 below) — **never** grounds for
+retuning the departure until the control passes. **No arm was re-run.**
+
+**This is a second data point on the order confound. It is NOT a correction, NOT a refutation and
+NOT a confirmation of the committed `+25.10 %` peak / `+19.22 %` mean, which stand exactly as
+recorded in `P2` and are not retired, amended or re-labelled by anything here.** The two pairs were
+taken on different instruments under different pins and in opposite orders; per `Batch 4`, **if the
+two pairs disagree, both stand.** They do not disagree in *sign* — ARMED is higher on both statistics
+in both pairs — and the magnitude is not compared across pins, because cross-pin comparability of the
+ARMS was never promised.
+
+The two frozen §6.2 caveats travel with this data point, quoted verbatim:
+
+> With n = 1 per arm this control has **no** inferential power against a small perturbation; it can
+> only surface a gross one.
+
+> These controls bound only a **SHIFT IN THE LEVEL** of RSS, not a **DISTORTION OF THE GROWTH SHAPE**.
+> A log sink's allocator behaviour over 4 h is not observable in a ≤ 900 s arm, so a departure that
+> leaves the level alone while bending the slope would pass this control unseen.
+
+Both are named as accepted residuals, not argued away.
+
+### 4. The crash double witness (`AC21`)
+
+`spec363-crashctl` carries **2** `CHECKPOINT` census records (`elapsedSecs` 303.02 and 603.03),
+root-level `restarts` = **2**, and a root-level `originReading` of `INDETERMINATE_INSTRUMENT` whose
+`originReason` reads, verbatim:
+
+```
+the server restarted 2 time(s) during the run, so the epochs_exited qualifier reset and would be
+misread
+```
+
+The restart branch — one of the two branches §6.4 says are otherwise never executed anywhere in this
+family — is therefore executed and witnessed under the new pin. **Recorded honestly about shape:**
+the reading and its reason are ROOT-level fields of the durable report, not per-census-row fields; a
+`CensusRow` carries no `originReading` key under either pin. The three conjuncts of `AC21` are
+satisfied as: ≥ 1 `CHECKPOINT` census record present (2), root `originReading` =
+`INDETERMINATE_INSTRUMENT` with the restart named in the reason, and root `restarts` > 0.
+
+**The absent-qualifier guard did NOT fire on any arm** (`AC22`): `epochsExitedAbsence` is explicit
+`null` on all three and `epochsExited` is a number on all three (10 / 29 / 30). `crashctl`'s
+`INDETERMINATE_INSTRUMENT` comes from the **restart** branch, which sits far above the guard and
+consumes no qualifier value. **There is nothing to route from `AC22`.**
+
+### 5. The `Batch 4` commit SHA (`AC17`) and the link-verification record (`AC29a`)
+
+**The `Batch 4` commit is `d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e`.** It is RECORDED here rather
+than derived, because `git log -1 --format=%H -- <this manifest>` resolves, by the time any check
+runs, to **Batch 5's own commit** — a resolver that silently answers the wrong question. (Confirmed:
+before this append that command returned exactly `d4ada54f…`; after it, it returns Batch 5's commit.)
+
+**Link 3 — pre-registration strictly precedes the evidence. VERIFIED.**
+
+```
+git merge-base --is-ancestor d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e 522dff68   ⇒ exit 0
+```
+
+`522dff68` is the commit that added the first `spec363-*` **artifact** set (`logctl-off`, 7 files).
+
+**A scoping defect in Validation item 7's literal command, recorded rather than smoothed over.** As
+pinned, item 7 resolves the right-hand operand with
+
+```
+git log --diff-filter=A --format=%H -- 'packages/server-rust/benches/soak_harness/evidence/spec363-*' | tail -1
+```
+
+which returns **`4bc51b92`** — the commit that added the **runner** `spec363-durable.sh`, not an
+artifact. The runner was committed *before* `Batch 4` (it is the thing `Batch 4` pre-registers the
+use of), so against that operand `--is-ancestor` exits **1**. Scoped to the artifacts proper —
+
+```
+git log --diff-filter=A --format=%H -- '…/evidence/spec363-*.soak*' '…/evidence/spec363-*.matrix.txt' \
+    '…/evidence/spec363-*.csv' | tail -1     ⇒ 522dff68,  --is-ancestor exit 0
+```
+
+— it exits **0**. `AC17`'s substance is *"the Batch-4 commit strictly precedes the first spec363
+**artifact** commit"*, and that holds. The over-broad glob is a defect of the checklist command, not
+of the pre-registration order, and it is exactly the class the checklist preamble names: a validation
+command that answers a question adjacent to the one asked. It is recorded here; it changes no
+verdict.
+
+**Link 1 — the `Option` chain, hop by hop. VERIFIED against the merged code.**
+
+```
+hop 1  parse → GaugeReading            monitor.rs:2045   Absent | Unreadable{n} | Read(LabelledGauge)
+                                                          absence is a VARIANT, not a zero
+hop 2  GaugeReading → GaugeObservation monitor.rs:2164   record(): Absent ⇒ None, Unreadable ⇒ None,
+                                                          Read ⇒ Some(max|sum). The only counter site.
+hop 3  many scrapes → one value        main.rs:1720      fold_scrape_into(): a scrape that read nothing
+                                                          leaves value untouched; a column no scrape
+                                                          ever read stays None.
+hop 4  observation → aggregate         main.rs:2793      epochs_exited.value passed as Option<u64>;
+                                                          no stand-in supplied at the hop.
+hop 5  aggregate → classifier          monitor.rs:1979   `let Some(epochs_exited) = … else { return
+                                                          IndeterminateInstrument }` — DESTRUCTURED,
+                                                          never compared as an Option.
+hop 6  classifier → OriginReport       main.rs:2581      epochs_exited: Option<u64>, NO
+                                                          skip_serializing_if ⇒ explicit null;
+                                                          epochs_exited_absence beside it.
+```
+
+The **ordered-comparison** hazard — `Option<u64>` compared against `Some(0)`, where `None < Some(_)`
+compiles and silently means −∞, coinciding with the frozen `NotObservedAtHead` branch — is refused by
+construction at hop 5 and is named in the code's own WHY-comment. Greps over the **whole**
+`<base>..HEAD` `.rs` diff, added lines only:
+
+```
+unwrap_or(0)  0    unwrap_or_default  0    unwrap_or(&0)  0    unwrap_or (any)  0
+map_or(false  0    is_some_and        0    matches!       0    ..Default::default()  0
+serde(default) 0   filter_map         0    flatten        0
+Option ordered against Some(_):  0   ( `Some(0) =>` / `Some(_) =>` occurrences in the diff are
+                                       EQUALITY patterns in the 24-cell enumeration test and in the
+                                       absence-token match, not ordered comparisons )
+```
+
+No atomic on this path is seeded at `0` and read as a value: `aggregate_origin_lines` is fed
+`epochs_exited.value` (an `Option`) from the scrape fold, not an `AtomicU64` load; no `AtomicU64` in
+`main.rs` reaches it. The two `skip_serializing_if` attributes in `main.rs` sit on `firing_envelope`
+and `origin_reason` and are pre-existing — neither is on this path.
+
+**Link 2 — one strip, at the capture boundary, panic watch on the RAW line. VERIFIED.**
+
+```
+strip_ansi definition        process.rs:598  (pub)
+strip_ansi call sites, prod  process.rs:108  — exactly ONE, inside OriginCapture::record_line
+grep -c strip_ansi main.rs   0               (also 0 in monitor.rs, report.rs, model.rs, client.rs)
+record_line order            let normalized = strip_ansi(line);  THEN  normalized.contains(TARGET)
+                             — strip precedes match; the RETAINED line is `normalized`, ANSI-free
+panic watch input            spawn_line_reader (process.rs:537-538):
+                               panic_watch.record_line(&line);      ← RAW, byte-identical
+                               origin_capture.record_line(&line);   ← strips internally
+```
+
+One strip per line, at the capture boundary; the panic watch's input is unchanged.
+
+**All three links verify.** None was asserted; each was traced against the merged code.
+
+### 6. `AC24` — the new artifacts are commit-pinned
+
+Each `spec363-*.matrix.txt` records the soak binary's build commit and asserts a clean `.rs` working
+tree at build time:
+
+```
+spec363-logctl-off   soak binary commit d4ada54f…   .rs working tree: CLEAN (asserted before the build)
+spec363-logctl-on    soak binary commit 522dff68…   .rs working tree: CLEAN (asserted before the build)
+spec363-crashctl     soak binary commit a1134e1d…   .rs working tree: CLEAN (asserted before the build)
+```
+
+The three commits differ because HEAD advanced as each arm's artifacts were committed; **all three
+are `.rs`-identical** — `git diff cac4814d..HEAD -- '*.rs'` is empty, so no `.rs` byte moved between
+the first and the third build. That is what makes the three arms witnesses of **one** instrument.
+
+**This closes manifest `P6` item 10 — control-artifact binary provenance is not commit-pinned — FOR
+THESE ARTIFACTS ONLY.** The `spec362-*` artifacts' provenance weakness is untouched by this spec and
+**stays routed** exactly as `P6` records it. Closing it here is a statement about the `spec363-*` set
+and nothing else.
+
+### 7. `AC29b` — the `Default` departure, recorded rather than silent
+
+`OriginReport` derives **no** `Default`, which departs from the PROJECT.md Auditor-Checklist item that
+asks report structs to. The reason, recorded here so the departure is not silent: no serialized report
+mirror in this harness derives `Default`; `OriginReport` has a **single** construction site; and it is
+a **mirror of an already-computed reading, not a wire payload** that a peer might need to
+default-construct. A `Default` on it would additionally manufacture exactly the artefact this spec
+exists to remove — an `epochs_exited` of `None`-or-`0` produced by no scrape at all.
+
+### 8. Digests
+
+**Frozen §0–§8, RE-VERIFIED at the moment of this append** with the pinned one-liner recorded in this
+post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
+
+**Batches 1–4 all still reproduce, byte-unchanged.** This batch corrects none of them and edits none
+of them:
+
+```
+batch-1          575bd28e76380b8501561abe050b62b865ae7bed3dcd8f8279f8a3febf5eca3d
+batch-2          467a9d80c06eec02a061c712a35b16a70ffef5791d0c9596805f4ac22ca7d38f
+batch-3          a8a0ab833ada09a529aeb630aa5a666c572fc158763ca93fd302bca076d04ad3
+batch-4          7d521a3091e2ce1e6c792535279a98f39d285427b752f07eeb7ae4649f2efab7
+```
+
+### 9. Routing — BY IDENTIFIER ONLY
+
+**No tracker file is created, edited or deleted by this batch.** All six route to **`TODO-634`** by
+id.
+
+1. **`TODO-634` ← (i) the gate-feeding parser retains the grammar this spec just declared unsafe.**
+   `parse_tombstone_bytes_gauge` (`main.rs`) is the **ONLY** gauge parser feeding a **gate**, and it
+   keeps the grammar `parse_labelled_gauge` was fixed away from. Measured on a verbatim replica of
+   its body: `NaN` → `Some(0)`, `-5` → `Some(0)`, `+Inf` → `Some(u64::MAX)`, `1.5e3` → `Some(1500)`,
+   `12.7` → `Some(12)`; a value-less matching line returns `None` from the **whole function**.
+   **`NaN → 0` and `-5 → 0` are FAIL-OPEN on a gate input.** It was **deliberately NOT fixed** under
+   this pin: `AC4` requires the function byte-unchanged, `R10` requires gate-input value-identity,
+   and `C7` is report-only — **changing a gate's input under a re-pin is precisely what the freeze
+   forbids.** Per **`R13`**, this is a **NEW defect class on a DIFFERENT function** — the **gate**
+   path, not the scrape/census layer this spec closes — so it is **not a regression of this spec**,
+   and it is the kind of thing that **would justify its own spec** rather than a sixth re-pin of this
+   layer.
+2. **`TODO-634` ← (ii) transport-failure conflation.** A failed scrape returns early, so no counter
+   moves; an artifact can therefore read `epochsExitedAbsence == "ABSENT"` alongside
+   `epochsExitedScrapesTotal == 0`, conflating *"never scraped"* with *"metric absent"*. It is
+   **diagnosable from the artifact** because `AC12a` makes `scrapes_total` observable — **mitigated,
+   not cured.**
+3. **`TODO-634` ← (iii) mixed-run token precedence.** When some scrapes are unreadable and others
+   absent, the rendered token collapses to `UNREADABLE`, so **absences are always the hidden side**.
+   Both counts remain first-class per `AC12a`, and `AC12`'s contract is about the **closed token
+   set**, not about mixed-run precedence — so this is a gap beside `AC12`, not a failure of it.
+4. **`TODO-634` ← (iv) per-key `HashSet` allocation perturbs the measured machine.**
+   `distinct_count_within_key` allocates a set per key, and the harness shares cores with the server
+   under measurement — marginally widening the very copy windows this change adds a field to report.
+   Value-identity with the quadratic oracle is intact (`AC9`), so this is **perturbation, not
+   correctness.**
+5. **`TODO-634` ← (v) `writebehindLagScrapesAbsent` is non-zero on every arm.**
+   ```
+   logctl-off   2 absent of 180 scrapes    logctl-on   2 absent of 180    crashctl   6 absent of 173
+   ```
+   **This is the ABSENT counter — not malformed, not overflowed.** All four
+   `…MalformedSamples` / `…OverflowedSamples` counters are **`0` on all three arms**, the scrape
+   identity `read + absent + unreadable == total` holds **exactly** on both columns on all three arms,
+   and **no routing rule was triggered**: `AC22`'s guard did not fire, `AC12a`'s identity did not
+   fail, and item 6's four-counter clause is satisfied. It is recorded because it is exactly the
+   signal the twelve counters were added to make visible, and an unexplained non-zero absence on a
+   clean run should not pass unremarked.
+   **Judgement, stated plainly: the `crashctl` 6 / 173 is FULLY EXPLAINED and needs no routing** — its
+   two deliberate `kill -9` / restart windows are intervals in which `/metrics` is simply
+   unavailable, and 6 scrapes is the right order of magnitude for two restarts at this scrape rate.
+   **The identical 2 / 180 on two independent, crash-free arms is NOT fully explained and IS
+   routed.** Identical counts across two separate runs are structural, not noise; the most plausible
+   mechanism is that `topgun_writebehind_lag` is not yet exported during the first scrapes after
+   start, which would make the absence a **startup-window artefact of the exporter rather than of the
+   harness** — but that is a hypothesis, and this spec measured it on neither side. Routed as: *is
+   the leading 2-scrape absence a pre-export startup window, and if so should the harness distinguish
+   a pre-export absence from a mid-run one?*
+6. **`TODO-634` ← (vi) the reversed-order pricing pair is AT OR ABOVE the 5.4 % spread.** Peak
+   **+5.43 %**, mean **+6.22 %**, ARMED higher on both (§3 above). Routed by id per `Batch 4`'s
+   pre-registered disposition. **Recorded, not retuned; and explicitly not a correction of the
+   committed `+25.10 %`.**
+
+**A Delta gap, recorded so the ledger is honest.** The implementation added a **`pub enum GaugeFold
+{ Max, Sum }`** that the spec's Delta did not list — an unledgered addition at the time it landed,
+since recorded in the spec itself by a concurrent agent. It sits in `monitor.rs`, **counted file 1**,
+so **the cap is unmoved: the counted ledger stands at 3 / 5 `.rs` files with ZERO PROJECT.md
+exemption shapes claimed.**
+
+### 10. The `/xreview` record (`AC29`)
+
+`/xreview` was run post-implementation on the full diff, scoped to the three counted `.rs` files,
+with `R9` (report-only) as its stated rule.
+
+- **`R9` report-only was independently CONFIRMED.** `passed` is bound once, immutably, before the
+  durable block begins; no value derived from any of the eleven types `R9` names reaches `passed` or
+  the process exit code.
+- **One finding was a real fail-open regression, and it was FIXED in `cac4814d`.** A value jammed
+  against a label block — `topgun_x{p="0"}0` — had the digits inside the label block read as a
+  sample. Measured across the three states: **pre-change `None`; post-change-pre-fix
+  `Read(max: 0)`; post-fix `Unreadable { malformed_samples: 1 }`.** The middle state is the
+  fail-open one — a fabricated zero where the pre-change code at least declined to answer — and the
+  post-fix state is the fail-closed reading this spec's whole grammar exists to produce.
+- **The remaining findings are routed above by id**, in §9. None was rejected silently.
+
+### 11. Validation items 4–7, as executed against the committed arms
+
+```
+item 4   epochsExited / epochsExitedAbsence / originReading, ROOT level
+         crashctl    {"epochsExited":10,"epochsExitedAbsence":null,"originReading":"INDETERMINATE_INSTRUMENT"}
+         logctl-off  {"epochsExited":29,"epochsExitedAbsence":null,"originReading":"INDETERMINATE_INSTRUMENT"}
+         logctl-on   {"epochsExited":30,"epochsExitedAbsence":null,"originReading":"NOT_REACHED_EQUAL_REFS"}
+         ⇒ three objects, each epochsExited a NUMBER and epochsExitedAbsence null (AC22);
+           crashctl INDETERMINATE_INSTRUMENT (AC21).  logctl-off's INDETERMINATE_INSTRUMENT is the
+           frozen `!armed` branch — the UNSET arm, byte-unchanged, exactly as before.
+item 4a  spec362-crashctl (READ-ONLY): .originReading → "INDETERMINATE_INSTRUMENT";
+         .origin.originReading → null.  The nested path is silent, as recorded.
+item 5   AC10 ordering on crashctl → prints `true`, exit 0.  Census set, in order:
+           LIVE_COPY   300.0016 → 300.1767
+           CHECKPOINT  303.0227 → 303.0930
+           LIVE_COPY   600.1840 → 600.3403
+           CHECKPOINT  603.0326 → 603.1081
+           TERMINAL    900.2754 → null
+         2 CHECKPOINT + 2 LIVE_COPY + 1 TERMINAL = 5 rows; every copy row non-null and
+         copyCompletedSecs >= elapsedSecs; TERMINAL explicit null; elapsedSecs == sort.
+         The LIVE_COPY rows are the ones produced by the producer L2 was sited at.
+         FENCE (AC4):  spec363-crashctl.soak.json → {"a":3,"f":0} — byte-identical to the
+         live-DISARMED spec362-crashctl.soak.json. Arming the live sampler moved the gate's
+         tally by exactly zero.
+         logctl arms, explicit-null rendering ONLY, NOT ordering evidence:
+           logctl-off  [{"source":"TERMINAL","copyCompletedSecs":null}]
+           logctl-on   [{"source":"TERMINAL","copyCompletedSecs":null}]
+item 5a  spec362-* (READ-ONLY): censuses length 3 / 1 / 1; crashctl first row CHECKPOINT at
+         303.016822792, last row TERMINAL at 901.216274042, LIVE_COPY count 0;
+         fence {"a":3,"f":0}.  spec363-crashctl's length is 5 = 3 + 2 live rows, as expected.
+item 6   twelve counters, per arm (crashctl / logctl-off / logctl-on):
+           writebehindLagMax              10826 / 10895 / 11369      (all numbers)
+           writebehindLagScrapesTotal       173 /   180 /   180
+           writebehindLagScrapesRead        167 /   178 /   178
+           writebehindLagScrapesAbsent        6 /     2 /     2
+           writebehindLagScrapesUnreadable    0 /     0 /     0
+           writebehindLagMalformedSamples     0 /     0 /     0
+           writebehindLagOverflowedSamples    0 /     0 /     0
+           epochsExitedScrapesTotal         173 /   180 /   180
+           epochsExitedScrapesRead          173 /   180 /   180
+           epochsExitedScrapesAbsent          0 /     0 /     0
+           epochsExitedScrapesUnreadable      0 /     0 /     0
+           epochsExitedMalformedSamples       0 /     0 /     0
+           epochsExitedOverflowedSamples      0 /     0 /     0
+         Every key present and integer on every arm; all four malformed/overflowed counters 0.
+         No arm's `sum` is a saturation marker.
+         identity → `true` on each of the three arms, exit 0.
+item 6a  spec362-crashctl (READ-ONLY): .writebehindLagMax → 51023. The key keeps that name,
+         its Option<u64> type and its explicit-null treatment under the new pin.
+item 7   git merge-base --is-ancestor d4ada54f… 522dff68  ⇒ exit 0.
+         The literal command's over-broad glob resolves to the runner commit 4bc51b92 and exits 1;
+         see §5 above, where that is recorded as a checklist-scoping defect that changes no verdict.
+```
+
+**No `spec362-*` artifact was edited, deleted or re-run.** Items 4a, 5a and 6a are **reads**.
+
+<!-- BATCH-5 END -->
+
+**Digest of Batch 5.** Same convention as Batches 1–4: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-5 BEGIN -->$/{p=1;next} /^<!-- BATCH-5 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-5          17c066fe64ee2bb4401fc2fc1c533da8e6d6e60c3040f18262d61ad49726bde2
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
