@@ -1467,6 +1467,7 @@ async fn run_soak(config: &Config) -> i32 {
     // report already is, because adding a field to `SoakReport` would cascade
     // into the struct literal the WAL-census integration target builds.
     if let Some(durable_report) = &durable_report {
+        assert_scrape_counter_identity(durable_report);
         print_durable_reading_report(durable_report);
         if let Some(path) = &config.json_output {
             let durable_path = path.with_extension("durable.json");
@@ -2873,6 +2874,57 @@ fn build_durable_reading_report(
         },
     };
     (reading, report)
+}
+
+/// Check, at the moment the reading becomes an artifact, that each observed
+/// column's scrape counters still add up: `read + absent + unreadable == total`.
+///
+/// A hard `assert!`, deliberately NOT a `debug_assert!`: every arm this harness
+/// runs is a release build, so a debug assertion here would be a check that
+/// never once executed in the use it was written for. It is sited at emission
+/// rather than at the fold because this is the last point before the numbers
+/// leave the process — a console line and a JSON file — and an artifact whose
+/// own counters disagree is not evidence of anything, so producing one silently
+/// is worse than failing loudly.
+///
+/// The identity is a real constraint rather than a restatement of subtraction
+/// only because `read` is recorded on the `Read` arm instead of being computed
+/// as `total - absent - unreadable`; a dropped increment anywhere in the fold
+/// therefore surfaces here. The two sample-scoped counters are not terms in it:
+/// they count samples, not scrapes.
+///
+/// This decides NOTHING about the run. It cannot turn a failing run into a
+/// passing one or the reverse — no counter reaches the verdict or the exit
+/// code — it fires only when the harness's own bookkeeping is inconsistent.
+fn assert_scrape_counter_identity(r: &DurableReadingReport) {
+    let epochs_parts = r
+        .origin
+        .epochs_exited_scrapes_read
+        .saturating_add(r.origin.epochs_exited_scrapes_absent)
+        .saturating_add(r.origin.epochs_exited_scrapes_unreadable);
+    assert!(
+        epochs_parts == r.origin.epochs_exited_scrapes_total,
+        "exited-epoch scrape counters disagree: read {} + absent {} + unreadable {} = {} != total {}",
+        r.origin.epochs_exited_scrapes_read,
+        r.origin.epochs_exited_scrapes_absent,
+        r.origin.epochs_exited_scrapes_unreadable,
+        epochs_parts,
+        r.origin.epochs_exited_scrapes_total
+    );
+
+    let lag_parts = r
+        .writebehind_lag_scrapes_read
+        .saturating_add(r.writebehind_lag_scrapes_absent)
+        .saturating_add(r.writebehind_lag_scrapes_unreadable);
+    assert!(
+        lag_parts == r.writebehind_lag_scrapes_total,
+        "write-behind-lag scrape counters disagree: read {} + absent {} + unreadable {} = {} != total {}",
+        r.writebehind_lag_scrapes_read,
+        r.writebehind_lag_scrapes_absent,
+        r.writebehind_lag_scrapes_unreadable,
+        lag_parts,
+        r.writebehind_lag_scrapes_total
+    );
 }
 
 /// Render the durable-layer reading to the console.
