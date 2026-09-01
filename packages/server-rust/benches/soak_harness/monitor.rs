@@ -4141,6 +4141,379 @@ other_gauge 7
         assert_eq!(bare.sum, 7);
     }
 
+    // ---------------------------------------------------------------------
+    // The pinned sample grammar
+    //
+    // The two ORACLES below each carry the PRE-CHANGE body of
+    // `parse_labelled_gauge` inlined verbatim, ending in the fold the two
+    // production call sites used to take. They are written out as named
+    // functions rather than as `parse_labelled_gauge(body, m).map(|g| ...)`
+    // because that expression no longer compiles: the reading is an enum now
+    // and an enum has no `.map`. An assertion has to be code that compiles
+    // after the change it audits.
+    // ---------------------------------------------------------------------
+
+    /// The pre-change `.map(|g| g.sum)` fold, verbatim.
+    fn oracle_sum(body: &str, metric: &str) -> Option<u64> {
+        let mut seen = false;
+        let mut gauge = LabelledGauge::default();
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((head, raw_value)) = line.rsplit_once(char::is_whitespace) else {
+                continue;
+            };
+            let head = head.trim();
+            let matches = head == metric
+                || (head.starts_with(metric) && head[metric.len()..].starts_with('{'));
+            if !matches {
+                continue;
+            }
+            let value: u64 = match raw_value.trim().parse::<u64>() {
+                Ok(v) => v,
+                Err(_) => match raw_value.trim().split_once('.') {
+                    Some((whole, _)) => match whole.parse::<u64>() {
+                        Ok(v) => v,
+                        Err(_) => return None,
+                    },
+                    None => continue,
+                },
+            };
+            seen = true;
+            gauge.max = gauge.max.max(value);
+            gauge.sum = gauge.sum.saturating_add(value);
+        }
+        if seen {
+            Some(gauge.sum)
+        } else {
+            None
+        }
+    }
+
+    /// The pre-change `.map(|g| g.max)` fold, verbatim.
+    fn oracle_max(body: &str, metric: &str) -> Option<u64> {
+        let mut seen = false;
+        let mut gauge = LabelledGauge::default();
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((head, raw_value)) = line.rsplit_once(char::is_whitespace) else {
+                continue;
+            };
+            let head = head.trim();
+            let matches = head == metric
+                || (head.starts_with(metric) && head[metric.len()..].starts_with('{'));
+            if !matches {
+                continue;
+            }
+            let value: u64 = match raw_value.trim().parse::<u64>() {
+                Ok(v) => v,
+                Err(_) => match raw_value.trim().split_once('.') {
+                    Some((whole, _)) => match whole.parse::<u64>() {
+                        Ok(v) => v,
+                        Err(_) => return None,
+                    },
+                    None => continue,
+                },
+            };
+            seen = true;
+            gauge.max = gauge.max.max(value);
+            gauge.sum = gauge.sum.saturating_add(value);
+        }
+        if seen {
+            Some(gauge.max)
+        } else {
+            None
+        }
+    }
+
+    /// The metric every grammar test below reads.
+    const GRAMMAR_METRIC: &str = "topgun_x";
+
+    /// The reading of `body` as the summed column observes it, taken through
+    /// the counter choke point so the observation under test is the one the
+    /// artifact will carry.
+    fn summed_observation(body: &str) -> Option<u64> {
+        let mut observation = GaugeObservation::default();
+        // `sum` across label sets: this is a total, and an unlabelled series
+        // sums to its own single value.
+        observation.record(&parse_labelled_gauge(body, GRAMMAR_METRIC), GaugeFold::Sum)
+    }
+
+    /// The reading of `body` as the max column observes it, taken through the
+    /// same choke point.
+    fn maxed_observation(body: &str) -> Option<u64> {
+        let mut observation = GaugeObservation::default();
+        // `max` across label sets: the lag is per-partition, and the
+        // observation this column carries is how far the WORST partition fell
+        // behind.
+        observation.record(&parse_labelled_gauge(body, GRAMMAR_METRIC), GaugeFold::Max)
+    }
+
+    #[test]
+    fn a_malformed_sample_does_not_blank_a_present_metric_in_either_order() {
+        // `-5.0` is the canonical member of the trigger class the pre-change
+        // `?` fired on: a value token that contains a `.` and whose whole part
+        // fails `u64::parse`. Scientific notation is deliberately NOT used
+        // here — `1.5e3` splits to a whole part of `1`, which parses, so a
+        // test built on it passes on the unfixed code and witnesses nothing.
+        let valid_then_malformed = "\
+topgun_x{a=\"1\"} 7
+topgun_x{a=\"2\"} -5.0
+";
+        let malformed_then_valid = "\
+topgun_x{a=\"1\"} -5.0
+topgun_x{a=\"2\"} 7
+";
+
+        // FALSIFIABILITY: both bodies are ones the pre-change fold answered
+        // `None` on, so reverting the fix fails this test rather than leaving
+        // it quietly green. The abort discarded the fold that had already
+        // accumulated, which is why the valid-first order is asserted too.
+        for body in [valid_then_malformed, malformed_then_valid] {
+            assert_eq!(
+                oracle_sum(body, GRAMMAR_METRIC),
+                None,
+                "the pre-change fold must lose this body, or the test proves nothing"
+            );
+            assert_eq!(oracle_max(body, GRAMMAR_METRIC), None);
+
+            let GaugeReading::Read(gauge) = parse_labelled_gauge(body, GRAMMAR_METRIC) else {
+                panic!("a present metric with one readable sample reads");
+            };
+            assert_eq!(gauge.max, 7);
+            assert_eq!(gauge.sum, 7);
+            assert_eq!(gauge.parsed_samples, 1);
+            assert_eq!(gauge.malformed_samples, 1);
+        }
+    }
+
+    #[test]
+    fn the_numeric_grammar_reads_integers_and_counts_every_other_form_malformed() {
+        // The `N.0` exporter rendering is load-bearing and must keep reading.
+        for (body, expected) in [
+            ("topgun_x 5\n", 5),
+            ("topgun_x 5.\n", 5),
+            ("topgun_x 5.0\n", 5),
+            ("topgun_x 5.000\n", 5),
+            ("topgun_x 12.0\n", 12),
+            ("topgun_x 0\n", 0),
+        ] {
+            let GaugeReading::Read(gauge) = parse_labelled_gauge(body, GRAMMAR_METRIC) else {
+                panic!("{body:?} reads under the pinned grammar");
+            };
+            assert_eq!(gauge.max, expected, "{body:?}");
+            assert_eq!(gauge.sum, expected, "{body:?}");
+            assert_eq!(gauge.parsed_samples, 1, "{body:?}");
+            assert_eq!(gauge.malformed_samples, 0, "{body:?}");
+        }
+
+        // Everything else is COUNTED and skipped — never truncated, never
+        // folded, never silently dropped. A body whose only sample is one of
+        // these is UNREADABLE, which is a different instrument fault from an
+        // absence and from a zero.
+        for token in [
+            "1.5e3", "5e3", "12.7", "0.7", "+5", "-5", "-5.0", ".5", "abc.5", "NaN", "+Inf",
+            "-Inf", "nonsense",
+        ] {
+            let body = format!("topgun_x {token}\n");
+            assert_eq!(
+                parse_labelled_gauge(&body, GRAMMAR_METRIC),
+                GaugeReading::Unreadable {
+                    malformed_samples: 1
+                },
+                "{token} must be counted malformed, not floored and not dropped"
+            );
+        }
+
+        // The empty value token, asserted at the grammar itself: the line
+        // shapes that would carry one are the value-less heads below.
+        assert_eq!(read_gauge_value(""), None);
+
+        // Several malformed samples of the same metric accumulate rather than
+        // collapsing to the first.
+        let all_malformed = "\
+topgun_x{a=\"1\"} 0.7
+topgun_x{a=\"2\"} 1.5e3
+topgun_x{a=\"3\"} NaN
+";
+        assert_eq!(
+            parse_labelled_gauge(all_malformed, GRAMMAR_METRIC),
+            GaugeReading::Unreadable {
+                malformed_samples: 3
+            }
+        );
+    }
+
+    #[test]
+    fn a_value_less_head_line_is_unreadable_rather_than_absent() {
+        // Under the pre-change loop order this was unsatisfiable: the value was
+        // split off first, so the line was skipped before its name was ever
+        // compared and a metric that DID appear reported an absence.
+        for body in ["topgun_x\n", "topgun_x{a=\"b\"}\n"] {
+            assert_eq!(
+                parse_labelled_gauge(body, GRAMMAR_METRIC),
+                GaugeReading::Unreadable {
+                    malformed_samples: 1
+                },
+                "{body:?} names the metric, so it cannot report an absence"
+            );
+            assert_eq!(
+                oracle_sum(body, GRAMMAR_METRIC),
+                None,
+                "the pre-change fold reported an absence here"
+            );
+        }
+    }
+
+    #[test]
+    fn a_trailing_timestamp_is_never_folded_as_the_value() {
+        // Measured pre-change: the labelled form folded the epoch AS the value
+        // and the bare form lost the metric entirely. Both are asserted, and
+        // both against the literal, so a regression that re-folds the timestamp
+        // cannot pass by coincidence.
+        for body in [
+            "topgun_x{a=\"b\"} 5 1699999999\n",
+            "topgun_x 5 1699999999\n",
+        ] {
+            let reading = parse_labelled_gauge(body, GRAMMAR_METRIC);
+            assert_ne!(reading, GaugeReading::Absent, "{body:?}");
+            let GaugeReading::Read(gauge) = reading else {
+                panic!("a timestamped sample is conforming exposition and reads");
+            };
+            assert_eq!(gauge.max, 5, "{body:?}");
+            assert_eq!(gauge.sum, 5, "{body:?}");
+            assert_ne!(gauge.max, 1_699_999_999, "{body:?}");
+            assert_ne!(gauge.sum, 1_699_999_999, "{body:?}");
+            // A well-formed timestamp is IGNORED, not counted against the
+            // sample.
+            assert_eq!(gauge.parsed_samples, 1, "{body:?}");
+            assert_eq!(gauge.malformed_samples, 0, "{body:?}");
+        }
+
+        // A third token that is not a well-formed timestamp, and any fourth
+        // token, make the sample malformed.
+        for body in [
+            "topgun_x 5 abc\n",
+            "topgun_x{a=\"b\"} 5 abc\n",
+            "topgun_x 5 1699999999 7\n",
+        ] {
+            assert_eq!(
+                parse_labelled_gauge(body, GRAMMAR_METRIC),
+                GaugeReading::Unreadable {
+                    malformed_samples: 1
+                },
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sum_fold_is_checked_and_its_saturation_is_recorded() {
+        let body = format!(
+            "topgun_x{{a=\"1\"}} {}\ntopgun_x{{a=\"2\"}} {}\n",
+            u64::MAX - 1,
+            7_u64
+        );
+        let GaugeReading::Read(gauge) = parse_labelled_gauge(&body, GRAMMAR_METRIC) else {
+            panic!("both values are legible; it is the fold that cannot represent the total");
+        };
+        assert_eq!(gauge.sum, u64::MAX, "the clamp is taken");
+        assert_eq!(
+            gauge.overflowed_samples, 1,
+            "and it is RECORDED, not silent"
+        );
+        assert_eq!(
+            gauge.parsed_samples, 2,
+            "the samples still parsed — the value was legible"
+        );
+        assert_eq!(gauge.malformed_samples, 0);
+        assert_eq!(gauge.max, u64::MAX - 1, "a running max cannot overflow");
+    }
+
+    #[test]
+    fn the_two_folds_are_value_identical_on_the_grammar_valid_corpus() {
+        // CORPUS A — every sample grammar-valid under the pinned form, so the
+        // new reading must equal the pre-change fold EXACTLY. The multi-label
+        // bodies are what make the corpus able to catch a transposition: on a
+        // single-label body `max` and `sum` are the same number.
+        let corpus_a = [
+            "topgun_x{p=\"0\"} 12\ntopgun_x{p=\"1\"} 30\n",
+            "topgun_x{p=\"0\"} 5.000\ntopgun_x{p=\"1\"} 1\n",
+            "topgun_x 7\n",
+            "topgun_x 5.0\n",
+            "# HELP topgun_x help text\n# TYPE topgun_x gauge\ntopgun_x{p=\"0\"} 3\ntopgun_x_total 999\nother_gauge 7\n",
+            "other_gauge 7\n",
+        ];
+        let mut distinguishing_bodies = 0;
+        for body in corpus_a {
+            let summed = oracle_sum(body, GRAMMAR_METRIC);
+            let maxed = oracle_max(body, GRAMMAR_METRIC);
+            if summed != maxed {
+                distinguishing_bodies += 1;
+            }
+            assert_eq!(
+                summed_observation(body),
+                summed,
+                "the summed column must equal the pre-change sum fold on {body:?}"
+            );
+            assert_eq!(
+                maxed_observation(body),
+                maxed,
+                "the max column must equal the pre-change max fold on {body:?}"
+            );
+        }
+        assert!(
+            distinguishing_bodies >= 2,
+            "a corpus where max == sum everywhere cannot detect a transposition"
+        );
+
+        // CORPUS B — the PINNED divergence. The oracles are NOT consulted here:
+        // these are exactly the bodies the grammar changes on purpose, so an
+        // identity assertion would fail on the inputs this fix exists for. Each
+        // is asserted against its pinned outcome instead.
+        let unreadable = GaugeReading::Unreadable {
+            malformed_samples: 1,
+        };
+        for body in [
+            "topgun_x 12.7\n",
+            "topgun_x 0.7\n",
+            "topgun_x 1.5e3\n",
+            "topgun_x +5\n",
+            "topgun_x -5\n",
+            "topgun_x NaN\n",
+            "topgun_x +Inf\n",
+            "topgun_x -Inf\n",
+            "topgun_x\n",
+            "topgun_x{a=\"b\"}\n",
+        ] {
+            assert_eq!(
+                parse_labelled_gauge(body, GRAMMAR_METRIC),
+                unreadable,
+                "{body:?}"
+            );
+            assert_eq!(summed_observation(body), None, "{body:?}");
+            assert_eq!(maxed_observation(body), None, "{body:?}");
+        }
+        for body in [
+            "topgun_x{a=\"b\"} 5 1699999999\n",
+            "topgun_x 5 1699999999\n",
+        ] {
+            assert_eq!(summed_observation(body), Some(5), "{body:?}");
+            assert_eq!(maxed_observation(body), Some(5), "{body:?}");
+        }
+        let overflowing = format!(
+            "topgun_x{{a=\"1\"}} {}\ntopgun_x{{a=\"2\"}} 7\n",
+            u64::MAX - 1
+        );
+        assert_eq!(summed_observation(&overflowing), Some(u64::MAX));
+        assert_eq!(maxed_observation(&overflowing), Some(u64::MAX - 1));
+    }
+
     /// A scratch directory for the filesystem samplers, named from the process
     /// id and a caller-supplied tag so concurrent test binaries cannot collide.
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
