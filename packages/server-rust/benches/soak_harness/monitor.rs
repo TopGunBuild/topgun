@@ -3895,6 +3895,68 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
+    // The within-key distinct count
+    // ---------------------------------------------------------------------
+
+    /// The previous quadratic definition of [`distinct_count_within_key`],
+    /// inlined VERBATIM as the oracle.
+    ///
+    /// Inlined rather than referenced because the implementation it audits
+    /// replaced it: an oracle that called the new function would assert the
+    /// new function equals itself. This body is what shipped before, so the
+    /// comparison below is a real claim about a value, not about a shape.
+    fn quadratic_distinct_count_oracle(tags: &[&str]) -> u64 {
+        let mut distinct: u64 = 0;
+        for (index, tag) in tags.iter().enumerate() {
+            if !tags[..index].contains(tag) {
+                distinct = distinct.saturating_add(1);
+            }
+        }
+        distinct
+    }
+
+    /// The set-based count returns the SAME VALUE the quadratic one returned,
+    /// on every shape a per-key tombstone vector can take.
+    ///
+    /// This asserts value identity and nothing else. It deliberately makes no
+    /// claim about time: a timing assertion in a test suite is a flake, and the
+    /// reason for the change is a cost bound, not a number this file can
+    /// reproduce. The large case exists to exercise the collision-and-repeat
+    /// behaviour at a size the quadratic form could not have been sampled at,
+    /// not to be a benchmark.
+    #[test]
+    fn distinct_count_within_key_is_value_identical_to_the_quadratic_oracle() {
+        let owned: Vec<String> = (0..1500).map(|i| format!("tag-{}", i % 250)).collect();
+        let large: Vec<&str> = owned.iter().map(String::as_str).collect();
+
+        let cases: [(&str, Vec<&str>, u64); 6] = [
+            ("empty", vec![], 0),
+            ("single", vec!["a"], 1),
+            ("all-distinct", vec!["a", "b", "c", "d"], 4),
+            ("all-equal", vec!["a", "a", "a", "a"], 1),
+            (
+                "duplicates-interleaved",
+                vec!["a", "b", "a", "c", "b", "c", "a"],
+                3,
+            ),
+            ("large", large, 250),
+        ];
+
+        for (name, tags, expected) in cases {
+            let oracle = quadratic_distinct_count_oracle(&tags);
+            assert_eq!(
+                oracle, expected,
+                "the oracle itself must be pinned on case {name}"
+            );
+            assert_eq!(
+                distinct_count_within_key(&tags),
+                oracle,
+                "the set-based count diverged from the quadratic one on case {name}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // The origin instrument
     // ---------------------------------------------------------------------
 
@@ -4083,10 +4145,15 @@ mod tests {
 
     /// The classification's input space, enumerated: every cell of
     /// `{no lines, all-equal, some-partial, some-zero-return}` ×
-    /// `{armed, unarmed}` × `{epochs_exited 0, > 0}` maps to exactly one
-    /// variant. Both the arming and the exited-epoch axes are read from the
+    /// `{armed, unarmed}` × `{epochs_exited absent, 0, > 0}` maps to exactly
+    /// one variant. Both the arming and the exited-epoch axes are read from the
     /// aggregate's own TYPED fields — never inferred from a log line, and never
     /// from a metric literal in this file.
+    ///
+    /// The qualifier axis is THREE-valued because the qualifier itself is:
+    /// enumerating only the two present values would leave the absence — the
+    /// one input on which a defaulting read would silently produce the most
+    /// reassuring reading in the set — outside the space this test covers.
     #[test]
     fn origin_reading_enumerates_its_whole_input_space() {
         let shapes: [(&str, Vec<OriginLine>); 4] = [
@@ -4098,21 +4165,21 @@ mod tests {
                 vec![origin_line(7, 7), origin_line(0, 7)],
             ),
         ];
+        let qualifiers: [(&str, Option<u64>); 3] =
+            [("absent", None), ("zero", Some(0)), ("positive", Some(4))];
         let mut cells = 0;
         for (shape, lines) in shapes {
             for armed in [false, true] {
-                for epochs_exited in [0u64, 4] {
-                    let aggregate = origin_aggregate(lines.clone(), armed, Some(epochs_exited));
+                for (qualifier, epochs_exited) in qualifiers {
+                    let aggregate = origin_aggregate(lines.clone(), armed, epochs_exited);
                     let (reading, reason) = classify_origin_reading(&aggregate);
                     let expected = if armed {
                         match shape {
-                            "no lines" => {
-                                if epochs_exited > 0 {
-                                    OriginReading::NoLinesWhileEpochsExited
-                                } else {
-                                    OriginReading::NotObservedAtHead
-                                }
-                            }
+                            "no lines" => match epochs_exited {
+                                None => OriginReading::IndeterminateInstrument,
+                                Some(0) => OriginReading::NotObservedAtHead,
+                                Some(_) => OriginReading::NoLinesWhileEpochsExited,
+                            },
                             "all-equal" => OriginReading::NotReachedEqualRefs,
                             "some-partial" => OriginReading::PartialDivergence,
                             _ => OriginReading::ReachedInProduction,
@@ -4122,14 +4189,95 @@ mod tests {
                     };
                     assert_eq!(
                         reading, expected,
-                        "cell ({shape}, armed={armed}, epochs_exited={epochs_exited})"
+                        "cell ({shape}, armed={armed}, epochs_exited={qualifier})"
                     );
-                    assert!(reason.is_some(), "every reading names its reason");
+                    let named = reason.expect("every reading names its reason");
+                    if shape == "no lines" && armed && epochs_exited.is_none() {
+                        assert!(
+                            named.contains("epochs_exited") && named.contains("absent"),
+                            "the absent-qualifier reading must name the absent qualifier, \
+                             got {named:?}"
+                        );
+                    }
                     cells += 1;
                 }
             }
         }
-        assert_eq!(cells, 16, "the enumeration must be complete");
+        assert_eq!(cells, 24, "the enumeration must be complete");
+    }
+
+    /// The absent qualifier fails closed at the ONE branch that consumes it,
+    /// and changes nothing above that branch.
+    ///
+    /// Stated separately from the enumeration because the enumeration proves
+    /// the mapping is total, while this proves the two halves of the siting
+    /// rule: the absence reads as an instrument fault rather than as the
+    /// observed zero, and every shape that reaches an earlier branch answers
+    /// identically whether the qualifier is absent or present.
+    #[test]
+    fn absent_epochs_exited_reads_as_an_instrument_fault_and_moves_no_earlier_branch() {
+        let (reading, reason) = classify_origin_reading(&origin_aggregate(vec![], true, None));
+        assert_eq!(
+            reading,
+            OriginReading::IndeterminateInstrument,
+            "an absent qualifier is not an observed zero"
+        );
+        let named = reason.expect("the reading names its reason");
+        assert!(named.contains("epochs_exited"), "got {named:?}");
+        assert!(named.contains("absent"), "got {named:?}");
+
+        // The observed zero keeps its own, distinct reading, so the absence did
+        // not simply swallow the branch it sits in front of.
+        let (zero_reading, _) = classify_origin_reading(&origin_aggregate(vec![], true, Some(0)));
+        assert_eq!(zero_reading, OriginReading::NotObservedAtHead);
+
+        // Every shape that resolves before the guard answers identically with
+        // and without the qualifier — the minimal-siting half of the rule.
+        let earlier: [Vec<OriginLine>; 3] = [
+            vec![origin_line(7, 7), origin_line(3, 3)],
+            vec![origin_line(7, 7), origin_line(2, 7)],
+            vec![origin_line(7, 7), origin_line(0, 7)],
+        ];
+        for lines in earlier {
+            let absent = classify_origin_reading(&origin_aggregate(lines.clone(), true, None));
+            let present = classify_origin_reading(&origin_aggregate(lines, true, Some(0)));
+            assert_eq!(
+                absent, present,
+                "a branch that never consumes the qualifier must not move because it is absent"
+            );
+        }
+    }
+
+    /// The absence disposition renders a CLOSED set of typed tokens.
+    ///
+    /// Pinned so that a consumer can read the disposition by equality: the
+    /// tokens carry no prose, no punctuation and no embedded counter, and no
+    /// two variants collapse onto the same string.
+    #[test]
+    fn epochs_exited_absence_renders_a_closed_token_set() {
+        assert_eq!(EpochsExitedAbsence::Absent.as_str(), "ABSENT");
+        assert_eq!(EpochsExitedAbsence::Unreadable.as_str(), "UNREADABLE");
+
+        let variants = [EpochsExitedAbsence::Absent, EpochsExitedAbsence::Unreadable];
+        let mut rendered: Vec<&str> = variants.iter().map(|v| v.as_str()).collect();
+        for token in &rendered {
+            assert!(
+                token.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
+                "a disposition is a token, never a sentence or a counter: {token:?}"
+            );
+        }
+        rendered.sort_unstable();
+        rendered.dedup();
+        assert_eq!(
+            rendered,
+            vec!["ABSENT", "UNREADABLE"],
+            "the rendered token set is closed"
+        );
+        assert_eq!(
+            rendered.len(),
+            variants.len(),
+            "no two dispositions may render to the same token"
+        );
     }
 
     // ---------------------------------------------------------------------
