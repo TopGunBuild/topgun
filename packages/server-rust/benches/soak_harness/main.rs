@@ -121,13 +121,13 @@ use monitor::{
     fold_undecodable_key, parse_labelled_gauge, sample_disk_mb, sample_redb_bytes, sample_rss_mb,
     sample_wal_retention, slope_clause_stays_hard, BootGap, CensusRecord, CensusSource,
     CorpusLevelDisposition, CorpusSample, DiskAssessment, DiskSample, DurableCensus,
-    DurableReading, MemSample, OrVariant, OriginLine, SeriesPoint, SeriesShapeReading,
-    TombstoneAssessment, TombstoneCorpusAssessment, TombstoneSample, DECIDING_SERIES,
-    DEFAULT_DISK_CEILING_MB, DEFAULT_DISK_MIN_GROWTH_MB, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
-    DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH, DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
-    DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR, DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES,
-    DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES, DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
-    DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
+    DurableReading, GaugeReading, MemSample, OrVariant, OriginLine, SeriesPoint,
+    SeriesShapeReading, TombstoneAssessment, TombstoneCorpusAssessment, TombstoneSample,
+    DECIDING_SERIES, DEFAULT_DISK_CEILING_MB, DEFAULT_DISK_MIN_GROWTH_MB,
+    DEFAULT_DISK_THRESHOLD_MB_PER_HOUR, DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+    DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS, DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+    DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES, DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
+    DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES, DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
 };
 use or_noloss::{missing_acked_adds, OrLedger};
 use process::{resolve_server_binary, OriginCaptureSnapshot, ServerConfig, ServerSupervisor};
@@ -1678,10 +1678,21 @@ async fn scrape_tombstone_bytes(http: &reqwest::Client, port: u16) -> Option<Met
         tombstone_bytes: parse_tombstone_bytes_gauge(&body),
         // `max` across label sets: the lag is per-partition, and the observation
         // this column carries is how far the WORST partition fell behind.
-        writebehind_lag_max: parse_labelled_gauge(&body, WRITEBEHIND_LAG_METRIC).map(|g| g.max),
+        writebehind_lag_max: match parse_labelled_gauge(&body, WRITEBEHIND_LAG_METRIC) {
+            GaugeReading::Read(g) => Some(g.max),
+            // PLACEHOLDER(g1): the two no-value readings are distinct facts and
+            // are folded apart onto their own counters downstream; collapsing
+            // them here keeps this site outcome-identical in the meantime.
+            GaugeReading::Absent | GaugeReading::Unreadable { .. } => None,
+        },
         // `sum` across label sets: this is a total, and an unlabelled series
         // sums to its own single value.
-        epochs_exited_total: parse_labelled_gauge(&body, EPOCHS_EXITED_METRIC).map(|g| g.sum),
+        epochs_exited_total: match parse_labelled_gauge(&body, EPOCHS_EXITED_METRIC) {
+            GaugeReading::Read(g) => Some(g.sum),
+            // PLACEHOLDER(g1): as above — the reading is narrowed to an
+            // `Option` only until the observation fold consumes it whole.
+            GaugeReading::Absent | GaugeReading::Unreadable { .. } => None,
+        },
     })
 }
 
@@ -1810,6 +1821,10 @@ impl CorpusSampler {
         if let Some(census) = scanned {
             t.censuses.push(CensusRecord {
                 elapsed_secs,
+                // PLACEHOLDER(g1): which instant fills this is decided where the
+                // copy window is actually measured. The terminal scan takes no
+                // copy at all, so an honest value here may well stay `None`.
+                copy_completed_secs: None,
                 source: CensusSource::Terminal,
                 census,
             });
@@ -1859,6 +1874,8 @@ fn sample_durable_corpus_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
     if let Some(census) = scanned {
         t.censuses.push(CensusRecord {
             elapsed_secs,
+            // PLACEHOLDER(g1): the copy window is measured where the copy runs.
+            copy_completed_secs: None,
             source: CensusSource::Checkpoint,
             census,
         });
@@ -1900,6 +1917,8 @@ fn sample_live_census_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
     match scanned {
         Some(census) => t.censuses.push(CensusRecord {
             elapsed_secs,
+            // PLACEHOLDER(g1): the copy window is measured where the copy runs.
+            copy_completed_secs: None,
             source: CensusSource::LiveCopy,
             census,
         }),
@@ -2443,7 +2462,14 @@ struct CensusRow {
     /// own `as_str`. A `LIVE_COPY` row is taken from a smeared image of a live
     /// store file and is OBSERVATION ONLY — the token is what fences it.
     source: String,
+    /// When the census was INITIATED. Meaning unchanged, so the sort and the
+    /// nearest-record lookup keyed on it are value-identical to before.
     elapsed_secs: f64,
+    /// When the census COMPLETED — the far edge of the window a live copy is
+    /// smeared across. Disposition-bearing: it always serializes, as an
+    /// explicit null where the producer took no copy, so "this producer takes
+    /// no copy" is never confused with "this artifact predates the field".
+    copy_completed_secs: Option<f64>,
     keys_scanned: u64,
     keys_undecodable: u64,
     or_map_keys: u64,
@@ -2488,7 +2514,35 @@ struct OriginReport {
     armed: bool,
     /// The exited-epoch qualifier. Observation only: it qualifies the origin
     /// reading and never enters a plateau predicate.
-    epochs_exited: u64,
+    ///
+    /// Disposition-bearing: it always serializes, as an explicit null where no
+    /// scrape ever read the metric, because a qualifier reported as `0` when it
+    /// was in fact never observed produces the most reassuring reading this
+    /// instrument can emit off no evidence at all.
+    epochs_exited: Option<u64>,
+    /// WHY the qualifier has no value, as a TYPED token rendered through
+    /// `EpochsExitedAbsence::as_str` — `ABSENT` or `UNREADABLE`, never a
+    /// sentence — so a consumer reads the disposition by equality rather than
+    /// by substring match. Disposition-bearing, and explicitly null whenever
+    /// `epochs_exited` carries a number: exactly one of the two is populated.
+    epochs_exited_absence: Option<String>,
+    /// Scrapes that reached the exited-epoch parse.
+    epochs_exited_scrapes_total: u64,
+    /// Scrapes in which at least one sample of it read. Independently
+    /// incremented on the `Read` arm — never computed as
+    /// `total - absent - unreadable` — so the identity
+    /// `read + absent + unreadable == total` can actually fail.
+    epochs_exited_scrapes_read: u64,
+    /// Scrapes in which the metric never appeared in the body.
+    epochs_exited_scrapes_absent: u64,
+    /// Scrapes in which it appeared and nothing read.
+    epochs_exited_scrapes_unreadable: u64,
+    /// Samples counted malformed across the run. Sample-scoped: NOT a term in
+    /// the scrape identity above.
+    epochs_exited_malformed_samples: u64,
+    /// Samples whose fold into the summed column overflowed. Sample-scoped. A
+    /// non-zero value makes that column a saturation marker, not a total.
+    epochs_exited_overflowed_samples: u64,
     /// Server restarts during the run, from the recovery checkpoint and from
     /// nothing else.
     restarts: u64,
@@ -2535,6 +2589,23 @@ struct DurableReadingReport {
     /// always serializes, as an explicit null where the metric was absent from
     /// every scraped body, so a silent absence can never masquerade as a zero.
     writebehind_lag_max: Option<u64>,
+    /// Scrapes that reached the write-behind-lag parse.
+    writebehind_lag_scrapes_total: u64,
+    /// Scrapes in which at least one sample of it read. Independently
+    /// incremented on the `Read` arm, for the same falsifiability reason as its
+    /// exited-epoch sibling.
+    writebehind_lag_scrapes_read: u64,
+    /// Scrapes in which the metric never appeared in the body.
+    writebehind_lag_scrapes_absent: u64,
+    /// Scrapes in which it appeared and nothing read.
+    writebehind_lag_scrapes_unreadable: u64,
+    /// Samples counted malformed across the run. Sample-scoped: NOT a term in
+    /// the scrape identity above.
+    writebehind_lag_malformed_samples: u64,
+    /// Samples whose fold overflowed. Sample-scoped. This column is a `max`, so
+    /// a non-zero value here reports the parse's own saturation rather than a
+    /// clamped column.
+    writebehind_lag_overflowed_samples: u64,
     /// The effective child log filter for this run — the one string that both
     /// launched the child and derived `armed`.
     log_filter: String,
@@ -2605,6 +2676,7 @@ fn census_row(record: &CensusRecord) -> CensusRow {
     CensusRow {
         source: record.source.as_str().to_string(),
         elapsed_secs: record.elapsed_secs,
+        copy_completed_secs: record.copy_completed_secs,
         keys_scanned: c.keys_scanned,
         keys_undecodable: c.keys_undecodable,
         or_map_keys: c.or_map_keys,
@@ -2690,8 +2762,13 @@ fn build_durable_reading_report(
     // fact quiet.
     let armed = log_filter.contains(process::ORIGIN_TARGET);
     let captured: Vec<String> = origin.lines.iter().map(|l| strip_ansi(l)).collect();
-    let aggregate =
-        aggregate_origin_lines(&captured, origin.dropped, restarts, armed, epochs_exited);
+    let aggregate = aggregate_origin_lines(
+        &captured,
+        origin.dropped,
+        restarts,
+        armed,
+        Some(epochs_exited),
+    );
     let (origin_reading, origin_reason) = classify_origin_reading(&aggregate);
     let first_zero_return_line = aggregate
         .lines
@@ -2712,6 +2789,14 @@ fn build_durable_reading_report(
         censuses: censuses.iter().map(census_row).collect(),
         census_terminal,
         writebehind_lag_max,
+        // PLACEHOLDER(g1): the six write-behind-lag counters are folded where
+        // the scrape reading is consumed, not invented here.
+        writebehind_lag_scrapes_total: 0,
+        writebehind_lag_scrapes_read: 0,
+        writebehind_lag_scrapes_absent: 0,
+        writebehind_lag_scrapes_unreadable: 0,
+        writebehind_lag_malformed_samples: 0,
+        writebehind_lag_overflowed_samples: 0,
         log_filter: log_filter.to_string(),
         origin: OriginReport {
             origin_matched: aggregate.matched,
@@ -2721,6 +2806,15 @@ fn build_durable_reading_report(
             origin_reason,
             armed: aggregate.armed,
             epochs_exited: aggregate.epochs_exited,
+            // PLACEHOLDER(g1): the token and the six counters are folded where
+            // the scrape reading is consumed, not invented here.
+            epochs_exited_absence: None,
+            epochs_exited_scrapes_total: 0,
+            epochs_exited_scrapes_read: 0,
+            epochs_exited_scrapes_absent: 0,
+            epochs_exited_scrapes_unreadable: 0,
+            epochs_exited_malformed_samples: 0,
+            epochs_exited_overflowed_samples: 0,
             restarts: aggregate.restarts,
             first_zero_return_line,
         },
@@ -2814,7 +2908,13 @@ fn print_durable_reading_report(r: &DurableReadingReport) {
         r.origin.origin_unparsed,
         r.origin.origin_dropped,
         r.origin.armed,
-        r.origin.epochs_exited,
+        // PLACEHOLDER(g1): how an ABSENT qualifier renders on the console — the
+        // token beside it, or in place of it — is decided with the fold that
+        // can actually produce one.
+        match r.origin.epochs_exited {
+            Some(observed) => observed.to_string(),
+            None => "(absent)".to_string(),
+        },
         r.origin.restarts
     );
     println!(

@@ -1144,7 +1144,19 @@ impl CensusSource {
 /// One census, tagged with when it was taken and from what.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CensusRecord {
+    /// When the census was INITIATED — for a copy-then-scan producer, when the
+    /// copy started. Unchanged in meaning: it is the key the record sort and
+    /// the nearest-record lookup already order on, and 21 committed artifacts
+    /// carry it, so completion is a NEW field rather than a re-timing of this
+    /// one.
     pub elapsed_secs: f64,
+    /// When the census COMPLETED — for a copy-then-scan producer, when the scan
+    /// of the copy finished. Without it a reader cannot tell how wide the
+    /// window was that the copy smeared across, which on a LIVE copy is the
+    /// whole question. `None` where the producer took no copy at all (the
+    /// terminal scan reads the data dir directly), so an absent window is a
+    /// visible gap rather than a zero-width one.
+    pub copy_completed_secs: Option<f64>,
     pub source: CensusSource,
     pub census: DurableCensus,
 }
@@ -1335,7 +1347,15 @@ pub struct OriginAggregate {
     /// literal: the literal belongs where the scrape that reads it lives. Used
     /// ONLY as the origin reading's qualifier and never as a plateau predicate
     /// input.
-    pub epochs_exited: u64,
+    ///
+    /// `Option`-shaped all the way from the scrape, because "the qualifier was
+    /// never observed" and "the qualifier was observed at zero" are different
+    /// facts and the second one is the most reassuring reading this instrument
+    /// can produce. Collapsing the first into the second is the absence
+    /// masquerade this aggregate exists to refuse, so it is never defaulted,
+    /// unwrapped-or-zeroed, or compared by `Ord` against `Some(0)` — `None`
+    /// orders below every `Some` and would silently read as minus infinity.
+    pub epochs_exited: Option<u64>,
     /// The named reason for the classified reading, carried here so the
     /// serializer emits it beside the counters it was derived from. Distinct
     /// from the durable reading's own reason. Disposition-bearing: it always
@@ -1821,7 +1841,7 @@ pub fn aggregate_origin_lines(
     dropped: u64,
     restarts: u64,
     armed: bool,
-    epochs_exited: u64,
+    epochs_exited: Option<u64>,
 ) -> OriginAggregate {
     let mut lines = Vec::with_capacity(captured.len());
     let mut unparsed: u64 = 0;
@@ -1923,14 +1943,27 @@ pub fn classify_origin_reading(aggregate: &OriginAggregate) -> (OriginReading, O
         );
     }
 
-    if aggregate.epochs_exited > 0 {
-        return (
-            OriginReading::NoLinesWhileEpochsExited,
-            Some(format!(
-                "no line was captured while epochs_exited reached {}",
-                aggregate.epochs_exited
-            )),
-        );
+    // The two branches below are the ONLY consumers of the qualifier, which is
+    // why the absent-qualifier disposition belongs exactly here and nowhere
+    // earlier: a branch that never reads the qualifier must not change its
+    // outcome because the qualifier went missing.
+    //
+    // PLACEHOLDER(g1): what an ABSENT qualifier reads as is NOT decided here
+    // yet. The qualifier is destructured explicitly rather than defaulted —
+    // a defaulting unwrap would launder the absence into the observed zero,
+    // which is the masquerade the `Option` retype exists to remove — and
+    // the absent path falls through to the pre-retype tail unchanged until its
+    // own disposition lands. It is unreachable in the current tree: every
+    // producer supplies `Some`.
+    if let Some(epochs_exited) = aggregate.epochs_exited {
+        if epochs_exited > 0 {
+            return (
+                OriginReading::NoLinesWhileEpochsExited,
+                Some(format!(
+                    "no line was captured while epochs_exited reached {epochs_exited}"
+                )),
+            );
+        }
     }
 
     (
@@ -1939,17 +1972,137 @@ pub fn classify_origin_reading(aggregate: &OriginAggregate) -> (OriginReading, O
     )
 }
 
-/// The `max` and the `sum` of one labelled gauge, taken over its label sets.
+/// The `max` and the `sum` of one labelled gauge, taken over its label sets,
+/// beside the sample counts the fold was taken over.
 ///
 /// Returned as a named pair rather than a positional one so a caller cannot
-/// silently transpose the two. `None` from [`parse_labelled_gauge`] — never a
-/// zero here — is what carries "the metric was absent from the body".
+/// silently transpose the two. [`GaugeReading::Absent`] — never a zero here —
+/// is what carries "the metric was absent from the body".
+///
+/// `sum` is folded with a CHECKED add. If `overflowed_samples > 0` then `sum`
+/// is a SATURATION MARKER, not a total, and may not be read as one: the fold
+/// could not represent the total, so the number is `u64::MAX` and the count of
+/// samples that could not be added is what says so. `max` cannot overflow.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LabelledGauge {
     /// The largest value across the metric's label sets.
     pub max: u64,
-    /// The sum across the metric's label sets.
+    /// The sum across the metric's label sets. See the type contract: a
+    /// non-zero `overflowed_samples` makes this a saturation marker.
     pub sum: u64,
+    /// Samples of this metric whose value token READ and was folded.
+    pub parsed_samples: u64,
+    /// Samples of this metric that appeared but whose value token did not read.
+    /// Counted and skipped — never returned from, never silently dropped, and
+    /// never truncated — so a body of nothing but malformed samples is legible
+    /// as such instead of vanishing into an absence.
+    pub malformed_samples: u64,
+    /// Samples whose value read but whose addition into `sum` could not be
+    /// represented. Recorded rather than clamped in silence, so a consumer can
+    /// tell a real total from a saturated one.
+    pub overflowed_samples: u64,
+}
+
+/// What one `/metrics` body had to say about one labelled gauge.
+///
+/// Three outcomes, one total type — the harness's existing fail-closed enum
+/// style ([`CensusSource`], [`OriginReading`]) rather than an `Option` plus a
+/// side counter, because the third outcome is exactly the one an `Option`
+/// cannot express. The distinction is load-bearing: "the metric never appeared"
+/// and "the metric appeared but nothing parsed" are different instrument
+/// faults, and folding either into a zero is the absence masquerade this
+/// reading exists to refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // PLACEHOLDER(g1): `Unreadable` is constructed by the grammar rewrite.
+pub enum GaugeReading {
+    /// The metric's name never matched a head in the body.
+    Absent,
+    /// The metric appeared, and every one of its samples was malformed.
+    /// Carries the count so the gap is quantified rather than merely named.
+    Unreadable { malformed_samples: u64 },
+    /// The metric appeared and at least one sample read.
+    Read(LabelledGauge),
+}
+
+impl GaugeReading {
+    /// The single rendered token for this reading. Consumed BOTH by the console
+    /// renderer and by the JSON serializer, so the two transports can never
+    /// disagree and no site retypes a literal.
+    #[must_use]
+    #[allow(dead_code)] // PLACEHOLDER(g1): the renderers land with the scrape fold.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "ABSENT",
+            Self::Unreadable { .. } => "UNREADABLE",
+            Self::Read(_) => "READ",
+        }
+    }
+}
+
+/// Why the exited-epoch qualifier has no value, as a TYPED token.
+///
+/// A token rather than a sentence, and a sibling of the counters rather than a
+/// container for them, so a consumer reads the disposition by EQUALITY and
+/// never by substring match. The same mirror pattern [`OriginReading`],
+/// [`SeriesShape`] and [`CensusSource`] already use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // PLACEHOLDER(g1): constructed by the scrape fold.
+pub enum EpochsExitedAbsence {
+    /// The metric never appeared in any scraped body.
+    Absent,
+    /// The metric appeared but no sample of it ever read.
+    Unreadable,
+}
+
+impl EpochsExitedAbsence {
+    /// The single rendered token for this disposition. Consumed BOTH by the
+    /// console renderer and by the JSON serializer, so the two transports can
+    /// never disagree and no site retypes a literal.
+    #[must_use]
+    #[allow(dead_code)] // PLACEHOLDER(g1): the renderers land with the scrape fold.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "ABSENT",
+            Self::Unreadable => "UNREADABLE",
+        }
+    }
+}
+
+/// One observed gauge column, folded across every scrape of a run.
+///
+/// The type that now stands between the parse and the artifact, and it carries
+/// the same non-transposability doctrine as [`LabelledGauge`]: the observed
+/// value is held under a NAMED field beside the counters it was folded from, so
+/// a caller cannot silently swap a `max` column for a `sum` one. WHICH fold
+/// feeds this field is the caller's decision and is stated at the caller.
+///
+/// The four scrape-scoped counters are INDEPENDENTLY incremented — `read` in
+/// particular is recorded on the `Read` arm and never computed as
+/// `total - absent - unreadable`, so `read + absent + unreadable == total`
+/// constrains the fold instead of restating subtraction and can actually fail.
+/// The two sample-scoped counters are outside that identity: they count
+/// samples, not scrapes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(dead_code)] // PLACEHOLDER(g1): folded and rendered downstream.
+pub struct GaugeObservation {
+    /// The folded observation, `None` where no scrape ever read the metric.
+    /// Never a zero standing in for an absence.
+    pub value: Option<u64>,
+    /// Scrapes that reached the parse for this metric.
+    pub scrapes_total: u64,
+    /// Scrapes in which at least one sample read.
+    pub scrapes_read: u64,
+    /// Scrapes in which the metric never appeared.
+    pub scrapes_absent: u64,
+    /// Scrapes in which the metric appeared and nothing read.
+    pub scrapes_unreadable: u64,
+    /// Samples counted malformed across the whole run. Sample-scoped: NOT a
+    /// term in the scrape identity above.
+    pub malformed_samples: u64,
+    /// Samples whose fold into a running sum overflowed. Sample-scoped, like
+    /// `malformed_samples`. A non-zero value makes the summed column a
+    /// saturation marker rather than a total.
+    pub overflowed_samples: u64,
 }
 
 /// Parse a labelled gauge out of a Prometheus text exposition body, folding its
@@ -1958,11 +2111,13 @@ pub struct LabelledGauge {
 /// Comment lines (`# HELP` / `# TYPE`) and blanks are skipped, and the name is
 /// matched EXACTLY — either bare or immediately followed by `{` — so a metric
 /// is never confused with a co-resident one that merely shares its prefix.
-/// Returns `None` when the metric does not appear in the body at all: an
-/// absence is a visible gap, and reporting it as a zero would let a silent
-/// absence masquerade as a flat series.
+/// Returns [`GaugeReading::Absent`] when the metric does not appear in the body
+/// at all: an absence is a visible gap, and reporting it as a zero would let a
+/// silent absence masquerade as a flat series. A metric that DID appear but
+/// whose samples did not read is [`GaugeReading::Unreadable`] — a different
+/// instrument fault, and one an `Option` return could not express.
 #[must_use]
-pub fn parse_labelled_gauge(body: &str, metric: &str) -> Option<LabelledGauge> {
+pub fn parse_labelled_gauge(body: &str, metric: &str) -> GaugeReading {
     let mut seen = false;
     let mut gauge = LabelledGauge::default();
     for line in body.lines() {
@@ -1985,7 +2140,14 @@ pub fn parse_labelled_gauge(body: &str, metric: &str) -> Option<LabelledGauge> {
         let value: u64 = match raw_value.trim().parse::<u64>() {
             Ok(v) => v,
             Err(_) => match raw_value.trim().split_once('.') {
-                Some((whole, _)) => whole.parse::<u64>().ok()?,
+                // PLACEHOLDER(g1): mechanically the pre-retype `?`, which
+                // abandoned the whole fold and returned the function's `None`.
+                // Kept outcome-identical here on purpose — the grammar rewrite
+                // is what turns this into a counted, skipped sample.
+                Some((whole, _)) => match whole.parse::<u64>() {
+                    Ok(v) => v,
+                    Err(_) => return GaugeReading::Absent,
+                },
                 None => continue,
             },
         };
@@ -1993,7 +2155,11 @@ pub fn parse_labelled_gauge(body: &str, metric: &str) -> Option<LabelledGauge> {
         gauge.max = gauge.max.max(value);
         gauge.sum = gauge.sum.saturating_add(value);
     }
-    seen.then_some(gauge)
+    if seen {
+        GaugeReading::Read(gauge)
+    } else {
+        GaugeReading::Absent
+    }
 }
 
 /// The embedded store file's apparent size in bytes, from filesystem METADATA
@@ -3606,7 +3772,7 @@ mod tests {
     fn origin_aggregate(
         lines: Vec<OriginLine>,
         armed: bool,
-        epochs_exited: u64,
+        epochs_exited: Option<u64>,
     ) -> OriginAggregate {
         OriginAggregate {
             matched: len_as_u64(lines.len()),
@@ -3628,12 +3794,12 @@ mod tests {
              op_seq=2 epoch=3"
                 .to_string(),
         ];
-        let aggregate = aggregate_origin_lines(&captured, 0, 0, true, 5);
+        let aggregate = aggregate_origin_lines(&captured, 0, 0, true, Some(5));
         assert_eq!(aggregate.matched, 2);
         assert_eq!(aggregate.unparsed, 1);
         assert_eq!(aggregate.lines.len(), 1);
         assert!(aggregate.armed);
-        assert_eq!(aggregate.epochs_exited, 5);
+        assert_eq!(aggregate.epochs_exited, Some(5));
         assert_eq!(
             classify_origin_reading(&aggregate).0,
             OriginReading::IndeterminateInstrument,
@@ -3646,14 +3812,14 @@ mod tests {
     /// is read from the aggregate's own counter and from nothing else.
     #[test]
     fn origin_dropped_and_restart_guards_are_fail_closed() {
-        let mut dropped = origin_aggregate(vec![origin_line(0, 7)], true, 3);
+        let mut dropped = origin_aggregate(vec![origin_line(0, 7)], true, Some(3));
         dropped.dropped = 1;
         assert_eq!(
             classify_origin_reading(&dropped).0,
             OriginReading::IndeterminateInstrument
         );
 
-        let mut restarted = origin_aggregate(vec![origin_line(0, 7)], true, 3);
+        let mut restarted = origin_aggregate(vec![origin_line(0, 7)], true, Some(3));
         restarted.restarts = 1;
         let (reading, reason) = classify_origin_reading(&restarted);
         assert_eq!(reading, OriginReading::IndeterminateInstrument);
@@ -3666,30 +3832,30 @@ mod tests {
     /// All six variants, and the tokens they render as.
     #[test]
     fn origin_reading_covers_all_six_variants() {
-        let mut unarmed = origin_aggregate(vec![], false, 0);
+        let mut unarmed = origin_aggregate(vec![], false, Some(0));
         unarmed.restarts = 0;
         assert_eq!(
             classify_origin_reading(&unarmed).0,
             OriginReading::IndeterminateInstrument
         );
         assert_eq!(
-            classify_origin_reading(&origin_aggregate(vec![origin_line(0, 7)], true, 3)).0,
+            classify_origin_reading(&origin_aggregate(vec![origin_line(0, 7)], true, Some(3))).0,
             OriginReading::ReachedInProduction
         );
         assert_eq!(
-            classify_origin_reading(&origin_aggregate(vec![origin_line(2, 7)], true, 3)).0,
+            classify_origin_reading(&origin_aggregate(vec![origin_line(2, 7)], true, Some(3))).0,
             OriginReading::PartialDivergence
         );
         assert_eq!(
-            classify_origin_reading(&origin_aggregate(vec![origin_line(7, 7)], true, 3)).0,
+            classify_origin_reading(&origin_aggregate(vec![origin_line(7, 7)], true, Some(3))).0,
             OriginReading::NotReachedEqualRefs
         );
         assert_eq!(
-            classify_origin_reading(&origin_aggregate(vec![], true, 3)).0,
+            classify_origin_reading(&origin_aggregate(vec![], true, Some(3))).0,
             OriginReading::NoLinesWhileEpochsExited
         );
         assert_eq!(
-            classify_origin_reading(&origin_aggregate(vec![], true, 0)).0,
+            classify_origin_reading(&origin_aggregate(vec![], true, Some(0))).0,
             OriginReading::NotObservedAtHead
         );
 
@@ -3740,7 +3906,7 @@ mod tests {
         for (shape, lines) in shapes {
             for armed in [false, true] {
                 for epochs_exited in [0u64, 4] {
-                    let aggregate = origin_aggregate(lines.clone(), armed, epochs_exited);
+                    let aggregate = origin_aggregate(lines.clone(), armed, Some(epochs_exited));
                     let (reading, reason) = classify_origin_reading(&aggregate);
                     let expected = if armed {
                         match shape {
@@ -3784,7 +3950,9 @@ some_gauge{partition=\"1\"} 30
 some_gauge_total 999
 other_gauge 7
 ";
-        let gauge = parse_labelled_gauge(body, "some_gauge").expect("the metric is present");
+        let GaugeReading::Read(gauge) = parse_labelled_gauge(body, "some_gauge") else {
+            panic!("the metric is present");
+        };
         assert_eq!(gauge.max, 30);
         assert_eq!(
             gauge.sum, 42,
@@ -3793,10 +3961,15 @@ other_gauge 7
 
         // An ABSENCE is a visible gap, never a zero: reporting it as zero would
         // let a silent absence masquerade as a flat series.
-        assert!(parse_labelled_gauge(body, "absent_gauge").is_none());
+        assert_eq!(
+            parse_labelled_gauge(body, "absent_gauge"),
+            GaugeReading::Absent
+        );
 
         // An unlabelled single sample folds to itself on both statistics.
-        let bare = parse_labelled_gauge(body, "other_gauge").expect("present");
+        let GaugeReading::Read(bare) = parse_labelled_gauge(body, "other_gauge") else {
+            panic!("present");
+        };
         assert_eq!(bare.max, 7);
         assert_eq!(bare.sum, 7);
     }
