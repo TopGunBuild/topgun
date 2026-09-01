@@ -2105,6 +2105,66 @@ pub struct GaugeObservation {
     pub overflowed_samples: u64,
 }
 
+/// WHICH statistic of a read gauge a column observes, as a NAMED token.
+///
+/// The same non-transposability doctrine [`LabelledGauge`] and
+/// [`GaugeObservation`] already carry: the fold is stated by name at the call
+/// site, so swapping a `max` column for a `sum` one has to be written out loud
+/// instead of slipping in as a one-character edit to a closure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// The scrape fold is this token's only production caller and has not landed
+// yet, so the bench binary's own compile still sees it unreferenced.
+#[allow(dead_code)]
+pub enum GaugeFold {
+    /// The largest value across the metric's label sets.
+    Max,
+    /// The sum across the metric's label sets.
+    Sum,
+}
+
+impl GaugeObservation {
+    /// Fold ONE scrape's reading into this column and hand back the value that
+    /// scrape read under `fold` — `None` when nothing read.
+    ///
+    /// The single place the six counters move. They are incremented here and
+    /// nowhere else, so `read + absent + unreadable == total` cannot drift
+    /// apart one call site at a time; `read` in particular is RECORDED on the
+    /// `Read` arm rather than derived by subtraction, which is what lets that
+    /// identity fail instead of restating itself. The per-scrape value is
+    /// returned rather than stored because how a run's scrapes combine into one
+    /// observation is the caller's decision, while how they are COUNTED is not.
+    // The scrape fold is this method's only production caller and has not
+    // landed yet, so the bench binary's own compile still sees it unreferenced.
+    #[allow(dead_code)]
+    pub fn record(&mut self, reading: &GaugeReading, fold: GaugeFold) -> Option<u64> {
+        self.scrapes_total = self.scrapes_total.saturating_add(1);
+        match reading {
+            GaugeReading::Absent => {
+                self.scrapes_absent = self.scrapes_absent.saturating_add(1);
+                None
+            }
+            GaugeReading::Unreadable { malformed_samples } => {
+                self.scrapes_unreadable = self.scrapes_unreadable.saturating_add(1);
+                self.malformed_samples = self.malformed_samples.saturating_add(*malformed_samples);
+                None
+            }
+            GaugeReading::Read(gauge) => {
+                self.scrapes_read = self.scrapes_read.saturating_add(1);
+                self.malformed_samples = self
+                    .malformed_samples
+                    .saturating_add(gauge.malformed_samples);
+                self.overflowed_samples = self
+                    .overflowed_samples
+                    .saturating_add(gauge.overflowed_samples);
+                Some(match fold {
+                    GaugeFold::Max => gauge.max,
+                    GaugeFold::Sum => gauge.sum,
+                })
+            }
+        }
+    }
+}
+
 /// Parse a labelled gauge out of a Prometheus text exposition body, folding its
 /// label sets into a max and a sum.
 ///
@@ -2118,48 +2178,155 @@ pub struct GaugeObservation {
 /// instrument fault, and one an `Option` return could not express.
 #[must_use]
 pub fn parse_labelled_gauge(body: &str, metric: &str) -> GaugeReading {
-    let mut seen = false;
+    let mut appeared = false;
     let mut gauge = LabelledGauge::default();
     for line in body.lines() {
         let line = line.trim();
+        // A blank line and a comment line never establish presence.
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((head, raw_value)) = line.rsplit_once(char::is_whitespace) else {
+        // Presence is decided on the HEAD, BEFORE any value is split off. The
+        // reverse order cannot express "the metric appeared but nothing
+        // parsed": a value-less occurrence gets skipped before its name is ever
+        // compared, so a metric that DID appear reports an absence.
+        let Some(head_len) = head_match_len(line, metric) else {
             continue;
         };
-        let head = head.trim();
-        let matches =
-            head == metric || (head.starts_with(metric) && head[metric.len()..].starts_with('{'));
-        if !matches {
-            continue;
-        }
-        // Gauge samples are rendered as decimals by some exporters; the durable
-        // instrument's own quantities are integer-semantic, so a fractional
-        // sample is floored rather than routed through an `f64` field.
-        let value: u64 = match raw_value.trim().parse::<u64>() {
-            Ok(v) => v,
-            Err(_) => match raw_value.trim().split_once('.') {
-                // PLACEHOLDER(g1): mechanically the pre-retype `?`, which
-                // abandoned the whole fold and returned the function's `None`.
-                // Kept outcome-identical here on purpose — the grammar rewrite
-                // is what turns this into a counted, skipped sample.
-                Some((whole, _)) => match whole.parse::<u64>() {
-                    Ok(v) => v,
-                    Err(_) => return GaugeReading::Absent,
-                },
-                None => continue,
-            },
+        // Past this point the metric HAS appeared. No failure below may return
+        // from the function, and none may skip a sample without counting it —
+        // that is what keeps an unreadable body legible as unreadable instead
+        // of letting it masquerade as an absence.
+        appeared = true;
+        let mut tokens = line[head_len..].split_whitespace();
+        let value = match (tokens.next(), tokens.next(), tokens.next()) {
+            // `name{labels} value`.
+            (Some(value), None, _) => read_gauge_value(value),
+            // `name{labels} value timestamp`: the timestamp is IGNORED, never
+            // folded as the value and never counted against the sample,
+            // because a timestamped sample is CONFORMING exposition — calling
+            // it malformed would rebuild the absence masquerade on a different
+            // input.
+            (Some(value), Some(stamp), None) if is_exposition_timestamp(stamp) => {
+                read_gauge_value(value)
+            }
+            // A value-less head line, a third token that is not a well-formed
+            // timestamp, and any fourth token: the line is not exposition this
+            // parser understands, and guessing is worse than counting.
+            _ => None,
         };
-        seen = true;
+        let Some(value) = value else {
+            gauge.malformed_samples += 1;
+            continue;
+        };
+        gauge.parsed_samples += 1;
         gauge.max = gauge.max.max(value);
-        gauge.sum = gauge.sum.saturating_add(value);
+        // A CHECKED fold. A clamp nobody can see is a wrong total that reads as
+        // a right one, so the saturation is recorded on its own counter and
+        // `sum` becomes a marker rather than a number. The sample itself still
+        // counts as parsed: the value was legible, it was the fold that could
+        // not represent the total.
+        if let Some(sum) = gauge.sum.checked_add(value) {
+            gauge.sum = sum;
+        } else {
+            gauge.sum = u64::MAX;
+            gauge.overflowed_samples += 1;
+        }
     }
-    if seen {
-        GaugeReading::Read(gauge)
-    } else {
-        GaugeReading::Absent
+    if !appeared {
+        return GaugeReading::Absent;
     }
+    if gauge.parsed_samples == 0 {
+        return GaugeReading::Unreadable {
+            malformed_samples: gauge.malformed_samples,
+        };
+    }
+    GaugeReading::Read(gauge)
+}
+
+/// The byte length of `line`'s head when that head is EXACTLY `metric` — the
+/// name bare, or the name immediately followed by a `{...}` label block — and
+/// `None` when the line is some other metric's.
+///
+/// Split out so presence can be decided on the head ALONE. The exact-name test
+/// is what establishes that the metric appeared, so it has to run before any
+/// value is looked at; a co-resident metric that merely shares the prefix
+/// (`x_total` against `x`) never matches, and a bare name is only a head when
+/// nothing but whitespace follows it.
+///
+/// The label block is scanned with quote awareness, so a label VALUE holding a
+/// space or a `}` cannot end the head early and turn a well-formed sample into
+/// a malformed one. An UNTERMINATED block still matches: the `{` already
+/// established the name, and the sample is then counted malformed rather than
+/// vanishing into an absence.
+fn head_match_len(line: &str, metric: &str) -> Option<usize> {
+    let rest = line.strip_prefix(metric)?;
+    if !rest.starts_with('{') {
+        let bare = rest.is_empty() || rest.starts_with(char::is_whitespace);
+        return if bare { Some(metric.len()) } else { None };
+    }
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (offset, ch) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' && in_quotes {
+            escaped = true;
+        } else if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if ch == '}' && !in_quotes {
+            return Some(metric.len() + offset + ch.len_utf8());
+        }
+    }
+    Some(line.len())
+}
+
+/// The pinned sample grammar — `digits+ ( '.' '0'* )?`, an unsigned decimal
+/// integer optionally followed by a fraction all of whose digits are zero — and
+/// `None` for every other form, which the caller COUNTS as malformed rather
+/// than truncating it, folding it or dropping it.
+///
+/// `5`, `5.`, `5.0` and `5.000` therefore all read as `5`: some exporters
+/// render an integer counter as `5.0`, and that case is load-bearing. A NONZERO
+/// fraction is a different act and must NOT be floored — a total that reaches
+/// `0.7` would floor to `0`, which on the exited-epoch qualifier is the most
+/// reassuring reading in the whole set, i.e. an instrument fault reported as
+/// good news. The rule is taken ONCE here rather than per column, so the
+/// parser's contract does not depend on its caller.
+///
+/// Scientific notation, any leading sign, `NaN`, `+Inf`, `-Inf` and an empty
+/// token are all malformed under this grammar — previously each of them failed
+/// `parse` and was dropped with nothing counted. A digit string too large for
+/// `u64` is malformed too: it conforms to the shape but not to the type, and
+/// counting it is the fail-closed disposition.
+fn read_gauge_value(token: &str) -> Option<u64> {
+    let (whole, fraction) = match token.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (token, None),
+    };
+    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let fraction_reads = match fraction {
+        Some(fraction) => fraction.bytes().all(|b| b == b'0'),
+        None => true,
+    };
+    if !fraction_reads {
+        return None;
+    }
+    // A `u64` that does not fit is a shape-conforming value the type cannot
+    // hold; the caller counts it, which is the fail-closed disposition.
+    whole.parse::<u64>().ok()
+}
+
+/// A well-formed exposition timestamp: `-?[0-9]+`. Only such a third token is
+/// ignorable; anything else in that position makes the sample malformed.
+fn is_exposition_timestamp(token: &str) -> bool {
+    let digits = match token.strip_prefix('-') {
+        Some(rest) => rest,
+        None => token,
+    };
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// The embedded store file's apparent size in bytes, from filesystem METADATA
