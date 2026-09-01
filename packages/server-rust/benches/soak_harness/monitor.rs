@@ -1955,22 +1955,44 @@ pub fn classify_origin_reading(aggregate: &OriginAggregate) -> (OriginReading, O
     // earlier: a branch that never reads the qualifier must not change its
     // outcome because the qualifier went missing.
     //
-    // PLACEHOLDER(g1): what an ABSENT qualifier reads as is NOT decided here
-    // yet. The qualifier is destructured explicitly rather than defaulted —
-    // a defaulting unwrap would launder the absence into the observed zero,
-    // which is the masquerade the `Option` retype exists to remove — and
-    // the absent path falls through to the pre-retype tail unchanged until its
-    // own disposition lands. It is unreachable in the current tree: every
-    // producer supplies `Some`.
-    if let Some(epochs_exited) = aggregate.epochs_exited {
-        if epochs_exited > 0 {
-            return (
-                OriginReading::NoLinesWhileEpochsExited,
-                Some(format!(
-                    "no line was captured while epochs_exited reached {epochs_exited}"
-                )),
-            );
-        }
+    // An ABSENT qualifier fails closed. The qualifier is destructured
+    // explicitly rather than defaulted, and it is never compared as an
+    // `Option` either: a defaulting unwrap would launder the absence into the
+    // observed zero, and an ordered comparison would do the same silently,
+    // because an absent value sorts below every present one and would land on
+    // the zero branch — the exact masquerade the `Option` typing exists to
+    // remove. What is unknown when the qualifier is missing is the INSTRUMENT,
+    // so that is what the reading says.
+    //
+    // A KNOWN ASYMMETRY, RECORDED SO IT IS NOT "TIDIED" AWAY. The
+    // `restarts > 0` branch far above rests on this same qualifier — it fires
+    // because a restart resets `epochs_exited` and the reset value would be
+    // misread — yet it sits at the TOP of the ordering while this guard, which
+    // rests on the same qualifier having no value at all, sits at the BOTTOM.
+    // Hoisting this one up to join it is FORBIDDEN. The ordering above is a
+    // settled reading rule whose per-branch outcomes are already witnessed on
+    // committed artifacts, and every branch above this point reaches its
+    // outcome WITHOUT consuming the qualifier; moving an absence check above
+    // them would change readings that have nothing to do with the absence, and
+    // would do it invisibly, since those readings would still look well-formed.
+    // The asymmetry is accepted debt, named here rather than resolved.
+    let Some(epochs_exited) = aggregate.epochs_exited else {
+        return (
+            OriginReading::IndeterminateInstrument,
+            Some(
+                "the epochs_exited qualifier was absent from the scrape, so no \
+                 qualifier-derived reading can be taken"
+                    .to_string(),
+            ),
+        );
+    };
+    if epochs_exited > 0 {
+        return (
+            OriginReading::NoLinesWhileEpochsExited,
+            Some(format!(
+                "no line was captured while epochs_exited reached {epochs_exited}"
+            )),
+        );
     }
 
     (
