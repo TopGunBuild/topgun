@@ -2994,12 +2994,21 @@ fn print_durable_reading_report(r: &DurableReadingReport) {
         r.origin.origin_unparsed,
         r.origin.origin_dropped,
         r.origin.armed,
-        // PLACEHOLDER(g1): how an ABSENT qualifier renders on the console — the
-        // token beside it, or in place of it — is decided with the fold that
-        // can actually produce one.
-        match r.origin.epochs_exited {
-            Some(observed) => observed.to_string(),
-            None => "(absent)".to_string(),
+        // The qualifier and its absence token are an XOR pair, so the console
+        // prints whichever one is populated: a number when some scrape read the
+        // metric, and otherwise the SAME token the artifact carries — taken
+        // from the field the JSON serializes rather than re-derived here, so
+        // the two transports cannot disagree and no site retypes a literal.
+        // The third arm is the XOR's own violation: it renders as a visibly
+        // wrong string rather than as an absence token that was never derived,
+        // because inventing one here would report a disposition nothing decided.
+        match (
+            r.origin.epochs_exited,
+            r.origin.epochs_exited_absence.as_deref()
+        ) {
+            (Some(observed), _) => observed.to_string(),
+            (None, Some(token)) => token.to_string(),
+            (None, None) => "(no disposition)".to_string(),
         },
         r.origin.restarts
     );
