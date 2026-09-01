@@ -1468,3 +1468,328 @@ recorded in this post-section's header — it still reproduces, so no frozen byt
 ```
 frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
 ```
+
+<!-- BATCH-4 BEGIN -->
+
+---
+
+## Batch 4 — `SPEC-363` re-pin pre-registration
+
+Appended by `SPEC-363`, the re-pinning spec that `Batch 3`'s §0(d) ruling said would be required.
+This batch **APPENDS**: §0–§8 gain and lose zero bytes, no existing post-section entry is edited, and
+every line of it sits below the `## POST-SECTION (append-only)` marker. It is committed **BEFORE any
+re-witness run**, which is what makes everything in it a pre-registration rather than a report.
+
+**This batch contains NO value produced by a re-witness run.** At the moment of this append, **no arm
+of `SPEC-363` has been executed** — not a partial one, not a smoke one filed as evidence. Every
+number below is either carried from an already-committed record or is an expectation fixed before the
+data.
+
+### 1. The §0(d) invocation
+
+Frozen §0(d) says that *"if an instrument defect is discovered after this spec's own merge, the
+remedy is a NEW SPEC THAT RE-PINS — never an edit absorbed under the pin, and never an edit to a
+frozen section here."* `Batch 3` recorded five such defects (`P7` items 11–15) and explicitly
+declined to patch them, precisely because patching under the old pin would either invalidate the
+three committed control arms or force a re-run that §6.2 / `R7` forbid.
+
+**`SPEC-363` is that new spec, and this is its invocation of §0(d).** Its consequences are stated
+here so no reader has to infer them:
+
+- The instrument changed. Under §0(d) *"any post-pin `.rs` change invalidates every run taken before
+  it"*, so **the `spec362-*` arms are not witnesses of the new instrument** and are not re-labelled
+  as such. They stay committed, byte-untouched, and stay quotable **only** for what they witnessed
+  under the OLD pin.
+- Because the old arms cannot speak for the new pin, the new pin **requires its own witnesses**. The
+  three arms pre-registered in section 4 below are those witnesses. **They are NOT re-runs of the
+  committed arms** — the thing being witnessed is a different instrument — and the prohibition on
+  re-running an arm until the physics cooperates is untouched and is restated in section 4.
+- **No frozen byte moves, and no new §0–§8 digest exists.** A new frozen digest would itself be the
+  evidence of the edit the freeze forbids. The pinned one-liner in this post-section's header still
+  reproduces `c7f3373f…`; that reproduction is re-verified in this batch's footer.
+
+### 2. The pin-resolution rule, and its exact command (`R7.4`)
+
+§8.1 item 2 obliges `SPEC-362b` to show `git diff --stat <pin>..HEAD -- '*.rs'` empty. After this
+re-pin, `<pin>` is **`SPEC-363`'s merge commit** — and this batch records the **rule and the command**
+that resolve it, not a hash. (A spec cannot contain the hash of the commit that contains it; that is
+§0(a)'s reasoning, and it is why no merge hash for `SPEC-363` appears anywhere in this batch.)
+
+**The rule.** The pin is **the merge commit on `origin/main` whose SECOND parent is `SPEC-363`'s
+branch tip** — the last commit on the implementation branch `spec-363-repin-instrument` before the
+merge.
+
+**The command, pinned verbatim.** The range and the COMMAND are both pinned, exactly as this
+post-section's header pins the digest one-liner:
+
+```
+git fetch origin
+git log origin/main --merges --format='%H %P' \
+  | awk -v tip=<BRANCH TIP — see section 2a> '$3==tip {print $1}'
+```
+
+`%P` prints the parents space-separated, so `$2` is the first parent and `$3` the second.
+
+- **`git fetch origin` is a PRECONDITION, not decoration.** The ref must be `origin/main` and it must
+  be current.
+- **A local `main` is NOT acceptable.** On the checkout `SPEC-363` was written from, local `main` sat
+  two PRs behind `origin/main`, and the same command run against `main` returns **empty** — the exact
+  silent-empty defect this clause exists to remove. An empty result read as "no `.rs` diff" would let
+  §8.1 item 2 pass while resolving nothing.
+- **The command must return EXACTLY ONE commit.** Zero means the merge has not happened or the ref is
+  stale — resolve that before reading anything else. More than one is impossible for a distinct tip
+  and would mean the recorded tip is wrong.
+- §8.1 item 2's `git diff --stat <pin>..HEAD -- '*.rs'` uses **that** commit and no other.
+
+**The "most recent merge touching the path" heuristic is REFUSED outright, not patched.** It is wrong
+twice over, and both reasons are recorded so a successor cannot reintroduce it as a convenience:
+
+1. **Mechanically** — `git log <ref> --merges -- '<path>'` returns empty, because default history
+   simplification drops TREESAME merges; and `--full-history` returns a **different** spec's merge.
+2. **Substantively, and this is the worse defect** — "most recent" **auto-advances** past
+   `SPEC-363`'s own witnesses the moment any later spec touches a `soak_harness` `.rs` file, at which
+   point §8.1 item 2 passes **vacuously**, against an instrument that carries no re-witness arms at
+   all. A pin bound to the second parent of this spec's own merge cannot move.
+
+#### 2a. The branch tip is an UNRESOLVED SLOT, and naming the gap is deliberate
+
+The command above reads `<BRANCH TIP — see section 2a>` because **no append inside this repository
+can name that SHA**, and pretending otherwise would break the very command it appears in:
+
+1. **A commit cannot contain its own hash.** The branch tip is, by construction, the **last** commit
+   on the implementation branch. This batch is committed early — before the 21 artifact commits, which
+   is what makes it a pre-registration — so the tip lies ~22 commits in its future. Nor can the later
+   `Batch 5` close the gap: writing a tip SHA into `Batch 5` would require `Batch 5` to contain the
+   hash of the commit that contains it, which is exactly the circularity §0(a) refuses for the merge
+   hash. Any commit that *did* record a SHA would move the tip by existing.
+2. **Recording today's HEAD would be ACTIVELY HARMFUL, not merely imprecise.** The merge's second
+   parent will not be any commit that exists at this append, so the pinned `awk` would match nothing
+   and return **empty** — which is precisely the silent-empty failure the rule above was written to
+   eliminate. A wrong value here is worse than a marked absence, because the command would still
+   *run*.
+3. **The SHA is therefore recorded in `SPEC-363`'s Execution Summary**, which lives outside version
+   control and can be written after the final commit without moving the tip.
+
+**The obligation this places on whoever merges `SPEC-363`:** transcribe that SHA into the slot above
+(as a further post-section entry, never as an edit to this one — see this section's rules).
+**Until that transcription exists, §8.1 item 2 has no resolvable pin**, and a successor that runs the
+command will get an empty result that means "unresolved", never "no `.rs` diff".
+
+### 3. §4.3 addendum — the absent qualifier is fail-closed
+
+§4.3 is frozen and is **not edited**. This addendum records what the re-pinned instrument does with a
+case §4.3's branch list never named, because under the old instrument the case could not be
+represented: the qualifier `topgun_or_prune_epochs_exited_total` being **ABSENT or UNREADABLE** in the
+scrape, as distinct from being **present and zero**.
+
+- Under the old pin the scrape returned `Option<u64>` folded to a number, and `Batch 3` `P7` item 11
+  showed that **one** malformed sample reported a **present** metric as absent — an absence that then
+  read as a `0`. A `0` qualifier sends §4.3 to branch **6** (`NotObservedAtHead`), *"nothing exited,
+  so the arm could not have been reached"*: the most reassuring reading in the set, produced by an
+  instrument fault. That is the masquerade this manifest forbids, arriving through the one door §4.3
+  did not have a branch for.
+- **The re-pinned rule:** the qualifier is three-valued (`Read` / `Absent` / `Unreadable`), and when
+  it is **not readable** the origin reading is **`IndeterminateInstrument`**, with a reason naming the
+  absent qualifier. An absence is never folded to a zero and never reaches branch 5 or branch 6.
+- **The guard is sited minimally, and the ordering is preserved.** It sits at the earliest point at
+  which the value is consumed — **after** `not-reached-equal-refs` (branch 4) and **before**
+  `epochs_exited > 0` (branch 5). Siting it earlier would change readings that never consume the
+  qualifier, i.e. widen a frozen rule for no reason; siting it later is impossible, because both
+  remaining branches consume it. **All seven of §4.3's branch conditions above the guard —
+  `!armed`, `dropped > 0`, `unparsed > 0`, `restarts > 0`, the zero-return branch, the
+  partial-divergence branch and the not-reached-equal-refs branch — are byte-unchanged, and every
+  input that reaches one of them returns exactly the reading it returned before.**
+- This addendum **adds no branch to §4.3 and re-tunes no reading rule**. §4.3's ordering doctrine —
+  fail-closed first — is what it applies; `C2`'s prohibition on touching the frozen reading rule is
+  untouched.
+
+### 4. The pre-registered re-witness protocol
+
+All three ≤ 900 s controls are re-executed under the new instrument, from the derivative runner
+`evidence/spec363-durable.sh` (the parent `spec362-durable.sh` is a closed diff and is not edited),
+with artifact prefix **`spec363-*`** so old and new witnesses stay trivially separable.
+
+**The order is REVERSED against the committed run, and it is pre-registered here:**
+
+| # | Arm | Log directive | `--crash-interval` | `--live-census-interval` | Purpose |
+|---|-----|---------------|--------------------|--------------------------|---------|
+| 1 | `spec363-logctl-off` | UNSET | 0 | 0 | pricing arm (§6.2), **run FIRST** |
+| 2 | `spec363-logctl-on` | ARMED | 0 | 0 | pricing arm (§6.2) + the arming witness (§6.3) |
+| 3 | `spec363-crashctl` | ARMED | 300 | **300** | the double witness (§6.4) **+ the live-census witness** |
+
+**Expected results, recorded PRE-DATA, carried from §6.3 and §6.4:**
+
+- **§6.3, the arming witness (mechanical and decisive, two-directional):** the **ARMED** arms must
+  show `matched > 0` and `unparsed == 0` (and `dropped == 0`); the **UNSET** arm must show
+  `matched == 0`. Together they prove the capture path is live and that a zero count under the ARMED
+  filter is a real null read rather than a dark instrument.
+- **§6.4, the crash double witness:** at least one census record with `CensusSource::Checkpoint`
+  present, and `originReading == "INDETERMINATE_INSTRUMENT"` **with the restart named as the reason**
+  (not the filter, not a drop — the arm runs with the directive ARMED, so this isolates the restart
+  guard), **and the root-level `restarts` count itself > 0**, so *"the reason names the restart"* has
+  provenance in the **artifact** rather than only in a reason string.
+- **§6.5's caveat travels with every verdict, verbatim and without exception.** These arms' verdicts
+  are about the **INSTRUMENT**. A `MonotoneRising` or `PlateauNotMet` on a control arm is **not per se
+  a false positive** and may not be quoted as one, and none of these arms concludes anything about the
+  plateau.
+
+**Why `crashctl` alone carries the live sampler, and why that stays inside `X8`.** The copy-completion
+fix is sited at the LIVE census producer, and **no committed arm has ever executed it**: every cell of
+`spec362-durable.sh` passed `--live-census-interval 0`, which is why all 21 committed artifacts hold
+only `CHECKPOINT` and `TERMINAL` rows. Discharging that fix "by construction" would apply a weaker
+standard to it than is applied to everything else under this pin. So the sampler is armed on **one**
+control, and:
+
+- **The pricing pair stays uncontaminated** — `logctl-on` / `logctl-off` keep `--live-census-interval
+  0`, so the §6.2 price and the order data point are measured on arms running exactly the parent's
+  sampler set. The live copy's I/O cost lands only on the arm that prices nothing.
+- **No new budget, no fourth control, no new lineage** — `crashctl` keeps its 900 s duration, its
+  300 s crash interval and every rate- and shape-determining literal. `X8` — which forbids a 4 h cell,
+  a width-1000 deciding matrix and a new measurement lineage, and permits only ≤ 900 s controls with
+  no fourth control — is untouched. The derivative runner ships **no 4 h cell at all**: the label is
+  deleted and a refusal comment stands in its place.
+- **The departure is enumerable**, as a recorded diff against the parent runner rather than a broken
+  comparison. Cross-pin comparability of the ARMS was never promised — the controls witness the
+  INSTRUMENT under the new pin.
+
+**The no-re-run clause, restated because this batch is the place it binds.** **No arm is re-run.** If
+an arm's physics fires the shipped tombstone byte-slope gate, that is **recorded and attributed**,
+exactly as the committed run did. Re-running an arm until the physics cooperates is what §6.2 / `R7`
+forbid, and it is forbidden here.
+
+### 5. The `crashctl` live-row count, PRE-REGISTERED
+
+**This clause is not optional and it is fixed before the data.** `crashctl` runs 900 s with the live
+sampler at 300 s, so its schedule nominally yields **two** `LIVE_COPY` rows (~300 s and ~600 s). But
+the same arm schedules its `kill -9` at `start + 300 s`: **the first live copy can land inside the
+crash / restart window and fail**, incrementing `live_tally.scans_failed` and producing **no**
+`LIVE_COPY` row — leaving the arm with **one** live row. All three outcomes and their dispositions are
+therefore recorded now, so that a single row cannot read at review as a partial failure of an arm that
+behaved exactly as predicted:
+
+- **2 rows — the nominal schedule.** Full PASS.
+- **1 row — a FULL PASS, not a partial one.** The first copy was consumed by the crash window; the
+  surviving row discharges the live-census witness in full. This is the **expected-and-acceptable**
+  outcome, pre-registered as such.
+- **0 rows — a recorded finding, routed to `TODO-634` by id.** The arm is **NOT re-run**. The
+  copy-completion property then falls back to the by-construction reading of the live sampler, and
+  `Batch 5` must **say so** rather than claim a witness it does not have.
+
+Each row of either kind must carry both timestamps — copy-**initiation** (the existing field, whose
+meaning is unchanged) and copy-**completion** (the new one) — with completion at or after initiation;
+the `TERMINAL` row takes no copy and serializes completion as an explicit `null`. The live records are
+**fenced from the gate**: they land on the live tally only, so `scansAttempted` / `scansFailed` /
+`censusTerminal` and the byte-slope gate's input are moved by exactly zero, and `Batch 5` checks that
+**on the artifact** rather than by reading source.
+
+### 6. The reversed order: disposition FIXED BEFORE THE DATA
+
+Execution finding 1 of the committed run recorded a **+25.10 %** `rss_kib` last-half-peak difference
+between the armed and unset pricing arms, with three caveats travelling with it — one of which is an
+**uncontrolled order confound**: the armed arm ran first. Running unset-first this time costs nothing
+(both arms run regardless; only the invocation order changes) and yields a **second data point on
+ordering**. Its disposition is fixed **here, before the arms run**:
+
+- The new pair is a witness of the **NEW instrument** and a **second, order-reversed observation**.
+- It may **NOT** be quoted as a correction, a refutation or a confirmation of the committed
+  **+25.10 %**, which stands exactly as recorded.
+- It may **NOT** be used to retune the departure. §0(c)'s disposition is unchanged: a difference at or
+  above the **5.4 %** spread is a **recorded finding routed to `TODO-634` by id**, and per §0(d) it is
+  grounds for a re-pinning spec — never grounds for retuning the departure.
+- **If the two pairs disagree, BOTH stand** and the divergence routes by id. **No third arm is run.**
+- §6.2's n = 1 honesty clause and the level-not-shape residual confound are restated verbatim beside
+  the number in `Batch 5`: with n = 1 per arm the pair has **no** inferential power against a small
+  perturbation and can only surface a gross one; it bounds a **shift in the LEVEL** of RSS, not a
+  **distortion of the growth SHAPE**.
+
+### 7. `P7` items 11–15 — CLOSED BY FIX under this pin
+
+All five findings `Batch 3` routed on the scrape / census layer are **fixed** under this re-pin, and
+each is witnessed by a directed test rather than asserted. Routing remains **by identifier only**:
+**no tracker file was created, edited or deleted** by this implementation.
+
+11. **Whole-metric abort on one bad sample — CLOSED.** The per-sample `?` is gone; a malformed sample
+    is counted and skipped, and the samples already folded are kept. A metric present with at least
+    one valid sample reads as **`Read`**; a metric present with **every** sample unparseable reads
+    **`Unreadable`**, never `Read` with a zero; a metric genuinely missing reads **`Absent`**. Both
+    fold orders are tested, because the pre-change `?` discarded an accumulated fold either way.
+12. **Origin capture matched before ANSI stripping — CLOSED.** Stripping happens at the line-reader
+    boundary, before the dispatch that decides whether the line matched, and the retained line is
+    ANSI-free. The panic watch's input remains the **RAW** line, byte-identical, and no second strip
+    is performed downstream.
+13. **Scientific-notation truncation — CLOSED,** by the same rewrite as item 11 and stated as a
+    grammar rather than a special case: a sample reads **iff** its value token is an unsigned integer
+    or an `N.0…` rendering. `1.5e3` no longer folds as `1`; it is counted malformed and skipped.
+14. **`distinct_count_within_key` was O(n²) per key — CLOSED,** with a per-key set. The census
+    contract forbids **cross-key** sets, not per-key ones, and the new implementation is proven
+    **value-identical** to the previous quadratic definition on a directed corpus including the
+    all-equal, duplicates-interleaved and ≥ 1000-element cases.
+15. **Live-census timestamps named copy-INITIATION only — CLOSED.** Initiation keeps its existing
+    meaning and its field; completion is a **new** field beside it, chosen over moving the capture
+    because moving it would silently change the meaning of a field already committed in 21 artifacts.
+    The fix is witnessed at its own defect site — see section 5.
+
+**The full extent of what changed under this pin, including the fix that is NOT a `P7` item.** A
+**seventh** fix rides on this re-pin: the **numeric grammar and the fold arithmetic** of the gauge
+parse, surfaced at the cross-vendor design checkpoint rather than by the review that produced `P7`.
+It is named here so that this pre-registration states the whole of what changed, not only the routed
+subset: presence is decided **before** the value (a value-less head line reads `Unreadable`, never
+`Absent`); a trailing timestamp is **never** folded as the value; a fractional sample is **counted
+malformed rather than floored** (flooring `0.7` to `0` would flip the origin classifier into the most
+reassuring branch in the set); signed values, `NaN`, `±Inf` and empty value tokens are malformed
+rather than silently dropped; and the `sum` fold is **checked**, with a clamped fold **counted and
+made artifact-visible** instead of saturating in silence.
+
+### 8. The declared EXIT of this line (`R13`)
+
+`SPEC-363` is the **fifth** consecutive instrument-side cycle in the `TODO-634` reclamation family,
+and a lineage with no declared exit is a lineage that will produce a sixth. So the exit is declared,
+as a closure condition rather than an aspiration:
+
+> With `P7` items 11–15 closed by fix and re-witnessed, the **scrape / census layer is CLOSED to
+> further routing**. A finding on this layer that is an instance of an already-closed class — an
+> absence flattened to a zero, a whole-metric abort on one sample, a match performed before
+> normalization, a per-key quadratic scan, a timestamp that names the wrong end of an operation, **a
+> value taken from the wrong token on the line, a numeric form folded on a guess rather than counted,
+> a sample dropped with nothing counted, or an arithmetic clamp that leaves no trace** — is a
+> **regression of `SPEC-363`**, handled as a defect against it. Only a **NEW defect class** on this
+> layer justifies a sixth re-pin, and this closure statement is what a successor must argue against in
+> order to open one.
+
+This clause routes nothing and gates nothing. It exists so that the family's terminal state is
+**declared** rather than merely reached.
+
+### 9. Batches 1–3 still reproduce (checked at this append)
+
+Verified with the manifest's own pinned per-batch one-liners, at the moment of this append and before
+this batch's own digest was taken:
+
+```
+batch-1          575bd28e76380b8501561abe050b62b865ae7bed3dcd8f8279f8a3febf5eca3d
+batch-2          467a9d80c06eec02a061c712a35b16a70ffef5791d0c9596805f4ac22ca7d38f
+batch-3          a8a0ab833ada09a529aeb630aa5a666c572fc158763ca93fd302bca076d04ad3
+```
+
+Batches 1–3 are **byte-unchanged**; this batch corrects none of them and edits none of them.
+
+<!-- BATCH-4 END -->
+
+**Digest of Batch 4.** Same convention as Batches 1–3: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-4 BEGIN -->$/{p=1;next} /^<!-- BATCH-4 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-4          7d521a3091e2ce1e6c792535279a98f39d285427b752f07eeb7ae4649f2efab7
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
