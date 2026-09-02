@@ -2237,3 +2237,148 @@ recorded in this post-section's header — it still reproduces, so no frozen byt
 ```
 frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
 ```
+
+<!-- BATCH-6 BEGIN -->
+
+---
+
+## Batch 6 — the amended pin-resolution rule (conductor amendment, 2026-09-02)
+
+Appended by `SPEC-363` after `Batch 5`. This batch **APPENDS**: §0–§8 gain and lose zero bytes, no
+existing post-section entry — `Batch 4`'s and `Batch 5`'s included — is edited, and every line of it
+sits below the `## POST-SECTION (append-only)` marker.
+
+**What this batch does, in one line.** It **SUPERSEDES `Batch 4` section 2 and section 2a** — the
+tip-anchored pin-resolution rule and its unresolved `<BRANCH TIP — see section 2a>` slot — with a rule
+anchored on a SHA that is **already recorded in this file**, and it **withdraws** the merge-time
+transcription obligation section 2a placed on whoever merges `SPEC-363`.
+
+**Supersession is by APPEND, never by edit.** §8.2 item 1 forbids editing any existing post-section
+entry, and §8.3 pins exactly this device for the analogous case of a rename: *the substitute lands as
+an appended entry, not as an edit*. `Batch 4` therefore stays byte-intact and its digest
+`7d521a3091e2…` still reproduces; a reader who resolves the pin must read `Batch 4` section 2 **and**
+this batch, and this batch wins where they differ.
+
+### 1. Why the tip-anchored rule is withdrawn — the circularity, named
+
+`Batch 4` section 2 bound the pin to *the merge commit on `origin/main` whose SECOND parent is
+`SPEC-363`'s branch tip*, and section 2a then recorded, correctly, that **no append inside this
+repository can name that SHA**. Section 2a's diagnosis is reaffirmed here in full and is not
+retracted: the branch tip is by construction the **last** commit on the implementation branch, so any
+commit that records it **moves it by existing** — the same circularity §0(a) refuses for the merge
+hash — and writing the then-current HEAD would have been worse than a marked absence, because the
+pinned command would still *run* and would return empty.
+
+What section 2a got wrong was only its **conclusion**: it left the slot open and deferred it to a
+merge-time transcription. That deferral is withdrawn for two reasons.
+
+1. **It needs a post-merge commit that gates every successor.** Until the transcription existed, §8.1
+   item 2 had no resolvable pin, so `SPEC-362b` could not start; and the transcription is a
+   post-merge append to a file whose whole purpose is to be settled *before* the evidence it governs.
+2. **It is unnecessary.** The tip was never the only non-circular anchor available. `Batch 5` already
+   records a SHA with every property the rule needs, and records it for an unrelated reason.
+
+**The tip is not needed for anything else either.** It remains recorded in `SPEC-363`'s Execution
+Summary as a fact about that run; **nothing resolves against it**, and no obligation now rests on it.
+
+### 2. The anchor: the `Batch 4` commit, already recorded in this file
+
+**The anchor is `d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e`** — the `Batch 4` commit, recorded by
+`Batch 5` in its section 5 above.
+
+It has, and had at the moment it was written, every property the tip lacked:
+
+- **It is in-repo.** It is written in this manifest, under the freeze discipline, and nothing about
+  resolving the pin requires reading anything outside this file.
+- **It was never circular to write.** `Batch 5` records an **earlier** commit's hash, not its own —
+  which is precisely why `Batch 5` was able to record it and why §0(a)'s refusal does not reach it.
+- **It is fixed before the merge**, and no later commit — this one included — can move it.
+
+That this `Batch 6` commit moves the branch tip is therefore **immaterial**: the tip is no longer part
+of the rule.
+
+### 3. The rule
+
+**The pin is the EARLIEST merge commit on `origin/main` that is a descendant of the `Batch 4`
+commit.** That merge is `SPEC-363`'s own merge: `SPEC-363`'s merge is the first way the `Batch 4`
+commit reaches `main`, so every later merge that also descends from it descends from *that* merge and
+cannot be earlier.
+
+### 4. The command, pinned verbatim
+
+The range and the COMMAND are both pinned, exactly as this post-section's header pins the digest
+one-liner:
+
+```
+git fetch origin
+git rev-list --ancestry-path --merges --reverse \
+  d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e..origin/main | head -1
+```
+
+`--ancestry-path` restricts the range to commits that are **descendants of the anchor and ancestors of
+`origin/main`**; `--merges` keeps only merge commits; `--reverse | head -1` takes the earliest.
+
+- **`git fetch origin` is a PRECONDITION, not decoration.** The ref must be `origin/main` and it must
+  be current. This half of `Batch 4` section 2 is unchanged and carries over intact, including its
+  reason: on the checkout `SPEC-363` was written from, local `main` sat two PRs behind `origin/main`.
+- **The command must return EXACTLY ONE line.** **Empty means UNRESOLVED** — the merge has not happened
+  or the ref is stale — and never *"no `.rs` diff"*. Resolve that before reading anything else. This is
+  the same silent-empty discipline `Batch 4` section 2 established, and it is why the empty case is
+  given a meaning here rather than left to the reader.
+- **Verified on the pre-merge checkout (2026-09-02):** with `origin/main` at
+  `2870862d4892368dd03238e56790f7bdd5779d6e`, the command returns **nothing** — the UNRESOLVED case,
+  behaving as specified.
+- **Required cross-check before the pin is used:**
+
+  ```
+  git merge-base --is-ancestor d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e <pin>
+  ```
+
+  Expected **exit 0**. A pin that fails this is not a descendant of the pre-registration and must not
+  be used.
+- **§8.1 item 2's `git diff --stat <pin>..HEAD -- '*.rs'` uses that commit and no other.**
+
+**Ordering caveat, recorded rather than left implicit.** `--reverse` reverses `git rev-list`'s default
+**commit-date** ordering. Every other candidate merge in the restricted range descends from
+`SPEC-363`'s merge, so it is also the earliest by date unless the repository carries clock skew.
+Adding `--topo-order` to the same command is skew-independent and **must return the same commit**; if
+the two forms ever disagree, the recorded anchor is wrong and that must be resolved before anything
+else is read.
+
+### 5. What is NOT changed by this amendment
+
+- **The refusal of the "most recent merge touching the path" heuristic stands verbatim**, on both of
+  the grounds `Batch 4` section 2 recorded: it is empty under default history simplification and
+  returns a different spec's merge under `--full-history`; and, worse, it **auto-advances** past
+  `SPEC-363`'s witnesses the moment any later spec touches a `soak_harness` `.rs`, letting §8.1 item 2
+  pass vacuously. **The amended rule cannot auto-advance either** — "earliest descendant merge" is
+  stable under every later merge, which is exactly the property the recency heuristic lacked.
+- **No merge hash for `SPEC-363` appears anywhere in this file.** This batch writes a rule and a
+  command, not a pin.
+- **No `spec362-*` artifact was edited, deleted or re-run**, and no frozen byte moved. The pinned
+  one-liner in this post-section's header still reproduces `c7f3373f…`; that reproduction is
+  re-verified in this batch's footer.
+- **Every obligation §8.1 and §8.2 place on `SPEC-362b` is untouched.** This batch changes only how
+  `<pin>` in §8.1 item 2 is resolved.
+
+<!-- BATCH-6 END -->
+
+**Digest of Batch 6.** Same convention as Batches 1–5: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-6 BEGIN -->$/{p=1;next} /^<!-- BATCH-6 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-6          0ac5d5d28821c233f64a34db67a0f46955a2debfcc475c8660def409ee697f6b
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
