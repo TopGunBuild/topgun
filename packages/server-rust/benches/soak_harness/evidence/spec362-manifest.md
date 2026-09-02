@@ -2779,3 +2779,107 @@ recorded in this post-section's header — it still reproduces, so no frozen byt
 ```
 frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
 ```
+
+<!-- BATCH-9 BEGIN -->
+
+---
+
+## Batch 9 — CORRECTION to Batch 8 §4: the gate did not relocate, it fired twice
+
+Appended by `SPEC-363` after a fresh-context review of the second cycle. This batch **APPENDS**:
+§0–§8 gain and lose zero bytes, no existing post-section entry — `Batch 8`'s included — is edited, and
+every line of it sits below the `## POST-SECTION (append-only)` marker. `Batch 8` stays byte-intact and
+its digest `735e1145…` still reproduces; **where the two differ, this batch wins.**
+
+**No `.rs` byte moves in this correction.** It is a record defect, not an instrument defect, so `C6a`
+does not fire and **no third witness cycle is bought**. The arms of `Batch 8` stand exactly as run.
+
+### 1. What `Batch 8` §4 got wrong
+
+`Batch 8` §4 states that the shipped tombstone byte-slope gate *"fired on `logctl-off` this cycle,
+where in cycle 1 it fired on `logctl-on`."* **That sentence reads as a RELOCATION, and the measurement
+is an INCREASE.** Measured on the committed artifacts of both cycles:
+
+```
+             cycle 1                            cycle 2
+arm          slope B/h    passed   result       slope B/h    passed   result
+logctl-off     -1620.2     true      ok           73005.8     false    FAIL
+logctl-on         852.8    false    FAIL          11454.0     false    FAIL
+crashctl       -6846.6     true      ok          (no slope failure)     PASS
+                                                  duration reached
+```
+
+**Two of three arms fired the shipped hard gate in cycle 2, against one of three in cycle 1**, and
+`logctl-on` — the arm that fired in cycle 1 — **did not stop firing**: its own slope rose from
+`852.8` to `11454.0` B/h, a **13.4×** move that `Batch 8` never states. `result: FAIL` appears at line
+20 of both `spec363-logctl-off.harness-console.log` and `spec363-logctl-on.harness-console.log`.
+
+### 2. The exit codes, which `Batch 8` §2's comparison table omitted
+
+`Batch 7` §3 pinned the cycle-1 exit codes as part of the superseded baseline. `Batch 8` §2's
+`c1 → c2` table carried every other pinned column and left this one out — and it is precisely the
+column whose cycle-2 value is worse. Stated here against the pinned row:
+
+```
+arm          exit code / passed        c1 → c2
+logctl-off   0 (passed=true)  →  non-zero (passed=false)      WORSE
+logctl-on    1 (passed=false) →  non-zero (passed=false)      same class, 13.4x steeper slope
+crashctl     0 (passed=true)  →  0 (passed=true)              unchanged
+```
+
+### 3. Why this correction is mandatory rather than cosmetic
+
+**`C6a` condition (iv)** admits a whole-set re-witness only if the superseded cycle's readings are
+*"carried into the completion record and compared, so a friendlier outcome cannot be quietly
+substituted for a harsher one."* The hazard that clause anticipates is a new cycle that looks better.
+**What happened here is the mirror image and is just as damaging: the new cycle IS harsher on this
+axis, and the record presented it as no worse.** A successor reads this digested, append-only document
+instead of re-deriving from artifacts, so an accurate corpus and a misleading summary of it are not the
+same evidence.
+
+**Nothing about the disposition changes.** Both firings remain **attributed** as uncontrolled ≤ 900 s
+physics, exactly as `C6` requires and as cycle 1's single firing was; **no arm is re-run**; and this
+spec still concludes **NOTHING** about the plateau (`C11`). The `logctl-off` load confound recorded in
+`Batch 8` §4 stands — it explains the `73005.8` figure — but it never explained `logctl-on`'s own rise,
+and `Batch 8` should not have left that unstated.
+
+**Consequence for the §6.2 pricing pair, restated:** with BOTH pricing arms firing the gate, cycle 2's
+`+34.85 %` / `+31.36 %` is weaker evidence than `Batch 8` §4 already conceded, not stronger. It stays a
+**third data point on run-to-run spread**, and the committed `+25.10 %` / `+19.22 %` stands exactly as
+recorded.
+
+### 4. A deferred inaccuracy in a code comment, recorded rather than fixed
+
+The same review found that the WHY-comment beside the `absent(<TOKEN>)` render illustrates with
+`absent(NOT_REACHED_EQUAL_REFS)`. That token is an `OriginReading` value; the cell it illustrates is
+`epochs_exited_absence`, whose value set is closed to `{ABSENT, UNREADABLE}` — a closure `AC12`
+requires and a directed test proves. **The comment's example therefore names a token that cannot appear
+in the cell it describes.** The code is correct; only the illustration is.
+
+**It is NOT fixed here, and the reason is the fix's price rather than its difficulty:** a comment is a
+`.rs` byte, so correcting it would break the `soak binary commit` provenance every `matrix.txt` records
+and, under `C6a`, would oblige a **third** whole-set re-witness — three arms and two further appends —
+to correct one word in an illustration. **Routed to `TODO-634` by id**, to be corrected by the next
+spec that touches `.rs` in this harness for a reason of its own.
+
+<!-- BATCH-9 END -->
+
+**Digest of Batch 9.** Same convention as Batches 1–8: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-9 BEGIN -->$/{p=1;next} /^<!-- BATCH-9 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-9          4d25f53c9d67a405e26cfd9d58072f059afd7eff5a6009479735718c864bbdf3
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
