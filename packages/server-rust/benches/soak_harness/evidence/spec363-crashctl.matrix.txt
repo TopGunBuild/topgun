@@ -1,8 +1,8 @@
 
 === spec363 durable run: cell crashctl ===
-  repo HEAD:      a1134e1d1fd447f23fbc6226d488331602ac77cc
+  repo HEAD:      fda9868aa7256a5123360dfbb471f4a51de1ba2d
   dirty tree:     yes
-  host/OS:        Darwin MacBook-Pro-koristuvac.local 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:18:49 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6000 arm64
+  host/OS:        Darwin MacBookPro 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:18:49 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6000 arm64
   lineage:        HEAD harness + HEAD server
   data dir:       /Users/koristuvac/Projects/topgun/topgun/target/spec363-crashctl-data
   csv:            /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec363-crashctl.csv
@@ -13,12 +13,12 @@
   console log:    /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec363-crashctl.harness-console.log
   matrix:         /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec363-crashctl.matrix.txt
   soak binary:    /Users/koristuvac/Projects/topgun/topgun/target/release/deps/soak_harness-bb9913e887e67248
-  soak binary commit: a1134e1d1fd447f23fbc6226d488331602ac77cc
+  soak binary commit: fda9868aa7256a5123360dfbb471f4a51de1ba2d
   .rs working tree:   CLEAN (asserted before the build)
   branch point:       2870862d4892368dd03238e56790f7bdd5779d6e
-    built:        2026-09-01T19:33:08Z
+    built:        2026-09-02T10:36:12Z
   server binary:  /Users/koristuvac/Projects/topgun/topgun/target/release/topgun-server
-    built:        2026-09-01T17:46:43Z
+    built:        2026-09-02T10:39:47Z
   --- varied knobs (AC16's enumerated list; everything else is the
       spec355-width.sh literal) ---
   TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
