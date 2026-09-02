@@ -1,0 +1,72 @@
+{
+  "mode": "soak",
+  "durationSecsTarget": 900,
+  "durationSecsActual": 901,
+  "churnClients": 6,
+  "keyspace": 200,
+  "walFsync": "batched",
+  "epochWidth": 1000,
+  "totalWrites": 145308,
+  "writeErrors": 12,
+  "reconnects": 736,
+  "resends": 24336,
+  "steadyCheckpoints": 2,
+  "recoveryCheckpoints": 2,
+  "crashes": 2,
+  "convergenceFailures": [],
+  "recoveryFailures": [],
+  "pendingGates": [],
+  "memory": {
+    "samples": 180,
+    "first_mb": 12.5625,
+    "peak_mb": 415.5625,
+    "last_mb": 415.5625,
+    "slope_mb_per_hour": 1076.2818476761968,
+    "passed": true,
+    "reason": null
+  },
+  "tombstones": {
+    "samples": 174,
+    "firstBytes": 0,
+    "peakBytes": 44077,
+    "lastBytes": 28094,
+    "slopeBytesPerHour": -27258.01316811476,
+    "passed": true,
+    "reason": null
+  },
+  "tombstoneCorpus": {
+    "scansAttempted": 3,
+    "scansFailed": 0,
+    "samples": 3,
+    "firstBytes": 29967,
+    "minBytes": 25784,
+    "peakBytes": 39512,
+    "lastBytes": 25784,
+    "firstHalfPeakBytes": 29967,
+    "lastHalfPeakBytes": 39512,
+    "riseBytes": 9545,
+    "spanSecs": 598.6498072499999,
+    "disposition": "LEVEL_SUPPRESSED",
+    "ceilingBytes": null,
+    "passed": true,
+    "reason": null
+  },
+  "disk": {
+    "samples": 180,
+    "firstMb": 1.51953125,
+    "peakMb": 19.82421875,
+    "lastMb": 19.484375,
+    "slopeMbPerHour": 47.243582109893126,
+    "passed": true,
+    "reason": null
+  },
+  "confirmApply": {
+    "confirms": 414,
+    "lastConfirmedEpoch": 34,
+    "confirmErrors": 12
+  },
+  "panicReport": null,
+  "passed": true,
+  "finishedReason": "duration reached",
+  "timestamp": "2026-09-02T11:26:58Z"
+}

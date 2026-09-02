@@ -84,6 +84,19 @@ impl OriginCapture {
     /// Record one child output line, retaining it when it carries the origin
     /// target and the retention cap has not been reached.
     ///
+    /// The line is ANSI-stripped FIRST and both the match and the retained
+    /// bytes are the stripped form. The child colours its output
+    /// unconditionally, so an escape sequence landing inside the target
+    /// substring makes a raw match miss a line the emitter did produce — an
+    /// instrument fault that reads, downstream, as a silent emitter. Stripping
+    /// at this boundary is also the only place the normalization can happen
+    /// exactly ONCE per line: the match and the evidence then see the same
+    /// bytes and no consumer has to re-derive whether what it holds was
+    /// normalized. The PANIC WATCH is deliberately fed the RAW line by the
+    /// caller and is unaffected by this — it matches payload text, not
+    /// structured fields, and its report is meant to quote what the child
+    /// actually printed.
+    ///
     /// Matching is on the TARGET substring rather than on message text, which
     /// is what lets the line be selected without a discriminant field. A match
     /// arriving once the cap is full is COUNTED as a drop and never silently
@@ -92,7 +105,8 @@ impl OriginCapture {
     /// capture that discarded quietly would let a truncated run be read as a
     /// complete one.
     pub fn record_line(&self, line: &str) {
-        if !line.contains(ORIGIN_TARGET) {
+        let normalized = strip_ansi(line);
+        if !normalized.contains(ORIGIN_TARGET) {
             return;
         }
         // Both counters move under the same lock the retained lines do, so a
@@ -103,7 +117,7 @@ impl OriginCapture {
         if lines.len() >= ORIGIN_CAPTURE_CAPACITY {
             self.dropped.fetch_add(1, Ordering::SeqCst);
         } else {
-            lines.push(line.to_string());
+            lines.push(normalized);
         }
     }
 
@@ -562,6 +576,51 @@ pub fn effective_server_log_filter() -> String {
     std::env::var("SOAK_SERVER_LOG").unwrap_or_else(|_| "warn".to_string())
 }
 
+/// Strip ANSI SGR escape sequences from one captured child line.
+///
+/// Sited HERE, in the module that owns the child's output, because the capture
+/// boundary is the only place a line can be normalized exactly ONCE: the origin
+/// match and the line the capture retains then see the same bytes, and no
+/// downstream consumer has to re-derive whether what it holds was stripped. The
+/// panic watch deliberately keeps reading the RAW line — it matches on payload
+/// text, not on structured fields, and a strip there could only lose signal.
+///
+/// The child's log formatter emits colour UNCONDITIONALLY — it never tests
+/// whether its output is a terminal — and the harness always reads that output
+/// through a pipe. Colour turns `ts=1756…` into an escape-interleaved token
+/// whose `key=value` split finds neither the key nor the value, and it can
+/// equally interleave the target itself, so a coloured run would both fail the
+/// capture's target match and read as unparsed downstream — on a run where the
+/// emitter was in fact working perfectly. Normalizing HERE, at the harness
+/// boundary that owns the child's output, keeps the parser formatter-agnostic
+/// and `std`-only and keeps this instrument out of the server it measures.
+#[must_use]
+pub fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(esc) = rest.find('\u{1b}') {
+        out.push_str(&rest[..esc]);
+        let tail = &rest[esc..];
+        let Some(after) = tail.strip_prefix("\u{1b}[") else {
+            // A lone escape that is not a CSI introducer: drop the escape alone,
+            // so no payload character is ever swallowed by mistake.
+            rest = &tail['\u{1b}'.len_utf8()..];
+            continue;
+        };
+        match after
+            .char_indices()
+            .find(|(_, c)| ('\u{40}'..='\u{7e}').contains(c))
+        {
+            // A complete CSI sequence: drop it up to and including its final byte.
+            Some((idx, c)) => rest = &after[idx + c.len_utf8()..],
+            // Unterminated: there is no final byte, so nothing after it is payload.
+            None => rest = "",
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 // These tests are the executable half of the capture contract, and the
 // integration target `tests/soak_tombstone_restart.rs` — which re-includes this
 // module under the standard harness — is what actually runs them. The bench
@@ -634,6 +693,90 @@ mod tests {
         assert_eq!(
             snap.matched,
             u64::try_from(ORIGIN_CAPTURE_CAPACITY + overflow).unwrap()
+        );
+    }
+
+    /// The strip is the ONLY normalization left in the chain, so its edge cases
+    /// have to hold on their own: a complete CSI sequence disappears, a lone
+    /// escape takes no payload character with it, and an unterminated CSI has
+    /// nothing after it that could be payload.
+    #[test]
+    fn strip_ansi_removes_escapes_without_swallowing_payload() {
+        assert_eq!(strip_ansi("plain line"), "plain line");
+        assert_eq!(strip_ansi("\u{1b}[32mgreen\u{1b}[0m"), "green");
+        assert_eq!(strip_ansi("a\u{1b}[1;2;3mb"), "ab");
+        assert_eq!(strip_ansi("a\u{1b}b"), "ab");
+        assert_eq!(strip_ansi("a\u{1b}[1;2"), "a");
+    }
+
+    /// Colour is emitted unconditionally by the child, so the capture must
+    /// select on the NORMALIZED line and retain the normalized form. The second
+    /// fixture puts an escape INSIDE the target — the case a raw match misses
+    /// outright, turning a working emitter into a silent one — and the
+    /// assertion that it does not match raw is what keeps this test falsifiable
+    /// against a capture that matched the raw bytes.
+    #[test]
+    fn matches_a_target_wrapped_in_ansi_and_retains_the_stripped_line() {
+        let capture = OriginCapture::new();
+
+        let wrapped = format!(
+            "2026-08-31T12:00:00.000000Z  \u{1b}[32mINFO\u{1b}[0m \u{1b}[2m{ORIGIN_TARGET}\u{1b}[0m: \
+             ts=\u{1b}[1m1\u{1b}[0m op_seq=4 epoch=3 refs_returned=0 refs_at_entry=2 \
+             bytes_returned=0 watermark=9 ceiling=9"
+        );
+        // The target is ASCII, so splitting it at a byte index is a char
+        // boundary; an escape landing there is what a span-per-segment
+        // formatter produces.
+        let (head, tail) = ORIGIN_TARGET.split_at(ORIGIN_TARGET.len() / 2);
+        let interleaved = format!(
+            "2026-08-31T12:00:00.000000Z  INFO {head}\u{1b}[2m{tail}\u{1b}[0m: ts=1 op_seq=5 \
+             epoch=3 refs_returned=0 refs_at_entry=2 bytes_returned=0 watermark=9 ceiling=9"
+        );
+        assert!(
+            !interleaved.contains(ORIGIN_TARGET),
+            "the interleaved fixture must NOT match raw, or it witnesses nothing"
+        );
+
+        capture.record_line(&wrapped);
+        capture.record_line(&interleaved);
+
+        let snap = capture.snapshot();
+        assert_eq!(snap.matched, 2);
+        assert_eq!(snap.dropped, 0);
+        assert_eq!(snap.lines.len(), 2);
+        for line in &snap.lines {
+            assert!(
+                !line.contains('\u{1b}'),
+                "the retained line must be ANSI-free: {line:?}"
+            );
+            assert!(line.contains(ORIGIN_TARGET));
+        }
+        assert!(snap.lines[0].contains("ts=1 op_seq=4"));
+        assert!(snap.lines[1].contains("ts=1 op_seq=5"));
+    }
+
+    /// The capture's normalization must not reach the panic watch. The watch
+    /// matches payload text rather than structured fields, and its report is
+    /// meant to quote what the child actually printed, so it is fed the RAW
+    /// line and quotes it byte for byte.
+    #[test]
+    fn panic_watch_still_sees_the_raw_line_the_capture_normalizes() {
+        let watch = PanicWatch::new_standalone();
+        let capture = OriginCapture::new();
+        let raw = "\u{1b}[31mthread 'main' panicked at src/lib.rs:1:1\u{1b}[0m: boom";
+        assert!(raw.contains('\u{1b}'), "the fixture must carry escapes");
+
+        // The same two calls, in the same order, the line reader makes.
+        watch.record_line(raw);
+        capture.record_line(raw);
+
+        assert!(watch.tripped());
+        let Some(report) = watch.report() else {
+            panic!("a tripped watch must carry a report")
+        };
+        assert!(
+            report.contains(raw),
+            "the panic report must quote the RAW line byte for byte: {report:?}"
         );
     }
 }

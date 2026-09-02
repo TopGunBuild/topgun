@@ -121,9 +121,10 @@ use monitor::{
     fold_undecodable_key, parse_labelled_gauge, sample_disk_mb, sample_redb_bytes, sample_rss_mb,
     sample_wal_retention, slope_clause_stays_hard, BootGap, CensusRecord, CensusSource,
     CorpusLevelDisposition, CorpusSample, DiskAssessment, DiskSample, DurableCensus,
-    DurableReading, MemSample, OrVariant, OriginLine, SeriesPoint, SeriesShapeReading,
-    TombstoneAssessment, TombstoneCorpusAssessment, TombstoneSample, DECIDING_SERIES,
-    DEFAULT_DISK_CEILING_MB, DEFAULT_DISK_MIN_GROWTH_MB, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
+    DurableReading, EpochsExitedAbsence, GaugeFold, GaugeObservation, GaugeReading, MemSample,
+    OrVariant, OriginLine, SeriesPoint, SeriesShapeReading, TombstoneAssessment,
+    TombstoneCorpusAssessment, TombstoneSample, DECIDING_SERIES, DEFAULT_DISK_CEILING_MB,
+    DEFAULT_DISK_MIN_GROWTH_MB, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
     DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH, DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
     DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR, DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES,
     DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES, DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
@@ -344,14 +345,23 @@ struct DurableObservations {
     wal_bytes: Mutex<Vec<SeriesPoint>>,
     /// Number of retained WAL segment files.
     wal_segment_files: Mutex<Vec<SeriesPoint>>,
-    /// Largest write-behind watermark lag seen across the run, across label
-    /// sets. `None` means the metric was never present in a scraped body — a
-    /// visible gap, deliberately NOT recorded as a zero, because a silent
-    /// absence must never be able to masquerade as a flat series.
-    writebehind_lag_max: Mutex<Option<u64>>,
-    /// Largest exited-epoch total seen across the run. A maximum rather than a
-    /// last value, because the counter restarts with the process.
-    epochs_exited: AtomicU64,
+    /// The write-behind watermark lag column, folded across every scrape of the
+    /// run. Its `value` is the largest lag seen; `None` means no scrape ever
+    /// read the metric — a visible gap, deliberately NOT recorded as a zero,
+    /// because a silent absence must never be able to masquerade as a flat
+    /// series, and the counters beside it say whether the metric was missing
+    /// from the bodies or present in them and unreadable.
+    writebehind_lag: Mutex<GaugeObservation>,
+    /// The exited-epoch column, folded across every scrape. Its `value` is a
+    /// maximum rather than a last value, because the counter restarts with the
+    /// process.
+    ///
+    /// Held as an observation rather than as an atomic counter: an atomic
+    /// seeded at zero cannot distinguish "never observed" from "observed as
+    /// zero", and that distinction is the entire reason this column exists —
+    /// the zero is the most reassuring reading the origin classifier can emit,
+    /// and it must never be reachable from no evidence at all.
+    epochs_exited: Mutex<GaugeObservation>,
     /// Server restarts during the run. The recovery checkpoint is the ONLY
     /// producer of this count; nothing infers it from a log line.
     restarts: AtomicU64,
@@ -700,12 +710,18 @@ async fn run_soak(config: &Config) -> i32 {
                     // durable consequence is already carried by the WAL retention
                     // series; the exited-epoch total is only ever the origin
                     // reading's qualifier.
-                    if let Some(lag) = scraped.writebehind_lag_max {
-                        let mut seen = durable.writebehind_lag_max.lock();
-                        *seen = Some(seen.map_or(lag, |prev| prev.max(lag)));
+                    {
+                        // `max` across label sets: the lag is per-partition, and
+                        // the observation this column carries is how far the
+                        // WORST partition fell behind.
+                        let mut lag = durable.writebehind_lag.lock();
+                        fold_scrape_into(&mut lag, &scraped.writebehind_lag, GaugeFold::Max);
                     }
-                    if let Some(exited) = scraped.epochs_exited_total {
-                        durable.epochs_exited.fetch_max(exited, Ordering::Relaxed);
+                    {
+                        // `sum` across label sets: this is a total, and an
+                        // unlabelled series sums to its own single value.
+                        let mut exited = durable.epochs_exited.lock();
+                        fold_scrape_into(&mut exited, &scraped.epochs_exited, GaugeFold::Sum);
                     }
                     if let Some(bytes) = scraped.tombstone_bytes {
                         let elapsed = start.elapsed().as_secs_f64();
@@ -848,7 +864,7 @@ async fn run_soak(config: &Config) -> i32 {
                 // from stalling the churn clients whose write rate defines the
                 // workload under measurement.
                 if tokio::task::spawn_blocking(move || {
-                    sample_live_census_via_copy(&sampler, elapsed);
+                    sample_live_census_via_copy(&sampler, start, elapsed);
                 })
                 .await
                 .is_err()
@@ -1451,6 +1467,7 @@ async fn run_soak(config: &Config) -> i32 {
     // report already is, because adding a field to `SoakReport` would cascade
     // into the struct literal the WAL-census integration target builds.
     if let Some(durable_report) = &durable_report {
+        assert_scrape_counter_identity(durable_report);
         print_durable_reading_report(durable_report);
         if let Some(path) = &config.json_output {
             let durable_path = path.with_extension("durable.json");
@@ -1676,26 +1693,57 @@ async fn scrape_tombstone_bytes(http: &reqwest::Client, port: u16) -> Option<Met
     let body = resp.text().await.ok()?;
     Some(MetricsScrape {
         tombstone_bytes: parse_tombstone_bytes_gauge(&body),
-        // `max` across label sets: the lag is per-partition, and the observation
-        // this column carries is how far the WORST partition fell behind.
-        writebehind_lag_max: parse_labelled_gauge(&body, WRITEBEHIND_LAG_METRIC).map(|g| g.max),
-        // `sum` across label sets: this is a total, and an unlabelled series
-        // sums to its own single value.
-        epochs_exited_total: parse_labelled_gauge(&body, EPOCHS_EXITED_METRIC).map(|g| g.sum),
+        // Handed on WHOLE, unnarrowed: which statistic each column folds is
+        // stated at the fold site, and the two no-value readings are distinct
+        // instrument faults that are counted apart there. Collapsing either
+        // decision into this site would throw away the fact the fold needs.
+        writebehind_lag: parse_labelled_gauge(&body, WRITEBEHIND_LAG_METRIC),
+        epochs_exited: parse_labelled_gauge(&body, EPOCHS_EXITED_METRIC),
     })
+}
+
+/// Fold ONE scrape's reading into a run-scoped observation column.
+///
+/// Counting is delegated to [`GaugeObservation::record`] — the single place the
+/// six counters move, so no call site can drift the scrape identity apart. What
+/// this function decides is the other half `record` deliberately leaves to its
+/// caller: how a run's MANY scrapes combine into ONE observed value. The rule
+/// is a RUNNING MAXIMUM over the per-scrape folded values, for both columns —
+/// the lag column reports the worst moment of the run rather than whatever the
+/// last scrape happened to catch, and the exited-epoch column must be a maximum
+/// rather than a last value because the counter restarts with the process.
+///
+/// A scrape that read nothing leaves the value exactly as it stood, so a column
+/// no scrape ever read stays `None`: the combine can never launder an absence
+/// into a zero, which is the one way this hop could re-create the masquerade
+/// the three-valued reading exists to refuse.
+fn fold_scrape_into(column: &mut GaugeObservation, reading: &GaugeReading, fold: GaugeFold) {
+    if let Some(scraped) = column.record(reading, fold) {
+        column.value = Some(match column.value {
+            Some(highest) => highest.max(scraped),
+            None => scraped,
+        });
+    }
 }
 
 /// The three quantities one `/metrics` response body yields.
 ///
 /// Read from ONE body rather than from three requests, so the widening costs no
-/// extra traffic and the three values describe the same instant. Each field is
-/// its own `Option`: a metric absent from the body is `None`, never a zero, so a
-/// silent absence can never masquerade as a real reading. Only
-/// `tombstone_bytes` feeds a gate; the other two are OBSERVATION ONLY.
+/// extra traffic and the three values describe the same instant. No field can
+/// report a zero it did not read: `tombstone_bytes` is `None` where its gauge
+/// was absent, and the two observed gauges carry the whole three-valued
+/// [`GaugeReading`], which keeps "never appeared" and "appeared and nothing
+/// read" apart all the way to the fold. Only `tombstone_bytes` feeds a gate;
+/// the other two are OBSERVATION ONLY.
+///
+/// The two gauge fields are named for their METRIC, not for a statistic, because
+/// the statistic is no longer chosen here — the fold site names it, and a field
+/// called `_max` holding an unfolded reading would invite exactly the silent
+/// transposition the named fold exists to prevent.
 struct MetricsScrape {
     tombstone_bytes: Option<u64>,
-    writebehind_lag_max: Option<u64>,
-    epochs_exited_total: Option<u64>,
+    writebehind_lag: GaugeReading,
+    epochs_exited: GaugeReading,
 }
 
 /// Parse the `topgun_ormap_tombstone_bytes` (decrementable gauge) sample value
@@ -1810,6 +1858,13 @@ impl CorpusSampler {
         if let Some(census) = scanned {
             t.censuses.push(CensusRecord {
                 elapsed_secs,
+                // This scan takes NO copy -- it reads the data dir directly
+                // once the child is gone -- so there is no copy window to
+                // report and `None` is the honest value, not a missing one.
+                // Rendering it as an explicit null is what keeps "this producer
+                // never copied" distinguishable from "this artifact predates
+                // the field".
+                copy_completed_secs: None,
                 source: CensusSource::Terminal,
                 census,
             });
@@ -1845,7 +1900,11 @@ impl CorpusSampler {
 /// re-scanned as this one's. A failed DELETE is not a scan failure — the
 /// sample was obtained — so it is logged and the run continues; the teardown
 /// sweep removes the residue.
-fn sample_durable_corpus_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
+fn sample_durable_corpus_via_copy(
+    sampler: &CorpusSampler,
+    sampler_start: Instant,
+    elapsed_secs: f64,
+) {
     // One attempt per checkpoint, counted before anything can fail, so a
     // failure can never go unattributed.
     let ordinal = {
@@ -1854,11 +1913,17 @@ fn sample_durable_corpus_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
         t.scans_attempted
     };
     let scanned = copy_and_scan_census(sampler, "durable-corpus", ordinal);
+    // The window's FAR edge, read off the same run clock the caller stamped the
+    // near edge on, and read HERE because here is the only place that knows the
+    // copy and the scan are done. Taken unconditionally, before the tally lock,
+    // so a slow lock cannot be charged to the copy.
+    let copy_completed_secs = sampler_start.elapsed().as_secs_f64();
 
     let mut t = sampler.tally.lock();
     if let Some(census) = scanned {
         t.censuses.push(CensusRecord {
             elapsed_secs,
+            copy_completed_secs: Some(copy_completed_secs),
             source: CensusSource::Checkpoint,
             census,
         });
@@ -1888,18 +1953,31 @@ fn sample_durable_corpus_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
 /// live tally and NEVER on the corpus-scan tally the durable-corpus estimator
 /// reads — including its `scans_attempted` / `scans_failed` counters, so an
 /// armed live sampler cannot even move that estimator's instrument clause.
-fn sample_live_census_via_copy(sampler: &CorpusSampler, elapsed_secs: f64) {
+fn sample_live_census_via_copy(sampler: &CorpusSampler, sampler_start: Instant, elapsed_secs: f64) {
     let ordinal = {
         let mut t = sampler.live_tally.lock();
         t.scans_attempted += 1;
         t.scans_attempted
     };
     let scanned = copy_and_scan_census(sampler, "live-census", ordinal);
+    // The window's FAR edge, on the same run clock as the near edge. This is
+    // the producer the smear question is actually asked of: the server is
+    // writing underneath this copy, so how wide the window was is the whole of
+    // what tells a reader how much the image could have smeared.
+    //
+    // The stamp lands after the copy AND the scan, because that is the only
+    // point that knows both are done. Smearing accrues only while files are
+    // being copied — the scan reads an already-frozen image — so the far edge
+    // is an UPPER BOUND on the smear window, not the window itself. Read it as
+    // a bound: a reader who takes the difference from the near edge gets a
+    // number that cannot understate how much the image could have moved.
+    let copy_completed_secs = sampler_start.elapsed().as_secs_f64();
 
     let mut t = sampler.live_tally.lock();
     match scanned {
         Some(census) => t.censuses.push(CensusRecord {
             elapsed_secs,
+            copy_completed_secs: Some(copy_completed_secs),
             source: CensusSource::LiveCopy,
             census,
         }),
@@ -2443,7 +2521,14 @@ struct CensusRow {
     /// own `as_str`. A `LIVE_COPY` row is taken from a smeared image of a live
     /// store file and is OBSERVATION ONLY — the token is what fences it.
     source: String,
+    /// When the census was INITIATED. Meaning unchanged, so the sort and the
+    /// nearest-record lookup keyed on it are value-identical to before.
     elapsed_secs: f64,
+    /// When the census COMPLETED — the far edge of the window a live copy is
+    /// smeared across. Disposition-bearing: it always serializes, as an
+    /// explicit null where the producer took no copy, so "this producer takes
+    /// no copy" is never confused with "this artifact predates the field".
+    copy_completed_secs: Option<f64>,
     keys_scanned: u64,
     keys_undecodable: u64,
     or_map_keys: u64,
@@ -2488,7 +2573,35 @@ struct OriginReport {
     armed: bool,
     /// The exited-epoch qualifier. Observation only: it qualifies the origin
     /// reading and never enters a plateau predicate.
-    epochs_exited: u64,
+    ///
+    /// Disposition-bearing: it always serializes, as an explicit null where no
+    /// scrape ever read the metric, because a qualifier reported as `0` when it
+    /// was in fact never observed produces the most reassuring reading this
+    /// instrument can emit off no evidence at all.
+    epochs_exited: Option<u64>,
+    /// WHY the qualifier has no value, as a TYPED token rendered through
+    /// `EpochsExitedAbsence::as_str` — `ABSENT` or `UNREADABLE`, never a
+    /// sentence — so a consumer reads the disposition by equality rather than
+    /// by substring match. Disposition-bearing, and explicitly null whenever
+    /// `epochs_exited` carries a number: exactly one of the two is populated.
+    epochs_exited_absence: Option<String>,
+    /// Scrapes that reached the exited-epoch parse.
+    epochs_exited_scrapes_total: u64,
+    /// Scrapes in which at least one sample of it read. Independently
+    /// incremented on the `Read` arm — never computed as
+    /// `total - absent - unreadable` — so the identity
+    /// `read + absent + unreadable == total` can actually fail.
+    epochs_exited_scrapes_read: u64,
+    /// Scrapes in which the metric never appeared in the body.
+    epochs_exited_scrapes_absent: u64,
+    /// Scrapes in which it appeared and nothing read.
+    epochs_exited_scrapes_unreadable: u64,
+    /// Samples counted malformed across the run. Sample-scoped: NOT a term in
+    /// the scrape identity above.
+    epochs_exited_malformed_samples: u64,
+    /// Samples whose fold into the summed column overflowed. Sample-scoped. A
+    /// non-zero value makes that column a saturation marker, not a total.
+    epochs_exited_overflowed_samples: u64,
     /// Server restarts during the run, from the recovery checkpoint and from
     /// nothing else.
     restarts: u64,
@@ -2535,48 +2648,28 @@ struct DurableReadingReport {
     /// always serializes, as an explicit null where the metric was absent from
     /// every scraped body, so a silent absence can never masquerade as a zero.
     writebehind_lag_max: Option<u64>,
+    /// Scrapes that reached the write-behind-lag parse.
+    writebehind_lag_scrapes_total: u64,
+    /// Scrapes in which at least one sample of it read. Independently
+    /// incremented on the `Read` arm, for the same falsifiability reason as its
+    /// exited-epoch sibling.
+    writebehind_lag_scrapes_read: u64,
+    /// Scrapes in which the metric never appeared in the body.
+    writebehind_lag_scrapes_absent: u64,
+    /// Scrapes in which it appeared and nothing read.
+    writebehind_lag_scrapes_unreadable: u64,
+    /// Samples counted malformed across the run. Sample-scoped: NOT a term in
+    /// the scrape identity above.
+    writebehind_lag_malformed_samples: u64,
+    /// Samples whose fold overflowed. Sample-scoped. This column is a `max`, so
+    /// a non-zero value here reports the parse's own saturation rather than a
+    /// clamped column.
+    writebehind_lag_overflowed_samples: u64,
     /// The effective child log filter for this run — the one string that both
     /// launched the child and derived `armed`.
     log_filter: String,
     #[serde(flatten)]
     origin: OriginReport,
-}
-
-/// Strip ANSI SGR escape sequences from one captured child line.
-///
-/// The child's log formatter emits colour UNCONDITIONALLY — it never tests
-/// whether its output is a terminal — and the harness always reads that output
-/// through a pipe. Colour turns `ts=1756…` into an escape-interleaved token
-/// whose `key=value` split finds neither the key nor the value, so every origin
-/// line would read as unparsed and the reading would fail closed on a run where
-/// the emitter was in fact working perfectly. Normalizing HERE, at the harness
-/// boundary that owns the child's output, is what keeps the parser
-/// formatter-agnostic and `std`-only and keeps this instrument out of the
-/// server it measures.
-fn strip_ansi(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut rest = line;
-    while let Some(esc) = rest.find('\u{1b}') {
-        out.push_str(&rest[..esc]);
-        let tail = &rest[esc..];
-        let Some(after) = tail.strip_prefix("\u{1b}[") else {
-            // A lone escape that is not a CSI introducer: drop the escape alone,
-            // so no payload character is ever swallowed by mistake.
-            rest = &tail['\u{1b}'.len_utf8()..];
-            continue;
-        };
-        match after
-            .char_indices()
-            .find(|(_, c)| ('\u{40}'..='\u{7e}').contains(c))
-        {
-            // A complete CSI sequence: drop it up to and including its final byte.
-            Some((idx, c)) => rest = &after[idx + c.len_utf8()..],
-            // Unterminated: there is no final byte, so nothing after it is payload.
-            None => rest = "",
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Render one parsed origin line back to its eight fields.
@@ -2605,6 +2698,7 @@ fn census_row(record: &CensusRecord) -> CensusRow {
     CensusRow {
         source: record.source.as_str().to_string(),
         elapsed_secs: record.elapsed_secs,
+        copy_completed_secs: record.copy_completed_secs,
         keys_scanned: c.keys_scanned,
         keys_undecodable: c.keys_undecodable,
         or_map_keys: c.or_map_keys,
@@ -2659,9 +2753,9 @@ fn build_durable_reading_report(
     let redb_bytes = durable.redb_bytes.lock().clone();
     let wal_bytes = durable.wal_bytes.lock().clone();
     let wal_segment_files = durable.wal_segment_files.lock().clone();
-    let writebehind_lag_max = *durable.writebehind_lag_max.lock();
+    let writebehind_lag = *durable.writebehind_lag.lock();
     let restarts = durable.restarts.load(Ordering::Relaxed);
-    let epochs_exited = durable.epochs_exited.load(Ordering::Relaxed);
+    let epochs_exited = *durable.epochs_exited.lock();
 
     // The four series are paired with the frozen names by construction, so the
     // classifier's name-set check cannot be satisfied by a set this site
@@ -2689,9 +2783,20 @@ fn build_durable_reading_report(
     // derived from, so a run cannot be reported as armed while the child was in
     // fact quiet.
     let armed = log_filter.contains(process::ORIGIN_TARGET);
-    let captured: Vec<String> = origin.lines.iter().map(|l| strip_ansi(l)).collect();
-    let aggregate =
-        aggregate_origin_lines(&captured, origin.dropped, restarts, armed, epochs_exited);
+    // The retained lines arrive ANSI-free: the capture strips at the boundary
+    // that owns the child's output, so exactly one strip happens per line and a
+    // second one here could only ever be a no-op that hides where the real one
+    // lives.
+    // The qualifier crosses this hop as the `Option` the fold produced. Nothing
+    // here may supply a stand-in value: an absence that arrives as a number is
+    // an absence the classifier can no longer refuse to classify from.
+    let aggregate = aggregate_origin_lines(
+        &origin.lines,
+        origin.dropped,
+        restarts,
+        armed,
+        epochs_exited.value,
+    );
     let (origin_reading, origin_reason) = classify_origin_reading(&aggregate);
     let first_zero_return_line = aggregate
         .lines
@@ -2705,13 +2810,37 @@ fn build_durable_reading_report(
         .find(|r| r.source == CensusSource::Terminal)
         .map(census_row);
 
+    // WHY the qualifier has no value, derived from the counters rather than
+    // from a second parse, and rendered through the token type's own `as_str`
+    // so the artifact can only ever carry one of the two pinned strings. A
+    // column that read nothing was either never seen in any body or seen in one
+    // and never legible, and those are different instrument faults: the second
+    // says the exporter is emitting the metric and the harness cannot read it.
+    // A run in which no scrape reached the parse at all reads ABSENT, and the
+    // `scrapes_total == 0` beside the token is what makes that case legible
+    // rather than indistinguishable from a body that omitted the metric.
+    // Exactly one of this and `epochs_exited` is populated.
+    let epochs_exited_absence = match epochs_exited.value {
+        Some(_) => None,
+        None if epochs_exited.scrapes_unreadable > 0 => {
+            Some(EpochsExitedAbsence::Unreadable.as_str().to_string())
+        }
+        None => Some(EpochsExitedAbsence::Absent.as_str().to_string()),
+    };
+
     let report = DurableReadingReport {
         reading: reading.as_str().to_string(),
         reason,
         deciding_series: readings.iter().map(shape_row).collect(),
         censuses: censuses.iter().map(census_row).collect(),
         census_terminal,
-        writebehind_lag_max,
+        writebehind_lag_max: writebehind_lag.value,
+        writebehind_lag_scrapes_total: writebehind_lag.scrapes_total,
+        writebehind_lag_scrapes_read: writebehind_lag.scrapes_read,
+        writebehind_lag_scrapes_absent: writebehind_lag.scrapes_absent,
+        writebehind_lag_scrapes_unreadable: writebehind_lag.scrapes_unreadable,
+        writebehind_lag_malformed_samples: writebehind_lag.malformed_samples,
+        writebehind_lag_overflowed_samples: writebehind_lag.overflowed_samples,
         log_filter: log_filter.to_string(),
         origin: OriginReport {
             origin_matched: aggregate.matched,
@@ -2721,11 +2850,73 @@ fn build_durable_reading_report(
             origin_reason,
             armed: aggregate.armed,
             epochs_exited: aggregate.epochs_exited,
+            epochs_exited_absence,
+            epochs_exited_scrapes_total: epochs_exited.scrapes_total,
+            epochs_exited_scrapes_read: epochs_exited.scrapes_read,
+            epochs_exited_scrapes_absent: epochs_exited.scrapes_absent,
+            epochs_exited_scrapes_unreadable: epochs_exited.scrapes_unreadable,
+            epochs_exited_malformed_samples: epochs_exited.malformed_samples,
+            epochs_exited_overflowed_samples: epochs_exited.overflowed_samples,
             restarts: aggregate.restarts,
             first_zero_return_line,
         },
     };
     (reading, report)
+}
+
+/// Check, at the moment the reading becomes an artifact, that each observed
+/// column's scrape counters still add up: `read + absent + unreadable == total`.
+///
+/// A hard `assert!`, deliberately NOT a `debug_assert!`: every arm this harness
+/// runs is a release build, so a debug assertion here would be a check that
+/// never once executed in the use it was written for. It is sited at emission
+/// rather than at the fold because this is the last point before the numbers
+/// leave the process — a console line and a JSON file — and an artifact whose
+/// own counters disagree is not evidence of anything, so producing one silently
+/// is worse than failing loudly.
+///
+/// The identity is a real constraint rather than a restatement of subtraction
+/// only because `read` is recorded on the `Read` arm instead of being computed
+/// as `total - absent - unreadable`; a dropped increment anywhere in the fold
+/// therefore surfaces here. The two sample-scoped counters are not terms in it:
+/// they count samples, not scrapes.
+///
+/// This decides NOTHING about the run: no counter is a term in the verdict,
+/// in `passed`, or in the exit code, and no counter value can turn a failing
+/// run into a passing one or the reverse. The one path by which it touches
+/// termination is its own failure — a tripped `assert!` panics out of the run
+/// and so bypasses the normal exit, which is the intended loud failure and is
+/// reachable ONLY from the harness's own bookkeeping being inconsistent, never
+/// from anything the run measured.
+fn assert_scrape_counter_identity(r: &DurableReadingReport) {
+    let epochs_parts = r
+        .origin
+        .epochs_exited_scrapes_read
+        .saturating_add(r.origin.epochs_exited_scrapes_absent)
+        .saturating_add(r.origin.epochs_exited_scrapes_unreadable);
+    assert!(
+        epochs_parts == r.origin.epochs_exited_scrapes_total,
+        "exited-epoch scrape counters disagree: read {} + absent {} + unreadable {} = {} != total {}",
+        r.origin.epochs_exited_scrapes_read,
+        r.origin.epochs_exited_scrapes_absent,
+        r.origin.epochs_exited_scrapes_unreadable,
+        epochs_parts,
+        r.origin.epochs_exited_scrapes_total
+    );
+
+    let lag_parts = r
+        .writebehind_lag_scrapes_read
+        .saturating_add(r.writebehind_lag_scrapes_absent)
+        .saturating_add(r.writebehind_lag_scrapes_unreadable);
+    assert!(
+        lag_parts == r.writebehind_lag_scrapes_total,
+        "write-behind-lag scrape counters disagree: read {} + absent {} + unreadable {} = {} != total {}",
+        r.writebehind_lag_scrapes_read,
+        r.writebehind_lag_scrapes_absent,
+        r.writebehind_lag_scrapes_unreadable,
+        lag_parts,
+        r.writebehind_lag_scrapes_total
+    );
 }
 
 /// Render the durable-layer reading to the console.
@@ -2768,19 +2959,41 @@ fn print_durable_reading_report(r: &DurableReadingReport) {
             row.last_quarter_trough
         );
     }
+    // The counters travel with the value on the SAME line rather than in a
+    // block of their own, because a lag figure read without knowing how many
+    // scrapes produced it is the exact misreading this column was retyped to
+    // prevent: `absent` and `10826` are both consistent with one good scrape
+    // and with a hundred, and only `read`/`absent`/`unreadable` separate them.
     println!(
-        "writebehind lag:   {} (observation only)",
+        "writebehind lag:   {} (observation only) \
+         scrapes total={} read={} absent={} unreadable={} \
+         malformed_samples={} overflowed_samples={}",
         r.writebehind_lag_max
-            .map_or_else(|| "absent".to_string(), |v| v.to_string())
+            .map_or_else(|| "absent".to_string(), |v| v.to_string()),
+        r.writebehind_lag_scrapes_total,
+        r.writebehind_lag_scrapes_read,
+        r.writebehind_lag_scrapes_absent,
+        r.writebehind_lag_scrapes_unreadable,
+        r.writebehind_lag_malformed_samples,
+        r.writebehind_lag_overflowed_samples
     );
     println!("censuses:          {}", r.censuses.len());
     for row in &r.censuses {
         println!(
-            "  {:<10} t={:.1}s keys={} undecodable={} or_map={} or_tomb={} lww={} \
+            "  {:<10} t={:.1}s copy_done={} keys={} undecodable={} or_map={} \
+             or_tomb={} lww={} \
              live={} live_tag_bytes={} tombstones={} tombstone_bytes={} dups={} \
              keys_with_tombstones={} keys_all_dead={} max_per_key={}",
             row.source,
             row.elapsed_secs,
+            // The far edge of the window the copying producers scan across, so
+            // a reader can see the smear a row was taken over instead of
+            // assuming it was instantaneous at `t`. A row with no window is
+            // rendered `n/a`, never as a number and never as `t` itself: the
+            // TERMINAL census does not copy, so any figure printed there would
+            // claim a window that was never opened.
+            row.copy_completed_secs
+                .map_or_else(|| "n/a".to_string(), |v| format!("{v:.4}s")),
             row.keys_scanned,
             row.keys_undecodable,
             row.or_map_keys,
@@ -2808,14 +3021,43 @@ fn print_durable_reading_report(r: &DurableReadingReport) {
     );
     println!(
         "origin:            reading={} matched={} unparsed={} dropped={} armed={} \
-         epochs_exited={} restarts={}",
+         epochs_exited={} restarts={} \
+         epochs_scrapes total={} read={} absent={} unreadable={} \
+         malformed_samples={} overflowed_samples={}",
         r.origin.origin_reading,
         r.origin.origin_matched,
         r.origin.origin_unparsed,
         r.origin.origin_dropped,
         r.origin.armed,
-        r.origin.epochs_exited,
-        r.origin.restarts
+        // The qualifier and its absence token are an XOR pair, so the console
+        // prints whichever one is populated: a number when some scrape read the
+        // metric, and otherwise the SAME token the artifact carries — taken
+        // from the field the JSON serializes rather than re-derived here, so
+        // the two transports cannot disagree and no site retypes a literal.
+        // The third arm is the XOR's own violation: it renders as a visibly
+        // wrong string rather than as an absence token that was never derived,
+        // because inventing one here would report a disposition nothing decided.
+        match (
+            r.origin.epochs_exited,
+            r.origin.epochs_exited_absence.as_deref()
+        ) {
+            (Some(observed), _) => observed.to_string(),
+            // Wrapped in `absent(...)` so a console reader cannot mistake the
+            // token for a value: an unwrapped `NOT_REACHED_EQUAL_REFS` sitting
+            // where a number belongs reads as data of some unfamiliar kind,
+            // whereas `absent(NOT_REACHED_EQUAL_REFS)` says the metric was not
+            // read and names why. The token itself is still the field the JSON
+            // serializes, so the two transports cannot disagree.
+            (None, Some(token)) => format!("absent({token})"),
+            (None, None) => "(no disposition)".to_string(),
+        },
+        r.origin.restarts,
+        r.origin.epochs_exited_scrapes_total,
+        r.origin.epochs_exited_scrapes_read,
+        r.origin.epochs_exited_scrapes_absent,
+        r.origin.epochs_exited_scrapes_unreadable,
+        r.origin.epochs_exited_malformed_samples,
+        r.origin.epochs_exited_overflowed_samples
     );
     println!(
         "origin reason:     {}",
@@ -3013,6 +3255,7 @@ async fn recovery_checkpoint(
     restarts.fetch_add(1, Ordering::Relaxed);
     sample_durable_corpus_via_copy(
         corpus_sampler,
+        boot_gap_clock.sampler_start,
         boot_gap_clock.sampler_start.elapsed().as_secs_f64(),
     );
     // Brief gap so the OS releases the listening socket before rebind.
@@ -4020,8 +4263,11 @@ mod tests {
         write_or_fixture(data.path());
         let sampler = CorpusSampler::new(data.path().to_path_buf(), scratch.path().to_path_buf());
 
+        // The initiation stamps are synthetic here; the completion instants are
+        // measured off this clock, so the records carry a real copy window.
+        let sampler_start = Instant::now();
         for i in 0..3 {
-            sample_live_census_via_copy(&sampler, f64::from(i));
+            sample_live_census_via_copy(&sampler, sampler_start, f64::from(i));
         }
 
         let corpus = sampler.tally.lock().clone();

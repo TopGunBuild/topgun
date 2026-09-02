@@ -1468,3 +1468,1514 @@ recorded in this post-section's header — it still reproduces, so no frozen byt
 ```
 frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
 ```
+
+<!-- BATCH-4 BEGIN -->
+
+---
+
+## Batch 4 — `SPEC-363` re-pin pre-registration
+
+Appended by `SPEC-363`, the re-pinning spec that `Batch 3`'s §0(d) ruling said would be required.
+This batch **APPENDS**: §0–§8 gain and lose zero bytes, no existing post-section entry is edited, and
+every line of it sits below the `## POST-SECTION (append-only)` marker. It is committed **BEFORE any
+re-witness run**, which is what makes everything in it a pre-registration rather than a report.
+
+**This batch contains NO value produced by a re-witness run.** At the moment of this append, **no arm
+of `SPEC-363` has been executed** — not a partial one, not a smoke one filed as evidence. Every
+number below is either carried from an already-committed record or is an expectation fixed before the
+data.
+
+### 1. The §0(d) invocation
+
+Frozen §0(d) says that *"if an instrument defect is discovered after this spec's own merge, the
+remedy is a NEW SPEC THAT RE-PINS — never an edit absorbed under the pin, and never an edit to a
+frozen section here."* `Batch 3` recorded five such defects (`P7` items 11–15) and explicitly
+declined to patch them, precisely because patching under the old pin would either invalidate the
+three committed control arms or force a re-run that §6.2 / `R7` forbid.
+
+**`SPEC-363` is that new spec, and this is its invocation of §0(d).** Its consequences are stated
+here so no reader has to infer them:
+
+- The instrument changed. Under §0(d) *"any post-pin `.rs` change invalidates every run taken before
+  it"*, so **the `spec362-*` arms are not witnesses of the new instrument** and are not re-labelled
+  as such. They stay committed, byte-untouched, and stay quotable **only** for what they witnessed
+  under the OLD pin.
+- Because the old arms cannot speak for the new pin, the new pin **requires its own witnesses**. The
+  three arms pre-registered in section 4 below are those witnesses. **They are NOT re-runs of the
+  committed arms** — the thing being witnessed is a different instrument — and the prohibition on
+  re-running an arm until the physics cooperates is untouched and is restated in section 4.
+- **No frozen byte moves, and no new §0–§8 digest exists.** A new frozen digest would itself be the
+  evidence of the edit the freeze forbids. The pinned one-liner in this post-section's header still
+  reproduces `c7f3373f…`; that reproduction is re-verified in this batch's footer.
+
+### 2. The pin-resolution rule, and its exact command (`R7.4`)
+
+§8.1 item 2 obliges `SPEC-362b` to show `git diff --stat <pin>..HEAD -- '*.rs'` empty. After this
+re-pin, `<pin>` is **`SPEC-363`'s merge commit** — and this batch records the **rule and the command**
+that resolve it, not a hash. (A spec cannot contain the hash of the commit that contains it; that is
+§0(a)'s reasoning, and it is why no merge hash for `SPEC-363` appears anywhere in this batch.)
+
+**The rule.** The pin is **the merge commit on `origin/main` whose SECOND parent is `SPEC-363`'s
+branch tip** — the last commit on the implementation branch `spec-363-repin-instrument` before the
+merge.
+
+**The command, pinned verbatim.** The range and the COMMAND are both pinned, exactly as this
+post-section's header pins the digest one-liner:
+
+```
+git fetch origin
+git log origin/main --merges --format='%H %P' \
+  | awk -v tip=<BRANCH TIP — see section 2a> '$3==tip {print $1}'
+```
+
+`%P` prints the parents space-separated, so `$2` is the first parent and `$3` the second.
+
+- **`git fetch origin` is a PRECONDITION, not decoration.** The ref must be `origin/main` and it must
+  be current.
+- **A local `main` is NOT acceptable.** On the checkout `SPEC-363` was written from, local `main` sat
+  two PRs behind `origin/main`, and the same command run against `main` returns **empty** — the exact
+  silent-empty defect this clause exists to remove. An empty result read as "no `.rs` diff" would let
+  §8.1 item 2 pass while resolving nothing.
+- **The command must return EXACTLY ONE commit.** Zero means the merge has not happened or the ref is
+  stale — resolve that before reading anything else. More than one is impossible for a distinct tip
+  and would mean the recorded tip is wrong.
+- §8.1 item 2's `git diff --stat <pin>..HEAD -- '*.rs'` uses **that** commit and no other.
+
+**The "most recent merge touching the path" heuristic is REFUSED outright, not patched.** It is wrong
+twice over, and both reasons are recorded so a successor cannot reintroduce it as a convenience:
+
+1. **Mechanically** — `git log <ref> --merges -- '<path>'` returns empty, because default history
+   simplification drops TREESAME merges; and `--full-history` returns a **different** spec's merge.
+2. **Substantively, and this is the worse defect** — "most recent" **auto-advances** past
+   `SPEC-363`'s own witnesses the moment any later spec touches a `soak_harness` `.rs` file, at which
+   point §8.1 item 2 passes **vacuously**, against an instrument that carries no re-witness arms at
+   all. A pin bound to the second parent of this spec's own merge cannot move.
+
+#### 2a. The branch tip is an UNRESOLVED SLOT, and naming the gap is deliberate
+
+The command above reads `<BRANCH TIP — see section 2a>` because **no append inside this repository
+can name that SHA**, and pretending otherwise would break the very command it appears in:
+
+1. **A commit cannot contain its own hash.** The branch tip is, by construction, the **last** commit
+   on the implementation branch. This batch is committed early — before the 21 artifact commits, which
+   is what makes it a pre-registration — so the tip lies ~22 commits in its future. Nor can the later
+   `Batch 5` close the gap: writing a tip SHA into `Batch 5` would require `Batch 5` to contain the
+   hash of the commit that contains it, which is exactly the circularity §0(a) refuses for the merge
+   hash. Any commit that *did* record a SHA would move the tip by existing.
+2. **Recording today's HEAD would be ACTIVELY HARMFUL, not merely imprecise.** The merge's second
+   parent will not be any commit that exists at this append, so the pinned `awk` would match nothing
+   and return **empty** — which is precisely the silent-empty failure the rule above was written to
+   eliminate. A wrong value here is worse than a marked absence, because the command would still
+   *run*.
+3. **The SHA is therefore recorded in `SPEC-363`'s Execution Summary**, which lives outside version
+   control and can be written after the final commit without moving the tip.
+
+**The obligation this places on whoever merges `SPEC-363`:** transcribe that SHA into the slot above
+(as a further post-section entry, never as an edit to this one — see this section's rules).
+**Until that transcription exists, §8.1 item 2 has no resolvable pin**, and a successor that runs the
+command will get an empty result that means "unresolved", never "no `.rs` diff".
+
+### 3. §4.3 addendum — the absent qualifier is fail-closed
+
+§4.3 is frozen and is **not edited**. This addendum records what the re-pinned instrument does with a
+case §4.3's branch list never named, because under the old instrument the case could not be
+represented: the qualifier `topgun_or_prune_epochs_exited_total` being **ABSENT or UNREADABLE** in the
+scrape, as distinct from being **present and zero**.
+
+- Under the old pin the scrape returned `Option<u64>` folded to a number, and `Batch 3` `P7` item 11
+  showed that **one** malformed sample reported a **present** metric as absent — an absence that then
+  read as a `0`. A `0` qualifier sends §4.3 to branch **6** (`NotObservedAtHead`), *"nothing exited,
+  so the arm could not have been reached"*: the most reassuring reading in the set, produced by an
+  instrument fault. That is the masquerade this manifest forbids, arriving through the one door §4.3
+  did not have a branch for.
+- **The re-pinned rule:** the qualifier is three-valued (`Read` / `Absent` / `Unreadable`), and when
+  it is **not readable** the origin reading is **`IndeterminateInstrument`**, with a reason naming the
+  absent qualifier. An absence is never folded to a zero and never reaches branch 5 or branch 6.
+- **The guard is sited minimally, and the ordering is preserved.** It sits at the earliest point at
+  which the value is consumed — **after** `not-reached-equal-refs` (branch 4) and **before**
+  `epochs_exited > 0` (branch 5). Siting it earlier would change readings that never consume the
+  qualifier, i.e. widen a frozen rule for no reason; siting it later is impossible, because both
+  remaining branches consume it. **All seven of §4.3's branch conditions above the guard —
+  `!armed`, `dropped > 0`, `unparsed > 0`, `restarts > 0`, the zero-return branch, the
+  partial-divergence branch and the not-reached-equal-refs branch — are byte-unchanged, and every
+  input that reaches one of them returns exactly the reading it returned before.**
+- This addendum **adds no branch to §4.3 and re-tunes no reading rule**. §4.3's ordering doctrine —
+  fail-closed first — is what it applies; `C2`'s prohibition on touching the frozen reading rule is
+  untouched.
+
+### 4. The pre-registered re-witness protocol
+
+All three ≤ 900 s controls are re-executed under the new instrument, from the derivative runner
+`evidence/spec363-durable.sh` (the parent `spec362-durable.sh` is a closed diff and is not edited),
+with artifact prefix **`spec363-*`** so old and new witnesses stay trivially separable.
+
+**The order is REVERSED against the committed run, and it is pre-registered here:**
+
+| # | Arm | Log directive | `--crash-interval` | `--live-census-interval` | Purpose |
+|---|-----|---------------|--------------------|--------------------------|---------|
+| 1 | `spec363-logctl-off` | UNSET | 0 | 0 | pricing arm (§6.2), **run FIRST** |
+| 2 | `spec363-logctl-on` | ARMED | 0 | 0 | pricing arm (§6.2) + the arming witness (§6.3) |
+| 3 | `spec363-crashctl` | ARMED | 300 | **300** | the double witness (§6.4) **+ the live-census witness** |
+
+**Expected results, recorded PRE-DATA, carried from §6.3 and §6.4:**
+
+- **§6.3, the arming witness (mechanical and decisive, two-directional):** the **ARMED** arms must
+  show `matched > 0` and `unparsed == 0` (and `dropped == 0`); the **UNSET** arm must show
+  `matched == 0`. Together they prove the capture path is live and that a zero count under the ARMED
+  filter is a real null read rather than a dark instrument.
+- **§6.4, the crash double witness:** at least one census record with `CensusSource::Checkpoint`
+  present, and `originReading == "INDETERMINATE_INSTRUMENT"` **with the restart named as the reason**
+  (not the filter, not a drop — the arm runs with the directive ARMED, so this isolates the restart
+  guard), **and the root-level `restarts` count itself > 0**, so *"the reason names the restart"* has
+  provenance in the **artifact** rather than only in a reason string.
+- **§6.5's caveat travels with every verdict, verbatim and without exception.** These arms' verdicts
+  are about the **INSTRUMENT**. A `MonotoneRising` or `PlateauNotMet` on a control arm is **not per se
+  a false positive** and may not be quoted as one, and none of these arms concludes anything about the
+  plateau.
+
+**Why `crashctl` alone carries the live sampler, and why that stays inside `X8`.** The copy-completion
+fix is sited at the LIVE census producer, and **no committed arm has ever executed it**: every cell of
+`spec362-durable.sh` passed `--live-census-interval 0`, which is why all 21 committed artifacts hold
+only `CHECKPOINT` and `TERMINAL` rows. Discharging that fix "by construction" would apply a weaker
+standard to it than is applied to everything else under this pin. So the sampler is armed on **one**
+control, and:
+
+- **The pricing pair stays uncontaminated** — `logctl-on` / `logctl-off` keep `--live-census-interval
+  0`, so the §6.2 price and the order data point are measured on arms running exactly the parent's
+  sampler set. The live copy's I/O cost lands only on the arm that prices nothing.
+- **No new budget, no fourth control, no new lineage** — `crashctl` keeps its 900 s duration, its
+  300 s crash interval and every rate- and shape-determining literal. `X8` — which forbids a 4 h cell,
+  a width-1000 deciding matrix and a new measurement lineage, and permits only ≤ 900 s controls with
+  no fourth control — is untouched. The derivative runner ships **no 4 h cell at all**: the label is
+  deleted and a refusal comment stands in its place.
+- **The departure is enumerable**, as a recorded diff against the parent runner rather than a broken
+  comparison. Cross-pin comparability of the ARMS was never promised — the controls witness the
+  INSTRUMENT under the new pin.
+
+**The no-re-run clause, restated because this batch is the place it binds.** **No arm is re-run.** If
+an arm's physics fires the shipped tombstone byte-slope gate, that is **recorded and attributed**,
+exactly as the committed run did. Re-running an arm until the physics cooperates is what §6.2 / `R7`
+forbid, and it is forbidden here.
+
+### 5. The `crashctl` live-row count, PRE-REGISTERED
+
+**This clause is not optional and it is fixed before the data.** `crashctl` runs 900 s with the live
+sampler at 300 s, so its schedule nominally yields **two** `LIVE_COPY` rows (~300 s and ~600 s). But
+the same arm schedules its `kill -9` at `start + 300 s`: **the first live copy can land inside the
+crash / restart window and fail**, incrementing `live_tally.scans_failed` and producing **no**
+`LIVE_COPY` row — leaving the arm with **one** live row. All three outcomes and their dispositions are
+therefore recorded now, so that a single row cannot read at review as a partial failure of an arm that
+behaved exactly as predicted:
+
+- **2 rows — the nominal schedule.** Full PASS.
+- **1 row — a FULL PASS, not a partial one.** The first copy was consumed by the crash window; the
+  surviving row discharges the live-census witness in full. This is the **expected-and-acceptable**
+  outcome, pre-registered as such.
+- **0 rows — a recorded finding, routed to `TODO-634` by id.** The arm is **NOT re-run**. The
+  copy-completion property then falls back to the by-construction reading of the live sampler, and
+  `Batch 5` must **say so** rather than claim a witness it does not have.
+
+Each row of either kind must carry both timestamps — copy-**initiation** (the existing field, whose
+meaning is unchanged) and copy-**completion** (the new one) — with completion at or after initiation;
+the `TERMINAL` row takes no copy and serializes completion as an explicit `null`. The live records are
+**fenced from the gate**: they land on the live tally only, so `scansAttempted` / `scansFailed` /
+`censusTerminal` and the byte-slope gate's input are moved by exactly zero, and `Batch 5` checks that
+**on the artifact** rather than by reading source.
+
+### 6. The reversed order: disposition FIXED BEFORE THE DATA
+
+Execution finding 1 of the committed run recorded a **+25.10 %** `rss_kib` last-half-peak difference
+between the armed and unset pricing arms, with three caveats travelling with it — one of which is an
+**uncontrolled order confound**: the armed arm ran first. Running unset-first this time costs nothing
+(both arms run regardless; only the invocation order changes) and yields a **second data point on
+ordering**. Its disposition is fixed **here, before the arms run**:
+
+- The new pair is a witness of the **NEW instrument** and a **second, order-reversed observation**.
+- It may **NOT** be quoted as a correction, a refutation or a confirmation of the committed
+  **+25.10 %**, which stands exactly as recorded.
+- It may **NOT** be used to retune the departure. §0(c)'s disposition is unchanged: a difference at or
+  above the **5.4 %** spread is a **recorded finding routed to `TODO-634` by id**, and per §0(d) it is
+  grounds for a re-pinning spec — never grounds for retuning the departure.
+- **If the two pairs disagree, BOTH stand** and the divergence routes by id. **No third arm is run.**
+- §6.2's n = 1 honesty clause and the level-not-shape residual confound are restated verbatim beside
+  the number in `Batch 5`: with n = 1 per arm the pair has **no** inferential power against a small
+  perturbation and can only surface a gross one; it bounds a **shift in the LEVEL** of RSS, not a
+  **distortion of the growth SHAPE**.
+
+### 7. `P7` items 11–15 — CLOSED BY FIX under this pin
+
+All five findings `Batch 3` routed on the scrape / census layer are **fixed** under this re-pin, and
+each is witnessed by a directed test rather than asserted. Routing remains **by identifier only**:
+**no tracker file was created, edited or deleted** by this implementation.
+
+11. **Whole-metric abort on one bad sample — CLOSED.** The per-sample `?` is gone; a malformed sample
+    is counted and skipped, and the samples already folded are kept. A metric present with at least
+    one valid sample reads as **`Read`**; a metric present with **every** sample unparseable reads
+    **`Unreadable`**, never `Read` with a zero; a metric genuinely missing reads **`Absent`**. Both
+    fold orders are tested, because the pre-change `?` discarded an accumulated fold either way.
+12. **Origin capture matched before ANSI stripping — CLOSED.** Stripping happens at the line-reader
+    boundary, before the dispatch that decides whether the line matched, and the retained line is
+    ANSI-free. The panic watch's input remains the **RAW** line, byte-identical, and no second strip
+    is performed downstream.
+13. **Scientific-notation truncation — CLOSED,** by the same rewrite as item 11 and stated as a
+    grammar rather than a special case: a sample reads **iff** its value token is an unsigned integer
+    or an `N.0…` rendering. `1.5e3` no longer folds as `1`; it is counted malformed and skipped.
+14. **`distinct_count_within_key` was O(n²) per key — CLOSED,** with a per-key set. The census
+    contract forbids **cross-key** sets, not per-key ones, and the new implementation is proven
+    **value-identical** to the previous quadratic definition on a directed corpus including the
+    all-equal, duplicates-interleaved and ≥ 1000-element cases.
+15. **Live-census timestamps named copy-INITIATION only — CLOSED.** Initiation keeps its existing
+    meaning and its field; completion is a **new** field beside it, chosen over moving the capture
+    because moving it would silently change the meaning of a field already committed in 21 artifacts.
+    The fix is witnessed at its own defect site — see section 5.
+
+**The full extent of what changed under this pin, including the fix that is NOT a `P7` item.** A
+**seventh** fix rides on this re-pin: the **numeric grammar and the fold arithmetic** of the gauge
+parse, surfaced at the cross-vendor design checkpoint rather than by the review that produced `P7`.
+It is named here so that this pre-registration states the whole of what changed, not only the routed
+subset: presence is decided **before** the value (a value-less head line reads `Unreadable`, never
+`Absent`); a trailing timestamp is **never** folded as the value; a fractional sample is **counted
+malformed rather than floored** (flooring `0.7` to `0` would flip the origin classifier into the most
+reassuring branch in the set); signed values, `NaN`, `±Inf` and empty value tokens are malformed
+rather than silently dropped; and the `sum` fold is **checked**, with a clamped fold **counted and
+made artifact-visible** instead of saturating in silence.
+
+### 8. The declared EXIT of this line (`R13`)
+
+`SPEC-363` is the **fifth** consecutive instrument-side cycle in the `TODO-634` reclamation family,
+and a lineage with no declared exit is a lineage that will produce a sixth. So the exit is declared,
+as a closure condition rather than an aspiration:
+
+> With `P7` items 11–15 closed by fix and re-witnessed, the **scrape / census layer is CLOSED to
+> further routing**. A finding on this layer that is an instance of an already-closed class — an
+> absence flattened to a zero, a whole-metric abort on one sample, a match performed before
+> normalization, a per-key quadratic scan, a timestamp that names the wrong end of an operation, **a
+> value taken from the wrong token on the line, a numeric form folded on a guess rather than counted,
+> a sample dropped with nothing counted, or an arithmetic clamp that leaves no trace** — is a
+> **regression of `SPEC-363`**, handled as a defect against it. Only a **NEW defect class** on this
+> layer justifies a sixth re-pin, and this closure statement is what a successor must argue against in
+> order to open one.
+
+This clause routes nothing and gates nothing. It exists so that the family's terminal state is
+**declared** rather than merely reached.
+
+### 9. Batches 1–3 still reproduce (checked at this append)
+
+Verified with the manifest's own pinned per-batch one-liners, at the moment of this append and before
+this batch's own digest was taken:
+
+```
+batch-1          575bd28e76380b8501561abe050b62b865ae7bed3dcd8f8279f8a3febf5eca3d
+batch-2          467a9d80c06eec02a061c712a35b16a70ffef5791d0c9596805f4ac22ca7d38f
+batch-3          a8a0ab833ada09a529aeb630aa5a666c572fc158763ca93fd302bca076d04ad3
+```
+
+Batches 1–3 are **byte-unchanged**; this batch corrects none of them and edits none of them.
+
+<!-- BATCH-4 END -->
+
+**Digest of Batch 4.** Same convention as Batches 1–3: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-4 BEGIN -->$/{p=1;next} /^<!-- BATCH-4 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-4          7d521a3091e2ce1e6c792535279a98f39d285427b752f07eeb7ae4649f2efab7
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
+
+<!-- BATCH-5 BEGIN -->
+
+---
+
+## Batch 5 — `SPEC-363` completion record
+
+Appended by `SPEC-363` after all three re-witness arms ran and were committed. This batch
+**APPENDS**: §0–§8 gain and lose zero bytes, no existing post-section entry — Batch 4's included —
+is edited, and every line of it sits below the `## POST-SECTION (append-only)` marker.
+
+`Batch 4` was the pre-registration; this is the report against it. Nothing here retunes anything
+`Batch 4` fixed before the data.
+
+### 1. The completion record — three arms, in the pre-registered order
+
+All three ran at ≤ 900 s, in the order `Batch 4` fixed, with the full 7-artifact set per arm
+committed (21 artifacts). No fourth arm, no combined-budget allowance, no 4 h cell. No arm was
+re-run.
+
+```
+#  arm                   directive  crash  live   commit    exit  verdict
+1  spec363-logctl-off    UNSET      0      0      522dff68  0     RESULT: instrument sound
+2  spec363-logctl-on     ARMED      0      0      a1134e1d  1     RESULT: instrument sound
+3  spec363-crashctl      ARMED      300    300    f3e01be8  0     RESULT: instrument sound
+```
+
+`finishedReason`, verbatim from each arm's `*.soak.json`:
+
+```
+1  logctl-off  duration reached
+2  logctl-on   tombstone-byte growth slope 852.8 bytes/h exceeds 512.0 bytes/h: tombstone-byte
+               growth slope 852.8 bytes/h exceeds 512.0 bytes/h (total growth 44022 bytes over
+               180 samples, last-half window 445s)
+3  crashctl    duration reached
+```
+
+**Arm 2's non-zero exit is the pre-existing SHIPPED tombstone byte-slope hard gate firing on
+uncontrolled ≤ 900 s physics**, exactly as it did on two `spec362-*` arms. It is attributed, never
+re-run, and **nothing this spec added contributes to it**: the gate reads the corpus-scan tombstone
+samples alone, and `parse_tombstone_bytes_gauge` and the tombstone-sample fold are byte-unchanged
+under this pin. The verdict line each arm prints — `RESULT: instrument sound` — is about the
+INSTRUMENT, which is the only thing these arms witness.
+
+**The arming witness (§6.3), closed two-directionally on the arms themselves:**
+
+```
+1  logctl-off (UNSET)  matched  0
+2  logctl-on  (ARMED)  matched 30   unparsed 0   dropped 0
+3  crashctl   (ARMED)  matched 28   unparsed 0   dropped 0
+```
+
+**The live-copy row count on `crashctl` is 2** — the *expected* cell of `Batch 4`'s pre-registered
+2 / 1 / 0 scale, i.e. the nominal 900 s / 300 s schedule with neither live copy consumed by a crash
+window. Goal-Backward truth 5 is therefore **witnessed on a committed artifact**, not fallen back to
+the by-construction reading, and the zero-row finding `Batch 4` pre-registered **did not have to be
+filed**.
+
+### 2. The shape sets, under §6.5's caveat carried VERBATIM
+
+**The frozen §6.5 caveat, quoted verbatim and stated WITH the data rather than after it:**
+
+> The controls carry a **real** load and therefore real growth, so a `MonotoneRising` or a
+> `PlateauNotMet` observed on a control arm is **NOT per se a false positive** and may not be quoted
+> as one.
+
+**This spec concludes NOTHING about the plateau.** Every verdict in this batch is about the
+**INSTRUMENT**. The rows below are recorded because §6.5 obliges the shape set for all three arms,
+not because any of them is read as evidence for or against a plateau.
+
+```
+arm          DurableReading    rss_kib          redb_bytes       wal_bytes            wal_segment_files
+logctl-off   PLATEAU_NOT_MET   MONOTONE_RISING  MONOTONE_RISING  LEVELLED             RISING_DECELERATING
+logctl-on    PLATEAU_NOT_MET   MONOTONE_RISING  MONOTONE_RISING  LEVELLED             MONOTONE_RISING
+crashctl     PLATEAU_NOT_MET   MONOTONE_RISING  MONOTONE_RISING  MONOTONE_RISING      MONOTONE_RISING
+
+firing envelope, per series
+logctl-off   rss_kib BOTH   redb_bytes PEAKS   wal_bytes (none)  wal_segment_files (none)
+logctl-on    rss_kib BOTH   redb_bytes PEAKS   wal_bytes (none)  wal_segment_files BOTH
+crashctl     rss_kib BOTH   redb_bytes PEAKS   wal_bytes FLOOR   wal_segment_files FLOOR
+```
+
+All three arms read `PLATEAU_NOT_MET` with `rss_kib` `MONOTONE_RISING` and its firing envelope
+**BOTH**. Under the caveat above, that is not per se a false positive and is not quoted as one.
+
+### 3. `AC23` — the order-confound data point (a SECOND observation, never a correction)
+
+`Batch 4` adopted the reversed order — UNSET first this time — and pre-registered the disposition
+before the data. The numbers, both taken off the **single 5 s durable channel** §6.2 names: the
+`rss_kib` row of each arm's `*.soak.durable.json`, fields `lastHalfPeak` / `lastHalfMean`. **Neither
+number is taken from the 60 s CSV `rss_mb` column.**
+
+```
+run order: logctl-off FIRST, logctl-on SECOND   (reversed vs. the committed pair)
+
+logctl-on  (ARMED):  lastHalfPeak 890896 KiB   lastHalfMean 609606 KiB
+logctl-off (UNSET):  lastHalfPeak 845040 KiB   lastHalfMean 573885 KiB
+difference:          peak +5.43 %              mean +6.22 %    (ARMED higher on both)
+SPEC-355 recorded run-to-run spread: 5.4 %  ⇒  AT OR ABOVE
+```
+
+**Disposition, exactly as pre-registered in `Batch 4`: a difference at or above the 5.4 % spread is
+a RECORDED FINDING routed to `TODO-634` by id** (item (vi) of §9 below) — **never** grounds for
+retuning the departure until the control passes. **No arm was re-run.**
+
+**This is a second data point on the order confound. It is NOT a correction, NOT a refutation and
+NOT a confirmation of the committed `+25.10 %` peak / `+19.22 %` mean, which stand exactly as
+recorded in `P2` and are not retired, amended or re-labelled by anything here.** The two pairs were
+taken on different instruments under different pins and in opposite orders; per `Batch 4`, **if the
+two pairs disagree, both stand.** They do not disagree in *sign* — ARMED is higher on both statistics
+in both pairs — and the magnitude is not compared across pins, because cross-pin comparability of the
+ARMS was never promised.
+
+The two frozen §6.2 caveats travel with this data point, quoted verbatim:
+
+> With n = 1 per arm this control has **no** inferential power against a small perturbation; it can
+> only surface a gross one.
+
+> These controls bound only a **SHIFT IN THE LEVEL** of RSS, not a **DISTORTION OF THE GROWTH SHAPE**.
+> A log sink's allocator behaviour over 4 h is not observable in a ≤ 900 s arm, so a departure that
+> leaves the level alone while bending the slope would pass this control unseen.
+
+Both are named as accepted residuals, not argued away.
+
+### 4. The crash double witness (`AC21`)
+
+`spec363-crashctl` carries **2** `CHECKPOINT` census records (`elapsedSecs` 303.02 and 603.03),
+root-level `restarts` = **2**, and a root-level `originReading` of `INDETERMINATE_INSTRUMENT` whose
+`originReason` reads, verbatim:
+
+```
+the server restarted 2 time(s) during the run, so the epochs_exited qualifier reset and would be
+misread
+```
+
+The restart branch — one of the two branches §6.4 says are otherwise never executed anywhere in this
+family — is therefore executed and witnessed under the new pin. **Recorded honestly about shape:**
+the reading and its reason are ROOT-level fields of the durable report, not per-census-row fields; a
+`CensusRow` carries no `originReading` key under either pin. The three conjuncts of `AC21` are
+satisfied as: ≥ 1 `CHECKPOINT` census record present (2), root `originReading` =
+`INDETERMINATE_INSTRUMENT` with the restart named in the reason, and root `restarts` > 0.
+
+**The absent-qualifier guard did NOT fire on any arm** (`AC22`): `epochsExitedAbsence` is explicit
+`null` on all three and `epochsExited` is a number on all three (10 / 29 / 30). `crashctl`'s
+`INDETERMINATE_INSTRUMENT` comes from the **restart** branch, which sits far above the guard and
+consumes no qualifier value. **There is nothing to route from `AC22`.**
+
+### 5. The `Batch 4` commit SHA (`AC17`) and the link-verification record (`AC29a`)
+
+**The `Batch 4` commit is `d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e`.** It is RECORDED here rather
+than derived, because `git log -1 --format=%H -- <this manifest>` resolves, by the time any check
+runs, to **Batch 5's own commit** — a resolver that silently answers the wrong question. (Confirmed:
+before this append that command returned exactly `d4ada54f…`; after it, it returns Batch 5's commit.)
+
+**Link 3 — pre-registration strictly precedes the evidence. VERIFIED.**
+
+```
+git merge-base --is-ancestor d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e 522dff68   ⇒ exit 0
+```
+
+`522dff68` is the commit that added the first `spec363-*` **artifact** set (`logctl-off`, 7 files).
+
+**A scoping defect in Validation item 7's literal command, recorded rather than smoothed over.** As
+pinned, item 7 resolves the right-hand operand with
+
+```
+git log --diff-filter=A --format=%H -- 'packages/server-rust/benches/soak_harness/evidence/spec363-*' | tail -1
+```
+
+which returns **`4bc51b92`** — the commit that added the **runner** `spec363-durable.sh`, not an
+artifact. The runner was committed *before* `Batch 4` (it is the thing `Batch 4` pre-registers the
+use of), so against that operand `--is-ancestor` exits **1**. Scoped to the artifacts proper —
+
+```
+git log --diff-filter=A --format=%H -- '…/evidence/spec363-*.soak*' '…/evidence/spec363-*.matrix.txt' \
+    '…/evidence/spec363-*.csv' | tail -1     ⇒ 522dff68,  --is-ancestor exit 0
+```
+
+— it exits **0**. `AC17`'s substance is *"the Batch-4 commit strictly precedes the first spec363
+**artifact** commit"*, and that holds. The over-broad glob is a defect of the checklist command, not
+of the pre-registration order, and it is exactly the class the checklist preamble names: a validation
+command that answers a question adjacent to the one asked. It is recorded here; it changes no
+verdict.
+
+**Link 1 — the `Option` chain, hop by hop. VERIFIED against the merged code.**
+
+```
+hop 1  parse → GaugeReading            monitor.rs:2045   Absent | Unreadable{n} | Read(LabelledGauge)
+                                                          absence is a VARIANT, not a zero
+hop 2  GaugeReading → GaugeObservation monitor.rs:2164   record(): Absent ⇒ None, Unreadable ⇒ None,
+                                                          Read ⇒ Some(max|sum). The only counter site.
+hop 3  many scrapes → one value        main.rs:1720      fold_scrape_into(): a scrape that read nothing
+                                                          leaves value untouched; a column no scrape
+                                                          ever read stays None.
+hop 4  observation → aggregate         main.rs:2793      epochs_exited.value passed as Option<u64>;
+                                                          no stand-in supplied at the hop.
+hop 5  aggregate → classifier          monitor.rs:1979   `let Some(epochs_exited) = … else { return
+                                                          IndeterminateInstrument }` — DESTRUCTURED,
+                                                          never compared as an Option.
+hop 6  classifier → OriginReport       main.rs:2581      epochs_exited: Option<u64>, NO
+                                                          skip_serializing_if ⇒ explicit null;
+                                                          epochs_exited_absence beside it.
+```
+
+The **ordered-comparison** hazard — `Option<u64>` compared against `Some(0)`, where `None < Some(_)`
+compiles and silently means −∞, coinciding with the frozen `NotObservedAtHead` branch — is refused by
+construction at hop 5 and is named in the code's own WHY-comment. Greps over the **whole**
+`<base>..HEAD` `.rs` diff, added lines only:
+
+```
+unwrap_or(0)  0    unwrap_or_default  0    unwrap_or(&0)  0    unwrap_or (any)  0
+map_or(false  0    is_some_and        0    matches!       0    ..Default::default()  0
+serde(default) 0   filter_map         0    flatten        0
+Option ordered against Some(_):  0   ( `Some(0) =>` / `Some(_) =>` occurrences in the diff are
+                                       EQUALITY patterns in the 24-cell enumeration test and in the
+                                       absence-token match, not ordered comparisons )
+```
+
+No atomic on this path is seeded at `0` and read as a value: `aggregate_origin_lines` is fed
+`epochs_exited.value` (an `Option`) from the scrape fold, not an `AtomicU64` load; no `AtomicU64` in
+`main.rs` reaches it. The two `skip_serializing_if` attributes in `main.rs` sit on `firing_envelope`
+and `origin_reason` and are pre-existing — neither is on this path.
+
+**Link 2 — one strip, at the capture boundary, panic watch on the RAW line. VERIFIED.**
+
+```
+strip_ansi definition        process.rs:598  (pub)
+strip_ansi call sites, prod  process.rs:108  — exactly ONE, inside OriginCapture::record_line
+grep -c strip_ansi main.rs   0               (also 0 in monitor.rs, report.rs, model.rs, client.rs)
+record_line order            let normalized = strip_ansi(line);  THEN  normalized.contains(TARGET)
+                             — strip precedes match; the RETAINED line is `normalized`, ANSI-free
+panic watch input            spawn_line_reader (process.rs:537-538):
+                               panic_watch.record_line(&line);      ← RAW, byte-identical
+                               origin_capture.record_line(&line);   ← strips internally
+```
+
+One strip per line, at the capture boundary; the panic watch's input is unchanged.
+
+**All three links verify.** None was asserted; each was traced against the merged code.
+
+### 6. `AC24` — the new artifacts are commit-pinned
+
+Each `spec363-*.matrix.txt` records the soak binary's build commit and asserts a clean `.rs` working
+tree at build time:
+
+```
+spec363-logctl-off   soak binary commit d4ada54f…   .rs working tree: CLEAN (asserted before the build)
+spec363-logctl-on    soak binary commit 522dff68…   .rs working tree: CLEAN (asserted before the build)
+spec363-crashctl     soak binary commit a1134e1d…   .rs working tree: CLEAN (asserted before the build)
+```
+
+The three commits differ because HEAD advanced as each arm's artifacts were committed; **all three
+are `.rs`-identical** — `git diff cac4814d..HEAD -- '*.rs'` is empty, so no `.rs` byte moved between
+the first and the third build. That is what makes the three arms witnesses of **one** instrument.
+
+**This closes manifest `P6` item 10 — control-artifact binary provenance is not commit-pinned — FOR
+THESE ARTIFACTS ONLY.** The `spec362-*` artifacts' provenance weakness is untouched by this spec and
+**stays routed** exactly as `P6` records it. Closing it here is a statement about the `spec363-*` set
+and nothing else.
+
+### 7. `AC29b` — the `Default` departure, recorded rather than silent
+
+`OriginReport` derives **no** `Default`, which departs from the PROJECT.md Auditor-Checklist item that
+asks report structs to. The reason, recorded here so the departure is not silent: no serialized report
+mirror in this harness derives `Default`; `OriginReport` has a **single** construction site; and it is
+a **mirror of an already-computed reading, not a wire payload** that a peer might need to
+default-construct. A `Default` on it would additionally manufacture exactly the artefact this spec
+exists to remove — an `epochs_exited` of `None`-or-`0` produced by no scrape at all.
+
+### 8. Digests
+
+**Frozen §0–§8, RE-VERIFIED at the moment of this append** with the pinned one-liner recorded in this
+post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
+
+**Batches 1–4 all still reproduce, byte-unchanged.** This batch corrects none of them and edits none
+of them:
+
+```
+batch-1          575bd28e76380b8501561abe050b62b865ae7bed3dcd8f8279f8a3febf5eca3d
+batch-2          467a9d80c06eec02a061c712a35b16a70ffef5791d0c9596805f4ac22ca7d38f
+batch-3          a8a0ab833ada09a529aeb630aa5a666c572fc158763ca93fd302bca076d04ad3
+batch-4          7d521a3091e2ce1e6c792535279a98f39d285427b752f07eeb7ae4649f2efab7
+```
+
+### 9. Routing — BY IDENTIFIER ONLY
+
+**No tracker file is created, edited or deleted by this batch.** All six route to **`TODO-634`** by
+id.
+
+1. **`TODO-634` ← (i) the gate-feeding parser retains the grammar this spec just declared unsafe.**
+   `parse_tombstone_bytes_gauge` (`main.rs`) is the **ONLY** gauge parser feeding a **gate**, and it
+   keeps the grammar `parse_labelled_gauge` was fixed away from. Measured on a verbatim replica of
+   its body: `NaN` → `Some(0)`, `-5` → `Some(0)`, `+Inf` → `Some(u64::MAX)`, `1.5e3` → `Some(1500)`,
+   `12.7` → `Some(12)`; a value-less matching line returns `None` from the **whole function**.
+   **`NaN → 0` and `-5 → 0` are FAIL-OPEN on a gate input.** It was **deliberately NOT fixed** under
+   this pin: `AC4` requires the function byte-unchanged, `R10` requires gate-input value-identity,
+   and `C7` is report-only — **changing a gate's input under a re-pin is precisely what the freeze
+   forbids.** Per **`R13`**, this is a **NEW defect class on a DIFFERENT function** — the **gate**
+   path, not the scrape/census layer this spec closes — so it is **not a regression of this spec**,
+   and it is the kind of thing that **would justify its own spec** rather than a sixth re-pin of this
+   layer.
+2. **`TODO-634` ← (ii) transport-failure conflation.** A failed scrape returns early, so no counter
+   moves; an artifact can therefore read `epochsExitedAbsence == "ABSENT"` alongside
+   `epochsExitedScrapesTotal == 0`, conflating *"never scraped"* with *"metric absent"*. It is
+   **diagnosable from the artifact** because `AC12a` makes `scrapes_total` observable — **mitigated,
+   not cured.**
+3. **`TODO-634` ← (iii) mixed-run token precedence.** When some scrapes are unreadable and others
+   absent, the rendered token collapses to `UNREADABLE`, so **absences are always the hidden side**.
+   Both counts remain first-class per `AC12a`, and `AC12`'s contract is about the **closed token
+   set**, not about mixed-run precedence — so this is a gap beside `AC12`, not a failure of it.
+4. **`TODO-634` ← (iv) per-key `HashSet` allocation perturbs the measured machine.**
+   `distinct_count_within_key` allocates a set per key, and the harness shares cores with the server
+   under measurement — marginally widening the very copy windows this change adds a field to report.
+   Value-identity with the quadratic oracle is intact (`AC9`), so this is **perturbation, not
+   correctness.**
+5. **`TODO-634` ← (v) `writebehindLagScrapesAbsent` is non-zero on every arm.**
+   ```
+   logctl-off   2 absent of 180 scrapes    logctl-on   2 absent of 180    crashctl   6 absent of 173
+   ```
+   **This is the ABSENT counter — not malformed, not overflowed.** All four
+   `…MalformedSamples` / `…OverflowedSamples` counters are **`0` on all three arms**, the scrape
+   identity `read + absent + unreadable == total` holds **exactly** on both columns on all three arms,
+   and **no routing rule was triggered**: `AC22`'s guard did not fire, `AC12a`'s identity did not
+   fail, and item 6's four-counter clause is satisfied. It is recorded because it is exactly the
+   signal the twelve counters were added to make visible, and an unexplained non-zero absence on a
+   clean run should not pass unremarked.
+   **Judgement, stated plainly: the `crashctl` 6 / 173 is FULLY EXPLAINED and needs no routing** — its
+   two deliberate `kill -9` / restart windows are intervals in which `/metrics` is simply
+   unavailable, and 6 scrapes is the right order of magnitude for two restarts at this scrape rate.
+   **The identical 2 / 180 on two independent, crash-free arms is NOT fully explained and IS
+   routed.** Identical counts across two separate runs are structural, not noise; the most plausible
+   mechanism is that `topgun_writebehind_lag` is not yet exported during the first scrapes after
+   start, which would make the absence a **startup-window artefact of the exporter rather than of the
+   harness** — but that is a hypothesis, and this spec measured it on neither side. Routed as: *is
+   the leading 2-scrape absence a pre-export startup window, and if so should the harness distinguish
+   a pre-export absence from a mid-run one?*
+6. **`TODO-634` ← (vi) the reversed-order pricing pair is AT OR ABOVE the 5.4 % spread.** Peak
+   **+5.43 %**, mean **+6.22 %**, ARMED higher on both (§3 above). Routed by id per `Batch 4`'s
+   pre-registered disposition. **Recorded, not retuned; and explicitly not a correction of the
+   committed `+25.10 %`.**
+
+**A Delta gap, recorded so the ledger is honest.** The implementation added a **`pub enum GaugeFold
+{ Max, Sum }`** that the spec's Delta did not list — an unledgered addition at the time it landed,
+since recorded in the spec itself by a concurrent agent. It sits in `monitor.rs`, **counted file 1**,
+so **the cap is unmoved: the counted ledger stands at 3 / 5 `.rs` files with ZERO PROJECT.md
+exemption shapes claimed.**
+
+### 10. The `/xreview` record (`AC29`)
+
+`/xreview` was run post-implementation on the full diff, scoped to the three counted `.rs` files,
+with `R9` (report-only) as its stated rule.
+
+- **`R9` report-only was independently CONFIRMED.** `passed` is bound once, immutably, before the
+  durable block begins; no value derived from any of the eleven types `R9` names reaches `passed` or
+  the process exit code.
+- **One finding was a real fail-open regression, and it was FIXED in `cac4814d`.** A value jammed
+  against a label block — `topgun_x{p="0"}0` — had the digits inside the label block read as a
+  sample. Measured across the three states: **pre-change `None`; post-change-pre-fix
+  `Read(max: 0)`; post-fix `Unreadable { malformed_samples: 1 }`.** The middle state is the
+  fail-open one — a fabricated zero where the pre-change code at least declined to answer — and the
+  post-fix state is the fail-closed reading this spec's whole grammar exists to produce.
+- **The remaining findings are routed above by id**, in §9. None was rejected silently.
+
+### 11. Validation items 4–7, as executed against the committed arms
+
+```
+item 4   epochsExited / epochsExitedAbsence / originReading, ROOT level
+         crashctl    {"epochsExited":10,"epochsExitedAbsence":null,"originReading":"INDETERMINATE_INSTRUMENT"}
+         logctl-off  {"epochsExited":29,"epochsExitedAbsence":null,"originReading":"INDETERMINATE_INSTRUMENT"}
+         logctl-on   {"epochsExited":30,"epochsExitedAbsence":null,"originReading":"NOT_REACHED_EQUAL_REFS"}
+         ⇒ three objects, each epochsExited a NUMBER and epochsExitedAbsence null (AC22);
+           crashctl INDETERMINATE_INSTRUMENT (AC21).  logctl-off's INDETERMINATE_INSTRUMENT is the
+           frozen `!armed` branch — the UNSET arm, byte-unchanged, exactly as before.
+item 4a  spec362-crashctl (READ-ONLY): .originReading → "INDETERMINATE_INSTRUMENT";
+         .origin.originReading → null.  The nested path is silent, as recorded.
+item 5   AC10 ordering on crashctl → prints `true`, exit 0.  Census set, in order:
+           LIVE_COPY   300.0016 → 300.1767
+           CHECKPOINT  303.0227 → 303.0930
+           LIVE_COPY   600.1840 → 600.3403
+           CHECKPOINT  603.0326 → 603.1081
+           TERMINAL    900.2754 → null
+         2 CHECKPOINT + 2 LIVE_COPY + 1 TERMINAL = 5 rows; every copy row non-null and
+         copyCompletedSecs >= elapsedSecs; TERMINAL explicit null; elapsedSecs == sort.
+         The LIVE_COPY rows are the ones produced by the producer L2 was sited at.
+         FENCE (AC4):  spec363-crashctl.soak.json → {"a":3,"f":0} — byte-identical to the
+         live-DISARMED spec362-crashctl.soak.json. Arming the live sampler moved the gate's
+         tally by exactly zero.
+         logctl arms, explicit-null rendering ONLY, NOT ordering evidence:
+           logctl-off  [{"source":"TERMINAL","copyCompletedSecs":null}]
+           logctl-on   [{"source":"TERMINAL","copyCompletedSecs":null}]
+item 5a  spec362-* (READ-ONLY): censuses length 3 / 1 / 1; crashctl first row CHECKPOINT at
+         303.016822792, last row TERMINAL at 901.216274042, LIVE_COPY count 0;
+         fence {"a":3,"f":0}.  spec363-crashctl's length is 5 = 3 + 2 live rows, as expected.
+item 6   twelve counters, per arm (crashctl / logctl-off / logctl-on):
+           writebehindLagMax              10826 / 10895 / 11369      (all numbers)
+           writebehindLagScrapesTotal       173 /   180 /   180
+           writebehindLagScrapesRead        167 /   178 /   178
+           writebehindLagScrapesAbsent        6 /     2 /     2
+           writebehindLagScrapesUnreadable    0 /     0 /     0
+           writebehindLagMalformedSamples     0 /     0 /     0
+           writebehindLagOverflowedSamples    0 /     0 /     0
+           epochsExitedScrapesTotal         173 /   180 /   180
+           epochsExitedScrapesRead          173 /   180 /   180
+           epochsExitedScrapesAbsent          0 /     0 /     0
+           epochsExitedScrapesUnreadable      0 /     0 /     0
+           epochsExitedMalformedSamples       0 /     0 /     0
+           epochsExitedOverflowedSamples      0 /     0 /     0
+         Every key present and integer on every arm; all four malformed/overflowed counters 0.
+         No arm's `sum` is a saturation marker.
+         identity → `true` on each of the three arms, exit 0.
+item 6a  spec362-crashctl (READ-ONLY): .writebehindLagMax → 51023. The key keeps that name,
+         its Option<u64> type and its explicit-null treatment under the new pin.
+item 7   git merge-base --is-ancestor d4ada54f… 522dff68  ⇒ exit 0.
+         The literal command's over-broad glob resolves to the runner commit 4bc51b92 and exits 1;
+         see §5 above, where that is recorded as a checklist-scoping defect that changes no verdict.
+```
+
+**No `spec362-*` artifact was edited, deleted or re-run.** Items 4a, 5a and 6a are **reads**.
+
+<!-- BATCH-5 END -->
+
+**Digest of Batch 5.** Same convention as Batches 1–4: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-5 BEGIN -->$/{p=1;next} /^<!-- BATCH-5 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-5          17c066fe64ee2bb4401fc2fc1c533da8e6d6e60c3040f18262d61ad49726bde2
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
+
+<!-- BATCH-6 BEGIN -->
+
+---
+
+## Batch 6 — the amended pin-resolution rule (conductor amendment, 2026-09-02)
+
+Appended by `SPEC-363` after `Batch 5`. This batch **APPENDS**: §0–§8 gain and lose zero bytes, no
+existing post-section entry — `Batch 4`'s and `Batch 5`'s included — is edited, and every line of it
+sits below the `## POST-SECTION (append-only)` marker.
+
+**What this batch does, in one line.** It **SUPERSEDES `Batch 4` section 2 and section 2a** — the
+tip-anchored pin-resolution rule and its unresolved `<BRANCH TIP — see section 2a>` slot — with a rule
+anchored on a SHA that is **already recorded in this file**, and it **withdraws** the merge-time
+transcription obligation section 2a placed on whoever merges `SPEC-363`.
+
+**Supersession is by APPEND, never by edit.** §8.2 item 1 forbids editing any existing post-section
+entry, and §8.3 pins exactly this device for the analogous case of a rename: *the substitute lands as
+an appended entry, not as an edit*. `Batch 4` therefore stays byte-intact and its digest
+`7d521a3091e2…` still reproduces; a reader who resolves the pin must read `Batch 4` section 2 **and**
+this batch, and this batch wins where they differ.
+
+### 1. Why the tip-anchored rule is withdrawn — the circularity, named
+
+`Batch 4` section 2 bound the pin to *the merge commit on `origin/main` whose SECOND parent is
+`SPEC-363`'s branch tip*, and section 2a then recorded, correctly, that **no append inside this
+repository can name that SHA**. Section 2a's diagnosis is reaffirmed here in full and is not
+retracted: the branch tip is by construction the **last** commit on the implementation branch, so any
+commit that records it **moves it by existing** — the same circularity §0(a) refuses for the merge
+hash — and writing the then-current HEAD would have been worse than a marked absence, because the
+pinned command would still *run* and would return empty.
+
+What section 2a got wrong was only its **conclusion**: it left the slot open and deferred it to a
+merge-time transcription. That deferral is withdrawn for two reasons.
+
+1. **It needs a post-merge commit that gates every successor.** Until the transcription existed, §8.1
+   item 2 had no resolvable pin, so `SPEC-362b` could not start; and the transcription is a
+   post-merge append to a file whose whole purpose is to be settled *before* the evidence it governs.
+2. **It is unnecessary.** The tip was never the only non-circular anchor available. `Batch 5` already
+   records a SHA with every property the rule needs, and records it for an unrelated reason.
+
+**The tip is not needed for anything else either.** It remains recorded in `SPEC-363`'s Execution
+Summary as a fact about that run; **nothing resolves against it**, and no obligation now rests on it.
+
+### 2. The anchor: the `Batch 4` commit, already recorded in this file
+
+**The anchor is `d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e`** — the `Batch 4` commit, recorded by
+`Batch 5` in its section 5 above.
+
+It has, and had at the moment it was written, every property the tip lacked:
+
+- **It is in-repo.** It is written in this manifest, under the freeze discipline, and nothing about
+  resolving the pin requires reading anything outside this file.
+- **It was never circular to write.** `Batch 5` records an **earlier** commit's hash, not its own —
+  which is precisely why `Batch 5` was able to record it and why §0(a)'s refusal does not reach it.
+- **It is fixed before the merge**, and no later commit — this one included — can move it.
+
+That this `Batch 6` commit moves the branch tip is therefore **immaterial**: the tip is no longer part
+of the rule.
+
+### 3. The rule
+
+**The pin is the EARLIEST merge commit on `origin/main` that is a descendant of the `Batch 4`
+commit.** That merge is `SPEC-363`'s own merge: `SPEC-363`'s merge is the first way the `Batch 4`
+commit reaches `main`, so every later merge that also descends from it descends from *that* merge and
+cannot be earlier.
+
+### 4. The command, pinned verbatim
+
+The range and the COMMAND are both pinned, exactly as this post-section's header pins the digest
+one-liner:
+
+```
+git fetch origin
+git rev-list --ancestry-path --merges --reverse \
+  d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e..origin/main | head -1
+```
+
+`--ancestry-path` restricts the range to commits that are **descendants of the anchor and ancestors of
+`origin/main`**; `--merges` keeps only merge commits; `--reverse | head -1` takes the earliest.
+
+- **`git fetch origin` is a PRECONDITION, not decoration.** The ref must be `origin/main` and it must
+  be current. This half of `Batch 4` section 2 is unchanged and carries over intact, including its
+  reason: on the checkout `SPEC-363` was written from, local `main` sat two PRs behind `origin/main`.
+- **The command must return EXACTLY ONE line.** **Empty means UNRESOLVED** — the merge has not happened
+  or the ref is stale — and never *"no `.rs` diff"*. Resolve that before reading anything else. This is
+  the same silent-empty discipline `Batch 4` section 2 established, and it is why the empty case is
+  given a meaning here rather than left to the reader.
+- **Verified on the pre-merge checkout (2026-09-02):** with `origin/main` at
+  `2870862d4892368dd03238e56790f7bdd5779d6e`, the command returns **nothing** — the UNRESOLVED case,
+  behaving as specified.
+- **Required cross-check before the pin is used:**
+
+  ```
+  git merge-base --is-ancestor d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e <pin>
+  ```
+
+  Expected **exit 0**. A pin that fails this is not a descendant of the pre-registration and must not
+  be used.
+- **§8.1 item 2's `git diff --stat <pin>..HEAD -- '*.rs'` uses that commit and no other.**
+
+**Ordering caveat, recorded rather than left implicit.** `--reverse` reverses `git rev-list`'s default
+**commit-date** ordering. Every other candidate merge in the restricted range descends from
+`SPEC-363`'s merge, so it is also the earliest by date unless the repository carries clock skew.
+Adding `--topo-order` to the same command is skew-independent and **must return the same commit**; if
+the two forms ever disagree, the recorded anchor is wrong and that must be resolved before anything
+else is read.
+
+### 5. What is NOT changed by this amendment
+
+- **The refusal of the "most recent merge touching the path" heuristic stands verbatim**, on both of
+  the grounds `Batch 4` section 2 recorded: it is empty under default history simplification and
+  returns a different spec's merge under `--full-history`; and, worse, it **auto-advances** past
+  `SPEC-363`'s witnesses the moment any later spec touches a `soak_harness` `.rs`, letting §8.1 item 2
+  pass vacuously. **The amended rule cannot auto-advance either** — "earliest descendant merge" is
+  stable under every later merge, which is exactly the property the recency heuristic lacked.
+- **No merge hash for `SPEC-363` appears anywhere in this file.** This batch writes a rule and a
+  command, not a pin.
+- **No `spec362-*` artifact was edited, deleted or re-run**, and no frozen byte moved. The pinned
+  one-liner in this post-section's header still reproduces `c7f3373f…`; that reproduction is
+  re-verified in this batch's footer.
+- **Every obligation §8.1 and §8.2 place on `SPEC-362b` is untouched.** This batch changes only how
+  `<pin>` in §8.1 item 2 is resolved.
+
+<!-- BATCH-6 END -->
+
+**Digest of Batch 6.** Same convention as Batches 1–5: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-6 BEGIN -->$/{p=1;next} /^<!-- BATCH-6 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-6          0ac5d5d28821c233f64a34db67a0f46955a2debfcc475c8660def409ee697f6b
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
+
+<!-- BATCH-7 BEGIN -->
+
+---
+
+## Batch 7 — second re-witness cycle, PRE-REGISTERED (conductor amendment C6a, 2026-09-02)
+
+Appended by `SPEC-363` **BEFORE any arm of the second cycle runs**, and committed before them, so
+this batch is a pre-registration in exactly the sense `Batch 4` was. This batch **APPENDS**: §0–§8
+gain and lose zero bytes, no existing post-section entry is edited, and every line of it sits below
+the `## POST-SECTION (append-only)` marker.
+
+### 1. Why a second cycle is mandatory, and why it is not a re-run
+
+A fresh-context implementation review found that three console renderings the re-pinned instrument
+was specified to carry had not landed, which additionally left
+`print_durable_reading_report`'s own doc-contract — *"every number the artifact carries is printed
+here too, so a console log is a complete record of the reading"* — **false in the code**. Correcting
+it moves `.rs` bytes.
+
+Frozen §0(d)'s reasoning is what forces the consequence: a `.rs` change *"invalidates every run taken
+before it"*. The three arms recorded in `Batch 5` were produced by a binary that no longer exists in
+the tree that will merge, so they are evidence of a **different instrument** and may not ship beside
+this one. **All three arms are therefore re-witnessed as a whole set.**
+
+**This is not the re-running `C6` forbids, and the difference is structural, not rhetorical.** `C6`
+forbids re-rolling until the physics cooperates. Here the physics is not the subject: the instrument
+changed, every arm is redone rather than the one whose result was disliked, this pre-registration is
+committed before any new run, and §3 below pins the superseded cycle's numbers **now** so a friendlier
+outcome cannot later be substituted for a harsher one. The carve is recorded as `C6a` in `SPEC-363`
+and is bounded by those five conditions.
+
+**What `C6a` does NOT license is stated so no successor can widen it:** a tombstone-gate exit on any
+arm stays **attributed**, exactly as `C6` requires. If the shipped gate fires again it is attributed
+again; if it stops firing, that is **run-to-run variance**, never a correction. Any divergence in the
+§6.2 pricing figures is a **second data point on variance** and may not be quoted as a better
+measurement.
+
+### 2. What changed in the instrument, stated as an extent
+
+Three renderings and two doc-contracts, all inside `benches/soak_harness/`:
+
+1. `writebehind lag` prints its **six** scrape counters beside the value.
+2. Every census row prints `copy_done` — the far edge of the copy window — and `n/a` where a row has
+   none, because the `TERMINAL` census does not copy.
+3. The origin line prints its **six** `epochs_exited` counters, and an absent qualifier renders
+   `absent(<TOKEN>)` rather than the bare token.
+4. `GaugeReading::as_str`'s doc-contract no longer claims consumers it does not have.
+5. `assert_scrape_counter_identity`'s doc-contract no longer claims absolutely that no counter
+   reaches the exit code: no counter **value** does, but a tripped assertion panics out of the run.
+
+**The change is RENDER-ONLY, and that is the property that makes the second cycle comparable to the
+first.** No measured value moves; no scrape, fold, classifier, guard, census producer, gate input,
+`passed` term or exit-code term is touched. `PIN 2` still holds (zero `.rs` under
+`packages/server-rust/src/` and `packages/core-rust/src/`), the ledger stays at **3 counted `.rs`
+files**, and the reading stays **report-only**. A divergence between the cycles' *measured* numbers
+is therefore attributable to run-to-run physics, never to the edit.
+
+**The pin-resolution rule of `Batch 6` is unaffected.** Its anchor is the `Batch 4` commit
+`d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e`, which every commit of this cycle descends from, so the
+resolver still returns this spec's merge and nothing about the amended rule is re-opened.
+
+### 3. The SUPERSEDED cycle's readings, pinned BEFORE the new runs
+
+Recorded here so `Batch 8`'s comparison is against numbers fixed in advance rather than chosen after
+the fact. These are the arms `Batch 5` reported.
+
+```
+arm            reading           origin_reading            matched  restarts  epochs_exited
+logctl-off     PLATEAU_NOT_MET   INDETERMINATE_INSTRUMENT       0         0             29
+logctl-on      PLATEAU_NOT_MET   NOT_REACHED_EQUAL_REFS        30         0             30
+crashctl       PLATEAU_NOT_MET   INDETERMINATE_INSTRUMENT      28         2             10
+
+arm            wb_max   wb scrapes total/read/absent/unreadable   epochs scrapes total/read/abs/unread
+logctl-off      10895                180 / 178 / 2 / 0                        180 / 180 / 0 / 0
+logctl-on       11369                180 / 178 / 2 / 0                        180 / 180 / 0 / 0
+crashctl        10826                173 / 167 / 6 / 0                        173 / 173 / 0 / 0
+
+crashctl census: LIVE_COPY 300.0016→300.1767 · CHECKPOINT 303.0227→303.0930
+                 LIVE_COPY 600.1840→600.3403 · CHECKPOINT 603.0326→603.1081
+                 TERMINAL  900.2754→(none)
+crashctl AC4 fence: scansAttempted 3, scansFailed 0
+
+§6.2 pricing (logctl-off FIRST, logctl-on SECOND):
+  logctl-on  (ARMED):  lastHalfPeak 890896 KiB   lastHalfMean 609606 KiB
+  logctl-off (UNSET):  lastHalfPeak 845040 KiB   lastHalfMean 573885 KiB
+  difference:          peak +5.43 %              mean +6.22 %   (ARMED higher on both)
+
+exit codes: logctl-off 0 · logctl-on 1 (shipped tombstone byte-slope gate, 852.8 > 512.0 B/h,
+            attributed and not re-run) · crashctl 0
+```
+
+**The identical `2 / 180` writebehind absences on both crash-free arms** are already routed to
+`TODO-634` by id in `Batch 5`. Whether the second cycle reproduces that count is **information, not a
+verdict**: it is recorded either way and changes no disposition here.
+
+### 4. The pre-registered protocol for the second cycle
+
+Identical to `Batch 4`'s in every parameter. Nothing is retuned:
+
+| # | Arm | Directive | `--crash-interval` | `--live-census-interval` | Purpose |
+|---|-----|-----------|--------------------|--------------------------|---------|
+| 1 | `spec363-logctl-off` | UNSET | 0 | 0 | pricing arm (§6.2), run FIRST |
+| 2 | `spec363-logctl-on` | ARMED | 0 | 0 | pricing arm (§6.2) + arming witness (§6.3) |
+| 3 | `spec363-crashctl` | ARMED | 300 | **300** | double witness (§6.4) + the live-census witness |
+
+- **Same order, same cells, same ≤ 900 s budget, full 7-artifact set per arm**, 21 artifacts, all
+  committed. **No fourth arm, no combined-budget allowance, no 4 h cell.**
+- **The `crashctl` live-row count keeps `Batch 4`'s pre-registered scale**: **2 expected**, **≥ 1
+  acceptable and a full PASS**, **0 a recorded finding routed by id**. The crash window at
+  `start + 300 s` can swallow the first live copy, and a single row must not read at review as a
+  partial failure.
+- **Expected readings are carried verbatim from §3 above**, and the arms are expected to reproduce
+  their reading CLASSES. A changed *class* is a finding to record and route, never grounds to run
+  again.
+- **The artifacts are written to the same `spec363-*` paths and supersede the first cycle's**, which
+  is why §3 pins those numbers here: after the new commits, the superseded values exist in this
+  manifest and in git history, and nowhere else.
+
+### 5. What is expected NOT to move, and is checked in `Batch 8`
+
+- `PIN 2` empty; ledger **3/5** counted `.rs` files; zero exemption shapes.
+- The `crashctl` **AC4 fence** `scansAttempted 3 / scansFailed 0` — unchanged, since nothing in the
+  census producers moved.
+- Every `passed` term, every gate input and every exit-code term — a render cannot reach them.
+- Frozen §0–§8 digest `c7f3373f…`, and the digests of Batches 1–6.
+
+### 6. The new renderings that the artifacts themselves must show
+
+So that the fix is witnessed in evidence rather than asserted:
+
+- every `harness-console.log` shows `writebehind lag: … scrapes total=… read=… absent=… unreadable=…
+  malformed_samples=… overflowed_samples=…`;
+- every census row shows `copy_done=`, with `n/a` on `TERMINAL` and a real `…s` figure on the
+  `crashctl` `LIVE_COPY` and `CHECKPOINT` rows;
+- the origin line shows the six `epochs_scrapes` counters.
+
+**One branch is expected to remain unwitnessed, and saying so is the point:** `absent(<TOKEN>)` renders
+only when the qualifier is absent, and no arm of the first cycle produced an absence
+(`epochsExitedAbsence` was null on all three). If the second cycle also produces none, that branch is
+covered by inspection only — recorded as such, not claimed as witnessed.
+
+<!-- BATCH-7 END -->
+
+**Digest of Batch 7.** Same convention as Batches 1–6: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-7 BEGIN -->$/{p=1;next} /^<!-- BATCH-7 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-7          30e5c1a6f2a0f4760014dffea8c905d02a7b17243b29ac4c600926a0e24d9e41
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
+
+<!-- BATCH-8 BEGIN -->
+
+---
+
+## Batch 8 — second re-witness cycle, COMPLETION RECORD
+
+Appended after all three arms of the pre-registered second cycle ran and were committed. This batch
+**APPENDS**: §0–§8 gain and lose zero bytes, no existing post-section entry — `Batch 7`'s included —
+is edited, and every line of it sits below the `## POST-SECTION (append-only)` marker.
+
+`Batch 7` was the pre-registration; this is the report against it. Nothing here retunes anything
+`Batch 7` fixed before the data.
+
+### 1. Pre-registration precedes the evidence, for THIS cycle too
+
+**The `Batch 7` commit is `c3f8a8feb13b300d9ec985e89cbb66f71cde7e23`.** RECORDED rather than derived,
+for the reason `Batch 5` §5 already gives: `git log -1 --format=%H -- <this manifest>` resolves, by
+the time any check runs, to this batch's own commit.
+
+```
+git merge-base --is-ancestor c3f8a8feb13b300d9ec985e89cbb66f71cde7e23 \
+  4f8c908ef7aeeb1c689226e447215fbff535c9dc      ⇒ exit 0   (VERIFIED)
+```
+
+`4f8c908e` is the first cycle-2 artifact commit. `Batch 7` contains no value produced by a cycle-2 run.
+
+### 2. The three arms, against `Batch 7` §3's pinned baseline
+
+Run ONCE each, in the pre-registered order, ≤ 900 s each, 7 artifacts per arm, 21 committed:
+`4f8c908e` (`logctl-off`) · `fda9868a` (`logctl-on`) · `7f7ac0bc` (`crashctl`).
+
+```
+arm          reading          origin_reading            matched  restarts  epochs_exited
+                                                        c1 → c2   c1 → c2      c1 → c2
+logctl-off   PLATEAU_NOT_MET  INDETERMINATE_INSTRUMENT   0 →  0    0 → 0       29 → 27
+logctl-on    PLATEAU_NOT_MET  NOT_REACHED_EQUAL_REFS    30 → 29    0 → 0       30 → 29
+crashctl     PLATEAU_NOT_MET  INDETERMINATE_INSTRUMENT  28 → 27    2 → 2       10 →  9
+
+arm          wb_max            wb scrapes total/read/absent/unreadable   epochs scrapes t/r/a/u
+             c1     → c2       c1              → c2                      c1 and c2
+logctl-off    10895 → 177676   180/178/2/0     → 180/178/2/0             180/180/0/0 → 180/180/0/0
+logctl-on     11369 →  10510   180/178/2/0     → 180/178/2/0             180/180/0/0 → 180/180/0/0
+crashctl      10826 →  10593   173/167/6/0     → 174/168/6/0             173/173/0/0 → 174/174/0/0
+```
+
+**Every reading CLASS reproduced.** `unparsed` and `dropped` are **0** on all three arms in both
+cycles; all four malformed/overflowed counters are **0** on all three arms; both counter identities
+(`read + absent + unreadable == total`, per column) hold on all three.
+
+**`crashctl` census — the pre-registered "2 expected" cell, a second time:**
+
+```
+LIVE_COPY  300.0007 → 300.2183      CHECKPOINT 303.0327 → 303.1059
+LIVE_COPY  600.2188 → 600.4071      CHECKPOINT 603.0176 → 603.1127
+TERMINAL   901.6825 → (explicit null)
+```
+
+Two `LIVE_COPY` rows, every copying row's far edge after its near edge, `TERMINAL` explicitly null,
+`elapsedSecs` ascending. **AC4 fence unmoved: `scansAttempted 3 / scansFailed 0`** — identical in
+cycle 1, in cycle 2, and in the live-DISARMED `spec362-crashctl`. Arming the live sampler perturbs
+neither the estimator nor the gate, now witnessed twice.
+
+### 3. The three renderings, witnessed in the artifacts
+
+Verified with **anchor-based** greps (`copy_done=`, `epochs_scrapes total=`, `scrapes total=`) rather
+than positional ones, because the new fields were inserted mid-line and any offset-based check against
+a pre-cycle-2 log would silently mismatch:
+
+```
+writebehind lag:   10593 (observation only) scrapes total=174 read=168 absent=6 \
+                   unreadable=0 malformed_samples=0 overflowed_samples=0
+  LIVE_COPY  t=300.0s copy_done=300.2183s keys=96 …
+  TERMINAL   t=901.7s copy_done=n/a       keys=96 …
+origin:            reading=INDETERMINATE_INSTRUMENT matched=27 … epochs_exited=9 restarts=2 \
+                   epochs_scrapes total=174 read=174 absent=0 unreadable=0 \
+                   malformed_samples=0 overflowed_samples=0
+```
+
+All three appear on all three arms; `copy_done` carries a real figure on all four copying rows of
+`crashctl` and `n/a` on every `TERMINAL`. **The doc-contract that was false is now true.**
+
+**The one branch that stayed unwitnessed, exactly as `Batch 7` §6 predicted it would:**
+`absent(<TOKEN>)` renders only when the qualifier is absent, and `epochsExitedAbsence` is **null on
+all three arms of both cycles**. That branch is covered **by inspection only**. Recorded as such, not
+claimed as witnessed.
+
+### 4. The load confound on `logctl-off`, and the THIRD pricing pair
+
+`logctl-off` ran under transient host load. Two of its measured quantities are far outside every other
+observation in this lineage: `writebehindLagMax` **177676** against a 10510–11369 band across the five
+other crash-free arm-runs, and a tombstone byte-slope of **73005.8 B/h** against `logctl-on`'s
+**11454.0** in the same cycle. The next arm placed both, which is what identifies this as host load
+rather than anything the instrument does: **a render cannot reach either number**, and `Batch 7` §2
+pre-registered that the change was render-only.
+
+**The shipped tombstone byte-slope gate therefore fired on `logctl-off` this cycle, where in cycle 1 it
+fired on `logctl-on`.** Attributed, **not re-run** — `C6` unchanged, and `C6a` explicitly does not
+license a re-run for physics.
+
+**The consequence for §6.2 is recorded rather than smoothed over: the confound sits on the UNSET arm
+ALONE, which inflates the ARMED-minus-UNSET difference.**
+
+```
+run order: logctl-off FIRST, logctl-on SECOND (same order as cycle 1)
+
+logctl-on  (ARMED):  lastHalfPeak 861088 KiB   lastHalfMean 575277 KiB
+logctl-off (UNSET):  lastHalfPeak 638576 KiB   lastHalfMean 437940 KiB
+difference:          peak +34.85 %             mean +31.36 %   (ARMED higher on both)
+```
+
+Three pairs now exist for the same comparison, each carrying a DIFFERENT confound:
+
+```
+SPEC-362 committed  peak +25.10 %   mean +19.22 %   (logctl-on first)
+cycle 1             peak  +5.43 %   mean  +6.22 %   (order reversed)
+cycle 2             peak +34.85 %   mean +31.36 %   (order as cycle 1; load on the UNSET arm)
+SPEC-355 recorded run-to-run spread: 5.4 %
+```
+
+**Read together they are a statement about run-to-run spread, not a measurement of the departure's
+cost.** The committed `+25.10 %` / `+19.22 %` stands exactly as recorded; **none of the three is a
+correction of another**, and no arm was re-run to obtain any of them. Routed to `TODO-634` by id.
+
+### 5. The writebehind absence, now at four crash-free observations
+
+`2 absent scrapes of 180` on **both** crash-free arms of **both** cycles — four runs, two different
+binaries, the same count every time. `crashctl`'s 6 of 173/174 is accounted for by its two `kill -9`
+windows; the crash-free count is not. Already routed to `TODO-634` by `Batch 5`; this cycle is a
+**test that could have refuted the structural reading and did not**. Recorded as strengthening, not as
+a new finding.
+
+### 6. What did not move
+
+- **`PIN 2` empty** — `git diff --stat <base>..HEAD -- 'packages/server-rust/src/*'
+  'packages/core-rust/src/*'` is empty. Ledger **3/5 counted `.rs` files**, zero exemption shapes.
+- **Every `passed` term, gate input and exit-code term** — a render cannot reach them, and the two
+  doc-contract corrections change no executable byte.
+- **`Batch 6`'s pin rule** — its anchor is the `Batch 4` commit, which every commit of this cycle
+  descends from.
+- **Digests, RECOMPUTED at this append rather than trusted from their footers**, because a pinned
+  value that is only ever read back is not a check: `batch-1 575bd28e…`, `batch-2 467a9d80…`,
+  `batch-3 a8a0ab83…`, `batch-4 7d521a30…`, `batch-5 17c066fe…`, `batch-6 0ac5d5d2…`,
+  `batch-7 30e5c1a6…`, and frozen §0–§8 `c7f3373f…`. **All eight reproduce.** Had any mismatched, that
+  would be a FINDING — never grounds to re-digest, which would silently defeat the pre-registration.
+
+### 7. Where the SUPERSEDED cycle's unpinned columns live
+
+`Batch 7` §3 pinned the readings, all twelve counters, the census window edges, the `AC4` fence, the
+pricing pair and the exit codes. It did **not** pin the remaining census columns (`keys_scanned`,
+`live_entries`, `tombstone_entries`, `tombstone_bytes`, `dups`, `max_per_key` and their siblings).
+Those are **not lost, and the recovery is named here rather than left as an exercise**: cycle 1's full
+artifacts are committed blobs, reachable at
+
+```
+git show 522dff68:…/evidence/spec363-logctl-off.soak.durable.json
+git show a1134e1d:…/evidence/spec363-logctl-on.soak.durable.json
+git show f3e01be8:…/evidence/spec363-crashctl.soak.durable.json
+```
+
+so every unpinned cycle-1 field has a durable, immutable baseline. **A successor comparing an unpinned
+column must read it from those commits and say so**, exactly as a pinned column is read from `Batch 7`.
+
+### 8. Two operational facts, recorded because they are invisible in the artifacts
+
+1. **This cycle ran under an explicit `SPEC363_FORCE=1`.** The runner refuses to overwrite existing
+   artifacts; overwriting them is precisely what a whole-set re-witness requires, and `C6a` authorizes
+   it. Recorded so the override is visible rather than inferred from the file mtimes.
+2. **The server binary was relinked before the cycle so both binaries come from one build.** Only
+   harness files had changed, so cargo left `topgun-server` at its previous link time and the runner's
+   own provenance guard warned that the two binaries were linked 60569 s apart. Forcing the relink
+   changed **no source byte** and left the `.rs` tree clean; each `matrix.txt` records both build
+   stamps. Cycle 1's pair were linked 1h47m apart, so this cycle's provenance is tighter, not looser.
+
+### 9. Cross-vendor implementation review of the render change (`R11` / `C12`)
+
+`z-ai/glm-5.3` reviewed the render diff against the cardinal rule *"a console render may never
+manufacture, imply or reorder a measured value."* **No violation of that rule was found.** Eight
+findings were raised; each is dispositioned:
+
+**Four REFUTED against the code, with the evidence:**
+
+1. *"`epochs_exited` and its absence token could both be populated, so the console would hide evidence
+   the artifact carries."* — Unconstructible. The token is DERIVED from the value in a single `match`
+   whose first arm is `Some(_) => None`; they are not two independent writes.
+2. *"`GaugeReading::as_str` may still have a JSON consumer, so the corrected doc-contract is false."* —
+   Zero call sites. Every `reading.as_str()` in the harness is a `DurableReading` (compared against
+   `DurableReading::IndeterminateInstrument` two lines above) or an `EpochsExitedAbsence`.
+3. *"A census producer might store a numeric sentinel, so `copy_done` would print a number where no
+   window opened."* — Three producers exist: `TERMINAL` sets `None`, `CHECKPOINT` and `LIVE_COPY` set
+   `Some(elapsed)`. No sentinel exists anywhere.
+4. *"A truncated log line could break the counter identity, making the panic measurement-caused."* —
+   The recording fn increments `total` once and then exactly one of `absent` / `unreadable` / `read`
+   through an exhaustive match on a three-variant enum. A truncated line lands in one of those arms and
+   still increments one counter; the identity is input-independent by construction.
+
+**Three ACCEPTED as obligations, and DISCHARGED in this batch:** anchor-based rather than positional
+verification greps (§3); a named recovery path for the unpinned cycle-1 columns (§7); recomputing
+every digest instead of reading the pinned values back (§6).
+
+**One ROUTED to `TODO-634` by id:** the census row renders its near edge as `t={:.1}s` against the far
+edge's `{:.4}s`, so the printed smear is understated by rounding. The JSON carries full precision, and
+`Batch 7` §6 pre-registered this exact format, so changing it mid-cycle would have restarted a running
+witness for a cosmetic gain.
+
+### 10. Routing
+
+To `TODO-634`, by id, no tracker file created or edited: the third pricing pair and the run-to-run
+spread it evidences (§4); the four-observation writebehind absence (§5); the near/far-edge precision
+asymmetry (§9).
+
+**No `spec362-*` artifact was edited, deleted or re-run.**
+
+<!-- BATCH-8 END -->
+
+**Digest of Batch 8.** Same convention as Batches 1–7: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-8 BEGIN -->$/{p=1;next} /^<!-- BATCH-8 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-8          735e114576124256d0b59b5f0b8d3fc0df9350f35ac74c77be3629ea7b422e2b
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
+
+<!-- BATCH-9 BEGIN -->
+
+---
+
+## Batch 9 — CORRECTION to Batch 8 §4: the gate did not relocate, it fired twice
+
+Appended by `SPEC-363` after a fresh-context review of the second cycle. This batch **APPENDS**:
+§0–§8 gain and lose zero bytes, no existing post-section entry — `Batch 8`'s included — is edited, and
+every line of it sits below the `## POST-SECTION (append-only)` marker. `Batch 8` stays byte-intact and
+its digest `735e1145…` still reproduces; **where the two differ, this batch wins.**
+
+**No `.rs` byte moves in this correction.** It is a record defect, not an instrument defect, so `C6a`
+does not fire and **no third witness cycle is bought**. The arms of `Batch 8` stand exactly as run.
+
+### 1. What `Batch 8` §4 got wrong
+
+`Batch 8` §4 states that the shipped tombstone byte-slope gate *"fired on `logctl-off` this cycle,
+where in cycle 1 it fired on `logctl-on`."* **That sentence reads as a RELOCATION, and the measurement
+is an INCREASE.** Measured on the committed artifacts of both cycles:
+
+```
+             cycle 1                            cycle 2
+arm          slope B/h    passed   result       slope B/h    passed   result
+logctl-off     -1620.2     true      ok           73005.8     false    FAIL
+logctl-on         852.8    false    FAIL          11454.0     false    FAIL
+crashctl       -6846.6     true      ok          (no slope failure)     PASS
+                                                  duration reached
+```
+
+**Two of three arms fired the shipped hard gate in cycle 2, against one of three in cycle 1**, and
+`logctl-on` — the arm that fired in cycle 1 — **did not stop firing**: its own slope rose from
+`852.8` to `11454.0` B/h, a **13.4×** move that `Batch 8` never states. `result: FAIL` appears at line
+20 of both `spec363-logctl-off.harness-console.log` and `spec363-logctl-on.harness-console.log`.
+
+### 2. The exit codes, which `Batch 8` §2's comparison table omitted
+
+`Batch 7` §3 pinned the cycle-1 exit codes as part of the superseded baseline. `Batch 8` §2's
+`c1 → c2` table carried every other pinned column and left this one out — and it is precisely the
+column whose cycle-2 value is worse. Stated here against the pinned row:
+
+```
+arm          exit code / passed        c1 → c2
+logctl-off   0 (passed=true)  →  non-zero (passed=false)      WORSE
+logctl-on    1 (passed=false) →  non-zero (passed=false)      same class, 13.4x steeper slope
+crashctl     0 (passed=true)  →  0 (passed=true)              unchanged
+```
+
+### 3. Why this correction is mandatory rather than cosmetic
+
+**`C6a` condition (iv)** admits a whole-set re-witness only if the superseded cycle's readings are
+*"carried into the completion record and compared, so a friendlier outcome cannot be quietly
+substituted for a harsher one."* The hazard that clause anticipates is a new cycle that looks better.
+**What happened here is the mirror image and is just as damaging: the new cycle IS harsher on this
+axis, and the record presented it as no worse.** A successor reads this digested, append-only document
+instead of re-deriving from artifacts, so an accurate corpus and a misleading summary of it are not the
+same evidence.
+
+**Nothing about the disposition changes.** Both firings remain **attributed** as uncontrolled ≤ 900 s
+physics, exactly as `C6` requires and as cycle 1's single firing was; **no arm is re-run**; and this
+spec still concludes **NOTHING** about the plateau (`C11`). The `logctl-off` load confound recorded in
+`Batch 8` §4 stands — it explains the `73005.8` figure — but it never explained `logctl-on`'s own rise,
+and `Batch 8` should not have left that unstated.
+
+**Consequence for the §6.2 pricing pair, restated:** with BOTH pricing arms firing the gate, cycle 2's
+`+34.85 %` / `+31.36 %` is weaker evidence than `Batch 8` §4 already conceded, not stronger. It stays a
+**third data point on run-to-run spread**, and the committed `+25.10 %` / `+19.22 %` stands exactly as
+recorded.
+
+### 4. A deferred inaccuracy in a code comment, recorded rather than fixed
+
+The same review found that the WHY-comment beside the `absent(<TOKEN>)` render illustrates with
+`absent(NOT_REACHED_EQUAL_REFS)`. That token is an `OriginReading` value; the cell it illustrates is
+`epochs_exited_absence`, whose value set is closed to `{ABSENT, UNREADABLE}` — a closure `AC12`
+requires and a directed test proves. **The comment's example therefore names a token that cannot appear
+in the cell it describes.** The code is correct; only the illustration is.
+
+**It is NOT fixed here, and the reason is the fix's price rather than its difficulty:** a comment is a
+`.rs` byte, so correcting it would break the `soak binary commit` provenance every `matrix.txt` records
+and, under `C6a`, would oblige a **third** whole-set re-witness — three arms and two further appends —
+to correct one word in an illustration. **Routed to `TODO-634` by id**, to be corrected by the next
+spec that touches `.rs` in this harness for a reason of its own.
+
+<!-- BATCH-9 END -->
+
+**Digest of Batch 9.** Same convention as Batches 1–8: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-9 BEGIN -->$/{p=1;next} /^<!-- BATCH-9 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-9          4d25f53c9d67a405e26cfd9d58072f059afd7eff5a6009479735718c864bbdf3
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
+
+<!-- BATCH-10 BEGIN -->
+
+---
+
+## Batch 10 — two corrections to Batch 9: a dropped negation, and two softened literals
+
+Appended after a further fresh-context review. This batch **APPENDS**: §0–§8 gain and lose zero bytes,
+no existing post-section entry — `Batch 9`'s included — is edited, and every line of it sits below the
+`## POST-SECTION (append-only)` marker. `Batch 9` stays byte-intact and its digest `4d25f53c…` still
+reproduces; **where the two differ, this batch wins.**
+
+**No `.rs` byte moves.** `C6a` does not fire and no further witness cycle is bought.
+
+### 1. `Batch 9` §4 drops a negation and inverts its own argument
+
+`Batch 9` §4 ends: *"The code is correct; only the illustration is."* Read plainly that says **only the
+illustration is CORRECT** — the exact inverse of what the section argues two sentences earlier.
+
+**The sentence should read: "The code is correct; only the illustration is WRONG."**
+
+The deferral itself is unchanged and is restated here without the defect, so the corpus carries one
+unambiguous version:
+
+- The WHY-comment beside the `absent(<TOKEN>)` render illustrates with
+  `absent(NOT_REACHED_EQUAL_REFS)`. That token is an `OriginReading` value.
+- The cell it illustrates is `epochs_exited_absence`, whose value set is **closed to
+  `{ABSENT, UNREADABLE}`** — one construction site, two `Some` arms, both routed through
+  `EpochsExitedAbsence::as_str()`, with `AC12` requiring the closure and a directed test proving it.
+- **The illustrated token is therefore unconstructible in the cell described. The CODE is correct; the
+  ILLUSTRATION is wrong.**
+- It stays **deferred and routed to `TODO-634` by id**, for the reason `Batch 9` gave: a comment is a
+  `.rs` byte, and correcting it would break the `soak binary commit` every `matrix.txt` pins and oblige
+  a third whole-set re-witness under `C6a` — three arms and two further appends — to fix one word in an
+  example already fenced by a closed enum, a single construction site, a directed test and `AC12`.
+
+**That a batch written to correct a misleading sentence itself carried one is recorded, not smoothed
+over.** It is the same failure mode at one remove, and the append-only discipline is what made it
+visible and fixable without touching either prior batch.
+
+### 2. Two cells where `Batch 9` answered a pinned literal with something softer
+
+`Batch 7` §3 pinned literals. `Batch 9` answered two of them one degree less precisely. Both were
+honest, and both are restored here so a column-for-column comparison finds like against like.
+
+**(a) Exit codes — `Batch 9` §2 answered the pinned `0 · 1 · 0` with the class `non-zero`.** No
+artifact persists a process exit code, which is why the class was used; what the artifacts DO persist
+is the `passed` flag and the harness verdict line, so those are the literals:
+
+```
+arm          Batch 7 §3 pinned (c1)      cycle 2, from the committed artifacts
+logctl-off   exit 0,  passed=true    →   passed=false, "result: FAIL"   (console log line 20)
+logctl-on    exit 1,  passed=false   →   passed=false, "result: FAIL"   (console log line 20)
+crashctl     exit 0,  passed=true    →   passed=true,  duration reached
+```
+
+**(b) `crashctl`'s cycle-2 slope — `Batch 9` §1 wrote `(no slope failure)` where cycle 1 carries the
+literal `-6846.6`.** The literal exists and is restored:
+
+```
+arm          tombstone-byte slope B/h        c1 → c2
+crashctl               -6846.6  →  -27258.0      (both negative, both "ok")
+```
+
+Source: `spec363-crashctl.harness-console.log`, the `tombstone_bytes:` line. Its being **more**
+negative in cycle 2 changes no disposition — a negative slope cannot fire a growth gate — and is
+recorded only so the row is a literal-for-literal comparison like every other.
+
+### 3. What is unchanged
+
+Every measurement, every disposition and every routing in Batches 7, 8 and 9 stands. The gate fired on
+**two of three** arms in cycle 2 against **one of three** in cycle 1, `logctl-on`'s own slope rose
+`852.8 → 11454.0` B/h, both firings are **attributed and no arm was re-run** (`C6`), and this spec
+concludes **NOTHING** about the plateau (`C11`).
+
+<!-- BATCH-10 END -->
+
+**Digest of Batch 10.** Same convention as Batches 1–9: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-10 BEGIN -->$/{p=1;next} /^<!-- BATCH-10 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-10         1b8f27c29d130801cdcb5e0a05b3c91663e254f91c0107e8d065c917757c85d7
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```

@@ -110,6 +110,7 @@
 //! directly by `tests::calibration_boot_gap_exclusion_does_not_trip_gate` with
 //! a fully synthetic sequence — no real process required.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
@@ -1144,7 +1145,19 @@ impl CensusSource {
 /// One census, tagged with when it was taken and from what.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CensusRecord {
+    /// When the census was INITIATED — for a copy-then-scan producer, when the
+    /// copy started. Unchanged in meaning: it is the key the record sort and
+    /// the nearest-record lookup already order on, and 21 committed artifacts
+    /// carry it, so completion is a NEW field rather than a re-timing of this
+    /// one.
     pub elapsed_secs: f64,
+    /// When the census COMPLETED — for a copy-then-scan producer, when the scan
+    /// of the copy finished. Without it a reader cannot tell how wide the
+    /// window was that the copy smeared across, which on a LIVE copy is the
+    /// whole question. `None` where the producer took no copy at all (the
+    /// terminal scan reads the data dir directly), so an absent window is a
+    /// visible gap rather than a zero-width one.
+    pub copy_completed_secs: Option<f64>,
     pub source: CensusSource,
     pub census: DurableCensus,
 }
@@ -1335,7 +1348,15 @@ pub struct OriginAggregate {
     /// literal: the literal belongs where the scrape that reads it lives. Used
     /// ONLY as the origin reading's qualifier and never as a plateau predicate
     /// input.
-    pub epochs_exited: u64,
+    ///
+    /// `Option`-shaped all the way from the scrape, because "the qualifier was
+    /// never observed" and "the qualifier was observed at zero" are different
+    /// facts and the second one is the most reassuring reading this instrument
+    /// can produce. Collapsing the first into the second is the absence
+    /// masquerade this aggregate exists to refuse, so it is never defaulted,
+    /// unwrapped-or-zeroed, or compared by `Ord` against `Some(0)` — `None`
+    /// orders below every `Some` and would silently read as minus infinity.
+    pub epochs_exited: Option<u64>,
     /// The named reason for the classified reading, carried here so the
     /// serializer emits it beside the counters it was derived from. Distinct
     /// from the durable reading's own reason. Disposition-bearing: it always
@@ -1481,14 +1502,20 @@ pub fn fold_undecodable_key(census: &mut DurableCensus) {
 
 /// Distinct tag count **within one key's own tombstone vector**.
 ///
-/// Quadratic in the key's tombstone count on purpose: it needs no allocation
-/// and no hashing, and the alternative — a set — is the cross-key structure the
-/// census contract forbids. The per-key vectors this runs over are small
-/// relative to the corpus, so the corpus-scale cost stays linear in rows.
+/// The set is built per key and dropped when the call returns, so it is NOT the
+/// cross-key structure the census contract forbids: nothing observed under one
+/// key can ever be seen while counting another. Within that boundary a set is
+/// simply the right shape — the scan it replaces re-walked the prefix for every
+/// tag, so one pathological key with a long tombstone vector cost quadratic
+/// time in a fold whose corpus-scale cost is supposed to be linear in rows.
+///
+/// The counter is incremented on first insertion rather than read off the set's
+/// length, which keeps the saturating widening to `u64` exactly where it was.
 fn distinct_count_within_key(tags: &[&str]) -> u64 {
+    let mut seen: HashSet<&str> = HashSet::with_capacity(tags.len());
     let mut distinct: u64 = 0;
-    for (index, tag) in tags.iter().enumerate() {
-        if !tags[..index].contains(tag) {
+    for &tag in tags {
+        if seen.insert(tag) {
             distinct = distinct.saturating_add(1);
         }
     }
@@ -1821,7 +1848,7 @@ pub fn aggregate_origin_lines(
     dropped: u64,
     restarts: u64,
     armed: bool,
-    epochs_exited: u64,
+    epochs_exited: Option<u64>,
 ) -> OriginAggregate {
     let mut lines = Vec::with_capacity(captured.len());
     let mut unparsed: u64 = 0;
@@ -1923,12 +1950,47 @@ pub fn classify_origin_reading(aggregate: &OriginAggregate) -> (OriginReading, O
         );
     }
 
-    if aggregate.epochs_exited > 0 {
+    // The two branches below are the ONLY consumers of the qualifier, which is
+    // why the absent-qualifier disposition belongs exactly here and nowhere
+    // earlier: a branch that never reads the qualifier must not change its
+    // outcome because the qualifier went missing.
+    //
+    // An ABSENT qualifier fails closed. The qualifier is destructured
+    // explicitly rather than defaulted, and it is never compared as an
+    // `Option` either: a defaulting unwrap would launder the absence into the
+    // observed zero, and an ordered comparison would do the same silently,
+    // because an absent value sorts below every present one and would land on
+    // the zero branch — the exact masquerade the `Option` typing exists to
+    // remove. What is unknown when the qualifier is missing is the INSTRUMENT,
+    // so that is what the reading says.
+    //
+    // A KNOWN ASYMMETRY, RECORDED SO IT IS NOT "TIDIED" AWAY. The
+    // `restarts > 0` branch far above rests on this same qualifier — it fires
+    // because a restart resets `epochs_exited` and the reset value would be
+    // misread — yet it sits at the TOP of the ordering while this guard, which
+    // rests on the same qualifier having no value at all, sits at the BOTTOM.
+    // Hoisting this one up to join it is FORBIDDEN. The ordering above is a
+    // settled reading rule whose per-branch outcomes are already witnessed on
+    // committed artifacts, and every branch above this point reaches its
+    // outcome WITHOUT consuming the qualifier; moving an absence check above
+    // them would change readings that have nothing to do with the absence, and
+    // would do it invisibly, since those readings would still look well-formed.
+    // The asymmetry is accepted debt, named here rather than resolved.
+    let Some(epochs_exited) = aggregate.epochs_exited else {
+        return (
+            OriginReading::IndeterminateInstrument,
+            Some(
+                "the epochs_exited qualifier was absent from the scrape, so no \
+                 qualifier-derived reading can be taken"
+                    .to_string(),
+            ),
+        );
+    };
+    if epochs_exited > 0 {
         return (
             OriginReading::NoLinesWhileEpochsExited,
             Some(format!(
-                "no line was captured while epochs_exited reached {}",
-                aggregate.epochs_exited
+                "no line was captured while epochs_exited reached {epochs_exited}"
             )),
         );
     }
@@ -1939,17 +2001,194 @@ pub fn classify_origin_reading(aggregate: &OriginAggregate) -> (OriginReading, O
     )
 }
 
-/// The `max` and the `sum` of one labelled gauge, taken over its label sets.
+/// The `max` and the `sum` of one labelled gauge, taken over its label sets,
+/// beside the sample counts the fold was taken over.
 ///
 /// Returned as a named pair rather than a positional one so a caller cannot
-/// silently transpose the two. `None` from [`parse_labelled_gauge`] — never a
-/// zero here — is what carries "the metric was absent from the body".
+/// silently transpose the two. [`GaugeReading::Absent`] — never a zero here —
+/// is what carries "the metric was absent from the body".
+///
+/// `sum` is folded with a CHECKED add. If `overflowed_samples > 0` then `sum`
+/// is a SATURATION MARKER, not a total, and may not be read as one: the fold
+/// could not represent the total, so the number is `u64::MAX` and the count of
+/// samples that could not be added is what says so. `max` cannot overflow.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LabelledGauge {
     /// The largest value across the metric's label sets.
     pub max: u64,
-    /// The sum across the metric's label sets.
+    /// The sum across the metric's label sets. See the type contract: a
+    /// non-zero `overflowed_samples` makes this a saturation marker.
     pub sum: u64,
+    /// Samples of this metric whose value token READ and was folded.
+    pub parsed_samples: u64,
+    /// Samples of this metric that appeared but whose value token did not read.
+    /// Counted and skipped — never returned from, never silently dropped, and
+    /// never truncated — so a body of nothing but malformed samples is legible
+    /// as such instead of vanishing into an absence.
+    pub malformed_samples: u64,
+    /// Samples whose value read but whose addition into `sum` could not be
+    /// represented. Recorded rather than clamped in silence, so a consumer can
+    /// tell a real total from a saturated one.
+    pub overflowed_samples: u64,
+}
+
+/// What one `/metrics` body had to say about one labelled gauge.
+///
+/// Three outcomes, one total type — the harness's existing fail-closed enum
+/// style ([`CensusSource`], [`OriginReading`]) rather than an `Option` plus a
+/// side counter, because the third outcome is exactly the one an `Option`
+/// cannot express. The distinction is load-bearing: "the metric never appeared"
+/// and "the metric appeared but nothing parsed" are different instrument
+/// faults, and folding either into a zero is the absence masquerade this
+/// reading exists to refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GaugeReading {
+    /// The metric's name never matched a head in the body.
+    Absent,
+    /// The metric appeared, and every one of its samples was malformed.
+    /// Carries the count so the gap is quantified rather than merely named.
+    Unreadable { malformed_samples: u64 },
+    /// The metric appeared and at least one sample read.
+    Read(LabelledGauge),
+}
+
+impl GaugeReading {
+    /// The single rendered token for this reading, so that any site which does
+    /// render a per-scrape reading takes the spelling from here rather than
+    /// retyping a literal. It has NO consumer today — see the note below,
+    /// which is the load-bearing half of this contract.
+    #[must_use]
+    // No consumer inside this instrument's scope: a run's scrapes are folded
+    // into a `GaugeObservation` and it is the FOLD's disposition, not any single
+    // scrape's reading, that the artifact and the console render. The method
+    // exists anyway so the three-outcome type carries its own token beside
+    // `EpochsExitedAbsence`'s, rather than leaving a future renderer of a
+    // per-scrape reading to invent a fourth spelling of ABSENT at the call site.
+    #[allow(dead_code)]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "ABSENT",
+            Self::Unreadable { .. } => "UNREADABLE",
+            Self::Read(_) => "READ",
+        }
+    }
+}
+
+/// Why the exited-epoch qualifier has no value, as a TYPED token.
+///
+/// A token rather than a sentence, and a sibling of the counters rather than a
+/// container for them, so a consumer reads the disposition by EQUALITY and
+/// never by substring match. The same mirror pattern [`OriginReading`],
+/// [`SeriesShape`] and [`CensusSource`] already use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpochsExitedAbsence {
+    /// The metric never appeared in any scraped body.
+    Absent,
+    /// The metric appeared but no sample of it ever read.
+    Unreadable,
+}
+
+impl EpochsExitedAbsence {
+    /// The single rendered token for this disposition. Consumed BOTH by the
+    /// console renderer and by the JSON serializer, so the two transports can
+    /// never disagree and no site retypes a literal.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "ABSENT",
+            Self::Unreadable => "UNREADABLE",
+        }
+    }
+}
+
+/// One observed gauge column, folded across every scrape of a run.
+///
+/// The type that now stands between the parse and the artifact, and it carries
+/// the same non-transposability doctrine as [`LabelledGauge`]: the observed
+/// value is held under a NAMED field beside the counters it was folded from, so
+/// a caller cannot silently swap a `max` column for a `sum` one. WHICH fold
+/// feeds this field is the caller's decision and is stated at the caller.
+///
+/// The four scrape-scoped counters are INDEPENDENTLY incremented — `read` in
+/// particular is recorded on the `Read` arm and never computed as
+/// `total - absent - unreadable`, so `read + absent + unreadable == total`
+/// constrains the fold instead of restating subtraction and can actually fail.
+/// The two sample-scoped counters are outside that identity: they count
+/// samples, not scrapes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GaugeObservation {
+    /// The folded observation, `None` where no scrape ever read the metric.
+    /// Never a zero standing in for an absence.
+    pub value: Option<u64>,
+    /// Scrapes that reached the parse for this metric.
+    pub scrapes_total: u64,
+    /// Scrapes in which at least one sample read.
+    pub scrapes_read: u64,
+    /// Scrapes in which the metric never appeared.
+    pub scrapes_absent: u64,
+    /// Scrapes in which the metric appeared and nothing read.
+    pub scrapes_unreadable: u64,
+    /// Samples counted malformed across the whole run. Sample-scoped: NOT a
+    /// term in the scrape identity above.
+    pub malformed_samples: u64,
+    /// Samples whose fold into a running sum overflowed. Sample-scoped, like
+    /// `malformed_samples`. A non-zero value makes the summed column a
+    /// saturation marker rather than a total.
+    pub overflowed_samples: u64,
+}
+
+/// WHICH statistic of a read gauge a column observes, as a NAMED token.
+///
+/// The same non-transposability doctrine [`LabelledGauge`] and
+/// [`GaugeObservation`] already carry: the fold is stated by name at the call
+/// site, so swapping a `max` column for a `sum` one has to be written out loud
+/// instead of slipping in as a one-character edit to a closure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GaugeFold {
+    /// The largest value across the metric's label sets.
+    Max,
+    /// The sum across the metric's label sets.
+    Sum,
+}
+
+impl GaugeObservation {
+    /// Fold ONE scrape's reading into this column and hand back the value that
+    /// scrape read under `fold` — `None` when nothing read.
+    ///
+    /// The single place the six counters move. They are incremented here and
+    /// nowhere else, so `read + absent + unreadable == total` cannot drift
+    /// apart one call site at a time; `read` in particular is RECORDED on the
+    /// `Read` arm rather than derived by subtraction, which is what lets that
+    /// identity fail instead of restating itself. The per-scrape value is
+    /// returned rather than stored because how a run's scrapes combine into one
+    /// observation is the caller's decision, while how they are COUNTED is not.
+    pub fn record(&mut self, reading: &GaugeReading, fold: GaugeFold) -> Option<u64> {
+        self.scrapes_total = self.scrapes_total.saturating_add(1);
+        match reading {
+            GaugeReading::Absent => {
+                self.scrapes_absent = self.scrapes_absent.saturating_add(1);
+                None
+            }
+            GaugeReading::Unreadable { malformed_samples } => {
+                self.scrapes_unreadable = self.scrapes_unreadable.saturating_add(1);
+                self.malformed_samples = self.malformed_samples.saturating_add(*malformed_samples);
+                None
+            }
+            GaugeReading::Read(gauge) => {
+                self.scrapes_read = self.scrapes_read.saturating_add(1);
+                self.malformed_samples = self
+                    .malformed_samples
+                    .saturating_add(gauge.malformed_samples);
+                self.overflowed_samples = self
+                    .overflowed_samples
+                    .saturating_add(gauge.overflowed_samples);
+                Some(match fold {
+                    GaugeFold::Max => gauge.max,
+                    GaugeFold::Sum => gauge.sum,
+                })
+            }
+        }
+    }
 }
 
 /// Parse a labelled gauge out of a Prometheus text exposition body, folding its
@@ -1958,42 +2197,173 @@ pub struct LabelledGauge {
 /// Comment lines (`# HELP` / `# TYPE`) and blanks are skipped, and the name is
 /// matched EXACTLY — either bare or immediately followed by `{` — so a metric
 /// is never confused with a co-resident one that merely shares its prefix.
-/// Returns `None` when the metric does not appear in the body at all: an
-/// absence is a visible gap, and reporting it as a zero would let a silent
-/// absence masquerade as a flat series.
+/// Returns [`GaugeReading::Absent`] when the metric does not appear in the body
+/// at all: an absence is a visible gap, and reporting it as a zero would let a
+/// silent absence masquerade as a flat series. A metric that DID appear but
+/// whose samples did not read is [`GaugeReading::Unreadable`] — a different
+/// instrument fault, and one an `Option` return could not express.
 #[must_use]
-pub fn parse_labelled_gauge(body: &str, metric: &str) -> Option<LabelledGauge> {
-    let mut seen = false;
+pub fn parse_labelled_gauge(body: &str, metric: &str) -> GaugeReading {
+    let mut appeared = false;
     let mut gauge = LabelledGauge::default();
     for line in body.lines() {
         let line = line.trim();
+        // A blank line and a comment line never establish presence.
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((head, raw_value)) = line.rsplit_once(char::is_whitespace) else {
+        // Presence is decided on the HEAD, BEFORE any value is split off. The
+        // reverse order cannot express "the metric appeared but nothing
+        // parsed": a value-less occurrence gets skipped before its name is ever
+        // compared, so a metric that DID appear reports an absence.
+        let Some(head_len) = head_match_len(line, metric) else {
             continue;
         };
-        let head = head.trim();
-        let matches =
-            head == metric || (head.starts_with(metric) && head[metric.len()..].starts_with('{'));
-        if !matches {
-            continue;
-        }
-        // Gauge samples are rendered as decimals by some exporters; the durable
-        // instrument's own quantities are integer-semantic, so a fractional
-        // sample is floored rather than routed through an `f64` field.
-        let value: u64 = match raw_value.trim().parse::<u64>() {
-            Ok(v) => v,
-            Err(_) => match raw_value.trim().split_once('.') {
-                Some((whole, _)) => whole.parse::<u64>().ok()?,
-                None => continue,
-            },
+        // Past this point the metric HAS appeared. No failure below may return
+        // from the function, and none may skip a sample without counting it —
+        // that is what keeps an unreadable body legible as unreadable instead
+        // of letting it masquerade as an absence.
+        appeared = true;
+        let rest = &line[head_len..];
+        // The value has to be SEPARATED from the head. A bare name already
+        // cannot reach here unseparated — `x0` is a different metric, not this
+        // one — but a label block ends the name unambiguously, so `x{p="0"}0`
+        // IS this metric with its value jammed against the brace. Tokenizing
+        // that would read the jammed digits as a sample, turning one corrupt
+        // line into an observed zero: a value manufactured from no evidence,
+        // landing on the most reassuring reading in the set. The line appeared,
+        // so it counts as a malformed sample rather than as an absence.
+        let separated = rest.is_empty() || rest.starts_with(char::is_whitespace);
+        let mut tokens = rest.split_whitespace();
+        let value = match (tokens.next(), tokens.next(), tokens.next()) {
+            _ if !separated => None,
+            // `name{labels} value`.
+            (Some(value), None, _) => read_gauge_value(value),
+            // `name{labels} value timestamp`: the timestamp is IGNORED, never
+            // folded as the value and never counted against the sample,
+            // because a timestamped sample is CONFORMING exposition — calling
+            // it malformed would rebuild the absence masquerade on a different
+            // input.
+            (Some(value), Some(stamp), None) if is_exposition_timestamp(stamp) => {
+                read_gauge_value(value)
+            }
+            // A value-less head line, a third token that is not a well-formed
+            // timestamp, and any fourth token: the line is not exposition this
+            // parser understands, and guessing is worse than counting.
+            _ => None,
         };
-        seen = true;
+        let Some(value) = value else {
+            gauge.malformed_samples += 1;
+            continue;
+        };
+        gauge.parsed_samples += 1;
         gauge.max = gauge.max.max(value);
-        gauge.sum = gauge.sum.saturating_add(value);
+        // A CHECKED fold. A clamp nobody can see is a wrong total that reads as
+        // a right one, so the saturation is recorded on its own counter and
+        // `sum` becomes a marker rather than a number. The sample itself still
+        // counts as parsed: the value was legible, it was the fold that could
+        // not represent the total.
+        if let Some(sum) = gauge.sum.checked_add(value) {
+            gauge.sum = sum;
+        } else {
+            gauge.sum = u64::MAX;
+            gauge.overflowed_samples += 1;
+        }
     }
-    seen.then_some(gauge)
+    if !appeared {
+        return GaugeReading::Absent;
+    }
+    if gauge.parsed_samples == 0 {
+        return GaugeReading::Unreadable {
+            malformed_samples: gauge.malformed_samples,
+        };
+    }
+    GaugeReading::Read(gauge)
+}
+
+/// The byte length of `line`'s head when that head is EXACTLY `metric` — the
+/// name bare, or the name immediately followed by a `{...}` label block — and
+/// `None` when the line is some other metric's.
+///
+/// Split out so presence can be decided on the head ALONE. The exact-name test
+/// is what establishes that the metric appeared, so it has to run before any
+/// value is looked at; a co-resident metric that merely shares the prefix
+/// (`x_total` against `x`) never matches, and a bare name is only a head when
+/// nothing but whitespace follows it.
+///
+/// The label block is scanned with quote awareness, so a label VALUE holding a
+/// space or a `}` cannot end the head early and turn a well-formed sample into
+/// a malformed one. An UNTERMINATED block still matches: the `{` already
+/// established the name, and the sample is then counted malformed rather than
+/// vanishing into an absence.
+fn head_match_len(line: &str, metric: &str) -> Option<usize> {
+    let rest = line.strip_prefix(metric)?;
+    if !rest.starts_with('{') {
+        let bare = rest.is_empty() || rest.starts_with(char::is_whitespace);
+        return if bare { Some(metric.len()) } else { None };
+    }
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (offset, ch) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' && in_quotes {
+            escaped = true;
+        } else if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if ch == '}' && !in_quotes {
+            return Some(metric.len() + offset + ch.len_utf8());
+        }
+    }
+    Some(line.len())
+}
+
+/// The pinned sample grammar — `digits+ ( '.' '0'* )?`, an unsigned decimal
+/// integer optionally followed by a fraction all of whose digits are zero — and
+/// `None` for every other form, which the caller COUNTS as malformed rather
+/// than truncating it, folding it or dropping it.
+///
+/// `5`, `5.`, `5.0` and `5.000` therefore all read as `5`: some exporters
+/// render an integer counter as `5.0`, and that case is load-bearing. A NONZERO
+/// fraction is a different act and must NOT be floored — a total that reaches
+/// `0.7` would floor to `0`, which on the exited-epoch qualifier is the most
+/// reassuring reading in the whole set, i.e. an instrument fault reported as
+/// good news. The rule is taken ONCE here rather than per column, so the
+/// parser's contract does not depend on its caller.
+///
+/// Scientific notation, any leading sign, `NaN`, `+Inf`, `-Inf` and an empty
+/// token are all malformed under this grammar — previously each of them failed
+/// `parse` and was dropped with nothing counted. A digit string too large for
+/// `u64` is malformed too: it conforms to the shape but not to the type, and
+/// counting it is the fail-closed disposition.
+fn read_gauge_value(token: &str) -> Option<u64> {
+    let (whole, fraction) = match token.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (token, None),
+    };
+    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let fraction_reads = match fraction {
+        Some(fraction) => fraction.bytes().all(|b| b == b'0'),
+        None => true,
+    };
+    if !fraction_reads {
+        return None;
+    }
+    // A `u64` that does not fit is a shape-conforming value the type cannot
+    // hold; the caller counts it, which is the fail-closed disposition.
+    whole.parse::<u64>().ok()
+}
+
+/// A well-formed exposition timestamp: `-?[0-9]+`. Only such a third token is
+/// ignorable; anything else in that position makes the sample malformed.
+fn is_exposition_timestamp(token: &str) -> bool {
+    let digits = match token.strip_prefix('-') {
+        Some(rest) => rest,
+        None => token,
+    };
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// The embedded store file's apparent size in bytes, from filesystem METADATA
@@ -3533,6 +3903,68 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
+    // The within-key distinct count
+    // ---------------------------------------------------------------------
+
+    /// The previous quadratic definition of [`distinct_count_within_key`],
+    /// inlined VERBATIM as the oracle.
+    ///
+    /// Inlined rather than referenced because the implementation it audits
+    /// replaced it: an oracle that called the new function would assert the
+    /// new function equals itself. This body is what shipped before, so the
+    /// comparison below is a real claim about a value, not about a shape.
+    fn quadratic_distinct_count_oracle(tags: &[&str]) -> u64 {
+        let mut distinct: u64 = 0;
+        for (index, tag) in tags.iter().enumerate() {
+            if !tags[..index].contains(tag) {
+                distinct = distinct.saturating_add(1);
+            }
+        }
+        distinct
+    }
+
+    /// The set-based count returns the SAME VALUE the quadratic one returned,
+    /// on every shape a per-key tombstone vector can take.
+    ///
+    /// This asserts value identity and nothing else. It deliberately makes no
+    /// claim about time: a timing assertion in a test suite is a flake, and the
+    /// reason for the change is a cost bound, not a number this file can
+    /// reproduce. The large case exists to exercise the collision-and-repeat
+    /// behaviour at a size the quadratic form could not have been sampled at,
+    /// not to be a benchmark.
+    #[test]
+    fn distinct_count_within_key_is_value_identical_to_the_quadratic_oracle() {
+        let owned: Vec<String> = (0..1500).map(|i| format!("tag-{}", i % 250)).collect();
+        let large: Vec<&str> = owned.iter().map(String::as_str).collect();
+
+        let cases: [(&str, Vec<&str>, u64); 6] = [
+            ("empty", vec![], 0),
+            ("single", vec!["a"], 1),
+            ("all-distinct", vec!["a", "b", "c", "d"], 4),
+            ("all-equal", vec!["a", "a", "a", "a"], 1),
+            (
+                "duplicates-interleaved",
+                vec!["a", "b", "a", "c", "b", "c", "a"],
+                3,
+            ),
+            ("large", large, 250),
+        ];
+
+        for (name, tags, expected) in cases {
+            let oracle = quadratic_distinct_count_oracle(&tags);
+            assert_eq!(
+                oracle, expected,
+                "the oracle itself must be pinned on case {name}"
+            );
+            assert_eq!(
+                distinct_count_within_key(&tags),
+                oracle,
+                "the set-based count diverged from the quadratic one on case {name}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // The origin instrument
     // ---------------------------------------------------------------------
 
@@ -3606,7 +4038,7 @@ mod tests {
     fn origin_aggregate(
         lines: Vec<OriginLine>,
         armed: bool,
-        epochs_exited: u64,
+        epochs_exited: Option<u64>,
     ) -> OriginAggregate {
         OriginAggregate {
             matched: len_as_u64(lines.len()),
@@ -3628,12 +4060,12 @@ mod tests {
              op_seq=2 epoch=3"
                 .to_string(),
         ];
-        let aggregate = aggregate_origin_lines(&captured, 0, 0, true, 5);
+        let aggregate = aggregate_origin_lines(&captured, 0, 0, true, Some(5));
         assert_eq!(aggregate.matched, 2);
         assert_eq!(aggregate.unparsed, 1);
         assert_eq!(aggregate.lines.len(), 1);
         assert!(aggregate.armed);
-        assert_eq!(aggregate.epochs_exited, 5);
+        assert_eq!(aggregate.epochs_exited, Some(5));
         assert_eq!(
             classify_origin_reading(&aggregate).0,
             OriginReading::IndeterminateInstrument,
@@ -3646,14 +4078,14 @@ mod tests {
     /// is read from the aggregate's own counter and from nothing else.
     #[test]
     fn origin_dropped_and_restart_guards_are_fail_closed() {
-        let mut dropped = origin_aggregate(vec![origin_line(0, 7)], true, 3);
+        let mut dropped = origin_aggregate(vec![origin_line(0, 7)], true, Some(3));
         dropped.dropped = 1;
         assert_eq!(
             classify_origin_reading(&dropped).0,
             OriginReading::IndeterminateInstrument
         );
 
-        let mut restarted = origin_aggregate(vec![origin_line(0, 7)], true, 3);
+        let mut restarted = origin_aggregate(vec![origin_line(0, 7)], true, Some(3));
         restarted.restarts = 1;
         let (reading, reason) = classify_origin_reading(&restarted);
         assert_eq!(reading, OriginReading::IndeterminateInstrument);
@@ -3666,30 +4098,30 @@ mod tests {
     /// All six variants, and the tokens they render as.
     #[test]
     fn origin_reading_covers_all_six_variants() {
-        let mut unarmed = origin_aggregate(vec![], false, 0);
+        let mut unarmed = origin_aggregate(vec![], false, Some(0));
         unarmed.restarts = 0;
         assert_eq!(
             classify_origin_reading(&unarmed).0,
             OriginReading::IndeterminateInstrument
         );
         assert_eq!(
-            classify_origin_reading(&origin_aggregate(vec![origin_line(0, 7)], true, 3)).0,
+            classify_origin_reading(&origin_aggregate(vec![origin_line(0, 7)], true, Some(3))).0,
             OriginReading::ReachedInProduction
         );
         assert_eq!(
-            classify_origin_reading(&origin_aggregate(vec![origin_line(2, 7)], true, 3)).0,
+            classify_origin_reading(&origin_aggregate(vec![origin_line(2, 7)], true, Some(3))).0,
             OriginReading::PartialDivergence
         );
         assert_eq!(
-            classify_origin_reading(&origin_aggregate(vec![origin_line(7, 7)], true, 3)).0,
+            classify_origin_reading(&origin_aggregate(vec![origin_line(7, 7)], true, Some(3))).0,
             OriginReading::NotReachedEqualRefs
         );
         assert_eq!(
-            classify_origin_reading(&origin_aggregate(vec![], true, 3)).0,
+            classify_origin_reading(&origin_aggregate(vec![], true, Some(3))).0,
             OriginReading::NoLinesWhileEpochsExited
         );
         assert_eq!(
-            classify_origin_reading(&origin_aggregate(vec![], true, 0)).0,
+            classify_origin_reading(&origin_aggregate(vec![], true, Some(0))).0,
             OriginReading::NotObservedAtHead
         );
 
@@ -3721,10 +4153,15 @@ mod tests {
 
     /// The classification's input space, enumerated: every cell of
     /// `{no lines, all-equal, some-partial, some-zero-return}` ×
-    /// `{armed, unarmed}` × `{epochs_exited 0, > 0}` maps to exactly one
-    /// variant. Both the arming and the exited-epoch axes are read from the
+    /// `{armed, unarmed}` × `{epochs_exited absent, 0, > 0}` maps to exactly
+    /// one variant. Both the arming and the exited-epoch axes are read from the
     /// aggregate's own TYPED fields — never inferred from a log line, and never
     /// from a metric literal in this file.
+    ///
+    /// The qualifier axis is THREE-valued because the qualifier itself is:
+    /// enumerating only the two present values would leave the absence — the
+    /// one input on which a defaulting read would silently produce the most
+    /// reassuring reading in the set — outside the space this test covers.
     #[test]
     fn origin_reading_enumerates_its_whole_input_space() {
         let shapes: [(&str, Vec<OriginLine>); 4] = [
@@ -3736,21 +4173,21 @@ mod tests {
                 vec![origin_line(7, 7), origin_line(0, 7)],
             ),
         ];
+        let qualifiers: [(&str, Option<u64>); 3] =
+            [("absent", None), ("zero", Some(0)), ("positive", Some(4))];
         let mut cells = 0;
         for (shape, lines) in shapes {
             for armed in [false, true] {
-                for epochs_exited in [0u64, 4] {
+                for (qualifier, epochs_exited) in qualifiers {
                     let aggregate = origin_aggregate(lines.clone(), armed, epochs_exited);
                     let (reading, reason) = classify_origin_reading(&aggregate);
                     let expected = if armed {
                         match shape {
-                            "no lines" => {
-                                if epochs_exited > 0 {
-                                    OriginReading::NoLinesWhileEpochsExited
-                                } else {
-                                    OriginReading::NotObservedAtHead
-                                }
-                            }
+                            "no lines" => match epochs_exited {
+                                None => OriginReading::IndeterminateInstrument,
+                                Some(0) => OriginReading::NotObservedAtHead,
+                                Some(_) => OriginReading::NoLinesWhileEpochsExited,
+                            },
                             "all-equal" => OriginReading::NotReachedEqualRefs,
                             "some-partial" => OriginReading::PartialDivergence,
                             _ => OriginReading::ReachedInProduction,
@@ -3760,14 +4197,95 @@ mod tests {
                     };
                     assert_eq!(
                         reading, expected,
-                        "cell ({shape}, armed={armed}, epochs_exited={epochs_exited})"
+                        "cell ({shape}, armed={armed}, epochs_exited={qualifier})"
                     );
-                    assert!(reason.is_some(), "every reading names its reason");
+                    let named = reason.expect("every reading names its reason");
+                    if shape == "no lines" && armed && epochs_exited.is_none() {
+                        assert!(
+                            named.contains("epochs_exited") && named.contains("absent"),
+                            "the absent-qualifier reading must name the absent qualifier, \
+                             got {named:?}"
+                        );
+                    }
                     cells += 1;
                 }
             }
         }
-        assert_eq!(cells, 16, "the enumeration must be complete");
+        assert_eq!(cells, 24, "the enumeration must be complete");
+    }
+
+    /// The absent qualifier fails closed at the ONE branch that consumes it,
+    /// and changes nothing above that branch.
+    ///
+    /// Stated separately from the enumeration because the enumeration proves
+    /// the mapping is total, while this proves the two halves of the siting
+    /// rule: the absence reads as an instrument fault rather than as the
+    /// observed zero, and every shape that reaches an earlier branch answers
+    /// identically whether the qualifier is absent or present.
+    #[test]
+    fn absent_epochs_exited_reads_as_an_instrument_fault_and_moves_no_earlier_branch() {
+        let (reading, reason) = classify_origin_reading(&origin_aggregate(vec![], true, None));
+        assert_eq!(
+            reading,
+            OriginReading::IndeterminateInstrument,
+            "an absent qualifier is not an observed zero"
+        );
+        let named = reason.expect("the reading names its reason");
+        assert!(named.contains("epochs_exited"), "got {named:?}");
+        assert!(named.contains("absent"), "got {named:?}");
+
+        // The observed zero keeps its own, distinct reading, so the absence did
+        // not simply swallow the branch it sits in front of.
+        let (zero_reading, _) = classify_origin_reading(&origin_aggregate(vec![], true, Some(0)));
+        assert_eq!(zero_reading, OriginReading::NotObservedAtHead);
+
+        // Every shape that resolves before the guard answers identically with
+        // and without the qualifier — the minimal-siting half of the rule.
+        let earlier: [Vec<OriginLine>; 3] = [
+            vec![origin_line(7, 7), origin_line(3, 3)],
+            vec![origin_line(7, 7), origin_line(2, 7)],
+            vec![origin_line(7, 7), origin_line(0, 7)],
+        ];
+        for lines in earlier {
+            let absent = classify_origin_reading(&origin_aggregate(lines.clone(), true, None));
+            let present = classify_origin_reading(&origin_aggregate(lines, true, Some(0)));
+            assert_eq!(
+                absent, present,
+                "a branch that never consumes the qualifier must not move because it is absent"
+            );
+        }
+    }
+
+    /// The absence disposition renders a CLOSED set of typed tokens.
+    ///
+    /// Pinned so that a consumer can read the disposition by equality: the
+    /// tokens carry no prose, no punctuation and no embedded counter, and no
+    /// two variants collapse onto the same string.
+    #[test]
+    fn epochs_exited_absence_renders_a_closed_token_set() {
+        assert_eq!(EpochsExitedAbsence::Absent.as_str(), "ABSENT");
+        assert_eq!(EpochsExitedAbsence::Unreadable.as_str(), "UNREADABLE");
+
+        let variants = [EpochsExitedAbsence::Absent, EpochsExitedAbsence::Unreadable];
+        let mut rendered: Vec<&str> = variants.iter().map(|v| v.as_str()).collect();
+        for token in &rendered {
+            assert!(
+                token.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
+                "a disposition is a token, never a sentence or a counter: {token:?}"
+            );
+        }
+        rendered.sort_unstable();
+        rendered.dedup();
+        assert_eq!(
+            rendered,
+            vec!["ABSENT", "UNREADABLE"],
+            "the rendered token set is closed"
+        );
+        assert_eq!(
+            rendered.len(),
+            variants.len(),
+            "no two dispositions may render to the same token"
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -3784,7 +4302,9 @@ some_gauge{partition=\"1\"} 30
 some_gauge_total 999
 other_gauge 7
 ";
-        let gauge = parse_labelled_gauge(body, "some_gauge").expect("the metric is present");
+        let GaugeReading::Read(gauge) = parse_labelled_gauge(body, "some_gauge") else {
+            panic!("the metric is present");
+        };
         assert_eq!(gauge.max, 30);
         assert_eq!(
             gauge.sum, 42,
@@ -3793,12 +4313,422 @@ other_gauge 7
 
         // An ABSENCE is a visible gap, never a zero: reporting it as zero would
         // let a silent absence masquerade as a flat series.
-        assert!(parse_labelled_gauge(body, "absent_gauge").is_none());
+        assert_eq!(
+            parse_labelled_gauge(body, "absent_gauge"),
+            GaugeReading::Absent
+        );
 
         // An unlabelled single sample folds to itself on both statistics.
-        let bare = parse_labelled_gauge(body, "other_gauge").expect("present");
+        let GaugeReading::Read(bare) = parse_labelled_gauge(body, "other_gauge") else {
+            panic!("present");
+        };
         assert_eq!(bare.max, 7);
         assert_eq!(bare.sum, 7);
+    }
+
+    // ---------------------------------------------------------------------
+    // The pinned sample grammar
+    //
+    // The two ORACLES below each carry the PRE-CHANGE body of
+    // `parse_labelled_gauge` inlined verbatim, ending in the fold the two
+    // production call sites used to take. They are written out as named
+    // functions rather than as `parse_labelled_gauge(body, m).map(|g| ...)`
+    // because that expression no longer compiles: the reading is an enum now
+    // and an enum has no `.map`. An assertion has to be code that compiles
+    // after the change it audits.
+    // ---------------------------------------------------------------------
+
+    /// The pre-change `.map(|g| g.sum)` fold, verbatim.
+    fn oracle_sum(body: &str, metric: &str) -> Option<u64> {
+        let mut seen = false;
+        let mut gauge = LabelledGauge::default();
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((head, raw_value)) = line.rsplit_once(char::is_whitespace) else {
+                continue;
+            };
+            let head = head.trim();
+            let matches = head == metric
+                || (head.starts_with(metric) && head[metric.len()..].starts_with('{'));
+            if !matches {
+                continue;
+            }
+            let value: u64 = match raw_value.trim().parse::<u64>() {
+                Ok(v) => v,
+                Err(_) => match raw_value.trim().split_once('.') {
+                    Some((whole, _)) => match whole.parse::<u64>() {
+                        Ok(v) => v,
+                        Err(_) => return None,
+                    },
+                    None => continue,
+                },
+            };
+            seen = true;
+            gauge.max = gauge.max.max(value);
+            gauge.sum = gauge.sum.saturating_add(value);
+        }
+        if seen {
+            Some(gauge.sum)
+        } else {
+            None
+        }
+    }
+
+    /// The pre-change `.map(|g| g.max)` fold, verbatim.
+    fn oracle_max(body: &str, metric: &str) -> Option<u64> {
+        let mut seen = false;
+        let mut gauge = LabelledGauge::default();
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((head, raw_value)) = line.rsplit_once(char::is_whitespace) else {
+                continue;
+            };
+            let head = head.trim();
+            let matches = head == metric
+                || (head.starts_with(metric) && head[metric.len()..].starts_with('{'));
+            if !matches {
+                continue;
+            }
+            let value: u64 = match raw_value.trim().parse::<u64>() {
+                Ok(v) => v,
+                Err(_) => match raw_value.trim().split_once('.') {
+                    Some((whole, _)) => match whole.parse::<u64>() {
+                        Ok(v) => v,
+                        Err(_) => return None,
+                    },
+                    None => continue,
+                },
+            };
+            seen = true;
+            gauge.max = gauge.max.max(value);
+            gauge.sum = gauge.sum.saturating_add(value);
+        }
+        if seen {
+            Some(gauge.max)
+        } else {
+            None
+        }
+    }
+
+    /// The metric every grammar test below reads.
+    const GRAMMAR_METRIC: &str = "topgun_x";
+
+    /// The reading of `body` as the summed column observes it, taken through
+    /// the counter choke point so the observation under test is the one the
+    /// artifact will carry.
+    fn summed_observation(body: &str) -> Option<u64> {
+        let mut observation = GaugeObservation::default();
+        // `sum` across label sets: this is a total, and an unlabelled series
+        // sums to its own single value.
+        observation.record(&parse_labelled_gauge(body, GRAMMAR_METRIC), GaugeFold::Sum)
+    }
+
+    /// The reading of `body` as the max column observes it, taken through the
+    /// same choke point.
+    fn maxed_observation(body: &str) -> Option<u64> {
+        let mut observation = GaugeObservation::default();
+        // `max` across label sets: the lag is per-partition, and the
+        // observation this column carries is how far the WORST partition fell
+        // behind.
+        observation.record(&parse_labelled_gauge(body, GRAMMAR_METRIC), GaugeFold::Max)
+    }
+
+    #[test]
+    fn a_malformed_sample_does_not_blank_a_present_metric_in_either_order() {
+        // `-5.0` is the canonical member of the trigger class the pre-change
+        // `?` fired on: a value token that contains a `.` and whose whole part
+        // fails `u64::parse`. Scientific notation is deliberately NOT used
+        // here — `1.5e3` splits to a whole part of `1`, which parses, so a
+        // test built on it passes on the unfixed code and witnesses nothing.
+        let valid_then_malformed = "\
+topgun_x{a=\"1\"} 7
+topgun_x{a=\"2\"} -5.0
+";
+        let malformed_then_valid = "\
+topgun_x{a=\"1\"} -5.0
+topgun_x{a=\"2\"} 7
+";
+
+        // FALSIFIABILITY: both bodies are ones the pre-change fold answered
+        // `None` on, so reverting the fix fails this test rather than leaving
+        // it quietly green. The abort discarded the fold that had already
+        // accumulated, which is why the valid-first order is asserted too.
+        for body in [valid_then_malformed, malformed_then_valid] {
+            assert_eq!(
+                oracle_sum(body, GRAMMAR_METRIC),
+                None,
+                "the pre-change fold must lose this body, or the test proves nothing"
+            );
+            assert_eq!(oracle_max(body, GRAMMAR_METRIC), None);
+
+            let GaugeReading::Read(gauge) = parse_labelled_gauge(body, GRAMMAR_METRIC) else {
+                panic!("a present metric with one readable sample reads");
+            };
+            assert_eq!(gauge.max, 7);
+            assert_eq!(gauge.sum, 7);
+            assert_eq!(gauge.parsed_samples, 1);
+            assert_eq!(gauge.malformed_samples, 1);
+        }
+    }
+
+    #[test]
+    fn the_numeric_grammar_reads_integers_and_counts_every_other_form_malformed() {
+        // The `N.0` exporter rendering is load-bearing and must keep reading.
+        for (body, expected) in [
+            ("topgun_x 5\n", 5),
+            ("topgun_x 5.\n", 5),
+            ("topgun_x 5.0\n", 5),
+            ("topgun_x 5.000\n", 5),
+            ("topgun_x 12.0\n", 12),
+            ("topgun_x 0\n", 0),
+        ] {
+            let GaugeReading::Read(gauge) = parse_labelled_gauge(body, GRAMMAR_METRIC) else {
+                panic!("{body:?} reads under the pinned grammar");
+            };
+            assert_eq!(gauge.max, expected, "{body:?}");
+            assert_eq!(gauge.sum, expected, "{body:?}");
+            assert_eq!(gauge.parsed_samples, 1, "{body:?}");
+            assert_eq!(gauge.malformed_samples, 0, "{body:?}");
+        }
+
+        // Everything else is COUNTED and skipped — never truncated, never
+        // folded, never silently dropped. A body whose only sample is one of
+        // these is UNREADABLE, which is a different instrument fault from an
+        // absence and from a zero.
+        for token in [
+            "1.5e3", "5e3", "12.7", "0.7", "+5", "-5", "-5.0", ".5", "abc.5", "NaN", "+Inf",
+            "-Inf", "nonsense",
+        ] {
+            let body = format!("topgun_x {token}\n");
+            assert_eq!(
+                parse_labelled_gauge(&body, GRAMMAR_METRIC),
+                GaugeReading::Unreadable {
+                    malformed_samples: 1
+                },
+                "{token} must be counted malformed, not floored and not dropped"
+            );
+        }
+
+        // The empty value token, asserted at the grammar itself: the line
+        // shapes that would carry one are the value-less heads below.
+        assert_eq!(read_gauge_value(""), None);
+
+        // Several malformed samples of the same metric accumulate rather than
+        // collapsing to the first.
+        let all_malformed = "\
+topgun_x{a=\"1\"} 0.7
+topgun_x{a=\"2\"} 1.5e3
+topgun_x{a=\"3\"} NaN
+";
+        assert_eq!(
+            parse_labelled_gauge(all_malformed, GRAMMAR_METRIC),
+            GaugeReading::Unreadable {
+                malformed_samples: 3
+            }
+        );
+    }
+
+    #[test]
+    fn a_value_jammed_against_the_label_block_is_malformed_not_an_observed_zero() {
+        // A label block ends the name unambiguously, so this IS the metric —
+        // with its value jammed against the closing brace. Reading the jammed
+        // digits would manufacture an observed value from a corrupt line, and
+        // for the qualifier an observed ZERO is the most reassuring reading in
+        // the whole set, reachable here from no evidence at all.
+        for body in ["topgun_x{p=\"0\"}0\n", "topgun_x{p=\"0\"}9\n"] {
+            assert_eq!(
+                parse_labelled_gauge(body, GRAMMAR_METRIC),
+                GaugeReading::Unreadable {
+                    malformed_samples: 1
+                },
+                "jammed body {body:?} must not read a value"
+            );
+        }
+        // A separated value on the same shape of line still reads, so the rule
+        // rejects the jamming and not the label block.
+        let GaugeReading::Read(gauge) =
+            parse_labelled_gauge("topgun_x{p=\"0\"} 9\n", GRAMMAR_METRIC)
+        else {
+            panic!("a separated labelled sample must still read");
+        };
+        assert_eq!(gauge.max, 9);
+        // A bare name jammed against digits is a DIFFERENT metric, so it stays
+        // an absence — the two rules are distinct and both are asserted.
+        assert_eq!(
+            parse_labelled_gauge("topgun_x0 5\n", GRAMMAR_METRIC),
+            GaugeReading::Absent
+        );
+    }
+
+    #[test]
+    fn a_value_less_head_line_is_unreadable_rather_than_absent() {
+        // Under the pre-change loop order this was unsatisfiable: the value was
+        // split off first, so the line was skipped before its name was ever
+        // compared and a metric that DID appear reported an absence.
+        for body in ["topgun_x\n", "topgun_x{a=\"b\"}\n"] {
+            assert_eq!(
+                parse_labelled_gauge(body, GRAMMAR_METRIC),
+                GaugeReading::Unreadable {
+                    malformed_samples: 1
+                },
+                "{body:?} names the metric, so it cannot report an absence"
+            );
+            assert_eq!(
+                oracle_sum(body, GRAMMAR_METRIC),
+                None,
+                "the pre-change fold reported an absence here"
+            );
+        }
+    }
+
+    #[test]
+    fn a_trailing_timestamp_is_never_folded_as_the_value() {
+        // Measured pre-change: the labelled form folded the epoch AS the value
+        // and the bare form lost the metric entirely. Both are asserted, and
+        // both against the literal, so a regression that re-folds the timestamp
+        // cannot pass by coincidence.
+        for body in [
+            "topgun_x{a=\"b\"} 5 1699999999\n",
+            "topgun_x 5 1699999999\n",
+        ] {
+            let reading = parse_labelled_gauge(body, GRAMMAR_METRIC);
+            assert_ne!(reading, GaugeReading::Absent, "{body:?}");
+            let GaugeReading::Read(gauge) = reading else {
+                panic!("a timestamped sample is conforming exposition and reads");
+            };
+            assert_eq!(gauge.max, 5, "{body:?}");
+            assert_eq!(gauge.sum, 5, "{body:?}");
+            assert_ne!(gauge.max, 1_699_999_999, "{body:?}");
+            assert_ne!(gauge.sum, 1_699_999_999, "{body:?}");
+            // A well-formed timestamp is IGNORED, not counted against the
+            // sample.
+            assert_eq!(gauge.parsed_samples, 1, "{body:?}");
+            assert_eq!(gauge.malformed_samples, 0, "{body:?}");
+        }
+
+        // A third token that is not a well-formed timestamp, and any fourth
+        // token, make the sample malformed.
+        for body in [
+            "topgun_x 5 abc\n",
+            "topgun_x{a=\"b\"} 5 abc\n",
+            "topgun_x 5 1699999999 7\n",
+        ] {
+            assert_eq!(
+                parse_labelled_gauge(body, GRAMMAR_METRIC),
+                GaugeReading::Unreadable {
+                    malformed_samples: 1
+                },
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sum_fold_is_checked_and_its_saturation_is_recorded() {
+        let body = format!(
+            "topgun_x{{a=\"1\"}} {}\ntopgun_x{{a=\"2\"}} {}\n",
+            u64::MAX - 1,
+            7_u64
+        );
+        let GaugeReading::Read(gauge) = parse_labelled_gauge(&body, GRAMMAR_METRIC) else {
+            panic!("both values are legible; it is the fold that cannot represent the total");
+        };
+        assert_eq!(gauge.sum, u64::MAX, "the clamp is taken");
+        assert_eq!(
+            gauge.overflowed_samples, 1,
+            "and it is RECORDED, not silent"
+        );
+        assert_eq!(
+            gauge.parsed_samples, 2,
+            "the samples still parsed — the value was legible"
+        );
+        assert_eq!(gauge.malformed_samples, 0);
+        assert_eq!(gauge.max, u64::MAX - 1, "a running max cannot overflow");
+    }
+
+    #[test]
+    fn the_two_folds_are_value_identical_on_the_grammar_valid_corpus() {
+        // CORPUS A — every sample grammar-valid under the pinned form, so the
+        // new reading must equal the pre-change fold EXACTLY. The multi-label
+        // bodies are what make the corpus able to catch a transposition: on a
+        // single-label body `max` and `sum` are the same number.
+        let corpus_a = [
+            "topgun_x{p=\"0\"} 12\ntopgun_x{p=\"1\"} 30\n",
+            "topgun_x{p=\"0\"} 5.000\ntopgun_x{p=\"1\"} 1\n",
+            "topgun_x 7\n",
+            "topgun_x 5.0\n",
+            "# HELP topgun_x help text\n# TYPE topgun_x gauge\ntopgun_x{p=\"0\"} 3\ntopgun_x_total 999\nother_gauge 7\n",
+            "other_gauge 7\n",
+        ];
+        let mut distinguishing_bodies = 0;
+        for body in corpus_a {
+            let summed = oracle_sum(body, GRAMMAR_METRIC);
+            let maxed = oracle_max(body, GRAMMAR_METRIC);
+            if summed != maxed {
+                distinguishing_bodies += 1;
+            }
+            assert_eq!(
+                summed_observation(body),
+                summed,
+                "the summed column must equal the pre-change sum fold on {body:?}"
+            );
+            assert_eq!(
+                maxed_observation(body),
+                maxed,
+                "the max column must equal the pre-change max fold on {body:?}"
+            );
+        }
+        assert!(
+            distinguishing_bodies >= 2,
+            "a corpus where max == sum everywhere cannot detect a transposition"
+        );
+
+        // CORPUS B — the PINNED divergence. The oracles are NOT consulted here:
+        // these are exactly the bodies the grammar changes on purpose, so an
+        // identity assertion would fail on the inputs this fix exists for. Each
+        // is asserted against its pinned outcome instead.
+        let unreadable = GaugeReading::Unreadable {
+            malformed_samples: 1,
+        };
+        for body in [
+            "topgun_x 12.7\n",
+            "topgun_x 0.7\n",
+            "topgun_x 1.5e3\n",
+            "topgun_x +5\n",
+            "topgun_x -5\n",
+            "topgun_x NaN\n",
+            "topgun_x +Inf\n",
+            "topgun_x -Inf\n",
+            "topgun_x\n",
+            "topgun_x{a=\"b\"}\n",
+        ] {
+            assert_eq!(
+                parse_labelled_gauge(body, GRAMMAR_METRIC),
+                unreadable,
+                "{body:?}"
+            );
+            assert_eq!(summed_observation(body), None, "{body:?}");
+            assert_eq!(maxed_observation(body), None, "{body:?}");
+        }
+        for body in [
+            "topgun_x{a=\"b\"} 5 1699999999\n",
+            "topgun_x 5 1699999999\n",
+        ] {
+            assert_eq!(summed_observation(body), Some(5), "{body:?}");
+            assert_eq!(maxed_observation(body), Some(5), "{body:?}");
+        }
+        let overflowing = format!(
+            "topgun_x{{a=\"1\"}} {}\ntopgun_x{{a=\"2\"}} 7\n",
+            u64::MAX - 1
+        );
+        assert_eq!(summed_observation(&overflowing), Some(u64::MAX));
+        assert_eq!(maxed_observation(&overflowing), Some(u64::MAX - 1));
     }
 
     /// A scratch directory for the filesystem samplers, named from the process
