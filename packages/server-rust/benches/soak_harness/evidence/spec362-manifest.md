@@ -2883,3 +2883,99 @@ recorded in this post-section's header — it still reproduces, so no frozen byt
 ```
 frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
 ```
+
+<!-- BATCH-10 BEGIN -->
+
+---
+
+## Batch 10 — two corrections to Batch 9: a dropped negation, and two softened literals
+
+Appended after a further fresh-context review. This batch **APPENDS**: §0–§8 gain and lose zero bytes,
+no existing post-section entry — `Batch 9`'s included — is edited, and every line of it sits below the
+`## POST-SECTION (append-only)` marker. `Batch 9` stays byte-intact and its digest `4d25f53c…` still
+reproduces; **where the two differ, this batch wins.**
+
+**No `.rs` byte moves.** `C6a` does not fire and no further witness cycle is bought.
+
+### 1. `Batch 9` §4 drops a negation and inverts its own argument
+
+`Batch 9` §4 ends: *"The code is correct; only the illustration is."* Read plainly that says **only the
+illustration is CORRECT** — the exact inverse of what the section argues two sentences earlier.
+
+**The sentence should read: "The code is correct; only the illustration is WRONG."**
+
+The deferral itself is unchanged and is restated here without the defect, so the corpus carries one
+unambiguous version:
+
+- The WHY-comment beside the `absent(<TOKEN>)` render illustrates with
+  `absent(NOT_REACHED_EQUAL_REFS)`. That token is an `OriginReading` value.
+- The cell it illustrates is `epochs_exited_absence`, whose value set is **closed to
+  `{ABSENT, UNREADABLE}`** — one construction site, two `Some` arms, both routed through
+  `EpochsExitedAbsence::as_str()`, with `AC12` requiring the closure and a directed test proving it.
+- **The illustrated token is therefore unconstructible in the cell described. The CODE is correct; the
+  ILLUSTRATION is wrong.**
+- It stays **deferred and routed to `TODO-634` by id**, for the reason `Batch 9` gave: a comment is a
+  `.rs` byte, and correcting it would break the `soak binary commit` every `matrix.txt` pins and oblige
+  a third whole-set re-witness under `C6a` — three arms and two further appends — to fix one word in an
+  example already fenced by a closed enum, a single construction site, a directed test and `AC12`.
+
+**That a batch written to correct a misleading sentence itself carried one is recorded, not smoothed
+over.** It is the same failure mode at one remove, and the append-only discipline is what made it
+visible and fixable without touching either prior batch.
+
+### 2. Two cells where `Batch 9` answered a pinned literal with something softer
+
+`Batch 7` §3 pinned literals. `Batch 9` answered two of them one degree less precisely. Both were
+honest, and both are restored here so a column-for-column comparison finds like against like.
+
+**(a) Exit codes — `Batch 9` §2 answered the pinned `0 · 1 · 0` with the class `non-zero`.** No
+artifact persists a process exit code, which is why the class was used; what the artifacts DO persist
+is the `passed` flag and the harness verdict line, so those are the literals:
+
+```
+arm          Batch 7 §3 pinned (c1)      cycle 2, from the committed artifacts
+logctl-off   exit 0,  passed=true    →   passed=false, "result: FAIL"   (console log line 20)
+logctl-on    exit 1,  passed=false   →   passed=false, "result: FAIL"   (console log line 20)
+crashctl     exit 0,  passed=true    →   passed=true,  duration reached
+```
+
+**(b) `crashctl`'s cycle-2 slope — `Batch 9` §1 wrote `(no slope failure)` where cycle 1 carries the
+literal `-6846.6`.** The literal exists and is restored:
+
+```
+arm          tombstone-byte slope B/h        c1 → c2
+crashctl               -6846.6  →  -27258.0      (both negative, both "ok")
+```
+
+Source: `spec363-crashctl.harness-console.log`, the `tombstone_bytes:` line. Its being **more**
+negative in cycle 2 changes no disposition — a negative slope cannot fire a growth gate — and is
+recorded only so the row is a literal-for-literal comparison like every other.
+
+### 3. What is unchanged
+
+Every measurement, every disposition and every routing in Batches 7, 8 and 9 stands. The gate fired on
+**two of three** arms in cycle 2 against **one of three** in cycle 1, `logctl-on`'s own slope rose
+`852.8 → 11454.0` B/h, both firings are **attributed and no arm was re-run** (`C6`), and this spec
+concludes **NOTHING** about the plateau (`C11`).
+
+<!-- BATCH-10 END -->
+
+**Digest of Batch 10.** Same convention as Batches 1–9: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-10 BEGIN -->$/{p=1;next} /^<!-- BATCH-10 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-10         1b8f27c29d130801cdcb5e0a05b3c91663e254f91c0107e8d065c917757c85d7
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
