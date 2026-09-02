@@ -2382,3 +2382,166 @@ recorded in this post-section's header — it still reproduces, so no frozen byt
 ```
 frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
 ```
+
+<!-- BATCH-7 BEGIN -->
+
+---
+
+## Batch 7 — second re-witness cycle, PRE-REGISTERED (conductor amendment C6a, 2026-09-02)
+
+Appended by `SPEC-363` **BEFORE any arm of the second cycle runs**, and committed before them, so
+this batch is a pre-registration in exactly the sense `Batch 4` was. This batch **APPENDS**: §0–§8
+gain and lose zero bytes, no existing post-section entry is edited, and every line of it sits below
+the `## POST-SECTION (append-only)` marker.
+
+### 1. Why a second cycle is mandatory, and why it is not a re-run
+
+A fresh-context implementation review found that three console renderings the re-pinned instrument
+was specified to carry had not landed, which additionally left
+`print_durable_reading_report`'s own doc-contract — *"every number the artifact carries is printed
+here too, so a console log is a complete record of the reading"* — **false in the code**. Correcting
+it moves `.rs` bytes.
+
+Frozen §0(d)'s reasoning is what forces the consequence: a `.rs` change *"invalidates every run taken
+before it"*. The three arms recorded in `Batch 5` were produced by a binary that no longer exists in
+the tree that will merge, so they are evidence of a **different instrument** and may not ship beside
+this one. **All three arms are therefore re-witnessed as a whole set.**
+
+**This is not the re-running `C6` forbids, and the difference is structural, not rhetorical.** `C6`
+forbids re-rolling until the physics cooperates. Here the physics is not the subject: the instrument
+changed, every arm is redone rather than the one whose result was disliked, this pre-registration is
+committed before any new run, and §3 below pins the superseded cycle's numbers **now** so a friendlier
+outcome cannot later be substituted for a harsher one. The carve is recorded as `C6a` in `SPEC-363`
+and is bounded by those five conditions.
+
+**What `C6a` does NOT license is stated so no successor can widen it:** a tombstone-gate exit on any
+arm stays **attributed**, exactly as `C6` requires. If the shipped gate fires again it is attributed
+again; if it stops firing, that is **run-to-run variance**, never a correction. Any divergence in the
+§6.2 pricing figures is a **second data point on variance** and may not be quoted as a better
+measurement.
+
+### 2. What changed in the instrument, stated as an extent
+
+Three renderings and two doc-contracts, all inside `benches/soak_harness/`:
+
+1. `writebehind lag` prints its **six** scrape counters beside the value.
+2. Every census row prints `copy_done` — the far edge of the copy window — and `n/a` where a row has
+   none, because the `TERMINAL` census does not copy.
+3. The origin line prints its **six** `epochs_exited` counters, and an absent qualifier renders
+   `absent(<TOKEN>)` rather than the bare token.
+4. `GaugeReading::as_str`'s doc-contract no longer claims consumers it does not have.
+5. `assert_scrape_counter_identity`'s doc-contract no longer claims absolutely that no counter
+   reaches the exit code: no counter **value** does, but a tripped assertion panics out of the run.
+
+**The change is RENDER-ONLY, and that is the property that makes the second cycle comparable to the
+first.** No measured value moves; no scrape, fold, classifier, guard, census producer, gate input,
+`passed` term or exit-code term is touched. `PIN 2` still holds (zero `.rs` under
+`packages/server-rust/src/` and `packages/core-rust/src/`), the ledger stays at **3 counted `.rs`
+files**, and the reading stays **report-only**. A divergence between the cycles' *measured* numbers
+is therefore attributable to run-to-run physics, never to the edit.
+
+**The pin-resolution rule of `Batch 6` is unaffected.** Its anchor is the `Batch 4` commit
+`d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e`, which every commit of this cycle descends from, so the
+resolver still returns this spec's merge and nothing about the amended rule is re-opened.
+
+### 3. The SUPERSEDED cycle's readings, pinned BEFORE the new runs
+
+Recorded here so `Batch 8`'s comparison is against numbers fixed in advance rather than chosen after
+the fact. These are the arms `Batch 5` reported.
+
+```
+arm            reading           origin_reading            matched  restarts  epochs_exited
+logctl-off     PLATEAU_NOT_MET   INDETERMINATE_INSTRUMENT       0         0             29
+logctl-on      PLATEAU_NOT_MET   NOT_REACHED_EQUAL_REFS        30         0             30
+crashctl       PLATEAU_NOT_MET   INDETERMINATE_INSTRUMENT      28         2             10
+
+arm            wb_max   wb scrapes total/read/absent/unreadable   epochs scrapes total/read/abs/unread
+logctl-off      10895                180 / 178 / 2 / 0                        180 / 180 / 0 / 0
+logctl-on       11369                180 / 178 / 2 / 0                        180 / 180 / 0 / 0
+crashctl        10826                173 / 167 / 6 / 0                        173 / 173 / 0 / 0
+
+crashctl census: LIVE_COPY 300.0016→300.1767 · CHECKPOINT 303.0227→303.0930
+                 LIVE_COPY 600.1840→600.3403 · CHECKPOINT 603.0326→603.1081
+                 TERMINAL  900.2754→(none)
+crashctl AC4 fence: scansAttempted 3, scansFailed 0
+
+§6.2 pricing (logctl-off FIRST, logctl-on SECOND):
+  logctl-on  (ARMED):  lastHalfPeak 890896 KiB   lastHalfMean 609606 KiB
+  logctl-off (UNSET):  lastHalfPeak 845040 KiB   lastHalfMean 573885 KiB
+  difference:          peak +5.43 %              mean +6.22 %   (ARMED higher on both)
+
+exit codes: logctl-off 0 · logctl-on 1 (shipped tombstone byte-slope gate, 852.8 > 512.0 B/h,
+            attributed and not re-run) · crashctl 0
+```
+
+**The identical `2 / 180` writebehind absences on both crash-free arms** are already routed to
+`TODO-634` by id in `Batch 5`. Whether the second cycle reproduces that count is **information, not a
+verdict**: it is recorded either way and changes no disposition here.
+
+### 4. The pre-registered protocol for the second cycle
+
+Identical to `Batch 4`'s in every parameter. Nothing is retuned:
+
+| # | Arm | Directive | `--crash-interval` | `--live-census-interval` | Purpose |
+|---|-----|-----------|--------------------|--------------------------|---------|
+| 1 | `spec363-logctl-off` | UNSET | 0 | 0 | pricing arm (§6.2), run FIRST |
+| 2 | `spec363-logctl-on` | ARMED | 0 | 0 | pricing arm (§6.2) + arming witness (§6.3) |
+| 3 | `spec363-crashctl` | ARMED | 300 | **300** | double witness (§6.4) + the live-census witness |
+
+- **Same order, same cells, same ≤ 900 s budget, full 7-artifact set per arm**, 21 artifacts, all
+  committed. **No fourth arm, no combined-budget allowance, no 4 h cell.**
+- **The `crashctl` live-row count keeps `Batch 4`'s pre-registered scale**: **2 expected**, **≥ 1
+  acceptable and a full PASS**, **0 a recorded finding routed by id**. The crash window at
+  `start + 300 s` can swallow the first live copy, and a single row must not read at review as a
+  partial failure.
+- **Expected readings are carried verbatim from §3 above**, and the arms are expected to reproduce
+  their reading CLASSES. A changed *class* is a finding to record and route, never grounds to run
+  again.
+- **The artifacts are written to the same `spec363-*` paths and supersede the first cycle's**, which
+  is why §3 pins those numbers here: after the new commits, the superseded values exist in this
+  manifest and in git history, and nowhere else.
+
+### 5. What is expected NOT to move, and is checked in `Batch 8`
+
+- `PIN 2` empty; ledger **3/5** counted `.rs` files; zero exemption shapes.
+- The `crashctl` **AC4 fence** `scansAttempted 3 / scansFailed 0` — unchanged, since nothing in the
+  census producers moved.
+- Every `passed` term, every gate input and every exit-code term — a render cannot reach them.
+- Frozen §0–§8 digest `c7f3373f…`, and the digests of Batches 1–6.
+
+### 6. The new renderings that the artifacts themselves must show
+
+So that the fix is witnessed in evidence rather than asserted:
+
+- every `harness-console.log` shows `writebehind lag: … scrapes total=… read=… absent=… unreadable=…
+  malformed_samples=… overflowed_samples=…`;
+- every census row shows `copy_done=`, with `n/a` on `TERMINAL` and a real `…s` figure on the
+  `crashctl` `LIVE_COPY` and `CHECKPOINT` rows;
+- the origin line shows the six `epochs_scrapes` counters.
+
+**One branch is expected to remain unwitnessed, and saying so is the point:** `absent(<TOKEN>)` renders
+only when the qualifier is absent, and no arm of the first cycle produced an absence
+(`epochsExitedAbsence` was null on all three). If the second cycle also produces none, that branch is
+covered by inspection only — recorded as such, not claimed as witnessed.
+
+<!-- BATCH-7 END -->
+
+**Digest of Batch 7.** Same convention as Batches 1–6: the digested range is the batch body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with:
+
+```
+awk '/^<!-- BATCH-7 BEGIN -->$/{p=1;next} /^<!-- BATCH-7 END -->$/{p=0} p' \
+    packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md \
+| shasum -a 256
+```
+
+```
+batch-7          30e5c1a6f2a0f4760014dffea8c905d02a7b17243b29ac4c600926a0e24d9e41
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
