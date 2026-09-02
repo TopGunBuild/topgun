@@ -2053,9 +2053,10 @@ pub enum GaugeReading {
 }
 
 impl GaugeReading {
-    /// The single rendered token for this reading. Consumed BOTH by the console
-    /// renderer and by the JSON serializer, so the two transports can never
-    /// disagree and no site retypes a literal.
+    /// The single rendered token for this reading, so that any site which does
+    /// render a per-scrape reading takes the spelling from here rather than
+    /// retyping a literal. It has NO consumer today — see the note below,
+    /// which is the load-bearing half of this contract.
     #[must_use]
     // No consumer inside this instrument's scope: a run's scrapes are folded
     // into a `GaugeObservation` and it is the FOLD's disposition, not any single

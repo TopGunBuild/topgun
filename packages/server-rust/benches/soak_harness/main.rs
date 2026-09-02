@@ -2881,9 +2881,13 @@ fn build_durable_reading_report(
 /// therefore surfaces here. The two sample-scoped counters are not terms in it:
 /// they count samples, not scrapes.
 ///
-/// This decides NOTHING about the run. It cannot turn a failing run into a
-/// passing one or the reverse — no counter reaches the verdict or the exit
-/// code — it fires only when the harness's own bookkeeping is inconsistent.
+/// This decides NOTHING about the run: no counter is a term in the verdict,
+/// in `passed`, or in the exit code, and no counter value can turn a failing
+/// run into a passing one or the reverse. The one path by which it touches
+/// termination is its own failure — a tripped `assert!` panics out of the run
+/// and so bypasses the normal exit, which is the intended loud failure and is
+/// reachable ONLY from the harness's own bookkeeping being inconsistent, never
+/// from anything the run measured.
 fn assert_scrape_counter_identity(r: &DurableReadingReport) {
     let epochs_parts = r
         .origin
@@ -2955,19 +2959,41 @@ fn print_durable_reading_report(r: &DurableReadingReport) {
             row.last_quarter_trough
         );
     }
+    // The counters travel with the value on the SAME line rather than in a
+    // block of their own, because a lag figure read without knowing how many
+    // scrapes produced it is the exact misreading this column was retyped to
+    // prevent: `absent` and `10826` are both consistent with one good scrape
+    // and with a hundred, and only `read`/`absent`/`unreadable` separate them.
     println!(
-        "writebehind lag:   {} (observation only)",
+        "writebehind lag:   {} (observation only) \
+         scrapes total={} read={} absent={} unreadable={} \
+         malformed_samples={} overflowed_samples={}",
         r.writebehind_lag_max
-            .map_or_else(|| "absent".to_string(), |v| v.to_string())
+            .map_or_else(|| "absent".to_string(), |v| v.to_string()),
+        r.writebehind_lag_scrapes_total,
+        r.writebehind_lag_scrapes_read,
+        r.writebehind_lag_scrapes_absent,
+        r.writebehind_lag_scrapes_unreadable,
+        r.writebehind_lag_malformed_samples,
+        r.writebehind_lag_overflowed_samples
     );
     println!("censuses:          {}", r.censuses.len());
     for row in &r.censuses {
         println!(
-            "  {:<10} t={:.1}s keys={} undecodable={} or_map={} or_tomb={} lww={} \
+            "  {:<10} t={:.1}s copy_done={} keys={} undecodable={} or_map={} \
+             or_tomb={} lww={} \
              live={} live_tag_bytes={} tombstones={} tombstone_bytes={} dups={} \
              keys_with_tombstones={} keys_all_dead={} max_per_key={}",
             row.source,
             row.elapsed_secs,
+            // The far edge of the window the copying producers scan across, so
+            // a reader can see the smear a row was taken over instead of
+            // assuming it was instantaneous at `t`. A row with no window is
+            // rendered `n/a`, never as a number and never as `t` itself: the
+            // TERMINAL census does not copy, so any figure printed there would
+            // claim a window that was never opened.
+            row.copy_completed_secs
+                .map_or_else(|| "n/a".to_string(), |v| format!("{v:.4}s")),
             row.keys_scanned,
             row.keys_undecodable,
             row.or_map_keys,
@@ -2995,7 +3021,9 @@ fn print_durable_reading_report(r: &DurableReadingReport) {
     );
     println!(
         "origin:            reading={} matched={} unparsed={} dropped={} armed={} \
-         epochs_exited={} restarts={}",
+         epochs_exited={} restarts={} \
+         epochs_scrapes total={} read={} absent={} unreadable={} \
+         malformed_samples={} overflowed_samples={}",
         r.origin.origin_reading,
         r.origin.origin_matched,
         r.origin.origin_unparsed,
@@ -3014,10 +3042,22 @@ fn print_durable_reading_report(r: &DurableReadingReport) {
             r.origin.epochs_exited_absence.as_deref()
         ) {
             (Some(observed), _) => observed.to_string(),
-            (None, Some(token)) => token.to_string(),
+            // Wrapped in `absent(...)` so a console reader cannot mistake the
+            // token for a value: an unwrapped `NOT_REACHED_EQUAL_REFS` sitting
+            // where a number belongs reads as data of some unfamiliar kind,
+            // whereas `absent(NOT_REACHED_EQUAL_REFS)` says the metric was not
+            // read and names why. The token itself is still the field the JSON
+            // serializes, so the two transports cannot disagree.
+            (None, Some(token)) => format!("absent({token})"),
             (None, None) => "(no disposition)".to_string(),
         },
-        r.origin.restarts
+        r.origin.restarts,
+        r.origin.epochs_exited_scrapes_total,
+        r.origin.epochs_exited_scrapes_read,
+        r.origin.epochs_exited_scrapes_absent,
+        r.origin.epochs_exited_scrapes_unreadable,
+        r.origin.epochs_exited_malformed_samples,
+        r.origin.epochs_exited_overflowed_samples
     );
     println!(
         "origin reason:     {}",
