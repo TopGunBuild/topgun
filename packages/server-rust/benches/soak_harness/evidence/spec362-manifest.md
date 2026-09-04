@@ -4459,3 +4459,59 @@ between those two moments (`§9.1`, the artifact commits), which is exactly why 
 redundant.
 
 <!-- SEC-9.2 END -->
+
+**Digest of `§9.2`.** Same convention as `§9.1` and Batches 1–10: the digested range is the section
+body **between** the two markers, exclusive of both marker lines and of this footer. Reproduce with
+the one-liner pinned in `§9.1` item 12, with `SEC-9.1` replaced by `SEC-9.2` and nothing else
+changed:
+
+```
+awk '/^<!-- SEC-9.2 BEGIN -->$/{p=1;next} /^<!-- SEC-9.2 END -->$/{p=0} p' \
+  packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md | shasum -a 256
+```
+
+```
+sec-9.2          9317f54fa7d9f7e276b9ca78cadf609caaf5c31f5f48c52aeeb47d3ac94f08f6
+```
+
+Because this footer sits **below** the `<!-- SEC-9.2 END -->` marker, it is outside the range it
+records, so appending it does not move the value it records — the same property that let `§9.1`'s
+footer be written after `§9.1`'s body without a fixed point to chase.
+
+**`§9.1`'s digest, RE-VERIFIED at the moment of this append** with **its own** pinned one-liner —
+not read back from the footer above — it still reproduces, so no `§9.1` byte moved:
+
+```
+awk '/^<!-- SEC-9.1 BEGIN -->$/{p=1;next} /^<!-- SEC-9.1 END -->$/{p=0} p' \
+  packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md | shasum -a 256
+```
+
+```
+sec-9.1          51eb0fbcc7cc1558d32fdc6263f07331da6db31851955c2db8fd8eaf2a6773e7
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
+
+**All ten batch digests, RE-VERIFIED at the moment of this append**, each with its own pinned
+one-liner — they all still reproduce, so no post-section byte moved either:
+
+```
+batch-1          575bd28e76380b8501561abe050b62b865ae7bed3dcd8f8279f8a3febf5eca3d
+batch-2          467a9d80c06eec02a061c712a35b16a70ffef5791d0c9596805f4ac22ca7d38f
+batch-3          a8a0ab833ada09a529aeb630aa5a666c572fc158763ca93fd302bca076d04ad3
+batch-4          7d521a3091e2ce1e6c792535279a98f39d285427b752f07eeb7ae4649f2efab7
+batch-5          17c066fe64ee2bb4401fc2fc1c533da8e6d6e60c3040f18262d61ad49726bde2
+batch-6          0ac5d5d28821c233f64a34db67a0f46955a2debfcc475c8660def409ee697f6b
+batch-7          30e5c1a6f2a0f4760014dffea8c905d02a7b17243b29ac4c600926a0e24d9e41
+batch-8          735e114576124256d0b59b5f0b8d3fc0df9350f35ac74c77be3629ea7b422e2b
+batch-9          4d25f53c9d67a405e26cfd9d58072f059afd7eff5a6009479735718c864bbdf3
+batch-10         1b8f27c29d130801cdcb5e0a05b3c91663e254f91c0107e8d065c917757c85d7
+```
+
+Every value above was **recomputed** at this append from the committed file — none was read back out
+of a footer (Batch 8 §6).
