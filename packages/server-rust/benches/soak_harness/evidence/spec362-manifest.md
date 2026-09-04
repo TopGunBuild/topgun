@@ -3903,3 +3903,559 @@ batch-8          735e114576124256d0b59b5f0b8d3fc0df9350f35ac74c77be3629ea7b422e2
 batch-9          4d25f53c9d67a405e26cfd9d58072f059afd7eff5a6009479735718c864bbdf3
 batch-10         1b8f27c29d130801cdcb5e0a05b3c91663e254f91c0107e8d065c917757c85d7
 ```
+
+<!-- SEC-9.2 BEGIN -->
+
+---
+
+## §9.2 — The deciding cell's EXECUTED RECORD
+
+Appended by the measuring half after the run and after the artifact commits. This entry **APPENDS**:
+§0–§8 gain and lose zero bytes, and no existing post-section entry — Batches 1–10 **and `§9.1`**
+included — is edited. `§9.1` is a committed pre-registration whose *this cell* slots are filled
+**here**, never edited **there**; that is the one property the whole pre-registration rests on.
+
+**Every literal below was read out of a committed artifact with the command shown beside it.** None
+was transcribed from an execution summary, a scrollback, or an operator's recall. Where a literal
+this section is obliged to carry is not in the artifact that was pre-registered as its source, that
+is recorded as the fact it is (item 7) rather than reconstructed.
+
+### 0. The run, its classification, and the shared cap
+
+**ONE execution.** The **launch vehicle is an OPERATOR record, not an artifact literal**, and is
+marked as such: the cell was launched from the repository root in a detached `tmux` session under
+`caffeinate -dims`, on mains power, via `§9.1` item 8's capture command verbatim — no committed
+artifact witnesses the `tmux` session or the power state, so that sentence is attributed to the
+operator and carries no more weight than that. **Artifact-anchored** times: the soak binary was linked `2026-09-04T13:32:04Z`
+(`spec362b-long4h.matrix.txt:20`, `built:`), and `spec362b-long4h.soak.json`'s own
+`timestamp` is `2026-09-04T17:32:07Z`, with `durationSecsActual` **14401** against a
+`durationSecsTarget` of 14400.
+
+```
+$ jq -r '.timestamp, .durationSecsActual, .durationSecsTarget, .crashes, .walFsync, .epochWidth' \
+    spec362b-long4h.soak.json
+2026-09-04T17:32:07Z
+14401
+14400
+0
+batched
+1000
+```
+
+**`jq .epochWidth` == `1000`** is the artifact witness that `TOPGUN_EPOCH_WIDTH` left **unset** did
+resolve to the production default — the second declared divergence, witnessed by the run itself and
+not by the matrix's `<unset: production default 1000>` prose alone.
+
+**Classification against `§9.1` item 4.1's four-row decision table, read from the runner console:**
+
+```
+$ sed -n '118p;124p' spec362b-long4h.runner-console.log
+RESULT: instrument sound; harness exit code 1.
+RUNNER_EXIT=1
+```
+
+A `RESULT:` line is **present**, so the ABORTED class (whose mechanical signature is the absence of
+that line, and nothing else) did **not** fire. The line reads `instrument sound; harness exit code 1`
+beside `RUNNER_EXIT=1`, which is **row 4**: *reading + gate attribution ⇒ FINAL, `§9.2` records
+`finishedReason`, **NO repeat***. Neither of the other two repeat-bearing classes fired: the reading
+is not `IndeterminateInstrument`, and the CSV shows no continuity gap (item 5).
+
+**The shared execution cap (R7) has consumed 1 of 3.** No trigger class fired, so no repeat is
+authorized, and the reading below is **FINAL and routes by id**.
+
+### 1. The four `SeriesShape` values, with the FIRING ENVELOPE NAMED
+
+```
+$ jq -c '.decidingSeries[] | {name, shape, firingEnvelope, samples, spanSecs}' \
+    spec362b-long4h.soak.durable.json
+{"name":"rss_kib","shape":"MONOTONE_RISING","firingEnvelope":"PEAKS","samples":2695,"spanSecs":13497.069104958}
+{"name":"redb_bytes","shape":"MONOTONE_RISING","firingEnvelope":"PEAKS","samples":2650,"spanSecs":13494.299554625}
+{"name":"wal_bytes","shape":"MONOTONE_RISING","firingEnvelope":"BOTH","samples":2650,"spanSecs":13494.299554625}
+{"name":"wal_segment_files","shape":"MONOTONE_RISING","firingEnvelope":"BOTH","samples":2650,"spanSecs":13494.299554625}
+```
+
+| series | shape | firing envelope (NAMED, §2.3 case 2) | samples | spanSecs |
+|---|---|---|---|---|
+| `rss_kib` | `MONOTONE_RISING` | **`PEAKS`** | 2695 | 13497.069104958 |
+| `redb_bytes` | `MONOTONE_RISING` | **`PEAKS`** | 2650 | 13494.299554625 |
+| `wal_bytes` | `MONOTONE_RISING` | **`BOTH`** | 2650 | 13494.299554625 |
+| `wal_segment_files` | `MONOTONE_RISING` | **`BOTH`** | 2650 | 13494.299554625 |
+
+**All four series are `MONOTONE_RISING`, and all four carry a NON-NULL envelope.** `§9.1` item 10's
+null map states that a `MonotoneRising` shape with a null envelope is an **instrument defect, never a
+reading**; that condition did not arise on any series. The culprit the §2.4 reason names is
+`rss_kib`, envelope `PEAKS` — **named by the instrument, not inferred by this record.**
+
+The eight envelope terms (plus `lastHalfMean`), read with
+`jq -c '.decidingSeries[]' spec362b-long4h.soak.durable.json`:
+
+| series | firstHalfPeak | lastHalfPeak | thirdQuarterPeak | lastQuarterPeak | firstHalfTrough | lastHalfTrough | thirdQuarterTrough | lastQuarterTrough | lastHalfMean |
+|---|---|---|---|---|---|---|---|---|---|
+| `rss_kib` | 10267952 | 12629024 | 12191744 | 12629024 | 765472 | 6118736 | 9698368 | 6118736 | 11126366 |
+| `redb_bytes` | 135278592 | 270020608 | 135278592 | 270020608 | 17379328 | 135278592 | 135278592 | 135278592 | 142091961 |
+| `wal_bytes` | 92996840 | 214361373 | 161393801 | 214361373 | 809586 | 93040662 | 93040662 | 161669725 | 158731488 |
+| `wal_segment_files` | 27222 | 70226 | 48294 | 70226 | 450 | 27257 | 27257 | 48379 | 48472 |
+
+### 2. The `DurableReading`
+
+```
+$ jq -r '.reading, .reason' spec362b-long4h.soak.durable.json
+PLATEAU_NOT_MET
+series rss_kib rose and was still rising at the end; firing envelope PEAKS
+```
+
+**Reading: `PLATEAU_NOT_MET`.** The reason is the instrument's own sentence, quoted above.
+
+The wrong path, recorded so nobody reads a missing key as a value (`§9.1` item 10):
+
+```
+$ jq '.durableReading' spec362b-long4h.soak.durable.json
+null
+```
+
+That `null` is a **wrong path, not a reading** — the type is `DurableReading`, the artifact's
+top-level keys are the lowercase `reading` and `reason`, and both are populated.
+
+**`NoRisingEnvelopeObserved` was not read on this cell, and is named here only to record that it may
+not be upgraded** into a claim that the plateau is reached — the phrase appears in `§9` solely in
+order to be forbidden. Symmetrically, a non-`MonotoneRising` verdict at 14,400 s would have been
+**explicitly NOT DECIDING for the asymptote** (§2.4's horizon clause): *"this horizon did not show
+it"*, never *"there is nothing to show"*.
+
+### 3. The `OriginReading`, and its §4.4 disposition
+
+```
+$ jq -c '{originReading,originReason,originMatched,originUnparsed,originDropped,armed,restarts,firstZeroReturnLine,logFilter}' \
+    spec362b-long4h.soak.durable.json
+{"originReading":"NOT_REACHED_EQUAL_REFS","originReason":"all 435 parsed line(s) returned exactly the refs held at entry","originMatched":435,"originUnparsed":0,"originDropped":0,"armed":true,"restarts":0,"firstZeroReturnLine":null,"logFilter":"warn,topgun_server::tombstone_frontier::removal=info"}
+```
+
+| field | value |
+|---|---|
+| `originReading` | **`NOT_REACHED_EQUAL_REFS`** |
+| `originReason` | `all 435 parsed line(s) returned exactly the refs held at entry` |
+| `originMatched` | 435 |
+| `originUnparsed` | 0 |
+| `originDropped` | 0 |
+| `armed` | `true` |
+| `restarts` | 0 |
+| `firstZeroReturnLine` | `null` — the **fact** `§9.1` item 10 pre-registered: the zero-return line was never reached |
+
+`armed == true` with `dropped == 0`, `unparsed == 0` and `restarts == 0` means §4.3's fail-closed
+first state (`IndeterminateInstrument`) did **not** fire, so the reading below is the instrument's,
+not a defect's.
+
+**§4.4 disposition, mapped explicitly.** §4.3's state 4 (`NotReachedEqualRefs`) **is `TODO-654`
+reading (b)**: *not reached under this load* — and `PD-F12`'s 8 h divergence therefore **needs a
+different account. Route, do not diagnose.** The three-way map in full, and where it stops:
+
+| `OriginReading` state | `TODO-654` reading | read on this cell |
+|---|---|---|
+| 2 — `ReachedInProduction` | **(a)** — reached in production; the origin question becomes a code-level fix spec | no |
+| 4 — `NotReachedEqualRefs` | **(b)** — not reached under this load | **YES** |
+| 5 — `NoLinesWhileEpochsExited` | **(c)** — the drain arm is not reached (dark path / gate) | no |
+| 3 — `PartialDivergence` | **OUTSIDE the three-way map** — a fourth physical state the two pre-registered readings do not cover; naming it is what stops it being silently folded into (b) | no |
+| 6 — `NotObservedAtHead` | **OUTSIDE the three-way map** — `SPEC-360`'s own `NOT-OBSERVED-AT-HEAD`, carried verbatim | no |
+
+That two of the classifier's six states fall outside `TODO-654`'s (a)/(b)/(c) is **precisely why §4.3
+names them**, and it is recorded here rather than smoothed over. The **null-read disposition** of §4.4
+applies unchanged: the instrument **ships regardless**, the null read **routes**, and it **does not
+reopen the diagnosis line that `E-C` HARD-STOPPED at `SPEC-358`**.
+
+**The qualifier carve, honoured:** `topgun_or_prune_epochs_exited_total` was read as **435** and is
+used **only** as this reading's *"while epochs exit"* qualifier — **never** as a plateau predicate
+input (§1.4, §4.4).
+
+### 4. The structural `DurableCensus` — the terminal scan, ONE sample
+
+```
+$ jq -c '.censusTerminal' spec362b-long4h.soak.durable.json
+{"source":"TERMINAL","elapsedSecs":14401.4492195,"copyCompletedSecs":null,"keysScanned":96,"keysUndecodable":0,"orMapKeys":96,"orTombstonesKeys":0,"lwwKeys":0,"liveEntries":870374,"liveTagBytes":29592725,"tombstoneEntries":44452,"tombstoneBytes":1016398,"tombstoneDupEntries":0,"keysWithTombstones":48,"keysAllDead":0,"maxTombstonesPerKey":1147}
+$ jq '.censuses | length' spec362b-long4h.soak.durable.json
+1
+```
+
+| §3.1 field | value |
+|---|---|
+| `source` | `TERMINAL` |
+| `elapsedSecs` | 14401.4492195 |
+| `copyCompletedSecs` | **`null`** — the **reading** `§9.1` item 10 pre-registered: *always, on this cell — the terminal census does not copy* |
+| `keysScanned` | 96 |
+| `keysUndecodable` | **0** |
+| `orMapKeys` / `orTombstonesKeys` / `lwwKeys` | 96 / 0 / 0 |
+| `liveEntries` | 870374 |
+| `liveTagBytes` | 29592725 |
+| `tombstoneEntries` | 44452 |
+| `tombstoneBytes` | 1016398 |
+| `tombstoneDupEntries` | **0** |
+| `keysWithTombstones` | 48 |
+| `keysAllDead` | **0** |
+| `maxTombstonesPerKey` | 1147 |
+
+**Exactly ONE census sample**, as §3.3 pre-registered: at the frozen cell's `--crash-interval 0`
+there is no recovery checkpoint, and `--live-census-interval` shipped **DISARMED (0)**
+(`spec362b-long4h.matrix.txt:30` — `--live-census-interval: 0 (DISARMED)`). **The census is therefore
+a STRUCTURAL end-of-run read, not a series**, and **no census quantity is a deciding-series input**
+(§1.5 lists every census field as observation-only).
+
+**The `scansAttempted` / `scansFailed` fence lives in a DIFFERENT ARTIFACT** — `spec362b-long4h.soak.json`
+under `tombstoneCorpus`; `*.soak.durable.json` carries neither:
+
+```
+$ jq -c '.tombstoneCorpus' spec362b-long4h.soak.json
+{"scansAttempted":1,"scansFailed":0,"samples":1,"firstBytes":1016398,"minBytes":1016398,"peakBytes":1016398,"lastBytes":1016398,"firstHalfPeakBytes":0,"lastHalfPeakBytes":1016398,"riseBytes":1016398,"spanSecs":0.0,"disposition":"LEVEL_SUPPRESSED","ceilingBytes":null,"passed":true,"reason":null}
+```
+
+**`scansAttempted` 1 / `scansFailed` 0** — one scan attempted, none failed, matching the one census
+record. The corpus block's `disposition` is `LEVEL_SUPPRESSED` with `passed: true` and a `spanSecs`
+of `0.0` on a single sample: the durable-corpus clauses are **report-only** and, with one sample,
+have nothing to level. That is observation, not a verdict.
+
+**Three channels report a terminal tombstone-byte figure, and they are NOT combined here:** the
+store-level census **1,016,398**, the in-process gauge's `lastBytes` **1,014,360**, and the CSV's last
+sample **1,014,337**. They are three different samplers reading at three different moments and
+through three different paths; §0(b)'s channel clause forbids resolving them against one another, so
+**no arithmetic relation between the three is asserted** and none is called wrong.
+
+### 5. The observation-only columns, and the HOST record
+
+**None of the values in this item is a predicate input.** §1.5's list is closed and every entry on it
+is *recorded, rendered, serialized — and never read by any predicate*; the statement is made
+explicitly here because that is the whole point of the fence.
+
+**`writebehind_lag_max`, with its six scrape counters:**
+
+```
+$ jq -c '{writebehindLagMax,writebehindLagScrapesTotal,writebehindLagScrapesRead,writebehindLagScrapesAbsent,writebehindLagScrapesUnreadable,writebehindLagMalformedSamples,writebehindLagOverflowedSamples}' \
+    spec362b-long4h.soak.durable.json
+{"writebehindLagMax":3993360,"writebehindLagScrapesTotal":2878,"writebehindLagScrapesRead":2876,"writebehindLagScrapesAbsent":2,"writebehindLagScrapesUnreadable":0,"writebehindLagMalformedSamples":0,"writebehindLagOverflowedSamples":0}
+```
+
+`writebehindLagMax` **3,993,360**; scrapes total **2878**, read **2876**, **absent 2**, unreadable 0,
+malformed samples 0, overflowed samples 0. The two absences are **visible gaps in an observation**,
+which is exactly the disposition §1.5 gives them now that the column is observation-only: they no
+longer fail-close anything. **R8 item 1 stands and is not rediscovered here:** `TODO-654`'s own
+predicate list still names write-behind occupancy, that tracker file is deliberately **not updated**,
+and this manifest governs.
+
+**`epochs_exited` and `epochsExitedAbsence`, with their six scrape counters:**
+
+```
+$ jq -c '{epochsExited,epochsExitedAbsence,epochsExitedScrapesTotal,epochsExitedScrapesRead,epochsExitedScrapesAbsent,epochsExitedScrapesUnreadable,epochsExitedMalformedSamples,epochsExitedOverflowedSamples}' \
+    spec362b-long4h.soak.durable.json
+{"epochsExited":435,"epochsExitedAbsence":null,"epochsExitedScrapesTotal":2878,"epochsExitedScrapesRead":2878,"epochsExitedScrapesAbsent":0,"epochsExitedScrapesUnreadable":0,"epochsExitedMalformedSamples":0,"epochsExitedOverflowedSamples":0}
+```
+
+`epochsExited` **435**; `epochsExitedAbsence` **`null`** — the **fact** `§9.1` item 10 pre-registered.
+**R8 item 4 recorded that `absent(<TOKEN>)` was UNWITNESSED on every arm so far; this cell does not
+witness it either**, and that is **information, not a verdict**: all 2878 scrapes were read, none
+absent, so the absence branch had no opportunity to fire and remains inspection-covered only.
+
+**The `topgun_ormap_tombstone_bytes` CSV series** (observation-only), as the runner summarised it and
+as the CSV reads:
+
+```
+$ sed -n '93p' spec362b-long4h.runner-console.log
+  tombstone_bytes n=241 empty=0 min=0 max=1014337
+```
+
+**The `du`-based cross-check** — the shell runner's `wal_mb` / `redb_mb` / `disk_total_mb` columns:
+
+```
+$ awk -F, 'NR>1{if($3+0>w)w=$3+0; if($4+0>r)r=$4+0; if($5+0>t)t=$5+0; lw=$3; lr=$4; lt=$5} END{printf "wal_mb peak=%.3f last=%s | redb_mb peak=%.3f last=%s | disk_total_mb peak=%.3f last=%s\n", w,lw,r,lr,t,lt}' spec362b-long4h.csv
+wal_mb peak=359.367 last=359.367 | redb_mb peak=153.527 last=153.527 | disk_total_mb peak=512.898 last=512.898
+```
+
+Against the harness channel's own `redb_bytes` last-half peak of **270,020,608 B** (≈ 257.5 MiB) and
+`wal_bytes` last-half peak of **214,361,373 B** (≈ 204.4 MiB), the two channels **differ, and that is
+expected**: `du -sk` measures **allocated blocks**, `metadata.len()` **apparent size**. They differ in
+**opposite directions** here — `du` reads *lower* than the harness on `redb` and *higher* on the WAL —
+and the two sets of extrema are not even taken at the same instants (60 s CSV rows against the
+harness's own cadence), so **no arithmetic relation between them is asserted**. §1.5's closing row is
+explicit that **neither corrects the other**, and only the harness channel is ever a predicate input.
+The difference is recorded, not reconciled.
+
+**HOST record — CSV continuity.** R4's `awk`, run from the evidence dir:
+
+```
+$ awk -F, 'NR>2{d=$1-p; if(d>180) printf "GAP %s -> %s = %ss\n", p, $1, d} NR>1{p=$1} END{print "checked rows:", NR-1}' spec362b-long4h.csv
+checked rows: 241
+$ awk -F, 'NR>2{d=$1-p; if(d>mx)mx=d} NR>1{p=$1} END{print "max gap secs =", mx}' spec362b-long4h.csv
+max gap secs = 61
+```
+
+**ZERO gaps > 180 s**; the largest inter-sample gap across all 241 rows is **61 s** against a 60 s
+cadence. **No host suspend, and therefore NO `INDETERMINATE-for-INSTRUMENT (host suspended)`
+disposition** — the series has no hole in it.
+
+**HOST record — the pre-run checklist's three records**, as executed and recorded in `§9.1` item 11
+before the capture command was issued:
+
+1. `env | grep -c '^SPEC362B_'` → **`0`**. No operator override leaked into `OUT_DIR` / `DATA_DIR` or
+   the binary selection, which would have been silent.
+2. `df -h` on `target/` and the evidence dir → **70 Gi free**, both paths on the same volume
+   (`/dev/disk3s5`). A full disk kills the run **through the capture layer** (`tee` takes `SIGPIPE`),
+   which lands in the ABORTED class rather than any instrument check; there was headroom.
+3. `git -C "$REPO_ROOT" status --porcelain` → **one untracked non-`.rs` file**,
+   `?? tests/integration-rust/rejected-op-witness.test.ts`, and nothing else. This is what
+   disambiguates `spec362b-long4h.matrix.txt:4`'s `dirty tree:     yes` beside `:17`'s
+   `.rs working tree:   CLEAN (asserted before the build)` — the `dirty tree` line is computed over
+   the **whole** tree, not over `.rs`.
+
+**HOST record — one further artifact fact, recorded rather than smoothed.** The runner's own console
+carries a build-provenance warning:
+
+```
+$ sed -n '6,10p' spec362b-long4h.runner-console.log
+server binary: /Users/koristuvac/Projects/topgun/topgun/target/release/topgun-server
+  built:       2026-09-02T10:39:47Z
+  WARNING: the two binaries were linked 183137s apart, so they are
+           probably NOT from one 'cargo build --release --bin topgun-server
+           --bench soak_harness'. Both runs must use one binary.
+```
+
+The warning is a **timestamp heuristic**. The authority on build identity under §0(d) is the pin
+gate, and it reads `pin diff (.rs):     EMPTY (asserted before the build)`
+(`spec362b-long4h.matrix.txt:19`) beside `.rs working tree:   CLEAN` (`:17`) — the `.rs` content at
+the run's HEAD is byte-identical to the pin, so the two link times bracket a tree that did not move.
+Recorded as a fact with its resolution; **no verdict is drawn from it**, and it is routed by id
+below.
+
+### 6. The byte-comparability table against `spec355-w1000` — *this cell* column FILLED
+
+The structure and the reference column below are **reproduced unchanged from `§9.1` item 9**, which
+committed them **before** the run; this section fills the *this cell* column **and nothing else**.
+**Every row names its CHANNEL, and no pair mixes channels** (§0(b)).
+
+| # | Channel and source | Quantity | Reference (`spec355-w1000`) | This cell |
+|---|---|---|---|---|
+| 1 | **in-process gauge** — `spec362b-long4h.soak.json` `tombstones.firstBytes` / `peakBytes` / `lastBytes` / `slopeBytesPerHour` | first → peak → last, and slope B/h | `0` → **646,306 B**, `peak == last` (*"ends at its maximum"*), over **14,401 s**; **`slopeBytesPerHour` 130,353.3 B/h (last-half window 7,195 s)** — `jq .tombstones.slopeBytesPerHour spec355-w1000.soak.json` == `130353.31432996661`, recorded in `spec355-manifest.md:1172` | `0` → peak **1,023,353 B** → last **1,014,360 B**, so **`peak != last`** — *"ends at its maximum"* is **NOT reproduced on this channel**, the last sample sitting **8,993 B below** the peak — over **14,401 s** (`durationSecsActual`), **2,878** samples; **`slopeBytesPerHour` 333,995.3019721093 B/h (last-half window 7,200 s)** — `jq .tombstones.slopeBytesPerHour spec362b-long4h.soak.json` == `333995.3019721093` |
+| 2 | **CSV** — `spec362b-long4h.csv` column `tombstone_bytes`, plus the last `elapsed_secs` row | **PAIRED:** peak / **last NON-EMPTY** `tombstone_bytes`; last `elapsed_secs`. **NOT paired (a FACT on each side):** the first data row's `tombstone_bytes` field, and whether the LAST data row's field is empty — both recorded **as they stand** | peak **629,654 B** / last **629,654 B** (the column's maximum) / **14400**; first data row is the literal `0,3.031,0.000,0.000,0.000,` — its `tombstone_bytes` field is **EMPTY, not `0`** | peak **1,014,337 B** / last non-empty **1,014,337 B** (the column's maximum, so **`peak == last`** — *"ends at its maximum"* **IS reproduced on this channel**) / **14400**; first data row is the literal `0,6.203,0.000,1.516,1.516,0` — its `tombstone_bytes` field is the literal **`0`, NOT empty**; the final data row's field is **non-empty**, and the column has **zero** empty cells across its **241** data rows |
+| 3 | **CSV, sliced** — `spec362b-long4h-seg{1..8}.csv` via §10.5.2's one-liner, each fitted with unforked `spec349c2-fit.awk -v col=tombstone_bytes -v window=full` | **EIGHT PAIRS**, W1–W8, on `span (s) \| slope B/h \| se \| r²`; plus a **`skipped`** column that is a FACT on this cell's side only | **eight per-window rows, pre-registered in full below** — W1 **113,657.12** … W8 **155,726.40**, **no decay**, against the **512 B/h** bound | **eight per-window rows, filled below** — W1 **95,653.60** … W8 **651,649.15**, **no decay** (not monotone: W2 < W1 and W4 < W3; and W8 = **6.81 ×** W1), against the **512 B/h** bound; `skipped` is **0** in every window |
+
+**Finding A — *"ends at its maximum"* SPLITS ACROSS THE TWO CHANNELS.** §0(b) states the property for
+the reference on both channels, so it is checked on both here, and the two answers **differ**:
+
+- **in-process gauge (row 1): `peak != last`.** `peakBytes` **1,023,353**, `lastBytes` **1,014,360** —
+  the last sample sits **8,993 B BELOW** the peak. The reference has `peak == last` (646,306 both).
+  ***"Ends at its maximum"* is NOT reproduced on this channel.**
+- **CSV (row 2): `peak == last`.** Both **1,014,337**, at `elapsed_secs` **14400**. ***"Ends at its
+  maximum"* IS reproduced on this channel.**
+
+The two channels sample at different cadences — **2,878** in-process samples against **241** CSV rows
+at 60 s — so this is a **two-sampler fact, not a contradiction to be resolved by picking a channel**.
+§0(b)'s channel clause forbids exactly that resolution. **Neither channel is averaged with the other,
+neither is preferred, and neither is called wrong.** Each row records what its own channel says.
+
+**Finding B — *"no decay"* is REPRODUCED, and more strongly than in the reference.** Evaluated as R5
+item 6 defines it and as nothing else: **the absence of a monotone decline across W1…W8**, never
+membership of an interval. This cell's eight slopes are **not monotone** (W2 < W1, and W4 < W3), and
+**W8 = 6.81 × W1** (651,649.15 / 95,653.60) — a strongly **accelerating** series, not a decaying one.
+The reference's own worked example is non-monotone with W8 above W1; this cell is non-monotone with W8
+**nearly seven times** W1. Every window sits far above the **512 B/h** bound — the smallest, W2, at
+**110.19 ×** it and the largest, W8, at **1,272.75 ×**.
+
+**Finding C — W1's span and `skipped` differ from the reference, and these are FACTS ON EACH SIDE, not
+findings against either.** This cell's W1 spans **1800.0 s from `t=0`** with `skipped_empty` **0**,
+because its first data row carries a real `0` in `tombstone_bytes`. The reference's W1 spanned
+**60 – 1,801 s** with `skipped_empty` **1**, because its first `tombstone_bytes` field was **EMPTY**.
+`§9.1` pre-registered that emptiness as a fact on each side; this cell's side is recorded as the fact
+it is. **`skipped` is a fact on this cell's side ONLY** — the reference table has no such column, so it
+**is not part of any pair**.
+
+**Row 3, the eight pairs** — the reference column reproduced unchanged from `§9.1`, the five
+*this cell* columns filled from `spec362b-long4h-seg{1..8}.csv` with unforked
+`spec349c2-fit.awk -v col=tombstone_bytes -v window=full`, run from the evidence dir:
+
+```
+$ for i in 1 2 3 4 5 6 7 8; do printf 'W%s ' "$i";     awk -f spec349c2-fit.awk -v col=tombstone_bytes -v window=full spec362b-long4h-seg$i.csv; done
+```
+
+**The eight rows are a deterministic function of committed bytes** — the same unforked tool over the
+same committed `seg` CSVs — so they were **verified by re-running that command at this append**, not
+transcribed from a summary. Nothing was re-measured: the cell was not re-run, and no `seg` CSV was
+re-sliced.
+
+| Window | ref span (s) | ref slope B/h | ref se | ref r² | this cell span (s) | this cell slope B/h | this cell se | this cell r² | this cell `skipped` |
+|---|---|---|---|---|---|---|---|---|---|
+| W1 | 60 – 1,801 | 113,657.12 | 13,941.33 | 0.704 | 0 – 1,800 (1800.0) | 95,653.596774 | 11,582.087427 | 0.701668 | 0 |
+| W2 | 1,860 – 3,660 | 244,197.34 | 7,573.42 | 0.973 | 1,860 – 3,660 (1800.0) | 56,417.641284 | 8,890.727791 | 0.581334 | 0 |
+| W3 | 3,720 – 5,520 | 151,075.57 | 9,213.40 | 0.903 | 3,720 – 5,520 (1800.0) | 171,702.411290 | 9,420.490965 | 0.919713 | 0 |
+| W4 | 5,580 – 7,380 | 166,532.06 | 8,971.47 | 0.922 | 5,580 – 7,380 (1800.0) | 154,358.564516 | 9,676.952167 | 0.897685 | 0 |
+| W5 | 7,440 – 9,240 | 118,189.21 | 9,703.11 | 0.836 | 7,440 – 9,240 (1800.0) | 212,434.306452 | 9,237.074005 | 0.948020 | 0 |
+| W6 | 9,300 – 11,100 | 132,688.50 | 10,151.52 | 0.855 | 9,300 – 11,100 (1800.0) | 224,270.032258 | 9,064.436463 | 0.954769 | 0 |
+| W7 | 11,160 – 12,960 | 133,598.47 | 9,651.38 | 0.869 | 11,160 – 12,960 (1800.0) | 484,239.217742 | 17,825.525574 | 0.962189 | 0 |
+| W8 | 13,020 – 14,400 | 155,726.40 | 12,099.61 | 0.883 | 13,020 – 14,400 (1380.0) | 651,649.151631 | 20,963.198025 | 0.977740 | 0 |
+
+### 7. The gate exit code — ATTRIBUTED, and quoted from the committed artifacts
+
+**The verdict belongs to the shipped tombstone byte-slope gate, not to the durable reading.** The
+durable reading is **report-only and structurally incapable of reaching the verdict**: the runner
+prints it under its own banner, after the harness has already exited with its code —
+
+```
+$ sed -n '59p;61p' spec362b-long4h.runner-console.log
+harness exited with code 1
+=== DURABLE-LAYER READING (report-only, decides nothing) ===
+```
+
+**The two pinned literals the runner console itself carries:**
+
+```
+$ sed -n '118p;124p' spec362b-long4h.runner-console.log
+RESULT: instrument sound; harness exit code 1.
+RUNNER_EXIT=1
+```
+
+**The three remaining pinned literals — the slope, the 512.0 B/h bound and the `passed` flag — are NOT
+in that file, and are recorded here as they stand rather than reconstructed.** R5 item 7 names
+`spec362b-long4h.runner-console.log` as the source of all five; the runner console instead **points at**
+`soak.json` for the attribution (`:122` — `Read 'finishedReason' in … spec362b-long4h.soak.json and
+record the attribution, rather than reading the flag as a verdict`). The three therefore come from the
+other two committed artifacts **of this same attempt**, each with its command and its line, and the
+gap between R5's named source and where the literals actually live is **routed by id to `TODO-664`**
+as a record-shape defect of the runner's tee. **Nothing is quoted from recall.**
+
+```
+$ sed -n '259p;269p' spec362b-long4h.harness-console.log
+finished_reason:   tombstone-byte growth slope 333995.3 bytes/h exceeds 512.0 bytes/h: tombstone-byte growth slope 333995.3 bytes/h exceeds 512.0 bytes/h (total growth 1023353 bytes over 2878 samples, last-half window 7200s)
+tombstone_bytes:   first=0 peak=1023353 last=1014360 slope=333995.3B/h samples=2878 -> FAIL (slope + blind-monitor both hard-gate; durable-corpus clauses are report-only) reason=tombstone-byte growth slope 333995.3 bytes/h exceeds 512.0 bytes/h (total growth 1023353 bytes over 2878 samples, last-half window 7200s)
+```
+
+```
+$ jq -c '{passed, tombstonesPassed: .tombstones.passed, tombstoneCorpusPassed: .tombstoneCorpus.passed}' spec362b-long4h.soak.json
+{"passed":false,"tombstonesPassed":false,"tombstoneCorpusPassed":true}
+$ jq -r '.finishedReason' spec362b-long4h.soak.json
+tombstone-byte growth slope 333995.3 bytes/h exceeds 512.0 bytes/h: tombstone-byte growth slope 333995.3 bytes/h exceeds 512.0 bytes/h (total growth 1023353 bytes over 2878 samples, last-half window 7200s)
+```
+
+**The literals, gathered:**
+
+| pinned literal | value | artifact and line |
+|---|---|---|
+| slope | **333,995.3 B/h** | `spec362b-long4h.harness-console.log:259`, `:269`; `soak.json` `.tombstones.slopeBytesPerHour` == `333995.3019721093` |
+| bound | **512.0 B/h** | `spec362b-long4h.harness-console.log:259`, `:269` |
+| `passed` | **`false`** (`.tombstones.passed` also `false`; `.tombstoneCorpus.passed` `true`, report-only) | `spec362b-long4h.soak.json` |
+| harness verdict line | `RESULT: instrument sound; harness exit code 1.` | `spec362b-long4h.runner-console.log:118` |
+| runner exit | `RUNNER_EXIT=1` | `spec362b-long4h.runner-console.log:124` |
+| `finishedReason` | quoted in full above | `spec362b-long4h.soak.json` |
+
+**R8 item 3 stands and is not rediscovered:** the shipped hard tombstone byte-slope gate already fires
+on short cells, so **a firing on the 4 h cell is attributed, not a surprise and not a re-run trigger**.
+The runner's own note says the same thing from its side (`:119-123`): *"a non-zero harness exit is NOT
+automatically a failed characterization … Read 'finishedReason' … and record the attribution, rather
+than reading the flag as a verdict."*
+
+**That gate's parser is FAIL-OPEN on pathological input — `TODO-664`**, recorded here by id beside the
+attribution it qualifies.
+
+**The runner's own post-hoc `full` / `last_half` OLS fits, quoted verbatim from the same artifact**
+(the SE caveat in `spec349c2-fit.awk` applies, and the field is named `slope_mb_per_hour` for every
+column — on `tombstone_bytes` the unit is **bytes**/h, as the runner's own units note at `:105-106`
+states):
+
+```
+$ sed -n '107,116p' spec362b-long4h.runner-console.log
+  col=rss_mb window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=6.203 y_last=10470.344 slope_mb_per_hour=2915.727186 se_mb_per_hour=86.966158 intercept_mb=1857.394408 r2=0.824660 sxx_hours2=324.011352005 sse=585677707.451944947
+  col=wal_mb window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=0.000 y_last=359.367 slope_mb_per_hour=99.371568 se_mb_per_hour=0.892210 intercept_mb=-49.600843 r2=0.981097 sxx_hours2=324.011352005 sse=61644.186939299
+  col=redb_mb window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=1.516 y_last=153.527 slope_mb_per_hour=34.779825 se_mb_per_hour=0.474388 intercept_mb=9.376456 r2=0.957429 sxx_hours2=324.011352005 sse=17427.149925767
+  col=disk_total_mb window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=1.516 y_last=512.898 slope_mb_per_hour=134.151598 se_mb_per_hour=0.860721 intercept_mb=-40.224585 r2=0.990257 sxx_hours2=324.011352005 sse=57369.772656766
+  col=tombstone_bytes window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=0.000 y_last=1014337.000 slope_mb_per_hour=216183.150750 se_mb_per_hour=4081.546507 intercept_mb=-84192.787400 r2=0.921495 sxx_hours2=324.011352005 sse=1290053216881.473144531
+  col=rss_mb window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=9772.188 y_last=10470.344 slope_mb_per_hour=246.813496 se_mb_per_hour=149.282056 intercept_mb=9971.689128 r2=0.022455 sxx_hours2=41.006009336 sse=108745096.681302518
+  col=wal_mb window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=135.332 y_last=359.367 slope_mb_per_hour=113.621590 se_mb_per_hour=0.371050 intercept_mb=-89.675396 r2=0.998733 sxx_hours2=41.006009336 sse=671.829925405
+  col=redb_mb window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=103.027 y_last=153.527 slope_mb_per_hour=20.749783 se_mb_per_hour=0.781639 intercept_mb=53.459836 r2=0.855533 sxx_hours2=41.006009336 sse=2981.308630527
+  col=disk_total_mb window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=238.359 y_last=512.898 slope_mb_per_hour=134.373801 se_mb_per_hour=0.797678 intercept_mb=-36.222712 r2=0.995824 sxx_hours2=41.006009336 sse=3104.913819406
+  col=tombstone_bytes window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=291562.000 y_last=1014337.000 slope_mb_per_hour=335132.182145 se_mb_per_hour=9364.159376 intercept_mb=-448439.456289 r2=0.914990 sxx_hours2=41.006009336 sse=427889925190.822631836
+```
+
+**ONE attempt, so one console.** There is no `spec362b-long4h.attemptN.runner-console.log`: no trigger
+class fired, the move-aside recipe was never entered, and no literal below is absent for that reason.
+
+### 8. The routing record — BY IDENTIFIER ONLY
+
+**No file under `.specflow/todos/` is created, edited or deleted by this append.** Routing is by id,
+in this manifest, and nowhere else:
+
+| finding | routed to |
+|---|---|
+| `DurableReading == PLATEAU_NOT_MET` on the 4 h cell, culprit `rss_kib` / `PEAKS`, all four series `MONOTONE_RISING` | **`TODO-634`** |
+| `OriginReading == NOT_REACHED_EQUAL_REFS` — `TODO-654` reading **(b)**; `PD-F12`'s 8 h divergence needs a different account | **`TODO-634`** |
+| *"Ends at its maximum"* splitting across the two channels (Finding A) — a two-sampler fact | **`TODO-634`** |
+| *"No decay"* reproduced more strongly than the reference: W8 = 6.81 × W1, against a 512 B/h bound (Finding B) | **`TODO-634`** |
+| Terminal census: 44,452 tombstone entries / 1,016,398 tombstone bytes over 96 keys, `keysAllDead` 0, `maxTombstonesPerKey` 1,147 | **`TODO-634`** |
+| The runner console does not carry three of R5 item 7's five pinned literals (item 7 above) | **`TODO-664`** |
+| The tombstone byte-slope gate's parser is **fail-open on pathological input** | **`TODO-664`** |
+| The runner's binary-link-time WARNING is a timestamp heuristic that fires on a legitimately unmoved `.rs` tree (item 5) | **`TODO-664`** |
+
+**Nothing above is diagnosed here.** Each is a recorded outcome with an identifier beside it; a stop
+is never a licence for a further execution and never grounds to retune a literal.
+
+### 9. The R7 record: what this reading does and does not authorize
+
+- **The reading is FINAL.** `PlateauNotMet` is a physics reading, and every physics reading is
+  **recorded and routed, never re-rolled**. The gate exit code is **attributed, not re-run**.
+- **The shared execution cap consumed 1 of 3.** One execution, no trigger class fired, **no repeat
+  authorized**. The doubled-repeat obligation applies **only** to `INDETERMINATE`-for-INSTRUMENT and
+  did not arise.
+- **`P1`'s null rate, recorded beside the verdict.** Batch 1 measured
+  **`P(MonotoneRising) = 0.444500` per series** under a stationary exchangeable null, so the pinned
+  `≤ 4 ×` union bound evaluates to **`≤ 1.778` — VACUOUS.** The **per-series** rate and the **named
+  culprit envelope** (`rss_kib` / `PEAKS`) carry the reading; **the compound bound carries nothing.**
+  §2.6 anticipated the direction and forbids gating on the number: this is a magnitude recorded beside
+  the verdict, **not** a reason to re-run. **R8 item 2 stands and is not rediscovered.**
+- **`NoRisingEnvelopeObserved` is NOT upgraded** — it was not read here, and it may never be turned
+  into a claim that the plateau is reached.
+- **A non-`MonotoneRising` verdict at 14,400 s is NOT DECIDING for the asymptote**, and this cell's
+  14,400 s horizon is likewise **not** evidence that no asymptote exists — only that this horizon did
+  not show one.
+- **NO gate is promoted or demoted.** `TG-OR-005` stays **`open (TODO-634)`** and **NAKED**;
+  **`NAKED_BASELINE` stays 4**; `INVARIANTS.md` and `scripts/check-invariants.sh` are
+  **byte-unedited**.
+- **The family PROCEEDS.** This was a measurement increment, not a diagnosis round, and it does not
+  reopen the diagnosis line that `E-C` HARD-STOPPED at `SPEC-358`.
+- **R8's six inherited limits are carried, not rediscovered:** the observation-only status of
+  `writebehind_lag_max` (item 1, item 5 above), the vacuous compound bound (item 2), the gate that
+  fires on short cells (item 3, item 7 above), `absent(<TOKEN>)` still unwitnessed (item 4, item 5
+  above), the `--durable-reading` neutrality row being an **argument, not a measurement** (item 5),
+  and the `SPEC-355` reference being the **reference statement of the defect, not a baseline to build
+  on** (item 6).
+
+### 10. Completion re-verification
+
+**Tracker integrity — the two digests reproduce byte-for-byte against the measuring half's G1:**
+
+```
+$ shasum -a 256 .specflow/todos/TODO-634.md .specflow/todos/TODO-654.md
+eb710d7f50734ef1fbea70c0999746d6e6b71728d08874f3d22b5f5daf1cac51  .specflow/todos/TODO-634.md
+237312c2c526e233ac645e0b1fc2d4b0cfb3b6a6a3cf07bc77b9d7f329fb870e  .specflow/todos/TODO-654.md
+```
+
+**The census on `TODO-634.md`, recomputed with §8.4's own four commands — `7 / 2 / 5 / 0`, unchanged:**
+
+```
+$ grep -cE '^- \[' .specflow/todos/TODO-634.md      -> 7
+$ grep -cE '^- \[x\]' .specflow/todos/TODO-634.md   -> 2
+$ grep -cE '^- \[ \]' .specflow/todos/TODO-634.md   -> 5
+$ grep -cE '^  +- \[' .specflow/todos/TODO-634.md   -> 0
+```
+
+The attribution `§9.1` item 6 recorded stands unchanged and is re-verified here rather than restated:
+the divergence from §8.4's pins is attributed in full to the conductor's out-of-spec appends, the
+**decision-bearing content the census exists to protect has not moved**, and §8.4's *"neither TODO file
+is edited"* prohibition is read as **partially MET — structure intact, prose appended** — not as wholly
+diverged.
+
+**Validation 12 — the wider pathspec diff is EMPTY at completion:**
+
+```
+$ git diff --stat eddf50ea6c1fae3f01171d63925cf9e93ceb24e9..HEAD -- '*.rs' INVARIANTS.md \
+    scripts/check-invariants.sh '*/spec362-durable.sh' '*/spec363-durable.sh'
+(no output)
+```
+
+Zero `.rs` bytes since the pin — at the moment the cell started (`spec362b-long4h.matrix.txt:19`,
+`pin diff (.rs):     EMPTY (asserted before the build)`) and again by hand at this append. HEAD moved
+between those two moments (`§9.1`, the artifact commits), which is exactly why the second check is not
+redundant.
+
+<!-- SEC-9.2 END -->
