@@ -2979,3 +2979,927 @@ recorded in this post-section's header — it still reproduces, so no frozen byt
 ```
 frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
 ```
+
+<!-- SEC-9.1 BEGIN -->
+
+---
+
+## §9.1 — The deciding cell's PRE-REGISTRATION, committed BEFORE the run
+
+Appended by the measuring half. This entry **APPENDS**: §0–§8 gain and lose zero bytes, no existing
+post-section entry — Batches 1–10 included — is edited, and every line of it sits below the
+`## POST-SECTION (append-only)` marker. **Nothing has been executed at this commit.** Every *this
+cell* slot below is deliberately **BLANK**; the cell runs only after this commit exists, and
+`§9.2` is what fills them. That commit order is the property this whole pre-registration rests on,
+and it is the same device the freeze itself uses (this post-section's header, mechanism 1).
+
+This entry carries thirteen items and nothing else.
+
+### 1. The resolved pin, and the four commands with their outputs
+
+**Pin: `eddf50ea6c1fae3f01171d63925cf9e93ceb24e9`** (`Merge pull request #157 from
+TopGunBuild/spec-363-repin-instrument`).
+
+```
+git fetch origin                                              -> exit 0
+
+git rev-list --ancestry-path --merges --reverse \
+  d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e..origin/main | head -1
+  -> eddf50ea6c1fae3f01171d63925cf9e93ceb24e9
+
+git rev-list --ancestry-path --merges --topo-order \
+  d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e..origin/main | head -1
+  -> eddf50ea6c1fae3f01171d63925cf9e93ceb24e9
+
+git merge-base --is-ancestor d4ada54fb74f2ff4cd04a70b910e1e9fb5f54f4e \
+  eddf50ea6c1fae3f01171d63925cf9e93ceb24e9                    -> exit 0
+
+git diff --stat eddf50ea6c1fae3f01171d63925cf9e93ceb24e9..HEAD -- '*.rs'
+  -> EMPTY (0 bytes of output)
+```
+
+**The resolver returned EXACTLY ONE LINE.** An empty result would have meant **UNRESOLVED** — never
+*"there is no `.rs` diff"*, which is a different command's answer. The `--reverse` and `--topo-order`
+forms agree, and the resolved value equals the expected pin, so no divergence was routed.
+
+**Two bounding observations, recorded as observations and not as findings:** the ancestry-path range
+holds exactly **one** merge, so the reverse/topo agreement is not an independent skew test at this
+HEAD; and HEAD equalled the pin at resolution time, so the EMPTY `.rs` diff was taken over a
+zero-commit range.
+
+### 2. The runner substitution, filed under the manifest header's GOVERNANCE CLAUSE against §8.1 item 3
+
+**The substitute file: `packages/server-rust/benches/soak_harness/evidence/spec362b-durable.sh`**, a
+derivative of `spec363-durable.sh`.
+
+**The filing, in three parts, under the header's own clause** (*"Where any spec text and this manifest
+differ, THIS MANIFEST GOVERNS, and the difference is recorded as an append-only post-section entry —
+never by editing §0–§8"*):
+
+1. **The difference.** §8.1 item 3's literal wording is *"Execute `spec362-durable.sh`'s frozen cell
+   (§5)"*; the measuring half executes **`spec362b-durable.sh`**. The spec text and this manifest
+   differ.
+2. **The manifest governs.** The difference is therefore **declared here**, not argued away, and
+   §8.1 item 3 is not edited.
+3. **It is discharged IN SUBSTANCE.** §8.1 item 3's referent is the **frozen cell (§5)**, not the
+   file's name. The substitute carries **§5's literals byte-for-byte; the row gains one knob the
+   frozen row predates** (item 3 below, the third declared divergence), and it supplies `P6` item
+   10's *"explicit build-and-record step"* — that entry said the 4 h cell *"inherits this same
+   weakness **unless** §8.1 is discharged with an explicit build-and-record step"*, and the inherited
+   build-from-HEAD difference **is** that step. The substitution therefore **discharges a standing
+   notice** rather than opening a new gap.
+
+**§8.3 is cited ONLY as precedent for the DEVICE** — *a substitute lands as an appended entry, never
+as an edit to a frozen section* — **and never as the grounds.** §8.3 governs a rename of the **spec
+id**; stretching it to cover a **runner** substitution would be the analogical move this family
+refuses by name elsewhere.
+
+**The two alternatives, refused BY NAME:**
+
+- **`spec363-durable.sh` CANNOT run this cell.** Its own enumerated difference **(d) deleted the
+  `long4h` label**; asking for it falls through to `usage` and exits 2. Smoke mode is refused into
+  the tracked evidence dir and a duration override is loud and refused there. **No invocation of
+  that file produces this cell.**
+- **`spec362-durable.sh long4h` MUST NOT be used**, even though §8.1 item 3 names that file. It
+  **mtime-selects** whichever `deps/soak_harness-*` is newest (`:396-398`) and its `matrix.txt`
+  records `dirty tree: yes` — exactly the provenance weakness recorded as `P6` item 10. Running the
+  **deciding** artifact of this family through a path that cannot prove which binary produced it —
+  when the whole reason the re-pin exists is that the earlier instrument had confirmed defects —
+  would file that artifact under an unprovable build.
+
+**Neither parent runner is edited**, and a `.sh` introduces **zero `.rs` bytes**, so §8.2 item 2 is
+untouched by construction rather than by assertion.
+
+**The difference list against `spec363-durable.sh` is CLOSED at SIX. There are no others:**
+
+- **(a) Identity.** Artifact prefix `spec362b-*` (basename `spec362b-long4h`); the **complete**
+  renamed variable surface `SPEC362B_DATA_DIR` / `SPEC362B_OUT_DIR` / `SPEC362B_SOAK_BIN` /
+  `SPEC362B_SMOKE_DURATION` / `SPEC362B_SMOKE_SAMPLE_INTERVAL` / `SPEC362B_FORCE`, **and** the three
+  provenance-branch variables `SPEC362B_PIN_SHA` / `SPEC362B_PIN_CMD` / `SPEC362B_PIN_WORKTREE`
+  (dead on this cell, whose `PROVENANCE` is `no`, and renamed anyway so that (a)'s surface is the
+  whole `SPEC363_*` surface and the list stays decidable before the diff is taken); the data dir
+  `target/spec362b-<cell>-data`; the `=== spec362b durable run: cell … ===` banner.
+- **(b) The `long4h` cell RESTORED**, carrying §5's frozen literals plus the one knob that row
+  predates — see item 3 below.
+- **(c) The pin as a LITERAL that is ENFORCED, not merely echoed.** One variable
+  `SPEC362B_PIN=eddf50ea6c1fae3f01171d63925cf9e93ceb24e9` replaces the parent's
+  `SPEC363_BASE_COMMIT` in place and is used **three times from that one variable, re-typed
+  nowhere**: (i) a **fail-closed pre-flight**
+  `git -C "$REPO_ROOT" diff --stat "$SPEC362B_PIN"..HEAD -- '*.rs'` that refuses to start; (ii) the
+  `matrix.txt` echo of the pin; (iii) the `matrix.txt` echo of that pre-flight's verdict,
+  `pin diff (.rs):     EMPTY (asserted before the build)`. The gate stands **before** the inherited
+  dirty-tree guard and **before** the build, so *"asserted before the build"* is true by
+  construction and a refusal costs no compile.
+
+  **The carve carries TWO refusal branches, and both are named here so a later reader is not
+  surprised by a message this pre-registration does not carry:**
+
+  1. **the "could not be computed" branch** — the pre-flight runs inside
+     `if ! PIN_RS_DIFF="$(… 2>&1)"; then`, and a `git` invocation that FAILS (an unknown revision, a
+     non-ancestor pin, a broken repository) refuses with
+     `FATAL: the .rs diff against the pin <sha> could not be computed, so the pin cannot be
+     asserted:` … `Refusing to start.`, exit 1. Written the ambient `2>/dev/null || true` way, such a
+     failure yields an **empty** diff and the gate would **pass** — fail-OPEN on the one guard whose
+     entire purpose is to fail closed;
+  2. **the pinned "differs from the pin" branch** — a non-empty diff refuses with the pinned message
+     `FATAL: the .rs tree at HEAD differs from the pin ${SPEC362B_PIN}; this run would not be filed
+     under the pin`, exit 1.
+
+  The two are **distinct in wording**, and both are distinct from the **inherited** dirty-tree
+  refusal that stands immediately after them and answers a different question (*"is the working tree
+  dirty?"*, not *"does HEAD differ from the pin?"*). The demonstration in item 7 quotes the second.
+- **(d) The three ≤ 900 s instrument control labels DELETED**, with an explicit refusal comment in
+  their place: `logctl-on`, `logctl-off` and `crashctl` belong to `spec362-durable.sh` and
+  `spec363-durable.sh`, they have been witnessed over two cycles, and re-running them from here would
+  create a fourth control set and a new witness cycle that nothing authorizes. Asking for one falls
+  through to `usage` and exits 2.
+- **(e) The derivation header/`usage` prose describing the CLOSED LIST AS A WHOLE** — the analogue of
+  the parent transition's own `36a39,68` block. Prose only: no knob, no literal, no control flow.
+- **(f) The one inherited uppercase spec marker.** The parent's `:391`
+  `#    and SPEC-349c2's committed width-1000 arms are the same matrix.` becomes `spec349c2`, the
+  lowercase form the same comment block already uses one line earlier. One word; the matrix literals
+  in that block are untouched.
+
+**What is deliberately NOT a difference** (recorded so the closed list is not read as an omission):
+the jitter seed literal `JITTER_SEED=20260831`, the server port `47355`, every 356-lineage matrix
+**value**, the environment-discipline block, the build-from-HEAD step and its dirty-`.rs`-tree
+refusal, the fail-closed `SOAK_SERVER_BINARY` guard, the artifact-overwrite refusal, the smoke-mode
+refusal into the tracked evidence dir, the CSV header literal, the post-run column reports and the
+`spec349c2-fit.awk` fits — **all carried verbatim.**
+
+#### 2.1 The COVERAGE record, part 1 — the `hunk → items` table
+
+`diff spec363-durable.sh spec362b-durable.sh` carries **36** change hunks. The invariant is
+**COVERAGE**: every changed line is attributable to at least one carve, and no changed line is
+unattributable. It is **not** an arity claim — many hunks share one carve, and a hunk may carry two
+or three.
+
+| # | hunk | items |   | # | hunk | items |
+|---|---|---|---|---|---|---|
+| 1 | `12,14c12,14` | d |  | 19 | `268c274` | a |
+| 2 | `19,20c19,20` | d |  | 20 | `286c292` | a |
+| 3 | `26,27c26,28` | d |  | 21 | `288,290c294,296` | a |
+| 4 | `37c38` | a |  | 22 | `301c307` | a |
+| 5 | `39,43c40,45` | e |  | 23 | `304,305c310,311` | a |
+| 6 | `45,62c47,79` | a, e |  | 24 | `391c397` | f |
+| 7 | `64,67c81,88` | a, e |  | 25 | `402,404c408,411` | d |
+| 8 | `77,82c98,103` | a |  | 26 | `449c456` | c |
+| 9 | `97c118` | a |  | 27 | `451,452c458,483` | c |
+| 10 | `99,100c120,121` | b, e |  | 28 | `463,464c494,495` | a |
+| 11 | `102,114c123,129` | b, d |  | 29 | `507c538` | a |
+| 12 | `116,119c131,136` | d |  | 30 | `512c543` | a |
+| 13 | `120a138,142` | c |  | 31 | `568c599` | a |
+| 14 | `135,136c157,158` | e |  | 32 | `570c601` | a |
+| 15 | `141,154c163,171` | b, d |  | 33 | `618c649` | a |
+| 16 | `156,157c173,175` | b, d |  | 34 | `634c665,666` | c |
+| 17 | `159,182c177,188` | a, b, d |  | 35 | `661,663c693,695` | a |
+| 18 | `191c197` | a |  | 36 | `666c698` | d |
+
+**Both pre-registered intersections were observed rather than discovered:** **(a) inside (b)** at
+hunk 17, where the restored row's `BASE="spec362b-long4h"` field is identity by the cell table's own
+row; and **(b) + (d) in one `case`-block hunk** at hunks 15 and 17, where the restoration and the
+deletion edit adjacent lines of the same `case` block. Three further intersections appear — **(a,e)**
+at hunks 6 and 7, **(b,e)** at hunk 10, and the three-way **(a,b,d)** at hunk 17 — which the coverage
+rule admits, since it fixes neither arity. Hunks 15, 16 and 17 are one contiguous region in which the
+`logctl-on` row is replaced by the `long4h` row: in each of them the removed lines are the deleted
+control's own row body — **(d)** — and the added lines are the restored cell's — **(b)** — which is
+why hunk 16, a knob doc-comment on both sides, carries both letters rather than (b) alone.
+
+**Carve (e) landed as a REPLACEMENT of the inherited derivation block, not as the pure addition it
+was pre-registered to be.** The reason is recorded rather than absorbed: the inherited block asserts
+three things that are **false** of this file — *"EXACTLY four enumerated differences"*, *"All three
+arms stay at 900s"*, and *"the 4h deciding cell is DELETED"* — so leaving it intact would have
+shipped a runner whose own header states three falsehoods about itself. Five further inherited prose
+sites naming the now-absent controls, and one stale cross-reference to the parent's own difference
+numbering, were rewritten for the same reason and are attributed to **(d)** and **(e)** respectively
+in the table above. **Coverage holds**: every one of those lines is attributed, which is the
+invariant. This is a divergence from the measuring half's own pre-registered *shape* for (e), **not**
+from a frozen section of this manifest, so it is **not** filed under the governance clause beside the
+three declared divergences.
+
+#### 2.2 The COVERAGE record, part 2 — the (a)-subtraction, its sed program and its normalized diff
+
+The identity carve is a pure rename set, so it is subtracted **first** and mechanically. Every
+residual hunk is **by construction not (a)** and must be covered by **(b)–(f)** — which is what
+closes coverage's one blind spot, *"an edit hiding inside a renamed line"*.
+
+```
+sed -e 's/SPEC363_/SPEC362B_/g' -e 's/spec363-/spec362b-/g' -e 's/spec363 durable run/spec362b durable run/' \
+  packages/server-rust/benches/soak_harness/evidence/spec363-durable.sh \
+| diff - packages/server-rust/benches/soak_harness/evidence/spec362b-durable.sh
+```
+
+**36 hunks before the subtraction; 20 after it.** The 16 that vanish are the pure-(a) hunks (rows 4,
+8, 9, 18–23, 28–33 and 35 of the table above). The 20 residual hunk headers, each with the carves the
+table assigns it:
+
+```
+12,14c12,14        d        99,100c120,121     b, e      391c397            f
+19,20c19,20        d        102,114c123,129    b, d      402,404c408,411    d
+26,27c26,28        d        116,119c131,136    d         449c456            c
+39,43c40,45        e        120a138,142        c         451,452c458,483    c
+45,62c47,79        e        135,136c157,158    e         634c665,666        c
+64,67c81,88        e        141,154c163,171    b, d      666c698            d
+                            156,157c173,175    b, d
+                            159,182c177,188    b, d
+```
+
+Residual hunks on the surviving **lowercase** references to `spec363-durable.sh` — the controls'
+home, named by (d)'s refusal comment and by the header block — are expected and are covered by (d)
+and (e); the residual on the parent's `:391` comment is expected and is covered by (f), the sed
+program's `s/spec363-/spec362b-/g` not touching the uppercase `SPEC-349c2` token. **No residual hunk
+is unattributable.**
+
+#### 2.3 The COVERAGE record, part 3 — the (d) counter and the (f) pair
+
+```
+grep -cE '^\s*(logctl-on|logctl-off|crashctl)\)' packages/server-rust/benches/soak_harness/evidence/spec362b-durable.sh
+  -> 0
+```
+
+The three control labels are **deleted, not merely commented**.
+
+```
+grep -cE 'SPEC-[0-9]' packages/server-rust/benches/soak_harness/evidence/spec363-durable.sh   -> 1
+grep -cE 'SPEC-[0-9]' packages/server-rust/benches/soak_harness/evidence/spec362b-durable.sh  -> 0
+```
+
+**The pair is the check, not either half alone:** the `1` shows the parent's single inherited marker
+exists at `:391`, and the `0` shows (f) reached the one line it owns and touched nothing else.
+
+### 3. The frozen cell literals, and the SECOND and THIRD declared divergences
+
+The cell as the substitute runner's table carries it:
+
+| knob | literal | §5 provenance |
+|---|---|---|
+| `WIDTH` | `""` | `TOPGUN_EPOCH_WIDTH` **unset ⇒ production default 1000** |
+| `DURATION` | `14400` | the pinned duration; a longer cell is **REFUSED, not deferred** |
+| `SAMPLE_INTERVAL` | `60` | the 60 s primary CSV cadence (instrument identity) |
+| `PROVENANCE` | `no` | no cell here is a provenance cell; the fail-closed guard is inherited |
+| `CELL_CRASH_INTERVAL` | `0` | no `kill -9`; the census has exactly ONE (terminal) sample (§3.3) |
+| `CELL_LIVE_CENSUS` | `0` | `--live-census-interval` **DISARMED** (§3.3 / §5) |
+| `ARM_LOG` | `yes` | the one declared departure, target-scoped (§4.1) |
+| `EXTRA_FLAGS` | `""` | none |
+| `BASE` | `spec362b-long4h` | difference (a) |
+
+with the 356-lineage protocol constants carried verbatim (`CHURN_CLIENTS=6`, `KEYSPACE=200`,
+`OR_CHURN=true`, `OR_KEYSPACE=48`, `OR_EVERY=5`, `WRITE_INTERVAL_MS=20`, `WRITES_PER_LIFE=200`,
+`OFFLINE_KEYS=3`, `CONFIRM_INTERVAL=2`, `CRASH_INTERVAL=0`, `STEADY_INTERVAL=300`, `QUIESCE=3`,
+`MEM_SAMPLE_INTERVAL=5`, `WAL_FSYNC=batched`, the neutralized memory gate), the seeded sampler jitter
+`--sampler-jitter-seed 20260831`, and `--durable-reading` ARMED.
+
+**The SECOND declared divergence, filed under the SAME governance clause as item 2.** §5's literal is
+`TOPGUN_EPOCH_WIDTH=1000`; this cell runs with the variable **UNSET**. The identity holds **in
+substance**, and it is proved three ways: the frozen `long4h` row in `spec362-durable.sh` is
+`WIDTH=""`; the runner's own column documentation reads *"`""` means UNSET, i.e. the PRODUCTION
+default (1000)"*; and `jq .epochWidth` on such a run is `1000`. **The manifest governs**, so the
+difference is DECLARED here rather than presented as if §5 had said *"unset"*.
+
+**The THIRD declared divergence, under the same clause again.** The frozen `long4h` row in
+`spec362-durable.sh` (`:109-111`) carries **no `CELL_LIVE_CENSUS` knob at all** — the knob postdates
+it — while the substitute's row adds `CELL_LIVE_CENSUS=0`. The claim this pre-registration makes is
+therefore **not** the unqualified *"byte-for-byte"*: it is **"§5's literals byte-for-byte; the row
+gains one knob the frozen row predates"**, the added literal being in substance §5's own
+*"`--live-census-interval` is **DISARMED (0)** on the deciding cell"*.
+
+**All three divergences are filed.** Filing only some would make the governance record selective in a
+family whose whole method is that a difference is **declared** rather than argued away.
+
+### 4. The pre-registered dispositions
+
+**Where each reading routes.** Whatever it reads, the family **PROCEEDS** — this is a measurement
+increment, not a diagnosis round.
+
+- **`DurableReading`.** Any **physics** reading is **FINAL**: `PlateauNotMet`,
+  `RisingDecelerating`-only, `Levelled`-only, `NoRisingEnvelopeObserved` and
+  **`INDETERMINATE-for-physics`** are recorded and routed, **never re-rolled**.
+  `INDETERMINATE-for-physics` — the 4 h horizon not separating a slow asymptote (§5's acknowledged
+  risk, §2.4's horizon clause) — **routes BY ID to the `TODO-634` umbrella and does NOT authorize a
+  longer cell**, here or anywhere. `NoRisingEnvelopeObserved` **may NOT be upgraded** into *"the
+  plateau is reached"* (§8.2 item 3); the phrase appears in `§9` **only in order to be forbidden**.
+  A **non-`MonotoneRising`** verdict at 14,400 s is explicitly **NOT DECIDING** for the asymptote: it
+  means *"this horizon did not show it"*, never *"there is nothing to show"*.
+  `IndeterminateInstrument` is the one reading that triggers a repeat — see the classes below.
+  `PlateauNotMet` arrives with `P1`'s null rate beside it: `P(MonotoneRising) = 0.444500` per series
+  under a stationary exchangeable null, so the pinned `≤ 4 ×` union bound evaluates to **`≤ 1.778` —
+  vacuous**. The **per-series** rate and the **named** culprit envelope carry the reading; the
+  compound bound carries nothing, and §2.6 forbids gating on it.
+- **`OriginReading`.** Its §4.4 disposition is mapped explicitly to `TODO-654` reading (a) / (b) /
+  (c) in `§9.2`, noting that the classifier's fourth and sixth states (`PartialDivergence`,
+  `NotObservedAtHead`) fall **outside** that three-way map, which is precisely why §4.3 names them.
+  Routing is **by identifier only**; no tracker file is created, edited or deleted.
+- **No gate is promoted or demoted** (§8.2 item 4). `TG-OR-005` stays `open (TODO-634)` and NAKED,
+  `NAKED_BASELINE` stays **4**, and `INVARIANTS.md` and `scripts/check-invariants.sh` stay
+  byte-unedited.
+
+#### 4.1 The three trigger classes, and the FOUR-ROW DECISION TABLE
+
+The trigger classes, and nothing else, are:
+
+- **ABORTED RUN.** Any termination that produced **neither a reading nor an exit 9** —
+  mechanically, **the `RESULT:` line ALONE: no `RESULT:` line in
+  `spec362b-long4h.runner-console.log`.** The runner emits one on **both** its sound path
+  (`RESULT: instrument sound; harness exit code N`) and its defective path
+  (`RESULT: INSTRUMENT DEFECT`), so its **absence** is the one signature of a run that never reached
+  a verdict. **`RUNNER_EXIT` is NOT part of this test**, and the reason is mechanical: the harness
+  returns `i32::from(!passed)` and the runner's last line is `exit "$HARNESS_RC"`, so **the shipped
+  tombstone byte-slope gate firing — the EXPECTED outcome on this cell (item 5 below; the
+  `spec355-w1000` reference ran at 130,353.3 B/h against the 512 B/h bound) — exits 1**. A
+  `RUNNER_EXIT ∉ {0, 9}` test would classify the expected reading as an abort and order a 4 h repeat
+  that the stopping rule forbids. Host suspend, `SIGHUP` from a closed terminal, a full disk taking
+  `tee` down by `SIGPIPE`, an OOM kill: none of these reaches an instrument check and **none of them
+  leaves a `RESULT:` line**. Disposition: commit what exists **by name**, move aside by the one
+  recipe, repeat with the **same** command.
+- **A runner-level INSTRUMENT DEFECT (exit 9)** — sampler abort, blind column, missing or empty
+  artifact — means **no reading was produced at all**. `exit 9` is reached **after** the console copy
+  and the `mv` of the mechanism report, so a defective attempt usually does have *some* artifacts,
+  but not necessarily all seven and not necessarily non-empty. Disposition: re-executed through the
+  recipe below, with **every** attempt recorded in `§9.2` and the defect named.
+- **A `DurableReading == IndeterminateInstrument`** triggers §7's **doubled-repeat obligation** — the
+  same frozen cell, no literal retuned, every run recorded. This is the manifest's own obligation,
+  not a new cell.
+- **A CSV CONTINUITY gap > 180 s** carries the disposition **`INDETERMINATE-for-INSTRUMENT (host
+  suspended)`** and is treated as an instance of the class above: the reading is not about the
+  physics, it is about a series with a hole in it. Checked, from the evidence dir, with one `awk`:
+
+  ```
+  awk -F, 'NR==1{next} {if(prev!="" && $1-prev>180) printf "GAP %s -> %s\n", prev, $1; prev=$1}' spec362b-long4h.csv
+  ```
+
+  Any gap **> 180 s** (3× the 60 s cadence) is a **FACT** carrying that disposition — not a physics
+  reading, and not grounds to edit the series. Any gap **≤ 180 s** is **recorded and nothing else**:
+  sampler jitter and scrape latency live there by design (§1.2), and a threshold that fired on them
+  would convert instrument identity into a finding.
+
+**The decision table, pre-registered exactly as the measuring half's `R4` states it:**
+
+| `RESULT:` line | `RUNNER_EXIT` | class | disposition |
+|---|---|---|---|
+| absent | any | ABORTED | commit by name, glob move-aside, repeat (cap 3) |
+| `INSTRUMENT DEFECT` | 9 | exit-9 | commit by name, move-aside, doubled repeat per R7 |
+| `instrument sound; harness exit code 0` | 0 | reading | FINAL, `§9.2` |
+| `instrument sound; harness exit code 1` | 1 | reading + gate attribution | FINAL, `§9.2` records `finishedReason` — NO repeat |
+
+**Row 4 generalises to any non-zero `HARNESS_RC`**: the harness returns `i32::from(!passed)`, so 1 is
+the value the gate produces, and *any* non-zero code standing beside a `RESULT: instrument sound`
+line is read the same way — **attribution, never a repeat**. Concretely: a non-zero `RUNNER_EXIT`
+beside a `RESULT: instrument sound; harness exit code N` line is a **gate attribution recorded in
+`§9.2`** (read `finishedReason`, record it, do **not** repeat), and it **consumes no repeat**. A
+`RUNNER_EXIT=9` beside `RESULT: INSTRUMENT DEFECT` is the exit-9 class.
+
+#### 4.2 The MOVE-ASIDE-BY-COMMIT recipe, in full
+
+**Every sanctioned repeat, whatever its trigger class, uses this ONE recipe, with NO guard bypass of
+any kind.**
+
+1. **Attempt N is COMMITTED as it stands, WITH WHATEVER ARTIFACTS IT PRODUCED, ENUMERATED BY NAME in
+   `§9.2` — even, and especially, when it is the defective attempt.** It is **not** *"all 16"*: the
+   exit-9 class explicitly includes `fail_instrument "missing or empty artifact"`, so a defective
+   attempt may legitimately carry **fewer than 7 harness artifacts, or an empty one**, and an aborted
+   attempt fewer still. **An empty file is committed AS IT IS** — the emptiness is the evidence of the
+   defect, and deleting or regenerating it would destroy the one thing that names the defect. **A
+   defective or aborted attempt produces NO `seg` files and NO eight-window fits**: the slicing is an
+   operator step over a CSV that may be truncated or absent, and reading it would collide with the
+   runner's own *"this run's series must not be recorded as evidence"*. It therefore commits the
+   harness artifacts that exist plus the runner console, and nothing else — **including, where the
+   run died between the harness writing `${BASE}.soak.mechanism.json` and the runner's `mv` to
+   `${BASE}.mechanism.json`, that stray file too**, under its own name: it is evidence of where the
+   run died, so it is enumerated rather than tidied away.
+2. **A move-aside commit** containing renames and nothing else, **driven by a GLOB OVER WHAT EXISTS,
+   not by a fixed list of 16**: every path matching `spec362b-long4h.*` or `spec362b-long4h-seg*.csv`
+   **whose name does not already contain `.attempt`** is `git mv`'d, replacing the prefix
+   `spec362b-long4h.` with `spec362b-long4h.attemptN.` and `spec362b-long4h-seg` with
+   `spec362b-long4h.attemptN-seg`, where **N is that attempt's index**. **The `.attempt` exclusion is
+   load-bearing: `*` matches a dot**, so without it a second move-aside would re-rename attempt 1's
+   files. The disposal step is **NAMED, not assumed**:
+   **`rm -rf target/spec362b-long4h-data target/spec362b-long4h-data.meta`** — the runner creates the
+   sibling `META_DIR="${DATA_DIR}.meta"` and removes neither. The `.meta` dir is benign (its console
+   is `>`-truncated and both sampler sentinels are `rm -f`'d), but a recipe whose stated virtue is
+   that disposal is named cannot leave its sibling unnamed. `git log --follow` preserves each renamed
+   file's provenance, and **no byte inside any of them — `matrix.txt` included — is edited**: a
+   renamed attempt's `matrix.txt` still names the **canonical** artifact paths, which is a **record of
+   what that run wrote, not a broken reference**.
+3. **The next attempt runs the SAME capture command (item 8), VERBATIM, with NO override of any
+   kind.** After the move-aside the data-dir guard (which has no escape hatch at all), the
+   artifact-overwrite guard (a closed list) and the capture command's own `test ! -e` head have
+   nothing to fire on: **no guard is bypassed because none is tripped.**
+4. **The count obligation:** **16 files for each COMPLETED attempt**; for a defective or aborted
+   attempt, **its actual enumerated set** — the name list written into `§9.2` is the authority, a
+   `wc -l` only its corroboration.
+5. **The SHARED EXECUTION CAP and the stopping rule are as follows**, reproduced here as the
+   measuring half's `R7` states them:
+
+   1. **The cap is THREE EXECUTIONS IN TOTAL** — the initial run plus **at most two** repeats,
+      **counted across ALL trigger classes together**, not per class. Each execution commits a
+      further **14,400 s plus setup** of wall clock, which is why the count is fixed before the run
+      rather than after an unwelcome reading.
+   2. **HARD STOP on the SECOND CONSECUTIVE firing of one class**, whichever class it is, and **hard
+      stop on reaching the cap**, whatever fired.
+   3. Within the `IndeterminateInstrument` class, *"doubled"* means **EXACTLY ONE additional
+      execution of that class** — two of that class in total — a cap **within** the class, sitting
+      under the shared cap above.
+   4. **Every stop routes BY ID**: an instrument finding to **`TODO-634`**, and **additionally to
+      `TODO-664`** where the defect is located in the harness. A stop is a **recorded outcome**,
+      never a licence for a fourth execution and never grounds to retune a literal.
+   5. **Every attempt is recorded in `§9.2`** regardless of which class stopped the sequence — a
+      defective attempt is evidence (step 1).
+
+   The composition matters because three repeat-bearing classes exist (ABORTED / exit 9 /
+   `IndeterminateInstrument`, the CSV-continuity gap being an instance of the third): a chain of
+   one-per-class repeats would otherwise quietly authorize an unbounded number of 4 h executions.
+   **The ABORTED class's mechanical signature is the `RESULT:`-line test ALONE**, and it is stated
+   again here because the cap's arithmetic depends on which outcomes can consume an execution — a
+   signature that read the expected gate firing as an abort would spend the cap on the one class this
+   rule calls FINAL.
+
+**`SPEC362B_FORCE` is inherited by RENAME ONLY (difference (a)) and is NEVER USED BY THIS SPEC.** It
+is not the repeat mechanism: the sanctioned repeats go through the recipe above, which leaves every
+guard armed.
+
+**The rejected alternative, recorded by name so it is not re-proposed:** a **per-attempt `BASE` via an
+env override**. It would add a new member to the runner's closed difference list and a new tail to
+the runner, for a branch that most likely never fires.
+
+### 5. The known limits this cell INHERITS
+
+Recorded here so `§9.2` does not rediscover them.
+
+1. **`writebehind_lag_max` is OBSERVATION-ONLY** (§1.3, fixated in Batch 1 `P5`). `TODO-654`'s own
+   predicate list still names write-behind occupancy; **that tracker file is deliberately NOT updated
+   and this manifest governs.** It is recorded, rendered, serialized and routed — it never decides.
+2. **The compound `≤ 4 ×` union bound is VACUOUS** (`≤ 1.778`); the per-series rule carries the
+   reading.
+3. **The shipped hard tombstone byte-slope gate fires on short cells** — one of three arms in cycle
+   1, **two of three** in cycle 2, with `logctl-on`'s own slope rising `852.8 → 11454.0` B/h (Batch
+   9 §1, corrected by Batch 10). **A firing on the 4 h cell is ATTRIBUTED** — not a surprise, and not
+   a re-run trigger.
+4. **`absent(<TOKEN>)` for `epochs_exited` is UNWITNESSED on any arm so far** — `epochsExitedAbsence`
+   was null on all three arms of both cycles, so that branch is **inspection-covered only** (Batch 7
+   §6, Batch 8 §3). Whether this cell witnesses it is **information, not a verdict**, recorded either
+   way.
+5. **The `--durable-reading` neutrality row is an ARGUMENT, not a measurement** (§0(b)); the seeded
+   sampler jitter is instrument-side and rides the three `fs` series only, with `rss_kib` deliberately
+   un-jittered (§1.2).
+6. **The `spec355-w1000` reference is the REFERENCE STATEMENT OF THE DEFECT, not a baseline to build
+   on** (§0(b)).
+
+### 6. Tracker integrity record
+
+| file | `shasum -a 256` at the measuring half's G1 |
+|---|---|
+| `.specflow/todos/TODO-634.md` | `eb710d7f50734ef1fbea70c0999746d6e6b71728d08874f3d22b5f5daf1cac51` |
+| `.specflow/todos/TODO-654.md` | `237312c2c526e233ac645e0b1fc2d4b0cfb3b6a6a3cf07bc77b9d7f329fb870e` |
+
+Both digests **re-verified at this append** and unchanged. The census on `TODO-634.md`, recomputed at
+this append with §8.4's own four commands: **7 top-level / 2 ticked / 5 unticked / 0 indented**.
+
+The attribution, recorded in full:
+
+> The two tracker digests recorded at `SPEC-362b`'s G1 diverge from §8.4's pins, and the divergence
+> is attributed in full to the conductor's out-of-spec appends. §8.4 pinned
+> `.specflow/todos/TODO-634.md` at `127ad250…` and `.specflow/todos/TODO-654.md` at `19ff3419…` at
+> `SPEC-362`'s G1; at `SPEC-362b`'s G1 they read
+> `eb710d7f50734ef1fbea70c0999746d6e6b71728d08874f3d22b5f5daf1cac51` and
+> `237312c2c526e233ac645e0b1fc2d4b0cfb3b6a6a3cf07bc77b9d7f329fb870e` respectively. Between those two
+> moments the conductor appended outcome and status prose to both files — `TODO-654.md`'s "Status
+> 2026-09-02" section is present in the current file, and `TODO-634.md` carries the corresponding
+> landing record. Those appends are outside this spec, were made by the conductor and not by any
+> group of `SPEC-362` or `SPEC-362b`, and `SPEC-362b`'s G1 therefore pins the CURRENT values as this
+> spec's own baseline, against which the completion check requires byte-for-byte reproduction.
+> Recorded in the same breath: `TODO-634.md`'s checkbox census is UNCHANGED from §8.4 — 7 top-level,
+> 2 ticked, 5 unticked, 0 indented, exactly §8.4's `7 / 2 / 5 / 0`, reproduced with §8.4's own four
+> commands. §8.4's "neither TODO file is edited" prohibition is accordingly to be read as partially
+> MET — structure intact, prose appended — and not as wholly diverged: the decision-bearing content
+> the census exists to protect has not moved, and only narrative prose was added. Reporting the
+> digest divergence without its surviving half would overstate the gap.
+
+### 7. The pin-gate demonstration record
+
+The fail-closed pre-flight of difference (c) was demonstrated **firing**, in a throwaway worktree, so
+that the guard is witnessed rather than asserted:
+
+| | |
+|---|---|
+| scratch worktree | `/private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/f88a6e5f-f66a-47b6-af05-aaeee36576f8/scratchpad/spec362b-ac12-demo` |
+| scratch branch | `spec362b-ac12-demo` (deleted after the demonstration) |
+| scratch commit SHA | `9793c6092db8fad85ee967dc76fac9e518901bbe` (a one-line `.rs` addition) |
+
+The SHA is recorded **because it is part of the evidence**: a refusal demonstration whose triggering
+commit is unnamed cannot be re-derived by a reader. The worktree and the branch are deleted; the SHA
+outlives them here.
+
+The runner's refusal, verbatim:
+
+```
+FATAL: the .rs tree at HEAD differs from the pin eddf50ea6c1fae3f01171d63925cf9e93ceb24e9; this run would not be filed under the pin
+ packages/server-rust/src/lib.rs | 2 ++
+ 1 file changed, 1 insertions(+)
+```
+
+Exit **1**; **no clock started and no build ran** — the scratch worktree's own `target/` never came
+into existence, which is the consequence of the gate standing before the build block. This is the
+**pin gate's** message, not the inherited dirty-tree refusal.
+
+### 8. The console-capture command, and the launch vehicle
+
+The runner's pre-flight lines, its `RESULT:` line, its **harness exit code** and its post-hoc
+`spec349c2-fit.awk` `full` / `last_half` fits print to the **operator's terminal** and reach **none**
+of the 7 harness artifacts (`harness-console.log` is the harness **child's** log). Re-running this
+cell for physics is forbidden, so a literal not captured at run time is **unobtainable afterwards**.
+The capture is an operator-side wrapper around the runner, **not** a change to it, so the closed
+difference list does not grow. It names `spec362b-long4h.runner-console.log` as the **eighth
+committed artifact**.
+
+**It is ONE command, run from the REPOSITORY ROOT, with every path repo-root-relative — one command,
+one `cwd`** — and it is written here byte-for-byte as the measuring half's `R4` carries it:
+
+   ```
+   test ! -e packages/server-rust/benches/soak_harness/evidence/spec362b-long4h.runner-console.log \
+     && caffeinate -dims bash -c '( bash packages/server-rust/benches/soak_harness/evidence/spec362b-durable.sh long4h; echo "RUNNER_EXIT=$?" ) 2>&1 | tee packages/server-rust/benches/soak_harness/evidence/spec362b-long4h.runner-console.log'
+   ```
+
+**The `test ! -e` head is a GUARD, not decoration.** The runner's own artifact-overwrite guard tests a
+closed list of eight paths that does **not** include `runner-console.log` — the capture is
+operator-side, so the runner cannot defend it. An existing canonical console therefore means exactly
+one thing: **a move-aside was skipped**, and a bare `tee` would truncate the previous attempt's only
+copy of its exit code, its `RESULT:` line and its fits. With the guard, nothing runs at all.
+
+**The LAUNCH VEHICLE is pre-registered too, because 4 h on a laptop is a host risk and not only an
+instrument risk.** The run is started **inside a detached `tmux` session** (so a closed terminal or a
+dropped SSH session cannot `SIGHUP` it), with the **lid open** and the machine **on mains power**;
+the command above is typed into that session **verbatim**. The reason is mechanical: the CSV's clock
+is **wall clock** (`emit_row` takes `date +%s`) while the harness's own duration accounting is a
+monotonic `Instant`, which on macOS **does not advance during sleep**. A host suspend therefore does
+not shorten the harness's run; it punches a **gap into the series** the deciding shapes are read
+from — which is what the CSV-continuity clause of item 4 exists to detect.
+
+**Two rejected alternatives, recorded by name.** *Transcribing* the terminal into `§9.2` was
+rejected: a transcription is not an executed witness, and the artifact it claims to quote would not
+exist. Batch 10 §2(a)'s **substitution** — `passed` plus the verdict line, exit code dropped by name
+— was rejected **here** because there it was a forced **post-hoc** repair of a literal already lost,
+whereas this pre-registration is written **before** the run and can simply not lose it. Batch 10
+§2(a)'s substituted literals stand; what is refused is treating that substitution as a **licence** to
+drop the exit code when capturing it costs one wrapper.
+
+The eight window segments and their fits run from a **DIFFERENT `cwd`** — the evidence dir
+(`cd packages/server-rust/benches/soak_harness/evidence`), because §10.5.2's one-liner reads and
+writes **bare basenames** and `spec349c2-fit.awk` is given bare segment names. The two `cwd`s are
+stated here side by side rather than discovered on a non-repeatable run.
+
+### 9. The byte-comparability comparison table — reference column FILLED, *this cell* column EMPTY
+
+**Every *this cell* cell below is deliberately BLANK at this commit.** `§9.2` fills them and nothing
+else. Pre-registering **which pairs get compared** is the whole point: choosing the numbers after
+seeing the data is what a pre-registration exists to prevent. **Every row names its CHANNEL, and
+channel-mixing is forbidden wherever two numbers are compared** (§0(b)).
+
+| # | Channel and source | Quantity | Reference (`spec355-w1000`) | This cell |
+|---|---|---|---|---|
+| 1 | **in-process gauge** — `spec362b-long4h.soak.json` `tombstones.firstBytes` / `peakBytes` / `lastBytes` / `slopeBytesPerHour` | first → peak → last, and slope B/h | `0` → **646,306 B**, `peak == last` (*"ends at its maximum"*), over **14,401 s**; **`slopeBytesPerHour` 130,353.3 B/h (last-half window 7,195 s)** — `jq .tombstones.slopeBytesPerHour spec355-w1000.soak.json` == `130353.31432996661`, recorded in `spec355-manifest.md:1172` | |
+| 2 | **CSV** — `spec362b-long4h.csv` column `tombstone_bytes`, plus the last `elapsed_secs` row | **PAIRED:** peak / **last NON-EMPTY** `tombstone_bytes`; last `elapsed_secs`. **NOT paired (a FACT on each side):** the first data row's `tombstone_bytes` field, and whether the LAST data row's field is empty — both recorded **as they stand** | peak **629,654 B** / last **629,654 B** (the column's maximum) / **14400**; first data row is the literal `0,3.031,0.000,0.000,0.000,` — its `tombstone_bytes` field is **EMPTY, not `0`** | |
+| 3 | **CSV, sliced** — `spec362b-long4h-seg{1..8}.csv` via §10.5.2's one-liner, each fitted with unforked `spec349c2-fit.awk -v col=tombstone_bytes -v window=full` | **EIGHT PAIRS**, W1–W8, on `span (s) \| slope B/h \| se \| r²`; plus a **`skipped`** column that is a FACT on this cell's side only | **eight per-window rows, pre-registered in full below** — W1 **113,657.12** … W8 **155,726.40**, **no decay**, against the **512 B/h** bound | |
+
+**Row 1's Quantity column names FOUR in-process values, so its reference pre-registers four** — the
+slope included, **130,353.3 B/h over the 7,195 s last-half window**, which is the reference's own
+harness verdict figure. A quantity named without its reference literal could not be supplied
+afterwards without editing a committed pre-registration, which is the one thing this section exists
+to make impossible.
+
+**Row 2's FIRST value is a FACT, not a pair.** The committed reference's first data row is
+`0,3.031,0.000,0.000,0.000,`: the CSV channel's first sample carries **no gauge value at all** — the
+`tombstone_bytes` field is **EMPTY**, which is not the same statement as `0` and must not be written
+as one. The comparison proper is on **peak / last / last `elapsed_secs`**, and this cell's first
+field is recorded exactly as it comes out — empty or not — as a fact on each side.
+
+**Row 2's LAST value is the last NON-EMPTY sample, and any emptiness is a recorded fact.** The
+`tombstone_bytes` column is a gauge scrape and is allowed to have holes: `spec349c2-fit.awk` treats an
+empty value cell as a scrape that did not answer, **counts it in `skipped` and drops it from the fit
+rather than dying** (a *present but non-numeric* cell is still fatal). So the eight fits are safe
+whatever the last cell holds — but *"last"* in a comparison must mean a **measured** value.
+
+**Row 3 is a table of its own — EIGHT PAIRS, its reference column pre-registered ROW BY ROW**, in
+§10.5.2's exact column shape. An interval (*"113,657–244,197 B/h"*) is satisfiable by almost any
+rising series and would be weaker than rows 1 and 2, so the reference is pinned per window. The five
+*this cell* columns are blank at this commit:
+
+| Window | ref span (s) | ref slope B/h | ref se | ref r² | this cell span (s) | this cell slope B/h | this cell se | this cell r² | this cell `skipped` |
+|---|---|---|---|---|---|---|---|---|---|
+| W1 | 60 – 1,801 | 113,657.12 | 13,941.33 | 0.704 | | | | | |
+| W2 | 1,860 – 3,660 | 244,197.34 | 7,573.42 | 0.973 | | | | | |
+| W3 | 3,720 – 5,520 | 151,075.57 | 9,213.40 | 0.903 | | | | | |
+| W4 | 5,580 – 7,380 | 166,532.06 | 8,971.47 | 0.922 | | | | | |
+| W5 | 7,440 – 9,240 | 118,189.21 | 9,703.11 | 0.836 | | | | | |
+| W6 | 9,300 – 11,100 | 132,688.50 | 10,151.52 | 0.855 | | | | | |
+| W7 | 11,160 – 12,960 | 133,598.47 | 9,651.38 | 0.869 | | | | | |
+| W8 | 13,020 – 14,400 | 155,726.40 | 12,099.61 | 0.883 | | | | | |
+
+**`"no decay"` is evaluated as a PROPERTY OF THE EIGHT PAIRS — the absence of a monotone decline
+across W1…W8 — and NOT as membership of an interval.** The reference is the worked example: it is not
+monotone (W1 < W2, W3 < W4, W5 < W6 < W7 < W8) and W8 sits **above** W1. The `skipped` column is
+fit.awk's own count of empty cells in that window and is a **fact on this cell's side only** — the
+reference table has no such column, so it is not part of any pair.
+
+**`"ends at its maximum"` is checked on BOTH channels** (rows 1 and 2), because that is how §0(b)
+states it for the reference and a one-channel check would not be the same property.
+
+### 10. The MAP OF EXPECTED NULLS, with a STATUS on each
+
+So that a `null` in `§9.2` is read as what it is instead of being argued about after the run. **Four
+fields, and nothing else, may legitimately be `null`:**
+
+| field | when it is null | status |
+|---|---|---|
+| `censusTerminal.copyCompletedSecs` | always, on this cell — the terminal census does not copy | **reading** (§3.3's pre-registered shape) |
+| `epochsExitedAbsence` | no absence was observed | **fact** (item 5.4: unwitnessed on every arm so far) |
+| `firstZeroReturnLine` | the zero-return line was never reached | **fact** |
+| `firingEnvelope` | **⇔ `shape != MonotoneRising`, BY CONSTRUCTION** (`monitor.rs:1648-1656`: the shape and the envelope come out of one `match`, and every `MonotoneRising` arm carries `Some(...)`) | **reading** where the shape is not `MonotoneRising`; **`MonotoneRising` WITH a null envelope is an INSTRUMENT DEFECT, never a reading** |
+
+**And two fields that may NEVER be null**, named here because the same rule makes a mistyped path look
+like a finding: **`jq .reading` and `jq .reason` on `spec362b-long4h.soak.durable.json`** — the
+`DurableReading` type's two top-level keys, both **lowercase**. `jq .durableReading` is `null` on
+every committed artifact of this lineage; that null is a **wrong path**, not a reading.
+
+**Any other null is an instrument finding, not a value.**
+
+### 11. The PRE-RUN CHECKLIST — executed and recorded
+
+Run at this append, from the repository root, before the capture command is issued.
+
+```
+$ env | grep -c '^SPEC362B_'
+0
+```
+
+An override leaked from the operator's shell is **silent**: it would redirect `OUT_DIR` / `DATA_DIR`
+or substitute the binary without any line in any artifact saying so.
+
+```
+$ df -h /Users/koristuvac/Projects/topgun/topgun/target \
+       /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   926Gi   833Gi    70Gi    93%    6.9M  731M    1%   /System/Volumes/Data
+/dev/disk3s5   926Gi   833Gi    70Gi    93%    6.9M  731M    1%   /System/Volumes/Data
+```
+
+**Free: 70 Gi**, both paths on the same volume. A full disk makes `tee` take `SIGPIPE` and kills the
+run **through the capture layer itself**, which lands in the ABORTED class rather than in any
+instrument check.
+
+```
+$ git -C "$REPO_ROOT" status --porcelain
+?? tests/integration-rust/rejected-op-witness.test.ts
+```
+
+**One untracked non-`.rs` file, and nothing else.** This is recorded because the runner's matrix line
+`dirty tree:` is computed over the **whole tree**, **not** over `.rs`, so the deciding artifact can
+read `dirty tree: yes` beside `.rs working tree: CLEAN` — exactly as the committed
+`spec363-logctl-on.matrix.txt` already does. This listing is what disambiguates that `yes` for a
+later reader. **It is NOT a difference** — the closed list stays at six and the matrix line is not
+edited — and it does not license committing whatever the listing shows.
+
+### 12. Digest footer
+
+`§9.1`'s own `shasum -a 256` is recorded **below the `<!-- SEC-9.1 END -->` marker**, outside the
+digested range, in the same convention Batches 1–10 use. The range is the body **between** the two
+markers, exclusive of both marker lines and of the footer, and it is computed with **this exact
+one-liner**, pinned here so a later re-verification cannot digest a range chosen at re-verification
+time:
+
+```
+awk '/^<!-- SEC-9.1 BEGIN -->$/{p=1;next} /^<!-- SEC-9.1 END -->$/{p=0} p' \
+  packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md | shasum -a 256
+```
+
+The frozen-sections digest and all ten batch digests are re-verified in that same footer.
+
+### 13. Predicate evidence — every mechanical predicate above, SHOWN DECIDABLE BEFORE IT IS COMMITTED
+
+Each predicate this section freezes is executed here, on a **committed reference artifact** or on the
+runner as it stands, and its **exact command and real output** are recorded. **A predicate that could
+not be shown decidable on a sound reference run would not be committed** — the remedy would be to
+stop and report, never to adjust the predicate until it passes.
+
+**(1) The ABORTED test.** The classification rule is the `RESULT:` line alone. Applied to committed
+consoles, with a committed console that carries no `RESULT:` line as the negative direction:
+
+```
+$ for f in spec356-long.runner-console.log spec356c-long-r1.runner-console.log spec355-w1000.harness-console.log; do
+    printf '%-42s ' "$f"
+    awk '/^RESULT: instrument sound; harness exit code/{c="reading (gate attribution when the code is non-zero)"}
+         /^RESULT: INSTRUMENT DEFECT/{c="exit-9"}
+         END{print (c==""?"ABORTED":c)}' "$f"
+  done
+spec356-long.runner-console.log            reading (gate attribution when the code is non-zero)
+spec356c-long-r1.runner-console.log        reading (gate attribution when the code is non-zero)
+spec355-w1000.harness-console.log          ABORTED
+```
+
+```
+$ grep -n '^RESULT:' spec356-long.runner-console.log
+190:RESULT: instrument sound; harness exit code 1.
+
+$ grep -c '^RUNNER_EXIT=' spec356-long.runner-console.log
+0
+```
+
+**PASS.** A committed reference console carrying `RESULT: instrument sound; harness exit code 1`
+classifies as **reading + gate attribution**, not as an abort — and it does so with **no
+`RUNNER_EXIT` line present at all**, which is the strongest available demonstration that
+`RUNNER_EXIT` is not part of the test. The third file is a **harness child** console, used only to
+show that the absent-`RESULT:` branch is decidable in the other direction; classifying it says
+nothing about the run that produced it.
+
+**(2) The (d) counter.**
+
+```
+$ grep -cE '^\s*(logctl-on|logctl-off|crashctl)\)' spec363-durable.sh
+3
+$ grep -cE '^\s*(logctl-on|logctl-off|crashctl)\)' spec362b-durable.sh
+0
+```
+
+**PASS** — 3 on the parent, 0 on the derivative: the labels are deleted, not commented.
+
+**(3) The (f) / AC13 pair.**
+
+```
+$ grep -cE 'SPEC-[0-9]' spec363-durable.sh
+1
+$ grep -cE 'SPEC-[0-9]' spec362b-durable.sh
+0
+```
+
+**PASS** — the pair, not either half alone.
+
+**(4) The `SPEC363_*` variable-surface check.**
+
+```
+$ grep -c 'SPEC363_' spec362b-durable.sh
+0
+```
+
+**PASS.** Hits on the FILE name `spec363-durable.sh` do not match this pattern and are allowed to
+remain (they are functional references to where the controls live).
+
+**(5) The pin gate, both directions.**
+
+```
+$ git diff --stat eddf50ea6c1fae3f01171d63925cf9e93ceb24e9..HEAD -- '*.rs'
+$ echo "exit=$?"
+exit=0
+```
+
+Empty at HEAD — the gate passes today. And the same gate **fires**, in the scratch worktree of item
+7, with the message quoted there verbatim (exit 1, no clock, no build). **PASS in both directions**:
+a guard shown passing only would not have been shown to be a guard.
+
+```
+$ grep -c 'eddf50ea6c1fae3f01171d63925cf9e93ceb24e9' spec362b-durable.sh
+1
+```
+
+The sha appears **once**, in the `SPEC362B_PIN=` assignment; no comment or `usage` line carries it.
+
+**(6) The CSV-continuity `awk`, on the committed reference series.**
+
+```
+$ awk -F, 'NR==1{next} {if(prev!="" && $1-prev>180) printf "GAP %s -> %s\n", prev, $1; prev=$1}' spec355-w1000.csv
+$ echo "exit=$?"
+exit=0
+```
+
+**PASS** — no output, i.e. **zero gaps > 180 s** on a sound 4 h reference series of 241 data rows at
+the 60 s cadence. The predicate is therefore quiet on a good series and is not a threshold that
+fires on ordinary jitter.
+
+**(7) The 8-window one-liner, reproducing §10.5.2's W1–W8 on the reference CSV.** Run in a scratch
+directory, on copies, so that no committed artifact is rewritten by a check:
+
+```
+$ awk -F, 'NR==1{h=$0; next} {rows[++n]=$0}
+    END{seg=int((n+7)/8);
+        for(i=1;i<=8;i++){f=sprintf("spec355-w1000-seg%d.csv",i); print h > f;
+          for(j=(i-1)*seg+1; j<=i*seg && j<=n; j++) print rows[j] > f; close(f)}}' spec355-w1000.csv
+$ for i in 1 2 3 4 5 6 7 8; do cmp "spec355-w1000-seg$i.csv" "<evidence>/spec355-w1000-seg$i.csv" && echo "seg$i identical"; done
+seg1 identical
+seg2 identical
+seg3 identical
+seg4 identical
+seg5 identical
+seg6 identical
+seg7 identical
+seg8 identical
+$ for i in 1 2 3 4 5 6 7 8; do printf 'W%s  ' "$i"; awk -f spec349c2-fit.awk -v col=tombstone_bytes -v window=full "spec355-w1000-seg$i.csv"; done
+W1  col=tombstone_bytes window=full rows_used=30 n=30 skipped_empty=1 t_start_secs=60.0 t_end_secs=1801.0 span_secs=1741.0 y_first=24568.000 y_last=78078.000 slope_mb_per_hour=113657.121100 se_mb_per_hour=13941.327812 intercept_mb=13891.058002 r2=0.703590 sxx_hours2=0.624439889 sse=3398262693.733716965
+W2  col=tombstone_bytes window=full rows_used=31 n=31 skipped_empty=0 t_start_secs=1860.0 t_end_secs=3660.0 span_secs=1800.0 y_first=93170.000 y_last=201476.000 slope_mb_per_hour=244197.338710 se_mb_per_hour=7573.420018 intercept_mb=-36749.314516 r2=0.972864 sxx_hours2=0.688888889 sse=1145859222.217740536
+W3  col=tombstone_bytes window=full rows_used=31 n=31 skipped_empty=0 t_start_secs=3720.0 t_end_secs=5520.0 span_secs=1800.0 y_first=202048.000 y_last=275224.000 slope_mb_per_hour=151075.566480 se_mb_per_hour=9213.399491 intercept_mb=56695.819831 r2=0.902643 sxx_hours2=0.688824149 sse=1695688859.936746359
+W4  col=tombstone_bytes window=full rows_used=31 n=31 skipped_empty=0 t_start_secs=5580.0 t_end_secs=7380.0 span_secs=1800.0 y_first=302111.000 y_last=366902.000 slope_mb_per_hour=166532.056452 se_mb_per_hour=8971.469103 intercept_mb=28778.072581 r2=0.922369 sxx_hours2=0.688888889 sse=1607956551.506046772
+W5  col=tombstone_bytes window=full rows_used=31 n=31 skipped_empty=0 t_start_secs=7440.0 t_end_secs=9240.0 span_secs=1800.0 y_first=367477.000 y_last=428726.000 slope_mb_per_hour=118189.209677 se_mb_per_hour=9703.105619 intercept_mb=126467.771774 r2=0.836496 sxx_hours2=0.688888889 sse=1880912945.211289167
+W6  col=tombstone_bytes window=full rows_used=31 n=31 skipped_empty=0 t_start_secs=9300.0 t_end_secs=11100.0 span_secs=1800.0 y_first=429554.000 y_last=513849.000 slope_mb_per_hour=132688.503765 se_mb_per_hour=10151.515244 intercept_mb=92596.695529 r2=0.854888 sxx_hours2=0.688824149 sse=2058581683.718467712
+W7  col=tombstone_bytes window=full rows_used=31 n=31 skipped_empty=0 t_start_secs=11160.0 t_end_secs=12960.0 span_secs=1800.0 y_first=501590.000 y_last=553386.000 slope_mb_per_hour=133598.467742 se_mb_per_hour=9651.379808 intercept_mb=84378.810484 r2=0.868548 sxx_hours2=0.688888889 sse=1860912663.379042149
+W8  col=tombstone_bytes window=full rows_used=24 n=24 skipped_empty=0 t_start_secs=13020.0 t_end_secs=14400.0 span_secs=1380.0 y_first=578502.000 y_last=629654.000 slope_mb_per_hour=155726.400000 se_mb_per_hour=12099.607753 intercept_mb=5306.376667 r2=0.882758 sxx_hours2=0.319444444 sse=1028870235.193334460
+```
+
+**PASS.** The regenerated segments are **byte-identical** to the committed
+`spec355-w1000-seg{1..8}.csv`, and the eight fits reproduce §10.5.2's W1–W8 **to every digit of the
+recorded table** — spans, slopes, `se` and `r²` alike. Note `W1 skipped_empty=1`: that is the first
+data row's empty `tombstone_bytes` field, the same fact row 2 of item 9 pre-registers, and it is
+counted and dropped rather than fatal.
+
+**(8) The frozen and batch digest one-liners — all eleven, run before this append.**
+
+```
+$ awk 'BEGIN{p=1} /^## POST-SECTION \(append-only\)$/{p=0} p' spec362-manifest.md | shasum -a 256
+c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54  -
+$ for n in 1..10: awk '/^<!-- BATCH-N BEGIN -->$/{p=1;next} /^<!-- BATCH-N END -->$/{p=0} p' spec362-manifest.md | shasum -a 256
+batch-1   575bd28e76380b8501561abe050b62b865ae7bed3dcd8f8279f8a3febf5eca3d
+batch-2   467a9d80c06eec02a061c712a35b16a70ffef5791d0c9596805f4ac22ca7d38f
+batch-3   a8a0ab833ada09a529aeb630aa5a666c572fc158763ca93fd302bca076d04ad3
+batch-4   7d521a3091e2ce1e6c792535279a98f39d285427b752f07eeb7ae4649f2efab7
+batch-5   17c066fe64ee2bb4401fc2fc1c533da8e6d6e60c3040f18262d61ad49726bde2
+batch-6   0ac5d5d28821c233f64a34db67a0f46955a2debfcc475c8660def409ee697f6b
+batch-7   30e5c1a6f2a0f4760014dffea8c905d02a7b17243b29ac4c600926a0e24d9e41
+batch-8   735e114576124256d0b59b5f0b8d3fc0df9350f35ac74c77be3629ea7b422e2b
+batch-9   4d25f53c9d67a405e26cfd9d58072f059afd7eff5a6009479735718c864bbdf3
+batch-10  1b8f27c29d130801cdcb5e0a05b3c91663e254f91c0107e8d065c917757c85d7
+```
+
+**PASS — 11 of 11 reproduce.** Each was run with the pinned one-liner for its own range (the loop
+above is a transcript convenience; the ten commands executed are the ten literal per-batch
+one-liners recorded beside each batch). They are re-verified **again** in the footer below, after this
+append, which is what proves the append moved no frozen and no batch byte.
+
+**(9) The tracker digests and the census.**
+
+```
+$ shasum -a 256 .specflow/todos/TODO-634.md .specflow/todos/TODO-654.md
+eb710d7f50734ef1fbea70c0999746d6e6b71728d08874f3d22b5f5daf1cac51  .specflow/todos/TODO-634.md
+237312c2c526e233ac645e0b1fc2d4b0cfb3b6a6a3cf07bc77b9d7f329fb870e  .specflow/todos/TODO-654.md
+$ grep -cE '^- \[' .specflow/todos/TODO-634.md      -> 7
+$ grep -cE '^- \[x\]' .specflow/todos/TODO-634.md   -> 2
+$ grep -cE '^- \[ \]' .specflow/todos/TODO-634.md   -> 5
+$ grep -cE '^  +- \[' .specflow/todos/TODO-634.md   -> 0
+```
+
+**PASS** — both digests reproduce item 6's values and the census reproduces §8.4's `7 / 2 / 5 / 0`.
+
+**(10) The reference literals of item 9, read out of the committed artifacts rather than transcribed
+from a prior manifest.**
+
+```
+$ jq -c '.tombstones' spec355-w1000.soak.json
+{"samples":2878,"firstBytes":0,"peakBytes":646306,"lastBytes":646306,"slopeBytesPerHour":130353.31432996661,"passed":false,"reason":"tombstone-byte growth slope 130353.3 bytes/h exceeds 512.0 bytes/h (total growth 646306 bytes over 2878 samples, last-half window 7195s)"}
+$ sed -n '2p' spec355-w1000.csv
+0,3.031,0.000,0.000,0.000,
+$ tail -1 spec355-w1000.csv
+14400,6243.344,398.730,203.527,602.254,629654
+$ awk -F, 'NR>1 && $6!="" {if($6+0>m)m=$6+0; last=$6+0} NR>1{e=$1} END{print "peak="m, "last_nonempty="last, "last_elapsed="e}' spec355-w1000.csv
+peak=629654 last_nonempty=629654 last_elapsed=14400
+```
+
+**PASS** — every reference literal in item 9's table was observed, not copied: `firstBytes 0`,
+`peakBytes == lastBytes == 646,306`, `slopeBytesPerHour 130353.31432996661` with the reason line's
+own `last-half window 7195s`, the CSV's first data row with its **empty** sixth field, and the CSV's
+peak `== last non-empty == 629,654` at `elapsed_secs 14400`.
+
+**Predicate evidence result: 10 of 10 PASS.** No predicate was adjusted, and none was committed
+undecided.
+
+<!-- SEC-9.1 END -->
+
+**Digest of `§9.1`.** Same convention as Batches 1–10: the digested range is the section body
+**between** the two markers, exclusive of both marker lines and of this footer. Reproduce with the
+one-liner pinned in item 12:
+
+```
+awk '/^<!-- SEC-9.1 BEGIN -->$/{p=1;next} /^<!-- SEC-9.1 END -->$/{p=0} p' \
+  packages/server-rust/benches/soak_harness/evidence/spec362-manifest.md | shasum -a 256
+```
+
+```
+sec-9.1          51eb0fbcc7cc1558d32fdc6263f07331da6db31851955c2db8fd8eaf2a6773e7
+```
+
+**Frozen-sections digest, RE-VERIFIED at the moment of this append** with the pinned one-liner
+recorded in this post-section's header — it still reproduces, so no frozen byte moved:
+
+```
+frozen-sections  c7f3373fb44bd80beb9e9c955e5d6e46e4d9a88a3abbd1579b802bc5e4882f54
+```
+
+**All ten batch digests, RE-VERIFIED at the moment of this append**, each with its own pinned
+one-liner — they all still reproduce, so no post-section byte moved either:
+
+```
+batch-1          575bd28e76380b8501561abe050b62b865ae7bed3dcd8f8279f8a3febf5eca3d
+batch-2          467a9d80c06eec02a061c712a35b16a70ffef5791d0c9596805f4ac22ca7d38f
+batch-3          a8a0ab833ada09a529aeb630aa5a666c572fc158763ca93fd302bca076d04ad3
+batch-4          7d521a3091e2ce1e6c792535279a98f39d285427b752f07eeb7ae4649f2efab7
+batch-5          17c066fe64ee2bb4401fc2fc1c533da8e6d6e60c3040f18262d61ad49726bde2
+batch-6          0ac5d5d28821c233f64a34db67a0f46955a2debfcc475c8660def409ee697f6b
+batch-7          30e5c1a6f2a0f4760014dffea8c905d02a7b17243b29ac4c600926a0e24d9e41
+batch-8          735e114576124256d0b59b5f0b8d3fc0df9350f35ac74c77be3629ea7b422e2b
+batch-9          4d25f53c9d67a405e26cfd9d58072f059afd7eff5a6009479735718c864bbdf3
+batch-10         1b8f27c29d130801cdcb5e0a05b3c91663e254f91c0107e8d065c917757c85d7
+```
