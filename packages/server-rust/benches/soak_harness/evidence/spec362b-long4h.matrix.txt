@@ -1,0 +1,45 @@
+
+=== spec362b durable run: cell long4h ===
+  repo HEAD:      cb8dccf4dcea47dc40b141434c6a04c9588cff93
+  dirty tree:     yes
+  host/OS:        Darwin MacBookPro 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:18:49 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6000 arm64
+  lineage:        HEAD harness + HEAD server
+  data dir:       /Users/koristuvac/Projects/topgun/topgun/target/spec362b-long4h-data
+  csv:            /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362b-long4h.csv
+  soak.json:      /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362b-long4h.soak.json
+  mechanism.json: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362b-long4h.mechanism.json (harness writes spec362b-long4h.soak.mechanism.json; renamed after the run)
+  durable.json:   /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362b-long4h.soak.durable.json (raw basename: NOT renamed, by design)
+  progress.jsonl: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362b-long4h.progress.jsonl
+  console log:    /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362b-long4h.harness-console.log
+  matrix:         /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec362b-long4h.matrix.txt
+  soak binary:    /Users/koristuvac/Projects/topgun/topgun/target/release/deps/soak_harness-bb9913e887e67248
+  soak binary commit: cb8dccf4dcea47dc40b141434c6a04c9588cff93
+  .rs working tree:   CLEAN (asserted before the build)
+  pin:                eddf50ea6c1fae3f01171d63925cf9e93ceb24e9
+  pin diff (.rs):     EMPTY (asserted before the build)
+    built:        2026-09-04T13:32:04Z
+  server binary:  /Users/koristuvac/Projects/topgun/topgun/target/release/topgun-server
+    built:        2026-09-02T10:39:47Z
+  --- varied knobs (AC16's enumerated list; everything else is the
+      spec355-width.sh literal) ---
+  TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
+  duration:            14400s
+  csv cadence:         60s
+  extra harness flags: <none>
+  --durable-reading:   ARMED (every cell in this table)
+  --live-census-interval: 0 (DISARMED)
+  --sampler-jitter-seed:  20260831
+  SOAK_SERVER_LOG:     warn,topgun_server::tombstone_frontier::removal=info
+  TOPGUN_LOG_FORMAT:   <unset: human fmt, which is what the origin parser reads>
+  server port:         47355
+  SOAK_SERVER_BINARY:  <unset: HEAD binary, fail-closed guard not on this path>
+  --- pinned matrix (identical to spec355-width.sh; crash-interval is
+      per-cell and is 0 on the one cell this runner ships) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 0;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+

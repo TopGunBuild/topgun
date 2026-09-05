@@ -1,0 +1,74 @@
+{
+  "mode": "soak",
+  "durationSecsTarget": 14400,
+  "durationSecsActual": 14401,
+  "churnClients": 6,
+  "keyspace": 200,
+  "walFsync": "batched",
+  "epochWidth": 1000,
+  "totalWrites": 2177658,
+  "writeErrors": 0,
+  "reconnects": 11072,
+  "resends": 368904,
+  "steadyCheckpoints": 47,
+  "recoveryCheckpoints": 0,
+  "crashes": 0,
+  "convergenceFailures": [],
+  "recoveryFailures": [],
+  "pendingGates": [
+    "disk growth slope 134.2 MB/h exceeds 50.0 MB/h — EXPECTED until TODO-566 bounds OR-Map tombstones (report-only, did NOT fail the run)"
+  ],
+  "memory": {
+    "samples": 2875,
+    "first_mb": 12.75,
+    "peak_mb": 12333.03125,
+    "last_mb": 10375.671875,
+    "slope_mb_per_hour": 2964.843657408216,
+    "passed": true,
+    "reason": null
+  },
+  "tombstones": {
+    "samples": 2878,
+    "firstBytes": 0,
+    "peakBytes": 1023353,
+    "lastBytes": 1014360,
+    "slopeBytesPerHour": 333995.3019721093,
+    "passed": false,
+    "reason": "tombstone-byte growth slope 333995.3 bytes/h exceeds 512.0 bytes/h (total growth 1023353 bytes over 2878 samples, last-half window 7200s)"
+  },
+  "tombstoneCorpus": {
+    "scansAttempted": 1,
+    "scansFailed": 0,
+    "samples": 1,
+    "firstBytes": 1016398,
+    "minBytes": 1016398,
+    "peakBytes": 1016398,
+    "lastBytes": 1016398,
+    "firstHalfPeakBytes": 0,
+    "lastHalfPeakBytes": 1016398,
+    "riseBytes": 1016398,
+    "spanSecs": 0.0,
+    "disposition": "LEVEL_SUPPRESSED",
+    "ceilingBytes": null,
+    "passed": true,
+    "reason": null
+  },
+  "disk": {
+    "samples": 2848,
+    "firstMb": 1.51953125,
+    "peakMb": 512.859375,
+    "lastMb": 512.859375,
+    "slopeMbPerHour": 134.23235759123307,
+    "passed": false,
+    "reason": "disk growth slope 134.2MB/h exceeds 50.0MB/h (total growth 511.3MB over 2848 samples)"
+  },
+  "confirmApply": {
+    "confirms": 6895,
+    "lastConfirmedEpoch": 437,
+    "confirmErrors": 205
+  },
+  "panicReport": null,
+  "passed": false,
+  "finishedReason": "tombstone-byte growth slope 333995.3 bytes/h exceeds 512.0 bytes/h: tombstone-byte growth slope 333995.3 bytes/h exceeds 512.0 bytes/h (total growth 1023353 bytes over 2878 samples, last-half window 7200s)",
+  "timestamp": "2026-09-04T17:32:07Z"
+}
