@@ -1122,14 +1122,6 @@ fn accepted_result(op_id: String) -> topgun_core::messages::OpResult {
 ///   no operation appears in both `accepted` and `refused` (TG-SYNC-001).
 /// - The refusal metric is emitted here, once per refusal, so neither transport
 ///   can forget to count one.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the transports consume the fold in a later change; `expect` (not `allow`) \
-                  fires the moment that lands, which is what forces the attribute to be deleted"
-    )
-)]
 pub(crate) async fn attribute_permanent_failure_per_op(
     partition_groups: Vec<(u32, Vec<topgun_core::messages::ClientOp>)>,
     cx: &OpBatchDispatchContext<'_>,
@@ -1247,17 +1239,99 @@ pub(crate) async fn attribute_permanent_failure_per_op(
     outcome
 }
 
-/// Splits an `OpBatch` by partition and dispatches all sub-batches concurrently.
+/// The `lastId` an acknowledgement that names operations individually may carry.
 ///
-/// Groups the batch's ops by `hash_to_partition(key)`, creates one
-/// `Operation::OpBatch` per partition group (each carrying `partition_id=Some(id)`
-/// so the dispatcher routes it to the correct partition worker instead of the
-/// single global worker), dispatches all groups concurrently, and sends a single
-/// `OP_ACK` with `lastId` from the last op in the original batch.
+/// The numeric maximum of the accepted ids, returned in its original spelling.
+/// Numeric and not lexicographic: operation ids are stringified autoincrement
+/// integers, so a lexicographic maximum picks `"9"` over `"10"` and would leave
+/// the client believing everything up to `"9"` was acknowledged.
 ///
-/// Per-sub-batch `OpAck` responses from `CrdtService::handle_op_batch()` are
-/// discarded; the aggregated ack is constructed from the original batch's
-/// last-op ID so the client always receives exactly one `OP_ACK`.
+/// `None` when no accepted id is a number at all. A non-numeric `lastId` makes
+/// the client mark **every** pending operation as synced, which on an exchange
+/// that refused something would durably discard a write the server never
+/// accepted — so the caller sends no acknowledgement instead, and the accepted
+/// operations are re-sent on the next flush.
+pub(crate) fn numeric_max_op_id(accepted: &[topgun_core::messages::OpResult]) -> Option<String> {
+    accepted
+        .iter()
+        .filter_map(|result| result.op_id.parse::<u64>().ok().map(|n| (n, &result.op_id)))
+        .max_by_key(|(n, _)| *n)
+        .map(|(_, op_id)| op_id.clone())
+}
+
+/// Serializes one frame and queues it on the connection's outbound channel.
+///
+/// `to_vec_named` and not `to_vec`: the client decodes `MsgPack` maps by field
+/// name, so an array-encoded frame is unreadable to it.
+async fn send_frame(msg: &TopGunMessage, tx: &mpsc::Sender<OutboundMessage>) {
+    if let Ok(bytes) = rmp_serde::to_vec_named(msg) {
+        let _ = tx.send(OutboundMessage::Binary(bytes)).await;
+    }
+}
+
+/// Queues one `OP_REJECTED` frame per attributed refusal.
+///
+/// Called before anything else the exchange sends, and unconditionally: an
+/// exchange that also hit a transient error still reports the operations it
+/// already reached a verdict on. The outbound channel is FIFO, so queueing these
+/// first IS the mechanism behind "a refusal always reaches the client ahead of
+/// any acknowledgement" (TG-SYNC-002) — there is no second ordering guard on the
+/// server side.
+///
+/// `permanent` is `true` on every frame this sends: the refusal sink holds only
+/// verdicts a retry cannot change, and a client that read a terminal refusal as
+/// retryable would re-send the write forever.
+async fn send_op_rejected_frames(refused: &[OpVerdict], tx: &mpsc::Sender<OutboundMessage>) {
+    for verdict in refused {
+        let OpVerdict::Refused {
+            op_id,
+            code,
+            reason,
+            ..
+        } = verdict
+        else {
+            continue;
+        };
+        let rejected = TopGunMessage::OpRejected(topgun_core::messages::OpRejectedMessage {
+            payload: topgun_core::messages::OpRejectedPayload {
+                op_id: op_id.clone(),
+                reason: reason.clone(),
+                code: Some(*code),
+                permanent: true,
+            },
+        });
+        send_frame(&rejected, tx).await;
+    }
+}
+
+/// Splits an `OpBatch` by partition, dispatches all sub-batches concurrently and
+/// answers with a per-operation verdict for everything the batch touched.
+///
+/// Groups the batch's ops by `hash_to_partition(key)`, hands the groups to the
+/// shared verdict fold — which dispatches one `Operation::OpBatch` per group and,
+/// when a group fails permanently, re-dispatches its operations one at a time to
+/// find out which of them the server actually refused — and then only shapes
+/// frames from the fold's outcome.
+///
+/// **Frames, in this order.** Every refusal becomes one `OP_REJECTED`, and all of
+/// them precede any acknowledgement (TG-SYNC-002); the outbound channel is FIFO,
+/// so queueing them first is the ordering mechanism. Then exactly one of:
+///
+/// - a transient (or non-attributed permanent) error → one `ERROR` frame and **no
+///   acknowledgement**, even when some operations were accepted;
+/// - nothing refused → today's `OP_ACK { lastId, achievedLevel }` with no
+///   `results`, byte-identical to the acknowledgement a server without per-operation
+///   verdicts sends;
+/// - everything refused → **nothing further**: the last `OP_REJECTED` terminates
+///   the exchange, because a batch in which every operation was refused has
+///   nothing to acknowledge;
+/// - otherwise → one `OP_ACK` naming the accepted operations in `results`.
+///
+/// **Why no partial acknowledgement beside a transient error.** Take sub-batches
+/// `{1,3,5}` (all refused) and `{2,4,6}` (transient). An acknowledgement whose
+/// `lastId` is the largest accepted id lets the client durably delete every
+/// operation at or below it — including 2 and 4, which nobody ever accepted. The
+/// operations a client re-sends must be exactly the operations nobody confirmed.
 async fn dispatch_op_batch(
     batch_msg: &topgun_core::messages::OpBatchMessage,
     conn_id: ConnectionId,
@@ -1269,15 +1343,15 @@ async fn dispatch_op_batch(
     let ops = &batch_msg.payload.ops;
 
     if ops.is_empty() {
+        // The only surviving `"unknown"` acknowledgement, and by construction it
+        // carries no refused operation: there is no operation to name.
         let ack = TopGunMessage::OpAck(OpAckMessage {
             payload: OpAckPayload {
                 last_id: "unknown".to_string(),
                 ..Default::default()
             },
         });
-        if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
-            let _ = tx.send(OutboundMessage::Binary(bytes)).await;
-        }
+        send_frame(&ack, tx).await;
         return;
     }
 
@@ -1297,61 +1371,34 @@ async fn dispatch_op_batch(
             .push(op.clone());
     }
 
-    let write_concern = batch_msg.payload.write_concern.clone();
-    let timeout = batch_msg.payload.timeout;
+    let cx = OpBatchDispatchContext {
+        classify_svc,
+        dispatcher,
+        transport: TransportKind::WebSocket,
+        caller_origin: CallerOrigin::Client,
+        client_id: None,
+        principal,
+        connection_id: Some(conn_id),
+        write_concern: batch_msg.payload.write_concern.clone(),
+        timeout: batch_msg.payload.timeout,
+    };
 
-    // Build all sub-batch operations up front, then dispatch concurrently.
-    let mut sub_ops: Vec<crate::service::operation::Operation> =
-        Vec::with_capacity(partition_groups.len());
-    for (partition_id, group_ops) in partition_groups {
-        let mut op = classify_svc.classify_op_batch_for_partition(
-            group_ops,
-            partition_id,
-            None,
-            CallerOrigin::Client,
-            write_concern.clone(),
-            timeout,
-        );
-        op.set_connection_id(conn_id);
-        if let Some(p) = principal.clone() {
-            op.set_principal(p);
-        }
-        sub_ops.push(op);
-    }
+    let mut outcome =
+        attribute_permanent_failure_per_op(partition_groups.into_iter().collect(), &cx).await;
 
-    // Dispatch all sub-batches concurrently; collect results.
-    let mut join_set = tokio::task::JoinSet::new();
-    for sub_op in sub_ops {
-        let dispatcher = Arc::clone(dispatcher);
-        join_set.spawn(async move { dispatcher.dispatch(sub_op).await });
-    }
+    send_op_rejected_frames(&outcome.refused, tx).await;
 
-    // Collect results and check for errors. Per-sub-batch OpAck responses are
-    // discarded; the aggregated OP_ACK is built from the original batch's lastId.
-    // Preserve the OperationError type so we can distinguish 429 from 500
-    // without inspecting string content.
-    let mut dispatch_error: Option<OperationError> = None;
-    while let Some(result) = join_set.join_next().await {
-        match result {
-            Ok(Ok(_resp)) => {
-                // Discard the per-sub-batch OpAck; we send one aggregated ack below.
-            }
-            Ok(Err(e)) => {
-                dispatch_error = Some(e);
-            }
-            Err(join_err) => {
-                dispatch_error = Some(OperationError::Internal(anyhow::anyhow!(
-                    "join error: {join_err}"
-                )));
-            }
-        }
-    }
-
-    if let Some(err) = dispatch_error {
+    // (i) A transient error outranks a non-attributed permanent one: retrying is
+    //     the only response that can still change the outcome.
+    if let Some(err) = outcome
+        .transient
+        .take()
+        .or_else(|| outcome.batch_error.take())
+    {
         debug!("dispatch_op_batch error for {:?}: {}", conn_id, err);
         let (code, message) = match err {
             OperationError::Overloaded => (429, "server overloaded, try again later".to_string()),
-            ref e => (500, format!("{e}")),
+            ref e => (e.wire_code(), format!("{e}")),
         };
         let err_response = TopGunMessage::Error {
             payload: ErrorPayload {
@@ -1360,25 +1407,58 @@ async fn dispatch_op_batch(
                 details: None,
             },
         };
-        if let Ok(bytes) = rmp_serde::to_vec_named(&err_response) {
-            let _ = tx.send(OutboundMessage::Binary(bytes)).await;
-        }
+        send_frame(&err_response, tx).await;
         return;
     }
 
-    // All sub-batches succeeded — send one OP_ACK with the original batch's lastId.
-    // Sub-batch responses are discarded; set APPLIED explicitly on the aggregated ack
-    // because each sub-batch's CRDT merge succeeded in memory.
+    // (ii) Nothing refused — today's aggregated acknowledgement, unchanged.
+    //      `achievedLevel` is set explicitly because each sub-batch's CRDT merge
+    //      succeeded in memory, and the per-sub-batch acks were folded away.
+    //
+    //      This branch MUST stay ahead of the one below: the fold populates
+    //      `accepted` only once something was refused, so an empty `accepted`
+    //      here means "not computed", not "nothing was accepted".
+    if outcome.refused.is_empty() {
+        let ack = TopGunMessage::OpAck(OpAckMessage {
+            payload: OpAckPayload {
+                last_id,
+                achieved_level: Some(WriteConcern::APPLIED),
+                ..Default::default()
+            },
+        });
+        send_frame(&ack, tx).await;
+        return;
+    }
+
+    // (iii) Every id-bearing operation was refused: the `OP_REJECTED` frames are
+    //       the whole answer. No `OP_ACK` (there is nothing to acknowledge) and
+    //       no `ERROR` (the exchange is already explained operation by operation).
+    if outcome.accepted.is_empty() {
+        return;
+    }
+
+    // Same silence for an acceptance set no numeric `lastId` can address: see
+    // `numeric_max_op_id`. The accepted operations stay pending and are re-sent,
+    // which is safe; falsely acknowledging the refused one would not be.
+    let Some(partial_last_id) = numeric_max_op_id(&outcome.accepted) else {
+        warn!(
+            "op batch for {:?}: accepted operations carry no numeric id; \
+             sending no partial ack rather than one the client would over-apply",
+            conn_id
+        );
+        return;
+    };
+
+    // (iv) Partial: `results` is the authoritative acceptance set, and it is
+    //      never empty on this path.
     let ack = TopGunMessage::OpAck(OpAckMessage {
         payload: OpAckPayload {
-            last_id,
+            last_id: partial_last_id,
             achieved_level: Some(WriteConcern::APPLIED),
-            ..Default::default()
+            results: Some(std::mem::take(&mut outcome.accepted)),
         },
     });
-    if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
-        let _ = tx.send(OutboundMessage::Binary(bytes)).await;
-    }
+    send_frame(&ack, tx).await;
 }
 
 /// Unpacks a BATCH message and dispatches each inner message individually.
@@ -1643,6 +1723,7 @@ mod tests {
         HybridSearchSubscription, SearchSubscription, SubscriptionRegistry,
     };
     use dashmap::DashSet;
+    use std::collections::BTreeSet;
     use topgun_core::messages::base::Query;
     use topgun_core::messages::search::SearchOptions;
     use topgun_core::messages::{BatchMessage, ClientOp, OpBatchMessage, OpBatchPayload};
@@ -1871,6 +1952,10 @@ mod tests {
         /// its metadata on every batch that carries a `connection_id`.
         _connection: Arc<ConnectionHandle>,
         _outbound: mpsc::Receiver<OutboundMessage>,
+        /// How many operations reached the domain service. One per sub-batch on
+        /// the optimistic pass, plus one per singleton the fallback re-dispatched
+        /// — which is what makes "the fallback was never entered" checkable.
+        service_calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl FoldFixture {
@@ -1883,10 +1968,7 @@ mod tests {
                 transport: TransportKind::WebSocket,
                 caller_origin: CallerOrigin::Client,
                 client_id: None,
-                principal: Some(Principal {
-                    id: "writer-1".to_string(),
-                    roles: vec!["user".to_string()],
-                }),
+                principal: Some(fold_principal()),
                 connection_id: Some(self.conn_id),
                 write_concern: Some(WriteConcern::APPLIED),
                 timeout: Some(5_000),
@@ -1914,6 +1996,62 @@ mod tests {
         }
     }
 
+    /// The authenticated writer every fold test dispatches as.
+    fn fold_principal() -> Principal {
+        Principal {
+            id: "writer-1".to_string(),
+            roles: vec!["user".to_string()],
+        }
+    }
+
+    /// A CRDT service that answers `Overloaded` for any batch touching
+    /// `shed_key`, and delegates everything else to the real one.
+    ///
+    /// The production `LoadShedLayer` sheds by semaphore occupancy, which cannot
+    /// be aimed at one operation of a sequentially re-dispatched fallback. What
+    /// the transport branches on is the error's disposition, not where it was
+    /// raised, so the transient is staged at the service instead — the same
+    /// `OperationError::Overloaded` a singleton re-entering load shedding
+    /// produces.
+    #[derive(Clone)]
+    struct SheddingCrdt {
+        inner: Arc<CrdtService>,
+        shed_key: Option<String>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl tower::Service<Operation> for SheddingCrdt {
+        type Response = OperationResponse;
+        type Error = OperationError;
+        type Future = std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<OperationResponse, OperationError>> + Send>,
+        >;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, op: Operation) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let sheds = self.shed_key.as_ref().is_some_and(|shed_key| match &op {
+                Operation::OpBatch { payload, .. } => payload
+                    .payload
+                    .ops
+                    .iter()
+                    .any(|client_op| &client_op.key == shed_key),
+                _ => false,
+            });
+            if sheds {
+                return Box::pin(async { Err(OperationError::Overloaded) });
+            }
+            let mut inner = Arc::clone(&self.inner);
+            Box::pin(async move { tower::Service::call(&mut inner, op).await })
+        }
+    }
+
     /// Builds the fixture with the given policies and optional map schema.
     ///
     /// An empty policy list leaves the store unconfigured, which is the
@@ -1922,6 +2060,16 @@ mod tests {
     async fn build_fold_fixture(
         policies: Vec<PermissionPolicy>,
         schema: Option<(&str, MapSchema)>,
+    ) -> FoldFixture {
+        build_fold_fixture_shedding(policies, schema, None).await
+    }
+
+    /// The same fixture, with the domain service made to shed every batch that
+    /// touches `shed_key` so a transient failure can be aimed at one operation.
+    async fn build_fold_fixture_shedding(
+        policies: Vec<PermissionPolicy>,
+        schema: Option<(&str, MapSchema)>,
+        shed_key: Option<String>,
     ) -> FoldFixture {
         let server_config = Arc::new(ServerConfig::default());
         let factory = Arc::new(RecordStoreFactory::new(
@@ -1972,9 +2120,17 @@ mod tests {
             worker_count: 1,
             channel_buffer_size: 64,
         };
+        let service_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let dispatcher = Arc::new(PartitionDispatcher::new(&dispatch_config, || {
             let mut router = OperationRouter::new();
-            router.register(service_names::CRDT, Arc::clone(&crdt));
+            router.register(
+                service_names::CRDT,
+                SheddingCrdt {
+                    inner: Arc::clone(&crdt),
+                    shed_key: shed_key.clone(),
+                    calls: Arc::clone(&service_calls),
+                },
+            );
             build_operation_pipeline(router, &server_config, Some(Arc::clone(&evaluator)))
         }));
 
@@ -1990,6 +2146,7 @@ mod tests {
             conn_id,
             _connection: connection,
             _outbound: outbound,
+            service_calls,
         }
     }
 
@@ -2378,6 +2535,429 @@ mod tests {
             ),
             2,
             "the batch call still returns Err, so the outcome label stays 'error'"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Frames: what one exchange puts on the wire
+    // -----------------------------------------------------------------------
+
+    /// `n` distinct keys that all hash to the SAME partition.
+    ///
+    /// `dispatch_op_batch` groups by `hash_to_partition(key)`, so arbitrary keys
+    /// would each form their own single-operation sub-batch and the multi-operation
+    /// sub-batch these tests exist to exercise would never be built.
+    fn keys_in_one_partition(n: usize) -> Vec<String> {
+        let mut buckets: HashMap<u32, Vec<String>> = HashMap::new();
+        for i in 0..100_000_u32 {
+            let key = format!("fold-key-{i}");
+            let bucket = buckets.entry(hash_to_partition(&key)).or_default();
+            bucket.push(key);
+            if bucket.len() == n {
+                return bucket.clone();
+            }
+        }
+        panic!("no partition collected {n} keys");
+    }
+
+    /// Runs one `OP_BATCH` through the real transport entry point and returns the
+    /// frames it queued, in wire order, as raw bytes.
+    ///
+    /// Bytes rather than decoded messages because one caller asserts the happy
+    /// path is byte-identical to what a server without per-operation verdicts
+    /// sent, and a decoded comparison cannot see an added-then-defaulted field.
+    async fn dispatch_batch_frames(fx: &FoldFixture, ops: Vec<ClientOp>) -> Vec<Vec<u8>> {
+        let (tx, mut rx) = mpsc::channel(64);
+        let batch = OpBatchMessage {
+            payload: OpBatchPayload {
+                ops,
+                write_concern: Some(WriteConcern::APPLIED),
+                timeout: Some(5_000),
+            },
+        };
+        dispatch_op_batch(
+            &batch,
+            fx.conn_id,
+            Some(fold_principal()),
+            &fx.classify_svc,
+            &fx.dispatcher,
+            &tx,
+        )
+        .await;
+        // The sender the handler holds is a borrow of this one; dropping ours
+        // closes the channel so the drain terminates.
+        drop(tx);
+
+        let mut frames = Vec::new();
+        while let Some(outbound) = rx.recv().await {
+            match outbound {
+                OutboundMessage::Binary(bytes) => frames.push(bytes),
+                OutboundMessage::Close(reason) => {
+                    panic!("an op batch must not close the connection: {reason:?}")
+                }
+            }
+        }
+        frames
+    }
+
+    /// Decodes queued frames back into messages, preserving wire order.
+    fn decode_frames(frames: &[Vec<u8>]) -> Vec<TopGunMessage> {
+        frames
+            .iter()
+            .map(|bytes| rmp_serde::from_slice(bytes).expect("a queued frame decodes"))
+            .collect()
+    }
+
+    /// `(op_id, code, permanent)` of every `OP_REJECTED`, in frame order.
+    fn rejections(msgs: &[TopGunMessage]) -> Vec<(String, Option<u32>, bool)> {
+        msgs.iter()
+            .filter_map(|msg| match msg {
+                TopGunMessage::OpRejected(rejected) => Some((
+                    rejected.payload.op_id.clone(),
+                    rejected.payload.code,
+                    rejected.payload.permanent,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every `OP_ACK` payload, in frame order.
+    fn ack_payloads(msgs: &[TopGunMessage]) -> Vec<&OpAckPayload> {
+        msgs.iter()
+            .filter_map(|msg| match msg {
+                TopGunMessage::OpAck(ack) => Some(&ack.payload),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every `ERROR` payload, in frame order.
+    fn error_payloads(msgs: &[TopGunMessage]) -> Vec<&ErrorPayload> {
+        msgs.iter()
+            .filter_map(|msg| match msg {
+                TopGunMessage::Error { payload } => Some(payload),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The operation ids an acknowledgement covers, computed the way the client
+    /// computes them: `results` when present, otherwise every batch id at or
+    /// below the numeric `lastId`.
+    fn ack_coverage(ack: &OpAckPayload, batch_ids: &[&str]) -> BTreeSet<String> {
+        if let Some(results) = ack.results.as_ref() {
+            return results
+                .iter()
+                .map(|result| result.op_id.clone())
+                .collect::<BTreeSet<String>>();
+        }
+        let last: u64 = ack
+            .last_id
+            .parse()
+            .expect("a prefix acknowledgement must carry a numeric lastId");
+        batch_ids
+            .iter()
+            .filter(|id| id.parse::<u64>().is_ok_and(|n| n <= last))
+            .map(|id| (*id).to_string())
+            .collect()
+    }
+
+    /// Collects `&str` ids into an owned set, for comparing verdict coverage.
+    fn id_set(ids: &[&str]) -> BTreeSet<String> {
+        ids.iter().map(|id| (*id).to_string()).collect()
+    }
+
+    /// Every operation of a mixed batch reaches exactly one terminal verdict, and
+    /// the two channels partition the batch (TG-SYNC-001 clauses (a) and (b)).
+    ///
+    /// Coverage is computed the client's way rather than read off the frames'
+    /// shape, so an acknowledgement that covered the refused operation by prefix
+    /// would fail here even though its `results` did not name it.
+    #[tokio::test]
+    async fn op_batch_every_op_gets_exactly_one_terminal_verdict() {
+        let fx = build_fold_fixture(deny_blocked_records(), None).await;
+        let keys = keys_in_one_partition(3);
+        let ops = vec![
+            put_op("501", FOLD_MAP, &keys[0], allowed_fields("first")),
+            put_op("502", FOLD_MAP, &keys[1], blocked_fields()),
+            put_op("503", FOLD_MAP, &keys[2], allowed_fields("third")),
+        ];
+        let batch_ids = ["501", "502", "503"];
+
+        let msgs = decode_frames(&dispatch_batch_frames(&fx, ops).await);
+
+        let rejected = rejections(&msgs);
+        assert_eq!(rejected, vec![("502".to_string(), Some(403), true)]);
+        let refused: BTreeSet<String> = rejected.into_iter().map(|(op_id, _, _)| op_id).collect();
+
+        let acks = ack_payloads(&msgs);
+        assert_eq!(acks.len(), 1, "one exchange acknowledges at most once");
+        let covered = ack_coverage(acks[0], &batch_ids);
+
+        assert!(
+            covered.is_disjoint(&refused),
+            "an operation must not be both acknowledged and refused: {covered:?} vs {refused:?}"
+        );
+        assert_eq!(
+            covered.union(&refused).cloned().collect::<BTreeSet<_>>(),
+            id_set(&batch_ids),
+            "every id-bearing operation of the batch must carry a verdict"
+        );
+        assert!(
+            error_payloads(&msgs).is_empty(),
+            "an attributed refusal is not also a batch error"
+        );
+        assert!(
+            acks[0].last_id.parse::<u64>().is_ok(),
+            "a partial ack's lastId must be numeric, got {:?}",
+            acks[0].last_id
+        );
+        assert_eq!(
+            acks[0].last_id, "503",
+            "lastId is the numeric max accepted id"
+        );
+    }
+
+    /// A batch in which every operation is refused is answered by the
+    /// `OP_REJECTED` frames and nothing else (TG-SYNC-001 clause (b')).
+    ///
+    /// The last rejection terminates the exchange: there is nothing to
+    /// acknowledge, and an `ERROR` frame would report a batch-level failure for
+    /// an exchange already explained operation by operation.
+    #[tokio::test]
+    async fn op_batch_all_refused_emits_rejections_and_no_ack() {
+        let fx = build_fold_fixture(deny_blocked_records(), None).await;
+        let keys = keys_in_one_partition(2);
+        let ops = vec![
+            put_op("601", FOLD_MAP, &keys[0], blocked_fields()),
+            put_op("602", FOLD_MAP, &keys[1], blocked_fields()),
+        ];
+
+        let msgs = decode_frames(&dispatch_batch_frames(&fx, ops).await);
+
+        assert!(
+            ack_payloads(&msgs).is_empty(),
+            "an all-refused batch has nothing to acknowledge"
+        );
+        assert!(
+            error_payloads(&msgs).is_empty(),
+            "the refusals already explain the exchange"
+        );
+        let rejected = rejections(&msgs);
+        assert_eq!(rejected.len(), 2, "one rejection per operation");
+        let named: BTreeSet<String> = rejected.iter().map(|(op_id, _, _)| op_id.clone()).collect();
+        assert_eq!(
+            named,
+            id_set(&["601", "602"]),
+            "each operation is named in exactly one rejection"
+        );
+        for (op_id, code, permanent) in rejected {
+            assert_eq!(code, Some(403), "{op_id} was refused by policy");
+            assert!(permanent, "{op_id} must not be presented as retryable");
+        }
+    }
+
+    /// A transient failure during the fallback leaves the operations after it
+    /// with no verdict at all, and acknowledges nothing (TG-SYNC-001 clause (c)).
+    ///
+    /// Two predicates carry the clause. The rejections already determined are
+    /// delivered, and NO acknowledgement is sent — and since `handleOpAck` is the
+    /// only client-side site that marks an operation synced, zero `OP_ACK` on the
+    /// wire is precisely "no operation of this exchange was marked synced". The
+    /// accepted-but-unacknowledged operations stay pending and are re-sent, which
+    /// is safe: a permanently failed sub-batch applied nothing (TG-SYNC-003) and
+    /// re-applying an accepted LWW write is idempotent.
+    #[tokio::test]
+    async fn op_batch_transient_mid_fallback_emits_no_ack() {
+        let keys = keys_in_one_partition(3);
+        let fx =
+            build_fold_fixture_shedding(deny_blocked_records(), None, Some(keys[2].clone())).await;
+        let ops = vec![
+            put_op("701", FOLD_MAP, &keys[0], blocked_fields()),
+            put_op("702", FOLD_MAP, &keys[1], blocked_fields()),
+            put_op("703", FOLD_MAP, &keys[2], allowed_fields("shed")),
+        ];
+
+        let msgs = decode_frames(&dispatch_batch_frames(&fx, ops).await);
+
+        let named: BTreeSet<String> = rejections(&msgs)
+            .into_iter()
+            .map(|(op_id, _, _)| op_id)
+            .collect();
+        assert_eq!(
+            named,
+            id_set(&["701", "702"]),
+            "the rejections settled before the transient failure are still delivered"
+        );
+        assert!(
+            ack_payloads(&msgs).is_empty(),
+            "no operation of this exchange may be acknowledged"
+        );
+    }
+
+    /// Every rejection reaches the client ahead of the acknowledgement, and the
+    /// acknowledgement never covers a refused operation (TG-SYNC-002).
+    ///
+    /// The ordering rests on FIFO delivery of the connection's outbound channel,
+    /// so it is asserted on frame positions in that channel.
+    #[tokio::test]
+    async fn op_rejected_precedes_ack_and_ack_excludes_refused_op() {
+        let fx = build_fold_fixture(deny_blocked_records(), None).await;
+        let keys = keys_in_one_partition(3);
+        let ops = vec![
+            put_op("801", FOLD_MAP, &keys[0], allowed_fields("first")),
+            put_op("802", FOLD_MAP, &keys[1], blocked_fields()),
+            put_op("803", FOLD_MAP, &keys[2], allowed_fields("third")),
+        ];
+
+        let msgs = decode_frames(&dispatch_batch_frames(&fx, ops).await);
+
+        let rejected_at: Vec<usize> = msgs
+            .iter()
+            .enumerate()
+            .filter(|(_, msg)| matches!(msg, TopGunMessage::OpRejected(_)))
+            .map(|(index, _)| index)
+            .collect();
+        let acked_at: Vec<usize> = msgs
+            .iter()
+            .enumerate()
+            .filter(|(_, msg)| matches!(msg, TopGunMessage::OpAck(_)))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(rejected_at.len(), 1);
+        assert_eq!(acked_at.len(), 1);
+        assert!(
+            rejected_at[0] < acked_at[0],
+            "OP_REJECTED must be queued before OP_ACK, got {rejected_at:?} then {acked_at:?}"
+        );
+
+        let ack = ack_payloads(&msgs)[0];
+        assert!(
+            !ack_coverage(ack, &["801", "802", "803"]).contains("802"),
+            "the acknowledgement must not cover the refused operation"
+        );
+    }
+
+    /// A batch nobody refused anything in is acknowledged with the exact bytes a
+    /// server without per-operation verdicts sent (AC6, constraint C7).
+    ///
+    /// Byte equality against a hand-built acknowledgement, not a field-by-field
+    /// comparison: an added-but-defaulted field is invisible to the latter and is
+    /// exactly what would change the hot path's wire output.
+    #[tokio::test]
+    async fn uniformly_accepted_batch_ack_is_byte_identical() {
+        let fx = build_fold_fixture(deny_blocked_records(), None).await;
+        let keys = keys_in_one_partition(3);
+        let ops = vec![
+            put_op("901", FOLD_MAP, &keys[0], allowed_fields("first")),
+            put_op("902", FOLD_MAP, &keys[1], allowed_fields("second")),
+            put_op("903", FOLD_MAP, &keys[2], allowed_fields("third")),
+        ];
+
+        let frames = dispatch_batch_frames(&fx, ops).await;
+
+        assert_eq!(frames.len(), 1, "the happy path emits exactly one frame");
+        let expected = TopGunMessage::OpAck(OpAckMessage {
+            payload: OpAckPayload {
+                last_id: "903".to_string(),
+                achieved_level: Some(WriteConcern::APPLIED),
+                ..Default::default()
+            },
+        });
+        assert_eq!(
+            frames[0],
+            rmp_serde::to_vec_named(&expected).expect("expected ack serializes"),
+            "the uniformly accepted path must not change a single byte"
+        );
+
+        let msgs = decode_frames(&frames);
+        assert!(rejections(&msgs).is_empty());
+        assert!(ack_payloads(&msgs)[0].results.is_none(), "no results field");
+    }
+
+    /// A transient sub-batch failure is reported as the retryable `ERROR` frame,
+    /// is never presented as a refusal, and does not enter the fallback at all.
+    ///
+    /// "No fallback" is asserted mechanically: the service is called exactly once
+    /// — the batch pass — where a fallback would have called it once per
+    /// operation. `Overloaded` is transient, so retrying is the correct client
+    /// response and retiring any of these operations would be wrong.
+    #[tokio::test]
+    async fn transient_subbatch_yields_429_error_and_no_fallback() {
+        let keys = keys_in_one_partition(3);
+        let fx = build_fold_fixture_shedding(Vec::new(), None, Some(keys[1].clone())).await;
+        let ops = vec![
+            put_op("1001", FOLD_MAP, &keys[0], allowed_fields("first")),
+            put_op("1002", FOLD_MAP, &keys[1], allowed_fields("shed")),
+            put_op("1003", FOLD_MAP, &keys[2], allowed_fields("third")),
+        ];
+
+        let msgs = decode_frames(&dispatch_batch_frames(&fx, ops).await);
+
+        let errors = error_payloads(&msgs);
+        assert_eq!(
+            errors.len(),
+            1,
+            "one batch-level error, not one per operation"
+        );
+        assert_eq!(errors[0].code, 429);
+        assert!(
+            rejections(&msgs).is_empty(),
+            "a transient failure is never a refusal"
+        );
+        assert!(
+            ack_payloads(&msgs).is_empty(),
+            "nothing may be acknowledged for a sub-batch that failed"
+        );
+        assert_eq!(
+            fx.service_calls.load(Ordering::Relaxed),
+            1,
+            "a transient sub-batch failure must not be re-dispatched per operation"
+        );
+    }
+
+    /// A transient failure raised by the THIRD singleton of a fallback yields the
+    /// 429 `ERROR` frame with no acknowledgement, behind the rejections the
+    /// earlier singletons already settled.
+    ///
+    /// This is the server-side half of the clause (c) test above and must not
+    /// drift from it: both establish "no operation was marked synced" the same
+    /// way, by asserting no acknowledgement is sent at all.
+    #[tokio::test]
+    async fn transient_mid_fallback_yields_429_after_earlier_rejections() {
+        let keys = keys_in_one_partition(3);
+        let fx =
+            build_fold_fixture_shedding(deny_blocked_records(), None, Some(keys[2].clone())).await;
+        let ops = vec![
+            put_op("1101", FOLD_MAP, &keys[0], blocked_fields()),
+            put_op("1102", FOLD_MAP, &keys[1], blocked_fields()),
+            put_op("1103", FOLD_MAP, &keys[2], allowed_fields("shed")),
+        ];
+
+        let msgs = decode_frames(&dispatch_batch_frames(&fx, ops).await);
+
+        let error_at = msgs
+            .iter()
+            .position(|msg| matches!(msg, TopGunMessage::Error { .. }))
+            .expect("the transient failure is reported as an ERROR frame");
+        let TopGunMessage::Error { payload } = &msgs[error_at] else {
+            unreachable!("position matched an ERROR frame")
+        };
+        assert_eq!(payload.code, 429);
+
+        let last_rejection = msgs
+            .iter()
+            .rposition(|msg| matches!(msg, TopGunMessage::OpRejected(_)))
+            .expect("the earlier singletons were refused");
+        assert!(
+            last_rejection < error_at,
+            "rejections already settled must precede the ERROR frame"
+        );
+        assert_eq!(rejections(&msgs).len(), 2);
+        assert!(
+            ack_payloads(&msgs).is_empty(),
+            "no ack at all, even though nothing before the transient was accepted"
         );
     }
 }
