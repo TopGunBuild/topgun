@@ -219,7 +219,22 @@ pub struct HttpSyncError {
     pub code: u32,
     /// Human-readable error message.
     pub message: String,
-    /// Optional context for the error (e.g., which operation failed).
+    /// Optional context for the error: the id of the operation this entry is
+    /// attributed to.
+    ///
+    /// **Contract every HTTP caller must uphold.** The presence of this field is
+    /// what distinguishes the two kinds of error entry, and callers must branch
+    /// on it rather than on the code or the message text:
+    ///
+    /// - `Some(op_id)` ⇔ a per-operation **permanent** verdict naming that
+    ///   operation: the server refused it and retrying it cannot help. The caller
+    ///   must surface it as a refusal of that single operation and retire it.
+    /// - `None` ⇔ a batch-level **transient** or non-attributed error: nothing is
+    ///   said about any individual operation, and the batch stays retryable.
+    ///
+    /// Reading a `None` entry as a per-operation refusal retires operations the
+    /// server never refused; reading a `Some` entry as batch-level retries a write
+    /// that will never be accepted (TG-SYNC-001).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub context: Option<String>,
 }
