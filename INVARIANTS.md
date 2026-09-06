@@ -583,3 +583,98 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Discovered by:** extraction pilot audit; load-bearing for SPEC-346/349 (the /xask
   Merkle-ordering caveat was refuted BY this sort — the sort itself deserves a test).
 - **Status:** decided (code sorts); enforcement NAKED.
+
+### TG-SYNC-001: At most one terminal verdict per op per exchange, exactly one when the exchange acks
+
+- **Scope:** one client→server operation exchange on either transport — a WebSocket `OP_BATCH`
+  and the `OP_REJECTED` / `OP_ACK` / `ERROR` frames it produces
+  (`network/handlers/websocket.rs`), and the HTTP `/sync` request and its
+  `{ ack, errors[] }` response body (`network/handlers/http_sync.rs`).
+- **Statement:**
+  (a) No op is ever both covered by an `OP_ACK` and named in an `OP_REJECTED`. (b) If the exchange
+  ends in an `OP_ACK`, every id-bearing op of the batch has exactly one verdict: covered by the ack
+  (`results` when present, else the numeric prefix) or named in an `OP_REJECTED`. (b') If the
+  exchange ends with `OP_REJECTED` frames and no ack, every id-bearing op is named in exactly one of
+  them. (c) If the exchange ends in an `ERROR` frame, only the already-emitted `OP_REJECTED` verdicts
+  exist; no op may be marked synced client-side; every un-named op remains pending and is safe to
+  re-send because a Permanent-failed sub-batch applied nothing (TG-SYNC-003) and an accepted op's
+  re-apply is LWW-idempotent (OR-Map re-apply is the pre-existing hazard TODO-665 item 4 owns).
+  (d) `OP_REJECTED{permanent: true}` is terminal across exchanges: the client never re-sends that op.
+- **Stated residue — id-less ops are outside (b)/(b') by construction,** because the clauses say
+  "id-bearing": an id-less op cannot be named; a non-SDK client whose id-less op is permanently
+  refused keeps today's behaviour (anonymous `ERROR`, op re-sent). Tracked as **TODO-665 item 5**.
+  The SDK always assigns ids (`SyncEngine.ts`), so every op this codebase emits is covered and the
+  status below is honest rather than aspirational.
+- **Maintaining code:** the per-operation verdict fold and its frame shaping
+  (`network/handlers/websocket.rs`), the same fold mapped onto the HTTP response body
+  (`network/handlers/http_sync.rs`), the exhaustive permanence classification the fold branches on
+  (`service/operation.rs` — `disposition`, `wire_code`, `error_kind`), and the client-side
+  retirement chain (`packages/client/src/SyncEngine.ts`). Citations are kept line-number-free on
+  purpose, per `TG-OR-004`.
+- **Clause (d) is enforced client-side, not by the Rust fns cited below,** and the gate does not
+  check it: terminality *across* exchanges cannot be observed inside the single server-side exchange
+  those fns drive. It is covered by the `packages/client` unit test
+  `a later OP_ACK covering a refused op neither resurrects it nor reports it synced`
+  (`packages/client/src/__tests__/SyncEngine.test.ts`), which delivers an `OP_ACK` covering an
+  already-retired op id and asserts the op is still reported `'rejected'`. `check-invariants.sh`
+  greps only `packages/server-rust/src` and `packages/server-rust/benches`, so a client citation
+  cannot live in the field below.
+- **Enforcing test:** `op_batch_every_op_gets_exactly_one_terminal_verdict` (clauses a and b),
+  `op_batch_all_refused_emits_rejections_and_no_ack` (clause b') and
+  `op_batch_transient_mid_fallback_emits_no_ack` (clause c), all in `websocket.rs`'s test module;
+  the HTTP siblings are `http_sync_mixed_batch_names_the_refused_op_and_acks_the_rest`,
+  `http_sync_all_refused_names_every_op_and_sends_no_ack` and
+  `http_sync_transient_reports_context_less_error_and_no_ack` in `http_sync.rs`.
+- **Violation consequence:** an op with **no** verdict wedges the client — it is neither retired nor
+  acked, so it is re-sent on every flush and blocks the queue behind it, which is exactly the defect
+  this row was written for. An op with **two** verdicts is worse: the client is told the same write
+  was both taken and refused, and which one it believes is a race.
+- **Discovered by:** the per-op rejection work resolving TODO-662; witnessed end-to-end by
+  `tests/integration-rust/rejected-op-refusal.test.ts`.
+- **Status:** decided, **enforced** (clause (d) client-side, as stated above).
+
+### TG-SYNC-002: A refusal is never re-described as an acceptance
+
+- **Scope:** the outbound frame sequence of one WebSocket operation exchange
+  (`network/handlers/websocket.rs`), and the `{ ack, errors[] }` pair of one HTTP `/sync` response
+  (`network/handlers/http_sync.rs`).
+- **Statement:** for a given `opId`, the `OP_REJECTED` set and the `OP_ACK` acceptance coverage are
+  disjoint, and the `OP_REJECTED` frame precedes the `OP_ACK` on the connection's outbound channel.
+- **Maintaining code:** the fold that emits every refusal before shaping the ack, and the ack
+  builder that carries `results` naming only accepted ops (`network/handlers/websocket.rs`);
+  the HTTP handler emits the errors alongside an ack built from the same accepted set
+  (`network/handlers/http_sync.rs`).
+- **Enforcing test:** `op_rejected_precedes_ack_and_ack_excludes_refused_op`, with
+  `transient_mid_fallback_yields_429_after_earlier_rejections` and
+  `fallback_redispatches_in_original_order` covering the ordering under the fallback path — all in
+  `websocket.rs`'s test module.
+- **Violation consequence:** the client sees the ack first, marks the op synced, and the refusal
+  that follows contradicts a state the application has already rendered. Ordering is what lets the
+  client treat a refusal as terminal without re-checking every ack against it.
+- **Discovered by:** the per-op rejection work resolving TODO-662.
+- **Status:** decided, **enforced**.
+
+### TG-SYNC-003: A sub-batch that fails with a Permanent disposition has applied nothing
+
+- **Scope:** one dispatch of an operation sub-batch through the service pipeline, from the
+  middleware stack down to `crdt.rs`'s `handle_op_batch`.
+- **Statement:** when a sub-batch dispatch returns an error whose disposition is Permanent, no
+  operation of that sub-batch was applied. This is what the per-op singleton re-dispatch relies on:
+  if a Permanent failure could occur *after* some ops were applied, the fallback would apply them a
+  second time.
+- **Maintaining code:** the basis is layer-by-layer. LoadShed, Timeout, Metrics, Authorization and
+  the Router all fail *before* the inner call; `handle_op_batch` raises every Permanent variant in
+  its validate loops *before* its apply loops; `apply_single_op` and `broadcast_event` return only
+  `Internal`, which is Transient. A future Permanent error raised mid-apply breaks this row, and
+  this row is what a reviewer trips over.
+- **Enforcing test:** `permanent_subbatch_failure_applied_nothing_before_fallback` and its
+  `permanent_subbatch_failure_applied_nothing_before_fallback_schema_case` companion — journal-count
+  assertions over the two Permanent classes that reach the apply layer — plus
+  `transient_subbatch_yields_429_error_and_no_fallback`, which pins that a Transient failure enters
+  no fallback at all; all in `websocket.rs`'s test module.
+- **Violation consequence:** double-apply on the fallback path. LWW re-apply is idempotent so the
+  damage is invisible there, but an OR-Map add re-applied under a fresh tag is a duplicate element
+  that no later remove will collect — silent divergence, discovered long after the write.
+- **Discovered by:** the per-op rejection work resolving TODO-662; it is the precondition R5's
+  singleton re-dispatch is only safe under.
+- **Status:** decided, **enforced**.
