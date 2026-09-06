@@ -150,6 +150,7 @@ describe('Cross-language fixture generation', () => {
         opId: 'op-bad',
         reason: 'schema validation failed',
         code: 400,
+        permanent: true,
       },
     });
   });

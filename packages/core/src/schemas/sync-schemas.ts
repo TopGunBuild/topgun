@@ -219,7 +219,17 @@ export const OpRejectedMessageSchema = z.object({
   payload: z.object({
     opId: z.string(),
     reason: z.string(),
+    /** Machine-readable error code. Optional on the wire for historical reasons;
+     * every rejection the server emits populates it. */
     code: z.number().optional(),
+    /**
+     * Whether retrying this identical op can ever succeed.
+     *
+     * Required, never optional: an absent key would be indistinguishable from
+     * `false`, and a client that reads a terminal refusal as transient retries
+     * a write the server will never accept, forever.
+     */
+    permanent: z.boolean(),
   }),
 });
 export type OpRejectedMessage = z.infer<typeof OpRejectedMessageSchema>;
