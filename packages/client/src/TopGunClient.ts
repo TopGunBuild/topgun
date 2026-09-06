@@ -15,6 +15,7 @@ import type {
   HybridSearchClientOptions,
   HybridSearchClientResult,
 } from './sync';
+import type { WriteRejectionListener } from './WriteRejectionEmitter';
 import type { AuthProvider } from './auth/types';
 import { QueryHandle } from './QueryHandle';
 import type { QueryFilter, QueryResultItem } from './QueryHandle';
@@ -1639,6 +1640,43 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    */
   public getConflictResolvers() {
     return this.syncEngine.getConflictResolverClient();
+  }
+
+  /**
+   * Subscribe to writes the server **permanently refused** — a permission
+   * denial, a schema violation, an oversized value.
+   *
+   * A refused write is never rolled back: the local value stays, and this event
+   * is how the application learns the server will not accept it. Retrying it
+   * cannot help, so the useful responses are to tell the user, or to write a
+   * different value.
+   *
+   * **These events are session-scoped and do NOT survive a page reload.** After
+   * a reload the refused record reads as `'synced'` again, and a `'synced'`
+   * state therefore does not by itself guarantee the server accepted the write.
+   * The durable refused-writes store that would close this gap is tracked as
+   * TODO-667.
+   *
+   * The refused record is also flipped to `'conflicted'` for `useSyncState`
+   * with no further integration on your side.
+   *
+   * @param listener Called once per refused write. A listener that throws is
+   *   logged and does not prevent the other listeners from running.
+   * @returns Unsubscribe function.
+   *
+   * @example
+   * ```typescript
+   * const unsubscribe = client.onWriteRejected((rejection) => {
+   *   if (rejection.cause === 'forbidden') {
+   *     toast.error(`You cannot edit ${rejection.key}`);
+   *   } else {
+   *     toast.error(`Rejected: ${rejection.reason}`);
+   *   }
+   * });
+   * ```
+   */
+  public onWriteRejected(listener: WriteRejectionListener): () => void {
+    return this.syncEngine.onWriteRejected(listener);
   }
 
   /**
