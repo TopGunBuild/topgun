@@ -1,6 +1,6 @@
 import { HLC, LWWMap, ORMap, deserialize } from '@topgunbuild/core';
 import type { EntryProcessorDef, EntryProcessorResult, SearchOptions } from '@topgunbuild/core';
-import type { LWWRecord, ORMapRecord, Timestamp } from '@topgunbuild/core';
+import type { LWWRecord, ORMapRecord, Timestamp, WriteRejection } from '@topgunbuild/core';
 import type {
   AuthFailMessage,
   AuthMessage,
@@ -37,6 +37,11 @@ import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
 import { AuthRequiredError } from './errors/AuthRequiredError';
 import { RecordSyncStateTracker } from './RecordSyncState';
+import {
+  WriteRejectionEmitter,
+  writeRejectionCauseFromCode,
+  type WriteRejectionListener,
+} from './WriteRejectionEmitter';
 import {
   WebSocketManager,
   BackpressureController,
@@ -279,6 +284,12 @@ export class SyncEngine {
    * insertion-ordered), capped at {@link SyncEngine.REJECTED_OPS_REGISTRY_LIMIT}.
    */
   private rejectedOps: Map<string, RejectedOpRecord> = new Map();
+  /**
+   * Fan-out for the application-facing refusal event. Deliberately separate
+   * from the registry above: the registry answers a later `confirmWrite` and is
+   * bounded because it stores, the emitter stores nothing at all.
+   */
+  private readonly writeRejectionEmitter = new WriteRejectionEmitter();
   /** Op ids whose durable delete is queued but has not resolved yet. */
   private retiringOps: Set<string> = new Set();
   /**
@@ -2190,6 +2201,11 @@ export class SyncEngine {
     // state-change + rejection subscriptions and clears internal tables.
     this.recordSyncStateTracker.dispose();
 
+    // Drop refusal listeners with the engine that feeds them: a closed engine
+    // emits nothing, and a retained listener set would keep the application's
+    // closures alive for no reason.
+    this.writeRejectionEmitter.clear();
+
     this.stateMachine.transition(SyncState.DISCONNECTED);
     logger.info('SyncEngine closed');
   }
@@ -2851,7 +2867,10 @@ export class SyncEngine {
     }
 
     if (!alreadyRecorded) {
-      this.recordRejection(opId, { mapName: op?.mapName, key: op?.key, reason, code });
+      // The op is passed along because this runs BEFORE the durable delete and
+      // the splice below: the refused value can still be read off it here, and
+      // nowhere later.
+      this.recordRejection(opId, { mapName: op?.mapName, key: op?.key, reason, code }, op);
       logger.warn({ opId, reason, code }, 'Operation permanently refused by server');
     }
 
@@ -2901,14 +2920,90 @@ export class SyncEngine {
   /**
    * Record a terminal refusal, evicting the oldest entry once the registry is
    * full. Map iteration is insertion-ordered, so the first key is the oldest.
+   *
+   * The single point at which a refusal becomes visible to the application:
+   * its one caller is guarded so that this runs exactly once per terminal
+   * refusal, which is what makes "one event per refused write" a property of
+   * the call graph rather than of listener bookkeeping.
    */
-  private recordRejection(opId: string, record: RejectedOpRecord): void {
+  private recordRejection(opId: string, record: RejectedOpRecord, op?: OpLogEntry): void {
     this.rejectedOps.set(opId, record);
     while (this.rejectedOps.size > SyncEngine.REJECTED_OPS_REGISTRY_LIMIT) {
       const oldest = this.rejectedOps.keys().next().value;
       if (oldest === undefined) break;
       this.rejectedOps.delete(oldest);
     }
+    this.publishWriteRejection(opId, record, op);
+  }
+
+  /**
+   * Present a terminal refusal to the application: emit it on
+   * {@link SyncEngine.onWriteRejected} and mark the record conflicted for
+   * `useSyncState`.
+   *
+   * Both happen here, at one site, so an application integrates the surface
+   * once (or not at all) and still gets the per-record state for free.
+   *
+   * Synchronous and allocation-light on purpose: this runs inside the message
+   * handler, before the durable delete is even queued, because the refused op
+   * is the only place the attempted value can still be read from.
+   */
+  private publishWriteRejection(opId: string, record: RejectedOpRecord, op?: OpLogEntry): void {
+    const { mapName, key, reason, code } = record;
+    // Read the value out of the op now rather than handing out the op itself,
+    // which is about to be deleted and spliced away.
+    const attemptedValue = op?.record !== undefined ? op.record.value : op?.orRecord?.value;
+    // The refused write's own clock, so the event's identity and the tracker's
+    // supersede comparison both speak about the write rather than about when
+    // the answer happened to arrive. A refusal naming an op the client no
+    // longer holds has no such clock, and falls back to the observation time.
+    const timestamp = op?.timestamp ?? this.hlc.now();
+
+    const rejection: WriteRejection = {
+      // The op id, always: on the retroactive path there is no op to build the
+      // `mapName:key:millis:counter` form from, and an id derived from unknown
+      // parts would collide with every other unknown-target refusal.
+      id: opId,
+      // Empty when the refusal names an op the client no longer holds — the
+      // refusal is still true, only its target cannot be recovered.
+      mapName: mapName ?? '',
+      key: key ?? '',
+      attemptedValue,
+      cause: writeRejectionCauseFromCode(code),
+      reason,
+      // Keep-and-present: no path rolls a locally-applied write back because
+      // the server refused it.
+      keptLocally: true,
+      // No emitter produces `true` here; the acked-then-lost case arrives with
+      // the TODO-653 fix, together with `cause: 'write_lost'`.
+      previouslyAcked: false,
+      timestamp,
+    };
+
+    this.writeRejectionEmitter.emit(rejection);
+
+    // Feed the per-record tracker only when the target is known: a slot keyed by
+    // two empty strings would be a record no application can ever look up.
+    if (mapName && key) {
+      this.recordSyncStateTracker.onRejection({
+        mapName,
+        key,
+        attemptedValue,
+        reason,
+        timestamp,
+        nodeId: this.nodeId,
+      });
+    }
+  }
+
+  /**
+   * Subscribe to writes the server permanently refused.
+   *
+   * @param listener Called once per refused write, synchronously.
+   * @returns Unsubscribe function.
+   */
+  public onWriteRejected(listener: WriteRejectionListener): () => void {
+    return this.writeRejectionEmitter.subscribe(listener);
   }
 
   /**
