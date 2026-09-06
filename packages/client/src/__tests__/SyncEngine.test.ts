@@ -1,5 +1,5 @@
 import { SyncEngine, SyncEngineConfig, OpLogEntry } from '../SyncEngine';
-import { IStorageAdapter } from '../IStorageAdapter';
+import { IStorageAdapter, OpLogEntry as StoredOpLogEntry } from '../IStorageAdapter';
 import { serialize, deserialize, LWWMap, ORMap, HLC } from '@topgunbuild/core';
 import { SingleServerProvider } from '../connection/SingleServerProvider';
 import { logger } from '../utils/logger';
@@ -1859,6 +1859,20 @@ describe('SyncEngine', () => {
   });
 
   describe('Permanently refused operations (per-op verdicts)', () => {
+    // Narrow views on the engine internals these tests must observe: the op log
+    // itself, and the backpressure state an all-refused flush has to release.
+    type EnginePrivates = {
+      opLog: OpLogEntry[];
+      backpressureController: {
+        checkLowWaterMark: () => void;
+        checkHighWaterMark: () => void;
+        highWaterMarkEmitted: boolean;
+        backpressurePaused: boolean;
+      };
+      recordRejection: (opId: string, record: unknown) => void;
+    };
+    const engine = () => syncEngine as unknown as EnginePrivates;
+
     const pendingOp = (id: string, key: string) => ({
       id,
       mapName: 'users',
@@ -1868,8 +1882,13 @@ describe('SyncEngine', () => {
       timestamp: { millis: 1000, counter: 0, nodeId: 'test' },
     });
 
-    async function bootWith(ops: unknown[], overrides: Partial<typeof config> = {}) {
-      mockStorage.getPendingOps.mockResolvedValue(ops as any);
+    async function bootWith(
+      ops: ReturnType<typeof pendingOp>[],
+      overrides: Partial<typeof config> = {},
+    ) {
+      // Restored rows carry the engine-side shape (`opType`), which the durable
+      // interface types more loosely than the engine writes it.
+      mockStorage.getPendingOps.mockResolvedValue(ops as unknown as StoredOpLogEntry[]);
       syncEngine = new SyncEngine({ ...config, ...overrides });
       await jest.runAllTimersAsync();
       return MockWebSocket.getLastInstance()!;
@@ -1880,7 +1899,7 @@ describe('SyncEngine', () => {
       payload: { opId, reason: 'forbidden by policy', code: 4003, permanent },
     });
 
-    const opLogOf = () => (syncEngine as any).opLog as OpLogEntry[];
+    const opLogOf = () => engine().opLog;
 
     test('waitForOpSynced answers rejected for an op already retired and spliced out', async () => {
       const ws = await bootWith([pendingOp('7', 'user7')]);
@@ -1954,7 +1973,7 @@ describe('SyncEngine', () => {
         pendingOp('2', 'user2'),
         pendingOp('3', 'user3'),
       ]);
-      const controller = (syncEngine as any).backpressureController;
+      const controller = engine().backpressureController;
       const lowWaterSpy = jest.spyOn(controller, 'checkLowWaterMark');
 
       // Op 3 is refused earlier in the stream, then the ack names the other two.
@@ -2051,7 +2070,7 @@ describe('SyncEngine', () => {
 
     test('a duplicate refusal produces no second refusal record and no second delete', async () => {
       const ws = await bootWith([pendingOp('4', 'user4')]);
-      const recordSpy = jest.spyOn(syncEngine as any, 'recordRejection');
+      const recordSpy = jest.spyOn(engine(), 'recordRejection');
 
       ws.simulateMessage(refusal('4'));
       await jest.runAllTimersAsync();
@@ -2069,7 +2088,7 @@ describe('SyncEngine', () => {
       const ws = await bootWith([pendingOp('1', 'user1'), pendingOp('2', 'user2')], {
         backpressure: { maxPendingOps: 2, highWaterMark: 0.5, lowWaterMark: 0.5 },
       });
-      const controller = (syncEngine as any).backpressureController;
+      const controller = engine().backpressureController;
       const lowWaterSpy = jest.spyOn(controller, 'checkLowWaterMark');
 
       // The client sits at the high water mark with writes paused.
