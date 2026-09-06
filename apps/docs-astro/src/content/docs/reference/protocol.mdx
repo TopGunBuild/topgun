@@ -110,8 +110,27 @@ export const opRejectedCode = `{
   "payload": {
     "opId": "op-456",
     "reason": "permission denied",
-    "code": 403
+    "code": 403,
+    "permanent": true
   }
+}`;
+
+export const httpSyncVerdictCode = `{
+  "serverHlc": { "millis": 1730000000000, "counter": 3, "nodeId": "node-1" },
+  "ack": {
+    "lastId": "op-3",
+    "results": [
+      { "opId": "op-1", "success": true, "achievedLevel": "PERSISTED" },
+      { "opId": "op-3", "success": true, "achievedLevel": "PERSISTED" }
+    ]
+  },
+  "errors": [
+    {
+      "code": 403,
+      "message": "write access denied for map: restricted-map",
+      "context": "op-2"
+    }
+  ]
 }`;
 
 export const querySubCode = `{
@@ -375,14 +394,93 @@ The `BATCH` message type carries multiple inner messages in a single binary fram
   </div>
   <div className="bg-card border border-card-border rounded-lg p-4">
     <h4 className="font-mono text-sm text-green-600 dark:text-green-400 mb-2">OP_ACK</h4>
-    <p className="text-xs text-neutral-300 mb-2">Server acknowledgment with optional Write Concern level achieved.</p>
+    <p className="text-xs text-neutral-300 mb-2">Confirms which of your operations the server took, with the Write Concern level actually achieved. When <code>results</code> is present it lists <strong>only the accepted</strong> operations; an operation missing from it was not accepted. When it is absent, every operation up to and including <code>lastId</code> was accepted.</p>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{opAckCode}</pre>
   </div>
   <div className="bg-card border border-card-border rounded-lg p-4">
     <h4 className="font-mono text-sm text-red-600 dark:text-red-400 mb-2">OP_REJECTED</h4>
-    <p className="text-xs text-neutral-300 mb-2">Server rejects an operation (e.g., permission denied).</p>
+    <p className="text-xs text-neutral-300 mb-2">Names one operation the server would not take, and says whether trying again could ever help. <code>permanent: true</code> means it could not — stop re-sending that operation. The field always serializes, so an absent key can never be mistaken for <code>false</code>.</p>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{opRejectedCode}</pre>
   </div>
+</div>
+
+### Per-Operation Verdicts
+
+One bad operation should not block the good ones behind it. Every operation you send gets its own answer, so a write your token may not make is refused on its own while the rest of the batch is applied and acknowledged.
+
+The two channels never overlap:
+
+<div className="overflow-x-auto not-prose mb-6">
+  <table className="w-full text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="text-left py-2 px-3 font-semibold text-foreground">Channel</th>
+        <th className="text-left py-2 px-3 font-semibold text-foreground">Means</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border/50">
+        <td className="py-2 px-3 font-mono text-xs text-neutral-600 dark:text-neutral-300">OP_ACK.results[]</td>
+        <td className="py-2 px-3 text-neutral-600 dark:text-neutral-300">The accepted set, and nothing else. Failures are never reported here.</td>
+      </tr>
+      <tr className="border-b border-card-border/50">
+        <td className="py-2 px-3 font-mono text-xs text-neutral-600 dark:text-neutral-300">OP_REJECTED</td>
+        <td className="py-2 px-3 text-neutral-600 dark:text-neutral-300">Exactly one frame per refused operation, sent <strong>before</strong> the acknowledgment.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+Reading the two together gives a client three rules, which the SDK already implements for you:
+
+<div className="space-y-3 text-neutral-600 dark:text-neutral-300 mb-6 not-prose">
+  <div className="flex items-start gap-2">
+    <span className="font-semibold text-foreground min-w-[150px]">Never both:</span>
+    <span>An operation is either covered by the acknowledgment or named in a rejection, never both.</span>
+  </div>
+  <div className="flex items-start gap-2">
+    <span className="font-semibold text-foreground min-w-[150px]">Ack ⇒ complete:</span>
+    <span>If the exchange ends in an <code>OP_ACK</code>, every operation you sent that carried an id has exactly one verdict.</span>
+  </div>
+  <div className="flex items-start gap-2">
+    <span className="font-semibold text-foreground min-w-[150px]">ERROR ⇒ retry:</span>
+    <span>If the exchange ends in an <code>ERROR</code> frame instead, only the rejections already sent are final. Everything unnamed stays pending and is safe to re-send — a batch that failed this way applied nothing.</span>
+  </div>
+</div>
+
+A rejection carrying <code>permanent: true</code> is terminal across reconnects: the operation is dropped from the outbound queue rather than retried forever. In the SDK this surfaces as <code>client.onWriteRejected(...)</code> (and the <code>useWriteRejections()</code> React hook), and <code>confirmWrite()</code> resolves to <code>'rejected'</code> instead of timing out. The locally-written value is kept, never rolled back, so the refusal is something you present to the user rather than data that silently disappears.
+
+#### Over HTTP
+
+The `POST /sync` transport carries the same two channels in one response body: `ack.results` for the accepted operations, `errors[]` for everything that failed. The `context` field is the discriminator, and callers must branch on it rather than on the code or the message text:
+
+<div className="overflow-x-auto not-prose mb-6">
+  <table className="w-full text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="text-left py-2 px-3 font-semibold text-foreground">errors[].context</th>
+        <th className="text-left py-2 px-3 font-semibold text-foreground">Means</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border/50">
+        <td className="py-2 px-3 font-mono text-xs text-neutral-600 dark:text-neutral-300">present (an opId)</td>
+        <td className="py-2 px-3 text-neutral-600 dark:text-neutral-300">A permanent refusal of that one operation — the HTTP equivalent of <code>OP_REJECTED</code>. Retire it; retrying cannot help.</td>
+      </tr>
+      <tr className="border-b border-card-border/50">
+        <td className="py-2 px-3 font-mono text-xs text-neutral-600 dark:text-neutral-300">absent</td>
+        <td className="py-2 px-3 text-neutral-600 dark:text-neutral-300">A batch-level, transient error naming no operation. Nothing is said about any individual write; the batch stays retryable.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="POST /sync — good, forbidden, good" language="json" code={httpSyncVerdictCode} />
+</div>
+
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-4 mb-6 not-prose">
+  <span className="text-sm text-brand">A batch with a refused operation never comes back as a bare <code>ack</code> with no <code>results</code>. That would claim the whole batch was taken, including the operation the server just refused.</span>
 </div>
 
 ### Write Concern Levels
