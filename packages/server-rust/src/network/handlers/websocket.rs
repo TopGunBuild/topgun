@@ -23,8 +23,8 @@ use futures_util::stream::{SplitSink, StreamExt};
 use tokio::sync::mpsc;
 use topgun_core::hash_to_partition;
 use topgun_core::messages::{
-    AuthAckData, DeviceAckData, ErrorPayload, Message as TopGunMessage, OpAckMessage, OpAckPayload,
-    WriteConcern,
+    AuthAckData, ClientOp, DeviceAckData, ErrorPayload, Message as TopGunMessage, OpAckMessage,
+    OpAckPayload, WriteConcern,
 };
 use tracing::{debug, warn};
 
@@ -36,7 +36,10 @@ use crate::network::device_identity::{frontier_client_id, DeviceIdentityStore};
 use crate::network::{ConnectionKind, OutboundMessage};
 use crate::service::classify::OperationService;
 use crate::service::dispatch::PartitionDispatcher;
-use crate::service::operation::{CallerOrigin, ClassifyError, OperationError, OperationResponse};
+use crate::service::operation::{
+    CallerOrigin, ClassifyError, ErrorDisposition, OpOutcome, OpVerdict, Operation, OperationError,
+    OperationResponse, ALL_ERROR_KINDS,
+};
 use topgun_core::Principal;
 
 /// Maximum number of in-flight dispatch tasks per connection.
@@ -85,6 +88,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let conn_id = handle.id;
 
     debug!("WebSocket connected: {:?}", conn_id);
+
+    // Register the refusal series at zero before this connection can write
+    // anything, so a scrape taken between connect and first write reads an
+    // explicit zero rather than an absent series. Cost is one `Once` check per
+    // connection and nothing per operation.
+    register_client_op_refusal_series();
 
     // Send AUTH_REQUIRED before splitting the socket, so the client
     // knows to authenticate before sending any other messages.
@@ -835,11 +844,6 @@ async fn dispatch_message(
 /// a metric label: two transports spelling the same label differently would
 /// silently split one series into two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    dead_code,
-    reason = "constructed by the transports once they consume the fold; `expect` (not `allow`) \
-              fires the moment that lands, which is what forces the attribute to be deleted"
-)]
 pub(crate) enum TransportKind {
     /// Persistent client `WebSocket` connection.
     WebSocket,
@@ -849,11 +853,6 @@ pub(crate) enum TransportKind {
 
 impl TransportKind {
     /// The metric label for this transport.
-    #[expect(
-        dead_code,
-        reason = "called by the fold when it emits the refusal metric; `expect` (not `allow`) \
-                  fires the moment that lands, which is what forces the attribute to be deleted"
-    )]
     pub(crate) fn as_label(self) -> &'static str {
         match self {
             Self::WebSocket => "ws",
@@ -869,11 +868,6 @@ impl TransportKind {
 /// identical set, and because `write_concern` / `timeout` travelling together
 /// with the dispatcher is what stops a singleton being judged under a different
 /// contract than the batch attempt that failed.
-#[expect(
-    dead_code,
-    reason = "constructed by the transports once they consume the fold; `expect` (not `allow`) \
-              fires the moment that lands, which is what forces the attribute to be deleted"
-)]
 pub(crate) struct OpBatchDispatchContext<'a> {
     /// Builds the per-partition `Operation::OpBatch` values.
     pub classify_svc: &'a OperationService,
@@ -895,6 +889,201 @@ pub(crate) struct OpBatchDispatchContext<'a> {
     pub timeout: Option<u64>,
 }
 
+// ---------------------------------------------------------------------------
+// Per-operation refusal metric
+// ---------------------------------------------------------------------------
+
+/// Counter: permanent per-operation refusals, labelled by `transport` and `reason`.
+///
+/// Deliberately a different series from `topgun_operation_errors_total`, which
+/// counts failed *pipeline calls*: one refused operation raises that counter
+/// twice (the batch call plus the singleton re-dispatch that names the operation)
+/// and raises this one exactly once. Reading a refusal count off the
+/// pipeline-error counter is the confusion this series exists to prevent.
+pub(crate) const METRIC_CLIENT_OP_REFUSALS_TOTAL: &str = "topgun_client_op_refusals_total";
+
+/// Guards the one-time registration of the refusal series' whole label space.
+static REFUSAL_SERIES_TOUCHED: std::sync::Once = std::sync::Once::new();
+
+/// Registers every `{transport, reason}` refusal series at zero, once per process.
+///
+/// A counter that has never been incremented does not render on `/metrics` at
+/// all, so without this an operator cannot tell "nothing was refused" from "the
+/// refusal instrument is missing" — and reading an absent series as a zero is
+/// exactly how a broken instrument passes for a healthy server.
+///
+/// Called from each transport's connection-setup path rather than at boot, so it
+/// runs before that transport's first write while still costing one `Once` check
+/// per connection and nothing at all per operation.
+pub(crate) fn register_client_op_refusal_series() {
+    REFUSAL_SERIES_TOUCHED.call_once(touch_client_op_refusal_series);
+}
+
+/// Touches every `transport × reason` series once.
+///
+/// Split from the `Once` guard so a test can drive it under its own recorder: a
+/// process-lifetime `Once` fires for whichever recorder happens to be bound
+/// first, which would make an assertion about the registration unrepeatable.
+///
+/// The label space is the full cross-product, not one series per transport: a
+/// query for `{transport="ws", reason="forbidden"}` reads a different series from
+/// one carrying `transport` alone, and would find it absent.
+fn touch_client_op_refusal_series() {
+    for transport in [TransportKind::WebSocket, TransportKind::Http] {
+        for reason in ALL_ERROR_KINDS {
+            // An `increment(0)` is what puts the series in the exporter's
+            // registry; merely resolving the handle does not.
+            metrics::counter!(
+                METRIC_CLIENT_OP_REFUSALS_TOTAL,
+                "transport" => transport.as_label(),
+                "reason" => reason,
+            )
+            .increment(0);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Verdict fold
+// ---------------------------------------------------------------------------
+
+impl OpBatchDispatchContext<'_> {
+    /// Builds one dispatchable sub-batch operation under this batch's contract.
+    ///
+    /// Every field the batch pass used is reapplied here, write concern and
+    /// timeout included, so a singleton re-dispatch is judged under the same
+    /// contract as the batch attempt that failed. A singleton judged under a
+    /// different contract could refuse an operation the batch would have accepted
+    /// — and the client would retire a write that was never really refused.
+    fn sub_batch_operation(
+        &self,
+        ops: Vec<topgun_core::messages::ClientOp>,
+        partition_id: u32,
+    ) -> Operation {
+        let mut op = self.classify_svc.classify_op_batch_for_partition(
+            ops,
+            partition_id,
+            self.client_id.clone(),
+            self.caller_origin,
+            self.write_concern.clone(),
+            self.timeout,
+        );
+        if let Some(connection_id) = self.connection_id {
+            op.set_connection_id(connection_id);
+        }
+        if let Some(principal) = self.principal.clone() {
+            op.set_principal(principal);
+        }
+        op
+    }
+}
+
+/// Precedence of a transient error for the single `ERROR` frame, lowest first.
+///
+/// `Unauthorized > Overloaded > Timeout > Internal` — auth first because it names
+/// the most actionable cause. A total order at all is the point: the alternative
+/// is "whichever sub-batch finished last", which makes the error the client sees
+/// depend on a task-completion race.
+///
+/// Exhaustive with no `_` arm, so a new variant has to be placed in the order
+/// deliberately.
+fn transient_precedence(error: &OperationError) -> u8 {
+    match error {
+        OperationError::Unauthorized => 0,
+        OperationError::Overloaded => 1,
+        OperationError::Timeout { .. } => 2,
+        OperationError::Internal(_) => 3,
+        // Permanent variants never reach the transient sink. Ranking them last
+        // keeps the match exhaustive without a catch-all arm.
+        OperationError::Forbidden { .. }
+        | OperationError::SchemaInvalid { .. }
+        | OperationError::ValueTooLarge { .. }
+        | OperationError::WrongService
+        | OperationError::UnknownService { .. } => u8::MAX,
+    }
+}
+
+/// Precedence of a non-attributed permanent error for the single `ERROR` frame.
+///
+/// `Forbidden > SchemaInvalid > ValueTooLarge > WrongService > UnknownService`.
+/// The last two are unreachable for an operation batch — the classifier hardcodes
+/// the CRDT service name and the server registers it unconditionally — and are
+/// kept in the order so the match needs no `_` arm, which is what makes a future
+/// variant a compile error here.
+fn batch_error_precedence(error: &OperationError) -> u8 {
+    match error {
+        OperationError::Forbidden { .. } => 0,
+        OperationError::SchemaInvalid { .. } => 1,
+        OperationError::ValueTooLarge { .. } => 2,
+        OperationError::WrongService => 3,
+        OperationError::UnknownService { .. } => 4,
+        // Transient variants have their own sink and their own order.
+        OperationError::Unauthorized
+        | OperationError::Overloaded
+        | OperationError::Timeout { .. }
+        | OperationError::Internal(_) => u8::MAX,
+    }
+}
+
+/// Keeps whichever of the held and the candidate error ranks higher.
+///
+/// Ties keep the error already held, so the outcome does not depend on the order
+/// sub-batches happened to complete in.
+fn keep_by_precedence(
+    slot: &mut Option<OperationError>,
+    candidate: OperationError,
+    precedence: fn(&OperationError) -> u8,
+) {
+    let take_candidate = match slot.as_ref() {
+        None => true,
+        Some(held) => precedence(&candidate) < precedence(held),
+    };
+    if take_candidate {
+        *slot = Some(candidate);
+    }
+}
+
+/// Whether a permanently failed sub-batch may be re-dispatched one op at a time.
+///
+/// Only the three admission refusals qualify. Each is decided before the batch
+/// applies anything, so re-dispatching an operation of that sub-batch cannot
+/// apply a write twice (TG-SYNC-003). `UnknownService` / `WrongService` describe
+/// server misrouting rather than a defect in any one operation, so splitting them
+/// would attribute a server fault to a client's write and make the client retire
+/// it forever.
+///
+/// `Unauthorized` is transient and therefore never reaches this gate: a singleton
+/// must not retire a valid operation that will succeed once the connection
+/// re-authenticates.
+///
+/// Exhaustive with no `_` arm, so a future error variant must be classified
+/// explicitly rather than silently inheriting either answer.
+fn is_redispatchable(error: &OperationError) -> bool {
+    match error {
+        OperationError::Forbidden { .. }
+        | OperationError::SchemaInvalid { .. }
+        | OperationError::ValueTooLarge { .. } => true,
+        // One arm, two reasons: the misrouting pair above, and the transient
+        // variants, which have their own sink and never reach this gate at all.
+        OperationError::UnknownService { .. }
+        | OperationError::WrongService
+        | OperationError::Unauthorized
+        | OperationError::Overloaded
+        | OperationError::Timeout { .. }
+        | OperationError::Internal(_) => false,
+    }
+}
+
+/// The acknowledgement entry for one accepted operation.
+fn accepted_result(op_id: String) -> topgun_core::messages::OpResult {
+    topgun_core::messages::OpResult {
+        op_id,
+        success: true,
+        achieved_level: WriteConcern::APPLIED,
+        error: None,
+    }
+}
+
 /// Dispatches one client batch and returns a per-operation verdict for every
 /// operation it could attribute one to.
 ///
@@ -914,7 +1103,10 @@ pub(crate) struct OpBatchDispatchContext<'a> {
 ///   part of an accepted sub-batch is accepted, and one that was part of a
 ///   refused sub-batch is a candidate for individual attribution.
 /// - Optimistic first: dispatch the sub-batches as-is. A sub-batch that succeeds
-///   contributes its operations to `OpOutcome::accepted`.
+///   contributes its operations to `OpOutcome::accepted` — but only if some
+///   operation of the batch was refused, because that is the only case in which
+///   the acknowledgement names operations individually. See the field's own
+///   contract before reading an empty `accepted` as "nothing was accepted".
 /// - A sub-batch failing with a **transient** error contributes to
 ///   `OpOutcome::transient`; the batch stays retryable and nothing is retired.
 /// - A sub-batch failing **permanently** is re-dispatched one operation at a
@@ -930,20 +1122,129 @@ pub(crate) struct OpBatchDispatchContext<'a> {
 ///   no operation appears in both `accepted` and `refused` (TG-SYNC-001).
 /// - The refusal metric is emitted here, once per refusal, so neither transport
 ///   can forget to count one.
-#[expect(
-    dead_code,
-    clippy::todo,
-    clippy::unused_async,
-    reason = "signature and contract are fixed ahead of the body so both transports can be \
-              written against them; `expect` (not `allow`) fires the moment the body lands, \
-              which is what forces the attribute to be deleted"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the transports consume the fold in a later change; `expect` (not `allow`) \
+                  fires the moment that lands, which is what forces the attribute to be deleted"
+    )
 )]
 pub(crate) async fn attribute_permanent_failure_per_op(
     partition_groups: Vec<(u32, Vec<topgun_core::messages::ClientOp>)>,
     cx: &OpBatchDispatchContext<'_>,
 ) -> crate::service::operation::OpOutcome {
-    let _ = (partition_groups, cx);
-    todo!("verdict fold body")
+    let mut outcome = OpOutcome::default();
+
+    // Optimistic pass: dispatch every sub-batch concurrently, exactly as an
+    // unattributed batch does today.
+    let mut join_set = tokio::task::JoinSet::new();
+    for (partition_id, group_ops) in partition_groups {
+        // The classifier consumes the operations it wraps, so the task keeps its
+        // own copy of them. Without one the completion carries only a result, and
+        // the sub-batch <-> result association — which decides both "these ops
+        // were accepted" and "re-dispatch exactly these ops" — is unrecoverable.
+        let sub_op = cx.sub_batch_operation(group_ops.clone(), partition_id);
+        let dispatcher = Arc::clone(cx.dispatcher);
+        join_set.spawn(async move {
+            let result = dispatcher.dispatch(sub_op).await;
+            (partition_id, group_ops, result)
+        });
+    }
+
+    let mut accepted_groups: Vec<(u32, Vec<ClientOp>)> = Vec::new();
+    let mut permanent_failures: Vec<(u32, Vec<ClientOp>, OperationError)> = Vec::new();
+
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok((partition_id, ops, Ok(_resp))) => accepted_groups.push((partition_id, ops)),
+            Ok((partition_id, ops, Err(e))) => match e.disposition() {
+                ErrorDisposition::Transient => {
+                    keep_by_precedence(&mut outcome.transient, e, transient_precedence);
+                }
+                ErrorDisposition::Permanent => permanent_failures.push((partition_id, ops, e)),
+            },
+            Err(join_err) => {
+                // A panicked or cancelled worker task names no operation, and
+                // `Internal` is transient, so the batch stays retryable.
+                keep_by_precedence(
+                    &mut outcome.transient,
+                    OperationError::Internal(anyhow::anyhow!("join error: {join_err}")),
+                    transient_precedence,
+                );
+            }
+        }
+    }
+
+    // Sub-batches complete in whatever order the runtime finishes them, so the
+    // fallback is walked in partition order instead: which frames a client
+    // receives for one batch must not depend on a task-completion race.
+    permanent_failures.sort_by_key(|(partition_id, _, _)| *partition_id);
+
+    let mut singleton_accepted: Vec<String> = Vec::new();
+    for (partition_id, ops, error) in permanent_failures {
+        if !is_redispatchable(&error) {
+            keep_by_precedence(&mut outcome.batch_error, error, batch_error_precedence);
+            continue;
+        }
+        // An operation with no id cannot be named in a rejection, and guessing
+        // which write was refused is worse than reporting that the batch failed.
+        // Collecting into `Option<Vec<_>>` yields `None` if ANY op lacks an id.
+        let Some(op_ids) = ops
+            .iter()
+            .map(|op| op.id.clone())
+            .collect::<Option<Vec<String>>>()
+        else {
+            keep_by_precedence(&mut outcome.batch_error, error, batch_error_precedence);
+            continue;
+        };
+
+        // Sequentially, in the sub-batch's original order: apply order is
+        // observable through the Event Journal, so it is part of what the caller
+        // sees and not an implementation detail.
+        for (op, op_id) in ops.into_iter().zip(op_ids) {
+            let singleton = cx.sub_batch_operation(vec![op], partition_id);
+            match cx.dispatcher.dispatch(singleton).await {
+                Ok(_) => singleton_accepted.push(op_id),
+                Err(e) => match e.disposition() {
+                    ErrorDisposition::Permanent => {
+                        metrics::counter!(
+                            METRIC_CLIENT_OP_REFUSALS_TOTAL,
+                            "transport" => cx.transport.as_label(),
+                            "reason" => e.error_kind(),
+                        )
+                        .increment(1);
+                        outcome.refused.push(OpVerdict::Refused {
+                            op_id,
+                            code: e.wire_code(),
+                            reason: format!("{e}"),
+                            kind: e.error_kind(),
+                        });
+                    }
+                    ErrorDisposition::Transient => {
+                        keep_by_precedence(&mut outcome.transient, e, transient_precedence);
+                    }
+                },
+            }
+        }
+    }
+
+    // The acknowledgement names individual operations only when some operation
+    // was refused: a batch nobody refused anything in is acknowledged by its last
+    // id with no `results` at all, so materializing the per-operation vector
+    // there would be hot-path cost for something no caller reads.
+    if !outcome.refused.is_empty() {
+        accepted_groups.sort_by_key(|(partition_id, _)| *partition_id);
+        outcome.accepted = accepted_groups
+            .into_iter()
+            .flat_map(|(_, ops)| ops)
+            .filter_map(|op| op.id)
+            .chain(singleton_accepted)
+            .map(accepted_result)
+            .collect();
+    }
+
+    outcome
 }
 
 /// Splits an `OpBatch` by partition and dispatches all sub-batches concurrently.
@@ -1515,6 +1816,568 @@ mod tests {
             hybrid_registry.get_subscriptions_for_map("users").len(),
             0,
             "hybrid-search registry retained subscription after disconnect"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Verdict fold: per-operation attribution of a permanent sub-batch failure
+    // -----------------------------------------------------------------------
+
+    use crate::network::config::ConnectionConfig;
+    use crate::network::connection::ConnectionRegistry;
+    use crate::service::config::ServerConfig;
+    use crate::service::dispatch::DispatchConfig;
+    use crate::service::domain::crdt::CrdtService;
+    use crate::service::domain::schema::SchemaService;
+    use crate::service::middleware::pipeline::build_operation_pipeline;
+    use crate::service::operation::service_names;
+    use crate::service::policy::{
+        InMemoryPolicyStore, PermissionAction, PermissionPolicy, PolicyEffect, PolicyEvaluator,
+        PolicyStore,
+    };
+    use crate::service::router::OperationRouter;
+    use crate::service::security::{SecurityConfig, WriteAdmission};
+    use crate::storage::datastores::NullDataStore;
+    use crate::storage::factory::RecordStoreFactory;
+    use crate::storage::impls::StorageConfig;
+    use crate::traits::SchemaProvider;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use topgun_core::messages::base::{PredicateNode, PredicateOp};
+    use topgun_core::{
+        FieldDef, FieldType, LWWRecord, MapSchema, Principal, SystemClock, Timestamp, HLC,
+    };
+
+    /// The map every fold test writes to. One map for every op of a sub-batch is
+    /// deliberate: it is what makes the fixture model the real refusal. Policy is
+    /// evaluated per `(map_name, op_data)`, so two ops on the same map can get
+    /// different decisions and the map name does NOT identify the denied write —
+    /// a fixture that put the bad op on its own map would let a wrong
+    /// implementation (split the sub-batch by map name) pass.
+    const FOLD_MAP: &str = "notes";
+
+    /// A map with a registered schema, used by the `SchemaInvalid` case.
+    const TYPED_MAP: &str = "typed-notes";
+
+    /// A whole pipeline — router, middleware, dispatcher, CRDT service — wired the
+    /// way the server wires it, so the fold is exercised against the real
+    /// Authorization middleware rather than a stub that returns `Forbidden`.
+    struct FoldFixture {
+        classify_svc: OperationService,
+        dispatcher: Arc<PartitionDispatcher>,
+        factory: Arc<RecordStoreFactory>,
+        journal: Arc<JournalStore>,
+        conn_id: ConnectionId,
+        /// Held so the connection stays registered: the CRDT service snapshots
+        /// its metadata on every batch that carries a `connection_id`.
+        _connection: Arc<ConnectionHandle>,
+        _outbound: mpsc::Receiver<OutboundMessage>,
+    }
+
+    impl FoldFixture {
+        /// The dispatch context the transports will build, with a write concern
+        /// and a timeout set so the singleton pass is exercised carrying them.
+        fn cx(&self) -> OpBatchDispatchContext<'_> {
+            OpBatchDispatchContext {
+                classify_svc: &self.classify_svc,
+                dispatcher: &self.dispatcher,
+                transport: TransportKind::WebSocket,
+                caller_origin: CallerOrigin::Client,
+                client_id: None,
+                principal: Some(Principal {
+                    id: "writer-1".to_string(),
+                    roles: vec!["user".to_string()],
+                }),
+                connection_id: Some(self.conn_id),
+                write_concern: Some(WriteConcern::APPLIED),
+                timeout: Some(5_000),
+            }
+        }
+
+        /// Whether the durable store holds a live value for `key`.
+        async fn holds(&self, map_name: &str, key: &str) -> bool {
+            self.factory
+                .get_or_create(map_name, hash_to_partition(key))
+                .get(key, false)
+                .await
+                .expect("store read")
+                .is_some()
+        }
+
+        /// Keys of every journalled event, in apply order.
+        fn journalled_keys(&self) -> Vec<String> {
+            self.journal
+                .read(0, 1000, None)
+                .0
+                .into_iter()
+                .map(|event| event.key)
+                .collect()
+        }
+    }
+
+    /// Builds the fixture with the given policies and optional map schema.
+    ///
+    /// An empty policy list leaves the store unconfigured, which is the
+    /// evaluator's documented allow-all gate — that is how the schema case gets a
+    /// permanent failure raised inside the CRDT service rather than by RBAC.
+    async fn build_fold_fixture(
+        policies: Vec<PermissionPolicy>,
+        schema: Option<(&str, MapSchema)>,
+    ) -> FoldFixture {
+        let server_config = Arc::new(ServerConfig::default());
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        ));
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        let journal = Arc::new(JournalStore::new(1_000));
+        let hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
+            "fold-test-node".to_string(),
+            Box::new(SystemClock),
+        )));
+        let schema_svc = Arc::new(SchemaService::new());
+        if let Some((map_name, map_schema)) = schema {
+            schema_svc
+                .register_schema(map_name, map_schema)
+                .await
+                .expect("schema registers");
+        }
+        let crdt = Arc::new(
+            CrdtService::new(
+                Arc::clone(&factory),
+                Arc::clone(&connection_registry),
+                Arc::new(WriteAdmission::new(
+                    Arc::new(SecurityConfig::default()),
+                    Arc::clone(&hlc),
+                )),
+                Arc::new(QueryRegistry::new()),
+                schema_svc,
+            )
+            .with_journal(Arc::clone(&journal)),
+        );
+
+        let policy_store = Arc::new(InMemoryPolicyStore::new());
+        for policy in policies {
+            policy_store
+                .upsert_policy(policy)
+                .await
+                .expect("policy upsert");
+        }
+        let evaluator = Arc::new(PolicyEvaluator::new(policy_store));
+
+        // One worker: every sub-batch and every singleton is served by the same
+        // pipeline instance, so nothing in these tests depends on which worker a
+        // partition happened to land on.
+        let dispatch_config = DispatchConfig {
+            worker_count: 1,
+            channel_buffer_size: 64,
+        };
+        let dispatcher = Arc::new(PartitionDispatcher::new(&dispatch_config, || {
+            let mut router = OperationRouter::new();
+            router.register(service_names::CRDT, Arc::clone(&crdt));
+            build_operation_pipeline(router, &server_config, Some(Arc::clone(&evaluator)))
+        }));
+
+        let (connection, outbound) =
+            connection_registry.register(ConnectionKind::Client, &ConnectionConfig::default());
+        let conn_id = connection.id;
+
+        FoldFixture {
+            classify_svc: OperationService::new(hlc, server_config),
+            dispatcher,
+            factory,
+            journal,
+            conn_id,
+            _connection: connection,
+            _outbound: outbound,
+        }
+    }
+
+    /// Allow every write to `FOLD_MAP`, except one whose record carries
+    /// `blocked: true`.
+    ///
+    /// Deny-wins, and the deny is selected by the record's own content, so the
+    /// denied op is identified by its data and not by its map.
+    fn deny_blocked_records() -> Vec<PermissionPolicy> {
+        vec![
+            PermissionPolicy {
+                id: "allow-notes".to_string(),
+                map_pattern: FOLD_MAP.to_string(),
+                action: PermissionAction::Write,
+                effect: PolicyEffect::Allow,
+                condition: None,
+            },
+            PermissionPolicy {
+                id: "deny-blocked".to_string(),
+                map_pattern: FOLD_MAP.to_string(),
+                action: PermissionAction::Write,
+                effect: PolicyEffect::Deny,
+                condition: Some(PredicateNode {
+                    op: PredicateOp::Eq,
+                    attribute: Some("blocked".to_string()),
+                    value: Some(rmpv::Value::Boolean(true)),
+                    children: None,
+                    value_ref: None,
+                }),
+            },
+        ]
+    }
+
+    /// A schema requiring a `name` string, so a record without one is rejected by
+    /// the CRDT service itself rather than by the middleware.
+    fn required_name_schema() -> MapSchema {
+        MapSchema {
+            version: 1,
+            fields: vec![FieldDef {
+                name: "name".to_string(),
+                required: true,
+                field_type: FieldType::String,
+                constraints: None,
+            }],
+            strict: false,
+        }
+    }
+
+    /// A client PUT carrying `fields` as its record value.
+    fn put_op(
+        op_id: &str,
+        map_name: &str,
+        key: &str,
+        fields: Vec<(&str, rmpv::Value)>,
+    ) -> ClientOp {
+        ClientOp {
+            id: Some(op_id.to_string()),
+            map_name: map_name.to_string(),
+            key: key.to_string(),
+            op_type: None,
+            record: Some(Some(LWWRecord {
+                value: Some(rmpv::Value::Map(
+                    fields
+                        .into_iter()
+                        .map(|(name, value)| (rmpv::Value::String(name.into()), value))
+                        .collect(),
+                )),
+                timestamp: Timestamp {
+                    millis: 1_700_000_000_000,
+                    counter: 1,
+                    node_id: "fold-test-node".to_string(),
+                },
+                ttl_ms: None,
+            })),
+            or_record: None,
+            or_tag: None,
+            write_concern: None,
+            timeout: None,
+        }
+    }
+
+    /// A record the deny policy matches.
+    fn blocked_fields() -> Vec<(&'static str, rmpv::Value)> {
+        vec![("blocked", rmpv::Value::Boolean(true))]
+    }
+
+    /// A record the deny policy does not match.
+    fn allowed_fields(name: &str) -> Vec<(&'static str, rmpv::Value)> {
+        vec![("name", rmpv::Value::String(name.into()))]
+    }
+
+    /// Op ids named by `OpOutcome::accepted`, in the order the fold produced them.
+    fn accepted_ids(outcome: &OpOutcome) -> Vec<String> {
+        outcome
+            .accepted
+            .iter()
+            .map(|result| result.op_id.clone())
+            .collect()
+    }
+
+    /// Destructures the single expected refusal.
+    fn sole_refusal(outcome: &OpOutcome) -> (String, u32, &'static str) {
+        assert_eq!(
+            outcome.refused.len(),
+            1,
+            "expected exactly one refusal, got {:?}",
+            outcome.refused
+        );
+        match &outcome.refused[0] {
+            OpVerdict::Refused {
+                op_id, code, kind, ..
+            } => (op_id.clone(), *code, *kind),
+            other @ OpVerdict::Accepted { .. } => {
+                panic!("expected a refusal verdict, got {other:?}")
+            }
+        }
+    }
+
+    /// A permanently refused sub-batch applies nothing before the fallback, and
+    /// the fallback names the refused op without re-applying the accepted ones
+    /// (TG-SYNC-003).
+    ///
+    /// The journal count is the mechanical guard, not a code-reading: every
+    /// applied mutation appends exactly one event, so a singleton re-applying
+    /// what the batch pass had already applied would show up as two.
+    #[tokio::test]
+    async fn permanent_subbatch_failure_applied_nothing_before_fallback() {
+        let fx = build_fold_fixture(deny_blocked_records(), None).await;
+        let ops = vec![
+            put_op("101", FOLD_MAP, "k-first", allowed_fields("first")),
+            put_op("102", FOLD_MAP, "k-denied", blocked_fields()),
+            put_op("103", FOLD_MAP, "k-third", allowed_fields("third")),
+        ];
+        let partition_id = 7;
+
+        // 1. Zero-applied canary. This is the fold's own batch pass, issued here
+        //    so the state BETWEEN the two passes is observable at all — the fold
+        //    performs it internally and never exposes the intermediate store.
+        let batch_pass = fx.cx().sub_batch_operation(ops.clone(), partition_id);
+        let refusal = fx
+            .dispatcher
+            .dispatch(batch_pass)
+            .await
+            .expect_err("the whole sub-batch is refused");
+        assert!(
+            matches!(refusal, OperationError::Forbidden { .. }),
+            "expected a middleware refusal, got {refusal:?}"
+        );
+        for key in ["k-first", "k-denied", "k-third"] {
+            assert!(
+                !fx.holds(FOLD_MAP, key).await,
+                "{key} was applied by a sub-batch that failed permanently"
+            );
+        }
+        assert!(
+            fx.journalled_keys().is_empty(),
+            "a permanently refused sub-batch journalled something"
+        );
+
+        // 2. The fold: two accepted, one refused, nothing else.
+        let outcome = attribute_permanent_failure_per_op(vec![(partition_id, ops)], &fx.cx()).await;
+        assert_eq!(
+            sole_refusal(&outcome),
+            ("102".to_string(), 403, "forbidden")
+        );
+        assert_eq!(accepted_ids(&outcome), vec!["101", "103"]);
+        assert!(
+            outcome.transient.is_none(),
+            "an attributed refusal must not also produce a transient error"
+        );
+        assert!(
+            outcome.batch_error.is_none(),
+            "an attributed refusal must not also produce a batch error"
+        );
+
+        // 3. Both good ops read back; the refused one did not land.
+        assert!(fx.holds(FOLD_MAP, "k-first").await);
+        assert!(fx.holds(FOLD_MAP, "k-third").await);
+        assert!(!fx.holds(FOLD_MAP, "k-denied").await);
+
+        // 4. Exactly one journal event per accepted op — the double-apply guard.
+        assert_eq!(fx.journalled_keys(), vec!["k-first", "k-third"]);
+    }
+
+    /// The same fallback attributes a permanent failure raised INSIDE the CRDT
+    /// service, not only one raised by the middleware, and carries its own code.
+    #[tokio::test]
+    async fn permanent_subbatch_failure_applied_nothing_before_fallback_schema_case() {
+        let fx = build_fold_fixture(Vec::new(), Some((TYPED_MAP, required_name_schema()))).await;
+        let ops = vec![
+            put_op("201", TYPED_MAP, "s-first", allowed_fields("first")),
+            put_op(
+                "202",
+                TYPED_MAP,
+                "s-invalid",
+                vec![("unrelated", rmpv::Value::Integer(1.into()))],
+            ),
+            put_op("203", TYPED_MAP, "s-third", allowed_fields("third")),
+        ];
+        let partition_id = 3;
+
+        let batch_pass = fx.cx().sub_batch_operation(ops.clone(), partition_id);
+        let refusal = fx
+            .dispatcher
+            .dispatch(batch_pass)
+            .await
+            .expect_err("the whole sub-batch is refused");
+        assert!(
+            matches!(refusal, OperationError::SchemaInvalid { .. }),
+            "expected an in-service schema refusal, got {refusal:?}"
+        );
+        assert!(
+            fx.journalled_keys().is_empty(),
+            "the validate-all loop must run before the apply loop"
+        );
+
+        let outcome = attribute_permanent_failure_per_op(vec![(partition_id, ops)], &fx.cx()).await;
+        assert_eq!(
+            sole_refusal(&outcome),
+            ("202".to_string(), 422, "schema_invalid")
+        );
+        assert_eq!(accepted_ids(&outcome), vec!["201", "203"]);
+        assert_eq!(fx.journalled_keys(), vec!["s-first", "s-third"]);
+    }
+
+    /// The singleton pass re-dispatches in the sub-batch's original order.
+    ///
+    /// Order is observable: each applied op appends one journal event, so the
+    /// journal sequence is the dispatch sequence. A fold that re-dispatched in
+    /// completion order, or in reverse, would show the two accepted ops swapped.
+    #[tokio::test]
+    async fn fallback_redispatches_in_original_order() {
+        let fx = build_fold_fixture(deny_blocked_records(), None).await;
+        // Deliberately ordered so a lexicographic or reversed walk is visible:
+        // `z-alpha` is dispatched FIRST and `a-omega` last.
+        let ops = vec![
+            put_op("301", FOLD_MAP, "z-alpha", allowed_fields("alpha")),
+            put_op("302", FOLD_MAP, "m-denied", blocked_fields()),
+            put_op("303", FOLD_MAP, "a-omega", allowed_fields("omega")),
+        ];
+
+        let outcome = attribute_permanent_failure_per_op(vec![(11, ops)], &fx.cx()).await;
+
+        assert_eq!(sole_refusal(&outcome).0, "302");
+        assert_eq!(
+            fx.journalled_keys(),
+            vec!["z-alpha", "a-omega"],
+            "singletons must be re-dispatched in the sub-batch's original order"
+        );
+        assert_eq!(accepted_ids(&outcome), vec!["301", "303"]);
+    }
+
+    /// Reads one labelled counter out of a Prometheus render.
+    ///
+    /// Matching on the metric name plus every required `label="value"` pair
+    /// rather than on a whole formatted line keeps the assertion independent of
+    /// the exporter's label ordering.
+    fn rendered_labelled_counter(rendered: &str, name: &str, labels: &[(&str, &str)]) -> u64 {
+        let matches: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.starts_with(&format!("{name}{{")))
+            .filter(|line| {
+                labels
+                    .iter()
+                    .all(|(key, value)| line.contains(&format!("{key}=\"{value}\"")))
+            })
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one {name} series for {labels:?}, render was:\n{rendered}"
+        );
+        matches[0]
+            .rsplit(' ')
+            .next()
+            .expect("a value follows the series")
+            .parse()
+            .expect("counter renders an integer")
+    }
+
+    /// Every `transport × reason` refusal series renders at zero before anything
+    /// is refused.
+    ///
+    /// Without the eager touch the series would simply be absent from a scrape,
+    /// and an operator cannot tell an absent series from a healthy zero — which
+    /// is how a refusal instrument that never fires passes for a server that
+    /// never refuses.
+    #[test]
+    fn refusal_series_registered_at_zero_for_every_transport_and_reason() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        // The process-wide `Once` fires for whichever recorder is bound first, so
+        // the touch itself is driven here rather than through the guard.
+        metrics::with_local_recorder(&recorder, touch_client_op_refusal_series);
+        let rendered = handle.render();
+
+        for transport in ["ws", "http"] {
+            for reason in ALL_ERROR_KINDS {
+                assert_eq!(
+                    rendered_labelled_counter(
+                        &rendered,
+                        METRIC_CLIENT_OP_REFUSALS_TOTAL,
+                        &[("transport", transport), ("reason", reason)],
+                    ),
+                    0,
+                    "series for {transport}/{reason} must render at zero"
+                );
+            }
+        }
+    }
+
+    /// The refusals series counts refusals; the pipeline counter counts pipeline
+    /// calls, and its `1 + k` arithmetic is pinned so nobody "fixes" it.
+    ///
+    /// For one refused op in a three-op sub-batch (k = 1) the refusals series
+    /// rises by exactly 1, while `topgun_operation_errors_total` rises by 2: the
+    /// failed batch call plus the failed singleton. That is correct for a counter
+    /// of pipeline-call errors — `MetricsLayer` sits above `AuthorizationLayer`,
+    /// so both calls are observed — and "correcting" it to 1 fails this test.
+    #[test]
+    fn refused_op_metric_arithmetic() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        // A current-thread runtime driven from inside the binding: the recorder is
+        // a THREAD-local, and the dispatcher's worker — where `MetricsLayer` emits
+        // — must be polled on the same thread for the emission to be seen.
+        let rendered = metrics::with_local_recorder(&recorder, || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime");
+            rt.block_on(async {
+                let fx = build_fold_fixture(deny_blocked_records(), None).await;
+
+                // Pre-write snapshot: the eager registration is what makes this a
+                // readable zero rather than an absent series.
+                touch_client_op_refusal_series();
+                assert_eq!(
+                    rendered_labelled_counter(
+                        &handle.render(),
+                        METRIC_CLIENT_OP_REFUSALS_TOTAL,
+                        &[("transport", "ws"), ("reason", "forbidden")],
+                    ),
+                    0,
+                    "the pre-write snapshot must read zero"
+                );
+
+                let ops = vec![
+                    put_op("401", FOLD_MAP, "m-first", allowed_fields("first")),
+                    put_op("402", FOLD_MAP, "m-denied", blocked_fields()),
+                    put_op("403", FOLD_MAP, "m-third", allowed_fields("third")),
+                ];
+                let outcome = attribute_permanent_failure_per_op(vec![(5, ops)], &fx.cx()).await;
+                assert_eq!(
+                    sole_refusal(&outcome),
+                    ("402".to_string(), 403, "forbidden")
+                );
+            });
+            handle.render()
+        });
+
+        assert_eq!(
+            rendered_labelled_counter(
+                &rendered,
+                METRIC_CLIENT_OP_REFUSALS_TOTAL,
+                &[("transport", "ws"), ("reason", "forbidden")],
+            ),
+            1,
+            "one refused op must count exactly once on the refusals series"
+        );
+        assert_eq!(
+            rendered_labelled_counter(
+                &rendered,
+                "topgun_operation_errors_total",
+                &[("service", service_names::CRDT), ("error", "forbidden")],
+            ),
+            2,
+            "1 + k pipeline-call errors: the batch call plus the refused singleton"
+        );
+        assert_eq!(
+            rendered_labelled_counter(
+                &rendered,
+                "topgun_operations_total",
+                &[("service", service_names::CRDT), ("outcome", "error")],
+            ),
+            2,
+            "the batch call still returns Err, so the outcome label stays 'error'"
         );
     }
 }
