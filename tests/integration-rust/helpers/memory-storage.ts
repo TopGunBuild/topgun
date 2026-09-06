@@ -51,8 +51,14 @@ export class MemoryStorageAdapter implements IStorageAdapter {
       if ((op.id ?? 0) <= lastId) op.synced = 1;
     });
   }
+  /**
+   * Deletes one op-log row. The pending set is a projection of the op log — the
+   * IndexedDB adapter derives it from the rows themselves — so a deleted op has
+   * to leave both here, or a retired op would resurrect on the next flush.
+   */
   async deleteOp(id: number): Promise<void> {
     this.opLog = this.opLog.filter((op) => op.id !== id);
+    this.pending = this.pending.filter((op) => op.id !== id);
   }
   async commitWrite(
     mutations: Array<{ store: 'kv' | 'meta'; type: 'put' | 'remove'; key: string; value?: any }>,
