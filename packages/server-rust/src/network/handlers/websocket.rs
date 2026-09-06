@@ -829,6 +829,123 @@ async fn dispatch_message(
     }
 }
 
+/// Which transport a verdict was produced on.
+///
+/// An enum rather than a string because it is a closed value set that ends up as
+/// a metric label: two transports spelling the same label differently would
+/// silently split one series into two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    dead_code,
+    reason = "constructed by the transports once they consume the fold; `expect` (not `allow`) \
+              fires the moment that lands, which is what forces the attribute to be deleted"
+)]
+pub(crate) enum TransportKind {
+    /// Persistent client `WebSocket` connection.
+    WebSocket,
+    /// One-shot HTTP `/sync` request.
+    Http,
+}
+
+impl TransportKind {
+    /// The metric label for this transport.
+    #[expect(
+        dead_code,
+        reason = "called by the fold when it emits the refusal metric; `expect` (not `allow`) \
+                  fires the moment that lands, which is what forces the attribute to be deleted"
+    )]
+    pub(crate) fn as_label(self) -> &'static str {
+        match self {
+            Self::WebSocket => "ws",
+            Self::Http => "http",
+        }
+    }
+}
+
+/// Everything the verdict fold needs to dispatch a batch and then re-dispatch a
+/// single operation under the *same* contract as the batch pass.
+///
+/// A struct rather than a parameter list because both transports must supply the
+/// identical set, and because `write_concern` / `timeout` travelling together
+/// with the dispatcher is what stops a singleton being judged under a different
+/// contract than the batch attempt that failed.
+#[expect(
+    dead_code,
+    reason = "constructed by the transports once they consume the fold; `expect` (not `allow`) \
+              fires the moment that lands, which is what forces the attribute to be deleted"
+)]
+pub(crate) struct OpBatchDispatchContext<'a> {
+    /// Builds the per-partition `Operation::OpBatch` values.
+    pub classify_svc: &'a OperationService,
+    /// Routes each operation to its partition worker.
+    pub dispatcher: &'a Arc<PartitionDispatcher>,
+    /// Transport this batch arrived on; becomes the refusal metric's label.
+    pub transport: TransportKind,
+    /// Caller origin recorded on every dispatched operation.
+    pub caller_origin: CallerOrigin,
+    /// Client identifier, where the transport knows one.
+    pub client_id: Option<String>,
+    /// Authenticated principal, used by the authorization middleware.
+    pub principal: Option<Principal>,
+    /// Connection the batch arrived on, where the transport has one.
+    pub connection_id: Option<ConnectionId>,
+    /// Write concern of the originating batch. The singleton pass MUST reuse it.
+    pub write_concern: Option<WriteConcern>,
+    /// Timeout of the originating batch. The singleton pass MUST reuse it.
+    pub timeout: Option<u64>,
+}
+
+/// Dispatches one client batch and returns a per-operation verdict for every
+/// operation it could attribute one to.
+///
+/// This is the single implementation of the verdict fold: both transports call
+/// it and then only shape frames from its result, so there is no second place
+/// where "which write did the server refuse?" is decided.
+///
+/// **Why a fold at all.** A sub-batch that fails permanently fails as a whole,
+/// so the failure names a partition, not a write. Reporting that to the client
+/// as a batch error leaves every operation in the batch un-verdicted, and the
+/// client keeps re-sending writes the server will never accept.
+///
+/// **Contract.**
+///
+/// - `partition_groups` is taken **by value**, so the association between a
+///   sub-batch's operations and its result cannot be lost: an operation that was
+///   part of an accepted sub-batch is accepted, and one that was part of a
+///   refused sub-batch is a candidate for individual attribution.
+/// - Optimistic first: dispatch the sub-batches as-is. A sub-batch that succeeds
+///   contributes its operations to `OpOutcome::accepted`.
+/// - A sub-batch failing with a **transient** error contributes to
+///   `OpOutcome::transient`; the batch stays retryable and nothing is retired.
+/// - A sub-batch failing **permanently** is re-dispatched one operation at a
+///   time, each as its own singleton batch through the same dispatcher, **in the
+///   sub-batch's original order**, and each singleton's own outcome becomes that
+///   operation's verdict. Only admission refusals are re-dispatched — the ones
+///   proven to be decided before anything is applied — so re-dispatching cannot
+///   apply a write twice (TG-SYNC-003).
+/// - A permanent error that is **not** re-dispatchable, and a sub-batch holding
+///   an operation with no id, both land in `OpOutcome::batch_error` and stay a
+///   batch-level error. Attribution that cannot be proven is not guessed.
+/// - Every refusal in `OpOutcome::refused` names an operation exactly once, and
+///   no operation appears in both `accepted` and `refused` (TG-SYNC-001).
+/// - The refusal metric is emitted here, once per refusal, so neither transport
+///   can forget to count one.
+#[expect(
+    dead_code,
+    clippy::todo,
+    clippy::unused_async,
+    reason = "signature and contract are fixed ahead of the body so both transports can be \
+              written against them; `expect` (not `allow`) fires the moment the body lands, \
+              which is what forces the attribute to be deleted"
+)]
+pub(crate) async fn attribute_permanent_failure_per_op(
+    partition_groups: Vec<(u32, Vec<topgun_core::messages::ClientOp>)>,
+    cx: &OpBatchDispatchContext<'_>,
+) -> crate::service::operation::OpOutcome {
+    let _ = (partition_groups, cx);
+    todo!("verdict fold body")
+}
+
 /// Splits an `OpBatch` by partition and dispatches all sub-batches concurrently.
 ///
 /// Groups the batch's ops by `hash_to_partition(key)`, creates one
