@@ -37,7 +37,12 @@ import type {
   SubscribeCallback,
 } from './QueryHandle';
 import type { TopicCallback } from './TopicHandle';
-import type { BackoffConfig, HeartbeatConfig, SyncEngineConfig } from './SyncEngine';
+import type {
+  BackoffConfig,
+  HeartbeatConfig,
+  RejectedOpRecord,
+  SyncEngineConfig,
+} from './SyncEngine';
 import type {
   StateChangeEvent,
   StateChangeListener,
@@ -188,6 +193,7 @@ export type {
   TopicCallback,
   BackoffConfig,
   HeartbeatConfig,
+  RejectedOpRecord,
   SyncEngineConfig,
   StateChangeEvent,
   StateChangeListener,
