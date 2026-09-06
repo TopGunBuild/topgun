@@ -1067,8 +1067,14 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    *   will sync on reconnect, but is NOT yet durable on the server.
    * - `'timeout'` — connected, but the server did not acknowledge within
    *   `timeoutMs`; the write is not yet confirmed durable.
-   * - `'failed'` — there was no recordable write to confirm (no tracked op, or
-   *   the local op could not be committed).
+   * - `'rejected'` — the server refused this write and **retrying cannot help**.
+   *   A server decision and terminal, so it is never a `'timeout'` in disguise.
+   *   The local value is deliberately kept rather than rolled back: present the
+   *   refusal to the user instead of assuming their data is gone.
+   * - `'failed'` — a **local** outcome, not a server decision: there was no
+   *   recordable write to confirm (no tracked op, or the local op could not be
+   *   committed), so the write never reached the wire. Fix the caller; do not
+   *   retry blindly.
    *
    * This is the honest "did the server take my write?" answer that callers
    * mutating a database (e.g. the MCP `mutate` tool) need before reporting
@@ -1098,12 +1104,17 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     }
 
     const outcome = await this.syncEngine.waitForOpSynced(opId, timeoutMs);
-    // Forget the in-flight write ONLY once the server has confirmed it. On
-    // offline/timeout we keep the entry so a later retry re-waits on the same op
-    // instead of hitting the no-tracked-write path above and reporting a false
-    // result. A subsequent write to the same key overwrites the entry, so this
-    // never grows unbounded.
-    if (outcome === 'synced' && this.inFlightWrites.get(writeKey) === opPromise) {
+    // Forget the in-flight write once the server has reached a TERMINAL verdict —
+    // accepted or refused. On offline/timeout we keep the entry so a later retry
+    // re-waits on the same op instead of hitting the no-tracked-write path above
+    // and reporting a false result; on a refusal keeping it would make a
+    // confirmWrite for a NEW write to the same key re-await the dead op and
+    // answer 'rejected' for a write nobody has judged yet. A subsequent write to
+    // the same key overwrites the entry, so this never grows unbounded.
+    if (
+      (outcome === 'synced' || outcome === 'rejected') &&
+      this.inFlightWrites.get(writeKey) === opPromise
+    ) {
       this.inFlightWrites.delete(writeKey);
     }
     return outcome;
