@@ -13,6 +13,18 @@ import { useExternalStore } from './internal/useExternalStore';
  * filters internally to the requested key — irrelevant key changes for
  * other rows in the same map do NOT cause this hook to re-render.
  *
+ * `'conflicted'` means the server did not take the write as issued. It covers
+ * BOTH a server-side resolver rejecting/downgrading the write AND the server
+ * **permanently refusing** it (permission denied, schema violation, oversized
+ * value) — the two are deliberately not distinguished here. Use
+ * `useWriteRejections()` when you need the cause, the refused value, or the
+ * reason to show the user.
+ *
+ * **Refusals are session-scoped and do not survive a page reload.** After a
+ * reload a refused record reads `'synced'` again, so `'synced'` does not by
+ * itself guarantee the server accepted the write. The durable refused-writes
+ * store that would close this gap is tracked as TODO-667.
+ *
  * @example
  * ```tsx
  * function TodoDetail({ todoKey }: { todoKey: string }) {
