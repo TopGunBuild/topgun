@@ -70,6 +70,14 @@ export interface WriteRejection {
    * carries `false`.
    */
   previouslyAcked: boolean;
-  /** When the refusal was observed, on the client's hybrid logical clock. */
+  /**
+   * The refused write's own hybrid-logical-clock timestamp.
+   *
+   * The write's clock, not the moment its refusal arrived: it is what makes
+   * {@link WriteRejection.id} stable across a re-delivery of the same refusal,
+   * and what lets a later write for the same key supersede this one instead of
+   * leaving the record permanently marked. A refusal naming a write the client
+   * no longer holds has no such clock and falls back to the observation time.
+   */
   timestamp: Timestamp;
 }
