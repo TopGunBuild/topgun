@@ -593,14 +593,6 @@ pub enum ErrorDisposition {
 /// incremented is invisible to a scrape, which is indistinguishable from
 /// "nothing was refused"). Kept beside `error_kind()` so the two cannot drift
 /// without the drift being visible in one screen.
-// Read by this module's own tests already, so the expectation is scoped to the
-// non-test build. `expect` rather than `allow`: it fires as an unfulfilled
-// expectation as soon as the transport-side verdict fold reads it, which is what
-// forces the attribute to be deleted instead of left behind.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first non-test reader is the verdict fold")
-)]
 pub(crate) const ALL_ERROR_KINDS: [&str; 9] = [
     "unknown_service",
     "timeout",
@@ -735,16 +727,21 @@ pub(crate) enum OpVerdict {
 /// would lie about its disposition; folding the first into the second would
 /// retire operations that a retry would have accepted.
 #[derive(Debug, Default)]
-#[expect(
-    dead_code,
-    reason = "the transport-side verdict fold is the first constructor; `expect` (not `allow`) \
-              fires as an unfulfilled expectation the moment it lands, which is what forces \
-              this attribute to be deleted rather than left behind"
-)]
 pub(crate) struct OpOutcome {
     /// Operations the server accepted, in the wire shape `OpAckPayload.results`
-    /// takes. Empty when nothing was accepted, in which case no acknowledgement
-    /// is sent at all.
+    /// takes.
+    ///
+    /// **Populated only when `refused` is non-empty**, which is the only case in
+    /// which an acknowledgement has to name operations one by one: a batch
+    /// nobody refused anything in is acknowledged by its last id with no
+    /// `results` field at all, so materializing this vector there would clone an
+    /// id per operation on the hot path for something no caller reads. Read it
+    /// only after finding `refused` non-empty; an empty `accepted` alongside an
+    /// empty `refused` means "not computed", NOT "nothing was accepted".
+    ///
+    /// Id-less accepted operations are absent even when it is populated: they
+    /// cannot be named back to the client. That residue is TG-SYNC-001's stated
+    /// exclusion.
     pub accepted: Vec<messages::OpResult>,
     /// Permanent refusals attributed to a named operation — one `OP_REJECTED`
     /// frame each, emitted before any acknowledgement (TG-SYNC-002).
