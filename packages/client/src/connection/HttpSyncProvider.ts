@@ -332,6 +332,34 @@ export class HttpSyncProvider implements IConnectionProvider {
         this.hlc.update(syncResponse.serverHlc);
       }
 
+      // Per-op refusals, translated into the same OP_REJECTED frames the
+      // WebSocket transport delivers, so SyncEngine sees ONE verdict model on both
+      // transports and retirement needs no second code path.
+      //
+      // `context` is the structural discriminator and the only correct one to
+      // branch on: an entry carrying it names a single operation the server
+      // permanently refused, while an entry without it is a batch-level transient
+      // or non-attributed error that says nothing about any individual op and must
+      // stay retryable. These are emitted BEFORE the acknowledgement below, which
+      // is what preserves refusal-before-ack ordering on this transport
+      // (TG-SYNC-002). A response carrying refusals and no `ack` at all is normal,
+      // not a hang: the refusals are then the whole exchange.
+      if (Array.isArray(syncResponse.errors)) {
+        for (const error of syncResponse.errors) {
+          const opId = error?.context;
+          if (typeof opId !== 'string' || opId.length === 0) continue;
+          const payload: { opId: string; reason: string; permanent: true; code?: number } = {
+            opId,
+            reason: typeof error.message === 'string' ? error.message : 'Rejected by server',
+            permanent: true,
+          };
+          if (typeof error.code === 'number') {
+            payload.code = error.code;
+          }
+          this.emit('message', 'http', serialize({ type: 'OP_REJECTED', payload }));
+        }
+      }
+
       // Process operation acknowledgments
       if (syncResponse.ack) {
         this.emit(
