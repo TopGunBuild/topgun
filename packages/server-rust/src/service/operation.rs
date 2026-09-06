@@ -567,6 +567,198 @@ pub enum OperationError {
 }
 
 // ---------------------------------------------------------------------------
+// ErrorDisposition
+// ---------------------------------------------------------------------------
+
+/// Whether retrying the identical operation can ever succeed.
+///
+/// This is a property of the error, decided once at the source, never
+/// re-derived from a formatted message at a call site: `format!("{e}")` produces
+/// the human-readable `reason` and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorDisposition {
+    /// The condition can clear on its own — the same operation may succeed on a
+    /// later attempt, so the client must keep it queued and retry it.
+    Transient,
+    /// The server refused the operation itself. No retry of the identical
+    /// operation can succeed, so the client must retire it instead of
+    /// re-sending it forever.
+    Permanent,
+}
+
+/// Every label `OperationError::error_kind()` can return, in variant order.
+///
+/// The enumerable form of the same vocabulary: it exists so metric series can be
+/// registered for the whole label space up front (a counter that has never been
+/// incremented is invisible to a scrape, which is indistinguishable from
+/// "nothing was refused"). Kept beside `error_kind()` so the two cannot drift
+/// without the drift being visible in one screen.
+// Read by this module's own tests already, so the expectation is scoped to the
+// non-test build. `expect` rather than `allow`: it fires as an unfulfilled
+// expectation as soon as the transport-side verdict fold reads it, which is what
+// forces the attribute to be deleted instead of left behind.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "first non-test reader is the verdict fold")
+)]
+pub(crate) const ALL_ERROR_KINDS: [&str; 9] = [
+    "unknown_service",
+    "timeout",
+    "overloaded",
+    "wrong_service",
+    "internal",
+    "unauthorized",
+    "forbidden",
+    "value_too_large",
+    "schema_invalid",
+];
+
+impl OperationError {
+    /// Classifies whether retrying the identical operation can ever succeed.
+    ///
+    /// Exhaustive with no `_` arm on purpose: a new `OperationError` variant must
+    /// fail to compile until someone decides what a client should do about it.
+    /// Defaulting an unclassified variant to either side is the failure this
+    /// method exists to prevent — `Transient` would retry a doomed write forever,
+    /// `Permanent` would silently discard a recoverable one.
+    ///
+    /// `Unauthorized` is **Transient**: it is a connection-level condition (the
+    /// connection's identity is gone or was never established), not a property of
+    /// the operation, so a logged-out user's queued writes must survive to the
+    /// next authenticated connection rather than be retired.
+    #[must_use]
+    pub fn disposition(&self) -> ErrorDisposition {
+        match self {
+            Self::Forbidden { .. } | Self::ValueTooLarge { .. } | Self::SchemaInvalid { .. } => {
+                ErrorDisposition::Permanent
+            }
+            Self::UnknownService { .. } | Self::WrongService => ErrorDisposition::Permanent,
+            Self::Unauthorized | Self::Overloaded | Self::Timeout { .. } | Self::Internal(_) => {
+                ErrorDisposition::Transient
+            }
+        }
+    }
+
+    /// The machine-readable code carried to the client on the wire.
+    ///
+    /// HTTP-style codes, so the same number means the same thing on both
+    /// transports. Exhaustive with no `_` arm for the same reason as
+    /// [`Self::disposition`].
+    #[must_use]
+    pub fn wire_code(&self) -> u32 {
+        match self {
+            Self::Unauthorized => 401,
+            Self::Forbidden { .. } => 403,
+            Self::ValueTooLarge { .. } => 413,
+            Self::SchemaInvalid { .. } => 422,
+            Self::Overloaded => 429,
+            Self::Internal(_) => 500,
+            Self::UnknownService { .. } | Self::WrongService => 501,
+            Self::Timeout { .. } => 504,
+        }
+    }
+
+    /// The stable, low-cardinality label used for metrics and for the client's
+    /// closed set of refusal causes.
+    ///
+    /// These nine strings are one vocabulary shared with the operation-error
+    /// metric emitted by the pipeline middleware; the strings are byte-identical
+    /// on both sides and [`ALL_ERROR_KINDS`] is their enumerable form. Never
+    /// derive a label from `format!("{e}")` — variant messages interpolate
+    /// unbounded values (map names, sizes) and would blow up label cardinality.
+    ///
+    /// Exhaustive with no `_` arm for the same reason as [`Self::disposition`].
+    #[must_use]
+    pub fn error_kind(&self) -> &'static str {
+        match self {
+            Self::UnknownService { .. } => "unknown_service",
+            Self::Timeout { .. } => "timeout",
+            Self::Overloaded => "overloaded",
+            Self::WrongService => "wrong_service",
+            Self::Internal(_) => "internal",
+            Self::Unauthorized => "unauthorized",
+            Self::Forbidden { .. } => "forbidden",
+            Self::ValueTooLarge { .. } => "value_too_large",
+            Self::SchemaInvalid { .. } => "schema_invalid",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-operation verdicts (internal fold types)
+// ---------------------------------------------------------------------------
+
+/// The verdict reached for one client operation in one exchange.
+///
+/// Internal to the server: these types are folded at the transport and then
+/// shaped into wire frames, so they carry no serde derives and never appear on
+/// the wire themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    dead_code,
+    reason = "the transport-side verdict fold is the first constructor; `expect` (not `allow`) \
+              fires as an unfulfilled expectation the moment it lands, which is what forces \
+              this attribute to be deleted rather than left behind"
+)]
+pub(crate) enum OpVerdict {
+    /// The operation was applied. Carries the operation's id where the client
+    /// supplied one — an id-less operation can still be accepted, it simply
+    /// cannot be named back to the client.
+    Accepted { op_id: Option<String> },
+    /// The operation was refused permanently and is attributed to a named
+    /// operation. A refusal that cannot be attributed to an id is NOT this
+    /// variant — it stays a batch-level error, because guessing which write was
+    /// refused is worse than reporting that the batch failed.
+    Refused {
+        /// Id of the refused operation. Attribution is the whole point of the
+        /// variant, so this is not optional.
+        op_id: String,
+        /// Wire code from [`OperationError::wire_code`].
+        code: u32,
+        /// Human-readable reason, from the error's `Display`.
+        reason: String,
+        /// Metric label from [`OperationError::error_kind`].
+        kind: &'static str,
+    },
+}
+
+/// The folded result of dispatching one client batch.
+///
+/// **Contract: every operation of the batch reaches at most one terminal sink,
+/// and exactly one when the exchange produced any verdict at all.** An operation
+/// that is in `accepted` is never in `refused`, and the reverse; that is what
+/// lets a client treat each frame it receives as final (TG-SYNC-003).
+///
+/// The two error sinks are deliberately separate rather than one field:
+/// `transient` is retryable and `batch_error` is a permanent failure that could
+/// NOT be attributed to a single operation. Folding the second into the first
+/// would lie about its disposition; folding the first into the second would
+/// retire operations that a retry would have accepted.
+#[derive(Debug, Default)]
+#[expect(
+    dead_code,
+    reason = "the transport-side verdict fold is the first constructor; `expect` (not `allow`) \
+              fires as an unfulfilled expectation the moment it lands, which is what forces \
+              this attribute to be deleted rather than left behind"
+)]
+pub(crate) struct OpOutcome {
+    /// Operations the server accepted, in the wire shape `OpAckPayload.results`
+    /// takes. Empty when nothing was accepted, in which case no acknowledgement
+    /// is sent at all.
+    pub accepted: Vec<messages::OpResult>,
+    /// Permanent refusals attributed to a named operation — one `OP_REJECTED`
+    /// frame each, emitted before any acknowledgement (TG-SYNC-002).
+    pub refused: Vec<OpVerdict>,
+    /// The single transient error to report for the whole exchange, chosen
+    /// deterministically when several sub-batches failed differently.
+    pub transient: Option<OperationError>,
+    /// A permanent error that was NOT attributed per operation — an unroutable
+    /// operation, or a batch whose operations carry no ids. Reported as the
+    /// batch-level error frame, never as a per-operation refusal.
+    pub batch_error: Option<OperationError>,
+}
+
+// ---------------------------------------------------------------------------
 // ClassifyError
 // ---------------------------------------------------------------------------
 
@@ -644,6 +836,103 @@ mod tests {
 
         let err = OperationError::Overloaded;
         assert_eq!(format!("{err}"), "server overloaded, try again later");
+    }
+
+    /// One value of every `OperationError` variant. Constructed by hand rather
+    /// than generated so that adding a variant leaves this list short by one and
+    /// the exhaustive `match` below fails to compile.
+    fn one_of_every_error_variant() -> Vec<OperationError> {
+        let all = vec![
+            OperationError::UnknownService {
+                name: "nope".to_string(),
+            },
+            OperationError::Timeout { timeout_ms: 1 },
+            OperationError::Overloaded,
+            OperationError::WrongService,
+            OperationError::Internal(anyhow::anyhow!("boom")),
+            OperationError::Unauthorized,
+            OperationError::Forbidden {
+                map_name: "m".to_string(),
+            },
+            OperationError::ValueTooLarge { size: 2, max: 1 },
+            OperationError::SchemaInvalid {
+                map_name: "m".to_string(),
+                errors: vec!["bad".to_string()],
+            },
+        ];
+        // Exhaustiveness guard: a new variant breaks this match, which is what
+        // forces the list above to be extended too.
+        for e in &all {
+            match e {
+                OperationError::UnknownService { .. }
+                | OperationError::Timeout { .. }
+                | OperationError::Overloaded
+                | OperationError::WrongService
+                | OperationError::Internal(_)
+                | OperationError::Unauthorized
+                | OperationError::Forbidden { .. }
+                | OperationError::ValueTooLarge { .. }
+                | OperationError::SchemaInvalid { .. } => {}
+            }
+        }
+        all
+    }
+
+    /// The label vocabulary is one vocabulary, not two that can drift: the same
+    /// nine strings are emitted by the pipeline middleware's own exhaustive
+    /// match, and `ALL_ERROR_KINDS` is their enumerable form.
+    #[test]
+    fn error_kind_matches_metrics_middleware_vocabulary() {
+        let mut from_fn: Vec<&str> = one_of_every_error_variant()
+            .iter()
+            .map(OperationError::error_kind)
+            .collect();
+        from_fn.sort_unstable();
+        assert_eq!(from_fn.len(), 9, "one label per variant, no duplicates");
+
+        let mut from_const: Vec<&str> = ALL_ERROR_KINDS.to_vec();
+        from_const.sort_unstable();
+        assert_eq!(from_fn, from_const, "error_kind() vs ALL_ERROR_KINDS drift");
+
+        let mut expected = vec![
+            "forbidden",
+            "internal",
+            "overloaded",
+            "schema_invalid",
+            "timeout",
+            "unauthorized",
+            "unknown_service",
+            "value_too_large",
+            "wrong_service",
+        ];
+        expected.sort_unstable();
+        assert_eq!(
+            from_fn, expected,
+            "labels must stay byte-identical to the ones the operation-error metric already emits"
+        );
+    }
+
+    /// Pins the classification table. `Unauthorized` being Transient is the
+    /// load-bearing entry: it is a connection-level condition, so retiring the
+    /// operation would throw away a write that succeeds after re-authentication.
+    #[test]
+    fn disposition_and_wire_code_follow_the_classification_table() {
+        let expected: Vec<(&str, ErrorDisposition, u32)> = vec![
+            ("unknown_service", ErrorDisposition::Permanent, 501),
+            ("timeout", ErrorDisposition::Transient, 504),
+            ("overloaded", ErrorDisposition::Transient, 429),
+            ("wrong_service", ErrorDisposition::Permanent, 501),
+            ("internal", ErrorDisposition::Transient, 500),
+            ("unauthorized", ErrorDisposition::Transient, 401),
+            ("forbidden", ErrorDisposition::Permanent, 403),
+            ("value_too_large", ErrorDisposition::Permanent, 413),
+            ("schema_invalid", ErrorDisposition::Permanent, 422),
+        ];
+        let actual: Vec<(&str, ErrorDisposition, u32)> = one_of_every_error_variant()
+            .iter()
+            .map(|e| (e.error_kind(), e.disposition(), e.wire_code()))
+            .collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]
