@@ -67,7 +67,7 @@ class MockTopGunClient {
   queryOncePagedCursor: string | undefined = undefined;
   // Outcome confirmWrite resolves with — defaults to a server-confirmed write so
   // the happy path needs no setup; override to exercise offline/timeout/failed.
-  confirmWriteOutcome: 'synced' | 'offline' | 'timeout' | 'failed' = 'synced';
+  confirmWriteOutcome: 'synced' | 'offline' | 'timeout' | 'failed' | 'rejected' = 'synced';
   // Records (map, key) pairs confirmWrite was asked to confirm, for assertions.
   confirmWriteCalls: Array<{ map: string; key: string }> = [];
 
@@ -82,7 +82,7 @@ class MockTopGunClient {
     map: string,
     key: string,
     _timeoutMs?: number,
-  ): Promise<'synced' | 'offline' | 'timeout' | 'failed'> {
+  ): Promise<'synced' | 'offline' | 'timeout' | 'failed' | 'rejected'> {
     this.confirmWriteCalls.push({ map, key });
     return this.confirmWriteOutcome;
   }
@@ -590,6 +590,27 @@ describe('MCP Tools', () => {
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('NOT yet durable');
       expect(result.content[0].text).not.toContain('Successfully');
+    });
+
+    it('should report a server refusal as final and never advise sending the write again', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.confirmWriteOutcome = 'rejected';
+
+      const result = await handleMutate(
+        { map: 'tasks', operation: 'set', key: 'task1', data: { title: 'Refused' } },
+        ctx,
+      );
+
+      expect(result.isError).toBe(true);
+      const text = result.content[0].text ?? '';
+      expect(text).toContain('DENIED');
+      // A refusal is terminal, so the agent must not be told to send it again --
+      // an agent that reads a permanent denial as a transient failure loops
+      // forever against a server that will never accept the write.
+      expect(text.toLowerCase()).not.toContain('retry');
+      expect(text.toLowerCase()).not.toContain('try again');
+      expect(text).not.toContain('Successfully');
     });
 
     it('should report an error when a set times out without server confirmation', async () => {
