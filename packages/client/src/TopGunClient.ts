@@ -105,11 +105,27 @@ export const DEFAULT_QUERY_ONCE_TIMEOUT_MS = 5000;
 
 /**
  * Outcome of {@link TopGunClient.confirmWrite}: whether a local write was
- * confirmed applied by the server (`'synced'`) or could not be confirmed —
- * because the client is offline (`'offline'`), the server did not acknowledge in
- * time (`'timeout'`), or the local op could not be recorded (`'failed'`).
+ * confirmed applied by the server.
+ *
+ * - `'synced'` — the server acknowledged the write.
+ * - `'offline'` — the client is offline, so nothing could be confirmed yet. The
+ *   write stays queued.
+ * - `'timeout'` — the server did not acknowledge in time. The write stays
+ *   queued and may still be accepted.
+ * - `'rejected'` — **the server refused this write and retrying cannot help.**
+ *   Terminal, and a decision made by the server. The local value is
+ *   deliberately kept rather than rolled back, so the application must present
+ *   the refusal instead of assuming the data is gone.
+ * - `'failed'` — a **local** outcome, not a server decision: there was no
+ *   recordable write to confirm (no tracked op for that map and key, or the
+ *   local write itself failed). The write never reached the wire, so the fix is
+ *   in the caller, not in a retry.
+ *
+ * `'rejected'` and `'failed'` are the two non-success outcomes with a cause and
+ * must not be conflated: the first means the server said no, the second means
+ * there was nothing to ask about.
  */
-export type WriteConfirmation = 'synced' | 'offline' | 'timeout' | 'failed';
+export type WriteConfirmation = 'synced' | 'offline' | 'timeout' | 'failed' | 'rejected';
 
 /**
  * Options for {@link TopGunClient.queryOnce}, a one-shot read that resolves with
