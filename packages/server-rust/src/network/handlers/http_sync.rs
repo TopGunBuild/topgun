@@ -353,10 +353,7 @@ async fn dispatch_operations(
             code,
             reason,
             ..
-        } = verdict
-        else {
-            continue;
-        };
+        } = verdict;
         response
             .errors
             .get_or_insert_with(Vec::new)

@@ -685,18 +685,14 @@ impl OperationError {
 /// Internal to the server: these types are folded at the transport and then
 /// shaped into wire frames, so they carry no serde derives and never appear on
 /// the wire themselves.
+///
+/// Only refusals get a per-operation verdict. Acceptance is carried by
+/// [`OpOutcome::accepted`] as wire-ready `OpResult`s instead, so there is
+/// deliberately no `Accepted` variant here: two representations of "this op was
+/// applied" would be two things to keep in step, and the fold already has to
+/// build the `OpResult` form to shape the ack.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[expect(
-    dead_code,
-    reason = "the transport-side verdict fold is the first constructor; `expect` (not `allow`) \
-              fires as an unfulfilled expectation the moment it lands, which is what forces \
-              this attribute to be deleted rather than left behind"
-)]
 pub(crate) enum OpVerdict {
-    /// The operation was applied. Carries the operation's id where the client
-    /// supplied one — an id-less operation can still be accepted, it simply
-    /// cannot be named back to the client.
-    Accepted { op_id: Option<String> },
     /// The operation was refused permanently and is attributed to a named
     /// operation. A refusal that cannot be attributed to an id is NOT this
     /// variant — it stays a batch-level error, because guessing which write was

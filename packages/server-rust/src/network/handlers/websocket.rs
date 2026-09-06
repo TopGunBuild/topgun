@@ -1288,10 +1288,7 @@ async fn send_op_rejected_frames(refused: &[OpVerdict], tx: &mpsc::Sender<Outbou
             code,
             reason,
             ..
-        } = verdict
-        else {
-            continue;
-        };
+        } = verdict;
         let rejected = TopGunMessage::OpRejected(topgun_core::messages::OpRejectedMessage {
             payload: topgun_core::messages::OpRejectedPayload {
                 op_id: op_id.clone(),
@@ -2255,14 +2252,10 @@ mod tests {
             "expected exactly one refusal, got {:?}",
             outcome.refused
         );
-        match &outcome.refused[0] {
-            OpVerdict::Refused {
-                op_id, code, kind, ..
-            } => (op_id.clone(), *code, *kind),
-            other @ OpVerdict::Accepted { .. } => {
-                panic!("expected a refusal verdict, got {other:?}")
-            }
-        }
+        let OpVerdict::Refused {
+            op_id, code, kind, ..
+        } = &outcome.refused[0];
+        (op_id.clone(), *code, *kind)
     }
 
     /// A permanently refused sub-batch applies nothing before the fallback, and
