@@ -2016,4 +2016,103 @@ mod tests {
             "a batch in which everything was refused has nothing to acknowledge"
         );
     }
+
+    /// Both halves of one `/sync` response write an id into `errors[].context`:
+    /// the operations half an operation id, the queries half a query id. A
+    /// caller that reads `context` as "an operation was refused" would retire a
+    /// write on a denied READ, so the two kinds must be distinguishable by the
+    /// id itself and never by the presence of the field.
+    #[tokio::test]
+    async fn http_sync_ops_and_queries_both_attribute_errors_by_request_item_id() {
+        let keys = keys_in_one_partition(2);
+        let ops = vec![
+            put_op("41", &keys[0], allowed_fields("first")),
+            put_op("42", &keys[1], blocked_fields()),
+        ];
+
+        let (classify_svc, dispatcher) = build_http_pipeline(false).await;
+        let principal = Principal {
+            id: "writer-1".to_string(),
+            roles: vec!["user".to_string()],
+        };
+        let mut response = HttpSyncResponse {
+            server_hlc: Timestamp {
+                millis: 1_700_000_000_000,
+                counter: 0,
+                node_id: "http-fold-node".to_string(),
+            },
+            ..Default::default()
+        };
+
+        dispatch_operations(
+            ops,
+            &classify_svc,
+            &dispatcher,
+            None,
+            CallerOrigin::HttpClient,
+            Some(&principal),
+            &mut response,
+        )
+        .await;
+
+        // The queries half of the SAME response. The policy store carries write
+        // rules only, so an evaluated read finds no allow rule and is denied.
+        let store_factory = RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        );
+        let policy_store = Arc::new(InMemoryPolicyStore::new());
+        for policy in deny_blocked_records() {
+            policy_store
+                .upsert_policy(policy)
+                .await
+                .expect("policy upsert");
+        }
+        let policy_store: Arc<dyn PolicyStore> = policy_store;
+        let admin_subjects = Arc::new(std::collections::HashSet::new());
+
+        dispatch_queries(
+            vec![HttpQueryRequest {
+                query_id: "q-1788000000000".to_string(),
+                map_name: HTTP_MAP.to_string(),
+                filter: rmpv::Value::Nil,
+                ..Default::default()
+            }],
+            &store_factory,
+            Some(&principal),
+            Some(&policy_store),
+            &admin_subjects,
+            &mut response,
+        )
+        .await;
+
+        let errors = response.errors.expect("both halves reported an entry");
+        assert_eq!(errors.len(), 2, "one operation refusal, one query denial");
+
+        let op_entry = &errors[0];
+        assert_eq!(op_entry.code, 403);
+        assert_eq!(
+            op_entry.context.as_deref(),
+            Some("42"),
+            "the operations half attributes its entry to an operation id"
+        );
+
+        let query_entry = &errors[1];
+        assert_eq!(query_entry.code, 403);
+        assert_eq!(
+            query_entry.context.as_deref(),
+            Some("q-1788000000000"),
+            "the queries half attributes its entry to a query id, in the SAME \
+             errors[] array — so `context` is present on an entry that refuses \
+             no operation at all"
+        );
+
+        let ack = response.ack.expect("the accepted operation is acknowledged");
+        assert_eq!(acked_ids(&ack), vec!["41"]);
+        assert!(
+            !acked_ids(&ack).contains(&"q-1788000000000".to_string()),
+            "a query id is never an acknowledged operation"
+        );
+    }
 }
