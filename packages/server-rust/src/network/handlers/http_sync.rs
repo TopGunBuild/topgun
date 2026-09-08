@@ -2108,7 +2108,9 @@ mod tests {
              no operation at all"
         );
 
-        let ack = response.ack.expect("the accepted operation is acknowledged");
+        let ack = response
+            .ack
+            .expect("the accepted operation is acknowledged");
         assert_eq!(acked_ids(&ack), vec!["41"]);
         assert!(
             !acked_ids(&ack).contains(&"q-1788000000000".to_string()),
