@@ -173,11 +173,15 @@ export function useWriteRejections(
     };
 
     return () => {
-      // Flush synchronously BEFORE deactivating. A refusal delivered in the same
-      // tick as this cleanup has no later drain of its own to publish it, and
-      // the emitter is fire-and-forget — there is no replay, so an event dropped
-      // here is lost for good. The store is `useSyncExternalStore`-backed, so
-      // notifying from a cleanup is legal.
+      // Publish whatever is still queued. This is a backstop, not the mechanism
+      // that closes the resubscription window: an event only ever enters
+      // `pending` alongside a scheduled `queueMicrotask(drain)`, and that drain
+      // publishes through `rejectionsRef`/`notifyRejections`, which outlive this
+      // effect instance -- so a queued refusal still reaches React without this
+      // flush. What actually closes the window is the queue being per-instance
+      // (see above), so a stale drain can only ever empty its own. Flushing here
+      // just publishes in this tick rather than one microtask later; the store is
+      // `useSyncExternalStore`-backed, so notifying from a cleanup is legal.
       //
       // No "inactive" flag guards the drain: the emitter iterates its live
       // listener set, so an unsubscribed listener is never visited again, and a
