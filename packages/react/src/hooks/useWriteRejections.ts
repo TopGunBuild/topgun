@@ -118,8 +118,6 @@ export function useWriteRejections(
   const discardPendingRef = useRef<() => void>(NOOP);
 
   useEffect(() => {
-    let active = true;
-
     // Refusals that have arrived but not yet been published to React. A
     // reconnect that refuses a whole offline queue delivers thousands of events
     // in one turn; draining them on a microtask turns that into ONE notify.
@@ -180,9 +178,12 @@ export function useWriteRejections(
       // the emitter is fire-and-forget — there is no replay, so an event dropped
       // here is lost for good. The store is `useSyncExternalStore`-backed, so
       // notifying from a cleanup is legal.
+      //
+      // No "inactive" flag guards the drain: the emitter iterates its live
+      // listener set, so an unsubscribed listener is never visited again, and a
+      // queue nobody else can reach needs no second check.
       const batch = takeQueue();
       if (batch.length > 0) publish(batch);
-      active = false;
       discardPendingRef.current = NOOP;
       unsubscribe();
     };

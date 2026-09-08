@@ -1,5 +1,11 @@
 import { HLC, serialize, deserialize } from '@topgunbuild/core';
 import { HttpSyncProvider } from '../connection/HttpSyncProvider';
+// A msgpack frame as the provider emits it: a tagged message with a payload.
+interface WireFrame {
+  type: string;
+  payload: Record<string, unknown>;
+}
+
 describe('HttpSyncProvider', () => {
   let hlc: HLC;
   let mockFetch: jest.Mock;
@@ -209,9 +215,11 @@ describe('HttpSyncProvider', () => {
     // written a query id into `errors[].context` since long before per-op
     // refusals existed, so a provider that branches on presence alone reports a
     // denied READ as a refusal of a write that was never refused.
-    const frames: any[] = [];
-    provider.on('message', (_nodeId: string, data: any) => {
-      frames.push(deserialize<any>(data instanceof ArrayBuffer ? new Uint8Array(data) : data));
+    const frames: WireFrame[] = [];
+    provider.on('message', (_nodeId: string, data: ArrayBuffer | Uint8Array) => {
+      frames.push(
+        deserialize<WireFrame>(data instanceof ArrayBuffer ? new Uint8Array(data) : data),
+      );
     });
 
     await provider.connect();
@@ -280,9 +288,11 @@ describe('HttpSyncProvider', () => {
   it('never retires an id claimed by both the operations and the queries half', async () => {
     // Op ids and query ids are disjoint by convention, not by type. An id in
     // both sets is ambiguous, so it is warned about and never translated.
-    const frames: any[] = [];
-    provider.on('message', (_nodeId: string, data: any) => {
-      frames.push(deserialize<any>(data instanceof ArrayBuffer ? new Uint8Array(data) : data));
+    const frames: WireFrame[] = [];
+    provider.on('message', (_nodeId: string, data: ArrayBuffer | Uint8Array) => {
+      frames.push(
+        deserialize<WireFrame>(data instanceof ArrayBuffer ? new Uint8Array(data) : data),
+      );
     });
 
     await provider.connect();
