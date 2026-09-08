@@ -452,7 +452,7 @@ A rejection carrying <code>permanent: true</code> is terminal across reconnects:
 
 #### Over HTTP
 
-The `POST /sync` transport carries the same two channels in one response body: `ack.results` for the accepted operations, `errors[]` for everything that failed. The `context` field is the discriminator, and callers must branch on it rather than on the code or the message text:
+The `POST /sync` transport carries the same two channels in one response body: `ack.results` for the accepted operations, `errors[]` for everything that failed. `context` names the **request item** an entry is attributed to — and both halves of the request write into it, so its presence alone does **not** mean an operation was refused. Match `context` against the ids you sent as operations in that same request; a query id belongs to the queries half and refuses no write:
 
 <div className="overflow-x-auto not-prose mb-6">
   <table className="w-full text-sm">
@@ -464,12 +464,16 @@ The `POST /sync` transport carries the same two channels in one response body: `
     </thead>
     <tbody>
       <tr className="border-b border-card-border/50">
-        <td className="py-2 px-3 font-mono text-xs text-neutral-600 dark:text-neutral-300">present (an opId)</td>
-        <td className="py-2 px-3 text-neutral-600 dark:text-neutral-300">A permanent refusal of that one operation — the HTTP equivalent of <code>OP_REJECTED</code>. Retire it; retrying cannot help.</td>
+        <td className="py-2 px-3 font-mono text-xs text-neutral-600 dark:text-neutral-300">an id you sent as an operation</td>
+        <td className="py-2 px-3 text-neutral-600 dark:text-neutral-300">A permanent refusal of that one operation — the HTTP equivalent of <code>OP_REJECTED</code>. Retire it; retrying cannot help. The fold attributes nothing else to a single operation, so an operation-attributed entry is always permanent.</td>
+      </tr>
+      <tr className="border-b border-card-border/50">
+        <td className="py-2 px-3 font-mono text-xs text-neutral-600 dark:text-neutral-300">an id you sent as a query</td>
+        <td className="py-2 px-3 text-neutral-600 dark:text-neutral-300">An error from the <strong>queries</strong> half of the same response — an RBAC read denial (<code>403</code>) or a malformed/expired cursor (<code>400</code>). It refuses no write. Retiring an operation on it reports a refusal that never happened. The two id namespaces are disjoint by convention, not by type, so an id claimed by both sets is ambiguous: never retire it.</td>
       </tr>
       <tr className="border-b border-card-border/50">
         <td className="py-2 px-3 font-mono text-xs text-neutral-600 dark:text-neutral-300">absent</td>
-        <td className="py-2 px-3 text-neutral-600 dark:text-neutral-300">A batch-level error naming no operation. Nothing is said about any individual write, so retire nothing on it. <code>code</code> separates the two kinds that arrive here: a <strong>transient</strong> failure, where retrying the batch is correct; and a <strong>non-attributed permanent</strong> failure — <code>501</code> (unknown or wrong service), or an operation that carried no id — where retrying fails identically and you must correct the batch.</td>
+        <td className="py-2 px-3 text-neutral-600 dark:text-neutral-300">A batch-level error naming no request item. Nothing is said about any individual write, so retire nothing on it. <code>code</code> separates the two kinds that arrive here: a <strong>transient</strong> failure, where retrying the batch is correct; and a <strong>non-attributed permanent</strong> failure — <code>501</code> (unknown or wrong service), or an operation that carried no id — where retrying fails identically and you must correct the batch.</td>
       </tr>
     </tbody>
   </table>
