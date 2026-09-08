@@ -1725,13 +1725,38 @@ export class SyncEngine {
     // authoritative coverage of the acknowledgement: a prefix silently covers ids
     // the same exchange may have refused.
     const acceptanceSet = Array.isArray(results) ? results : undefined;
+    // The smallest id in this exchange that the server did NOT accept. It bounds
+    // the durable prefix below: `markOpsSynced` DELETES every row at or under the
+    // id it is given, so an accepted op with a larger id must not carry the prefix
+    // past an unaccepted smaller one — that would durably destroy a write the
+    // server never took. `Infinity` means "no failure seen, nothing to cap".
+    // Set-based (rather than prefix) op-log compaction removes the need for this
+    // cap entirely and is tracked as TODO-666.
+    let minUnacceptedId = Infinity;
+    const acceptedIdNums: number[] = [];
     if (acceptanceSet) {
       for (const result of acceptanceSet) {
         const op = this.opLog.find((o) => o.id === result.opId);
+        // An entry the server reports as failed is not an acceptance. It gets no
+        // verdict from this exchange: not marked synced, not announced to the
+        // tracker, not allowed to raise the durable prefix — it simply stays
+        // pending and is retried. Its write-concern promise still resolves below,
+        // with the failure the server reported.
+        if (result.success === false) {
+          logger.warn(
+            { opId: result.opId, error: result.error },
+            'OP_ACK results entry reports failure — leaving the op pending',
+          );
+          const failedIdNum = parseInt(result.opId, 10);
+          // An unparseable failed id cannot bound the prefix numerically, so no
+          // prefix is safe this exchange: suppress the durable mark entirely
+          // rather than guess a bound that might delete this op.
+          minUnacceptedId = isNaN(failedIdNum) ? -1 : Math.min(minUnacceptedId, failedIdNum);
+        }
         // Sticky terminal state (TG-SYNC-002): a refusal is never re-described as
         // an acceptance. A refused op is neither marked synced nor allowed to
         // raise the id whose durable delete this acknowledgement drives.
-        if (op?.rejected === true || this.rejectedOps.has(result.opId)) {
+        else if (op?.rejected === true || this.rejectedOps.has(result.opId)) {
           logger.debug(
             { opId: result.opId },
             'OP_ACK names an op the server already refused — not marking it synced',
@@ -1748,12 +1773,21 @@ export class SyncEngine {
             this.recordSyncStateTracker.onAcknowledge(op);
           }
           const acceptedIdNum = parseInt(result.opId, 10);
-          if (!isNaN(acceptedIdNum) && acceptedIdNum > maxSyncedId) {
-            maxSyncedId = acceptedIdNum;
+          if (!isNaN(acceptedIdNum)) {
+            acceptedIdNums.push(acceptedIdNum);
           }
         }
         // Resolve pending Write Concern promise if exists (delegates to WriteConcernManager)
         this.writeConcernManager.resolveWriteConcernPromise(result.opId, result);
+      }
+      // The durable prefix is the largest accepted id STRICTLY BELOW the smallest
+      // unaccepted one, not the largest accepted id outright. With no failure in
+      // the exchange the two are the same; with one, the difference is the whole
+      // point of the cap.
+      for (const acceptedIdNum of acceptedIdNums) {
+        if (acceptedIdNum < minUnacceptedId && acceptedIdNum > maxSyncedId) {
+          maxSyncedId = acceptedIdNum;
+        }
       }
     }
 

@@ -2030,6 +2030,45 @@ describe('SyncEngine', () => {
       expect(syncEngine!.getPendingOpsCount()).toBe(1);
     });
 
+    test('a results entry reporting success:false is not an acceptance and is not durably deleted', async () => {
+      const ws = await bootWith([
+        pendingOp('1', 'user1'),
+        pendingOp('2', 'user2'),
+        pendingOp('3', 'user3'),
+      ]);
+
+      // A foreign or future server may report a per-entry failure inside results
+      // rather than as an OP_REJECTED frame. This server never does, but the
+      // client is a protocol consumer: an entry it cannot read as an acceptance
+      // must not be marked synced, and — because markOpsSynced is a durable
+      // PREFIX delete — must not be swept away by a larger accepted id either.
+      ws.simulateMessage({
+        type: 'OP_ACK',
+        payload: {
+          lastId: '3',
+          results: [
+            { opId: '1', success: true, achievedLevel: 'PERSISTED' },
+            { opId: '2', success: false, achievedLevel: 'PERSISTED', error: 'partition down' },
+            { opId: '3', success: true, achievedLevel: 'PERSISTED' },
+          ],
+        },
+      });
+      await jest.runAllTimersAsync();
+
+      // Op 2 has no verdict this exchange: still pending, never spliced, and no
+      // refusal record — a failure is not a refusal.
+      expect(opLogOf().map((o) => o.id)).toEqual(['2']);
+      expect(opLogOf()[0].synced).toBe(false);
+      expect(syncEngine!.getPendingOpsCount()).toBe(1);
+      expect(syncEngine!.getRejectedOpCount()).toBe(0);
+
+      // The durable prefix stops BELOW the failed id: 1 is deleted, 2 survives on
+      // disk. Op 3 is accepted in memory but stays on disk until a later ack
+      // moves the prefix past 2 — it re-sends after a restart, which is safe.
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledTimes(1);
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(1);
+    });
+
     test('an EMPTY acceptance set falls through to the numeric prefix (foreign-server compatibility)', async () => {
       const ws = await bootWith([pendingOp('1', 'user1'), pendingOp('2', 'user2')]);
 
