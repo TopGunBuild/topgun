@@ -162,6 +162,69 @@ describe('useWriteRejections', () => {
     });
   });
 
+  describe('resubscription windows', () => {
+    // The queue of un-drained refusals used to be a ref shared by every effect
+    // instance. A drain scheduled by the outgoing subscription then ran after
+    // the incoming one had already queued into that same array, took the batch
+    // and discarded it as inactive — the event was gone, and its id was already
+    // in the dedup set, so a redelivery could not bring it back either.
+    it('publishes a refusal queued after a dependency change, with a stale drain in flight', async () => {
+      const { result, rerender } = renderHook(
+        (props: { mapName?: string }) => useWriteRejections(props),
+        { wrapper, initialProps: { mapName: 'todos' } as { mapName?: string } },
+      );
+
+      // Deliberately NOT inside an outer act(): a nested act defers passive
+      // effects to the outermost scope, which would run the drain before the
+      // cleanup and close the very window under test. Driven this way,
+      // `rerender`'s own act is outermost and flushes the swap synchronously.
+      // Schedules a drain that will not run until the end of this tick.
+      mockClient._trigger(rejection('1'));
+      // Replaces the subscription while that drain is still pending.
+      rerender({ mapName: undefined });
+      // Queued by the NEW subscription, before the stale drain fires.
+      mockClient._trigger(rejection('2'));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(result.current.rejections.map((r) => r.id)).toEqual(['1', '2']);
+    });
+
+    it('publishes a refusal delivered in the same tick as the cleanup', async () => {
+      // `onWriteRejected` is fire-and-forget: the emitter loops its listeners
+      // once and never replays. An event queued by the outgoing subscription has
+      // no later drain of its own, so the cleanup must flush it or it is lost.
+      const { result, rerender } = renderHook(
+        (props: { mapName?: string }) => useWriteRejections(props),
+        { wrapper, initialProps: { mapName: 'todos' } as { mapName?: string } },
+      );
+
+      // Outside act for the same reason as above: the cleanup must land between
+      // the enqueue and the drain.
+      mockClient._trigger(rejection('9'));
+      rerender({ mapName: undefined });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(result.current.rejections.map((r) => r.id)).toEqual(['9']);
+      expect(result.current.lastRejection?.id).toBe('9');
+    });
+
+    it('publishes one entry when the same id is delivered twice in one tick', async () => {
+      const { result } = renderHook(() => useWriteRejections(), { wrapper });
+
+      await act(async () => {
+        mockClient._trigger(rejection('5'));
+        mockClient._trigger(rejection('5'));
+        await Promise.resolve();
+      });
+
+      expect(result.current.rejections.map((r) => r.id)).toEqual(['5']);
+    });
+  });
+
   describe('clear', () => {
     it('empties the history and lastRejection', async () => {
       const { result } = renderHook(() => useWriteRejections(), { wrapper });
