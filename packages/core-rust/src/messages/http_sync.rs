@@ -229,8 +229,14 @@ pub struct HttpSyncError {
     /// - `Some(op_id)` ⇔ a per-operation **permanent** verdict naming that
     ///   operation: the server refused it and retrying it cannot help. The caller
     ///   must surface it as a refusal of that single operation and retire it.
-    /// - `None` ⇔ a batch-level **transient** or non-attributed error: nothing is
-    ///   said about any individual operation, and the batch stays retryable.
+    /// - `None` ⇔ a batch-level error attributed to no operation. Nothing is said
+    ///   about any individual operation, so no operation may be retired on it.
+    ///   Two kinds arrive here and `code` (from `OperationError::wire_code`) is
+    ///   what separates them: a **transient** failure, where retrying the batch is
+    ///   the correct response; and a **non-attributed permanent** failure —
+    ///   `UnknownService` / `WrongService` (501), or an operation carrying no id —
+    ///   where retrying fails identically and the caller must correct the batch
+    ///   instead.
     ///
     /// Reading a `None` entry as a per-operation refusal retires operations the
     /// server never refused; reading a `Some` entry as batch-level retries a write

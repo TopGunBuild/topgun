@@ -469,7 +469,7 @@ The `POST /sync` transport carries the same two channels in one response body: `
       </tr>
       <tr className="border-b border-card-border/50">
         <td className="py-2 px-3 font-mono text-xs text-neutral-600 dark:text-neutral-300">absent</td>
-        <td className="py-2 px-3 text-neutral-600 dark:text-neutral-300">A batch-level, transient error naming no operation. Nothing is said about any individual write; the batch stays retryable.</td>
+        <td className="py-2 px-3 text-neutral-600 dark:text-neutral-300">A batch-level error naming no operation. Nothing is said about any individual write, so retire nothing on it. <code>code</code> separates the two kinds that arrive here: a <strong>transient</strong> failure, where retrying the batch is correct; and a <strong>non-attributed permanent</strong> failure — <code>501</code> (unknown or wrong service), or an operation that carried no id — where retrying fails identically and you must correct the batch.</td>
       </tr>
     </tbody>
   </table>

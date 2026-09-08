@@ -44,8 +44,12 @@ export type WriteRejectionCause =
 export interface WriteRejection {
   /**
    * Stable identity of this rejection: used to deduplicate repeated deliveries
-   * and as a React key. The op id where the write has one, otherwise
-   * `` `${mapName}:${key}:${millis}:${counter}` ``.
+   * and as a React key. Always the op id — every emitter that exists today
+   * refuses a specific operation, so every event has one.
+   *
+   * An op-less refusal would need to define its own stable id, and none is
+   * defined: the only emitter that would produce one is the TODO-653 fix, which
+   * has not landed. Adding that emitter means specifying its id here first.
    */
   id: string;
   /** Map the refused write targeted. */
