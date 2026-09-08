@@ -1737,15 +1737,20 @@ export class SyncEngine {
     if (acceptanceSet) {
       for (const result of acceptanceSet) {
         const op = this.opLog.find((o) => o.id === result.opId);
-        // An entry the server reports as failed is not an acceptance. It gets no
+        // Only an entry that positively reports success is an acceptance.
+        // Anything else — an explicit failure, or a malformed entry from a
+        // foreign server that omits `success` or sends a non-boolean — gets no
         // verdict from this exchange: not marked synced, not announced to the
         // tracker, not allowed to raise the durable prefix — it simply stays
         // pending and is retried. Its write-concern promise still resolves below,
-        // with the failure the server reported.
-        if (result.success === false) {
+        // with whatever the server reported. Testing for `!== true` rather than
+        // `=== false` keeps an absent flag on the safe side of the durable
+        // delete: an unacknowledged op is retried, an over-acknowledged one is
+        // destroyed.
+        if (result.success !== true) {
           logger.warn(
-            { opId: result.opId, error: result.error },
-            'OP_ACK results entry reports failure — leaving the op pending',
+            { opId: result.opId, success: result.success, error: result.error },
+            'OP_ACK results entry does not report success — leaving the op pending',
           );
           const failedIdNum = parseInt(result.opId, 10);
           // An unparseable failed id cannot bound the prefix numerically, so no

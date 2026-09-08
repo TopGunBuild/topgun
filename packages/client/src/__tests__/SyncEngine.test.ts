@@ -2069,6 +2069,36 @@ describe('SyncEngine', () => {
       expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(1);
     });
 
+    test('a results entry that omits success is not an acceptance either', async () => {
+      const ws = await bootWith([
+        pendingOp('1', 'user1'),
+        pendingOp('2', 'user2'),
+        pendingOp('3', 'user3'),
+      ]);
+
+      // Nothing validates an inbound frame at runtime, so `success` is a type-level
+      // promise, not an enforced one. An entry carrying an error but no `success`
+      // must land on the safe side of a durable PREFIX delete: an op left pending
+      // is retried, an op deleted while unaccepted is gone.
+      ws.simulateMessage({
+        type: 'OP_ACK',
+        payload: {
+          lastId: '3',
+          results: [
+            { opId: '1', success: true, achievedLevel: 'PERSISTED' },
+            { opId: '2', achievedLevel: 'PERSISTED', error: 'partition down' },
+            { opId: '3', success: true, achievedLevel: 'PERSISTED' },
+          ],
+        },
+      });
+      await jest.runAllTimersAsync();
+
+      expect(opLogOf().map((o) => o.id)).toEqual(['2']);
+      expect(opLogOf()[0].synced).toBe(false);
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledTimes(1);
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(1);
+    });
+
     test('an EMPTY acceptance set falls through to the numeric prefix (foreign-server compatibility)', async () => {
       const ws = await bootWith([pendingOp('1', 'user1'), pendingOp('2', 'user2')]);
 
