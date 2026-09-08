@@ -25,16 +25,17 @@ const CAUSE_BY_WIRE_CODE: Readonly<Record<number, WriteRejectionCause>> = {
  * Translate the refusal's machine-readable wire code into a
  * {@link WriteRejectionCause}.
  *
- * An unrecognised or absent code is reported as `'forbidden'` rather than
- * dropped: the code is optional on the wire for historical reasons, and a
- * refusal whose code this client does not recognise is still a refusal the
- * application must be told about — swallowing it would recreate exactly the
- * silence this surface exists to remove. `'forbidden'` is the closest member of
- * the closed union to the one fact such a frame does establish ("the server
- * said no, permanently"), and the server's own {@link WriteRejection.reason}
- * carries the detail the cause cannot. The unmapped code is logged, so a server
- * that starts attributing a new refusal kind is visible to operators before any
- * consumer has to guess.
+ * An unrecognised or absent code is reported as `'unknown'` rather than dropped:
+ * the code is optional on the wire for historical reasons, and a refusal whose
+ * code this client does not recognise is still a refusal the application must be
+ * told about — swallowing it would recreate exactly the silence this surface
+ * exists to remove. It is reported as `'unknown'` rather than as the nearest
+ * named cause because a named cause asserts something the frame does not
+ * establish: an application branching on `'forbidden'` would show "access
+ * denied" for what may be a schema refusal from a newer server. The server's own
+ * {@link WriteRejection.reason} carries the detail the cause cannot. The
+ * unmapped code is logged, so a server that starts attributing a new refusal
+ * kind is visible to operators before any consumer has to guess.
  */
 export function writeRejectionCauseFromCode(code?: number): WriteRejectionCause {
   if (code !== undefined) {
@@ -42,10 +43,10 @@ export function writeRejectionCauseFromCode(code?: number): WriteRejectionCause 
     if (known) return known;
     logger.warn(
       { code },
-      'Refusal carries a wire code this client does not map to a cause — reporting it as forbidden',
+      'Refusal carries a wire code this client does not map to a cause — reporting it as unknown',
     );
   }
-  return 'forbidden';
+  return 'unknown';
 }
 
 /**

@@ -172,14 +172,19 @@ describe('writeRejectionCauseFromCode', () => {
     expect(writeRejectionCauseFromCode(422)).toBe('schema_invalid');
   });
 
-  test('reports an unmapped or absent code as forbidden, and logs the unmapped one', () => {
+  test('reports an unmapped or absent code as unknown, and logs the unmapped one', () => {
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
 
-    expect(writeRejectionCauseFromCode(undefined)).toBe('forbidden');
+    // Neither is reported under a named cause: an application branching on
+    // 'forbidden' would show "access denied" for a refusal kind this client
+    // version cannot classify — a newer server's schema refusal, say.
+    expect(writeRejectionCauseFromCode(undefined)).toBe('unknown');
     expect(warnSpy).not.toHaveBeenCalled();
 
-    expect(writeRejectionCauseFromCode(4003)).toBe('forbidden');
+    expect(writeRejectionCauseFromCode(499)).toBe('unknown');
     expect(warnSpy).toHaveBeenCalled();
+
+    expect(writeRejectionCauseFromCode(4003)).toBe('unknown');
     warnSpy.mockRestore();
   });
 });

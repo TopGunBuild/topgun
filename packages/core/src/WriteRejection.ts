@@ -14,13 +14,21 @@ import type { Timestamp } from './HLC';
  *   {@link WriteRejection.previouslyAcked}: **no emitter produces this cause
  *   today**; it is emitted by the TODO-653 fix.
  * - `'stale'` — refused on arrival after a long offline period.
+ * - `'unknown'` — a refusal kind this client version does not classify;
+ *   permanent — do not retry; read {@link WriteRejection.reason}. It is what a
+ *   refusal carrying no wire code, or a code from a newer server, is reported
+ *   as. Reporting such a refusal under a *named* cause would tell the
+ *   application something the frame does not establish — "access denied" for
+ *   what may be a schema refusal — so the honest answer is that the cause is
+ *   not known, not the nearest guess.
  */
 export type WriteRejectionCause =
   | 'forbidden'
   | 'schema_invalid'
   | 'value_too_large'
   | 'write_lost'
-  | 'stale';
+  | 'stale'
+  | 'unknown';
 
 /**
  * A write the server will never accept, reported to the application.
