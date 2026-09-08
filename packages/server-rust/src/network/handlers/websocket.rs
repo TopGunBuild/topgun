@@ -2001,19 +2001,40 @@ mod tests {
         }
     }
 
-    /// A CRDT service that answers `Overloaded` for any batch touching
+    /// The failure a [`SheddingCrdt`] stages for the batch it is aimed at.
+    ///
+    /// `OperationError` is not `Clone`, and the fixture's service is, so the
+    /// staged failure is carried as this discriminant and constructed per call.
+    #[derive(Clone, Copy)]
+    enum StagedFailure {
+        Overloaded,
+        Unauthorized,
+    }
+
+    impl StagedFailure {
+        fn error(self) -> OperationError {
+            match self {
+                Self::Overloaded => OperationError::Overloaded,
+                Self::Unauthorized => OperationError::Unauthorized,
+            }
+        }
+    }
+
+    /// A CRDT service that answers its staged failure for any batch touching
     /// `shed_key`, and delegates everything else to the real one.
     ///
     /// The production `LoadShedLayer` sheds by semaphore occupancy, which cannot
-    /// be aimed at one operation of a sequentially re-dispatched fallback. What
-    /// the transport branches on is the error's disposition, not where it was
-    /// raised, so the transient is staged at the service instead — the same
-    /// `OperationError::Overloaded` a singleton re-entering load shedding
+    /// be aimed at one operation of a sequentially re-dispatched fallback, and
+    /// `Unauthorized` is raised by middleware the fixture does not drive per
+    /// operation either. What the transport branches on is the error's
+    /// disposition, not where it was raised, so the failure is staged at the
+    /// service instead — the same `OperationError` value the real raiser
     /// produces.
     #[derive(Clone)]
     struct SheddingCrdt {
         inner: Arc<CrdtService>,
         shed_key: Option<String>,
+        staged: StagedFailure,
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
@@ -2042,7 +2063,8 @@ mod tests {
                 _ => false,
             });
             if sheds {
-                return Box::pin(async { Err(OperationError::Overloaded) });
+                let staged = self.staged;
+                return Box::pin(async move { Err(staged.error()) });
             }
             let mut inner = Arc::clone(&self.inner);
             Box::pin(async move { tower::Service::call(&mut inner, op).await })
@@ -2067,6 +2089,17 @@ mod tests {
         policies: Vec<PermissionPolicy>,
         schema: Option<(&str, MapSchema)>,
         shed_key: Option<String>,
+    ) -> FoldFixture {
+        build_fold_fixture_staging(policies, schema, shed_key, StagedFailure::Overloaded).await
+    }
+
+    /// The shedding fixture with the staged failure named, for the cases whose
+    /// subject is a disposition other than the transient one.
+    async fn build_fold_fixture_staging(
+        policies: Vec<PermissionPolicy>,
+        schema: Option<(&str, MapSchema)>,
+        shed_key: Option<String>,
+        staged: StagedFailure,
     ) -> FoldFixture {
         let server_config = Arc::new(ServerConfig::default());
         let factory = Arc::new(RecordStoreFactory::new(
@@ -2125,6 +2158,7 @@ mod tests {
                 SheddingCrdt {
                     inner: Arc::clone(&crdt),
                     shed_key: shed_key.clone(),
+                    staged,
                     calls: Arc::clone(&service_calls),
                 },
             );
@@ -2907,6 +2941,57 @@ mod tests {
             fx.service_calls.load(Ordering::Relaxed),
             1,
             "a transient sub-batch failure must not be re-dispatched per operation"
+        );
+    }
+
+    /// `Unauthorized` is classified transient, so a sub-batch that fails with it
+    /// is reported as the retryable 401 `ERROR` frame — never as a refusal, and
+    /// never acknowledged.
+    ///
+    /// This is the third assertion of the per-op verdict contract: the two
+    /// permanent-refusal paths are proven elsewhere, and this is the case that
+    /// says an auth failure is NOT one of them. "No fallback" is asserted the
+    /// same way its `Overloaded` twin asserts it — the service is called exactly
+    /// once, where a fallback would have called it once per operation — because
+    /// a fallback here would re-dispatch operations the server never refused and
+    /// hand each one a permanent verdict it has not earned.
+    #[tokio::test]
+    async fn unauthorized_subbatch_yields_401_error_and_no_rejection() {
+        let keys = keys_in_one_partition(3);
+        let fx = build_fold_fixture_staging(
+            Vec::new(),
+            None,
+            Some(keys[1].clone()),
+            StagedFailure::Unauthorized,
+        )
+        .await;
+        let ops = vec![
+            put_op("1201", FOLD_MAP, &keys[0], allowed_fields("first")),
+            put_op("1202", FOLD_MAP, &keys[1], allowed_fields("unauthorized")),
+            put_op("1203", FOLD_MAP, &keys[2], allowed_fields("third")),
+        ];
+
+        let msgs = decode_frames(&dispatch_batch_frames(&fx, ops).await);
+
+        let errors = error_payloads(&msgs);
+        assert_eq!(
+            errors.len(),
+            1,
+            "one batch-level error, not one per operation"
+        );
+        assert_eq!(errors[0].code, 401);
+        assert!(
+            rejections(&msgs).is_empty(),
+            "an auth failure is not a per-operation refusal"
+        );
+        assert!(
+            ack_payloads(&msgs).is_empty(),
+            "nothing may be acknowledged for a sub-batch that failed"
+        );
+        assert_eq!(
+            fx.service_calls.load(Ordering::Relaxed),
+            1,
+            "an Unauthorized sub-batch must not be re-dispatched per operation"
         );
     }
 
