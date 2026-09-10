@@ -1,0 +1,52 @@
+# One real `footprint --swapped -p <pid>` snapshot, captured against a
+# release `topgun-server` process so the runner's parser can be written and
+# run against real field names before it is committed.
+#
+# Binary sampled: target/release/topgun-server
+#   binary mtime:  2026-09-10T18:51:18+03:00
+#   nearest commit: b5e26010 (the last commit whose commit time precedes the
+#     binary's mtime; git does not embed a commit hash in the binary, and this
+#     spec's contract types are not compiled into any binary yet, so an exact
+#     match is not obtainable here -- footprint's field names do not depend on
+#     this spec's code, which is why any release binary is sufficient for this
+#     sample).
+# Process: started fresh with `TOPGUN_NO_AUTH=1 topgun-server --port 0` from a
+# scratch working directory, no client ever connected, sampled a few seconds
+# after boot. All swap/reclaim columns read 0 because nothing had run yet;
+# the sample exists to pin field names and units, not to exercise non-zero
+# values.
+# Captured with: /usr/bin/footprint --swapped -p <pid>
+#
+# ---- raw output below ----
+================================================================================
+topgun-server [51574]: 64-bit    Footprint: 5392 KB (16384 bytes per page)
+================================================================================
+
+  Dirty  (Swapped)      Clean  Reclaimable    Regions    Category
+    ---        ---        ---          ---        ---    ---
+3376 KB        0 B        0 B          0 B          4    MALLOC_SMALL
+ 672 KB        0 B        0 B          0 B         45    __DATA_CONST
+ 320 KB        0 B        0 B          0 B          8    MALLOC metadata
+ 256 KB        0 B        0 B          0 B          1    page table
+ 208 KB        0 B        0 B          0 B         22    stack
+ 132 KB        0 B        0 B          0 B         36    __DATA_DIRTY
+ 128 KB        0 B        0 B          0 B          1    MALLOC_TINY
+ 122 KB        0 B        0 B          0 B         37    __DATA
+  50 KB        0 B        0 B          0 B        130    unused dyld shared cache area
+  32 KB        0 B        0 B          0 B          1    MALLOC_NANO
+  32 KB        0 B        0 B          0 B         26    untagged (VM_ALLOCATE)
+  32 KB        0 B        0 B          0 B          2    __TPRO_CONST
+  16 KB        0 B        0 B          0 B          1    os_alloc_once
+  16 KB        0 B        0 B          0 B          1    tag 22
+    0 B        0 B    3952 KB          0 B         48    __TEXT
+    0 B        0 B      16 KB          0 B          3    __LINKEDIT
+    0 B        0 B        0 B          0 B         47    __AUTH_CONST
+    0 B        0 B        0 B          0 B         12    __AUTH
+    0 B        0 B        0 B          0 B          1    MALLOC_LARGE
+    0 B        0 B        0 B          0 B          1    mapped file
+    ---        ---        ---          ---        ---    ---
+5392 KB        0 B    3968 KB          0 B        429    TOTAL
+
+Auxiliary data:
+    phys_footprint: 5408 KB
+    phys_footprint_peak: 5408 KB
