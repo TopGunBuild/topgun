@@ -45,7 +45,7 @@ done
 # The D5 header literal, byte for byte -- a drift here means the runner and
 # this readout have gone out of sync, which is a FATAL condition rather
 # than something to parse around: every column offset below is positional.
-EXPECTED_HEADER='elapsed_secs,rss_mb,wal_mb,redb_mb,disk_total_mb,tombstone_bytes,phys_footprint_mb,phys_footprint_peak_mb,reclaimable_mb,compressed_mb,conj_snapshots_total,conj_current_epoch,conj_ceiling,conj_durable_watermark,durable_watermark_lag,claims,claim_lag_p50,claim_lag_p99,claim_lag_max,ret_epochs_claim_only,ret_epochs_durability_only,ret_epochs_both,ret_epochs_neither,ret_refs_claim_only,ret_refs_durability_only,ret_refs_both,ret_refs_neither,ret_stamped_bytes,ret_epochs_unslotted,ret_refs_open_epoch,ret_stamped_bytes_open_epoch,indexed_refs,considered_total,dropped_total,matched_nothing_total,absent_total,bytes_freed_total,removed_refs_observed_total,removed_bytes_observed_total,stamped_bytes_total'
+EXPECTED_HEADER='elapsed_secs,rss_mb,wal_mb,redb_mb,disk_total_mb,tombstone_bytes,phys_footprint_mb,phys_footprint_peak_mb,reclaimable_mb,compressed_mb,conj_snapshots_total,conj_current_epoch,conj_ceiling,conj_durable_watermark,durable_watermark_lag,claims,claim_lag_p50,claim_lag_p99,claim_lag_max,ret_epochs_claim_only,ret_epochs_durability_only,ret_epochs_both,ret_epochs_neither,ret_refs_claim_only,ret_refs_durability_only,ret_refs_both,ret_refs_neither,ret_stamped_bytes,ret_epochs_unslotted,ret_refs_open_epoch,ret_stamped_bytes_open_epoch,indexed_refs,considered_total,dropped_total,matched_nothing_total,absent_total,bytes_freed_total,removed_refs_observed_total,removed_bytes_observed_total,stamped_bytes_total,clean_mb'
 ACTUAL_HEADER="$(head -n 1 "$CSV")"
 if [ "$ACTUAL_HEADER" != "$EXPECTED_HEADER" ]; then
   echo "FATAL: $CSV header does not match the D5 literal" >&2
@@ -64,12 +64,12 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 LAST_ROW="$(tail -n +2 "$CSV" | tail -n 1)"
 LAST_ROW_COLS="$(awk -F',' '{print NF}' <<<"$LAST_ROW")"
-if [ "$LAST_ROW_COLS" != "40" ]; then
-  echo "FATAL: last row of $CSV has $LAST_ROW_COLS columns, expected 40" >&2
+if [ "$LAST_ROW_COLS" != "41" ]; then
+  echo "FATAL: last row of $CSV has $LAST_ROW_COLS columns, expected 41" >&2
   exit 2
 fi
 
-# Positional accessor -- the D5 header is a fixed 40-column literal, so a
+# Positional accessor -- the D5 header is a fixed 41-column literal, so a
 # column's meaning is its position, not a name looked up at run time.
 csv_col() {
   awk -F',' -v n="$1" '{print $n}' <<<"$LAST_ROW"
@@ -567,14 +567,17 @@ AWKEOF
 LC_ALL=C awk -f "$TMP_DIR/sectionD.awk" -v text_out="$SECTIOND_TXT" "$CONJUNCT_TSV"
 
 # ---------------------------------------------------------------------------
-# 6. sectionE -- footprint reconstruction over every CSV data row.
+# 6. sectionE -- footprint reconstruction over every CSV data row after t=0.
+#    rss counts resident clean pages that phys_footprint does not, so the
+#    reconstruction is phys_footprint + clean + reclaimable. The t=0 row is
+#    taken at server-ready, before the working set exists, and is excluded.
 # ---------------------------------------------------------------------------
 SECTIONE_TXT="$TMP_DIR/sectionE.txt"
 LC_ALL=C awk -F',' -v text_out="$SECTIONE_TXT" '
-NR > 1 {
+NR > 1 && $1 + 0 > 0 {
     total++
-    if ($2 == "" || $7 == "" || $9 == "" || $2 + 0 == 0) next
-    diff = $2 - ($7 + $9)
+    if ($2 == "" || $7 == "" || $9 == "" || $41 == "" || $2 + 0 == 0) next
+    diff = $2 - ($7 + $41 + $9)
     if (diff < 0) diff = -diff
     ratio = diff / $2
     if (ratio <= 0.02) within++

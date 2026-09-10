@@ -678,12 +678,13 @@ echo "server ready: pid $SERVER_PID (t0 = server-ready)"
 # ---------------------------------------------------------------------------
 kib_to_mb() { awk -v k="${1:-0}" 'BEGIN { printf "%.3f", k / 1024 }'; }
 
-# The CSV header literal (40 columns). The inherited six stay byte-identical
+# The CSV header literal (41 columns; column 41, clean_mb, is the footprint
+# Clean column, appended last so 1-40 keep their positions). The inherited six stay byte-identical
 # in content and position; columns 7-10 are the per-process memory breakdown;
 # columns 11-31 are the conjunct snapshot's counter and 20 gauges, in the
 # order the record's fields are defined; columns 32-40 are the pre-existing
 # prune _total/indexed_refs series this cell now also samples.
-CSV_HEADER='elapsed_secs,rss_mb,wal_mb,redb_mb,disk_total_mb,tombstone_bytes,phys_footprint_mb,phys_footprint_peak_mb,reclaimable_mb,compressed_mb,conj_snapshots_total,conj_current_epoch,conj_ceiling,conj_durable_watermark,durable_watermark_lag,claims,claim_lag_p50,claim_lag_p99,claim_lag_max,ret_epochs_claim_only,ret_epochs_durability_only,ret_epochs_both,ret_epochs_neither,ret_refs_claim_only,ret_refs_durability_only,ret_refs_both,ret_refs_neither,ret_stamped_bytes,ret_epochs_unslotted,ret_refs_open_epoch,ret_stamped_bytes_open_epoch,indexed_refs,considered_total,dropped_total,matched_nothing_total,absent_total,bytes_freed_total,removed_refs_observed_total,removed_bytes_observed_total,stamped_bytes_total'
+CSV_HEADER='elapsed_secs,rss_mb,wal_mb,redb_mb,disk_total_mb,tombstone_bytes,phys_footprint_mb,phys_footprint_peak_mb,reclaimable_mb,compressed_mb,conj_snapshots_total,conj_current_epoch,conj_ceiling,conj_durable_watermark,durable_watermark_lag,claims,claim_lag_p50,claim_lag_p99,claim_lag_max,ret_epochs_claim_only,ret_epochs_durability_only,ret_epochs_both,ret_epochs_neither,ret_refs_claim_only,ret_refs_durability_only,ret_refs_both,ret_refs_neither,ret_stamped_bytes,ret_epochs_unslotted,ret_refs_open_epoch,ret_stamped_bytes_open_epoch,indexed_refs,considered_total,dropped_total,matched_nothing_total,absent_total,bytes_freed_total,removed_refs_observed_total,removed_bytes_observed_total,stamped_bytes_total,clean_mb'
 
 # The ordered metric-name list behind the one /metrics scrape below. Position
 # 1 is the inherited tombstone-bytes gauge (CSV column 6); positions 2-31 are
@@ -723,10 +724,13 @@ scrape_prune_metrics() {
 # runner was committed: the TOTAL row's columns are Dirty, Swapped, Clean,
 # Reclaimable, Regions, Category (--swapped's own doc names the second column
 # "swapped/compressed"), and the Auxiliary-data block below the table carries
-# phys_footprint and phys_footprint_peak. Any parse miss -- a vanished pid, a
-# tool-output shape this awk does not recognise -- yields four empty cells,
-# never a fatal: the sampler must survive a process racing to exit under it.
-footprint_row() {   # $1 = pid; prints "phys_footprint_mb,phys_footprint_peak_mb,reclaimable_mb,compressed_mb"
+# phys_footprint and phys_footprint_peak. The TOTAL row's Clean column is
+# carried too: rss counts resident clean pages (mostly __TEXT) that
+# phys_footprint does not, so rss can only be reconstructed with it. Any parse
+# miss -- a vanished pid, a tool-output shape this awk does not recognise --
+# yields five empty cells, never a fatal: the sampler must survive a process
+# racing to exit under it.
+footprint_row() {   # $1 = pid; prints "phys_footprint_mb,phys_footprint_peak_mb,reclaimable_mb,compressed_mb,clean_mb"
   local out
   out="$(/usr/bin/footprint --swapped -p "$1" 2>/dev/null)" || out=""
   printf '%s' "$out" | awk '
@@ -741,15 +745,17 @@ footprint_row() {   # $1 = pid; prints "phys_footprint_mb,phys_footprint_peak_mb
     /^[[:space:]]*phys_footprint_peak:/ { pfp = to_mb($2, $3); pfp_ok = 1 }
     $NF == "TOTAL" && NF == 10 {
       compressed = to_mb($3, $4)
+      clean = to_mb($5, $6)
       reclaimable = to_mb($7, $8)
       total_ok = 1
     }
     END {
-      printf "%s,%s,%s,%s\n", \
+      printf "%s,%s,%s,%s,%s\n", \
         (pf_ok  ? sprintf("%.3f", pf)  : ""), \
         (pfp_ok ? sprintf("%.3f", pfp) : ""), \
         (total_ok ? sprintf("%.3f", reclaimable) : ""), \
-        (total_ok ? sprintf("%.3f", compressed)  : "")
+        (total_ok ? sprintf("%.3f", compressed)  : ""), \
+        (total_ok ? sprintf("%.3f", clean)       : "")
     }
   '
 }
@@ -861,10 +867,13 @@ emit_row() {
     ''|*[!0-9]*) tomb="" ;;
   esac
 
-  local footprint_cols
-  footprint_cols="$(footprint_row "$pid")"
+  local footprint_all footprint_cols clean_col
+  footprint_all="$(footprint_row "$pid")"
+  # Clean goes last so columns 1-40 keep the positions every readout rule cites.
+  footprint_cols="${footprint_all%,*}"
+  clean_col="${footprint_all##*,}"
 
-  printf '%d,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%d,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$elapsed" \
     "$(kib_to_mb "$rss_kib")" \
     "$(kib_to_mb "$wal_kib")" \
@@ -873,6 +882,7 @@ emit_row() {
     "$tomb" \
     "$footprint_cols" \
     "$prune_rest" \
+    "$clean_col" \
     >> "$CSV_OUT"
 }
 
