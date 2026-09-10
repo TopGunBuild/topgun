@@ -1,52 +1,56 @@
-# One real `footprint --swapped -p <pid>` snapshot, captured against a
-# release `topgun-server` process so the runner's parser can be written and
-# run against real field names before it is committed.
+# One real `footprint --swapped --format bytes -p <pid>` snapshot, captured
+# against a release `topgun-server` process so the runner's parser is pinned
+# against the exact command and output shape it parses.
 #
-# Binary sampled: target/release/topgun-server
-#   binary mtime:  2026-09-10T18:51:18+03:00
-#   nearest commit: b5e26010 (the last commit whose commit time precedes the
-#     binary's mtime; git does not embed a commit hash in the binary, and this
-#     spec's contract types are not compiled into any binary yet, so an exact
-#     match is not obtainable here -- footprint's field names do not depend on
-#     this spec's code, which is why any release binary is sufficient for this
-#     sample).
+# Binary sampled: target/release/topgun-server built at SPEC365_CODE_FREEZE
+#   (9fdaaf5a141bf24ee3b7801cb6a16c861ab228cc), sha256
+#   7fbad1b1114af3258a3dfe5e7721464e34c64420a87377bb3121a4a2d8193c90.
 # Process: started fresh with `TOPGUN_NO_AUTH=1 topgun-server --port 0` from a
-# scratch working directory, no client ever connected, sampled a few seconds
-# after boot. All swap/reclaim columns read 0 because nothing had run yet;
-# the sample exists to pin field names and units, not to exercise non-zero
-# values.
-# Captured with: /usr/bin/footprint --swapped -p <pid>
+# scratch working directory, no client ever connected, sampled 3 s after boot
+# (ps rss at the same moment: 9728 KiB).
+# Captured with: /usr/bin/footprint --swapped --format bytes -p <pid>
+#
+# Why `--format bytes`: the default ("formatted") output rounds to whole MB
+# once a value passes a few MB, which alone moves the rss reconstruction by
+# about 2 % on a 30-50 MB process. The layout is the same in both formats --
+# every value is a number followed by a unit token ("B" here) -- so the TOTAL
+# row keeps 10 fields: Dirty, Swapped, Clean, Reclaimable (value + unit each),
+# Regions, Category.
+#
+# Parser check against this sample (expected): phys_footprint 5.328 MB,
+# phys_footprint_peak 5.328 MB, reclaimable 0.000, compressed 0.000,
+# clean 3.859 MB.
 #
 # ---- raw output below ----
 ================================================================================
-topgun-server [51574]: 64-bit    Footprint: 5392 KB (16384 bytes per page)
+topgun-server [90839]: 64-bit    Footprint: 5570944 B (16384 bytes per page)
 ================================================================================
 
-  Dirty  (Swapped)      Clean  Reclaimable    Regions    Category
-    ---        ---        ---          ---        ---    ---
-3376 KB        0 B        0 B          0 B          4    MALLOC_SMALL
- 672 KB        0 B        0 B          0 B         45    __DATA_CONST
- 320 KB        0 B        0 B          0 B          8    MALLOC metadata
- 256 KB        0 B        0 B          0 B          1    page table
- 208 KB        0 B        0 B          0 B         22    stack
- 132 KB        0 B        0 B          0 B         36    __DATA_DIRTY
- 128 KB        0 B        0 B          0 B          1    MALLOC_TINY
- 122 KB        0 B        0 B          0 B         37    __DATA
-  50 KB        0 B        0 B          0 B        130    unused dyld shared cache area
-  32 KB        0 B        0 B          0 B          1    MALLOC_NANO
-  32 KB        0 B        0 B          0 B         26    untagged (VM_ALLOCATE)
-  32 KB        0 B        0 B          0 B          2    __TPRO_CONST
-  16 KB        0 B        0 B          0 B          1    os_alloc_once
-  16 KB        0 B        0 B          0 B          1    tag 22
-    0 B        0 B    3952 KB          0 B         48    __TEXT
-    0 B        0 B      16 KB          0 B          3    __LINKEDIT
-    0 B        0 B        0 B          0 B         47    __AUTH_CONST
-    0 B        0 B        0 B          0 B         12    __AUTH
-    0 B        0 B        0 B          0 B          1    MALLOC_LARGE
-    0 B        0 B        0 B          0 B          1    mapped file
-    ---        ---        ---          ---        ---    ---
-5392 KB        0 B    3968 KB          0 B        429    TOTAL
+      Dirty     (Swapped)         Clean   Reclaimable    Regions    Category
+        ---           ---           ---           ---        ---    ---
+  3489792 B           0 B           0 B           0 B          4    MALLOC_SMALL
+   688128 B           0 B           0 B           0 B         45    __DATA_CONST
+   327680 B           0 B           0 B           0 B          8    MALLOC metadata
+   278912 B           0 B           0 B           0 B          1    page table
+   212992 B           0 B           0 B           0 B         22    stack
+   134992 B           0 B           0 B           0 B         36    __DATA_DIRTY
+   131072 B           0 B           0 B           0 B          1    MALLOC_TINY
+   125437 B           0 B           0 B           0 B         37    __DATA
+    50923 B           0 B           0 B           0 B        130    unused dyld shared cache area
+    32768 B           0 B           0 B           0 B         26    untagged (VM_ALLOCATE)
+    32768 B           0 B           0 B           0 B          1    MALLOC_NANO
+    32712 B           0 B           0 B           0 B          2    __TPRO_CONST
+    16384 B           0 B           0 B           0 B          1    os_alloc_once
+    16384 B           0 B           0 B           0 B          1    tag 22
+        0 B           0 B     4030464 B           0 B         48    __TEXT
+        0 B           0 B       16384 B           0 B          3    __LINKEDIT
+        0 B           0 B           0 B           0 B         47    __AUTH_CONST
+        0 B           0 B           0 B           0 B         12    __AUTH
+        0 B           0 B           0 B           0 B          1    MALLOC_LARGE
+        0 B           0 B           0 B           0 B          1    mapped file
+        ---           ---           ---           ---        ---    ---
+  5570944 B           0 B     4046848 B           0 B        429    TOTAL
 
 Auxiliary data:
-    phys_footprint: 5408 KB
-    phys_footprint_peak: 5408 KB
+    phys_footprint: 5587328 B
+    phys_footprint_peak: 5587328 B

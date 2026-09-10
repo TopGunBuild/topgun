@@ -732,7 +732,10 @@ scrape_prune_metrics() {
 # racing to exit under it.
 footprint_row() {   # $1 = pid; prints "phys_footprint_mb,phys_footprint_peak_mb,reclaimable_mb,compressed_mb,clean_mb"
   local out
-  out="$(/usr/bin/footprint --swapped -p "$1" 2>/dev/null)" || out=""
+  # --format bytes: the default output rounds to whole MB at this scale, which
+  # alone moves the reconstruction by ~2 % on a 30-50 MB process. The layout is
+  # unchanged (value then unit, "B" here), so to_mb's bytes branch handles it.
+  out="$(/usr/bin/footprint --swapped --format bytes -p "$1" 2>/dev/null)" || out=""
   printf '%s' "$out" | awk '
     function to_mb(v, unit,   n) {
       n = v + 0
