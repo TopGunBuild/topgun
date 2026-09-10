@@ -3822,7 +3822,11 @@ mod tests {
                 inner: Arc::new(NullDataStore),
                 watermark: 999,
             });
-            let f = TombstoneFrontier::new(Some(store));
+            let mut f = TombstoneFrontier::new(Some(store));
+            // Forced rather than inherited from the environment: a disarmed publish returns
+            // before taking the lock, so an operator shell exporting a falsey arming value
+            // would turn every "unchanged" assertion below into a vacuous pass.
+            f.prune_arming = PruneRecordArming::Armed;
             f.set_epoch_width(1);
             for i in 1..=3u32 {
                 f.stamp_tombstone("m", &format!("k{i}"), &format!("TAG{i}"));

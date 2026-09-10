@@ -119,9 +119,10 @@ mod tests {
     /// rendering, so the body it returns carries every one of the 21 conjunct series —
     /// not just the ones a prior test happened to touch.
     ///
-    /// Only presence is asserted: the process-global recorder is shared across the
-    /// test binary, so a concurrently running test can move a value between the two
-    /// scrapes this test would otherwise compare.
+    /// The process-global recorder is shared across the test binary, so a concurrently
+    /// running test can move any gauge between two renders. Hence only presence is
+    /// asserted for the gauges, plus a strict rise of the snapshot counter: a counter never
+    /// goes down, so that rise survives any interleaving.
     #[tokio::test]
     async fn metrics_handler_publishes_conjunct_snapshot_before_render() {
         use crate::service::middleware::init_observability;
@@ -135,7 +136,8 @@ mod tests {
             METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_DURABILITY_ONLY,
             METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_NEITHER,
             METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_UNSLOTTED,
-            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_BOTH, METRIC_PRUNE_CONJUNCT_RETAINED_REFS_CLAIM_ONLY,
+            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_BOTH,
+            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_CLAIM_ONLY,
             METRIC_PRUNE_CONJUNCT_RETAINED_REFS_DURABILITY_ONLY,
             METRIC_PRUNE_CONJUNCT_RETAINED_REFS_NEITHER,
             METRIC_PRUNE_CONJUNCT_RETAINED_REFS_OPEN_EPOCH,
@@ -145,12 +147,26 @@ mod tests {
         };
         use crate::tombstone_frontier_impl::TombstoneFrontier;
 
+        // Reads a counter's value from a rendered body; absent reads as 0.
+        fn counter_value(body: &str, name: &str) -> u64 {
+            body.lines()
+                .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+        }
+
         // `init_observability()` first, so the recorder is bound before anything else
         // touches a metric; a series touched before binding would be lost to this render.
-        let obs = init_observability();
+        let obs = Arc::new(init_observability());
         let mut state = test_state_no_obs();
-        state.observability = Some(Arc::new(obs));
+        state.observability = Some(Arc::clone(&obs));
         state.frontier = Some(Arc::new(TombstoneFrontier::new(None)));
+        // Building the frontier registers every conjunct series eagerly, so presence alone
+        // would pass even if the handler never published. The snapshot counter only moves on
+        // a publish and never goes down, so a strict rise across the handler call proves the
+        // publish happened, however many other tests share the global recorder.
+        let snapshots_before =
+            counter_value(&obs.render_metrics(), METRIC_PRUNE_CONJUNCT_SNAPSHOTS_TOTAL);
 
         let resp = metrics_handler(State(state)).await.into_response();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -188,5 +204,12 @@ mod tests {
                  body was:\n{body}"
             );
         }
+
+        let snapshots_after = counter_value(&body, METRIC_PRUNE_CONJUNCT_SNAPSHOTS_TOTAL);
+        assert!(
+            snapshots_after > snapshots_before,
+            "the handler's own body must show a snapshot published during this scrape \
+             (before={snapshots_before}, after={snapshots_after})"
+        );
     }
 }

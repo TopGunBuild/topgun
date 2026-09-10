@@ -726,7 +726,8 @@ pub struct ConjunctSnapshotRecord {
     pub durable_watermark_lag: Epoch,
     /// The number of live claims observed.
     pub claims: u64,
-    /// Nearest-rank 50th percentile of `current_epoch - claim` over the observed claim set.
+    /// Nearest-rank 50th percentile of `current_epoch.saturating_sub(claim)` over the observed
+    /// claim set.
     pub claim_lag_p50: u64,
     /// Nearest-rank 99th percentile of the same distribution.
     pub claim_lag_p99: u64,
