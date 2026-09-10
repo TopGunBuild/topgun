@@ -108,3 +108,100 @@ that column 41 and the exact-byte footprint read correct.
   scrapes serially, so the pin holds for this cell; known limit 3's fallback covers any mismatch.
 
 ## APPEND-ONLY BELOW
+
+## §2 — Executed record
+
+Execution 1 of 3 (cap). One `conj900` run: 900 s, 16 CSV rows at a 60 s cadence, started after §1
+was committed (`5d91128d`); artifacts committed in `857d6cdc`.
+
+### Verdict (§F, verbatim)
+
+```
+READOUT: O2; retained_closed_epochs=1; reconciliation=SPLIT
+```
+
+Routing per the frozen table: **O2 INDEX_DURABILITY → TODO-634** (write-behind / watermark carve).
+`reconciliation=SPLIT` localises PD-F12 at the drain-return / prune-loop boundary (split epochs 10, 27).
+
+### §A — retained epochs (`conjunct` line `seq=195`, matched to the last row's `conj_snapshots_total=195`)
+
+| epoch | class | open |
+|---|---|---|
+| 29 | durability_only | false |
+| 30 | | true |
+
+Consistency: counted `claim_only=0 durability_only=1 both=0 neither=0` equals the line's counts;
+`retained_truncated=false`. OK.
+
+### §B — where the retained tag tombstones live (last row)
+
+| quantity | value |
+|---|---|
+| `B_store` | 46641 |
+| `ret_stamped_bytes` (closed epochs) | 22000 |
+| `ret_stamped_bytes_open_epoch` | 21472 |
+| `B_index` | 43472 |
+| `X = B_store − B_index` | 3169 |
+| `X / B_store` | 0.067945 |
+| `tau` | 4664.1 |
+
+`X ≤ tau`, so O1 does not fire and `X ≥ −tau`, so O5 does not fire; `ret_refs_durability_only >
+ret_refs_claim_only` routes to O2. Durable census (post-kill redb): tombstone_entries=1454,
+or_map_keys=96, keys_with_tombstones=48, max_tombstones_per_key=38.
+
+### §C — per-exited-epoch reconciliation
+
+27 exited epochs (2–28), one drain pass each.
+
+| status | count | epochs |
+|---|---|---|
+| RECONCILED | 25 | all others |
+| NO_SETTLEMENT | 2 | 10, 27 |
+| IN_FLIGHT | 0 | |
+| MISMATCH | 0 | |
+
+Totals: refs_returned=27000, considered=25000, dropped=25000, matched_nothing=0, absent=0,
+restored_sum=0, bytes_returned=577718, bytes_freed=534718. The last-row metric check reads
+`removed_refs_observed_total=27000` against `considered_total=25000` (MISMATCH): the counters
+independently confirm the two unsettled drains, 2000 refs that left the index and never reached
+the prune loop. Neither split epoch is the last pass, so IN_FLIGHT does not apply.
+
+### §D — claim lag (195 `conjunct` lines)
+
+max `claim_lag_max` = 1; `claim_lag_p50` min/median/max = 0/0/1; `claim_lag_p99` = 0/0/1;
+max `claims` = 1; `durable_watermark_lag` max = 4, last = 2.
+
+### §E — footprint reconstruction
+
+`rows_within_2pct=15/15` (rows with `elapsed_secs > 0`).
+
+### Harness and provenance
+
+- Harness exit code: **1**. Attribution: the shipped tombstone-byte slope hard gate failed
+  (`27591.9 B/h` over 180 samples; peak 48049, last 44045 bytes). `finishedReason`: `tombstone-byte growth slope 27591.9 bytes/h exceeds 512.0 bytes/h: tombstone-byte growth slope 27591.9 bytes/h exceeds 512.0 bytes/h (total growth 48049 bytes over 180 samples, last-half window 446s)`.
+  Recorded, and not a readout input (§1).
+- `matrix.txt`: repo HEAD `5d91128d943e28e798e50130d7cc64b3498dc87e`; server binary sha256
+  `27e71e98841c2b1128423186028e43ba3defc688ddbcd61c0f5547a5400b6527`, built by the runner from
+  that HEAD, whose `.rs` tree equals `SPEC365_CODE_FREEZE` (the runner's D6 guard held).
+- Not a readout input, recorded for the successor: `rss_mb` rose from 0.031 to 546.578 MB over the
+  cell (OLS 2260.7 MB/h) while `B_store` stayed under 47 KB, so the RSS growth is not
+  tombstone bytes.
+
+### Prediction scored
+
+| clause | predicted | observed | score |
+|---|---|---|---|
+| verdict | `READOUT: O1` | `READOUT: O2` | miss |
+| `X/B_store` on the last row | `≥ 0.5` | 0.068 | miss |
+| `retained_closed_epochs` | `≤ 1` | 1 | hit |
+| class of that epoch | `claim_only` | `durability_only` | miss |
+| reconciliation | `RECONCILED` | `SPLIT` (10, 27) | miss |
+| max `claim_lag_max` | `≤ 3` | 1 | hit |
+
+### §1 integrity
+
+sha256 over §1's byte range (from the first byte of this file through the `## APPEND-ONLY BELOW`
+line, inclusive), computed with
+`awk '/^## APPEND-ONLY BELOW$/{print; exit} {print}' spec365-manifest.md | shasum -a 256`:
+`d1da2c4aad7468d87d87d2809759b27f2b936555026a587918728bb6f2188d20`. It equals the value computed
+when §1 was committed.
