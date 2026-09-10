@@ -199,6 +199,25 @@ impl SweepToken {
     }
 }
 
+/// The observability-only readout [`ReclamationBoundary::observe_claim_set`] returns.
+///
+/// # No `Serialize`/`Deserialize` derive, deliberately
+///
+/// It is never serialised — the same class as [`SweepToken`] / [`ClaimAdmission`]. The Rust
+/// checklist's camelCase-on-serialize item targets serialised structs only; it does not apply
+/// here.
+///
+/// `claims` holds values only — no [`ClaimantId`] — and is unordered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimSetObservation {
+    /// The ceiling proposal, computed by the same [`RegistryState::prune_ceiling`] helper
+    /// [`ReclamationBoundary::begin_sweep`] uses, inside the same lock acquisition that copies
+    /// `claims`.
+    pub ceiling: Epoch,
+    /// The live claim positions, unordered, carrying no claimant identity.
+    pub claims: Vec<Epoch>,
+}
+
 /// The reclamation boundary protocol: register claims, reduce them, bracket sweeps.
 ///
 /// # Never a head, never a caller-supplied boundary (HARD)
@@ -405,6 +424,16 @@ pub trait ReclamationBoundary: Send + Sync {
     /// Resolved **once** at construction, never per query, so the parse and the arithmetic cannot
     /// observe different answers.
     fn margin_epochs(&self) -> u64;
+
+    /// A scrape-time readout of the live claim set under `scope`.
+    ///
+    /// # Observability ONLY — MUST NOT gate reclamation (HARD, the same clause as
+    /// [`Self::min_live_claim`])
+    ///
+    /// It moves **no** gauge and increments **no** counter. `ceiling` is computed by the same
+    /// [`RegistryState::prune_ceiling`] helper [`Self::begin_sweep`] uses, inside the **same** lock
+    /// acquisition that copies `claims`.
+    fn observe_claim_set(&self, scope: ClaimScope) -> ClaimSetObservation;
 }
 
 /// Default reclamation margin, in **epochs**, subtracted from the minimum live claim to form the
