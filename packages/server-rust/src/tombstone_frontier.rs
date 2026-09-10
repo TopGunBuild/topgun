@@ -673,6 +673,93 @@ pub enum PruneRecordArming {
     Disarmed,
 }
 
+/// Which prune conjunct, if any, is holding a given (closed) epoch back from the drain.
+///
+/// `Neither` means the epoch is eligible for the drain filter's next pass — it is the classifier's
+/// negation of `:971`'s admission test, never a third disqualifying condition of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConjunctBinding {
+    /// The claim conjunct alone blocks: the durability fence has already passed this epoch.
+    ClaimOnly,
+    /// The durability conjunct alone blocks: the claim ceiling has already passed this epoch.
+    DurabilityOnly,
+    /// Both conjuncts block.
+    Both,
+    /// Neither conjunct blocks — the epoch is eligible, awaiting a pass.
+    Neither,
+}
+
+impl ConjunctBinding {
+    /// The stable label the `conjunct` line's `retained` list renders per epoch, and the same
+    /// label the mechanical readout parses back.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ConjunctBinding::ClaimOnly => "claim_only",
+            ConjunctBinding::DurabilityOnly => "durability_only",
+            ConjunctBinding::Both => "both",
+            ConjunctBinding::Neither => "neither",
+        }
+    }
+}
+
+/// One scrape-time snapshot of both prune conjuncts, computed fresh on every call — see
+/// [`crate::tombstone_frontier_impl::TombstoneFrontier::publish_conjunct_snapshot`] for the
+/// algorithm that fills it.
+///
+/// Every field is `u64` / [`Epoch`]; there is no `Option` field because a snapshot is either fully
+/// computed or not emitted at all — the `Disarmed` early return skips the whole call rather than
+/// emitting a partially filled record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConjunctSnapshotRecord {
+    /// The frontier's current (open) epoch at snapshot time.
+    pub current_epoch: Epoch,
+    /// The claim ceiling: [`crate::reclamation_registry::ReclamationBoundary::observe_claim_set`]'s
+    /// `ceiling`, read in the same lock acquisition as `claims`.
+    pub ceiling: Epoch,
+    /// The durable epoch watermark, `max(state.durable_epoch_watermark,
+    /// compute_durable_epoch_watermark(flushed))`, computed into a local — this snapshot never
+    /// advances the cached field.
+    pub durable_watermark: Epoch,
+    /// `current_epoch.saturating_sub(durable_watermark)`.
+    pub durable_watermark_lag: Epoch,
+    /// The number of live claims observed.
+    pub claims: u64,
+    /// Nearest-rank 50th percentile of `current_epoch - claim` over the observed claim set.
+    pub claim_lag_p50: u64,
+    /// Nearest-rank 99th percentile of the same distribution.
+    pub claim_lag_p99: u64,
+    /// The maximum of the same distribution.
+    pub claim_lag_max: u64,
+    /// Closed epochs (`e != current_epoch`) classified [`ConjunctBinding::ClaimOnly`].
+    pub retained_epochs_claim_only: u64,
+    /// Closed epochs classified [`ConjunctBinding::DurabilityOnly`].
+    pub retained_epochs_durability_only: u64,
+    /// Closed epochs classified [`ConjunctBinding::Both`].
+    pub retained_epochs_both: u64,
+    /// Closed epochs classified [`ConjunctBinding::Neither`] (eligible, awaiting a pass).
+    pub retained_epochs_neither: u64,
+    /// Refs held by [`ConjunctBinding::ClaimOnly`] closed epochs.
+    pub retained_refs_claim_only: u64,
+    /// Refs held by [`ConjunctBinding::DurabilityOnly`] closed epochs.
+    pub retained_refs_durability_only: u64,
+    /// Refs held by [`ConjunctBinding::Both`] closed epochs.
+    pub retained_refs_both: u64,
+    /// Refs held by [`ConjunctBinding::Neither`] closed epochs.
+    pub retained_refs_neither: u64,
+    /// Sum of `epoch_slots[e].stamped_bytes` over every classified closed epoch (`0` for a key
+    /// with no slot entry).
+    pub retained_stamped_bytes: u64,
+    /// The number of closed epoch-index keys with no `epoch_slots` entry.
+    pub retained_epochs_unslotted: u64,
+    /// The open epoch's (`e == current_epoch`) own ref count. The open epoch is never classified —
+    /// this and `retained_stamped_bytes_open_epoch` are its only representation on this record.
+    pub retained_refs_open_epoch: u64,
+    /// The open epoch's entry-side stamped bytes (`0` if unslotted).
+    pub retained_stamped_bytes_open_epoch: u64,
+}
+
 /// Sink for the prune record.
 ///
 /// The prune loop and the frontier code against this trait, never against a concrete recorder, so
@@ -837,10 +924,19 @@ pub trait PruneRecordObserver: Send + Sync {
     /// `removed_bytes_observed` — the OBSERVATION series, credited on the `DrainedByPrune` arm
     /// only, distinct from the ATTRIBUTION series the entry/exit rows already carry.
     fn observe_epoch_residency(&self, record: &PruneEpochResidencyRecord);
+
+    /// One scrape-time snapshot of both prune conjuncts — see
+    /// [`crate::tombstone_frontier_impl::TombstoneFrontier::publish_conjunct_snapshot`].
+    ///
+    /// # Gauge neutrality (HARD, restated — `TG-OR-006`(b))
+    ///
+    /// The body names no tombstone-byte counter or gauge. This method has **no default body**, so
+    /// neither implementor can silently skip it.
+    fn observe_conjunct_snapshot(&self, record: &ConjunctSnapshotRecord);
 }
 
 // ---------------------------------------------------------------------------
-// Pinned metric names — 24 counters, 11 gauges, 7 histograms
+// Pinned metric names — 25 counters, 31 gauges, 7 histograms
 // ---------------------------------------------------------------------------
 //
 // The name set is CLOSED. Emitting a series under this prefix that is not named here, or emitting
@@ -965,6 +1061,67 @@ pub const METRIC_PRUNE_EPOCH_CONSIDERED: &str = "topgun_or_prune_epoch_considere
 pub const METRIC_PRUNE_EPOCH_DROPPED: &str = "topgun_or_prune_epoch_dropped";
 /// Histogram: tombstone bytes freed, per drained epoch.
 pub const METRIC_PRUNE_EPOCH_BYTES_FREED: &str = "topgun_or_prune_epoch_bytes_freed";
+
+// ---------------------------------------------------------------------------
+// Conjunct instrument — one counter, 20 gauges, in `ConjunctSnapshotRecord` field order
+// ---------------------------------------------------------------------------
+
+/// Counter: scrape-time conjunct snapshots published.
+pub const METRIC_PRUNE_CONJUNCT_SNAPSHOTS_TOTAL: &str = "topgun_or_prune_conjunct_snapshots_total";
+/// Gauge: [`ConjunctSnapshotRecord::current_epoch`].
+pub const METRIC_PRUNE_CONJUNCT_CURRENT_EPOCH: &str = "topgun_or_prune_conjunct_current_epoch";
+/// Gauge: [`ConjunctSnapshotRecord::ceiling`].
+pub const METRIC_PRUNE_CONJUNCT_CEILING: &str = "topgun_or_prune_conjunct_ceiling";
+/// Gauge: [`ConjunctSnapshotRecord::durable_watermark`].
+pub const METRIC_PRUNE_CONJUNCT_DURABLE_WATERMARK: &str =
+    "topgun_or_prune_conjunct_durable_watermark";
+/// Gauge: [`ConjunctSnapshotRecord::durable_watermark_lag`].
+pub const METRIC_PRUNE_CONJUNCT_DURABLE_WATERMARK_LAG: &str =
+    "topgun_or_prune_conjunct_durable_watermark_lag";
+/// Gauge: [`ConjunctSnapshotRecord::claims`].
+pub const METRIC_PRUNE_CONJUNCT_CLAIMS: &str = "topgun_or_prune_conjunct_claims";
+/// Gauge: [`ConjunctSnapshotRecord::claim_lag_p50`].
+pub const METRIC_PRUNE_CONJUNCT_CLAIM_LAG_P50: &str = "topgun_or_prune_conjunct_claim_lag_p50";
+/// Gauge: [`ConjunctSnapshotRecord::claim_lag_p99`].
+pub const METRIC_PRUNE_CONJUNCT_CLAIM_LAG_P99: &str = "topgun_or_prune_conjunct_claim_lag_p99";
+/// Gauge: [`ConjunctSnapshotRecord::claim_lag_max`].
+pub const METRIC_PRUNE_CONJUNCT_CLAIM_LAG_MAX: &str = "topgun_or_prune_conjunct_claim_lag_max";
+/// Gauge: [`ConjunctSnapshotRecord::retained_epochs_claim_only`].
+pub const METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_CLAIM_ONLY: &str =
+    "topgun_or_prune_conjunct_retained_epochs_claim_only";
+/// Gauge: [`ConjunctSnapshotRecord::retained_epochs_durability_only`].
+pub const METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_DURABILITY_ONLY: &str =
+    "topgun_or_prune_conjunct_retained_epochs_durability_only";
+/// Gauge: [`ConjunctSnapshotRecord::retained_epochs_both`].
+pub const METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_BOTH: &str =
+    "topgun_or_prune_conjunct_retained_epochs_both";
+/// Gauge: [`ConjunctSnapshotRecord::retained_epochs_neither`].
+pub const METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_NEITHER: &str =
+    "topgun_or_prune_conjunct_retained_epochs_neither";
+/// Gauge: [`ConjunctSnapshotRecord::retained_refs_claim_only`].
+pub const METRIC_PRUNE_CONJUNCT_RETAINED_REFS_CLAIM_ONLY: &str =
+    "topgun_or_prune_conjunct_retained_refs_claim_only";
+/// Gauge: [`ConjunctSnapshotRecord::retained_refs_durability_only`].
+pub const METRIC_PRUNE_CONJUNCT_RETAINED_REFS_DURABILITY_ONLY: &str =
+    "topgun_or_prune_conjunct_retained_refs_durability_only";
+/// Gauge: [`ConjunctSnapshotRecord::retained_refs_both`].
+pub const METRIC_PRUNE_CONJUNCT_RETAINED_REFS_BOTH: &str =
+    "topgun_or_prune_conjunct_retained_refs_both";
+/// Gauge: [`ConjunctSnapshotRecord::retained_refs_neither`].
+pub const METRIC_PRUNE_CONJUNCT_RETAINED_REFS_NEITHER: &str =
+    "topgun_or_prune_conjunct_retained_refs_neither";
+/// Gauge: [`ConjunctSnapshotRecord::retained_stamped_bytes`].
+pub const METRIC_PRUNE_CONJUNCT_RETAINED_STAMPED_BYTES: &str =
+    "topgun_or_prune_conjunct_retained_stamped_bytes";
+/// Gauge: [`ConjunctSnapshotRecord::retained_epochs_unslotted`].
+pub const METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_UNSLOTTED: &str =
+    "topgun_or_prune_conjunct_retained_epochs_unslotted";
+/// Gauge: [`ConjunctSnapshotRecord::retained_refs_open_epoch`].
+pub const METRIC_PRUNE_CONJUNCT_RETAINED_REFS_OPEN_EPOCH: &str =
+    "topgun_or_prune_conjunct_retained_refs_open_epoch";
+/// Gauge: [`ConjunctSnapshotRecord::retained_stamped_bytes_open_epoch`].
+pub const METRIC_PRUNE_CONJUNCT_RETAINED_STAMPED_BYTES_OPEN_EPOCH: &str =
+    "topgun_or_prune_conjunct_retained_stamped_bytes_open_epoch";
 
 // ---------------------------------------------------------------------------
 // Drain attribution classification
