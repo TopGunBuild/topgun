@@ -67,12 +67,11 @@
 # enumerable with:
 #   diff spec362b-durable.sh spec365-conjuncts.sh
 #
-# THIS RUNNER CANNOT COMPLETE A REAL RUN YET. Its freeze gate (g) refuses
-# while SPEC365_CODE_FREEZE still reads its placeholder, which is true until
-# the instrument this file samples exists in a committed tree. That is
-# intentional: this file is authored and syntax-checked now, against the
-# contract's names as specified, and is smoke-validated once that instrument
-# lands.
+# THE FREEZE GATE (g) PINS THE .rs TREE. SPEC365_CODE_FREEZE names the commit
+# at which the instrument this file samples was complete and the full gate
+# matrix green. The runner refuses to start if the literal ever reads its
+# placeholder again, or if any .rs file at HEAD differs from that commit, so
+# the series it records can only come from the frozen instrument.
 #
 # THE MATRIX IS EXECUTED, NOT TRANSCRIBED. Every knob is a literal in this
 # file, so the record of what was run is this committed script rather than an
