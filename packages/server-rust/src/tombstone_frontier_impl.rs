@@ -71,14 +71,14 @@ use crate::reclamation_registry::{
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::RecordValue;
 use crate::tombstone_frontier::{
-    CausalFrontier, ClientId, Epoch, EpochExitKind, GateToken, PruneClaimSpanRecord,
-    PruneEpochEntryRecord, PruneEpochRecord, PruneEpochResidencyRecord, PrunePassRecord,
-    PruneRecordArming, PruneRecordObserver, PruneSafety, METRIC_PRUNE_ABSENT_TOTAL,
-    METRIC_PRUNE_BYTES_FREED_TOTAL, METRIC_PRUNE_CLAIM_LAG_EPOCHS, METRIC_PRUNE_CLAIM_SPAN_EPOCHS,
-    METRIC_PRUNE_CONSIDERED_TOTAL, METRIC_PRUNE_CURRENT_EPOCH, METRIC_PRUNE_DRAINED_REFS_TOTAL,
-    METRIC_PRUNE_DRAIN_EPOCHS, METRIC_PRUNE_DRAIN_REFS, METRIC_PRUNE_DROPPED_TOTAL,
-    METRIC_PRUNE_DURABLE_EPOCH_WATERMARK, METRIC_PRUNE_ELIGIBLE_REFS,
-    METRIC_PRUNE_EMPTY_DRAINS_TOTAL, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL,
+    CausalFrontier, ClientId, ConjunctBinding, ConjunctSnapshotRecord, Epoch, EpochExitKind,
+    GateToken, PruneClaimSpanRecord, PruneEpochEntryRecord, PruneEpochRecord,
+    PruneEpochResidencyRecord, PrunePassRecord, PruneRecordArming, PruneRecordObserver,
+    PruneSafety, METRIC_PRUNE_ABSENT_TOTAL, METRIC_PRUNE_BYTES_FREED_TOTAL,
+    METRIC_PRUNE_CLAIM_LAG_EPOCHS, METRIC_PRUNE_CLAIM_SPAN_EPOCHS, METRIC_PRUNE_CONSIDERED_TOTAL,
+    METRIC_PRUNE_CURRENT_EPOCH, METRIC_PRUNE_DRAINED_REFS_TOTAL, METRIC_PRUNE_DRAIN_EPOCHS,
+    METRIC_PRUNE_DRAIN_REFS, METRIC_PRUNE_DROPPED_TOTAL, METRIC_PRUNE_DURABLE_EPOCH_WATERMARK,
+    METRIC_PRUNE_ELIGIBLE_REFS, METRIC_PRUNE_EMPTY_DRAINS_TOTAL, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL,
     METRIC_PRUNE_EPOCHS_ENTERED_TOTAL, METRIC_PRUNE_EPOCHS_EXITED_TOTAL,
     METRIC_PRUNE_EPOCH_BYTES_FREED, METRIC_PRUNE_EPOCH_CONSIDERED, METRIC_PRUNE_EPOCH_DROPPED,
     METRIC_PRUNE_INDEXED_EPOCHS, METRIC_PRUNE_INDEXED_REFS, METRIC_PRUNE_INELIGIBLE_REFS,
@@ -93,6 +93,7 @@ use crate::tombstone_frontier::{
     METRIC_PRUNE_STAMPED_BYTES_TOTAL, METRIC_PRUNE_STAMPED_REFS_TOTAL, METRIC_PRUNE_TRACKED_CLAIMS,
 };
 use metrics::{Counter, Gauge, Histogram};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -1284,6 +1285,16 @@ pub struct TombstoneFrontier {
     /// as well so it is readable without taking the frontier lock, and so the lock order stays
     /// one-way: frontier lock, then registry lock, never the reverse.
     registry: Arc<ReclamationRegistry>,
+    /// The arming this frontier resolved at construction, from the same single
+    /// `prune_record_arming_from_env()` read that chose `prune_observer`. Cached here so
+    /// `publish_conjunct_snapshot`'s early return needs no second env read — a second read
+    /// could disagree with the one that picked the observer.
+    prune_arming: PruneRecordArming,
+    /// Monotone count of conjunct snapshots published. Lives on `TombstoneFrontier`, not on
+    /// `FrontierState`, because publishing one never takes a write path through the frontier
+    /// lock's own mutation surface. `publish_conjunct_snapshot` increments this strictly after
+    /// the recorder's own counter, so the two always agree at their post-increment value.
+    conjunct_seq: AtomicU64,
 }
 
 /// A unit of work for the background cursor-persistence worker.
@@ -1381,8 +1392,11 @@ impl TombstoneFrontier {
         };
         // The arming kill-switch is read HERE and nowhere else, and exactly once per
         // frontier: reading it again per pass would let the arming gate and the recording
-        // branch observe two different answers for the same operation.
-        let prune_observer: Box<dyn PruneRecordObserver> = match prune_record_arming_from_env() {
+        // branch observe two different answers for the same operation. The resolved value is
+        // also cached on `prune_arming` below, so `publish_conjunct_snapshot`'s own early
+        // return reuses this single read instead of asking the environment again.
+        let prune_arming = prune_record_arming_from_env();
+        let prune_observer: Box<dyn PruneRecordObserver> = match prune_arming {
             PruneRecordArming::Armed => Box::new(MetricsPruneRecorder::new()),
             PruneRecordArming::Disarmed => Box::new(NullPruneRecorder),
         };
@@ -1399,6 +1413,8 @@ impl TombstoneFrontier {
             persist_worker,
             prune_observer,
             registry,
+            prune_arming,
+            conjunct_seq: AtomicU64::new(0),
         }
     }
 
@@ -2161,6 +2177,209 @@ impl TombstoneFrontier {
     pub fn epoch_width(&self) -> u64 {
         self.lock().epoch_width
     }
+
+    /// One scrape-time snapshot of both prune conjuncts: which one, if any, binds each closed
+    /// retained epoch, and where the open epoch's own refs/bytes sit. Observation only — writes
+    /// no `FrontierState` field, advances no cached watermark, moves no registry claim or
+    /// executed watermark.
+    ///
+    /// # No coalescing, no caching (HARD)
+    ///
+    /// Every call recomputes: there is no cached record and no last-snapshot timestamp anywhere
+    /// on this frontier. One O(k log k + claims) frontier-lock hold per call (`k` = indexed
+    /// epochs — the same sort [`FrontierState::compute_durable_epoch_watermark`] performs),
+    /// serialised with `stamp_tombstone`/`register_claim` on the same lock. Bounding scrape rate
+    /// on the public endpoint is the operator's concern (TODO-670), not this method's.
+    pub fn publish_conjunct_snapshot(&self) {
+        // Disarmed: no lock, no allocation, no line. The arming was resolved once, at
+        // construction, from the same env read that picked `prune_observer`.
+        if self.prune_arming == PruneRecordArming::Disarmed {
+            return;
+        }
+
+        // Outside the frontier lock, exactly as `refreshed_watermark` reads it.
+        let flushed = self.store.as_ref().map(|s| s.flushed_watermark());
+
+        let (current_epoch, watermark, claims, mut record, mut retained) = {
+            let state = self.lock();
+            let current_epoch = state.current_epoch;
+            // A LOCAL only: this snapshot never advances `state.durable_epoch_watermark`,
+            // unlike `refreshed_watermark`'s caller, which writes the cache back.
+            let watermark = match flushed {
+                Some(flushed) => state
+                    .durable_epoch_watermark
+                    .max(state.compute_durable_epoch_watermark(flushed)),
+                None => state.durable_epoch_watermark,
+            };
+
+            // Registry leaf lock nested inside the frontier lock — the same order
+            // `drain_prunable` uses. Observation only: moves no gauge, no counter, no claim.
+            let claim_set = self.registry.observe_claim_set(ClaimScope::Global);
+            let ceiling = claim_set.ceiling;
+
+            let mut retained_epochs_claim_only = 0u64;
+            let mut retained_epochs_durability_only = 0u64;
+            let mut retained_epochs_both = 0u64;
+            let mut retained_epochs_neither = 0u64;
+            let mut retained_refs_claim_only = 0u64;
+            let mut retained_refs_durability_only = 0u64;
+            let mut retained_refs_both = 0u64;
+            let mut retained_refs_neither = 0u64;
+            let mut retained_stamped_bytes = 0u64;
+            let mut retained_epochs_unslotted = 0u64;
+            let mut retained_refs_open_epoch = 0u64;
+            let mut retained_stamped_bytes_open_epoch = 0u64;
+            let mut retained: Vec<(Epoch, ConjunctBinding)> = Vec::new();
+
+            // Folded over the index's keys, using only `Vec::len` per key — never iterating
+            // the refs themselves — so the hold stays O(k), not O(total refs).
+            for &e in state.epoch_tags.keys() {
+                let refs_len = state
+                    .epoch_tags
+                    .get(&e)
+                    .map_or(0u64, |refs| u64::try_from(refs.len()).unwrap_or(u64::MAX));
+                let stamped_bytes = state
+                    .epoch_slots
+                    .get(&e)
+                    .map_or(0, |slot| slot.stamped_bytes);
+
+                if e == current_epoch {
+                    // The open epoch is never classified and never joins `retained` — its
+                    // only representation on the record is these two accumulators.
+                    retained_refs_open_epoch += refs_len;
+                    retained_stamped_bytes_open_epoch += stamped_bytes;
+                    continue;
+                }
+
+                if !state.epoch_slots.contains_key(&e) {
+                    retained_epochs_unslotted += 1;
+                }
+                retained_stamped_bytes += stamped_bytes;
+
+                let class = conjunct_binding(e, ceiling, watermark);
+                match class {
+                    ConjunctBinding::ClaimOnly => {
+                        retained_epochs_claim_only += 1;
+                        retained_refs_claim_only += refs_len;
+                    }
+                    ConjunctBinding::DurabilityOnly => {
+                        retained_epochs_durability_only += 1;
+                        retained_refs_durability_only += refs_len;
+                    }
+                    ConjunctBinding::Both => {
+                        retained_epochs_both += 1;
+                        retained_refs_both += refs_len;
+                    }
+                    ConjunctBinding::Neither => {
+                        retained_epochs_neither += 1;
+                        retained_refs_neither += refs_len;
+                    }
+                }
+                retained.push((e, class));
+            }
+
+            // The claim-lag percentiles and `durable_watermark_lag` are deliberately NOT
+            // computed here — `claim_set.claims` (unsorted) is carried out of the lock below
+            // and the sort/rank arithmetic runs unlocked, so the frontier lock hold stays
+            // linear in the claim count rather than paying its sort.
+            let record = ConjunctSnapshotRecord {
+                current_epoch,
+                ceiling,
+                durable_watermark: watermark,
+                claims: u64::try_from(claim_set.claims.len()).unwrap_or(u64::MAX),
+                retained_epochs_claim_only,
+                retained_epochs_durability_only,
+                retained_epochs_both,
+                retained_epochs_neither,
+                retained_refs_claim_only,
+                retained_refs_durability_only,
+                retained_refs_both,
+                retained_refs_neither,
+                retained_stamped_bytes,
+                retained_epochs_unslotted,
+                retained_refs_open_epoch,
+                retained_stamped_bytes_open_epoch,
+                // Filled in below, outside the lock.
+                durable_watermark_lag: 0,
+                claim_lag_p50: 0,
+                claim_lag_p99: 0,
+                claim_lag_max: 0,
+            };
+            (current_epoch, watermark, claim_set.claims, record, retained)
+        };
+        // The lock is dropped here. Everything from this point runs unlocked.
+
+        // Nearest-rank percentiles over `current_epoch - claim`, and the watermark lag —
+        // R3 step 4's outside-the-lock arithmetic.
+        let mut lags: Vec<u64> = claims
+            .iter()
+            .map(|&claim| current_epoch.saturating_sub(claim))
+            .collect();
+        lags.sort_unstable();
+        let n = lags.len();
+        // Nearest-rank percentile: `lags[(K*n + 99)/100 - 1]`. `n == 0` yields `0` for all
+        // three; `claims == 0` on the record disambiguates that from a real zero-lag
+        // distribution.
+        let nearest_rank = |k: u64| -> u64 {
+            if n == 0 {
+                return 0;
+            }
+            let rank = (k * n as u64 + 99) / 100;
+            let idx = usize::try_from(rank.saturating_sub(1))
+                .unwrap_or(0)
+                .min(n - 1);
+            lags[idx]
+        };
+        record.claim_lag_p50 = nearest_rank(50);
+        record.claim_lag_p99 = nearest_rank(99);
+        record.claim_lag_max = lags.last().copied().unwrap_or(0);
+        record.durable_watermark_lag = current_epoch.saturating_sub(watermark);
+
+        // Step 5's pin: the recorder runs FIRST, so its own snapshot counter advances before
+        // this frontier-owned `AtomicU64` does — the two therefore always agree at their
+        // post-increment value, because `metrics_handler` is this method's only call site and
+        // every call advances both by exactly one.
+        self.prune_observer.observe_conjunct_snapshot(&record);
+        let seq = self.conjunct_seq.fetch_add(1, Ordering::Relaxed) + 1;
+
+        retained.sort_unstable_by_key(|(e, _)| *e);
+        let retained_truncated = retained.len() > 256;
+        let retained_rendered = retained
+            .iter()
+            .take(256)
+            .map(|(e, class)| format!("{e}:{}", class.as_str()))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        info!(
+            target: "topgun_server::tombstone_frontier::conjunct",
+            seq,
+            ts = now_millis_i64(),
+            current_epoch = record.current_epoch,
+            ceiling = record.ceiling,
+            durable_watermark = record.durable_watermark,
+            durable_watermark_lag = record.durable_watermark_lag,
+            claims = record.claims,
+            claim_lag_p50 = record.claim_lag_p50,
+            claim_lag_p99 = record.claim_lag_p99,
+            claim_lag_max = record.claim_lag_max,
+            retained_epochs_claim_only = record.retained_epochs_claim_only,
+            retained_epochs_durability_only = record.retained_epochs_durability_only,
+            retained_epochs_both = record.retained_epochs_both,
+            retained_epochs_neither = record.retained_epochs_neither,
+            retained_refs_claim_only = record.retained_refs_claim_only,
+            retained_refs_durability_only = record.retained_refs_durability_only,
+            retained_refs_both = record.retained_refs_both,
+            retained_refs_neither = record.retained_refs_neither,
+            retained_stamped_bytes = record.retained_stamped_bytes,
+            retained_epochs_unslotted = record.retained_epochs_unslotted,
+            retained_refs_open_epoch = record.retained_refs_open_epoch,
+            retained_stamped_bytes_open_epoch = record.retained_stamped_bytes_open_epoch,
+            retained = %retained_rendered,
+            retained_truncated,
+            "conjunct snapshot"
+        );
+    }
 }
 
 /// Encode an epoch as a fixed 8-byte big-endian blob for lossless redb storage.
@@ -2438,6 +2657,29 @@ fn parse_prune_record_arming(raw: &str) -> PruneRecordArming {
         );
     }
     PruneRecordArming::Armed
+}
+
+// ---------------------------------------------------------------------------
+// Conjunct classifier
+// ---------------------------------------------------------------------------
+
+/// Which prune conjunct, if any, binds a given (closed) epoch — the drain filter's (`:971`)
+/// exact negation, restricted to `epoch != 0`.
+///
+/// Takes no `current_epoch` and has no notion of "open": the open-epoch exclusion is a
+/// fold-level policy at this function's only call site
+/// ([`TombstoneFrontier::publish_conjunct_snapshot`]), which never calls this for
+/// `e == current_epoch`. The drain filter itself is never edited or refactored to route through
+/// this classifier.
+fn conjunct_binding(epoch: Epoch, ceiling: Epoch, watermark: Epoch) -> ConjunctBinding {
+    let claim_blocks = ceiling <= epoch;
+    let durability_blocks = watermark < epoch;
+    match (claim_blocks, durability_blocks) {
+        (true, true) => ConjunctBinding::Both,
+        (true, false) => ConjunctBinding::ClaimOnly,
+        (false, true) => ConjunctBinding::DurabilityOnly,
+        (false, false) => ConjunctBinding::Neither,
+    }
 }
 
 /// Resolve a counter handle and touch it, so the series is registered before any observation.
