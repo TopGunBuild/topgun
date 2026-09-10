@@ -525,6 +525,14 @@ pub struct OpAckPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub achieved_level: Option<WriteConcern>,
     /// Optional per-operation results within the batch.
+    ///
+    /// **Contract — this field enumerates acceptances only.** When present, it is
+    /// the authoritative set of operations the server accepted in this exchange;
+    /// an operation absent from it was NOT accepted. It is never the refusal
+    /// channel: a refusal is reported by exactly one `OP_REJECTED` frame, sent
+    /// before this acknowledgement (TG-SYNC-002). Adding failure entries here
+    /// would open a second per-operation verdict channel and let a client observe
+    /// two different verdicts for the same operation.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub results: Option<Vec<OpResult>>,
 }
@@ -551,8 +559,21 @@ pub struct OpRejectedPayload {
     /// Human-readable reason for the rejection.
     pub reason: String,
     /// Optional machine-readable error code.
+    ///
+    /// Optional on the wire for historical reasons; every rejection this server
+    /// emits populates it.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub code: Option<u32>,
+    /// Whether retrying this identical operation can ever succeed.
+    ///
+    /// `true` means the server refused the write and no retry can change that,
+    /// so the client must retire the operation instead of re-sending it forever;
+    /// `false` means the failure is transient and the operation stays queued.
+    ///
+    /// Deliberately NOT `skip_serializing_if`: the key always serializes, because
+    /// an absent key would be indistinguishable from `false` and would silently
+    /// turn a terminal refusal into an infinite retry loop.
+    pub permanent: bool,
 }
 
 /// Operation rejection message.
@@ -1038,6 +1059,7 @@ mod tests {
                 op_id: "op-1".to_string(),
                 reason: "permission denied".to_string(),
                 code: Some(403),
+                permanent: true,
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -1050,8 +1072,42 @@ mod tests {
                 op_id: "op-2".to_string(),
                 reason: "unknown error".to_string(),
                 code: None,
+                permanent: false,
             },
         };
+        assert_eq!(roundtrip_named(&msg), msg);
+    }
+
+    #[test]
+    fn op_rejected_permanent_key_is_present_even_when_false() {
+        // The absence of `permanent` must never be readable as "not permanent":
+        // a client that cannot see the key cannot tell a terminal refusal from a
+        // transient one, so the key has to be on the wire for BOTH values.
+        let msg = OpRejectedMessage {
+            payload: OpRejectedPayload {
+                op_id: "op-3".to_string(),
+                reason: "server overloaded".to_string(),
+                code: Some(429),
+                permanent: false,
+            },
+        };
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode");
+        let outer = raw.as_map().expect("outer map");
+        let (_, payload_val) = outer
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("payload"))
+            .expect("payload key present");
+        let payload = payload_val.as_map().expect("payload map");
+        let (_, permanent_val) = payload
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("permanent"))
+            .expect("permanent key present even when false");
+        assert_eq!(
+            permanent_val.as_bool(),
+            Some(false),
+            "permanent must serialize as the boolean false, not be elided"
+        );
         assert_eq!(roundtrip_named(&msg), msg);
     }
 

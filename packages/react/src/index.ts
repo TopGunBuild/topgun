@@ -19,6 +19,10 @@ export * from './hooks/useEventJournal';
 // resolvers — that surface is on the v2.x WASM-sandbox roadmap).
 export * from './hooks/useMergeRejections';
 
+// Permanent server refusals (permission denied, schema violation, oversized
+// value) — the write the server will never accept, not a merge outcome.
+export * from './hooks/useWriteRejections';
+
 // Full-Text Search hooks
 export * from './hooks/useSearch';
 

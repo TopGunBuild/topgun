@@ -24,13 +24,17 @@ use topgun_core::messages::{
 use topgun_core::Timestamp;
 
 use super::auth_validator::AuthValidationContext;
+use super::websocket::{
+    attribute_permanent_failure_per_op, numeric_max_op_id, register_client_op_refusal_series,
+    OpBatchDispatchContext, TransportKind,
+};
 use super::AppState;
 use crate::query::cursor::{
     build_next_cursor, decode_cursor, is_after_cursor, validate_cursor_expiry,
 };
 use crate::service::dispatch::PartitionDispatcher;
 use crate::service::domain::predicate::{execute_query, value_to_rmpv};
-use crate::service::operation::CallerOrigin;
+use crate::service::operation::{CallerOrigin, OpVerdict};
 use crate::service::policy::{
     GateDecision, PermissionAction, PolicyDecision, PolicyEvaluator, PolicyStore,
 };
@@ -280,6 +284,18 @@ fn enforce_auth(
 }
 
 /// Dispatches operations through the partition pipeline and populates the response.
+///
+/// Shapes the shared verdict fold's outcome into the HTTP response, mirroring the
+/// WebSocket frames one for one: a refusal that names an operation becomes an
+/// `HttpSyncError` carrying that operation's id in `context`, and a batch-level
+/// failure becomes one entry with `context: None`. The two are what the caller
+/// branches on — a `Some(_)` entry is terminal for that operation, a `None` entry
+/// leaves the whole batch retryable (TG-SYNC-001).
+///
+/// The acknowledgement follows the same four-way split the WebSocket transport
+/// uses: no acknowledgement beside a batch-level error, today's `ack` with no
+/// `results` when nothing was refused, **no `ack` at all** when everything was
+/// refused, and an `ack` naming the accepted operations otherwise.
 async fn dispatch_operations(
     ops: Vec<topgun_core::messages::ClientOp>,
     classify_svc: &crate::service::classify::OperationService,
@@ -293,6 +309,12 @@ async fn dispatch_operations(
         return;
     }
 
+    // A refusal series that has never been incremented does not render on
+    // `/metrics` at all, and an operator cannot tell an absent instrument from a
+    // healthy zero. HTTP has no connection setup to hang this on, so it is done
+    // on the first batch; the guard is a `Once`.
+    register_client_op_refusal_series();
+
     let last_id = ops
         .last()
         .and_then(|op| op.id.clone())
@@ -305,59 +327,96 @@ async fn dispatch_operations(
         partition_groups.entry(partition_id).or_default().push(op);
     }
 
-    // Build sub-batch operations up front, then dispatch concurrently.
-    let mut sub_ops: Vec<crate::service::operation::Operation> =
-        Vec::with_capacity(partition_groups.len());
-    for (partition_id, group_ops) in partition_groups {
-        let mut op = classify_svc.classify_op_batch_for_partition(
-            group_ops,
-            partition_id,
-            claims.map(|c| c.user_id.clone()),
-            caller_origin,
-            None,
-            None,
-        );
-        // Set principal on context for RBAC authorization middleware (HTTP path).
-        if let Some(p) = principal {
-            op.set_principal(p.clone());
-        }
-        sub_ops.push(op);
+    let cx = OpBatchDispatchContext {
+        classify_svc,
+        dispatcher,
+        transport: TransportKind::Http,
+        caller_origin,
+        client_id: claims.map(|c| c.user_id.clone()),
+        // Set for the RBAC authorization middleware, exactly as the WebSocket
+        // path does.
+        principal: principal.cloned(),
+        // One-shot request: there is no connection for a broadcast to target.
+        connection_id: None,
+        write_concern: None,
+        timeout: None,
+    };
+
+    let mut outcome =
+        attribute_permanent_failure_per_op(partition_groups.into_iter().collect(), &cx).await;
+
+    // Attributed refusals first, so the entries a caller must act on per
+    // operation precede any batch-level entry, as the frames do on the socket.
+    for verdict in &outcome.refused {
+        let OpVerdict::Refused {
+            op_id,
+            code,
+            reason,
+            ..
+        } = verdict;
+        response
+            .errors
+            .get_or_insert_with(Vec::new)
+            .push(HttpSyncError {
+                code: *code,
+                message: reason.clone(),
+                context: Some(op_id.clone()),
+            });
     }
 
-    // Dispatch all sub-batches concurrently.
-    let mut join_set = tokio::task::JoinSet::new();
-    for sub_op in sub_ops {
-        let d = Arc::clone(dispatcher);
-        join_set.spawn(async move { d.dispatch(sub_op).await });
+    // A transient error outranks a non-attributed permanent one: retrying is the
+    // only response that can still change the outcome. Either way the batch stays
+    // retryable, so it is reported without an `ack` and without a context.
+    if let Some(err) = outcome
+        .transient
+        .take()
+        .or_else(|| outcome.batch_error.take())
+    {
+        response
+            .errors
+            .get_or_insert_with(Vec::new)
+            .push(HttpSyncError {
+                code: err.wire_code(),
+                message: format!("{err}"),
+                context: None,
+            });
+        return;
     }
 
-    // Collect results; record any dispatch errors.
-    let mut dispatch_error: Option<String> = None;
-    while let Some(result) = join_set.join_next().await {
-        match result {
-            Ok(Ok(_resp)) => {}
-            Ok(Err(e)) => {
-                dispatch_error = Some(format!("{e}"));
-            }
-            Err(join_err) => {
-                dispatch_error = Some(format!("join error: {join_err}"));
-            }
-        }
-    }
-
-    if let Some(msg) = dispatch_error {
-        let errors = response.errors.get_or_insert_with(Vec::new);
-        errors.push(HttpSyncError {
-            code: 500,
-            message: msg,
-            context: None,
-        });
-    } else {
+    // Nothing refused — today's acknowledgement, unchanged. This branch MUST stay
+    // ahead of the one below: the fold populates `accepted` only once something
+    // was refused, so an empty `accepted` here means "not computed", not "nothing
+    // was accepted".
+    if outcome.refused.is_empty() {
         response.ack = Some(HttpSyncAck {
             last_id,
             results: None,
         });
+        return;
     }
+
+    // Every id-bearing operation was refused: the per-operation entries are the
+    // whole answer. No `ack`, and no context-less error to go with it — the
+    // caller processes `ack` only when present and does not retry on its absence.
+    if outcome.accepted.is_empty() {
+        return;
+    }
+
+    // Same silence for an acceptance set no numeric `last_id` can address: a
+    // non-numeric one makes the caller treat every pending operation as
+    // acknowledged, which here would include the one just refused.
+    let Some(partial_last_id) = numeric_max_op_id(&outcome.accepted) else {
+        tracing::warn!(
+            "http sync: accepted operations carry no numeric id; sending no partial ack \
+             rather than one the caller would over-apply"
+        );
+        return;
+    };
+
+    response.ack = Some(HttpSyncAck {
+        last_id: partial_last_id,
+        results: Some(std::mem::take(&mut outcome.accepted)),
+    });
 }
 
 /// Executes one-shot queries directly from the in-memory record store, bypassing the
@@ -1610,5 +1669,452 @@ mod tests {
         let claims = result.unwrap();
         assert!(claims.is_some(), "no validator should accept valid token");
         assert_eq!(claims.unwrap().user_id, "user-ok");
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-operation verdicts on the HTTP transport
+    // -----------------------------------------------------------------------
+
+    use crate::network::connection::ConnectionRegistry;
+    use crate::service::config::ServerConfig;
+    use crate::service::dispatch::DispatchConfig;
+    use crate::service::domain::crdt::CrdtService;
+    use crate::service::domain::query::QueryRegistry;
+    use crate::service::domain::schema::SchemaService;
+    use crate::service::middleware::pipeline::build_operation_pipeline;
+    use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
+    use crate::service::policy::{
+        InMemoryPolicyStore, PermissionPolicy, PolicyEffect, PolicyEvaluator,
+    };
+    use crate::service::router::OperationRouter;
+    use crate::service::security::{SecurityConfig, WriteAdmission};
+    use topgun_core::messages::base::{PredicateNode, PredicateOp};
+    use topgun_core::messages::ClientOp;
+    use topgun_core::{hash_to_partition, LWWRecord, Principal, SystemClock, HLC};
+
+    /// The map every HTTP verdict test writes to. One map for all three ops, so
+    /// the denied write is identified by its content and not by its map name.
+    const HTTP_MAP: &str = "notes";
+
+    /// A domain service that is always overloaded.
+    ///
+    /// `Overloaded` is transient, so the whole batch stays retryable and no
+    /// operation may be attributed a verdict — which is the case the
+    /// context-less error entry exists for.
+    #[derive(Clone)]
+    struct AlwaysOverloaded;
+
+    impl tower::Service<Operation> for AlwaysOverloaded {
+        type Response = OperationResponse;
+        type Error = OperationError;
+        type Future = std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<OperationResponse, OperationError>> + Send>,
+        >;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _op: Operation) -> Self::Future {
+            Box::pin(async { Err(OperationError::Overloaded) })
+        }
+    }
+
+    /// Allow every write to `HTTP_MAP`, except one whose record carries
+    /// `blocked: true`.
+    fn deny_blocked_records() -> Vec<PermissionPolicy> {
+        vec![
+            PermissionPolicy {
+                id: "allow-notes".to_string(),
+                map_pattern: HTTP_MAP.to_string(),
+                action: PermissionAction::Write,
+                effect: PolicyEffect::Allow,
+                condition: None,
+            },
+            PermissionPolicy {
+                id: "deny-blocked".to_string(),
+                map_pattern: HTTP_MAP.to_string(),
+                action: PermissionAction::Write,
+                effect: PolicyEffect::Deny,
+                condition: Some(PredicateNode {
+                    op: PredicateOp::Eq,
+                    attribute: Some("blocked".to_string()),
+                    value: Some(rmpv::Value::Boolean(true)),
+                    children: None,
+                    value_ref: None,
+                }),
+            },
+        ]
+    }
+
+    /// A whole pipeline wired the way the server wires it, so the refusal comes
+    /// from the real Authorization middleware.
+    ///
+    /// `overloaded` swaps the CRDT service for one that always answers
+    /// `Overloaded`, which is how the transient row of the mapping is exercised
+    /// without a timing race.
+    async fn build_http_pipeline(
+        overloaded: bool,
+    ) -> (
+        crate::service::classify::OperationService,
+        Arc<PartitionDispatcher>,
+    ) {
+        let server_config = Arc::new(ServerConfig::default());
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        ));
+        let hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
+            "http-fold-node".to_string(),
+            Box::new(SystemClock),
+        )));
+        let crdt = Arc::new(CrdtService::new(
+            factory,
+            Arc::new(ConnectionRegistry::new()),
+            Arc::new(WriteAdmission::new(
+                Arc::new(SecurityConfig::default()),
+                Arc::clone(&hlc),
+            )),
+            Arc::new(QueryRegistry::new()),
+            Arc::new(SchemaService::new()),
+        ));
+
+        let policy_store = Arc::new(InMemoryPolicyStore::new());
+        for policy in deny_blocked_records() {
+            policy_store
+                .upsert_policy(policy)
+                .await
+                .expect("policy upsert");
+        }
+        let evaluator = Arc::new(PolicyEvaluator::new(policy_store));
+
+        let dispatch_config = DispatchConfig {
+            worker_count: 1,
+            channel_buffer_size: 64,
+        };
+        let dispatcher = Arc::new(PartitionDispatcher::new(&dispatch_config, || {
+            let mut router = OperationRouter::new();
+            if overloaded {
+                router.register(service_names::CRDT, AlwaysOverloaded);
+            } else {
+                router.register(service_names::CRDT, Arc::clone(&crdt));
+            }
+            build_operation_pipeline(router, &server_config, Some(Arc::clone(&evaluator)))
+        }));
+
+        (
+            crate::service::classify::OperationService::new(hlc, server_config),
+            dispatcher,
+        )
+    }
+
+    /// `n` distinct keys that all hash to the SAME partition, so the batch forms
+    /// exactly one sub-batch and one denied operation fails the whole group.
+    fn keys_in_one_partition(n: usize) -> Vec<String> {
+        let mut buckets: HashMap<u32, Vec<String>> = HashMap::new();
+        for i in 0..100_000_u32 {
+            let key = format!("http-key-{i}");
+            let bucket = buckets.entry(hash_to_partition(&key)).or_default();
+            bucket.push(key);
+            if bucket.len() == n {
+                return bucket.clone();
+            }
+        }
+        panic!("no partition collected {n} keys");
+    }
+
+    /// A client PUT carrying `fields` as its record value.
+    fn put_op(op_id: &str, key: &str, fields: Vec<(&str, rmpv::Value)>) -> ClientOp {
+        ClientOp {
+            id: Some(op_id.to_string()),
+            map_name: HTTP_MAP.to_string(),
+            key: key.to_string(),
+            op_type: None,
+            record: Some(Some(LWWRecord {
+                value: Some(rmpv::Value::Map(
+                    fields
+                        .into_iter()
+                        .map(|(name, value)| (rmpv::Value::String(name.into()), value))
+                        .collect(),
+                )),
+                timestamp: Timestamp {
+                    millis: 1_700_000_000_000,
+                    counter: 1,
+                    node_id: "http-fold-node".to_string(),
+                },
+                ttl_ms: None,
+            })),
+            or_record: None,
+            or_tag: None,
+            write_concern: None,
+            timeout: None,
+        }
+    }
+
+    /// A record the deny policy matches.
+    fn blocked_fields() -> Vec<(&'static str, rmpv::Value)> {
+        vec![("blocked", rmpv::Value::Boolean(true))]
+    }
+
+    /// A record the deny policy does not match.
+    fn allowed_fields(name: &str) -> Vec<(&'static str, rmpv::Value)> {
+        vec![("name", rmpv::Value::String(name.into()))]
+    }
+
+    /// Runs one batch through the HTTP dispatch path and returns the response.
+    async fn http_dispatch(overloaded: bool, ops: Vec<ClientOp>) -> HttpSyncResponse {
+        let (classify_svc, dispatcher) = build_http_pipeline(overloaded).await;
+        let principal = Principal {
+            id: "writer-1".to_string(),
+            roles: vec!["user".to_string()],
+        };
+        let mut response = HttpSyncResponse {
+            server_hlc: Timestamp {
+                millis: 1_700_000_000_000,
+                counter: 0,
+                node_id: "http-fold-node".to_string(),
+            },
+            ..Default::default()
+        };
+        dispatch_operations(
+            ops,
+            &classify_svc,
+            &dispatcher,
+            None,
+            CallerOrigin::HttpClient,
+            Some(&principal),
+            &mut response,
+        )
+        .await;
+        response
+    }
+
+    /// Op ids named by an acknowledgement's `results`.
+    fn acked_ids(ack: &HttpSyncAck) -> Vec<String> {
+        ack.results
+            .as_ref()
+            .expect("a partial ack names its acceptances")
+            .iter()
+            .map(|result| result.op_id.clone())
+            .collect()
+    }
+
+    /// A mixed batch names the refused operation and acknowledges the rest.
+    #[tokio::test]
+    async fn http_sync_mixed_batch_names_the_refused_op_and_acks_the_rest() {
+        let keys = keys_in_one_partition(3);
+        let ops = vec![
+            put_op("1", &keys[0], allowed_fields("first")),
+            put_op("2", &keys[1], blocked_fields()),
+            put_op("3", &keys[2], allowed_fields("third")),
+        ];
+
+        let response = http_dispatch(false, ops).await;
+
+        let errors = response.errors.expect("the refusal is reported");
+        assert_eq!(errors.len(), 1, "one entry, for the one refused operation");
+        assert_eq!(errors[0].code, 403);
+        assert_eq!(
+            errors[0].context.as_deref(),
+            Some("2"),
+            "a per-operation refusal names the operation it refuses"
+        );
+
+        let ack = response
+            .ack
+            .expect("the accepted operations are acknowledged");
+        assert_eq!(acked_ids(&ack), vec!["1", "3"]);
+        assert_eq!(
+            ack.last_id, "3",
+            "lastId is the numeric max accepted id, never the refused one"
+        );
+    }
+
+    /// A batch nobody refused anything in is acknowledged exactly as before: one
+    /// `ack`, no `results`, no error entries.
+    #[tokio::test]
+    async fn http_sync_uniformly_accepted_batch_acks_without_results() {
+        let keys = keys_in_one_partition(2);
+        let ops = vec![
+            put_op("11", &keys[0], allowed_fields("first")),
+            put_op("12", &keys[1], allowed_fields("second")),
+        ];
+
+        let response = http_dispatch(false, ops).await;
+
+        assert!(response.errors.is_none(), "nothing was refused");
+        let ack = response.ack.expect("the batch is acknowledged");
+        assert_eq!(ack.last_id, "12");
+        assert!(
+            ack.results.is_none(),
+            "the hot path must not materialize a per-operation vector"
+        );
+    }
+
+    /// A transient failure is one context-less error entry and no `ack` — the
+    /// caller retries the whole batch, and no operation is retired.
+    #[tokio::test]
+    async fn http_sync_transient_reports_context_less_error_and_no_ack() {
+        let keys = keys_in_one_partition(3);
+        let ops = vec![
+            put_op("21", &keys[0], allowed_fields("first")),
+            put_op("22", &keys[1], allowed_fields("second")),
+            put_op("23", &keys[2], allowed_fields("third")),
+        ];
+
+        let response = http_dispatch(true, ops).await;
+
+        let errors = response.errors.expect("the failure is reported");
+        assert_eq!(
+            errors.len(),
+            1,
+            "one batch-level entry, not one per operation"
+        );
+        assert_eq!(errors[0].code, 429);
+        assert!(
+            errors[0].context.is_none(),
+            "a transient failure says nothing about any individual operation"
+        );
+        assert!(
+            response.ack.is_none(),
+            "a failed batch is not acknowledged in part or in whole"
+        );
+    }
+
+    /// Every operation refused: one entry per operation, each naming its own
+    /// operation, no `ack` at all and no context-less entry beside them.
+    ///
+    /// The HTTP mirror of "the rejections and nothing else". A context-less entry
+    /// here would make the caller retry a batch every operation of which was
+    /// permanently refused.
+    #[tokio::test]
+    async fn http_sync_all_refused_names_every_op_and_sends_no_ack() {
+        let keys = keys_in_one_partition(2);
+        let ops = vec![
+            put_op("31", &keys[0], blocked_fields()),
+            put_op("32", &keys[1], blocked_fields()),
+        ];
+
+        let response = http_dispatch(false, ops).await;
+
+        let errors = response.errors.expect("both refusals are reported");
+        assert_eq!(errors.len(), 2, "one entry per refused operation");
+        let named: Vec<Option<&str>> = errors
+            .iter()
+            .map(|error| error.context.as_deref())
+            .collect();
+        assert_eq!(named, vec![Some("31"), Some("32")]);
+        for error in &errors {
+            assert_eq!(error.code, 403);
+        }
+        assert!(
+            response.ack.is_none(),
+            "a batch in which everything was refused has nothing to acknowledge"
+        );
+    }
+
+    /// Both halves of one `/sync` response write an id into `errors[].context`:
+    /// the operations half an operation id, the queries half a query id. A
+    /// caller that reads `context` as "an operation was refused" would retire a
+    /// write on a denied READ, so the two kinds must be distinguishable by the
+    /// id itself and never by the presence of the field.
+    #[tokio::test]
+    async fn http_sync_ops_and_queries_both_attribute_errors_by_request_item_id() {
+        let keys = keys_in_one_partition(2);
+        let ops = vec![
+            put_op("41", &keys[0], allowed_fields("first")),
+            put_op("42", &keys[1], blocked_fields()),
+        ];
+
+        let (classify_svc, dispatcher) = build_http_pipeline(false).await;
+        let principal = Principal {
+            id: "writer-1".to_string(),
+            roles: vec!["user".to_string()],
+        };
+        let mut response = HttpSyncResponse {
+            server_hlc: Timestamp {
+                millis: 1_700_000_000_000,
+                counter: 0,
+                node_id: "http-fold-node".to_string(),
+            },
+            ..Default::default()
+        };
+
+        dispatch_operations(
+            ops,
+            &classify_svc,
+            &dispatcher,
+            None,
+            CallerOrigin::HttpClient,
+            Some(&principal),
+            &mut response,
+        )
+        .await;
+
+        // The queries half of the SAME response. The policy store carries write
+        // rules only, so an evaluated read finds no allow rule and is denied.
+        let store_factory = RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        );
+        let policy_store = Arc::new(InMemoryPolicyStore::new());
+        for policy in deny_blocked_records() {
+            policy_store
+                .upsert_policy(policy)
+                .await
+                .expect("policy upsert");
+        }
+        let policy_store: Arc<dyn PolicyStore> = policy_store;
+        let admin_subjects = Arc::new(std::collections::HashSet::new());
+
+        dispatch_queries(
+            vec![HttpQueryRequest {
+                query_id: "q-1788000000000".to_string(),
+                map_name: HTTP_MAP.to_string(),
+                filter: rmpv::Value::Nil,
+                ..Default::default()
+            }],
+            &store_factory,
+            Some(&principal),
+            Some(&policy_store),
+            &admin_subjects,
+            &mut response,
+        )
+        .await;
+
+        let errors = response.errors.expect("both halves reported an entry");
+        assert_eq!(errors.len(), 2, "one operation refusal, one query denial");
+
+        let op_entry = &errors[0];
+        assert_eq!(op_entry.code, 403);
+        assert_eq!(
+            op_entry.context.as_deref(),
+            Some("42"),
+            "the operations half attributes its entry to an operation id"
+        );
+
+        let query_entry = &errors[1];
+        assert_eq!(query_entry.code, 403);
+        assert_eq!(
+            query_entry.context.as_deref(),
+            Some("q-1788000000000"),
+            "the queries half attributes its entry to a query id, in the SAME \
+             errors[] array — so `context` is present on an entry that refuses \
+             no operation at all"
+        );
+
+        let ack = response
+            .ack
+            .expect("the accepted operation is acknowledged");
+        assert_eq!(acked_ids(&ack), vec!["41"]);
+        assert!(
+            !acked_ids(&ack).contains(&"q-1788000000000".to_string()),
+            "a query id is never an acknowledged operation"
+        );
     }
 }

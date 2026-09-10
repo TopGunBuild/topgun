@@ -3,6 +3,7 @@ import {
   AuthMessageSchema,
   QuerySubMessageSchema,
   ClientOpMessageSchema,
+  OpRejectedMessageSchema,
 } from '../schemas';
 
 describe('Message Schemas', () => {
@@ -73,6 +74,38 @@ describe('Message Schemas', () => {
     if (result.success) {
       expect(result.data.type).toBe('SYNC_INIT');
     }
+  });
+
+  test('OP_REJECTED requires permanent', () => {
+    const validRejection = {
+      type: 'OP_REJECTED',
+      payload: {
+        opId: 'op1',
+        reason: 'write access denied for map: users',
+        code: 403,
+        permanent: true,
+      },
+    };
+    expect(OpRejectedMessageSchema.safeParse(validRejection).success).toBe(true);
+
+    // Omitting `permanent` must throw rather than default: a client that cannot
+    // tell a terminal refusal from a transient one retries a doomed write forever.
+    const payloadWithoutPermanent: Record<string, unknown> = { ...validRejection.payload };
+    delete payloadWithoutPermanent.permanent;
+    expect(() =>
+      OpRejectedMessageSchema.parse({
+        type: 'OP_REJECTED',
+        payload: payloadWithoutPermanent,
+      }),
+    ).toThrow();
+
+    // `code` stays optional -- only `permanent` is required on both sides.
+    expect(
+      OpRejectedMessageSchema.safeParse({
+        type: 'OP_REJECTED',
+        payload: { opId: 'op2', reason: 'server overloaded', permanent: false },
+      }).success,
+    ).toBe(true);
   });
 
   test('rejects unknown message types', () => {

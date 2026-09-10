@@ -1,5 +1,11 @@
 import { HLC, serialize, deserialize } from '@topgunbuild/core';
 import { HttpSyncProvider } from '../connection/HttpSyncProvider';
+// A msgpack frame as the provider emits it: a tagged message with a payload.
+interface WireFrame {
+  type: string;
+  payload: Record<string, unknown>;
+}
+
 describe('HttpSyncProvider', () => {
   let hlc: HLC;
   let mockFetch: jest.Mock;
@@ -202,6 +208,129 @@ describe('HttpSyncProvider', () => {
 
     // One SERVER_EVENT message for the delta record
     expect(messageHandler).toHaveBeenCalled();
+  });
+
+  it('translates only errors[] entries naming an operation this request sent', async () => {
+    // A /sync response carries both halves of the request. The queries half has
+    // written a query id into `errors[].context` since long before per-op
+    // refusals existed, so a provider that branches on presence alone reports a
+    // denied READ as a refusal of a write that was never refused.
+    const frames: WireFrame[] = [];
+    provider.on('message', (_nodeId: string, data: ArrayBuffer | Uint8Array) => {
+      frames.push(
+        deserialize<WireFrame>(data instanceof ArrayBuffer ? new Uint8Array(data) : data),
+      );
+    });
+
+    await provider.connect();
+
+    provider.send(
+      serialize({
+        type: 'OP_BATCH',
+        payload: {
+          ops: [
+            {
+              id: '7',
+              mapName: 'users',
+              key: 'user-7',
+              record: { value: { name: 'Alice' }, timestamp: hlc.now() },
+            },
+          ],
+        },
+      }),
+    );
+    provider.send(
+      serialize({
+        type: 'QUERY_SUB',
+        payload: { requestId: 'q-1788000000000', mapName: 'users', query: { where: {} } },
+      }),
+    );
+
+    frames.length = 0;
+    mockFetch.mockResolvedValue(
+      createMockResponse(
+        defaultSyncResponse({
+          errors: [
+            { code: 403, message: 'blocked by policy', context: '7' },
+            { code: 403, message: 'access denied', context: 'q-1788000000000' },
+            { code: 400, message: 'invalid cursor', context: 'q-1788000000000' },
+            { code: 503, message: 'overloaded' },
+          ],
+          ack: { lastId: '7', results: [{ opId: '7', success: true }] },
+        }),
+      ),
+    );
+
+    await new Promise((r) => setTimeout(r, 150));
+
+    const rejected = frames.filter((f) => f.type === 'OP_REJECTED');
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].payload.opId).toBe('7');
+    expect(rejected[0].payload.permanent).toBe(true);
+    expect(rejected[0].payload.code).toBe(403);
+    expect(rejected[0].payload.reason).toBe('blocked by policy');
+
+    // The query-attributed entries and the batch-level one are left exactly as
+    // they were before per-op refusals existed: no frame at all, so nothing
+    // downstream can retire or register them.
+    const rejectedIds = rejected.map((f) => f.payload.opId);
+    expect(rejectedIds).not.toContain('q-1788000000000');
+
+    // A refusal and an acknowledgement naming the same op can share one
+    // response. The refusal is emitted FIRST, which is what lets the sticky
+    // check downstream keep the ack from flipping an op already refused.
+    const rejectedIndex = frames.findIndex((f) => f.type === 'OP_REJECTED');
+    const ackIndex = frames.findIndex((f) => f.type === 'OP_ACK');
+    expect(ackIndex).toBeGreaterThan(-1);
+    expect(rejectedIndex).toBeLessThan(ackIndex);
+  });
+
+  it('never retires an id claimed by both the operations and the queries half', async () => {
+    // Op ids and query ids are disjoint by convention, not by type. An id in
+    // both sets is ambiguous, so it is warned about and never translated.
+    const frames: WireFrame[] = [];
+    provider.on('message', (_nodeId: string, data: ArrayBuffer | Uint8Array) => {
+      frames.push(
+        deserialize<WireFrame>(data instanceof ArrayBuffer ? new Uint8Array(data) : data),
+      );
+    });
+
+    await provider.connect();
+
+    provider.send(
+      serialize({
+        type: 'OP_BATCH',
+        payload: {
+          ops: [
+            {
+              id: 'collide',
+              mapName: 'users',
+              key: 'user-9',
+              record: { value: { name: 'Bob' }, timestamp: hlc.now() },
+            },
+          ],
+        },
+      }),
+    );
+    provider.send(
+      serialize({
+        type: 'QUERY_SUB',
+        payload: { requestId: 'collide', mapName: 'users', query: { where: {} } },
+      }),
+    );
+
+    frames.length = 0;
+    mockFetch.mockResolvedValue(
+      createMockResponse(
+        defaultSyncResponse({
+          errors: [{ code: 403, message: 'access denied', context: 'collide' }],
+        }),
+      ),
+    );
+
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(frames.filter((f) => f.type === 'OP_REJECTED')).toHaveLength(0);
   });
 
   it('emits connected after first successful request', async () => {

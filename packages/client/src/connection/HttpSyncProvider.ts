@@ -332,6 +332,66 @@ export class HttpSyncProvider implements IConnectionProvider {
         this.hlc.update(syncResponse.serverHlc);
       }
 
+      // Per-op refusals, translated into the same OP_REJECTED frames the
+      // WebSocket transport delivers, so SyncEngine sees ONE verdict model on both
+      // transports and retirement needs no second code path.
+      //
+      // `context` names the request item an entry is attributed to, and the two
+      // halves of a `/sync` response both write into it: the operations half puts
+      // an operation id there, the queries half puts a query id there (an RBAC read
+      // denial, a malformed cursor). Branching on presence alone would translate a
+      // denied READ into a refusal of a write that was never refused, so the
+      // translation is narrowed to ids THIS request actually sent as operations.
+      // Every other entry — batch-level, or attributed to a query — is left exactly
+      // as it was before per-op refusals existed: ignored by this provider.
+      //
+      // The two id namespaces are disjoint by construction (op ids are stringified
+      // op-log integers, query ids are UUIDs or `q-<millis>`), but that is a
+      // convention rather than a type, so an id claimed by both sets is ambiguous
+      // and is never retired.
+      //
+      // An operation-attributed entry is always a permanent verdict: the server
+      // fold attributes nothing else to a single operation. These are emitted
+      // BEFORE the acknowledgement below, which is what preserves
+      // refusal-before-ack ordering on this transport (TG-SYNC-002). A response
+      // carrying refusals and no `ack` at all is normal, not a hang: the refusals
+      // are then the whole exchange.
+      if (Array.isArray(syncResponse.errors)) {
+        const sentOpIds = new Set<string>(
+          operations
+            .map((op) => op?.id)
+            .filter((id): id is string => typeof id === 'string' && id.length > 0),
+        );
+        const sentQueryIds = new Set<string>(
+          queries
+            .map((query) => query?.queryId)
+            .filter((id): id is string => typeof id === 'string' && id.length > 0),
+        );
+        for (const error of syncResponse.errors) {
+          const opId = error?.context;
+          if (typeof opId !== 'string' || opId.length === 0) continue;
+          if (sentQueryIds.has(opId)) {
+            if (sentOpIds.has(opId)) {
+              logger.warn(
+                { context: opId },
+                'HTTP sync provider: error context names both an operation and a query, not retiring',
+              );
+            }
+            continue;
+          }
+          if (!sentOpIds.has(opId)) continue;
+          const payload: { opId: string; reason: string; permanent: true; code?: number } = {
+            opId,
+            reason: typeof error.message === 'string' ? error.message : 'Rejected by server',
+            permanent: true,
+          };
+          if (typeof error.code === 'number') {
+            payload.code = error.code;
+          }
+          this.emit('message', 'http', serialize({ type: 'OP_REJECTED', payload }));
+        }
+      }
+
       // Process operation acknowledgments
       if (syncResponse.ack) {
         this.emit(

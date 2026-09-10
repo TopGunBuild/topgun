@@ -1,6 +1,6 @@
 import { HLC, LWWMap, ORMap, deserialize } from '@topgunbuild/core';
 import type { EntryProcessorDef, EntryProcessorResult, SearchOptions } from '@topgunbuild/core';
-import type { LWWRecord, ORMapRecord, Timestamp } from '@topgunbuild/core';
+import type { LWWRecord, ORMapRecord, Timestamp, WriteRejection } from '@topgunbuild/core';
 import type {
   AuthFailMessage,
   AuthMessage,
@@ -37,6 +37,11 @@ import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
 import { AuthRequiredError } from './errors/AuthRequiredError';
 import { RecordSyncStateTracker } from './RecordSyncState';
+import {
+  WriteRejectionEmitter,
+  writeRejectionCauseFromCode,
+  type WriteRejectionListener,
+} from './WriteRejectionEmitter';
 import {
   WebSocketManager,
   BackpressureController,
@@ -80,6 +85,39 @@ export interface OpLogEntry {
   orTag?: string; // ORMap Remove (Tombstone tag)
   timestamp: Timestamp; // HLC timestamp of the operation
   synced: boolean; // True if this operation has been successfully pushed to the server
+  /**
+   * True once the server has permanently refused this operation.
+   *
+   * Sticky and terminal: it is set on the same object the op log holds, so an
+   * in-flight {@link SyncEngine.waitForOpSynced} — which captures the entry by
+   * reference — observes the refusal, and no acknowledgement path may ever mark
+   * a flagged entry synced (TG-SYNC-002). It is the second, independent line of
+   * defence behind the wire-level guarantee that a refusal is sent before any
+   * acknowledgement that excludes the refused op.
+   */
+  rejected?: boolean;
+}
+
+/**
+ * What the client remembers about a write the server permanently refused.
+ *
+ * Held in a bounded, session-scoped registry so that a confirmation asked for
+ * *after* the op was retired is still answered honestly. Retirement removes the
+ * op, and an absent op would otherwise take the "acked and compacted" fast path
+ * in {@link SyncEngine.waitForOpSynced} and report a refused write as synced.
+ *
+ * `mapName` and `key` are optional because a refusal can name an op the client
+ * no longer holds (evicted by drop-oldest backpressure, or the op log cleared
+ * and rebuilt on reconnect). The refusal is still true and is still recorded;
+ * only its target cannot be recovered from an op that is gone.
+ */
+export interface RejectedOpRecord {
+  mapName?: string;
+  key?: string;
+  /** Human-readable reason, as sent by the server. */
+  reason: string;
+  /** Machine-readable code, where the server sent one. */
+  code?: number;
 }
 
 export interface HeartbeatConfig {
@@ -232,7 +270,43 @@ export class SyncEngine {
   // MessageRouter handles type-based message routing
   private readonly messageRouter: IMessageRouter;
 
+  /**
+   * How many terminal refusals the rejection registry retains before evicting
+   * the oldest. A client reconnecting after a long offline period can have its
+   * whole queue refused at once, so the registry must not grow with the refusal
+   * stream.
+   */
+  private static readonly REJECTED_OPS_REGISTRY_LIMIT = 1000;
+
   private opLog: OpLogEntry[] = [];
+  /**
+   * Terminal refusals observed in this session, oldest first (Map iteration is
+   * insertion-ordered), capped at {@link SyncEngine.REJECTED_OPS_REGISTRY_LIMIT}.
+   */
+  private rejectedOps: Map<string, RejectedOpRecord> = new Map();
+  /**
+   * Fan-out for the application-facing refusal event. Deliberately separate
+   * from the registry above: the registry answers a later `confirmWrite` and is
+   * bounded because it stores, the emitter stores nothing at all.
+   */
+  private readonly writeRejectionEmitter = new WriteRejectionEmitter();
+  /** Op ids whose durable delete is queued but has not resolved yet. */
+  private retiringOps: Set<string> = new Set();
+  /**
+   * Serializes every durable op-log removal — a refused op's `deleteOp` and an
+   * acknowledgement's `markOpsSynced` alike — so their relative order is a
+   * mechanism rather than a hope. `markOpsSynced` DELETES every op at or below
+   * the given id, so running it before the delete of an op the same server
+   * refused would destroy the ordering the wire protocol establishes
+   * (TG-SYNC-002).
+   */
+  private opRetirementChain: Promise<void> = Promise.resolve();
+  /**
+   * Highest id already handed to `markOpsSynced`. Acknowledgements from two
+   * server dispatch tasks can interleave, so a lower id says nothing new and is
+   * skipped rather than re-issued as a durable no-op.
+   */
+  private lastMarkedSyncedId: number = -1;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- maps registry holds heterogeneous LWWMap and ORMap instances; value types differ per map name
   private maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
   private lastSyncTimestamp: number = 0;
@@ -1643,71 +1717,144 @@ export class SyncEngine {
     const { lastId, achievedLevel, results } = message.payload;
     logger.info({ lastId, achievedLevel, hasResults: !!results }, 'Received ACK for ops');
 
-    // Handle per-operation results if available
-    if (results && Array.isArray(results)) {
-      for (const result of results) {
+    let maxSyncedId = -1;
+    let ackedCount = 0;
+
+    // Per-op acceptance set. When the server sends `results` it is naming exactly
+    // the ops it accepted, so this — not the numeric prefix below — is the
+    // authoritative coverage of the acknowledgement: a prefix silently covers ids
+    // the same exchange may have refused.
+    const acceptanceSet = Array.isArray(results) ? results : undefined;
+    // The smallest id in this exchange that the server did NOT accept. It bounds
+    // the durable prefix below: `markOpsSynced` DELETES every row at or under the
+    // id it is given, so an accepted op with a larger id must not carry the prefix
+    // past an unaccepted smaller one — that would durably destroy a write the
+    // server never took. `Infinity` means "no failure seen, nothing to cap".
+    // Set-based (rather than prefix) op-log compaction removes the need for this
+    // cap entirely and is tracked as TODO-666.
+    let minUnacceptedId = Infinity;
+    const acceptedIdNums: number[] = [];
+    if (acceptanceSet) {
+      for (const result of acceptanceSet) {
         const op = this.opLog.find((o) => o.id === result.opId);
-        if (op && !op.synced) {
-          op.synced = true;
-          logger.debug(
-            { opId: result.opId, achievedLevel: result.achievedLevel, success: result.success },
-            'Op ACK with Write Concern',
+        // Only an entry that positively reports success is an acceptance.
+        // Anything else — an explicit failure, or a malformed entry from a
+        // foreign server that omits `success` or sends a non-boolean — gets no
+        // verdict from this exchange: not marked synced, not announced to the
+        // tracker, not allowed to raise the durable prefix — it simply stays
+        // pending and is retried. Its write-concern promise still resolves below,
+        // with whatever the server reported. Testing for `!== true` rather than
+        // `=== false` keeps an absent flag on the safe side of the durable
+        // delete: an unacknowledged op is retried, an over-acknowledged one is
+        // destroyed.
+        if (result.success !== true) {
+          logger.warn(
+            { opId: result.opId, success: result.success, error: result.error },
+            'OP_ACK results entry does not report success — leaving the op pending',
           );
-          // Notify per-record sync-state tracker that this op flipped synced=true.
-          this.recordSyncStateTracker.onAcknowledge(op);
+          const failedIdNum = parseInt(result.opId, 10);
+          // An unparseable failed id cannot bound the prefix numerically, so no
+          // prefix is safe this exchange: suppress the durable mark entirely
+          // rather than guess a bound that might delete this op.
+          minUnacceptedId = isNaN(failedIdNum) ? -1 : Math.min(minUnacceptedId, failedIdNum);
+        }
+        // Sticky terminal state (TG-SYNC-002): a refusal is never re-described as
+        // an acceptance. A refused op is neither marked synced nor allowed to
+        // raise the id whose durable delete this acknowledgement drives.
+        else if (op?.rejected === true || this.rejectedOps.has(result.opId)) {
+          logger.debug(
+            { opId: result.opId },
+            'OP_ACK names an op the server already refused — not marking it synced',
+          );
+        } else {
+          if (op && !op.synced) {
+            op.synced = true;
+            ackedCount++;
+            logger.debug(
+              { opId: result.opId, achievedLevel: result.achievedLevel, success: result.success },
+              'Op ACK with Write Concern',
+            );
+            // Notify per-record sync-state tracker that this op flipped synced=true.
+            this.recordSyncStateTracker.onAcknowledge(op);
+          }
+          const acceptedIdNum = parseInt(result.opId, 10);
+          if (!isNaN(acceptedIdNum)) {
+            acceptedIdNums.push(acceptedIdNum);
+          }
         }
         // Resolve pending Write Concern promise if exists (delegates to WriteConcernManager)
         this.writeConcernManager.resolveWriteConcernPromise(result.opId, result);
       }
+      // The durable prefix is the largest accepted id STRICTLY BELOW the smallest
+      // unaccepted one, not the largest accepted id outright. With no failure in
+      // the exchange the two are the same; with one, the difference is the whole
+      // point of the cap.
+      for (const acceptedIdNum of acceptedIdNums) {
+        if (acceptedIdNum < minUnacceptedId && acceptedIdNum > maxSyncedId) {
+          maxSyncedId = acceptedIdNum;
+        }
+      }
     }
 
-    // Mark all ops up to lastId as synced (numeric comparison — IDs are stringified integers)
-    const lastIdNum = parseInt(lastId, 10);
-    let maxSyncedId = -1;
-    let ackedCount = 0;
+    // An EMPTY acceptance set has nothing to be authoritative about, so the prefix
+    // loop still runs on `lastId`. This server never sends one — a batch it
+    // accepted nothing from carries no acknowledgement at all — so an empty set
+    // can only come from a foreign or future server, whose `lastId` is then the
+    // only verdict it sent.
+    if (!acceptanceSet || acceptanceSet.length === 0) {
+      // Mark all ops up to lastId as synced (numeric comparison — IDs are stringified integers)
+      const lastIdNum = parseInt(lastId, 10);
 
-    if (!isNaN(lastIdNum)) {
-      // Normal path: server returned a valid numeric lastId
-      this.opLog.forEach((op) => {
-        if (op.id) {
-          const opIdNum = parseInt(op.id, 10);
-          if (!isNaN(opIdNum) && opIdNum <= lastIdNum) {
-            if (!op.synced) {
-              ackedCount++;
-              // Per-record sync-state tracker — emit only on the actual flip.
-              op.synced = true;
-              this.recordSyncStateTracker.onAcknowledge(op);
-            } else {
-              op.synced = true;
+      if (!isNaN(lastIdNum)) {
+        // Normal path: server returned a valid numeric lastId
+        this.opLog.forEach((op) => {
+          if (op.id && op.rejected !== true) {
+            const opIdNum = parseInt(op.id, 10);
+            if (!isNaN(opIdNum) && opIdNum <= lastIdNum) {
+              if (!op.synced) {
+                ackedCount++;
+                // Per-record sync-state tracker — emit only on the actual flip.
+                op.synced = true;
+                this.recordSyncStateTracker.onAcknowledge(op);
+              } else {
+                op.synced = true;
+              }
+              if (opIdNum > maxSyncedId) {
+                maxSyncedId = opIdNum;
+              }
             }
-            if (opIdNum > maxSyncedId) {
+          }
+        });
+      } else {
+        // Fallback: server returned non-numeric lastId (e.g. "unknown", "undefined").
+        // The server ACKed the batch, so mark ALL pending ops as synced.
+        logger.warn(
+          { lastId },
+          'OP_ACK has non-numeric lastId — marking all pending ops as synced',
+        );
+        this.opLog.forEach((op) => {
+          if (!op.synced && op.rejected !== true) {
+            ackedCount++;
+            op.synced = true;
+            // Per-record sync-state tracker — emit only on the actual flip.
+            this.recordSyncStateTracker.onAcknowledge(op);
+            const opIdNum = parseInt(op.id, 10);
+            if (!isNaN(opIdNum) && opIdNum > maxSyncedId) {
               maxSyncedId = opIdNum;
             }
           }
-        }
-      });
-    } else {
-      // Fallback: server returned non-numeric lastId (e.g. "unknown", "undefined").
-      // The server ACKed the batch, so mark ALL pending ops as synced.
-      logger.warn({ lastId }, 'OP_ACK has non-numeric lastId — marking all pending ops as synced');
-      this.opLog.forEach((op) => {
-        if (!op.synced) {
-          ackedCount++;
-          op.synced = true;
-          // Per-record sync-state tracker — emit only on the actual flip.
-          this.recordSyncStateTracker.onAcknowledge(op);
-          const opIdNum = parseInt(op.id, 10);
-          if (!isNaN(opIdNum) && opIdNum > maxSyncedId) {
-            maxSyncedId = opIdNum;
-          }
-        }
-      });
+        });
+      }
     }
 
+    // Shared tail — both paths run it, neither duplicates or bypasses it. An
+    // acceptance-set path that merely marked the right ops in memory would
+    // silently lose durable ack-marking (the ops reload as pending after a
+    // restart), op-log compaction and the backpressure release, and none of that
+    // is visible to a pending-count assertion, because a synced-but-unspliced op
+    // already counts as zero pending.
     if (maxSyncedId !== -1) {
-      this.storageAdapter
-        .markOpsSynced(maxSyncedId)
-        .catch((err) => logger.error({ err }, 'Failed to mark ops synced'));
+      this.markOpsSyncedDurably(maxSyncedId);
     }
 
     // Compaction (in-memory): splice acked ops out of opLog so it holds only pending ops.
@@ -1726,6 +1873,37 @@ export class SyncEngine {
     if (ackedCount > 0) {
       this.backpressureController.checkLowWaterMark();
     }
+  }
+
+  /**
+   * Durably record that every op at or below `maxSyncedId` is acknowledged.
+   *
+   * Two properties are enforced here rather than at the call sites:
+   *
+   *   - **Ordered behind retirement.** `markOpsSynced` DELETES every durable op
+   *     at or below the id — an over-broad id is unrecoverable loss, not a
+   *     mislabel — so it is queued on the same chain as a refused op's
+   *     `deleteOp`. Because the server sends a refusal before any acknowledgement
+   *     that excludes the refused op (TG-SYNC-002), the refusal's delete is
+   *     already on the chain and therefore completes first. The chain is the
+   *     ordering mechanism; there is no timer anywhere in it.
+   *   - **Monotonic.** Acknowledgements from two server dispatch tasks can
+   *     interleave. An id below one already applied would delete a strictly
+   *     smaller set that is already gone, so it is skipped outright instead of
+   *     being issued as a durable no-op.
+   */
+  private markOpsSyncedDurably(maxSyncedId: number): void {
+    if (maxSyncedId <= this.lastMarkedSyncedId) {
+      logger.debug(
+        { maxSyncedId, lastMarkedSyncedId: this.lastMarkedSyncedId },
+        'OP_ACK covers no id beyond the last durably marked one — skipping',
+      );
+      return;
+    }
+    this.lastMarkedSyncedId = maxSyncedId;
+    this.opRetirementChain = this.opRetirementChain
+      .then(() => this.storageAdapter.markOpsSynced(maxSyncedId))
+      .catch((err) => logger.error({ err }, 'Failed to mark ops synced'));
   }
 
   private handleQueryResp(message: QueryRespMessage): void {
@@ -2062,6 +2240,11 @@ export class SyncEngine {
     // state-change + rejection subscriptions and clears internal tables.
     this.recordSyncStateTracker.dispose();
 
+    // Drop refusal listeners with the engine that feeds them: a closed engine
+    // emits nothing, and a retained listener set would keep the application's
+    // closures alive for no reason.
+    this.writeRejectionEmitter.clear();
+
     this.stateMachine.transition(SyncState.DISCONNECTED);
     logger.info('SyncEngine closed');
   }
@@ -2265,12 +2448,26 @@ export class SyncEngine {
    * map writes. Per-op Write Concern promises only resolve when the server
    * returns per-op `results`, which the single-server OP_BATCH path does not — so
    * this op-log/ACK projection is the correct primitive for confirming a write.
+   *
+   * Resolves `'rejected'` when the server permanently refused the op. That check
+   * runs FIRST, before the absent-op fast path described above, and it has to:
+   * retirement deletes the refused op, so the fast path would otherwise read its
+   * absence as an ack and report a refused write as synced — manufacturing
+   * exactly the dishonesty the refusal registry exists to remove. The registry is
+   * therefore consulted for an op that is gone, and the sticky flag on the entry
+   * for an op still held (TG-SYNC-001 clause d).
    */
   public async waitForOpSynced(
     opId: string,
     timeoutMs: number,
-  ): Promise<'synced' | 'offline' | 'timeout'> {
+  ): Promise<'synced' | 'offline' | 'timeout' | 'rejected'> {
     const deadline = Date.now() + timeoutMs;
+
+    // Terminal refusals are consulted BEFORE the absent-op fast path below, and
+    // the order is the whole point: retiring a refused op REMOVES it, so the fast
+    // path would read the absence as "acked and compacted" and answer 'synced'
+    // for a write the server explicitly refused.
+    if (this.rejectedOps.has(opId)) return 'rejected';
 
     // Capture the op object ONCE by id, then poll ITS `synced` flag — do NOT
     // re-find by id each tick. The distinction matters for correctness:
@@ -2295,6 +2492,9 @@ export class SyncEngine {
     if (!op) return 'synced';
 
     while (op.synced !== true) {
+      // A refusal that lands while we wait is terminal: report it instead of
+      // spinning to the deadline and calling a refused write a timeout.
+      if (op.rejected === true || this.rejectedOps.has(opId)) return 'rejected';
       // Fail fast when offline with the op still pending: it will only sync on a
       // future reconnect, so there is nothing to wait for here.
       if (!this.isOnline()) return 'offline';
@@ -2633,20 +2833,233 @@ export class SyncEngine {
   }
 
   /**
-   * Handle operation rejected by server (permission denied, validation failure, etc.).
+   * Handle a per-operation refusal from the server (permission denied, schema
+   * violation, oversized value, ...).
+   *
+   * A refusal the server marks `permanent` is terminal, and the op is retired:
+   * retrying it can never succeed, so leaving it pending would re-send it on
+   * every flush forever while `confirmWrite` reported a timeout. A refusal that
+   * is not permanent is deliberately left alone — the op stays pending and a
+   * later flush retries it, which is the correct handling of a transient
+   * failure.
    */
   private handleOpRejected(message: OpRejectedMessage): void {
-    const { opId, reason, code } = message.payload;
-    logger.warn({ opId, reason, code }, 'Operation rejected by server');
+    const { opId, reason, code, permanent } = message.payload;
 
-    // Reject pending write concern promise if exists
+    // Release the Write Concern waiter on both dispositions: a caller blocked on
+    // this op must learn the server said no, terminally or not. FIRE_AND_FORGET
+    // is the honest achieved level — a refused op achieved nothing.
     this.writeConcernManager.resolveWriteConcernPromise(opId, {
       opId,
       success: false,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- string literal cast to satisfy the WriteConcernValue type at a rejection code path without importing the enum
-      achievedLevel: 'FIRE_AND_FORGET' as any,
+      achievedLevel: 'FIRE_AND_FORGET',
       error: reason,
     });
+
+    // Absent `permanent` means a server that predates the per-op verdict
+    // contract: read as retryable, which is this client's historical behaviour
+    // and the safe direction (a retryable read of a terminal refusal wastes a
+    // re-send; a terminal read of a transient one discards a good write).
+    if (permanent !== true) {
+      logger.warn({ opId, reason, code }, 'Operation rejected by server (retryable)');
+      return;
+    }
+
+    this.retireRejectedOp(opId, reason, code);
+  }
+
+  /**
+   * Retire an op the server permanently refused: flag it, record the refusal,
+   * delete it durably, splice it out of the op log and release backpressure.
+   *
+   * The last step is not decoration. When a server refuses every op of a flush it
+   * sends the refusals and NO acknowledgement at all, so `handleOpAck` — the only
+   * other place backpressure is released — never runs, and a client at the
+   * high-water mark would stay pinned there with an empty pending set.
+   */
+  private retireRejectedOp(opId: string, reason: string, code?: number): void {
+    // Idempotent and retroactive. Flushes are not serialised and the server
+    // dispatches frames from several tasks, so the same op can be refused twice.
+    // A duplicate must produce no second refusal record and no second durable
+    // delete — but a refusal whose delete FAILED left the op pending, so that op
+    // is legitimately re-sent, refused and retired again, and must not be
+    // swallowed here.
+    const alreadyRecorded = this.rejectedOps.has(opId);
+    const index = this.opLog.findIndex((o) => o.id === opId);
+    const op = index === -1 ? undefined : this.opLog[index];
+    if (alreadyRecorded && (this.retiringOps.has(opId) || !op)) {
+      logger.debug({ opId }, 'Duplicate refusal for an already-retired op — ignored');
+      return;
+    }
+
+    if (op) {
+      // Sticky terminal flag, set on the SAME object the op log holds: an
+      // in-flight waitForOpSynced captured this reference and observes the
+      // refusal through it even after the splice below.
+      op.rejected = true;
+    } else {
+      // A legitimate race, not an anomaly: the op may have been evicted by
+      // drop-oldest backpressure or the op log cleared and rebuilt on reconnect.
+      // The refusal is still true, so it is recorded rather than swallowed —
+      // otherwise a later confirmWrite would answer for a write nobody refused.
+      logger.debug({ opId, reason, code }, 'Refusal names an op the client no longer holds');
+    }
+
+    if (!alreadyRecorded) {
+      // The op is passed along because this runs BEFORE the durable delete and
+      // the splice below: the refused value can still be read off it here, and
+      // nowhere later.
+      this.recordRejection(opId, { mapName: op?.mapName, key: op?.key, reason, code }, op);
+      logger.warn({ opId, reason, code }, 'Operation permanently refused by server');
+    }
+
+    if (!op) return;
+
+    const numericId = parseInt(opId, 10);
+    if (isNaN(numericId)) {
+      // `deleteOp` addresses a durable row by its numeric auto-increment id, so a
+      // non-numeric id cannot be deleted at all. Keep the op in memory, visibly
+      // flagged, instead of splicing it away: nothing is silently skipped, and
+      // confirmWrite still answers from the refusal registry. Throwing would
+      // abandon the rest of the frame — a message handler, unlike a resync, has
+      // no transaction to abort.
+      logger.error(
+        { opId },
+        'Refused op has a non-numeric id and cannot be deleted durably — keeping it in memory, marked rejected',
+      );
+      return;
+    }
+
+    // Durable delete FIRST, splice SECOND, never the reverse: a delete that fails
+    // must leave the op in BOTH memory and storage rather than dropping it from
+    // memory while it survives on disk to resurrect on the next reload.
+    this.retiringOps.add(opId);
+    this.opRetirementChain = this.opRetirementChain.then(async () => {
+      try {
+        await this.storageAdapter.deleteOp(numericId);
+        const at = this.opLog.findIndex((o) => o.id === opId);
+        if (at !== -1) {
+          this.opLog.splice(at, 1);
+        }
+        this.backpressureController.checkLowWaterMark();
+      } catch (err) {
+        // Keep the op in memory, still flagged, and do NOT splice. It is re-sent
+        // on a later flush, refused again and retired again — a loop bounded by
+        // one attempt per flush that heals as soon as storage accepts the delete.
+        logger.error(
+          { err, opId },
+          'Failed to durably delete a refused op — keeping it in memory, marked rejected',
+        );
+      } finally {
+        this.retiringOps.delete(opId);
+      }
+    });
+  }
+
+  /**
+   * Record a terminal refusal, evicting the oldest entry once the registry is
+   * full. Map iteration is insertion-ordered, so the first key is the oldest.
+   *
+   * The single point at which a refusal becomes visible to the application:
+   * its one caller is guarded so that this runs exactly once per terminal
+   * refusal, which is what makes "one event per refused write" a property of
+   * the call graph rather than of listener bookkeeping.
+   */
+  private recordRejection(opId: string, record: RejectedOpRecord, op?: OpLogEntry): void {
+    this.rejectedOps.set(opId, record);
+    while (this.rejectedOps.size > SyncEngine.REJECTED_OPS_REGISTRY_LIMIT) {
+      const oldest = this.rejectedOps.keys().next().value;
+      if (oldest === undefined) break;
+      this.rejectedOps.delete(oldest);
+    }
+    this.publishWriteRejection(opId, record, op);
+  }
+
+  /**
+   * Present a terminal refusal to the application: emit it on
+   * {@link SyncEngine.onWriteRejected} and mark the record conflicted for
+   * `useSyncState`.
+   *
+   * Both happen here, at one site, so an application integrates the surface
+   * once (or not at all) and still gets the per-record state for free.
+   *
+   * Synchronous and allocation-light on purpose: this runs inside the message
+   * handler, before the durable delete is even queued, because the refused op
+   * is the only place the attempted value can still be read from.
+   */
+  private publishWriteRejection(opId: string, record: RejectedOpRecord, op?: OpLogEntry): void {
+    const { mapName, key, reason, code } = record;
+    // Read the value out of the op now rather than handing out the op itself,
+    // which is about to be deleted and spliced away.
+    const attemptedValue = op?.record !== undefined ? op.record.value : op?.orRecord?.value;
+    // The refused write's own clock, so the event's identity and the tracker's
+    // supersede comparison both speak about the write rather than about when
+    // the answer happened to arrive. A refusal naming an op the client no
+    // longer holds has no such clock, and falls back to the observation time.
+    const timestamp = op?.timestamp ?? this.hlc.now();
+
+    const rejection: WriteRejection = {
+      // The op id, always: on the retroactive path there is no op to build the
+      // `mapName:key:millis:counter` form from, and an id derived from unknown
+      // parts would collide with every other unknown-target refusal.
+      id: opId,
+      // Empty when the refusal names an op the client no longer holds — the
+      // refusal is still true, only its target cannot be recovered.
+      mapName: mapName ?? '',
+      key: key ?? '',
+      attemptedValue,
+      cause: writeRejectionCauseFromCode(code),
+      reason,
+      // Keep-and-present: no path rolls a locally-applied write back because
+      // the server refused it.
+      keptLocally: true,
+      // No emitter produces `true` here; the acked-then-lost case arrives with
+      // the TODO-653 fix, together with `cause: 'write_lost'`.
+      previouslyAcked: false,
+      timestamp,
+    };
+
+    this.writeRejectionEmitter.emit(rejection);
+
+    // Feed the per-record tracker only when the target is known: a slot keyed by
+    // two empty strings would be a record no application can ever look up.
+    if (mapName && key) {
+      this.recordSyncStateTracker.onRejection({
+        mapName,
+        key,
+        attemptedValue,
+        reason,
+        timestamp,
+        nodeId: this.nodeId,
+      });
+    }
+  }
+
+  /**
+   * Subscribe to writes the server permanently refused.
+   *
+   * @param listener Called once per refused write, synchronously.
+   * @returns Unsubscribe function.
+   */
+  public onWriteRejected(listener: WriteRejectionListener): () => void {
+    return this.writeRejectionEmitter.subscribe(listener);
+  }
+
+  /**
+   * The terminal refusal recorded for `opId`, if the server permanently refused
+   * that op in this session and the record has not yet been evicted.
+   *
+   * Session-scoped: refusals do not survive a reload, so after one a refused
+   * record reads as synced while holding a value the server rejected (TODO-667
+   * owns the durable store that would close this).
+   */
+  public getOpRejection(opId: string): RejectedOpRecord | undefined {
+    return this.rejectedOps.get(opId);
+  }
+
+  /** How many terminal refusals the registry currently retains (bounded). */
+  public getRejectedOpCount(): number {
+    return this.rejectedOps.size;
   }
 
   /**

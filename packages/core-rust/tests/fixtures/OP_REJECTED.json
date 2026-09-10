@@ -3,6 +3,7 @@
   "payload": {
     "opId": "op-bad",
     "reason": "schema validation failed",
-    "code": 400
+    "code": 400,
+    "permanent": true
   }
 }

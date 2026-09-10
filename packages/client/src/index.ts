@@ -37,7 +37,12 @@ import type {
   SubscribeCallback,
 } from './QueryHandle';
 import type { TopicCallback } from './TopicHandle';
-import type { BackoffConfig, HeartbeatConfig, SyncEngineConfig } from './SyncEngine';
+import type {
+  BackoffConfig,
+  HeartbeatConfig,
+  RejectedOpRecord,
+  SyncEngineConfig,
+} from './SyncEngine';
 import type {
   StateChangeEvent,
   StateChangeListener,
@@ -76,6 +81,10 @@ export type { JournalEventData, JournalSubscribeOptions } from './EventJournalRe
 // Conflict Resolver exports
 export { ConflictResolverClient } from './ConflictResolverClient';
 export type { ResolverInfo, RegisterResult } from './ConflictResolverClient';
+
+// Write-refusal surface exports
+export { WriteRejectionEmitter, writeRejectionCauseFromCode } from './WriteRejectionEmitter';
+export type { WriteRejectionListener } from './WriteRejectionEmitter';
 
 // Per-record sync-state exports
 export { RecordSyncStateTracker } from './RecordSyncState';
@@ -188,6 +197,7 @@ export type {
   TopicCallback,
   BackoffConfig,
   HeartbeatConfig,
+  RejectedOpRecord,
   SyncEngineConfig,
   StateChangeEvent,
   StateChangeListener,

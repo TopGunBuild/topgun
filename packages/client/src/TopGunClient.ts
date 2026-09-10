@@ -15,6 +15,7 @@ import type {
   HybridSearchClientOptions,
   HybridSearchClientResult,
 } from './sync';
+import type { WriteRejectionListener } from './WriteRejectionEmitter';
 import type { AuthProvider } from './auth/types';
 import { QueryHandle } from './QueryHandle';
 import type { QueryFilter, QueryResultItem } from './QueryHandle';
@@ -105,11 +106,27 @@ export const DEFAULT_QUERY_ONCE_TIMEOUT_MS = 5000;
 
 /**
  * Outcome of {@link TopGunClient.confirmWrite}: whether a local write was
- * confirmed applied by the server (`'synced'`) or could not be confirmed —
- * because the client is offline (`'offline'`), the server did not acknowledge in
- * time (`'timeout'`), or the local op could not be recorded (`'failed'`).
+ * confirmed applied by the server.
+ *
+ * - `'synced'` — the server acknowledged the write.
+ * - `'offline'` — the client is offline, so nothing could be confirmed yet. The
+ *   write stays queued.
+ * - `'timeout'` — the server did not acknowledge in time. The write stays
+ *   queued and may still be accepted.
+ * - `'rejected'` — **the server refused this write and retrying cannot help.**
+ *   Terminal, and a decision made by the server. The local value is
+ *   deliberately kept rather than rolled back, so the application must present
+ *   the refusal instead of assuming the data is gone.
+ * - `'failed'` — a **local** outcome, not a server decision: there was no
+ *   recordable write to confirm (no tracked op for that map and key, or the
+ *   local write itself failed). The write never reached the wire, so the fix is
+ *   in the caller, not in a retry.
+ *
+ * `'rejected'` and `'failed'` are the two non-success outcomes with a cause and
+ * must not be conflated: the first means the server said no, the second means
+ * there was nothing to ask about.
  */
-export type WriteConfirmation = 'synced' | 'offline' | 'timeout' | 'failed';
+export type WriteConfirmation = 'synced' | 'offline' | 'timeout' | 'failed' | 'rejected';
 
 /**
  * Options for {@link TopGunClient.queryOnce}, a one-shot read that resolves with
@@ -1051,8 +1068,14 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    *   will sync on reconnect, but is NOT yet durable on the server.
    * - `'timeout'` — connected, but the server did not acknowledge within
    *   `timeoutMs`; the write is not yet confirmed durable.
-   * - `'failed'` — there was no recordable write to confirm (no tracked op, or
-   *   the local op could not be committed).
+   * - `'rejected'` — the server refused this write and **retrying cannot help**.
+   *   A server decision and terminal, so it is never a `'timeout'` in disguise.
+   *   The local value is deliberately kept rather than rolled back: present the
+   *   refusal to the user instead of assuming their data is gone.
+   * - `'failed'` — a **local** outcome, not a server decision: there was no
+   *   recordable write to confirm (no tracked op, or the local op could not be
+   *   committed), so the write never reached the wire. Fix the caller; do not
+   *   retry blindly.
    *
    * This is the honest "did the server take my write?" answer that callers
    * mutating a database (e.g. the MCP `mutate` tool) need before reporting
@@ -1082,12 +1105,17 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     }
 
     const outcome = await this.syncEngine.waitForOpSynced(opId, timeoutMs);
-    // Forget the in-flight write ONLY once the server has confirmed it. On
-    // offline/timeout we keep the entry so a later retry re-waits on the same op
-    // instead of hitting the no-tracked-write path above and reporting a false
-    // result. A subsequent write to the same key overwrites the entry, so this
-    // never grows unbounded.
-    if (outcome === 'synced' && this.inFlightWrites.get(writeKey) === opPromise) {
+    // Forget the in-flight write once the server has reached a TERMINAL verdict —
+    // accepted or refused. On offline/timeout we keep the entry so a later retry
+    // re-waits on the same op instead of hitting the no-tracked-write path above
+    // and reporting a false result; on a refusal keeping it would make a
+    // confirmWrite for a NEW write to the same key re-await the dead op and
+    // answer 'rejected' for a write nobody has judged yet. A subsequent write to
+    // the same key overwrites the entry, so this never grows unbounded.
+    if (
+      (outcome === 'synced' || outcome === 'rejected') &&
+      this.inFlightWrites.get(writeKey) === opPromise
+    ) {
       this.inFlightWrites.delete(writeKey);
     }
     return outcome;
@@ -1612,6 +1640,43 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    */
   public getConflictResolvers() {
     return this.syncEngine.getConflictResolverClient();
+  }
+
+  /**
+   * Subscribe to writes the server **permanently refused** — a permission
+   * denial, a schema violation, an oversized value.
+   *
+   * A refused write is never rolled back: the local value stays, and this event
+   * is how the application learns the server will not accept it. Retrying it
+   * cannot help, so the useful responses are to tell the user, or to write a
+   * different value.
+   *
+   * **These events are session-scoped and do NOT survive a page reload.** After
+   * a reload the refused record reads as `'synced'` again, and a `'synced'`
+   * state therefore does not by itself guarantee the server accepted the write.
+   * The durable refused-writes store that would close this gap is tracked as
+   * TODO-667.
+   *
+   * The refused record is also flipped to `'conflicted'` for `useSyncState`
+   * with no further integration on your side.
+   *
+   * @param listener Called once per refused write. A listener that throws is
+   *   logged and does not prevent the other listeners from running.
+   * @returns Unsubscribe function.
+   *
+   * @example
+   * ```typescript
+   * const unsubscribe = client.onWriteRejected((rejection) => {
+   *   if (rejection.cause === 'forbidden') {
+   *     toast.error(`You cannot edit ${rejection.key}`);
+   *   } else {
+   *     toast.error(`Rejected: ${rejection.reason}`);
+   *   }
+   * });
+   * ```
+   */
+  public onWriteRejected(listener: WriteRejectionListener): () => void {
+    return this.syncEngine.onWriteRejected(listener);
   }
 
   /**

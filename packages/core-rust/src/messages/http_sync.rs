@@ -219,7 +219,42 @@ pub struct HttpSyncError {
     pub code: u32,
     /// Human-readable error message.
     pub message: String,
-    /// Optional context for the error (e.g., which operation failed).
+    /// Optional context for the error: the id of the **request item** this entry
+    /// is attributed to.
+    ///
+    /// **Contract every HTTP caller must uphold.** Both halves of a `/sync`
+    /// request write into this field, so its presence alone does NOT make an
+    /// entry a refusal of an operation:
+    ///
+    /// - An entry produced by the **operations** half carries an **operation
+    ///   id**, and is a per-operation **permanent** verdict naming that
+    ///   operation: the server refused it and retrying it cannot help. The fold
+    ///   attributes nothing else to a single operation, so an operation-attributed
+    ///   entry is always permanent.
+    /// - An entry produced by the **queries** half carries a **query id** — an
+    ///   RBAC read denial (403) or a malformed/expired cursor (400). It refuses no
+    ///   operation at all.
+    /// - `None` ⇔ a batch-level error attributed to no request item. Nothing is said
+    ///   about any individual operation, so no operation may be retired on it.
+    ///   Two kinds arrive here and `code` (from `OperationError::wire_code`) is
+    ///   what separates them: a **transient** failure, where retrying the batch is
+    ///   the correct response; and a **non-attributed permanent** failure —
+    ///   `UnknownService` / `WrongService` (501), or an operation carrying no id —
+    ///   where retrying fails identically and the caller must correct the batch
+    ///   instead.
+    ///
+    /// A caller may therefore retire **only ids it sent as operations in this same
+    /// request**, and must match `context` against that set rather than branching
+    /// on the field being present. The two id namespaces are disjoint by
+    /// convention (operation ids are stringified op-log integers, query ids are
+    /// UUIDs or `q-<millis>`) but not by type, so an id claimed by both sets is
+    /// ambiguous and must never be retired.
+    ///
+    /// Reading a `None` entry as a per-operation refusal retires operations the
+    /// server never refused; reading a query-attributed entry as an operation
+    /// refusal reports a write that was never refused; reading an
+    /// operation-attributed entry as batch-level retries a write that will never
+    /// be accepted (TG-SYNC-001).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub context: Option<String>,
 }

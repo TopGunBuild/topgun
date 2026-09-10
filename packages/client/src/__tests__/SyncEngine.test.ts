@@ -1,7 +1,8 @@
 import { SyncEngine, SyncEngineConfig, OpLogEntry } from '../SyncEngine';
-import { IStorageAdapter } from '../IStorageAdapter';
+import { IStorageAdapter, OpLogEntry as StoredOpLogEntry } from '../IStorageAdapter';
 import { serialize, deserialize, LWWMap, ORMap, HLC } from '@topgunbuild/core';
 import { SingleServerProvider } from '../connection/SingleServerProvider';
+import { logger } from '../utils/logger';
 
 // --- Mock WebSocket ---
 class MockWebSocket {
@@ -1854,6 +1855,359 @@ describe('SyncEngine', () => {
       await (syncEngine as any).startMerkleSync();
       expect((syncEngine as any).heldSetIncomplete).toBe(false);
       expect(await storage.getMeta('__sys__:x:ormap')).toBe(1);
+    });
+  });
+
+  describe('Permanently refused operations (per-op verdicts)', () => {
+    // Narrow views on the engine internals these tests must observe: the op log
+    // itself, and the backpressure state an all-refused flush has to release.
+    type EnginePrivates = {
+      opLog: OpLogEntry[];
+      backpressureController: {
+        checkLowWaterMark: () => void;
+        checkHighWaterMark: () => void;
+        highWaterMarkEmitted: boolean;
+        backpressurePaused: boolean;
+      };
+      recordRejection: (opId: string, record: unknown) => void;
+    };
+    const engine = () => syncEngine as unknown as EnginePrivates;
+
+    const pendingOp = (id: string, key: string) => ({
+      id,
+      mapName: 'users',
+      opType: 'PUT',
+      key,
+      synced: false,
+      timestamp: { millis: 1000, counter: 0, nodeId: 'test' },
+    });
+
+    async function bootWith(
+      ops: ReturnType<typeof pendingOp>[],
+      overrides: Partial<typeof config> = {},
+    ) {
+      // Restored rows carry the engine-side shape (`opType`), which the durable
+      // interface types more loosely than the engine writes it.
+      mockStorage.getPendingOps.mockResolvedValue(ops as unknown as StoredOpLogEntry[]);
+      syncEngine = new SyncEngine({ ...config, ...overrides });
+      await jest.runAllTimersAsync();
+      return MockWebSocket.getLastInstance()!;
+    }
+
+    const refusal = (opId: string, permanent = true) => ({
+      type: 'OP_REJECTED',
+      payload: { opId, reason: 'forbidden by policy', code: 4003, permanent },
+    });
+
+    const opLogOf = () => engine().opLog;
+
+    test('waitForOpSynced answers rejected for an op already retired and spliced out', async () => {
+      const ws = await bootWith([pendingOp('7', 'user7')]);
+
+      ws.simulateMessage(refusal('7'));
+      await jest.runAllTimersAsync();
+
+      // Retired: durably deleted, gone from the op log, and no longer pending.
+      expect(mockStorage.deleteOp).toHaveBeenCalledWith(7);
+      expect(opLogOf().find((o) => o.id === '7')).toBeUndefined();
+      expect(syncEngine!.getPendingOpsCount()).toBe(0);
+
+      // The op is ABSENT, which is exactly the state the "acked and compacted"
+      // fast path reads as 'synced'. The refusal registry is consulted first.
+      await expect(syncEngine!.waitForOpSynced('7', 100)).resolves.toBe('rejected');
+    });
+
+    test('a later OP_ACK covering a refused op neither resurrects it nor reports it synced', async () => {
+      const order: string[] = [];
+      mockStorage.deleteOp.mockImplementation(
+        () =>
+          new Promise<void>((resolve) =>
+            setTimeout(() => {
+              order.push('deleteOp');
+              resolve();
+            }, 50),
+          ),
+      );
+      mockStorage.markOpsSynced.mockImplementation(async () => {
+        order.push('markOpsSynced');
+      });
+
+      const ws = await bootWith([pendingOp('3', 'user3'), pendingOp('5', 'user5')]);
+
+      // Refusal then an ack whose numeric prefix would otherwise swallow the
+      // refused op — the two arrive back to back, before the delete resolves.
+      ws.simulateMessage(refusal('5'));
+      ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '5' } });
+      await jest.runAllTimersAsync();
+
+      await expect(syncEngine!.waitForOpSynced('5', 100)).resolves.toBe('rejected');
+      // The prefix stops at the last op the server did NOT refuse.
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(3);
+      // Ordering is a mechanism, not a hope: markOpsSynced DELETES every durable
+      // op at or below its id, so it must never run before the refused op's own
+      // delete has resolved.
+      expect(order).toEqual(['deleteOp', 'markOpsSynced']);
+    });
+
+    test('a refusal naming a non-numeric opId is kept, not thrown and not silently skipped', async () => {
+      const errorSpy = jest.spyOn(logger, 'error');
+      const ws = await bootWith([pendingOp('abc', 'userAbc')]);
+
+      expect(() => ws.simulateMessage(refusal('abc'))).not.toThrow();
+      await jest.runAllTimersAsync();
+
+      // deleteOp addresses a durable row by numeric id, so this op cannot be
+      // deleted at all: it stays in memory, visibly refused, rather than being
+      // spliced away while it survives on disk.
+      expect(mockStorage.deleteOp).not.toHaveBeenCalled();
+      const kept = opLogOf().find((o) => o.id === 'abc');
+      expect(kept?.rejected).toBe(true);
+      expect(errorSpy).toHaveBeenCalled();
+      await expect(syncEngine!.waitForOpSynced('abc', 100)).resolves.toBe('rejected');
+      errorSpy.mockRestore();
+    });
+
+    test('a partial ack drives the full tail: durable mark, compaction, backpressure release', async () => {
+      const ws = await bootWith([
+        pendingOp('1', 'user1'),
+        pendingOp('2', 'user2'),
+        pendingOp('3', 'user3'),
+      ]);
+      const controller = engine().backpressureController;
+      const lowWaterSpy = jest.spyOn(controller, 'checkLowWaterMark');
+
+      // Op 3 is refused earlier in the stream, then the ack names the other two.
+      ws.simulateMessage(refusal('3'));
+      await jest.runAllTimersAsync();
+      mockStorage.markOpsSynced.mockClear();
+
+      ws.simulateMessage({
+        type: 'OP_ACK',
+        payload: {
+          // lastId would cover the refused op — the acceptance set, not the
+          // prefix, decides what this ack covers.
+          lastId: '3',
+          results: [
+            { opId: '1', success: true, achievedLevel: 'PERSISTED' },
+            { opId: '2', success: true, achievedLevel: 'PERSISTED' },
+          ],
+        },
+      });
+      await jest.runAllTimersAsync();
+
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledTimes(1);
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(2);
+      expect(opLogOf()).toHaveLength(0);
+      // Back to the pending count the client had before the batch was queued.
+      expect(syncEngine!.getPendingOpsCount()).toBe(0);
+      expect(lowWaterSpy).toHaveBeenCalled();
+    });
+
+    test('a present acceptance set is authoritative: the numeric prefix is not consulted', async () => {
+      const ws = await bootWith([
+        pendingOp('1', 'user1'),
+        pendingOp('2', 'user2'),
+        pendingOp('4', 'user4'),
+      ]);
+
+      // The set names 1 and 2; the prefix would additionally sweep in 4, which
+      // the server said nothing about. When results is present it is the whole
+      // coverage of the ack, so 4 stays pending.
+      ws.simulateMessage({
+        type: 'OP_ACK',
+        payload: {
+          lastId: '4',
+          results: [
+            { opId: '1', success: true, achievedLevel: 'PERSISTED' },
+            { opId: '2', success: true, achievedLevel: 'PERSISTED' },
+          ],
+        },
+      });
+      await jest.runAllTimersAsync();
+
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(2);
+      expect(opLogOf().map((o) => o.id)).toEqual(['4']);
+      expect(syncEngine!.getPendingOpsCount()).toBe(1);
+    });
+
+    test('a results entry reporting success:false is not an acceptance and is not durably deleted', async () => {
+      const ws = await bootWith([
+        pendingOp('1', 'user1'),
+        pendingOp('2', 'user2'),
+        pendingOp('3', 'user3'),
+      ]);
+
+      // A foreign or future server may report a per-entry failure inside results
+      // rather than as an OP_REJECTED frame. This server never does, but the
+      // client is a protocol consumer: an entry it cannot read as an acceptance
+      // must not be marked synced, and — because markOpsSynced is a durable
+      // PREFIX delete — must not be swept away by a larger accepted id either.
+      ws.simulateMessage({
+        type: 'OP_ACK',
+        payload: {
+          lastId: '3',
+          results: [
+            { opId: '1', success: true, achievedLevel: 'PERSISTED' },
+            { opId: '2', success: false, achievedLevel: 'PERSISTED', error: 'partition down' },
+            { opId: '3', success: true, achievedLevel: 'PERSISTED' },
+          ],
+        },
+      });
+      await jest.runAllTimersAsync();
+
+      // Op 2 has no verdict this exchange: still pending, never spliced, and no
+      // refusal record — a failure is not a refusal.
+      expect(opLogOf().map((o) => o.id)).toEqual(['2']);
+      expect(opLogOf()[0].synced).toBe(false);
+      expect(syncEngine!.getPendingOpsCount()).toBe(1);
+      expect(syncEngine!.getRejectedOpCount()).toBe(0);
+
+      // The durable prefix stops BELOW the failed id: 1 is deleted, 2 survives on
+      // disk. Op 3 is accepted in memory but stays on disk until a later ack
+      // moves the prefix past 2 — it re-sends after a restart, which is safe.
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledTimes(1);
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(1);
+    });
+
+    test('a results entry that omits success is not an acceptance either', async () => {
+      const ws = await bootWith([
+        pendingOp('1', 'user1'),
+        pendingOp('2', 'user2'),
+        pendingOp('3', 'user3'),
+      ]);
+
+      // Nothing validates an inbound frame at runtime, so `success` is a type-level
+      // promise, not an enforced one. An entry carrying an error but no `success`
+      // must land on the safe side of a durable PREFIX delete: an op left pending
+      // is retried, an op deleted while unaccepted is gone.
+      ws.simulateMessage({
+        type: 'OP_ACK',
+        payload: {
+          lastId: '3',
+          results: [
+            { opId: '1', success: true, achievedLevel: 'PERSISTED' },
+            { opId: '2', achievedLevel: 'PERSISTED', error: 'partition down' },
+            { opId: '3', success: true, achievedLevel: 'PERSISTED' },
+          ],
+        },
+      });
+      await jest.runAllTimersAsync();
+
+      expect(opLogOf().map((o) => o.id)).toEqual(['2']);
+      expect(opLogOf()[0].synced).toBe(false);
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledTimes(1);
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(1);
+    });
+
+    test('an EMPTY acceptance set falls through to the numeric prefix (foreign-server compatibility)', async () => {
+      const ws = await bootWith([pendingOp('1', 'user1'), pendingOp('2', 'user2')]);
+
+      // This server never sends an empty results — a batch it accepted nothing
+      // from carries no ack at all — so an empty one can only come from a foreign
+      // or future server, whose lastId is then the only verdict it sent.
+      ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '2', results: [] } });
+      await jest.runAllTimersAsync();
+
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(2);
+      expect(syncEngine!.getPendingOpsCount()).toBe(0);
+    });
+
+    test('an ack whose max accepted id is below the last applied one marks nothing again', async () => {
+      const ws = await bootWith([
+        pendingOp('1', 'user1'),
+        pendingOp('2', 'user2'),
+        pendingOp('5', 'user5'),
+      ]);
+
+      ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '5' } });
+      await jest.runAllTimersAsync();
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledTimes(1);
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(5);
+
+      // Acks from two server dispatch tasks can interleave; a lower id would
+      // delete a strictly smaller, already-deleted set.
+      ws.simulateMessage({
+        type: 'OP_ACK',
+        payload: {
+          lastId: '2',
+          results: [{ opId: '2', success: true, achievedLevel: 'PERSISTED' }],
+        },
+      });
+      await jest.runAllTimersAsync();
+      expect(mockStorage.markOpsSynced).toHaveBeenCalledTimes(1);
+    });
+
+    test('a duplicate refusal produces no second refusal record and no second delete', async () => {
+      const ws = await bootWith([pendingOp('4', 'user4')]);
+      const recordSpy = jest.spyOn(engine(), 'recordRejection');
+
+      ws.simulateMessage(refusal('4'));
+      await jest.runAllTimersAsync();
+      ws.simulateMessage(refusal('4'));
+      await jest.runAllTimersAsync();
+
+      // recordRejection is where a refusal becomes visible to a presentation
+      // surface, so "called once" is "presented once".
+      expect(recordSpy).toHaveBeenCalledTimes(1);
+      expect(mockStorage.deleteOp).toHaveBeenCalledTimes(1);
+      expect(syncEngine!.getRejectedOpCount()).toBe(1);
+    });
+
+    test('an all-refused flush releases the high water mark without any OP_ACK', async () => {
+      const ws = await bootWith([pendingOp('1', 'user1'), pendingOp('2', 'user2')], {
+        backpressure: { maxPendingOps: 2, highWaterMark: 0.5, lowWaterMark: 0.5 },
+      });
+      const controller = engine().backpressureController;
+      const lowWaterSpy = jest.spyOn(controller, 'checkLowWaterMark');
+
+      // The client sits at the high water mark with writes paused.
+      controller.checkHighWaterMark();
+      controller.backpressurePaused = true;
+      expect(controller.highWaterMarkEmitted).toBe(true);
+      let resumed = false;
+      syncEngine!.onBackpressure('backpressure:low', () => {
+        resumed = true;
+      });
+
+      // Every op of the flush is refused and the server sends NO ack at all, so
+      // handleOpAck — the other backpressure release — never runs.
+      ws.simulateMessage(refusal('1'));
+      ws.simulateMessage(refusal('2'));
+      await jest.runAllTimersAsync();
+
+      expect(lowWaterSpy).toHaveBeenCalled();
+      expect(syncEngine!.getPendingOpsCount()).toBe(0);
+      expect(controller.highWaterMarkEmitted).toBe(false);
+      expect(syncEngine!.isBackpressurePaused()).toBe(false);
+      expect(resumed).toBe(true);
+    });
+
+    test('the refusal registry is bounded and evicts the oldest entries', async () => {
+      const ws = await bootWith([]);
+
+      for (let i = 1; i <= 1500; i++) {
+        ws.simulateMessage(refusal(String(i)));
+      }
+      await jest.runAllTimersAsync();
+
+      expect(syncEngine!.getRejectedOpCount()).toBe(1000);
+      // Oldest 500 evicted, newest 1000 retained.
+      expect(syncEngine!.getOpRejection('1')).toBeUndefined();
+      expect(syncEngine!.getOpRejection('500')).toBeUndefined();
+      expect(syncEngine!.getOpRejection('501')).toBeDefined();
+      expect(syncEngine!.getOpRejection('1500')).toBeDefined();
+    });
+
+    test('a refusal that is not permanent leaves the op pending for a later flush', async () => {
+      const ws = await bootWith([pendingOp('9', 'user9')]);
+
+      ws.simulateMessage(refusal('9', false));
+      await jest.runAllTimersAsync();
+
+      expect(mockStorage.deleteOp).not.toHaveBeenCalled();
+      expect(opLogOf().find((o) => o.id === '9')?.rejected).toBeUndefined();
+      expect(syncEngine!.getRejectedOpCount()).toBe(0);
+      expect(syncEngine!.getPendingOpsCount()).toBe(1);
     });
   });
 });

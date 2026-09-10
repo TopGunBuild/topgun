@@ -41,7 +41,22 @@ export interface TrackedOpLogEntry {
  *   - `synced`     — server OP_ACK received (or no local write outstanding)
  *   - `pending`    — local write in opLog, transmission in flight (connection up)
  *   - `local-only` — local write in opLog, awaiting reconnect (connection down)
- *   - `conflicted` — server-side resolver rejected/downgraded the write
+ *   - `conflicted` — the server did not take the write as issued: either a
+ *                    server-side resolver rejected/downgraded it, or the server
+ *                    **permanently refused** it (permission denied, schema
+ *                    violation, oversized value)
+ *
+ * `conflicted` covers BOTH of those. It deliberately does not distinguish them:
+ * a `'refused'` member would be additive at the type level but a source break
+ * for every consumer with an exhaustive switch. Ask
+ * `client.onWriteRejected(cb)` / `useWriteRejections()` when the application
+ * needs the cause, the refused value, or the human-readable reason.
+ *
+ * A refusal is session-scoped: it is observed on the wire, never re-read from
+ * storage, so after a page reload a refused record projects `'synced'` again
+ * while holding a value the server rejected. `'synced'` therefore does not by
+ * itself guarantee the server accepted the write. The durable refused-writes
+ * store that would close this gap is tracked as TODO-667.
  */
 export type RecordSyncState = 'synced' | 'pending' | 'conflicted' | 'local-only';
 
@@ -96,8 +111,8 @@ type ChangeListener = (snapshot: ReadonlyMap<string, RecordSyncState>) => void;
 
 /**
  * Projects existing client-observable signals (OpLog mutations, connection
- * state, MergeRejection stream) into a per-record `RecordSyncState` map per
- * map name.
+ * state, merge rejections and terminal server refusals) into a per-record
+ * `RecordSyncState` map per map name.
  *
  * Owned by SyncEngine; SyncEngine.close() must call dispose() as part of its
  * teardown sequence.
@@ -192,10 +207,15 @@ export class RecordSyncStateTracker {
   }
 
   /**
-   * Subscribed by SyncEngine to ConflictResolverClient.onRejection. Marks the
-   * (mapName, key) slot with the rejection; projection rule 1 decides whether
-   * the late-arrival case (rejection older than latest local write) suppresses
-   * the conflicted state.
+   * Marks the (mapName, key) slot with a rejection; projection rule 1 decides
+   * whether the late-arrival case (rejection older than latest local write)
+   * suppresses the conflicted state.
+   *
+   * Fed from two places in SyncEngine: ConflictResolverClient.onRejection (a
+   * server-side resolver rejected/downgraded the write) and the terminal
+   * refusal path (the server permanently refused it). Both project to
+   * `conflicted` — see {@link RecordSyncState} for why the two are not
+   * distinguished here.
    */
   onRejection(rejection: MergeRejection): void {
     if (this.disposed) return;

@@ -71,6 +71,11 @@ export type {
   MergeRejection,
 } from './ConflictResolver';
 
+// Write rejection exports -- a write the server refused, presented rather than
+// rolled back. Sited beside MergeRejection: both the client and the React
+// bindings import it.
+export type { WriteRejection, WriteRejectionCause } from './WriteRejection';
+
 export * from './utils/hash';
 export * from './serializer';
 export * from './predicate';

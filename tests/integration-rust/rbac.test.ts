@@ -6,8 +6,9 @@
  * repeated cargo/server startup overhead. Policies are seeded via the admin
  * API in beforeAll and remain for the lifetime of the test suite.
  *
- * Write denials are detected via OP_BATCH (which returns an ERROR message
- * on the WebSocket when the operation is forbidden). Write successes are
+ * Write denials are detected via OP_BATCH: a forbidden operation comes back
+ * as an OP_REJECTED frame naming that operation, with `permanent: true`,
+ * because no retry of a policy denial can ever succeed. Write successes are
  * confirmed by OP_ACK.
  *
  * Note: policies use map scoping (no role conditions) because the predicate
@@ -34,7 +35,7 @@ const adminToken = createTestToken('admin-setup', ['admin']);
  * Creates a single OP_BATCH payload containing one CLIENT_OP write.
  *
  * OP_BATCH is used for write operations because the WebSocket dispatch
- * handler sends an ERROR response for batch-level failures, making denials
+ * handler attributes a refusal to the individual operation, making denials
  * observable from the client side. Plain CLIENT_OP errors are silently
  * discarded by the handler in the current implementation.
  */
@@ -77,8 +78,22 @@ function makeOwnerWriteBatch(mapName: string, key: string, ownerId: string): obj
 }
 
 /**
- * Sends a pre-built message and resolves with the first server response
- * (either OP_ACK for success or ERROR for denial).
+ * Asserts that a response is a policy denial.
+ *
+ * A denial is attributed to the operation it refused and is marked permanent:
+ * a policy decision cannot be changed by re-sending the same write, so the
+ * client must retire the operation rather than retry it forever.
+ */
+function expectDenied(resp: { type: string; payload?: any }): void {
+  expect(resp.type).toBe('OP_REJECTED');
+  expect(resp.payload?.permanent).toBe(true);
+  expect(resp.payload?.code).toBe(403);
+}
+
+/**
+ * Sends a pre-built message and resolves with the first server response:
+ * OP_ACK for success, OP_REJECTED for a per-operation refusal, ERROR for a
+ * batch-level failure that names no operation.
  */
 async function sendAndWaitForResponse(
   client: TestClient,
@@ -97,7 +112,7 @@ async function sendAndWaitForResponse(
     const check = () => {
       for (let i = baseIndex; i < client.messages.length; i++) {
         const msg = client.messages[i];
-        if (msg.type === 'OP_ACK' || msg.type === 'ERROR') {
+        if (msg.type === 'OP_ACK' || msg.type === 'OP_REJECTED' || msg.type === 'ERROR') {
           clearTimeout(timeout);
           resolve(msg);
           return;
@@ -110,8 +125,9 @@ async function sendAndWaitForResponse(
 }
 
 /**
- * Sends an OP_BATCH write and resolves with the first server response
- * (either OP_ACK for success or ERROR for denial).
+ * Sends an OP_BATCH write and resolves with the first server response:
+ * OP_ACK for success, OP_REJECTED for a per-operation refusal, ERROR for a
+ * batch-level failure that names no operation.
  */
 async function writeAndWaitForResponse(
   client: TestClient,
@@ -232,7 +248,7 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
         'restricted-map',
         'key-t1-restricted',
       );
-      expect(restrictedResp.type).toBe('ERROR');
+      expectDenied(restrictedResp);
     } finally {
       client.close();
     }
@@ -256,7 +272,7 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
 
       // Write to "admin-settings" — no policy exists for this map.
       const adminResp = await writeAndWaitForResponse(client, 'admin-settings', 'setting-1');
-      expect(adminResp.type).toBe('ERROR');
+      expectDenied(adminResp);
     } finally {
       client.close();
     }
@@ -303,7 +319,7 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
       // Same uncovered map as Test 3 — but this subject is not server-trusted,
       // so default-deny applies despite the admin role claim.
       const resp = await writeAndWaitForResponse(fakeAdmin, 'no-policy-map', 'forged-admin-key');
-      expect(resp.type).toBe('ERROR');
+      expectDenied(resp);
     } finally {
       fakeAdmin.close();
     }
@@ -323,7 +339,7 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
 
       // Write to "completely-unknown" — no policy exists, default-deny applies.
       const resp = await writeAndWaitForResponse(client, 'completely-unknown', 'key-denied');
-      expect(resp.type).toBe('ERROR');
+      expectDenied(resp);
     } finally {
       client.close();
     }
@@ -343,7 +359,7 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
 
       // Before adding the policy, write to "new-map" should be denied.
       const beforeResp = await writeAndWaitForResponse(client, 'new-map', 'pre-policy');
-      expect(beforeResp.type).toBe('ERROR');
+      expectDenied(beforeResp);
 
       // Add the policy via admin API (no server restart required).
       await createPolicy(server.port, {
@@ -418,7 +434,7 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
         'owner write (mismatched)',
       );
 
-      expect(resp.type).toBe('ERROR');
+      expectDenied(resp);
     } finally {
       client.close();
     }

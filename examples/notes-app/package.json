@@ -7,7 +7,7 @@
     "start": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "echo \"No tests for example app\" && exit 0"
+    "test": "echo \"No tests for example app\""
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.61.6",

@@ -56,6 +56,15 @@ function unconfirmedWriteError(
         `Error: the ${verb} of '${key}' in map '${map}' could not be recorded locally ` +
         `(storage/commit failure). The ${verb} did not take effect.`;
       break;
+    case 'rejected':
+      text =
+        `Error: the server DENIED the ${verb} of '${key}' in map '${map}'. This is final: ` +
+        `sending the same ${verb} once more will never succeed. The value may still be ` +
+        `visible in the local replica, which is deliberate — the client does not roll back ` +
+        `a refused write — but the server did not accept it. Do NOT repeat this ${verb}; ` +
+        `report the denial, and if the ${verb} is required ask for the permission or the ` +
+        `data to be corrected first.`;
+      break;
   }
   return { content: [{ type: 'text', text }], isError: true };
 }
