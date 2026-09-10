@@ -1012,6 +1012,24 @@ impl ReclamationBoundary for ReclamationRegistry {
     fn margin_epochs(&self) -> u64 {
         self.lock().margin_epochs
     }
+
+    fn observe_claim_set(&self, scope: ClaimScope) -> ClaimSetObservation {
+        // One acquisition for both reads, so the ceiling and the claim set the caller receives
+        // come from the identical state — never a ceiling from one instant paired with claims
+        // from a later one. The inherent `prune_ceiling` helper is used, not the trait method:
+        // the trait method re-locks and also moves gauges and counters, which this call must not
+        // do.
+        let state = self.lock();
+        let ceiling = state.prune_ceiling(scope);
+        let claims = state
+            .claims
+            .iter()
+            .filter(|((_, claim_scope), _)| *claim_scope == scope)
+            .map(|(_, claim)| *claim)
+            .collect();
+
+        ClaimSetObservation { ceiling, claims }
+    }
 }
 
 #[cfg(test)]
@@ -1595,6 +1613,80 @@ mod tests {
                 );
                 assert_series(&last, METRIC_RECLAMATION_SWEEPS_TOTAL, "1");
                 assert_exactly_thirteen_series(&last);
+            });
+        }
+
+        /// [`ReclamationBoundary::observe_claim_set`] must report exactly what
+        /// [`ReclamationBoundary::prune_ceiling`] would compute for the same state, and must move
+        /// no metric this file pins — both are doc-contract HARD clauses, asserted here on the
+        /// exporter's own text.
+        #[test]
+        fn observe_claim_set_is_non_observing_and_agrees_with_prune_ceiling() {
+            // Margin 0: the ceiling is the bare fleet MIN.
+            let margin0 = PrometheusBuilder::new().build_recorder();
+            metrics::with_local_recorder(&margin0, || {
+                let registry = ReclamationRegistry::with_margin(0, 0);
+                registry.register_claim(&claimant("a"), ClaimScope::Global, 5);
+                registry.register_claim(&claimant("b"), ClaimScope::Global, 9);
+
+                let observation = registry.observe_claim_set(ClaimScope::Global);
+                assert_eq!(observation.ceiling, 5);
+                let mut claims = observation.claims.clone();
+                claims.sort_unstable();
+                assert_eq!(claims, vec![5, 9]);
+            });
+
+            // Margin 2: the ceiling is the fleet MIN minus the margin.
+            let margin2 = PrometheusBuilder::new().build_recorder();
+            metrics::with_local_recorder(&margin2, || {
+                let registry = ReclamationRegistry::with_margin(0, 2);
+                registry.register_claim(&claimant("a"), ClaimScope::Global, 5);
+                registry.register_claim(&claimant("b"), ClaimScope::Global, 9);
+
+                let observation = registry.observe_claim_set(ClaimScope::Global);
+                assert_eq!(observation.ceiling, 3);
+            });
+
+            // No live claim: the ceiling is the boot floor, and the claim list is empty.
+            let empty = PrometheusBuilder::new().build_recorder();
+            metrics::with_local_recorder(&empty, || {
+                let registry = ReclamationRegistry::with_margin(7, 0);
+
+                let observation = registry.observe_claim_set(ClaimScope::Global);
+                assert_eq!(observation.ceiling, 7);
+                assert!(observation.claims.is_empty());
+            });
+
+            // Agreement with `prune_ceiling`, and metric neutrality bracketed around the ONE call
+            // under test.
+            let neutrality = PrometheusBuilder::new().build_recorder();
+            let handle = neutrality.handle();
+            metrics::with_local_recorder(&neutrality, || {
+                let registry = ReclamationRegistry::with_margin(0, 0);
+                registry.register_claim(&claimant("a"), ClaimScope::Global, 5);
+                registry.register_claim(&claimant("b"), ClaimScope::Global, 9);
+
+                // Read OUTSIDE the before/after bracket below: `prune_ceiling` itself increments
+                // the query counter and sets the ceiling gauge, so taking the expected value here
+                // — rather than inside the bracket — is what keeps the bracket honest about the
+                // single `observe_claim_set` call it is meant to bracket.
+                let expected_ceiling = registry.prune_ceiling(ClaimScope::Global);
+
+                let before = handle.render();
+                let observation = registry.observe_claim_set(ClaimScope::Global);
+                let after = handle.render();
+
+                assert_eq!(observation.ceiling, expected_ceiling);
+                assert_eq!(
+                    rendered_value(&before, METRIC_RECLAMATION_CEILING_QUERIES_TOTAL),
+                    rendered_value(&after, METRIC_RECLAMATION_CEILING_QUERIES_TOTAL),
+                    "observe_claim_set must not move the ceiling-query counter"
+                );
+                assert_eq!(
+                    rendered_value(&before, METRIC_RECLAMATION_PRUNE_CEILING),
+                    rendered_value(&after, METRIC_RECLAMATION_PRUNE_CEILING),
+                    "observe_claim_set must not move the ceiling gauge"
+                );
             });
         }
     }
