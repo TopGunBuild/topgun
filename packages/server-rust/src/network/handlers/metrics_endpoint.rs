@@ -36,6 +36,12 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
 
     match &state.observability {
         Some(handle) => {
+            // Pull the conjunct snapshot fresh on every scrape — this is the only call
+            // site, so the render below always reflects the state at this instant rather
+            // than a value cached from an earlier request or a background tick.
+            if let Some(frontier) = &state.frontier {
+                frontier.publish_conjunct_snapshot();
+            }
             let body = handle.render_metrics();
             Response::builder()
                 .status(StatusCode::OK)
@@ -107,5 +113,103 @@ mod tests {
             .get("content-type")
             .expect("content-type present");
         assert_eq!(ct, PROMETHEUS_CONTENT_TYPE);
+    }
+
+    /// A scrape with a frontier attached must publish a conjunct snapshot before
+    /// rendering, so the body it returns carries every one of the 21 conjunct series —
+    /// not just the ones a prior test happened to touch.
+    ///
+    /// The process-global recorder is shared across the test binary, so a concurrently
+    /// running test can move any gauge between two renders. Hence only presence is
+    /// asserted for the gauges, plus a strict rise of the snapshot counter: a counter never
+    /// goes down, so that rise survives any interleaving.
+    #[tokio::test]
+    async fn metrics_handler_publishes_conjunct_snapshot_before_render() {
+        use crate::service::middleware::init_observability;
+        use crate::tombstone_frontier::{
+            METRIC_PRUNE_CONJUNCT_CEILING, METRIC_PRUNE_CONJUNCT_CLAIMS,
+            METRIC_PRUNE_CONJUNCT_CLAIM_LAG_MAX, METRIC_PRUNE_CONJUNCT_CLAIM_LAG_P50,
+            METRIC_PRUNE_CONJUNCT_CLAIM_LAG_P99, METRIC_PRUNE_CONJUNCT_CURRENT_EPOCH,
+            METRIC_PRUNE_CONJUNCT_DURABLE_WATERMARK, METRIC_PRUNE_CONJUNCT_DURABLE_WATERMARK_LAG,
+            METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_BOTH,
+            METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_CLAIM_ONLY,
+            METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_DURABILITY_ONLY,
+            METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_NEITHER,
+            METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_UNSLOTTED,
+            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_BOTH,
+            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_CLAIM_ONLY,
+            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_DURABILITY_ONLY,
+            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_NEITHER,
+            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_OPEN_EPOCH,
+            METRIC_PRUNE_CONJUNCT_RETAINED_STAMPED_BYTES,
+            METRIC_PRUNE_CONJUNCT_RETAINED_STAMPED_BYTES_OPEN_EPOCH,
+            METRIC_PRUNE_CONJUNCT_SNAPSHOTS_TOTAL,
+        };
+        use crate::tombstone_frontier_impl::TombstoneFrontier;
+
+        // Reads a counter's value from a rendered body; absent reads as 0.
+        fn counter_value(body: &str, name: &str) -> u64 {
+            body.lines()
+                .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+        }
+
+        // `init_observability()` first, so the recorder is bound before anything else
+        // touches a metric; a series touched before binding would be lost to this render.
+        let obs = Arc::new(init_observability());
+        let mut state = test_state_no_obs();
+        state.observability = Some(Arc::clone(&obs));
+        state.frontier = Some(Arc::new(TombstoneFrontier::new(None)));
+        // Building the frontier registers every conjunct series eagerly, so presence alone
+        // would pass even if the handler never published. The snapshot counter only moves on
+        // a publish and never goes down, so a strict rise across the handler call proves the
+        // publish happened, however many other tests share the global recorder.
+        let snapshots_before =
+            counter_value(&obs.render_metrics(), METRIC_PRUNE_CONJUNCT_SNAPSHOTS_TOTAL);
+
+        let resp = metrics_handler(State(state)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("readable body");
+        let body = String::from_utf8(body_bytes.to_vec()).expect("utf-8 body");
+
+        for name in [
+            METRIC_PRUNE_CONJUNCT_SNAPSHOTS_TOTAL,
+            METRIC_PRUNE_CONJUNCT_CURRENT_EPOCH,
+            METRIC_PRUNE_CONJUNCT_CEILING,
+            METRIC_PRUNE_CONJUNCT_DURABLE_WATERMARK,
+            METRIC_PRUNE_CONJUNCT_DURABLE_WATERMARK_LAG,
+            METRIC_PRUNE_CONJUNCT_CLAIMS,
+            METRIC_PRUNE_CONJUNCT_CLAIM_LAG_P50,
+            METRIC_PRUNE_CONJUNCT_CLAIM_LAG_P99,
+            METRIC_PRUNE_CONJUNCT_CLAIM_LAG_MAX,
+            METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_CLAIM_ONLY,
+            METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_DURABILITY_ONLY,
+            METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_BOTH,
+            METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_NEITHER,
+            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_CLAIM_ONLY,
+            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_DURABILITY_ONLY,
+            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_BOTH,
+            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_NEITHER,
+            METRIC_PRUNE_CONJUNCT_RETAINED_STAMPED_BYTES,
+            METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_UNSLOTTED,
+            METRIC_PRUNE_CONJUNCT_RETAINED_REFS_OPEN_EPOCH,
+            METRIC_PRUNE_CONJUNCT_RETAINED_STAMPED_BYTES_OPEN_EPOCH,
+        ] {
+            assert!(
+                body.contains(name),
+                "conjunct series {name} missing from a scrape with a frontier attached; \
+                 body was:\n{body}"
+            );
+        }
+
+        let snapshots_after = counter_value(&body, METRIC_PRUNE_CONJUNCT_SNAPSHOTS_TOTAL);
+        assert!(
+            snapshots_after > snapshots_before,
+            "the handler's own body must show a snapshot published during this scrape \
+             (before={snapshots_before}, after={snapshots_after})"
+        );
     }
 }

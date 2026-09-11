@@ -71,10 +71,23 @@ use crate::reclamation_registry::{
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::RecordValue;
 use crate::tombstone_frontier::{
-    CausalFrontier, ClientId, Epoch, EpochExitKind, GateToken, PruneClaimSpanRecord,
-    PruneEpochEntryRecord, PruneEpochRecord, PruneEpochResidencyRecord, PrunePassRecord,
-    PruneRecordArming, PruneRecordObserver, PruneSafety, METRIC_PRUNE_ABSENT_TOTAL,
-    METRIC_PRUNE_BYTES_FREED_TOTAL, METRIC_PRUNE_CLAIM_LAG_EPOCHS, METRIC_PRUNE_CLAIM_SPAN_EPOCHS,
+    CausalFrontier, ClientId, ConjunctBinding, ConjunctSnapshotRecord, Epoch, EpochExitKind,
+    GateToken, PruneClaimSpanRecord, PruneEpochEntryRecord, PruneEpochRecord,
+    PruneEpochResidencyRecord, PrunePassRecord, PruneRecordArming, PruneRecordObserver,
+    PruneSafety, METRIC_PRUNE_ABSENT_TOTAL, METRIC_PRUNE_BYTES_FREED_TOTAL,
+    METRIC_PRUNE_CLAIM_LAG_EPOCHS, METRIC_PRUNE_CLAIM_SPAN_EPOCHS, METRIC_PRUNE_CONJUNCT_CEILING,
+    METRIC_PRUNE_CONJUNCT_CLAIMS, METRIC_PRUNE_CONJUNCT_CLAIM_LAG_MAX,
+    METRIC_PRUNE_CONJUNCT_CLAIM_LAG_P50, METRIC_PRUNE_CONJUNCT_CLAIM_LAG_P99,
+    METRIC_PRUNE_CONJUNCT_CURRENT_EPOCH, METRIC_PRUNE_CONJUNCT_DURABLE_WATERMARK,
+    METRIC_PRUNE_CONJUNCT_DURABLE_WATERMARK_LAG, METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_BOTH,
+    METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_CLAIM_ONLY,
+    METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_DURABILITY_ONLY,
+    METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_NEITHER, METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_UNSLOTTED,
+    METRIC_PRUNE_CONJUNCT_RETAINED_REFS_BOTH, METRIC_PRUNE_CONJUNCT_RETAINED_REFS_CLAIM_ONLY,
+    METRIC_PRUNE_CONJUNCT_RETAINED_REFS_DURABILITY_ONLY,
+    METRIC_PRUNE_CONJUNCT_RETAINED_REFS_NEITHER, METRIC_PRUNE_CONJUNCT_RETAINED_REFS_OPEN_EPOCH,
+    METRIC_PRUNE_CONJUNCT_RETAINED_STAMPED_BYTES,
+    METRIC_PRUNE_CONJUNCT_RETAINED_STAMPED_BYTES_OPEN_EPOCH, METRIC_PRUNE_CONJUNCT_SNAPSHOTS_TOTAL,
     METRIC_PRUNE_CONSIDERED_TOTAL, METRIC_PRUNE_CURRENT_EPOCH, METRIC_PRUNE_DRAINED_REFS_TOTAL,
     METRIC_PRUNE_DRAIN_EPOCHS, METRIC_PRUNE_DRAIN_REFS, METRIC_PRUNE_DROPPED_TOTAL,
     METRIC_PRUNE_DURABLE_EPOCH_WATERMARK, METRIC_PRUNE_ELIGIBLE_REFS,
@@ -93,6 +106,7 @@ use crate::tombstone_frontier::{
     METRIC_PRUNE_STAMPED_BYTES_TOTAL, METRIC_PRUNE_STAMPED_REFS_TOTAL, METRIC_PRUNE_TRACKED_CLAIMS,
 };
 use metrics::{Counter, Gauge, Histogram};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -1284,6 +1298,19 @@ pub struct TombstoneFrontier {
     /// as well so it is readable without taking the frontier lock, and so the lock order stays
     /// one-way: frontier lock, then registry lock, never the reverse.
     registry: Arc<ReclamationRegistry>,
+    /// The arming this frontier resolved at construction, from the same single
+    /// `prune_record_arming_from_env()` read that chose `prune_observer`. Cached here so
+    /// `publish_conjunct_snapshot`'s early return needs no second env read — a second read
+    /// could disagree with the one that picked the observer.
+    prune_arming: PruneRecordArming,
+    /// Monotone count of conjunct snapshots published. Lives on `TombstoneFrontier`, not on
+    /// `FrontierState`, because publishing one never takes a write path through the frontier
+    /// lock's own mutation surface. `publish_conjunct_snapshot` increments this strictly after
+    /// the recorder's own counter, so for a single serial caller (e.g. one `/metrics` scrape at
+    /// a time) the two agree at their post-increment value. Two concurrent calls can interleave
+    /// their `Relaxed` increments, so this is not an unconditional equality across concurrent
+    /// scrapes.
+    conjunct_seq: AtomicU64,
 }
 
 /// A unit of work for the background cursor-persistence worker.
@@ -1381,8 +1408,11 @@ impl TombstoneFrontier {
         };
         // The arming kill-switch is read HERE and nowhere else, and exactly once per
         // frontier: reading it again per pass would let the arming gate and the recording
-        // branch observe two different answers for the same operation.
-        let prune_observer: Box<dyn PruneRecordObserver> = match prune_record_arming_from_env() {
+        // branch observe two different answers for the same operation. The resolved value is
+        // also cached on `prune_arming` below, so `publish_conjunct_snapshot`'s own early
+        // return reuses this single read instead of asking the environment again.
+        let prune_arming = prune_record_arming_from_env();
+        let prune_observer: Box<dyn PruneRecordObserver> = match prune_arming {
             PruneRecordArming::Armed => Box::new(MetricsPruneRecorder::new()),
             PruneRecordArming::Disarmed => Box::new(NullPruneRecorder),
         };
@@ -1399,6 +1429,8 @@ impl TombstoneFrontier {
             persist_worker,
             prune_observer,
             registry,
+            prune_arming,
+            conjunct_seq: AtomicU64::new(0),
         }
     }
 
@@ -2161,6 +2193,216 @@ impl TombstoneFrontier {
     pub fn epoch_width(&self) -> u64 {
         self.lock().epoch_width
     }
+
+    /// One scrape-time snapshot of both prune conjuncts: which one, if any, binds each closed
+    /// retained epoch, and where the open epoch's own refs/bytes sit. Observation only — writes
+    /// no `FrontierState` field, advances no cached watermark, moves no registry claim or
+    /// executed watermark.
+    ///
+    /// # No coalescing, no caching (HARD)
+    ///
+    /// Every call recomputes: there is no cached record and no last-snapshot timestamp anywhere
+    /// on this frontier. One O(k log k + claims) frontier-lock hold per call (`k` = indexed
+    /// epochs — the same sort [`FrontierState::compute_durable_epoch_watermark`] performs),
+    /// serialised with `stamp_tombstone`/`register_claim` on the same lock. Bounding scrape rate
+    /// on the public endpoint is the operator's concern (TODO-670), not this method's.
+    // One body deliberately: the locked fold, the outside-the-lock percentile arithmetic and
+    // the single `info!` emission are one algorithm over one snapshot, and splitting them into
+    // helper fns would separate the "under this lock" and "after this lock drops" halves from
+    // the ordering guarantee that makes the whole thing correct.
+    #[allow(clippy::too_many_lines)]
+    pub fn publish_conjunct_snapshot(&self) {
+        // Disarmed: no lock, no allocation, no line. The arming was resolved once, at
+        // construction, from the same env read that picked `prune_observer`.
+        if self.prune_arming == PruneRecordArming::Disarmed {
+            return;
+        }
+
+        // Outside the frontier lock, exactly as `refreshed_watermark` reads it.
+        let flushed = self.store.as_ref().map(|s| s.flushed_watermark());
+
+        let (current_epoch, watermark, claims, mut record, mut retained) = {
+            let state = self.lock();
+            let current_epoch = state.current_epoch;
+            // A LOCAL only: this snapshot never advances `state.durable_epoch_watermark`,
+            // unlike `refreshed_watermark`'s caller, which writes the cache back.
+            let watermark = match flushed {
+                Some(flushed) => state
+                    .durable_epoch_watermark
+                    .max(state.compute_durable_epoch_watermark(flushed)),
+                None => state.durable_epoch_watermark,
+            };
+
+            // Registry leaf lock nested inside the frontier lock — the same order
+            // `drain_prunable` uses. Observation only: moves no gauge, no counter, no claim.
+            let claim_set = self.registry.observe_claim_set(ClaimScope::Global);
+            let ceiling = claim_set.ceiling;
+
+            let mut retained_epochs_claim_only = 0u64;
+            let mut retained_epochs_durability_only = 0u64;
+            let mut retained_epochs_both = 0u64;
+            let mut retained_epochs_neither = 0u64;
+            let mut retained_refs_claim_only = 0u64;
+            let mut retained_refs_durability_only = 0u64;
+            let mut retained_refs_both = 0u64;
+            let mut retained_refs_neither = 0u64;
+            let mut retained_stamped_bytes = 0u64;
+            let mut retained_epochs_unslotted = 0u64;
+            let mut retained_refs_open_epoch = 0u64;
+            let mut retained_stamped_bytes_open_epoch = 0u64;
+            let mut retained: Vec<(Epoch, ConjunctBinding)> = Vec::new();
+
+            // Folded over the index's keys, using only `Vec::len` per key — never iterating
+            // the refs themselves — so the hold stays O(k), not O(total refs).
+            for &e in state.epoch_tags.keys() {
+                let refs_len = state
+                    .epoch_tags
+                    .get(&e)
+                    .map_or(0u64, |refs| u64::try_from(refs.len()).unwrap_or(u64::MAX));
+                let stamped_bytes = state
+                    .epoch_slots
+                    .get(&e)
+                    .map_or(0, |slot| slot.stamped_bytes);
+
+                if e == current_epoch {
+                    // The open epoch is never classified and never joins `retained` — its
+                    // only representation on the record is these two accumulators.
+                    retained_refs_open_epoch += refs_len;
+                    retained_stamped_bytes_open_epoch += stamped_bytes;
+                    continue;
+                }
+
+                if !state.epoch_slots.contains_key(&e) {
+                    retained_epochs_unslotted += 1;
+                }
+                retained_stamped_bytes += stamped_bytes;
+
+                let class = conjunct_binding(e, ceiling, watermark);
+                match class {
+                    ConjunctBinding::ClaimOnly => {
+                        retained_epochs_claim_only += 1;
+                        retained_refs_claim_only += refs_len;
+                    }
+                    ConjunctBinding::DurabilityOnly => {
+                        retained_epochs_durability_only += 1;
+                        retained_refs_durability_only += refs_len;
+                    }
+                    ConjunctBinding::Both => {
+                        retained_epochs_both += 1;
+                        retained_refs_both += refs_len;
+                    }
+                    ConjunctBinding::Neither => {
+                        retained_epochs_neither += 1;
+                        retained_refs_neither += refs_len;
+                    }
+                }
+                retained.push((e, class));
+            }
+
+            // The claim-lag percentiles and `durable_watermark_lag` are deliberately NOT
+            // computed here — `claim_set.claims` (unsorted) is carried out of the lock below
+            // and the sort/rank arithmetic runs unlocked, so the frontier lock hold stays
+            // linear in the claim count rather than paying its sort.
+            let record = ConjunctSnapshotRecord {
+                current_epoch,
+                ceiling,
+                durable_watermark: watermark,
+                claims: u64::try_from(claim_set.claims.len()).unwrap_or(u64::MAX),
+                retained_epochs_claim_only,
+                retained_epochs_durability_only,
+                retained_epochs_both,
+                retained_epochs_neither,
+                retained_refs_claim_only,
+                retained_refs_durability_only,
+                retained_refs_both,
+                retained_refs_neither,
+                retained_stamped_bytes,
+                retained_epochs_unslotted,
+                retained_refs_open_epoch,
+                retained_stamped_bytes_open_epoch,
+                // Filled in below, outside the lock.
+                durable_watermark_lag: 0,
+                claim_lag_p50: 0,
+                claim_lag_p99: 0,
+                claim_lag_max: 0,
+            };
+            (current_epoch, watermark, claim_set.claims, record, retained)
+        };
+        // The lock is dropped here. Everything from this point runs unlocked.
+
+        // Nearest-rank percentiles over `current_epoch - claim`, and the watermark lag —
+        // R3 step 4's outside-the-lock arithmetic.
+        let mut lags: Vec<u64> = claims
+            .iter()
+            .map(|&claim| current_epoch.saturating_sub(claim))
+            .collect();
+        lags.sort_unstable();
+        let n = lags.len();
+        // Nearest-rank percentile: `lags[(K*n + 99)/100 - 1]`. `n == 0` yields `0` for all
+        // three; `claims == 0` on the record disambiguates that from a real zero-lag
+        // distribution.
+        let nearest_rank = |k: u64| -> u64 {
+            if n == 0 {
+                return 0;
+            }
+            let rank = (k * n as u64).div_ceil(100);
+            let idx = usize::try_from(rank.saturating_sub(1))
+                .unwrap_or(0)
+                .min(n - 1);
+            lags[idx]
+        };
+        record.claim_lag_p50 = nearest_rank(50);
+        record.claim_lag_p99 = nearest_rank(99);
+        record.claim_lag_max = lags.last().copied().unwrap_or(0);
+        record.durable_watermark_lag = current_epoch.saturating_sub(watermark);
+
+        // Step 5's pin: the recorder runs FIRST, so its own snapshot counter advances before
+        // this frontier-owned `AtomicU64` does. For a single serial caller — `metrics_handler`
+        // is this method's only call site, and scrapes run one at a time — the two therefore
+        // agree at their post-increment value, because every call advances both by exactly one.
+        // Two overlapping calls (e.g. concurrent scrapes) can interleave the two `Relaxed`
+        // increments; this pin does not claim equality across concurrent callers.
+        self.prune_observer.observe_conjunct_snapshot(&record);
+        let seq = self.conjunct_seq.fetch_add(1, Ordering::Relaxed) + 1;
+
+        retained.sort_unstable_by_key(|(e, _)| *e);
+        let retained_truncated = retained.len() > 256;
+        let retained_rendered = retained
+            .iter()
+            .take(256)
+            .map(|(e, class)| format!("{e}:{}", class.as_str()))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        info!(
+            target: "topgun_server::tombstone_frontier::conjunct",
+            seq,
+            ts = now_millis_i64(),
+            current_epoch = record.current_epoch,
+            ceiling = record.ceiling,
+            durable_watermark = record.durable_watermark,
+            durable_watermark_lag = record.durable_watermark_lag,
+            claims = record.claims,
+            claim_lag_p50 = record.claim_lag_p50,
+            claim_lag_p99 = record.claim_lag_p99,
+            claim_lag_max = record.claim_lag_max,
+            retained_epochs_claim_only = record.retained_epochs_claim_only,
+            retained_epochs_durability_only = record.retained_epochs_durability_only,
+            retained_epochs_both = record.retained_epochs_both,
+            retained_epochs_neither = record.retained_epochs_neither,
+            retained_refs_claim_only = record.retained_refs_claim_only,
+            retained_refs_durability_only = record.retained_refs_durability_only,
+            retained_refs_both = record.retained_refs_both,
+            retained_refs_neither = record.retained_refs_neither,
+            retained_stamped_bytes = record.retained_stamped_bytes,
+            retained_epochs_unslotted = record.retained_epochs_unslotted,
+            retained_refs_open_epoch = record.retained_refs_open_epoch,
+            retained_stamped_bytes_open_epoch = record.retained_stamped_bytes_open_epoch,
+            retained = %retained_rendered,
+            retained_truncated,
+            "conjunct snapshot"
+        );
+    }
 }
 
 /// Encode an epoch as a fixed 8-byte big-endian blob for lossless redb storage.
@@ -2440,6 +2682,29 @@ fn parse_prune_record_arming(raw: &str) -> PruneRecordArming {
     PruneRecordArming::Armed
 }
 
+// ---------------------------------------------------------------------------
+// Conjunct classifier
+// ---------------------------------------------------------------------------
+
+/// Which prune conjunct, if any, binds a given (closed) epoch — the drain filter's (`:971`)
+/// exact negation, restricted to `epoch != 0`.
+///
+/// Takes no `current_epoch` and has no notion of "open": the open-epoch exclusion is a
+/// fold-level policy at this function's only call site
+/// ([`TombstoneFrontier::publish_conjunct_snapshot`]), which never calls this for
+/// `e == current_epoch`. The drain filter itself is never edited or refactored to route through
+/// this classifier.
+fn conjunct_binding(epoch: Epoch, ceiling: Epoch, watermark: Epoch) -> ConjunctBinding {
+    let claim_blocks = ceiling <= epoch;
+    let durability_blocks = watermark < epoch;
+    match (claim_blocks, durability_blocks) {
+        (true, true) => ConjunctBinding::Both,
+        (true, false) => ConjunctBinding::ClaimOnly,
+        (false, true) => ConjunctBinding::DurabilityOnly,
+        (false, false) => ConjunctBinding::Neither,
+    }
+}
+
 /// Resolve a counter handle and touch it, so the series is registered before any observation.
 fn touched_counter(name: &'static str) -> Counter {
     let handle = metrics::counter!(name);
@@ -2534,6 +2799,30 @@ pub struct MetricsPruneRecorder {
     epoch_considered: Histogram,
     epoch_dropped: Histogram,
     epoch_bytes_freed: Histogram,
+
+    // The conjunct instrument: one counter and the 20 gauges mirroring
+    // `ConjunctSnapshotRecord` field-for-field, in that struct's declared order.
+    conjunct_snapshots: Counter,
+    conjunct_current_epoch: Gauge,
+    conjunct_ceiling: Gauge,
+    conjunct_durable_watermark: Gauge,
+    conjunct_durable_watermark_lag: Gauge,
+    conjunct_claims: Gauge,
+    conjunct_claim_lag_p50: Gauge,
+    conjunct_claim_lag_p99: Gauge,
+    conjunct_claim_lag_max: Gauge,
+    conjunct_retained_epochs_claim_only: Gauge,
+    conjunct_retained_epochs_durability_only: Gauge,
+    conjunct_retained_epochs_both: Gauge,
+    conjunct_retained_epochs_neither: Gauge,
+    conjunct_retained_refs_claim_only: Gauge,
+    conjunct_retained_refs_durability_only: Gauge,
+    conjunct_retained_refs_both: Gauge,
+    conjunct_retained_refs_neither: Gauge,
+    conjunct_retained_stamped_bytes: Gauge,
+    conjunct_retained_epochs_unslotted: Gauge,
+    conjunct_retained_refs_open_epoch: Gauge,
+    conjunct_retained_stamped_bytes_open_epoch: Gauge,
 }
 
 impl std::fmt::Debug for MetricsPruneRecorder {
@@ -2607,6 +2896,52 @@ impl MetricsPruneRecorder {
             epoch_considered: registered_histogram(METRIC_PRUNE_EPOCH_CONSIDERED),
             epoch_dropped: registered_histogram(METRIC_PRUNE_EPOCH_DROPPED),
             epoch_bytes_freed: registered_histogram(METRIC_PRUNE_EPOCH_BYTES_FREED),
+
+            conjunct_snapshots: touched_counter(METRIC_PRUNE_CONJUNCT_SNAPSHOTS_TOTAL),
+            conjunct_current_epoch: touched_gauge(METRIC_PRUNE_CONJUNCT_CURRENT_EPOCH),
+            conjunct_ceiling: touched_gauge(METRIC_PRUNE_CONJUNCT_CEILING),
+            conjunct_durable_watermark: touched_gauge(METRIC_PRUNE_CONJUNCT_DURABLE_WATERMARK),
+            conjunct_durable_watermark_lag: touched_gauge(
+                METRIC_PRUNE_CONJUNCT_DURABLE_WATERMARK_LAG,
+            ),
+            conjunct_claims: touched_gauge(METRIC_PRUNE_CONJUNCT_CLAIMS),
+            conjunct_claim_lag_p50: touched_gauge(METRIC_PRUNE_CONJUNCT_CLAIM_LAG_P50),
+            conjunct_claim_lag_p99: touched_gauge(METRIC_PRUNE_CONJUNCT_CLAIM_LAG_P99),
+            conjunct_claim_lag_max: touched_gauge(METRIC_PRUNE_CONJUNCT_CLAIM_LAG_MAX),
+            conjunct_retained_epochs_claim_only: touched_gauge(
+                METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_CLAIM_ONLY,
+            ),
+            conjunct_retained_epochs_durability_only: touched_gauge(
+                METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_DURABILITY_ONLY,
+            ),
+            conjunct_retained_epochs_both: touched_gauge(
+                METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_BOTH,
+            ),
+            conjunct_retained_epochs_neither: touched_gauge(
+                METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_NEITHER,
+            ),
+            conjunct_retained_refs_claim_only: touched_gauge(
+                METRIC_PRUNE_CONJUNCT_RETAINED_REFS_CLAIM_ONLY,
+            ),
+            conjunct_retained_refs_durability_only: touched_gauge(
+                METRIC_PRUNE_CONJUNCT_RETAINED_REFS_DURABILITY_ONLY,
+            ),
+            conjunct_retained_refs_both: touched_gauge(METRIC_PRUNE_CONJUNCT_RETAINED_REFS_BOTH),
+            conjunct_retained_refs_neither: touched_gauge(
+                METRIC_PRUNE_CONJUNCT_RETAINED_REFS_NEITHER,
+            ),
+            conjunct_retained_stamped_bytes: touched_gauge(
+                METRIC_PRUNE_CONJUNCT_RETAINED_STAMPED_BYTES,
+            ),
+            conjunct_retained_epochs_unslotted: touched_gauge(
+                METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_UNSLOTTED,
+            ),
+            conjunct_retained_refs_open_epoch: touched_gauge(
+                METRIC_PRUNE_CONJUNCT_RETAINED_REFS_OPEN_EPOCH,
+            ),
+            conjunct_retained_stamped_bytes_open_epoch: touched_gauge(
+                METRIC_PRUNE_CONJUNCT_RETAINED_STAMPED_BYTES_OPEN_EPOCH,
+            ),
         }
     }
 }
@@ -2761,6 +3096,48 @@ impl PruneRecordObserver for MetricsPruneRecorder {
             EpochExitKind::StillResidentAtShutdown | EpochExitKind::Unclassified { .. } => {}
         }
     }
+
+    // Gauge neutrality (`TG-OR-006`(b)): this body names no tombstone-byte counter or
+    // gauge. It only sets the 20 conjunct gauges from `record` and bumps the one
+    // snapshot counter — it participates in nothing the prune path itself accounts for.
+    #[allow(clippy::cast_precision_loss)]
+    fn observe_conjunct_snapshot(&self, record: &ConjunctSnapshotRecord) {
+        self.conjunct_current_epoch.set(record.current_epoch as f64);
+        self.conjunct_ceiling.set(record.ceiling as f64);
+        self.conjunct_durable_watermark
+            .set(record.durable_watermark as f64);
+        self.conjunct_durable_watermark_lag
+            .set(record.durable_watermark_lag as f64);
+        self.conjunct_claims.set(record.claims as f64);
+        self.conjunct_claim_lag_p50.set(record.claim_lag_p50 as f64);
+        self.conjunct_claim_lag_p99.set(record.claim_lag_p99 as f64);
+        self.conjunct_claim_lag_max.set(record.claim_lag_max as f64);
+        self.conjunct_retained_epochs_claim_only
+            .set(record.retained_epochs_claim_only as f64);
+        self.conjunct_retained_epochs_durability_only
+            .set(record.retained_epochs_durability_only as f64);
+        self.conjunct_retained_epochs_both
+            .set(record.retained_epochs_both as f64);
+        self.conjunct_retained_epochs_neither
+            .set(record.retained_epochs_neither as f64);
+        self.conjunct_retained_refs_claim_only
+            .set(record.retained_refs_claim_only as f64);
+        self.conjunct_retained_refs_durability_only
+            .set(record.retained_refs_durability_only as f64);
+        self.conjunct_retained_refs_both
+            .set(record.retained_refs_both as f64);
+        self.conjunct_retained_refs_neither
+            .set(record.retained_refs_neither as f64);
+        self.conjunct_retained_stamped_bytes
+            .set(record.retained_stamped_bytes as f64);
+        self.conjunct_retained_epochs_unslotted
+            .set(record.retained_epochs_unslotted as f64);
+        self.conjunct_retained_refs_open_epoch
+            .set(record.retained_refs_open_epoch as f64);
+        self.conjunct_retained_stamped_bytes_open_epoch
+            .set(record.retained_stamped_bytes_open_epoch as f64);
+        self.conjunct_snapshots.increment(1);
+    }
 }
 
 /// The disarmed prune-record observer.
@@ -2806,6 +3183,8 @@ impl PruneRecordObserver for NullPruneRecorder {
     fn observe_epoch_entry(&self, _record: &PruneEpochEntryRecord) {}
 
     fn observe_epoch_residency(&self, _record: &PruneEpochResidencyRecord) {}
+
+    fn observe_conjunct_snapshot(&self, _record: &ConjunctSnapshotRecord) {}
 }
 
 /// Wall-clock milliseconds since the Unix epoch (0 on a clock error).
@@ -2871,8 +3250,11 @@ mod tests {
     // Prune record — arming parse and eager registration
     // -----------------------------------------------------------------------
 
-    /// The 22 pinned counters (15 pre-existing + the 7 this half adds, R2.1 / `AC2a`).
-    const PRUNE_COUNTER_NAMES: [&str; 22] = [
+    /// The 25 pinned counters: the 22 pre-existing, plus the two OBSERVATION counters
+    /// (`removed_refs_observed` / `removed_bytes_observed`) `MetricsPruneRecorder::new`
+    /// already touches eagerly but this array omitted before, plus the one conjunct
+    /// snapshot counter.
+    const PRUNE_COUNTER_NAMES: [&str; 25] = [
         METRIC_PRUNE_PASSES_TOTAL,
         METRIC_PRUNE_CONSIDERED_TOTAL,
         METRIC_PRUNE_DROPPED_TOTAL,
@@ -2895,10 +3277,14 @@ mod tests {
         METRIC_PRUNE_REBUILD_CLEARED_REFS_TOTAL,
         METRIC_PRUNE_EPOCHS_ENTERED_TOTAL,
         METRIC_PRUNE_EPOCHS_EXITED_TOTAL,
+        METRIC_PRUNE_REMOVED_REFS_OBSERVED_TOTAL,
+        METRIC_PRUNE_REMOVED_BYTES_OBSERVED_TOTAL,
+        METRIC_PRUNE_CONJUNCT_SNAPSHOTS_TOTAL,
     ];
 
-    /// The 11 pinned gauges.
-    const PRUNE_GAUGE_NAMES: [&str; 11] = [
+    /// The 31 pinned gauges: the 11 pre-existing plus the 20 conjunct gauges, in
+    /// `ConjunctSnapshotRecord` field order.
+    const PRUNE_GAUGE_NAMES: [&str; 31] = [
         METRIC_PRUNE_INDEXED_REFS,
         METRIC_PRUNE_INDEXED_EPOCHS,
         METRIC_PRUNE_ELIGIBLE_REFS,
@@ -2910,6 +3296,26 @@ mod tests {
         METRIC_PRUNE_LAST_DRAINED_EPOCH,
         METRIC_PRUNE_LWM_STALL_SECONDS,
         METRIC_PRUNE_TRACKED_CLAIMS,
+        METRIC_PRUNE_CONJUNCT_CURRENT_EPOCH,
+        METRIC_PRUNE_CONJUNCT_CEILING,
+        METRIC_PRUNE_CONJUNCT_DURABLE_WATERMARK,
+        METRIC_PRUNE_CONJUNCT_DURABLE_WATERMARK_LAG,
+        METRIC_PRUNE_CONJUNCT_CLAIMS,
+        METRIC_PRUNE_CONJUNCT_CLAIM_LAG_P50,
+        METRIC_PRUNE_CONJUNCT_CLAIM_LAG_P99,
+        METRIC_PRUNE_CONJUNCT_CLAIM_LAG_MAX,
+        METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_CLAIM_ONLY,
+        METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_DURABILITY_ONLY,
+        METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_BOTH,
+        METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_NEITHER,
+        METRIC_PRUNE_CONJUNCT_RETAINED_REFS_CLAIM_ONLY,
+        METRIC_PRUNE_CONJUNCT_RETAINED_REFS_DURABILITY_ONLY,
+        METRIC_PRUNE_CONJUNCT_RETAINED_REFS_BOTH,
+        METRIC_PRUNE_CONJUNCT_RETAINED_REFS_NEITHER,
+        METRIC_PRUNE_CONJUNCT_RETAINED_STAMPED_BYTES,
+        METRIC_PRUNE_CONJUNCT_RETAINED_EPOCHS_UNSLOTTED,
+        METRIC_PRUNE_CONJUNCT_RETAINED_REFS_OPEN_EPOCH,
+        METRIC_PRUNE_CONJUNCT_RETAINED_STAMPED_BYTES_OPEN_EPOCH,
     ];
 
     /// The 7 pinned histograms.
@@ -2967,8 +3373,8 @@ mod tests {
     }
 
     /// Eager registration: with a recorder bound FIRST and **no** observations taken at all,
-    /// the very first render already carries every pinned series — the 15 counters at `0`, the
-    /// 11 gauges at `0`, and each of the 7 histograms rendering both `_sum` and `_count`.
+    /// the very first render already carries every pinned series — the 25 counters at `0`, the
+    /// 31 gauges at `0`, and each of the 7 histograms rendering both `_sum` and `_count`.
     ///
     /// This is what makes an absent series unrepresentable, and therefore what stops a
     /// downstream sampler from ever having to distinguish "has not moved" from "does not
@@ -3071,6 +3477,577 @@ mod tests {
                  render was:\n{rendered}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Conjunct instrument — classifier, snapshot algorithm, and observation-only
+    // -----------------------------------------------------------------------
+
+    /// A [`MapDataStore`] that reports a caller-chosen [`MapDataStore::flushed_watermark`] and
+    /// delegates everything else to an inner store — lets a test give a store-backed frontier a
+    /// durable watermark sitting ahead of the frontier's own cached field, so a scrape can be
+    /// shown to read it without ever writing it back.
+    struct FixedWatermarkStore {
+        inner: Arc<dyn MapDataStore>,
+        watermark: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl MapDataStore for FixedWatermarkStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner.add(map, key, value, expiration_time, now).await
+        }
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .add_backup(map, key, value, expiration_time, now)
+                .await
+        }
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove(map, key, now).await
+        }
+        async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove_backup(map, key, now).await
+        }
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.inner.load(map, key).await
+        }
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.inner.load_all(map, keys).await
+        }
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn crate::storage::map_data_store::LeafSink,
+        ) -> anyhow::Result<()> {
+            self.inner.enumerate_leaves(map, is_backup, sink).await
+        }
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<crate::storage::map_data_store::ScanBatch> {
+            self.inner.scan_values(map, is_backup, max_batch_cost).await
+        }
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: crate::storage::map_data_store::ScanCursor,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<crate::storage::map_data_store::ScanBatch> {
+            self.inner
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await
+        }
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.inner.remove_all(map, keys).await
+        }
+        fn is_loadable(&self, key: &str) -> bool {
+            self.inner.is_loadable(key)
+        }
+        fn pending_operation_count(&self) -> u64 {
+            self.inner.pending_operation_count()
+        }
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            self.inner.soft_flush().await
+        }
+        fn flushed_watermark(&self) -> u64 {
+            self.watermark
+        }
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            self.inner.hard_flush().await
+        }
+        async fn flush_key(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            is_backup: bool,
+        ) -> anyhow::Result<()> {
+            self.inner.flush_key(map, key, value, is_backup).await
+        }
+        fn reset(&self) {
+            self.inner.reset();
+        }
+    }
+
+    /// The one captured event whose `tracing` target is the conjunct snapshot line.
+    fn conjunct_line(events: &[String]) -> &str {
+        events
+            .iter()
+            .find(|e| e.contains("target=topgun_server::tombstone_frontier::conjunct"))
+            .map_or_else(
+                || panic!("no conjunct line captured: {events:#?}"),
+                String::as_str,
+            )
+    }
+
+    /// The rendered text of field `name` inside a captured event's field text (the
+    /// `captured_tracing_events` / `FieldTextVisitor` transport), up to the next space.
+    fn conjunct_field<'a>(event: &'a str, name: &str) -> &'a str {
+        let needle = format!(" {name}=");
+        let start = event
+            .find(&needle)
+            .unwrap_or_else(|| panic!("field `{name}` not found in: {event}"))
+            + needle.len();
+        let rest = &event[start..];
+        &rest[..rest.find(' ').unwrap_or(rest.len())]
+    }
+
+    /// `conjunct_binding` must be the exact negation of the drain filter's own admission test
+    /// (`:971`, `watermark >= e && e != 0 && ceiling > e`) for every `e != 0` — checked over the
+    /// full `e in 1..=8, c in 0..=9, w in 0..=9` grid, which reaches every one of the four
+    /// variants (including the boundary cases `ceiling == e` and `watermark == e`) at least once.
+    #[test]
+    fn conjunct_binding_neither_iff_drain_filter_admits() {
+        let mut seen_claim_only = false;
+        let mut seen_durability_only = false;
+        let mut seen_both = false;
+        let mut seen_neither = false;
+        for e in 1..=8u64 {
+            for c in 0..=9u64 {
+                for w in 0..=9u64 {
+                    let class = conjunct_binding(e, c, w);
+                    let admitted = w >= e && e != 0 && c > e;
+                    assert_eq!(
+                        class == ConjunctBinding::Neither,
+                        admitted,
+                        "conjunct_binding({e}, {c}, {w}) = {class:?}, but the drain filter's \
+                         own admission test says admitted={admitted}"
+                    );
+                    match class {
+                        ConjunctBinding::ClaimOnly => seen_claim_only = true,
+                        ConjunctBinding::DurabilityOnly => seen_durability_only = true,
+                        ConjunctBinding::Both => seen_both = true,
+                        ConjunctBinding::Neither => seen_neither = true,
+                    }
+                }
+            }
+        }
+        assert!(seen_claim_only, "ClaimOnly was never reached over the grid");
+        assert!(
+            seen_durability_only,
+            "DurabilityOnly was never reached over the grid"
+        );
+        assert!(seen_both, "Both was never reached over the grid");
+        assert!(seen_neither, "Neither was never reached over the grid");
+    }
+
+    /// A snapshot's `neither` set — read off the emitted `conjunct` line's `retained` field —
+    /// equals exactly the epochs the very next `drain_prunable_tombstones()` call drains, with no
+    /// intervening mutation. Two configurations are needed because a single snapshot cannot reach
+    /// all four classes at once (`claim_only` requires `ceiling <= watermark`, `durability_only`
+    /// requires `watermark < ceiling - 1`, and those are mutually exclusive); across the two, all
+    /// four classes are reached at least once.
+    // One body deliberately: the two configurations are symmetric fixtures whose only
+    // difference is a handful of literals, and a shared helper would separate each
+    // configuration's assertions from the exact ceiling/watermark pair that produced it.
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn conjunct_snapshot_neither_set_equals_next_drain() {
+        use std::collections::BTreeSet;
+
+        fn parse_retained(field: &str) -> Vec<(u64, &str)> {
+            field
+                .split(',')
+                .filter(|e| !e.is_empty())
+                .map(|entry| {
+                    let (epoch, class) = entry
+                        .split_once(':')
+                        .unwrap_or_else(|| panic!("malformed retained entry: {entry:?}"));
+                    (epoch.parse::<u64>().expect("epoch parses as u64"), class)
+                })
+                .collect()
+        }
+
+        let mut classes_seen: BTreeSet<String> = BTreeSet::new();
+
+        // Configuration (i), `ceiling <= watermark`: ceiling 3, watermark 5, closed epochs
+        // 1..=7, open epoch 8. Classifies: {1,2} neither, {3,4,5} claim_only, {6,7} both.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 1..=8u32 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("TAG{i}"));
+            }
+            f.set_durable_epoch_watermark(5);
+            f.set_delivered(CONN_A, 100);
+            let client: ClientId = "a5:conjunct-cfg-i|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&client, 3, CONN_A)));
+
+            let events = captured_tracing_events(|| f.publish_conjunct_snapshot());
+            let retained = parse_retained(conjunct_field(conjunct_line(&events), "retained"));
+
+            let neither: BTreeSet<u64> = retained
+                .iter()
+                .filter(|(_, c)| *c == "neither")
+                .map(|(e, _)| *e)
+                .collect();
+            let claim_only: BTreeSet<u64> = retained
+                .iter()
+                .filter(|(_, c)| *c == "claim_only")
+                .map(|(e, _)| *e)
+                .collect();
+            let both: BTreeSet<u64> = retained
+                .iter()
+                .filter(|(_, c)| *c == "both")
+                .map(|(e, _)| *e)
+                .collect();
+            assert!(
+                !neither.is_empty(),
+                "configuration (i) must reach `neither`: {retained:?}"
+            );
+            assert!(
+                !claim_only.is_empty(),
+                "configuration (i) must reach `claim_only`: {retained:?}"
+            );
+            assert!(
+                !both.is_empty(),
+                "configuration (i) must reach `both`: {retained:?}"
+            );
+            classes_seen.extend(retained.iter().map(|(_, c)| (*c).to_string()));
+
+            let drained_epochs: BTreeSet<u64> = f
+                .drain_prunable_tombstones()
+                .iter()
+                .map(|(e, _)| *e)
+                .collect();
+            assert_eq!(
+                neither, drained_epochs,
+                "the snapshot's `neither` set must equal the very next drain's epochs \
+                 (configuration i)"
+            );
+        }
+
+        // Configuration (ii), `watermark < ceiling - 1`: ceiling 5, watermark 2, closed epochs
+        // 1..=7, open epoch 8. Classifies: {1,2} neither, {3,4} durability_only, {5,6,7} both.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 1..=8u32 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("TAG{i}"));
+            }
+            f.set_durable_epoch_watermark(2);
+            f.set_delivered(CONN_A, 100);
+            let client: ClientId = "a5:conjunct-cfg-ii|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&client, 5, CONN_A)));
+
+            let events = captured_tracing_events(|| f.publish_conjunct_snapshot());
+            let retained = parse_retained(conjunct_field(conjunct_line(&events), "retained"));
+
+            let neither: BTreeSet<u64> = retained
+                .iter()
+                .filter(|(_, c)| *c == "neither")
+                .map(|(e, _)| *e)
+                .collect();
+            let durability_only: BTreeSet<u64> = retained
+                .iter()
+                .filter(|(_, c)| *c == "durability_only")
+                .map(|(e, _)| *e)
+                .collect();
+            let both: BTreeSet<u64> = retained
+                .iter()
+                .filter(|(_, c)| *c == "both")
+                .map(|(e, _)| *e)
+                .collect();
+            assert!(
+                !neither.is_empty(),
+                "configuration (ii) must reach `neither`: {retained:?}"
+            );
+            assert!(
+                !durability_only.is_empty(),
+                "configuration (ii) must reach `durability_only`: {retained:?}"
+            );
+            assert!(
+                !both.is_empty(),
+                "configuration (ii) must reach `both`: {retained:?}"
+            );
+            classes_seen.extend(retained.iter().map(|(_, c)| (*c).to_string()));
+
+            let drained_epochs: BTreeSet<u64> = f
+                .drain_prunable_tombstones()
+                .iter()
+                .map(|(e, _)| *e)
+                .collect();
+            assert_eq!(
+                neither, drained_epochs,
+                "the snapshot's `neither` set must equal the very next drain's epochs \
+                 (configuration ii)"
+            );
+        }
+
+        for class in ["claim_only", "durability_only", "both", "neither"] {
+            assert!(
+                classes_seen.contains(class),
+                "class {class:?} was never reached across the two configurations: \
+                 {classes_seen:?}"
+            );
+        }
+    }
+
+    /// One `publish_conjunct_snapshot` call, over a store-backed frontier whose flushed
+    /// watermark sits ahead of the cached field, mutates none of: the O-0 index-conservation
+    /// snapshot, the cached `durable_epoch_watermark`, the registry's executed watermark, the
+    /// registry's live-claim count, or the registry's own rendered ceiling-query counter.
+    #[test]
+    fn conjunct_snapshot_mutates_no_frontier_or_registry_state() {
+        use crate::reclamation_registry::METRIC_RECLAMATION_CEILING_QUERIES_TOTAL;
+
+        const SOURCE: &str = include_str!("tombstone_frontier_impl.rs");
+
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let store: Arc<dyn MapDataStore> = Arc::new(FixedWatermarkStore {
+                inner: Arc::new(NullDataStore),
+                watermark: 999,
+            });
+            let mut f = TombstoneFrontier::new(Some(store));
+            // Forced rather than inherited from the environment: a disarmed publish returns
+            // before taking the lock, so an operator shell exporting a falsey arming value
+            // would turn every "unchanged" assertion below into a vacuous pass.
+            f.prune_arming = PruneRecordArming::Armed;
+            f.set_epoch_width(1);
+            for i in 1..=3u32 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("TAG{i}"));
+            }
+            f.set_delivered(CONN_A, 100);
+            let client: ClientId = "a5:conjunct-mutation|dev-1".into();
+            assert!(block_on(f.confirm_apply_ack(&client, 2, CONN_A)));
+
+            let before_index = f.index_conservation_snapshot();
+            let before_cached_watermark = f.lock().durable_epoch_watermark;
+            let before_executed = f.reclamation().executed_watermark(ClaimScope::Global);
+            let before_claims = f.reclamation().live_claims(ClaimScope::Global);
+            let before_render = handle.render();
+
+            f.publish_conjunct_snapshot();
+
+            let after_index = f.index_conservation_snapshot();
+            let after_cached_watermark = f.lock().durable_epoch_watermark;
+            let after_executed = f.reclamation().executed_watermark(ClaimScope::Global);
+            let after_claims = f.reclamation().live_claims(ClaimScope::Global);
+            let after_render = handle.render();
+
+            assert_eq!(
+                before_index, after_index,
+                "publish_conjunct_snapshot must not change any O-0 conservation counter"
+            );
+            assert_eq!(
+                before_cached_watermark, after_cached_watermark,
+                "the cached durable_epoch_watermark must stay put even though the store's own \
+                 flushed watermark (999) sits ahead of it — a scrape reads it, never writes it \
+                 back"
+            );
+            assert_eq!(
+                before_executed, after_executed,
+                "publish_conjunct_snapshot must not move the registry's executed watermark"
+            );
+            assert_eq!(
+                before_claims, after_claims,
+                "publish_conjunct_snapshot must not move the registry's live claim count"
+            );
+            assert_eq!(
+                rendered_value(&before_render, METRIC_RECLAMATION_CEILING_QUERIES_TOTAL),
+                rendered_value(&after_render, METRIC_RECLAMATION_CEILING_QUERIES_TOTAL),
+                "publish_conjunct_snapshot must not move the registry's rendered \
+                 ceiling-query counter"
+            );
+        });
+
+        // The gauge-neutrality half, read as source text: `MetricsPruneRecorder`'s
+        // `observe_conjunct_snapshot` body names no tombstone-byte counter or gauge
+        // (`TG-OR-006`(b)) — a future edit that adds one is caught mechanically here rather
+        // than by review.
+        let body = item_body(
+            SOURCE,
+            "fn observe_conjunct_snapshot(&self, record: &ConjunctSnapshotRecord) {",
+            "    ",
+        );
+        assert!(
+            !body.contains("tombstone_bytes"),
+            "MetricsPruneRecorder::observe_conjunct_snapshot must name no tombstone-byte \
+             series; body was:\n{body}"
+        );
+    }
+
+    /// Nearest-rank percentiles of `current_epoch - claim` over the observed claim set, read off
+    /// the emitted `conjunct` line — the real algorithm end to end, not a copy of it.
+    #[test]
+    fn conjunct_snapshot_percentiles_nearest_rank() {
+        fn percentiles(f: &TombstoneFrontier) -> (u64, u64, u64, u64) {
+            let events = captured_tracing_events(|| f.publish_conjunct_snapshot());
+            let line = conjunct_line(&events);
+            (
+                conjunct_field(line, "claim_lag_p50").parse().unwrap(),
+                conjunct_field(line, "claim_lag_p99").parse().unwrap(),
+                conjunct_field(line, "claim_lag_max").parse().unwrap(),
+                conjunct_field(line, "claims").parse().unwrap(),
+            )
+        }
+        fn register_claims(f: &TombstoneFrontier, claims: &[u64]) {
+            f.set_delivered(CONN_A, 10_000);
+            for (i, &c) in claims.iter().enumerate() {
+                let client: ClientId = format!("a5:conjunct-lag-{i}|dev-1");
+                assert!(block_on(f.confirm_apply_ack(&client, c, CONN_A)));
+            }
+        }
+
+        // lags = [7]: (7, 7, 7).
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 1..=8u32 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("TAG{i}"));
+            }
+            register_claims(&f, &[1]);
+            assert_eq!(percentiles(&f), (7, 7, 7, 1));
+        }
+
+        // lags = [1,2,3,4]: (2, 4, 4).
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 1..=5u32 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("TAG{i}"));
+            }
+            register_claims(&f, &[4, 3, 2, 1]);
+            assert_eq!(percentiles(&f), (2, 4, 4, 4));
+        }
+
+        // lags = 1..=100: (50, 99, 100).
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 1..=101u32 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("TAG{i}"));
+            }
+            let claims: Vec<u64> = (1..=100).rev().collect();
+            register_claims(&f, &claims);
+            assert_eq!(percentiles(&f), (50, 99, 100, 100));
+        }
+
+        // Empty claim set: (0, 0, 0), disambiguated by `claims == 0`.
+        {
+            let f = frontier();
+            assert_eq!(percentiles(&f), (0, 0, 0, 0));
+        }
+    }
+
+    /// With 300 resident closed epochs, `retained` holds exactly the first 256 (sorted by
+    /// epoch) and `retained_truncated=true`; with 3, every entry is present and
+    /// `retained_truncated=false`. The rendering is checked byte-for-byte, unquoted, as R3 step 6
+    /// pins it (`retained = %list`, Display — never the `?` Debug form, which would quote).
+    #[test]
+    fn conjunct_snapshot_retained_list_truncates_at_256_and_says_so() {
+        // No claim and no durable watermark: ceiling and watermark are both 0, so every closed
+        // epoch (`e >= 1`) classifies `both` — the truncation boundary is exercised without also
+        // varying the classifier.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 1..=301u32 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("TAG{i}"));
+            }
+            let events = captured_tracing_events(|| f.publish_conjunct_snapshot());
+            let line = conjunct_line(&events);
+            let retained = conjunct_field(line, "retained");
+            let expected: String = (1..=256u64)
+                .map(|e| format!("{e}:both"))
+                .collect::<Vec<_>>()
+                .join(",");
+            assert_eq!(
+                retained, expected,
+                "retained must hold exactly the first 256 entries, sorted by epoch, unquoted"
+            );
+            assert!(
+                !retained.starts_with('"') && !retained.ends_with('"'),
+                "retained must render unquoted (Display, not Debug); rendered: {retained}"
+            );
+            assert_eq!(conjunct_field(line, "retained_truncated"), "true");
+        }
+
+        // 3 closed epochs: no truncation.
+        {
+            let f = frontier();
+            f.set_epoch_width(1);
+            for i in 1..=4u32 {
+                f.stamp_tombstone("m", &format!("k{i}"), &format!("TAG{i}"));
+            }
+            let events = captured_tracing_events(|| f.publish_conjunct_snapshot());
+            let line = conjunct_line(&events);
+            assert_eq!(conjunct_field(line, "retained"), "1:both,2:both,3:both");
+            assert_eq!(conjunct_field(line, "retained_truncated"), "false");
+        }
+    }
+
+    /// Under `Disarmed`, `publish_conjunct_snapshot` does no lock, no allocation and no line:
+    /// the capture is empty and the frontier's own sequence never leaves 0.
+    #[test]
+    fn conjunct_snapshot_disarmed_takes_no_work() {
+        let mut f = frontier();
+        f.prune_arming = PruneRecordArming::Disarmed;
+
+        let events = captured_tracing_events(|| f.publish_conjunct_snapshot());
+        assert!(
+            events
+                .iter()
+                .all(|e| !e.contains("target=topgun_server::tombstone_frontier::conjunct")),
+            "a disarmed frontier must emit no conjunct line, captured: {events:#?}"
+        );
+        assert_eq!(
+            f.conjunct_seq.load(Ordering::Relaxed),
+            0,
+            "a disarmed call must not advance the snapshot sequence"
+        );
+    }
+
+    /// The step-5 pin (`seq` equals the recorder's own snapshot counter at its post-increment
+    /// value) holds for a single SERIAL caller — the regime `metrics_handler` actually runs in,
+    /// one scrape at a time. Two concurrent calls could interleave their `Relaxed` increments;
+    /// this test drives the pin the way it is actually claimed, back-to-back on one thread.
+    #[test]
+    fn conjunct_seq_matches_recorder_counter_across_serial_calls() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let f = frontier();
+            for expected in 1..=3u64 {
+                f.publish_conjunct_snapshot();
+                let rendered = handle.render();
+                assert_eq!(
+                    f.conjunct_seq.load(Ordering::Relaxed),
+                    expected,
+                    "the frontier's own sequence must advance by exactly one per serial call"
+                );
+                assert_eq!(
+                    rendered_value(&rendered, METRIC_PRUNE_CONJUNCT_SNAPSHOTS_TOTAL),
+                    Some(expected.to_string().as_str()),
+                    "for a single serial caller the recorder's counter must equal the \
+                     frontier's own sequence at the same instant; render was:\n{rendered}"
+                );
+            }
+        });
     }
 
     // -----------------------------------------------------------------------

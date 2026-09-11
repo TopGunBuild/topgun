@@ -1,0 +1,79 @@
+=== spec365 conjunct readout: spec365-conj900 ===
+
+SectionA: source=matched seq=195 conj_snapshots_total=195
+epoch | class | open
+29 | durability_only | false
+30 |  | true
+consistency: counted(claim_only=0 durability_only=1 both=0 neither=0) line(claim_only=0 durability_only=1 both=0 neither=0) retained_truncated=false OK
+
+SectionB: where the retained tag tombstones live
+B_store=46641
+ret_stamped_bytes=22000
+ret_stamped_bytes_open_epoch=21472
+B_index=43472
+X=3169
+X/B_store=0.067945
+tau=4664.100
+X series (elapsed_secs,X):
+0	NA
+60	15060
+120	0
+180	21
+240	0
+300	2751
+360	2772
+420	2751
+480	2751
+540	12673
+600	2751
+660	2751
+720	2751
+780	2751
+840	3169
+900	3169
+durable census (post-kill redb, flushed state only): tombstone_entries=1454 or_map_keys=96 keys_with_tombstones=48 max_tombstones_per_key=38
+
+SectionC: per exited epoch reconciliation
+epoch | passes | refs_at_entry | refs_returned | bytes_returned | considered | dropped | matched_nothing | absent | restored_sum | bytes_freed | status
+2 | 1 | 1000 | 1000 | 19821 | 1000 | 1000 | 0 | 0 | 0 | 19821 | RECONCILED
+3 | 1 | 1000 | 1000 | 20535 | 1000 | 1000 | 0 | 0 | 0 | 20535 | RECONCILED
+4 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
+5 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
+6 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
+7 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
+8 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
+9 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
+10 | 1 | 1000 | 1000 | 21000 | 0 | 0 | 0 | 0 | 0 | 0 | NO_SETTLEMENT
+11 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
+12 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
+13 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
+14 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
+15 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
+16 | 1 | 1000 | 1000 | 21362 | 1000 | 1000 | 0 | 0 | 0 | 21362 | RECONCILED
+17 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
+18 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
+19 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
+20 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
+21 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
+22 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
+23 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
+24 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
+25 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
+26 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
+27 | 1 | 1000 | 1000 | 22000 | 0 | 0 | 0 | 0 | 0 | 0 | NO_SETTLEMENT
+28 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
+totals: passes=27 refs_at_entry=27000 refs_returned=27000 bytes_returned=577718 considered=25000 dropped=25000 matched_nothing=0 absent=0 restored_sum=0 bytes_freed=534718
+last-row metric check: removed_refs_observed_total=27000 considered_total=25000 MISMATCH
+reconciliation=SPLIT split_epochs=10,27
+
+SectionD: claim-lag distribution over 195 conjunct line(s)
+max_claim_lag_max=1
+claim_lag_p50: min=0 median=0 max=1
+claim_lag_p99: min=0 median=0 max=1
+max_claims=1
+durable_watermark_lag: max=4 last=2
+
+SectionE: footprint reconstruction
+rows_within_2pct=15/15
+
+READOUT: O2; retained_closed_epochs=1; reconciliation=SPLIT
