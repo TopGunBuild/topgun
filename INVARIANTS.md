@@ -662,8 +662,19 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   operation of that sub-batch was applied. This is what the per-op singleton re-dispatch relies on:
   if a Permanent failure could occur *after* some ops were applied, the fallback would apply them a
   second time.
-- **Maintaining code:** the basis is layer-by-layer. LoadShed, Timeout, Metrics, Authorization and
-  the Router all fail *before* the inner call; `handle_op_batch` raises every Permanent variant in
+- **Maintaining code:** the basis is layer-by-layer, in stack order. `MetricsLayer` only observes: it
+  records the outcome and returns the inner result unchanged, so it raises no error of its own and
+  applies nothing. `LoadShedLayer` fails with `Overloaded` before the inner future is built at all.
+  `TimeoutLayer` may fail *after* the inner future has started — it drops that future mid-flight, so a
+  sub-batch under it can already have applied operations — which is safe for this row because
+  `Timeout` is `Transient`, and a Transient failure enters no singleton fallback at all.
+  `AuthorizationLayer` builds the inner future before the RBAC decision — the reserved-map refusal
+  returns `Forbidden` before any future exists — but fails before that future is ever *polled*: the
+  Deny arm returns `Forbidden` and drops it un-awaited, and nothing has been
+  applied because `Arc<CrdtService>::call` does all of its work inside the boxed future it returns —
+  since `Forbidden` is Permanent, this row's guarantee on the Authorization path rests on exactly
+  that property. The Router dispatches to the domain service, where the rest of this bullet takes
+  over; `handle_op_batch` raises every Permanent variant in
   its validate loops *before* its apply loops; `apply_single_op` and `broadcast_event` return only
   `Internal`, which is Transient. A future Permanent error raised mid-apply breaks this row, and
   this row is what a reviewer trips over.
