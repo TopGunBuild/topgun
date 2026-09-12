@@ -748,9 +748,9 @@ impl CrdtService {
             // elapse, the layer cancels the call mid-pass, and the caller is told
             // the write timed out while the server kept it. This trigger is O(1)
             // and never awaits, so an op's latency no longer depends on the size
-            // of the backlog it happens to follow. Reclamation is no less certain
-            // — permits coalesce, so a burst of writes still yields a pass — but
-            // it needs the partner task the prune wake is consumed by.
+            // of the backlog it happens to follow. The write-triggered cadence is
+            // unchanged — permits coalesce, so a burst still yields one pass after
+            // it — for as long as the task consuming the wake lives; nothing supervises it.
             if let Some(frontier) = self.frontier.as_ref() {
                 frontier.request_prune();
             }
@@ -1935,8 +1935,8 @@ pub(crate) async fn prune_epoch_tombstones(
 /// teardown drops the task, and `PrunePassGuard` re-indexes the in-flight pass's unsettled refs
 /// as that future is dropped, so a torn-down pass loses no ref from the index — in RAM only;
 /// the restart rebuild remains the authoritative recovery. A panic inside a pass unwinds
-/// through the same guard and then ends the task; no respawn is attempted, which leaves a
-/// panicking op with the failure mode it already had rather than a new one.
+/// through that guard and then ends the task. The claim is never released, so the failure is NEW
+/// in kind: reclamation stops process-wide, silently, no re-trigger. Supervision is out of scope.
 #[must_use]
 pub fn spawn_prune_task(
     frontier: Arc<TombstoneFrontier>,
