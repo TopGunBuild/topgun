@@ -1872,7 +1872,7 @@ fn build_services(
     frontier.set_epoch_width(epoch_width);
     tracing::info!(
         epoch_width = frontier.epoch_width(),
-        "tombstone epoch counter initialized (prune dark until SPEC-342j supplies the durability watermark)"
+        "tombstone epoch counter initialized (the epoch prune runs on the background task)"
     );
     let key_writer = Arc::new(topgun_server::service::domain::key_writer::KeyWriterRegistry::new());
 
