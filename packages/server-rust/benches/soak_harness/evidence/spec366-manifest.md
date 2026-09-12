@@ -28,7 +28,9 @@ is appended after the run.
 |---|---|---|
 | `spec365-conjuncts.sh` | `1087ec6f33d8dcad537ae5af43d06d7a5391e55b45d01e3efec2cff5a2074591` | frozen evidence, byte-unchanged (equals the digest recorded in `spec365-manifest.md` §1) |
 | `spec365-readout.sh` | `5fbfa3e9d9df2a74830edbf89cf4036ae3e376add9171676fe70800b335d7a11` | frozen evidence, byte-unchanged (ditto); it is the readout this run uses, UNEDITED, invoked with basename `spec366-conj900` |
-| `spec366-conjuncts.sh` | `9b073f6c786827080e78279a60d1e23ad5cefc19b8f601f729dc6fb237734be4` | this spec's runner |
+| `spec366-conjuncts.sh` | `401d61c95bcdb9ba69f91e0eb2ad6d543ef27b98e4d471d39c6cdf562e529d59` | this spec's runner, with difference item 5 (the pre-clock provenance assertion) added after cell attempt 1 was invalidated. The digest before item 5 was `9b073f6c786827080e78279a60d1e23ad5cefc19b8f601f729dc6fb237734be4`. |
+| `spec366-p5.awk` | `2e3ba4f4c0429d77d7f1cf267112706ddf95b095b2a14a6b05460cfa5d018c33` | P5, committed so the predicate is regenerable by path; bytes equal the §2 block |
+| `spec366-p67.awk` | `ba65ffc4076307ffdbfb014565edaf1f17e185ef987ca6b3fe2565d544400215` | P6/P7, ditto |
 
 ### The difference, verbatim
 
@@ -41,14 +43,14 @@ mechanically rather than narrated:
 ---
 > # Prune-conjunct readout cell runner -- the SPEC-366 successor of the frozen
 > # spec365-conjuncts.sh, which is NOT edited.
-4a6,45
+4a6,62
 > # A SUCCESSOR EXISTS BECAUSE THE FROZEN RUNNER CANNOT BE RUN FOR THIS SPEC.
 > # spec365-conjuncts.sh refuses to start unless `git diff <freeze>..HEAD --
 > # '*.rs'` is empty against SPEC365_CODE_FREEZE, and that guard has no override
 > # while SPEC-366 changes .rs files by definition; it also hard-codes
 > # BASE="spec365-conj900", whose artifacts are committed evidence a re-run must
 > # not overwrite. This file is therefore a COPY, and the difference list against
-> # spec365-conjuncts.sh is CLOSED at exactly four items:
+> # spec365-conjuncts.sh is CLOSED at exactly five items:
 > #
 > #   1. THE FREEZE VARIABLE IS RENAMED SPEC366_CODE_FREEZE and its literal is
 > #      SPEC-366's own freeze commit. The same three refusal guards -- the
@@ -72,6 +74,23 @@ mechanically rather than narrated:
 > #      scrapes with the first run's -- which corrupts the decision-scrape
 > #      selection silently instead of failing loudly.
 > #   4. this header and the usage text, naming the successor.
+> #   5. A PRE-CLOCK PROVENANCE ASSERTION on the server binary, added after cell
+> #      attempt 1 was invalidated. That attempt ran a server built from the PIN,
+> #      not from this branch: an earlier experiment had shared one
+> #      CARGO_TARGET_DIR between a pin worktree and the main checkout, cargo gave
+> #      both source paths the same metadata hash, and `cargo build` then judged
+> #      the pin-built binary fresh. The cell produced a full set of artifacts and
+> #      a readout, and NOTHING in the run said the measured binary was the wrong
+> #      one -- the predicates simply read as FALSE. So, after this runner's own
+> #      build and BEFORE T0:
+> #        (a) the binary must CONTAIN the string of a counter this branch adds,
+> #            `topgun_or_prune_restored_cancelled_total`, else FATAL naming it;
+> #        (b) its mtime must be >= this invocation's recorded start, else FATAL
+> #            "stale artifact -- not built by this invocation";
+> #        (c) its sha256, already on the matrix, is repeated as the FIRST line of
+> #            the console log, so every artifact set carries the identity of the
+> #            binary that produced it.
+> #      A measurement that cannot say which binary it ran is not evidence.
 > #
 > # The matrix, the cell literals, the harness flags, the log directive and the
 > # readout invocation are byte-identical, and the readout is the UNCHANGED
@@ -82,40 +101,47 @@ mechanically rather than narrated:
 > # Everything from here on is spec365-conjuncts.sh's own header, kept verbatim
 > # so the lineage back to spec362b-durable.sh stays readable.
 > #
-49c90
+49c107
 < #       becomes SPEC365_CODE_FREEZE here, with one added behaviour the parent
 ---
 > #       becomes SPEC366_CODE_FREEZE here, with one added behaviour the parent
-70c111
+70c128
 < # THE FREEZE GATE (g) PINS THE .rs TREE. SPEC365_CODE_FREEZE names the commit
 ---
 > # THE FREEZE GATE (g) PINS THE .rs TREE. SPEC366_CODE_FREEZE names the commit
-106c147
+106c164
 < usage: spec365-conjuncts.sh <cell>
 ---
 > usage: spec366-conjuncts.sh <cell>
-108,109c149,151
+108,109c166,168
 <   Derived from spec362b-durable.sh, which is not edited. The difference list
 <   against that file is CLOSED and is enumerated in the header block above.
 ---
 >   A COPY of spec365-conjuncts.sh, which is not edited. The difference list
->   against that file is CLOSED, has exactly four items, and is enumerated in
+>   against that file is CLOSED, has exactly five items, and is enumerated in
 >   the header block above.
-121c163
+121c180
 <   SPEC365_CODE_FREEZE still reads its own placeholder value, or unless the
 ---
 >   SPEC366_CODE_FREEZE still reads its own placeholder value, or unless the
-149c191
+149c208
 <               EXTRA_FLAGS=""; BASE="spec365-conj900" ;;
 ---
 >               EXTRA_FLAGS=""; BASE="spec366-conj900" ;;
-179a222,226
+177a237,242
+> 
+> # Item 5: this invocation's start, recorded BEFORE anything is built. The
+> # provenance clause below compares the server binary's mtime against it, so the
+> # timestamp has to predate the build or the comparison proves nothing.
+> RUN_START_EPOCH="$(date +%s)"
+> RUN_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+179a245,249
 > # Every /metrics body this run scrapes, kept verbatim, one file per sample.
 > # P6/P7 are decided on a RAW body taken outside every open prune window, and no
 > # CSV row can carry one: the row is 31 numbers awk-ed out of a body that today
 > # is discarded.
 > SCRAPES_DIR="${OUT_DIR}/${BASE}.scrapes"
-378,380c425,427
+378,380c448,450
 < SPEC365_CODE_FREEZE=9fdaaf5a141bf24ee3b7801cb6a16c861ab228cc
 < if [ "$SPEC365_CODE_FREEZE" = "PENDING_SPEC365_CODE_FREEZE" ]; then
 <   echo "FATAL: SPEC365_CODE_FREEZE still reads its placeholder value." >&2
@@ -123,18 +149,78 @@ mechanically rather than narrated:
 > SPEC366_CODE_FREEZE=a18e09de
 > if [ "$SPEC366_CODE_FREEZE" = "PENDING_SPEC366_CODE_FREEZE" ]; then
 >   echo "FATAL: SPEC366_CODE_FREEZE still reads its placeholder value." >&2
-391,392c438,439
+391,392c461,462
 < if ! FREEZE_RS_DIFF="$(git -C "$REPO_ROOT" diff --stat "$SPEC365_CODE_FREEZE"..HEAD -- '*.rs' 2>&1)"; then
 <   echo "FATAL: the .rs diff against the freeze commit ${SPEC365_CODE_FREEZE} could" >&2
 ---
 > if ! FREEZE_RS_DIFF="$(git -C "$REPO_ROOT" diff --stat "$SPEC366_CODE_FREEZE"..HEAD -- '*.rs' 2>&1)"; then
 >   echo "FATAL: the .rs diff against the freeze commit ${SPEC366_CODE_FREEZE} could" >&2
-399c446
+399c469
 <   echo "FATAL: the .rs tree at HEAD differs from the freeze commit ${SPEC365_CODE_FREEZE}; this run would not be filed under it" >&2
 ---
 >   echo "FATAL: the .rs tree at HEAD differs from the freeze commit ${SPEC366_CODE_FREEZE}; this run would not be filed under it" >&2
-516a564,580
+449a520,572
 > 
+> # ---------------------------------------------------------------------------
+> # Item 5 -- PRE-CLOCK PROVENANCE ASSERTION.
+> #
+> # Cell attempt 1 ran a server built from the PIN and produced a complete,
+> # plausible artifact set: a readout, a CSV, 16 scrapes, and predicates that
+> # simply read FALSE. Nothing in the run said the measured binary was the wrong
+> # one. These two clauses are what turn that silent failure into a refusal, and
+> # they run BEFORE T0 so a bad binary costs nothing but a restart.
+> # ---------------------------------------------------------------------------
+> PROV_COUNTER="topgun_or_prune_restored_cancelled_total"
+> 
+> # (a) The binary must carry a symbol this branch introduces. A binary built
+> #     from any earlier source simply does not contain the string.
+> #     NOT `grep -q`: this runner is `set -euo pipefail`, and `grep -q` exits at
+> #     the first match, so `strings` takes SIGPIPE and the PIPELINE reports 141
+> #     even when the string IS present -- measured rc=141 against a binary that
+> #     contains it. That would fail the assertion on a CORRECT binary and refuse
+> #     every run. `grep -c` consumes all of its input, so the status reflects the
+> #     match count rather than a broken pipe.
+> PROV_HITS="$(strings "$SERVER_BIN" | grep -c "$PROV_COUNTER" || true)"
+> if [ "${PROV_HITS:-0}" -eq 0 ]; then
+>   echo "FATAL: the server binary does not contain '${PROV_COUNTER}'." >&2
+>   echo "       binary: $SERVER_BIN" >&2
+>   echo "       built:  $(date -r "$SERVER_BIN" -u '+%Y-%m-%dT%H:%M:%SZ')" >&2
+>   echo "       sha256: ${SERVER_BIN_SHA256:-<unavailable>}" >&2
+>   echo "       This counter is emitted by the branch under test, so a binary" >&2
+>   echo "       without it was built from other sources. Attempt 1 ran exactly" >&2
+>   echo "       such a binary and the cell was worthless." >&2
+>   exit 1
+> fi
+> 
+> # (b) It must have been produced by THIS invocation. A binary older than the
+> #     run's own start was inherited from somewhere else, which is precisely how
+> #     a stale artifact survives an intervening `cargo build` that judged it
+> #     fresh.
+> SERVER_MTIME_EPOCH="$(date -r "$SERVER_BIN" '+%s')"
+> if [ "$SERVER_MTIME_EPOCH" -lt "$RUN_START_EPOCH" ]; then
+>   echo "FATAL: stale artifact -- not built by this invocation." >&2
+>   echo "       binary: $SERVER_BIN" >&2
+>   echo "       built:  $(date -r "$SERVER_BIN" -u '+%Y-%m-%dT%H:%M:%SZ')" >&2
+>   echo "       run started: ${RUN_START_UTC}" >&2
+>   echo "       Remove it and let this runner rebuild it; do not reuse a binary" >&2
+>   echo "       from another tree or another run." >&2
+>   exit 1
+> fi
+> 
+> # (c) The identity of the measured binary travels WITH the artifacts: the same
+> #     sha256 the matrix records is repeated as the console log's first line.
+> #     The predicate awks skip any line without a timestamp prefix, so this is
+> #     inert to them.
+> PROV_LINE="provenance: server sha256=${SERVER_BIN_SHA256} built=$(date -r "$SERVER_BIN" -u '+%Y-%m-%dT%H:%M:%SZ') run_start=${RUN_START_UTC} ${PROV_COUNTER}=present"
+> echo "$PROV_LINE"
+450a574,579
+> # Every path that publishes the console artifact goes through this, so the
+> # provenance line cannot be lost on an early-exit path.
+> write_console_out() {
+>   { printf '%s\n' "$PROV_LINE"; cat "$CONSOLE_LOG"; } > "$CONSOLE_OUT" 2>/dev/null || true
+> }
+> 
+517a647,663
 > # The per-sample scrape directory is an ARTIFACT and joins the refusal above.
 > # The loop enumerates NAMED FILES, so a directory beside them would sit outside
 > # it, and a second run would then MIX its scrapes with the surviving ones --
@@ -151,15 +237,24 @@ mechanically rather than narrated:
 >   echo "FATAL: cannot create artifact directory: $SCRAPES_DIR" >&2
 >   exit 1
 > fi
-565c629
+> 
+565c711
 <   echo "  code freeze:            ${SPEC365_CODE_FREEZE}"
 ---
 >   echo "  code freeze:            ${SPEC366_CODE_FREEZE}"
-699c763
+661c807
+<     cp -f "$CONSOLE_LOG" "$CONSOLE_OUT" 2>/dev/null || true
+---
+>     write_console_out
+670c816
+<   cp -f "$CONSOLE_LOG" "$CONSOLE_OUT" 2>/dev/null || true
+---
+>   write_console_out
+699c845
 <   local body
 ---
 >   local body stamp
-700a765,772
+700a847,854
 >   # The body is kept WHOLE before it is reduced to 31 numbers, under the same
 >   # fixed-width UTC RFC 3339 stamp the console prefix uses -- the one time
 >   # domain the manifest's window rules compare in. A failed curl writes an
@@ -168,36 +263,45 @@ mechanically rather than narrated:
 >   # that was never due.
 >   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 >   printf '%s' "$body" > "${SCRAPES_DIR}/${stamp}.txt" || true
+937c1091
+< cp -f "$CONSOLE_LOG" "$CONSOLE_OUT"
+---
+> write_console_out
 ```
 
 ### Hunk → item mapping
 
-The AC reads "the hunks map onto the four items", not "four hunks": item 3 alone lands as three
-hunks (the path variable, the artifact-guard entry, the write inside `scrape_prune_metrics`), and
-the item-1 rename touches every site that reads the variable.
+The AC reads "the hunks map onto the five items", not "five hunks". Item 1's rename touches every
+site that reads the variable; item 3 lands as four hunks; and item 5, added after cell attempt 1 was
+invalidated, lands as six because its three clauses sit at three different points in the run.
 
 | hunk | item | what it is |
 |---|---|---|
 | `3c3,4` | **4** | the file's opening line names the SPEC-366 successor of the frozen runner. |
-| `4a6,45` | **4** | the successor header block: why a successor exists at all, and the CLOSED four-item list itself (it *describes* items 1-3; it *is* item 4). |
-| `49c90` | **1 (prose)** | the parent's `(g)` freeze-gate paragraph names the renamed variable. |
-| `70c111` | **1 (prose)** | the `THE FREEZE GATE (g) PINS THE .rs TREE` paragraph names the renamed variable. |
-| `106c147` | **4** | `usage:` line names the successor. |
-| `108,109c149,151` | **4** | usage prose: a COPY of spec365-conjuncts.sh, closed at four items. |
-| `121c163` | **1 (prose)** | the usage refusal paragraph names the renamed variable. |
-| `149c191` | **2** | `BASE="spec366-conj900"`. Nothing else on the cell line changes; the env override names are untouched everywhere. |
-| `179a222,226` | **3** | `SCRAPES_DIR` -- the path the persisted bodies are written to. |
-| `378,380c425,427` | **1** | the freeze variable, its literal, and guard 1 (the placeholder refusal). |
-| `391,392c438,439` | **1** | guard 2 (the `.rs` diff against the freeze commit) reads the renamed variable. |
-| `399c446` | **1** | guard 2's FATAL message names the renamed variable. Guard 3 (dirty `.rs` tree) reads no variable and is byte-unchanged. |
-| `516a564,580` | **3** | `.scrapes/` joins the artifact-overwrite refusal: same FATAL wording, same `SPEC365_FORCE=1` override, refuse-when-non-empty, else clear and recreate. |
-| `565c629` | **1 (mechanically forced)** | the matrix banner echoes the freeze variable. This is the ONE banner line that changes, and it is not a choice: the runner is `set -euo pipefail`, so echoing the now-nonexistent `SPEC365_CODE_FREEZE` would abort the run at the banner. |
-| `699c763` | **3** | `local body stamp` -- the declaration the persistence write needs. |
-| `700a765,772` | **3** | the verbatim write itself, plus the reason a failed curl writes an EMPTY file. |
+| `4a6,62` | **4** | the successor header block: why a successor exists, and the CLOSED list itself (it *describes* items 1-3 and 5; it *is* item 4). |
+| `49c107` | **1 (prose)** | the parent's `(g)` freeze-gate paragraph names the renamed variable. |
+| `70c128` | **1 (prose)** | the `THE FREEZE GATE (g) PINS THE .rs TREE` paragraph names the renamed variable. |
+| `106c164` | **4** | `usage:` line names the successor. |
+| `108,109c166,168` | **4** | usage prose: a COPY of spec365-conjuncts.sh, closed at five items. |
+| `121c180` | **1 (prose)** | the usage refusal paragraph names the renamed variable. |
+| `149c208` | **2** | `BASE="spec366-conj900"`. Nothing else on the cell line changes; the env override names are untouched everywhere. |
+| `177a237,242` | **5** | `RUN_START_EPOCH` / `RUN_START_UTC`, recorded BEFORE any build so clause (b) compares against something that predates it. |
+| `179a245,249` | **3** | `SCRAPES_DIR` -- the path the persisted bodies are written to. |
+| `378,380c448,450` | **1** | the freeze variable, its literal, and guard 1 (the placeholder refusal). |
+| `391,392c461,462` | **1** | guard 2 (the `.rs` diff against the freeze commit) reads the renamed variable. |
+| `399c469` | **1** | guard 2's FATAL message names the renamed variable. Guard 3 (dirty `.rs` tree) reads no variable and is byte-unchanged. |
+| `449a520,572` | **5** | clauses (a) and (b): the counter-string assertion and the mtime assertion, both BEFORE `T0`, each with its own FATAL. |
+| `450a574,579` | **5** | clause (c)'s helper `write_console_out`, so the provenance line cannot be lost on an early-exit path. |
+| `517a647,663` | **3** | `.scrapes/` joins the artifact-overwrite refusal: same FATAL wording, same `SPEC365_FORCE=1` override, refuse-when-non-empty, else clear and recreate. |
+| `565c711` | **1 (mechanically forced)** | the matrix banner echoes the freeze variable. Not a choice: the runner is `set -euo pipefail`, so echoing the now-nonexistent `SPEC365_CODE_FREEZE` would abort at the banner. |
+| `661c807` | **5** | console-out publish on the harness-failure path routed through the helper. |
+| `670c816` | **5** | console-out publish on the second early-exit path. |
+| `699c845` | **3** | `local body stamp` -- the declaration the persistence write needs. |
+| `700a847,854` | **3** | the verbatim write itself, plus the reason a failed curl writes an EMPTY file. |
+| `937c1091` | **5** | console-out publish on the normal completion path. |
 
-Sixteen hunks, four items, nothing else. Mechanically re-checkable at any time with the `diff`
-above.
-
+Twenty-two hunks, five items, nothing else: item 1 → 7, item 2 → 1, item 3 → 4, item 4 → 4,
+item 5 → 6. Mechanically re-checkable at any time with the `diff` above.
 ### Byte-identity of the parts the spec requires to be identical
 
 Checked by extracting each region from both files and diffing it; all six reported IDENTICAL:
@@ -352,7 +456,9 @@ fields and sums only three `restored_*` fields into `restored_sum`, so any `rest
 on a settlement row makes that epoch's six-exit check fail and it reads `MISMATCH` in the readout's
 §C. That outcome is **P5 FALSE anyway**, and the readout is NOT edited.
 
-Save as `spec366-p5.awk` (scratch; the text below is the pinned one):
+Committed as `evidence/spec366-p5.awk`, whose bytes equal the block below.
+`sha256 = 2e3ba4f4c0429d77d7f1cf267112706ddf95b095b2a14a6b05460cfa5d018c33`.
+The predicate is therefore regenerable by path, which AC 17 requires:
 
 ```awk
 # P5 -- settlement discipline, over the ANSI-stripped console log.
@@ -451,7 +557,9 @@ LC_ALL=C awk -f spec366-p5.awk "$EV/$BASE.harness-console.log"
 
 They share one command because they share the decision scrape: selecting it twice would be two
 selection rules, and a divergence between them is exactly the defect this evidence exists to rule
-out. Save as `spec366-p67.awk` (scratch; the text below is the pinned one):
+out. Committed as `evidence/spec366-p67.awk`, whose bytes equal the block below.
+`sha256 = ba65ffc4076307ffdbfb014565edaf1f17e185ef987ca6b3fe2565d544400215`.
+The predicate is therefore regenerable by path, which AC 17 requires:
 
 ```awk
 # P6/P7 -- decided on the LAST persisted scrape lying outside every open prune
@@ -600,4 +708,63 @@ predicate. The conductor decides what the FALSE means and what runs next.
 
 ## §3 — Executed record
 
-*Placeholder. Filled after the run, from the committed `spec366-conj900.*` artifacts only.*
+### Attempt 1 — INVALID (binary provenance). Consumes no predicate verdict.
+
+The pre-registered predicates were never evaluated against this spec's binary, so the FALSE values
+below say nothing about the fix. Recorded here because a discarded measurement that leaves no trace
+is indistinguishable from one that was never taken.
+
+**The binary the cell actually ran** — `target/release/topgun-server`:
+
+- `sha256 = 1078e168f5a7b0894924d025d567339f626d55019ca805332f93b562507e76d9`
+- mtime `2026-09-12T13:16:26Z`
+- does **not** contain `topgun_or_prune_restored_cancelled_total`
+
+**Four-binary control table.** The counter string is the discriminator: this branch emits it, no
+earlier source does.
+
+| binary | source | counter | sha256 |
+|---|---|---|---|
+| `target/release/topgun-server` (what the cell ran) | — | **absent** | `1078e168…76d9` |
+| matrix worktree build | branch `c6dd1efa` | present | `96244aa2…1ef8` |
+| AC 14 branch-side build | branch | present | `6b604cbe…b324` |
+| AC 14 pin-side build | pin `550936dc` | absent | `53bf4adc…2851` |
+
+Branch source demonstrably produces the counter, so the fault was the binary, not the code.
+
+**Observed, as observed** (not predicate verdicts):
+
+```
+READOUT: O2; retained_closed_epochs=1; reconciliation=SPLIT   (split_epochs=23,25)
+last-row metric check: removed_refs_observed_total=28000 considered_total=26000 MISMATCH
+harness exit 1, finishedReason = tombstone-byte growth slope 8497.0 bytes/h exceeds 512.0 bytes/h
+P1=FALSE reason=reconciliation=SPLIT split_epochs=23,25
+P2=FALSE reason=split_epochs=23,25
+P3=FALSE reason=verdict_O2
+P5=FALSE reason=restored_cancelled clause: epoch 2..29: restored_cancelled ABSENT; unsettled epochs 23,25
+P5-observed: removal_rows=28 settlement_rows=26 unsettled=23,25
+P5-zero-return: none observed
+DECISION_SCRAPE=2026-09-12T14:04:00Z.txt
+P6=TRUE removed_refs_observed_total=19000 considered_total=19000 gap=0
+P7=FALSE reason=absent_series topgun_or_prune_restored_cancelled_total in 2026-09-12T14:04:00Z.txt
+windows=28 settlement_rows=26 zero_return_removal_rows=0 scrapes=16
+```
+
+`restored_cancelled` absent from **every** settlement row, and the counter absent from the scrape
+while the other 76 `topgun_or_prune_*` series were present, is impossible for a branch binary — the
+const is in `PRUNE_COUNTER_NAMES`, eagerly touched so it renders at 0 from the first scrape,
+incremented in `observe_pass`, and emitted at `crdt.rs:1651`.
+
+**Cause.** An earlier load-harness experiment shared one `CARGO_TARGET_DIR` between a pin worktree
+and the main checkout. Cargo gave both source paths the same metadata hash, so the pin build landed
+in `target/release/` and a later `cargo build` judged it fresh. The cell's own build produced a fresh
+soak bench (13:53:58Z) and left the server at 13:16:26Z. The harness runs the server **out of
+process**, so a stale binary silently decided the whole cell.
+
+**Disposition.** Artifacts moved to `.specflow/artifacts/spec366-conj900-attempt1-INVALID/` (local,
+never committed); this block is their only committed record. Difference item 5 exists so this class
+of failure refuses before `T0` instead of producing a plausible readout.
+
+### Attempt 2
+
+*Placeholder. Filled after the re-run, from the committed `spec366-conj900.*` artifacts only.*

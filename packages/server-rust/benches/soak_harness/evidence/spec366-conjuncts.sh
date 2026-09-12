@@ -9,7 +9,7 @@
 # while SPEC-366 changes .rs files by definition; it also hard-codes
 # BASE="spec365-conj900", whose artifacts are committed evidence a re-run must
 # not overwrite. This file is therefore a COPY, and the difference list against
-# spec365-conjuncts.sh is CLOSED at exactly four items:
+# spec365-conjuncts.sh is CLOSED at exactly five items:
 #
 #   1. THE FREEZE VARIABLE IS RENAMED SPEC366_CODE_FREEZE and its literal is
 #      SPEC-366's own freeze commit. The same three refusal guards -- the
@@ -33,6 +33,23 @@
 #      scrapes with the first run's -- which corrupts the decision-scrape
 #      selection silently instead of failing loudly.
 #   4. this header and the usage text, naming the successor.
+#   5. A PRE-CLOCK PROVENANCE ASSERTION on the server binary, added after cell
+#      attempt 1 was invalidated. That attempt ran a server built from the PIN,
+#      not from this branch: an earlier experiment had shared one
+#      CARGO_TARGET_DIR between a pin worktree and the main checkout, cargo gave
+#      both source paths the same metadata hash, and `cargo build` then judged
+#      the pin-built binary fresh. The cell produced a full set of artifacts and
+#      a readout, and NOTHING in the run said the measured binary was the wrong
+#      one -- the predicates simply read as FALSE. So, after this runner's own
+#      build and BEFORE T0:
+#        (a) the binary must CONTAIN the string of a counter this branch adds,
+#            `topgun_or_prune_restored_cancelled_total`, else FATAL naming it;
+#        (b) its mtime must be >= this invocation's recorded start, else FATAL
+#            "stale artifact -- not built by this invocation";
+#        (c) its sha256, already on the matrix, is repeated as the FIRST line of
+#            the console log, so every artifact set carries the identity of the
+#            binary that produced it.
+#      A measurement that cannot say which binary it ran is not evidence.
 #
 # The matrix, the cell literals, the harness flags, the log directive and the
 # readout invocation are byte-identical, and the readout is the UNCHANGED
@@ -147,7 +164,7 @@ usage() {
 usage: spec366-conjuncts.sh <cell>
 
   A COPY of spec365-conjuncts.sh, which is not edited. The difference list
-  against that file is CLOSED, has exactly four items, and is enumerated in
+  against that file is CLOSED, has exactly five items, and is enumerated in
   the header block above.
 
   This runner ships ONE cell:
@@ -217,6 +234,12 @@ MECH_OUT="${OUT_DIR}/${BASE}.mechanism.json"
 DURABLE_OUT="${OUT_DIR}/${BASE}.soak.durable.json"
 # The harness's own stdout, committed IN THE EVIDENCE DIRECTORY.
 CONSOLE_OUT="${OUT_DIR}/${BASE}.harness-console.log"
+
+# Item 5: this invocation's start, recorded BEFORE anything is built. The
+# provenance clause below compares the server binary's mtime against it, so the
+# timestamp has to predate the build or the comparison proves nothing.
+RUN_START_EPOCH="$(date +%s)"
+RUN_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # The readout's own output, written by spec365-readout.sh, not by this file.
 READOUT_OUT="${OUT_DIR}/${BASE}.readout.txt"
 # Every /metrics body this run scrapes, kept verbatim, one file per sample.
@@ -495,6 +518,65 @@ else
 fi
 SERVER_BIN_SHA256="$(shasum -a 256 "$SERVER_BIN" 2>/dev/null | awk '{print $1}')"
 
+# ---------------------------------------------------------------------------
+# Item 5 -- PRE-CLOCK PROVENANCE ASSERTION.
+#
+# Cell attempt 1 ran a server built from the PIN and produced a complete,
+# plausible artifact set: a readout, a CSV, 16 scrapes, and predicates that
+# simply read FALSE. Nothing in the run said the measured binary was the wrong
+# one. These two clauses are what turn that silent failure into a refusal, and
+# they run BEFORE T0 so a bad binary costs nothing but a restart.
+# ---------------------------------------------------------------------------
+PROV_COUNTER="topgun_or_prune_restored_cancelled_total"
+
+# (a) The binary must carry a symbol this branch introduces. A binary built
+#     from any earlier source simply does not contain the string.
+#     NOT `grep -q`: this runner is `set -euo pipefail`, and `grep -q` exits at
+#     the first match, so `strings` takes SIGPIPE and the PIPELINE reports 141
+#     even when the string IS present -- measured rc=141 against a binary that
+#     contains it. That would fail the assertion on a CORRECT binary and refuse
+#     every run. `grep -c` consumes all of its input, so the status reflects the
+#     match count rather than a broken pipe.
+PROV_HITS="$(strings "$SERVER_BIN" | grep -c "$PROV_COUNTER" || true)"
+if [ "${PROV_HITS:-0}" -eq 0 ]; then
+  echo "FATAL: the server binary does not contain '${PROV_COUNTER}'." >&2
+  echo "       binary: $SERVER_BIN" >&2
+  echo "       built:  $(date -r "$SERVER_BIN" -u '+%Y-%m-%dT%H:%M:%SZ')" >&2
+  echo "       sha256: ${SERVER_BIN_SHA256:-<unavailable>}" >&2
+  echo "       This counter is emitted by the branch under test, so a binary" >&2
+  echo "       without it was built from other sources. Attempt 1 ran exactly" >&2
+  echo "       such a binary and the cell was worthless." >&2
+  exit 1
+fi
+
+# (b) It must have been produced by THIS invocation. A binary older than the
+#     run's own start was inherited from somewhere else, which is precisely how
+#     a stale artifact survives an intervening `cargo build` that judged it
+#     fresh.
+SERVER_MTIME_EPOCH="$(date -r "$SERVER_BIN" '+%s')"
+if [ "$SERVER_MTIME_EPOCH" -lt "$RUN_START_EPOCH" ]; then
+  echo "FATAL: stale artifact -- not built by this invocation." >&2
+  echo "       binary: $SERVER_BIN" >&2
+  echo "       built:  $(date -r "$SERVER_BIN" -u '+%Y-%m-%dT%H:%M:%SZ')" >&2
+  echo "       run started: ${RUN_START_UTC}" >&2
+  echo "       Remove it and let this runner rebuild it; do not reuse a binary" >&2
+  echo "       from another tree or another run." >&2
+  exit 1
+fi
+
+# (c) The identity of the measured binary travels WITH the artifacts: the same
+#     sha256 the matrix records is repeated as the console log's first line.
+#     The predicate awks skip any line without a timestamp prefix, so this is
+#     inert to them.
+PROV_LINE="provenance: server sha256=${SERVER_BIN_SHA256} built=$(date -r "$SERVER_BIN" -u '+%Y-%m-%dT%H:%M:%SZ') run_start=${RUN_START_UTC} ${PROV_COUNTER}=present"
+echo "$PROV_LINE"
+
+# Every path that publishes the console artifact goes through this, so the
+# provenance line cannot be lost on an early-exit path.
+write_console_out() {
+  { printf '%s\n' "$PROV_LINE"; cat "$CONSOLE_LOG"; } > "$CONSOLE_OUT" 2>/dev/null || true
+}
+
 SOAK_BIN="${SPEC365_SOAK_BIN:-}"
 if [ -n "$SOAK_BIN" ]; then
   SOAK_BIN_COMMIT="<UNPROVEN: SPEC365_SOAK_BIN override, not built by this run>"
@@ -722,7 +804,7 @@ while [ "$waited" -lt "$READY_TIMEOUT" ]; do
   if ! kill -0 "$HARNESS_PID" 2>/dev/null; then
     echo "FATAL: harness exited before the server became ready" >&2
     tail -40 "$CONSOLE_LOG" >&2 || true
-    cp -f "$CONSOLE_LOG" "$CONSOLE_OUT" 2>/dev/null || true
+    write_console_out
     exit 1
   fi
   sleep 1
@@ -731,7 +813,7 @@ done
 if [ -z "$SERVER_PID" ]; then
   echo "FATAL: no single listener on port ${SERVER_PORT} after ${READY_TIMEOUT}s" >&2
   tail -40 "$CONSOLE_LOG" >&2 || true
-  cp -f "$CONSOLE_LOG" "$CONSOLE_OUT" 2>/dev/null || true
+  write_console_out
   exit 1
 fi
 T0="$(date +%s)"
@@ -1006,7 +1088,7 @@ tail -25 "$CONSOLE_LOG" || true
 # 11. Post-run: land the console log in its COMMITTED home, normalize the
 #     mechanism report's name, then validate the series.
 # ---------------------------------------------------------------------------
-cp -f "$CONSOLE_LOG" "$CONSOLE_OUT"
+write_console_out
 echo "console log: $CONSOLE_OUT"
 
 if [ -f "$MECH_RAW" ]; then
