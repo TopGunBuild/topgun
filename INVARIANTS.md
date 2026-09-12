@@ -668,8 +668,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `TimeoutLayer` may fail *after* the inner future has started — it drops that future mid-flight, so a
   sub-batch under it can already have applied operations — which is safe for this row because
   `Timeout` is `Transient`, and a Transient failure enters no singleton fallback at all.
-  `AuthorizationLayer` builds the inner future before it decides, but fails before that future is
-  ever *polled*: the Deny arm returns `Forbidden` and drops it un-awaited, and nothing has been
+  `AuthorizationLayer` builds the inner future before the RBAC decision — the reserved-map refusal
+  returns `Forbidden` before any future exists — but fails before that future is ever *polled*: the
+  Deny arm returns `Forbidden` and drops it un-awaited, and nothing has been
   applied because `Arc<CrdtService>::call` does all of its work inside the boxed future it returns —
   since `Forbidden` is Permanent, this row's guarantee on the Authorization path rests on exactly
   that property. The Router dispatches to the domain service, where the rest of this bullet takes
