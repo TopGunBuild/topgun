@@ -866,4 +866,14 @@ the predicate, its literal value and its transport, and does **not** re-run the 
 bound, widen a carve-out or edit a predicate. What `O2` means here — and whether one retained closed
 epoch is expected at this cell size — is the conductor's adjudication, not the executor's.
 
+**Adjudication (conductor rulings v6 R1).** P3 FALSE is a **pre-registration error, not a fix
+failure**; it is recorded as FALSE and closed by adjudication. `O3` requires
+`durability_only + both ≤ claim_only`. In this cell `claim_only = 0` (claim lag 0–1) while the durable
+watermark lags 1–3 epochs (`durable_watermark_lag max=3 last=2`), so at ANY snapshot the newest closed
+epoch (here 32) is durability-held: `durability_only = 1 > 0` ⇒ `O2` by the readout's first-match
+rule. SPEC-365's cell read the same shape (epoch 29 `durability_only`, O2). Nothing in this spec's
+code moves the durable watermark, so `O3` was never reachable by the fix — the prediction was about
+the instrument's steady state, and it was wrong. No re-tuning, no re-run, no edit to §2. The fix's
+claim rests on P1/P2/P5/P6/P7 and on the pre-registered gap 2,000 → 0.
+
 **Waiting discipline:** 0 no-op polls; liveness confirmations only, as recorded in the STOP 3b report.
