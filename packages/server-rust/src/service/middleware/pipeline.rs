@@ -19,9 +19,12 @@ use crate::service::router::OperationRouter;
 /// Build the operation pipeline by wrapping the `OperationRouter` with middleware layers.
 ///
 /// Layer order (outermost to innermost):
-/// 1. `LoadShedLayer` -- reject when overloaded (fail fast before doing any work)
-/// 2. `TimeoutLayer` -- enforce per-operation timeouts
-/// 3. `MetricsLayer` -- record timing and outcome (before auth so denied requests are tracked)
+/// 1. `MetricsLayer` -- record timing and outcome. Outermost, so shed, timed-out and
+///    denied operations are all counted: any layer placed outside it can drop or
+///    short-circuit the inner future, and that operation's outcome would then be
+///    unobservable on `/metrics` no matter what the error kinds say.
+/// 2. `LoadShedLayer` -- reject when overloaded (fail fast before doing any work)
+/// 3. `TimeoutLayer` -- enforce per-operation timeouts
 /// 4. `AuthorizationLayer` (optional) -- RBAC policy enforcement; omitted when `None`
 /// 5. `OperationRouter` -- domain service dispatch
 ///
@@ -38,17 +41,17 @@ pub fn build_operation_pipeline(
 ) -> OperationPipeline {
     if let Some(evaluator) = policy_evaluator {
         let svc = ServiceBuilder::new()
+            .layer(MetricsLayer)
             .layer(LoadShedLayer::new(config.max_concurrent_operations))
             .layer(TimeoutLayer)
-            .layer(MetricsLayer)
             .layer(AuthorizationLayer::new(evaluator))
             .service(router);
         OperationPipeline::new(svc)
     } else {
         let svc = ServiceBuilder::new()
+            .layer(MetricsLayer)
             .layer(LoadShedLayer::new(config.max_concurrent_operations))
             .layer(TimeoutLayer)
-            .layer(MetricsLayer)
             .service(router);
         OperationPipeline::new(svc)
     }
