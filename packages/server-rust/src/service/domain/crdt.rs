@@ -1907,6 +1907,50 @@ pub(crate) async fn prune_epoch_tombstones(
     // settled. One emission site, reached the same way either way.
 }
 
+/// Spawn the ONE long-lived prune task for this frontier.
+///
+/// Returns `None`, having spawned nothing, when a task was already claimed for this frontier,
+/// so a second call cannot put a second concurrent pass over the same index. Two loops would
+/// each drain refs the other never sees settle. Must be called from inside a tokio runtime.
+///
+/// The pass belongs here rather than on a caller's timeline because a request-path pass is a
+/// future under that request's own timeout budget: a slow pass makes the budget elapse, the
+/// layer drops the future mid-pass, and the work is cancelled for reasons that have nothing to
+/// do with the op that happened to trigger it. Nothing on this task wraps the pass in a
+/// timeout and nothing here runs under a request budget, so a pass ends when it finishes, when
+/// it panics, or at runtime teardown — and never because some unrelated caller ran out of time.
+///
+/// A frontier wired into a service **without** this spawn never prunes at all: every
+/// `TombstoneFrontier::request_prune` then only leaves a permit nobody ever consumes, while
+/// each trigger site keeps returning successfully and the wiring keeps looking correct. That is
+/// deliberately the shape every unit-test fixture has, and it is why this call is the required
+/// partner of the trigger: a production assembly that omits it reclaims nothing, silently.
+///
+/// The task owns its three `Arc`s for the lifetime of the process. Whatever assembled them
+/// keeps them alive anyway, so this closes no reference cycle and needs no `Weak`. Runtime
+/// teardown drops the task, and `PrunePassGuard` re-indexes the in-flight pass's unsettled refs
+/// as that future is dropped, so a torn-down pass loses no ref from the index — in RAM only;
+/// the restart rebuild remains the authoritative recovery. A panic inside a pass unwinds
+/// through the same guard and then ends the task; no respawn is attempted, which leaves a
+/// panicking op with the failure mode it already had rather than a new one.
+#[must_use]
+pub fn spawn_prune_task(
+    frontier: Arc<TombstoneFrontier>,
+    factory: Arc<RecordStoreFactory>,
+    key_writer: Arc<KeyWriterRegistry>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !frontier.claim_prune_task() {
+        return None;
+    }
+    let wake = frontier.prune_wake();
+    Some(tokio::spawn(async move {
+        loop {
+            wake.notified().await;
+            prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
+        }
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -5897,6 +5941,51 @@ mod tests {
             retryable.iter().any(|(_, r)| r.key == K_HELD),
             "the blocked key's ref must still be indexed after the call, got {retryable:?}"
         );
+    }
+
+    /// The prune runs on ONE long-lived task per frontier.
+    ///
+    /// Single-flight limb: a second `spawn_prune_task` over the same frontier
+    /// spawns nothing and hands back `None`. Two loops over one index would each
+    /// drain refs the other never sees settle, so the claim is what keeps the
+    /// pass a single writer no matter how many wiring sites call this.
+    ///
+    /// The reclaim and never-blocks-the-op limbs of this contract arrive with the
+    /// move of the trigger sites off the request path. They are deliberately not
+    /// asserted yet: while the `OR_REMOVE` arm still runs a pass inline, a reclaim
+    /// assertion here would be satisfied on the caller's own timeline and would
+    /// keep passing even if the spawned task were never polled at all.
+    #[tokio::test]
+    async fn spawned_prune_task_reclaims_after_an_or_remove_and_never_blocks_the_op() {
+        let (svc, factory, frontier) = make_service_with_frontier();
+
+        let first = spawn_prune_task(
+            Arc::clone(&frontier),
+            Arc::clone(&factory),
+            Arc::clone(&svc.key_writer),
+        );
+        assert!(
+            first.is_some(),
+            "the first spawn over a fresh frontier must claim the task"
+        );
+
+        let second = spawn_prune_task(
+            Arc::clone(&frontier),
+            Arc::clone(&factory),
+            Arc::clone(&svc.key_writer),
+        );
+        assert!(
+            second.is_none(),
+            "a second spawn over the same frontier must claim nothing: one index \
+             admits exactly one prune loop"
+        );
+
+        // Nothing here calls `request_prune`, so the task parks forever on its
+        // first wake; aborting it keeps the runtime's shutdown free of a live
+        // task holding the fixture's `Arc`s.
+        if let Some(task) = first {
+            task.abort();
+        }
     }
 
     /// Evicts named keys the instant the record store rehydrates them.
