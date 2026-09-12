@@ -62,7 +62,6 @@ use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionRegistry};
 use crate::network::device_identity::frontier_client_id;
-use crate::service::domain::crdt::prune_epoch_tombstones;
 use crate::service::domain::key_writer::KeyWriterRegistry;
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
@@ -370,13 +369,17 @@ impl SyncService {
         }
     }
 
-    /// Run the wholesale epoch-drop prune over the SYNC-leaf path. DARK by
-    /// construction (the frontier watermark is constant 0), so this drops nothing
-    /// in production; tests inject a watermark to exercise the drop. No-op unless
-    /// BOTH the frontier and the shared per-key writer are wired.
-    async fn run_leaf_prune(&self) {
-        if let (Some(frontier), Some(key_writer)) = (&self.frontier, &self.key_writer) {
-            prune_epoch_tombstones(frontier, &self.record_store_factory, key_writer).await;
+    /// Wake the prune task; drain nothing here.
+    ///
+    /// The pass itself belongs on the long-lived prune task rather than on a
+    /// handler's timeline: it walks every eligible ref and re-acquires the
+    /// per-key writer per dropped tag, so running it here would put unbounded
+    /// work inside this request's timeout budget. This trigger is O(1) and never
+    /// awaits. No-op unless a frontier is wired — the shared per-key writer is
+    /// not part of the condition, because the task holds its own.
+    fn run_leaf_prune(&self) {
+        if let Some(frontier) = &self.frontier {
+            frontier.request_prune();
         }
     }
 
@@ -915,11 +918,13 @@ impl SyncService {
         let map_name = payload.payload.map_name;
         let path = payload.payload.path;
 
-        // Wholesale epoch-drop prune wired into the SYNC-leaf path: drop
-        // prune-eligible tombstones from storage BEFORE the leaf is read, so the
-        // emitted leaf naturally carries the reduced set. DARK by construction (the
-        // frontier watermark is constant 0) — drops nothing in production.
-        self.run_leaf_prune().await;
+        // Wholesale epoch-drop prune wired into the SYNC-leaf path as a TRIGGER:
+        // ask the prune task for a pass, so prune-eligible tombstones leave
+        // storage on the task's timeline instead of inside this request's budget.
+        // The reduction is therefore asynchronous — the leaf emitted below may
+        // still carry a tombstone the next pass drops, which costs a client one
+        // extra converged round rather than correctness.
+        self.run_leaf_prune();
 
         // Gate `set_delivered` for a forgotten/unknown/regressed client (R9): the
         // covering epoch is still conveyed as metadata, but `delivered_conn` is not
@@ -1512,14 +1517,12 @@ impl SyncService {
             }
         }
 
-        // Third prune site (R2): wire the wholesale epoch-drop prune into the
-        // push-diff merge path. DARK by construction — the frontier's durability
-        // watermark is constant 0 in this child, so the call-site conjunction never
-        // licenses a prune for any stamped epoch (all `>= 1`): this drops ZERO epochs
-        // until SPEC-342j supplies the real watermark. Runs AFTER the per-key guards
-        // above are dropped (the sweep re-acquires the same per-key writer per dropped
-        // tag, so holding a key guard here would self-deadlock).
-        self.run_leaf_prune().await;
+        // Third prune trigger: the push-diff merge path asks the prune task for a
+        // pass. Nothing is drained here, so the per-key guards above being dropped
+        // first is no longer a deadlock question — it is only the end of their
+        // critical sections — and the merge this path just committed is what makes
+        // a pass worth asking for.
+        self.run_leaf_prune();
 
         Ok(OperationResponse::Ack {
             call_id: ctx.call_id,
@@ -1626,6 +1629,9 @@ mod tests {
 
     use super::*;
     use crate::network::connection::ConnectionRegistry;
+    // The leaf handler only TRIGGERS a pass, so a test that wants the drop has to
+    // run the pass itself; production no longer calls this from this file.
+    use crate::service::domain::crdt::prune_epoch_tombstones;
     use crate::service::operation::{service_names, OperationContext};
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::merkle_sync::MerkleSyncManager;
@@ -1683,11 +1689,12 @@ mod tests {
     }
 
     /// AC4 (SYNC-leaf site): the wholesale epoch-drop prune is wired into the
-    /// OR-Map SYNC-leaf path (`handle_ormap_merkle_req_bucket` runs the sweep at
-    /// entry). With an injected durability watermark and the low-water-mark past
-    /// the stamped epoch, invoking the leaf handler drops the tombstone from
-    /// storage while the live record survives. DARK by default (watermark 0); the
-    /// injected watermark exercises the real drop path.
+    /// OR-Map SYNC-leaf path (`handle_ormap_merkle_req_bucket` triggers at entry)
+    /// as a TRIGGER — invoking the leaf handler wakes the prune task and drains
+    /// nothing on the handler's own timeline. With an injected durability
+    /// watermark and the low-water-mark past the stamped epoch, the pass the
+    /// trigger asks for then drops the tombstone from storage while the live
+    /// record survives.
     #[tokio::test]
     async fn ac4_prune_wired_into_sync_leaf() {
         use crate::storage::record::OrMapEntry as StoreOrMapEntry;
@@ -1723,7 +1730,7 @@ mod tests {
         assert!(frontier.confirm_apply_ack(&c, 2, ConnectionId(1)).await);
         frontier.set_durable_epoch_watermark(1000);
 
-        // Invoke the OR-Map leaf handler — the prune sweep fires at its top.
+        // Invoke the OR-Map leaf handler — the prune trigger fires at its top.
         let mut ctx = make_ctx(service_names::SYNC);
         ctx.connection_id = Some(ConnectionId(1));
         Arc::clone(&svc)
@@ -1739,6 +1746,29 @@ mod tests {
             .await
             .expect("bucket handler");
 
+        // The handler triggered, it did not drain: the tombstone is untouched on
+        // the handler's own timeline and a wake permit is waiting for the task.
+        match store.get(key, false).await.unwrap().map(|r| r.value) {
+            Some(RecordValue::OrMap { tombstones, .. }) => assert_eq!(
+                tombstones,
+                vec![tomb.to_string()],
+                "the leaf handler wakes the prune task and drains nothing itself"
+            ),
+            other => panic!("expected OrMap, got {other:?}"),
+        }
+        let wake = frontier.prune_wake();
+        tokio::time::timeout(std::time::Duration::from_millis(1), wake.notified())
+            .await
+            .expect("the leaf handler must leave a wake permit pending for the prune task");
+
+        // The pass the trigger asked for, run explicitly: this fixture spawns no
+        // task, so nothing else would ever consume the permit.
+        let key_writer = svc
+            .key_writer
+            .clone()
+            .expect("the fixture wires the shared per-key writer");
+        prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
+
         match store.get(key, false).await.unwrap().map(|r| r.value) {
             Some(RecordValue::OrMap {
                 records,
@@ -1746,7 +1776,8 @@ mod tests {
             }) => {
                 assert!(
                     tombstones.is_empty(),
-                    "epoch-1 tombstone pruned from storage via the SYNC-leaf path"
+                    "epoch-1 tombstone pruned from storage by the pass the SYNC-leaf \
+                     path asked for"
                 );
                 assert_eq!(records.len(), 1, "the live record survives the prune");
             }
@@ -4441,9 +4472,10 @@ mod tests {
     }
 
     /// AC4 (third prune site): the push-diff merge path wires the wholesale
-    /// epoch-drop prune, DARK by construction — with the production watermark (0) a
-    /// push-diff drops ZERO epochs even though the low-water-mark is past a stamped
-    /// epoch. The stamped tombstone survives.
+    /// epoch-drop prune as a TRIGGER — a push-diff drops ZERO epochs itself, even
+    /// with the low-water-mark past a stamped epoch, because the pass belongs to
+    /// the prune task and this fixture spawns none. The stamped tombstone
+    /// survives the push.
     #[tokio::test]
     async fn ac4_push_diff_prune_site_dark() {
         use crate::storage::record::OrMapEntry as StoreOrMapEntry;
@@ -4476,8 +4508,8 @@ mod tests {
             frontier.is_epoch_prune_eligible(1),
             "LWM strictly past epoch 1"
         );
-        // Watermark stays 0 (production dark). Push an unrelated key so the merge
-        // path — and thus the third prune site — runs.
+        // Push an unrelated key so the merge path — and thus the third prune
+        // trigger — runs.
         let mut ctx = make_ctx(service_names::SYNC);
         ctx.connection_id = Some(conn);
         Arc::clone(&svc)
@@ -4488,7 +4520,7 @@ mod tests {
             Some(RecordValue::OrMap { tombstones, .. }) => assert_eq!(
                 tombstones,
                 vec!["T1".to_string()],
-                "DARK by construction: the third prune site drops zero epochs at watermark 0"
+                "the third prune site only triggers: the push-diff path drops zero epochs itself"
             ),
             other => panic!("expected OrMap, got {other:?}"),
         }

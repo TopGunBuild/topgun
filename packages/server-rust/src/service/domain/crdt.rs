@@ -736,19 +736,23 @@ impl CrdtService {
                 }
             }
 
-            // Release the per-key writer before the prune sweep re-acquires it: the
-            // sweep takes the same per-key writer per dropped tag, so holding it here
-            // would self-deadlock on this key.
+            // End of the critical section: the tombstone append and its epoch
+            // stamp are both committed, and the payload built below only clones
+            // locals, so nothing past this point needs the key held.
             drop(key_guard);
 
-            // Wholesale epoch-drop prune over the OR write path. Active whenever the
-            // low-water mark has advanced past a stamped epoch AND the durable epoch
-            // watermark has caught up to it — both conjuncts move forward as tracked
-            // clients confirm-apply and the durable backend flushes, so this drains
-            // real tombstones once those two conditions line up.
+            // Ask for a prune pass; do NOT run one here. A pass walks every
+            // eligible ref and re-acquires the per-key writer per dropped tag, so
+            // on this timeline it would run inside the request's own timeout
+            // budget: a writer held anywhere in the eligible set makes the budget
+            // elapse, the layer cancels the call mid-pass, and the caller is told
+            // the write timed out while the server kept it. This trigger is O(1)
+            // and never awaits, so an op's latency no longer depends on the size
+            // of the backlog it happens to follow. Reclamation is no less certain
+            // — permits coalesce, so a burst of writes still yields a pass — but
+            // it needs the partner task the prune wake is consumed by.
             if let Some(frontier) = self.frontier.as_ref() {
-                prune_epoch_tombstones(frontier, &self.record_store_factory, &self.key_writer)
-                    .await;
+                frontier.request_prune();
             }
 
             Ok(ServerEventPayload {
@@ -4482,12 +4486,13 @@ mod tests {
         (svc, factory, frontier)
     }
 
-    /// AC4 (OR write path): the wholesale epoch-drop prune is wired into the
-    /// `OR_REMOVE` write path (the sweep runs after each apply). With an injected
-    /// durability watermark and the low-water-mark STRICTLY past the epoch, a
-    /// subsequent `OR_REMOVE` fires the sweep and drops the earlier epoch's
-    /// tombstone from storage; a not-strictly-past epoch survives. DARK by
-    /// default — the injected watermark exercises the real drop path.
+    /// AC4 (OR write path): the `OR_REMOVE` write path is wired to the wholesale
+    /// epoch-drop prune as a TRIGGER — the op wakes the prune task and drains
+    /// nothing on its own timeline. With an injected durability watermark and the
+    /// low-water-mark STRICTLY past the epoch, the pass the trigger asks for then
+    /// drops that epoch's tombstone from storage; a not-strictly-past epoch
+    /// survives. DARK by default — the injected watermark exercises the real drop
+    /// path.
     #[tokio::test]
     async fn ac4_prune_wired_into_or_write_path() {
         let (svc, factory, frontier) = make_service_with_frontier();
@@ -4518,9 +4523,9 @@ mod tests {
         assert_eq!(frontier.low_water_mark(), 2);
         frontier.set_durable_epoch_watermark(1000);
 
-        // Fire the sweep via an OR_REMOVE on a THIRD key. Its own new tombstone
-        // lands in epoch 3 (pinned); epoch 2 is pinned too (LWM 2 not strictly
-        // past 2); epoch 1's T1 is dropped.
+        // Trigger via an OR_REMOVE on a THIRD key. Its own new tombstone lands in
+        // epoch 3 (pinned); epoch 2 is pinned too (LWM 2 not strictly past 2);
+        // epoch 1's T1 is what the pass is licensed to drop.
         Arc::clone(&svc)
             .oneshot(or_add_op("m", "k3", "v3", "T3"))
             .await
@@ -4529,6 +4534,22 @@ mod tests {
             .oneshot(or_remove_op("m", "k3", "T3"))
             .await
             .unwrap();
+
+        // The op triggered, it did not drain: T1 is still stored on the op's own
+        // timeline, and a wake permit is waiting for the task.
+        let (_, untouched) = read_or_map(&factory, "m", "k1").await;
+        assert!(
+            untouched.contains(&"T1".to_string()),
+            "the OR_REMOVE wakes the prune task and drains nothing itself"
+        );
+        let wake = frontier.prune_wake();
+        tokio::time::timeout(std::time::Duration::from_millis(1), wake.notified())
+            .await
+            .expect("the OR_REMOVE must leave a wake permit pending for the prune task");
+
+        // The pass the trigger asked for, run explicitly: this fixture spawns no
+        // task, so nothing else would ever consume the permit.
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
 
         let (_, tombs_k1) = read_or_map(&factory, "m", "k1").await;
         assert!(
@@ -4579,9 +4600,8 @@ mod tests {
             assert_eq!(frontier.low_water_mark(), 2);
             frontier.set_durable_epoch_watermark(1000);
 
-            // Fire the sweep via an OR_REMOVE on a THIRD key: epoch 3 (its own)
-            // and epoch 2 stay pinned, epoch 1's T1 is dropped and its bytes are
-            // returned to the gauge.
+            // Trigger via an OR_REMOVE on a THIRD key: epoch 3 (its own) and
+            // epoch 2 stay pinned, epoch 1's T1 is what the pass may drop.
             Arc::clone(&svc)
                 .oneshot(or_add_op("m", "k3", "v3", t3))
                 .await
@@ -4590,6 +4610,12 @@ mod tests {
                 .oneshot(or_remove_op("m", "k3", t3))
                 .await
                 .unwrap();
+
+            // The pass the trigger asked for, run explicitly inside the isolated
+            // gauge scope so its decrement lands in the measured delta. This is
+            // the same function the spawned task runs, which is what keeps this a
+            // `TG-OR-004` enforcing test of the real prune path.
+            prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
 
             // Pin the drop the decrement accounts for. Without this, a gauge
             // delta alone could also be produced by a prune that never ran plus
@@ -5845,14 +5871,16 @@ mod tests {
     }
 
     /// An `OR_REMOVE` carried through the PRODUCTION `TimeoutLayer` must not lose
-    /// the refs its inline prune drained.
+    /// the refs a prune drained.
     ///
-    /// `TG-OR-006`: the inline prune runs inside the request's own timeout
-    /// budget, so a per-key writer held anywhere in the drained set makes the
-    /// budget elapse and the layer cancel the call mid-pass. The op's own remove
-    /// is applied regardless, so the caller is told the write timed out while the
-    /// server kept it — and the drained refs are gone from the index. This is the
-    /// behavioural proof on the production mechanism, not on a synthetic pass.
+    /// `TG-OR-006`: a pass run on the caller's own timeline sits inside that
+    /// request's timeout budget, so a per-key writer held anywhere in the drained
+    /// set makes the budget elapse and the layer cancel the call mid-pass. The
+    /// op's own remove is applied regardless, so the caller is told the write
+    /// timed out while the server kept it — and the drained refs are gone from
+    /// the index. Asking for the pass instead of running it is what keeps the op
+    /// inside its budget. This is the behavioural proof on the production
+    /// mechanism, not on a synthetic pass.
     #[tokio::test]
     async fn or_remove_under_the_timeout_layer_never_loses_drained_refs() {
         const K_HELD: &str = "kheld";
@@ -5936,10 +5964,119 @@ mod tests {
             outcome.is_ok(),
             "an OR_REMOVE must complete within its own budget, got {outcome:?}"
         );
+        // What the op did instead of pruning: it left a wake permit. This fixture
+        // spawns no task, so the permit is still pending for the assertion to
+        // consume.
+        let wake = frontier.prune_wake();
+        tokio::time::timeout(std::time::Duration::from_millis(1), wake.notified())
+            .await
+            .expect("the OR_REMOVE must leave a wake permit pending for the prune task");
         let retryable = frontier.drain_prunable_tombstones();
         assert!(
             retryable.iter().any(|(_, r)| r.key == K_HELD),
             "the blocked key's ref must still be indexed after the call, got {retryable:?}"
+        );
+    }
+
+    /// An `OR_REMOVE` asks for a prune pass; it never runs one.
+    ///
+    /// The trigger has to stay O(1) whatever the backlog, so with a large
+    /// eligible set indexed and both gates open the op must drain NONE of it,
+    /// leave a wake permit behind, and grow the index by exactly its own stamp.
+    /// The drain counter is re-read after a yield as well: a regression that
+    /// spawned a per-op pass would satisfy a single immediate read, because the
+    /// spawned pass has not been polled yet. The structural limb closes the same
+    /// gap from the other side — the arm names no spawn at all — and the pair is
+    /// what makes "O(1)" a property of the code rather than of the wall clock.
+    #[tokio::test]
+    async fn or_remove_only_wakes_the_prune_task_and_drains_nothing() {
+        const BACKLOG: u64 = 1_000;
+        const SOURCE: &str = include_str!("crdt.rs");
+        let (svc, _factory, frontier) = make_service_with_frontier();
+
+        // The record the op under test removes from, added before the backlog so
+        // its own slot is never one of the eligible refs.
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "kop", "v", "TOP"))
+            .await
+            .unwrap();
+
+        // Epoch width is 1, so each stamp owns an epoch: the backlog fills epochs
+        // 1..=BACKLOG and the pin takes the next one, letting the cursor sit
+        // strictly past every backlog epoch without exceeding the epochs that
+        // exist.
+        for i in 1..=BACKLOG {
+            frontier.stamp_tombstone("m", &format!("kbacklog{i}"), &format!("TB{i}"));
+        }
+        assert_eq!(
+            frontier.stamp_tombstone("m", "kpin", "TPIN"),
+            BACKLOG + 1,
+            "the pin owns the epoch past the backlog"
+        );
+        let client: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 10_000);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, BACKLOG + 1, ConnectionId(1))
+                .await
+        );
+        assert_eq!(frontier.low_water_mark(), BACKLOG + 1);
+        frontier.set_durable_epoch_watermark(1_000_000);
+
+        let before = frontier.index_conservation_snapshot();
+        assert!(
+            before.indexed_refs >= BACKLOG,
+            "precondition: the op runs against a real backlog, got {before:?}"
+        );
+
+        Arc::clone(&svc)
+            .oneshot(or_remove_op("m", "kop", "TOP"))
+            .await
+            .expect("the OR_REMOVE must return Ok");
+
+        let after = frontier.index_conservation_snapshot();
+        assert_eq!(
+            after.drained_refs_total, before.drained_refs_total,
+            "the op must drain nothing: reclamation is the task's work, not the \
+             caller's, got {after:?}"
+        );
+        assert_eq!(
+            after.indexed_refs,
+            before.indexed_refs + 1,
+            "the index grows by exactly the op's own stamp, got {after:?}"
+        );
+
+        // What the op did instead: it left a wake permit. Nothing consumes it
+        // here — the fixture spawns no task — so it is still pending.
+        let wake = frontier.prune_wake();
+        tokio::time::timeout(std::time::Duration::from_millis(1), wake.notified())
+            .await
+            .expect("the OR_REMOVE must leave a wake permit pending for the prune task");
+
+        // Re-read after a yield: a spawned per-op pass would be invisible to the
+        // read above simply because it had not been polled yet.
+        tokio::task::yield_now().await;
+        assert_eq!(
+            frontier.index_conservation_snapshot().drained_refs_total,
+            before.drained_refs_total,
+            "still nothing drained once other tasks have had a chance to run"
+        );
+
+        // The same claim structurally: no arm of the write path may hand the pass
+        // to a task of its own. A per-op task is a per-op pass with a thread hop
+        // in front of it, which is the unbounded work this trigger exists to
+        // avoid, and it would also put a second writer over the one index.
+        let arm = SOURCE
+            .split_once("} else if is_or_remove {")
+            .expect("the OR_REMOVE arm is in this file")
+            .1;
+        let arm = arm
+            .split_once("\n        } else {")
+            .expect("the OR_REMOVE arm closes into the LWW PUT branch")
+            .0;
+        assert!(
+            !arm.contains("spawn"),
+            "the OR_REMOVE arm must name no spawn; arm was:\n{arm}"
         );
     }
 
