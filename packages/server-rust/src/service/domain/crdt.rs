@@ -1946,8 +1946,9 @@ mod tests {
         METRIC_PRUNE_ABSENT_TOTAL, METRIC_PRUNE_CONSIDERED_TOTAL, METRIC_PRUNE_DROPPED_TOTAL,
         METRIC_PRUNE_EMPTY_DRAINS_TOTAL, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL,
         METRIC_PRUNE_MATCHED_NOTHING_TOTAL, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL,
-        METRIC_PRUNE_PASSES_TOTAL, METRIC_PRUNE_RESTORED_EVICTED_TOTAL,
-        METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
+        METRIC_PRUNE_PASSES_TOTAL, METRIC_PRUNE_RESTORED_CANCELLED_TOTAL,
+        METRIC_PRUNE_RESTORED_EVICTED_TOTAL, METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
+        METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
     };
 
     // -----------------------------------------------------------------------
@@ -6442,6 +6443,26 @@ mod tests {
         restored_refs: Vec<(Epoch, String, String)>,
     }
 
+    /// The handles the ledger test needs once the workload has returned.
+    ///
+    /// A struct SEPARATE from [`PruneWorkloadOutcome`], and one that derives
+    /// NOTHING. It exists because the ledger test has to keep driving the same
+    /// frontier after the shared workload is done — stamping a further pin and
+    /// running a second, cancelled pass — and the workload consumes its fixture.
+    ///
+    /// Keeping the handles out of the outcome is what preserves the
+    /// armed-vs-disarmed equality: that comparison is over reclaim behaviour,
+    /// and a struct carrying `Arc`s would drag pointer identity into it. A
+    /// future reader must not re-add `Debug` here either — `#[derive(Debug)]`
+    /// over an `Arc<T>` requires `T: Debug`, and neither [`CrdtService`] nor the
+    /// test-local [`ArmableStore`] has one, so the derive would not compile.
+    struct SixExitHandles {
+        svc: Arc<CrdtService>,
+        factory: Arc<RecordStoreFactory>,
+        frontier: Arc<TombstoneFrontier>,
+        store: Arc<ArmableStore>,
+    }
+
     fn build_six_exit_fixture() -> SixExitFixture {
         let store = Arc::new(ArmableStore::default());
         let evictor = Arc::new(EvictOnRehydrate::default());
@@ -6472,7 +6493,9 @@ mod tests {
     /// clock. The failure modes are armed only after seeding, so every setup
     /// write succeeds and the prune's own read/write is the one that fails.
     #[allow(clippy::too_many_lines)]
-    async fn run_six_exit_prune_workload(fixture: SixExitFixture) -> PruneWorkloadOutcome {
+    async fn run_six_exit_prune_workload(
+        fixture: SixExitFixture,
+    ) -> (PruneWorkloadOutcome, SixExitHandles) {
         let SixExitFixture {
             store,
             evictor,
@@ -6528,6 +6551,17 @@ mod tests {
             7,
             "the pin sits in epoch 7"
         );
+
+        // One EXPLICIT pass while both gates are still shut, so the workload
+        // owns an empty drain of its own. The empty-drain regime has to be
+        // reachable from the workload itself rather than from whatever sweeps
+        // happen to run as a side effect of the seeding writes: those sweeps are
+        // a property of where the prune is TRIGGERED from, so a test that reads
+        // its empty pass off them is pinning the trigger's shape instead of the
+        // pass record's. Nothing is eligible here — no cursor has been
+        // confirmed, so the low-water mark is still 0 — which is exactly what
+        // makes this an empty drain.
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
 
         let client: String = "a5:alice|dev-1".into();
         frontier.set_delivered(ConnectionId(1), 100);
@@ -6598,11 +6632,19 @@ mod tests {
             .collect();
         restored_refs.sort();
 
-        PruneWorkloadOutcome {
-            durable_tombstones,
-            dropped_observed,
-            restored_refs,
-        }
+        (
+            PruneWorkloadOutcome {
+                durable_tombstones,
+                dropped_observed,
+                restored_refs,
+            },
+            SixExitHandles {
+                svc,
+                factory,
+                frontier,
+                store,
+            },
+        )
     }
 
     /// Run the six-exit workload once and return its outcome, its isolated
@@ -6637,7 +6679,7 @@ mod tests {
         } else {
             Some(rt.block_on(async { build_six_exit_fixture() }))
         };
-        let (outcome, gauge_delta) = metrics::with_local_recorder(&recorder, || {
+        let ((outcome, _handles), gauge_delta) = metrics::with_local_recorder(&recorder, || {
             let fixture =
                 prebuilt.unwrap_or_else(|| rt.block_on(async { build_six_exit_fixture() }));
             rt.block_on(with_isolated_gauge(run_six_exit_prune_workload(fixture)))
@@ -6658,27 +6700,127 @@ mod tests {
             .unwrap_or_else(|e| panic!("counter {name} did not render an integer: {e}"))
     }
 
-    /// The prune ledger is exit-path EXHAUSTIVE, and a pass is counted once per
-    /// invocation rather than once per ref.
+    /// The prune ledger is exit-path EXHAUSTIVE over all SEVEN exits, and a pass
+    /// is counted once per invocation rather than once per ref.
     ///
     /// Two identities, one test, because they share a workload and because the
     /// second is the premise the first's usefulness rests on:
     ///
     /// The exit identity, `considered == dropped + matched_nothing + absent +
-    /// restored_read_error + restored_evicted + restored_write_error`. Every ref
-    /// the loop examines leaves through exactly one counted exit, so a ref that
-    /// quietly stops being accounted for — the mechanism behind a reclaim
-    /// fraction that falls with no instrument able to say why — cannot hide.
+    /// restored_read_error + restored_evicted + restored_write_error +
+    /// restored_cancelled`. Every ref the loop examines leaves through exactly
+    /// one counted exit, so a ref that quietly stops being accounted for — the
+    /// mechanism behind a reclaim fraction that falls with no instrument able to
+    /// say why — cannot hide.
     ///
     /// The pass identity, `passes == empty_drains + nonempty_drains`, pinned
-    /// alongside `nonempty_drains == 1` and `empty_drains >= 1`: the pass
+    /// alongside `nonempty_drains == 2` and `empty_drains >= 1`: the pass
     /// observation is sited at the invocation and outside the loop body. Sited
     /// inside the loop it would read zero in a total stall — precisely the
-    /// regime the record exists to describe — and would here count six passes
-    /// for one drain; made conditional on work, it would drop every empty pass.
+    /// regime the record exists to describe — and would here count seven passes
+    /// for two drains; made conditional on work, it would drop every empty pass.
+    ///
+    /// The SEVENTH exit is driven here and in none of the tests that share this
+    /// workload, because a cancelled pass is not a property of the workload: it
+    /// is a second pass this test alone runs, and a shared one would inject an
+    /// injected-failure ref into every sibling's counts. The sequence is forced,
+    /// and each step is what keeps the next one honest:
+    ///
+    /// 1. the shared one-pass workload runs unchanged, driving six exits;
+    /// 2. its own outcome drain CONSUMES the three refs that pass restored, so
+    ///    they cannot re-enter the second pass still carrying their injected
+    ///    read / write / eviction failures, settle through the wrong exit, and
+    ///    break both counts below;
+    /// 3. a fresh pin is stamped at epoch 8 and acked, which makes `kpinned`'s
+    ///    epoch 7 eligible while the new pin holds the frontier open — leaving
+    ///    the index holding exactly ONE drainable ref;
+    /// 4. that ref's per-key writer is held and a second pass runs under a short
+    ///    timeout, so the pass drains its one ref, blocks on a writer it can
+    ///    never take, and is cancelled on it: exactly one `RestoredCancelled`.
+    ///
+    /// `with_isolated_gauge` wraps the workload AND steps 3–4 rather than the
+    /// workload alone. The cancelled pass is where the cancellation happens, so
+    /// its tombstone-byte writes have to land in the same task-local sink
+    /// instead of on the process gauge. The fixture is built INSIDE the recorder
+    /// binding for the reason `six_exit_run` documents: a frontier constructed
+    /// before the recorder is bound leaves every prune-record handle a permanent
+    /// no-op, and the pins below are read by `rendered_counter`, which PANICS on
+    /// an absent counter rather than reading a zero.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn prune_exit_ledger_sums_to_considered() {
-        let (outcome, _gauge_delta, rendered) = six_exit_run(true);
+        const K_PINNED: &str = "kpinned";
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let ((outcome, _handles), _gauge_delta) = metrics::with_local_recorder(&recorder, || {
+            let fixture = rt.block_on(async { build_six_exit_fixture() });
+            rt.block_on(with_isolated_gauge(async {
+                let (outcome, handles) = run_six_exit_prune_workload(fixture).await;
+
+                // Step 3. The fresh pin takes epoch 8, so a cursor at 8 licenses
+                // epoch 7 — eligibility is STRICT — without licensing the pin
+                // itself.
+                assert_eq!(
+                    handles.frontier.stamp_tombstone("m", "knew", "TNEW"),
+                    8,
+                    "the fresh pin sits in epoch 8"
+                );
+                let client: String = "a5:alice|dev-1".into();
+                assert!(
+                    handles
+                        .frontier
+                        .confirm_apply_ack(&client, 8, ConnectionId(1))
+                        .await
+                );
+                assert_eq!(
+                    handles.frontier.low_water_mark(),
+                    8,
+                    "epoch 7 is eligible now and epoch 8 is pinned"
+                );
+
+                // Step 4. The pass takes the per-key writer for every ref it
+                // works on, so holding this one blocks it on its only ref and
+                // the budget always elapses — a deterministic stop, not a race.
+                let held = handles.svc.key_writer.acquire("m", K_PINNED).await;
+                let cancelled = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    prune_epoch_tombstones(
+                        &handles.frontier,
+                        &handles.factory,
+                        &handles.svc.key_writer,
+                    ),
+                )
+                .await;
+                assert!(
+                    cancelled.is_err(),
+                    "the second pass cannot pass the held writer, so it must be \
+                     cancelled"
+                );
+                drop(held);
+
+                // WHERE the pass stopped is what decides which exit its one ref
+                // takes, and this is the witness for it: the pinned ref names no
+                // durable record at all, so a pass that had got as far as the
+                // rehydrating read would have settled it through `AbsentKey` and
+                // the seventh exit would never have fired. Blocked at the writer,
+                // strictly ahead of that read, the cancelled exit is the only one
+                // it can take.
+                assert!(
+                    handles.store.durable("m", K_PINNED).is_none(),
+                    "the pinned ref names no durable record, so the exit it takes \
+                     is decided by where the pass stopped"
+                );
+
+                (outcome, handles)
+            }))
+        });
+        let rendered = handle.render();
 
         assert_eq!(
             outcome.dropped_observed, 1,
@@ -6695,6 +6837,7 @@ mod tests {
         let restored_evicted = rendered_counter(&rendered, METRIC_PRUNE_RESTORED_EVICTED_TOTAL);
         let restored_write_error =
             rendered_counter(&rendered, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL);
+        let restored_cancelled = rendered_counter(&rendered, METRIC_PRUNE_RESTORED_CANCELLED_TOTAL);
 
         // Each exit fired exactly once. Asserted before the sum so a workload
         // that stopped reaching an exit fails HERE, loudly, instead of leaving
@@ -6709,6 +6852,7 @@ mod tests {
                 METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
                 restored_write_error,
             ),
+            (METRIC_PRUNE_RESTORED_CANCELLED_TOTAL, restored_cancelled),
         ] {
             assert_eq!(
                 observed, 1,
@@ -6725,11 +6869,15 @@ mod tests {
                 + absent
                 + restored_read_error
                 + restored_evicted
-                + restored_write_error,
+                + restored_write_error
+                + restored_cancelled,
             "every considered ref must leave through exactly one counted exit; \
              render was:\n{rendered}"
         );
-        assert_eq!(considered, 6, "six refs drained, one per exit");
+        assert_eq!(
+            considered, 7,
+            "seven refs considered across the two passes, one per exit"
+        );
 
         let passes = rendered_counter(&rendered, METRIC_PRUNE_PASSES_TOTAL);
         let empty_drains = rendered_counter(&rendered, METRIC_PRUNE_EMPTY_DRAINS_TOTAL);
@@ -6741,21 +6889,84 @@ mod tests {
              two drain buckets; render was:\n{rendered}"
         );
         assert_eq!(
-            nonempty_drains, 1,
-            "the pass observation is sited at the invocation, so the one drain \
-             that took work counts ONCE — six here would mean it had been moved \
+            nonempty_drains, 2,
+            "the pass observation is sited at the invocation, so each drain that \
+             took work counts ONCE — seven here would mean it had been moved \
              into the per-ref loop; render was:\n{rendered}"
         );
         assert!(
             empty_drains >= 1,
-            "the OR write path sweeps while the gates are shut, and those empty \
-             passes must be counted too — a pass increment inside the loop body \
-             would count none of them; render was:\n{rendered}"
+            "the workload runs an explicit pass while its gates are shut, and \
+             such empty passes must be counted too — a pass increment inside the \
+             loop body would count none of them; render was:\n{rendered}"
         );
         assert_eq!(
             rendered_counter(&rendered, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL),
-            6,
+            7,
             "one epoch per ref at epoch width 1; render was:\n{rendered}"
+        );
+    }
+
+    /// The guard's `Drop` — the one emission site a cancelled pass ever reaches
+    /// — is panic-free and moves no tombstone bytes.
+    ///
+    /// `TG-OR-004`: this `Drop` runs on a path a caller reaches by GIVING UP on
+    /// the pass, and a panic inside a `drop` during an unwind aborts the
+    /// process. "It happens not to panic today" is therefore not the property
+    /// worth having — the body must name no fallible-unwrap construct at all.
+    /// It must equally move no bytes: a restored ref freed nothing, and the
+    /// gauge decrement belongs behind a durable write that succeeded.
+    ///
+    /// The single `restore_tombstone_ref` and single `observe_pass` call sites
+    /// are the structural half. One restore path rather than two is what stops a
+    /// second, divergent one being added later, and it is satisfiable only
+    /// because the in-flight ref and the remainder are handed back in ONE
+    /// chained iteration rather than in two loops.
+    ///
+    /// The slice is delimited exactly as this file's sibling structural tests
+    /// delimit theirs — the anchor, then the first column-0 closing brace after
+    /// it. Without a fixed delimiter "the body" is undefined: a scan running to
+    /// the end of the file would read this very test and make the no-`unwrap(`
+    /// and no-`panic!` limbs spuriously RED, while one stopping too early would
+    /// make them vacuous.
+    #[test]
+    fn prune_guard_drop_is_panic_free_and_gauge_neutral() {
+        const SOURCE: &str = include_str!("crdt.rs");
+
+        let start = SOURCE
+            .find("impl Drop for PrunePassGuard")
+            .expect("the guard's Drop is implemented in this file");
+        let tail = &SOURCE[start..];
+        let end = tail
+            .find("\n}\n")
+            .expect("the Drop impl closes at a column-0 brace");
+        let body = &tail[..end];
+
+        for needle in ["unwrap(", "expect(", "panic!"] {
+            assert!(
+                !body.contains(needle),
+                "the guard's Drop must name no `{needle}`: it runs on the \
+                 cancellation path, where a panic during an unwind aborts the \
+                 process"
+            );
+        }
+        assert!(
+            !body.contains("_tombstone_bytes"),
+            "the guard's Drop must move no tombstone bytes: a ref handed back \
+             freed nothing, and the decrement belongs behind a successful \
+             durable write"
+        );
+        assert_eq!(
+            body.matches("observe_pass").count(),
+            1,
+            "the pass is observed exactly once per invocation, from the guard's \
+             single emission site"
+        );
+        assert_eq!(
+            body.matches("restore_tombstone_ref").count(),
+            1,
+            "exactly one restore call site: two would be two restore paths, and \
+             a second path is how a divergent one gets added later"
         );
     }
 
@@ -6870,21 +7081,27 @@ mod tests {
         passes
     }
 
-    /// R2.1/R2.2/AC3: the six-exit identity holds **per epoch**, exactly as it
+    /// R2.1/R2.2/AC3: the seven-exit identity holds **per epoch**, exactly as it
     /// already holds per pass — read off the settlement row, the only transport
     /// `PruneEpochRecord` has (it carries no Prometheus series of its own).
     ///
     /// The six-exit fixture drains six epochs of width 1, one ref each, so
     /// every epoch's settlement row has `considered == 1` and exactly one of
-    /// the six exit terms `== 1` — a per-epoch identity that would read exactly
+    /// the exit terms `== 1` — a per-epoch identity that would read exactly
     /// as "true" on a settlement row wired to the wrong per-epoch counter (all
     /// zero on one side), which is why each epoch's OWN nonzero exit is also
     /// checked below rather than only the sum.
+    ///
+    /// The cancelled term is summed here too and reads 0 on every row: this
+    /// workload's one pass runs to completion, so no ref leaves through it.
+    /// Reading it anyway is what keeps the identity a SEVEN-term one — a term
+    /// omitted from the sum is a term the identity stops being able to see, and
+    /// the exit it names is exactly the one a cancelled pass depends on.
     #[tokio::test]
-    async fn per_epoch_six_exit_identity_holds_on_the_settlement_row() {
+    async fn per_epoch_seven_exit_identity_holds_on_the_settlement_row() {
         let (guard, sink) = capture_tracing_rows();
         let fixture = build_six_exit_fixture();
-        let _outcome = run_six_exit_prune_workload(fixture).await;
+        let (_outcome, _handles) = run_six_exit_prune_workload(fixture).await;
         drop(guard);
         let rows = sink.lock().unwrap().clone();
 
@@ -6913,6 +7130,7 @@ mod tests {
             let restored_read_error = row_u64(row, "restored_read_error");
             let restored_evicted = row_u64(row, "restored_evicted");
             let restored_write_error = row_u64(row, "restored_write_error");
+            let restored_cancelled = row_u64(row, "restored_cancelled");
             assert_eq!(
                 considered,
                 dropped
@@ -6920,8 +7138,9 @@ mod tests {
                     + absent
                     + restored_read_error
                     + restored_evicted
-                    + restored_write_error,
-                "the per-epoch six-exit identity must hold on this settlement \
+                    + restored_write_error
+                    + restored_cancelled,
+                "the per-epoch seven-exit identity must hold on this settlement \
                  row: {row:?}"
             );
             assert_eq!(considered, 1, "one ref per epoch at epoch width 1: {row:?}");
@@ -6941,17 +7160,17 @@ mod tests {
     /// entry/exit rows use, with `kind = "prune_pass"` and the right
     /// `considered` / `empty_drain` values (R2.5, R2.5a, R2.5b).
     ///
-    /// The six-exit workload's OWN seeding writes sweep the (still-shut) prune
-    /// gates on top of the workload's one explicit call at the end (the same
-    /// mechanism `prune_exit_ledger_sums_to_considered` pins with `empty_drains
-    /// >= 1`), so a single run of it already exercises both an empty-drain pass
-    /// and a draining one — no hand-rolled second invocation needed, and none
-    /// of the exact auto-swept row count is assumed.
+    /// The six-exit workload runs an explicit `prune_epoch_tombstones` pass
+    /// while its prune gates are still shut, ahead of the draining call at the
+    /// end (the same pass `prune_exit_ledger_sums_to_considered` pins with
+    /// `empty_drains >= 1`), so a single run of it already exercises both an
+    /// empty-drain pass and a draining one — no hand-rolled second invocation
+    /// needed, and no exact pass-row count assumed.
     #[tokio::test]
     async fn pass_row_fires_on_every_invocation_including_an_empty_drain() {
         let (guard, sink) = capture_tracing_rows();
         let fixture = build_six_exit_fixture();
-        let _outcome = run_six_exit_prune_workload(fixture).await;
+        let (_outcome, _handles) = run_six_exit_prune_workload(fixture).await;
         drop(guard);
         let rows = sink.lock().unwrap().clone();
 
@@ -6969,9 +7188,9 @@ mod tests {
 
         assert!(
             pass_rows.len() >= 2,
-            "the workload's seeding writes sweep the shut prune gates, so more \
-             than one pass row is expected on top of the workload's own \
-             explicit call; capture was:\n{rows:#?}"
+            "the workload runs an explicit pass while its prune gates are shut, \
+             so at least one pass row is expected on top of its own draining \
+             call; capture was:\n{rows:#?}"
         );
         assert!(
             pass_rows
@@ -6980,21 +7199,21 @@ mod tests {
             "at least one pass row must report an empty drain (considered=0, \
              empty_drain=true); capture was:\n{rows:#?}"
         );
-        // The workload's own explicit `prune_epoch_tombstones` call is the LAST
-        // invocation of the run, strictly after every seeding write, so it is
-        // deterministically the capture's last pass row. Cited by name, not by
-        // line: a same-file line number is falsified by any insertion above it
-        // without anything failing.
+        // The workload's own DRAINING `prune_epoch_tombstones` call is the LAST
+        // invocation of the run — its shut-gate pass runs strictly before the
+        // gates open — so it is deterministically the capture's last pass row.
+        // Cited by name, not by line: a same-file line number is falsified by
+        // any insertion above it without anything failing.
         let last = pass_rows.last().expect("at least one pass row exists");
         assert_eq!(
             row_u64(last, "considered"),
             6,
-            "the workload's own explicit call is the last invocation and \
+            "the workload's draining call is the last invocation and \
              drains all six seeded refs: {last:?}"
         );
         assert!(
             !row_bool(last, "empty_drain"),
-            "the workload's own explicit call is a non-empty drain: {last:?}"
+            "the workload's draining call is a non-empty drain: {last:?}"
         );
     }
 
@@ -7031,23 +7250,23 @@ mod tests {
     /// Evaluated over EVERY pass the six-exit workload's run individuates —
     /// split by [`split_into_passes`]'s frozen rule, so each pass's own rows
     /// are summed separately rather than pooled across the whole capture. The
-    /// workload's own seeding writes sweep the shut prune gates ahead of its
-    /// one explicit call (see the pass-row test above), so a single run
-    /// already produces both empty-drain passes and one draining pass without
-    /// a hand-rolled second invocation or an assumed exact pass count.
+    /// workload runs an explicit `prune_epoch_tombstones` pass while its gates
+    /// are shut, ahead of its draining call (see the pass-row test above), so a
+    /// single run already produces both an empty-drain pass and a draining pass
+    /// without a hand-rolled second invocation or an assumed exact pass count.
     #[tokio::test]
     async fn i1_i2_pass_identity_holds_on_an_empty_and_a_draining_pass() {
         let (guard, sink) = capture_tracing_rows();
         let fixture = build_six_exit_fixture();
-        let _outcome = run_six_exit_prune_workload(fixture).await;
+        let (_outcome, _handles) = run_six_exit_prune_workload(fixture).await;
         drop(guard);
         let rows = sink.lock().unwrap().clone();
 
         let passes = split_into_passes(&rows);
         assert!(
             passes.len() >= 2,
-            "the workload's seeding writes must individuate more than one \
-             pass on top of its own explicit call; capture was:\n{rows:#?}"
+            "the workload's explicit shut-gate pass must individuate a pass on \
+             top of its own draining call; capture was:\n{rows:#?}"
         );
 
         let mut saw_empty = false;
@@ -7110,7 +7329,7 @@ mod tests {
             "at least one pass in the capture must be a draining pass; \
              capture was:\n{rows:#?}"
         );
-        // The workload's own explicit `prune_epoch_tombstones` call is the last
+        // The workload's own DRAINING `prune_epoch_tombstones` call is the last
         // invocation of the run, so it is deterministically the capture's last
         // pass. Cited by name, not by line, for the reason given at the sibling
         // assertion above.
