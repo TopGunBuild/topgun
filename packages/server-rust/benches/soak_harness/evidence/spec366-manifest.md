@@ -765,6 +765,105 @@ process**, so a stale binary silently decided the whole cell.
 never committed); this block is their only committed record. Difference item 5 exists so this class
 of failure refuses before `T0` instead of producing a plausible readout.
 
-### Attempt 2
+### Attempt 2 — VALID measurement. P1, P2, P5, P6, P7 TRUE; **P3 FALSE**.
 
-*Placeholder. Filled after the re-run, from the committed `spec366-conj900.*` artifacts only.*
+**Provenance (difference item 5, the reason this attempt can be believed at all).** The assertion ran
+after the runner's own build and before `T0`, and passed:
+
+```
+provenance: server sha256=ac34c2d7e39bca3e0ce4aabce7122833658c660a2e30f455ba9d90808bc0b8f7 built=2026-09-12T15:26:48Z run_start=2026-09-12T15:23:11Z topgun_or_prune_restored_cancelled_total=present
+```
+
+That line is the console log's first line (clause c) and the same sha256 is on the matrix. The binary
+was built at `15:26:48Z` against a recorded run start of `15:23:11Z`, so clause (b) held on real data;
+it contains the counter, so clause (a) held. Its sha differs from attempt 1's stale `1078e168…`.
+Matrix also records `code freeze: a18e09de` and `code freeze diff (.rs): EMPTY (asserted before the
+build)`.
+
+**Readout**
+
+```
+READOUT: O2; retained_closed_epochs=1; reconciliation=RECONCILED
+```
+
+Re-running the UNCHANGED `spec365-readout.sh spec366-conj900` reproduces it **byte-for-byte**
+(AC 17's regenerability clause, checked).
+
+**Predicates, run verbatim from the committed programs**
+
+```
+P1=TRUE
+P2=TRUE
+P3=FALSE reason=verdict_O2
+P5=TRUE
+P5-observed: removal_rows=32 settlement_rows=32 unsettled=none
+P5-zero-return: none observed
+DECISION_SCRAPE=2026-09-12T15:38:51Z.txt
+P6=TRUE removed_refs_observed_total=25000 considered_total=25000 gap=0
+P7=TRUE restored_cancelled_total=0
+windows=32 settlement_rows=32 zero_return_removal_rows=0 scrapes=15
+```
+
+Transports: P1/P2/P3 over `spec366-conj900.readout.txt`; P5 over the ANSI-stripped
+`spec366-conj900.harness-console.log` via `spec366-p5.awk`; P6/P7 over the decision scrape via
+`spec366-p67.awk`. No fail-closed reason was emitted — every series was present and integral.
+
+**Zero-return observation, stated explicitly** so an empty list is never mistaken for an unparsed
+field: **no zero-return epoch was observed.** `P5-zero-return: none observed`, and the P6/P7 line
+reads `zero_return_removal_rows=0`. §2 predicted exactly this, which makes item 2a's exclusion
+defensive rather than load-bearing here.
+
+**What the fix did, against the SPEC-365 baseline.** §2 pre-registered the reference gap as exactly
+2,000 (`removed_refs_observed_total=27000` vs `considered_total=25000`, the two `NO_SETTLEMENT`
+epochs 10 and 27 at 1,000 refs each). On the decision scrape the gap is now **0**, `split_epochs` is
+empty, and SectionC reports **every one of the 32 exited epochs as RECONCILED**:
+
+```
+totals: passes=32 refs_at_entry=32000 refs_returned=32000 bytes_returned=687709
+        considered=32000 dropped=32000 matched_nothing=0 absent=0 restored_sum=0 bytes_freed=687709
+```
+
+No epoch was left unsettled, and `restored_sum=0` — no ref took a restore exit at all, cancelled or
+otherwise, which is the expected shape when no pass is cut short.
+
+**CSV last-row metric check (recorded; NOT P6's transport).**
+
+```
+last-row metric check: removed_refs_observed_total=30000 considered_total=29000 MISMATCH
+```
+
+This is the pre-registered in-flight artifact: `removed_refs_observed` is credited at drain and
+`considered` at the end of the pass, so a CSV row sampled mid-pass reads MISMATCH on a correct
+binary. It is why P6 is decided on the decision scrape instead, where the gap is 0.
+
+**Harness exit attribution.** `exit 1`, `passed: false`,
+`finishedReason = tombstone-byte growth slope 795.9 bytes/h exceeds 512.0 bytes/h (total growth
+49214 bytes over 180 samples, last-half window 446s)`. Recorded as attribution, not as a predicate:
+the runner states plainly that a non-zero harness exit is not automatically a failed
+characterization. For contrast, attempt 1's slope was 8497.0 bytes/h — the same gate, ~10.7× lower.
+
+**A7 — pass latency and inter-exit interval (RECORDED, NOT GATED).** §2 pins no command for this, so
+the extraction is not a pinned predicate; the numbers below come from the console log's RFC 3339
+prefixes in the same time domain the pinned predicates use.
+
+| metric | value |
+|---|---|
+| settled epochs | 32 (every exited epoch) |
+| pass latency, mean | 4.3 s |
+| pass latency, max | 5 s |
+| inter-exit interval, mean | 27.0 s |
+| inter-exit interval, min | 18 s |
+| **max(latency) / min(inter-exit)** | **0.278** |
+
+Per-epoch latency ranged 2–5 s across epochs 2–33, with no epoch left open. A7 asks whether one
+serial task keeps up: at 0.278 the ratio is well inside parity, so the single prune task is not the
+bottleneck at this cadence. No ratio > 1, so there is nothing to report as a TODO-634 finding and
+nothing to tune.
+
+**P3 is FALSE, and this is the pre-registered FALSE branch.** The predicate required verdict `O3`;
+the readout gives `O2` with `retained_closed_epochs=1`. Per §2's FALSE branch the executor reports
+the predicate, its literal value and its transport, and does **not** re-run the cell, re-tune a
+bound, widen a carve-out or edit a predicate. What `O2` means here — and whether one retained closed
+epoch is expected at this cell size — is the conductor's adjudication, not the executor's.
+
+**Waiting discipline:** 0 no-op polls; liveness confirmations only, as recorded in the STOP 3b report.
