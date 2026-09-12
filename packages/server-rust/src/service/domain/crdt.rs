@@ -1502,9 +1502,10 @@ pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticV
 /// restored, or the prune loop livelocks on it — by a flag the closure itself
 /// sets, because the `Ok(bool)` from `update_in_place` conflates the two.
 ///
-/// Every ref leaves the loop body through exactly one of six counted exits, so
+/// Every ref leaves the loop body through exactly one of seven counted exits, so
 /// `considered == dropped + matched_nothing + absent + restored_read_error +
-/// restored_evicted + restored_write_error` holds by construction. The tombstone-byte
+/// restored_evicted + restored_write_error + restored_cancelled` holds by
+/// construction. The tombstone-byte
 /// decrement stays where it already was — in the post-write success arm, behind
 /// `dropped` — because a decrement moved to follow the ledger would credit bytes the
 /// durable write never actually freed.
@@ -1736,7 +1737,7 @@ pub(crate) async fn prune_epoch_tombstones(
             .observe_drained_epoch(epoch_record);
         // One settlement line per drained epoch, joined to that epoch's exit row by
         // `epoch` — a field populated on every row of both ledgers, so the join needs
-        // no wall clock. This is the only place the per-epoch six-exit identity is
+        // no wall clock. This is the only place the per-epoch seven-exit identity is
         // observable end to end: `PruneEpochRecord` has no Prometheus series of its
         // own, so without this line the per-epoch counters above would be provably
         // correct in-process yet unreadable by anything outside it.
@@ -5704,7 +5705,11 @@ mod tests {
         // the drain sees exactly the two seeded refs.
         let client: String = "a5:alice|dev-1".into();
         frontier.set_delivered(ConnectionId(1), 10_000);
-        assert!(frontier.confirm_apply_ack(&client, 3, ConnectionId(1)).await);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, 3, ConnectionId(1))
+                .await
+        );
         assert_eq!(frontier.low_water_mark(), 3);
         frontier.set_durable_epoch_watermark(1000);
 

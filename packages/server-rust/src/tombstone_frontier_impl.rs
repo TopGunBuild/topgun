@@ -106,7 +106,7 @@ use crate::tombstone_frontier::{
     METRIC_PRUNE_STAMPED_BYTES_TOTAL, METRIC_PRUNE_STAMPED_REFS_TOTAL, METRIC_PRUNE_TRACKED_CLAIMS,
 };
 use metrics::{Counter, Gauge, Histogram};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -1311,6 +1311,17 @@ pub struct TombstoneFrontier {
     /// their `Relaxed` increments, so this is not an unconditional equality across concurrent
     /// scrapes.
     conjunct_seq: AtomicU64,
+    /// Wake handle for a background prune task: a trigger leaves a permit here instead of
+    /// running the pass on the triggering request's own timeline.
+    ///
+    /// A `Notify` rather than a channel because the signal carries no payload and must not
+    /// queue: any number of triggers that land while a pass is running collapse into exactly
+    /// one follow-up pass, which is the coalescing a whole-index sweep wants.
+    prune_wake: Arc<tokio::sync::Notify>,
+    /// Whether some wiring site has already claimed the right to run this frontier's prune
+    /// task. Single-flight, so one frontier can never end up with two prune loops racing each
+    /// other over the same index.
+    prune_task_claimed: AtomicBool,
 }
 
 /// A unit of work for the background cursor-persistence worker.
@@ -1431,6 +1442,8 @@ impl TombstoneFrontier {
             registry,
             prune_arming,
             conjunct_seq: AtomicU64::new(0),
+            prune_wake: Arc::new(tokio::sync::Notify::new()),
+            prune_task_claimed: AtomicBool::new(false),
         }
     }
 
@@ -1454,6 +1467,44 @@ impl TombstoneFrontier {
     #[must_use]
     pub fn prune_observer(&self) -> &dyn PruneRecordObserver {
         self.prune_observer.as_ref()
+    }
+
+    /// Ask for a prune pass. O(1) and non-blocking; never drains, never awaits.
+    ///
+    /// `notify_one` stores a single permit when the task is not parked, so a trigger that
+    /// lands while a pass is running is not lost: the task runs exactly one more pass after
+    /// the current one finishes. Triggers beyond that first permit coalesce, which is what
+    /// keeps a burst of writes from queueing a burst of sweeps.
+    ///
+    /// A frontier wired into a service **without** a spawned prune task never prunes at all —
+    /// this call then only leaves a permit nobody ever consumes. That is exactly the shape
+    /// every unit-test fixture has, and it is why the pairing matters in production: a wiring
+    /// that forgets the spawn reclaims nothing while still looking correctly wired, because
+    /// every trigger site keeps returning successfully.
+    pub fn request_prune(&self) {
+        self.prune_wake.notify_one();
+    }
+
+    /// The wake handle a prune task parks on.
+    ///
+    /// Handed out as an owned `Arc` so the spawned task can await it for its whole lifetime
+    /// without borrowing the frontier.
+    #[must_use]
+    pub fn prune_wake(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.prune_wake)
+    }
+
+    /// Single-flight claim on this frontier's prune task: true exactly once per frontier.
+    ///
+    /// A `compare_exchange` from `false` to `true`, so of any number of racing wiring sites
+    /// exactly one is told to spawn the task and every other is told one already exists. Two
+    /// prune loops over one frontier would each drain refs the other never sees settle, so the
+    /// claim is what keeps the pass a single writer.
+    #[must_use]
+    pub fn claim_prune_task(&self) -> bool {
+        self.prune_task_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     /// Publish the frontier's index and epoch state.
