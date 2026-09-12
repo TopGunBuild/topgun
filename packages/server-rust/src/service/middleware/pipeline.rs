@@ -28,6 +28,11 @@ use crate::service::router::OperationRouter;
 /// 4. `AuthorizationLayer` (optional) -- RBAC policy enforcement; omitted when `None`
 /// 5. `OperationRouter` -- domain service dispatch
 ///
+/// One accepted consequence of this order: the timeout layer now sits inside the
+/// metrics layer, so an operation's budget no longer has to cover the work of
+/// recording its own outcome. That shift is microseconds wide and is the price of
+/// making a timed-out operation observable at all.
+///
 /// When `policy_evaluator` is `None` (RBAC not configured), the authorization layer
 /// is omitted entirely so there is zero overhead for non-RBAC deployments.
 ///
@@ -205,7 +210,10 @@ mod tests {
     /// the binding and everything is polled on that one current-thread runtime.
     /// The clock is paused: the runtime then auto-advances to the earliest
     /// deadline, which is the 50 ms budget rather than the stub's 200 ms sleep,
-    /// so the outcome cannot depend on wall-clock scheduling.
+    /// so the outcome cannot depend on wall-clock scheduling. That determinism
+    /// assumes the timeout layer keeps arming its deadline through `tokio::time`;
+    /// were it ever moved to another clock source, the paused runtime would stop
+    /// governing this test and the stub's sleep would start winning the race.
     #[test]
     fn timed_out_operation_increments_the_timeout_error_counter() {
         let recorder = PrometheusBuilder::new().build_recorder();
@@ -258,9 +266,11 @@ mod tests {
 
     /// A shed operation must be COUNTED, not silently dropped.
     ///
-    /// The permit is taken synchronously inside `call`, so holding the first
-    /// future WITHOUT polling it is enough to occupy the only permit — no sleep
-    /// and no spawn, and therefore no timing assumption at all.
+    /// `LoadShedService::call` takes the permit synchronously: its
+    /// `try_acquire_owned` runs before the future it returns even exists. Holding
+    /// that first future WITHOUT polling it is therefore enough to occupy the only
+    /// permit — no sleep and no spawn, and so no timing assumption at all. This is
+    /// a property of this crate's own load-shed layer, not of a generic one.
     #[test]
     fn shed_operation_increments_the_overloaded_error_counter() {
         let recorder = PrometheusBuilder::new().build_recorder();
