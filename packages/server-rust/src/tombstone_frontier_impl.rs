@@ -100,10 +100,11 @@ use crate::tombstone_frontier::{
     METRIC_PRUNE_MATCHED_NOTHING_TOTAL, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL,
     METRIC_PRUNE_PASSES_TOTAL, METRIC_PRUNE_REBUILD_CLEARED_REFS_TOTAL,
     METRIC_PRUNE_REMOVED_BYTES_OBSERVED_TOTAL, METRIC_PRUNE_REMOVED_REFS_OBSERVED_TOTAL,
-    METRIC_PRUNE_RESTORED_EVICTED_TOTAL, METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
-    METRIC_PRUNE_RESTORED_REFS_TOTAL, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
-    METRIC_PRUNE_SPLIT_COMPUTED_EPOCH, METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL,
-    METRIC_PRUNE_STAMPED_BYTES_TOTAL, METRIC_PRUNE_STAMPED_REFS_TOTAL, METRIC_PRUNE_TRACKED_CLAIMS,
+    METRIC_PRUNE_RESTORED_CANCELLED_TOTAL, METRIC_PRUNE_RESTORED_EVICTED_TOTAL,
+    METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL, METRIC_PRUNE_RESTORED_REFS_TOTAL,
+    METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL, METRIC_PRUNE_SPLIT_COMPUTED_EPOCH,
+    METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL, METRIC_PRUNE_STAMPED_BYTES_TOTAL,
+    METRIC_PRUNE_STAMPED_REFS_TOTAL, METRIC_PRUNE_TRACKED_CLAIMS,
 };
 use metrics::{Counter, Gauge, Histogram};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -2804,6 +2805,7 @@ pub struct MetricsPruneRecorder {
     restored_read_error: Counter,
     restored_evicted: Counter,
     restored_write_error: Counter,
+    restored_cancelled: Counter,
     bytes_freed: Counter,
     epochs_drained: Counter,
     empty_drains: Counter,
@@ -2911,6 +2913,7 @@ impl MetricsPruneRecorder {
             restored_read_error: touched_counter(METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL),
             restored_evicted: touched_counter(METRIC_PRUNE_RESTORED_EVICTED_TOTAL),
             restored_write_error: touched_counter(METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL),
+            restored_cancelled: touched_counter(METRIC_PRUNE_RESTORED_CANCELLED_TOTAL),
             bytes_freed: touched_counter(METRIC_PRUNE_BYTES_FREED_TOTAL),
             epochs_drained: touched_counter(METRIC_PRUNE_EPOCHS_DRAINED_TOTAL),
             empty_drains: touched_counter(METRIC_PRUNE_EMPTY_DRAINS_TOTAL),
@@ -3022,6 +3025,7 @@ impl PruneRecordObserver for MetricsPruneRecorder {
         self.restored_evicted.increment(record.restored_evicted);
         self.restored_write_error
             .increment(record.restored_write_error);
+        self.restored_cancelled.increment(record.restored_cancelled);
         self.bytes_freed.increment(record.bytes_freed);
         self.epochs_drained.increment(record.epochs_drained);
         if record.empty_drain {
@@ -3301,11 +3305,11 @@ mod tests {
     // Prune record — arming parse and eager registration
     // -----------------------------------------------------------------------
 
-    /// The 25 pinned counters: the 22 pre-existing, plus the two OBSERVATION counters
+    /// The 26 pinned counters: the 22 pre-existing, plus the two OBSERVATION counters
     /// (`removed_refs_observed` / `removed_bytes_observed`) `MetricsPruneRecorder::new`
     /// already touches eagerly but this array omitted before, plus the one conjunct
-    /// snapshot counter.
-    const PRUNE_COUNTER_NAMES: [&str; 25] = [
+    /// snapshot counter, plus the cancelled-exit counter.
+    const PRUNE_COUNTER_NAMES: [&str; 26] = [
         METRIC_PRUNE_PASSES_TOTAL,
         METRIC_PRUNE_CONSIDERED_TOTAL,
         METRIC_PRUNE_DROPPED_TOTAL,
@@ -3314,6 +3318,7 @@ mod tests {
         METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
         METRIC_PRUNE_RESTORED_EVICTED_TOTAL,
         METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
+        METRIC_PRUNE_RESTORED_CANCELLED_TOTAL,
         METRIC_PRUNE_BYTES_FREED_TOTAL,
         METRIC_PRUNE_EPOCHS_DRAINED_TOTAL,
         METRIC_PRUNE_EMPTY_DRAINS_TOTAL,
@@ -3424,7 +3429,7 @@ mod tests {
     }
 
     /// Eager registration: with a recorder bound FIRST and **no** observations taken at all,
-    /// the very first render already carries every pinned series — the 25 counters at `0`, the
+    /// the very first render already carries every pinned series — the 26 counters at `0`, the
     /// 31 gauges at `0`, and each of the 7 histograms rendering both `_sum` and `_count`.
     ///
     /// This is what makes an absent series unrepresentable, and therefore what stops a
