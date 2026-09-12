@@ -7,18 +7,32 @@ is appended after the run.
 
 ### Freeze commit
 
-- `SPEC366_CODE_FREEZE`: **`a18e09de`** (full: `a18e09de3572593d3315a55df239c7d5da813574`,
-  `docs(invariants): extend the prune-record exit contract to a cancelled pass`) — the last
-  `.rs`-touching commit on `spec-8c-prune-cancel-safe`, seven commits on the SPEC-365 pin
-  `550936dc`. At that commit the gate matrix was green: `cargo test -p topgun-server --lib`
-  1898 passed / 0 failed; workspace `cargo clippy --all-targets --all-features -- -D warnings`
-  clean; `cargo fmt --check` clean; `pnpm test:sim` clean; `scripts/check-invariants.sh` exit 0.
-- The literal committed in `spec366-conjuncts.sh` reads `SPEC366_CODE_FREEZE=a18e09de`, the
-  abbreviated form of the SHA above; `git rev-parse a18e09de` resolves to it, and the runner's own
+- `SPEC366_CODE_FREEZE`: **`3a009e42`** (full: `3a009e42ced4bfcc771c3a7b4bec70819fbdc6a9`,
+  `docs(server): state the prune task's liveness condition honestly`) — the last `.rs`-touching
+  commit on `spec-8c-prune-cancel-safe`, eight commits on the SPEC-365 pin `550936dc`. At that
+  commit the gate matrix was green: `cargo test -p topgun-server --lib` 1898 passed / 0 failed;
+  workspace `cargo clippy --all-targets --all-features -- -D warnings` clean; `cargo fmt --check`
+  clean; `pnpm test:sim` clean; `scripts/check-invariants.sh` exit 0; the full §A matrix re-run at
+  this commit in a clean scratch worktree reported `MATRIX_OVERALL=PASS`, all ten gates `exit=0`.
+- **The freeze MOVED from `a18e09de`, and this section is re-committed before the cell runs,
+  exactly as the conditional clause below requires.** `3a009e42` is a COMMENT-ONLY change to
+  `crdt.rs`: 5 insertions / 5 deletions, file length 9146 unchanged, both hunks at identical
+  offsets and extents (`-751,3 +751,3`, `-1938,2 +1938,2`), so no code line moved. Two doc
+  sentences claimed liveness the code does not provide — Review v1 raised them as its two majors
+  and conductor rulings v7 R1 ordered the wording fixed.
+- **Byte-identity against cell attempt 2 was TESTED and REFUTED**, which is why attempt 2 cannot be
+  carried forward under this freeze and the cell is re-run as attempt 3 (rulings v7 R1.3). The
+  measured binary was still intact on disk when the test ran (`ac34c2d7…`, control matched).
+  Rebuilt at `3a009e42`: in a clean scratch worktree `a1ac5900…` (DIFFERENT), and in the main
+  checkout — the same path the measurement used — `5c666185…` (DIFFERENT). The two rebuilds also
+  differ from EACH OTHER, so this release profile (`lto`, `codegen-units=1`, `strip=symbols`) is
+  not reproducible across build paths, and preserving comment line counts is not sufficient to
+  make a comment-only edit produce a byte-identical binary.
+- The literal committed in `spec366-conjuncts.sh` reads `SPEC366_CODE_FREEZE=3a009e42`, the
+  abbreviated form of the SHA above; `git rev-parse 3a009e42` resolves to it, and the runner's own
   guard is `git diff --stat "$SPEC366_CODE_FREEZE"..HEAD -- '*.rs'`, which takes either form.
-- **This literal is CONDITIONAL on no further `.rs` commit landing.** It can only move if the
-  in-flight load-harness measurement or the §A matrix forces a code fix. If any `.rs` commit lands
-  after `a18e09de`, the literal in `spec366-conjuncts.sh` and this section MUST be updated and
+- **This literal is CONDITIONAL on no further `.rs` commit landing.** If any `.rs` commit lands
+  after `3a009e42`, the literal in `spec366-conjuncts.sh` and this section MUST be updated and
   re-committed *before* the cell runs — otherwise the runner refuses to start (guard 2), which is
   the fail-closed direction, but the freeze recorded here would be false.
 
@@ -28,7 +42,7 @@ is appended after the run.
 |---|---|---|
 | `spec365-conjuncts.sh` | `1087ec6f33d8dcad537ae5af43d06d7a5391e55b45d01e3efec2cff5a2074591` | frozen evidence, byte-unchanged (equals the digest recorded in `spec365-manifest.md` §1) |
 | `spec365-readout.sh` | `5fbfa3e9d9df2a74830edbf89cf4036ae3e376add9171676fe70800b335d7a11` | frozen evidence, byte-unchanged (ditto); it is the readout this run uses, UNEDITED, invoked with basename `spec366-conj900` |
-| `spec366-conjuncts.sh` | `401d61c95bcdb9ba69f91e0eb2ad6d543ef27b98e4d471d39c6cdf562e529d59` | this spec's runner, with difference item 5 (the pre-clock provenance assertion) added after cell attempt 1 was invalidated. The digest before item 5 was `9b073f6c786827080e78279a60d1e23ad5cefc19b8f601f729dc6fb237734be4`. |
+| `spec366-conjuncts.sh` | `e1c283a069f66cc521ece02ae567126844e147a10b130b54ea586d2f2ce92fcb` | this spec's runner. Two changes since it was first committed, each recorded here rather than narrated: **difference item 5** (the pre-clock provenance assertion), added after cell attempt 1 was invalidated; and **item 1's freeze literal repointed** `a18e09de` → `3a009e42` for attempt 3, after Review v1 forced a comment-only `.rs` fix and byte-identity against attempt 2 was refuted. Prior digests: `9b073f6c786827080e78279a60d1e23ad5cefc19b8f601f729dc6fb237734be4` before item 5, `401d61c95bcdb9ba69f91e0eb2ad6d543ef27b98e4d471d39c6cdf562e529d59` before the repoint. |
 | `spec366-p5.awk` | `2e3ba4f4c0429d77d7f1cf267112706ddf95b095b2a14a6b05460cfa5d018c33` | P5, committed so the predicate is regenerable by path; bytes equal the §2 block |
 | `spec366-p67.awk` | `ba65ffc4076307ffdbfb014565edaf1f17e185ef987ca6b3fe2565d544400215` | P6/P7, ditto |
 
@@ -146,7 +160,7 @@ mechanically rather than narrated:
 < if [ "$SPEC365_CODE_FREEZE" = "PENDING_SPEC365_CODE_FREEZE" ]; then
 <   echo "FATAL: SPEC365_CODE_FREEZE still reads its placeholder value." >&2
 ---
-> SPEC366_CODE_FREEZE=a18e09de
+> SPEC366_CODE_FREEZE=3a009e42
 > if [ "$SPEC366_CODE_FREEZE" = "PENDING_SPEC366_CODE_FREEZE" ]; then
 >   echo "FATAL: SPEC366_CODE_FREEZE still reads its placeholder value." >&2
 391,392c461,462

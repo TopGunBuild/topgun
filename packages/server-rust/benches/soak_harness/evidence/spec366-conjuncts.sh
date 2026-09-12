@@ -445,7 +445,7 @@ fi
 #     yet, and the run refuses immediately rather than attempting to diff
 #     against a value that is not a revision.
 # ---------------------------------------------------------------------------
-SPEC366_CODE_FREEZE=a18e09de
+SPEC366_CODE_FREEZE=3a009e42
 if [ "$SPEC366_CODE_FREEZE" = "PENDING_SPEC366_CODE_FREEZE" ]; then
   echo "FATAL: SPEC366_CODE_FREEZE still reads its placeholder value." >&2
   echo "       The prune-conjunct instrument this runner samples is not yet" >&2
