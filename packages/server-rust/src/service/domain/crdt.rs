@@ -5480,6 +5480,280 @@ mod tests {
         );
     }
 
+    /// A prune pass that is cancelled mid-flight must hand every ref it drained
+    /// but never settled back to the index.
+    ///
+    /// `TG-OR-004`: the drain removes a ref from the RAM index BEFORE the pass
+    /// tries to drop its tag from storage, so a pass that stops early leaves
+    /// those refs named by nobody — no later sweep can retry a tag whose index
+    /// entry is gone, and the tombstone bytes it names are stranded in storage
+    /// for the life of the process. A held per-key writer makes the stop
+    /// deterministic rather than a race: the pass can never get past `K_HELD`.
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn cancelled_prune_pass_restores_every_unsettled_ref() {
+        const N: usize = 4;
+        const K_HELD: &str = "kheld";
+
+        let (svc, factory, frontier) = make_service_with_frontier();
+
+        // Epoch width is 1, so each OR_REMOVE lands its own ref in its own
+        // epoch and which epochs are eligible is decided by the injected gates
+        // below rather than by a clock. The gates are still shut here, so the
+        // inline prune every seeding OR_REMOVE runs drains nothing.
+        let mut seeded: Vec<(String, String)> = Vec::new();
+        for i in 0..N {
+            let key = if i == 0 {
+                K_HELD.to_string()
+            } else {
+                format!("k{i}")
+            };
+            let tag = format!("T{i}");
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", &key, "v", &tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", &key, &tag))
+                .await
+                .unwrap();
+            seeded.push((key, tag));
+        }
+        assert_eq!(
+            frontier.current_epoch(),
+            N as u64,
+            "one stamped tombstone per seeded pair, one epoch each"
+        );
+
+        // Pins the epoch counter one past the seeded refs, so the cursor can sit
+        // strictly past every seeded epoch without making a further one eligible.
+        frontier.stamp_tombstone("m", "kfiller", "FILLER");
+
+        // Both conjuncts open past the seeded epochs only: eligibility is STRICT,
+        // so a cursor at N+1 licenses epochs 1..=N and leaves the filler out.
+        let client: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 10_000);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, (N + 1) as u64, ConnectionId(1))
+                .await
+        );
+        assert_eq!(frontier.low_water_mark(), (N + 1) as u64);
+        frontier.set_durable_epoch_watermark(1000);
+
+        // The pass takes this same per-key writer per dropped tag, so holding it
+        // blocks the pass forever on K_HELD and the budget below always elapses.
+        let held = svc.key_writer.acquire("m", K_HELD).await;
+
+        let (guard, sink) = capture_tracing_rows();
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            prune_epoch_tombstones(&frontier, &factory, &svc.key_writer),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "the pass cannot pass the held writer, so it must be cancelled"
+        );
+        drop(held);
+        // The capture is thread-local and the rows are read off it only once the
+        // guard is gone; the index assertion's own drain runs after that, since
+        // the drain mutates the very index it inspects.
+        drop(guard);
+        let rows = sink.lock().unwrap().clone();
+
+        let retryable = frontier.drain_prunable_tombstones();
+        let mut durably_gone = 0usize;
+        for (key, tag) in &seeded {
+            let (_, tombs) = read_or_map(&factory, "m", key).await;
+            if !tombs.contains(tag) {
+                durably_gone += 1;
+            }
+        }
+
+        assert!(
+            retryable.iter().any(|(_, r)| r.key == K_HELD),
+            "the ref the cancelled pass was blocked on must be back in the index, \
+             got {retryable:?}"
+        );
+        // Order-independent: the drain visits epochs in hash order, so which refs
+        // settled before the block is not assumed — only that every seeded ref is
+        // either settled durably or still retryable.
+        assert_eq!(
+            retryable.len() + durably_gone,
+            N,
+            "every seeded ref must be accounted for, either durably dropped or \
+             handed back; got {} retryable and {durably_gone} durably gone",
+            retryable.len()
+        );
+
+        let pass_rows: Vec<&str> = rows
+            .iter()
+            .map(String::as_str)
+            .filter(|l| {
+                is_row(
+                    l,
+                    "topgun_server::tombstone_frontier::residency",
+                    "prune_pass",
+                )
+            })
+            .collect();
+        assert_eq!(
+            pass_rows.len(),
+            1,
+            "a cancelled pass still owes exactly one pass row; capture was:\n{rows:#?}"
+        );
+
+        // The settlement row carries no `kind` field, so filter on target alone.
+        let settlement_rows: Vec<&str> = rows
+            .iter()
+            .map(String::as_str)
+            .filter(|l| l.contains(" target=topgun_server::tombstone_frontier::settlement "))
+            .collect();
+        let mut considered_sum = 0u64;
+        let mut restored_cancelled_sum = 0u64;
+        for row in &settlement_rows {
+            let considered = row_u64(row, "considered");
+            let dropped = row_u64(row, "dropped");
+            let matched_nothing = row_u64(row, "matched_nothing");
+            let absent = row_u64(row, "absent");
+            let restored_read_error = row_u64(row, "restored_read_error");
+            let restored_evicted = row_u64(row, "restored_evicted");
+            let restored_write_error = row_u64(row, "restored_write_error");
+            let restored_cancelled = row_u64(row, "restored_cancelled");
+            assert_eq!(
+                considered,
+                dropped
+                    + matched_nothing
+                    + absent
+                    + restored_read_error
+                    + restored_evicted
+                    + restored_write_error
+                    + restored_cancelled,
+                "the per-epoch exit identity must hold on this settlement row: {row:?}"
+            );
+            considered_sum += considered;
+            restored_cancelled_sum += restored_cancelled;
+        }
+        assert_eq!(
+            considered_sum, N as u64,
+            "every eligible ref must be considered by the cancelled pass"
+        );
+        assert_eq!(
+            restored_cancelled_sum,
+            (N - durably_gone) as u64,
+            "every ref the pass did not settle must leave through the cancelled exit"
+        );
+        assert!(
+            restored_cancelled_sum >= 1,
+            "the blocked ref alone makes this exit nonempty"
+        );
+
+        let snapshot = frontier.index_conservation_snapshot();
+        assert_eq!(
+            snapshot.stamped_refs_total + snapshot.restored_refs_total
+                - snapshot.drained_refs_total
+                - snapshot.rebuild_cleared_refs_total,
+            snapshot.indexed_refs,
+            "O-0 must hold across a cancelled pass too, got {snapshot:?}"
+        );
+    }
+
+    /// An `OR_REMOVE` carried through the PRODUCTION `TimeoutLayer` must not lose
+    /// the refs its inline prune drained.
+    ///
+    /// `TG-OR-006`: the inline prune runs inside the request's own timeout
+    /// budget, so a per-key writer held anywhere in the drained set makes the
+    /// budget elapse and the layer cancel the call mid-pass. The op's own remove
+    /// is applied regardless, so the caller is told the write timed out while the
+    /// server kept it — and the drained refs are gone from the index. This is the
+    /// behavioural proof on the production mechanism, not on a synthetic pass.
+    #[tokio::test]
+    async fn or_remove_under_the_timeout_layer_never_loses_drained_refs() {
+        const K_HELD: &str = "kheld";
+        const K_OP: &str = "kop";
+        const BUDGET_MS: u64 = 500;
+
+        let (svc, factory, frontier) = make_service_with_frontier();
+
+        // Two eligible refs, on two distinct keys, one of them the key whose
+        // writer the test holds.
+        for (key, tag) in [(K_HELD, "THELD"), ("kother", "TOTHER")] {
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", key, "v", tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", key, tag))
+                .await
+                .unwrap();
+        }
+        // The record the op under test removes from.
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", K_OP, "v", "TOP"))
+            .await
+            .unwrap();
+
+        // Pins the epoch counter one past the seeded refs: the low-water mark
+        // cannot advance beyond the epochs that exist, so without this stamp a
+        // cursor past epoch 2 would clamp back to 2 and license only epoch 1.
+        frontier.stamp_tombstone("m", "kfiller", "FILLER");
+
+        // Past the two seeded epochs only. The filler holds epoch 3 and the op's
+        // own stamp lands in epoch 4, neither of which a cursor at 3 licenses, so
+        // the drain sees exactly the two seeded refs.
+        let client: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 10_000);
+        assert!(frontier.confirm_apply_ack(&client, 3, ConnectionId(1)).await);
+        assert_eq!(frontier.low_water_mark(), 3);
+        frontier.set_durable_epoch_watermark(1000);
+
+        // Built here rather than via `or_remove_op`: the budget has to be set on
+        // the context BEFORE the op is constructed, and there is no `ctx_mut`.
+        let mut ctx = make_ctx_for_key(K_OP);
+        ctx.call_timeout_ms = BUDGET_MS;
+        let op = Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("rm-TOP".to_string()),
+                    map_name: "m".to_string(),
+                    key: K_OP.to_string(),
+                    op_type: None,
+                    record: None,
+                    or_record: None,
+                    or_tag: Some(Some("TOP".to_string())),
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        let held = svc.key_writer.acquire("m", K_HELD).await;
+        let layered = tower::ServiceBuilder::new()
+            .layer(crate::service::middleware::TimeoutLayer)
+            .service(Arc::clone(&svc));
+        let outcome = layered.oneshot(op).await;
+        drop(held);
+
+        // Both halves of the witness are printed BEFORE the first assertion, so
+        // the applied-then-timed-out pair is readable in the failure output even
+        // though the assertion that fails is the one about the returned value.
+        let (_, tombs) = read_or_map(&factory, "m", K_OP).await;
+        println!("witness: stored tombstones on {K_OP} = {tombs:?}");
+        println!("witness: returned = {outcome:?}");
+
+        assert!(
+            outcome.is_ok(),
+            "an OR_REMOVE must complete within its own budget, got {outcome:?}"
+        );
+        let retryable = frontier.drain_prunable_tombstones();
+        assert!(
+            retryable.iter().any(|(_, r)| r.key == K_HELD),
+            "the blocked key's ref must still be indexed after the call, got {retryable:?}"
+        );
+    }
+
     /// Evicts named keys the instant the record store rehydrates them.
     ///
     /// This is the only in-process lever that manufactures the "evicted between
