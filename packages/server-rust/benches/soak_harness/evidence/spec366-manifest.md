@@ -33,6 +33,11 @@ is appended after the run.
   | 4 | `3a009e42`, main checkout, clean (`rm` + `cargo clean -p`) | `ac34c2d7…` |
   | 5 | `3a009e42`, main checkout, clean again — same command, same path | `5c666185…` |
 
+  **Raw observations are committed beside this manifest as `spec366-build-nondeterminism.txt`** —
+  the verbatim runner output for all five builds, plus the commands to re-check it. The logs they
+  came from live in a scratch directory and do not survive, and a load-bearing claim should not
+  rest on a path that will be gone.
+
   Builds 4 and 5 have **identical inputs and an identical procedure and differ from each other**,
   so this release profile (`lto`, `codegen-units=1`, `strip=symbols`) is **not reproducible even at
   a fixed path**; the output alternates between two values. Byte-identity presupposes that
