@@ -20,14 +20,27 @@ is appended after the run.
   offsets and extents (`-751,3 +751,3`, `-1938,2 +1938,2`), so no code line moved. Two doc
   sentences claimed liveness the code does not provide — Review v1 raised them as its two majors
   and conductor rulings v7 R1 ordered the wording fixed.
-- **Byte-identity against cell attempt 2 was TESTED and REFUTED**, which is why attempt 2 cannot be
-  carried forward under this freeze and the cell is re-run as attempt 3 (rulings v7 R1.3). The
-  measured binary was still intact on disk when the test ran (`ac34c2d7…`, control matched).
-  Rebuilt at `3a009e42`: in a clean scratch worktree `a1ac5900…` (DIFFERENT), and in the main
-  checkout — the same path the measurement used — `5c666185…` (DIFFERENT). The two rebuilds also
-  differ from EACH OTHER, so this release profile (`lto`, `codegen-units=1`, `strip=symbols`) is
-  not reproducible across build paths, and preserving comment line counts is not sufficient to
-  make a comment-only edit produce a byte-identical binary.
+- **Byte-identity against cell attempt 2 was TESTED and is UNAVAILABLE AS A TECHNIQUE**, which is
+  why attempt 2 cannot be carried forward under this freeze and the cell is re-run as attempt 3
+  (rulings v7 R1.3). The measured binary was still intact on disk when the test ran (`ac34c2d7…`,
+  control matched). Five builds were recorded:
+
+  | # | build | sha256 |
+  |---|---|---|
+  | 1 | the measurement (attempt 2, freeze `a18e09de`, main checkout) | `ac34c2d7…` |
+  | 2 | `3a009e42`, clean scratch worktree | `a1ac5900…` |
+  | 3 | `3a009e42`, main checkout, incremental | `5c666185…` |
+  | 4 | `3a009e42`, main checkout, clean (`rm` + `cargo clean -p`) | `ac34c2d7…` |
+  | 5 | `3a009e42`, main checkout, clean again — same command, same path | `5c666185…` |
+
+  Builds 4 and 5 have **identical inputs and an identical procedure and differ from each other**,
+  so this release profile (`lto`, `codegen-units=1`, `strip=symbols`) is **not reproducible even at
+  a fixed path**; the output alternates between two values. Byte-identity presupposes that
+  source → bytes is a function. Here it is not, so the technique cannot establish provenance at
+  all — and build 4's match with the measurement is a coincidence of that non-determinism, not
+  evidence, since the same commit also yields `5c666185…`. Preserving comment line counts (which
+  this freeze does: no code line moved) is therefore necessary but nowhere near sufficient.
+  **Provenance rests on measurement under the new freeze — attempt 3 — not on identity.**
 - The literal committed in `spec366-conjuncts.sh` reads `SPEC366_CODE_FREEZE=3a009e42`, the
   abbreviated form of the SHA above; `git rev-parse 3a009e42` resolves to it, and the runner's own
   guard is `git diff --stat "$SPEC366_CODE_FREEZE"..HEAD -- '*.rs'`, which takes either form.
