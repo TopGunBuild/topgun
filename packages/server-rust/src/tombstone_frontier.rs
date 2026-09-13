@@ -299,8 +299,9 @@ pub trait PruneSafety: CausalFrontier {
 ///
 /// The set is **CLOSED**: every ref the loop considers leaves through exactly one of these, and the
 /// identity `considered == dropped + matched_nothing + absent + restored_read_error +
-/// restored_evicted + restored_write_error` MUST hold. Exhaustiveness is load-bearing rather than
-/// tidiness: [`PruneExit::AbsentKey`] consumes a ref **without** a tombstone-byte decrement, so a
+/// restored_evicted + restored_write_error + restored_cancelled` MUST hold. Exhaustiveness is
+/// load-bearing rather than tidiness: [`PruneExit::AbsentKey`] consumes a ref **without** a
+/// tombstone-byte decrement, so a
 /// growing `AbsentKey` share is a candidate mechanism for a falling reclaim fraction that no other
 /// instrument in the tree can see. This contract takes no position on whether that happens; it
 /// requires that the record be able to say.
@@ -323,6 +324,15 @@ pub enum PruneExit {
     RestoredEvicted,
     /// The in-place update errored; the ref is re-indexed.
     RestoredWriteError,
+    /// The pass was dropped (cancelled) before this ref's exit was recorded; the guard
+    /// re-indexed it for the next pass.
+    ///
+    /// This is the only exit a ref can take without the loop body reaching a decision about
+    /// it: the pass's future stopped being polled, so the ref is neither reclaimed nor known
+    /// to be unreclaimable. Counting it separately is what keeps the identity total under
+    /// cancellation — folded into any other exit it would either claim a reclaim that never
+    /// happened or attribute a storage outcome that was never observed.
+    RestoredCancelled,
 }
 
 /// One prune pass — one whole invocation of the epoch-tombstone prune loop, empty drains included.
@@ -358,6 +368,8 @@ pub struct PrunePassRecord {
     pub restored_evicted: u64,
     /// Refs that left through [`PruneExit::RestoredWriteError`].
     pub restored_write_error: u64,
+    /// Refs that left through [`PruneExit::RestoredCancelled`].
+    pub restored_cancelled: u64,
     /// Tombstone bytes the pass freed.
     pub bytes_freed: u64,
     /// Epochs the pass drained.
@@ -404,6 +416,8 @@ pub struct PruneEpochRecord {
     pub restored_evicted: u64,
     /// Refs of this epoch that left through [`PruneExit::RestoredWriteError`].
     pub restored_write_error: u64,
+    /// Refs of this epoch that left through [`PruneExit::RestoredCancelled`].
+    pub restored_cancelled: u64,
     /// Tombstone bytes this epoch freed.
     pub bytes_freed: u64,
 }
@@ -839,15 +853,21 @@ pub struct ConjunctSnapshotRecord {
 pub trait PruneRecordObserver: Send + Sync {
     /// One completed prune pass.
     ///
-    /// Feeds the pass counter, the six exit counters, `considered`, `bytes_freed`,
+    /// Feeds the pass counter, the seven exit counters, `considered`, `bytes_freed`,
     /// `epochs_drained`, exactly one of the empty / non-empty drain counters, and — on a non-empty
     /// drain only — the refs-per-drain and epochs-per-drain distributions.
     fn observe_pass(&self, record: &PrunePassRecord);
 
-    /// One epoch drained inside a pass. Feeds the three per-drained-epoch distributions and,
-    /// via the five newly-added per-epoch exit counters, the per-epoch six-exit identity
+    /// One epoch drained inside a pass. Feeds the three per-drained-epoch distributions and
+    /// nothing else.
+    ///
+    /// There are deliberately **no per-epoch exit counters**: this record's exit terms reach no
+    /// Prometheus series at all, because a per-epoch count summed into a process-wide counter
+    /// would duplicate the pass-level exit counters while losing the very per-epoch association
+    /// that would make it worth having. The per-epoch identity
     /// (`considered == dropped + matched_nothing + absent + restored_read_error +
-    /// restored_evicted + restored_write_error`) that previously only held per pass.
+    /// restored_evicted + restored_write_error + restored_cancelled`) is therefore observable on
+    /// the **settlement row only** — the one transport this record has.
     fn observe_drained_epoch(&self, record: &PruneEpochRecord);
 
     /// The claim span at an LWM movement or a non-empty drain.
@@ -937,7 +957,7 @@ pub trait PruneRecordObserver: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Pinned metric names — 25 counters, 31 gauges, 7 histograms
+// Pinned metric names — 26 counters, 31 gauges, 7 histograms
 // ---------------------------------------------------------------------------
 //
 // The name set is CLOSED. Emitting a series under this prefix that is not named here, or emitting
@@ -970,6 +990,9 @@ pub const METRIC_PRUNE_RESTORED_EVICTED_TOTAL: &str = "topgun_or_prune_restored_
 /// Counter: refs that left through [`PruneExit::RestoredWriteError`].
 pub const METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL: &str =
     "topgun_or_prune_restored_write_error_total";
+/// Counter: refs that left through [`PruneExit::RestoredCancelled`] — re-indexed by the guard
+/// because the pass was dropped before their exit was recorded.
+pub const METRIC_PRUNE_RESTORED_CANCELLED_TOTAL: &str = "topgun_or_prune_restored_cancelled_total";
 /// Counter: tombstone bytes freed by the prune.
 pub const METRIC_PRUNE_BYTES_FREED_TOTAL: &str = "topgun_or_prune_bytes_freed_total";
 /// Counter: epochs drained.

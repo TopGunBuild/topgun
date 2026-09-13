@@ -1872,7 +1872,7 @@ fn build_services(
     frontier.set_epoch_width(epoch_width);
     tracing::info!(
         epoch_width = frontier.epoch_width(),
-        "tombstone epoch counter initialized (prune dark until SPEC-342j supplies the durability watermark)"
+        "tombstone epoch counter initialized (the epoch prune runs on the background task)"
     );
     let key_writer = Arc::new(topgun_server::service::domain::key_writer::KeyWriterRegistry::new());
 
@@ -1917,6 +1917,16 @@ fn build_services(
             Arc::clone(&datastore_for_merkle_seed),
         )
     });
+    // The ONE long-lived prune task, spawned here so exactly one exists per
+    // process in BOTH the cluster and the single-node branch that call this fn.
+    // Its trigger sites only leave a wake permit; without this consumer the
+    // server would reclaim no tombstone at all while every write path kept
+    // returning successfully.
+    let _prune_task = topgun_server::service::domain::crdt::spawn_prune_task(
+        Arc::clone(&frontier),
+        Arc::clone(&record_store_factory),
+        Arc::clone(&key_writer),
+    );
     let query_svc_base = QueryService::new(
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),

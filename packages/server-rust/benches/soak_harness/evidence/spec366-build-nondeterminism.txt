@@ -1,0 +1,87 @@
+spec366 — the release build is not reproducible (raw observations)
+==================================================================
+
+Why this file exists
+--------------------
+Manifest §1 states that byte-identity cannot establish provenance for this spec, because the
+release build does not map source to bytes as a function. That is a load-bearing claim: it is the
+reason cell attempt 2 could not be carried across the freeze move from a18e09de to 3a009e42, and
+the reason attempt 3 was run instead. The claim was substantiated from runner logs that live in a
+scratch directory and do not survive, so the observations are recorded here, committed beside the
+manifest, rather than cited to a path that will be gone.
+
+What was being tested
+---------------------
+Conductor rulings v7 R1.2 proposed option (b'): fix the two doc sentences in crdt.rs with each
+comment block's line count preserved, rebuild, and if the binary is byte-identical to the one the
+cell measured, provenance holds by identity rather than by ancestry. Comments are not compiled and
+no code line moved (5 insertions / 5 deletions, file length 9146 unchanged, hunks -751,3 +751,3 and
+-1938,2 +1938,2), so identity was a reasonable expectation.
+
+The five builds
+---------------
+  #  build                                                            sha256
+  1  the measurement (cell attempt 2, freeze a18e09de, main checkout) ac34c2d7e39bca3e0ce4aabce7122833658c660a2e30f455ba9d90808bc0b8f7
+  2  3a009e42, clean scratch worktree                                 a1ac59009e2f2c1e2f2c25cc2274034a08eec4ca53ac2eb769693935cc05ff37
+  3  3a009e42, main checkout, incremental                             5c666185e3af3480fab5c7b5e896d5e9c7223933c2f740e79c31c24864723db5
+  4  3a009e42, main checkout, clean (rm + cargo clean -p)             ac34c2d7e39bca3e0ce4aabce7122833658c660a2e30f455ba9d90808bc0b8f7
+  5  3a009e42, main checkout, clean again, same command, same path    5c666185e3af3480fab5c7b5e896d5e9c7223933c2f740e79c31c24864723db5
+
+Verbatim, builds 1-3 (chain-v7 run, 2026-09-12)
+-----------------------------------------------
+  ### final commit (new freeze): 3a009e42ced4bfcc771c3a7b4bec70819fbdc6a9
+  ### CONTROL_ON_DISK_SHA256=ac34c2d7e39bca3e0ce4aabce7122833658c660a2e30f455ba9d90808bc0b8f7
+  ### CONTROL_MATCHES_MEASURED=yes
+  ### RESULT A.build exit=0
+  ### REBUILT_SHA256_WORKTREE=a1ac59009e2f2c1e2f2c25cc2274034a08eec4ca53ac2eb769693935cc05ff37
+  ### MEASURED_SHA256=ac34c2d7e39bca3e0ce4aabce7122833658c660a2e30f455ba9d90808bc0b8f7
+  ### SHA_VERDICT_WORKTREE=DIFFERENT
+  ### RESULT B.build exit=0
+  ### REBUILT_SHA256_MAIN=5c666185e3af3480fab5c7b5e896d5e9c7223933c2f740e79c31c24864723db5
+  ### SHA_VERDICT_MAIN=DIFFERENT
+
+  CONTROL_MATCHES_MEASURED=yes matters: it proves the measured artifact was still intact on disk
+  when the comparison ran, so the mismatch is not an artifact of something having clobbered it.
+
+Verbatim, builds 4-5 (determinism check, 2026-09-12)
+----------------------------------------------------
+  ### DETERMINISM CHECK 2026-09-12T18:24:48Z
+  ### HEAD=9ab96b77 rs-freeze=3a009e42 clean=yes
+  ### BUILD1_SHA256=ac34c2d7e39bca3e0ce4aabce7122833658c660a2e30f455ba9d90808bc0b8f7  (attempt 3 pre-flight, clean rebuild)
+  ### --- wiping and rebuilding clean, second time ---
+  ### build2 rc=0
+  ### BUILD2_SHA256=5c666185e3af3480fab5c7b5e896d5e9c7223933c2f740e79c31c24864723db5
+  ### MEASURED_SHA256=ac34c2d7e39bca3e0ce4aabce7122833658c660a2e30f455ba9d90808bc0b8f7
+  ### BUILD1_EQ_BUILD2=NO
+  ### BUILD2_EQ_MEASURED=NO
+  ### CMP_BYTEWISE_VS_MEASURED=DIFFERENT
+  ### counter string present: 1
+  ### DETERMINISM_COMPLETE 2026-09-12T18:28:22Z
+
+  Build 4 is the binary cell attempt 3 actually ran (console log line 1 records
+  sha256=ac34c2d7..., built=2026-09-13T08:46:31Z). Build 5 repeated build 4's exact procedure at
+  the same path on the same commit and produced different bytes. cmp confirms the difference
+  bytewise, not merely by digest.
+
+Conclusion
+----------
+Builds 4 and 5 share commit, path, command and cleaning procedure, and differ. So the release
+profile (lto, codegen-units=1, strip=symbols) is not reproducible even at a fixed path; observed
+output alternates between two values. Byte-identity presupposes that source -> bytes is a function,
+so option (b') is unavailable in principle here, not merely unlucky.
+
+It follows that build 4 matching the measurement is a COINCIDENCE of that alternation and is not
+evidence of provenance: the same commit also yields 5c666185. Preserving comment line counts is
+necessary but nowhere near sufficient.
+
+Provenance therefore rests on MEASUREMENT, which survives non-determinism: the runner asserts, before
+the clock, that the binary contains this branch's counter string and was built by this invocation,
+and records its sha256 as the first line of the console log. That says WHICH binary produced the
+numbers, which is the question identity was only ever a proxy for.
+
+How to re-check
+---------------
+  cd <repo>; git checkout 3a009e42
+  rm -f target/release/topgun-server && cargo clean -p topgun-server --release
+  cargo build --release --bin topgun-server -p topgun-server && shasum -a 256 target/release/topgun-server
+  # repeat the three lines above; the digest is expected to differ between runs.

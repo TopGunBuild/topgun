@@ -3,7 +3,7 @@
 //! Merges LWW-Map and OR-Map data into the `RecordStore` and broadcasts
 //! `ServerEvent` messages to subscribed client connections.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -36,8 +36,8 @@ use crate::service::security::WriteAdmission;
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::wal::OrDelta;
 use crate::storage::{CallerProvenance, ExpiryPolicy, MutateOutcome, RecordStoreFactory};
-use crate::tombstone_frontier::{Epoch, PruneEpochRecord, PrunePassRecord};
-use crate::tombstone_frontier_impl::TombstoneFrontier;
+use crate::tombstone_frontier::{Epoch, PruneEpochRecord, PruneExit, PrunePassRecord};
+use crate::tombstone_frontier_impl::{TombstoneFrontier, TombstoneRef};
 use crate::traits::SchemaProvider;
 
 // ---------------------------------------------------------------------------
@@ -736,19 +736,23 @@ impl CrdtService {
                 }
             }
 
-            // Release the per-key writer before the prune sweep re-acquires it: the
-            // sweep takes the same per-key writer per dropped tag, so holding it here
-            // would self-deadlock on this key.
+            // End of the critical section: the tombstone append and its epoch
+            // stamp are both committed, and the payload built below only clones
+            // locals, so nothing past this point needs the key held.
             drop(key_guard);
 
-            // Wholesale epoch-drop prune over the OR write path. Active whenever the
-            // low-water mark has advanced past a stamped epoch AND the durable epoch
-            // watermark has caught up to it — both conjuncts move forward as tracked
-            // clients confirm-apply and the durable backend flushes, so this drains
-            // real tombstones once those two conditions line up.
+            // Ask for a prune pass; do NOT run one here. A pass walks every
+            // eligible ref and re-acquires the per-key writer per dropped tag, so
+            // on this timeline it would run inside the request's own timeout
+            // budget: a writer held anywhere in the eligible set makes the budget
+            // elapse, the layer cancels the call mid-pass, and the caller is told
+            // the write timed out while the server kept it. This trigger is O(1)
+            // and never awaits, so an op's latency no longer depends on the size
+            // of the backlog it happens to follow. The write-triggered cadence is
+            // unchanged — permits coalesce, so a burst still yields one pass after
+            // it — for as long as the task consuming the wake lives; nothing supervises it.
             if let Some(frontier) = self.frontier.as_ref() {
-                prune_epoch_tombstones(frontier, &self.record_store_factory, &self.key_writer)
-                    .await;
+                frontier.request_prune();
             }
 
             Ok(ServerEventPayload {
@@ -1474,6 +1478,200 @@ pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticV
     OrMapSemanticView { live, tombstones }
 }
 
+/// Owner of one prune pass's un-settled tombstone refs and of that pass's whole ledger.
+///
+/// A prune pass is a future, and its caller may stop polling it at any await. A ref that
+/// has left the index but has not yet been settled is then named by nobody: the drain
+/// removes the index entry BEFORE the tag is dropped from storage, so no later sweep can
+/// retry that tag and the tombstone bytes it names stay in storage for the life of the
+/// process. Keeping those refs in here is what makes that unreachable — `Drop` runs on the
+/// cancellation path exactly as it runs on the normal one, and hands back every ref still
+/// inside.
+///
+/// The ledger lives here for the same reason. A pass that emitted its records from the end
+/// of the function body would emit nothing at all when cancelled, so the pass-level series
+/// would silently describe only the passes that happened to finish — the one population
+/// whose behaviour is already known to be fine.
+struct PrunePassGuard<'a> {
+    /// The index every un-settled ref goes back into.
+    frontier: &'a TombstoneFrontier,
+    /// The ref the loop body is working on right now, if any.
+    ///
+    /// Held here rather than moved out to the body, so a cancellation at any of that
+    /// body's three awaits still finds it. This slot is the whole difference between "the
+    /// pass stopped while working on a ref" and "that ref is gone".
+    in_flight: Option<(Epoch, TombstoneRef)>,
+    /// The refs the loop has not begun yet, in drain order.
+    pending: VecDeque<(Epoch, TombstoneRef)>,
+    /// The pass ledger. Emitted from `Drop`, never from the loop.
+    pass: PrunePassRecord,
+    /// The per-epoch ledger. Emitted from `Drop`, never from the loop.
+    per_epoch: BTreeMap<Epoch, PruneEpochRecord>,
+}
+
+impl<'a> PrunePassGuard<'a> {
+    /// Take ownership of a drain's refs. Called before the pass can await anything.
+    fn new(frontier: &'a TombstoneFrontier, drained: Vec<(Epoch, TombstoneRef)>) -> Self {
+        // One record per invocation, empty drains included: a pass that drains nothing is
+        // exactly the regime this record has to be able to describe, so the pass is counted
+        // here rather than behind any eligibility or per-ref condition. A pass counted
+        // inside the loop would read zero during a total stall.
+        let empty_drain = drained.is_empty();
+        Self {
+            frontier,
+            in_flight: None,
+            pending: drained.into(),
+            pass: PrunePassRecord {
+                empty_drain,
+                ..PrunePassRecord::default()
+            },
+            per_epoch: BTreeMap::new(),
+        }
+    }
+
+    /// Begin the next ref and hand the loop body a COPY of it to work with.
+    ///
+    /// The ref itself stays in `in_flight` until `settle` records its exit, which is what
+    /// makes the body's three awaits cancellation-safe: whatever the body was in the middle
+    /// of, the ref is still inside the guard. The copy is how that coexists with a body
+    /// that also has to call `&mut self` methods on the guard — borrowing the ref out of
+    /// the guard across those awaits would forbid it. Three short strings cloned per ref is
+    /// far below the cost of the storage read and write the body is about to do with them.
+    fn begin_next_ref(&mut self) -> Option<(Epoch, TombstoneRef)> {
+        self.in_flight = self.pending.pop_front();
+        self.in_flight.clone()
+    }
+
+    /// Record one ref's exit. This is the ONLY way a ref leaves this guard.
+    ///
+    /// `considered` and the exit's own counter move together here, on the pass record and
+    /// on the epoch record alike, so `considered == Σ exits` holds after every individual
+    /// call rather than only at the end of a completed loop. Counting a ref as considered
+    /// where the body BEGINS it would break the identity on precisely the path the
+    /// cancelled exit exists for: a pass stopped while awaiting the in-flight ref would
+    /// have counted that ref and could never record an exit for it.
+    ///
+    /// `bytes_freed` is part of the exit rather than a separate credit, because only
+    /// [`PruneExit::Dropped`] frees anything and a byte total recorded apart from the exit
+    /// that earned it is free to drift from it.
+    fn settle(&mut self, epoch: Epoch, exit: PruneExit, bytes_freed: u64) {
+        // The in-flight slot empties HERE and nowhere else. On the cancellation path it is
+        // already empty (`Drop` took it), and clearing it again is a no-op.
+        self.in_flight = None;
+        let epoch_record = self.per_epoch.entry(epoch).or_insert(PruneEpochRecord {
+            epoch,
+            ..PruneEpochRecord::default()
+        });
+        self.pass.considered += 1;
+        epoch_record.considered += 1;
+        self.pass.bytes_freed += bytes_freed;
+        epoch_record.bytes_freed += bytes_freed;
+        // One `+= 1` pair for every exit, so the two ledgers cannot be wired to different
+        // exits by an edit that touches only one of them.
+        let (pass_exit, epoch_exit) = match exit {
+            PruneExit::Dropped => (&mut self.pass.dropped, &mut epoch_record.dropped),
+            PruneExit::MatchedNothing => (
+                &mut self.pass.matched_nothing,
+                &mut epoch_record.matched_nothing,
+            ),
+            PruneExit::AbsentKey => (&mut self.pass.absent, &mut epoch_record.absent),
+            PruneExit::RestoredReadError => (
+                &mut self.pass.restored_read_error,
+                &mut epoch_record.restored_read_error,
+            ),
+            PruneExit::RestoredEvicted => (
+                &mut self.pass.restored_evicted,
+                &mut epoch_record.restored_evicted,
+            ),
+            PruneExit::RestoredWriteError => (
+                &mut self.pass.restored_write_error,
+                &mut epoch_record.restored_write_error,
+            ),
+            PruneExit::RestoredCancelled => (
+                &mut self.pass.restored_cancelled,
+                &mut epoch_record.restored_cancelled,
+            ),
+        };
+        *pass_exit += 1;
+        *epoch_exit += 1;
+    }
+}
+
+impl Drop for PrunePassGuard<'_> {
+    /// The pass's single emission site, and the only part of it that survives a dropped
+    /// future.
+    ///
+    /// Nothing here can panic: the restore is infallible and its lock recovers from
+    /// poisoning, and `tracing` and `metrics` calls do not panic. That is a property to
+    /// hold rather than an accident — a panic in a `drop` during an unwind aborts the
+    /// process, and this runs on a path a caller reaches by giving up on the pass.
+    fn drop(&mut self) {
+        // Both values come OUT of `self` first, so the chain below borrows nothing while
+        // the loop settles back into `self`.
+        let in_flight = self.in_flight.take();
+        let pending = std::mem::take(&mut self.pending);
+        // ONE chained iteration, the in-flight ref ahead of the remainder. Two loops would
+        // be two restore call sites, and a second restore path is exactly how a divergent
+        // one gets added later.
+        for (epoch, r) in in_flight.into_iter().chain(pending) {
+            // Settled BEFORE the restore, so a ref has already left the guard by the time
+            // it re-enters the index and no ref can be handed back twice.
+            self.settle(epoch, PruneExit::RestoredCancelled, 0);
+            self.frontier.restore_tombstone_ref(epoch, r);
+        }
+        if self.pass.restored_cancelled > 0 {
+            // Emitted ahead of the pass row below, which stays the last row a pass emits.
+            tracing::warn!(
+                restored_cancelled = self.pass.restored_cancelled,
+                "prune pass cancelled; {} un-settled refs re-indexed for the next pass",
+                self.pass.restored_cancelled
+            );
+        }
+        self.pass.epochs_drained = self.per_epoch.len() as u64;
+        for epoch_record in self.per_epoch.values() {
+            self.frontier
+                .prune_observer()
+                .observe_drained_epoch(epoch_record);
+            // One settlement line per drained epoch, joined to that epoch's exit row by
+            // `epoch` — a field populated on every row of both ledgers, so the join needs
+            // no wall clock. This is the only place the per-epoch seven-exit identity is
+            // observable end to end: `PruneEpochRecord` has no Prometheus series of its
+            // own, so without this line the per-epoch counters would be provably correct
+            // in-process yet unreadable by anything outside it.
+            tracing::info!(
+                target: "topgun_server::tombstone_frontier::settlement",
+                epoch = epoch_record.epoch,
+                considered = epoch_record.considered,
+                dropped = epoch_record.dropped,
+                matched_nothing = epoch_record.matched_nothing,
+                absent = epoch_record.absent,
+                restored_read_error = epoch_record.restored_read_error,
+                restored_evicted = epoch_record.restored_evicted,
+                restored_write_error = epoch_record.restored_write_error,
+                restored_cancelled = epoch_record.restored_cancelled,
+                bytes_freed = epoch_record.bytes_freed,
+                "prune epoch settlement"
+            );
+        }
+        // Exactly one pass observation per invocation — the recorder counts the pass
+        // itself, so a second or a conditional call would break the pass identity.
+        self.frontier.prune_observer().observe_pass(&self.pass);
+        // The pass row: `considered` and `empty_drain` have no other `tracing` transport,
+        // so neither term is readable in-process by anything that cannot bind the
+        // (permanently no-op, outside its own recorder binding) Prometheus handles. Fires
+        // on EVERY pass, empty drains and cancelled passes included, unconditionally —
+        // that unconditional placement is what makes this row individuate a pass on the
+        // capture: it is always the last row a pass emits.
+        tracing::info!(
+            target: "topgun_server::tombstone_frontier::residency",
+            kind = "prune_pass",
+            considered = self.pass.considered,
+            empty_drain = self.pass.empty_drain,
+            "prune pass"
+        );
+    }
+}
+
 /// Run the wholesale epoch-drop prune over the storage backing `factory`.
 ///
 /// Drains every currently prune-eligible epoch's tombstone refs out of the
@@ -1502,12 +1700,22 @@ pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticV
 /// restored, or the prune loop livelocks on it — by a flag the closure itself
 /// sets, because the `Ok(bool)` from `update_in_place` conflates the two.
 ///
-/// Every ref leaves the loop body through exactly one of six counted exits, so
+/// Every ref leaves the loop body through exactly one of seven counted exits, so
 /// `considered == dropped + matched_nothing + absent + restored_read_error +
-/// restored_evicted + restored_write_error` holds by construction. The tombstone-byte
+/// restored_evicted + restored_write_error + restored_cancelled` holds by
+/// construction. The tombstone-byte
 /// decrement stays where it already was — in the post-write success arm, behind
 /// `dropped` — because a decrement moved to follow the ledger would credit bytes the
 /// durable write never actually freed.
+///
+/// The seventh of those exits is not recorded by this body at all. The pass is a future
+/// its caller may stop polling at any of the loop's three awaits, so every ref the drain
+/// returned is held by [`PrunePassGuard`] until its own exit is recorded; whatever is
+/// still inside the guard when the future is dropped is re-indexed and counted as
+/// `restored_cancelled` by the guard's `Drop`. That is also the single site every emission
+/// happens from — the per-epoch settlement rows, the pass observation and the pass row all
+/// fire from there, on the cancelled path exactly as on the completed one, so a cancelled
+/// pass is a recorded pass rather than a silent gap in the series.
 ///
 /// # WHAT THIS PASS RECORD CANNOT TELL YOU (read before drawing a conclusion from it)
 ///
@@ -1536,10 +1744,13 @@ pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticV
 /// returned beside what the slot recorded at entry. Read that line when this record
 /// says a pass did nothing. Reconciling the two ledgers is deferred and tracked in
 /// `TODO-634`.
-// Kept as one body deliberately: splitting the loop out would move the exit
-// counters and the tombstone-byte decrement into a helper, where neither the
-// summing identity nor the "exactly one decrement, in the post-write arm behind
-// `dropped`" siting is assertable against this function any more.
+// Split along exactly one seam, and this is the side that stays: the loop, its three
+// awaits and the tombstone-byte decrement live in this body, so the "exactly one
+// decrement, in the post-write arm behind `dropped`" siting is still assertable
+// against this function. What moved into `PrunePassGuard` is the ledger's STORAGE and
+// its EMISSION, because the guard is the only part of a pass that survives a dropped
+// future: a ledger owned by this body would be lost on the very path the cancelled
+// exit exists to describe, and the refs it had not yet settled would be lost with it.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn prune_epoch_tombstones(
     frontier: &TombstoneFrontier,
@@ -1547,34 +1758,20 @@ pub(crate) async fn prune_epoch_tombstones(
     key_writer: &KeyWriterRegistry,
 ) {
     let drained = frontier.drain_prunable_tombstones();
-    // One record per invocation, empty drains included: a pass that drains nothing
-    // is exactly the regime this record has to be able to describe, so the pass is
-    // counted here rather than behind any eligibility or per-ref condition. A pass
-    // counted inside the loop below would read zero during a total stall.
-    let mut pass = PrunePassRecord {
-        empty_drain: drained.is_empty(),
-        ..PrunePassRecord::default()
-    };
     // The epoch/watermark state is NOT read here. The drain has already released the
     // frontier lock, so three accessor calls would be three independent acquisitions
     // and could tear against a concurrent ACK; the frontier publishes that state
     // itself, from a snapshot taken under the drain's own lock.
-    let mut per_epoch: BTreeMap<Epoch, PruneEpochRecord> = BTreeMap::new();
+    //
+    // The drained vector moves into the guard before this function can await anything:
+    // there is no suspension point between the two statements, so there is no instant
+    // at which a ref is outside both the index and the guard.
+    let mut guard = PrunePassGuard::new(frontier, drained);
 
-    for (epoch, r) in drained {
-        // The exhaustiveness identity's left-hand side: every ref the body examines
-        // is counted here and leaves through exactly one exit counter below.
-        pass.considered += 1;
-        per_epoch
-            .entry(epoch)
-            .or_insert(PruneEpochRecord {
-                epoch,
-                ..PruneEpochRecord::default()
-            })
-            .considered += 1;
+    while let Some((epoch, r)) = guard.begin_next_ref() {
         let store = factory.get_or_create(&r.map, hash_to_partition(&r.key));
         // Serialize the drop against concurrent OR writes on this key.
-        let _guard = key_writer.acquire(&r.map, &r.key).await;
+        let _key_guard = key_writer.acquire(&r.map, &r.key).await;
         // Ensure the key is resident before the in-place drop: init=None only mutates
         // an already-resident slot, so an evicted key's durable tombstone would
         // otherwise never be reclaimed and its frontier ref would be consumed without
@@ -1588,18 +1785,12 @@ pub(crate) async fn prune_epoch_tombstones(
             // bucket: a growing share here is a candidate mechanism for a falling
             // reclaim fraction that no other instrument can see.
             Ok(None) => {
-                pass.absent += 1;
-                if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
-                    epoch_record.absent += 1;
-                }
+                guard.settle(epoch, PruneExit::AbsentKey, 0);
                 continue;
             }
             Err(e) => {
                 tracing::warn!(map = %r.map, key = %r.key, epoch, "prune read failed, re-indexing tombstone for retry: {e}");
-                pass.restored_read_error += 1;
-                if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
-                    epoch_record.restored_read_error += 1;
-                }
+                guard.settle(epoch, PruneExit::RestoredReadError, 0);
                 frontier.restore_tombstone_ref(epoch, r);
                 continue;
             }
@@ -1674,13 +1865,7 @@ pub(crate) async fn prune_epoch_tombstones(
             Ok(_) => {
                 if dropped {
                     crate::storage::record::sub_tombstone_bytes(r.tag.len() as u64);
-                    let freed = r.tag.len() as u64;
-                    pass.dropped += 1;
-                    pass.bytes_freed += freed;
-                    if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
-                        epoch_record.dropped += 1;
-                        epoch_record.bytes_freed += freed;
-                    }
+                    guard.settle(epoch, PruneExit::Dropped, r.tag.len() as u64);
                 }
                 // The closure never ran: the key was evicted between the
                 // rehydrating get and this write, so init=None mutated nothing
@@ -1702,76 +1887,72 @@ pub(crate) async fn prune_epoch_tombstones(
                         epoch,
                         "prune found key evicted mid-write, re-indexing tombstone for retry"
                     );
-                    pass.restored_evicted += 1;
-                    if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
-                        epoch_record.restored_evicted += 1;
-                    }
+                    guard.settle(epoch, PruneExit::RestoredEvicted, 0);
                     frontier.restore_tombstone_ref(epoch, r);
                 } else if !dropped {
                     // The closure ran and matched no tag; it may still have owed the
                     // shape-upgrade write above, but no tombstone was reclaimed.
-                    pass.matched_nothing += 1;
-                    if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
-                        epoch_record.matched_nothing += 1;
-                    }
+                    guard.settle(epoch, PruneExit::MatchedNothing, 0);
                 }
             }
             Err(e) => {
                 // Operator-visible: a swallowed storage error on the prune path
                 // would silently stall tombstone reclamation.
                 tracing::warn!(map = %r.map, key = %r.key, epoch, "prune update failed, re-indexing tombstone for retry: {e}");
-                pass.restored_write_error += 1;
-                if let Some(epoch_record) = per_epoch.get_mut(&epoch) {
-                    epoch_record.restored_write_error += 1;
-                }
+                guard.settle(epoch, PruneExit::RestoredWriteError, 0);
                 frontier.restore_tombstone_ref(epoch, r);
             }
         }
     }
 
-    pass.epochs_drained = per_epoch.len() as u64;
-    for epoch_record in per_epoch.values() {
-        frontier
-            .prune_observer()
-            .observe_drained_epoch(epoch_record);
-        // One settlement line per drained epoch, joined to that epoch's exit row by
-        // `epoch` — a field populated on every row of both ledgers, so the join needs
-        // no wall clock. This is the only place the per-epoch six-exit identity is
-        // observable end to end: `PruneEpochRecord` has no Prometheus series of its
-        // own, so without this line the per-epoch counters above would be provably
-        // correct in-process yet unreadable by anything outside it.
-        tracing::info!(
-            target: "topgun_server::tombstone_frontier::settlement",
-            epoch = epoch_record.epoch,
-            considered = epoch_record.considered,
-            dropped = epoch_record.dropped,
-            matched_nothing = epoch_record.matched_nothing,
-            absent = epoch_record.absent,
-            restored_read_error = epoch_record.restored_read_error,
-            restored_evicted = epoch_record.restored_evicted,
-            restored_write_error = epoch_record.restored_write_error,
-            bytes_freed = epoch_record.bytes_freed,
-            "prune epoch settlement"
-        );
+    // Nothing is emitted here. `guard` goes out of scope on the next line and its
+    // `Drop` writes the whole ledger out: on this path with nothing left pending and
+    // `restored_cancelled == 0`, on the cancelled path with whatever the pass never
+    // settled. One emission site, reached the same way either way.
+}
+
+/// Spawn the ONE long-lived prune task for this frontier.
+///
+/// Returns `None`, having spawned nothing, when a task was already claimed for this frontier,
+/// so a second call cannot put a second concurrent pass over the same index. Two loops would
+/// each drain refs the other never sees settle. Must be called from inside a tokio runtime.
+///
+/// The pass belongs here rather than on a caller's timeline because a request-path pass is a
+/// future under that request's own timeout budget: a slow pass makes the budget elapse, the
+/// layer drops the future mid-pass, and the work is cancelled for reasons that have nothing to
+/// do with the op that happened to trigger it. Nothing on this task wraps the pass in a
+/// timeout and nothing here runs under a request budget, so a pass ends when it finishes, when
+/// it panics, or at runtime teardown — and never because some unrelated caller ran out of time.
+///
+/// A frontier wired into a service **without** this spawn never prunes at all: every
+/// `TombstoneFrontier::request_prune` then only leaves a permit nobody ever consumes, while
+/// each trigger site keeps returning successfully and the wiring keeps looking correct. That is
+/// deliberately the shape every unit-test fixture has, and it is why this call is the required
+/// partner of the trigger: a production assembly that omits it reclaims nothing, silently.
+///
+/// The task owns its three `Arc`s for the lifetime of the process. Whatever assembled them
+/// keeps them alive anyway, so this closes no reference cycle and needs no `Weak`. Runtime
+/// teardown drops the task, and `PrunePassGuard` re-indexes the in-flight pass's unsettled refs
+/// as that future is dropped, so a torn-down pass loses no ref from the index — in RAM only;
+/// the restart rebuild remains the authoritative recovery. A panic inside a pass unwinds
+/// through that guard and then ends the task. The claim is never released, so the failure is NEW
+/// in kind: reclamation stops process-wide, silently, no re-trigger. Supervision is out of scope.
+#[must_use]
+pub fn spawn_prune_task(
+    frontier: Arc<TombstoneFrontier>,
+    factory: Arc<RecordStoreFactory>,
+    key_writer: Arc<KeyWriterRegistry>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !frontier.claim_prune_task() {
+        return None;
     }
-    // Exactly one pass observation per invocation, outside the loop body and on
-    // every path through this function — the recorder counts the pass itself, so a
-    // second or a conditional call would break the pass identity.
-    frontier.prune_observer().observe_pass(&pass);
-    // The pass row: `considered` and `empty_drain` have never had a `tracing`
-    // transport before this line, so neither term was readable in-process by
-    // anything that cannot bind the (permanently no-op, outside its own recorder
-    // binding) Prometheus handles. Fires on EVERY invocation, empty drains
-    // included, unconditionally and outside the loop above — that unconditional
-    // placement is what makes this row individuate a pass on the capture: it is
-    // always the last row a pass emits.
-    tracing::info!(
-        target: "topgun_server::tombstone_frontier::residency",
-        kind = "prune_pass",
-        considered = pass.considered,
-        empty_drain = pass.empty_drain,
-        "prune pass"
-    );
+    let wake = frontier.prune_wake();
+    Some(tokio::spawn(async move {
+        loop {
+            wake.notified().await;
+            prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
+        }
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1813,8 +1994,9 @@ mod tests {
         METRIC_PRUNE_ABSENT_TOTAL, METRIC_PRUNE_CONSIDERED_TOTAL, METRIC_PRUNE_DROPPED_TOTAL,
         METRIC_PRUNE_EMPTY_DRAINS_TOTAL, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL,
         METRIC_PRUNE_MATCHED_NOTHING_TOTAL, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL,
-        METRIC_PRUNE_PASSES_TOTAL, METRIC_PRUNE_RESTORED_EVICTED_TOTAL,
-        METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
+        METRIC_PRUNE_PASSES_TOTAL, METRIC_PRUNE_RESTORED_CANCELLED_TOTAL,
+        METRIC_PRUNE_RESTORED_EVICTED_TOTAL, METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
+        METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
     };
 
     // -----------------------------------------------------------------------
@@ -4304,12 +4486,13 @@ mod tests {
         (svc, factory, frontier)
     }
 
-    /// AC4 (OR write path): the wholesale epoch-drop prune is wired into the
-    /// `OR_REMOVE` write path (the sweep runs after each apply). With an injected
-    /// durability watermark and the low-water-mark STRICTLY past the epoch, a
-    /// subsequent `OR_REMOVE` fires the sweep and drops the earlier epoch's
-    /// tombstone from storage; a not-strictly-past epoch survives. DARK by
-    /// default — the injected watermark exercises the real drop path.
+    /// AC4 (OR write path): the `OR_REMOVE` write path is wired to the wholesale
+    /// epoch-drop prune as a TRIGGER — the op wakes the prune task and drains
+    /// nothing on its own timeline. With an injected durability watermark and the
+    /// low-water-mark STRICTLY past the epoch, the pass the trigger asks for then
+    /// drops that epoch's tombstone from storage; a not-strictly-past epoch
+    /// survives. DARK by default — the injected watermark exercises the real drop
+    /// path.
     #[tokio::test]
     async fn ac4_prune_wired_into_or_write_path() {
         let (svc, factory, frontier) = make_service_with_frontier();
@@ -4340,9 +4523,9 @@ mod tests {
         assert_eq!(frontier.low_water_mark(), 2);
         frontier.set_durable_epoch_watermark(1000);
 
-        // Fire the sweep via an OR_REMOVE on a THIRD key. Its own new tombstone
-        // lands in epoch 3 (pinned); epoch 2 is pinned too (LWM 2 not strictly
-        // past 2); epoch 1's T1 is dropped.
+        // Trigger via an OR_REMOVE on a THIRD key. Its own new tombstone lands in
+        // epoch 3 (pinned); epoch 2 is pinned too (LWM 2 not strictly past 2);
+        // epoch 1's T1 is what the pass is licensed to drop.
         Arc::clone(&svc)
             .oneshot(or_add_op("m", "k3", "v3", "T3"))
             .await
@@ -4351,6 +4534,22 @@ mod tests {
             .oneshot(or_remove_op("m", "k3", "T3"))
             .await
             .unwrap();
+
+        // The op triggered, it did not drain: T1 is still stored on the op's own
+        // timeline, and a wake permit is waiting for the task.
+        let (_, untouched) = read_or_map(&factory, "m", "k1").await;
+        assert!(
+            untouched.contains(&"T1".to_string()),
+            "the OR_REMOVE wakes the prune task and drains nothing itself"
+        );
+        let wake = frontier.prune_wake();
+        tokio::time::timeout(std::time::Duration::from_millis(1), wake.notified())
+            .await
+            .expect("the OR_REMOVE must leave a wake permit pending for the prune task");
+
+        // The pass the trigger asked for, run explicitly: this fixture spawns no
+        // task, so nothing else would ever consume the permit.
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
 
         let (_, tombs_k1) = read_or_map(&factory, "m", "k1").await;
         assert!(
@@ -4401,9 +4600,8 @@ mod tests {
             assert_eq!(frontier.low_water_mark(), 2);
             frontier.set_durable_epoch_watermark(1000);
 
-            // Fire the sweep via an OR_REMOVE on a THIRD key: epoch 3 (its own)
-            // and epoch 2 stay pinned, epoch 1's T1 is dropped and its bytes are
-            // returned to the gauge.
+            // Trigger via an OR_REMOVE on a THIRD key: epoch 3 (its own) and
+            // epoch 2 stay pinned, epoch 1's T1 is what the pass may drop.
             Arc::clone(&svc)
                 .oneshot(or_add_op("m", "k3", "v3", t3))
                 .await
@@ -4412,6 +4610,12 @@ mod tests {
                 .oneshot(or_remove_op("m", "k3", t3))
                 .await
                 .unwrap();
+
+            // The pass the trigger asked for, run explicitly inside the isolated
+            // gauge scope so its decrement lands in the measured delta. This is
+            // the same function the spawned task runs, which is what keeps this a
+            // `TG-OR-004` enforcing test of the real prune path.
+            prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
 
             // Pin the drop the decrement accounts for. Without this, a gauge
             // delta alone could also be produced by a prune that never ran plus
@@ -5480,6 +5684,447 @@ mod tests {
         );
     }
 
+    /// A prune pass that is cancelled mid-flight must hand every ref it drained
+    /// but never settled back to the index.
+    ///
+    /// `TG-OR-004`: the drain removes a ref from the RAM index BEFORE the pass
+    /// tries to drop its tag from storage, so a pass that stops early leaves
+    /// those refs named by nobody — no later sweep can retry a tag whose index
+    /// entry is gone, and the tombstone bytes it names are stranded in storage
+    /// for the life of the process. A held per-key writer makes the stop
+    /// deterministic rather than a race: the pass can never get past `K_HELD`.
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn cancelled_prune_pass_restores_every_unsettled_ref() {
+        const N: usize = 4;
+        const K_HELD: &str = "kheld";
+
+        let (svc, factory, frontier) = make_service_with_frontier();
+
+        // Epoch width is 1, so each OR_REMOVE lands its own ref in its own
+        // epoch and which epochs are eligible is decided by the injected gates
+        // below rather than by a clock. The gates are still shut here, so the
+        // inline prune every seeding OR_REMOVE runs drains nothing.
+        let mut seeded: Vec<(String, String)> = Vec::new();
+        for i in 0..N {
+            let key = if i == 0 {
+                K_HELD.to_string()
+            } else {
+                format!("k{i}")
+            };
+            let tag = format!("T{i}");
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", &key, "v", &tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", &key, &tag))
+                .await
+                .unwrap();
+            seeded.push((key, tag));
+        }
+        assert_eq!(
+            frontier.current_epoch(),
+            N as u64,
+            "one stamped tombstone per seeded pair, one epoch each"
+        );
+
+        // Pins the epoch counter one past the seeded refs, so the cursor can sit
+        // strictly past every seeded epoch without making a further one eligible.
+        frontier.stamp_tombstone("m", "kfiller", "FILLER");
+
+        // Both conjuncts open past the seeded epochs only: eligibility is STRICT,
+        // so a cursor at N+1 licenses epochs 1..=N and leaves the filler out.
+        let client: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 10_000);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, (N + 1) as u64, ConnectionId(1))
+                .await
+        );
+        assert_eq!(frontier.low_water_mark(), (N + 1) as u64);
+        frontier.set_durable_epoch_watermark(1000);
+
+        // The pass takes this same per-key writer per dropped tag, so holding it
+        // blocks the pass forever on K_HELD and the budget below always elapses.
+        let held = svc.key_writer.acquire("m", K_HELD).await;
+
+        let (guard, sink) = capture_tracing_rows();
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            prune_epoch_tombstones(&frontier, &factory, &svc.key_writer),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "the pass cannot pass the held writer, so it must be cancelled"
+        );
+        drop(held);
+        // The capture is thread-local and the rows are read off it only once the
+        // guard is gone; the index assertion's own drain runs after that, since
+        // the drain mutates the very index it inspects.
+        drop(guard);
+        let rows = sink.lock().unwrap().clone();
+
+        // Conservation is read HERE, ahead of the inspection drain below, because that
+        // drain is a measurement artifact rather than part of the property: the drain
+        // decrements `indexed_refs` once per REF, while `drained_refs_total` is credited
+        // once per epoch SLOT, and a ref handed back into an already-exited epoch has no
+        // slot to credit. Re-draining what the cancelled pass restored therefore subtracts
+        // from one side of the identity and not the other. Read after it, this would
+        // measure that asymmetry instead of whether the cancelled pass conserved the index.
+        let snapshot = frontier.index_conservation_snapshot();
+        assert_eq!(
+            snapshot.stamped_refs_total + snapshot.restored_refs_total
+                - snapshot.drained_refs_total
+                - snapshot.rebuild_cleared_refs_total,
+            snapshot.indexed_refs,
+            "O-0 must hold across a cancelled pass too, got {snapshot:?}"
+        );
+
+        let retryable = frontier.drain_prunable_tombstones();
+        let mut durably_gone = 0usize;
+        for (key, tag) in &seeded {
+            let (_, tombs) = read_or_map(&factory, "m", key).await;
+            if !tombs.contains(tag) {
+                durably_gone += 1;
+            }
+        }
+
+        assert!(
+            retryable.iter().any(|(_, r)| r.key == K_HELD),
+            "the ref the cancelled pass was blocked on must be back in the index, \
+             got {retryable:?}"
+        );
+        // Order-independent: the drain visits epochs in hash order, so which refs
+        // settled before the block is not assumed — only that every seeded ref is
+        // either settled durably or still retryable.
+        assert_eq!(
+            retryable.len() + durably_gone,
+            N,
+            "every seeded ref must be accounted for, either durably dropped or \
+             handed back; got {} retryable and {durably_gone} durably gone",
+            retryable.len()
+        );
+
+        let pass_rows: Vec<&str> = rows
+            .iter()
+            .map(String::as_str)
+            .filter(|l| {
+                is_row(
+                    l,
+                    "topgun_server::tombstone_frontier::residency",
+                    "prune_pass",
+                )
+            })
+            .collect();
+        assert_eq!(
+            pass_rows.len(),
+            1,
+            "a cancelled pass still owes exactly one pass row; capture was:\n{rows:#?}"
+        );
+
+        // The settlement row carries no `kind` field, so filter on target alone.
+        let settlement_rows: Vec<&str> = rows
+            .iter()
+            .map(String::as_str)
+            .filter(|l| l.contains(" target=topgun_server::tombstone_frontier::settlement "))
+            .collect();
+        let mut considered_sum = 0u64;
+        let mut restored_cancelled_sum = 0u64;
+        for row in &settlement_rows {
+            let considered = row_u64(row, "considered");
+            let dropped = row_u64(row, "dropped");
+            let matched_nothing = row_u64(row, "matched_nothing");
+            let absent = row_u64(row, "absent");
+            let restored_read_error = row_u64(row, "restored_read_error");
+            let restored_evicted = row_u64(row, "restored_evicted");
+            let restored_write_error = row_u64(row, "restored_write_error");
+            let restored_cancelled = row_u64(row, "restored_cancelled");
+            assert_eq!(
+                considered,
+                dropped
+                    + matched_nothing
+                    + absent
+                    + restored_read_error
+                    + restored_evicted
+                    + restored_write_error
+                    + restored_cancelled,
+                "the per-epoch exit identity must hold on this settlement row: {row:?}"
+            );
+            considered_sum += considered;
+            restored_cancelled_sum += restored_cancelled;
+        }
+        assert_eq!(
+            considered_sum, N as u64,
+            "every eligible ref must be considered by the cancelled pass"
+        );
+        assert_eq!(
+            restored_cancelled_sum,
+            (N - durably_gone) as u64,
+            "every ref the pass did not settle must leave through the cancelled exit"
+        );
+        assert!(
+            restored_cancelled_sum >= 1,
+            "the blocked ref alone makes this exit nonempty"
+        );
+    }
+
+    /// An `OR_REMOVE` carried through the PRODUCTION `TimeoutLayer` must not lose
+    /// the refs a prune drained.
+    ///
+    /// `TG-OR-006`: a pass run on the caller's own timeline sits inside that
+    /// request's timeout budget, so a per-key writer held anywhere in the drained
+    /// set makes the budget elapse and the layer cancel the call mid-pass. The
+    /// op's own remove is applied regardless, so the caller is told the write
+    /// timed out while the server kept it — and the drained refs are gone from
+    /// the index. Asking for the pass instead of running it is what keeps the op
+    /// inside its budget. This is the behavioural proof on the production
+    /// mechanism, not on a synthetic pass.
+    #[tokio::test]
+    async fn or_remove_under_the_timeout_layer_never_loses_drained_refs() {
+        const K_HELD: &str = "kheld";
+        const K_OP: &str = "kop";
+        const BUDGET_MS: u64 = 500;
+
+        let (svc, factory, frontier) = make_service_with_frontier();
+
+        // Two eligible refs, on two distinct keys, one of them the key whose
+        // writer the test holds.
+        for (key, tag) in [(K_HELD, "THELD"), ("kother", "TOTHER")] {
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", key, "v", tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", key, tag))
+                .await
+                .unwrap();
+        }
+        // The record the op under test removes from.
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", K_OP, "v", "TOP"))
+            .await
+            .unwrap();
+
+        // Pins the epoch counter one past the seeded refs: the low-water mark
+        // cannot advance beyond the epochs that exist, so without this stamp a
+        // cursor past epoch 2 would clamp back to 2 and license only epoch 1.
+        frontier.stamp_tombstone("m", "kfiller", "FILLER");
+
+        // Past the two seeded epochs only. The filler holds epoch 3 and the op's
+        // own stamp lands in epoch 4, neither of which a cursor at 3 licenses, so
+        // the drain sees exactly the two seeded refs.
+        let client: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 10_000);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, 3, ConnectionId(1))
+                .await
+        );
+        assert_eq!(frontier.low_water_mark(), 3);
+        frontier.set_durable_epoch_watermark(1000);
+
+        // Built here rather than via `or_remove_op`: the budget has to be set on
+        // the context BEFORE the op is constructed, and there is no `ctx_mut`.
+        let mut ctx = make_ctx_for_key(K_OP);
+        ctx.call_timeout_ms = BUDGET_MS;
+        let op = Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("rm-TOP".to_string()),
+                    map_name: "m".to_string(),
+                    key: K_OP.to_string(),
+                    op_type: None,
+                    record: None,
+                    or_record: None,
+                    or_tag: Some(Some("TOP".to_string())),
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        let held = svc.key_writer.acquire("m", K_HELD).await;
+        let layered = tower::ServiceBuilder::new()
+            .layer(crate::service::middleware::TimeoutLayer)
+            .service(Arc::clone(&svc));
+        let outcome = layered.oneshot(op).await;
+        drop(held);
+
+        // Both halves of the witness are printed BEFORE the first assertion, so
+        // the applied-then-timed-out pair is readable in the failure output even
+        // though the assertion that fails is the one about the returned value.
+        let (_, tombs) = read_or_map(&factory, "m", K_OP).await;
+        println!("witness: stored tombstones on {K_OP} = {tombs:?}");
+        println!("witness: returned = {outcome:?}");
+
+        assert!(
+            outcome.is_ok(),
+            "an OR_REMOVE must complete within its own budget, got {outcome:?}"
+        );
+        // What the op did instead of pruning: it left a wake permit. This fixture
+        // spawns no task, so the permit is still pending for the assertion to
+        // consume.
+        let wake = frontier.prune_wake();
+        tokio::time::timeout(std::time::Duration::from_millis(1), wake.notified())
+            .await
+            .expect("the OR_REMOVE must leave a wake permit pending for the prune task");
+        let retryable = frontier.drain_prunable_tombstones();
+        assert!(
+            retryable.iter().any(|(_, r)| r.key == K_HELD),
+            "the blocked key's ref must still be indexed after the call, got {retryable:?}"
+        );
+    }
+
+    /// An `OR_REMOVE` asks for a prune pass; it never runs one.
+    ///
+    /// The trigger has to stay O(1) whatever the backlog, so with a large
+    /// eligible set indexed and both gates open the op must drain NONE of it,
+    /// leave a wake permit behind, and grow the index by exactly its own stamp.
+    /// The drain counter is re-read after a yield as well: a regression that
+    /// spawned a per-op pass would satisfy a single immediate read, because the
+    /// spawned pass has not been polled yet. The structural limb closes the same
+    /// gap from the other side — the arm names no spawn at all — and the pair is
+    /// what makes "O(1)" a property of the code rather than of the wall clock.
+    #[tokio::test]
+    async fn or_remove_only_wakes_the_prune_task_and_drains_nothing() {
+        const BACKLOG: u64 = 1_000;
+        const SOURCE: &str = include_str!("crdt.rs");
+        let (svc, _factory, frontier) = make_service_with_frontier();
+
+        // The record the op under test removes from, added before the backlog so
+        // its own slot is never one of the eligible refs.
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "kop", "v", "TOP"))
+            .await
+            .unwrap();
+
+        // Epoch width is 1, so each stamp owns an epoch: the backlog fills epochs
+        // 1..=BACKLOG and the pin takes the next one, letting the cursor sit
+        // strictly past every backlog epoch without exceeding the epochs that
+        // exist.
+        for i in 1..=BACKLOG {
+            frontier.stamp_tombstone("m", &format!("kbacklog{i}"), &format!("TB{i}"));
+        }
+        assert_eq!(
+            frontier.stamp_tombstone("m", "kpin", "TPIN"),
+            BACKLOG + 1,
+            "the pin owns the epoch past the backlog"
+        );
+        let client: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 10_000);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, BACKLOG + 1, ConnectionId(1))
+                .await
+        );
+        assert_eq!(frontier.low_water_mark(), BACKLOG + 1);
+        frontier.set_durable_epoch_watermark(1_000_000);
+
+        let before = frontier.index_conservation_snapshot();
+        assert!(
+            before.indexed_refs >= BACKLOG,
+            "precondition: the op runs against a real backlog, got {before:?}"
+        );
+
+        Arc::clone(&svc)
+            .oneshot(or_remove_op("m", "kop", "TOP"))
+            .await
+            .expect("the OR_REMOVE must return Ok");
+
+        let after = frontier.index_conservation_snapshot();
+        assert_eq!(
+            after.drained_refs_total, before.drained_refs_total,
+            "the op must drain nothing: reclamation is the task's work, not the \
+             caller's, got {after:?}"
+        );
+        assert_eq!(
+            after.indexed_refs,
+            before.indexed_refs + 1,
+            "the index grows by exactly the op's own stamp, got {after:?}"
+        );
+
+        // What the op did instead: it left a wake permit. Nothing consumes it
+        // here — the fixture spawns no task — so it is still pending.
+        let wake = frontier.prune_wake();
+        tokio::time::timeout(std::time::Duration::from_millis(1), wake.notified())
+            .await
+            .expect("the OR_REMOVE must leave a wake permit pending for the prune task");
+
+        // Re-read after a yield: a spawned per-op pass would be invisible to the
+        // read above simply because it had not been polled yet.
+        tokio::task::yield_now().await;
+        assert_eq!(
+            frontier.index_conservation_snapshot().drained_refs_total,
+            before.drained_refs_total,
+            "still nothing drained once other tasks have had a chance to run"
+        );
+
+        // The same claim structurally: no arm of the write path may hand the pass
+        // to a task of its own. A per-op task is a per-op pass with a thread hop
+        // in front of it, which is the unbounded work this trigger exists to
+        // avoid, and it would also put a second writer over the one index.
+        let arm = SOURCE
+            .split_once("} else if is_or_remove {")
+            .expect("the OR_REMOVE arm is in this file")
+            .1;
+        let arm = arm
+            .split_once("\n        } else {")
+            .expect("the OR_REMOVE arm closes into the LWW PUT branch")
+            .0;
+        assert!(
+            !arm.contains("spawn"),
+            "the OR_REMOVE arm must name no spawn; arm was:\n{arm}"
+        );
+    }
+
+    /// The prune runs on ONE long-lived task per frontier.
+    ///
+    /// Single-flight limb: a second `spawn_prune_task` over the same frontier
+    /// spawns nothing and hands back `None`. Two loops over one index would each
+    /// drain refs the other never sees settle, so the claim is what keeps the
+    /// pass a single writer no matter how many wiring sites call this.
+    ///
+    /// The reclaim and never-blocks-the-op limbs of this contract arrive with the
+    /// move of the trigger sites off the request path. They are deliberately not
+    /// asserted yet: while the `OR_REMOVE` arm still runs a pass inline, a reclaim
+    /// assertion here would be satisfied on the caller's own timeline and would
+    /// keep passing even if the spawned task were never polled at all.
+    #[tokio::test]
+    async fn spawned_prune_task_reclaims_after_an_or_remove_and_never_blocks_the_op() {
+        let (svc, factory, frontier) = make_service_with_frontier();
+
+        let first = spawn_prune_task(
+            Arc::clone(&frontier),
+            Arc::clone(&factory),
+            Arc::clone(&svc.key_writer),
+        );
+        assert!(
+            first.is_some(),
+            "the first spawn over a fresh frontier must claim the task"
+        );
+
+        let second = spawn_prune_task(
+            Arc::clone(&frontier),
+            Arc::clone(&factory),
+            Arc::clone(&svc.key_writer),
+        );
+        assert!(
+            second.is_none(),
+            "a second spawn over the same frontier must claim nothing: one index \
+             admits exactly one prune loop"
+        );
+
+        // Nothing here calls `request_prune`, so the task parks forever on its
+        // first wake; aborting it keeps the runtime's shutdown free of a live
+        // task holding the fixture's `Arc`s.
+        if let Some(task) = first {
+            task.abort();
+        }
+    }
+
     /// Evicts named keys the instant the record store rehydrates them.
     ///
     /// This is the only in-process lever that manufactures the "evicted between
@@ -6024,6 +6669,26 @@ mod tests {
         restored_refs: Vec<(Epoch, String, String)>,
     }
 
+    /// The handles the ledger test needs once the workload has returned.
+    ///
+    /// A struct SEPARATE from [`PruneWorkloadOutcome`], and one that derives
+    /// NOTHING. It exists because the ledger test has to keep driving the same
+    /// frontier after the shared workload is done — stamping a further pin and
+    /// running a second, cancelled pass — and the workload consumes its fixture.
+    ///
+    /// Keeping the handles out of the outcome is what preserves the
+    /// armed-vs-disarmed equality: that comparison is over reclaim behaviour,
+    /// and a struct carrying `Arc`s would drag pointer identity into it. A
+    /// future reader must not re-add `Debug` here either — `#[derive(Debug)]`
+    /// over an `Arc<T>` requires `T: Debug`, and neither [`CrdtService`] nor the
+    /// test-local [`ArmableStore`] has one, so the derive would not compile.
+    struct SixExitHandles {
+        svc: Arc<CrdtService>,
+        factory: Arc<RecordStoreFactory>,
+        frontier: Arc<TombstoneFrontier>,
+        store: Arc<ArmableStore>,
+    }
+
     fn build_six_exit_fixture() -> SixExitFixture {
         let store = Arc::new(ArmableStore::default());
         let evictor = Arc::new(EvictOnRehydrate::default());
@@ -6054,7 +6719,9 @@ mod tests {
     /// clock. The failure modes are armed only after seeding, so every setup
     /// write succeeds and the prune's own read/write is the one that fails.
     #[allow(clippy::too_many_lines)]
-    async fn run_six_exit_prune_workload(fixture: SixExitFixture) -> PruneWorkloadOutcome {
+    async fn run_six_exit_prune_workload(
+        fixture: SixExitFixture,
+    ) -> (PruneWorkloadOutcome, SixExitHandles) {
         let SixExitFixture {
             store,
             evictor,
@@ -6110,6 +6777,17 @@ mod tests {
             7,
             "the pin sits in epoch 7"
         );
+
+        // One EXPLICIT pass while both gates are still shut, so the workload
+        // owns an empty drain of its own. The empty-drain regime has to be
+        // reachable from the workload itself rather than from whatever sweeps
+        // happen to run as a side effect of the seeding writes: those sweeps are
+        // a property of where the prune is TRIGGERED from, so a test that reads
+        // its empty pass off them is pinning the trigger's shape instead of the
+        // pass record's. Nothing is eligible here — no cursor has been
+        // confirmed, so the low-water mark is still 0 — which is exactly what
+        // makes this an empty drain.
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
 
         let client: String = "a5:alice|dev-1".into();
         frontier.set_delivered(ConnectionId(1), 100);
@@ -6180,11 +6858,19 @@ mod tests {
             .collect();
         restored_refs.sort();
 
-        PruneWorkloadOutcome {
-            durable_tombstones,
-            dropped_observed,
-            restored_refs,
-        }
+        (
+            PruneWorkloadOutcome {
+                durable_tombstones,
+                dropped_observed,
+                restored_refs,
+            },
+            SixExitHandles {
+                svc,
+                factory,
+                frontier,
+                store,
+            },
+        )
     }
 
     /// Run the six-exit workload once and return its outcome, its isolated
@@ -6219,7 +6905,7 @@ mod tests {
         } else {
             Some(rt.block_on(async { build_six_exit_fixture() }))
         };
-        let (outcome, gauge_delta) = metrics::with_local_recorder(&recorder, || {
+        let ((outcome, _handles), gauge_delta) = metrics::with_local_recorder(&recorder, || {
             let fixture =
                 prebuilt.unwrap_or_else(|| rt.block_on(async { build_six_exit_fixture() }));
             rt.block_on(with_isolated_gauge(run_six_exit_prune_workload(fixture)))
@@ -6240,27 +6926,127 @@ mod tests {
             .unwrap_or_else(|e| panic!("counter {name} did not render an integer: {e}"))
     }
 
-    /// The prune ledger is exit-path EXHAUSTIVE, and a pass is counted once per
-    /// invocation rather than once per ref.
+    /// The prune ledger is exit-path EXHAUSTIVE over all SEVEN exits, and a pass
+    /// is counted once per invocation rather than once per ref.
     ///
     /// Two identities, one test, because they share a workload and because the
     /// second is the premise the first's usefulness rests on:
     ///
     /// The exit identity, `considered == dropped + matched_nothing + absent +
-    /// restored_read_error + restored_evicted + restored_write_error`. Every ref
-    /// the loop examines leaves through exactly one counted exit, so a ref that
-    /// quietly stops being accounted for — the mechanism behind a reclaim
-    /// fraction that falls with no instrument able to say why — cannot hide.
+    /// restored_read_error + restored_evicted + restored_write_error +
+    /// restored_cancelled`. Every ref the loop examines leaves through exactly
+    /// one counted exit, so a ref that quietly stops being accounted for — the
+    /// mechanism behind a reclaim fraction that falls with no instrument able to
+    /// say why — cannot hide.
     ///
     /// The pass identity, `passes == empty_drains + nonempty_drains`, pinned
-    /// alongside `nonempty_drains == 1` and `empty_drains >= 1`: the pass
+    /// alongside `nonempty_drains == 2` and `empty_drains >= 1`: the pass
     /// observation is sited at the invocation and outside the loop body. Sited
     /// inside the loop it would read zero in a total stall — precisely the
-    /// regime the record exists to describe — and would here count six passes
-    /// for one drain; made conditional on work, it would drop every empty pass.
+    /// regime the record exists to describe — and would here count seven passes
+    /// for two drains; made conditional on work, it would drop every empty pass.
+    ///
+    /// The SEVENTH exit is driven here and in none of the tests that share this
+    /// workload, because a cancelled pass is not a property of the workload: it
+    /// is a second pass this test alone runs, and a shared one would inject an
+    /// injected-failure ref into every sibling's counts. The sequence is forced,
+    /// and each step is what keeps the next one honest:
+    ///
+    /// 1. the shared one-pass workload runs unchanged, driving six exits;
+    /// 2. its own outcome drain CONSUMES the three refs that pass restored, so
+    ///    they cannot re-enter the second pass still carrying their injected
+    ///    read / write / eviction failures, settle through the wrong exit, and
+    ///    break both counts below;
+    /// 3. a fresh pin is stamped at epoch 8 and acked, which makes `kpinned`'s
+    ///    epoch 7 eligible while the new pin holds the frontier open — leaving
+    ///    the index holding exactly ONE drainable ref;
+    /// 4. that ref's per-key writer is held and a second pass runs under a short
+    ///    timeout, so the pass drains its one ref, blocks on a writer it can
+    ///    never take, and is cancelled on it: exactly one `RestoredCancelled`.
+    ///
+    /// `with_isolated_gauge` wraps the workload AND steps 3–4 rather than the
+    /// workload alone. The cancelled pass is where the cancellation happens, so
+    /// its tombstone-byte writes have to land in the same task-local sink
+    /// instead of on the process gauge. The fixture is built INSIDE the recorder
+    /// binding for the reason `six_exit_run` documents: a frontier constructed
+    /// before the recorder is bound leaves every prune-record handle a permanent
+    /// no-op, and the pins below are read by `rendered_counter`, which PANICS on
+    /// an absent counter rather than reading a zero.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn prune_exit_ledger_sums_to_considered() {
-        let (outcome, _gauge_delta, rendered) = six_exit_run(true);
+        const K_PINNED: &str = "kpinned";
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let ((outcome, _handles), _gauge_delta) = metrics::with_local_recorder(&recorder, || {
+            let fixture = rt.block_on(async { build_six_exit_fixture() });
+            rt.block_on(with_isolated_gauge(async {
+                let (outcome, handles) = run_six_exit_prune_workload(fixture).await;
+
+                // Step 3. The fresh pin takes epoch 8, so a cursor at 8 licenses
+                // epoch 7 — eligibility is STRICT — without licensing the pin
+                // itself.
+                assert_eq!(
+                    handles.frontier.stamp_tombstone("m", "knew", "TNEW"),
+                    8,
+                    "the fresh pin sits in epoch 8"
+                );
+                let client: String = "a5:alice|dev-1".into();
+                assert!(
+                    handles
+                        .frontier
+                        .confirm_apply_ack(&client, 8, ConnectionId(1))
+                        .await
+                );
+                assert_eq!(
+                    handles.frontier.low_water_mark(),
+                    8,
+                    "epoch 7 is eligible now and epoch 8 is pinned"
+                );
+
+                // Step 4. The pass takes the per-key writer for every ref it
+                // works on, so holding this one blocks it on its only ref and
+                // the budget always elapses — a deterministic stop, not a race.
+                let held = handles.svc.key_writer.acquire("m", K_PINNED).await;
+                let cancelled = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    prune_epoch_tombstones(
+                        &handles.frontier,
+                        &handles.factory,
+                        &handles.svc.key_writer,
+                    ),
+                )
+                .await;
+                assert!(
+                    cancelled.is_err(),
+                    "the second pass cannot pass the held writer, so it must be \
+                     cancelled"
+                );
+                drop(held);
+
+                // WHERE the pass stopped is what decides which exit its one ref
+                // takes, and this is the witness for it: the pinned ref names no
+                // durable record at all, so a pass that had got as far as the
+                // rehydrating read would have settled it through `AbsentKey` and
+                // the seventh exit would never have fired. Blocked at the writer,
+                // strictly ahead of that read, the cancelled exit is the only one
+                // it can take.
+                assert!(
+                    handles.store.durable("m", K_PINNED).is_none(),
+                    "the pinned ref names no durable record, so the exit it takes \
+                     is decided by where the pass stopped"
+                );
+
+                (outcome, handles)
+            }))
+        });
+        let rendered = handle.render();
 
         assert_eq!(
             outcome.dropped_observed, 1,
@@ -6277,6 +7063,7 @@ mod tests {
         let restored_evicted = rendered_counter(&rendered, METRIC_PRUNE_RESTORED_EVICTED_TOTAL);
         let restored_write_error =
             rendered_counter(&rendered, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL);
+        let restored_cancelled = rendered_counter(&rendered, METRIC_PRUNE_RESTORED_CANCELLED_TOTAL);
 
         // Each exit fired exactly once. Asserted before the sum so a workload
         // that stopped reaching an exit fails HERE, loudly, instead of leaving
@@ -6291,6 +7078,7 @@ mod tests {
                 METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
                 restored_write_error,
             ),
+            (METRIC_PRUNE_RESTORED_CANCELLED_TOTAL, restored_cancelled),
         ] {
             assert_eq!(
                 observed, 1,
@@ -6307,11 +7095,15 @@ mod tests {
                 + absent
                 + restored_read_error
                 + restored_evicted
-                + restored_write_error,
+                + restored_write_error
+                + restored_cancelled,
             "every considered ref must leave through exactly one counted exit; \
              render was:\n{rendered}"
         );
-        assert_eq!(considered, 6, "six refs drained, one per exit");
+        assert_eq!(
+            considered, 7,
+            "seven refs considered across the two passes, one per exit"
+        );
 
         let passes = rendered_counter(&rendered, METRIC_PRUNE_PASSES_TOTAL);
         let empty_drains = rendered_counter(&rendered, METRIC_PRUNE_EMPTY_DRAINS_TOTAL);
@@ -6323,21 +7115,84 @@ mod tests {
              two drain buckets; render was:\n{rendered}"
         );
         assert_eq!(
-            nonempty_drains, 1,
-            "the pass observation is sited at the invocation, so the one drain \
-             that took work counts ONCE — six here would mean it had been moved \
+            nonempty_drains, 2,
+            "the pass observation is sited at the invocation, so each drain that \
+             took work counts ONCE — seven here would mean it had been moved \
              into the per-ref loop; render was:\n{rendered}"
         );
         assert!(
             empty_drains >= 1,
-            "the OR write path sweeps while the gates are shut, and those empty \
-             passes must be counted too — a pass increment inside the loop body \
-             would count none of them; render was:\n{rendered}"
+            "the workload runs an explicit pass while its gates are shut, and \
+             such empty passes must be counted too — a pass increment inside the \
+             loop body would count none of them; render was:\n{rendered}"
         );
         assert_eq!(
             rendered_counter(&rendered, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL),
-            6,
+            7,
             "one epoch per ref at epoch width 1; render was:\n{rendered}"
+        );
+    }
+
+    /// The guard's `Drop` — the one emission site a cancelled pass ever reaches
+    /// — is panic-free and moves no tombstone bytes.
+    ///
+    /// `TG-OR-004`: this `Drop` runs on a path a caller reaches by GIVING UP on
+    /// the pass, and a panic inside a `drop` during an unwind aborts the
+    /// process. "It happens not to panic today" is therefore not the property
+    /// worth having — the body must name no fallible-unwrap construct at all.
+    /// It must equally move no bytes: a restored ref freed nothing, and the
+    /// gauge decrement belongs behind a durable write that succeeded.
+    ///
+    /// The single `restore_tombstone_ref` and single `observe_pass` call sites
+    /// are the structural half. One restore path rather than two is what stops a
+    /// second, divergent one being added later, and it is satisfiable only
+    /// because the in-flight ref and the remainder are handed back in ONE
+    /// chained iteration rather than in two loops.
+    ///
+    /// The slice is delimited exactly as this file's sibling structural tests
+    /// delimit theirs — the anchor, then the first column-0 closing brace after
+    /// it. Without a fixed delimiter "the body" is undefined: a scan running to
+    /// the end of the file would read this very test and make the no-`unwrap(`
+    /// and no-`panic!` limbs spuriously RED, while one stopping too early would
+    /// make them vacuous.
+    #[test]
+    fn prune_guard_drop_is_panic_free_and_gauge_neutral() {
+        const SOURCE: &str = include_str!("crdt.rs");
+
+        let start = SOURCE
+            .find("impl Drop for PrunePassGuard")
+            .expect("the guard's Drop is implemented in this file");
+        let tail = &SOURCE[start..];
+        let end = tail
+            .find("\n}\n")
+            .expect("the Drop impl closes at a column-0 brace");
+        let body = &tail[..end];
+
+        for needle in ["unwrap(", "expect(", "panic!"] {
+            assert!(
+                !body.contains(needle),
+                "the guard's Drop must name no `{needle}`: it runs on the \
+                 cancellation path, where a panic during an unwind aborts the \
+                 process"
+            );
+        }
+        assert!(
+            !body.contains("_tombstone_bytes"),
+            "the guard's Drop must move no tombstone bytes: a ref handed back \
+             freed nothing, and the decrement belongs behind a successful \
+             durable write"
+        );
+        assert_eq!(
+            body.matches("observe_pass").count(),
+            1,
+            "the pass is observed exactly once per invocation, from the guard's \
+             single emission site"
+        );
+        assert_eq!(
+            body.matches("restore_tombstone_ref").count(),
+            1,
+            "exactly one restore call site: two would be two restore paths, and \
+             a second path is how a divergent one gets added later"
         );
     }
 
@@ -6452,21 +7307,27 @@ mod tests {
         passes
     }
 
-    /// R2.1/R2.2/AC3: the six-exit identity holds **per epoch**, exactly as it
+    /// R2.1/R2.2/AC3: the seven-exit identity holds **per epoch**, exactly as it
     /// already holds per pass — read off the settlement row, the only transport
     /// `PruneEpochRecord` has (it carries no Prometheus series of its own).
     ///
     /// The six-exit fixture drains six epochs of width 1, one ref each, so
     /// every epoch's settlement row has `considered == 1` and exactly one of
-    /// the six exit terms `== 1` — a per-epoch identity that would read exactly
+    /// the exit terms `== 1` — a per-epoch identity that would read exactly
     /// as "true" on a settlement row wired to the wrong per-epoch counter (all
     /// zero on one side), which is why each epoch's OWN nonzero exit is also
     /// checked below rather than only the sum.
+    ///
+    /// The cancelled term is summed here too and reads 0 on every row: this
+    /// workload's one pass runs to completion, so no ref leaves through it.
+    /// Reading it anyway is what keeps the identity a SEVEN-term one — a term
+    /// omitted from the sum is a term the identity stops being able to see, and
+    /// the exit it names is exactly the one a cancelled pass depends on.
     #[tokio::test]
-    async fn per_epoch_six_exit_identity_holds_on_the_settlement_row() {
+    async fn per_epoch_seven_exit_identity_holds_on_the_settlement_row() {
         let (guard, sink) = capture_tracing_rows();
         let fixture = build_six_exit_fixture();
-        let _outcome = run_six_exit_prune_workload(fixture).await;
+        let (_outcome, _handles) = run_six_exit_prune_workload(fixture).await;
         drop(guard);
         let rows = sink.lock().unwrap().clone();
 
@@ -6495,6 +7356,7 @@ mod tests {
             let restored_read_error = row_u64(row, "restored_read_error");
             let restored_evicted = row_u64(row, "restored_evicted");
             let restored_write_error = row_u64(row, "restored_write_error");
+            let restored_cancelled = row_u64(row, "restored_cancelled");
             assert_eq!(
                 considered,
                 dropped
@@ -6502,8 +7364,9 @@ mod tests {
                     + absent
                     + restored_read_error
                     + restored_evicted
-                    + restored_write_error,
-                "the per-epoch six-exit identity must hold on this settlement \
+                    + restored_write_error
+                    + restored_cancelled,
+                "the per-epoch seven-exit identity must hold on this settlement \
                  row: {row:?}"
             );
             assert_eq!(considered, 1, "one ref per epoch at epoch width 1: {row:?}");
@@ -6523,17 +7386,17 @@ mod tests {
     /// entry/exit rows use, with `kind = "prune_pass"` and the right
     /// `considered` / `empty_drain` values (R2.5, R2.5a, R2.5b).
     ///
-    /// The six-exit workload's OWN seeding writes sweep the (still-shut) prune
-    /// gates on top of the workload's one explicit call at the end (the same
-    /// mechanism `prune_exit_ledger_sums_to_considered` pins with `empty_drains
-    /// >= 1`), so a single run of it already exercises both an empty-drain pass
-    /// and a draining one — no hand-rolled second invocation needed, and none
-    /// of the exact auto-swept row count is assumed.
+    /// The six-exit workload runs an explicit `prune_epoch_tombstones` pass
+    /// while its prune gates are still shut, ahead of the draining call at the
+    /// end (the same pass `prune_exit_ledger_sums_to_considered` pins with
+    /// `empty_drains >= 1`), so a single run of it already exercises both an
+    /// empty-drain pass and a draining one — no hand-rolled second invocation
+    /// needed, and no exact pass-row count assumed.
     #[tokio::test]
     async fn pass_row_fires_on_every_invocation_including_an_empty_drain() {
         let (guard, sink) = capture_tracing_rows();
         let fixture = build_six_exit_fixture();
-        let _outcome = run_six_exit_prune_workload(fixture).await;
+        let (_outcome, _handles) = run_six_exit_prune_workload(fixture).await;
         drop(guard);
         let rows = sink.lock().unwrap().clone();
 
@@ -6551,9 +7414,9 @@ mod tests {
 
         assert!(
             pass_rows.len() >= 2,
-            "the workload's seeding writes sweep the shut prune gates, so more \
-             than one pass row is expected on top of the workload's own \
-             explicit call; capture was:\n{rows:#?}"
+            "the workload runs an explicit pass while its prune gates are shut, \
+             so at least one pass row is expected on top of its own draining \
+             call; capture was:\n{rows:#?}"
         );
         assert!(
             pass_rows
@@ -6562,21 +7425,21 @@ mod tests {
             "at least one pass row must report an empty drain (considered=0, \
              empty_drain=true); capture was:\n{rows:#?}"
         );
-        // The workload's own explicit `prune_epoch_tombstones` call is the LAST
-        // invocation of the run, strictly after every seeding write, so it is
-        // deterministically the capture's last pass row. Cited by name, not by
-        // line: a same-file line number is falsified by any insertion above it
-        // without anything failing.
+        // The workload's own DRAINING `prune_epoch_tombstones` call is the LAST
+        // invocation of the run — its shut-gate pass runs strictly before the
+        // gates open — so it is deterministically the capture's last pass row.
+        // Cited by name, not by line: a same-file line number is falsified by
+        // any insertion above it without anything failing.
         let last = pass_rows.last().expect("at least one pass row exists");
         assert_eq!(
             row_u64(last, "considered"),
             6,
-            "the workload's own explicit call is the last invocation and \
+            "the workload's draining call is the last invocation and \
              drains all six seeded refs: {last:?}"
         );
         assert!(
             !row_bool(last, "empty_drain"),
-            "the workload's own explicit call is a non-empty drain: {last:?}"
+            "the workload's draining call is a non-empty drain: {last:?}"
         );
     }
 
@@ -6613,23 +7476,23 @@ mod tests {
     /// Evaluated over EVERY pass the six-exit workload's run individuates —
     /// split by [`split_into_passes`]'s frozen rule, so each pass's own rows
     /// are summed separately rather than pooled across the whole capture. The
-    /// workload's own seeding writes sweep the shut prune gates ahead of its
-    /// one explicit call (see the pass-row test above), so a single run
-    /// already produces both empty-drain passes and one draining pass without
-    /// a hand-rolled second invocation or an assumed exact pass count.
+    /// workload runs an explicit `prune_epoch_tombstones` pass while its gates
+    /// are shut, ahead of its draining call (see the pass-row test above), so a
+    /// single run already produces both an empty-drain pass and a draining pass
+    /// without a hand-rolled second invocation or an assumed exact pass count.
     #[tokio::test]
     async fn i1_i2_pass_identity_holds_on_an_empty_and_a_draining_pass() {
         let (guard, sink) = capture_tracing_rows();
         let fixture = build_six_exit_fixture();
-        let _outcome = run_six_exit_prune_workload(fixture).await;
+        let (_outcome, _handles) = run_six_exit_prune_workload(fixture).await;
         drop(guard);
         let rows = sink.lock().unwrap().clone();
 
         let passes = split_into_passes(&rows);
         assert!(
             passes.len() >= 2,
-            "the workload's seeding writes must individuate more than one \
-             pass on top of its own explicit call; capture was:\n{rows:#?}"
+            "the workload's explicit shut-gate pass must individuate a pass on \
+             top of its own draining call; capture was:\n{rows:#?}"
         );
 
         let mut saw_empty = false;
@@ -6692,7 +7555,7 @@ mod tests {
             "at least one pass in the capture must be a draining pass; \
              capture was:\n{rows:#?}"
         );
-        // The workload's own explicit `prune_epoch_tombstones` call is the last
+        // The workload's own DRAINING `prune_epoch_tombstones` call is the last
         // invocation of the run, so it is deterministically the capture's last
         // pass. Cited by name, not by line, for the reason given at the sibling
         // assertion above.

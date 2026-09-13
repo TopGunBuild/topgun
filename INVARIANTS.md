@@ -463,8 +463,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   Citations are kept line-number-free on purpose — the SPEC-349 extraction relocated the surrounding
   code, and a line citation would have drifted silently.
 - **Enforcing test:** SPEC-351 suite (9 tests) — real-prune-path coverage at
-  `crdt.rs::prune_epoch_tombstones`, post-write `Ok(_)` arm (mutating that `sub_tombstone_bytes` call
-  → deterministic RED), per-binding tripwire, private-counter foreign traffic control.
+  `crdt.rs::prune_epoch_tombstones`, which the long-lived prune task runs as its pass (an OR write
+  only requests a wake), post-write `Ok(_)` arm (mutating that `sub_tombstone_bytes` call →
+  deterministic RED), per-binding tripwire, private-counter foreign traffic control.
 - **Violation consequence:** the SPEC-345 tombstone hard gate reads a fiction; the 72h soak's
   primary instrument lies.
 - **Discovered by:** SPEC-351 audit C1 (the gauge was previously asserted only against a test
@@ -536,8 +537,11 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   **(a) Exit-path exhaustive:** every tombstone ref the sweep considers leaves through exactly one
   counted exit —
   `considered == dropped + matched_nothing + absent + restored_read_error + restored_evicted +
-  restored_write_error` — so a ref that quietly stops being accounted for cannot hide behind a
-  falling reclaim fraction. **(b) Gauge-neutral:** arming the record moves no tombstone bytes and
+  restored_write_error + restored_cancelled` — and that identity holds on **every** exit path,
+  **including a pass dropped (cancelled) before it settles a ref**: the pass guard re-indexes each
+  still-unsettled ref as its `Drop` runs and counts it as `restored_cancelled`, so a ref that
+  quietly stops being accounted for can hide neither behind a falling reclaim fraction nor behind a
+  cancellation. **(b) Gauge-neutral:** arming the record moves no tombstone bytes and
   reclaims no differently — the same workload run armed and disarmed yields identical isolated
   gauge deltas and an identical reclaim outcome, and the single `sub_tombstone_bytes` call stays in
   `prune_epoch_tombstones`'s post-write `Ok(_)` arm behind `dropped` while the recorder body names
@@ -546,10 +550,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   metrics-emitting and null observers plus the single arming read at `TombstoneFrontier::new`
   (`tombstone_frontier_impl.rs`), and the ledger inside `crdt.rs::prune_epoch_tombstones`.
   Citations are kept line-number-free on purpose, per `TG-OR-004`.
-- **Enforcing test:** `prune_exit_ledger_sums_to_considered` (the exhaustiveness identity, with each
-  of the six exits driven exactly once so no limb is vacuous) and
-  `prune_record_armed_disarmed_gauge_neutral` (the armed-vs-disarmed gauge-delta equality plus the
-  structural counter-siting assertion), both in `crdt.rs`'s inline test module.
+- **Enforcing test:** `prune_exit_ledger_sums_to_considered` (the seven-exit identity, each exit
+  driven exactly once), `cancelled_prune_pass_restores_every_unsettled_ref` (the cancelled limb),
+  `prune_guard_drop_is_panic_free_and_gauge_neutral` (guard `Drop` panic-free, naming no
+  tombstone-byte counter) and `prune_record_armed_disarmed_gauge_neutral` (limb (b)), in `crdt.rs`.
 - **The pass-siting premise is enforced by the identity TOGETHER WITH its two count pins, not by the
   sum alone.** `passes == empty_drains + nonempty_drains` is pinned alongside `nonempty_drains == 1`
   and `empty_drains >= 1`, because a pass observation made *conditional on work* survives the bare

@@ -100,13 +100,14 @@ use crate::tombstone_frontier::{
     METRIC_PRUNE_MATCHED_NOTHING_TOTAL, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL,
     METRIC_PRUNE_PASSES_TOTAL, METRIC_PRUNE_REBUILD_CLEARED_REFS_TOTAL,
     METRIC_PRUNE_REMOVED_BYTES_OBSERVED_TOTAL, METRIC_PRUNE_REMOVED_REFS_OBSERVED_TOTAL,
-    METRIC_PRUNE_RESTORED_EVICTED_TOTAL, METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
-    METRIC_PRUNE_RESTORED_REFS_TOTAL, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
-    METRIC_PRUNE_SPLIT_COMPUTED_EPOCH, METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL,
-    METRIC_PRUNE_STAMPED_BYTES_TOTAL, METRIC_PRUNE_STAMPED_REFS_TOTAL, METRIC_PRUNE_TRACKED_CLAIMS,
+    METRIC_PRUNE_RESTORED_CANCELLED_TOTAL, METRIC_PRUNE_RESTORED_EVICTED_TOTAL,
+    METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL, METRIC_PRUNE_RESTORED_REFS_TOTAL,
+    METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL, METRIC_PRUNE_SPLIT_COMPUTED_EPOCH,
+    METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL, METRIC_PRUNE_STAMPED_BYTES_TOTAL,
+    METRIC_PRUNE_STAMPED_REFS_TOTAL, METRIC_PRUNE_TRACKED_CLAIMS,
 };
 use metrics::{Counter, Gauge, Histogram};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -1311,6 +1312,17 @@ pub struct TombstoneFrontier {
     /// their `Relaxed` increments, so this is not an unconditional equality across concurrent
     /// scrapes.
     conjunct_seq: AtomicU64,
+    /// Wake handle for a background prune task: a trigger leaves a permit here instead of
+    /// running the pass on the triggering request's own timeline.
+    ///
+    /// A `Notify` rather than a channel because the signal carries no payload and must not
+    /// queue: any number of triggers that land while a pass is running collapse into exactly
+    /// one follow-up pass, which is the coalescing a whole-index sweep wants.
+    prune_wake: Arc<tokio::sync::Notify>,
+    /// Whether some wiring site has already claimed the right to run this frontier's prune
+    /// task. Single-flight, so one frontier can never end up with two prune loops racing each
+    /// other over the same index.
+    prune_task_claimed: AtomicBool,
 }
 
 /// A unit of work for the background cursor-persistence worker.
@@ -1431,6 +1443,8 @@ impl TombstoneFrontier {
             registry,
             prune_arming,
             conjunct_seq: AtomicU64::new(0),
+            prune_wake: Arc::new(tokio::sync::Notify::new()),
+            prune_task_claimed: AtomicBool::new(false),
         }
     }
 
@@ -1454,6 +1468,44 @@ impl TombstoneFrontier {
     #[must_use]
     pub fn prune_observer(&self) -> &dyn PruneRecordObserver {
         self.prune_observer.as_ref()
+    }
+
+    /// Ask for a prune pass. O(1) and non-blocking; never drains, never awaits.
+    ///
+    /// `notify_one` stores a single permit when the task is not parked, so a trigger that
+    /// lands while a pass is running is not lost: the task runs exactly one more pass after
+    /// the current one finishes. Triggers beyond that first permit coalesce, which is what
+    /// keeps a burst of writes from queueing a burst of sweeps.
+    ///
+    /// A frontier wired into a service **without** a spawned prune task never prunes at all —
+    /// this call then only leaves a permit nobody ever consumes. That is exactly the shape
+    /// every unit-test fixture has, and it is why the pairing matters in production: a wiring
+    /// that forgets the spawn reclaims nothing while still looking correctly wired, because
+    /// every trigger site keeps returning successfully.
+    pub fn request_prune(&self) {
+        self.prune_wake.notify_one();
+    }
+
+    /// The wake handle a prune task parks on.
+    ///
+    /// Handed out as an owned `Arc` so the spawned task can await it for its whole lifetime
+    /// without borrowing the frontier.
+    #[must_use]
+    pub fn prune_wake(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.prune_wake)
+    }
+
+    /// Single-flight claim on this frontier's prune task: true exactly once per frontier.
+    ///
+    /// A `compare_exchange` from `false` to `true`, so of any number of racing wiring sites
+    /// exactly one is told to spawn the task and every other is told one already exists. Two
+    /// prune loops over one frontier would each drain refs the other never sees settle, so the
+    /// claim is what keeps the pass a single writer.
+    #[must_use]
+    pub fn claim_prune_task(&self) -> bool {
+        self.prune_task_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     /// Publish the frontier's index and epoch state.
@@ -2753,6 +2805,7 @@ pub struct MetricsPruneRecorder {
     restored_read_error: Counter,
     restored_evicted: Counter,
     restored_write_error: Counter,
+    restored_cancelled: Counter,
     bytes_freed: Counter,
     epochs_drained: Counter,
     empty_drains: Counter,
@@ -2860,6 +2913,7 @@ impl MetricsPruneRecorder {
             restored_read_error: touched_counter(METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL),
             restored_evicted: touched_counter(METRIC_PRUNE_RESTORED_EVICTED_TOTAL),
             restored_write_error: touched_counter(METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL),
+            restored_cancelled: touched_counter(METRIC_PRUNE_RESTORED_CANCELLED_TOTAL),
             bytes_freed: touched_counter(METRIC_PRUNE_BYTES_FREED_TOTAL),
             epochs_drained: touched_counter(METRIC_PRUNE_EPOCHS_DRAINED_TOTAL),
             empty_drains: touched_counter(METRIC_PRUNE_EMPTY_DRAINS_TOTAL),
@@ -2971,6 +3025,7 @@ impl PruneRecordObserver for MetricsPruneRecorder {
         self.restored_evicted.increment(record.restored_evicted);
         self.restored_write_error
             .increment(record.restored_write_error);
+        self.restored_cancelled.increment(record.restored_cancelled);
         self.bytes_freed.increment(record.bytes_freed);
         self.epochs_drained.increment(record.epochs_drained);
         if record.empty_drain {
@@ -3250,11 +3305,11 @@ mod tests {
     // Prune record — arming parse and eager registration
     // -----------------------------------------------------------------------
 
-    /// The 25 pinned counters: the 22 pre-existing, plus the two OBSERVATION counters
+    /// The 26 pinned counters: the 22 pre-existing, plus the two OBSERVATION counters
     /// (`removed_refs_observed` / `removed_bytes_observed`) `MetricsPruneRecorder::new`
     /// already touches eagerly but this array omitted before, plus the one conjunct
-    /// snapshot counter.
-    const PRUNE_COUNTER_NAMES: [&str; 25] = [
+    /// snapshot counter, plus the cancelled-exit counter.
+    const PRUNE_COUNTER_NAMES: [&str; 26] = [
         METRIC_PRUNE_PASSES_TOTAL,
         METRIC_PRUNE_CONSIDERED_TOTAL,
         METRIC_PRUNE_DROPPED_TOTAL,
@@ -3263,6 +3318,7 @@ mod tests {
         METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
         METRIC_PRUNE_RESTORED_EVICTED_TOTAL,
         METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
+        METRIC_PRUNE_RESTORED_CANCELLED_TOTAL,
         METRIC_PRUNE_BYTES_FREED_TOTAL,
         METRIC_PRUNE_EPOCHS_DRAINED_TOTAL,
         METRIC_PRUNE_EMPTY_DRAINS_TOTAL,
@@ -3373,7 +3429,7 @@ mod tests {
     }
 
     /// Eager registration: with a recorder bound FIRST and **no** observations taken at all,
-    /// the very first render already carries every pinned series — the 25 counters at `0`, the
+    /// the very first render already carries every pinned series — the 26 counters at `0`, the
     /// 31 gauges at `0`, and each of the 7 histograms rendering both `_sum` and `_count`.
     ///
     /// This is what makes an absent series unrepresentable, and therefore what stops a
