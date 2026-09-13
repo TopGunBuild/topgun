@@ -1,10 +1,10 @@
 
 === spec365 conjunct-readout run: cell conj900 ===
-  repo HEAD:      4d3aac846ccdc69df633314f62d8135f31eeceb9
+  repo HEAD:      9e99ccc229e91772ecf0cdb89fc74c78a70571de
   dirty tree:     yes
   host/OS:        Darwin MacBookPro 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:18:49 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6000 arm64
   lineage:        HEAD harness + HEAD server
-  data dir:       /Users/koristuvac/Projects/topgun/topgun/target/spec366-conj900-data
+  data dir:       /Users/koristuvac/Projects/topgun/topgun/target/spec365-conj900-data
   csv:            /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec366-conj900.csv
   soak.json:      /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec366-conj900.soak.json
   mechanism.json: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec366-conj900.mechanism.json (harness writes spec366-conj900.soak.mechanism.json; renamed after the run)
@@ -14,13 +14,13 @@
   matrix:         /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec366-conj900.matrix.txt
   readout:        /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec366-conj900.readout.txt (written by spec365-readout.sh, not this file)
   soak binary:    /Users/koristuvac/Projects/topgun/topgun/target/release/deps/soak_harness-bb9913e887e67248
-  soak binary commit: 4d3aac846ccdc69df633314f62d8135f31eeceb9
+  soak binary commit: 9e99ccc229e91772ecf0cdb89fc74c78a70571de
   .rs working tree:   CLEAN (asserted before the build)
-  code freeze:            a18e09de
+  code freeze:            3a009e42
   code freeze diff (.rs): EMPTY (asserted before the build)
-    built:        2026-09-12T15:25:35Z
+    built:        2026-09-13T08:45:17Z
   server binary:  /Users/koristuvac/Projects/topgun/topgun/target/release/topgun-server
-    built:        2026-09-12T15:26:48Z
+    built:        2026-09-13T08:46:31Z
     sha256:       ac34c2d7e39bca3e0ce4aabce7122833658c660a2e30f455ba9d90808bc0b8f7
   --- varied knobs; everything else is the spec362b-durable.sh long4h
       literal ---

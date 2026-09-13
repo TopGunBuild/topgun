@@ -1,41 +1,42 @@
 === spec365 conjunct readout: spec366-conj900 ===
 
-SectionA: source=matched seq=183 conj_snapshots_total=183
+SectionA: source=matched seq=196 conj_snapshots_total=196
 epoch | class | open
-32 | durability_only | false
-33 |  | true
+34 | durability_only | false
+35 |  | true
 consistency: counted(claim_only=0 durability_only=1 both=0 neither=0) line(claim_only=0 durability_only=1 both=0 neither=0) retained_truncated=false OK
 
 SectionB: where the retained tag tombstones live
-B_store=28006
+B_store=28116
 ret_stamped_bytes=22000
-ret_stamped_bytes_open_epoch=5148
-B_index=27148
-X=858
-X/B_store=0.030636
-tau=2800.600
+ret_stamped_bytes_open_epoch=6116
+B_index=28116
+X=0
+X/B_store=0.000000
+tau=2811.600
 X series (elapsed_secs,X):
 0	0
 60	0
 120	0
 180	0
-240	0
+240	19152
 300	0
 360	0
 420	0
 480	0
-540	18656
-600	0
+540	0
+600	22
 660	0
-720	0
-780	19404
-840	858
-durable census (post-kill redb, flushed state only): tombstone_entries=1654 or_map_keys=96 keys_with_tombstones=48 max_tombstones_per_key=49
+720	17996
+780	2244
+840	0
+900	0
+durable census (post-kill redb, flushed state only): tombstone_entries=1531 or_map_keys=96 keys_with_tombstones=48 max_tombstones_per_key=47
 
 SectionC: per exited epoch reconciliation
 epoch | passes | refs_at_entry | refs_returned | bytes_returned | considered | dropped | matched_nothing | absent | restored_sum | bytes_freed | status
-2 | 1 | 1000 | 1000 | 19821 | 1000 | 1000 | 0 | 0 | 0 | 19821 | RECONCILED
-3 | 1 | 1000 | 1000 | 20536 | 1000 | 1000 | 0 | 0 | 0 | 20536 | RECONCILED
+2 | 1 | 1000 | 1000 | 19820 | 1000 | 1000 | 0 | 0 | 0 | 19820 | RECONCILED
+3 | 1 | 1000 | 1000 | 20535 | 1000 | 1000 | 0 | 0 | 0 | 20535 | RECONCILED
 4 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
 5 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
 6 | 1 | 1000 | 1000 | 21000 | 1000 | 1000 | 0 | 0 | 0 | 21000 | RECONCILED
@@ -66,18 +67,18 @@ epoch | passes | refs_at_entry | refs_returned | bytes_returned | considered | d
 31 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
 32 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
 33 | 1 | 1000 | 1000 | 22000 | 1000 | 1000 | 0 | 0 | 0 | 22000 | RECONCILED
-totals: passes=32 refs_at_entry=32000 refs_returned=32000 bytes_returned=687709 considered=32000 dropped=32000 matched_nothing=0 absent=0 restored_sum=0 bytes_freed=687709
-last-row metric check: removed_refs_observed_total=30000 considered_total=29000 MISMATCH
+totals: passes=32 refs_at_entry=32000 refs_returned=32000 bytes_returned=687707 considered=32000 dropped=32000 matched_nothing=0 absent=0 restored_sum=0 bytes_freed=687707
+last-row metric check: removed_refs_observed_total=32000 considered_total=32000 MATCH
 reconciliation=RECONCILED
 
-SectionD: claim-lag distribution over 195 conjunct line(s)
+SectionD: claim-lag distribution over 196 conjunct line(s)
 max_claim_lag_max=1
 claim_lag_p50: min=0 median=0 max=1
 claim_lag_p99: min=0 median=0 max=1
 max_claims=1
-durable_watermark_lag: max=3 last=2
+durable_watermark_lag: max=4 last=2
 
 SectionE: footprint reconstruction
-rows_within_2pct=14/14
+rows_within_2pct=15/15
 
 READOUT: O2; retained_closed_epochs=1; reconciliation=RECONCILED

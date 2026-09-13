@@ -792,7 +792,16 @@ process**, so a stale binary silently decided the whole cell.
 never committed); this block is their only committed record. Difference item 5 exists so this class
 of failure refuses before `T0` instead of producing a plausible readout.
 
-### Attempt 2 — VALID measurement. P1, P2, P5, P6, P7 TRUE; **P3 FALSE**.
+### Attempt 2 — VALID measurement under the SUPERSEDED freeze `a18e09de` — HISTORY
+
+**Kept as history, not as the measurement of record** (rulings v7 R1.3). This attempt was sound and
+its readout line is recorded below unchanged. It was superseded only because Review v1 required a
+`.rs` doc fix, which moved the freeze to `3a009e42`; byte-identity could not carry attempt 2 forward
+across that move (§1 records why it is unavailable as a technique), so the cell was re-run as
+attempt 3. The artifacts under the canonical `spec366-conj900.*` names are attempt 3's; attempt 2's
+remain retrievable from commits `d1615522` and `cb98debe`.
+
+P1, P2, P5, P6, P7 TRUE; **P3 FALSE**.
 
 **Provenance (difference item 5, the reason this attempt can be believed at all).** The assertion ran
 after the runner's own build and before `T0`, and passed:
@@ -904,3 +913,112 @@ the instrument's steady state, and it was wrong. No re-tuning, no re-run, no edi
 claim rests on P1/P2/P5/P6/P7 and on the pre-registered gap 2,000 → 0.
 
 **Waiting discipline:** 0 no-op polls; liveness confirmations only, as recorded in the STOP 3b report.
+
+---
+
+### Attempt 3 — THE MEASUREMENT OF RECORD, under freeze `3a009e42`
+
+**Why it exists.** Review v1 found two `crdt.rs` doc sentences overclaiming liveness; rulings v7 R1
+ordered them fixed. The fix is comment-only and moves no code line, but it moved the freeze, and §1
+records that byte-identity cannot carry a measurement across that move in this build profile. So
+provenance is re-established the only way that survives a non-deterministic build: by measuring
+again under the new freeze.
+
+**One launch refused before the clock and is not an attempt.** The first relaunch stopped at the
+runner's own data-dir guard (`FATAL: data dir is NOT empty: target/spec365-conj900-data`, left by
+attempt 2) *before* `T0`. No cell ran, `SPEC365_FORCE=1` overwrote nothing, and attempt 2's
+artifacts were still intact afterwards. The scratch data dir was cleared and the cell relaunched.
+
+**Provenance (difference item 5).** Console log's FIRST line, same sha256 on the matrix:
+
+```
+provenance: server sha256=ac34c2d7e39bca3e0ce4aabce7122833658c660a2e30f455ba9d90808bc0b8f7 built=2026-09-13T08:46:31Z run_start=2026-09-13T08:42:53Z topgun_or_prune_restored_cancelled_total=present
+```
+
+Clause (a) counter present; clause (b) `built 08:46:31Z ≥ run_start 08:42:53Z`, so the binary was
+built by this invocation (the stale artifact was removed and `cargo clean -p` run first, per v5
+R2.1). **That this sha equals attempt 2's is a coincidence of the non-deterministic build, not a
+carry-over**: the same commit also produces `5c666185…` (§1, builds 4 and 5). The assertion's value
+here is that it names *which* binary ran — provenance by measurement, which is exactly what survives
+when identity cannot.
+
+**Readout**
+
+```
+READOUT: O2; retained_closed_epochs=1; reconciliation=RECONCILED
+```
+
+**Predicates, run by path from the committed programs**
+
+```
+P1=TRUE
+P2=TRUE
+P3=FALSE reason=verdict_O2
+P5=TRUE
+P5-observed: removal_rows=32 settlement_rows=32 unsettled=none
+P5-zero-return: none observed
+DECISION_SCRAPE=2026-09-13T09:01:33Z.txt
+P6=TRUE removed_refs_observed_total=32000 considered_total=32000 gap=0
+P7=TRUE restored_cancelled_total=0
+windows=32 settlement_rows=32 zero_return_removal_rows=0 scrapes=16
+```
+
+**P3 FALSE — the same adjudication as attempt 2 (rulings v6 R1), re-derived from this cell's own
+artifact.** `consistency: counted(claim_only=0 durability_only=1 both=0 neither=0)` with
+`durable_watermark_lag: max=4 last=2`. `O3` requires `durability_only + both ≤ claim_only`; with
+`claim_only = 0` and the newest closed epoch durability-held, `durability_only = 1 > 0`, so `O2`
+wins by the readout's first-match rule. Nothing in this spec's code moves the durable watermark, so
+`O3` was never reachable. §2 is frozen and still pre-registers `O3`, so the predicate is recorded
+FALSE with its literal value and transport; no re-tune, no re-run, no edit to §2.
+
+**What the fix did.** SectionC — all 32 exited epochs (2–33) RECONCILED:
+
+```
+totals: passes=32 refs_at_entry=32000 refs_returned=32000 bytes_returned=687707
+        considered=32000 dropped=32000 matched_nothing=0 absent=0 restored_sum=0 bytes_freed=687707
+```
+
+`restored_sum=0`, `unsettled=none`, `split_epochs` empty. The §2 reference gap of 2,000 (SPEC-365's
+two `NO_SETTLEMENT` epochs) is **0** here.
+
+**CSV last-row metric check — MATCH, and better than attempt 2.**
+
+```
+last-row metric check: removed_refs_observed_total=32000 considered_total=32000 MATCH
+```
+
+Attempt 2 read `30000 vs 29000 MISMATCH`, the pre-registered in-flight artifact of a row sampled
+mid-pass. Here the last row happens to fall outside a pass, so the equality holds on the CSV as well
+as on the decision scrape. This is luck of sampling, not a behaviour change, and P6 is still decided
+on the decision scrape as pre-registered.
+
+**Harness exit attribution — and an honest note on the slope.** `exit 1`, `passed: false`,
+`finishedReason = tombstone-byte growth slope 16697.9 bytes/h exceeds 512.0 bytes/h (total growth
+47828 bytes over 180 samples, last-half window 446s)`. Attribution, not a predicate. **Attempt 2
+recorded 795.9 B/h on 49214 bytes of total growth; attempt 3 records 16697.9 B/h on 47828 bytes —
+21× the slope from slightly LESS total growth.** The gated quantity is a fit over the last-half
+window, so it is dominated by tail shape and is volatile run-to-run at this cell size. Neither
+number should be read as a trend, and this cell remains **not** a plateau demonstration
+(rulings v6 R3): `TG-OR-005` stays `open (TODO-634)`, `NAKED_BASELINE` unchanged, and the plateau
+question belongs to the 4 h cell with footprint columns.
+
+**A7 — pass latency vs inter-exit interval (RECORDED, NOT GATED).** §2 pins no command; extracted
+from the ANSI-stripped console log's RFC 3339 prefixes, the same time domain the pinned predicates
+use (`removal` rows at `topgun_server::tombstone_frontier::removal`, `settlement` rows at
+`…::settlement`, matched per `epoch`).
+
+| metric | value |
+|---|---|
+| settled epochs | 32 (every exited epoch, 2–33) |
+| pass latency mean / max / min | 4.4 s / 6 s / 3 s |
+| inter-exit interval mean / min / max | 26.9 s / 18 s / 38 s |
+| **max(latency) ÷ min(inter-exit)** | **0.333 — within parity** |
+
+No ratio > 1, so the single serial prune task keeps up at this cadence and there is nothing to route
+to TODO-634 and nothing to tune. (Attempt 2 read 0.278 on the same method.)
+
+**Regenerability (AC 17).** Re-running the UNCHANGED `spec365-readout.sh spec366-conj900` reproduces
+the committed readout byte-for-byte.
+
+**Waiting discipline:** 0 no-op polls. Both long runs were detached and harness-tracked and each woke
+the session on exit; the only foreground checks were verification and answers to direct questions.
