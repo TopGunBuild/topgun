@@ -2118,6 +2118,7 @@ mod tests {
         METRIC_PRUNE_RESTORED_EVICTED_TOTAL, METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
         METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
     };
+    use crate::tombstone_frontier_impl::METRIC_PRUNE_TASK_ALIVE;
 
     // -----------------------------------------------------------------------
     // Normalized source search
@@ -6478,6 +6479,7 @@ mod tests {
         let (tracing_guard, sink) = capture_tracing_rows();
         let store = Arc::new(PanicOnWriteStore::default());
         let recorder = PrometheusBuilder::new().build_recorder();
+        let render = recorder.handle();
         // Bind the recorder BEFORE the frontier resolves a single handle: one
         // resolved first would bind to a no-op for its whole lifetime.
         let (svc, factory, frontier) = metrics::with_local_recorder(&recorder, || {
@@ -6579,6 +6581,16 @@ mod tests {
             "the panic row must carry the panic payload's own message: {row:?}"
         );
 
+        // Step 7 — a CAUGHT pass panic does not move liveness: the task is
+        // alive, and the row above is what makes the panic visible.
+        let rendered = render.render();
+        assert_eq!(
+            rendered_series(&rendered, METRIC_PRUNE_TASK_ALIVE),
+            Some("1"),
+            "the task that survived the panic still holds the claim; render \
+             was:\n{rendered}"
+        );
+
         // Step 8.
         task.abort();
         let _ = task.await;
@@ -6594,7 +6606,21 @@ mod tests {
     /// join resolves, so the exit lease has already run.
     #[tokio::test]
     async fn prune_task_claim_is_released_when_the_task_exits() {
-        let (svc, factory, frontier) = make_service_with_frontier();
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let render = recorder.handle();
+        let (svc, factory, frontier) =
+            metrics::with_local_recorder(&recorder, make_service_with_frontier);
+
+        // Step 0 — the series is PRESENT, at 0, before any spawn. Absent and
+        // zero are the same picture to a human and different facts to a
+        // sampler, which is why this reads the option rather than a number.
+        let rendered = render.render();
+        assert_eq!(
+            rendered_series(&rendered, METRIC_PRUNE_TASK_ALIVE),
+            Some("0"),
+            "a frontier with no prune task must RENDER the absence, not omit \
+             it; render was:\n{rendered}"
+        );
 
         let first = spawn_prune_task(
             Arc::clone(&frontier),
@@ -6602,6 +6628,12 @@ mod tests {
             Arc::clone(&svc.key_writer),
         )
         .expect("the first spawn over a fresh frontier must claim the task");
+        let rendered = render.render();
+        assert_eq!(
+            rendered_series(&rendered, METRIC_PRUNE_TASK_ALIVE),
+            Some("1"),
+            "the spawn publishes liveness; render was:\n{rendered}"
+        );
 
         first.abort();
         let joined = first.await;
@@ -6611,6 +6643,13 @@ mod tests {
                 .is_cancelled(),
             "the abort must resolve as a cancellation, which is what guarantees \
              the task's future has already been dropped"
+        );
+        let rendered = render.render();
+        assert_eq!(
+            rendered_series(&rendered, METRIC_PRUNE_TASK_ALIVE),
+            Some("0"),
+            "the exit publishes the absence BEFORE any respawn; render \
+             was:\n{rendered}"
         );
 
         let second = spawn_prune_task(
@@ -6623,6 +6662,12 @@ mod tests {
             "a task that has exited must have released its claim: otherwise the \
              frontier is claimed by nothing forever and reclamation stops \
              process-wide, silently"
+        );
+        let rendered = render.render();
+        assert_eq!(
+            rendered_series(&rendered, METRIC_PRUNE_TASK_ALIVE),
+            Some("1"),
+            "the respawn publishes liveness again; render was:\n{rendered}"
         );
 
         if let Some(task) = second {
@@ -6660,6 +6705,185 @@ mod tests {
                 "line {} of the workspace manifest sets a panic strategy ({line:?}); \
                  a catch at the pass boundary is inert under an aborting profile",
                 index + 1
+            );
+        }
+    }
+
+    /// Everything above the first column-0 `#[cfg(test)]` attribute — the half
+    /// of a scanned file the compiler builds into a NON-test binary.
+    ///
+    /// The cut is what lets the needles below be counted exactly: this module
+    /// sits under it, so a scan that spells the thing it counts cannot count
+    /// itself.
+    fn production_half(source: &str) -> &str {
+        let cut = concat!("\n#[cfg(", "test)]\n");
+        source.find(cut).map_or(source, |at| &source[..at])
+    }
+
+    /// One item's body, delimited by its own closing brace.
+    ///
+    /// The delimiter is the caller's, not a constant: a column-0 item closes at
+    /// `\n}\n`, while a method inside an `impl` block closes at a column-4
+    /// brace. Using the column-0 form on a method would swallow the rest of the
+    /// impl block — thousands of lines — and turn every absence limb below
+    /// spuriously red. The slice starts at the `impl`/`fn` line, so the item's
+    /// own doc comment is deliberately OUTSIDE it.
+    fn item_body<'a>(source: &'a str, anchor: &str, close: &str) -> &'a str {
+        assert_eq!(
+            source.matches(anchor).count(),
+            1,
+            "the anchor {anchor:?} must occur exactly once in the scanned source"
+        );
+        let from = source.find(anchor).expect("the anchor was just counted");
+        let tail = &source[from..];
+        let to = tail
+            .find(close)
+            .unwrap_or_else(|| panic!("{anchor:?} does not close at {close:?}"));
+        &tail[..to]
+    }
+
+    /// The supervision is WIRED, asserted over the sources rather than over a
+    /// run: two of its six limbs cover properties no behavioural test in this
+    /// suite can observe.
+    ///
+    /// (a)/(b) There is exactly ONE release site, and it is the exit lease's
+    /// `Drop`. A second one — anywhere — could free the claim under a live task
+    /// and let a second prune loop start beside the first, which is the state
+    /// the claim exists to make unrepresentable.
+    ///
+    /// (c) The doc no longer says supervision is out of scope, and no longer
+    /// says the claim is never released. A doc asserting a property the code
+    /// does not have is the same defect in the other direction.
+    ///
+    /// (d) The spawn site reports a swallowed `None`. A `let _` binding there
+    /// is how the only failure this call can report became invisible.
+    ///
+    /// (e) The exit path names no fallible-unwrap construct. It runs inside a
+    /// `Drop` that may itself be running during an unwind, where a panic aborts
+    /// the process — "it happens not to panic today" is not the property worth
+    /// having.
+    ///
+    /// (f) The spawn body neither requests a prune nor notifies the wake. A
+    /// caught panic that re-triggered itself would turn a deterministically
+    /// panicking pass into a hot loop. T-A cannot see this: with a
+    /// post-mutation panic a re-triggered pass matches nothing and emits no
+    /// second row, so this limb is the only mechanical check on it.
+    #[test]
+    fn prune_task_supervision_is_wired() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        const IMPL_SOURCE: &str = include_str!("../../tombstone_frontier_impl.rs");
+        const BIN_SOURCE: &str = include_str!("../../bin/topgun_server.rs");
+
+        let release = concat!("release_prune", "_task(");
+        let lease_impl = concat!("impl Drop for ", "PruneTaskLease");
+        let spawn_fn = concat!("pub fn spawn_prune", "_task(");
+
+        // (a) — one release call in this file's production half, inside the
+        // lease's Drop.
+        let crdt_production = production_half(SOURCE);
+        assert_eq!(
+            normalized(crdt_production).matches(release).count(),
+            1,
+            "exactly one release call belongs in this file: the exit lease's Drop"
+        );
+        let lease_drop = item_body(crdt_production, lease_impl, "\n}\n");
+        assert!(
+            lease_drop.contains(release),
+            "the one release call must be the lease's Drop: {lease_drop:?}"
+        );
+
+        // (b) — and none at all on the frontier's own side beyond the
+        // definition, which the `fn` prefix distinguishes.
+        let impl_production = production_half(IMPL_SOURCE);
+        assert_eq!(
+            normalized(impl_production).matches(release).count(),
+            1,
+            "the frontier must define the release and never call it itself: a \
+             release taken without the task exiting frees the claim under a \
+             live pass"
+        );
+
+        // (c) — the retired claims are gone from the doc.
+        let crdt_normalized = normalized(crdt_production);
+        for retired in [
+            concat!("Supervision is out ", "of scope"),
+            concat!("The claim is never ", "released"),
+        ] {
+            assert!(
+                !crdt_normalized.contains(retired),
+                "the spawn doc still claims {retired:?}, which the supervision \
+                 above makes false"
+            );
+        }
+
+        // (d) — the spawn site checks its result and warns.
+        let bin = normalized(production_half(BIN_SOURCE));
+        assert!(
+            !bin.contains(concat!("let _prune", "_task")),
+            "a discarding binding is how the only failure this call can report \
+             became invisible"
+        );
+        let call = concat!("spawn_prune", "_task(");
+        assert_eq!(
+            bin.matches(call).count(),
+            1,
+            "the bin spawns the prune task exactly once"
+        );
+        let after_call = &bin[bin.find(call).expect("the call was just counted")..];
+        let window = &after_call[..after_call.find("let ").unwrap_or(after_call.len())];
+        let none_at = window
+            .find(".is_none()")
+            .expect("the spawn result must be tested for `None` at the call site");
+        let warn_at = window
+            .find(concat!("tracing::", "warn!"))
+            .expect("a swallowed `None` must be reported");
+        assert!(
+            none_at < warn_at,
+            "the warning must be what the `None` test leads to: {window:?}"
+        );
+
+        // (e) — the exit path is panic-free. Indexing is checked as the absence
+        // of any `[`, which is satisfiable because neither body indexes,
+        // slices or writes an array literal.
+        let release_body = item_body(
+            impl_production,
+            concat!("fn release_prune", "_task("),
+            "\n    }\n",
+        );
+        // Each slice must carry the statement it is about, so a delimiter that
+        // drifted earlier cannot make these absence limbs vacuously green.
+        assert!(
+            release_body.contains(concat!("prune_task_", "claimed")),
+            "the sliced release must contain the claim store: {release_body:?}"
+        );
+        assert!(
+            lease_drop.contains(concat!("tracing::", "warn!")),
+            "the sliced Drop must contain its exit row: {lease_drop:?}"
+        );
+        for (what, body) in [
+            ("the lease's Drop", lease_drop),
+            ("the release", release_body),
+        ] {
+            for needle in ["unwrap(", "expect(", "panic!", "debug_assert", "["] {
+                assert!(
+                    !body.contains(needle),
+                    "{what} must name no `{needle}`: it runs on a drop path, \
+                     where a panic during an unwind aborts the process"
+                );
+            }
+        }
+
+        // (f) — no self re-trigger after a caught panic.
+        let spawn_body = item_body(crdt_production, spawn_fn, "\n}\n");
+        assert!(
+            spawn_body.contains(concat!("catch_", "unwind")),
+            "the sliced spawn body must contain the pass catch: {spawn_body:?}"
+        );
+        for needle in [concat!("request_", "prune"), concat!("notify_", "one")] {
+            assert!(
+                !spawn_body.contains(needle),
+                "the spawn body must not name `{needle}`: a pass that panics \
+                 deterministically would become a hot loop"
             );
         }
     }
@@ -7450,6 +7674,18 @@ mod tests {
             rt.block_on(with_isolated_gauge(run_six_exit_prune_workload(fixture)))
         });
         (outcome, gauge_delta, handle.render())
+    }
+
+    /// The rendered value of the bare series `name`, if the render carries that
+    /// line at all.
+    ///
+    /// `None` and `Some("0")` are different facts about a gauge — an
+    /// unregistered series versus a registered one reading zero — so this
+    /// returns the distinction rather than collapsing it into a number.
+    fn rendered_series<'a>(rendered: &'a str, name: &str) -> Option<&'a str> {
+        rendered
+            .lines()
+            .find_map(|line| Some(line.strip_prefix(name)?.strip_prefix(' ')?.trim()))
     }
 
     /// Read one counter's value out of a Prometheus render.
