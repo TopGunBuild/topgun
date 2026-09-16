@@ -6125,6 +6125,425 @@ mod tests {
         }
     }
 
+    /// A `MapDataStore` that PANICS — rather than returning `Err` — on a durable
+    /// write to an ARMED key.
+    ///
+    /// Arm-ability, and arming only AFTER seeding, is load-bearing for the same
+    /// reason [`ArmableStore`] documents: a store that panicked from the start
+    /// would never let a tombstone reach the index, so the pass under test would
+    /// have nothing to drain and nothing to panic over. Delegating to an inner
+    /// `ArmableStore` keeps retention — and therefore the rehydration path —
+    /// identical to the store the other write-path tests here run against; only
+    /// the arming verdict differs.
+    ///
+    /// Both `add` and `add_with_witness` panic, because the in-place write path
+    /// the prune takes reaches the datastore through `add_with_witness`, and it
+    /// reaches it only AFTER the engine has already applied the prune to the
+    /// resident slot. The panic therefore fires inside `update_in_place`, on the
+    /// pass's own future — exactly the unwind the supervision under test has to
+    /// survive — and it is a post-mutation panic, so the ref restored behind it
+    /// settles as a match against nothing on the next pass rather than panicking
+    /// again. The message names the key, so the captured panic row identifies it.
+    #[derive(Default)]
+    struct PanicOnWriteStore {
+        inner: Arc<ArmableStore>,
+        panic_keys: Mutex<HashSet<String>>,
+    }
+
+    impl PanicOnWriteStore {
+        /// Panic on every subsequent durable write to `key`.
+        fn arm_panic(&self, key: &str) {
+            self.panic_keys.lock().insert(key.to_string());
+        }
+
+        /// Let writes to `key` through again.
+        fn disarm_panic(&self, key: &str) {
+            self.panic_keys.lock().remove(key);
+        }
+
+        fn panic_if_armed(&self, key: &str) {
+            assert!(
+                !self.panic_keys.lock().contains(key),
+                "armed panic on the datastore write for {key}"
+            );
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for PanicOnWriteStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.panic_if_armed(key);
+            self.inner.add(map, key, value, expiration_time, now).await
+        }
+
+        async fn add_with_witness(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+            witness: Option<&OrDelta>,
+        ) -> anyhow::Result<()> {
+            self.panic_if_armed(key);
+            self.inner
+                .add_with_witness(map, key, value, expiration_time, now, witness)
+                .await
+        }
+
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .add_backup(map, key, value, expiration_time, now)
+                .await
+        }
+
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove(map, key, now).await
+        }
+
+        async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove_backup(map, key, now).await
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.inner.load(map, key).await
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.inner.load_all(map, keys).await
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.inner.remove_all(map, keys).await
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            backup: bool,
+            sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            self.inner.enumerate_leaves(map, backup, sink).await
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            backup: bool,
+            limit: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.inner.scan_values(map, backup, limit).await
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            backup: bool,
+            cursor: ScanCursor,
+            limit: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.inner
+                .scan_values_batched(map, backup, cursor, limit)
+                .await
+        }
+
+        fn is_loadable(&self, key: &str) -> bool {
+            self.inner.is_loadable(key)
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            self.inner.pending_operation_count()
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            self.inner.soft_flush().await
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            self.inner.hard_flush().await
+        }
+
+        async fn flush_key(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            backup: bool,
+        ) -> anyhow::Result<()> {
+            self.inner.flush_key(map, key, value, backup).await
+        }
+
+        fn reset(&self) {
+            self.inner.reset();
+        }
+
+        fn is_null(&self) -> bool {
+            self.inner.is_null()
+        }
+    }
+
+    /// Add then remove one OR tag through the real write path, which stamps its
+    /// tombstone into a fresh epoch of its own (the fixtures set width 1).
+    async fn seed_or_tombstone(svc: &Arc<CrdtService>, key: &str, val: &str, tag: &str) {
+        Arc::clone(svc)
+            .oneshot(or_add_op("m", key, val, tag))
+            .await
+            .unwrap();
+        Arc::clone(svc)
+            .oneshot(or_remove_op("m", key, tag))
+            .await
+            .unwrap();
+    }
+
+    /// Wait, bounded, until `tag` is gone from `key`'s STORED tombstones.
+    ///
+    /// Bounded rather than a fixed sleep because the pass runs on a task this
+    /// test does not drive: a sleep long enough to be reliable would also be
+    /// long enough to hide a task that only starts late.
+    async fn await_tombstone_gone(
+        factory: &Arc<RecordStoreFactory>,
+        key: &str,
+        tag: &str,
+        why: &str,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let (_, tombs) = read_or_map(factory, "m", key).await;
+            if !tombs.contains(&tag.to_string()) {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "{why}");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// A pass panic must not end the prune task: the SAME task consumes the next
+    /// permit and reclaims the next eligible epoch.
+    ///
+    /// RED at the pin. The pass panic in step 3 unwinds out of the spawned
+    /// future and ends the task, so nothing is alive to consume the step-4
+    /// permit and the step-5 wait times out. The guard's restore in step 3 is
+    /// the one limb that already holds at the pin.
+    ///
+    /// The fixture panics in the datastore write-through, i.e. AFTER the engine
+    /// has applied the prune to the resident slot. On the step-5 pass the
+    /// restored `kpanic` ref therefore matches no tag, the store returns early
+    /// before any write-through, and the ref settles without panicking a second
+    /// time — which is why step 6 can require EXACTLY one panic row. Nothing is
+    /// asserted about the `kpanic` ref beyond step 3.
+    ///
+    /// Runs on the default current-thread flavour: the `tracing` capture is
+    /// thread-local, so a multi-thread runtime would observe an empty capture
+    /// instead of the row this asserts on.
+    #[tokio::test]
+    async fn prune_pass_panic_is_caught_and_the_task_consumes_the_next_permit() {
+        let (tracing_guard, sink) = capture_tracing_rows();
+        let store = Arc::new(PanicOnWriteStore::default());
+        let recorder = PrometheusBuilder::new().build_recorder();
+        // Bind the recorder BEFORE the frontier resolves a single handle: one
+        // resolved first would bind to a no-op for its whole lifetime.
+        let (svc, factory, frontier) = metrics::with_local_recorder(&recorder, || {
+            let data_store: Arc<dyn MapDataStore> = store.clone();
+            make_service_with_frontier_and_store(data_store, Vec::new())
+        });
+
+        let task = spawn_prune_task(
+            Arc::clone(&frontier),
+            Arc::clone(&factory),
+            Arc::clone(&svc.key_writer),
+        )
+        .expect("the first spawn over a fresh frontier must claim the task");
+
+        // Step 2 — seed `kpanic`'s tombstone into epoch 1 and a pin into epoch 2,
+        // then open the two gates exactly as `ac4_prune_wired_into_or_write_path`
+        // does: LWM 2 is strictly past epoch 1, so epoch 1 alone is eligible.
+        seed_or_tombstone(&svc, "kpanic", "v1", "TP").await;
+        seed_or_tombstone(&svc, "kpin", "v2", "TPIN").await;
+        assert_eq!(frontier.current_epoch(), 2, "epochs 1..=2 stamped");
+        let c: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 100);
+        assert!(frontier.confirm_apply_ack(&c, 2, ConnectionId(1)).await);
+        assert_eq!(frontier.low_water_mark(), 2);
+        // THE LAST SEEDING STEP, and no `.await` may sit between it and the
+        // arming below. The fixture frontier is built with no store, so this
+        // synchronous injection is the instant `kpanic` becomes eligible; a
+        // yield here would let an earlier OR_REMOVE's own permit prune `kpanic`
+        // through an UN-armed store, no panic would fire, and the wait below
+        // would time out at the pin AND at the fix.
+        frontier.set_durable_epoch_watermark(1000);
+
+        // Step 3 — the pass that panics.
+        store.arm_panic("kpanic");
+        let before = frontier.index_conservation_snapshot();
+        frontier.request_prune();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let after = loop {
+            let now = frontier.index_conservation_snapshot();
+            if now.restored_refs_total > before.restored_refs_total {
+                break now;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the panicking pass must re-index the refs it never settled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert_eq!(
+            after.indexed_refs, before.indexed_refs,
+            "the drained ref is back in the index: drained, then re-indexed by \
+             the guard as the pass unwound"
+        );
+
+        // Step 4 — a second eligible epoch, with the permit issued only once it
+        // IS eligible, so the pass under test cannot be one an earlier
+        // OR_REMOVE happened to trigger.
+        store.disarm_panic("kpanic");
+        seed_or_tombstone(&svc, "kok", "v3", "TOK").await;
+        seed_or_tombstone(&svc, "kpin2", "v4", "TPIN2").await;
+        assert_eq!(frontier.current_epoch(), 4, "epochs 3..=4 stamped");
+        assert!(frontier.confirm_apply_ack(&c, 4, ConnectionId(1)).await);
+        assert_eq!(frontier.low_water_mark(), 4);
+        frontier.request_prune();
+
+        // Step 5 — the red limb.
+        await_tombstone_gone(
+            &factory,
+            "kok",
+            "TOK",
+            "the task must survive a pass panic and consume the next permit: \
+             the epoch-3 tombstone is still stored",
+        )
+        .await;
+
+        // Step 6 — the panic is attributed exactly once.
+        drop(tracing_guard);
+        let rows = sink.lock().unwrap().clone();
+        let needle = concat!("prune pass ", "panicked;");
+        let panic_rows: Vec<&str> = rows
+            .iter()
+            .map(String::as_str)
+            .filter(|line| line.contains(needle))
+            .collect();
+        assert_eq!(
+            panic_rows.len(),
+            1,
+            "a caught pass panic must emit exactly one attribution row; capture \
+             was:\n{rows:#?}"
+        );
+        let row = panic_rows[0];
+        assert!(
+            row_u64(row, "restored") >= 1,
+            "the panic row must carry the count of refs this pass re-indexed: {row:?}"
+        );
+        assert!(
+            row.contains(concat!("armed panic on the datastore ", "write for kpanic")),
+            "the panic row must carry the panic payload's own message: {row:?}"
+        );
+
+        // Step 8.
+        task.abort();
+        let _ = task.await;
+    }
+
+    /// A prune task that EXITS releases its single-flight claim, so a later
+    /// spawn can put a live task back over the same frontier.
+    ///
+    /// RED at the pin: nothing ever stores `false` back into the claim, so the
+    /// second spawn returns `None` and reclamation is stopped for the life of
+    /// the process. Awaiting the aborted handle is what makes the respawn
+    /// assertion non-racy — tokio drops a cancelled task's future before the
+    /// join resolves, so the exit lease has already run.
+    #[tokio::test]
+    async fn prune_task_claim_is_released_when_the_task_exits() {
+        let (svc, factory, frontier) = make_service_with_frontier();
+
+        let first = spawn_prune_task(
+            Arc::clone(&frontier),
+            Arc::clone(&factory),
+            Arc::clone(&svc.key_writer),
+        )
+        .expect("the first spawn over a fresh frontier must claim the task");
+
+        first.abort();
+        let joined = first.await;
+        assert!(
+            joined
+                .expect_err("an aborted task never returns a value")
+                .is_cancelled(),
+            "the abort must resolve as a cancellation, which is what guarantees \
+             the task's future has already been dropped"
+        );
+
+        let second = spawn_prune_task(
+            Arc::clone(&frontier),
+            Arc::clone(&factory),
+            Arc::clone(&svc.key_writer),
+        );
+        assert!(
+            second.is_some(),
+            "a task that has exited must have released its claim: otherwise the \
+             frontier is claimed by nothing forever and reclamation stops \
+             process-wide, silently"
+        );
+
+        if let Some(task) = second {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    /// No Cargo profile in this workspace sets a panic strategy, so the
+    /// per-pass catch the prune task relies on is live in EVERY build.
+    ///
+    /// Under `panic = "abort"` a `catch_unwind` never runs its handler: the
+    /// process dies at the panic instead. The supervision would then be
+    /// silently inert — every test that exercises it runs under `test`, which
+    /// always unwinds, so no behavioural test in this suite could notice. That
+    /// is what makes this a structural pin rather than a redundancy.
+    ///
+    /// Comment lines are ignored: the release profile's own comment forbids the
+    /// strategy in prose, and reading that as a setting would make the check
+    /// permanently red.
+    #[test]
+    fn no_cargo_profile_sets_panic_abort() {
+        const MANIFEST: &str = include_str!("../../../../../Cargo.toml");
+
+        for (index, line) in MANIFEST.lines().enumerate() {
+            let code: String = line
+                .split('#')
+                .next()
+                .unwrap_or("")
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            assert!(
+                !code.starts_with(concat!("panic", "=")),
+                "line {} of the workspace manifest sets a panic strategy ({line:?}); \
+                 a catch at the pass boundary is inert under an aborting profile",
+                index + 1
+            );
+        }
+    }
+
     /// Evicts named keys the instant the record store rehydrates them.
     ///
     /// This is the only in-process lever that manufactures the "evicted between
