@@ -6257,14 +6257,21 @@ mod tests {
     /// identical to the store the other write-path tests here run against; only
     /// the arming verdict differs.
     ///
-    /// Both `add` and `add_with_witness` panic, because the in-place write path
-    /// the prune takes reaches the datastore through `add_with_witness`, and it
-    /// reaches it only AFTER the engine has already applied the prune to the
-    /// resident slot. The panic therefore fires inside `update_in_place`, on the
-    /// pass's own future — exactly the unwind the supervision under test has to
-    /// survive — and it is a post-mutation panic, so the ref restored behind it
-    /// settles as a match against nothing on the next pass rather than panicking
-    /// again. The message names the key, so the captured panic row identifies it.
+    /// Arming `add` alone covers BOTH durable write entry points, and that is
+    /// why the witness-aware one is deliberately left defaulted: the in-place
+    /// write path the prune takes reaches this store through
+    /// `add_with_witness`, whose defaulted body drops the witness and calls
+    /// `add` on this very type. A second override here would buy nothing and
+    /// would put a second witness-aware implementor in the package, which the
+    /// implementor-cascade guard above counts.
+    ///
+    /// That write-through is reached only AFTER the engine has already applied
+    /// the prune to the resident slot, so the panic fires inside
+    /// `update_in_place`, on the pass's own future — exactly the unwind the
+    /// supervision under test has to survive — and it is a post-mutation panic,
+    /// so the ref restored behind it settles as a match against nothing on the
+    /// next pass rather than panicking again. The message names the key, so the
+    /// captured panic row identifies it.
     #[derive(Default)]
     struct PanicOnWriteStore {
         inner: Arc<ArmableStore>,
@@ -6302,21 +6309,6 @@ mod tests {
         ) -> anyhow::Result<()> {
             self.panic_if_armed(key);
             self.inner.add(map, key, value, expiration_time, now).await
-        }
-
-        async fn add_with_witness(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            expiration_time: i64,
-            now: i64,
-            witness: Option<&OrDelta>,
-        ) -> anyhow::Result<()> {
-            self.panic_if_armed(key);
-            self.inner
-                .add_with_witness(map, key, value, expiration_time, now, witness)
-                .await
         }
 
         async fn add_backup(
