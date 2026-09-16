@@ -1911,6 +1911,47 @@ pub(crate) async fn prune_epoch_tombstones(
     // settled. One emission site, reached the same way either way.
 }
 
+/// The spawned prune task's hold on its frontier's single-flight claim.
+///
+/// Owned BY the spawned future rather than released by code placed after the loop, because the
+/// loop has no normal exit: every way the task ends — `JoinHandle::abort` before or after the
+/// first poll, runtime teardown, a panic that escapes the pass boundary — ends it by DROPPING
+/// the future. A drop guard is the only release site every one of those routes passes through.
+struct PruneTaskLease {
+    frontier: Arc<TombstoneFrontier>,
+}
+
+impl Drop for PruneTaskLease {
+    fn drop(&mut self) {
+        // Warned before the release, so the row is emitted while the frontier still reads as
+        // claimed. Operator-visible because a prune task that is gone is not a degraded mode
+        // that heals: every trigger afterwards only leaves a permit nobody consumes.
+        tracing::warn!(
+            "the prune task exited; no tombstone reclamation runs for this frontier until a \
+             prune task is spawned again. Expected during runtime teardown, which is how a \
+             graceful shutdown ends this task"
+        );
+        // Last statement, and panic-free by contract: a panic in a drop that is itself running
+        // during an unwind aborts the process.
+        self.frontier.release_prune_task();
+    }
+}
+
+/// The panic payload's own message, for attribution in the caught-panic row.
+///
+/// `panic!` with a literal yields a `&'static str` payload and a formatted one a `String`;
+/// anything else is a payload this process does not produce, and naming it is more useful than
+/// rendering nothing.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "<panic payload was neither &str nor String>"
+    }
+}
+
 /// Spawn the ONE long-lived prune task for this frontier.
 ///
 /// Returns `None`, having spawned nothing, when a task was already claimed for this frontier,
@@ -1934,9 +1975,44 @@ pub(crate) async fn prune_epoch_tombstones(
 /// keeps them alive anyway, so this closes no reference cycle and needs no `Weak`. Runtime
 /// teardown drops the task, and `PrunePassGuard` re-indexes the in-flight pass's unsettled refs
 /// as that future is dropped, so a torn-down pass loses no ref from the index — in RAM only;
-/// the restart rebuild remains the authoritative recovery. A panic inside a pass unwinds
-/// through that guard and then ends the task. The claim is never released, so the failure is NEW
-/// in kind: reclamation stops process-wide, silently, no re-trigger. Supervision is out of scope.
+/// the restart rebuild remains the authoritative recovery.
+///
+/// # A pass that panics
+///
+/// The panic is caught at the pass boundary, around the `poll` of ONE pass future, so it ends
+/// that pass and not this task. By the time the catch returns, the guard has already re-indexed
+/// every ref the pass never settled — counted as restored-cancelled, because what the guard
+/// observed is a pass future that stopped being polled, and unwinding is one of the two ways
+/// that happens. A `warn!` then names the panic's own message and the number of refs this pass
+/// re-indexed, and the task goes back to waiting for the next permit. It does NOT re-trigger
+/// itself: a deterministically panicking pass would otherwise become a hot loop, and waiting is
+/// the same cadence the task has for every other pass.
+///
+/// What a LATER pass does then depends on where the panic fired.
+///
+/// - **After the engine mutation** — anywhere in the post-mutation window of the record store's
+///   in-place write: the observer notifications, the datastore write-through and the engine's
+///   own mark-stored call all run only once the prune has already been applied to the resident
+///   slot. One panic, one `warn!`. On the next pass that reaches the restored ref the closure
+///   matches no tag, the store returns early before any write-through, and the ref settles as a
+///   match against nothing. The durable tombstone then stays until the restart rebuild — the
+///   same shape as a failed prune write.
+/// - **Before or inside the engine mutation** — the prune closure, or the engine. That repeats
+///   on every pass that reaches the key; the refs drained after it in a pass are re-indexed each
+///   time, and the `warn!` repeats with it. A store write that panics is a bug to fix, not a
+///   steady state, and there is deliberately no quarantine: isolating such a ref would need an
+///   eighth exit and a change to the exit-ledger invariant.
+///
+/// # When the task ends
+///
+/// It ends only by being dropped — `JoinHandle::abort`, runtime teardown, or a panic that
+/// escapes the catch. An exit lease owned by the future releases the single-flight claim, sets
+/// the liveness gauge to `0` and warns on every one of those routes, so a later
+/// `spawn_prune_task` over the same frontier succeeds instead of finding it claimed by nothing.
+///
+/// The catch is inert under `panic = "abort"`, which no profile in this workspace sets; a
+/// structural test pins that, because under an aborting profile this supervision would be
+/// silently absent rather than visibly broken.
 #[must_use]
 pub fn spawn_prune_task(
     frontier: Arc<TombstoneFrontier>,
@@ -1946,11 +2022,55 @@ pub fn spawn_prune_task(
     if !frontier.claim_prune_task() {
         return None;
     }
+    let lease = PruneTaskLease {
+        frontier: Arc::clone(&frontier),
+    };
     let wake = frontier.prune_wake();
     Some(tokio::spawn(async move {
+        // A NAMED binding, so the lease lives as long as this future. A `_` pattern would drop
+        // it here and release the claim while the loop below still runs.
+        let _lease = lease;
         loop {
             wake.notified().await;
-            prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
+            // Read before the pass future exists, so the delta below covers the whole pass and
+            // nothing outside it. Exact because a frontier admits one pass at a time and every
+            // production re-index runs inside one.
+            let restored_before = frontier.index_conservation_snapshot().restored_refs_total;
+            let outcome = {
+                // Pinned once per iteration and polled through a catch. Catching HERE rather
+                // than running each pass on its own `tokio::spawn` is what preserves single
+                // flight: dropping a `JoinHandle` does not abort the task behind it, so a
+                // supervisor reading `JoinError` would detach a live pass over the index and
+                // could then let a second one start beside it.
+                let mut pass =
+                    std::pin::pin!(prune_epoch_tombstones(&frontier, &factory, &key_writer));
+                std::future::poll_fn(|cx| {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        std::future::Future::poll(pass.as_mut(), cx)
+                    })) {
+                        Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+                        Ok(std::task::Poll::Ready(())) => std::task::Poll::Ready(Ok(())),
+                        // Ready, so this future is never polled again: the pass's state machine
+                        // is poisoned by the unwind and polling it again is undefined.
+                        Err(payload) => std::task::Poll::Ready(Err(payload)),
+                    }
+                })
+                .await
+            };
+            if let Err(payload) = outcome {
+                let restored = frontier
+                    .index_conservation_snapshot()
+                    .restored_refs_total
+                    .saturating_sub(restored_before);
+                // The attribution the counters cannot carry: the guard's own row calls every
+                // unwind a cancellation, and this row is what tells the two apart.
+                tracing::warn!(
+                    restored,
+                    panic_message = %panic_payload_message(payload.as_ref()),
+                    "prune pass panicked; the refs it had not settled were re-indexed by this \
+                     pass and the prune task keeps running, waiting for the next trigger"
+                );
+            }
         }
     }))
 }

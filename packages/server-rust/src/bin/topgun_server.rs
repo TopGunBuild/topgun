@@ -1922,11 +1922,22 @@ fn build_services(
     // Its trigger sites only leave a wake permit; without this consumer the
     // server would reclaim no tombstone at all while every write path kept
     // returning successfully.
-    let _prune_task = topgun_server::service::domain::crdt::spawn_prune_task(
+    // The handle is deliberately detached: the task is meant to outlive this fn and end only
+    // at runtime teardown. A `None` is not: it is the one thing this call can silently do
+    // nothing about, so it is reported rather than discarded.
+    if topgun_server::service::domain::crdt::spawn_prune_task(
         Arc::clone(&frontier),
         Arc::clone(&record_store_factory),
         Arc::clone(&key_writer),
-    );
+    )
+    .is_none()
+    {
+        tracing::warn!(
+            "no prune task was spawned here: one is already claimed for this frontier. That \
+             claim is the only reason this call declines, and the task holding it is the one \
+             that reclaims tombstones"
+        );
+    }
     let query_svc_base = QueryService::new(
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),
