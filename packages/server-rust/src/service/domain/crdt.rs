@@ -6680,6 +6680,19 @@ mod tests {
     /// Comment lines are ignored: the release profile's own comment forbids the
     /// strategy in prose, and reading that as a setting would make the check
     /// permanently red.
+    ///
+    /// The manifest is only one of the routes to an aborting build; `RUSTFLAGS`
+    /// and a cargo config's `[build] rustflags` never appear in it. The
+    /// `compile_error!` below covers those for the compilation this module
+    /// belongs to, and it fires while building rather than while running,
+    /// because a test binary that aborts on the first panic cannot report
+    /// anything about itself.
+    #[cfg(panic = "abort")]
+    compile_error!(
+        "this crate is being compiled with an aborting panic strategy, under which \
+         the catch at the prune pass boundary is inert"
+    );
+
     #[test]
     fn no_cargo_profile_sets_panic_abort() {
         const MANIFEST: &str = include_str!("../../../../../Cargo.toml");
@@ -6734,6 +6747,64 @@ mod tests {
         &tail[..to]
     }
 
+    /// Every body on the exit path names no construct that can panic: the exit
+    /// lease's `Drop`, the release it calls, and the pass guard's own `Drop`.
+    ///
+    /// The guard's `Drop` belongs here because it runs during the very unwind
+    /// the pass catch exists to survive — a fallible construct added there
+    /// later would abort the process before the catch could see the panic.
+    ///
+    /// Each slice is first checked to carry the statement it is about, so a
+    /// delimiter that drifted earlier cannot make these absence limbs vacuously
+    /// green. Indexing is checked as the absence of any `[`, which is
+    /// satisfiable because none of the three bodies indexes, slices or writes
+    /// an array literal.
+    fn assert_exit_path_is_panic_free(
+        crdt_production: &str,
+        impl_production: &str,
+        lease_drop: &str,
+    ) {
+        let release_body = item_body(
+            impl_production,
+            concat!("fn release_prune", "_task("),
+            "\n    }\n",
+        );
+        let guard_drop = item_body(
+            crdt_production,
+            concat!("impl Drop for ", "PrunePassGuard"),
+            "\n}\n",
+        );
+        for (what, body, present) in [
+            (
+                "the lease's Drop",
+                lease_drop,
+                concat!("tracing::", "warn!"),
+            ),
+            (
+                "the release",
+                release_body,
+                concat!("prune_task_", "claimed"),
+            ),
+            (
+                "the pass guard's Drop",
+                guard_drop,
+                concat!("restore_tombstone", "_ref("),
+            ),
+        ] {
+            assert!(
+                body.contains(present),
+                "the sliced body for {what} must contain {present:?}: {body:?}"
+            );
+            for needle in ["unwrap(", "expect(", "panic!", "debug_assert", "["] {
+                assert!(
+                    !body.contains(needle),
+                    "{what} must name no `{needle}`: it runs on a drop path, \
+                     where a panic during an unwind aborts the process"
+                );
+            }
+        }
+    }
+
     /// The supervision is WIRED, asserted over the sources rather than over a
     /// run: two of its six limbs cover properties no behavioural test in this
     /// suite can observe.
@@ -6750,10 +6821,11 @@ mod tests {
     /// (d) The spawn site reports a swallowed `None`. A `let _` binding there
     /// is how the only failure this call can report became invisible.
     ///
-    /// (e) The exit path names no fallible-unwrap construct. It runs inside a
-    /// `Drop` that may itself be running during an unwind, where a panic aborts
-    /// the process — "it happens not to panic today" is not the property worth
-    /// having.
+    /// (e) The exit path names no fallible-unwrap construct — the lease's
+    /// `Drop`, the release it calls, and the pass guard's own `Drop`. Each runs
+    /// inside a `Drop` that may itself be running during an unwind, where a
+    /// panic aborts the process — "it happens not to panic today" is not the
+    /// property worth having.
     ///
     /// (f) The spawn body neither requests a prune nor notifies the wake. A
     /// caught panic that re-triggered itself would turn a deterministically
@@ -6834,36 +6906,8 @@ mod tests {
             "the warning must be what the `None` test leads to: {window:?}"
         );
 
-        // (e) — the exit path is panic-free. Indexing is checked as the absence
-        // of any `[`, which is satisfiable because neither body indexes,
-        // slices or writes an array literal.
-        let release_body = item_body(
-            impl_production,
-            concat!("fn release_prune", "_task("),
-            "\n    }\n",
-        );
-        // Each slice must carry the statement it is about, so a delimiter that
-        // drifted earlier cannot make these absence limbs vacuously green.
-        assert!(
-            release_body.contains(concat!("prune_task_", "claimed")),
-            "the sliced release must contain the claim store: {release_body:?}"
-        );
-        assert!(
-            lease_drop.contains(concat!("tracing::", "warn!")),
-            "the sliced Drop must contain its exit row: {lease_drop:?}"
-        );
-        for (what, body) in [
-            ("the lease's Drop", lease_drop),
-            ("the release", release_body),
-        ] {
-            for needle in ["unwrap(", "expect(", "panic!", "debug_assert", "["] {
-                assert!(
-                    !body.contains(needle),
-                    "{what} must name no `{needle}`: it runs on a drop path, \
-                     where a panic during an unwind aborts the process"
-                );
-            }
-        }
+        // (e) — the exit path is panic-free, across all three of its bodies.
+        assert_exit_path_is_panic_free(crdt_production, impl_production, lease_drop);
 
         // (f) — no self re-trigger after a caught panic.
         let spawn_body = item_body(crdt_production, spawn_fn, "\n}\n");

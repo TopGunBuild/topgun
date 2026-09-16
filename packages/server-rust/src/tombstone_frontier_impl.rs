@@ -142,6 +142,11 @@ pub const DEFAULT_FORGET_LAG_EPOCHS: u64 = 1000;
 /// readable by an operator who disarmed the measurement record. The series is registered
 /// eagerly at frontier construction under both armings, so it renders from the FIRST scrape
 /// rather than appearing only once something moves.
+///
+/// Unlabelled, and therefore process-global: it reads as this process's prune-task liveness
+/// because the server builds exactly ONE frontier. A process that built a second one would
+/// have the two tasks store through the same series, and an exiting task's `0` would mask the
+/// other's live claim.
 pub const METRIC_PRUNE_TASK_ALIVE: &str = "topgun_prune_task_alive";
 
 /// The storage location of a stamped tombstone: the `(map, key)` its OR-Map
