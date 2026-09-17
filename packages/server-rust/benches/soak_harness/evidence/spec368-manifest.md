@@ -1108,3 +1108,305 @@ observation, not a reading about the 4 h question — a 16-row column is far bel
 manifest's P-B is pre-registered to read.)
 
 ## APPEND-ONLY BELOW
+
+## §3 — the 4 h plateau cell (n=1): reading, regeneration, adjudication
+
+Appended 2026-09-17, after the data commit `347ce2a17e977e537865868b85d048f74987ece4` (artifacts) and
+before nothing else: this append is the second and last commit of the cell. Nothing above
+`## APPEND-ONLY BELOW` changed. The R-Artifacts set spans the data commit **and** this append.
+
+**Outcome in one line: STOP — P-M FALSE on PM-A7 (W3 ratio 1.047).** The pre-registered FALSE branch
+governs: no re-run, no re-tuning of any bound, no widening of any carve-out, no edit to any program or to
+§1/§2. The `REPLICATE=AUTHORIZED` line printed by `spec368-pb.awk` is **void** under that rule (§3.6).
+
+### 3.1 Provenance, clean target, and the foreign-binary demo
+
+`cargo clean -p topgun-server --release` removed 27 files / 126.4 MiB; `rm -f target/release/topgun-server`
+then left `test ! -e target/release/topgun-server` true (AC-9). The stale 2026-09-13 binary inherited by
+the pre-registration commit was removed by that step, not reused.
+
+The clause-(a) demo ran exactly once, with `CARGO_TARGET_DIR` on a scratch directory holding a copy of
+`/usr/bin/true` as `release/topgun-server` and `SPEC365_SOAK_BIN=/usr/bin/true`, so no build entered
+`target/` and no artifact was written. `DEMO_EXIT=1`, and the output was:
+
+```
+WARNING: SPEC365_SOAK_BIN is set, so this runner did NOT build the bench
+         binary from HEAD. The freeze gate is NOT discharged for this run
+         and matrix.txt will say so.
+FATAL: the server binary does not contain 'topgun_or_prune_restored_cancelled_total'.
+       binary: /var/folders/dy/35x7phnx3pz88gmkjf9560sm0000gn/T/tmp.V81XQITFsw/release/topgun-server
+       built:  2026-09-16T14:58:19Z
+       sha256: 875c7eea9c66c826091ede3cc44599311dc6818caf17f9e53d97c54c288842b2
+       This counter is emitted by the branch under test, so a binary
+       without it was built from other sources. Attempt 1 ran exactly
+       such a binary and the cell was worthless.
+```
+
+The FATAL `sha256:` equals `shasum -a 256` of the planted binary. Afterwards
+`target/spec368-plateau4h-data` and `target/spec368-plateau4h-data.meta` did not exist, the evidence
+directory had no untracked or modified file, and `target/release/topgun-server` did not exist (AC-10).
+
+The measured binary was built by the runner's own invocation (`Finished release profile [optimized] in
+3m 51s`), and its identity travels with the artifacts:
+
+```
+provenance: server sha256=1f506548a5126bc34216f4a3f7f9ee1ab8d57995573f3075c4bf121764c89ab3 built=2026-09-16T15:02:43Z run_start=2026-09-16T14:58:51Z topgun_or_prune_restored_cancelled_total=present
+  code freeze:            d6a3d38f
+  code freeze diff (.rs): EMPTY (asserted before the build)
+    sha256:       1f506548a5126bc34216f4a3f7f9ee1ab8d57995573f3075c4bf121764c89ab3
+```
+
+Console line 1 and the matrix `sha256:` are the same hash, and `built` is 3 m 52 s after `run_start`, so
+clause (b) held on a binary this invocation produced. The counter's presence discharges `PROV_HITS ≥ 1`
+without a separate reading: clause (a) did not fire.
+
+### 3.2 Runner attribution
+
+```
+harness exited with code 1
+csv rows: 241
+RESULT: instrument sound; harness exit code 1.
+RUNNER_EXIT=1
+false
+tombstone-byte growth slope 677.7 bytes/h exceeds 512.0 bytes/h: tombstone-byte growth slope 677.7 bytes/h exceeds 512.0 bytes/h (total growth 60984 bytes over 2875 samples, last-half window 7197s)
+14402
+```
+
+Class = **reading + gate attribution** (R-Chain 4, row 4): the instrument is sound and the non-zero exit
+is the harness's own tombstone-slope gate firing. `passed=false`, that message as `finishedReason`,
+`durationSecsActual=14402`. Recorded as attribution, never as grounds for a repeat.
+
+### 3.3 Readout
+
+```
+READOUT: O2; retained_closed_epochs=1; reconciliation=RECONCILED
+SectionA: source=matched seq=3116 conj_snapshots_total=3116
+consistency: counted(claim_only=0 durability_only=1 both=0 neither=0) line(claim_only=0 durability_only=1 both=0 neither=0) retained_truncated=false OK
+durable_watermark_lag: max=3 last=2
+```
+
+### 3.4 P-M — FALSE
+
+```
+PM-reconciled=TRUE
+PM-split=TRUE
+P5=TRUE
+P5-observed: removal_rows=527 settlement_rows=527 unsettled=none
+P5-zero-return: none observed
+DECISION_SCRAPE=2026-09-16T19:02:44Z.txt
+P6=TRUE removed_refs_observed_total=527000 considered_total=527000 gap=0
+P7=TRUE restored_cancelled_total=0
+windows=527 settlement_rows=527 zero_return_removal_rows=0 scrapes=241
+A7=FALSE reason=ratio_ge_1_W3
+A7-removals=527 settlements=527 unsettled=none
+```
+
+P-M is TRUE only if every `PM-*` row is TRUE; `A7=FALSE` is one of those rows, so **P-M is FALSE** and the
+STOP branch applies. The window table (extreme-value ratio per window: max pass latency over min
+inter-exit interval):
+
+```
+window | span_s | latencies | max_latency_s | intervals | min_interval_s | ratio
+W1 | 0-1800 | 63 | 12.092 | 62 | 14.712 | 0.822
+W2 | 1800-3600 | 64 | 15.128 | 64 | 15.884 | 0.952
+W3 | 3600-5400 | 65 | 16.363 | 65 | 15.623 | 1.047
+W4 | 5400-7200 | 67 | 7.117 | 67 | 16.655 | 0.427
+W5 | 7200-9000 | 66 | 6.094 | 66 | 15.381 | 0.396
+W6 | 9000-10800 | 66 | 7.437 | 66 | 15.402 | 0.483
+W7 | 10800-12600 | 67 | 6.640 | 67 | 15.858 | 0.419
+W8 | 12600-14400 | 69 | 7.377 | 69 | 16.668 | 0.443
+```
+
+The `A7-epoch` per-epoch series stays in `spec368-plateau4h.predicates.txt`: **527 lines**, maximum
+per-epoch `ratio=0.439`. The single window ratio ≥ 1 is W3's, and it is an extreme-value statistic (one
+worst latency against one shortest interval in the same 1800 s window), not a per-epoch average.
+
+### 3.5 P-S — TRUE
+
+```
+PS-rows=TRUE rows=241 evaluable=241 exempt=0 first_snapshot_elapsed=0 max(sum-lag)=-1
+PS-verdict=TRUE verdict=O2
+```
+
+Every one of the 241 rows was evaluable, none exempt, and the verdict is the pre-registered O2. The
+recorded shape is §3.3's `consistency:` line (one `durability_only` epoch, `retained_truncated=false`,
+`OK`), `retained_closed_epochs=1`, and `durable_watermark_lag: max=3 last=2`.
+
+### 3.6 P-B — DECAYING_NOT_BOUND, and the void replicate line
+
+```
+PB-C1 slope_W8=2772.000000 slope_W1=12922.088710 W8<W1=TRUE recorded_decay_observation
+PB-C2 last_half_slope=656.985130 <=512=FALSE
+PB-C3 n=241 skipped_empty=0 half_start=120 quarter_start=180 last_half_mean=35172.893 last_quarter_mean=35096.492 deviation_pct=0.217 <=10=TRUE
+PB-ratio W8/W1=0.21
+PB-near_threshold=NO
+PB-level_near_miss=NO
+PB=DECAYING_NOT_BOUND
+REPLICATE=AUTHORIZED
+```
+
+**`REPLICATE=AUTHORIZED` is void.** `spec368-pb.awk` evaluates P-B alone and cannot see P-M, while the
+replicate policy sits under the STOP rule — and P-M is FALSE. No replicate is run, and no third run. This
+is a spec/program drift: the flag should have been gated on P-M ∧ P-S. The frozen program is **not**
+edited; the drift is recorded here and in the umbrella tracker as a lesson for the next carve's programs
+(conductor rulings v4, ruling 1).
+
+### 3.7 P-F — recorded, never gated
+
+```
+PF-recon2 rows_within_2pct=202/240 NOT_MET
+PF-recon3 rows_within_2pct=203/240 NOT_MET
+PF-phys_footprint_mb peak=8670.961 last=8670.961 peak_eq_last=TRUE
+PF-reclaimable_mb peak=1231.109 last=0.000 peak_eq_last=FALSE
+PF-phys_footprint_peak_mb last=8670.961
+PF-shape phys_footprint_mb last_half_slope_sign=+ slope_mb_per_hour=1802.274746
+PF-shape reclaimable_mb last_half_slope_sign=- slope_mb_per_hour=-292.642028
+```
+
+`decidingSeries` shape tokens, from the harness:
+
+```
+"PLATEAU_NOT_MET"
+"series rss_kib rose and was still rising at the end; firing envelope BOTH"
+{"name":"rss_kib","shape":"MONOTONE_RISING","firingEnvelope":"BOTH","lastHalfMean":6945402}
+{"name":"redb_bytes","shape":"MONOTONE_RISING","firingEnvelope":"PEAKS","lastHalfMean":183729658}
+{"name":"wal_bytes","shape":"MONOTONE_RISING","firingEnvelope":"FLOOR","lastHalfMean":1399553}
+{"name":"wal_segment_files","shape":"MONOTONE_RISING","firingEnvelope":"BOTH","lastHalfMean":518}
+```
+
+### 3.8 The three eight-window slope tables
+
+From `spec368-plateau4h.fits.txt` (27 lines). The fitter's column is named `slope_mb_per_hour` for every
+series; for `tombstone_bytes` the underlying column is bytes, so those figures are **B/h**. `LH` is the
+last-half fit (`n=121`), the statistic C2 uses. `skipped_empty` is 0 in all 27 fits.
+
+`tombstone_bytes` (B/h):
+
+| window | span_s | slope | se | r² |
+|---|---|---|---|---|
+| W1 | 1800 | 12,922.089 | 11,285.280 | 0.0433 |
+| W2 | 1800 | 15,393.435 | 11,198.743 | 0.0612 |
+| W3 | 1800 | 1,042.745 | 7,832.563 | 0.0006 |
+| W4 | 1800 | 13,368.750 | 6,529.125 | 0.1263 |
+| W5 | 1800 | 2,446.920 | 7,378.714 | 0.0038 |
+| W6 | 1800 | 4,157.109 | 8,465.463 | 0.0082 |
+| W7 | 1800 | 7,209.387 | 8,224.057 | 0.0258 |
+| W8 | 1380 | 2,772.000 | 10,301.920 | 0.0033 |
+| LH | 7200 | **656.985** | 999.741 | 0.0036 |
+
+Reference tables beside it, both `PB=NOT_MET` cells:
+
+| reference | W1 … W8 `tombstone_bytes` slopes (B/h) | W8/W1 | source |
+|---|---|---|---|
+| `spec362b-long4h` | 95,653.60 / 56,417.64 / 171,702.41 / 154,358.56 / 212,434.31 / 224,270.03 / 484,239.22 / 651,649.15 | **6.81×** | `spec362-manifest.md:4281-4288,4253` |
+| `spec355-w1000` | 113,657.12 / 244,197.34 / 151,075.57 / 166,532.06 / 118,189.21 / 132,688.50 / 133,598.47 / 155,726.40 | **1.37×** | `spec355-manifest.md:1192-1201` |
+
+Every window of this cell is one to two orders of magnitude below both references, and the direction is
+reversed: `W8/W1=0.21` here against 6.81 and 1.37 there.
+
+`phys_footprint_mb` (MB/h):
+
+| window | span_s | slope | se | r² |
+|---|---|---|---|---|
+| W1 | 1800 | 1,929.363 | 38.555 | 0.9886 |
+| W2 | 1800 | 3,117.226 | 106.869 | 0.9670 |
+| W3 | 1800 | 2,576.038 | 128.895 | 0.9323 |
+| W4 | 1800 | 1,780.419 | 175.508 | 0.7802 |
+| W5 | 1800 | 2,846.645 | 42.542 | 0.9936 |
+| W6 | 1800 | 1,438.200 | 138.163 | 0.7889 |
+| W7 | 1800 | 3,966.259 | 79.374 | 0.9885 |
+| W8 | 1380 | 2,144.115 | 32.416 | 0.9950 |
+| LH | 7200 | **1,802.275** | 47.151 | 0.9247 |
+
+`reclaimable_mb` (MB/h):
+
+| window | span_s | slope | se | r² |
+|---|---|---|---|---|
+| W1 | 1800 | 1,515.130 | 54.089 | 0.9644 |
+| W2 | 1800 | −1,808.819 | 355.256 | 0.4720 |
+| W3 | 1800 | 213.754 | 389.908 | 0.0103 |
+| W4 | 1800 | 1,580.826 | 147.327 | 0.7988 |
+| W5 | 1800 | −1,046.328 | 72.818 | 0.8768 |
+| W6 | 1800 | −108.503 | 115.136 | 0.0297 |
+| W7 | 1800 | −1,808.124 | 183.848 | 0.7693 |
+| W8 | 1380 | −0.010 | 0.006 | 0.1200 |
+| LH | 7200 | **−292.642** | 33.569 | 0.3897 |
+
+### 3.9 Terminal census against the references
+
+```
+{"source":"TERMINAL","elapsedSecs":14402.13937625,"keysScanned":96,"keysUndecodable":0,"orMapKeys":96,"tombstoneEntries":1676,"tombstoneBytes":38548,"tombstoneDupEntries":0,"keysWithTombstones":48,"keysAllDead":0,"maxTombstonesPerKey":42}
+{"scansAttempted":1,"scansFailed":0,"samples":1,"firstBytes":38548,"minBytes":38548,"peakBytes":38548,"lastBytes":38548,"firstHalfPeakBytes":0,"lastHalfPeakBytes":38548,"riseBytes":38548,"spanSecs":0.0,"disposition":"LEVEL_SUPPRESSED","ceilingBytes":null,"passed":true,"reason":null}
+```
+
+| quantity | this cell | `spec362b-long4h` reference (`spec362-manifest.md:4073,4088-4093`) |
+|---|---|---|
+| tombstone entries | 1,676 | 44,452 |
+| tombstone bytes | 38,548 | 1,016,398 |
+| max tombstones per key | 42 | 1,147 |
+
+Same duration, same cadence, ~26× fewer entries and ~26× fewer bytes. The census is a single end-of-run
+structural read of the **durable** store, so it is not the same measurement as the resident
+`tombstone_bytes` gauge (23,805 B at the last scrape); both are small.
+
+### 3.10 Regeneration, ordering, and the AC roll-up
+
+```
+READOUT_REGEN=IDENTICAL
+PREDICATES_REGEN=IDENTICAL
+ORDER=OK
+```
+
+Both regenerations ran on `mktemp -d` copies, never with `cwd` = evidence. `PREDICATES_REGEN=IDENTICAL`
+covers `fits.txt`, `predicates.txt` and all eight segments; the single admissible non-IDENTICAL case (a
+`spec366-p67.awk` `no_persisted_scrape_in` FALSE branch) did not arise, because `P6=TRUE gap=0`.
+
+- **AC-14** — the R-Artifacts set spans the data commit (artifacts) and this append (§3);
+  `ls spec368-plateau4h.scrapes | wc -l` = **241** = CSV data rows = the pre-registered 241, so no
+  call-out is owed.
+- **AC-15** — `ORDER=OK` with `M=a80c823d95932ebdf4bdb805771714f266214e2c`,
+  `D=347ce2a17e977e537865868b85d048f74987ece4`: `M ≠ D`, `M` an ancestor of `D`, the first commit of all
+  four `spec368-*.awk`, `spec368-predicates.sh` and `spec368-plateau4h.sh` equals `M`, no artifact path in
+  `M`, `## APPEND-ONLY BELOW` occurring exactly once at `M`, and the text above it identical at `M` and
+  `HEAD` (`93e02eed1cd0da7969f06b5de91ed064574f2d5d595ed8631e8dc0714c0e6f42` at both).
+- **AC-16** — both regeneration lines IDENTICAL, no exception invoked.
+- **AC-18** — no `.rs`, no `INVARIANTS.md`, no `scripts/check-invariants.sh`, no `spec365-readout.sh`,
+  `spec349c2-fit.awk` or `spec366-*` change; `git diff d6a3d38f..HEAD --name-only` lists only
+  `spec368*` paths under `evidence/`. `TG-OR-005` stays open and `NAKED_BASELINE` stays 4.
+
+### 3.11 STOP marker
+
+**P-M FALSE on PM-A7 (W3 ratio 1.047).** Literal reason line: `A7=FALSE reason=ratio_ge_1_W3`. The
+pre-registered FALSE branch was followed: the artifacts and every predicate line are recorded as written,
+the `REPLICATE=AUTHORIZED` line is void (§3.6), and nothing was re-run, re-tuned, widened or edited. P-B's
+`DECAYING_NOT_BOUND` is a reading, not a FALSE; P-F and the census are never STOP triggers.
+
+### 3.12 Conductor adjudication (reference/SPEC-368-conductor-rulings-v4.md)
+
+Quoted from ruling 2 of the conductor session's file (local conductor file, not committed); the
+cross-vendor second opinion recorded there agrees on the STOP reading.
+
+1. **Mechanism holds at 4 h.** 527 epochs removed and settled, gap 0, zero restored-cancelled,
+   RECONCILED, O2 as pre-registered. The cancellation-loss class stays CLOSED.
+2. **Tombstone bytes are a bounded sawtooth, not a trend.** 24–45 KB around 35.2 KB (last-half mean) vs
+   35.1 KB (last-quarter mean). The last-half OLS slope, 657 ± 1000 B/h, is indistinguishable from zero
+   AND from 512; the harness gate (677 B/h) fires on the same noise. C2 and the harness gate are
+   non-discriminating at this noise floor. The pre-registered verdict stands: `DECAYING_NOT_BOUND`; C1's
+   decay ratio 0.21 is partly a start-up artefact (W1 begins at `y_first=0`). No gate change here
+   (non-goal); this IS the input to the level/ceiling re-derivation carve.
+3. **A7 is a capacity-margin warning, not a mechanism failure.** Max pass latency 12–16 s in W1–W3
+   against a ~15 s min inter-exit interval; 6–7 s from W4 on. Extreme-value ratio; every epoch settled,
+   no backlog. But prune throughput (~1,000 refs per 6–16 s) runs at only 1–2.5× the removal cadence
+   (~1,000 refs / 15 s): the steady-state tombstone level is set by removal rate × pass latency, and the
+   margin is thin. Follow-up: latency and interval DISTRIBUTIONS, p99/p1, and why early passes are 2×
+   slower.
+4. **Memory is the headline, and it is not tombstones.** `phys_footprint` 8.67 GB still rising
+   1.8 GB/h in the last half while resident tombstone bytes are ~24 KB and durable tombstones 38.5 KB
+   (the census scans the durable store; the gauge counts resident bytes — different measurements, both
+   small). Live tags 1.06 M / 35.9 MB. The RSS residue is the umbrella tracker's earlier item, unchanged
+   by this carve.
+5. **Next carve: level/ceiling re-derivation**, pre-registering (a) a ceiling test on the last-half mean
+   (C3's form is the only informative P-B statistic here), (b) if a slope is kept, a noise-robust
+   estimator (Theil–Sen) with a threshold ≥ 2–3 se from the measured floor (se ≈ 1,000 B/h at 2 h / 60 s
+   cadence) and a power calculation, (c) the harness gate re-derived on the same basis. `TG-OR-005`
+   stays open; `NAKED_BASELINE` unchanged.
