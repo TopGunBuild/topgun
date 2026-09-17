@@ -2598,6 +2598,163 @@ mod tests {
             .collect()
     }
 
+    /// Build a 4h tombstone-byte series shaped like healthy OR churn: a bounded
+    /// sawtooth whose teeth sweep one epoch's worth of tag bytes every 27.3s,
+    /// riding a ±2 KB level wobble with a 2h period. The gauge never exceeds the
+    /// tooth height, so its LEVEL is bounded and stable — but every tooth rises,
+    /// so a per-hour slope fit over the last half reads a steady climb.
+    ///
+    /// `cadence_secs` is the scrape interval; both the 5s harness cadence and the
+    /// 60s cell cadence are exercised, because the sawtooth is aliased differently
+    /// by each and the fitted slope is not the same.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn bounded_sawtooth(cadence_secs: u64) -> Vec<TombstoneSample> {
+        let mut samples = Vec::new();
+        let mut t = 0_u64;
+        while t <= 14_400 {
+            let elapsed_secs = t as f64;
+            let bytes = 12_000.0
+                + 46_000.0 * ((elapsed_secs % 27.3) / 27.3)
+                + 2_000.0 * (std::f64::consts::TAU * (elapsed_secs - 3_600.0) / 7_200.0).sin();
+            samples.push(TombstoneSample {
+                elapsed_secs,
+                bytes: bytes.round() as u64,
+            });
+            t += cadence_secs;
+        }
+        samples
+    }
+
+    /// A bounded sawtooth is NOT a leak. Its run maximum stays far under a
+    /// mechanism-derived level ceiling and its level is stable — the last-quarter
+    /// mean sits within tolerance of the last-half mean — yet the rising teeth
+    /// give the last-half OLS a per-hour slope of ~1.9–2.2 KB/h at both cadences.
+    /// A slope-as-gate therefore REDs a healthy run; that is exactly the false
+    /// positive the level-ceiling gate replaces (TG-OR-005).
+    ///
+    /// The level quantities are computed here rather than read off the assessment
+    /// because no level clause exists yet; they migrate to the assessment's own
+    /// fields once the gate lands.
+    #[allow(clippy::cast_precision_loss)]
+    #[test]
+    fn calibration_bounded_sawtooth_is_not_a_leak() {
+        /// One cadence of the sawtooth with every quantity the series pins.
+        struct Case {
+            cadence_secs: u64,
+            samples: usize,
+            run_max: u64,
+            last_half_ols: f64,
+            last_half_mean: f64,
+            last_quarter_mean: f64,
+            level_deviation: f64,
+            level_tolerance: f64,
+        }
+        let cases = [
+            Case {
+                cadence_secs: 5,
+                samples: 2_881,
+                run_max: 59_997,
+                last_half_ols: 1_882.2,
+                last_half_mean: 35_077.695,
+                last_quarter_mean: 36_381.888,
+                level_deviation: 1_304.193,
+                level_tolerance: 3_507.769,
+            },
+            Case {
+                cadence_secs: 60,
+                samples: 241,
+                run_max: 59_997,
+                last_half_ols: 2_190.9,
+                last_half_mean: 35_240.182,
+                last_quarter_mean: 38_021.295,
+                level_deviation: 2_781.113,
+                level_tolerance: 3_524.018,
+            },
+        ];
+        for case in cases {
+            let cadence = case.cadence_secs;
+            let ols = case.last_half_ols;
+            let samples = bounded_sawtooth(cadence);
+            assert_eq!(
+                samples.len(),
+                case.samples,
+                "cadence {cadence}s sample count"
+            );
+
+            let peak = samples.iter().map(|s| s.bytes).max().unwrap();
+            assert_eq!(peak, case.run_max, "cadence {cadence}s run maximum");
+
+            let mean = |window: &[TombstoneSample]| -> f64 {
+                window.iter().map(|s| s.bytes as f64).sum::<f64>() / window.len() as f64
+            };
+            let last_half_mean = mean(&samples[samples.len() / 2..]);
+            let last_quarter_mean = mean(&samples[3 * samples.len() / 4..]);
+            let level_deviation = (last_quarter_mean - last_half_mean).abs();
+            // 10% of the last-half mean, floored at one epoch's worth of tag
+            // bytes (width 1000 × 23 B) so a near-zero level cannot make the
+            // tolerance vanish.
+            let level_tolerance = 0.10 * last_half_mean.max(23_000.0);
+
+            assert!(
+                (last_half_mean - case.last_half_mean).abs() < 1.0,
+                "cadence {cadence}s last-half mean {last_half_mean:.3} != {:.3}",
+                case.last_half_mean
+            );
+            assert!(
+                (last_quarter_mean - case.last_quarter_mean).abs() < 1.0,
+                "cadence {cadence}s last-quarter mean {last_quarter_mean:.3} != {:.3}",
+                case.last_quarter_mean
+            );
+            assert!(
+                (level_deviation - case.level_deviation).abs() < 1.0,
+                "cadence {cadence}s level deviation {level_deviation:.3} != {:.3}",
+                case.level_deviation
+            );
+            assert!(
+                (level_tolerance - case.level_tolerance).abs() < 1.0,
+                "cadence {cadence}s level tolerance {level_tolerance:.3} != {:.3}",
+                case.level_tolerance
+            );
+
+            let a = assess_tombstone_bytes(
+                &samples,
+                DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+                DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+                DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+            );
+            assert!(
+                (a.slope_bytes_per_hour - ols).abs() / ols < 0.01,
+                "cadence {cadence}s last-half OLS {:.1} != {ols:.1}",
+                a.slope_bytes_per_hour
+            );
+
+            // The series is a "leak" only under a slope gate: it climbs at ~2 KB/h,
+            // stays under the 138,000 B ceiling (6 epochs × 1000 × 23 B) and its
+            // level is stable within tolerance.
+            assert!(a.slope_bytes_per_hour > DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR);
+            assert!(
+                peak < 138_000,
+                "cadence {cadence}s must stay under the ceiling"
+            );
+            assert!(
+                level_deviation < level_tolerance,
+                "cadence {cadence}s level must be stable"
+            );
+
+            assert!(
+                a.passed,
+                "a bounded, level-stable sawtooth must PASS; cadence {cadence}s \
+                 slope={:.1} peak={peak} deviation={level_deviation:.3} \
+                 tolerance={level_tolerance:.3} reason={:?}",
+                a.slope_bytes_per_hour, a.reason
+            );
+        }
+    }
+
     /// A clearly-linear tombstone-byte-growth series — well above the tight
     /// per-hour threshold — MUST FAIL. Mirrors the RSS gate's
     /// `calibration_fails_linear_tombstone_leak`, but at the byte gauge's much
