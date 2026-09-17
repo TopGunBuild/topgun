@@ -324,14 +324,15 @@ pub enum PruneExit {
     RestoredEvicted,
     /// The in-place update errored; the ref is re-indexed.
     RestoredWriteError,
-    /// The pass was dropped (cancelled) before this ref's exit was recorded; the guard
-    /// re-indexed it for the next pass.
+    /// The pass's future was dropped (cancelled or unwinding) before this ref's exit was
+    /// recorded; the guard re-indexed it for the next pass.
     ///
     /// This is the only exit a ref can take without the loop body reaching a decision about
-    /// it: the pass's future stopped being polled, so the ref is neither reclaimed nor known
-    /// to be unreclaimable. Counting it separately is what keeps the identity total under
-    /// cancellation — folded into any other exit it would either claim a reclaim that never
-    /// happened or attribute a storage outcome that was never observed.
+    /// it: the pass's future stopped being polled — because it was cancelled, or because a
+    /// panic unwound through it — so the ref is neither reclaimed nor known to be
+    /// unreclaimable. Counting it separately is what keeps the identity total in both cases —
+    /// folded into any other exit it would either claim a reclaim that never happened or
+    /// attribute a storage outcome that was never observed.
     RestoredCancelled,
 }
 

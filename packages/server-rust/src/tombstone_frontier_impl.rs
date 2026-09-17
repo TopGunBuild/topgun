@@ -128,6 +128,27 @@ pub const DEFAULT_EPOCH_WIDTH: u64 = 1000;
 /// detail here.
 pub const DEFAULT_FORGET_LAG_EPOCHS: u64 = 1000;
 
+/// Liveness of a frontier's prune task: `1` exactly while a task holds this frontier's
+/// single-flight claim, `0` otherwise.
+///
+/// `1` covers both the task parked on its wake and the task polling a pass — including a pass
+/// that is unwinding, because a caught pass panic does not end the task and therefore does not
+/// move this gauge. `0` means either that no task has ever been spawned for this frontier or
+/// that the one that was has exited, which is the state in which every trigger only leaves a
+/// permit nobody consumes and no tombstone is ever reclaimed again.
+///
+/// Deliberately OUTSIDE the `topgun_or_prune_` family: the absence of that whole prefix from a
+/// scrape is the documented proof that the prune record is disarmed, and liveness must stay
+/// readable by an operator who disarmed the measurement record. The series is registered
+/// eagerly at frontier construction under both armings, so it renders from the FIRST scrape
+/// rather than appearing only once something moves.
+///
+/// Unlabelled, and therefore process-global: it reads as this process's prune-task liveness
+/// because the server builds exactly ONE frontier. A process that built a second one would
+/// have the two tasks store through the same series, and an exiting task's `0` would mask the
+/// other's live claim.
+pub const METRIC_PRUNE_TASK_ALIVE: &str = "topgun_prune_task_alive";
+
 /// The storage location of a stamped tombstone: the `(map, key)` its OR-Map
 /// record lives under plus the tombstone `tag`. The server-side `epoch → tags`
 /// index stores these so a wholesale epoch-drop prune can remove each tag from
@@ -1323,6 +1344,14 @@ pub struct TombstoneFrontier {
     /// task. Single-flight, so one frontier can never end up with two prune loops racing each
     /// other over the same index.
     prune_task_claimed: AtomicBool,
+    /// The externally-readable mirror of `prune_task_claimed`, resolved once at construction
+    /// and stored through from the claim and release sites only.
+    ///
+    /// A cached handle rather than a macro at each site: the two sites are rare, but a
+    /// by-name registry lookup inside a claim would put a lookup on the one path that must
+    /// stay a compare-exchange plus a store. Its semantics are
+    /// [`METRIC_PRUNE_TASK_ALIVE`]'s.
+    prune_task_alive: Gauge,
 }
 
 /// A unit of work for the background cursor-persistence worker.
@@ -1378,12 +1407,14 @@ impl TombstoneFrontier {
     /// # Construction-order precondition — the metrics recorder MUST already be installed
     ///
     /// This constructor resolves and caches the prune record's metric handles (see
-    /// [`MetricsPruneRecorder::new`]). In `metrics` 0.24 a handle resolved **before** a
-    /// recorder is installed binds to a no-op for that handle's entire lifetime and never
-    /// re-resolves, so a frontier built ahead of observability initialisation would record
-    /// nothing forever while still looking armed. Every production construction site must
-    /// therefore run after the Prometheus recorder is installed. Both of them do today, and
-    /// the property is a precondition each site owns, not one this constructor can enforce:
+    /// [`MetricsPruneRecorder::new`]) and, independently of the record's arming, the
+    /// prune-task liveness gauge ([`METRIC_PRUNE_TASK_ALIVE`]). In `metrics` 0.24 a handle
+    /// resolved **before** a recorder is installed binds to a no-op for that handle's entire
+    /// lifetime and never re-resolves, so a frontier built ahead of observability
+    /// initialisation would record nothing forever while still looking armed. Every
+    /// production construction site must therefore run after the Prometheus recorder is
+    /// installed. Both of them do today, and the property is a precondition each site owns,
+    /// not one this constructor can enforce:
     ///
     /// - `bin/topgun_server.rs` builds the frontier on the server boot path, after the same
     ///   path has already called `init_observability()` (which installs the recorder in
@@ -1434,6 +1465,11 @@ impl TombstoneFrontier {
         // checkpoint passes it here instead. The registry reads its margin from the environment
         // once, at this construction, so the parse and the arithmetic cannot disagree later.
         let registry = Arc::new(ReclamationRegistry::new(0));
+        // Resolved OUTSIDE the arming match above, and touched, so the series renders at 0
+        // from the first scrape whether or not the prune record is armed: liveness is what an
+        // operator reads to tell "nothing to reclaim" from "nothing is reclaiming", and that
+        // question does not go away when the measurement record is switched off.
+        let prune_task_alive = touched_gauge(METRIC_PRUNE_TASK_ALIVE);
         Self {
             state: Mutex::new(FrontierState::new(Arc::clone(&registry))),
             store,
@@ -1445,6 +1481,7 @@ impl TombstoneFrontier {
             conjunct_seq: AtomicU64::new(0),
             prune_wake: Arc::new(tokio::sync::Notify::new()),
             prune_task_claimed: AtomicBool::new(false),
+            prune_task_alive,
         }
     }
 
@@ -1495,17 +1532,49 @@ impl TombstoneFrontier {
         Arc::clone(&self.prune_wake)
     }
 
-    /// Single-flight claim on this frontier's prune task: true exactly once per frontier.
+    /// Single-flight claim on this frontier's prune task: true for ONE HOLDER AT A TIME.
     ///
     /// A `compare_exchange` from `false` to `true`, so of any number of racing wiring sites
     /// exactly one is told to spawn the task and every other is told one already exists. Two
     /// prune loops over one frontier would each drain refs the other never sees settle, so the
     /// claim is what keeps the pass a single writer.
+    ///
+    /// The claim is not permanent: a task that exits by any route — abort, runtime teardown, a
+    /// panic that escapes the pass boundary — releases it as its own future is dropped, so a
+    /// later spawn can put a live task back over this frontier instead of the frontier staying
+    /// claimed by nothing forever.
+    ///
+    /// A successful claim, and only a successful claim, stores `1` into the liveness gauge
+    /// ([`METRIC_PRUNE_TASK_ALIVE`]). The store is on the success side so a losing racer cannot
+    /// re-assert a `1` it does not own.
     #[must_use]
     pub fn claim_prune_task(&self) -> bool {
-        self.prune_task_claimed
+        let claimed = self
+            .prune_task_claimed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+            .is_ok();
+        if claimed {
+            self.prune_task_alive.set(1.0);
+        }
+        claimed
+    }
+
+    /// Release the single-flight claim taken by [`TombstoneFrontier::claim_prune_task`].
+    ///
+    /// The ONE intended caller is the exit lease the spawned prune task owns, which runs this
+    /// as its future is dropped. That is why this is `pub(crate)` and not `pub`: a caller that
+    /// could free the claim from outside could free it while a pass is still running over the
+    /// index, and the next spawn would then put a SECOND concurrent writer over it — the exact
+    /// state the claim exists to make unrepresentable.
+    ///
+    /// The gauge is stored to FIRST and the claim released second, so a racing re-claim's `1`
+    /// always lands after this `0` rather than being overwritten by it.
+    ///
+    /// Panic-free by contract: this runs inside a `Drop`, which may itself run during an
+    /// unwind, and a panic there aborts the process.
+    pub(crate) fn release_prune_task(&self) {
+        self.prune_task_alive.set(0.0);
+        self.prune_task_claimed.store(false, Ordering::Release);
     }
 
     /// Publish the frontier's index and epoch state.
@@ -3533,6 +3602,73 @@ mod tests {
                  render was:\n{rendered}"
             );
         }
+    }
+
+    /// The liveness gauge tracks the claim, in both directions, and the series exists from the
+    /// FIRST scrape.
+    ///
+    /// The first assertion is the load-bearing one: a freshly constructed frontier must render
+    /// `0`, not nothing. An ABSENT series is indistinguishable from a present one reading `0`
+    /// only to a human; to a sampler it is the difference between "no prune task is running"
+    /// and "this build does not report whether one is". That is why the handle is resolved
+    /// eagerly at construction, outside the prune record's arming branch.
+    ///
+    /// The rest walks the claim's own state machine — claim, a losing re-claim, release,
+    /// re-claim — because the gauge is only worth reading if a second claim cannot re-assert a
+    /// `1` it does not hold and a release cannot leave a live task reading `0`.
+    #[test]
+    fn prune_task_alive_gauge_tracks_the_claim() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        // Bound BEFORE construction: a handle resolved first binds to a no-op for its whole
+        // lifetime, and the inverted order would turn every assertion below into one about
+        // nothing.
+        let frontier = metrics::with_local_recorder(&recorder, || TombstoneFrontier::new(None));
+
+        assert_eq!(
+            rendered_value(&handle.render(), METRIC_PRUNE_TASK_ALIVE),
+            Some("0"),
+            "the series must exist, at 0, before any claim; render was:\n{}",
+            handle.render()
+        );
+
+        assert!(frontier.claim_prune_task(), "the first claim wins");
+        assert_eq!(
+            rendered_value(&handle.render(), METRIC_PRUNE_TASK_ALIVE),
+            Some("1"),
+            "a won claim publishes liveness; render was:\n{}",
+            handle.render()
+        );
+
+        assert!(
+            !frontier.claim_prune_task(),
+            "a second claim under a live holder must lose"
+        );
+        assert_eq!(
+            rendered_value(&handle.render(), METRIC_PRUNE_TASK_ALIVE),
+            Some("1"),
+            "a LOST claim must not move the gauge; render was:\n{}",
+            handle.render()
+        );
+
+        frontier.release_prune_task();
+        assert_eq!(
+            rendered_value(&handle.render(), METRIC_PRUNE_TASK_ALIVE),
+            Some("0"),
+            "the release publishes the absence; render was:\n{}",
+            handle.render()
+        );
+
+        assert!(
+            frontier.claim_prune_task(),
+            "a released claim is claimable again"
+        );
+        assert_eq!(
+            rendered_value(&handle.render(), METRIC_PRUNE_TASK_ALIVE),
+            Some("1"),
+            "the re-claim publishes liveness again; render was:\n{}",
+            handle.render()
+        );
     }
 
     // -----------------------------------------------------------------------
