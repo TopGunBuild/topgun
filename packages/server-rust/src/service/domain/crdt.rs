@@ -2067,8 +2067,8 @@ pub fn spawn_prune_task(
                 tracing::warn!(
                     restored,
                     panic_message = %panic_payload_message(payload.as_ref()),
-                    "prune pass panicked; the refs it had not settled were re-indexed by this \
-                     pass and the prune task keeps running, waiting for the next trigger"
+                    "prune pass panicked; `restored` counts the refs re-indexed by this pass, \
+                     and the prune task keeps running, waiting for the next trigger"
                 );
             }
         }
@@ -6683,10 +6683,14 @@ mod tests {
     ///
     /// The manifest is only one of the routes to an aborting build; `RUSTFLAGS`
     /// and a cargo config's `[build] rustflags` never appear in it. The
-    /// `compile_error!` below covers those for the compilation this module
-    /// belongs to, and it fires while building rather than while running,
-    /// because a test binary that aborts on the first panic cannot report
-    /// anything about itself.
+    /// `compile_error!` below covers those routes, and it fires while building
+    /// rather than while running, because a test binary that aborts on the
+    /// first panic cannot report anything about itself.
+    ///
+    /// Its reach is this module: it lives under `#[cfg(test)]`, so it guards
+    /// TEST compilations of this crate and says nothing about a production
+    /// build configured to abort. Catching that is a policy-level guard on the
+    /// build itself, not something a test can assert.
     #[cfg(panic = "abort")]
     compile_error!(
         "this crate is being compiled with an aborting panic strategy, under which \

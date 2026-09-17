@@ -1408,12 +1408,13 @@ impl TombstoneFrontier {
     ///
     /// This constructor resolves and caches the prune record's metric handles (see
     /// [`MetricsPruneRecorder::new`]) and, independently of the record's arming, the
-    /// prune-task liveness gauge ([`METRIC_PRUNE_TASK_ALIVE`]). In `metrics` 0.24 a handle resolved **before** a
-    /// recorder is installed binds to a no-op for that handle's entire lifetime and never
-    /// re-resolves, so a frontier built ahead of observability initialisation would record
-    /// nothing forever while still looking armed. Every production construction site must
-    /// therefore run after the Prometheus recorder is installed. Both of them do today, and
-    /// the property is a precondition each site owns, not one this constructor can enforce:
+    /// prune-task liveness gauge ([`METRIC_PRUNE_TASK_ALIVE`]). In `metrics` 0.24 a handle
+    /// resolved **before** a recorder is installed binds to a no-op for that handle's entire
+    /// lifetime and never re-resolves, so a frontier built ahead of observability
+    /// initialisation would record nothing forever while still looking armed. Every
+    /// production construction site must therefore run after the Prometheus recorder is
+    /// installed. Both of them do today, and the property is a precondition each site owns,
+    /// not one this constructor can enforce:
     ///
     /// - `bin/topgun_server.rs` builds the frontier on the server boot path, after the same
     ///   path has already called `init_observability()` (which installs the recorder in
