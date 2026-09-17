@@ -509,6 +509,281 @@ pub fn assess_tombstone_bytes(
 }
 
 // ---------------------------------------------------------------------------
+// Resident OR tombstone gauge: the mechanism-derived level ceiling.
+//
+// The items below are the ceiling's frozen surface: the bound, its three
+// rendered dispositions, the window statistic the bound is derived from, and the
+// window split the level clause uses. The verdict that consumes them, and the
+// sampler that measures their inputs, land in the wiring commit that follows.
+//
+// Each carries `allow(dead_code)` only until that commit references it: the soak
+// binary is the target where an unreferenced item is dead (the calibration
+// integration target already includes this module under its own
+// `allow(dead_code)`). Every one of these attributes is removed by the wiring
+// commit, so an item left unused there stops being silent.
+// ---------------------------------------------------------------------------
+
+/// Mechanism-derived bound on resident OR tombstone bytes (see TG-OR-005).
+///
+/// Every field is either read off the server the harness launched or measured by
+/// the harness itself; none is chosen to make a run pass. `epoch_width` and
+/// `tag_bytes_max` are the mechanism's two byte factors, `stamps_in_window_max`
+/// is the measured input to the rate-dependent epoch term, and `ceiling_epochs`
+/// is what [`TombstoneLevelBound::derive`] computes from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct TombstoneLevelBound {
+    pub ceiling_epochs: u64,
+    pub epoch_width: u64,
+    pub tag_bytes_max: u64,
+    pub stamps_in_window_max: u64,
+}
+
+#[allow(dead_code)]
+impl TombstoneLevelBound {
+    /// `ceiling_epochs = DEFAULT_TOMBSTONE_CEILING_FIXED_EPOCHS +
+    /// ceil(stamps_in_window_max / epoch_width)`, saturating.
+    ///
+    /// `epoch_width` is clamped to at least 1 and STORED clamped, mirroring the
+    /// server's `set_epoch_width` (`tombstone_frontier_impl.rs:2308-2310`), so
+    /// `derive(0, b, s)` and `derive(1, b, s)` are the same bound. The clamp is
+    /// written as `if epoch_width == 0 { 1 } else { epoch_width }` because
+    /// `Ord::max` is not callable in a `const fn`, and the epoch term uses
+    /// `u64::div_ceil` because the hand-rolled `(s + w - 1) / w` overflows at
+    /// `u64::MAX`.
+    ///
+    /// **Where a counted tombstone can be.** The gauge rises by `tag.len()` per
+    /// new tombstone and falls when a prune frees it, so at any instant every
+    /// counted tombstone sits in exactly one of four places: the OPEN epoch (O),
+    /// which holds at most one epoch's stamps because an epoch closes after
+    /// `epoch_width` of them (`tombstone_frontier_impl.rs:115-119`); the closed
+    /// epochs the durability fence still HOLDS (H), which is the rate-dependent
+    /// term below; the epochs that EXITED since the previous prune pass read the
+    /// fence, including any the running pass has drained but not yet freed (P);
+    /// and the epochs already eligible but QUEUED behind a pass (Q). A single
+    /// pass drains every eligible epoch at once (`drain_prunable_tombstones`,
+    /// `tombstone_frontier_impl.rs:2241-2252`), and the fence is read only when a
+    /// pass runs, with a pass requested per remove (`crdt.rs:754-756`). O
+    /// contributes one epoch always; P contributes one and Q none under the A7
+    /// premise below, which is what [`DEFAULT_TOMBSTONE_CEILING_FIXED_EPOCHS`]
+    /// stands for.
+    ///
+    /// **Premise P-A, recorded and not enforced.** H counts the closed epochs
+    /// holding a stamp whose write sequence is above the store's flushed
+    /// watermark — the minimum still-pending tracked sequence
+    /// (`write_behind.rs:2911-2923`). The code bounds neither the serial drain
+    /// time of the entries queued ahead of that minimum nor the retry backoff,
+    /// which sleeps inside the same flush loop (`write_behind.rs:2175-2196`), so
+    /// the age of the minimum has no bound in code. What is adopted instead is
+    /// the codebase's own contract for the longest LEGITIMATE non-advance of a
+    /// write-behind watermark: no tracked sequence stays pending longer than `A`,
+    /// the effective `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS`
+    /// (`write_behind.rs:144`). That contract is alarm-only and watches a
+    /// different sequence space, so this is a premise, not a proof. Under it
+    /// every held epoch has a stamp inside `(now - A, now]`, and with `S_A`
+    /// stamps in the widest such window at most `ceil(S_A / epoch_width)` closed
+    /// epochs can be touched — the term derived here. A violated P-A leaves H
+    /// unbounded and is visible only through the recorded fence rows.
+    ///
+    /// **The A7 premise, recorded and not enforced.** P equal to one and Q equal
+    /// to zero hold only while a prune pass finishes faster than the interval
+    /// between epoch exits. A pass that outlasts an interval can leave more than
+    /// one drained-but-unfreed epoch and a non-empty queue. The harness records
+    /// the server's own count of eligible-but-unfreed epochs for exactly this, so
+    /// a breach coinciding with it is attributed rather than repaired.
+    ///
+    /// **Crash-enabled runs are outside the bound.** A `kill -9` recovery
+    /// re-stamps every live tombstone into one recovery epoch
+    /// (`rebuild_into_epoch`, `tombstone_frontier_impl.rs:893-`) that stays
+    /// unprunable until the client re-confirms, which can add up to one further
+    /// ceiling of bytes. The ceiling clause is therefore report-only in any run
+    /// that enables crashes, while the level-stability clause beside it stays
+    /// hard; extending the bound across recovery is a deferred item on the
+    /// reclamation umbrella and is not claimed here.
+    ///
+    /// **Why the capacity form is not a bound.** Deriving the held term as
+    /// `ceil(write-behind capacity / epoch_width) + 1` assumes one buffered
+    /// record per remove. Every OR remove after the first on the same key
+    /// coalesces into the already-queued entry (`write_behind.rs:2436-2449`),
+    /// which retires the predecessor's sequence and leaves `pending_count`
+    /// unchanged (`write_behind.rs:2448`), and the capacity check rejects only a
+    /// NEW key (`write_behind.rs:2325-2336`). With a churn keyspace far smaller
+    /// than one epoch's stamps, an unbounded number of stamps can therefore sit
+    /// above the pending minimum while `pending_count` stays far below capacity.
+    /// Capacity bounds distinct buffered keys, not sequences and not stamps, so
+    /// that form is neither used here nor recorded as a bound.
+    #[must_use]
+    pub const fn derive(epoch_width: u64, tag_bytes_max: u64, stamps_in_window_max: u64) -> Self {
+        let width = if epoch_width == 0 { 1 } else { epoch_width };
+        Self {
+            ceiling_epochs: DEFAULT_TOMBSTONE_CEILING_FIXED_EPOCHS
+                .saturating_add(stamps_in_window_max.div_ceil(width)),
+            epoch_width: width,
+            tag_bytes_max,
+            stamps_in_window_max,
+        }
+    }
+
+    /// Bytes one epoch can hold: `epoch_width × tag_bytes_max`, saturating.
+    #[must_use]
+    pub const fn epoch_bytes(&self) -> u64 {
+        self.epoch_width.saturating_mul(self.tag_bytes_max)
+    }
+
+    /// The ceiling itself: `ceiling_epochs × epoch_bytes()`, saturating — the
+    /// largest resident tombstone-byte total the mechanism admits.
+    #[must_use]
+    pub const fn ceiling_bytes(&self) -> u64 {
+        self.ceiling_epochs.saturating_mul(self.epoch_bytes())
+    }
+}
+
+/// What actually happened to one tombstone-byte clause. Rendered verbatim, so a
+/// clause that was never evaluated is visible rather than indistinguishable from
+/// one that passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum TombstoneClauseDisposition {
+    /// The clause was evaluated and its breach flag is its verdict.
+    Evaluated,
+    /// NOT evaluated: the last-half window spans too little wall-clock time for
+    /// the clause to mean anything. Never "ok".
+    SuppressedShortWindow,
+    /// Evaluated, but the run enables crashes, so the breach is recorded and
+    /// does NOT fail the run (see [`TombstoneLevelBound::derive`]).
+    ReportOnlyCrashRun,
+}
+
+#[allow(dead_code)]
+impl TombstoneClauseDisposition {
+    /// The single rendered token for this disposition. Consumed BOTH by the
+    /// console line in `main.rs` and by the JSON serializer in `report.rs`, so
+    /// the two transports can never disagree and no site retypes a literal.
+    /// Deliberately hand-written rather than serde-derived: this file is
+    /// `#[path]`-included by an integration target and must stay `std`-only.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Evaluated => "EVALUATED",
+            Self::SuppressedShortWindow => "SUPPRESSED_SHORT_WINDOW",
+            Self::ReportOnlyCrashRun => "REPORT_ONLY_CRASH_RUN",
+        }
+    }
+}
+
+/// The epochs that are resident by construction at any churn rate: the open
+/// epoch and the one epoch that exited since the previous prune pass read the
+/// durability fence.
+///
+/// This is the part of the epoch count that no measurement can shrink, NOT the
+/// whole count of any run: the rate-dependent held term is derived per run in
+/// [`TombstoneLevelBound::derive`].
+#[allow(dead_code)]
+pub const DEFAULT_TOMBSTONE_CEILING_FIXED_EPOCHS: u64 = 2;
+
+/// Fallback for premise P-A's fence age `A` (ms) when
+/// `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS` is unset, mirroring the server's own
+/// default (`write_behind.rs:144`).
+///
+/// The harness reads the same variable with the same default as the server
+/// process it launched, so the `A` in the derivation is the `A` the measured
+/// server actually ran under rather than an assumption about it.
+#[allow(dead_code)]
+pub const DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS: u64 = 60_000;
+
+/// RECORDED only: the epoch count observed under the O2 steady state — open
+/// plus pass plus the two epochs the durability fence held — in the committed
+/// 4 h calibration cell.
+///
+/// It attributes a reading and decides nothing: it never enters
+/// [`TombstoneLevelBound::derive`], [`TombstoneLevelBound::ceiling_bytes`] or
+/// any verdict, and its only consumer is the field that transports it to the
+/// report.
+#[allow(dead_code)]
+pub const K_EFF_EXPECTED_UNDER_O2: u64 = 4;
+
+/// Half-width of the level-stability band, as a fraction of the larger of the
+/// last-half mean and one epoch's bytes.
+///
+/// A coarse pre-data choice, taken for being one rather than for anything it
+/// does to a number. The epoch-bytes floor in the tolerance is what keeps a
+/// near-empty corpus from being gated on a fraction of nearly nothing, where a
+/// purely relative band would red on single-digit-byte wobble.
+#[allow(dead_code)]
+pub const DEFAULT_TOMBSTONE_LEVEL_TOLERANCE_FRACTION: f64 = 0.10;
+
+/// Minimum wall-clock span of the last-half window before the level-stability
+/// clause is evaluated at all.
+///
+/// Below this the two window means describe ramp-up rather than a level, and the
+/// clause would be answering a question the run has not yet posed. Deliberately
+/// longer than the slope statistic's own span guard
+/// ([`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`]): the level comparison needs
+/// enough time for BOTH the half and its trailing quarter to be levels.
+#[allow(dead_code)]
+pub const DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS: f64 = 600.0;
+
+/// The index at which a series splits off its LAST QUARTER.
+///
+/// Held separately from [`quarter_split_index`] on purpose: that one answers
+/// "where do the third and fourth quarters meet" by halving twice, while the
+/// level clause needs the plain `3 * len / 4` boundary of the trailing quarter
+/// it compares against the trailing half. They agree on the lengths a real run
+/// produces; keeping the level clause's own definition literal means a reader
+/// checking a pinned mean against the code reads one expression, not two nested
+/// ones.
+#[allow(dead_code)]
+const fn last_quarter_split_index(len: usize) -> usize {
+    3 * len / 4
+}
+
+/// The largest number of events that any window of `window_secs` can contain,
+/// read off a cumulative counter sampled as `(elapsed_secs, count)` pairs.
+///
+/// `max_i (R_i - R_{j(i)})`, where `j(i)` is the largest index whose timestamp
+/// satisfies `t_j <= t_{i-1} - window_secs - latency_allowance_secs`, the
+/// baseline is `0` when no such index exists, and the `i = 0` term is `R_0`.
+/// The series is expected non-decreasing in both components, which is what a
+/// cumulative counter sampled in order gives.
+///
+/// **Both widenings are load-bearing.** The old end of the counted span is
+/// `t_{i-1}`, not a nominal `t_i - window_secs`, which keeps the count sound
+/// when a scrape runs late or is skipped entirely; `latency_allowance_secs`
+/// then covers the lag between the counted event and the state it produces. An
+/// event inside a real window that ends between two samples came from a counted
+/// event no earlier than `t_{i-1} - window_secs - latency_allowance_secs`, so
+/// long as that lag stays inside the allowance — premise P-Δ, which the harness
+/// records and never gates on. Dropping either widening would leave one of the
+/// two terms uncovered.
+///
+/// **The error direction, stated plainly.** If the lag exceeds the allowance the
+/// result can only be too SMALL, which makes any bound derived from it tighter,
+/// never looser: it can produce a false breach, never a false pass.
+#[must_use]
+#[allow(dead_code)]
+pub fn max_count_in_window(
+    series: &[(f64, u64)],
+    window_secs: f64,
+    latency_allowance_secs: f64,
+) -> u64 {
+    let mut widest = 0;
+    for (i, &(_, count)) in series.iter().enumerate() {
+        let baseline = if i == 0 {
+            0
+        } else {
+            let cutoff = series[i - 1].0 - window_secs - latency_allowance_secs;
+            series[..i]
+                .iter()
+                .rev()
+                .find(|&&(elapsed_secs, _)| elapsed_secs <= cutoff)
+                .map_or(0, |&(_, earlier_count)| earlier_count)
+        };
+        widest = widest.max(count.saturating_sub(baseline));
+    }
+    widest
+}
+
+// ---------------------------------------------------------------------------
 // Durable-layer OR tombstone corpus: level/ceiling estimator.
 //
 // The items below are the estimator's frozen surface. They are `allow`ed for
