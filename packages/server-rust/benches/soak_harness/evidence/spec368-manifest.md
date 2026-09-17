@@ -1263,6 +1263,12 @@ PF-shape phys_footprint_mb last_half_slope_sign=+ slope_mb_per_hour=1802.274746
 PF-shape reclaimable_mb last_half_slope_sign=- slope_mb_per_hour=-292.642028
 ```
 
+Two notes on `PF-recon3`, neither of them a defect (P-F is never gated): the `203/240` figure reproduces
+the frozen readout's own `SectionE: rows_within_2pct=203/240` exactly, which is cross-instrument
+corroboration rather than a second measurement; and it departs from the parent cell's `15/15 MET`
+recorded in §2's R-Exec row 2, which was a 16-row column — a reconstruction rate over 240 rows is simply
+a different sample, not a regression against it.
+
 `decidingSeries` shape tokens, from the harness:
 
 ```
@@ -1301,8 +1307,10 @@ Reference tables beside it, both `PB=NOT_MET` cells:
 | `spec362b-long4h` | 95,653.60 / 56,417.64 / 171,702.41 / 154,358.56 / 212,434.31 / 224,270.03 / 484,239.22 / 651,649.15 | **6.81×** | `spec362-manifest.md:4281-4288,4253` |
 | `spec355-w1000` | 113,657.12 / 244,197.34 / 151,075.57 / 166,532.06 / 118,189.21 / 132,688.50 / 133,598.47 / 155,726.40 | **1.37×** | `spec355-manifest.md:1192-1201` |
 
-Every window of this cell is one to two orders of magnitude below both references, and the direction is
-reversed: `W8/W1=0.21` here against 6.81 and 1.37 there.
+Every window of this cell is below both references, but the margin is not uniform: the factor ranges from
+**3.67×** (W2 against `spec362b-long4h`) to **235.08×** (W8 against the same reference), with W1 at
+7.40× / 8.80×, W2 at 3.67× / 15.86× and W4 at 11.55× / 12.46× — the four-window group that is *not* an
+order of magnitude down. The direction is also reversed: `W8/W1=0.21` here against 6.81 and 1.37 there.
 
 `phys_footprint_mb` (MB/h):
 
@@ -1361,6 +1369,13 @@ Both regenerations ran on `mktemp -d` copies, never with `cwd` = evidence. `PRED
 covers `fits.txt`, `predicates.txt` and all eight segments; the single admissible non-IDENTICAL case (a
 `spec366-p67.awk` `no_persisted_scrape_in` FALSE branch) did not arise, because `P6=TRUE gap=0`.
 
+Four of these criteria are **attestation-only** and cannot be re-derived from the committed tree, because
+their subject is a one-time machine state rather than an artifact: **AC-9** (the target was clean before
+the demo), **AC-10**'s absence checks (no data dir, no `.meta`, no `target/release/topgun-server` after
+the demo), **AC-13** (the waiting tool-call count) and **R-Branch 1** (nothing else built in `target/`
+while the cell ran). §3.1 records them as observed. The one reproducible part of AC-10 does hold
+independently: `shasum -a 256 /usr/bin/true` equals the `sha256:` in the recorded FATAL block.
+
 - **AC-14** — the R-Artifacts set spans the data commit (artifacts) and this append (§3);
   `ls spec368-plateau4h.scrapes | wc -l` = **241** = CSV data rows = the pre-registered 241, so no
   call-out is owed.
@@ -1410,3 +1425,11 @@ cross-vendor second opinion recorded there agrees on the STOP reading.
    estimator (Theil–Sen) with a threshold ≥ 2–3 se from the measured floor (se ≈ 1,000 B/h at 2 h / 60 s
    cadence) and a power calculation, (c) the harness gate re-derived on the same basis. `TG-OR-005`
    stays open; `NAKED_BASELINE` unchanged.
+
+**Editorial note on item 2's band (the quote above is left as written).** The "24–45 KB" figure is close
+to the last half's p5–p95, measured at **25,093 – 45,103 B**; the artifact-exact ranges are
+**21,275 – 49,312 B** over the last half (n=121) and **19,228 – 59,950 B** over the whole run excluding
+the `elapsed_secs=0` row (n=240). The adjudication's conclusion — a bounded sawtooth around a flat
+~35.2 KB mean, with a last-half slope indistinguishable from both zero and 512 B/h — is unaffected by the
+wider exact bounds; the note is here so no later reader takes 24–45 KB for a measured minimum and
+maximum.
