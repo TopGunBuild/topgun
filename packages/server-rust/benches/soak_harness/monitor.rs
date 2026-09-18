@@ -47,55 +47,68 @@
 //! "no leak large enough to clear the noise floor in this window", NOT "bounded
 //! memory proven". Do not read a short green soak as the latter.
 //!
-//! ## Tombstone-byte gate: same slope idea, no detection floor
+//! ## Tombstone-byte gate: a mechanism-derived level ceiling, not a slope
 //!
 //! `topgun_ormap_tombstone_bytes` (the DECREMENTABLE gauge, sampled over HTTP
 //! from `GET /metrics` — distinct from the monotonic `_total` creation-rate
 //! counter also exported on the same endpoint) is a direct,
 //! residency-independent count of tombstone bytes on the write path — unlike
 //! RSS it carries no allocator retention, no read/GC jitter, and no
-//! cache-warmup wobble. Every unit of observed growth is either a newly
-//! inserted tombstone or nothing; there is no noise floor to wait out. That is
-//! why [`assess_tombstone_bytes`] uses a much tighter per-hour threshold than
-//! the RSS gate AND does not replicate RSS's large min-growth guard (see
-//! "Detection floor" above) — the RSS guard exists solely to suppress noise
-//! until a leak's absolute growth clears it, and this gauge has no analogous
-//! noise to suppress. That is precisely what lets *short* soak runs gain real
-//! leak signal from the byte gate long before the RSS gate's multi-hour
-//! detection floor would let it see anything.
+//! cache-warmup wobble. What it does carry under healthy churn is a SAWTOOTH:
+//! every epoch fills with tombstones and is then pruned in one pass, so the
+//! gauge climbs tooth by tooth and drops. A per-hour slope fitted to such a
+//! series measures where the fit window starts and ends on the teeth, not
+//! whether the bytes are bounded, and a bounded sawtooth can read a steady
+//! climb of a few KB/h. The slope is therefore still computed and reported,
+//! but it decides nothing.
+//!
+//! What decides is the question `TG-OR-005` actually asks — do the bytes stay
+//! bounded — in two independent clauses of [`assess_tombstone_bytes`]:
+//! - the **level ceiling**: the whole-run maximum must not exceed the bound
+//!   [`TombstoneLevelBound`] derives from the prune mechanism (epoch count ×
+//!   epoch width × the largest tag the harness emitted), with the rate-dependent
+//!   epoch term measured by the harness on the run itself;
+//! - **level stability**: the last-quarter mean must sit within
+//!   [`DEFAULT_TOMBSTONE_LEVEL_TOLERANCE_FRACTION`] of the last-half mean
+//!   (floored at one epoch's bytes), so a level that is still rising or falling
+//!   fails even while it is under the ceiling.
+//!
+//! Each clause is suppressed below its own window floor and records what
+//! happened to it as a [`TombstoneClauseDisposition`], so a clause that was not
+//! evaluated is never read as one that passed.
 //!
 //! Note on gating responsibility: [`assess_tombstone_bytes`] *computes* the byte
 //! verdict (including its `passed` flag), but whether that verdict gates the run
-//! is decided in `main.rs`, not here. The byte **slope** is a HARD gate there
-//! in every run class. The durable-corpus level clause beside it is
-//! report-only: a control cell that injected no fault at all breached it, so it
-//! is recorded and rendered but decides no verdict, and the slope gates exactly
-//! as it always did — so no run configuration is left with neither.
+//! is decided in `main.rs`, not here. Level stability is HARD there in every run
+//! class; the ceiling is HARD in every run class except a crash-enabled one,
+//! where the assessment already routes a breach to a report-only reason (a
+//! recovery re-stamps the live tombstones into one epoch the bound does not
+//! cover). The durable-corpus level clause beside the gauge is report-only: a
+//! control cell that injected no fault at all breached it, so it is recorded and
+//! rendered but decides no verdict.
 //! The gauge is restart-survivable (`reconcile_tombstone_bytes` in
 //! `storage/record.rs` re-seeds it via `set_tombstone_bytes` at boot) AND
 //! decrementable within a process life: every tombstone-add increments it and
 //! a successful prune-drop decrements it (`sub_tombstone_bytes`, wired on the
 //! CRDT write path's remove/prune handling). Decrementing alone is not
-//! sufficient for a plateau, though — the prune only fires once the server's
-//! per-device causal frontier low-water-mark has advanced past a tombstone's
-//! epoch, and the low-water-mark is vacuously 0 (prune NOTHING) until at least
-//! one client actually runs the confirm-apply protocol. `main.rs` therefore
-//! also drives a tracked-and-ACKing client (`SoakClient::connect_tracked` +
-//! `confirm_apply`) alongside the churn clients for the run's duration, which
-//! is what makes the gauge's plateau — and thus the hard gate — reachable in
-//! practice rather than merely possible in principle. `main.rs`'s `--no-ack`
-//! and `--inject-slow-leak` modes are the negative/slow-leak controls that
-//! exercise this: disabling the tracked client's ack loop pins the
-//! low-water-mark at 0 and must trip the gate, and a deliberately
-//! slow-acking second tracked client calibrates the OLS slope's detection
-//! floor against a small, non-instantaneous leak. The blind-monitor
-//! zero-sample case remains a second, independent hard gate (an unreachable
-//! `/metrics` scrape is a harness defect regardless of leak magnitude). The
-//! RSS gate above remains a coarse, non-tombstone backstop. (This module's
-//! `passed: bool` on [`TombstoneAssessment`] drives both the hard-gate
-//! decision in `main.rs` — which applies in every run class — and the
-//! calibration tests below; the assessment itself does not know or care
-//! whether its caller treats a breach as report-only or hard-gating.)
+//! sufficient for a bounded level, though — the prune only fires once the
+//! server's per-device causal frontier low-water-mark has advanced past a
+//! tombstone's epoch, and the low-water-mark is vacuously 0 (prune NOTHING)
+//! until at least one client actually runs the confirm-apply protocol.
+//! `main.rs` therefore also drives a tracked-and-ACKing client
+//! (`SoakClient::connect_tracked` + `confirm_apply`) alongside the churn clients
+//! for the run's duration, which is what makes a bounded level — and thus a
+//! passing gate — reachable in practice rather than merely possible in
+//! principle. `main.rs`'s `--no-ack` and `--inject-slow-leak` modes are the
+//! negative/slow-leak controls that exercise this: disabling the tracked
+//! client's ack loop pins the low-water-mark at 0 and must trip the gate, and a
+//! deliberately slow-acking second tracked client exercises a small,
+//! non-instantaneous leak. The blind-monitor zero-sample case remains a
+//! separate, independent hard gate (an unreachable `/metrics` scrape is a
+//! harness defect regardless of leak magnitude). The RSS gate above remains a
+//! coarse, non-tombstone backstop. (This module's `passed: bool` on
+//! [`TombstoneAssessment`] drives both the gate decision in `main.rs` and the
+//! calibration tests below.)
 //!
 //! ## Boot-recompute-gap exclusion
 //!
@@ -105,7 +118,7 @@
 //! that drops every sample falling inside a recorded [`BootGap`] before the
 //! series reaches [`assess_tombstone_bytes`], so a spurious pre-reconcile read
 //! (or the very act of a `kill -9` and restart) can never manufacture a false
-//! leak/plateau signal. `main.rs` calls it once per scraped tombstone sample
+//! leak or level signal. `main.rs` calls it once per scraped tombstone sample
 //! from the sampling loop; being pure and series-based, it is also driven
 //! directly by `tests::calibration_boot_gap_exclusion_does_not_trip_gate` with
 //! a fully synthetic sequence — no real process required.
@@ -265,24 +278,6 @@ fn least_squares_slope_per_hour(points: &[(f64, f64)]) -> f64 {
     }
 }
 
-/// Least-squares slope over just the LAST HALF of `points` (by time order),
-/// expressed as a per-hour rate.
-///
-/// This is the plateau/leak statistic for the tombstone-byte gate
-/// ([`assess_tombstone_bytes`]). A first-half/second-half growth RATIO is
-/// unstable as the denominator (first-half growth) approaches zero — exactly
-/// the shape a genuinely-bounded run produces once the M4 tombstone bound
-/// engages. A last-half-window OLS slope has no such singularity: it stays
-/// well-defined and near zero whether the window is perfectly flat or has
-/// tiny jitter, and it correctly reports near-zero on a "grow, then flatten"
-/// series even though a full-window fit would still be dragged upward by the
-/// earlier growth. `points.len() / 2` (floor) biases the split toward
-/// INCLUDING more of the recent half on an odd count.
-///
-/// The slope statistic and the minimum-window-span guard in
-/// [`assess_tombstone_bytes`] MUST agree on which samples make up the "recent
-/// half" — otherwise the guard could clear a window the slope was actually fit
-/// over (or vice versa) — so both derive it from [`last_half_window`].
 /// The index at which a sample series splits into its first and last halves.
 ///
 /// The last-half window is `&points[last_half_split_index(points.len())..]`, so
@@ -300,27 +295,40 @@ fn last_half_window(points: &[(f64, f64)]) -> &[(f64, f64)] {
     &points[last_half_split_index(points.len())..]
 }
 
+/// Least-squares slope over just the LAST HALF of `points` (by time order),
+/// expressed as a per-hour rate.
+///
+/// Recorded beside the tombstone-byte verdict ([`assess_tombstone_bytes`]) and
+/// never a clause of it: on the sawtooth a healthy prune produces, the fitted
+/// slope depends on where the window cuts the teeth. A last-half-window OLS slope
+/// is still the right statistic to RECORD — unlike a first-half/second-half
+/// growth ratio it has no singularity as first-half growth approaches zero, and
+/// it reads near-zero on a "grow, then flatten" series even though a full-window
+/// fit would still be dragged upward by the earlier growth. `points.len() / 2`
+/// (floor) biases the split toward INCLUDING more of the recent half on an odd
+/// count.
+///
+/// The slope, the span that window guards compare against, and the level
+/// clause's last-half mean MUST agree on which samples make up the "recent
+/// half", so all of them derive it from [`last_half_split_index`].
 fn last_half_window_slope_per_hour(points: &[(f64, f64)]) -> f64 {
     least_squares_slope_per_hour(last_half_window(points))
 }
 
 /// Wall-clock span (seconds) covered by the last-half window — `0.0` when that
-/// window has fewer than two points (no meaningful span to extrapolate over).
+/// window has fewer than two points (no span at all).
 ///
-/// Gates the per-hour slope clause in [`assess_tombstone_bytes`]: the per-hour
-/// rate is an extrapolation (bytes/sec × 3600), so over a sub-minute window the
-/// `3600 / span` amplification turns a few KB of ordinary ramp-up into a
-/// six-figure B/h "leak". This span lets the gate suppress that clause until the
-/// fitted window covers enough real time for the per-hour number to mean
-/// anything.
+/// Both window guards in [`assess_tombstone_bytes`] compare against this span:
+/// the ceiling clause below [`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`] and the
+/// level clause below [`DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS`]. It is also the
+/// span the recorded per-hour slope extrapolates over (bytes/sec × 3600), which
+/// is why that number is meaningless on a sub-minute window.
 ///
-/// A degenerate last-half window of ≤2 points therefore yields `0.0` and is
-/// intentionally suppressed: a run that produced only one or two samples (a very
-/// short soak) cannot trip even the report-only slope clause regardless of how
-/// linear its growth looks — there is no window to extrapolate over, and the
-/// 120s [`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`] floor would suppress it in any
-/// case. Real bounded/72h soaks accumulate hundreds of samples, so this bounds
-/// nothing they rely on.
+/// A degenerate last-half window of fewer than two points therefore yields
+/// `0.0`, and both clauses are suppressed on it: a run that produced only one or
+/// two samples (a very short soak) has no window to describe a level over. Real
+/// bounded/72h soaks accumulate hundreds of samples, so this bounds nothing they
+/// rely on.
 fn last_half_window_span_secs(points: &[(f64, f64)]) -> f64 {
     let window = last_half_window(points);
     match (window.first(), window.last()) {
@@ -329,64 +337,25 @@ fn last_half_window_span_secs(points: &[(f64, f64)]) -> f64 {
     }
 }
 
-/// Calibrated slope ceiling (bytes/hour) for the tombstone-byte gate.
+/// Minimum wall-clock span (seconds) of the last-half window before the
+/// tombstone-byte level CEILING clause is evaluated.
 ///
-/// ~0.5 KB/h. Tight by design — see the module-level "no detection floor" doc:
-/// with no RSS-style noise to absorb, any sustained per-hour growth this small
-/// is already real signal, not measurement wobble.
+/// Below this floor the clause is suppressed and records
+/// [`TombstoneClauseDisposition::SuppressedShortWindow`]; it never fails the run.
+/// The bound the ceiling compares against is derived from quantities the harness
+/// measures on the run itself — the largest tag it emitted and the most remove
+/// attempts it saw inside one fence-age window — and a run whose last half spans
+/// less than two minutes has not measured them over anything a steady state
+/// could be read from. The blocking CI "Short no-crash soak" (~25s, last-half
+/// span ~10-15s) and the loaded 150s run (last-half span ~75s) stay suppressed
+/// exactly as they were under the slope clause this floor used to guard.
 ///
-/// Consumed by `main.rs` (the soak loop scrapes `GET /metrics` and calls
-/// [`assess_tombstone_bytes`] with this threshold alongside the RSS `assess`) and
-/// by the `soak_monitor_calibration` integration target's tests — the harness
-/// wiring has landed, so no `allow(dead_code)` is needed here. The slope this
-/// threshold measures is a HARD gate in `main.rs` in every run class; the
-/// durable-corpus level clause beside it is report-only and takes none of
-/// them over. The decrementable gauge is
-/// expected to plateau under sustained churn now that a tracked-and-ACKing
-/// client drives the server's low-water-mark forward (see the module-level
-/// "Tombstone-byte gate" doc above), subject to the min-window-span guard and
-/// boot-gap exclusion. The blind-monitor zero-sample clause is a second,
-/// independent hard gate, and it too is unconditional: it asserts harness
-/// health, not the tombstone property. RSS above is the coarse backstop.
-pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
-
-/// Absolute-growth guard (bytes) for the tombstone-byte slope clause.
-///
-/// Deliberately minimal — NOT the RSS gate's large [`DEFAULT_MEM_MIN_GROWTH_MB`]
-/// analogue. The RSS guard exists to suppress a real leak's *slope* signal
-/// until enough hours have passed for its absolute growth to clear RSS noise;
-/// this gauge has no such noise, so a large guard would only reintroduce the
-/// RSS gate's multi-hour detection floor for no benefit. Kept just above zero
-/// so a one/two-sample run (degenerate least-squares fit) cannot trip the
-/// clause on rounding.
-pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
-
-/// Minimum wall-clock span (seconds) of the last-half fit window before the
-/// per-hour slope clause is allowed to hard-gate the run.
-///
-/// This floor governs the slope clause alone. The durable-corpus level clause
-/// selects no run class away from it: that clause is report-only, so the slope
-/// decides every run, and no run configuration is left ungated.
-///
-/// The slope is a per-hour EXTRAPOLATION (bytes/sec × 3600). Over a sub-minute
-/// window the `3600 / span_secs` amplification is enormous: a healthy short run
-/// that has simply not yet had time to plateau (e.g. the 25s blocking CI "Short
-/// no-crash soak", ~6 samples over ~25s with a few KB of ordinary ramp-up)
-/// extrapolates to a six-figure B/h rate and would surface a spurious breach.
-/// Below this floor the slope carries no plateau signal — a leak and a
-/// not-yet-plateaued healthy run are indistinguishable — so the clause is
-/// suppressed (no breach is emitted for it) and the assessment passes on the
-/// blind-monitor + absolute-growth clauses alone. (The slope is a HARD gate
-/// once the window clears this floor — see
-/// [`DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR`];
-/// this floor is what keeps that hard gate from crying wolf on a short run.)
-///
-/// 120s sits well above the smoke run's ~10-15s last-half span (suppressed) and
-/// well below a real bounded soak's window (a 10-60 min live run's last-half
-/// span is minutes, so a genuine leak still trips the clause; the 72h soak's
-/// span is orders of magnitude above it). The gauge is restart-survivable, so a
-/// crash-enabled long run keeps a continuous series whose window clears the
-/// floor.
+/// 120s is well below a real bounded soak's window (a 10-60 min live run's
+/// last-half span is minutes, and the 72h soak's is orders of magnitude above
+/// it), so a genuine breach on those runs is still evaluated. The gauge is
+/// restart-survivable, so a crash-enabled long run keeps a continuous series
+/// whose window clears the floor. The level-stability clause has its own,
+/// longer floor ([`DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS`]).
 pub const DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS: f64 = 120.0;
 
 /// One tombstone-byte-gauge sample (`topgun_ormap_tombstone_bytes`, the
@@ -399,96 +368,202 @@ pub struct TombstoneSample {
     pub bytes: u64,
 }
 
-/// Verdict of a tombstone-byte-growth assessment. Mirrors [`MemoryAssessment`]'s
-/// shape so callers (soak `main.rs`) can report both gates uniformly.
+/// Verdict of a tombstone-byte assessment. Mirrors [`MemoryAssessment`]'s
+/// shape so callers (soak `main.rs`) can report both gates uniformly, and
+/// carries every quantity each clause compared, so a reader can check a verdict
+/// against its inputs without re-running it.
 #[derive(Debug, Clone)]
 pub struct TombstoneAssessment {
     pub samples: usize,
     pub first_bytes: u64,
+    /// The whole-run maximum — the value the ceiling clause compares.
     pub peak_bytes: u64,
     pub last_bytes: u64,
+    /// Last-half OLS slope. RECORDED only: no clause reads it.
     pub slope_bytes_per_hour: f64,
     pub passed: bool,
     pub reason: Option<String>,
+    /// The bound the ceiling clause was evaluated against.
+    pub bound: TombstoneLevelBound,
+    /// `bound.ceiling_bytes()`, carried so the report cannot recompute it
+    /// differently.
+    pub ceiling_bytes: u64,
+    /// The span both window guards compared against.
+    pub last_half_span_secs: f64,
+    pub last_half_mean_bytes: f64,
+    pub last_half_max_bytes: u64,
+    pub last_quarter_mean_bytes: f64,
+    /// `|last_quarter_mean − last_half_mean|`.
+    pub level_deviation_bytes: f64,
+    /// `DEFAULT_TOMBSTONE_LEVEL_TOLERANCE_FRACTION × max(last_half_mean, epoch_bytes)`.
+    pub level_tolerance_bytes: f64,
+    /// Whether the run maximum exceeded the ceiling. Computed whenever the
+    /// clause is not suppressed, including in a crash-enabled run where it does
+    /// not fail the run.
+    pub ceiling_breached: bool,
+    pub level_breached: bool,
+    pub ceiling_disposition: TombstoneClauseDisposition,
+    pub level_disposition: TombstoneClauseDisposition,
+    /// The ceiling breach reason of a crash-enabled run, which does NOT fail the
+    /// run and is therefore absent from `reason`. `main.rs` surfaces it as a
+    /// report-only line. `None` whenever the ceiling was not breached, or was
+    /// breached in a run where it decides.
+    pub ceiling_report_only_reason: Option<String>,
 }
 
-/// Assess a series of tombstone-byte samples for bounded growth.
+/// Arithmetic mean of a window's byte totals (`0.0` for an empty window).
+#[allow(clippy::cast_precision_loss)]
+fn mean_tombstone_bytes(window: &[TombstoneSample]) -> f64 {
+    if window.is_empty() {
+        return 0.0;
+    }
+    window.iter().map(|s| s.bytes as f64).sum::<f64>() / window.len() as f64
+}
+
+/// The verdict for a run that produced zero tombstone-byte samples.
+fn blind_tombstone_assessment(
+    bound: TombstoneLevelBound,
+    ceiling_bytes: u64,
+) -> TombstoneAssessment {
+    // Same rationale as the RSS gate's empty-samples branch: zero samples
+    // means the monitor was BLIND (metrics scrape failed or the server was
+    // never reachable) — a leak would be invisible. Fail rather than
+    // silently pass. Neither clause had a window, so both say so.
+    TombstoneAssessment {
+        samples: 0,
+        first_bytes: 0,
+        peak_bytes: 0,
+        last_bytes: 0,
+        slope_bytes_per_hour: 0.0,
+        passed: false,
+        reason: Some(
+            "no tombstone-byte samples collected — monitoring was blind (metrics scrape \
+             failed or server never reachable); cannot assert bounded tombstone growth"
+                .to_string(),
+        ),
+        bound,
+        ceiling_bytes,
+        last_half_span_secs: 0.0,
+        last_half_mean_bytes: 0.0,
+        last_half_max_bytes: 0,
+        last_quarter_mean_bytes: 0.0,
+        level_deviation_bytes: 0.0,
+        level_tolerance_bytes: 0.0,
+        ceiling_breached: false,
+        level_breached: false,
+        ceiling_disposition: TombstoneClauseDisposition::SuppressedShortWindow,
+        level_disposition: TombstoneClauseDisposition::SuppressedShortWindow,
+        ceiling_report_only_reason: None,
+    }
+}
+
+/// Assess a series of tombstone-byte samples for a bounded, stable level
+/// (TG-OR-005).
 ///
-/// * `threshold_bytes_per_hour` — maximum tolerated growth slope.
-/// * `min_growth_bytes` — absolute growth (peak − first) below which slope is
-///   treated as noise. Kept minimal (see [`DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH`]
-///   doc) rather than mirroring the RSS gate's large guard.
-/// * `min_window_secs` — minimum wall-clock span of the last-half fit window
-///   before the per-hour slope clause is surfaced as a (report-only) breach
-///   (see [`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`]). Guards against a
-///   too-short-to-plateau run false-REDing on the per-hour extrapolation of a
-///   sub-minute window. Pass `0.0` to disable the guard.
+/// Two independent clauses decide; their reasons are joined with `"; "`:
+/// - **Ceiling.** The whole-run maximum must not exceed `bound.ceiling_bytes()`
+///   (see [`TombstoneLevelBound::derive`] for why that is a bound). Suppressed
+///   while the last-half span is under `min_window_secs`. In a `crash_run` the
+///   breach is still computed and rendered, but it is report-only: it goes to
+///   `ceiling_report_only_reason` and leaves `passed` alone, because a
+///   recovery's re-stamp epoch is outside the bound.
+/// - **Level stability.** `|last_quarter_mean − last_half_mean|` must not exceed
+///   [`DEFAULT_TOMBSTONE_LEVEL_TOLERANCE_FRACTION`] of the larger of the
+///   last-half mean and one epoch's bytes. The epoch floor keeps a near-empty
+///   corpus from being gated on a fraction of nearly nothing. Suppressed while
+///   the last-half span is under `level_min_window_secs`; HARD in every run
+///   class, crash runs included.
+///
+/// The last-half OLS slope is computed and recorded and decides nothing. Zero
+/// samples means the monitor was blind, which fails the run on its own.
+///
+/// Pass `0.0` for either window to disable that clause's guard.
 #[allow(clippy::cast_precision_loss)]
 pub fn assess_tombstone_bytes(
     samples: &[TombstoneSample],
-    threshold_bytes_per_hour: f64,
-    min_growth_bytes: f64,
+    bound: TombstoneLevelBound,
+    crash_run: bool,
     min_window_secs: f64,
+    level_min_window_secs: f64,
 ) -> TombstoneAssessment {
+    let ceiling_bytes = bound.ceiling_bytes();
+
     if samples.is_empty() {
-        // Same rationale as the RSS gate's empty-samples branch: zero samples
-        // means the monitor was BLIND (metrics scrape failed or the server was
-        // never reachable) — a leak would be invisible. Fail rather than
-        // silently pass.
-        return TombstoneAssessment {
-            samples: 0,
-            first_bytes: 0,
-            peak_bytes: 0,
-            last_bytes: 0,
-            slope_bytes_per_hour: 0.0,
-            passed: false,
-            reason: Some(
-                "no tombstone-byte samples collected — monitoring was blind (metrics scrape \
-                 failed or server never reachable); cannot assert bounded tombstone growth"
-                    .to_string(),
-            ),
-        };
+        return blind_tombstone_assessment(bound, ceiling_bytes);
     }
 
     let first_bytes = samples[0].bytes;
     let last_bytes = samples[samples.len() - 1].bytes;
     let peak_bytes = samples.iter().map(|s| s.bytes).max().unwrap_or(first_bytes);
 
-    #[allow(clippy::cast_precision_loss)]
     let points: Vec<(f64, f64)> = samples
         .iter()
         .map(|s| (s.elapsed_secs, s.bytes as f64))
         .collect();
-    // Last-half-window OLS, not the full-window fit: robust near zero and
-    // correctly reports a genuine plateau even after an earlier ramp (see
-    // `last_half_window_slope_per_hour` doc).
     let slope_bytes_per_hour = last_half_window_slope_per_hour(&points);
-    // Span of the window the slope was actually fit over — the per-hour rate is
-    // an extrapolation over exactly this span, so it is what the min-window
-    // guard must clear.
     let last_half_span_secs = last_half_window_span_secs(&points);
 
-    #[allow(clippy::cast_precision_loss)]
-    let growth = peak_bytes.saturating_sub(first_bytes) as f64;
+    let last_half = &samples[last_half_split_index(samples.len())..];
+    let last_quarter = &samples[last_quarter_split_index(samples.len())..];
+    let last_half_max_bytes = last_half.iter().map(|s| s.bytes).max().unwrap_or(0);
+    let last_half_mean_bytes = mean_tombstone_bytes(last_half);
+    let last_quarter_mean_bytes = mean_tombstone_bytes(last_quarter);
+    let level_deviation_bytes = (last_quarter_mean_bytes - last_half_mean_bytes).abs();
+    let level_tolerance_bytes = DEFAULT_TOMBSTONE_LEVEL_TOLERANCE_FRACTION
+        * last_half_mean_bytes.max(bound.epoch_bytes() as f64);
+
     let mut reasons = Vec::new();
 
-    // The per-hour slope clause only carries a plateau/leak signal once the fit
-    // window spans enough wall-clock time (min_window_secs). Below that, the
-    // per-hour extrapolation of a sub-minute window is dominated by the
-    // `3600 / span` amplification — a healthy run that simply has not plateaued
-    // yet is indistinguishable from a leak — so the clause is suppressed and the
-    // run passes on the blind-monitor + absolute-growth clauses alone. A real
-    // unbounded leak still trips it once the run is long enough (the 72h soak's
-    // window is orders of magnitude above the floor).
-    if last_half_span_secs >= min_window_secs
-        && growth >= min_growth_bytes
-        && slope_bytes_per_hour > threshold_bytes_per_hour
-    {
+    let (ceiling_disposition, ceiling_breached) = if last_half_span_secs < min_window_secs {
+        (TombstoneClauseDisposition::SuppressedShortWindow, false)
+    } else if crash_run {
+        (
+            TombstoneClauseDisposition::ReportOnlyCrashRun,
+            peak_bytes > ceiling_bytes,
+        )
+    } else {
+        (
+            TombstoneClauseDisposition::Evaluated,
+            peak_bytes > ceiling_bytes,
+        )
+    };
+    let mut ceiling_report_only_reason = None;
+    if ceiling_breached {
+        let reason = format!(
+            "tombstone-byte level ceiling breached: run max {peak_bytes} B > {ceiling_bytes} B \
+             ({} epochs = {DEFAULT_TOMBSTONE_CEILING_FIXED_EPOCHS} + ceil({} stamps / width {}) \
+             × width {} × tag bytes {}); last-half max {last_half_max_bytes} B",
+            bound.ceiling_epochs,
+            bound.stamps_in_window_max,
+            bound.epoch_width,
+            bound.epoch_width,
+            bound.tag_bytes_max,
+        );
+        if ceiling_disposition == TombstoneClauseDisposition::ReportOnlyCrashRun {
+            ceiling_report_only_reason = Some(reason);
+        } else {
+            reasons.push(reason);
+        }
+    }
+
+    let (level_disposition, level_breached) = if last_half_span_secs < level_min_window_secs {
+        (TombstoneClauseDisposition::SuppressedShortWindow, false)
+    } else {
+        (
+            TombstoneClauseDisposition::Evaluated,
+            level_deviation_bytes > level_tolerance_bytes,
+        )
+    };
+    if level_breached {
+        let direction = if last_quarter_mean_bytes > last_half_mean_bytes {
+            "up"
+        } else {
+            "down"
+        };
         reasons.push(format!(
-            "tombstone-byte growth slope {slope_bytes_per_hour:.1} bytes/h exceeds \
-             {threshold_bytes_per_hour:.1} bytes/h (total growth {growth:.0} bytes over {} \
-             samples, last-half window {last_half_span_secs:.0}s)",
-            samples.len()
+            "tombstone-byte level unstable: direction {direction}, last-half mean \
+             {last_half_mean_bytes:.3} B, last-quarter mean {last_quarter_mean_bytes:.3} B, \
+             deviation {level_deviation_bytes:.3} B > tolerance {level_tolerance_bytes:.3} B"
         ));
     }
 
@@ -505,6 +580,19 @@ pub fn assess_tombstone_bytes(
         } else {
             Some(reasons.join("; "))
         },
+        bound,
+        ceiling_bytes,
+        last_half_span_secs,
+        last_half_mean_bytes,
+        last_half_max_bytes,
+        last_quarter_mean_bytes,
+        level_deviation_bytes,
+        level_tolerance_bytes,
+        ceiling_breached,
+        level_breached,
+        ceiling_disposition,
+        level_disposition,
+        ceiling_report_only_reason,
     }
 }
 
@@ -513,14 +601,11 @@ pub fn assess_tombstone_bytes(
 //
 // The items below are the ceiling's frozen surface: the bound, its three
 // rendered dispositions, the window statistic the bound is derived from, and the
-// window split the level clause uses. The verdict that consumes them, and the
-// sampler that measures their inputs, land in the wiring commit that follows.
-//
-// Each carries `allow(dead_code)` only until that commit references it: the soak
-// binary is the target where an unreferenced item is dead (the calibration
-// integration target already includes this module under its own
-// `allow(dead_code)`). Every one of these attributes is removed by the wiring
-// commit, so an item left unused there stops being silent.
+// window split the level clause uses. `assess_tombstone_bytes` above consumes
+// the bound, the dispositions, the fixed epoch term, the level tolerance and the
+// quarter split; the soak binary's sampler measures the bound's inputs and its
+// report renders the rest. None of them carries `allow(dead_code)`, so an item
+// the binary stops using fails the build instead of going silent.
 // ---------------------------------------------------------------------------
 
 /// Mechanism-derived bound on resident OR tombstone bytes (see TG-OR-005).
@@ -531,7 +616,6 @@ pub fn assess_tombstone_bytes(
 /// is the measured input to the rate-dependent epoch term, and `ceiling_epochs`
 /// is what [`TombstoneLevelBound::derive`] computes from them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct TombstoneLevelBound {
     pub ceiling_epochs: u64,
     pub epoch_width: u64,
@@ -539,7 +623,6 @@ pub struct TombstoneLevelBound {
     pub stamps_in_window_max: u64,
 }
 
-#[allow(dead_code)]
 impl TombstoneLevelBound {
     /// `ceiling_epochs = DEFAULT_TOMBSTONE_CEILING_FIXED_EPOCHS +
     /// ceil(stamps_in_window_max / epoch_width)`, saturating.
@@ -642,7 +725,6 @@ impl TombstoneLevelBound {
 /// clause that was never evaluated is visible rather than indistinguishable from
 /// one that passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum TombstoneClauseDisposition {
     /// The clause was evaluated and its breach flag is its verdict.
     Evaluated,
@@ -654,7 +736,6 @@ pub enum TombstoneClauseDisposition {
     ReportOnlyCrashRun,
 }
 
-#[allow(dead_code)]
 impl TombstoneClauseDisposition {
     /// The single rendered token for this disposition. Consumed BOTH by the
     /// console line in `main.rs` and by the JSON serializer in `report.rs`, so
@@ -678,7 +759,6 @@ impl TombstoneClauseDisposition {
 /// This is the part of the epoch count that no measurement can shrink, NOT the
 /// whole count of any run: the rate-dependent held term is derived per run in
 /// [`TombstoneLevelBound::derive`].
-#[allow(dead_code)]
 pub const DEFAULT_TOMBSTONE_CEILING_FIXED_EPOCHS: u64 = 2;
 
 /// Fallback for premise P-A's fence age `A` (ms) when
@@ -688,7 +768,6 @@ pub const DEFAULT_TOMBSTONE_CEILING_FIXED_EPOCHS: u64 = 2;
 /// The harness reads the same variable with the same default as the server
 /// process it launched, so the `A` in the derivation is the `A` the measured
 /// server actually ran under rather than an assumption about it.
-#[allow(dead_code)]
 pub const DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS: u64 = 60_000;
 
 /// RECORDED only: the epoch count observed under the O2 steady state — open
@@ -699,7 +778,6 @@ pub const DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS: u64 = 60_000;
 /// [`TombstoneLevelBound::derive`], [`TombstoneLevelBound::ceiling_bytes`] or
 /// any verdict, and its only consumer is the field that transports it to the
 /// report.
-#[allow(dead_code)]
 pub const K_EFF_EXPECTED_UNDER_O2: u64 = 4;
 
 /// Half-width of the level-stability band, as a fraction of the larger of the
@@ -709,7 +787,6 @@ pub const K_EFF_EXPECTED_UNDER_O2: u64 = 4;
 /// does to a number. The epoch-bytes floor in the tolerance is what keeps a
 /// near-empty corpus from being gated on a fraction of nearly nothing, where a
 /// purely relative band would red on single-digit-byte wobble.
-#[allow(dead_code)]
 pub const DEFAULT_TOMBSTONE_LEVEL_TOLERANCE_FRACTION: f64 = 0.10;
 
 /// Minimum wall-clock span of the last-half window before the level-stability
@@ -720,7 +797,6 @@ pub const DEFAULT_TOMBSTONE_LEVEL_TOLERANCE_FRACTION: f64 = 0.10;
 /// longer than the slope statistic's own span guard
 /// ([`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`]): the level comparison needs
 /// enough time for BOTH the half and its trailing quarter to be levels.
-#[allow(dead_code)]
 pub const DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS: f64 = 600.0;
 
 /// The index at which a series splits off its LAST QUARTER.
@@ -732,7 +808,6 @@ pub const DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS: f64 = 600.0;
 /// produces; keeping the level clause's own definition literal means a reader
 /// checking a pinned mean against the code reads one expression, not two nested
 /// ones.
-#[allow(dead_code)]
 const fn last_quarter_split_index(len: usize) -> usize {
     3 * len / 4
 }
@@ -760,7 +835,6 @@ const fn last_quarter_split_index(len: usize) -> usize {
 /// result can only be too SMALL, which makes any bound derived from it tighter,
 /// never looser: it can produce a false breach, never a false pass.
 #[must_use]
-#[allow(dead_code)]
 pub fn max_count_in_window(
     series: &[(f64, u64)],
     window_secs: f64,
@@ -786,10 +860,9 @@ pub fn max_count_in_window(
 // ---------------------------------------------------------------------------
 // Durable-layer OR tombstone corpus: level/ceiling estimator.
 //
-// The items below are the estimator's frozen surface. They are `allow`ed for
-// dead code because the soak binary does not reference them until the sampler
-// and the verdict re-point are wired; the calibration integration target
-// already includes this module under its own `allow(dead_code)`.
+// The items below are the estimator's frozen surface. The soak binary's corpus
+// sampler and its report-only verdict reference them, so none of them carries
+// an `allow(dead_code)` of its own.
 // ---------------------------------------------------------------------------
 
 /// Level headroom (bytes) between the first-half and last-half corpus peaks.
@@ -892,7 +965,7 @@ pub struct CorpusSample {
 pub enum CorpusLevelDisposition {
     /// L1 was evaluated and decided.
     LevelEvaluated,
-    /// L1 was NOT evaluated. The slope clause hard-gates regardless. Never "ok".
+    /// L1 was NOT evaluated. The resident gauge's clauses decide regardless. Never "ok".
     LevelSuppressed,
     /// L0 failed. L1 and L2 are NOT EVALUATED (fail-closed order).
     InstrumentFailed,
@@ -979,7 +1052,7 @@ pub struct TombstoneCorpusAssessment {
 /// re-import a rate spread as if it were an independent noise source.
 ///
 /// The window partition is the same split index [`last_half_window`] uses, so
-/// this clause and the slope clause split any series identically and a reader
+/// this clause and the recorded slope statistic split any series identically and a reader
 /// comparing the two is comparing like with like.
 ///
 /// Total over its inputs: no panic path, no interior mutability, no I/O, and no
@@ -1096,21 +1169,22 @@ pub fn assess_tombstone_corpus_level(
     }
 }
 
-/// Whether the tombstone-byte SLOPE clause would be the only hard-gate left on
-/// a run that produced this disposition — equivalently, whether the
-/// durable-corpus level clause decided. EXHAUSTIVE BY CONSTRUCTION: a fourth
+/// Whether the durable-corpus level clause did NOT decide on a run that
+/// produced this disposition — `true` when it was suppressed or the instrument
+/// failed, `false` when it was evaluated. EXHAUSTIVE BY CONSTRUCTION: a fourth
 /// variant does not compile here, which is what makes the no-ungated-window
-/// coverage argument structural rather than a source-read. The slope now
-/// decides every run class, so the verdict expression does not consult this;
-/// `main.rs` uses it to name which corpus clause a report-only breach came
-/// from, and re-types no comparison of its own.
+/// coverage argument structural rather than a source-read.
+/// The resident gauge's own clauses (the level ceiling and level stability of
+/// [`assess_tombstone_bytes`]) decide every run class, so the verdict expression
+/// does not consult this; `main.rs` uses it to name which corpus clause a
+/// report-only breach came from, and re-types no comparison of its own.
 #[must_use]
 // One arm per variant, deliberately not merged into a single `|` pattern: the
 // point of the enumeration is that every variant is classified in its own
 // right, so a fourth variant has to be given an explicit answer here rather
 // than being absorbed into an existing pattern.
 #[allow(clippy::match_same_arms)]
-pub const fn slope_clause_stays_hard(disposition: CorpusLevelDisposition) -> bool {
+pub const fn corpus_level_clause_undecided(disposition: CorpusLevelDisposition) -> bool {
     match disposition {
         CorpusLevelDisposition::LevelEvaluated => false,
         CorpusLevelDisposition::LevelSuppressed => true,
@@ -2904,17 +2978,118 @@ mod tests {
         samples
     }
 
-    /// A bounded sawtooth is NOT a leak. Its run maximum stays far under a
+    /// `k = duration/cadence` steps from `from` to `to`, rounded, one sample per
+    /// cadence at `t = i × cadence` for `i = 0..=k`.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn ramp(from: u64, to: u64, duration_secs: u64, cadence_secs: u64) -> Vec<TombstoneSample> {
+        let steps = duration_secs / cadence_secs;
+        (0..=steps)
+            .map(|i| TombstoneSample {
+                elapsed_secs: (i * cadence_secs) as f64,
+                bytes: (from as f64 + (to as f64 - from as f64) * i as f64 / steps as f64).round()
+                    as u64,
+            })
+            .collect()
+    }
+
+    /// The constant `value` on the same time axis as [`ramp`].
+    fn flat(value: u64, duration_secs: u64, cadence_secs: u64) -> Vec<TombstoneSample> {
+        ramp(value, value, duration_secs, cadence_secs)
+    }
+
+    /// `n = k + 1` samples on the [`ramp`] axis: `from` for index `i < 3n/4`
+    /// (integer division) and `to` from there on — a level that moves exactly at
+    /// the start of the last quarter.
+    fn step(from: u64, to: u64, duration_secs: u64, cadence_secs: u64) -> Vec<TombstoneSample> {
+        let mut samples = flat(from, duration_secs, cadence_secs);
+        let split = 3 * samples.len() / 4;
+        for s in &mut samples[split..] {
+            s.bytes = to;
+        }
+        samples
+    }
+
+    /// The bound every test uses unless it says otherwise: the committed
+    /// calibration cell's width (1000), tag bytes (23) and measured window count
+    /// (3,389 remove attempts) — K 6, one epoch 23,000 B, ceiling 138,000 B.
+    const fn default_bound() -> TombstoneLevelBound {
+        TombstoneLevelBound::derive(1_000, 23, 3_389)
+    }
+
+    /// The harness's own call: default bound, no crashes, both default floors.
+    fn assess_bytes(samples: &[TombstoneSample]) -> TombstoneAssessment {
+        assess_tombstone_bytes(
+            samples,
+            default_bound(),
+            false,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+            DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS,
+        )
+    }
+
+    /// A pinned mean, deviation or tolerance, to within one byte.
+    #[track_caller]
+    fn assert_bytes_close(actual: f64, expected: f64, what: &str) {
+        assert!(
+            (actual - expected).abs() < 1.0,
+            "{what}: {actual:.3} != pinned {expected:.3}"
+        );
+    }
+
+    /// The four level quantities an assessment pinned, in one call.
+    #[track_caller]
+    fn assert_level(a: &TombstoneAssessment, half: f64, quarter: f64, dev: f64, tol: f64) {
+        assert_bytes_close(a.last_half_mean_bytes, half, "last-half mean");
+        assert_bytes_close(a.last_quarter_mean_bytes, quarter, "last-quarter mean");
+        assert_bytes_close(a.level_deviation_bytes, dev, "level deviation");
+        assert_bytes_close(a.level_tolerance_bytes, tol, "level tolerance");
+    }
+
+    /// Both clauses' dispositions and breached flags, in one call.
+    #[track_caller]
+    fn assert_clauses(
+        a: &TombstoneAssessment,
+        ceiling: (TombstoneClauseDisposition, bool),
+        level: (TombstoneClauseDisposition, bool),
+    ) {
+        assert_eq!(
+            (a.ceiling_disposition, a.ceiling_breached),
+            ceiling,
+            "ceiling clause; reason={:?}",
+            a.reason
+        );
+        assert_eq!(
+            (a.level_disposition, a.level_breached),
+            level,
+            "level clause; reason={:?}",
+            a.reason
+        );
+    }
+
+    const EVALUATED: TombstoneClauseDisposition = TombstoneClauseDisposition::Evaluated;
+    const SUPPRESSED: TombstoneClauseDisposition =
+        TombstoneClauseDisposition::SuppressedShortWindow;
+    const REPORT_ONLY: TombstoneClauseDisposition = TombstoneClauseDisposition::ReportOnlyCrashRun;
+    const CEILING_PREFIX: &str = "tombstone-byte level ceiling breached: ";
+    const LEVEL_PREFIX: &str = "tombstone-byte level unstable: ";
+
+    /// A bounded sawtooth is NOT a leak. Its run maximum stays far under the
     /// mechanism-derived level ceiling and its level is stable — the last-quarter
     /// mean sits within tolerance of the last-half mean — yet the rising teeth
     /// give the last-half OLS a per-hour slope of ~1.9–2.2 KB/h at both cadences.
-    /// A slope-as-gate therefore REDs a healthy run; that is exactly the false
-    /// positive the level-ceiling gate replaces (TG-OR-005).
+    /// The slope gate this replaced RED a healthy run on exactly this series; the
+    /// level-ceiling gate passes it (TG-OR-005).
     ///
-    /// The level quantities are computed here rather than read off the assessment
-    /// because no level clause exists yet; they migrate to the assessment's own
-    /// fields once the gate lands.
-    #[allow(clippy::cast_precision_loss)]
+    /// The level quantities are computed here independently of the assessment
+    /// and then required to equal the assessment's own fields, so the pinned
+    /// numbers check both the series and the gate's window arithmetic.
+    // Long only because it pins eight quantities at two cadences and checks each
+    // one against both the series and the assessment.
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     #[test]
     fn calibration_bounded_sawtooth_is_not_a_leak() {
         /// One cadence of the sawtooth with every quantity the series pins.
@@ -2995,22 +3170,18 @@ mod tests {
                 case.level_tolerance
             );
 
-            let a = assess_tombstone_bytes(
-                &samples,
-                DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-                DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-                DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
-            );
+            let a = assess_bytes(&samples);
             assert!(
                 (a.slope_bytes_per_hour - ols).abs() / ols < 0.01,
                 "cadence {cadence}s last-half OLS {:.1} != {ols:.1}",
                 a.slope_bytes_per_hour
             );
 
-            // The series is a "leak" only under a slope gate: it climbs at ~2 KB/h,
-            // stays under the 138,000 B ceiling (6 epochs × 1000 × 23 B) and its
-            // level is stable within tolerance.
-            assert!(a.slope_bytes_per_hour > DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR);
+            // The series is a "leak" only under a slope gate: it climbs at ~2 KB/h
+            // — past the retired slope gate's 512 B/h — stays under the 138,000 B
+            // ceiling (6 epochs × 1000 × 23 B) and its level is stable within
+            // tolerance.
+            assert!(a.slope_bytes_per_hour > 512.0);
             assert!(
                 peak < 138_000,
                 "cadence {cadence}s must stay under the ceiling"
@@ -3019,6 +3190,16 @@ mod tests {
                 level_deviation < level_tolerance,
                 "cadence {cadence}s level must be stable"
             );
+
+            assert_eq!(a.peak_bytes, peak, "cadence {cadence}s assessed peak");
+            assert_level(
+                &a,
+                last_half_mean,
+                last_quarter_mean,
+                level_deviation,
+                level_tolerance,
+            );
+            assert_clauses(&a, (EVALUATED, false), (EVALUATED, false));
 
             assert!(
                 a.passed,
@@ -3030,90 +3211,357 @@ mod tests {
         }
     }
 
-    /// A clearly-linear tombstone-byte-growth series — well above the tight
-    /// per-hour threshold — MUST FAIL. Mirrors the RSS gate's
-    /// `calibration_fails_linear_tombstone_leak`, but at the byte gauge's much
-    /// tighter scale: with no RSS noise floor, a sustained per-hour growth this
-    /// small is already real signal (see module docs).
+    /// A ramp from empty to 1.1 × C breaches the ceiling — and, being a ramp,
+    /// the level too: the last quarter of any linear ramp from 0 sits 0.125 × top
+    /// above the last half while the tolerance is 0.075 × top. The ceiling reason
+    /// is pinned in full, so the rendered derivation cannot drift from the bound.
     #[test]
-    fn calibration_fails_linear_tombstone_bytes() {
-        let samples = linear_bytes_series(1_000, 24, 5_000);
-        let a = assess_tombstone_bytes(
-            &samples,
-            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+    fn calibration_ramp_to_1_1_c_breaches_ceiling() {
+        let a = assess_bytes(&ramp(0, 151_800, 14_400, 5));
+        assert_eq!(a.peak_bytes, 151_800);
+        assert_eq!(a.ceiling_bytes, 138_000);
+        assert_level(&a, 113_850.0, 132_825.0, 18_975.0, 11_385.0);
+        assert_clauses(&a, (EVALUATED, true), (EVALUATED, true));
+        assert!(!a.passed);
+        let reason = a.reason.expect("a breaching run carries a reason");
+        // The ceiling reason carries a "; " of its own, so split on the level
+        // clause's prefix rather than on the bare separator.
+        let (ceiling, level) = reason
+            .split_once(&format!("; {LEVEL_PREFIX}"))
+            .expect("both clauses' reasons, joined");
+        let level = format!("{LEVEL_PREFIX}{level}");
+        assert_eq!(
+            ceiling,
+            "tombstone-byte level ceiling breached: run max 151800 B > 138000 B \
+             (6 epochs = 2 + ceil(3389 stamps / width 1000) × width 1000 × tag bytes 23); \
+             last-half max 151800 B"
         );
-        assert!(
-            !a.passed,
-            "5000 bytes/h linear tombstone-byte growth must fail the tight gate; \
-             slope={:.1} reason={:?}",
-            a.slope_bytes_per_hour, a.reason
-        );
-        assert!(a.slope_bytes_per_hour > DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR);
+        assert!(level.starts_with(LEVEL_PREFIX), "{level}");
+        assert!(level.contains("direction up"), "{level}");
+        assert!(a.ceiling_report_only_reason.is_none());
     }
 
-    /// A flat tombstone-byte series (churn stopped, or a future prune landed)
+    /// A linear leak at the magnitude this lineage's failing cells measured
+    /// breaches both clauses.
+    #[test]
+    fn calibration_linear_leak_breaches_ceiling() {
+        let a = assess_bytes(&ramp(0, 520_000, 14_400, 5));
+        assert_eq!(a.peak_bytes, 520_000);
+        assert_level(&a, 390_000.0, 455_000.0, 65_000.0, 39_000.0);
+        assert_clauses(&a, (EVALUATED, true), (EVALUATED, true));
+        assert!(!a.passed);
+        assert!(a.reason.unwrap().starts_with(CEILING_PREFIX));
+    }
+
+    /// A slow ramp that never reaches the ceiling is still caught: its level is
+    /// still rising, so the level clause fails it on its own.
+    #[test]
+    fn calibration_slow_ramp_under_ceiling_breaches_level_up() {
+        let a = assess_bytes(&ramp(10_000, 85_000, 14_400, 5));
+        assert_eq!(a.peak_bytes, 85_000);
+        assert_level(&a, 66_250.0, 75_625.0, 9_375.0, 6_625.0);
+        assert_clauses(&a, (EVALUATED, false), (EVALUATED, true));
+        assert!(!a.passed);
+        let reason = a.reason.unwrap();
+        assert!(reason.starts_with(LEVEL_PREFIX), "{reason}");
+        assert!(reason.contains("direction up"), "{reason}");
+    }
+
+    /// A level that steps up at the start of the last quarter, still under the
+    /// ceiling, fails on the level clause alone.
+    #[test]
+    fn calibration_step_up_breaches_level_only() {
+        let samples = step(30_000, 60_000, 14_400, 5);
+        assert_eq!(samples.len(), 2_881);
+        let a = assess_bytes(&samples);
+        assert_level(&a, 45_010.409, 60_000.0, 14_989.591, 4_501.041);
+        assert_clauses(&a, (EVALUATED, false), (EVALUATED, true));
+        assert!(!a.passed);
+        let reason = a.reason.unwrap();
+        assert!(reason.starts_with(LEVEL_PREFIX), "{reason}");
+        assert!(reason.contains("direction up"), "{reason}");
+    }
+
+    /// The level clause is symmetric: a level that steps DOWN is not a level
+    /// either, and fails with its direction named.
+    #[test]
+    fn calibration_step_down_breaches_level_down() {
+        let a = assess_bytes(&step(60_000, 30_000, 14_400, 5));
+        assert_level(&a, 44_989.591, 30_000.0, 14_989.591, 4_498.959);
+        assert_clauses(&a, (EVALUATED, false), (EVALUATED, true));
+        assert!(!a.passed);
+        let reason = a.reason.unwrap();
+        assert!(reason.starts_with(LEVEL_PREFIX), "{reason}");
+        assert!(reason.contains("direction down"), "{reason}");
+    }
+
+    /// The ceiling is inclusive: a run that sits exactly AT C passes, and one
+    /// byte over it, once, fails — while the level is stable in both.
+    #[test]
+    fn calibration_ceiling_edge_is_inclusive() {
+        let at = flat(138_000, 3_600, 60);
+        assert_eq!(at.len(), 61);
+        let a = assess_bytes(&at);
+        assert_bytes_close(a.last_half_span_secs, 1_800.0, "last-half span");
+        assert_clauses(&a, (EVALUATED, false), (EVALUATED, false));
+        assert!(a.passed, "reason={:?}", a.reason);
+
+        let mut over = at;
+        over[30].bytes = 138_001;
+        let b = assess_bytes(&over);
+        assert_eq!(b.peak_bytes, 138_001);
+        assert_clauses(&b, (EVALUATED, true), (EVALUATED, false));
+        assert!(!b.passed);
+        assert!(b.reason.unwrap().starts_with(CEILING_PREFIX));
+        assert!(
+            (b.level_deviation_bytes - 0.032).abs() < 0.001,
+            "deviation {:.4}",
+            b.level_deviation_bytes
+        );
+        assert_bytes_close(b.level_tolerance_bytes, 13_800.003, "level tolerance");
+    }
+
+    /// Near zero the tolerance is floored at a tenth of one epoch's bytes: a
+    /// 2 KB step on a ~1 KB level passes, where a purely relative band (100 B)
+    /// would red it on a wobble of nearly nothing.
+    #[test]
+    fn calibration_near_zero_level_uses_epoch_floor() {
+        let a = assess_bytes(&step(0, 2_000, 14_400, 5));
+        assert_level(&a, 1_000.694, 2_000.0, 999.306, 2_300.0);
+        assert!(
+            0.10 * a.last_half_mean_bytes < a.level_deviation_bytes,
+            "sanity: a relative-only tolerance would have breached"
+        );
+        assert_clauses(&a, (EVALUATED, false), (EVALUATED, false));
+        assert!(a.passed, "reason={:?}", a.reason);
+    }
+
+    /// Regression lock for the blocking CI "Short no-crash soak must be GREEN"
+    /// gate: a too-short run has no level to describe, so both clauses are
+    /// suppressed and it passes. Proven load-bearing: the SAME series with both
+    /// windows disabled breaches the level clause.
+    #[test]
+    fn calibration_short_run_suppresses_both_clauses() {
+        // (a) 6 samples at 5s, 0 -> 60,000 B: a last-half span of 10s.
+        let samples: Vec<TombstoneSample> = (0..6u32)
+            .map(|i| TombstoneSample {
+                elapsed_secs: f64::from(i) * 5.0,
+                bytes: u64::from(i) * 12_000,
+            })
+            .collect();
+        let guarded = assess_bytes(&samples);
+        assert_bytes_close(guarded.last_half_span_secs, 10.0, "last-half span");
+        assert_level(&guarded, 48_000.0, 54_000.0, 6_000.0, 4_800.0);
+        assert_clauses(&guarded, (SUPPRESSED, false), (SUPPRESSED, false));
+        assert!(guarded.passed, "reason={:?}", guarded.reason);
+
+        // (b) Guards disabled: without them the same series fails, or (a) would
+        // prove nothing.
+        let unguarded = assess_tombstone_bytes(&samples, default_bound(), false, 0.0, 0.0);
+        assert_level(&unguarded, 48_000.0, 54_000.0, 6_000.0, 4_800.0);
+        assert_clauses(&unguarded, (EVALUATED, false), (EVALUATED, true));
+        assert!(!unguarded.passed);
+
+        // (c) Between the two floors: the ceiling is evaluated, the level is not.
+        let between = ramp(0, 21_000, 400, 5);
+        assert_eq!(between.len(), 81);
+        let c = assess_bytes(&between);
+        assert_bytes_close(c.last_half_span_secs, 200.0, "last-half span");
+        assert_clauses(&c, (EVALUATED, false), (SUPPRESSED, false));
+        assert!(c.passed, "reason={:?}", c.reason);
+    }
+
+    /// In a crash-enabled run the ceiling breach is computed and handed to the
+    /// caller as a report-only reason, and does not fail the run; the level
+    /// clause stays HARD there.
+    #[test]
+    fn calibration_crash_run_ceiling_is_report_only() {
+        let over = flat(151_800, 14_400, 60);
+        assert_eq!(over.len(), 241);
+        let assess_crash = |samples: &[TombstoneSample], crash_run: bool| {
+            assess_tombstone_bytes(
+                samples,
+                default_bound(),
+                crash_run,
+                DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+                DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS,
+            )
+        };
+
+        // (a) Crash run: breached, reported, NOT failed.
+        let a = assess_crash(&over, true);
+        assert_level(&a, 151_800.0, 151_800.0, 0.0, 15_180.0);
+        assert_clauses(&a, (REPORT_ONLY, true), (EVALUATED, false));
+        assert!(a.passed, "reason={:?}", a.reason);
+        assert!(a.reason.is_none());
+        assert!(a
+            .ceiling_report_only_reason
+            .expect("a report-only breach still carries its reason")
+            .starts_with(CEILING_PREFIX));
+
+        // (b) The same series without crashes fails on the ceiling.
+        let b = assess_crash(&over, false);
+        assert_clauses(&b, (EVALUATED, true), (EVALUATED, false));
+        assert!(!b.passed);
+        assert!(b.ceiling_report_only_reason.is_none());
+
+        // (c) Level stays HARD in a crash run.
+        let c = assess_crash(&step(30_000, 60_000, 14_400, 5), true);
+        assert_bytes_close(c.level_deviation_bytes, 14_989.591, "level deviation");
+        assert_clauses(&c, (REPORT_ONLY, false), (EVALUATED, true));
+        assert!(!c.passed);
+        assert!(c.ceiling_report_only_reason.is_none());
+    }
+
+    /// The bound arithmetic, including the width clamp and both overflow guards.
+    #[test]
+    fn calibration_bound_derivation() {
+        let b = TombstoneLevelBound::derive(1_000, 23, 3_389);
+        assert_eq!(b.ceiling_epochs, 6);
+        assert_eq!(b.epoch_bytes(), 23_000);
+        assert_eq!(b.ceiling_bytes(), 138_000);
+        assert_eq!(TombstoneLevelBound::derive(1_000, 23, 0).ceiling_epochs, 2);
+        assert_eq!(
+            TombstoneLevelBound::derive(1_000, 23, 4_000).ceiling_epochs,
+            6
+        );
+        assert_eq!(
+            TombstoneLevelBound::derive(1_000, 23, 4_001).ceiling_epochs,
+            7
+        );
+
+        let clamped = TombstoneLevelBound::derive(0, 23, 5);
+        assert_eq!(clamped.epoch_width, 1);
+        assert_eq!(clamped.ceiling_epochs, 7);
+        assert_eq!(clamped.epoch_bytes(), 23);
+        assert_eq!(clamped.ceiling_bytes(), 161);
+        assert_eq!(clamped, TombstoneLevelBound::derive(1, 23, 5));
+
+        let max = TombstoneLevelBound::derive(u64::MAX, u64::MAX, u64::MAX);
+        assert_eq!(max.ceiling_epochs, 3);
+        assert_eq!(max.epoch_bytes(), u64::MAX);
+        assert_eq!(max.ceiling_bytes(), u64::MAX);
+        let many = TombstoneLevelBound::derive(1, 1, u64::MAX);
+        assert_eq!(many.ceiling_epochs, u64::MAX);
+        assert_eq!(many.epoch_bytes(), 1);
+        assert_eq!(many.ceiling_bytes(), u64::MAX);
+
+        assert_eq!(EVALUATED.as_str(), "EVALUATED");
+        assert_eq!(SUPPRESSED.as_str(), "SUPPRESSED_SHORT_WINDOW");
+        assert_eq!(REPORT_ONLY.as_str(), "REPORT_ONLY_CRASH_RUN");
+    }
+
+    /// The window statistic, with both widenings: one sample gap on the old end
+    /// and the latency allowance.
+    #[allow(clippy::cast_precision_loss)]
+    #[test]
+    fn calibration_max_count_in_window() {
+        // 1/s for ten minutes, then 60/s for two, sampled every 5s.
+        let uniform: Vec<(f64, u64)> = (0..=144u64)
+            .map(|i| {
+                let t = i * 5;
+                let count = if t <= 600 { t } else { 600 + 60 * (t - 600) };
+                (t as f64, count)
+            })
+            .collect();
+        // A 70s span (60 + one 5s gap + 5s allowance) at 60/s; the unwidened
+        // definition read 3,600.
+        assert_eq!(max_count_in_window(&uniform, 60.0, 5.0), 4_200);
+
+        let skipped: Vec<(f64, u64)> = uniform
+            .iter()
+            .copied()
+            .filter(|&(t, _)| (t - 690.0).abs() > f64::EPSILON)
+            .collect();
+        assert_eq!(skipped.len(), uniform.len() - 1);
+        assert_eq!(max_count_in_window(&skipped, 60.0, 5.0), 4_500);
+
+        let counterexample: Vec<(f64, u64)> = (0..=14u64)
+            .map(|i| {
+                let t = i * 5;
+                let count = match t {
+                    0 => 0,
+                    5..=60 => 1_000,
+                    _ => 2_000,
+                };
+                (t as f64, count)
+            })
+            .collect();
+        assert_eq!(max_count_in_window(&counterexample, 60.0, 5.0), 2_000);
+
+        assert_eq!(max_count_in_window(&[], 60.0, 5.0), 0);
+        assert_eq!(max_count_in_window(&[(0.0, 7)], 60.0, 5.0), 7);
+    }
+
+    /// A clearly-linear tombstone-byte series that climbs to 1.5 × C over a day
+    /// MUST FAIL, on both clauses: the run maximum is over the ceiling and the
+    /// last quarter is still above the last half. Mirrors the RSS gate's
+    /// `calibration_fails_linear_tombstone_leak` with hourly samples.
+    #[test]
+    fn calibration_fails_linear_tombstone_bytes() {
+        let a = assess_bytes(&linear_bytes_series(1_000, 24, 8_600));
+        assert_eq!(a.peak_bytes, 207_400);
+        assert_bytes_close(a.last_half_span_secs, 43_200.0, "last-half span");
+        assert_level(&a, 155_800.0, 181_600.0, 25_800.0, 15_580.0);
+        assert_clauses(&a, (EVALUATED, true), (EVALUATED, true));
+        assert!(!a.passed);
+        assert!(a.reason.unwrap().starts_with(CEILING_PREFIX));
+    }
+
+    /// A flat tombstone-byte series (churn stopped, or a prune keeping pace)
     /// MUST PASS — otherwise the gate false-FAILs every healthy run.
     #[test]
     fn calibration_passes_flat_tombstone_bytes() {
-        let samples = linear_bytes_series(50_000, 24, 0);
-        let a = assess_tombstone_bytes(
-            &samples,
-            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
-        );
-        assert!(
-            a.passed,
-            "flat tombstone-byte series must pass; slope={:.3} reason={:?}",
-            a.slope_bytes_per_hour, a.reason
-        );
+        let a = assess_bytes(&linear_bytes_series(50_000, 24, 0));
+        assert_eq!(a.peak_bytes, 50_000);
+        assert_level(&a, 50_000.0, 50_000.0, 0.0, 5_000.0);
+        assert_clauses(&a, (EVALUATED, false), (EVALUATED, false));
+        assert!(a.passed, "reason={:?}", a.reason);
     }
 
     /// Zero samples means the metrics scrape was blind — must FAIL, same
     /// rationale as the RSS gate's empty-samples branch (AC6: a zero-sample
-    /// run must not silently report bounded growth).
+    /// run must not silently report bounded growth). Neither clause had a
+    /// window, and both say so.
     #[test]
     fn calibration_fails_zero_tombstone_samples() {
-        let a = assess_tombstone_bytes(
-            &[],
-            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
-        );
+        let a = assess_bytes(&[]);
+        assert_clauses(&a, (SUPPRESSED, false), (SUPPRESSED, false));
         assert!(!a.passed, "zero samples must fail as a blind monitor");
+        assert!(a
+            .reason
+            .unwrap()
+            .starts_with("no tombstone-byte samples collected"));
     }
 
     /// AC10: the prune-disabled negative control, as a synthetic calibration
     /// unit test (no live prune-disable toggle exists in the harness/server —
-    /// the live run is a documented manual step). A sustained byte-growth rate
-    /// realistic for a bounded 10-60 min run (single-digit KB total) MUST FAIL
-    /// — and specifically on the BYTE gate, not RSS: RSS's
-    /// `DEFAULT_MEM_MIN_GROWTH_MB` (80 MB) guard would false-GREEN this exact
-    /// magnitude of growth, so the byte gate is the only instrument that can
-    /// actually deliver the required FAIL.
+    /// the live run is a documented manual step). Four hours of sustained byte
+    /// growth to 1.5 × C (~208 KB) MUST FAIL — and specifically on the BYTE
+    /// gate, not RSS: at a fifth of a megabyte, the growth is invisible behind
+    /// RSS's `DEFAULT_MEM_MIN_GROWTH_MB` (80 MB) guard, so the byte gate is the
+    /// only instrument that can actually deliver the required FAIL.
     #[test]
     fn calibration_sustained_growth_fails_byte_gate_not_rss() {
-        // 4 hourly samples (enough points for a non-degenerate last-half OLS
-        // window) at 5000 bytes/h -> ~20 KB total growth over 4h, single-digit
-        // scale next to RSS's 80 MB guard.
-        let byte_samples = linear_bytes_series(1_000, 4, 5_000);
-        let bytes_assessment = assess_tombstone_bytes(
-            &byte_samples,
-            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+        // Hourly samples at 52,000 B/h: the ceiling and the level both breach.
+        let bytes_assessment = assess_bytes(&linear_bytes_series(1_000, 4, 52_000));
+        assert_eq!(bytes_assessment.peak_bytes, 209_000);
+        assert_bytes_close(
+            bytes_assessment.last_half_span_secs,
+            7_200.0,
+            "last-half span",
         );
+        assert_level(&bytes_assessment, 157_000.0, 183_000.0, 26_000.0, 15_700.0);
+        assert_clauses(&bytes_assessment, (EVALUATED, true), (EVALUATED, true));
         assert!(
             !bytes_assessment.passed,
-            "sustained byte growth must fail the byte gate; slope={:.1} reason={:?}",
-            bytes_assessment.slope_bytes_per_hour, bytes_assessment.reason
+            "sustained byte growth must fail the byte gate; reason={:?}",
+            bytes_assessment.reason
         );
 
-        // Same tiny (single-digit-KB-scale) magnitude of growth, expressed as
-        // an RSS series, must NOT fail the RSS gate — proving the byte gate,
-        // not RSS, is what makes the negative control fail.
+        // Growth far below RSS's guard, expressed as an RSS series, must NOT
+        // fail the RSS gate — proving the byte gate, not RSS, is what makes the
+        // negative control fail.
         let rss_samples = vec![
             MemSample {
                 elapsed_secs: 0.0,
@@ -3132,92 +3580,106 @@ mod tests {
         );
         assert!(
             rss_assessment.passed,
-            "a single-digit-KB-scale leak must NOT fail the RSS gate (its 80 MB \
-             min-growth guard structurally cannot see it); reason={:?}",
+            "a sub-megabyte leak must NOT fail the RSS gate (its 80 MB min-growth \
+             guard structurally cannot see it); reason={:?}",
             rss_assessment.reason
         );
     }
 
-    /// The grow-then-flatten shape a residency-tracking gauge WOULD produce once
-    /// the OR-Map bound engages: tombstone bytes grow while the churn stream
-    /// fills the keyspace, then flatten. Only the LAST-HALF window should drive
-    /// the fitted slope (R9(d)), so this PASSes even though the run grew earlier.
+    /// The grow-then-flatten shape a residency-tracking gauge produces once the
+    /// OR-Map bound engages: tombstone bytes grow while the churn stream fills
+    /// the keyspace, then flatten.
     ///
-    /// NOTE — this validates the OLS/last-half-window MATH directly on a
-    /// hand-authored series; it does not itself drive a live server. A real
-    /// run reaches this same grow-then-flatten shape once the tracked-and-ACKing
-    /// client (`main.rs`'s `SoakClient::connect_tracked` + `confirm_apply`)
-    /// advances the low-water-mark far enough for the epoch-scoped prune to
-    /// engage — see `calibration_additive_only_gauge_never_plateaus` below for
-    /// the contrasting shape produced when nothing drives the low-water-mark
-    /// (e.g. `main.rs`'s `--no-ack` negative control).
+    /// (a) A ramp that stays under the ceiling and then holds its level PASSES
+    /// even though the run grew earlier: the level clause reads the last half
+    /// only.
+    ///
+    /// (b) The same shape with an early OVERSHOOT past the ceiling FAILS even
+    /// though its tail is flat: the ceiling bounds the whole run, not its end,
+    /// so a transient excursion above what the mechanism admits is a breach.
+    ///
+    /// NOTE — this validates the gate's arithmetic on hand-authored series; it
+    /// does not itself drive a live server. A real run reaches shape (a) once
+    /// the tracked-and-ACKing client (`main.rs`'s `SoakClient::connect_tracked` +
+    /// `confirm_apply`) advances the low-water-mark far enough for the
+    /// epoch-scoped prune to engage — see
+    /// `calibration_additive_only_gauge_never_plateaus` below for the
+    /// contrasting shape produced when nothing drives the low-water-mark (e.g.
+    /// `main.rs`'s `--no-ack` negative control).
     #[test]
     fn calibration_delayed_plateau_grow_then_flatten_passes() {
-        let mut samples = Vec::new();
-        for h in 0..=11u32 {
-            samples.push(TombstoneSample {
-                elapsed_secs: f64::from(h) * 3600.0,
-                bytes: 1_000 + u64::from(h) * 1_000,
-            });
-        }
-        for h in 12..=23u32 {
-            samples.push(TombstoneSample {
-                elapsed_secs: f64::from(h) * 3600.0,
-                bytes: 12_000,
-            });
-        }
-        let a = assess_tombstone_bytes(
-            &samples,
-            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
-        );
+        let hourly = |value: &dyn Fn(u32) -> u64| -> Vec<TombstoneSample> {
+            (0..=23u32)
+                .map(|h| TombstoneSample {
+                    elapsed_secs: f64::from(h) * 3600.0,
+                    bytes: value(h),
+                })
+                .collect()
+        };
+
+        let under = hourly(&|h| {
+            if h <= 11 {
+                1_000 + u64::from(h) * 1_000
+            } else {
+                12_000
+            }
+        });
+        let a = assess_bytes(&under);
+        assert_eq!(a.peak_bytes, 12_000);
+        assert_bytes_close(a.level_deviation_bytes, 0.0, "level deviation");
+        assert_clauses(&a, (EVALUATED, false), (EVALUATED, false));
         assert!(
             a.passed,
-            "delayed-plateau (grow-then-flatten) must pass on the last-half-window \
-             slope; slope={:.2} reason={:?}",
-            a.slope_bytes_per_hour, a.reason
+            "delayed-plateau (grow-then-flatten) under the ceiling must pass; reason={:?}",
+            a.reason
         );
+
+        // round(150,000 × h / 11) for the ramp, computed in integers.
+        let overshoot = hourly(&|h| {
+            if h <= 11 {
+                (150_000 * u64::from(h) + 5) / 11
+            } else {
+                50_000
+            }
+        });
+        let b = assess_bytes(&overshoot);
+        assert_eq!(b.peak_bytes, 150_000);
+        assert_eq!(b.last_half_max_bytes, 50_000);
+        assert_bytes_close(b.level_deviation_bytes, 0.0, "level deviation");
+        assert_clauses(&b, (EVALUATED, true), (EVALUATED, false));
+        assert!(!b.passed);
+        assert!(b.reason.unwrap().starts_with(CEILING_PREFIX));
     }
 
     /// Pins the shape produced when NOTHING drives the low-water-mark forward —
-    /// exactly `main.rs`'s `--no-ack` negative control (or, pre-this-spec, every
-    /// production run, since no client ever ran the confirm-apply protocol at
-    /// all): with the low-water-mark vacuously 0, the epoch-scoped prune never
-    /// fires, so the gauge climbs monotonically at the tombstone-*creation* rate
-    /// and never flattens — the grow-then-flatten shape the plateau statistic
-    /// looks for cannot occur. This test feeds exactly that monotone shape (well
-    /// past the min-window floor) and asserts the assessment reports NOT-passed
-    /// — which is precisely the hard-gate failure `main.rs` asserts on for this
-    /// scenario in every run class; the durable-corpus level clause beside it is
-    /// report-only (see the module doc's "Tombstone-byte gate" section).
+    /// exactly `main.rs`'s `--no-ack` negative control: with the low-water-mark
+    /// vacuously 0, the epoch-scoped prune never fires, so the gauge climbs
+    /// monotonically at the tombstone-*creation* rate and never levels off. Six
+    /// hours of that at 34,500 B/h climb past the ceiling with the last quarter
+    /// still well above the last half, so BOTH clauses report NOT-passed — the
+    /// hard-gate failure `main.rs` asserts on for this scenario; the
+    /// durable-corpus level clause beside it is report-only (see the module
+    /// doc's "Tombstone-byte gate" section).
     #[test]
     fn calibration_additive_only_gauge_never_plateaus() {
-        // ~6h of steady creation at 5000 B/h — a multi-hour last-half window
-        // (well past the 120s min-window floor), monotone, no flatten. This is
-        // the shape an unbounded (no-driver / `--no-ack`) soak produces.
-        let samples = linear_bytes_series(1_000, 6, 5_000);
-        let a = assess_tombstone_bytes(
-            &samples,
-            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
-        );
+        let a = assess_bytes(&linear_bytes_series(1_000, 6, 34_500));
+        assert_eq!(a.peak_bytes, 208_000);
+        assert_bytes_close(a.last_half_span_secs, 10_800.0, "last-half span");
+        assert_level(&a, 156_250.0, 190_750.0, 34_500.0, 15_625.0);
+        assert_clauses(&a, (EVALUATED, true), (EVALUATED, true));
         assert!(
             !a.passed,
             "an unbounded monotone-growth shape (no low-water-mark driver) must \
-             NOT be reported as a plateau — this is the hard-gate FAIL `main.rs` \
-             asserts on in every run class; \
-             slope={:.1} reason={:?}",
-            a.slope_bytes_per_hour, a.reason
+             NOT be reported as a bounded level; reason={:?}",
+            a.reason
         );
     }
 
     /// R9(d) proof: on the same grow-then-flatten shape, the FULL-window slope
-    /// is dragged well above the gate threshold by the earlier growth even
-    /// though the run has genuinely plateaued, while the LAST-HALF-window
-    /// slope correctly reports near-zero. This is why the plateau statistic
-    /// must be last-half-window, not full-window.
+    /// is dragged well upward by the earlier growth even though the run has
+    /// genuinely levelled off, while the LAST-HALF-window slope correctly
+    /// reports zero. This is why the recorded slope is last-half-window, not
+    /// full-window.
     #[test]
     fn last_half_window_slope_differs_from_full_window_on_delayed_plateau() {
         let mut points = Vec::new();
@@ -3230,31 +3692,31 @@ mod tests {
         let full = least_squares_slope_per_hour(&points);
         let last_half = last_half_window_slope_per_hour(&points);
         assert!(
-            full > DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            full > 2_000.0,
             "sanity: the full-window slope on this shape must itself be large \
-             enough to matter (full={full:.1} B/h)"
+             (full={full:.1} B/h)"
         );
         assert!(
-            last_half.abs() < DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            last_half.abs() < 1.0,
             "the last-half-window slope on a genuinely-flattened tail must be \
-             near zero even though the full-window slope is not \
+             zero even though the full-window slope is not \
              (full={full:.1} B/h, last_half={last_half:.1} B/h)"
         );
     }
 
     /// AC11: a synthetic post-kill sample sequence (a spurious near-zero read
     /// during the boot-recompute gap, then the reconciled-total jump) must NOT
-    /// pollute the fitted slope. [`exclude_boot_gap_samples`] drops every
-    /// sample inside the recorded [`BootGap`] before the series reaches
+    /// pollute the level. [`exclude_boot_gap_samples`] drops every sample inside
+    /// the recorded [`BootGap`] before the series reaches
     /// [`assess_tombstone_bytes`], so the gate sees only reconciled, continuous
     /// data.
     #[test]
     fn calibration_boot_gap_exclusion_does_not_trip_gate() {
-        // Life 0 plateaus at 50_000 bytes from t=0 to t=3600 (1h). At t=3605
-        // the process is killed; the restarted process's gauge is not yet
+        // Life 0 holds 50_000 bytes from t=0 to t=3600 (1h). At t=3605 the
+        // process is killed; the restarted process's gauge is not yet
         // reconciled until t=3610 (a 5s boot-recompute gap) — a scrape taken
         // at t=3607 during that window reads a spurious near-zero total. From
-        // t=3610 onward, life 1 resumes at a slightly higher plateau (a small
+        // t=3610 onward, life 1 resumes at a slightly higher level (a small
         // amount of legitimate growth, restart-survivable — not a reset to 0).
         let samples = vec![
             TombstoneSample {
@@ -3304,82 +3766,28 @@ mod tests {
             "the spurious near-zero in-gap sample must be excluded"
         );
 
-        let a = assess_tombstone_bytes(
-            &filtered,
-            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
-        );
+        let a = assess_bytes(&filtered);
+        assert_bytes_close(a.last_half_span_secs, 3_590.0, "last-half span");
+        assert_bytes_close(a.level_deviation_bytes, 0.0, "level deviation");
+        assert_clauses(&a, (EVALUATED, false), (EVALUATED, false));
         assert!(
             a.passed,
-            "boot-gap-excluded plateau must pass; slope={:.2} reason={:?}",
-            a.slope_bytes_per_hour, a.reason
+            "boot-gap-excluded level must pass; reason={:?}",
+            a.reason
         );
 
         // Sanity: the unfiltered series (spurious dip included) is actually
         // capable of tripping the gate, or this test would not be proving the
-        // exclusion is load-bearing.
-        let unfiltered = assess_tombstone_bytes(
-            &samples,
-            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
-        );
+        // exclusion is load-bearing — the dip drags the last-half mean far
+        // below the last quarter's.
+        let unfiltered = assess_bytes(&samples);
+        assert_bytes_close(unfiltered.last_half_span_secs, 3_593.0, "last-half span");
+        assert_level(&unfiltered, 37_508.75, 50_010.0, 12_501.25, 3_750.875);
+        assert_clauses(&unfiltered, (EVALUATED, false), (EVALUATED, true));
         assert!(
             !unfiltered.passed,
             "sanity: the unfiltered series with the boot-gap dip must actually \
              trip the gate, or this test would not be proving anything"
-        );
-    }
-
-    /// Regression lock for the blocking CI "Short no-crash soak must be GREEN"
-    /// gate: a too-short-to-plateau run grows the tombstone gauge by a few KB
-    /// while the keyspace fills but has not had wall-clock time to plateau. Its
-    /// last-half fit window spans only seconds, so the per-hour extrapolation is
-    /// meaningless (a few KB over ~25s reads as a six-figure B/h "leak"). The
-    /// minimum-window-span guard MUST suppress the slope clause so the run
-    /// PASSES. Proven load-bearing: the SAME series with the guard disabled
-    /// (`min_window_secs = 0.0`) FAILS — this is exactly the reproduced smoke
-    /// regression the guard closes.
-    #[test]
-    fn calibration_short_run_below_min_window_passes() {
-        // 6 samples at 5s intervals = 25s total, linear 0 -> 6000 bytes — the
-        // exact shape reproduced FAILing the blocking CI smoke gate.
-        let samples: Vec<TombstoneSample> = (0..6u32)
-            .map(|i| TombstoneSample {
-                elapsed_secs: f64::from(i) * 5.0,
-                bytes: u64::from(i) * 1_200,
-            })
-            .collect();
-
-        // Guard disabled: the sub-minute per-hour slope is enormous and trips
-        // the gate — without this the test would prove nothing.
-        let no_guard = assess_tombstone_bytes(
-            &samples,
-            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-            0.0,
-        );
-        assert!(
-            !no_guard.passed,
-            "sanity: with the window guard disabled the sub-minute slope must \
-             trip the gate (slope={:.0} B/h) — otherwise this test is vacuous",
-            no_guard.slope_bytes_per_hour
-        );
-        assert!(no_guard.slope_bytes_per_hour > DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR);
-
-        // Real guard: the too-short window is suppressed and the run passes.
-        let guarded = assess_tombstone_bytes(
-            &samples,
-            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
-        );
-        assert!(
-            guarded.passed,
-            "a too-short-to-plateau run (last-half window well under the \
-             {:.0}s floor) must pass; slope={:.0} B/h reason={:?}",
-            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS, guarded.slope_bytes_per_hour, guarded.reason
         );
     }
 
@@ -3657,8 +4065,9 @@ mod tests {
         );
     }
 
-    /// Whenever the level clause did NOT decide, the slope clause must still
-    /// decide — otherwise a run could pass through a window no clause held.
+    /// Whenever the durable-corpus level clause did NOT decide, the resident
+    /// tombstone-gauge verdict must still decide — otherwise a run could pass
+    /// through a window no clause held.
     /// The enumeration lives on the type: a fourth disposition fails to compile
     /// inside the predicate, so what this asserts is the CLASSIFICATION of each
     /// variant, not the exhaustiveness (the compiler owns that).
@@ -3667,15 +4076,15 @@ mod tests {
     /// already carries `passed == false`, so it fails through the first
     /// conjunct and never depends on the fallback to rescue it.
     #[test]
-    fn calibration_slope_clause_hard_for_every_non_evaluated_disposition() {
-        for (disposition, stays_hard) in [
+    fn calibration_corpus_level_undecided_for_every_non_evaluated_disposition() {
+        for (disposition, undecided) in [
             (CorpusLevelDisposition::LevelEvaluated, false),
             (CorpusLevelDisposition::LevelSuppressed, true),
             (CorpusLevelDisposition::InstrumentFailed, true),
         ] {
             assert_eq!(
-                slope_clause_stays_hard(disposition),
-                stays_hard,
+                corpus_level_clause_undecided(disposition),
+                undecided,
                 "{} is classified wrongly",
                 disposition.as_str()
             );

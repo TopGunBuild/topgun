@@ -18,22 +18,29 @@
 //!    halves are scoped to the capability each actually delivers.
 //! 3. **Bounded memory:** the decrementable OR-Map tombstone-bytes gauge
 //!    (`topgun_ormap_tombstone_bytes`, scraped from the server's own
-//!    `GET /metrics`) is sampled every interval and its bounded-plateau slope
-//!    (last-half-window OLS, boot-recompute-gap samples excluded — see
-//!    `monitor.rs`) is computed against a tight per-hour threshold — a direct,
+//!    `GET /metrics`) is sampled every interval (boot-recompute-gap samples
+//!    excluded — see `monitor.rs`) and judged on its LEVEL, a direct,
 //!    residency-independent leak signal with no allocator/cache noise floor.
-//!    The slope is a HARD gate in every run class. The durable-corpus level
-//!    clause below is report-only and takes no run class over from it.
+//!    Two clauses decide: the run maximum must stay under a mechanism-derived
+//!    ceiling (open + drained-not-freed epochs plus the epochs a fence-age
+//!    window of remove attempts can hold, times epoch width, times the largest
+//!    churn tag — every factor measured on the run), and the last-quarter mean
+//!    must stay within a tolerance of the last-half mean. Level stability is
+//!    HARD in every run class; the ceiling is HARD except in crash-enabled
+//!    runs, where it is report-only. The last-half OLS slope is still
+//!    computed and reported, and decides nothing. The durable-corpus level
+//!    clause below is report-only and takes no run class over from the gauge.
 //!    A tracked-and-ACKing client
 //!    (`SoakClient::connect_tracked` + `confirm_apply`) is driven alongside the
 //!    churn clients for the run's duration so the server's per-device causal
 //!    frontier — and therefore its low-water-mark — actually advances, which is
 //!    what lets the epoch-scoped prune fire and the gauge genuinely plateau
-//!    under sustained churn instead of only ever growing. The min-window-span
-//!    guard (`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`) keeps a
+//!    under sustained churn instead of only ever growing. The two min-window
+//!    guards (`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS` for the ceiling,
+//!    `DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS` for level stability) keep a
 //!    too-short-to-plateau run (e.g. the 25s blocking smoke) from false-REDing
 //!    on a not-yet-flattened ramp, and the blind-monitor (zero-sample) clause
-//!    hard-gates independently of the slope. Beside the gauge, the DURABLE
+//!    hard-gates independently of both. Beside the gauge, the DURABLE
 //!    corpus itself is sampled from a byte copy of the datastore at every
 //!    recovery checkpoint: a blind sampler, a recent half peaking more than
 //!    the configured headroom above the earlier half, and a peak above an
@@ -41,7 +48,7 @@
 //!    because a control cell with no fault injected at all breached the
 //!    headroom clause on its own — an instrument that fires on an unperturbed
 //!    run cannot yet tell a leak from ordinary growth, so it decides no
-//!    verdict and takes nothing over from the gauge slope above.
+//!    verdict and takes nothing over from the gauge clauses above.
 //!    Server RSS is sampled in parallel
 //!    and asserted against a looser slope as a coarse, non-tombstone backstop
 //!    gate. The on-disk data-dir slope (below) remains REPORT-ONLY — bounding
@@ -59,8 +66,8 @@
 //! never fires, and the gate must FAIL under sustained churn), and
 //! `--inject-slow-leak` adds a second, deliberately slow-acking tracked client
 //! whose stale cursor repeatedly caps the fleet-wide low-water-mark — a bounded
-//! ramp-then-catch-up pattern used to calibrate the OLS slope's detection floor
-//! against a small, non-instantaneous leak rather than only total blockage.
+//! ramp-then-catch-up pattern used to exercise the gauge clauses against a
+//! small, non-instantaneous leak rather than only total blockage.
 //! Independently of the gauge, `scan_redb_tombstone_corpus` sums the real
 //! on-disk tombstone corpus. It runs once per recovery checkpoint — between
 //! the `kill -9` and the restart, over a BYTE COPY on a scratch path outside
@@ -117,18 +124,18 @@ use model::{compare, next_stamp, Model};
 use monitor::{
     aggregate_origin_lines, assess, assess_disk, assess_tombstone_bytes,
     assess_tombstone_corpus_level, classify_durable_reading, classify_origin_reading,
-    classify_series_shape, exclude_boot_gap_samples, fold_lww_key, fold_or_key,
-    fold_undecodable_key, parse_labelled_gauge, sample_disk_mb, sample_redb_bytes, sample_rss_mb,
-    sample_wal_retention, slope_clause_stays_hard, BootGap, CensusRecord, CensusSource,
+    classify_series_shape, corpus_level_clause_undecided, exclude_boot_gap_samples, fold_lww_key,
+    fold_or_key, fold_undecodable_key, max_count_in_window, parse_labelled_gauge, sample_disk_mb,
+    sample_redb_bytes, sample_rss_mb, sample_wal_retention, BootGap, CensusRecord, CensusSource,
     CorpusLevelDisposition, CorpusSample, DiskAssessment, DiskSample, DurableCensus,
     DurableReading, EpochsExitedAbsence, GaugeFold, GaugeObservation, GaugeReading, MemSample,
     OrVariant, OriginLine, SeriesPoint, SeriesShapeReading, TombstoneAssessment,
-    TombstoneCorpusAssessment, TombstoneSample, DECIDING_SERIES, DEFAULT_DISK_CEILING_MB,
-    DEFAULT_DISK_MIN_GROWTH_MB, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
-    DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH, DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
-    DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR, DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES,
+    TombstoneCorpusAssessment, TombstoneLevelBound, TombstoneSample, DECIDING_SERIES,
+    DEFAULT_DISK_CEILING_MB, DEFAULT_DISK_MIN_GROWTH_MB, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
+    DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS, DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES,
     DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES, DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
-    DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
+    DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS, DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS,
+    DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS,
 };
 use or_noloss::{missing_acked_adds, OrLedger};
 use process::{resolve_server_binary, OriginCaptureSnapshot, ServerConfig, ServerSupervisor};
@@ -413,6 +420,57 @@ struct SoakMetrics {
     /// harness plumbing failure (the tracked client can't ACK) — NOT a server
     /// tombstone leak, even though both surface as an unbounded gauge slope.
     confirm_errors: AtomicU64,
+    /// Largest churn tag, in bytes, any client has emitted. One of the tombstone
+    /// ceiling's measured factors: a remove's tombstone carries its tag.
+    churn_tag_bytes_max: AtomicU64,
+    /// Every churn `or_remove` issued, whatever its outcome. Counted BEFORE the
+    /// call, so an attempt whose await never returns is still counted — the
+    /// fence-age window counts stamps the server may hold, not removes acked.
+    or_remove_attempts: AtomicU64,
+    /// Churn `or_remove` calls that returned `Ok`. `attempts − acked` is the
+    /// un-acked count the ack-latency evidence cannot see.
+    or_remove_acked: AtomicU64,
+    /// Latency of every acked churn `or_remove`, in ms.
+    or_remove_ack_latency_ms: AckLatencyHistogram,
+}
+
+/// Ack latency of the churn removes, in whole ms (rounded up, at least 1).
+///
+/// RECORDED evidence for the ceiling's P-Δ premise (a remove is acked within one
+/// sample gap of its stamp); it enters no verdict. A newtype only so
+/// `SoakMetrics` keeps its derived `Default`.
+struct AckLatencyHistogram(Mutex<hdrhistogram::Histogram<u64>>);
+
+/// Upper bound of [`AckLatencyHistogram`], one hour in ms. A value above it is
+/// clamped by `saturating_record` rather than rejected.
+const OR_REMOVE_ACK_LATENCY_MAX_MS: u64 = 3_600_000;
+
+impl Default for AckLatencyHistogram {
+    fn default() -> Self {
+        Self(Mutex::new(
+            hdrhistogram::Histogram::new_with_bounds(1, OR_REMOVE_ACK_LATENCY_MAX_MS, 3)
+                .expect("static histogram bounds are valid"),
+        ))
+    }
+}
+
+impl AckLatencyHistogram {
+    fn record(&self, latency: Duration) {
+        let ms = latency.as_nanos().div_ceil(1_000_000).max(1);
+        self.0
+            .lock()
+            .saturating_record(u64::try_from(ms).unwrap_or(u64::MAX));
+    }
+
+    /// `(p99, max)` in ms, each `None` when no remove was acked.
+    fn p99_and_max_ms(&self) -> (Option<u64>, Option<u64>) {
+        let h = self.0.lock();
+        if h.is_empty() {
+            (None, None)
+        } else {
+            (Some(h.value_at_quantile(0.99)), Some(h.max()))
+        }
+    }
 }
 
 /// Context shared with every churn client task.
@@ -688,9 +746,20 @@ async fn run_soak(config: &Config) -> i32 {
     // sampler below excludes any sample landing inside one of these windows
     // so a spurious pre-reconcile read never pollutes the OLS slope.
     let boot_gaps: Arc<Mutex<Vec<BootGap>>> = Arc::new(Mutex::new(Vec::new()));
+    // `(elapsed, cumulative remove attempts)`, one point per KEPT byte sample,
+    // so the ceiling's stamp count and the byte series share one clock and one
+    // boot-gap filter.
+    let remove_attempts: Arc<Mutex<Vec<(f64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    // RECORDED premise evidence for the ceiling, folded off the same scrape
+    // body as the byte gauge. Enters no verdict.
+    let conjunct_maxima: Arc<Mutex<ConjunctMaxima>> =
+        Arc::new(Mutex::new(ConjunctMaxima::default()));
     {
         let samples = Arc::clone(&tombstone_samples);
         let boot_gaps = Arc::clone(&boot_gaps);
+        let remove_attempts = Arc::clone(&remove_attempts);
+        let conjunct_maxima = Arc::clone(&conjunct_maxima);
+        let metrics = Arc::clone(&metrics);
         let stop = Arc::clone(&stop);
         let durable = Arc::clone(&durable);
         let interval = config.mem_sample_interval;
@@ -723,6 +792,7 @@ async fn run_soak(config: &Config) -> i32 {
                         let mut exited = durable.epochs_exited.lock();
                         fold_scrape_into(&mut exited, &scraped.epochs_exited, GaugeFold::Sum);
                     }
+                    conjunct_maxima.lock().fold(&scraped);
                     if let Some(bytes) = scraped.tombstone_bytes {
                         let elapsed = start.elapsed().as_secs_f64();
                         let candidate = TombstoneSample {
@@ -743,6 +813,12 @@ async fn run_soak(config: &Config) -> i32 {
                         .is_empty()
                         {
                             samples.lock().push(candidate);
+                            // Read AFTER `elapsed`, never before the scrape
+                            // `await`: an earlier read would pin later attempts
+                            // to an earlier timestamp and undercount the new end
+                            // of every fence-age window.
+                            let attempts = metrics.or_remove_attempts.load(Ordering::Relaxed);
+                            remove_attempts.lock().push((elapsed, attempts));
                         }
                     }
                 }
@@ -1092,50 +1168,66 @@ async fn run_soak(config: &Config) -> i32 {
         config.mem_ceiling_mb,
     );
 
-    // --- Assess tombstone-byte growth (direct residency-independent leak
-    // instrument, the bounded-plateau signal — a HARD gate in every run
-    // class, see the note below).
-    // Coexists with the RSS gate above as a coarse non-tombstone
-    // backstop — neither replaces the other. The sampling loop already
-    // excluded boot-recompute-gap samples (R9(c)), so this series is safe to
-    // fit directly.
+    // --- Assess the resident tombstone-byte gauge (direct,
+    // residency-independent leak instrument). Coexists with the RSS gate above
+    // as a coarse non-tombstone backstop — neither replaces the other. The
+    // sampling loop already excluded boot-recompute-gap samples, so this
+    // series is safe to judge directly.
+    //
+    // The gauge is judged on its LEVEL, not its slope (see TG-OR-005). The
+    // bound is derived from the mechanism, with every factor measured on this
+    // run: the epoch width the server was launched with, the largest churn tag
+    // this harness emitted, and the most remove attempts any fence-age window
+    // held (widened by one sample gap, so the count covers every stamp the
+    // window can hold). The fence-age bound is the server's own
+    // `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS`, read once here with the server's
+    // default. Two clauses decide:
+    //   - the run maximum must stay under the ceiling — HARD in every non-crash
+    //     run class, and report-only when `--crash-interval` is set (a crash
+    //     run's held-epoch term is not derived yet), in which case a breach
+    //     goes to `pending_gates` below;
+    //   - the last-quarter mean must stay within tolerance of the last-half
+    //     mean — HARD in every run class.
+    // Each clause has its own min-window guard, which keeps the 25s blocking
+    // Soak Smoke G4b run from being judged before its keyspace can plateau.
+    // The tracked-and-ACKing client spawned above drives the low-water-mark,
+    // so the epoch-scoped prune fires and the decrementable gauge is expected
+    // to hold a level rather than climb at the tombstone-creation rate.
+    // `--no-ack` and `--inject-slow-leak` are the negative and slow-leak
+    // control modes. The last-half OLS slope is still computed and reported,
+    // and decides nothing.
     let tombstone_samples_snapshot = tombstone_samples.lock().clone();
+    let remove_attempts_snapshot = remove_attempts.lock().clone();
+    let fence_age_bound_ms = std::env::var("TOPGUN_WAL_WATERMARK_STALL_BOUND_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS);
+    let tombstone_bound = TombstoneLevelBound::derive(
+        effective_epoch_width(),
+        metrics.churn_tag_bytes_max.load(Ordering::Relaxed),
+        max_count_in_window(
+            &remove_attempts_snapshot,
+            fence_age_bound_ms as f64 / 1000.0,
+            config.mem_sample_interval.as_secs_f64(),
+        ),
+    );
     let tombstones = assess_tombstone_bytes(
         &tombstone_samples_snapshot,
-        DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
-        DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+        tombstone_bound,
+        config.crash_interval.is_some(),
         DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+        DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS,
     );
+    if let Some(reason) = &tombstones.ceiling_report_only_reason {
+        pending_gates.push(format!(
+            "{reason} (report-only in crash-enabled runs, did NOT fail the run)"
+        ));
+    }
 
-    // The tombstone-byte SLOPE clause is an UNCONDITIONAL HARD gate: it
-    // decides the verdict in every run class, and the durable-corpus level
-    // clause below takes none of them over, because that clause is
-    // report-only. The tracked-and-ACKing client spawned above
-    // (`run_tracked_confirm_client` / `TRACKER_IDX`) drives the server's
-    // per-device causal frontier forward every `confirm_interval`, so the
-    // fleet-wide low-water-mark actually advances and the epoch-scoped prune
-    // fires — the exported gauge (`topgun_ormap_tombstone_bytes`) is
-    // decrementable and is expected to genuinely plateau under sustained churn,
-    // not merely climb at the tombstone-creation rate. Two guards keep this
-    // from false-REDing:
-    //   - the min-window-span guard (`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`)
-    //     suppresses the slope clause until the last-half fit window covers
-    //     enough wall-clock time for a per-hour extrapolation to mean anything
-    //     — this is what keeps the 25s blocking Soak Smoke G4b run green even
-    //     though its keyspace has not yet had time to plateau;
-    //   - boot-recompute-gap exclusion (unchanged) keeps a spurious
-    //     post-restart pre-reconcile read from manufacturing a false leak.
-    // RSS above remains a coarse, non-tombstone backstop (its large min-growth
-    // guard cannot catch a single-digit-MB/KB tombstone leak on a bounded run).
-    // `--no-ack` and `--inject-slow-leak` (see their doc comments on `Config`)
-    // are the negative/slow-leak control modes that prove this gate can
-    // actually fail and actually catches a small sustained leak, not only a
-    // total blockage.
-    //
-    // The blind-monitor guard hard-gates independently of the slope clause:
-    // zero samples means the `/metrics` scrape was dead — a real harness
-    // defect independent of the leak magnitude, so a run that monitored
-    // nothing must not pass.
+    // The blind-monitor guard hard-gates independently of both clauses: zero
+    // samples means the `/metrics` scrape was dead — a real harness defect
+    // independent of the leak magnitude, so a run that monitored nothing must
+    // not pass.
     let blind_monitor = tombstones.samples == 0;
 
     // --- Assess the DURABLE tombstone corpus: the level/ceiling instrument
@@ -1149,8 +1241,8 @@ async fn run_soak(config: &Config) -> i32 {
     // sample and span guards). A live control cell with no fault injected
     // breached the level clause on its own, so the clause is not yet able to
     // separate a leak from ordinary growth and must not fail honest runs; the
-    // byte slope above therefore keeps gating every run class, and no run
-    // configuration is left ungated.
+    // resident gauge's clauses above therefore keep gating every run class, and
+    // no run configuration is left ungated.
     let corpus_snapshot = corpus_sampler.snapshot();
     let corpus = assess_tombstone_corpus_level(
         &corpus_snapshot.samples,
@@ -1164,7 +1256,7 @@ async fn run_soak(config: &Config) -> i32 {
 
     // --- Assess disk growth (durable-dir footprint; catches leaks RSS cannot
     // see, e.g. lazy-loaded records that never touch the in-memory cache).
-    // Mirrors the tombstone-byte gate exactly: the SLOPE is report-only (the
+    // The SLOPE is report-only (the
     // pre-TODO-566 OR-churn leak grows the durable dir linearly by design, so
     // hard-gating the slope would RED the blocking no-crash Soak Smoke G4b
     // run — the same regression class SPEC-340 hit); only the blind-monitor
@@ -1179,8 +1271,9 @@ async fn run_soak(config: &Config) -> i32 {
     let disk_blind_monitor = disk.samples == 0;
 
     let panic_report = panic_watch.report();
-    // The tombstone-byte slope is the HARD gate, in every run class and with
-    // no guard in front of it. The durable-corpus verdict is deliberately
+    // The resident gauge's verdict is ANDed in every run class: level stability
+    // always decides, and the ceiling decides in every non-crash class. The
+    // durable-corpus verdict is deliberately
     // absent from this conjunction: the control cell that injected no fault at
     // all breached the level clause on its own, which destroys attribution —
     // an instrument that reds an unperturbed run would fail honest runs rather
@@ -1224,20 +1317,18 @@ async fn run_soak(config: &Config) -> i32 {
                 tombstones.reason.clone().unwrap_or_default()
             ))
         } else if !tombstones.passed {
-            // An UNCONDITIONAL HARD gate: with the tracked-and-ACKing
-            // client driving the low-water-mark, a sustained slope breach past the
-            // min-window-guarded threshold means the epoch-scoped prune is not
-            // keeping up with (or has stopped) bounding tombstone growth — a real
-            // regression, not an expected/known gap. AND it into `passed`.
+            // With the tracked-and-ACKing client driving the low-water-mark, a
+            // level above the mechanism-derived ceiling, or a level that keeps
+            // moving across the last half, means the epoch-scoped prune is not
+            // keeping up with (or has stopped) bounding tombstone growth — a
+            // real regression, not an expected/known gap.
             //
-            // Rank 4: the slope clause, which hard-gates every run class. The
-            // guard is exactly the verdict's own term above, so the verdict and
-            // the reason cannot disagree, and a passing run cannot carry a
-            // failure reason.
+            // Rank 4: the gauge's level clauses. The guard is exactly the
+            // verdict's own term above, so the verdict and the reason cannot
+            // disagree, and a passing run cannot carry a failure reason. The
+            // reason names whichever clause breached.
             Some(format!(
-                "tombstone-byte growth slope {:.1} bytes/h exceeds {:.1} bytes/h: {}",
-                tombstones.slope_bytes_per_hour,
-                DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+                "tombstone-byte level gate failed: {}",
                 tombstones.reason.clone().unwrap_or_default()
             ))
         } else if disk_blind_monitor {
@@ -1263,7 +1354,7 @@ async fn run_soak(config: &Config) -> i32 {
         // Which clause to name comes from the exhaustive disposition predicate,
         // so a future fourth disposition cannot land silently on either side of
         // the split, and this block re-types no comparison of its own.
-        let clause = if slope_clause_stays_hard(corpus.disposition) {
+        let clause = if corpus_level_clause_undecided(corpus.disposition) {
             if corpus.disposition == CorpusLevelDisposition::InstrumentFailed {
                 "instrument failed"
             } else {
@@ -1278,7 +1369,7 @@ async fn run_soak(config: &Config) -> i32 {
         ));
     }
     if !disk_blind_monitor && !disk.passed {
-        // Report-only, same rationale as the tombstone-byte slope above: the
+        // Report-only: the
         // pre-566 OR churn grows the durable dir linearly by design, so this is
         // the EXPECTED honest signal, not a regression. Do NOT AND this into
         // `passed`. Rank 6 of the precedence above, and deliberately NOT a
@@ -1331,6 +1422,9 @@ async fn run_soak(config: &Config) -> i32 {
         None
     };
 
+    let conjunct = *conjunct_maxima.lock();
+    let (ack_latency_p99_ms, ack_latency_max_ms) =
+        metrics.or_remove_ack_latency_ms.p99_and_max_ms();
     let report = SoakReport {
         mode: "soak".to_string(),
         duration_secs_target: config.duration.as_secs(),
@@ -1366,6 +1460,35 @@ async fn run_soak(config: &Config) -> i32 {
             slope_bytes_per_hour: tombstones.slope_bytes_per_hour,
             passed: tombstones.passed,
             reason: tombstones.reason.clone(),
+            ceiling_epochs: tombstones.bound.ceiling_epochs,
+            epoch_width: tombstones.bound.epoch_width,
+            tag_bytes_max: tombstones.bound.tag_bytes_max,
+            stamps_in_window_max: tombstones.bound.stamps_in_window_max,
+            fence_age_bound_ms,
+            sample_interval_ms: u64::try_from(config.mem_sample_interval.as_millis())
+                .unwrap_or(u64::MAX),
+            ceiling_bytes: tombstones.ceiling_bytes,
+            last_half_span_secs: tombstones.last_half_span_secs,
+            last_half_mean_bytes: tombstones.last_half_mean_bytes,
+            last_half_max_bytes: tombstones.last_half_max_bytes,
+            last_quarter_mean_bytes: tombstones.last_quarter_mean_bytes,
+            level_deviation_bytes: tombstones.level_deviation_bytes,
+            level_tolerance_bytes: tombstones.level_tolerance_bytes,
+            ceiling_breached: tombstones.ceiling_breached,
+            level_breached: tombstones.level_breached,
+            ceiling_disposition: tombstones.ceiling_disposition,
+            level_disposition: tombstones.level_disposition,
+            // RECORDED only; the constant's one read, and it enters no verdict.
+            k_eff_expected_under_o2: monitor::K_EFF_EXPECTED_UNDER_O2,
+            held_epochs_max_observed: conjunct.held_epochs,
+            neither_epochs_max_observed: conjunct.neither_epochs,
+            durable_watermark_lag_max_observed: conjunct.durable_watermark_lag,
+            or_remove_ack_latency_p99_ms: ack_latency_p99_ms,
+            or_remove_ack_latency_max_ms: ack_latency_max_ms,
+            or_remove_unacked_count: metrics
+                .or_remove_attempts
+                .load(Ordering::Relaxed)
+                .saturating_sub(metrics.or_remove_acked.load(Ordering::Relaxed)),
         },
         tombstone_corpus: TombstoneCorpusReport {
             scans_attempted: corpus.scans_attempted,
@@ -1531,17 +1654,16 @@ fn print_summary(
         r.memory.slope_mb_per_hour,
         if r.memory.passed { "ok" } else { "FAIL" }
     );
-    // The byte SLOPE is a HARD gate in every run class; the durable-corpus
-    // level clause beside it is report-only and takes none of them over. The
-    // tracked-and-ACKing client drives
-    // the low-water-mark forward, so the epoch-scoped prune actually fires and
-    // the gauge is expected to plateau under sustained churn (subject to the
-    // min-window-span guard and boot-gap exclusion). See the run-end verdict
+    // The level clauses and the blind-monitor clause decide; the slope is
+    // printed as a recorded number. The tracked-and-ACKing client drives the
+    // low-water-mark forward, so the epoch-scoped prune actually fires and the
+    // gauge is expected to hold a level under sustained churn (subject to the
+    // min-window guards and boot-gap exclusion). See the run-end verdict
     // rationale.
-    let tombstone_role =
-        "slope + blind-monitor both hard-gate; durable-corpus clauses are report-only";
+    let tombstone_role = "ceiling + level + blind-monitor decide (ceiling report-only in \
+         crash runs); slope recorded; durable-corpus clauses are report-only";
     println!(
-        "tombstone_bytes:   first={} peak={} last={} slope={:.1}B/h samples={} -> {} ({}){}",
+        "tombstone_bytes:   first={} peak={} last={} slope={:.1}B/h(recorded) samples={} -> {} ({}){}",
         tombstones.first_bytes,
         tombstones.peak_bytes,
         tombstones.last_bytes,
@@ -1553,6 +1675,35 @@ fn print_summary(
             .reason
             .as_ref()
             .map_or_else(String::new, |r| format!(" reason={r}")),
+    );
+    let bound = tombstones.bound;
+    println!(
+        "tombstone_level:   ceiling={} ({} epochs x width {} x tag bytes {}; stamps_in_window={}) \
+         -> {}{} | last_half mean={:.1} max={} span={:.0}s, last_quarter mean={:.1}, \
+         deviation={:.1} tolerance={:.1} -> {}{}",
+        tombstones.ceiling_bytes,
+        bound.ceiling_epochs,
+        bound.epoch_width,
+        bound.tag_bytes_max,
+        bound.stamps_in_window_max,
+        tombstones.ceiling_disposition.as_str(),
+        if tombstones.ceiling_breached {
+            " BREACHED"
+        } else {
+            ""
+        },
+        tombstones.last_half_mean_bytes,
+        tombstones.last_half_max_bytes,
+        tombstones.last_half_span_secs,
+        tombstones.last_quarter_mean_bytes,
+        tombstones.level_deviation_bytes,
+        tombstones.level_tolerance_bytes,
+        tombstones.level_disposition.as_str(),
+        if tombstones.level_breached {
+            " BREACHED"
+        } else {
+            ""
+        },
     );
     // The durable-corpus gate's own verdict line, rendered under the single
     // prefix constant so no site retypes it. Its content and meaning changed
@@ -1622,8 +1773,7 @@ fn print_summary(
             );
         }
     }
-    // Unlike the tombstone-byte slope above (a hard gate in every run
-    // class), the disk slope
+    // Unlike the tombstone-byte level clauses above (hard-gating), the disk slope
     // stays REPORT-ONLY: it is EXPECTED to breach pre-TODO-566 under default
     // OR-churn (linear durable-dir growth by design, independent of the
     // tombstone prune this spec drives); only the blind-monitor (zero-sample)
@@ -1684,6 +1834,12 @@ fn print_summary(
 async fn scrape_tombstone_bytes(http: &reqwest::Client, port: u16) -> Option<MetricsScrape> {
     const WRITEBEHIND_LAG_METRIC: &str = "topgun_wal_applied_watermark_lag";
     const EPOCHS_EXITED_METRIC: &str = "topgun_or_prune_epochs_exited_total";
+    const RETAINED_DURABILITY_ONLY_METRIC: &str =
+        "topgun_or_prune_conjunct_retained_epochs_durability_only";
+    const RETAINED_BOTH_METRIC: &str = "topgun_or_prune_conjunct_retained_epochs_both";
+    const RETAINED_CLAIM_ONLY_METRIC: &str = "topgun_or_prune_conjunct_retained_epochs_claim_only";
+    const RETAINED_NEITHER_METRIC: &str = "topgun_or_prune_conjunct_retained_epochs_neither";
+    const DURABLE_WATERMARK_LAG_METRIC: &str = "topgun_or_prune_conjunct_durable_watermark_lag";
 
     let url = format!("http://127.0.0.1:{port}/metrics");
     let resp = http.get(&url).send().await.ok()?;
@@ -1699,7 +1855,70 @@ async fn scrape_tombstone_bytes(http: &reqwest::Client, port: u16) -> Option<Met
         // decision into this site would throw away the fact the fold needs.
         writebehind_lag: parse_labelled_gauge(&body, WRITEBEHIND_LAG_METRIC),
         epochs_exited: parse_labelled_gauge(&body, EPOCHS_EXITED_METRIC),
+        retained_durability_only: parse_labelled_gauge(&body, RETAINED_DURABILITY_ONLY_METRIC),
+        retained_both: parse_labelled_gauge(&body, RETAINED_BOTH_METRIC),
+        retained_claim_only: parse_labelled_gauge(&body, RETAINED_CLAIM_ONLY_METRIC),
+        retained_neither: parse_labelled_gauge(&body, RETAINED_NEITHER_METRIC),
+        durable_watermark_lag: parse_labelled_gauge(&body, DURABLE_WATERMARK_LAG_METRIC),
     })
+}
+
+/// Running maxima of the reclamation-conjunct gauges across a run: the RECORDED
+/// evidence the tombstone ceiling's held-epoch term is read against. None of
+/// them enters a verdict.
+///
+/// Each stays `None` until a scrape reads it, so a run whose server never
+/// exported the gauges (they are armed by `TOPGUN_PRUNE_RECORD`) reports
+/// "not armed" rather than a zero it never read.
+#[derive(Debug, Default, Clone, Copy)]
+struct ConjunctMaxima {
+    /// Held epochs per scrape = durability-only + both + claim-only. A scrape
+    /// that did not read all three contributes nothing: a partial sum would
+    /// understate what was held.
+    held_epochs: Option<u64>,
+    neither_epochs: Option<u64>,
+    durable_watermark_lag: Option<u64>,
+}
+
+impl ConjunctMaxima {
+    fn fold(&mut self, scraped: &MetricsScrape) {
+        let held = match (
+            gauge_value(&scraped.retained_durability_only, GaugeFold::Sum),
+            gauge_value(&scraped.retained_both, GaugeFold::Sum),
+            gauge_value(&scraped.retained_claim_only, GaugeFold::Sum),
+        ) {
+            (Some(d), Some(b), Some(c)) => Some(d.saturating_add(b).saturating_add(c)),
+            _ => None,
+        };
+        fold_running_max(&mut self.held_epochs, held);
+        fold_running_max(
+            &mut self.neither_epochs,
+            gauge_value(&scraped.retained_neither, GaugeFold::Sum),
+        );
+        fold_running_max(
+            &mut self.durable_watermark_lag,
+            gauge_value(&scraped.durable_watermark_lag, GaugeFold::Max),
+        );
+    }
+}
+
+/// The value one scrape read for a gauge under `fold`, `None` unless it read.
+fn gauge_value(reading: &GaugeReading, fold: GaugeFold) -> Option<u64> {
+    match reading {
+        GaugeReading::Read(gauge) => Some(match fold {
+            GaugeFold::Max => gauge.max,
+            GaugeFold::Sum => gauge.sum,
+        }),
+        GaugeReading::Absent | GaugeReading::Unreadable { .. } => None,
+    }
+}
+
+/// Raise `column` to `scraped` if it is higher; a scrape that read nothing
+/// leaves it as it stood.
+fn fold_running_max(column: &mut Option<u64>, scraped: Option<u64>) {
+    if let Some(v) = scraped {
+        *column = Some(column.map_or(v, |c| c.max(v)));
+    }
 }
 
 /// Fold ONE scrape's reading into a run-scoped observation column.
@@ -1726,17 +1945,18 @@ fn fold_scrape_into(column: &mut GaugeObservation, reading: &GaugeReading, fold:
     }
 }
 
-/// The three quantities one `/metrics` response body yields.
+/// The quantities one `/metrics` response body yields.
 ///
-/// Read from ONE body rather than from three requests, so the widening costs no
-/// extra traffic and the three values describe the same instant. No field can
+/// Read from ONE body rather than from one request each, so the widening costs
+/// no extra traffic and the values describe the same instant. No field can
 /// report a zero it did not read: `tombstone_bytes` is `None` where its gauge
-/// was absent, and the two observed gauges carry the whole three-valued
+/// was absent, and the observed gauges carry the whole three-valued
 /// [`GaugeReading`], which keeps "never appeared" and "appeared and nothing
 /// read" apart all the way to the fold. Only `tombstone_bytes` feeds a gate;
-/// the other two are OBSERVATION ONLY.
+/// the rest are OBSERVATION ONLY (the five conjunct gauges are the tombstone
+/// ceiling's recorded premise evidence, see [`ConjunctMaxima`]).
 ///
-/// The two gauge fields are named for their METRIC, not for a statistic, because
+/// The gauge fields are named for their METRIC, not for a statistic, because
 /// the statistic is no longer chosen here — the fold site names it, and a field
 /// called `_max` holding an unfolded reading would invite exactly the silent
 /// transposition the named fold exists to prevent.
@@ -1744,6 +1964,11 @@ struct MetricsScrape {
     tombstone_bytes: Option<u64>,
     writebehind_lag: GaugeReading,
     epochs_exited: GaugeReading,
+    retained_durability_only: GaugeReading,
+    retained_both: GaugeReading,
+    retained_claim_only: GaugeReading,
+    retained_neither: GaugeReading,
+    durable_watermark_lag: GaugeReading,
 }
 
 /// Parse the `topgun_ormap_tombstone_bytes` (decrementable gauge) sample value
@@ -3516,6 +3741,10 @@ async fn run_churn_client(idx: usize, ctx: ChurnCtx) {
             if ctx.or_churn && write_count.is_multiple_of(ctx.or_every) {
                 let or_key = format!("ork-{}", slot % ctx.or_keyspace.max(1));
                 let tag = format!("{ms}:{ctr}:{idx}");
+                ctx.metrics.churn_tag_bytes_max.fetch_max(
+                    u64::try_from(tag.len()).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
                 // Churn value is irrelevant — this stream is add-then-remove and is
                 // excluded from the no-loss ledger; only its tombstone growth matters.
                 let churn_value = i64::from(ctr);
@@ -3524,10 +3753,18 @@ async fn run_churn_client(idx: usize, ctx: ChurnCtx) {
                     .await
                     .is_ok()
                 {
+                    ctx.metrics
+                        .or_remove_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    let issued = Instant::now();
                     if client.or_remove(OR_MAP, &or_key, &tag).await.is_err() {
                         session_alive = false;
                         break;
                     }
+                    ctx.metrics.or_remove_acked.fetch_add(1, Ordering::Relaxed);
+                    ctx.metrics
+                        .or_remove_ack_latency_ms
+                        .record(issued.elapsed());
                 } else {
                     session_alive = false;
                     break;

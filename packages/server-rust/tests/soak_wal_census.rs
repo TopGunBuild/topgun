@@ -59,6 +59,7 @@ use topgun_server::storage::wal::{OrDelta, WalEntry, WalOp, WalStorePayload};
 use topgun_server::tombstone_frontier_impl::DEFAULT_EPOCH_WIDTH;
 
 use monitor::CorpusLevelDisposition;
+use monitor::TombstoneClauseDisposition;
 use report::{
     effective_epoch_width, scan_wal_frame_sizes, ConfirmApplyReport, DiskReport, MemoryReport,
     SoakReport, TombstoneCorpusReport, TombstoneReport,
@@ -360,6 +361,37 @@ fn sample_report(wal_fsync: &str, epoch_width: u64) -> SoakReport {
             slope_bytes_per_hour: 248_148.9,
             passed: false,
             reason: Some("tombstone slope exceeded".to_string()),
+            ceiling_epochs: 44,
+            // Distinct from the report's top-level `epochWidth` argument, so a
+            // field wired to the matrix value instead of the bound shows up.
+            epoch_width: 55,
+            tag_bytes_max: 66,
+            stamps_in_window_max: 77,
+            fence_age_bound_ms: 88,
+            sample_interval_ms: 99,
+            // Deliberately NOT `ceiling_epochs × epoch_width × tag_bytes_max`:
+            // this fixture tests transport, and a field cross-wired to a
+            // computed value has to show up.
+            ceiling_bytes: 110,
+            last_half_span_secs: 121.5,
+            last_half_mean_bytes: 132.5,
+            last_half_max_bytes: 143,
+            last_quarter_mean_bytes: 154.5,
+            level_deviation_bytes: 165.5,
+            level_tolerance_bytes: 176.5,
+            ceiling_breached: true,
+            level_breached: true,
+            ceiling_disposition: TombstoneClauseDisposition::ReportOnlyCrashRun,
+            level_disposition: TombstoneClauseDisposition::SuppressedShortWindow,
+            k_eff_expected_under_o2: 4,
+            held_epochs_max_observed: Some(187),
+            neither_epochs_max_observed: Some(198),
+            // The one `None`: a recorded gauge that was never scraped must
+            // serialize as a present `null`, never as an absent key.
+            durable_watermark_lag_max_observed: None,
+            or_remove_ack_latency_p99_ms: Some(209),
+            or_remove_ack_latency_max_ms: Some(220),
+            or_remove_unacked_count: 231,
         },
         // The ceiling is ARMED here on purpose. It is disarmed by default, so
         // the serialized non-null branch reaches no transport anywhere else,
@@ -451,6 +483,123 @@ fn soak_report_emits_every_hard_anded_verdict_tracking_its_input() {
     assert_eq!(
         t.get("reason").and_then(serde_json::Value::as_str),
         Some("tombstone slope exceeded")
+    );
+    // The level-ceiling bound, its inputs, both clause verdicts and the
+    // recorded premise evidence: each key carries its own distinct value.
+    assert_eq!(
+        t.get("ceilingEpochs").and_then(serde_json::Value::as_u64),
+        Some(44)
+    );
+    assert_eq!(
+        t.get("epochWidth").and_then(serde_json::Value::as_u64),
+        Some(55)
+    );
+    assert_eq!(
+        t.get("tagBytesMax").and_then(serde_json::Value::as_u64),
+        Some(66)
+    );
+    assert_eq!(
+        t.get("stampsInWindowMax")
+            .and_then(serde_json::Value::as_u64),
+        Some(77)
+    );
+    assert_eq!(
+        t.get("fenceAgeBoundMs").and_then(serde_json::Value::as_u64),
+        Some(88)
+    );
+    assert_eq!(
+        t.get("sampleIntervalMs")
+            .and_then(serde_json::Value::as_u64),
+        Some(99)
+    );
+    assert_eq!(
+        t.get("ceilingBytes").and_then(serde_json::Value::as_u64),
+        Some(110)
+    );
+    assert_eq!(
+        t.get("lastHalfMaxBytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(143)
+    );
+    assert_eq!(
+        t.get("kEffExpectedUnderO2")
+            .and_then(serde_json::Value::as_u64),
+        Some(4)
+    );
+    assert_eq!(
+        t.get("heldEpochsMaxObserved")
+            .and_then(serde_json::Value::as_u64),
+        Some(187)
+    );
+    assert_eq!(
+        t.get("neitherEpochsMaxObserved")
+            .and_then(serde_json::Value::as_u64),
+        Some(198)
+    );
+    assert_eq!(
+        t.get("orRemoveAckLatencyP99Ms")
+            .and_then(serde_json::Value::as_u64),
+        Some(209)
+    );
+    assert_eq!(
+        t.get("orRemoveAckLatencyMaxMs")
+            .and_then(serde_json::Value::as_u64),
+        Some(220)
+    );
+    assert_eq!(
+        t.get("orRemoveUnackedCount")
+            .and_then(serde_json::Value::as_u64),
+        Some(231)
+    );
+    assert_eq!(
+        t.get("lastHalfSpanSecs")
+            .and_then(serde_json::Value::as_f64),
+        Some(121.5)
+    );
+    assert_eq!(
+        t.get("lastHalfMeanBytes")
+            .and_then(serde_json::Value::as_f64),
+        Some(132.5)
+    );
+    assert_eq!(
+        t.get("lastQuarterMeanBytes")
+            .and_then(serde_json::Value::as_f64),
+        Some(154.5)
+    );
+    assert_eq!(
+        t.get("levelDeviationBytes")
+            .and_then(serde_json::Value::as_f64),
+        Some(165.5)
+    );
+    assert_eq!(
+        t.get("levelToleranceBytes")
+            .and_then(serde_json::Value::as_f64),
+        Some(176.5)
+    );
+    assert_eq!(
+        t.get("ceilingBreached")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        t.get("levelBreached").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        t.get("ceilingDisposition")
+            .and_then(serde_json::Value::as_str),
+        Some("REPORT_ONLY_CRASH_RUN")
+    );
+    assert_eq!(
+        t.get("levelDisposition")
+            .and_then(serde_json::Value::as_str),
+        Some("SUPPRESSED_SHORT_WINDOW")
+    );
+    // Present and `null`: absence means "not armed", so the key is never
+    // skipped.
+    assert_eq!(
+        t.get("durableWatermarkLagMaxObserved"),
+        Some(&serde_json::Value::Null)
     );
 
     let tc = json
