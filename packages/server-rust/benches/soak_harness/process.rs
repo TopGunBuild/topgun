@@ -312,6 +312,12 @@ impl ServerSupervisor {
     /// listener is bound). Returns an error if the child dies or the line does
     /// not appear within `ready_timeout`.
     pub async fn start(self: &Arc<Self>, ready_timeout: Duration) -> Result<()> {
+        // The journal stays on (the production default) so the soak measures the real write
+        // path; an operator may turn it off for a diagnosis cell that isolates its cost. The
+        // value handed to the child is echoed so a run's console proves which one it got.
+        let journal_enabled =
+            std::env::var("TOPGUN_JOURNAL_ENABLED").unwrap_or_else(|_| "true".to_string());
+        eprintln!("soak: child TOPGUN_JOURNAL_ENABLED={journal_enabled}");
         let mut cmd = Command::new(&self.config.binary);
         cmd.arg("--port")
             .arg(self.config.port.to_string())
@@ -342,9 +348,7 @@ impl ServerSupervisor {
                 std::env::var("TOPGUN_WRITEBEHIND_BATCH_SIZE")
                     .unwrap_or_else(|_| "5000".to_string()),
             )
-            // Keep journal on (production default) so the soak measures the real
-            // write path; capacity small since the soak never reads the journal.
-            .env("TOPGUN_JOURNAL_ENABLED", "true")
+            .env("TOPGUN_JOURNAL_ENABLED", &journal_enabled)
             .env("RUST_BACKTRACE", "1")
             // Quiet the server's own logs unless the operator opts in.
             .env("RUST_LOG", effective_server_log_filter())
