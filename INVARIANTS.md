@@ -487,9 +487,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   spans `A` plus one sample gap plus the latency allowance `Δ`. The bound rests on two premises, both
   RECORDED and neither enforced: **A** — no write-behind sequence stays pending longer than
   `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS`, which the server alarms on but does not enforce (enforcement
-  tracked in TODO-689) — and **Δ (P-Δ)** — attempt-to-stamp latency ≤ the harness sample interval,
-  evidenced on acked removes by the recorded remove-latency p99 and max, with the un-acked count
-  bounding what that evidence cannot see. The K in this statement is the K the cited cell measured and
+  tracked in TODO-689) — and **Δ (P-Δ)** — attempt-to-stamp latency ≤ the 5 s allowance
+  (constant), recorded against the measured ack max (acked removes: the recorded remove-latency p99
+  and max), with the un-acked count bounding what that evidence cannot see. The K in this statement is the K the cited cell measured and
   gated on; it is never re-derived from an exact-`A` count.
   **Steady (level):** the last-quarter mean lies within `0.10 × max(last-half mean, W × b_max)` of the
   last-half mean.
@@ -552,9 +552,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   width-100 runs gave slopes 4.6× apart with a second instrument flipping sign, and the gate's
   verdict is non-monotonic in width (FAIL at 100, PASS at 300, FAIL at 1000). When a prune fix
   lands, the bound must be re-derived with a **level/ceiling** estimator rather than re-armed on the
-  same slope statistic. The soak harness gate is now a derived level ceiling plus level stability; the 512 B/h slope is report-only.
-  The harness's S_A measurement under-counted the server stamp proxy by up to 20 % in the evidencing
-  cell; the error tightens the ceiling (TODO-690).
+  same slope statistic. The soak harness gate is now a derived level ceiling plus level stability;
+  the 512 B/h slope is report-only. The harness's S_A measurement under-counted the server stamp
+  proxy by up to 20 % in the evidencing cell; the error tightens the ceiling (TODO-690).
 - **Discovered by:** SPEC-355 (R3.2's pre-registered 8-window plateau test), resolving TODO-630.
   Evidence: `packages/server-rust/benches/soak_harness/evidence/spec355-manifest.md`.
 

@@ -1411,3 +1411,34 @@ definitions, both proxies over-read in-row stamps by up to one epoch. On that re
 under-counts by 8–20 %" is the upper estimate against the proxies, not a measured under-count. The
 ruling's conclusion is unaffected: under either reading, the error direction tightens the ceiling.
 The invariant's caveat sentence is scoped to "the server stamp proxy" and is true as written.
+
+### 3.14 Addendum after review — the `PK-a7` row, and the Δ constant
+
+Appended in the review-fix commit. §3.1–3.13 above are unchanged.
+
+**`PK-a7 neither_max_observed=1 FALSE recorded_attributed_not_gated`.** §3.5 and §3.13 say "A7 is TRUE
+in all eight windows". That sentence is about the window-ratio statistic (pass latency ÷ minimum
+inter-exit interval). `PK-a7` is a different, server-side row, and §3 did not discuss it. It is the
+maximum of `ret_epochs_neither`: closed epochs that were not held and were still indexed when a scrape
+landed. That is the derivation's **Q** term ("eligible, queued behind a pass"), which the ceiling
+assumes is 0 under the A7 premise.
+
+Exactly one of the 241 rows has Q > 0:
+
+```
+elapsed_secs=11100 ret_epochs_neither=1 ret_refs_neither=1000 held(durability_only+both+claim_only)=0 tombstone_bytes=41170
+```
+
+At that instant, the whole retained set was at most O + Q + P ≤ 3 epochs, with H = 0 against the K = 5
+the gate used. `tombstone_bytes` was 41,170 B = 0.358 C. So the one Q epoch sat in a held slot that
+happened to be empty: the premise was momentarily not met, but the bound was not approached. The
+row is recorded, and it attributes a reading without deciding one. It does not change the decision.
+If Q > 0 recurred together with a full H term, the ceiling would under-provision by one epoch. That
+belongs to the same premise family as A7 and is tracked with the ceiling derivation (TODO-634).
+
+**Δ became a constant after the cross-vendor review.** `max_count_in_window`'s latency allowance used
+to be `mem_sample_interval`. It is now the constant `DEFAULT_TOMBSTONE_STAMP_LATENCY_ALLOWANCE_SECS`
+= 5 s, recorded as `stampLatencyAllowanceMs`, so a coarser sampling cadence can no longer widen the
+counted window. The sample interval was 5 s in this cell, and it is 5 s in every pinned test
+(`calibration_max_count_in_window`: 4,200 / 4,500 / 2,000). So `stamps_window_max=2774`, K = 5 and every
+predicate line above are what the new code computes too. The cell is not re-run.

@@ -51,7 +51,7 @@ pub struct MemoryReport {
 ///
 /// The ceiling's inputs are persisted beside its verdict (`ceilingEpochs`,
 /// `epochWidth`, `tagBytesMax`, `stampsInWindowMax`, `fenceAgeBoundMs`,
-/// `sampleIntervalMs`), so the bound a run was judged against is recomputable
+/// `sampleIntervalMs`, `stampLatencyAllowanceMs`), so the bound a run was judged against is recomputable
 /// from this object alone. `slopeBytesPerHour` is RECORDED only: no clause
 /// reads it.
 ///
@@ -77,6 +77,9 @@ pub struct TombstoneReport {
     pub stamps_in_window_max: u64,
     pub fence_age_bound_ms: u64,
     pub sample_interval_ms: u64,
+    /// The latency allowance `Δ` the stamp window was widened by — a constant,
+    /// recorded so it can be read against the measured ack-latency maximum.
+    pub stamp_latency_allowance_ms: u64,
     pub ceiling_bytes: u64,
     pub last_half_span_secs: f64,
     pub last_half_mean_bytes: f64,

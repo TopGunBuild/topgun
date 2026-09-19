@@ -369,6 +369,7 @@ fn sample_report(wal_fsync: &str, epoch_width: u64) -> SoakReport {
             stamps_in_window_max: 77,
             fence_age_bound_ms: 88,
             sample_interval_ms: 99,
+            stamp_latency_allowance_ms: 105,
             // Deliberately NOT `ceiling_epochs × epoch_width × tag_bytes_max`:
             // this fixture tests transport, and a field cross-wired to a
             // computed value has to show up.
@@ -511,6 +512,11 @@ fn soak_report_emits_every_hard_anded_verdict_tracking_its_input() {
         t.get("sampleIntervalMs")
             .and_then(serde_json::Value::as_u64),
         Some(99)
+    );
+    assert_eq!(
+        t.get("stampLatencyAllowanceMs")
+            .and_then(serde_json::Value::as_u64),
+        Some(105)
     );
     assert_eq!(
         t.get("ceilingBytes").and_then(serde_json::Value::as_u64),

@@ -135,7 +135,7 @@ use monitor::{
     DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS, DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES,
     DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES, DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
     DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS, DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS,
-    DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS,
+    DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS, DEFAULT_TOMBSTONE_STAMP_LATENCY_ALLOWANCE_SECS,
 };
 use or_noloss::{missing_acked_adds, OrLedger};
 use process::{resolve_server_binary, OriginCaptureSnapshot, ServerConfig, ServerSupervisor};
@@ -1198,17 +1198,28 @@ async fn run_soak(config: &Config) -> i32 {
     // and decides nothing.
     let tombstone_samples_snapshot = tombstone_samples.lock().clone();
     let remove_attempts_snapshot = remove_attempts.lock().clone();
-    let fence_age_bound_ms = std::env::var("TOPGUN_WAL_WATERMARK_STALL_BOUND_MS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS);
+    // Trimmed like the server's own parse, so the harness and the process it
+    // launched read the same `A`. A value that does not parse still falls back,
+    // but loudly: a silent fallback would change a HARD gate's input with no
+    // trace beyond the recorded number.
+    let fence_age_bound_ms = match std::env::var("TOPGUN_WAL_WATERMARK_STALL_BOUND_MS") {
+        Ok(raw) => raw.trim().parse::<u64>().unwrap_or_else(|_| {
+            eprintln!(
+                "WARNING: TOPGUN_WAL_WATERMARK_STALL_BOUND_MS={raw:?} does not parse as \
+                 milliseconds; the tombstone ceiling uses the default \
+                 {DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS} ms instead."
+            );
+            DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS
+        }),
+        Err(_) => DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS,
+    };
     let tombstone_bound = TombstoneLevelBound::derive(
         effective_epoch_width(),
         metrics.churn_tag_bytes_max.load(Ordering::Relaxed),
         max_count_in_window(
             &remove_attempts_snapshot,
             fence_age_bound_ms as f64 / 1000.0,
-            config.mem_sample_interval.as_secs_f64(),
+            DEFAULT_TOMBSTONE_STAMP_LATENCY_ALLOWANCE_SECS,
         ),
     );
     let tombstones = assess_tombstone_bytes(
@@ -1467,6 +1478,12 @@ async fn run_soak(config: &Config) -> i32 {
             fence_age_bound_ms,
             sample_interval_ms: u64::try_from(config.mem_sample_interval.as_millis())
                 .unwrap_or(u64::MAX),
+            stamp_latency_allowance_ms: Duration::from_secs_f64(
+                DEFAULT_TOMBSTONE_STAMP_LATENCY_ALLOWANCE_SECS,
+            )
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX),
             ceiling_bytes: tombstones.ceiling_bytes,
             last_half_span_secs: tombstones.last_half_span_secs,
             last_half_mean_bytes: tombstones.last_half_mean_bytes,

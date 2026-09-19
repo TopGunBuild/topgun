@@ -77,6 +77,15 @@
 //! happened to it as a [`TombstoneClauseDisposition`], so a clause that was not
 //! evaluated is never read as one that passed.
 //!
+//! **Detection floor of a 4 h run.** Neither clause is a rate detector. On a
+//! 4 h run the level clause catches a sustained drift of roughly 8 KB/h at the
+//! observed ~35 KB level (the last quarter has to move more than 10 % off the
+//! last-half mean); a slower leak passes it. The ceiling does bound any leak,
+//! whatever its rate: bytes cannot stay under `C` for longer than about
+//! `C / rate` hours, which is 57 h for a 2 KB/h leak at `C` = 115 KB. A slower
+//! leak is therefore not proven absent by a green 4 h run — the 72 h soak stays
+//! the leak detector, exactly as for RSS above.
+//!
 //! Note on gating responsibility: [`assess_tombstone_bytes`] *computes* the byte
 //! verdict (including its `passed` flag), but whether that verdict gates the run
 //! is decided in `main.rs`, not here. Level stability is HARD there in every run
@@ -769,6 +778,18 @@ pub const DEFAULT_TOMBSTONE_CEILING_FIXED_EPOCHS: u64 = 2;
 /// process it launched, so the `A` in the derivation is the `A` the measured
 /// server actually ran under rather than an assumption about it.
 pub const DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS: u64 = 60_000;
+
+/// Latency allowance `Δ` (seconds) of premise P-Δ: how long after a counted
+/// remove attempt its tombstone stamp may land and still fall inside the
+/// fence-age window [`max_count_in_window`] counts.
+///
+/// A constant rather than the sample interval: the sample-gap widening is
+/// already applied inside [`max_count_in_window`], and tying `Δ` to a
+/// sampling-cadence knob would let a coarser cadence inflate the counted
+/// window, and with it the ceiling, without the mechanism changing at all. The
+/// value is RECORDED beside the measured ack-latency maximum, which is the
+/// evidence that the premise held on a given run.
+pub const DEFAULT_TOMBSTONE_STAMP_LATENCY_ALLOWANCE_SECS: f64 = 5.0;
 
 /// RECORDED only: the epoch count observed under the O2 steady state — open
 /// plus pass plus the two epochs the durability fence held — in the committed
