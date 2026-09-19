@@ -979,3 +979,435 @@ evidence directory as the working directory.
     `PK-latency=UNKNOWN p99_ms=null max_ms=4871 delta_ms=5000 unacked=13 recorded_not_gated`.
 
 ## APPEND-ONLY BELOW
+
+## §3 — the 4 h level-ceiling cell (n=1): reading, regeneration, adjudication
+
+Appended 2026-09-19, after the data commit D = `3ac48cd8a64184c7317012032060d86deb29a424`
+(`chore(soak): record the 4 h level-ceiling cell artifacts`, 260 files). This append is the second
+commit of the cell; the third, and last, is the `INVARIANTS.md` flip. Nothing above
+`## APPEND-ONLY BELOW` changed, and no program, runner, `.rs` file or §1/§2 text changed after M
+`024d1b4e`. D landed before any predicate line was read by a person.
+
+**Outcome in one line: `PLATEAU=TRUE`, `READING=BOUNDED_STEADY`, `REPLICATE=NOT_NEEDED`,
+`TG-OR-005=FLIP_TO_EVIDENCED`.** Every STOP predicate is TRUE. At K = 5 (C = 115,000 B) the run
+maximum is 50,002 B (0.435 C). The level moved 38 B against a 3,469 B tolerance. The harness (5 s) and
+the cell (60 s) agree.
+
+### 3.1 Provenance, clean target, and the two refusal demos (AC-10, AC-12)
+
+`cargo clean -p topgun-server --release` removed 52 files (189.7 MiB), and
+`rm -f target/release/topgun-server` then left `test ! -e target/release/topgun-server` true. At that
+point there was no `target/release/deps/soak_harness-*` and no `target/spec370*`.
+
+**Demo 1: foreign server, clause (a).** This ran with `CARGO_TARGET_DIR` pointing at a scratch
+directory whose `release/topgun-server` was a copy of `/usr/bin/true`, and with
+`SPEC365_SOAK_BIN=/usr/bin/true`. `DEMO_EXIT=1`:
+
+```
+WARNING: SPEC365_SOAK_BIN is set, so this runner did NOT build the bench
+         binary from HEAD. The freeze gate is NOT discharged for this run
+         and matrix.txt will say so.
+FATAL: the server binary does not contain 'topgun_or_prune_restored_cancelled_total'.
+       binary: /var/folders/dy/35x7phnx3pz88gmkjf9560sm0000gn/T/tmp.NUhQNNVIGn/release/topgun-server
+       built:  2026-09-18T14:30:27Z
+       sha256: 875c7eea9c66c826091ede3cc44599311dc6818caf17f9e53d97c54c288842b2
+       This counter is emitted by the branch under test, so a binary
+       without it was built from other sources. Attempt 1 ran exactly
+       such a binary and the cell was worthless.
+```
+
+**Demo 2: pin-built harness, item 6 (a).** The harness was built from the pin `86656caa` in a
+detached worktree with a scratch `CARGO_TARGET_DIR` (`soak_harness-0379469b8a4255d8`, 0 hits for the
+gate literal). The server was built from M in a second scratch target, and that copy carries the
+counter. `DEMO2_EXIT=1`:
+
+```
+WARNING: SPEC365_SOAK_BIN is set, so this runner did NOT build the bench
+         binary from HEAD. The freeze gate is NOT discharged for this run
+         and matrix.txt will say so.
+provenance: server sha256=ce7671e8f9553ccbab80e8e328971c393b1b876a4efa8c41001257818bf7e1bb built=2026-09-18T15:39:36Z run_start=2026-09-18T14:39:36Z topgun_or_prune_restored_cancelled_total=present
+FATAL: the soak harness binary does not contain 'tombstone-byte level ceiling breached'.
+       binary: /private/tmp/claude-501/-Users-koristuvac-Projects-topgun-topgun/0dcd65f5-0df0-4019-be9a-26fb80bd053d/scratchpad/demo2/target-pin/release/deps/soak_harness-0379469b8a4255d8
+       built:  2026-09-18T14:33:49Z
+       sha256: dae9ce3fef2683fc3fe6c50085cd86fa3377766f7b34ce84bfdf6715c386fef9
+       The level-ceiling gate is what this cell evaluates, so a harness
+       without it was built from other sources. Refusing to start.
+```
+
+The server clauses (a) and (b) passed, which is why the `provenance:` line precedes the FATAL. That
+means item 6 is the clause that refused.
+
+**Recorded deviation:** the scratch server copy was given a *future* mtime (`touch -t`, now + 1 h).
+With a plain `cp`, its mtime would fall before `RUN_START_EPOCH`, clause (b) would refuse first, and
+the demo would never reach item 6. The shift shows in the line above: `built=15:39:36Z`,
+`run_start=14:39:36Z`. It touched only the scratch copy.
+
+After each demo, `target/spec370-plateau4h-data` and its `.meta` did not exist, the evidence directory
+had no untracked or modified file, and `target/release/topgun-server` did not exist.
+
+**The measured binaries** were built by the runner's own invocation, and both identities travel with
+the artifacts. Console line 1 of `spec370-plateau4h.harness-console.log` and the matrix:
+
+```
+provenance: server sha256=c5089faed37c58571007939eda55290f19f734dd0ab19d1263706dbd381fccf0 built=2026-09-18T14:43:49Z run_start=2026-09-18T14:40:11Z topgun_or_prune_restored_cancelled_total=present harness sha256=82b50c9c83821f456f90d8822335cbfb41e0b02f6dc4fdf39c38a37aee1f7bc1 harness_built=2026-09-18T14:42:34Z tombstone_level_ceiling_gate=present
+  code freeze:            b13afaed
+  code freeze diff (.rs): EMPTY (asserted before the build)
+  tombstone gate: level ceiling K=2+ceil(S_A/W) epochs × W × b_max (S_A, b_max measured by the harness; A = TOPGUN_WAL_WATERMARK_STALL_BOUND_MS, not set by this runner); level stability 10 %; slope report-only
+  harness sha256: 82b50c9c83821f456f90d8822335cbfb41e0b02f6dc4fdf39c38a37aee1f7bc1
+```
+
+Both binaries were built after `run_start`, and both shas are 64 hex. Each equals its matrix line,
+which `PV=TRUE` checks mechanically (§3.4).
+
+### 3.2 Runner attribution and readout
+
+```
+harness exited with code 0
+csv rows: 241
+RESULT: instrument sound; harness exit code 0.
+RUNNER_EXIT=0
+READOUT: O2; retained_closed_epochs=1; reconciliation=RECONCILED
+```
+
+Class = **reading**: the instrument is sound and the harness passed on its own gates (`passed=true`,
+`finishedReason` `duration reached`, `durationSecsActual=14401`). The chain wrapper exited 0
+(`### CHAIN COMPLETE`), with no `CHAIN_ABORT` and no FATAL. The harness's own gate line (console
+`:4435`):
+
+```
+tombstone_level:   ceiling=115000 (5 epochs x width 1000 x tag bytes 23; stamps_in_window=2774) -> EVALUATED | last_half mean=33961.9 max=49841 span=7197s, last_quarter mean=34425.8, deviation=463.9 tolerance=3396.2 -> EVALUATED
+```
+
+### 3.3 `predicates.txt`, verbatim
+
+The file has 619 lines (sha256 `05f4b44384e20f0fec8bdd85fd0ce907d7ea8283b72a38e0daa80cfb15aad5d4`).
+The block below is that file **with only its 523 `^A7-epoch ` per-epoch data rows removed**
+(`grep -v '^A7-epoch '`, 96 lines kept). Every predicate, recorded and decision line is included
+unchanged. The per-epoch series is in the committed file itself, and its roll-up is the A7 table and
+the `A7-removals` / `A7=TRUE` lines below.
+
+```
+== STOP: P-M ==
+PM-reconciled=TRUE
+PM-split=TRUE
+P5=TRUE
+P5-observed: removal_rows=523 settlement_rows=523 unsettled=none
+P5-zero-return: none observed
+DECISION_SCRAPE=2026-09-18T18:43:51Z.txt
+P6=TRUE removed_refs_observed_total=523000 considered_total=523000 gap=0
+P7=TRUE restored_cancelled_total=0
+windows=523 settlement_rows=523 zero_return_removal_rows=0 scrapes=241
+== STOP: P-S ==
+PS-rows=TRUE rows=241 evaluable=241 exempt=0 first_snapshot_elapsed=0 max(sum-lag)=-1
+PS-verdict=TRUE verdict=O2
+== STOP: PV ==
+PV-line1 server_sha256=c5089faed37c58571007939eda55290f19f734dd0ab19d1263706dbd381fccf0 harness_sha256=82b50c9c83821f456f90d8822335cbfb41e0b02f6dc4fdf39c38a37aee1f7bc1
+PV-shape=TRUE
+PV=TRUE matrix_server_sha256=c5089faed37c58571007939eda55290f19f734dd0ab19d1263706dbd381fccf0 matrix_harness_sha256=82b50c9c83821f456f90d8822335cbfb41e0b02f6dc4fdf39c38a37aee1f7bc1
+== STOP: PR ==
+PR-rows=TRUE rows=241 scrapes=241
+PR-crashes=TRUE crashes=0 boot_gap_set=empty
+PR-class=TRUE
+== DECIDING: P-K ==
+PK-derived stamps_window_max=2774 epoch_width=1000 held_max_derived=3 ceiling_epochs=5
+PK-recorded held_max_observed=2 durable_watermark_lag_max=3 neither_max_observed=1 k_eff_expected_under_O2=4 recorded_not_gated
+PK-crosscheck csv_stamps_per_row_max=3342 stamps_window_max=2774 <=FALSE recorded_not_gated
+PK-a7 neither_max_observed=1 FALSE recorded_attributed_not_gated
+PK-premise=TRUE held_max_observed=2 durable_watermark_lag_max=3 held_max_derived=3
+PK=5
+PK-latency p99_ms=23 max_ms=531 delta_ms=5000 unacked=0 p99<=delta=TRUE max<=delta=TRUE recorded_not_gated
+== DECIDING: P-C / P-L ==
+PC-inputs ceiling_epochs=5 epoch_width=1000 tag_bytes_max=23 epoch_bytes=23000 ceiling_bytes=115000
+PC-max n=241 skipped_empty=0 run_max=50002 run_max_elapsed=11820 last_half_max=50002 ceiling=115000 run_max_over_ceiling=0.435 <=ceiling=TRUE
+PC-mean last_half_mean=34691.413 over_ceiling=0.302 recorded_implied_by_PC-max
+PL half_start=120 quarter_start=180 last_half_mean=34691.413 last_quarter_mean=34729.623 deviation_bytes=38.210 tolerance_bytes=3469.141 deviation_pct=0.110 direction=up <=tolerance=TRUE
+PC=TRUE
+PL=TRUE
+== DECIDING: P-H ==
+PH-harness ceiling_ok=TRUE level_ok=TRUE ceiling_disposition=EVALUATED level_disposition=EVALUATED ceiling_epochs=5 epoch_width=1000 tag_bytes_max=23 stamps_in_window_max=2774 ceiling_bytes=115000 peak_bytes=49841
+PH-cell ceiling_ok=TRUE level_ok=TRUE ceiling_epochs=5 tag_bytes_max=23 ceiling_bytes=115000
+PH=TRUE
+{"kEffExpectedUnderO2":4,"heldEpochsMaxObserved":2,"neitherEpochsMaxObserved":1,"durableWatermarkLagMaxObserved":3,"fenceAgeBoundMs":60000,"stampsInWindowMax":2774,"slopeBytesPerHour":768.6789621274689}
+== recorded: A7 ==
+window | span_s | latencies | max_latency_s | intervals | min_interval_s | ratio
+W1 | 0-1800 | 62 | 7.382 | 61 | 15.572 | 0.474
+W2 | 1800-3600 | 68 | 6.843 | 68 | 16.050 | 0.426
+W3 | 3600-5400 | 64 | 7.912 | 64 | 15.623 | 0.506
+W4 | 5400-7200 | 65 | 6.093 | 65 | 15.585 | 0.391
+W5 | 7200-9000 | 63 | 7.302 | 63 | 16.051 | 0.455
+W6 | 9000-10800 | 65 | 6.312 | 65 | 17.038 | 0.370
+W7 | 10800-12600 | 67 | 7.269 | 67 | 16.956 | 0.429
+W8 | 12600-14400 | 69 | 6.889 | 69 | 15.399 | 0.447
+A7-removals=523 settlements=523 unsettled=none
+A7=TRUE
+== recorded: Theil-Sen ==
+PR-theil_sen last_half_rows=121 pairs=7260 slope_bytes_per_hour=388.152 recorded_not_gated
+== recorded: WAL watermark alarms ==
+PA-wal_watermark_alarm_lines=0 recorded_not_gated
+== recorded: P-F ==
+PF-recon2 rows_within_2pct=232/240 MET
+PF-recon3 rows_within_2pct=240/240 MET
+PF-phys_footprint_mb peak=8236.994 last=8236.994 peak_eq_last=TRUE
+PF-reclaimable_mb peak=4066.625 last=1130.297 peak_eq_last=FALSE
+PF-phys_footprint_peak_mb last=8236.994
+PF-shape phys_footprint_mb last_half_slope_sign=+ slope_mb_per_hour=1688.743672
+PF-shape reclaimable_mb last_half_slope_sign=- slope_mb_per_hour=-1460.246699
+"PLATEAU_NOT_MET"
+"series rss_kib rose and was still rising at the end; firing envelope BOTH"
+{"name":"rss_kib","shape":"MONOTONE_RISING","firingEnvelope":"BOTH","lastHalfMean":8776962}
+{"name":"redb_bytes","shape":"MONOTONE_RISING","firingEnvelope":"PEAKS","lastHalfMean":236958913}
+{"name":"wal_bytes","shape":"RISING_DECELERATING","firingEnvelope":null,"lastHalfMean":1391287}
+{"name":"wal_segment_files","shape":"MONOTONE_RISING","firingEnvelope":"PEAKS","lastHalfMean":518}
+== recorded: census ==
+{"source":"TERMINAL","elapsedSecs":14401.943739042,"keysScanned":96,"keysUndecodable":0,"orMapKeys":96,"tombstoneEntries":1533,"tombstoneBytes":35259,"tombstoneDupEntries":0,"keysWithTombstones":48,"keysAllDead":0,"maxTombstonesPerKey":41}
+1
+{"scansAttempted":1,"scansFailed":0,"samples":1,"firstBytes":35259,"minBytes":35259,"peakBytes":35259,"lastBytes":35259,"firstHalfPeakBytes":0,"lastHalfPeakBytes":35259,"riseBytes":35259,"spanSecs":0.0,"disposition":"LEVEL_SUPPRESSED","ceilingBytes":null,"passed":true,"reason":null}
+== recorded: harness attribution ==
+harness exited with code 0
+csv rows: 241
+RESULT: instrument sound; harness exit code 0.
+RUNNER_EXIT=0
+true
+duration reached
+14401
+0
+provenance: server sha256=c5089faed37c58571007939eda55290f19f734dd0ab19d1263706dbd381fccf0 built=2026-09-18T14:43:49Z run_start=2026-09-18T14:40:11Z topgun_or_prune_restored_cancelled_total=present harness sha256=82b50c9c83821f456f90d8822335cbfb41e0b02f6dc4fdf39c38a37aee1f7bc1 harness_built=2026-09-18T14:42:34Z tombstone_level_ceiling_gate=present
+  code freeze:            b13afaed
+  code freeze diff (.rs): EMPTY (asserted before the build)
+    sha256:       c5089faed37c58571007939eda55290f19f734dd0ab19d1263706dbd381fccf0
+  harness sha256: 82b50c9c83821f456f90d8822335cbfb41e0b02f6dc4fdf39c38a37aee1f7bc1
+== DECISION ==
+DECISION stops=OK
+PREMISE=TRUE
+PLATEAU=TRUE
+READING=BOUNDED_STEADY
+REPLICATE=NOT_NEEDED
+TG-OR-005=FLIP_TO_EVIDENCED
+```
+
+### 3.4 STOP predicates — all TRUE
+
+`PM-reconciled`, `PM-split`, `P5`, `P6` (523,000 = 523,000, gap 0), `P7` (0 restored-cancelled),
+`PS-rows` (241/241 evaluable), `PS-verdict` (O2), `PV` (both shas 64 hex, each equal to its matrix
+line), `PR-rows` (241 rows = 241 scrapes), `PR-crashes` (0) and `PR-class` are all TRUE. The
+`DECISION stops=OK` line confirms that `spec370-decide.awk` found every STOP line present and TRUE.
+
+### 3.5 Deciding predicates — PK = 5, PC, PL, PH TRUE
+
+- **P-K:** `stamps_window_max=2774` ⇒ `held_max_derived = ⌈2774/1000⌉ = 3` ⇒ **K = 5**, C = 5 × 1000 ×
+  23 = **115,000 B**. The server-side rows are recorded, not gated: `held_max_observed=2`,
+  `durable_watermark_lag_max=3`, `neither_max_observed=1`. `PK-premise=TRUE` (2 ≤ 3 and 3 ≤ 4).
+- **P-C:** run max 50,002 B at t = 11,820 s = **0.435 C**, and TRUE. The last-half mean of 34,691 B
+  (0.302 C) is recorded, and P-C implies it.
+- **P-L:** last-half mean 34,691.413 B, last-quarter mean 34,729.623 B, deviation **38.210 B (0.110 %)**
+  against a 3,469.141 B tolerance, direction `up`. TRUE.
+- **P-H:** the harness (5 s: peak 49,841 B, both dispositions `EVALUATED`) and the cell agree on K, b
+  and C, and both clauses are OK. TRUE.
+- Recorded: A7 is TRUE in all eight windows (max ratio 0.506, W3). The Theil–Sen last-half slope is
+  388 B/h, and the harness's report-only OLS slope is 768.7 B/h; neither gates. There were 0 WAL
+  watermark alarm lines.
+
+### 3.6 Which side of the K boundaries S landed on (R-Artifacts (a))
+
+The spec pre-registered the question against the 6→7 boundary at S = 4,000, because the calibration
+CSV gave S_60 = 3,389 (K = 6). The cell's `stampsInWindowMax` = **2,774**. That is **1,226 below** the
+6→7 boundary. It is also **226 below** the 5→6 boundary at 3,000, so the cell derived and gated on
+**K = 5**, one epoch *tighter* than the calibration K. The calibration verdicts (§2.4) were computed
+at K = 6 on other data and are not re-read here. This cell's gate is its own K = 5, as the invariant
+text requires ("the K the cited cell measured and gated on").
+
+### 3.7 P-Δ (R-Artifacts (b))
+
+*P-Δ is evidenced on acked removes (`PK-latency` p99 and max); the recorded un-acked count bounds what
+that evidence cannot see.* In this cell: `PK-latency p99_ms=23 max_ms=531 delta_ms=5000 unacked=0`.
+Every attempted remove was acked, and the slowest took 531 ms against a 5,000 ms allowance, so no
+attempt fell outside the evidence.
+
+### 3.8 The PK-crosscheck discrepancy — disclosed, tracked, not repaired (conductor rulings v4, Ruling 2)
+
+**The recorded row.** `PK-crosscheck csv_stamps_per_row_max=3342 stamps_window_max=2774 <=FALSE
+recorded_not_gated`. This row never gates (§2 "Recorded, never gated"). It is FALSE, and it is
+disclosed here with both server-side proxies:
+
+| proxy (per 60 s CSV row) | definition | max | at `elapsed_secs` | vs `S_A = 2,774` (70 s window) |
+|---|---|---|---|---|
+| `spec370-pk.awk` crosscheck | `Δ(considered_total + indexed_refs)` | **3,342** | 3,180 | +568 (S_A is 17.0 % below) |
+| stamped-bytes proxy | `Δ(stamped_bytes_total) / 23` | **3,000** (69,000 B) | 4,800 | +226 (S_A is 7.5 % below) |
+
+Read at face value, both proxies say the harness's S_A under-counts server stamps by 8–20 % (the
+conductor's range). 51 of the 240 row deltas of the first proxy exceed 2,774.
+
+**Direction of the error.** A smaller S_A gives a smaller K and a smaller C, so the gate becomes
+*stricter*. That is the pre-registered direction (§D1.3, and `max_count_in_window`'s own doc,
+`monitor.rs:834-836`): an under-count can produce a false breach, never a false pass. The cell's
+PASS therefore does not depend on S_A being exact.
+
+**Recorded row: `C_csv` at the proxy's S.** With S = 3,342: `H = ⌈3342/1000⌉ = 4`, **K = 6**,
+`C_csv = 6 × 1000 × 23 = 138,000 B`. The run max of 50,002 B is **≤ C_csv** (0.362 C_csv), and so is
+the harness's 5 s peak of 49,841 B. The 3,000 proxy also gives K = 5 (⌈3000/1000⌉ = 3), the same C as
+the gate used. Under either proxy, the run max clears the ceiling that proxy implies by more than 2×.
+
+**Best-effort explanation, from the counter definitions only (no code change).**
+
+*What the harness counts.* `or_remove_attempts` (`main.rs:426-429`) is one shared `Arc<SoakMetrics>`
+counter for **every** churn client (`main.rs:633`, `:644`). It is incremented **once per tag**, never
+per batch. The increment comes after that tag's `or_add` returns `Ok` and before its `or_remove` is
+issued (`main.rs:3751-3760`). The harness has exactly one `or_remove` call site (`main.rs:3760`), and
+the persist stream (`ork-persist-*`) never removes. The sampler reads the counter once per kept 5 s
+byte sample, after the scrape's `elapsed` (`main.rs:815-821`). `max_count_in_window`
+(`monitor.rs:838-857`) takes differences against the last sample at or before
+`t_{i-1} − A − Δ` (`main.rs:1200-1212`: A = 60 s, Δ = the 5 s sample interval), so each counted
+window spans up to ≈ 70 s.
+
+*What the server stamps.* The server stamps at most once per remove: only when the apply reports a
+genuinely new tombstone (`crdt.rs:688-697` sets `stamped_new_tombstone`, and `crdt.rs:733-736` calls
+`stamp_tombstone`). Each stamp adds one ref to `indexed_refs` (`tombstone_frontier_impl.rs:577`).
+From the definitions alone, then, stamps in any window ≤ attempts in a window that reaches back one
+latency allowance further, and this cell's `unacked=0` and 531 ms max latency sit well inside that
+allowance. The definitions do not by themselves predict a harness under-count.
+
+*What the proxies include, and why each can exceed the in-row stamp count by up to one epoch.*
+1. `Δ(stamped_bytes_total)/23`: the exported counter is **not** credited per stamp. It is credited
+   **per epoch, at rollover**, with that epoch's whole accumulated total
+   (`observe_epoch_entry`, `tombstone_frontier_impl.rs:3186-3197`, fired from the rollover branch at
+   `:605` via `publish_epoch_entry`, `:2084`). A row's delta is therefore a sum of whole epochs of up
+   to W = 1,000 refs each. Three rollovers inside one 60 s row need only ≥ 2,001 stamps in that row;
+   the other ≤ 999 refs of the first credited epoch were stamped in earlier rows. `Δ/23` is a lower
+   bound on refs *credited* (tags ≤ 23 B). It is not a lower bound on refs *stamped in that row*. The
+   in-row stamps implied by the 3,000 reading are ≥ 2,001, which is consistent with 2,774.
+2. `Δ(considered_total + indexed_refs)`: the two terms are published at different instants of one
+   prune pass. The drain removes refs from the index and republishes the lower `indexed_refs` gauge
+   at the start of the pass (`tombstone_frontier_impl.rs:1026-1027`, `:2274`; called at
+   `crdt.rs:1760`). `considered_total` is credited only when the finished pass is observed
+   (`crdt.rs:1658` → `tombstone_frontier_impl.rs:3088`). Pass latency was 2.9–7.9 s (the A7 table),
+   so a scrape that falls inside a pass sees the sum about one epoch low, and the next row's delta is
+   about one epoch high. The rows around the maximum show that sawtooth:
+   `Δ = 1,347 (t=3,120) → 3,342 (t=3,180) → 2,300 → 2,298 → 1,058 (t=3,360)`, which averages 2,249 per
+   row over 3,180–3,360. Restores would add to this proxy too (`restore` re-adds a ref to
+   `indexed_refs`, `tombstone_frontier_impl.rs:1101-1110`, and the drained ref was already counted in
+   `considered`), but `P6` shows `considered_total = removed_refs_observed_total = 523,000` and `P7`
+   shows 0 restored-cancelled, so restores do not explain this cell's excess.
+3. Whole-run context: the first proxy ends at 524,397 over 14,400 s, a mean of 2,185 per 60 s or
+   2,549 per 70 s. Over two, three and four rows its maximum per-60 s rate falls to 2,821, 2,664 and
+   2,551.
+
+*Reading.* By their definitions, both proxies carry up to one epoch (≈ 1,000 refs) of upward
+per-row skew. That alone covers the whole gap (568 and 226 refs), so this cell's data does not show a
+real under-count by the harness. It does not exclude one either, because neither proxy is an exact
+per-window stamp count. The conductor's 8–20 % figure is therefore recorded as the **upper** estimate
+of the under-count, measured against the proxies. Whichever reading holds, the direction argument
+above keeps the flip sound. Resolving it (an exact per-window server stamp count, or a proxy without
+the skew) is **TODO-690**. No `.rs`, program or §1/§2 text changed here.
+
+### 3.9 Decision against the pre-registered table (AC-14)
+
+`== DECISION ==` is the last section of `predicates.txt`. Checked by hand, in table order:
+- **S1** does not match. Every STOP line is TRUE, and all four deciding lines (`PK=5`, `PC=TRUE`,
+  `PL=TRUE`, `PH=TRUE`) are present and determinate.
+- **T** matches. PC ∧ PL ∧ PH hold, `PK-premise=TRUE`, and `PA-wal_watermark_alarm_lines=0` is
+  present.
+
+Row T prescribes `PLATEAU=TRUE`, `READING=BOUNDED_STEADY`, `REPLICATE=NOT_NEEDED` and
+`TG-OR-005=FLIP_TO_EVIDENCED`. The file prints exactly those four flags and `PREMISE=TRUE`.
+
+### 3.10 Regeneration, ordering, and the AC roll-up
+
+```
+READOUT_REGEN=IDENTICAL
+PREDICATES_REGEN=IDENTICAL
+tmp_files_left=0
+ORDER=OK
+```
+
+- **Regeneration (AC-13).** Both ran on `mktemp -d` copies of the D set with `cwd=/tmp`, never with
+  `cwd` = evidence. The readout was regenerated from the CSV, the console log and `soak.durable.json`
+  by the unchanged `spec365-readout.sh`. `spec370-predicates.sh` covered `fits.txt`, `predicates.txt`
+  and all eight segments.
+- **Ordering (AC-11).** `ORDER=OK` at D = `3ac48cd8…a424`, and again after this commit. The checks:
+  - M = `024d1b4e` ≠ D, M is an ancestor of D, and D is an ancestor of HEAD.
+  - The first commit of all ten `spec370-*` files at M is M itself: the seven programs, the
+    calibration, the manifest and the runner.
+  - M contains no artifact path.
+  - `## APPEND-ONLY BELOW` occurs once at M.
+  - The text through that marker is identical at M and HEAD
+    (`e4d1067b95fc2d4eb099f0508cdfed81e262b12c05a34c4fb76ab9f9c30b74e4`).
+- **AC-4.** `git diff --name-only 86656caa..HEAD -- '*.rs'` lists `main.rs`, `monitor.rs`,
+  `report.rs` and `tests/soak_wal_census.rs`: 4 of 5.
+- **AC-5.** The provenance-id grep over `.rs`/`.sh`/`.awk` finds 0 hits.
+- **AC-15.** `ls spec370-plateau4h.scrapes | wc -l` = **241** = CSV data rows. D is the R-Artifacts
+  set exactly, and this §3 is a separate, later commit.
+- **AC-16.** `git diff 86656caa..D -- INVARIANTS.md` is empty. This commit does not touch
+  `INVARIANTS.md` either; the flip is the next commit.
+- **AC-17.** `soak.json` `tombstones` carries `kEffExpectedUnderO2: 4`, `heldEpochsMaxObserved: 2`,
+  `neitherEpochsMaxObserved: 1` and `durableWatermarkLagMaxObserved: 3`. `PK-recorded` and
+  `PK-premise` are present.
+- **AC-19.** One tool call was made while the 4.5 h chain ran (a `date`, answering a question about
+  remaining time).
+- **AC-20.** Each premise row appears exactly once (§3.3).
+- **Attestation-only**, because the subject is a one-time machine state: the clean target before the
+  demos, and the absence checks after them (§3.1). The reproducible part holds independently: the
+  demo 1 FATAL `sha256:` is the sha256 of `/usr/bin/true`.
+
+### 3.11 Was the `TG-OR-005` flip eligible? (R-Artifacts (c))
+
+**Yes.** The decision prints `TG-OR-005=FLIP_TO_EVIDENCED` on row T, and the flip condition holds in
+full:
+- `PLATEAU=TRUE`;
+- `PK-premise=TRUE` (`held_max_observed=2 ≤ held_max_derived=3`, `durable_watermark_lag_max=3 ≤ 4`);
+- a `PA-wal_watermark_alarm_lines=` line is present (value 0).
+
+The PK-crosscheck FALSE (§3.8) is a recorded row. It cannot affect eligibility, and its error
+direction cannot produce a false PASS. The flip is the next commit
+(`docs(invariants): evidence TG-OR-005 from the 4 h level-ceiling cell`). It applies R-Invariant's
+text, cites D as evidence and adds the S_A under-count sentence to the caveat. `NAKED_BASELINE` stays
+4, because the entry's enforcing-test field stays NAKED (soak-evidenced, not CI-enforced).
+
+### 3.12 Deferred
+
+- **TODO-690.** The S_A-vs-server-stamp cross-check (§3.8): an exact per-window stamp count, or a
+  skew-free proxy, before S_A feeds a gate again.
+- **TODO-689.** Premise A is alarmed, not enforced: no write-behind sequence pending longer than
+  `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS`.
+- **TODO-634.** The crash-run ceiling (a recovery re-stamps every live tombstone into one epoch) is
+  not derived. Also the memory residue: this cell's durable-layer reading is `PLATEAU_NOT_MET` on
+  `rss_kib` (`MONOTONE_RISING`, envelope `BOTH`), and `phys_footprint` reached 8.24 GB with a
+  last-half slope of +1,689 MB/h. That is outside this carve; resident tombstone bytes are ~35 KB.
+
+### 3.13 Conductor adjudication (reference/SPEC-370-conductor-rulings-v4.md)
+
+Quoted from the conductor session's local ruling file (not committed). The conductor verified D =
+`3ac48cd8` (260 artifact files, 0 `.rs`/`.sh`/`.md`/`.awk`), M `024d1b4e` as an ancestor of D, and the
+pre-marker manifest sha as equal at M and HEAD (`e4d1067b…`). The conductor then read
+`spec370-plateau4h.predicates.txt` for the first time, after D:
+
+1. **STOP predicates all TRUE.** PM-reconciled, PM-split, P5, P6 (523,000 = 523,000, gap 0), P7 (0),
+   PS (241/241, O2), PV (both sha 64 hex, equal to the matrix), PR (241 rows, 0 crashes, class
+   reading).
+2. **P-K:** `stamps_window_max=2774`, `held_max_derived=3`, **K = 5**, C = 115,000 B. Recorded:
+   `held_max_observed=2`, `durable_watermark_lag_max=3`, `neither_max=1`; `PK-premise=TRUE`;
+   `PK-latency p99=23 ms, max=531 ms ≤ Δ=5000, unacked=0`.
+3. **P-C:** run max 50,002 B at t=11,820 = 0.435 C, TRUE. **P-L:** last-half mean 34,691 B,
+   last-quarter 34,730 B, deviation 0.110 % (38 B against a 3,469 B tolerance), TRUE. **P-H:**
+   harness and cell agree (harness peak 49,841 B, both dispositions EVALUATED), TRUE. A7 is TRUE in
+   all 8 windows (max 0.506). Theil–Sen last-half slope 388 B/h (recorded). WAL watermark alarm
+   lines: 0.
+4. **DECISION: `PLATEAU=TRUE`, `REPLICATE=NOT_NEEDED`, `TG-OR-005=FLIP_TO_EVIDENCED`.** The harness
+   tombstone gate is `ok`, exit 0. The durable-layer reading `PLATEAU_NOT_MET` (rss_kib) is the
+   memory residue: recorded, and outside this carve.
+5. **Ruling 1 — the flip is AUTHORIZED.** Every pre-registered condition holds
+   (`PLATEAU=TRUE` ∧ `PK-premise=TRUE`). `TG-OR-005` becomes evidenced, with D as its evidence and
+   the statement per R-Invariant. `NAKED_BASELINE=4` stays, and `check-invariants.sh` must exit 0 on
+   the flip commit.
+6. **Ruling 2 — the cross-check discrepancy is DISCLOSED in §3 and tracked, not repaired.** Both
+   proxies exceed the harness's 2,774 (3,342 and 3,000), "so S_A under-counts server stamps by
+   8–20 %". The direction makes the gate stricter, and the run max clears both C(K=5)=115,000 and
+   C(K=6)=138,000, "the flip therefore stands on the evidence". Disclosed in §3.8, with the C_csv
+   row, the direction and the counter definitions, and deferred to TODO-690.
+7. **Ruling 3 — G5 mechanics.** First this §3 commit, then the flip commit (`INVARIANTS.md` only),
+   in that order, with `ORDER=OK` re-run after each.
+
+**Executor's note on item 6 (the quote is left as written).** §3.8 finds that, by the counter
+definitions, both proxies over-read in-row stamps by up to one epoch. On that reading, "S_A
+under-counts by 8–20 %" is the upper estimate against the proxies, not a measured under-count. The
+ruling's conclusion is unaffected: under either reading, the error direction tightens the ceiling.
+The invariant's caveat sentence is scoped to "the server stamp proxy" and is true as written.
