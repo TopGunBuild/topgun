@@ -537,8 +537,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Enforcing test:** `NAKED — evidenced by a pre-registered 4 h soak cell
   (packages/server-rust/benches/soak_harness/evidence/spec370-manifest.md §3); no CI-run test proves the
   bound; the harness gate that asserts it runs only in soak runs; premise A is not enforced (TODO-634, TODO-689)`.
-- **Violation consequence:** the 72 h soak reds on the SPEC-345 tombstone clause by construction,
-  and resident tombstone bytes grow without a known ceiling on a long-lived node.
+- **Violation consequence:** the soak harness reds on the SPEC-370 tombstone clauses — the level
+  ceiling (run max > `C = K × W × b_max`) or level stability (last-quarter mean outside the band
+  around the last-half mean) — and on a long-lived node resident tombstone bytes would exceed the
+  derived ceiling `C`.
 - **Distinct from `TG-OR-004`, which is gauge FIDELITY** (does the counter track the real add/prune
   paths), **not BOUNDEDNESS** (do the bytes stay bounded). A red tombstone gate is **not** evidence
   against `TG-OR-004`; **do not flip it.** `TG-OR-004` is `decided, enforced` and this measurement
