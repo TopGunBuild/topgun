@@ -18,7 +18,7 @@ use std::path::Path;
 use serde::Serialize;
 use topgun_server::storage::record::RecordValue;
 
-use crate::monitor::CorpusLevelDisposition;
+use crate::monitor::{CorpusLevelDisposition, TombstoneClauseDisposition};
 use topgun_server::storage::wal::format::{self, FrameDecodeResult};
 use topgun_server::storage::wal::{WalOp, WalStorePayload};
 
@@ -43,10 +43,22 @@ pub struct MemoryReport {
 /// numbers used to live in is a scratch file under `target/`.
 ///
 /// Its `passed` is ANDed in every run class: the durable-corpus clauses beside
-/// it are report-only, so they take no class over from it. It is therefore an
-/// unconditional hard gate and not report-only, and
-/// [`TombstoneCorpusReport::disposition`] says which durable-corpus clause was
-/// live on a given run without changing that.
+/// it are report-only, so they take no class over from it. The verdict is the
+/// level-stability clause (HARD in every run class) and the level-ceiling clause
+/// (HARD except in crash-enabled runs, where `ceilingDisposition` reads
+/// `REPORT_ONLY_CRASH_RUN`). [`TombstoneCorpusReport::disposition`] says which
+/// durable-corpus clause was live on a given run without changing that.
+///
+/// The ceiling's inputs are persisted beside its verdict (`ceilingEpochs`,
+/// `epochWidth`, `tagBytesMax`, `stampsInWindowMax`, `fenceAgeBoundMs`,
+/// `sampleIntervalMs`, `stampLatencyAllowanceMs`), so the bound a run was judged against is recomputable
+/// from this object alone. `slopeBytesPerHour` is RECORDED only: no clause
+/// reads it.
+///
+/// The `…MaxObserved` and ack-latency fields are RECORDED premise evidence and
+/// enter no verdict. Each is `null` when its gauge was never scraped or no
+/// remove was acked; the key is never skipped, because an absent key would make
+/// "not armed" indistinguishable from "this report predates the field".
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TombstoneReport {
@@ -57,6 +69,44 @@ pub struct TombstoneReport {
     pub slope_bytes_per_hour: f64,
     pub passed: bool,
     pub reason: Option<String>,
+    pub ceiling_epochs: u64,
+    pub epoch_width: u64,
+    pub tag_bytes_max: u64,
+    /// Remove ATTEMPTS counted in the widest fence-age window, an upper bound
+    /// on the tombstone stamps the window can hold.
+    pub stamps_in_window_max: u64,
+    pub fence_age_bound_ms: u64,
+    pub sample_interval_ms: u64,
+    /// The latency allowance `Δ` the stamp window was widened by — a constant,
+    /// recorded so it can be read against the measured ack-latency maximum.
+    pub stamp_latency_allowance_ms: u64,
+    pub ceiling_bytes: u64,
+    pub last_half_span_secs: f64,
+    pub last_half_mean_bytes: f64,
+    pub last_half_max_bytes: u64,
+    pub last_quarter_mean_bytes: f64,
+    pub level_deviation_bytes: f64,
+    pub level_tolerance_bytes: f64,
+    pub ceiling_breached: bool,
+    pub level_breached: bool,
+    #[serde(serialize_with = "serialize_clause_disposition")]
+    pub ceiling_disposition: TombstoneClauseDisposition,
+    #[serde(serialize_with = "serialize_clause_disposition")]
+    pub level_disposition: TombstoneClauseDisposition,
+    /// The epoch count observed under the O2 steady state. RECORDED only: it
+    /// never enters the bound or any verdict.
+    pub k_eff_expected_under_o2: u64,
+    /// Running max of the held epochs (durability-only + both + claim-only,
+    /// summed per scrape).
+    pub held_epochs_max_observed: Option<u64>,
+    pub neither_epochs_max_observed: Option<u64>,
+    pub durable_watermark_lag_max_observed: Option<u64>,
+    pub or_remove_ack_latency_p99_ms: Option<u64>,
+    pub or_remove_ack_latency_max_ms: Option<u64>,
+    /// Removes attempted but never acked (errored, timed out, or lost their
+    /// session). The ack-latency fields cannot see these; this count bounds
+    /// that blind spot.
+    pub or_remove_unacked_count: u64,
 }
 
 /// Emit a disposition as its single rendered token.
@@ -70,6 +120,19 @@ pub struct TombstoneReport {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn serialize_disposition<S>(
     value: &CorpusLevelDisposition,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(value.as_str())
+}
+
+/// Emit a tombstone clause disposition as its single rendered token, for the
+/// same reason [`serialize_disposition`] exists.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn serialize_clause_disposition<S>(
+    value: &TombstoneClauseDisposition,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where

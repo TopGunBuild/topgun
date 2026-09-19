@@ -1,0 +1,34 @@
+## K derivation (spec368-plateau4h CSV)
+PK-derived stamps_window_max=3389 epoch_width=1000 held_max_derived=4 ceiling_epochs=6
+PK-recorded held_max_observed=2 durable_watermark_lag_max=3 neither_max_observed=0 k_eff_expected_under_O2=4 recorded_not_gated
+PK-crosscheck csv_stamps_per_row_max=3389 stamps_window_max=3389 <=TRUE recorded_not_gated
+PK-a7 neither_max_observed=0 TRUE recorded_attributed_not_gated
+PK-premise=TRUE held_max_observed=2 durable_watermark_lag_max=3 held_max_derived=4
+PK=6
+## spec368-plateau4h
+PC-inputs ceiling_epochs=6 epoch_width=1000 tag_bytes_max=23 epoch_bytes=23000 ceiling_bytes=138000
+PC-max n=241 skipped_empty=0 run_max=59950 run_max_elapsed=3120 last_half_max=49312 ceiling=138000 run_max_over_ceiling=0.434 <=ceiling=TRUE
+PC-mean last_half_mean=35172.893 over_ceiling=0.255 recorded_implied_by_PC-max
+PL half_start=120 quarter_start=180 last_half_mean=35172.893 last_quarter_mean=35096.492 deviation_bytes=76.401 tolerance_bytes=3517.289 deviation_pct=0.217 direction=down <=tolerance=TRUE
+PC=TRUE
+PL=TRUE
+PR-theil_sen last_half_rows=121 pairs=7260 slope_bytes_per_hour=745.032 recorded_not_gated
+CAL-harness-peak spec368-plateau4h peak_bytes=60984 ceiling=138000 <=ceiling=TRUE
+## spec355-w1000
+PC-inputs ceiling_epochs=6 epoch_width=1000 tag_bytes_max=23 epoch_bytes=23000 ceiling_bytes=138000
+PC-max n=240 skipped_empty=1 run_max=629654 run_max_elapsed=14400 last_half_max=629654 ceiling=138000 run_max_over_ceiling=4.563 <=ceiling=FALSE
+PC-mean last_half_mean=490713.300 over_ceiling=3.556 recorded_implied_by_PC-max
+PL half_start=120 quarter_start=180 last_half_mean=490713.300 last_quarter_mean=555204.533 deviation_bytes=64491.233 tolerance_bytes=49071.330 deviation_pct=13.142 direction=up <=tolerance=FALSE
+PC=FALSE reason=run_max_above_ceiling
+PL=FALSE reason=level_deviation_above_tolerance
+PR-theil_sen last_half_rows=120 pairs=7140 slope_bytes_per_hour=130576.476 recorded_not_gated
+CAL-harness-peak spec355-w1000 peak_bytes=646306 ceiling=138000 <=ceiling=FALSE
+## spec362b-long4h
+PC-inputs ceiling_epochs=6 epoch_width=1000 tag_bytes_max=23 epoch_bytes=23000 ceiling_bytes=138000
+PC-max n=241 skipped_empty=0 run_max=1014337 run_max_elapsed=14400 last_half_max=1014337 ceiling=138000 run_max_over_ceiling=7.350 <=ceiling=FALSE
+PC-mean last_half_mean=556957.860 over_ceiling=4.036 recorded_implied_by_PC-max
+PL half_start=120 quarter_start=180 last_half_mean=556957.860 last_quarter_mean=714418.885 deviation_bytes=157461.026 tolerance_bytes=55695.786 deviation_pct=28.272 direction=up <=tolerance=FALSE
+PC=FALSE reason=run_max_above_ceiling
+PL=FALSE reason=level_deviation_above_tolerance
+PR-theil_sen last_half_rows=121 pairs=7260 slope_bytes_per_hour=286662.664 recorded_not_gated
+CAL-harness-peak spec362b-long4h peak_bytes=1023353 ceiling=138000 <=ceiling=FALSE

@@ -1,0 +1,129 @@
+building from HEAD 024d1b4e7b146aa96b6fa832acae2591585e6667: cargo build --release --bin topgun-server --bench soak_harness
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+    Finished `release` profile [optimized] target(s) in 3m 38s
+provenance: server sha256=c5089faed37c58571007939eda55290f19f734dd0ab19d1263706dbd381fccf0 built=2026-09-18T14:43:49Z run_start=2026-09-18T14:40:11Z topgun_or_prune_restored_cancelled_total=present
+provenance: server sha256=c5089faed37c58571007939eda55290f19f734dd0ab19d1263706dbd381fccf0 built=2026-09-18T14:43:49Z run_start=2026-09-18T14:40:11Z topgun_or_prune_restored_cancelled_total=present harness sha256=82b50c9c83821f456f90d8822335cbfb41e0b02f6dc4fdf39c38a37aee1f7bc1 harness_built=2026-09-18T14:42:34Z tombstone_level_ceiling_gate=present
+soak binary:   /Users/koristuvac/Projects/topgun/topgun/target/release/deps/soak_harness-0379469b8a4255d8
+  built:       2026-09-18T14:42:34Z
+server binary: /Users/koristuvac/Projects/topgun/topgun/target/release/topgun-server
+  built:       2026-09-18T14:43:49Z
+
+=== spec365 conjunct-readout run: cell plateau4h ===
+  repo HEAD:      024d1b4e7b146aa96b6fa832acae2591585e6667
+  dirty tree:     yes
+  host/OS:        Darwin MacBookPro 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:18:49 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6000 arm64
+  lineage:        HEAD harness + HEAD server
+  data dir:       /Users/koristuvac/Projects/topgun/topgun/target/spec370-plateau4h-data
+  csv:            /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.csv
+  soak.json:      /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.soak.json
+  mechanism.json: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.mechanism.json (harness writes spec370-plateau4h.soak.mechanism.json; renamed after the run)
+  durable.json:   /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.soak.durable.json (raw basename: NOT renamed, by design)
+  progress.jsonl: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.progress.jsonl
+  console log:    /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.harness-console.log
+  matrix:         /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.matrix.txt
+  readout:        /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.readout.txt (written by spec365-readout.sh, not this file)
+  soak binary:    /Users/koristuvac/Projects/topgun/topgun/target/release/deps/soak_harness-0379469b8a4255d8
+  soak binary commit: 024d1b4e7b146aa96b6fa832acae2591585e6667
+  .rs working tree:   CLEAN (asserted before the build)
+  code freeze:            b13afaed
+  code freeze diff (.rs): EMPTY (asserted before the build)
+    built:        2026-09-18T14:42:34Z
+  server binary:  /Users/koristuvac/Projects/topgun/topgun/target/release/topgun-server
+    built:        2026-09-18T14:43:49Z
+    sha256:       c5089faed37c58571007939eda55290f19f734dd0ab19d1263706dbd381fccf0
+  --- varied knobs; everything else is the spec362b-durable.sh long4h
+      literal ---
+  TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
+  duration:            14400s
+  csv cadence:         60s
+  extra harness flags: <none>
+  --durable-reading:   ARMED
+  --live-census-interval: 0 (DISARMED)
+  --sampler-jitter-seed:  20260831
+  SOAK_SERVER_LOG:     warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  SOAK_SERVER_LOG_PASSTHROUGH: 1
+  TOPGUN_PRUNE_RECORD: true
+  TOPGUN_LOG_FORMAT:   <unset: human fmt, which is what the origin parser reads>
+  server port:         47356
+  SOAK_SERVER_BINARY:  <unset: HEAD binary, fail-closed guard not on this path>
+  --- pinned matrix (identical to spec362b-durable.sh's long4h cell;
+      crash-interval is per-cell and is 0 on the one cell this runner
+      ships) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 0;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+  tombstone gate: level ceiling K=2+ceil(S_A/W) epochs × W × b_max (S_A, b_max measured by the harness; A = TOPGUN_WAL_WATERMARK_STALL_BOUND_MS, not set by this runner); level stability 10 %; slope report-only
+  harness sha256: 82b50c9c83821f456f90d8822335cbfb41e0b02f6dc4fdf39c38a37aee1f7bc1
+
+harness pid 92368; follow with: tail -f /Users/koristuvac/Projects/topgun/topgun/target/spec370-plateau4h-data.meta/harness-console.log
+server ready: pid 92382 (t0 = server-ready)
+
+harness exited with code 0
+
+=== DURABLE-LAYER READING (report-only, decides nothing) ===
+reading:           PLATEAU_NOT_MET
+reason:            series rss_kib rose and was still rising at the end; firing envelope BOTH
+log filter:        warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  rss_kib            shape=MONOTONE_RISING envelope=BOTH samples=2695 span=13492.1s
+                     peaks  h1=9182112 h2=9625984 q3=9039072 q4=9625984 last_half_mean=8776962
+                     floor  h1=725568 h2=8384240 q3=8384240 q4=8478160
+  redb_bytes         shape=MONOTONE_RISING envelope=PEAKS samples=2691 span=13492.3s
+                     peaks  h1=202387456 h2=404238336 q3=202387456 q4=404238336 last_half_mean=236958913
+                     floor  h1=17379328 h2=202387456 q3=202387456 q4=202387456
+  wal_bytes          shape=RISING_DECELERATING envelope=- samples=2691 span=13492.3s
+                     peaks  h1=1683440 h2=1601054 q3=1570197 q4=1601054 last_half_mean=1391287
+                     floor  h1=902917 h2=939034 q3=999641 q4=939034
+  wal_segment_files  shape=MONOTONE_RISING envelope=PEAKS samples=2691 span=13492.3s
+                     peaks  h1=555 h2=557 q3=554 q4=557 last_half_mean=518
+                     floor  h1=445 h2=456 q3=480 q4=456
+writebehind lag:   13440 (observation only) scrapes total=2875 read=2873 absent=2 unreadable=0 malformed_samples=0 overflowed_samples=0
+censuses:          1
+  TERMINAL   t=14401.9s copy_done=n/a keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=1047614 live_tag_bytes=35618878 tombstones=1533 tombstone_bytes=35259 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=41
+terminal census:   keys=96 tombstone_bytes=35259
+origin:            reading=NOT_REACHED_EQUAL_REFS matched=523 unparsed=0 dropped=0 armed=true epochs_exited=523 restarts=0 epochs_scrapes total=2875 read=2875 absent=0 unreadable=0 malformed_samples=0 overflowed_samples=0
+origin reason:     all 523 parsed line(s) returned exactly the refs held at entry
+first zero-return: (none)
+wrote durable reading to /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.soak.durable.json
+console log: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.harness-console.log
+mechanism report: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.mechanism.json
+csv rows: 241
+csv columns:
+  rss_mb         n=241 empty=0 nonzero=241 min=14.406 max=9362.281
+  wal_mb         n=241 empty=0 nonzero=241 min=0.055 max=3.602
+  redb_mb        n=241 empty=0 nonzero=241 min=1.516 max=216.531
+  disk_total_mb  n=241 empty=0 nonzero=241 min=1.570 max=219.762
+  tombstone_bytes n=241 empty=0 min=0 max=50002
+  progress.jsonl checkpoints: 47
+  soak.json "walFsync": "batched",
+  soak.json "epochWidth": 1000,
+  soak.json "crashes": 0,
+  soak.json "churnClients": 6,
+  soak.json "keyspace": 200,
+  soak.json "durationSecsActual": 14401,
+  mechanism.json "orDeltaFrames": 3212,
+  mechanism.json "orSnapshotFrames": 0,
+
+post-hoc OLS fits (see the SE caveat in spec349c2-fit.awk):
+  units: the field is named slope_mb_per_hour for every column; on the
+  tombstone_bytes row the fit is identical but the unit is BYTES/hour.
+  col=rss_mb window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=14.406 y_last=9362.281 slope_mb_per_hour=1939.347571 se_mb_per_hour=78.642852 intercept_mb=2926.190923 r2=0.717869 sxx_hours2=324.009435637 sse=478932231.846785903
+  col=wal_mb window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=0.055 y_last=3.227 slope_mb_per_hour=0.012054 se_mb_per_hour=0.012975 intercept_mb=3.289792 r2=0.003598 sxx_hours2=324.009435637 sse=13.036623199
+  col=redb_mb window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=1.516 y_last=216.531 slope_mb_per_hour=49.593157 se_mb_per_hour=0.971967 intercept_mb=-0.599388 r2=0.915916 sxx_hours2=324.009435637 sse=73157.436123680
+  col=disk_total_mb window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=1.570 y_last=219.762 slope_mb_per_hour=49.605589 se_mb_per_hour=0.972627 intercept_mb=2.689841 r2=0.915850 sxx_hours2=324.009435637 sse=73256.802606979
+  col=tombstone_bytes window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=0.000 y_last=32131.000 slope_mb_per_hour=776.966902 se_mb_per_hour=389.023019 intercept_mb=32392.177004 r2=0.016416 sxx_hours2=324.009435637 sse=11719421042.773674011
+  col=rss_mb window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=8965.359 y_last=9362.281 slope_mb_per_hour=230.221940 se_mb_per_hour=40.611571 intercept_mb=7899.195552 r2=0.212630 sxx_hours2=41.005231707 sse=8047960.159028764
+  col=wal_mb window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=3.223 y_last=3.227 slope_mb_per_hour=0.036073 se_mb_per_hour=0.015627 intercept_mb=3.203069 r2=0.042859 sxx_hours2=41.005231707 sse=1.191631493
+  col=redb_mb window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=105.027 y_last=216.531 slope_mb_per_hour=69.403654 se_mb_per_hour=3.017938 intercept_mb=-63.567985 r2=0.816319 sxx_hours2=41.005231707 sse=44443.368663597
+  col=disk_total_mb window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=108.250 y_last=219.762 slope_mb_per_hour=69.440376 se_mb_per_hour=3.019714 intercept_mb=-60.366054 r2=0.816302 sxx_hours2=41.005231707 sse=44495.687866122
+  col=tombstone_bytes window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=33028.000 y_last=32131.000 slope_mb_per_hour=279.817735 se_mb_per_hour=1039.616325 intercept_mb=33851.958092 r2=0.000608 sxx_hours2=41.005231707 sse=5273906335.157526970
+
+RESULT: instrument sound; harness exit code 0.
+
+invoking readout: bash /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec365-readout.sh spec370-plateau4h
+wrote readout to /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.readout.txt
+READOUT: O2; retained_closed_epochs=1; reconciliation=RECONCILED
+RUNNER_EXIT=0
