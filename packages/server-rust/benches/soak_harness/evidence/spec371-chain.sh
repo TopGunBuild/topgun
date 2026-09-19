@@ -58,7 +58,10 @@ if [ -z "${SDKROOT:-}" ] && [ -x /usr/bin/xcrun ]; then
 fi
 
 # ----------------------------------------------------------------- 2. builds
-T_ROOT="${SERVER_ROOT}/target"
+# Under the repo-root target/, which .gitignore covers: build scripts write
+# generated .rs files into a target dir, and an un-ignored one would trip the
+# runner's dirty-.rs guard on every cell.
+T_ROOT="${REPO_ROOT}/target"
 guarded_rm() {   # $1 = candidate target dir; removes it only if it is one of the four chain-owned paths
   local cand parent resolved
   cand="$1"
@@ -67,10 +70,10 @@ guarded_rm() {   # $1 = candidate target dir; removes it only if it is one of th
   mkdir -p "$parent"
   resolved="$(cd "$parent" && pwd -P)/$(basename "$cand")"
   case "$resolved" in
-    "${REPO_ROOT}/packages/server-rust/target/spec371-r"|\
-    "${REPO_ROOT}/packages/server-rust/target/spec371-ca"|\
-    "${REPO_ROOT}/packages/server-rust/target/spec371-dh"|\
-    "${REPO_ROOT}/packages/server-rust/target/spec371-h") rm -rf "$resolved" ;;
+    "${REPO_ROOT}/target/spec371-r"|\
+    "${REPO_ROOT}/target/spec371-ca"|\
+    "${REPO_ROOT}/target/spec371-dh"|\
+    "${REPO_ROOT}/target/spec371-h") rm -rf "$resolved" ;;
     *) say "FATAL: refusing to remove '$resolved': not a chain-owned target dir"; exit 1 ;;
   esac
 }
