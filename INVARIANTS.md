@@ -472,14 +472,42 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   mirror — the discovered hole this entry closes).
 - **Status:** decided, **enforced**.
 
-### TG-OR-005: Resident OR tombstone bytes stay bounded under sustained churn at the production epoch width
+### TG-OR-005: Resident OR tombstone bytes stay under a derived ceiling (bounded) and level-stable (steady) under sustained churn at the production epoch width
 
-- **Scope:** the epoch-scoped tombstone prune (`crdt.rs::prune_epoch_tombstones`) under sustained
-  OR churn at the **production** epoch width (`TOPGUN_EPOCH_WIDTH` unset → 1000).
-- **Statement:** resident OR tombstone bytes reach a bounded steady state under sustained churn at
-  epoch width 1000 — i.e. the prune reclaims what the churn adds, rather than falling progressively
-  behind it.
-- **Status:** `open (TODO-634)`.
+- **Scope:** the epoch-scoped tombstone prune under sustained OR churn at the **production** epoch
+  width (`TOPGUN_EPOCH_WIDTH` unset → 1000), with a tracked client confirming, in **non-crash runs**.
+  The crash-run bound (a recovery re-stamps every live tombstone into one epoch) is not derived and is
+  deferred under TODO-634.
+- **Statement:** two clauses, each carrying one claim.
+  **Bounded (ceiling):** resident OR tombstone bytes (`topgun_ormap_tombstone_bytes`) never exceed
+  `C = K × W × b_max` with `K = 2 + ⌈S_A / W⌉` — one open epoch, the epochs that exited since the
+  previous prune pass (one under the pass-latency premise), and at most `⌈S_A / W⌉` epochs held by the
+  write-behind durability fence. `S_A` is the soak harness's
+  `max_count_in_window(remove_attempts, A, Δ)`: the most remove attempts in any counted window, which
+  spans `A` plus one sample gap plus the latency allowance `Δ`. The bound rests on two premises, both
+  RECORDED and neither enforced: **A** — no write-behind sequence stays pending longer than
+  `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS`, which the server alarms on but does not enforce (enforcement
+  tracked in TODO-689) — and **Δ (P-Δ)** — attempt-to-stamp latency ≤ the harness sample interval,
+  evidenced on acked removes by the recorded remove-latency p99 and max, with the un-acked count
+  bounding what that evidence cannot see. The K in this statement is the K the cited cell measured and
+  gated on; it is never re-derived from an exact-`A` count.
+  **Steady (level):** the last-quarter mean lies within `0.10 × max(last-half mean, W × b_max)` of the
+  last-half mean.
+- **Status:** `evidenced by one pre-registered 4 h cell (spec370-plateau4h; not CI-enforced; bounded
+  clause under premise A)`.
+- **Evidence:** the 4 h cell `spec370-plateau4h`, data commit `3ac48cd8`
+  (`packages/server-rust/benches/soak_harness/evidence/spec370-plateau4h.predicates.txt`; reading in
+  `spec370-manifest.md` §3). Decision row T: `PLATEAU=TRUE`, `READING=BOUNDED_STEADY`,
+  `REPLICATE=NOT_NEEDED`. The cell's lines, verbatim:
+  ```
+  PK-derived stamps_window_max=2774 epoch_width=1000 held_max_derived=3 ceiling_epochs=5
+  PK-crosscheck csv_stamps_per_row_max=3342 stamps_window_max=2774 <=FALSE recorded_not_gated
+  PK-premise=TRUE held_max_observed=2 durable_watermark_lag_max=3 held_max_derived=3
+  PC-max n=241 skipped_empty=0 run_max=50002 run_max_elapsed=11820 last_half_max=50002 ceiling=115000 run_max_over_ceiling=0.435 <=ceiling=TRUE
+  PL half_start=120 quarter_start=180 last_half_mean=34691.413 last_quarter_mean=34729.623 deviation_bytes=38.210 tolerance_bytes=3469.141 deviation_pct=0.110 direction=up <=tolerance=TRUE
+  PH=TRUE
+  PA-wal_watermark_alarm_lines=0 recorded_not_gated
+  ```
 - **What is measured, and what is NOT claimed.** In a committed 4 h run at width 1000
   (`spec355-w1000.*`, 2878 samples, 458 epochs, a tracked client ACKing throughout so the
   low-water mark advanced), resident bytes grew **0 → 646,306 B** and the series **ended at its
@@ -506,8 +534,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   Do not read "not a regression" as "characterised all the way back".
 - **Maintaining code:** `crdt.rs::prune_epoch_tombstones` and the epoch frontier it consumes
   (`tombstone_frontier_impl.rs`). Citations are kept line-number-free on purpose, per `TG-OR-004`.
-- **Enforcing test:** `NAKED — no test proves resident OR tombstone bytes are bounded at the
-  production epoch width; no plateau found in a 4 h measurement (TODO-634)`.
+- **Enforcing test:** `NAKED — evidenced by a pre-registered 4 h soak cell
+  (packages/server-rust/benches/soak_harness/evidence/spec370-manifest.md §3); no CI-run test proves the
+  bound; the harness gate that asserts it runs only in soak runs; premise A is not enforced (TODO-634, TODO-689)`.
 - **Violation consequence:** the 72 h soak reds on the SPEC-345 tombstone clause by construction,
   and resident tombstone bytes grow without a known ceiling on a long-lived node.
 - **Distinct from `TG-OR-004`, which is gauge FIDELITY** (does the counter track the real add/prune
@@ -523,7 +552,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   width-100 runs gave slopes 4.6× apart with a second instrument flipping sign, and the gate's
   verdict is non-monotonic in width (FAIL at 100, PASS at 300, FAIL at 1000). When a prune fix
   lands, the bound must be re-derived with a **level/ceiling** estimator rather than re-armed on the
-  same slope statistic.
+  same slope statistic. The soak harness gate is now a derived level ceiling plus level stability; the 512 B/h slope is report-only.
+  The harness's S_A measurement under-counted the server stamp proxy by up to 20 % in the evidencing
+  cell; the error tightens the ceiling (TODO-690).
 - **Discovered by:** SPEC-355 (R3.2's pre-registered 8-window plateau test), resolving TODO-630.
   Evidence: `packages/server-rust/benches/soak_harness/evidence/spec355-manifest.md`.
 
