@@ -435,3 +435,324 @@ See `diff spec370-plateau4h.sh spec371-memdiag.sh`; the map is the table below, 
 | `1284,1295d1431` | 8 — the parent's readout invocation dropped |
 
 ## APPEND-ONLY BELOW
+
+## §3 — carve 9a readout: the release regime grows, the count-alloc regime does not
+
+Appended 2026-09-20, after the data commit D = `48e31816`
+(`docs(soak): record the carve 9a memory diagnosis cells`, 161 artifacts, 0 `.rs`/`.sh`/`.awk`/`.py`).
+Nothing above `## APPEND-ONLY BELOW` changed: M = `12627ad3` is an ancestor of D, and the §1 prefix
+sha256 (lines 1 through the marker, inclusive) is
+`7efeb27782811684c9b947fb996660c78d3120fa9987114877d9bef54cda36a9` at M and at HEAD. `ORDER=OK`.
+The chain ran once, detached, 09:55:30 → 11:36Z, `CHAIN_RC=0`, six cells `RUNNER_EXIT=0`.
+
+Everything below was recomputed under `LC_ALL=C`, which is the only locale in which the committed
+fits reproduce (§1: under `ru_RU` the same fit over the same file reads 1682.7 instead of 1680.5).
+
+### 3.1 The eight flags, verbatim
+
+`spec371.decision.txt`, `STOP=FALSE`, no `STOP-reason:` lines:
+
+```
+CLASS=INDETERMINATE_NO_GROWTH
+REPLICATE_AGREE=n/a
+JOURNAL=n/a
+F1_FORECAST_HELD=UNRESOLVED
+CA_REGIME=SUPPRESSED
+RELEASE_RETENTION=TRUE
+LEVER=n/a
+NEXT=TODO-590+TODO-591
+```
+
+This is branch A6(ii) firing exactly as pre-registered — `INDETERMINATE_NO_GROWTH` ∧
+`RELEASE_RETENTION=TRUE`, with ops parity held — so the route is a table literal from R6.7 and is
+not re-derived here. `NEXT = TODO-590 + TODO-591`.
+
+**The result in one line, qualified.** *On the two pre-registered baseline cells* c0 and c2, the
+counting wrapper removes 85–97 % of the release-regime growth at the same ops rate. That is a
+statement about c0 and c2 only: c1 ran the SAME count-alloc binary and grew 1858 MB/h, so
+suppression is not a property of the binary. What the chain shows across all three count-alloc cells
+is the retention reading of §3.5.
+
+### 3.2 The recorded readings above the flags, verbatim
+
+```
+GMIN=68.3343 GMAX=211.731 G_c0=211.731 G_c2=68.3343 G_c1=1857.97 L_c0=225.604 L_c2=221.094
+OPS_PER_S r0=183.05 c0=179.227 c1=184.14 c2=181.213
+OPS_RATIO=0.979 OPS_RATIO_c1=1.006
+G_ref min=1412.23 max=2107.07 ratio_GMIN_over_max=0.032 ratio_GMAX_over_min=0.150
+RET_SHARE_REL=0.850
+JLIVE=0.362
+AMP_ratio_CA c0=0.246
+AMP_ratio_CA c2=0.159
+CLASS_FRAGILE=n/a
+LEVER_CONTESTED=FALSE
+C3-top1-all-std=FALSE
+```
+
+`G_ref`, all three members with their sources (`spec371-gref.txt`):
+
+```
+G_ref member=r0 slope=2107.069286 se=167.477578 n=8 rows=all    source=spec371-r0.csv
+G_ref member=8e slope=1412.225714 se=214.120481 n=8 rows=le900  source=spec368-plateau4h.csv
+G_ref member=8f slope=1680.520255 se=241.860652 n=8 rows=le900  source=spec370-plateau4h.csv
+```
+
+`G_r0` sits ABOVE both committed members rather than below them, so the census asymmetry §1 flagged
+(`G_r0` measured with the live-copy census ARMED, `G_8e`/`G_8f` with it DISARMED) did not depress
+this chain's own release reference. The three members are reported, not averaged.
+
+Ops parity was evaluated before the regime, as v3a A1 requires: `OPS_RATIO = 0.979` against the
+0.80 floor, `WRITE_ERRORS=0` in every cell. The `SUPPRESSED` reading is therefore conditional on a
+condition that was met, not true by construction.
+
+### 3.3 Per-cell fits, `G ± se (n)` and `L ± se (n)`
+
+Frozen `spec349c2-fit.awk`, window `last_half`, `G` on `phys_footprint_mb`, `L` on `alloc_live_mb`:
+
+| cell | `G ± se (n)` MB/h | `L ± se (n)` MB/h | `FP_end` | `LIVE_end` | `RET_end` | `LIVE_LH_mean` |
+|---|---|---|---|---|---|---|
+| r0  | 2107.07 ± 167.48 (8) | — (release: no alloc columns) | 387.0 @840 | — | — | — |
+| c0  | 211.73 ± 61.50 (8)   | 225.60 ± 14.08 (8) | 93.2 | 66.9 | 26.3 | 52.6 |
+| c1  | 1857.97 ± 117.96 (8) | 232.12 ± 21.48 (8) | 356.0 @840 | 67.1 | — | 52.9 |
+| c2  | 68.33 ± 49.76 (8)    | 221.09 ± 24.93 (8) | 60.8 | 67.4 | −6.7 | 52.9 |
+| c3e | 209.55 ± 78.76 (3)   | — (dhat) | 50.5 | — | — | — |
+| c3l | 60.59 ± 27.55 (8)    | — (dhat) | 64.6 | — | — | — |
+
+`FP_end` for r0 and c1 is the last row that CARRIES a footprint, t = 840; both cells' t = 900 row has
+an empty `phys_footprint_mb` (r0's is the post-mortem row `PM1` counted, c1's is a live scrape whose
+`ps` sample did not land — `tombstone_bytes=25124` is present on that row). c3e's fit has n = 3,
+which is why its slope is a level marker and nothing more. The dhat cells' slopes are recorded and
+never enter the decision (§1 R5).
+
+`CLASS_FRAGILE=n/a`, and the reason is definitional, not a missing input: the fragility test compares
+the band of `(L − se)/(G + se)` against the band of `(L + se)/(G − se)`, and R6.5 defines it only for
+a banded CLASS. `INDETERMINATE_NO_GROWTH` is the growth-floor branch, decided before any `R_c` is
+computed (R6.2 forbids the division below the floor), so there is no band to perturb. The
+±1 se question that R6.3 asks §3 to answer therefore has a one-line answer: at ±1 se, `GMAX` spans
+150–273 MB/h and `GMIN` spans 19–118 MB/h, both below the 200 MB/h floor at the low end and `GMIN`
+below it at every point — CLASS does not change at ±1 se.
+
+`RET_end = −6.7 MB` on c2 means `alloc_live` exceeds `phys_footprint` there. That is expected when
+the allocator has returned pages the counter still counts as live; it is a recorded level, never a
+decision input.
+
+### 3.4 Amplification at TERMINAL
+
+Per §1 R4: `AMP_fp = phys_footprint_bytes / live_tag_bytes`, `AMP_redb = phys_footprint_bytes /
+(redb_mb × 1048576)`, `AMP_live = alloc_live_bytes / live_tag_bytes`, `B_per_entry =
+phys_footprint_bytes / live`. `live_tag_bytes` counts tag STRINGS only (~34 B/entry), which is why
+`AMP_redb` and `B_per_entry` travel beside `AMP_fp`.
+
+| cell | joined `row=` | `join_lag_s` | `live` | `AMP_fp` | `AMP_redb` | `AMP_live` | `B_per_entry` |
+|---|---|---|---|---|---|---|---|
+| r0  | 840 | 60.3 | 64,602 | 184.8 | 23.35 | n/a  | 6,282 |
+| c0  | 900 |  0.3 | 63,115 |  45.5 |  5.62 | 32.7 | 1,548 |
+| c1  | 840 | 60.2 | 65,193 | 168.4 | 21.48 | 30.0 | 5,726 |
+| c2  | 900 |  0.1 | 63,781 |  29.4 |  3.67 | 32.6 |   999 |
+| c3e | 300 |  7.6 |  9,011 | 172.7 | 14.31 | n/a  | 5,871 |
+| c3l | 900 | 11.3 | 20,972 |  95.1 |  9.98 | n/a  | 3,232 |
+
+`AMP_ratio_CA` = 0.246 (c0) and 0.159 (c2): the count-alloc build holds 4–6× LESS resident memory
+per live tag byte than the release build. **r0 and c1 joined at row 840**, one cadence back, because
+their t = 900 rows carry no footprint; their `join_lag_s` of ~60 s is that fact, not a census smear.
+Note `AMP_live` is flat at 30–33 across all three count-alloc cells while `AMP_fp` spans 29 to 168 —
+the reachable side does not move, the resident side does.
+
+### 3.5 c1 — the strongest retention reading in the chain, and what it is NOT
+
+c1 is the journal-OFF cell. It ran the same count-alloc binary as c0 and c2, at parity
+(`OPS_RATIO_c1 = 1.006`, `WRITE_ERRORS=0`, `PJ=TRUE echoes=1 value=false`), and:
+
+- **reachable bytes are identical to the baselines:** `LIVE_end` 67.1 MB against 66.9 (c0) and 67.4
+  (c2); `LIVE_LH_mean` 52.9 against 52.6 and 52.9; `JLIVE = +0.36 MB`;
+- **the footprint is 4–6× the baselines:** 356 MB at t = 840 against 93 MB (c0) and 61 MB (c2), with
+  `G_c1 = 1858 ± 118` against 212 ± 62 and 68 ± 50.
+
+Same reachable heap, four to six times the footprint, one binary. That is the retention reading, and
+it is the plainest one the chain produced.
+
+**§3 makes no causal claim about the journal.** n = 1; c1's allocator span equals c0's (§3.6: 569 vs
+533 MB, while c2 reads 187 — the span variance is not aligned with the journal switch); and the
+ring's reachable level is `JLIVE = 0.36 MB`, which F1's code reading (`crdt.rs:928`: an OR_ADD entry
+carries the ONE added tag's value, never the resident record) predicted at exactly that order of
+magnitude. Turning the journal OFF did not lower the footprint. `JOURNAL=n/a` by the R6.4 table,
+because CLASS took the no-growth branch and nothing was routed on it. **No replicate is ordered:**
+it cannot change `NEXT`, which is already the allocator carve.
+
+### 3.6 POST HOC — the allocator's touched span `S` (decides nothing)
+
+Labelled POST HOC: this definition was not pre-registered, it changes no flag, and it is recorded
+because it is what the next carve's gate has to be designed against.
+
+The runner already records `reclaimable_mb` — pages the allocator has marked reusable, which sit
+OUTSIDE `phys_footprint`. Define the allocator's touched span as
+
+    S = phys_footprint_mb + reclaimable_mb
+
+Re-derivable from the committed CSVs with awk alone, using the same floor-biased last-half split as
+the frozen fitter:
+
+```awk
+# spec371 §3.6 — S = phys_footprint_mb + reclaimable_mb; last-half OLS slope in MB/h.
+# usage: LC_ALL=C awk -f this.awk spec371-<cell>.csv
+BEGIN { FS = "," }
+NR == 1 { for (i = 1; i <= NF; i++) { if ($i == "elapsed_secs")      e = i
+                                      if ($i == "phys_footprint_mb") f = i
+                                      if ($i == "reclaimable_mb")    r = i }
+          next }
+$f != "" && $r != "" { t[n] = $e + 0; fp[n] = $f + 0; rc[n] = $r + 0
+                       s[n] = fp[n] + rc[n]; n++ }
+END { st = int(n / 2); m = n - st                  # same split as spec349c2-fit.awk
+      for (i = st; i < n; i++) { x[i] = t[i] / 3600.0; sx += x[i]; sy += s[i] }
+      xb = sx / m; yb = sy / m
+      for (i = st; i < n; i++) { d = x[i] - xb; sxx += d * d; sxy += d * (s[i] - yb) }
+      printf "rows=%d n=%d t_end=%d fp_end=%.0f reclaimable_end=%.0f S_end=%.0f S_slope_mb_per_h=%.0f\n",
+             n, m, t[n-1], fp[n-1], rc[n-1], s[n-1], sxy / sxx }
+```
+
+Its output on the four 900 s cells (the dhat cells are excluded: dhat runs at a third of the ops
+rate and its span is not comparable):
+
+| cell | `fp_end` | `reclaimable_end` | `S_end` | `S` slope (MB/h) |
+|---|---|---|---|---|
+| r0 | 387 | 466 | 853 | 5106 |
+| c0 |  93 | 440 | 533 | 2847 |
+| c1 | 356 | 213 | 569 | 3167 |
+| c2 |  61 | 126 | 187 |  508 |
+
+Three readings, none of them a decision:
+
+1. **c1 is NOT an outlier in span** (569 against c0's 533). What differs between c1 and c0 is the
+   SHARE the allocator marked reusable — 213 MB against 440 MB — not how much memory it touched.
+   That is the arithmetic reason §3.5 forbids a journal-causality reading.
+2. **c0 and c2 differ 2.9× in span on identical configuration** (533 vs 187). The known run-to-run
+   dirty-set variance lives in `S`, not only in the footprint, and it is the reason the spec never
+   compares single runs.
+3. **In every cell `S` grows at 0.5–5 GB/h while reachable bytes grow at ≈ 0.22 GB/h**
+   (`L_c0 = 225.6`, `L_c2 = 221.1`). The gap is the retention this carve was built to find.
+
+**The same definition on the committed 8f 4 h cell**, rows at 2400 / 4800 / 7200 / 9600 / 12000 /
+14400 s of `spec370-plateau4h.csv`:
+
+| `t` (s) | 2400 | 4800 | 7200 | 9600 | 12000 | 14400 |
+|---|---|---|---|---|---|---|
+| `phys_footprint_mb` | 1540 | 3237 | 4940 | 5275 | 6889 | 8237 |
+| `reclaimable_mb`    | 2908 | 2938 | 4035 | 2980 | 1547 | 1130 |
+| `S` | 4449 | 6175 | 8975 | 8256 | 8436 | 9367 |
+
+After ~2 h `S` is roughly flat at 8.3–9.4 GB while the footprint keeps rising INTO it, as reusable
+pages are re-dirtied. The "+1.7 GB/h footprint over the last half" of 8e/8f is therefore largely a
+CONVERSION inside a span that had already stopped growing — which is the early-window caveat
+(rulings v3a A4, §1) made concrete. This is a reading for the next carve's gate design. **It is not a
+plateau claim**, and §3 does not make one.
+
+### 3.7 POST HOC — reachable bytes per live OR entry (decides nothing)
+
+`alloc_live` rose ≈ 50–51 MB between t = 60 and the last row on all three count-alloc cells, while
+the census gained ≈ 59–61 k live entries. The live count at t = 60 is not measured — no census fires
+there — so it is interpolated linearly from the origin through the first `LIVE_COPY`, which is the
+only live-count series a cell records. The third digit of the result is that interpolation, not a
+measurement:
+
+```awk
+# spec371 §3.7 — reachable bytes per live OR entry, t=60 -> last row, count-alloc cells.
+# usage: LC_ALL=C awk -f this.awk spec371-<cell>.csv spec371-<cell>.amp.txt
+BEGIN { FS = "," }
+FILENAME ~ /\.amp\.txt$/ { FS = " " }
+FNR == 1 && FILENAME ~ /\.csv$/ { for (i = 1; i <= NF; i++) {
+        if ($i == "elapsed_secs") e = i; if ($i == "alloc_live_mb") a = i } ; next }
+FILENAME ~ /\.csv$/ && $a != "" { if (($e + 0) == 60) a60 = $a + 0; aN = $a + 0 }
+FILENAME ~ /\.amp\.txt$/ {
+        for (i = 1; i <= NF; i++) { split($i, kv, "="); k[NR, kv[1]] = kv[2] }
+        if (k[NR, "source"] == "LIVE_COPY" && c1t == 0) { c1t = k[NR, "t"] + 0; c1l = k[NR, "live"] + 0 }
+        if (k[NR, "source"] == "TERMINAL")              { tl  = k[NR, "live"] + 0 } }
+END { l60 = c1l * 60.0 / c1t
+      printf "d_alloc_live_mb=%.2f live_t60_est=%.0f live_terminal=%d d_live=%.0f B_per_live_entry=%.0f\n",
+             aN - a60, l60, tl, tl - l60, (aN - a60) * 1048576 / (tl - l60) }
+```
+
+```
+c0  d_alloc_live_mb=51.31 live_t60_est=4150 live_terminal=63115 d_live=58965 B_per_live_entry=912
+c1  d_alloc_live_mb=50.13 live_t60_est=4299 live_terminal=65193 d_live=60894 B_per_live_entry=863
+c2  d_alloc_live_mb=50.15 live_t60_est=4141 live_terminal=63781 d_live=59640 B_per_live_entry=882
+```
+
+≈ 0.86–0.91 KB reachable per live OR entry — read as ≈ 0.9 KB; the conductor's v4 figure of ≈ 0.87 KB
+is the same quantity under a slightly different t = 60 estimate, and the two agree to the precision
+the interpolation supports. The stored payload is a 34 B tag, an i64 and a timestamp, so ≈ 0.9 KB is
+roughly an order of magnitude above the data.
+
+Scaled to 8f's terminal census (`live=1047614`, `live_tag_bytes=35618878`) that is ≈ 0.9 GB of
+reachable live set against an ≈ 9.4 GB span (§3.6) — roughly a tenth. Route: **TODO-593**, BEHIND the
+allocator carve, not before it.
+
+### 3.8 dhat (recorded; C3 never enters CLASS)
+
+`LEVER=n/a` by the R6.6 table, because CLASS is not `REACHABLE` or `MIXED`. What the diff recorded:
+
+```
+PD-format=TRUE  PD-sym=TRUE symbolised=46/50  PD-crate=TRUE  PD=TRUE  C3-top1-lever=592
+top-3 levers: 1:592, 2:593, 3:UNMAPPED
+lever_share: 592=1.52MB(38%), 593=1.50MB(38%), UNMAPPED=0.92MB(23%), 591=0.03MB(1%)
+all_std_pps=0 all_std_share=0%   C3-top1-all-std=FALSE   LEVER_CONTESTED=FALSE
+total early: sum_eb=13633359 (13.00 MB) sum_gb=24057368 (22.94 MB) pps=4097
+total late:  sum_eb=15689110 (14.96 MB) sum_gb=36003410 (34.34 MB) pps=4663
+```
+
+The top three `Δeb` signatures start at non-std frames, so the v3 R2 strip is doing its job:
+`1 redb::…PagedCachedFile::write` (1.51 MB), `2 topgun_server::…crdt::apply_or_delta`
+(`crdt.rs:1371`, 1.50 MB), `3 topgun_server::…CrdtService::apply_single_op` (`crdt.rs:530`, 0.38 MB).
+
+Two things this does and does not say. 592 and 593 are within 1 % of each other in `lever_share`, so
+the top-1 token names a holder and not a winner; and the reachable heap moved only 13.0 → 15.0 MB
+across the two profiles, under a 3× throughput throttle (57–74 ops/s against 180/s on the CA cells).
+A reachable heap that small, moving that little, is consistent with the count-alloc cells' flat
+`L` and with §3.7 — it is further evidence that the growth is not on the reachable side, and it
+names holders only.
+
+### 3.9 The one console warning, verbatim
+
+24 occurrences, c3e only, all inside 0.52 s of its SIGTERM drain (11:20:06.126248Z →
+11:20:06.643162Z). Twenty read `Cannot unlink sealed WAL segment`, four read `WAL fsync failed`; the
+first of each, verbatim (ANSI escapes stripped):
+
+```
+[server] 2026-09-20T11:20:06.126248Z  WARN topgun_server::storage::datastores::write_behind: Failed to mark WAL watermark applied; next restart will re-replay (safe but redundant) partition=232 watermark=43807 error=WAL fsync failed for /Users/koristuvac/Projects/topgun/topgun/target/spec371-c3e-data/wal/partition-232-00000000000000042190.log: background task failed
+[server] 2026-09-20T11:20:06.142858Z  WARN topgun_server::storage::datastores::write_behind: Failed to mark WAL watermark applied; next restart will re-replay (safe but redundant) partition=162 watermark=44069 error=Cannot unlink sealed WAL segment /Users/koristuvac/Projects/topgun/topgun/target/spec371-c3e-data/wal/partition-162-00000000000000041072.log: background task failed
+```
+
+**Classification (no fix here).** This is the WAL-watermark surface **TODO-689** owns, and it is
+recorded there as an observation, not fixed by this carve. It is a DISTINCT symptom from the 238
+`AbandonedWrite { origin: Live }` ERROR alarms TODO-689 was opened on: WARN not ERROR, at
+graceful-shutdown drain rather than in steady state, with `background task failed` as the inner
+error — the WAL executor was already shut down when the watermark write was attempted. It appeared
+in exactly one of six cells, the only cell that shuts down with `TOPGUN_SOAK_GRACEFUL_SHUTDOWN=1`
+after a 300 s run; the four SIGKILL cells and the 900 s graceful cell have zero occurrences. Benign
+by its own text (`next restart will re-replay (safe but redundant)`). Across all six cells there
+were **0** `AbandonedWrite` lines, **0** stalled-watermark alarms, **0** panics and **0**
+`INSTRUMENT DEFECT` lines.
+
+### 3.10 Scope of every claim above
+
+**All six cells read minutes 7–15 of a run.** `CLASS`, `CA_REGIME`, `RELEASE_RETENTION` and the §3.6
+/ §3.7 readings are early-window claims, and §3.6's 8f series is the direct evidence that the
+regime changes after ~2 h: the span stops growing and the footprint converts into it.
+
+The **acceptance gate of the carve this decision routes to (TODO-590 + TODO-591) is a ≥ 4 h
+plain-release cell on this matrix**, read on BOTH `phys_footprint` and `S`, with ops parity
+recorded. It is not a 900 s re-measure, and it is not a count-alloc cell: this chain has just
+demonstrated that the count-alloc regime does not reproduce the growth the fix has to remove.
+
+### 3.11 Deferred, with ids — no fix claims
+
+| id | what | when |
+|---|---|---|
+| **TODO-590 + TODO-591** | the routed next step: alternative global allocator, and the per-op record clone in write-behind / observer fan-out | **next**, per `NEXT=` |
+| TODO-593 | resident per-key OrMap live-set growth — ≈ 0.9 KB reachable per live OR entry (§3.7), ≈ 0.9 GB at 8f scale | behind the allocator carve |
+| TODO-592 | cap the redb read-path page cache — the top dhat grower (§3.8) at 1.52 MB, i.e. small | behind the allocator carve |
+| TODO-693 | per-scrape live-OR-bytes gauge on `/metrics`, so a CSV row carries live bytes at every sample instead of only at census instants | after the memory FIX carve |
+| TODO-689 | the WAL-watermark surface; §3.9's 24 c3e WARN lines are recorded against it as a distinct symptom | after the memory carve |
+
+This carve measured and changed nothing: 1 `.rs` file (`process.rs`, K1 `e69cb0c6`, passing
+`TOPGUN_JOURNAL_ENABLED` through instead of forcing it), evidence programs, and artifacts. No fix,
+gate, monitor or invariant moved.
