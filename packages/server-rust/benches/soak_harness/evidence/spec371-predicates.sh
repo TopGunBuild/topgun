@@ -145,6 +145,43 @@ CADENCE="$(matrix_int 'csv cadence:')"
              else if (f["live"] + 0 > 0 && f["live_tag_bytes"] + 0 > 0) print "PC=TRUE live=" f["live"] " live_tag_bytes=" f["live_tag_bytes"]
              else print "PC=FALSE live=" f["live"] " live_tag_bytes=" f["live_tag_bytes"] }' "$CONSOLE"
 
+  echo "== STOP: PM1 =="
+  PM_ROWS="$(awk -F= '/^post_mortem_rows=/ { v = $2 } END { print (v == "" ? "NA" : v) }' "$RUNNER" 2>/dev/null || echo NA)"
+  if [ "$PM_ROWS" = "NA" ] || [ -z "$DURATION" ] || [ -z "$CADENCE" ] || [ ! -s "$CSV" ]; then
+    echo "PM1=FALSE reason=no_counter_or_csv post_mortem_rows=${PM_ROWS}"
+  else
+    awk -F, -v pm="$PM_ROWS" -v dur="$DURATION" -v cad="$CADENCE" '
+      NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; if (!("tombstone_bytes" in col)) { print "PM1=FALSE reason=missing_csv_column"; bad = 1; exit } next }
+      {
+        e = $col["elapsed_secs"] + 0
+        # A row whose scrape produced nothing has an empty tombstone_bytes; the
+        # post-mortem counter says how many of those were taken after the server
+        # was gone. Both must be late, and a live scrape must exist near the end.
+        if ($col["tombstone_bytes"] == "") { empt++; if (!havemin || e < minempty) { minempty = e; havemin = 1 } }
+        else lastlive = e
+      }
+      END {
+        if (bad) exit
+        need = dur - 2 * cad
+        ok = (pm + 0 <= 1) && (pm + 0 == 0 || (havemin && minempty >= dur)) && (lastlive + 0 >= need)
+        printf "PM1=%s post_mortem_rows=%s empty_scrape_rows=%d first_empty_elapsed=%s last_live_scrape_elapsed=%d need_ge=%d\n",
+               (ok ? "TRUE" : "FALSE"), pm, empt + 0, (havemin ? minempty "" : "none"), lastlive + 0, need
+      }' "$CSV"
+  fi
+
+  echo "== recorded: ops parity =="
+  awk -v f="$EV/$BASE.soak.json" '
+    BEGIN {
+      while ((getline l < f) > 0) {
+        if (match(l, /"totalWrites"[ ]*:[ ]*[0-9]+/)) { v = substr(l, RSTART, RLENGTH); sub(/.*: */, "", v); tw = v + 0 }
+        if (match(l, /"writeErrors"[ ]*:[ ]*[0-9]+/)) { v = substr(l, RSTART, RLENGTH); sub(/.*: */, "", v); we = v + 0; hwe = 1 }
+        if (match(l, /"durationSecsActual"[ ]*:[ ]*[0-9.]+/)) { v = substr(l, RSTART, RLENGTH); sub(/.*: */, "", v); ds = v + 0 }
+      }
+      if (ds > 0 && tw > 0) printf "OPS_PER_S=%.3f\n", tw / ds; else print "OPS_PER_S=n/a reason=no_totalWrites_or_duration"
+      print "WRITE_ERRORS=" (hwe ? we "" : "n/a")
+      print "TOTAL_WRITES=" (tw ? tw "" : "n/a") " DURATION_ACTUAL=" (ds ? ds "" : "n/a")
+    }' /dev/null
+
   if [ "$CELL" = "c3l" ]; then
     echo "== STOP: PD (c3l, over both dhat cells) =="
     DIFF="$EV/spec371-dhat-diff.txt"
@@ -216,13 +253,16 @@ awk -v csv="$CSV" '
     for (i = 2; i <= NF; i++) { split($i, kv, "="); g[kv[1]] = kv[2] }
     t = g["t"]; sub(/s$/, "", t); cd = g["copy_done"]; sub(/s$/, "", cd)
     best = 0
-    if (src == "TERMINAL") best = r
+    # TERMINAL joins to the LAST row that actually has a footprint: the final
+    # row of a run can be sampled while the server is being torn down, and its
+    # footprint fields are then empty.
+    if (src == "TERMINAL") { for (j = r; j >= 1; j--) if (fp[j] != "") { best = j; break } }
     else { bd = 31; for (j = 1; j <= r; j++) { d = el[j] - t; if (d < 0) d = -d; if (d <= 30 && d < bd) { bd = d; best = j } } }
     ltb = g["live_tag_bytes"] + 0; live = g["live"] + 0
     line = sprintf("AMP source=%s t=%s copy_done=%s live=%d live_tag_bytes=%d", src, t, cd, live, ltb)
     if (best == 0 || fp[best] == "") { print line " row=none"; next }
     fpb = fp[best] * 1048576
-    line = line sprintf(" row=%d fp_mb=%s", el[best], fp[best])
+    line = line sprintf(" row=%d join_lag_s=%.1f fp_mb=%s", el[best], t - el[best], fp[best])
     line = line ((ltb > 0) ? sprintf(" AMP_fp=%.1f", fpb / ltb) : " AMP_fp=n/a")
     line = line ((rd[best] + 0 > 0) ? sprintf(" AMP_redb=%.2f", fp[best] / rd[best]) : " AMP_redb=n/a")
     line = line ((al[best] != "" && ltb > 0) ? sprintf(" AMP_live=%.1f", al[best] / ltb) : " AMP_live=n/a")

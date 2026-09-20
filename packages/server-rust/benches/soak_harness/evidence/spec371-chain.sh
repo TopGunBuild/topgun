@@ -210,24 +210,28 @@ synthetic_base() {   # $1 = dir: every STOP predicate TRUE, PA=n/a where pre-dec
   mkdir -p "$d"
   for c in r0 c0 c1 c2 c3e c3l; do
     f="$d/spec371-$c.predicates.txt"; : > "$f"
-    for k in PV PR-crashes PR-class PE PJ PC; do echo "$k=TRUE" >> "$f"; done
+    for k in PV PR-crashes PR-class PE PJ PC PM1; do echo "$k=TRUE" >> "$f"; done
+    case "$c" in r0|c0|c1|c2) echo "OPS_PER_S=180" >> "$f" ;; esac
     case "$c" in r0|c3e|c3l) echo "PA=n/a reason=synthetic" >> "$f" ;; *) echo "PA=TRUE" >> "$f" ;; esac
     case "$c" in r0|c0|c1|c2) printf 'P5=TRUE\nP6=TRUE\nP7=TRUE\n' >> "$f" ;; esac
     [ "$c" = "c3l" ] && echo "PD=TRUE" >> "$f"
   done
-  printf 'G=1000\nL=600\nLIVE_LH_mean=100\nAMP_fp_terminal=200\n' >> "$d/spec371-c0.predicates.txt"
-  printf 'G=1000\nL=300\nLIVE_LH_mean=110\nAMP_fp_terminal=210\n' >> "$d/spec371-c2.predicates.txt"
-  printf 'G=700\nL=100\nLIVE_LH_mean=95\n' >> "$d/spec371-c1.predicates.txt"
+  printf 'G=1000\nG_se=50\nL=600\nL_se=30\nLIVE_LH_mean=100\nAMP_fp_terminal=200\n' >> "$d/spec371-c0.predicates.txt"
+  printf 'G=1000\nG_se=50\nL=300\nL_se=30\nLIVE_LH_mean=110\nAMP_fp_terminal=210\n' >> "$d/spec371-c2.predicates.txt"
+  printf 'G=700\nG_se=40\nL=100\nL_se=20\nLIVE_LH_mean=95\n' >> "$d/spec371-c1.predicates.txt"
   printf 'AMP_fp_terminal=100\n' >> "$d/spec371-r0.predicates.txt"
   printf 'G_ref member=r0 slope=1000 source=synthetic\nG_ref member=8e slope=1400 source=synthetic\nG_ref member=8f slope=1700 source=synthetic\n' > "$d/spec371-gref.txt"
-  printf 'PD-format=TRUE\nPD-sym=TRUE\nPD-crate=TRUE\nC3-top1-lever=591\n' > "$d/spec371-dhat-diff.txt"
+  printf 'PD-format=TRUE\nPD-sym=TRUE\nPD-crate=TRUE\nC3-top1-lever=591\nLEVER_CONTESTED=FALSE\nC3-top1-all-std=FALSE\n' > "$d/spec371-dhat-diff.txt"
 }
 synthetic_base "$SYN/S1"
 synthetic_base "$SYN/S2"; sed -i '' 's/^P6=TRUE$/P6=FALSE reason=synthetic/' "$SYN/S2/spec371-c2.predicates.txt"
 synthetic_base "$SYN/S3"
 sed -i '' 's/^G=1000$/G=150/' "$SYN/S3/spec371-c0.predicates.txt" "$SYN/S3/spec371-c2.predicates.txt"
 printf 'G_ref member=r0 slope=1500 source=synthetic\nG_ref member=8e slope=1400 source=synthetic\nG_ref member=8f slope=1700 source=synthetic\n' > "$SYN/S3/spec371-gref.txt"
-for s in S1 S2 S3; do
+# S4: S3's inputs with the count-alloc cell serving half the release cell's ops.
+cp -r "$SYN/S3" "$SYN/S4"
+sed -i '' 's/^OPS_PER_S=180$/OPS_PER_S=90/' "$SYN/S4/spec371-c0.predicates.txt"
+for s in S1 S2 S3 S4; do
   decide "$SYN/$s" "$SYN/$s.decision.txt"
   say "synthetic ${s}:"; tail -8 "$SYN/$s.decision.txt" | tee -a "$LOG"
 done

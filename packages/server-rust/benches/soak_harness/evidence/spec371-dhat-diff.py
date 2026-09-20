@@ -19,8 +19,14 @@ import json
 import re
 import sys
 
+# Leading frames that are the allocator or the standard library: stripped from
+# the top of every stack so a signature starts at the first frame this codebase
+# owns. Without the std prefixes the five kept frames are container internals
+# (Arc::allocate_for_slice, Vec::push, slice::to_vec) and the token table cannot
+# see the holder at all.
 ALLOC_FRAME = re.compile(
-    r"^\[root\]|dhat::|__rust_|alloc::alloc::|alloc::raw_vec::|<alloc::raw_vec|core::alloc::|std::alloc::"
+    r"^\[root\]|^dhat::|^__rust_|^alloc::|^core::|^std::|^<alloc::|^<core::|^<std::|"
+    r"^<T as alloc::|^<T as core::"
 )
 ADDR = re.compile(r"^0x[0-9a-fA-F]+: ")
 UNSYMBOLISED = re.compile(r"\?\?\?:0:0|__mh_execute_header")
@@ -49,10 +55,21 @@ def frames(prof, pp):
 
 
 def signature(fr):
+    """The first SIG_FRAMES frames after the leading allocator/std frames.
+
+    Fallback: when stripping leaves nothing (dhat's 10-frame trim ended inside
+    std), the signature is the literal ALL_STD: plus the first three raw frames.
+    Its lever is UNMAPPED, and the caller reports how much growth such stacks
+    hold, so a deep-std top grower cannot route a REACHABLE result to a ruling
+    by construction.
+    """
     k = 0
     while k < len(fr) and ALLOC_FRAME.search(fr[k]):
         k += 1
-    return " <- ".join(fr[k:k + SIG_FRAMES]) or "<allocator frames only>"
+    kept = fr[k:k + SIG_FRAMES]
+    if not kept:
+        return "ALL_STD: " + " <- ".join(fr[:3])
+    return " <- ".join(kept)
 
 
 def aggregate(prof):
@@ -67,6 +84,8 @@ def aggregate(prof):
 
 
 def lever(sig):
+    if sig.startswith("ALL_STD:"):
+        return "UNMAPPED"
     for name, rx in LEVERS:
         if rx.search(sig):
             return name
@@ -126,12 +145,34 @@ def main():
     sym_ok = bool(top50) and clean >= 0.8 * len(top50)
     crate_ok = any("topgun_server" in r[4] for r in rows[:10])
 
+    # ALL_STD accounting.
+    all_std = [r for r in rows if r[4].startswith("ALL_STD:")]
+    pos_top = sum(r[0] for r in rows[:10] if r[0] > 0) or 1
+    all_std_share = sum(r[0] for r in all_std[:10] if r[0] > 0) / pos_top
+
+    # lever_share: positive growth per lever token over the top-10 growers.
+    share = {}
+    for r in rows[:10]:
+        if r[0] > 0:
+            share[lever(r[4])] = share.get(lever(r[4]), 0) + r[0]
+    ranked = sorted(share.items(), key=lambda kv: kv[1], reverse=True)
+
+    # LEVER stays top-1 (pre-registered). When the top-1 signature is ALL_STD the
+    # lever is taken from the first non-ALL_STD signature instead.
+    top1_all_std = bool(rows) and rows[0][4].startswith("ALL_STD:")
+    pick = next((r for r in rows if not r[4].startswith("ALL_STD:")), None) if top1_all_std else (rows[0] if rows else None)
+    top1_lever = lever(pick[4]) if pick else "UNMAPPED"
+
     print()
     print("top-3 levers: " + ", ".join(f"{i}:{lever(r[4])}" for i, r in enumerate(rows[:3], 1)))
+    print("lever_share: " + ", ".join(f"{k}={mb(v):.2f}MB({v / pos_top:.0%})" for k, v in ranked))
+    print(f"all_std_pps={len(all_std)} all_std_share={all_std_share:.0%}")
+    print(f"C3-top1-all-std={'TRUE' if top1_all_std else 'FALSE'}")
+    print(f"LEVER_CONTESTED={'TRUE' if ranked and ranked[0][0] != top1_lever else 'FALSE'}")
     print(f"PD-format={'TRUE' if fmt_ok else 'FALSE'}")
     print(f"PD-sym={'TRUE' if sym_ok else 'FALSE'} symbolised={clean}/{len(top50)}")
     print(f"PD-crate={'TRUE' if crate_ok else 'FALSE'}")
-    print(f"C3-top1-lever={lever(rows[0][4]) if rows else 'UNMAPPED'}")
+    print(f"C3-top1-lever={top1_lever}")
     return 0
 
 

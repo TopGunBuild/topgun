@@ -383,6 +383,8 @@ DATA_DIR="${SPEC365_DATA_DIR:-${REPO_ROOT}/target/spec371-${CELL}-data}"
 META_DIR="${DATA_DIR}.meta"      # sibling: NEVER inside the measured data dir
 CONSOLE_LOG="${META_DIR}/harness-console.log"
 STOP_FILE="${META_DIR}/sampler.stop"
+PM_FILE="${META_DIR}/sampler.post_mortem_rows"   # item 17: the sampler runs in a
+                                                 # subshell, so its counter lives in a file
 FAIL_FILE="${META_DIR}/sampler.fail"
 
 # ---------------------------------------------------------------------------
@@ -749,7 +751,7 @@ if [ -e "$DATA_DIR" ]; then
   fi
 fi
 mkdir -p "$DATA_DIR" "$META_DIR" "$OUT_DIR"
-rm -f "$STOP_FILE" "$FAIL_FILE"
+rm -f "$STOP_FILE" "$FAIL_FILE" "$PM_FILE"
 
 # Refuse to silently overwrite artifacts: a re-run that clobbers a recorded
 # series destroys the only copy of a measurement.
@@ -875,6 +877,7 @@ fi
   echo "  TOPGUN_JOURNAL_ENABLED:        ${TOPGUN_JOURNAL_ENABLED:-<unset: harness passes true>}"
   echo "  TOPGUN_SOAK_GRACEFUL_SHUTDOWN: ${TOPGUN_SOAK_GRACEFUL_SHUTDOWN:-<unset: SIGKILL teardown>}"
   echo "  DHAT_OUT:                      ${DHAT_OUT:-<unset>}"
+  echo "  post-mortem rows:              counted at the end of the run (item 17)"
   echo
 } | tee "$MATRIX_OUT"
 
@@ -978,9 +981,30 @@ PRUNE_METRIC_NAMES="topgun_ormap_tombstone_bytes topgun_or_prune_conjunct_snapsh
 # One curl /metrics per row. Prints the 31 values above as one comma-joined
 # string, in list order. A metric absent from the body -- including every
 # name in this list, if the scrape itself fails -- becomes an empty field.
-scrape_prune_metrics() {
+scrape_prune_metrics() {   # $1 = the server pid this row sampled
   local body stamp
   body="$(curl -fsS --max-time 5 "http://127.0.0.1:${SERVER_PORT}/metrics" 2>/dev/null)" || body=""
+  # POST-MORTEM ROW (item 17). T0 is server-ready, which is later than the
+  # harness's own start, so the row due at T0+D always lands after the harness
+  # has finished and killed the server. The parent persists an empty file on a
+  # failed curl on purpose -- a live server that cannot be read is a named
+  # fail-closed reason for P6/P7 -- but a scrape taken after the harness
+  # deliberately killed the server observed nothing, and letting it decide
+  # P6/P7 would stop a whole chain on a race. So: if the pid is GONE, no scrape
+  # file is written for this row and the row is counted; if it is ALIVE, the
+  # empty file is written exactly as the parent does.
+  # The counter lives in a FILE: this function runs inside a command
+  # substitution, so a shell variable incremented here would die with the
+  # subshell and the count would always read 0.
+  if [ -z "$body" ] && ! kill -0 "$1" 2>/dev/null; then
+    local pm
+    pm="$(cat "$PM_FILE" 2>/dev/null || echo 0)"
+    case "$pm" in ''|*[!0-9]*) pm=0 ;; esac
+    echo $((pm + 1)) > "$PM_FILE"
+    echo "post-mortem row: the /metrics scrape failed and pid $1 is gone; no scrape file written" >&2
+    printf '%s' "" | awk -v names="$PRUNE_METRIC_NAMES" 'BEGIN { n = split(names, want, " "); out = ""; for (i = 1; i <= n; i++) out = (i == 1) ? "" : out ","; print out }'
+    return 0
+  fi
   # The body is kept WHOLE before it is reduced to 31 numbers, under the same
   # fixed-width UTC RFC 3339 stamp the console prefix uses -- the one time
   # domain the manifest's window rules compare in. A failed curl writes an
@@ -1154,14 +1178,21 @@ emit_row() {
   # (first field) and the 30 new metric columns (the remainder), from the
   # same response body.
   local prune_row tomb prune_rest
-  prune_row="$(scrape_prune_metrics)"
+  prune_row="$(scrape_prune_metrics "$pid")"
   tomb="${prune_row%%,*}"
   prune_rest="${prune_row#*,}"
   case "$tomb" in
     ''|*[!0-9]*) tomb="" ;;
   esac
 
-  # The count-alloc probe: the server prints it on stderr every 30 s and the
+  local footprint_all footprint_cols clean_col
+  footprint_all="$(footprint_row "$pid")"
+  # Clean goes last so columns 1-40 keep the positions every readout rule cites.
+  footprint_cols="${footprint_all%,*}"
+  clean_col="${footprint_all##*,}"
+
+  # The count-alloc probe, read LAST so the new work cannot eat the margin the
+  # lineage's sampler timing relies on: the server prints it on stderr every 30 s and the
   # harness mirrors it as "[server] alloc_probe ...". The last line seen so far
   # fills four columns; none seen (always so on the R and DH builds) leaves
   # them empty. `|| true` because a no-match must not kill a pipefail sampler.
@@ -1176,11 +1207,6 @@ emit_row() {
     probe_cols=",,,"
   fi
 
-  local footprint_all footprint_cols clean_col
-  footprint_all="$(footprint_row "$pid")"
-  # Clean goes last so columns 1-40 keep the positions every readout rule cites.
-  footprint_cols="${footprint_all%,*}"
-  clean_col="${footprint_all##*,}"
 
   printf '%d,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$elapsed" \
@@ -1266,6 +1292,10 @@ if [ "$HEADER_PREFIX" != 'elapsed_secs,rss_mb,wal_mb,redb_mb,disk_total_mb,tombs
 fi
 ROWS="$(( $(wc -l < "$CSV_OUT") - 1 ))"
 echo "csv rows: $ROWS"
+PM_ROWS="$(cat "$PM_FILE" 2>/dev/null || echo 0)"
+case "$PM_ROWS" in ''|*[!0-9]*) PM_ROWS=0 ;; esac
+echo "post_mortem_rows=${PM_ROWS}"
+printf '  post_mortem_rows: %s\n' "$PM_ROWS" >> "$MATRIX_OUT"
 if [ "$ROWS" -lt 2 ]; then
   fail_instrument "CSV has $ROWS data rows"
 fi

@@ -27,7 +27,7 @@ BEGIN {
   for (i = 1; i <= ncells; i++) {
     c = cells[i]
     need(c, "PV"); need(c, "PR-crashes"); need(c, "PR-class"); need(c, "PE"); need(c, "PA")
-    need(c, "PJ"); need(c, "PC")
+    need(c, "PJ"); need(c, "PC"); need(c, "PM1")
     if (c == "r0" || c == "c0" || c == "c1" || c == "c2") { need(c, "P5"); need(c, "P6"); need(c, "P7") }
   }
   need("c3l", "PD")
@@ -49,7 +49,12 @@ src == "GREF" && $1 == "G_ref" {
   if (m != "") { gref[m] = sl; gorder[++ng] = m }
   next
 }
-src == "DIFF" { if (key($1) == "C3-top1-lever") top1 = val($1); next }
+src == "DIFF" {
+  if (key($1) == "C3-top1-lever") top1 = val($1)
+  if (key($1) == "LEVER_CONTESTED") contested = val($1)
+  if (key($1) == "C3-top1-all-std") allstd = val($1)
+  next
+}
 src != "" && src != "GREF" && src != "DIFF" { k = key($1); if (!((src, k) in v)) v[src, k] = val($1) }
 
 END {
@@ -89,6 +94,19 @@ END {
   GMIN = (G0 < G2) ? G0 : G2; GMAX = (G0 > G2) ? G0 : G2
   printf "GMIN=%s GMAX=%s G_c0=%s G_c2=%s G_c1=%s L_c0=%s L_c2=%s\n", GMIN, GMAX, G0, G2, G1, L0, L2
 
+  # Ops parity. Every slope is per HOUR, so a count-alloc build that served
+  # fewer ops would show a smaller slope for a reason that is not retention.
+  # The load is paced, so parity is expected -- but it is read, not assumed.
+  ops_r0 = v["r0", "OPS_PER_S"] + 0; ops_c0 = v["c0", "OPS_PER_S"] + 0
+  ops_c2 = v["c2", "OPS_PER_S"] + 0; ops_c1 = v["c1", "OPS_PER_S"] + 0
+  ops_min = (ops_c0 < ops_c2) ? ops_c0 : ops_c2
+  if (num(v["r0", "OPS_PER_S"]) && ops_r0 > 0 && num(v["c0", "OPS_PER_S"]) && num(v["c2", "OPS_PER_S"])) {
+    ops_ratio = ops_min / ops_r0
+    printf "OPS_PER_S r0=%s c0=%s c1=%s c2=%s\n", ops_r0, ops_c0, ops_c1, ops_c2
+    printf "OPS_RATIO=%.3f OPS_RATIO_c1=%.3f\n", ops_ratio, (ops_r0 > 0 ? ops_c1 / ops_r0 : 0)
+    ops_ok = (ops_ratio >= 0.80)
+  } else { ops_ok = 0; ops_ratio = -1; print "OPS_RATIO=n/a reason=missing_ops_reading" }
+
   # CA regime over G_ref = {r0, 8e, 8f}
   gbad = 0; ghave = 0
   for (j = 1; j <= ng; j++) {
@@ -99,7 +117,8 @@ END {
     if (!ghave || x > grmax) grmax = x
     ghave = 1
   }
-  if (gbad) { CA = "n/a"; RR = "n/a"; print "CA_REGIME-reason=gref member <= 0 or non-numeric" }
+  if (!ops_ok) { CA = "n/a"; RR = "n/a"; print "CA_REGIME-reason=ops (OPS_RATIO " ((ops_ratio < 0) ? "unreadable" : "< 0.80") ")" }
+  else if (gbad) { CA = "n/a"; RR = "n/a"; print "CA_REGIME-reason=gref member <= 0 or non-numeric" }
   else {
     CA = (GMIN >= 0.5 * grmin) ? "COMPARABLE" : ((GMAX < 0.5 * grmin) ? "SUPPRESSED" : "PARTIAL")
     RR = (CA == "SUPPRESSED") ? "TRUE" : ((CA == "COMPARABLE") ? "FALSE" : "PARTIAL")
@@ -134,6 +153,24 @@ END {
     if (num(ar) && ar + 0 > 0 && num(x)) printf "AMP_ratio_CA %s=%.3f\n", c, x / ar
     else print "AMP_ratio_CA " c "=n/a"
   }
+
+  # CLASS_FRAGILE (recorded; changes no flag): would the band of c0 or c2 move
+  # if its two slopes were read one standard error apart?
+  fragile = "n/a"
+  if (CLASS != "INDETERMINATE_NO_GROWTH") {
+    fragile = "FALSE"
+    for (j = 1; j <= 2; j++) {
+      c = (j == 1 ? "c0" : "c2")
+      gs = v[c, "G_se"]; ls = v[c, "L_se"]; g = v[c, "G"] + 0; l = v[c, "L"] + 0
+      if (!num(gs) || !num(ls)) { fragile = "n/a"; break }
+      lo = (g + gs > 0) ? (l - ls) / (g + gs) : 0
+      hi = (g - gs > 0) ? (l + ls) / (g - gs) : 1e9
+      if (band(lo) != band(hi)) fragile = "TRUE"
+    }
+  }
+  print "CLASS_FRAGILE=" fragile
+  print "LEVER_CONTESTED=" ((contested == "") ? "n/a" : contested)
+  print "C3-top1-all-std=" ((allstd == "") ? "n/a" : allstd)
 
   # LEVER and NEXT
   LEVER = (CLASS == "REACHABLE" || CLASS == "MIXED") ? (top1 == "" ? "UNMAPPED" : top1) : "n/a"

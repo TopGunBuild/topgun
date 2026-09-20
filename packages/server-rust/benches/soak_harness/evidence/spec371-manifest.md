@@ -25,7 +25,18 @@ growth-diff, and routes the next carve. No fix, gate, monitor or invariant chang
 - **CLASS classifies the count-alloc regime.** The `stats_alloc` wrapper keeps libmalloc, but it
   moves allocator timing: SPEC-347 measured the wrapper alone cutting the RSS slope 7×, before delta
   framing. How far the CA regime sits from release is `CA_REGIME` over `G_ref = {G_r0, G_8e, G_8f}`,
-  and it is a DECISION INPUT through `RELEASE_RETENTION`.
+  and it is a DECISION INPUT through `RELEASE_RETENTION`. That reading is **conditional on ops
+  parity** (`OPS_RATIO = min(OPS_c0, OPS_c2)/OPS_r0 ≥ 0.80`), not true by construction: two atomic
+  RMWs per allocation could also lower the ops served, and every slope is per hour. Below 0.80 the
+  regime flags read `n/a reason=ops` and NEXT falls back to a ruling.
+- **EARLY-WINDOW SCOPE.** All six cells read minutes 7–15 of a run, while the committed 4 h cells
+  show a regime change near 2 h (`reclaimable_mb` peaks ≈ 4 GB and then falls while the footprint
+  keeps rising). `CLASS`, `CA_REGIME` and `LEVER` are therefore early-window claims, and the
+  acceptance gate of the carve this decision routes to is a ≥ 4 h plain-release cell on the same
+  matrix, not a 900 s re-measure.
+- **Post-mortem rows.** The row due at `T0 + D` lands after the harness has killed the server; such
+  a row writes no scrape file, is counted, and is bounded by the STOP predicate `PM1` (count ≤ 1,
+  late, and a live scrape within 2 cadences of the end). The frozen P6/P7 awk is untouched.
 - **What `alloc_live` does not see:** memory outside the Rust global allocator (thread stacks, mmap
   regions made outside `GlobalAlloc`, kernel/IOKit accounting that `phys_footprint` includes) and
   libmalloc size-class rounding (`stats_alloc` counts requested sizes). This is why RETENTION is read
@@ -128,6 +139,12 @@ The program takes the builds file as its third argument (`spec371-predicates.sh 
     directive `warn,topgun_server::tombstone_frontier::{removal,settlement,conjunct}=info` does not
     admit `info` for that target. The directive is NOT widened for this, because widening it would
     change the console volume against the SPEC-370 matrix.
+- `PM1` (ruling v3 R3 + v3a A2): `post_mortem_rows ≤ 1` **and** every post-mortem row has
+  `elapsed_secs ≥ D` **and** `last_live_scrape_elapsed ≥ D − 2·cadence`, where the last live scrape
+  is the last CSV row with a non-empty `tombstone_bytes` (that column is filled from the scrape, so
+  it is empty exactly when the scrape produced nothing). A post-mortem row before `D` means the
+  server died early, which is a `PR-crashes` matter, and the staleness clause stops a cell whose
+  scrapes went blind well before the end from passing on the counter alone.
 - `PC`: a `TERMINAL` census line is present with `live_tag_bytes > 0` and `live > 0`.
 - `PD` (checked on c3l, over both C3 cells): both `.dhat.json.gz` decode, and each has
   `dhatFileVersion == 2`, `mode == "rust-heap"` and `Σ eb > 0`. Two further conjuncts:
@@ -145,6 +162,10 @@ The program takes the builds file as its third argument (`spec371-predicates.sh 
 - Fits with the frozen `spec349c2-fit.awk`, window `last_half`, on `phys_footprint_mb`, `rss_mb`,
   `reclaimable_mb` and (CA only) `alloc_live_mb`. The outputs are `G` = footprint slope (MB/h),
   `L` = live slope, their `se`, and `r2`.
+- **Ops parity** (v3a A1), per cell: `OPS_PER_S = totalWrites / durationSecsActual` and
+  `WRITE_ERRORS`, read from `<BASE>.soak.json`. The soak load is paced, so parity across flavours is
+  expected — but the wrapper's two atomic RMWs per allocation could also lower the ops served, and
+  every slope is per hour, so this is read rather than assumed.
 - `G_ref` (CHAIN-LEVEL, not per-cell: the chain computes it once at R7 step 4, after r0 and before
   the per-cell programs; it is described here because it is a fitter reading) is the SET
   `{G_r0, G_8e, G_8f}`, written to `spec371-gref.txt` with one line per member naming its source:
@@ -167,7 +188,9 @@ The program takes the builds file as its third argument (`spec371-predicates.sh 
   `RET_end = FP_end − LIVE_end` (bytes the allocator holds beyond what is reachable);
   `LIVE_LH_mean` = mean `alloc_live_mb` over the last-half rows.
 - **AMP** (`<BASE>.amp.txt`): for every census row (LIVE_COPY and TERMINAL) that joins to a CSV row
-  within ±30 s, taking the nearest row, or the last row for TERMINAL:
+  within ±30 s, taking the nearest row; **TERMINAL joins to the LAST row whose `phys_footprint_mb`
+  is non-empty**, because the final row of a run can be sampled while the server is being torn down.
+  Every AMP line prints `row=<elapsed>` and `join_lag_s = t_census − row`:
   `AMP_fp = phys_footprint_bytes / live_tag_bytes`,
   `AMP_live = alloc_live_bytes / live_tag_bytes` (CA),
   `B_per_entry = phys_footprint_bytes / live`,
@@ -186,9 +209,18 @@ The program takes the builds file as its third argument (`spec371-predicates.sh 
    strings are comparable.
 2. For each pp, the frame list is `[ftbl[i] for i in pp.fs]`, with any leading `0x…: ` address
    stripped.
-3. Drop the leading allocator frames: every frame from the top whose text matches
-   `^\[root\]|dhat::|__rust_|alloc::alloc::|alloc::raw_vec::|<alloc::raw_vec|core::alloc::|std::alloc::`.
-4. **Signature** = the next 5 frames, joined with ` ← `. **Known depth limit:** dhat keeps at most
+3. Drop the leading allocator AND standard-library frames: every frame from the top whose function
+   path starts with `[root]`, `dhat::`, `__rust_`, `alloc::`, `core::`, `std::`, `<alloc::`,
+   `<core::`, `<std::`, `<T as alloc::` or `<T as core::`. Without the std prefixes the five kept
+   frames are container internals (`Arc::allocate_for_slice`, `Vec::push`, `slice::to_vec`) and the
+   token table cannot see the holder — measured on the smoke-2 diff, whose top grower read
+   `UNMAPPED` for that reason alone.
+4. **Signature** = the next 5 frames, joined with ` ← `. **Fallback:** when stripping leaves NO
+   frame (dhat's 10-frame trim ended inside std), the signature is the literal `ALL_STD:` plus the
+   first 3 raw frames, its lever is `UNMAPPED`, and the diff prints `all_std_pps=<count>` with their
+   share of `Δeb`. If the top-1 `Δeb` signature is `ALL_STD`, `LEVER` is taken from the first
+   non-`ALL_STD` signature and the diff prints `C3-top1-all-std=TRUE`, so a deep-std top grower
+   cannot route a REACHABLE result to a ruling by construction. **Known depth limit:** dhat keeps at most
    10 frames per backtrace, because `trim_backtraces` is not set and the crate default `Some(10)`
    applies. The signature can therefore never reach deeper than frame 10 of the allocation stack,
    and a holder whose distinguishing frame lies deeper shows up under a shared allocator-side
@@ -206,7 +238,10 @@ The program takes the builds file as its third argument (`spec371-predicates.sh 
    - `broadcast|ServerEventPayload|or_record` → `588`
    - otherwise `UNMAPPED`
 
-   The diff prints `C3-top1-lever=<token>` and the top-3 levers.
+   The diff prints `C3-top1-lever=<token>`, the top-3 levers, and **`lever_share`** (v3a A3): the
+   sum of positive `Δeb` per lever token over the top-10 growers, including `UNMAPPED` and
+   `ALL_STD`. `LEVER` stays top-1 as pre-registered; when the top-1 lever is not also the
+   `lever_share` leader the diff prints `LEVER_CONTESTED=TRUE`. Both are recorded, never routing.
 
 dhat throttles throughput, so C3 is used ONLY to NAME holders and never to compare slopes. Its CSV
 slopes are recorded and do not enter the decision.
@@ -241,6 +276,10 @@ same exported environment.
    - Every division is guarded: `R_c = L_c / G_c` for c ∈ {c0, c2} is computed ONLY after the
      growth floor in step 3 has passed, so `G_c ≥ 200` there.
    - `G_c1` is never a divisor; no `R_c1` is computed.
+   - **Ops guard (v3a A1), evaluated BEFORE the regime:** `OPS_RATIO = min(OPS_c0, OPS_c2) / OPS_r0`
+     (and `OPS_RATIO_c1` recorded). If `OPS_RATIO < 0.80`, or `OPS_r0 ≤ 0`, or a reading is
+     missing, then `CA_REGIME=n/a reason=ops`, `RELEASE_RETENTION=n/a`, and NEXT takes the same
+     fallback as a bad `G_ref` (`CONDUCTOR_RULING`). `OPS_RATIO` prints next to `RET_SHARE_REL`.
    - `CA_REGIME` divides by `min(G_ref)` and `max(G_ref)`; if any member of `G_ref` is ≤ 0, it
      prints `CA_REGIME=n/a reason=gref`, `RELEASE_RETENTION=n/a reason=gref`, and NEXT falls back to
      `CONDUCTOR_RULING` (a missing regime reading must not silently drop the retention prefix).
@@ -290,6 +329,11 @@ same exported environment.
      retention share of the RELEASE slope.
    - §3 reads `SUPPRESSED` as "the release binary's extra growth is allocator retention, and CLASS
      understates retention".
+   - **`CLASS_FRAGILE`** (v3a A3, recorded before the flag block, changes no flag): TRUE iff for c0
+     or c2 the band of `(L − se) / (G + se)` differs from the band of `(L + se) / (G − se)`; `n/a`
+     when a standard error is missing or CLASS is `INDETERMINATE_NO_GROWTH`. §3 states it, and a
+     MIXED or REACHABLE result under `CLASS_FRAGILE=TRUE` is read as provisional.
+   - `LEVER_CONTESTED` and `C3-top1-all-std` are copied from the diff and printed beside it.
 6. **LEVER** = `C3-top1-lever` (R5.7) when CLASS ∈ {REACHABLE, MIXED}, and `n/a` otherwise.
 7. **NEXT** is a literal for every combination; there is no free text.
    - The lever maps to a route through `route(l)`:
@@ -347,38 +391,47 @@ same exported environment.
 
 ### Programs frozen at M
 - `spec371-memdiag.sh` — the per-cell runner (a copy of `spec370-plateau4h.sh`, closed difference
-  list of 16 items; hunk map below)
+  list of 17 items; hunk map below)
 - `spec371-chain.sh` — builds, cells, gref, dhat diff, predicates, decide; `SPEC371_SMOKE=1` runs
   the R8 admission smoke
 - `spec371-predicates.sh`, `spec371-decide.awk`, `spec371-dhat-diff.py`
 - Unedited inputs: `spec349c2-fit.awk`, `spec366-p5.awk`, `spec366-p67.awk`,
   `spec368-plateau4h.csv` (8e) and `spec370-plateau4h.csv` (8f) for `G_ref`
 
-### Runner diff: every hunk maps to one of the 16 items
+### Runner diff: every hunk maps to one of the 17 items
+See `diff spec370-plateau4h.sh spec371-memdiag.sh`; the map is the table below, extended by item 17
+(post-mortem rows) and by the alloc-probe read moving to the end of `emit_row`.
+
 | diff hunk (`diff spec370-plateau4h.sh spec371-memdiag.sh`) | item |
 |---|---|
 | `2a3,67` | 9 — this runner's header (the parent's header follows verbatim) |
-| `157a223` | 16 — `export LC_ALL=C` after `set -euo pipefail` |
+| `157a223` | 16 — `export LC_ALL=C` before any numeric parse |
 | `168c234`, `170,171c236,237`, `174,182c240,248`, `186,187c252,253`, `191c257,258`, `193,195c260,262` | 9 — usage text |
 | `211a279,288` | 1 (flavour/journal/graceful column doc) + 11 (base-suffix refusal) |
 | `213,217c290,296`, `218a298` | 1 — the six-cell table and the fixed basename |
 | `302c382` | 4 — data dir `target/spec371-<cell>-data` |
-| `337a418,425` | 15 — smoke-only live-census override, refused outside smoke mode |
-| `386c474,489` | 10 — per-cell env block (graceful, journal, DHAT_OUT; capacity unset) |
-| `430c533` | 4 — port 47357 |
-| `456,458c559,561`, `469,470c572,573`, `477c580` | 2 + 3 — freeze variable renamed, literal = K1 `e69cb0c6` |
-| `492,513c595,599`, `514a601,606` | 5 — the runner builds nothing; `SPEC371_HARNESS_BIN` and `SPEC371_CHAIN_START_EPOCH` required |
-| `539a632,645` | 12 — server flavour-marker assertion |
-| `560,563c666,668`, `565,566c670,671` | 5 — server freshness clause (b) against the chain start |
-| `579c684` | 6 — `flavour=` on console line 1 |
-| `588,599c693` | 5 — the harness is `SPEC371_HARNESS_BIN` |
-| `621,625c715,724` | 12 (journal-echo literal) + 5 (harness freshness clause (b) against the chain start) |
-| `635,636d733`, `641,649d737` | 14 — BUILD_GAP warning and its two mtime assignments removed |
-| `736c824`, `740c828,829`, `751c839`, `785a874,877` | 6 — matrix banner, lineage, chain start, flavour/shas/per-cell env echo |
-| `749d837` | 8 — the matrix no longer names a readout file |
-| `753c841` | 2 — freeze variable name in the matrix |
-| `871c963,964`, `877c970`, `1069a1163,1177`, `1077c1185`, `1086a1195` | 7 — four probe columns: header, sampler, row printf |
-| `1269a1379,1387` | 8 + 13 — dhat profile gzip; missing profile = INSTRUMENT DEFECT |
-| `1284,1295d1401` | 8 — the parent's readout invocation dropped |
+| `305a386,387` | 17 — `PM_FILE`, the post-mortem counter's file |
+| `337a420,427` | 15 — smoke-only live-census override, refused outside smoke mode |
+| `386c476,491` | 10 — per-cell env block (graceful, journal, DHAT_OUT; capacity unset) |
+| `430c535` | 4 — port 47357 |
+| `456,458c561,563`, `469,470c574,575`, `477c582` | 2 + 3 — freeze variable renamed, literal = K1 `e69cb0c6` |
+| `492,513c597,601`, `514a603,608` | 5 — the runner builds nothing; `SPEC371_HARNESS_BIN` and `SPEC371_CHAIN_START_EPOCH` required |
+| `539a634,647` | 12 — server flavour-marker assertion |
+| `560,563c668,670`, `565,566c672,673` | 5 — server freshness clause (b) against the chain start |
+| `579c686` | 6 — `flavour=` on console line 1 |
+| `588,599c695` | 5 — the harness is `SPEC371_HARNESS_BIN` |
+| `621,625c717,726` | 12 (journal-echo literal) + 5 (harness freshness clause (b)) |
+| `635,636d735`, `641,649d739` | 14 — BUILD_GAP warning and its two mtime assignments removed |
+| `664c754` | 17 — the post-mortem counter file is reset with the other sampler state |
+| `736c826`, `740c830,831`, `751c841`, `785a876,880` | 6 — matrix banner, lineage, chain start, flavour/shas/per-cell env echo |
+| `749d839` | 8 — the matrix no longer names a readout file |
+| `753c843` | 2 — freeze variable name in the matrix |
+| `871c966,967`, `877c973` | 7 — the CSV header gains the four probe columns |
+| `888c984`, `890a987,1007` | 17 — `scrape_prune_metrics` takes the pid and skips the scrape file for a post-mortem row |
+| `1064c1181` | 17 — the pid is passed to the scrape |
+| `1077c1194,1211`, `1086a1221` | 7 — the probe read (now the LAST step of `emit_row`, ruling v3 R3) and the widened row `printf` |
+| `1159a1295,1298` | 17 — `post_mortem_rows` on the runner console and in `matrix.txt` |
+| `1269a1409,1417` | 8 + 13 — dhat profile gzip; missing profile = INSTRUMENT DEFECT |
+| `1284,1295d1431` | 8 — the parent's readout invocation dropped |
 
 ## APPEND-ONLY BELOW
