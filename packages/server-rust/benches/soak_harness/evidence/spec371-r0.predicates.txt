@@ -1,0 +1,38 @@
+== STOP: PV ==
+PV=TRUE server_sha256=9c0ff916b19cf04c1bbb80f19d216fbddd0ddca2cef8a71d0f06894d82293c84 harness_sha256=cc18490162d51277ef25ebd1537194bef6f67ed429129a499a6ecb66120ce3f6 flavour=R
+== STOP: PR ==
+PR-crashes=TRUE crashes=0
+PR-class=TRUE
+== mechanism: P5 / P6 / P7 ==
+P5=TRUE
+P5-observed: removal_rows=31 settlement_rows=31 unsettled=none
+P5-zero-return: none observed
+DECISION_SCRAPE=2026-09-20T10:28:50Z.txt
+P6=TRUE removed_refs_observed_total=29000 considered_total=29000 gap=0
+P7=TRUE restored_cancelled_total=0
+windows=31 settlement_rows=31 zero_return_removal_rows=0 scrapes=15
+== STOP: PE / PA ==
+PE=TRUE evaluable=15 need=15 E=15
+PA=n/a reason=flavour_R
+== STOP: PJ ==
+PJ=TRUE echoes=1 value=true
+PJ-child=n/a reason=filtered
+== STOP: PC ==
+PC=TRUE live=64602 live_tag_bytes=2196470
+== STOP: PM1 ==
+PM1=TRUE post_mortem_rows=1 empty_scrape_rows=1 first_empty_elapsed=900 last_live_scrape_elapsed=840 need_ge=780
+== recorded: ops parity ==
+OPS_PER_S=183.050
+WRITE_ERRORS=0
+TOTAL_WRITES=164745 DURATION_ACTUAL=900
+== readings ==
+G=2107.069286
+G_se=167.477578
+G_n=8
+FP_end=
+== AMP summary ==
+AMP_fp_terminal=184.8
+AMP_redb_terminal=23.35
+AMP_live_terminal=n/a
+B_per_entry_terminal=6282
+AMP_trend=1.300

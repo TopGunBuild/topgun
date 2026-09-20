@@ -1,0 +1,4 @@
+flavour=R path=/Users/koristuvac/Projects/topgun/topgun/target/spec371-r/release/topgun-server sha256=9c0ff916b19cf04c1bbb80f19d216fbddd0ddca2cef8a71d0f06894d82293c84 mtime=1789898396 recompiled=yes marker=ok
+flavour=CA path=/Users/koristuvac/Projects/topgun/topgun/target/spec371-ca/release/topgun-server sha256=c16c0e845b6ec7e105d6c8bc55076169221767d98a068524c16d0a8fd7438849 mtime=1789898663 recompiled=yes marker=ok
+flavour=DH path=/Users/koristuvac/Projects/topgun/topgun/target/spec371-dh/release-with-debug/topgun-server sha256=6a5655c68f70f8ea0d0557d76a8cd77f2dcbfc385422b57e426240b836957e9a mtime=1789899031 recompiled=yes marker=ok
+flavour=H path=/Users/koristuvac/Projects/topgun/topgun/target/spec371-h/release/deps/soak_harness-0379469b8a4255d8 sha256=cc18490162d51277ef25ebd1537194bef6f67ed429129a499a6ecb66120ce3f6 mtime=1789899215 recompiled=yes marker=ok

@@ -1,0 +1,3 @@
+AMP source=LIVE_COPY t=300.0 copy_done=300.1568 live=20548 live_tag_bytes=698632 row=300 join_lag_s=0.0 fp_mb=53.360 AMP_fp=80.1 AMP_redb=11.79 AMP_live=46.7 B_per_entry=2723 copy_smear_s=0.1568
+AMP source=LIVE_COPY t=600.2 copy_done=600.3320 live=41425 live_tag_bytes=1408450 row=600 join_lag_s=0.2 fp_mb=50.485 AMP_fp=37.6 AMP_redb=5.91 AMP_live=35.0 B_per_entry=1278 copy_smear_s=0.1320
+AMP source=TERMINAL t=900.1 copy_done=n/a live=63781 live_tag_bytes=2168554 row=900 join_lag_s=0.1 fp_mb=60.782 AMP_fp=29.4 AMP_redb=3.67 AMP_live=32.6 B_per_entry=999 copy_smear_s=n/a
