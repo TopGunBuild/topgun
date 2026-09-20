@@ -443,7 +443,13 @@ Appended 2026-09-20, after the data commit D = `48e31816`
 Nothing above `## APPEND-ONLY BELOW` changed: M = `12627ad3` is an ancestor of D, and the §1 prefix
 sha256 (lines 1 through the marker, inclusive) is
 `7efeb27782811684c9b947fb996660c78d3120fa9987114877d9bef54cda36a9` at M and at HEAD. `ORDER=OK`.
-The chain ran once, detached, 09:55:30 → 11:36Z, `CHAIN_RC=0`, six cells `RUNNER_EXIT=0`.
+
+The chain ran once, detached, from `chain start: 2026-09-20T09:55:30Z` to
+`chain end: 2026-09-20T11:35:21Z` (`spec371-chain.log`). **What carries the weight is the six
+committed `RUNNER_EXIT=0` lines**, one per `spec371-<cell>.runner-console.log`, each beside a
+`RESULT: instrument sound`. The chain script does not print its own exit code, so no `CHAIN_RC`
+appears in any committed artifact and none is claimed here; that is a residue for the next runner
+lineage to fix when it is copied, not a re-cut of this one.
 
 Everything below was recomputed under `LC_ALL=C`, which is the only locale in which the committed
 fits reproduce (§1: under `ru_RU` the same fit over the same file reads 1682.7 instead of 1680.5).
@@ -520,7 +526,9 @@ Frozen `spec349c2-fit.awk`, window `last_half`, `G` on `phys_footprint_mb`, `L` 
 
 `FP_end` for r0 and c1 is the last row that CARRIES a footprint, t = 840; both cells' t = 900 row has
 an empty `phys_footprint_mb` (r0's is the post-mortem row `PM1` counted, c1's is a live scrape whose
-`ps` sample did not land — `tombstone_bytes=25124` is present on that row). c3e's fit has n = 3,
+`ps` sample did not land — `tombstone_bytes=25124` is present on that row). **c1's `RET_end` is absent rather than computed:**
+`FP_end` and `LIVE_end` would come from different rows there (840 and 900), so the predicate program
+printed no `RET_end=` line at all rather than subtract across a row boundary. c3e's fit has n = 3,
 which is why its slope is a level marker and nothing more. The dhat cells' slopes are recorded and
 never enter the decision (§1 R5).
 
@@ -565,10 +573,12 @@ c1 is the journal-OFF cell. It ran the same count-alloc binary as c0 and c2, at 
 
 - **reachable bytes are identical to the baselines:** `LIVE_end` 67.1 MB against 66.9 (c0) and 67.4
   (c2); `LIVE_LH_mean` 52.9 against 52.6 and 52.9; `JLIVE = +0.36 MB`;
-- **the footprint is 4–6× the baselines:** 356 MB at t = 840 against 93 MB (c0) and 61 MB (c2), with
-  `G_c1 = 1858 ± 118` against 212 ± 62 and 68 ± 50.
+- **the footprint is 3.7× and 5.9× the baselines at the matched row t = 840** (356.0 MB against
+  96.8 MB on c0 and 60.8 MB on c2), with `G_c1 = 1858 ± 118` against 212 ± 62 and 68 ± 50. The
+  comparison is made at a row all three cells carry: c1's t = 900 row has no footprint (below), so
+  reading c1@840 against c0/c2@900 would flatter the ratio at its low end.
 
-Same reachable heap, four to six times the footprint, one binary. That is the retention reading, and
+Same reachable heap, ~4–6× the footprint, one binary. That is the retention reading, and
 it is the plainest one the chain produced.
 
 **§3 makes no causal claim about the journal.** n = 1; c1's allocator span equals c0's (§3.6: 569 vs
@@ -703,34 +713,64 @@ The top three `Δeb` signatures start at non-std frames, so the v3 R2 strip is d
 `1 redb::…PagedCachedFile::write` (1.51 MB), `2 topgun_server::…crdt::apply_or_delta`
 (`crdt.rs:1371`, 1.50 MB), `3 topgun_server::…CrdtService::apply_single_op` (`crdt.rs:530`, 0.38 MB).
 
-Two things this does and does not say. 592 and 593 are within 1 % of each other in `lever_share`, so
+Two things this does and does not say. 592 and 593 are within 1.3 % of each other on the underlying MB (1.52 vs 1.50; equal at the
+printed share precision of 38 %), so
 the top-1 token names a holder and not a winner; and the reachable heap moved only 13.0 → 15.0 MB
 across the two profiles, under a 3× throughput throttle (57–74 ops/s against 180/s on the CA cells).
 A reachable heap that small, moving that little, is consistent with the count-alloc cells' flat
 `L` and with §3.7 — it is further evidence that the growth is not on the reachable side, and it
 names holders only.
 
-### 3.9 The one console warning, verbatim
+### 3.9 Console WARN inventory — every family, all six cells
 
-24 occurrences, c3e only, all inside 0.52 s of its SIGTERM drain (11:20:06.126248Z →
-11:20:06.643162Z). Twenty read `Cannot unlink sealed WAL segment`, four read `WAL fsync failed`; the
-first of each, verbatim (ANSI escapes stripped):
+There are **no ERROR lines, no panics, no `INSTRUMENT DEFECT` lines, no `AbandonedWrite` lines and no
+stalled-watermark alarms anywhere in the chain**. The WARN lines are exhaustively these four families,
+and the per-cell counts below sum to each console's total WARN count (1 / 1 / 1 / 1 / 211 / 234):
+
+| family | r0 | c0 | c1 | c2 | c3e | c3l | window |
+|---|---|---|---|---|---|---|---|
+| `WAL fsync policy is Batched (default)` (boot) | 1 | 1 | 1 | 1 | 1 | 1 | server boot |
+| `prune update failed, re-indexing tombstone for retry` | 0 | 0 | 0 | 0 | **185** | **232** | teardown, 11:20:01.24–11:20:02.56 (c3e) / 11:35:09.59–11:35:12.74 (c3l) |
+| `the prune task exited; no tombstone reclamation runs …` | 0 | 0 | 0 | 0 | 1 | 1 | teardown, 11:20:06.074096Z (c3e) / 11:35:19.551883Z (c3l) |
+| `Failed to mark WAL watermark applied` | 0 | 0 | 0 | 0 | **24** | 0 | teardown, 11:20:06.126248Z–11:20:06.643162Z (c3e) |
+
+**No flag, fit, predicate or reading in this manifest depends on any of them.** All four families are
+outside the last-half fit windows: the boot line precedes t = 0, and every teardown line lands after
+the cell's last CSV row.
+
+**1 — the documented boot WARN**, once per cell, in all six. It is the line CLAUDE.md specifies the
+server must emit whenever the effective policy is the `batched` default with a durable backend, so its
+presence is the configuration being correct, not an anomaly:
+
+```
+[server] 2026-09-20T10:14:50.610685Z  WARN topgun_server: WAL fsync policy is Batched (default): acked writes inside the ~10ms group-commit window are NOT durable under an unclean shutdown. Set TOPGUN_WAL_FSYNC_POLICY=per_op for acked-implies-durable.
+```
+
+**2 and 3 — the prune/write-behind teardown pair**, in the two graceful cells only (c3e and c3l are the
+only cells that shut down with `TOPGUN_SOAK_GRACEFUL_SHUTDOWN=1`; the four SIGKILL cells have zero).
+First line of each, verbatim (ANSI escapes stripped):
+
+```
+[server] 2026-09-20T11:20:01.244681Z  WARN topgun_server::service::domain::crdt: prune update failed, re-indexing tombstone for retry: write-behind store is shutting down; write rejected for map=soak_or key=ork-25 map=soak_or key=ork-25 epoch=5
+[server] 2026-09-20T11:20:06.074096Z  WARN topgun_server::service::domain::crdt: the prune task exited; no tombstone reclamation runs for this frontier until a prune task is spawned again. Expected during runtime teardown, which is how a graceful shutdown ends this task
+```
+
+**4 — the WAL-watermark family**, c3e only, 24 lines inside 0.52 s of its SIGTERM drain: 20 read
+`Cannot unlink sealed WAL segment`, 4 read `WAL fsync failed`. The first of each, verbatim:
 
 ```
 [server] 2026-09-20T11:20:06.126248Z  WARN topgun_server::storage::datastores::write_behind: Failed to mark WAL watermark applied; next restart will re-replay (safe but redundant) partition=232 watermark=43807 error=WAL fsync failed for /Users/koristuvac/Projects/topgun/topgun/target/spec371-c3e-data/wal/partition-232-00000000000000042190.log: background task failed
 [server] 2026-09-20T11:20:06.142858Z  WARN topgun_server::storage::datastores::write_behind: Failed to mark WAL watermark applied; next restart will re-replay (safe but redundant) partition=162 watermark=44069 error=Cannot unlink sealed WAL segment /Users/koristuvac/Projects/topgun/topgun/target/spec371-c3e-data/wal/partition-162-00000000000000041072.log: background task failed
 ```
 
-**Classification (no fix here).** This is the WAL-watermark surface **TODO-689** owns, and it is
-recorded there as an observation, not fixed by this carve. It is a DISTINCT symptom from the 238
-`AbandonedWrite { origin: Live }` ERROR alarms TODO-689 was opened on: WARN not ERROR, at
-graceful-shutdown drain rather than in steady state, with `background task failed` as the inner
-error — the WAL executor was already shut down when the watermark write was attempted. It appeared
-in exactly one of six cells, the only cell that shuts down with `TOPGUN_SOAK_GRACEFUL_SHUTDOWN=1`
-after a 300 s run; the four SIGKILL cells and the 900 s graceful cell have zero occurrences. Benign
-by its own text (`next restart will re-replay (safe but redundant)`). Across all six cells there
-were **0** `AbandonedWrite` lines, **0** stalled-watermark alarms, **0** panics and **0**
-`INSTRUMENT DEFECT` lines.
+**Classification (no fix here).** Families 2 and 3 are one symptom: **graceful-shutdown ordering — the
+prune task keeps issuing updates after the write-behind store has begun rejecting writes**, which the
+third line names in its own text (`Expected during runtime teardown`). They route to **TODO-694**, not
+to TODO-689. Family 4 is the WAL-watermark surface **TODO-689** owns, and it is recorded there as an
+observation: it is a DISTINCT symptom from the 238 `AbandonedWrite { origin: Live }` ERROR alarms that
+TODO-689 was opened on — WARN not ERROR, at graceful-shutdown drain rather than in steady state, with
+`background task failed` as the inner error, i.e. the WAL executor was already down when the watermark
+write was attempted. Benign by its own text (`next restart will re-replay (safe but redundant)`).
 
 ### 3.10 Scope of every claim above
 
@@ -751,7 +791,13 @@ demonstrated that the count-alloc regime does not reproduce the growth the fix h
 | TODO-593 | resident per-key OrMap live-set growth — ≈ 0.9 KB reachable per live OR entry (§3.7), ≈ 0.9 GB at 8f scale | behind the allocator carve |
 | TODO-592 | cap the redb read-path page cache — the top dhat grower (§3.8) at 1.52 MB, i.e. small | behind the allocator carve |
 | TODO-693 | per-scrape live-OR-bytes gauge on `/metrics`, so a CSV row carries live bytes at every sample instead of only at census instants | after the memory FIX carve |
-| TODO-689 | the WAL-watermark surface; §3.9's 24 c3e WARN lines are recorded against it as a distinct symptom | after the memory carve |
+| TODO-694 | graceful-shutdown ordering: quiesce the prune task before the write-behind store rejects writes — §3.9 families 2 and 3, 185 / 232 WARNs per graceful teardown | with the next shutdown-path carve |
+| TODO-689 | the WAL-watermark surface; §3.9's 24 c3e WARN lines (family 4) are recorded against it as a distinct symptom | after the memory carve |
+
+**Residue without a TODO:** a dead `READOUT_OUT` assignment at `spec371-memdiag.sh:332`, left by R3
+item 8 when the parent's `spec365-readout.sh` invocation was dropped. It moves no measurement, and M
+is frozen under D, so it is NOT fixed here — re-cutting M beneath a committed D would break the
+provenance chain this carve rests on. Drop the line when the next lineage copies this runner.
 
 This carve measured and changed nothing: 1 `.rs` file (`process.rs`, K1 `e69cb0c6`, passing
 `TOPGUN_JOURNAL_ENABLED` through instead of forcing it), evidence programs, and artifacts. No fix,
