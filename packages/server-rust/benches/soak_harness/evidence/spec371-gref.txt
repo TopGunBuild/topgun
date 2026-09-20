@@ -1,0 +1,3 @@
+G_ref member=r0 slope=2107.069286 se=167.477578 n=8 rows=all source=spec371-r0.csv
+G_ref member=8e slope=1412.225714 se=214.120481 n=8 rows=le900 source=spec368-plateau4h.csv
+G_ref member=8f slope=1680.520255 se=241.860652 n=8 rows=le900 source=spec370-plateau4h.csv

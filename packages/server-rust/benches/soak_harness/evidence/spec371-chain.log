@@ -1,0 +1,107 @@
+chain start: 2026-09-20T09:55:30Z epoch=1789898130 smoke=0 HEAD=12627ad37591c0a83f1ca706998c750928fd2956
+build R: CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec371-r cargo build --release --bin topgun-server
+   Compiling reqwest v0.12.28
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+    Finished `release` profile [optimized] target(s) in 4m 25s
+build CA: CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec371-ca cargo build --release --features count-alloc --bin topgun-server
+   Compiling reqwest v0.12.28
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+    Finished `release` profile [optimized] target(s) in 4m 26s
+build DH: CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec371-dh cargo build --profile release-with-debug --features dhat-heap --bin topgun-server
+   Compiling reqwest v0.12.28
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+    Finished `release-with-debug` profile [optimized + debuginfo] target(s) in 6m 07s
+build H: CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec371-h cargo build --release --bench soak_harness
+   Compiling reqwest v0.12.28
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+    Finished `release` profile [optimized] target(s) in 4m 16s
+flavour=R path=/Users/koristuvac/Projects/topgun/topgun/target/spec371-r/release/topgun-server sha256=9c0ff916b19cf04c1bbb80f19d216fbddd0ddca2cef8a71d0f06894d82293c84 mtime=1789898396 recompiled=yes marker=ok
+flavour=CA path=/Users/koristuvac/Projects/topgun/topgun/target/spec371-ca/release/topgun-server sha256=c16c0e845b6ec7e105d6c8bc55076169221767d98a068524c16d0a8fd7438849 mtime=1789898663 recompiled=yes marker=ok
+flavour=DH path=/Users/koristuvac/Projects/topgun/topgun/target/spec371-dh/release-with-debug/topgun-server sha256=6a5655c68f70f8ea0d0557d76a8cd77f2dcbfc385422b57e426240b836957e9a mtime=1789899031 recompiled=yes marker=ok
+flavour=H path=/Users/koristuvac/Projects/topgun/topgun/target/spec371-h/release/deps/soak_harness-0379469b8a4255d8 sha256=cc18490162d51277ef25ebd1537194bef6f67ed429129a499a6ecb66120ce3f6 mtime=1789899215 recompiled=yes marker=ok
+--- cell r0 at 2026-09-20T10:14:48Z
+13:14  up 10 days, 23:50, 2 users, load averages: 3.35 5.65 6.60
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   627772.
+Pages active:                                 329230.
+Pages inactive:                               601328.
+Pages speculative:                             51968.
+Pages throttled:                                   0.
+Pages wired down:                             147893.
+Pages purgeable:                               12693.
+cell r0: RUNNER_EXIT=0
+--- cell c0 at 2026-09-20T10:29:51Z
+13:29  up 11 days, 5 mins, 2 users, load averages: 13.83 10.82 8.75
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   464314.
+Pages active:                                 481691.
+Pages inactive:                               611558.
+Pages speculative:                             63671.
+Pages throttled:                                   0.
+Pages wired down:                             147277.
+Pages purgeable:                               12185.
+cell c0: RUNNER_EXIT=0
+--- cell c1 at 2026-09-20T10:44:54Z
+13:44  up 11 days, 20 mins, 2 users, load averages: 6.25 8.64 9.55
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   478803.
+Pages active:                                 453266.
+Pages inactive:                               612591.
+Pages speculative:                             75710.
+Pages throttled:                                   0.
+Pages wired down:                             150621.
+Pages purgeable:                               15731.
+cell c1: RUNNER_EXIT=0
+--- cell c2 at 2026-09-20T10:59:56Z
+13:59  up 11 days, 35 mins, 2 users, load averages: 7.25 6.77 7.57
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   455326.
+Pages active:                                 482408.
+Pages inactive:                               611639.
+Pages speculative:                             72587.
+Pages throttled:                                   0.
+Pages wired down:                             151849.
+Pages purgeable:                               23757.
+cell c2: RUNNER_EXIT=0
+--- cell c3e at 2026-09-20T11:14:57Z
+14:14  up 11 days, 50 mins, 2 users, load averages: 4.55 6.37 7.30
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   315192.
+Pages active:                                 611696.
+Pages inactive:                               625775.
+Pages speculative:                             80975.
+Pages throttled:                                   0.
+Pages wired down:                             151399.
+Pages purgeable:                               43450.
+cell c3e: RUNNER_EXIT=0
+--- cell c3l at 2026-09-20T11:20:07Z
+14:20  up 11 days, 55 mins, 2 users, load averages: 7.40 7.40 7.50
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   193375.
+Pages active:                                 663581.
+Pages inactive:                               624797.
+Pages speculative:                            152178.
+Pages throttled:                                   0.
+Pages wired down:                             151182.
+Pages purgeable:                               43734.
+cell c3l: RUNNER_EXIT=0
+G_ref member=r0 slope=2107.069286 se=167.477578 n=8 rows=all source=spec371-r0.csv
+G_ref member=8e slope=1412.225714 se=214.120481 n=8 rows=le900 source=spec368-plateau4h.csv
+G_ref member=8f slope=1680.520255 se=241.860652 n=8 rows=le900 source=spec370-plateau4h.csv
+dhat diff rc=0
+wrote /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-r0.predicates.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-r0.fits.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-r0.amp.txt
+wrote /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c0.predicates.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c0.fits.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c0.amp.txt
+wrote /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c1.predicates.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c1.fits.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c1.amp.txt
+wrote /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c2.predicates.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c2.fits.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c2.amp.txt
+wrote /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c3e.predicates.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c3e.fits.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c3e.amp.txt
+wrote /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c3l.predicates.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c3l.fits.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c3l.amp.txt
+decision:
+CLASS=INDETERMINATE_NO_GROWTH
+REPLICATE_AGREE=n/a
+JOURNAL=n/a
+F1_FORECAST_HELD=UNRESOLVED
+CA_REGIME=SUPPRESSED
+RELEASE_RETENTION=TRUE
+LEVER=n/a
+NEXT=TODO-590+TODO-591
+chain end: 2026-09-20T11:35:21Z

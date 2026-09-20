@@ -1,0 +1,2 @@
+AMP source=LIVE_COPY t=300.0 copy_done=300.1578 live=8740 live_tag_bytes=297160 row=300 join_lag_s=0.0 fp_mb=50.454 AMP_fp=178.0 AMP_redb=14.31 AMP_live=n/a B_per_entry=6053 copy_smear_s=0.1578
+AMP source=TERMINAL t=307.6 copy_done=n/a live=9011 live_tag_bytes=306374 row=300 join_lag_s=7.6 fp_mb=50.454 AMP_fp=172.7 AMP_redb=14.31 AMP_live=n/a B_per_entry=5871 copy_smear_s=n/a

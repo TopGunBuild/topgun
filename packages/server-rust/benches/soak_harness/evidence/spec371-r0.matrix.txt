@@ -1,0 +1,58 @@
+
+=== spec371 memory-diagnosis run: cell r0 (flavour R) ===
+  repo HEAD:      12627ad37591c0a83f1ca706998c750928fd2956
+  dirty tree:     yes
+  host/OS:        Darwin MacBookPro 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:18:49 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6000 arm64
+  lineage:        chain-built harness + chain-built R server
+  chain start:    1789898130
+  data dir:       /Users/koristuvac/Projects/topgun/topgun/target/spec371-r0-data
+  csv:            /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-r0.csv
+  soak.json:      /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-r0.soak.json
+  mechanism.json: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-r0.mechanism.json (harness writes spec371-r0.soak.mechanism.json; renamed after the run)
+  durable.json:   /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-r0.soak.durable.json (raw basename: NOT renamed, by design)
+  progress.jsonl: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-r0.progress.jsonl
+  console log:    /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-r0.harness-console.log
+  matrix:         /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-r0.matrix.txt
+  soak binary:    /Users/koristuvac/Projects/topgun/topgun/target/spec371-h/release/deps/soak_harness-0379469b8a4255d8
+  soak binary commit: 12627ad37591c0a83f1ca706998c750928fd2956 (HEAD; the binary itself is identified by its sha256)
+  .rs working tree:   CLEAN (asserted before the build)
+  code freeze:            e69cb0c6
+  code freeze diff (.rs): EMPTY (asserted before the build)
+    built:        2026-09-20T10:13:35Z
+  server binary:  /Users/koristuvac/Projects/topgun/topgun/target/spec371-r/release/topgun-server
+    built:        2026-09-20T09:59:56Z
+    sha256:       9c0ff916b19cf04c1bbb80f19d216fbddd0ddca2cef8a71d0f06894d82293c84
+  --- varied knobs; everything else is the spec362b-durable.sh long4h
+      literal ---
+  TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
+  duration:            900s
+  csv cadence:         60s
+  extra harness flags: <none>
+  --durable-reading:   ARMED
+  --live-census-interval: 300 (ARMED: the live-copy census)
+  --sampler-jitter-seed:  20260831
+  SOAK_SERVER_LOG:     warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  SOAK_SERVER_LOG_PASSTHROUGH: 1
+  TOPGUN_PRUNE_RECORD: true
+  TOPGUN_LOG_FORMAT:   <unset: human fmt, which is what the origin parser reads>
+  server port:         47357
+  SOAK_SERVER_BINARY:  /Users/koristuvac/Projects/topgun/topgun/target/spec371-r/release/topgun-server
+  --- pinned matrix (identical to spec362b-durable.sh's long4h cell;
+      crash-interval is per-cell and is 0 on the one cell this runner
+      ships) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 0;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+  tombstone gate: level ceiling K=2+ceil(S_A/W) epochs × W × b_max (S_A, b_max measured by the harness; A = TOPGUN_WAL_WATERMARK_STALL_BOUND_MS, not set by this runner); level stability 10 %; slope report-only
+  harness sha256: cc18490162d51277ef25ebd1537194bef6f67ed429129a499a6ecb66120ce3f6
+  server flavour: R
+  TOPGUN_JOURNAL_ENABLED:        <unset: harness passes true>
+  TOPGUN_SOAK_GRACEFUL_SHUTDOWN: <unset: SIGKILL teardown>
+  DHAT_OUT:                      <unset>
+  post-mortem rows:              counted at the end of the run (item 17)
+
+  post_mortem_rows: 1
