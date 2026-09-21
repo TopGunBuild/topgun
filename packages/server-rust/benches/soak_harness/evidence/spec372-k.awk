@@ -102,14 +102,29 @@ function stage1(   sv, aj, am, sj, sm, big, n, i, h, cf, cl, drift, churn, arm, 
     print "T_DECAY_UPPER_MI=n/a reason=too_few_probe_points"
   } else {
     h = int((n - 1) / 2) + 1          # 1-based index of the boundary point
-    cl = ((kb[n] - kb[h]) / (ke[n] - ke[h])) / kl[n]
-    cf = ((kb[h] - kb[1]) / (ke[h] - ke[1])) / kl[h]
-    drift = cf / cl
-    print "CHURN_RATIO=" r4(cl) " points=" n " window_s=" ke[h] "-" ke[n]
-    print "CHURN_RATIO_DRIFT=" r4(drift)
-    print "K_PROVISIONAL=" ((drift < 0.67 || drift > 1.5) ? "TRUE" : "FALSE")
-    print "T_DECAY_UPPER_JE=" r4(10 * cl)
-    print "T_DECAY_UPPER_MI=" r4(1 * cl)
+    # awk aborts on a zero divisor, so every denominator is checked and a zero
+    # one becomes a named n/a rather than a truncated artifact.
+    if (ke[n] <= ke[h] || ke[h] <= ke[1] || kl[n] <= 0 || kl[h] <= 0) {
+      print "CHURN_RATIO=n/a reason=degenerate_window points=" n
+      print "CHURN_RATIO_DRIFT=n/a reason=degenerate_window"
+      print "K_PROVISIONAL=n/a reason=degenerate_window"
+      print "T_DECAY_UPPER_JE=n/a reason=degenerate_window"
+      print "T_DECAY_UPPER_MI=n/a reason=degenerate_window"
+    } else {
+      cl = ((kb[n] - kb[h]) / (ke[n] - ke[h])) / kl[n]
+      cf = ((kb[h] - kb[1]) / (ke[h] - ke[1])) / kl[h]
+      print "CHURN_RATIO=" r4(cl) " points=" n " window_s=" ke[h] "-" ke[n]
+      if (cl > 0) {
+        drift = cf / cl
+        print "CHURN_RATIO_DRIFT=" r4(drift)
+        print "K_PROVISIONAL=" ((drift < 0.67 || drift > 1.5) ? "TRUE" : "FALSE")
+      } else {
+        print "CHURN_RATIO_DRIFT=n/a reason=zero_last_half_churn"
+        print "K_PROVISIONAL=n/a reason=zero_last_half_churn"
+      }
+      print "T_DECAY_UPPER_JE=" r4(10 * cl)
+      print "T_DECAY_UPPER_MI=" r4(1 * cl)
+    }
   }
 
   # Sample (n - 1) coefficient of variation of the two replicates' TERMINAL AMP_FP.

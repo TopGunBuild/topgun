@@ -51,6 +51,16 @@ if [ "$SMOKE" = "1" ]; then
 else
   OUT="$SCRIPT_DIR"
 fi
+# One spec372 program at a time: every one of them builds into, or reclaims,
+# this carve's target dirs and needs the host to itself, so an overlap could
+# delete a running cell's binary or contaminate a measurement.
+LOCK="${REPO_ROOT}/target/spec372.lock"
+mkdir -p "${REPO_ROOT}/target"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "FATAL: another spec372 program holds ${LOCK} ($(cat "$LOCK/owner" 2>/dev/null || echo unknown))" >&2; exit 2
+fi
+echo "pid=$$ program=$(basename "$0") since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK/owner"
+trap 'rm -rf "$LOCK"' EXIT
 TXT="$OUT/spec372-buildstory.txt"
 RAW="$OUT/.spec372-buildstory-raw"; rm -rf "$RAW"; mkdir -p "$RAW"
 : > "$TXT"

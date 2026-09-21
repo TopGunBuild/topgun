@@ -241,6 +241,8 @@ function trend(c, pre,   lh, used, sl, se) {
          " slope_amp_per_hour=" P[c, pre] " se=" P[c, pre "_se"] " n=" get(c, pre "_n", "n/a") " r2=" get(c, pre "_r2", "n/a") \
          ((pre == "TREND") ? " points_dropped=" get(c, "TREND_dropped", "n/a") : "")
 }
+# a2j's recorded state: ran | budget | no_s1_rank (chain 2 had no rank to pick its arm).
+function a2j_reason() { return (a2j_state == "budget" || a2j_state == "no_s1_rank") ? a2j_state : "cell_did_not_run" }
 function reclaim(c) { return has(c, "RECLAIM_RATIO_end") ? ((P[c, "RECLAIM_RATIO_end"] + 0 <= 0.02) ? "MADV_FREE" : "REUSABLE") " ratio=" P[c, "RECLAIM_RATIO_end"] : "UNKNOWN" }
 function stage2(   sv, i, n, ks, arm, c, cells, t, tv, amp, vs, vss, opsr, v, agree, pj, rr) {
   sv = get("STAGE1", "S1_SURVIVORS", "missing")
@@ -325,7 +327,7 @@ function stage2(   sv, i, n, ks, arm, c, cells, t, tv, amp, vs, vss, opsr, v, ag
   if (a2j_state == "ran") {
     out("OPS_a2j", get("a2j", "OPS_PER_S", "n/a reason=missing_reading"))
     out("OPS_RATIO_a2j_vs_4h", ratio(get("a2j", "OPS_PER_S", ""), get((a2j_flavour == "JE") ? "j2" : "m2", "OPS_AT_900", "")))
-  } else { out("OPS_a2j", "n/a reason=" ((a2j_state == "budget") ? "budget" : "cell_did_not_run")); out("OPS_RATIO_a2j_vs_4h", "n/a reason=" ((a2j_state == "budget") ? "budget" : "cell_did_not_run")) }
+  } else { out("OPS_a2j", "n/a reason=" a2j_reason()); out("OPS_RATIO_a2j_vs_4h", "n/a reason=" a2j_reason()) }
 
   # VERDICT per arm, over the total order of R5.4. n/a reasons in precedence:
   # dropped_stage1, cell_did_not_run, ops, missing_reading, few_points.
@@ -351,7 +353,7 @@ function stage2(   sv, i, n, ks, arm, c, cells, t, tv, amp, vs, vss, opsr, v, ag
   out("RECLAIM_SEMANTICS_JE", ("j2" in seenfile) ? reclaim("j2") : "n/a reason=cell_did_not_run")
   out("RECLAIM_SEMANTICS_MI", ("m2" in seenfile) ? reclaim("m2") : "n/a reason=cell_did_not_run")
   out("JE_ESTIMATOR_AGREE", (agree == "n/a") ? "n/a" : agree " ratio=" P["j2", "DECIDE_EST_AGREE"])
-  out("JOURNAL", (a2j_state == "ran") ? "recorded" : ((a2j_state == "budget") ? "n/a reason=budget" : "n/a reason=cell_did_not_run"))
+  out("JOURNAL", (a2j_state == "ran") ? "recorded" : "n/a reason=" a2j_reason())
   for (i = 1; i <= 2; i++) { arm = (i == 1) ? "JE" : "MI"; D_P[arm] = get("PERF", "PERF_" arm, "n/a"); out("PERF_" arm, D_P[arm]) }
   for (i = 1; i <= 2; i++) {
     arm = (i == 1) ? "JE" : "MI"

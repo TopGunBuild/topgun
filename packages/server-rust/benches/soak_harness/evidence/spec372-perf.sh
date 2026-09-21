@@ -38,6 +38,16 @@ if [ "$SMOKE" = "1" ]; then
 else
   OUT="$SCRIPT_DIR"; RUNS=3; DUR=15; DEF_DUR=30
 fi
+# One spec372 program at a time: every one of them builds into, or reclaims,
+# this carve's target dirs and needs the host to itself, so an overlap could
+# delete a running cell's binary or contaminate a measurement.
+LOCK="${REPO_ROOT}/target/spec372.lock"
+mkdir -p "${REPO_ROOT}/target"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "FATAL: another spec372 program holds ${LOCK} ($(cat "$LOCK/owner" 2>/dev/null || echo unknown))" >&2; exit 2
+fi
+echo "pid=$$ program=$(basename "$0") since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK/owner"
+trap 'rm -rf "$LOCK"' EXIT
 TXT="$OUT/spec372-perf.txt"
 RAW="$OUT/.spec372-perf-raw"; rm -rf "$RAW"; mkdir -p "$RAW"
 : > "$TXT"
@@ -71,8 +81,12 @@ run() {   # $1 arm, $2 block, $3 mode (faw|faf|default), $4 run index
   # shellcheck disable=SC2046,SC2086
   ( cd "$SERVER_ROOT" && CARGO_TARGET_DIR="$(tdir $arm)" cargo bench --bench load_harness $(features $arm) -- $args --json-output "$json" ) > "$RAW/$arm-$blk-$mode-$n.log" 2>&1
   rc=$?
-  if [ -s "$json" ]; then
-    say "RUN arm=${arm} block=${blk} mode=${mode} run=${n} ops_per_sec=$(jq -r '.ops_per_sec' "$json") p50_us=$(jq -r '.latency.p50_us' "$json") p99_us=$(jq -r '.latency.p99_us' "$json") total_ops=$(jq -r '.total_ops' "$json") rc=${rc}"
+  # A report missing a field (jq prints "null") is a run that failed to report,
+  # never a zero that would read as a regression.
+  local o p50 p99
+  o="$(jq -r '.ops_per_sec' "$json" 2>/dev/null)"; p50="$(jq -r '.latency.p50_us' "$json" 2>/dev/null)"; p99="$(jq -r '.latency.p99_us' "$json" 2>/dev/null)"
+  if [ -s "$json" ] && [[ "$o" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "$p99" =~ ^[0-9]+$ ]]; then
+    say "RUN arm=${arm} block=${blk} mode=${mode} run=${n} ops_per_sec=${o} p50_us=${p50} p99_us=${p99} total_ops=$(jq -r '.total_ops' "$json") rc=${rc}"
   else
     say "RUN arm=${arm} block=${blk} mode=${mode} run=${n} ops_per_sec=n/a p50_us=n/a p99_us=n/a rc=${rc}"
   fi

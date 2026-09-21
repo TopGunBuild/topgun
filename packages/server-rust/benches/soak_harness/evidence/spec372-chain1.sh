@@ -50,6 +50,16 @@ if [ "$SMOKE" = "1" ]; then
 else
   OUT="$SCRIPT_DIR"
 fi
+# One spec372 program at a time: every one of them builds into, or reclaims,
+# this carve's target dirs and needs the host to itself, so an overlap could
+# delete a running cell's binary or contaminate a measurement.
+LOCK="${REPO_ROOT}/target/spec372.lock"
+mkdir -p "${REPO_ROOT}/target"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "FATAL: another spec372 program holds ${LOCK} ($(cat "$LOCK/owner" 2>/dev/null || echo unknown))" >&2; exit 2
+fi
+echo "pid=$$ program=$(basename "$0") since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK/owner"
+trap 'rm -rf "$LOCK"' EXIT
 LOG="$OUT/spec372-chain1.log"
 : > "$LOG"
 say() { echo "$*" | tee -a "$LOG"; }
@@ -187,25 +197,37 @@ for c in $CELLS; do
 done
 [ -f "$OUT/spec372-k1.csv" ] || missing="$missing spec372-k1.csv"
 # shellcheck disable=SC2086
-awk -v mode=stage1 -f "$SCRIPT_DIR/spec372-k.awk" $k_inputs "$OUT/spec372-k1.csv" > "$OUT/spec372.k-stage1.txt" 2>&1
-say "k.awk stage1 rc=$?"
+awk -v mode=stage1 -f "$SCRIPT_DIR/spec372-k.awk" $k_inputs "$OUT/spec372-k1.csv" > "$OUT/spec372.k-stage1.txt" 2>> "$LOG"
+KRC=$?
+say "k.awk stage1 rc=${KRC}"
 # shellcheck disable=SC2086
 awk -v mode=stage1 -v disk_free="$DISK_FREE_GB" -v missing="${missing# }" -f "$SCRIPT_DIR/spec372-decide.awk" \
-    $k_inputs "$OUT/spec372.k-stage1.txt" > "$OUT/spec372.stage1.txt"
-say "decide.awk stage1 rc=$?"
+    $k_inputs "$OUT/spec372.k-stage1.txt" > "$OUT/spec372.stage1.txt" 2>> "$LOG"
+DRC=$?
+say "decide.awk stage1 rc=${DRC}"
 cat "$OUT/spec372.stage1.txt" >> "$LOG"
 SV_DECIDE="$(awk -F= '$1 == "S1_SURVIVORS" { print substr($0, index($0, "=") + 1) }' "$OUT/spec372.stage1.txt")"
 SV_K="$(awk -F= '$1 == "S1_SURVIVORS" { print substr($0, index($0, "=") + 1) }' "$OUT/spec372.k-stage1.txt")"
 STOP1="$(awk -F= '$1 == "STOP" { print $2 }' "$OUT/spec372.stage1.txt")"
 say "S1_SURVIVORS decide=${SV_DECIDE} k=${SV_K} STOP=${STOP1}"
 CHAIN_RC=0
+# A program that failed, or a Stage-1 file without a STOP line or a survivor
+# set, is not a result: it must never read as a finished chain.
+if [ "$KRC" -ne 0 ] || [ "$DRC" -ne 0 ] || [ -z "$SV_DECIDE" ] || [ -z "$SV_K" ] \
+   || { [ "$STOP1" != "TRUE" ] && [ "$STOP1" != "FALSE" ]; }; then
+  say "FATAL: a Stage-1 program failed or wrote no result (k rc=${KRC}, decide rc=${DRC}, STOP=${STOP1:-<none>})"
+  CHAIN_RC=4
+fi
 if [ "$STOP1" = "FALSE" ] && [ "$SV_DECIDE" != "$SV_K" ]; then
   say "STOP: decide.awk and k.awk disagree on S1_SURVIVORS"
   CHAIN_RC=3
 fi
 if [ "$STOP1" = "FALSE" ] && [ "$SV_DECIDE" = "NONE" ] && [ "$CHAIN_RC" -eq 0 ]; then
   awk -v mode=stage2 -v disk_free="$DISK_FREE_GB" -v a2j_state=n/a -f "$SCRIPT_DIR/spec372-decide.awk" \
-      "$OUT/spec372.stage1.txt" > "$OUT/spec372.decision.txt"
+      "$OUT/spec372.stage1.txt" > "$OUT/spec372.decision.txt" 2>> "$LOG"
+  rc=$?
+  grep -q '^NEXT=' "$OUT/spec372.decision.txt" || rc=9
+  [ "$rc" -eq 0 ] || { say "FATAL: decide.awk stage2 over Stage 1 failed rc=${rc}"; CHAIN_RC=4; }
   say "S1_SURVIVORS=NONE: decision written by decide.awk stage2 over Stage 1; chain 2 is not launched"
   tail -3 "$OUT/spec372.decision.txt" | tee -a "$LOG"
 fi
@@ -270,11 +292,17 @@ function arm(n, surv, x,   v, b, k, p, d) {
     if (f["DEFAULT_CANDIDATE"] != c) { badc++; if (badc < 4) print "candidate mismatch want=" c ": " $0 }
     cnt[f["NEXT"]]++ }
   END { printf "ENUM inputs=%d one_next_per_input=%s unmatched=%d candidate_mismatches=%d literals_outside_closed_list=%d\n", rows, (multi + order == 0 ? "TRUE" : "FALSE"), unm + 0, badc + 0, badlit + 0
-        for (k in cnt) printf "ENUM NEXT=%s count=%d\n", k, cnt[k] }' | sort | tee -a "$LOG"
+        for (k in cnt) printf "ENUM NEXT=%s count=%d\n", k, cnt[k] }' | sort | tee -a "$LOG" > "$SYN/enum.summary"
+# The enumeration is the smoke's executable proof of totality, so its
+# assertions gate the smoke's exit code; the spot checks are read by hand.
+grep -q '^ENUM inputs=[1-9][0-9]* one_next_per_input=TRUE unmatched=0 candidate_mismatches=0 literals_outside_closed_list=0$' "$SYN/enum.summary" \
+  || { say "SMOKE FAIL: an enumeration assertion failed"; CHAIN_RC=5; }
 
 # (b) One explicitly OUT-OF-DOMAIN input: a corrupted verdict token.
 echo "ID=ood STOP=FALSE S1_SURVIVORS=JE EST_PROVISIONAL=FALSE AMP_FP_JE=3.0 AMP_FP_MI=5.0 AMP_S_JE=3.0 AMP_S_MI=5.0 VERDICT_JE=PLATEUA VS_SYS_JE=BETTER K_HI_VACUOUS_JE=FALSE PERF_JE=PASS BUILD_JE=OK VERDICT_MI=n/a:dropped_stage1" \
-  | awk -v mode=list -f "$SCRIPT_DIR/spec372-decide.awk" | sed 's/^/OOD /' | tee -a "$LOG"
+  | awk -v mode=list -f "$SCRIPT_DIR/spec372-decide.awk" | sed 's/^/OOD /' | tee -a "$LOG" > "$SYN/ood.txt"
+grep -q '^OOD DEFAULT_CANDIDATE=NONE NEXT=CONDUCTOR_RULING;UNMATCHED ' "$SYN/ood.txt" \
+  || { say "SMOKE FAIL: the out-of-domain input did not reach the catch-all"; CHAIN_RC=5; }
 
 # (c) Hand-derived spot checks, through the FULL stage-2 path (predicates-shaped
 # files -> k.awk stage2 -> decide.awk stage2). Inputs only; the reader derives

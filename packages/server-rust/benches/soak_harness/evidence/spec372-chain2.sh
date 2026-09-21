@@ -48,6 +48,16 @@ else
   OUT="$SCRIPT_DIR"
   if [ -n "${SPEC372_SMOKE_SURVIVORS:-}" ]; then echo "FATAL: SPEC372_SMOKE_SURVIVORS is a smoke-only knob" >&2; exit 2; fi
 fi
+# One spec372 program at a time: every one of them builds into, or reclaims,
+# this carve's target dirs and needs the host to itself, so an overlap could
+# delete a running cell's binary or contaminate a measurement.
+LOCK="${REPO_ROOT}/target/spec372.lock"
+mkdir -p "${REPO_ROOT}/target"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "FATAL: another spec372 program holds ${LOCK} ($(cat "$LOCK/owner" 2>/dev/null || echo unknown))" >&2; exit 2
+fi
+echo "pid=$$ program=$(basename "$0") since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK/owner"
+trap 'rm -rf "$LOCK"' EXIT
 LOG="$OUT/spec372-chain2.log"
 : > "$LOG"
 say() { echo "$*" | tee -a "$LOG"; }
@@ -164,7 +174,7 @@ case "$SURV" in MI|JE+MI) CELLS="$CELLS m2" ;; esac
 A2J_STATE=ran
 if [ "$A2J_DROPPED_FOR_BUDGET" = "yes" ]; then A2J_STATE=budget
 else
-  case "$RANK" in JE|MI) CELLS="$CELLS a2j" ;; *) A2J_STATE=n/a; say "a2j not run: S1_RANK=${RANK}" ;; esac
+  case "$RANK" in JE|MI) CELLS="$CELLS a2j" ;; *) A2J_STATE=no_s1_rank; say "a2j not run: S1_RANK=${RANK}" ;; esac
 fi
 export SPEC372_A2J_FLAVOUR="$RANK"
 say "cells: ${CELLS} (a2j_state=${A2J_STATE}, a2j flavour=${RANK})"
@@ -204,14 +214,26 @@ done
 kfiles=""
 for c in s2 j2 m2; do [ -f "$OUT/spec372-${c}.predicates.txt" ] && case " $CELLS " in *" $c "*) kfiles="$kfiles $OUT/spec372-${c}.predicates.txt" ;; esac; done
 # shellcheck disable=SC2086
-awk -v mode=stage2 -f "$SCRIPT_DIR/spec372-k.awk" "$STAGE1" $kfiles > "$OUT/spec372.k-stage2.txt" 2>&1
-say "k.awk stage2 rc=$?"
+awk -v mode=stage2 -f "$SCRIPT_DIR/spec372-k.awk" "$STAGE1" $kfiles > "$OUT/spec372.k-stage2.txt" 2>> "$LOG"
+KRC=$?
+say "k.awk stage2 rc=${KRC}"
+# Every cell this chain ran must have produced its predicates; one that did not
+# is a named missing input (a STOP), never a cell that "did not run".
+missing=""
+for c in $CELLS; do [ -f "$OUT/spec372-${c}.predicates.txt" ] || missing="$missing spec372-${c}.predicates.txt"; done
 extra=""
 for f in spec372-perf.txt spec372-buildstory.txt; do [ -f "$OUT/$f" ] && extra="$extra $OUT/$f"; done
 # shellcheck disable=SC2086
-awk -v mode=stage2 -v disk_free="$DISK_FREE_GB" -v a2j_state="$A2J_STATE" -v a2j_flavour="$RANK" \
-    -f "$SCRIPT_DIR/spec372-decide.awk" "$STAGE1" $files "$OUT/spec372.k-stage2.txt" $extra > "$OUT/spec372.decision.txt"
-say "decide.awk stage2 rc=$?"
+awk -v mode=stage2 -v disk_free="$DISK_FREE_GB" -v a2j_state="$A2J_STATE" -v a2j_flavour="$RANK" -v missing="${missing# }" \
+    -f "$SCRIPT_DIR/spec372-decide.awk" "$STAGE1" $files "$OUT/spec372.k-stage2.txt" $extra > "$OUT/spec372.decision.txt" 2>> "$LOG"
+DRC=$?
+say "decide.awk stage2 rc=${DRC}"
 cat "$OUT/spec372.decision.txt" >> "$LOG"
+# The decision file is the one artifact the conductor reads: a failed program
+# or a file without its STOP and NEXT lines must not end as a finished chain.
+RC=0
+if [ "$KRC" -ne 0 ] || [ "$DRC" -ne 0 ] || ! grep -qE '^STOP=(TRUE|FALSE)$' "$OUT/spec372.decision.txt" || ! grep -q '^NEXT=' "$OUT/spec372.decision.txt"; then
+  say "FATAL: a Stage-2 program failed or wrote no decision (k rc=${KRC}, decide rc=${DRC})"; RC=4
+fi
 [ "$SMOKE" = "1" ] && say "### SMOKE COMPLETE $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-finish 0
+finish "$RC"
