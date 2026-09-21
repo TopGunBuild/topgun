@@ -505,10 +505,12 @@ async fn main() -> anyhow::Result<()> {
 
         // The compiled defaults ARE the treatment (no MALLOC_CONF is set), so they
         // are recorded once rather than assumed. The decay and retain options have
-        // no safe typed accessor in the ctl crate, so they print `n/a`.
+        // no safe typed accessor in the ctl crate, so they print `n/a`. The ctl
+        // crate's string reads keep the C terminator, and a NUL mid-line makes
+        // line-oriented readers (awk) drop everything after the version.
         eprintln!(
             "je_config version={} arenas_narenas={} opt_narenas={} opt_background_thread={} background_thread={} max_background_threads={} opt_tcache={} opt_tcache_max={} opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a",
-            or_na(version::read()),
+            or_na(version::read().map(|v| v.trim_end_matches('\0'))),
             or_na(arenas::narenas::read()),
             or_na(opt::narenas::read()),
             or_na(opt::background_thread::read()),
