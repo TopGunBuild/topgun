@@ -26,11 +26,24 @@ dhat-heap = ["dep:dhat"]
 # high-throughput regime a full heap profiler would throttle. Mutually exclusive
 # with dhat-heap; never enabled in production builds.
 count-alloc = ["dep:stats_alloc"]
+# Candidate production allocators (off by default), evaluated against the System
+# allocator on the OR-churn soak to decide whether a different allocator stops
+# freed pages being retained as resident memory. Each installs its crate's
+# allocator as the global one; the jemalloc arm also prints jemalloc's own
+# allocated/active/resident/retained stats, which gives a live-bytes reading
+# without the counting wrapper. Mutually exclusive with dhat-heap and
+# count-alloc (an instrument feature wins when both are set) and with each other
+# (jemalloc wins); never enabled in production builds.
+alloc-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
+alloc-mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 topgun-core = { path = "../core-rust", features = ["arrow"] }
 dhat = { version = "0.3", optional = true }
 stats_alloc = { version = "0.1", optional = true }
+tikv-jemallocator = { version = "0.7", features = ["stats"], optional = true }
+tikv-jemalloc-ctl = { version = "0.7", features = ["stats"], optional = true }
+mimalloc = { version = "0.1", default-features = false, optional = true }
 async-trait = "0.1"
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }

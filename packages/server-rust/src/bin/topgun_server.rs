@@ -288,6 +288,7 @@ fn log_boot_summary(
         wal_fsync_policy = ?write_behind_config.wal_fsync_policy,
         wal_watermark_stall_bound_ms = write_behind_config.wal_watermark_stall_bound_ms,
         or_delta_wal = write_behind_config.or_delta_wal,
+        allocator = %ALLOCATOR_NAME,
         policies_loaded,
         rbac_configured,
         "eviction + write-behind + WAL initialized"
@@ -383,6 +384,62 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 #[global_allocator]
 static ALLOC: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
+// Candidate production allocators, each behind its own feature so the same tree
+// can be measured under jemalloc, mimalloc and the System allocator. The
+// predicates extend the instrument ordering above instead of editing it:
+// count-alloc > dhat-heap > alloc-jemalloc > alloc-mimalloc > System, so any
+// feature subset — `--all-features` included — selects exactly one allocator.
+// Both crates implement `GlobalAlloc` on a unit struct inside the crate, so no
+// `unsafe` is needed here.
+#[cfg(all(
+    feature = "alloc-jemalloc",
+    not(any(feature = "count-alloc", feature = "dhat-heap"))
+))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(
+    feature = "alloc-mimalloc",
+    not(any(
+        feature = "count-alloc",
+        feature = "dhat-heap",
+        feature = "alloc-jemalloc"
+    ))
+))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+// The allocator this binary actually runs, declared once per lattice row under
+// the same predicates as the statics. Being a single const, it is also the
+// compile-time proof that the lattice is total: an overlap is a duplicate
+// definition and a gap leaves the use site unresolved, whereas the statics alone
+// would compile with zero allocators declared.
+#[cfg(feature = "count-alloc")]
+const ALLOCATOR_NAME: &str = "count-alloc";
+#[cfg(all(feature = "dhat-heap", not(feature = "count-alloc")))]
+const ALLOCATOR_NAME: &str = "dhat";
+#[cfg(all(
+    feature = "alloc-jemalloc",
+    not(any(feature = "count-alloc", feature = "dhat-heap"))
+))]
+const ALLOCATOR_NAME: &str = "jemalloc";
+#[cfg(all(
+    feature = "alloc-mimalloc",
+    not(any(
+        feature = "count-alloc",
+        feature = "dhat-heap",
+        feature = "alloc-jemalloc"
+    ))
+))]
+const ALLOCATOR_NAME: &str = "mimalloc";
+#[cfg(not(any(
+    feature = "count-alloc",
+    feature = "dhat-heap",
+    feature = "alloc-jemalloc",
+    feature = "alloc-mimalloc"
+)))]
+const ALLOCATOR_NAME: &str = "system";
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
@@ -413,12 +470,81 @@ async fn main() -> anyhow::Result<()> {
             #[allow(clippy::cast_precision_loss)]
             let live_mb = live as f64 / 1_048_576.0;
             eprintln!(
-                "alloc_probe elapsed_s={} live_bytes={} live_mb={:.1} allocs={} deallocs={}",
+                "alloc_probe elapsed_s={} live_bytes={} live_mb={:.1} allocs={} deallocs={} bytes_alloc={} bytes_dealloc={}",
                 start.elapsed().as_secs(),
                 live,
                 live_mb,
                 s.allocations,
-                s.deallocations
+                s.deallocations,
+                s.bytes_allocated,
+                s.bytes_deallocated
+            );
+        }
+    });
+
+    // jemalloc's own accounting, on the same 30 s cadence and stderr transport as
+    // `alloc_probe`. `allocated` is the live heap measured by the allocator itself,
+    // so the jemalloc build carries a reachable-bytes reading without the counting
+    // wrapper, whose own effect on retention is not neutral. Gated on the lattice
+    // row rather than the bare feature: when an instrument allocator wins, jemalloc
+    // is linked but idle and its stats would describe nothing. Every read is a safe
+    // typed accessor; a failed read prints `n/a` instead of stopping the ticker,
+    // because an instrument must never be able to take the server down.
+    #[cfg(all(
+        feature = "alloc-jemalloc",
+        not(any(feature = "count-alloc", feature = "dhat-heap"))
+    ))]
+    tokio::spawn(async move {
+        use tikv_jemalloc_ctl::{
+            arenas, background_thread, epoch, max_background_threads, opt, stats, version,
+        };
+
+        fn or_na<T: std::fmt::Display, E>(read: Result<T, E>) -> String {
+            read.map_or_else(|_| "n/a".to_string(), |v| v.to_string())
+        }
+
+        // The compiled defaults ARE the treatment (no MALLOC_CONF is set), so they
+        // are recorded once rather than assumed. The decay and retain options have
+        // no safe typed accessor in the ctl crate, so they print `n/a`.
+        eprintln!(
+            "je_config version={} arenas_narenas={} opt_narenas={} opt_background_thread={} background_thread={} max_background_threads={} opt_tcache={} opt_tcache_max={} opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a",
+            or_na(version::read()),
+            or_na(arenas::narenas::read()),
+            or_na(opt::narenas::read()),
+            or_na(opt::background_thread::read()),
+            or_na(background_thread::read()),
+            or_na(max_background_threads::read()),
+            or_na(opt::tcache::read()),
+            or_na(opt::tcache_max::read()),
+        );
+
+        let start = std::time::Instant::now();
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut seq: u64 = 0;
+        loop {
+            tick.tick().await;
+            seq += 1;
+            // Stats are cached and refresh only on an epoch advance; if the advance
+            // fails, the cached values are stale and printing them would pass an old
+            // reading off as a new one.
+            let fresh = epoch::advance().is_ok();
+            let field = |read: Result<usize, tikv_jemalloc_ctl::Error>| {
+                if fresh {
+                    or_na(read)
+                } else {
+                    "n/a".to_string()
+                }
+            };
+            eprintln!(
+                "je_probe elapsed_s={} allocated={} active={} resident={} retained={} mapped={} metadata={} seq={}",
+                start.elapsed().as_secs(),
+                field(stats::allocated::read()),
+                field(stats::active::read()),
+                field(stats::resident::read()),
+                field(stats::retained::read()),
+                field(stats::mapped::read()),
+                field(stats::metadata::read()),
+                seq
             );
         }
     });
@@ -2165,6 +2291,20 @@ mod tests {
         assert!(
             rendered.contains("or_delta_wal=false"),
             "the operator-facing boot line must carry the EFFECTIVE OR delta-framing switch; \
+             captured: {rendered}"
+        );
+        // Only the default build has a single right answer here; under an
+        // allocator feature the constant legitimately names another allocator. A
+        // field wired to the wrong constant still fails in the build CI tests.
+        #[cfg(not(any(
+            feature = "count-alloc",
+            feature = "dhat-heap",
+            feature = "alloc-jemalloc",
+            feature = "alloc-mimalloc"
+        )))]
+        assert!(
+            rendered.contains("allocator=system"),
+            "the operator-facing boot line must name the allocator the binary runs; \
              captured: {rendered}"
         );
     }
