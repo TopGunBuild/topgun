@@ -272,3 +272,42 @@ The parent programs `spec349c2-fit.awk`, `spec366-p5.awk`, `spec366-p67.awk`, `s
 `spec371-memdiag.sh`, `spec371-chain.sh`, `spec371-predicates.sh` and `spec371-decide.awk` are not edited.
 
 ## APPEND-ONLY BELOW
+
+## STAGE-1 FROZEN READINGS (computed by spec372-k.awk at M2)
+
+Computed over the Stage-1 artifacts committed at D1 = `b38d3a51` (M = `e92fa977`), from the repo root,
+under `LC_ALL=C`, by the program bytes frozen at M:
+
+```
+E=packages/server-rust/benches/soak_harness/evidence
+awk -v mode=stage1 -f $E/spec372-k.awk $E/spec372-{s1a,j1a,m1a,k1,j1b,m1b,s1b}.predicates.txt $E/spec372-k1.csv
+```
+
+Output, verbatim (byte-identical to the chain-1 artifact `spec372.k-stage1.txt`; `decide.awk stage1`,
+re-run over the same D1 inputs, reproduces `spec372.stage1.txt` byte-for-byte and prints the same
+`S1_SURVIVORS`):
+
+```
+S1_SURVIVORS=JE+MI
+S1_RANK=JE
+CHURN_RATIO=0.8721 points=15 window_s=480-900
+CHURN_RATIO_DRIFT=0.8185
+K_PROVISIONAL=FALSE
+T_DECAY_UPPER_JE=8.7213
+T_DECAY_UPPER_MI=0.8721
+CV_JE=0.0913
+CV_MI=0.0395
+EST_AGREE_900_j1a=1.2385
+EST_AGREE_900_j1b=1.1821
+```
+
+Program sha256 re-printed at M2 (`ORDER=OK` clause 4; identical to the list in section 1):
+
+- `814c7a3b60dffaaf232df737d7d04ae84ead9eb4bdbe54a1552c749cb674cf6c` `packages/server-rust/benches/soak_harness/evidence/spec372-allocdiag.sh`
+- `c2bf391dc470df6a6d9e134de16752337b915f56d027bc3171c29ae335302d8e` `packages/server-rust/benches/soak_harness/evidence/spec372-chain1.sh`
+- `aa98986cb1b51e1380c457f70c60dc632304637a299a5b7fcc8448d32d4b1764` `packages/server-rust/benches/soak_harness/evidence/spec372-chain2.sh`
+- `baf0bce7dd6c29751fb62f525153b631ec9eeb37f0ba858aed7174fd978b1c91` `packages/server-rust/benches/soak_harness/evidence/spec372-predicates.sh`
+- `bada887b1b91ba3b4ee9c650e2ac6cf3368ca2815de1380f92196e05aa34aa3f` `packages/server-rust/benches/soak_harness/evidence/spec372-k.awk`
+- `606e36f23895d87c3e33ad40cdc96bbe6ddb23789b45a21f9bb8d63be0b1fc0e` `packages/server-rust/benches/soak_harness/evidence/spec372-decide.awk`
+- `d58fd6fa667fa04879340dabae64ab9486e1d4d5672e9afcfc488c7c7c10a81d` `packages/server-rust/benches/soak_harness/evidence/spec372-perf.sh`
+- `722513c725167c211ddad58981ef7b41beb1939d0841291be710b74f39d6a0d6` `packages/server-rust/benches/soak_harness/evidence/spec372-buildstory.sh`
