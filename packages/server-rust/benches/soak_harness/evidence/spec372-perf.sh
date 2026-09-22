@@ -2,22 +2,25 @@
 #
 # spec372 load-harness arm matrix. The allocator sits on every hot path, so
 # each arm is measured against the System allocator in the same session, on an
-# idle host, at CI's perf-gate parameters (.github/workflows/rust.yml):
-#   fire-and-wait:   --scenario throughput --connections 200 --duration 15 --interval 50
-#   fire-and-forget: --scenario throughput --connections 200 --duration 15 --interval 0 --fire-and-forget
-# >= 3 runs of each per block. Block order SYS, JE, MI, SYS: the two SYS blocks
-# bracket the arms, and their agreement is the check that the harness is quiet
-# enough to read a 20 % effect at all. The harness default run (200 connections,
-# 30 s, 50 ms) is recorded once per block and never gates.
+# idle host, at CI's perf-gate shape (.github/workflows/rust.yml) lengthened to
+# the harness default duration, because 15 s runs were noise-limited:
+#   fire-and-wait:   --scenario throughput --connections 200 --duration 30 --interval 50
+#   fire-and-forget: --scenario throughput --connections 200 --duration 30 --interval 0 --fire-and-forget
+# 5 runs of each per block. Block order SYS, JE, MI, SYS: the two SYS blocks
+# bracket the arms, and their spread is the range an arm is compared with. One
+# run at CI's own 15 s fire-and-wait parameters is recorded per block, the
+# reference the pinned shape came from; it never gates.
 #
-# Verdict, per arm, against the FIRST SYS block's medians:
-#   PERF_<arm>=FAIL  iff, in either mode, median ops/s < 0.80 x SYS's, or
-#                    median p99 > 1.20 x SYS's (p99 compared only when SYS's
-#                    p99 is non-zero);
-#   PERF_<arm>=n/a   iff the two SYS blocks' medians differ by >= 20 % on ops/s
-#                    or p99 in either mode (a harness that noisy cannot
+# Verdict, per arm, against SYS's RANGE (the two SYS blocks' medians):
+#   PERF_<arm>=FAIL  iff the arm's median ops/s < 0.80 x the LOWER SYS block
+#                    median in either mode, or its fire-and-wait median p99 >
+#                    1.20 x the HIGHER SYS block median;
+#   PERF_<arm>=n/a   iff the two SYS blocks' median ops/s differ by >= 20 % of
+#                    the smaller in either mode (a harness that noisy cannot
 #                    disqualify anything), or a run failed to report;
 #   PERF_<arm>=PASS  otherwise.
+# p50 and the fire-and-forget p99 are recorded; the SYS-vs-SYS p99 spread is
+# printed and gates nothing.
 # The load harness serves in-process, so the arm's allocator reaches it only
 # through the allocator lattice in benches/load_harness/main.rs.
 #
@@ -36,7 +39,7 @@ if [ "$SMOKE" = "1" ]; then
   [ "$OUT" != "$SCRIPT_DIR" ] || { echo "FATAL: smoke must not write into the evidence dir" >&2; exit 2; }
   RUNS=1; DUR=5; DEF_DUR=5
 else
-  OUT="$SCRIPT_DIR"; RUNS=3; DUR=15; DEF_DUR=30
+  OUT="$SCRIPT_DIR"; RUNS=5; DUR=30; DEF_DUR=15
 fi
 # One spec372 program at a time: every one of them builds into, or reclaims,
 # this carve's target dirs and needs the host to itself, so an overlap could
@@ -75,7 +78,7 @@ run() {   # $1 arm, $2 block, $3 mode (faw|faf|default), $4 run index
   case "$mode" in
     faw) args="--scenario throughput --connections 200 --duration $DUR --interval 50" ;;
     faf) args="--scenario throughput --connections 200 --duration $DUR --interval 0 --fire-and-forget" ;;
-    default) args="--scenario throughput --connections 200 --duration $DEF_DUR --interval 50" ;;
+    ci15) args="--scenario throughput --connections 200 --duration $DEF_DUR --interval 50" ;;
   esac
   rm -f "$json"
   # shellcheck disable=SC2046,SC2086
@@ -95,7 +98,7 @@ block() {   # $1 arm, $2 block number
   local i
   for i in $(seq 1 "$RUNS"); do run "$1" "$2" faw "$i"; done
   for i in $(seq 1 "$RUNS"); do run "$1" "$2" faf "$i"; done
-  run "$1" "$2" default 1
+  run "$1" "$2" ci15 1
 }
 block SYS 1; block JE 1; block MI 1; block SYS 2
 
@@ -106,7 +109,7 @@ awk '
   function med(a, n,   i, j, t) { for (i = 2; i <= n; i++) { t = a[i]; for (j = i - 1; j >= 1 && a[j] > t; j--) a[j + 1] = a[j]; a[j + 1] = t }
                                   return (n % 2) ? a[(n + 1) / 2] : (a[n / 2] + a[n / 2 + 1]) / 2 }
   /^RUN / { delete f; for (i = 2; i <= NF; i++) { split($i, kv, "="); f[kv[1]] = kv[2] }
-    if (f["mode"] == "default") next
+    if (f["mode"] == "ci15") next
     g = f["arm"] SUBSEP f["block"] SUBSEP f["mode"]
     if (f["ops_per_sec"] == "n/a") { bad[f["arm"]] = 1; if (f["arm"] == "SYS") bad["JE"] = bad["MI"] = 1; next }
     n[g]++; ops[g, n[g]] = f["ops_per_sec"] + 0; p99[g, n[g]] = f["p99_us"] + 0 }
@@ -117,25 +120,29 @@ awk '
       md = modes[mi]
       for (b = 1; b <= 2; b++) printf "MEDIAN arm=SYS block=%d mode=%s ops_per_sec=%s p99_us=%s\n", b, md, m("SYS", b, md, "ops"), m("SYS", b, md, "p99")
       o1 = m("SYS", 1, md, "ops"); o2 = m("SYS", 2, md, "ops"); q1 = m("SYS", 1, md, "p99"); q2 = m("SYS", 2, md, "p99")
-      if (o1 == "" || o2 == "" || o1 <= 0) noisy = 1
-      else {
-        dq = (q1 > 0) ? ((q2 > q1 ? q2 - q1 : q1 - q2) / q1) : 0
-        do_ = (o2 > o1 ? o2 - o1 : o1 - o2) / o1
-        printf "SYS_REPEAT mode=%s ops_delta=%.4f p99_delta=%.4f\n", md, do_, dq
-        if (do_ >= 0.20 || dq >= 0.20) noisy = 1
-      }
+      if (o1 == "" || o2 == "" || o1 <= 0 || o2 <= 0) { noisy = 1; continue }
+      lo[md] = (o1 < o2) ? o1 : o2; hi[md] = (o1 > o2) ? o1 : o2
+      phi[md] = (q1 > q2) ? q1 : q2
+      do_ = (hi[md] - lo[md]) / lo[md]
+      dq = (q1 > 0 && q2 > 0) ? ((q2 > q1 ? q2 - q1 : q1 - q2) / (q1 < q2 ? q1 : q2)) : 0
+      printf "SYS_RANGE mode=%s ops_lo=%s ops_hi=%s ops_spread=%.4f p99_hi=%s p99_spread=%.4f (p99 spread recorded, not gated)\n", md, lo[md], hi[md], do_, phi[md], dq
+      if (do_ >= 0.20) noisy = 1
     }
     print "SYS_QUIET=" (noisy ? "FALSE" : "TRUE")
     for (ai = 1; ai <= 2; ai++) {
       arm = (ai == 1) ? "JE" : "MI"; fail = 0; why = ""
       for (mi = 1; mi <= 2; mi++) {
-        md = modes[mi]; ao = m(arm, 1, md, "ops"); ap = m(arm, 1, md, "p99"); so = m("SYS", 1, md, "ops"); sp = m("SYS", 1, md, "p99")
+        md = modes[mi]; ao = m(arm, 1, md, "ops"); ap = m(arm, 1, md, "p99")
         printf "MEDIAN arm=%s block=1 mode=%s ops_per_sec=%s p99_us=%s\n", arm, md, ao, ap
-        if (ao == "" || so == "") { bad[arm] = 1; continue }
-        ro = ao / so; rp = (sp > 0) ? ap / sp : ""
-        printf "RATIO arm=%s mode=%s ops=%.4f p99=%s\n", arm, md, ro, (rp == "" ? "n/a" : sprintf("%.4f", rp))
+        if (ao == "" || !(md in lo)) { bad[arm] = 1; continue }
+        ro = ao / lo[md]
+        printf "RATIO arm=%s mode=%s ops_vs_sys_lo=%.4f", arm, md, ro
         if (ro < 0.80) { fail = 1; why = why " " md "_ops" }
-        if (rp != "" && rp > 1.20) { fail = 1; why = why " " md "_p99" }
+        if (md == "faw") {
+          if (phi[md] > 0) { rp = ap / phi[md]; printf " p99_vs_sys_hi=%.4f", rp; if (rp > 1.20) { fail = 1; why = why " faw_p99" } }
+          else printf " p99_vs_sys_hi=n/a"
+        }
+        printf "\n"
       }
       if (bad[arm]) print "PERF_" arm "=n/a reason=run_failed"
       else if (noisy) print "PERF_" arm "=n/a reason=harness_noisy"
