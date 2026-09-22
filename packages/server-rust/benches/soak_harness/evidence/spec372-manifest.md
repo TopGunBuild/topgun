@@ -158,12 +158,16 @@ chain's reclaim (smoke read 97 and 84 GB).
   `bytes_alloc`/`bytes_dealloc` numeric). `PJ`: the harness echo reads `false` on `a2j` and `true`
   elsewhere — the harness always echoes (`process.rs:318-320`, default `true`), so "absent" in R6
   means the env is unset.
-- **PERF_<arm>** (`spec372-perf.sh`, CI's perf-gate parameters, 3 runs per mode, blocks SYS → JE →
-  MI → SYS): `FAIL` iff, in either mode, the median ops/s < 0.80 × the FIRST SYS block's or the
-  median p99 > 1.20 × SYS's (p99 compared only where SYS's p99 is non-zero; fire-and-forget reports
-  p99 = 0); `n/a reason=harness_noisy` iff the two SYS blocks' medians differ by ≥ 20 % on ops/s or
-  p99 in either mode (Validation item 5: a harness that noisy cannot disqualify); `n/a
-  reason=run_failed` iff a run reported no numeric field; `PASS` otherwise.
+- **PERF_<arm>** (`spec372-perf.sh`; conductor rulings v5 R2): CI's perf-gate shape lengthened to
+  the harness default duration — `--scenario throughput --connections 200 --duration 30`, `--interval
+  50` (fire-and-wait) and `--interval 0 --fire-and-forget` — **5 runs per mode per block**, blocks SYS →
+  JE → MI → SYS; one run per block at CI's own 15 s fire-and-wait parameters is recorded as the
+  reference the shape came from, and never gates. Against SYS's RANGE (the two SYS block medians):
+  `FAIL` iff the arm's median ops/s `< 0.80 ×` the LOWER SYS block median in either mode, OR its
+  fire-and-wait median p99 `> 1.20 ×` the HIGHER SYS block median; `n/a reason=harness_noisy` iff the
+  two SYS blocks' median ops/s differ by `≥ 20 %` of the smaller in either mode (ops/s only — the
+  SYS-vs-SYS p99 spread is printed, not gated); `n/a reason=run_failed` iff a run reported no numeric
+  field; `PASS` otherwise. p50 and the fire-and-forget p99 are recorded.
 - **BUILD_<arm>** (`spec372-buildstory.sh`): `OK` iff items 1, 2, 3 build and items 4, 5 exit 0;
   `FAIL` iff item 1 fails; `PARTIAL` otherwise. Docker (item 3) builds for the host's native
   platform (linux/aarch64 here) from a scratch context holding exactly what the Dockerfile COPYs:
@@ -246,6 +250,14 @@ re-derivable by re-running the frozen program); `spec372-builds2.txt` and `spec3
 (chain 2's own build record, so re-running Stage-1 predicates after chain 2 still matches chain 1's
 shas); `spec372-<cell>.ampfp.csv` is in the Delta.
 
+### The §1 prefix sha256 — the command (conductor rulings v5 R1)
+`ORDER=OK` clause 2 compares this value at M, M2, D1, D2 and HEAD; every STOP quotes it, computed at
+each named commit by exactly this command (the marker line is included in the hash):
+
+```
+git show <commit>:packages/server-rust/benches/soak_harness/evidence/spec372-manifest.md | sed '/^## APPEND-ONLY BELOW/q' | shasum -a 256
+```
+
 ### Programs frozen at M (sha256; `ORDER=OK` clauses 3–4 re-check these bytes at M2, D1, D2, HEAD)
 - `814c7a3b60dffaaf232df737d7d04ae84ead9eb4bdbe54a1552c749cb674cf6c` `packages/server-rust/benches/soak_harness/evidence/spec372-allocdiag.sh`
 - `c2bf391dc470df6a6d9e134de16752337b915f56d027bc3171c29ae335302d8e` `packages/server-rust/benches/soak_harness/evidence/spec372-chain1.sh`
@@ -253,7 +265,7 @@ shas); `spec372-<cell>.ampfp.csv` is in the Delta.
 - `baf0bce7dd6c29751fb62f525153b631ec9eeb37f0ba858aed7174fd978b1c91` `packages/server-rust/benches/soak_harness/evidence/spec372-predicates.sh`
 - `bada887b1b91ba3b4ee9c650e2ac6cf3368ca2815de1380f92196e05aa34aa3f` `packages/server-rust/benches/soak_harness/evidence/spec372-k.awk`
 - `606e36f23895d87c3e33ad40cdc96bbe6ddb23789b45a21f9bb8d63be0b1fc0e` `packages/server-rust/benches/soak_harness/evidence/spec372-decide.awk`
-- `98660dfde3ce9c6eecb3b20e6c2c277818e4e511c08475986d2f743adb6a0859` `packages/server-rust/benches/soak_harness/evidence/spec372-perf.sh`
+- `d58fd6fa667fa04879340dabae64ab9486e1d4d5672e9afcfc488c7c7c10a81d` `packages/server-rust/benches/soak_harness/evidence/spec372-perf.sh`
 - `722513c725167c211ddad58981ef7b41beb1939d0841291be710b74f39d6a0d6` `packages/server-rust/benches/soak_harness/evidence/spec372-buildstory.sh`
 
 The parent programs `spec349c2-fit.awk`, `spec366-p5.awk`, `spec366-p67.awk`, `spec370-plateau4h.sh`,
