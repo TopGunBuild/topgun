@@ -1,0 +1,101 @@
+== STOP: PV ==
+PV=TRUE server_sha256=fa60f730ad3dca92afaf5684942cd451a08c9672529034f15ad2451861c36dec harness_sha256=ed0769d00ec582a033f152fa77aa74798df338440cb5ed16a4a773ec09fbe74d flavour=JE
+== STOP: PR ==
+PR-crashes=TRUE crashes=0
+PR-class=TRUE
+== STOP: P5 / P6 / P7 ==
+P5=TRUE
+P5-observed: removal_rows=31 settlement_rows=31 unsettled=none
+P5-zero-return: none observed
+DECISION_SCRAPE=2026-09-22T13:02:06Z.txt
+P6=TRUE removed_refs_observed_total=31000 considered_total=31000 gap=0
+P7=TRUE restored_cancelled_total=0
+windows=31 settlement_rows=31 zero_return_removal_rows=0 scrapes=16
+== STOP: PE / PA ==
+PE=TRUE rows_with_footprint=16 rows=16 N=16 need=15
+PA=TRUE wellformed_lines=31 lines=31 need=28
+== STOP: PJ ==
+PJ=TRUE echoes=1 value=true
+PJ-child=n/a reason=filtered
+== STOP: PC ==
+PC=TRUE live=64575 live_tag_bytes=2195550
+== STOP: PM1 ==
+PM1=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=900 need_ge=780
+== recorded: ops ==
+OPS_PER_S=182.742
+WRITE_ERRORS=0
+TOTAL_WRITES=164468 DURATION_ACTUAL=900
+OPS_AT_900=n/a reason=no_checkpoint_near_900
+== recorded: host state before the cell (the chain writes it at the head of the runner console) ==
+HOST=load_1m=6.70 load_5m=6.78 load_15m=7.10 memory_free=77% therm=no_warning_recorded
+== recorded: je_config ==
+JE_CONFIG=je_config version=5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8 arenas_narenas=41 opt_narenas=40 opt_background_thread=false background_thread=n/a max_background_threads=n/a opt_tcache=true opt_tcache_max=32768 opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a
+== readings: fits (slopes per hour; on amp series the unit is AMP per hour) ==
+FP_slope=545.567143
+FP_slope_se=44.527373
+FP_slope_n=8
+FP_slope_r2=0.961568
+S_slope=545.567143
+S_slope_se=44.527373
+S_slope_n=8
+S_slope_r2=0.961568
+TREND=-0.072324
+TREND_se=NA
+TREND_n=2
+TREND_r2=1.000000
+TREND3=FIT_ERROR
+TREND_NATIVE=0.701989
+TREND_NATIVE_se=0.682647
+TREND_NATIVE_n=8
+TREND_NATIVE_r2=0.149837
+TREND_dropped=0
+TREND_points_used=3
+== readings: end levels (last row carrying a footprint) ==
+END_elapsed=900
+FP_end=165.954
+S_end=165.954
+RECLAIM_end=0.000
+RECLAIM_RATIO_end=0.000000
+== readings: census points (TERMINAL, and the deciding point = the last used one) ==
+TERM_src=TERMINAL
+TERM_t=900.2
+TERM_join_lag_s=0.2
+TERM_live=64575
+TERM_reach_bytes=74661757
+TERM_fp_mb=165.954
+TERM_s_mb=165.954
+TERM_redb_mb=16.574
+TERM_AMP_FP=2.330716
+TERM_AMP_S=2.330716
+TERM_A0_share=0.233698
+TERM_R_redb=0.232771
+TERM_je_allocated=88258032
+TERM_je_metadata=8201928
+TERM_AMP_JE=2.068187
+TERM_DIRTY_SHARE=0.213371
+TERM_FRAG_SHARE=0.761885
+TERM_R_meta=0.109854
+TERM_EST_AGREE=1.182105
+TERM_UNMODELLED_MB=12.966
+TERM_UNMODELLED_SHARE=0.182105
+DECIDE_src=TERMINAL
+DECIDE_t=900.2
+DECIDE_join_lag_s=0.2
+DECIDE_live=64575
+DECIDE_reach_bytes=74661757
+DECIDE_fp_mb=165.954
+DECIDE_s_mb=165.954
+DECIDE_redb_mb=16.574
+DECIDE_AMP_FP=2.330716
+DECIDE_AMP_S=2.330716
+DECIDE_A0_share=0.233698
+DECIDE_R_redb=0.232771
+DECIDE_je_allocated=88258032
+DECIDE_je_metadata=8201928
+DECIDE_AMP_JE=2.068187
+DECIDE_DIRTY_SHARE=0.213371
+DECIDE_FRAG_SHARE=0.761885
+DECIDE_R_meta=0.109854
+DECIDE_EST_AGREE=1.182105
+DECIDE_UNMODELLED_MB=12.966
+DECIDE_UNMODELLED_SHARE=0.182105

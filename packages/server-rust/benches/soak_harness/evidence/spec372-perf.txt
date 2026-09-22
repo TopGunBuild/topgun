@@ -1,0 +1,68 @@
+perf start: 2026-09-22T10:45:29Z smoke=0 HEAD=e92fa9774e66457336b278d065f5ff32aa160353 runs=5 duration=30
+host: 13:45  up 15:51, 1 user, load averages: 3.76 6.20 7.87
+baseline.json: {"fire_and_wait":{"min_ops_per_sec":30000,"max_p50_us":5000},"fire_and_forget":{"min_ops_per_sec":380000,"max_p50_us":1000000},
+build arm=SYS rc=0 target=/Users/koristuvac/Projects/topgun/topgun/target/spec372-perf-sys
+build arm=JE rc=0 target=/Users/koristuvac/Projects/topgun/topgun/target/spec372-perf-je
+build arm=MI rc=0 target=/Users/koristuvac/Projects/topgun/topgun/target/spec372-perf-mi
+RUN arm=SYS block=1 mode=faw run=1 ops_per_sec=37964 p50_us=1356 p99_us=7467 total_ops=1138940 rc=0
+RUN arm=SYS block=1 mode=faw run=2 ops_per_sec=37991 p50_us=1353 p99_us=6455 total_ops=1139750 rc=0
+RUN arm=SYS block=1 mode=faw run=3 ops_per_sec=37918 p50_us=1421 p99_us=7091 total_ops=1137540 rc=0
+RUN arm=SYS block=1 mode=faw run=4 ops_per_sec=37970 p50_us=1387 p99_us=6431 total_ops=1139100 rc=0
+RUN arm=SYS block=1 mode=faw run=5 ops_per_sec=38135 p50_us=1205 p99_us=5335 total_ops=1144050 rc=0
+RUN arm=SYS block=1 mode=faf run=1 ops_per_sec=510918 p50_us=0 p99_us=0 total_ops=15327550 rc=0
+RUN arm=SYS block=1 mode=faf run=2 ops_per_sec=516359 p50_us=0 p99_us=0 total_ops=15490780 rc=0
+RUN arm=SYS block=1 mode=faf run=3 ops_per_sec=511523 p50_us=0 p99_us=0 total_ops=15345710 rc=0
+RUN arm=SYS block=1 mode=faf run=4 ops_per_sec=514842 p50_us=0 p99_us=0 total_ops=15445270 rc=0
+RUN arm=SYS block=1 mode=faf run=5 ops_per_sec=519269 p50_us=0 p99_us=0 total_ops=15578070 rc=0
+RUN arm=SYS block=1 mode=ci15 run=1 ops_per_sec=34478 p50_us=6039 p99_us=18527 total_ops=517170 rc=0
+RUN arm=JE block=1 mode=faw run=1 ops_per_sec=35261 p50_us=4495 p99_us=17887 total_ops=1057830 rc=0
+RUN arm=JE block=1 mode=faw run=2 ops_per_sec=35473 p50_us=4103 p99_us=17391 total_ops=1064190 rc=0
+RUN arm=JE block=1 mode=faw run=3 ops_per_sec=35359 p50_us=4383 p99_us=16975 total_ops=1060780 rc=0
+RUN arm=JE block=1 mode=faw run=4 ops_per_sec=35198 p50_us=4739 p99_us=16895 total_ops=1055960 rc=0
+RUN arm=JE block=1 mode=faw run=5 ops_per_sec=35568 p50_us=3245 p99_us=17087 total_ops=1067060 rc=0
+RUN arm=JE block=1 mode=faf run=1 ops_per_sec=516177 p50_us=0 p99_us=0 total_ops=15485320 rc=0
+RUN arm=JE block=1 mode=faf run=2 ops_per_sec=528993 p50_us=0 p99_us=0 total_ops=15869810 rc=0
+RUN arm=JE block=1 mode=faf run=3 ops_per_sec=485123 p50_us=0 p99_us=0 total_ops=14553710 rc=0
+RUN arm=JE block=1 mode=faf run=4 ops_per_sec=525615 p50_us=0 p99_us=0 total_ops=15768460 rc=0
+RUN arm=JE block=1 mode=faf run=5 ops_per_sec=511896 p50_us=0 p99_us=0 total_ops=15356900 rc=0
+RUN arm=JE block=1 mode=ci15 run=1 ops_per_sec=37166 p50_us=1574 p99_us=14447 total_ops=557500 rc=0
+RUN arm=MI block=1 mode=faw run=1 ops_per_sec=37853 p50_us=1351 p99_us=9543 total_ops=1135600 rc=0
+RUN arm=MI block=1 mode=faw run=2 ops_per_sec=36095 p50_us=2459 p99_us=17183 total_ops=1082870 rc=0
+RUN arm=MI block=1 mode=faw run=3 ops_per_sec=36987 p50_us=1671 p99_us=14207 total_ops=1109630 rc=0
+RUN arm=MI block=1 mode=faw run=4 ops_per_sec=35862 p50_us=3325 p99_us=17807 total_ops=1075870 rc=0
+RUN arm=MI block=1 mode=faw run=5 ops_per_sec=36492 p50_us=2219 p99_us=15399 total_ops=1094770 rc=0
+RUN arm=MI block=1 mode=faf run=1 ops_per_sec=529869 p50_us=0 p99_us=0 total_ops=15896090 rc=0
+RUN arm=MI block=1 mode=faf run=2 ops_per_sec=514724 p50_us=0 p99_us=0 total_ops=15441740 rc=0
+RUN arm=MI block=1 mode=faf run=3 ops_per_sec=516518 p50_us=0 p99_us=0 total_ops=15495560 rc=0
+RUN arm=MI block=1 mode=faf run=4 ops_per_sec=521523 p50_us=0 p99_us=0 total_ops=15645690 rc=0
+RUN arm=MI block=1 mode=faf run=5 ops_per_sec=500296 p50_us=0 p99_us=0 total_ops=15008900 rc=0
+RUN arm=MI block=1 mode=ci15 run=1 ops_per_sec=37830 p50_us=1440 p99_us=8083 total_ops=567460 rc=0
+RUN arm=SYS block=2 mode=faw run=1 ops_per_sec=38013 p50_us=1365 p99_us=6067 total_ops=1140410 rc=0
+RUN arm=SYS block=2 mode=faw run=2 ops_per_sec=38078 p50_us=1290 p99_us=5007 total_ops=1142340 rc=0
+RUN arm=SYS block=2 mode=faw run=3 ops_per_sec=38087 p50_us=1258 p99_us=5839 total_ops=1142610 rc=0
+RUN arm=SYS block=2 mode=faw run=4 ops_per_sec=38103 p50_us=1278 p99_us=4999 total_ops=1143090 rc=0
+RUN arm=SYS block=2 mode=faw run=5 ops_per_sec=36556 p50_us=2008 p99_us=16495 total_ops=1096690 rc=0
+RUN arm=SYS block=2 mode=faf run=1 ops_per_sec=517407 p50_us=0 p99_us=0 total_ops=15522210 rc=0
+RUN arm=SYS block=2 mode=faf run=2 ops_per_sec=521944 p50_us=0 p99_us=0 total_ops=15658330 rc=0
+RUN arm=SYS block=2 mode=faf run=3 ops_per_sec=518851 p50_us=0 p99_us=0 total_ops=15565550 rc=0
+RUN arm=SYS block=2 mode=faf run=4 ops_per_sec=519107 p50_us=0 p99_us=0 total_ops=15573230 rc=0
+RUN arm=SYS block=2 mode=faf run=5 ops_per_sec=524125 p50_us=0 p99_us=0 total_ops=15723760 rc=0
+RUN arm=SYS block=2 mode=ci15 run=1 ops_per_sec=37711 p50_us=1617 p99_us=8559 total_ops=565670 rc=0
+MEDIAN arm=SYS block=1 mode=faw ops_per_sec=37970 p99_us=6455
+MEDIAN arm=SYS block=2 mode=faw ops_per_sec=38078 p99_us=5839
+SYS_RANGE mode=faw ops_lo=37970 ops_hi=38078 ops_spread=0.0028 p99_hi=6455 p99_spread=0.1055 (p99 spread recorded, not gated)
+MEDIAN arm=SYS block=1 mode=faf ops_per_sec=514842 p99_us=0
+MEDIAN arm=SYS block=2 mode=faf ops_per_sec=519107 p99_us=0
+SYS_RANGE mode=faf ops_lo=514842 ops_hi=519107 ops_spread=0.0083 p99_hi=0 p99_spread=0.0000 (p99 spread recorded, not gated)
+SYS_QUIET=TRUE
+MEDIAN arm=JE block=1 mode=faw ops_per_sec=35359 p99_us=17087
+RATIO arm=JE mode=faw ops_vs_sys_lo=0.9312 p99_vs_sys_hi=2.6471
+MEDIAN arm=JE block=1 mode=faf ops_per_sec=516177 p99_us=0
+RATIO arm=JE mode=faf ops_vs_sys_lo=1.0026
+PERF_JE=FAIL breached=faw_p99
+MEDIAN arm=MI block=1 mode=faw ops_per_sec=36492 p99_us=15399
+RATIO arm=MI mode=faw ops_vs_sys_lo=0.9611 p99_vs_sys_hi=2.3856
+MEDIAN arm=MI block=1 mode=faf ops_per_sec=516518 p99_us=0
+RATIO arm=MI mode=faf ops_vs_sys_lo=1.0033
+PERF_MI=FAIL breached=faw_p99
+perf end: 2026-09-22T11:25:21Z

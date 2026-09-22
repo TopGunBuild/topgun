@@ -1,0 +1,93 @@
+STOP=FALSE
+CELL_s1a=FP_end=74.782 S_end=460.813 RECLAIM_end=386.031 FP_slope=160.322857 S_slope=2327.469286 AMP_FP_TERM=1.105439 AMP_S_TERM=6.811811 OPS_PER_S=170.494 join_lag_s=0.4
+HOST_s1a=load_1m=1.98 load_5m=3.80 load_15m=5.26 memory_free=77% therm=no_warning_recorded
+CELL_j1a=FP_end=180.204 S_end=180.204 RECLAIM_end=0.000 FP_slope=594.197857 S_slope=594.197857 AMP_FP_TERM=2.652540 AMP_S_TERM=2.652540 OPS_PER_S=171.589 join_lag_s=0.4
+HOST_j1a=load_1m=15.27 load_5m=10.44 load_15m=7.90 memory_free=77% therm=no_warning_recorded
+CELL_m1a=FP_end=252.345 S_end=275.814 RECLAIM_end=23.469 FP_slope=855.842857 S_slope=884.337857 AMP_FP_TERM=3.692204 AMP_S_TERM=4.035592 OPS_PER_S=172.943 join_lag_s=0.3
+HOST_m1a=load_1m=6.08 load_5m=6.78 load_15m=7.18 memory_free=79% therm=no_warning_recorded
+CELL_k1=FP_end=51.922 S_end=176.719 RECLAIM_end=124.797 FP_slope=-17.801429 S_slope=382.566429 AMP_FP_TERM=0.732392 AMP_S_TERM=2.492731 OPS_PER_S=181.821 join_lag_s=0.2
+HOST_k1=load_1m=10.85 load_5m=9.46 load_15m=8.35 memory_free=79% therm=no_warning_recorded
+CELL_j1b=FP_end=165.954 S_end=165.954 RECLAIM_end=0.000 FP_slope=545.567143 S_slope=545.567143 AMP_FP_TERM=2.330716 AMP_S_TERM=2.330716 OPS_PER_S=182.742 join_lag_s=0.2
+HOST_j1b=load_1m=6.70 load_5m=6.78 load_15m=7.10 memory_free=77% therm=no_warning_recorded
+CELL_m1b=FP_end=272.641 S_end=300.766 RECLAIM_end=28.125 FP_slope=809.932857 S_slope=1073.208571 AMP_FP_TERM=3.904593 AMP_S_TERM=4.307381 OPS_PER_S=178.390 join_lag_s=0.4
+HOST_m1b=load_1m=4.43 load_5m=5.31 load_15m=6.18 memory_free=78% therm=no_warning_recorded
+CELL_s1b=FP_end=84.501 S_end=545.563 RECLAIM_end=461.062 FP_slope=-206.046429 S_slope=3205.222857 AMP_FP_TERM=1.247969 AMP_S_TERM=8.057253 OPS_PER_S=171.697 join_lag_s=0.4
+HOST_s1b=load_1m=10.57 load_5m=11.17 load_15m=9.50 memory_free=78% therm=no_warning_recorded
+S1_VERDICT_JE=SURVIVE worst_SYS_FP_end=84.501 worst_SYS_S_end=545.563
+S1_VERDICT_MI=SURVIVE worst_SYS_FP_end=84.501 worst_SYS_S_end=545.563
+JE_CONFIG_j1a=je_config version=5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8 arenas_narenas=41 opt_narenas=40 opt_background_thread=false background_thread=n/a max_background_threads=n/a opt_tcache=true opt_tcache_max=32768 opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a
+JE_CONFIG_j1b=je_config version=5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8 arenas_narenas=41 opt_narenas=40 opt_background_thread=false background_thread=n/a max_background_threads=n/a opt_tcache=true opt_tcache_max=32768 opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a
+WRITE_ERRORS=0
+DISK_FREE_AT_START=82
+OPS_RATIO_JE_S1=1.0064
+OPS_RATIO_MI_S1=1.0144
+OPS_RATIO_JE_S2=n/a reason=stage1
+OPS_RATIO_MI_S2=n/a reason=stage1
+S1_SURVIVORS=JE+MI
+S1_RANK=JE
+CHURN_RATIO=0.8721 points=15 window_s=480-900
+CHURN_RATIO_DRIFT=0.8185
+K_PROVISIONAL=FALSE
+T_DECAY_UPPER_JE=8.7213
+T_DECAY_UPPER_MI=0.8721
+CV_JE=0.0913
+CV_MI=0.0395
+K_lo_JE=n/a reason=stage1
+K_hi_JE=n/a reason=stage1
+K_lo_MI=n/a reason=stage1
+K_hi_MI=n/a reason=stage1
+R_redb_s2=n/a reason=stage1
+R_redb_j2=n/a reason=stage1
+R_redb_m2=n/a reason=stage1
+K_HI_VACUOUS_JE=n/a reason=stage1
+K_HI_VACUOUS_MI=n/a reason=stage1
+DIRTY_SHARE_j1a=0.264980
+DIRTY_SHARE_j1b=0.213371
+DIRTY_SHARE_j2=n/a reason=stage1
+FRAG_SHARE_j1a=0.853146
+FRAG_SHARE_j1b=0.761885
+FRAG_SHARE_j2=n/a reason=stage1
+EST_AGREE_900_j1a=1.2385
+EST_AGREE_900_j1b=1.1821
+UNMODELLED_REACHABLE_j1a=16.203 0.238504
+UNMODELLED_REACHABLE_j1b=12.966 0.182105
+UNMODELLED_REACHABLE_j2=n/a reason=stage1
+AMP_FP_S2=n/a reason=stage1
+AMP_S_S2=n/a reason=stage1
+AMP_FP_JE=n/a reason=stage1
+AMP_S_JE=n/a reason=stage1
+AMP_JE=n/a reason=stage1
+AMP_FP_MI=n/a reason=stage1
+AMP_S_MI=n/a reason=stage1
+TREND_JE=n/a reason=stage1
+TREND_MI=n/a reason=stage1
+TREND_JE_NATIVE=n/a reason=stage1
+TREND_JE_LAST_THIRD=n/a reason=stage1
+TREND_MI_LAST_THIRD=n/a reason=stage1
+RECLAIM_SEMANTICS_SYS=n/a reason=stage1
+JE_CONFIG=n/a reason=stage1
+LEVEL_JE=n/a reason=stage1
+LEVEL_MI=n/a reason=stage1
+VS_SYS_JE=n/a reason=stage1
+VS_SYS_MI=n/a reason=stage1
+VS_SYS_S_JE=n/a reason=stage1
+VS_SYS_S_MI=n/a reason=stage1
+EST_PROVISIONAL=n/a reason=stage1
+OPS_a2j=n/a reason=stage1
+OPS_RATIO_a2j_vs_4h=n/a reason=stage1
+VERDICT_JE=n/a reason=stage1
+VERDICT_MI=n/a reason=stage1
+RECLAIM_SEMANTICS_JE=n/a reason=stage1
+RECLAIM_SEMANTICS_MI=n/a reason=stage1
+JE_ESTIMATOR_AGREE=n/a reason=stage1
+JOURNAL=n/a reason=stage1
+PERF_JE=n/a reason=stage1
+PERF_MI=n/a reason=stage1
+SIZE_JE=n/a reason=stage1
+SIZE_HEADROOM_JE=n/a reason=stage1
+SIZE_MI=n/a reason=stage1
+SIZE_HEADROOM_MI=n/a reason=stage1
+BUILD_JE=n/a reason=stage1
+BUILD_MI=n/a reason=stage1
+DEFAULT_CANDIDATE=n/a reason=stage1
+NEXT=n/a reason=stage1

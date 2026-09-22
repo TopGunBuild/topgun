@@ -1,0 +1,47 @@
+buildstory start: 2026-09-22T09:29:25Z smoke=0 HEAD=e92fa9774e66457336b278d065f5ff32aa160353 pin=f59a61ec
+toolchain: rustc 1.93.1 (01f6ddf75 2026-02-11) / cargo 1.93.1 (083ac5135 2025-12-15) / cargo-zigbuild 0.22.3 / zig 0.16.0
+LATTICE subset=0 features=[] check_rc=0
+LATTICE subset=1 features=[count-alloc] check_rc=0
+LATTICE subset=2 features=[dhat-heap] check_rc=0
+LATTICE subset=3 features=[count-alloc,dhat-heap] check_rc=0
+LATTICE subset=4 features=[alloc-jemalloc] check_rc=0
+LATTICE subset=5 features=[count-alloc,alloc-jemalloc] check_rc=0
+LATTICE subset=6 features=[dhat-heap,alloc-jemalloc] check_rc=0
+LATTICE subset=7 features=[count-alloc,dhat-heap,alloc-jemalloc] check_rc=0
+LATTICE subset=8 features=[alloc-mimalloc] check_rc=0
+LATTICE subset=9 features=[count-alloc,alloc-mimalloc] check_rc=0
+LATTICE subset=10 features=[dhat-heap,alloc-mimalloc] check_rc=0
+LATTICE subset=11 features=[count-alloc,dhat-heap,alloc-mimalloc] check_rc=0
+LATTICE subset=12 features=[alloc-jemalloc,alloc-mimalloc] check_rc=0
+LATTICE subset=13 features=[count-alloc,alloc-jemalloc,alloc-mimalloc] check_rc=0
+LATTICE subset=14 features=[dhat-heap,alloc-jemalloc,alloc-mimalloc] check_rc=0
+LATTICE subset=15 features=[count-alloc,dhat-heap,alloc-jemalloc,alloc-mimalloc] check_rc=0
+LATTICE_TOTAL=TRUE subsets=16
+ITEM1 arm=SYS target=darwin-arm64 rc=0 wall_s=248 size_bytes=17456576
+ITEM2 arm=SYS target=linux-x64 rc=0 wall_s=253 size_bytes=20994088 file=ELF 64-bit LSB pie executable, x86-64
+ITEM1 arm=JE target=darwin-arm64 rc=0 wall_s=268 size_bytes=18084800
+ITEM2 arm=JE target=linux-x64 rc=0 wall_s=282 size_bytes=21560624 file=ELF 64-bit LSB pie executable, x86-64
+ITEM1 arm=MI target=darwin-arm64 rc=0 wall_s=262 size_bytes=17674656
+ITEM2 arm=MI target=linux-x64 rc=0 wall_s=257 size_bytes=21184256 file=ELF 64-bit LSB pie executable, x86-64
+docker daemon: 28.3.3 linux/aarch64
+docker context:  59M (Cargo.toml, Cargo.lock, .dockerignore, packages/core-rust, packages/server-rust)
+ITEM3 arm=JE rc=0 wall_s=257 platform=linux/aarch64 new_apt_packages=none (derived Dockerfile differs from the committed one only in its cargo line)
+ITEM3 arm=MI rc=0 wall_s=238 platform=linux/aarch64 new_apt_packages=none (derived Dockerfile differs from the committed one only in its cargo line)
+ITEM4 clippy=all-features rc=0 cold_wall_s=82
+ITEM4 clippy=JE rc=0 wall_s=27
+ITEM4 clippy=MI rc=0 wall_s=21
+ITEM6 clippy_all_features_cold pin_rc=0 pin_wall_s=97 head_wall_s=82 delta_s=-15
+ITEM6 ci_test_job=cargo test --all-targets (default features; does not resolve the allocator crates)
+ITEM5 cargo_audit rc=0 warning: 15 allowed warnings found 
+ITEM5-TREE advisory_crate=paste id=RUSTSEC-2024-0436 (an allocator crate appears in its dependency tree)
+ITEM5-TREE advisory_crate=anyhow id=RUSTSEC-2026-0190 (an allocator crate appears in its dependency tree)
+ITEM5-TREE advisory_crate=js-sys id=warning:yanked (an allocator crate appears in its dependency tree)
+ITEM5-TREE advisory_crate=wasm-bindgen id=warning:yanked (an allocator crate appears in its dependency tree)
+ITEM5-ADVISORIES_NAMING_AN_ALLOCATOR_CRATE=0
+SIZE_JE=566536 linux_x64_bytes=21560624 sys_linux_x64_bytes=20994088 darwin_delta_bytes=628224
+SIZE_HEADROOM_JE=TIGHT headroom_bytes=-589104
+BUILD_JE=OK item1=0 item2=0 item3=0 item4_all=0 item4_arm=0 item5=0
+SIZE_MI=190168 linux_x64_bytes=21184256 sys_linux_x64_bytes=20994088 darwin_delta_bytes=218080
+SIZE_HEADROOM_MI=TIGHT headroom_bytes=-212736
+BUILD_MI=OK item1=0 item2=0 item3=0 item4_all=0 item4_arm=0 item5=0
+buildstory end: 2026-09-22T10:10:39Z
