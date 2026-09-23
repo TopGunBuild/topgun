@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
-use crate::storage::engine::{FetchResult, IterationCursor, StorageEngine};
+use crate::storage::engine::{FetchResult, IterationCursor, PutIfAbsentOutcome, StorageEngine};
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
@@ -29,6 +29,11 @@ fn now_millis() -> i64 {
         .unwrap_or_default()
         .as_millis() as i64
 }
+
+/// Attempts `update_in_place` makes to materialize a non-resident key before it
+/// gives up with a retryable error. An attempt is repeated only when a removal
+/// of a key sharing the key's vacancy-generation stripe landed during its load.
+const MATERIALIZE_MAX_ATTEMPTS: u32 = 8;
 
 /// Configuration for storage behavior, applied per-RecordStore.
 ///
@@ -118,18 +123,23 @@ impl RecordStore for DefaultRecordStore {
     // --- Core CRUD ---
 
     async fn get(&self, key: &str, touch: bool) -> anyhow::Result<Option<Record>> {
-        // Step 1: Check engine
-        if let Some(mut record) = self.engine.get(key) {
-            if touch {
-                let now = now_millis();
-                record.metadata.on_access(now);
-                self.engine.put(key, record.clone());
-            }
+        // Step 1: Check engine. A touch stamps the access in place under the
+        // key's lock; writing a stamped copy back would overwrite any write that
+        // landed between the read and the write-back.
+        let resident = if touch {
+            self.engine.touch(key, now_millis())
+        } else {
+            self.engine.get(key)
+        };
+        if let Some(record) = resident {
             return Ok(Some(record));
         }
 
-        // Step 2: Try loading from data store if non-null
+        // Step 2: Try loading from data store if non-null. The generation is
+        // read BEFORE the load, so a removal of the key that lands during the
+        // load makes the insert below refuse the loaded value (TG-OR-007).
         if !self.data_store.is_null() {
+            let generation = self.engine.vacancy_generation(key);
             if let Some(value) = self.data_store.load(&self.name, key).await? {
                 let now = now_millis();
                 let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
@@ -139,9 +149,23 @@ impl RecordStore for DefaultRecordStore {
                 let mut metadata = RecordMetadata::new(now, cost);
                 metadata.on_store(now);
                 let record = Record { value, metadata };
-                self.engine.put(key, record.clone());
-                self.observer.on_load(key, &record, false);
-                return Ok(Some(record));
+                return Ok(Some(
+                    match self
+                        .engine
+                        .put_if_absent_at(key, record.clone(), generation)
+                    {
+                        PutIfAbsentOutcome::Inserted => {
+                            self.observer.on_load(key, &record, false);
+                            record
+                        }
+                        // A write materialized the key during the load: the
+                        // resident is newer than what was loaded.
+                        PutIfAbsentOutcome::Resident(resident) => resident,
+                        // A removal intervened: answer with what was read, but
+                        // never cache it.
+                        PutIfAbsentOutcome::Stale => record,
+                    },
+                ));
             }
         }
 
@@ -236,6 +260,19 @@ impl RecordStore for DefaultRecordStore {
         Ok(old_record.map(|r| r.value))
     }
 
+    /// Mutates the key's record in place, materializing it from the data store
+    /// first when it is durable but not resident (TG-OR-007).
+    ///
+    /// Caller obligation: every caller holds the key's per-key writer across the
+    /// whole call — the load, the mutate and the staging of the write-through —
+    /// and every whole-key [`remove`](RecordStore::remove) of the key holds the
+    /// same writer. The vacancy generation guards against readers and eviction;
+    /// only the writer excludes a remove that stages its delete while this write
+    /// mutates a still-resident slot and re-stages it over that delete.
+    ///
+    /// Retries at most `MATERIALIZE_MAX_ATTEMPTS` times when a removal moves the
+    /// generation during the load, then returns an error the caller surfaces as
+    /// a transient failure (the client re-sends the op).
     async fn update_in_place(
         &self,
         key: &str,
@@ -256,23 +293,73 @@ impl RecordStore for DefaultRecordStore {
         // Re-borrow the `&mut (dyn FnMut + Send)` as the plain `&mut dyn FnMut`
         // the engine seam expects, and split the outcome so the engine keeps its
         // `-> bool` closure: only `changed` is what the engine decides on. The
-        // witness is stashed in a local instead of travelling through the engine
-        // because the wrapper is only ever called synchronously inside
-        // update_in_place (before any await) — so it needs no Send bound, and the
-        // closure's borrow of `witness` ends when the engine call returns, which
-        // makes the captured delta readable at the write-through below.
+        // witness is stashed in a local instead of travelling through the engine,
+        // and the closure's borrow of `witness` ends with the last engine call,
+        // which makes the captured delta readable at the write-through below.
         let mut witness: Option<OrDelta> = None;
         let mut engine_mutate = |value: &mut RecordValue| {
             let mutated = mutate(value);
             witness = mutated.witness;
             mutated.changed
         };
-        let outcome = self
-            .engine
-            .update_in_place(key, now, init, &mut engine_mutate, &cost_of);
+
+        // The durable value loaded to materialize a non-resident key, kept as
+        // the pre-image for `on_load` when the materialized record is inserted.
+        let mut pre_image: Option<RecordValue> = None;
+        let outcome = if self.data_store.is_null() {
+            self.engine
+                .update_in_place(key, now, init, None, &mut engine_mutate, &cost_of)
+        } else {
+            // Materialize a durable-but-non-resident key before mutating it, so the
+            // write merges into the key's durable value instead of replacing it
+            // with a slot built from `init` alone (TG-OR-007). The closure runs at
+            // most once per attempt and an attempt that runs it ends the loop:
+            // only `Absent` (resident probe) and `Stale` (generation moved during
+            // the load) continue, and both return before the closure (TG-OR-001).
+            let mut attempts = 0_u32;
+            loop {
+                if attempts == MATERIALIZE_MAX_ATTEMPTS {
+                    metrics::counter!("topgun_update_in_place_materialize_exhausted_total")
+                        .increment(1);
+                    return Err(anyhow::anyhow!("materialize retries exhausted"));
+                }
+                attempts += 1;
+
+                let resident =
+                    self.engine
+                        .update_in_place(key, now, None, None, &mut engine_mutate, &cost_of);
+                if !matches!(resident, UpdateInPlaceOutcome::Absent) {
+                    break resident;
+                }
+
+                // Read the generation BEFORE the load: a removal of the key that
+                // lands after this point moves it, and the insert below refuses a
+                // value loaded across that removal.
+                let generation = self.engine.vacancy_generation(key);
+                let loaded = self.data_store.load(&self.name, key).await?;
+                if loaded.is_none() && init.is_none() {
+                    return Ok(false);
+                }
+                pre_image.clone_from(&loaded);
+                let base = loaded.or_else(|| init.clone());
+                let attempt = self.engine.update_in_place(
+                    key,
+                    now,
+                    base,
+                    Some(generation),
+                    &mut engine_mutate,
+                    &cost_of,
+                );
+                if !matches!(attempt, UpdateInPlaceOutcome::Stale) {
+                    break attempt;
+                }
+            }
+        };
 
         let (record, inserted) = match outcome {
-            UpdateInPlaceOutcome::Absent | UpdateInPlaceOutcome::Unchanged => return Ok(false),
+            UpdateInPlaceOutcome::Absent
+            | UpdateInPlaceOutcome::Unchanged
+            | UpdateInPlaceOutcome::Stale => return Ok(false),
             UpdateInPlaceOutcome::Written { record, inserted } => (record, inserted),
         };
 
@@ -287,16 +374,31 @@ impl RecordStore for DefaultRecordStore {
         // old value rather than re-cloning the resident slot this seam exists to
         // stop churning.
         //
+        // A record materialized from the data store is a residency transition
+        // followed by a write: `on_load` with the durable pre-image, then
+        // `on_update` with the post-image (TG-OR-002), never `on_put` — the key
+        // existed before this write.
+        //
         // CONTRACT: any observer added later that reads `old_value` for an OrMap
         // record would receive the post-image here, not the true pre-image. That
         // is only safe because this seam is OrMap-only; if a future observer needs
         // the OrMap pre-image, capture a pre-mutation clone in the engine's
         // Occupied arm and thread it through instead of reusing the new value.
-        if inserted {
-            self.observer.on_put(key, &record, None, false);
-        } else {
-            self.observer
-                .on_update(key, &record, &record.value, &record.value, false);
+        match (inserted, pre_image) {
+            (true, Some(pre)) => {
+                let loaded_record = Record {
+                    value: pre,
+                    metadata: record.metadata.clone(),
+                };
+                self.observer.on_load(key, &loaded_record, false);
+                self.observer
+                    .on_update(key, &record, &record.value, &record.value, false);
+            }
+            (true, None) => self.observer.on_put(key, &record, None, false),
+            (false, _) => {
+                self.observer
+                    .on_update(key, &record, &record.value, &record.value, false);
+            }
         }
 
         // Write-through for Client or CrdtMerge provenance — byte-identical to
@@ -344,23 +446,41 @@ impl RecordStore for DefaultRecordStore {
         self.data_store.wants_or_witness()
     }
 
+    /// Removes the key durably and from memory (TG-OR-007).
+    ///
+    /// The durable delete is staged FIRST, so from then on every data-store
+    /// load of the key returns `None`; only then is the engine entry removed,
+    /// which advances the key's vacancy generation. A reader that hits the
+    /// engine before that sees the pre-remove value (the remove has not taken
+    /// effect in memory); a reader that loaded the key before the delete was
+    /// staged either inserts before the engine removal, which then removes its
+    /// copy, or is refused by the generation. If the durable delete fails, the
+    /// engine is left untouched.
+    ///
+    /// Caller obligation: the caller holds the key's per-key writer across the
+    /// call, the same writer every in-place write of the key holds (see
+    /// [`update_in_place`](RecordStore::update_in_place)), so no in-place write
+    /// can mutate the still-resident slot and re-stage it over the delete.
     async fn remove(
         &self,
         key: &str,
         provenance: CallerProvenance,
     ) -> anyhow::Result<Option<RecordValue>> {
-        // Step 1: Remove from engine
-        let old_record = self.engine.remove(key);
-
-        // Step 2: Fire observer if removed
-        if let Some(ref record) = old_record {
-            self.observer.on_remove(key, record, false);
-        }
-
-        // Step 3: Remove from data store
+        // Step 1: Stage the durable delete.
         let now = now_millis();
         let _ = provenance; // provenance available for future use
         self.data_store.remove(&self.name, key, now).await?;
+
+        // Step 2: Remove from the engine, advancing the vacancy generation.
+        let old_record = self.engine.remove(key);
+
+        // Step 3: Notify observers. A key that was not resident still had its
+        // durable row deleted, so observers that track durable keys are told
+        // by key; removing a key an observer never held is a no-op there.
+        match old_record {
+            Some(ref record) => self.observer.on_remove(key, record, false),
+            None => self.observer.on_remove_key(key, false),
+        }
 
         // Step 4: Return old value
         Ok(old_record.map(|r| r.value))
@@ -445,25 +565,6 @@ impl RecordStore for DefaultRecordStore {
                 consumer(&key, &record);
             }
         }
-    }
-
-    fn hydrate_loaded(&self, key: &str, value: RecordValue) -> bool {
-        // Engine-first check mirrors get(): never clobber a resident value, which
-        // may be a fresher unflushed or concurrently-merged write.
-        if self.engine.contains_key(key) {
-            return false;
-        }
-        let now = now_millis();
-        let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
-        // A record materialized from the datastore is already persisted, so it
-        // enters the engine clean (last_stored_time = now) and is immediately
-        // eligible for re-eviction — required for the evict→reload steady state.
-        let mut metadata = RecordMetadata::new(now, cost);
-        metadata.on_store(now);
-        let record = Record { value, metadata };
-        self.engine.put(key, record.clone());
-        self.observer.on_load(key, &record, false);
-        true
     }
 
     // --- Size and cost ---
@@ -577,10 +678,18 @@ impl RecordStore for DefaultRecordStore {
         // candidates appear first. i64 is Copy + Ord so sort_by_key is idiomatic.
         candidates.sort_by_key(|(_, r)| r.metadata.last_access_time);
 
-        // Evict only up to target_count of the oldest non-dirty candidates.
+        // Evict only up to target_count of the oldest non-dirty candidates. The
+        // snapshot can be stale by the time a candidate is removed, so the
+        // removal re-checks under the key's lock that the resident is still the
+        // clean write the snapshot saw (TG-EVI-001).
         let mut evicted: usize = 0;
-        for (key, _) in candidates.into_iter().take(target_count as usize) {
-            if self.evict(&key, is_backup).is_some() {
+        for (key, snapshot) in candidates.into_iter().take(target_count as usize) {
+            let snapshot_token = snapshot.metadata.write_token;
+            let removed = self.engine.remove_if(&key, &|resident: &Record| {
+                !resident.metadata.is_dirty() && resident.metadata.write_token == snapshot_token
+            });
+            if let Some(record) = removed {
+                self.observer.on_evict(&key, &record, is_backup);
                 evicted += 1;
             }
         }
@@ -1326,6 +1435,7 @@ mod tests {
             hits: 0,
             cost: 0,
             write_token: 0, // test helper only — not used on the mark_stored path
+            stored_token: 0,
         };
         Record {
             value: make_value("clean"),
@@ -1347,7 +1457,9 @@ mod tests {
             last_stored_time: 0, // never stored => dirty
             hits: 0,
             cost: 0,
-            write_token: 0, // test helper only — not used on the mark_stored path
+            // The current write differs from the (absent) stored one => dirty.
+            write_token: 1,
+            stored_token: 0,
         };
         Record {
             value: make_value("dirty"),
@@ -1537,5 +1649,915 @@ mod tests {
             "must return the actual eviction count, not wrap or panic"
         );
         assert!(store.is_empty(), "all clean records must be evicted");
+    }
+
+    /// Writes on a key that is durable but not resident, and the races around
+    /// materializing it (TG-OR-007, TG-OR-002, TG-EVI-001).
+    mod materialize {
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        use crate::storage::engine::{
+            FetchResult as EngineFetch, PutIfAbsentOutcome, UpdateInPlaceOutcome,
+        };
+        use crate::storage::map_data_store::{LeafSink, ScanBatch, ScanCursor};
+
+        use super::*;
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::map_data_store::merkle_leaf_hash;
+        use crate::storage::merkle_sync::{MerkleMutationObserver, MerkleSyncManager};
+        use crate::storage::record::OrMapEntry;
+        use crate::storage::record_store::MutateOutcome;
+
+        pub(super) const MAP: &str = "materialize_map";
+        pub(super) const KEY: &str = "doc";
+
+        pub(super) fn redb(dir: &tempfile::TempDir) -> Arc<dyn MapDataStore> {
+            Arc::new(RedbDataStore::new(dir.path().join("materialize.redb")).expect("redb open"))
+        }
+
+        pub(super) fn entry(tag: &str) -> OrMapEntry {
+            OrMapEntry {
+                value: Value::String(format!("v-{tag}")),
+                tag: tag.to_string(),
+                timestamp: Timestamp {
+                    millis: 1_000_000,
+                    counter: 0,
+                    node_id: "node-1".to_string(),
+                },
+            }
+        }
+
+        pub(super) fn or_value(tags: &[&str], tombs: &[&str]) -> RecordValue {
+            RecordValue::OrMap {
+                records: tags.iter().map(|t| entry(t)).collect(),
+                tombstones: tombs.iter().map(|t| (*t).to_string()).collect(),
+            }
+        }
+
+        pub(super) fn store_over(
+            data_store: Arc<dyn MapDataStore>,
+            engine: Box<dyn StorageEngine>,
+            observers: Vec<Arc<dyn MutationObserver>>,
+        ) -> DefaultRecordStore {
+            DefaultRecordStore::new(
+                MAP.to_string(),
+                0,
+                engine,
+                data_store,
+                Arc::new(CompositeMutationObserver::new(observers)),
+                StorageConfig::default(),
+            )
+        }
+
+        /// An in-place OR add of `tag`, shaped like the CRDT service's `OR_ADD`
+        /// (empty `OrMap` `init`, closure appends the entry).
+        pub(super) async fn or_add(store: &DefaultRecordStore, tag: &str) -> anyhow::Result<bool> {
+            let new_entry = entry(tag);
+            let mut add = |value: &mut RecordValue| {
+                if let RecordValue::OrMap { records, .. } = value {
+                    if !records.iter().any(|e| e.tag == new_entry.tag) {
+                        records.push(new_entry.clone());
+                    }
+                }
+                MutateOutcome {
+                    changed: true,
+                    witness: None,
+                }
+            };
+            store
+                .update_in_place(
+                    KEY,
+                    Some(or_value(&[], &[])),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                    &mut add,
+                )
+                .await
+        }
+
+        pub(super) fn tags_of(value: &RecordValue) -> Vec<String> {
+            match value {
+                RecordValue::OrMap { records, .. } => {
+                    let mut tags: Vec<String> = records.iter().map(|e| e.tag.clone()).collect();
+                    tags.sort();
+                    tags
+                }
+                other => panic!("not an OrMap: {other:?}"),
+            }
+        }
+
+        /// The durable tag set of `KEY`, or `None` when no durable row exists.
+        pub(super) async fn durable_tags(ds: &Arc<dyn MapDataStore>) -> Option<Vec<String>> {
+            ds.load(MAP, KEY)
+                .await
+                .expect("load durable row")
+                .map(|v| tags_of(&v))
+        }
+
+        pub(super) fn strings(v: &[&str]) -> Vec<String> {
+            v.iter().map(|s| (*s).to_string()).collect()
+        }
+
+        /// Records the order of observer callbacks.
+        #[derive(Default)]
+        pub(super) struct OrderObserver {
+            pub(super) events: Mutex<Vec<&'static str>>,
+        }
+
+        impl OrderObserver {
+            fn push(&self, event: &'static str) {
+                self.events.lock().unwrap().push(event);
+            }
+
+            pub(super) fn take(&self) -> Vec<&'static str> {
+                std::mem::take(&mut *self.events.lock().unwrap())
+            }
+        }
+
+        impl MutationObserver for OrderObserver {
+            fn on_put(&self, _: &str, _: &Record, _: Option<&RecordValue>, _: bool) {
+                self.push("put");
+            }
+            fn on_update(&self, _: &str, _: &Record, _: &RecordValue, _: &RecordValue, _: bool) {
+                self.push("update");
+            }
+            fn on_remove(&self, _: &str, _: &Record, _: bool) {
+                self.push("remove");
+            }
+            fn on_evict(&self, _: &str, _: &Record, _: bool) {
+                self.push("evict");
+            }
+            fn on_load(&self, _: &str, _: &Record, _: bool) {
+                self.push("load");
+            }
+            fn on_replication_put(&self, _: &str, _: &Record, _: bool) {}
+            fn on_clear(&self) {}
+            fn on_reset(&self) {}
+            fn on_destroy(&self, _: bool) {}
+        }
+
+        /// How long a test waits for a double to park before it declares that
+        /// the setup never reached the park point.
+        pub(crate) const PARK_BOUND: Duration = Duration::from_secs(2);
+
+        /// The parked side of a one-shot async gate.
+        pub(crate) struct Gate {
+            parked: tokio::sync::oneshot::Sender<()>,
+            release: tokio::sync::oneshot::Receiver<()>,
+        }
+
+        impl Gate {
+            async fn pass(self) {
+                let _ = self.parked.send(());
+                let _ = self.release.await;
+            }
+        }
+
+        /// The test's side of a one-shot async gate. Dropping it releases the
+        /// parked caller, so a failing test never leaves a task parked.
+        pub(crate) struct GateHandle {
+            parked: Option<tokio::sync::oneshot::Receiver<()>>,
+            release: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+
+        impl GateHandle {
+            /// Waits until the caller parks; panics after [`PARK_BOUND`].
+            pub(crate) async fn wait_parked(&mut self) {
+                let parked = self.parked.take().expect("wait_parked called once");
+                tokio::time::timeout(PARK_BOUND, parked)
+                    .await
+                    .expect("the double never parked: the setup did not reach the park point")
+                    .expect("gate dropped before parking");
+            }
+
+            pub(crate) fn release(&mut self) {
+                if let Some(release) = self.release.take() {
+                    let _ = release.send(());
+                }
+            }
+        }
+
+        fn gate() -> (Gate, GateHandle) {
+            let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            (
+                Gate {
+                    parked: parked_tx,
+                    release: release_rx,
+                },
+                GateHandle {
+                    parked: Some(parked_rx),
+                    release: Some(release_tx),
+                },
+            )
+        }
+
+        /// A data store that forwards to `inner` and can park ONE call, armed
+        /// just before the targeted caller runs: on RETURN from `load` (holding
+        /// the loaded value) or on ENTRY to `remove` (before it delegates). A park is consumed by the
+        /// first matching call, so any later call passes unparked.
+        pub(crate) struct ParkingStore {
+            inner: Arc<dyn MapDataStore>,
+            after_load: Mutex<Option<Gate>>,
+            before_remove: Mutex<Option<Gate>>,
+        }
+
+        impl ParkingStore {
+            pub(crate) fn new(inner: Arc<dyn MapDataStore>) -> Self {
+                Self {
+                    inner,
+                    after_load: Mutex::new(None),
+                    before_remove: Mutex::new(None),
+                }
+            }
+
+            fn arm(slot: &Mutex<Option<Gate>>) -> GateHandle {
+                let (parked, handle) = gate();
+                *slot.lock().unwrap() = Some(parked);
+                handle
+            }
+
+            pub(crate) fn park_after_load(&self) -> GateHandle {
+                Self::arm(&self.after_load)
+            }
+
+            pub(crate) fn park_before_remove(&self) -> GateHandle {
+                Self::arm(&self.before_remove)
+            }
+
+            fn take(slot: &Mutex<Option<Gate>>) -> Option<Gate> {
+                slot.lock().unwrap().take()
+            }
+        }
+
+        #[async_trait]
+        impl MapDataStore for ParkingStore {
+            async fn add(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                expiration_time: i64,
+                now: i64,
+            ) -> anyhow::Result<()> {
+                self.inner.add(map, key, value, expiration_time, now).await
+            }
+
+            async fn add_backup(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                expiration_time: i64,
+                now: i64,
+            ) -> anyhow::Result<()> {
+                self.inner
+                    .add_backup(map, key, value, expiration_time, now)
+                    .await
+            }
+
+            async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+                if let Some(parked) = Self::take(&self.before_remove) {
+                    parked.pass().await;
+                }
+                self.inner.remove(map, key, now).await
+            }
+
+            async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+                self.inner.remove_backup(map, key, now).await
+            }
+
+            async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+                let loaded = self.inner.load(map, key).await;
+                if let Some(parked) = Self::take(&self.after_load) {
+                    parked.pass().await;
+                }
+                loaded
+            }
+
+            async fn load_all(
+                &self,
+                map: &str,
+                keys: &[String],
+            ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+                self.inner.load_all(map, keys).await
+            }
+
+            async fn enumerate_leaves(
+                &self,
+                map: &str,
+                is_backup: bool,
+                sink: &mut dyn LeafSink,
+            ) -> anyhow::Result<()> {
+                self.inner.enumerate_leaves(map, is_backup, sink).await
+            }
+
+            async fn scan_values(
+                &self,
+                map: &str,
+                is_backup: bool,
+                max_batch_cost: u64,
+            ) -> anyhow::Result<ScanBatch> {
+                self.inner.scan_values(map, is_backup, max_batch_cost).await
+            }
+
+            async fn scan_values_batched(
+                &self,
+                map: &str,
+                is_backup: bool,
+                cursor: ScanCursor,
+                max_batch_cost: u64,
+            ) -> anyhow::Result<ScanBatch> {
+                self.inner
+                    .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                    .await
+            }
+
+            async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+                self.inner.remove_all(map, keys).await
+            }
+
+            async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+                self.inner.list_maps().await
+            }
+
+            fn is_loadable(&self, key: &str) -> bool {
+                self.inner.is_loadable(key)
+            }
+
+            fn pending_operation_count(&self) -> u64 {
+                self.inner.pending_operation_count()
+            }
+
+            async fn soft_flush(&self) -> anyhow::Result<u64> {
+                self.inner.soft_flush().await
+            }
+
+            async fn hard_flush(&self) -> anyhow::Result<()> {
+                self.inner.hard_flush().await
+            }
+
+            async fn flush_key(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                is_backup: bool,
+            ) -> anyhow::Result<()> {
+                self.inner.flush_key(map, key, value, is_backup).await
+            }
+
+            fn reset(&self) {
+                self.inner.reset();
+            }
+        }
+
+        /// The parked side of a one-shot blocking gate, for the synchronous
+        /// engine calls. It parks on ENTRY to the engine method, before any
+        /// entry lock is taken.
+        struct SyncGate {
+            parked: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+
+        /// The test's side of a [`SyncGate`]. Dropping it releases the caller.
+        pub(crate) struct SyncGateHandle {
+            parked: std::sync::mpsc::Receiver<()>,
+            release: Option<std::sync::mpsc::Sender<()>>,
+        }
+
+        impl SyncGateHandle {
+            /// Blocks until the caller parks; panics after [`PARK_BOUND`].
+            pub(crate) fn wait_parked(&self) {
+                self.parked.recv_timeout(PARK_BOUND).expect(
+                    "the engine double never parked: the setup did not reach the park point",
+                );
+            }
+
+            pub(crate) fn release(&mut self) {
+                if let Some(release) = self.release.take() {
+                    let _ = release.send(());
+                }
+            }
+        }
+
+        #[derive(Default)]
+        pub(crate) struct EngineParks {
+            removal: Mutex<Option<SyncGate>>,
+            write_back: Mutex<Option<SyncGate>>,
+        }
+
+        impl EngineParks {
+            fn arm(slot: &Mutex<Option<SyncGate>>) -> SyncGateHandle {
+                let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                *slot.lock().unwrap() = Some(SyncGate {
+                    parked: parked_tx,
+                    release: release_rx,
+                });
+                SyncGateHandle {
+                    parked: parked_rx,
+                    release: Some(release_tx),
+                }
+            }
+
+            /// Parks the next `remove` or `remove_if`.
+            pub(crate) fn park_removal(&self) -> SyncGateHandle {
+                Self::arm(&self.removal)
+            }
+
+            /// Parks the next `put` or `touch`.
+            pub(crate) fn park_write_back(&self) -> SyncGateHandle {
+                Self::arm(&self.write_back)
+            }
+
+            fn pass(slot: &Mutex<Option<SyncGate>>) {
+                let parked = slot.lock().unwrap().take();
+                if let Some(parked) = parked {
+                    let _ = parked.parked.send(());
+                    let _ = parked.release.recv();
+                }
+            }
+        }
+
+        /// A [`HashMapStorage`] that can park on entry to a removal or to a
+        /// value write-back, before delegating.
+        pub(crate) struct ParkingEngine {
+            inner: HashMapStorage,
+            parks: Arc<EngineParks>,
+        }
+
+        impl ParkingEngine {
+            pub(crate) fn new() -> (Self, Arc<EngineParks>) {
+                let parks = Arc::new(EngineParks::default());
+                (
+                    Self {
+                        inner: HashMapStorage::new(),
+                        parks: Arc::clone(&parks),
+                    },
+                    parks,
+                )
+            }
+        }
+
+        impl StorageEngine for ParkingEngine {
+            fn put(&self, key: &str, record: Record) -> Option<Record> {
+                EngineParks::pass(&self.parks.write_back);
+                self.inner.put(key, record)
+            }
+
+            fn get(&self, key: &str) -> Option<Record> {
+                self.inner.get(key)
+            }
+
+            fn mark_stored(&self, key: &str, now: i64, token: u64) -> bool {
+                self.inner.mark_stored(key, now, token)
+            }
+
+            fn update_in_place(
+                &self,
+                key: &str,
+                now: i64,
+                init: Option<RecordValue>,
+                init_generation: Option<u64>,
+                mutate: &mut dyn FnMut(&mut RecordValue) -> bool,
+                cost_of: &dyn Fn(&RecordValue) -> u64,
+            ) -> UpdateInPlaceOutcome {
+                self.inner
+                    .update_in_place(key, now, init, init_generation, mutate, cost_of)
+            }
+
+            fn vacancy_generation(&self, key: &str) -> u64 {
+                self.inner.vacancy_generation(key)
+            }
+
+            fn put_if_absent_at(
+                &self,
+                key: &str,
+                record: Record,
+                generation: u64,
+            ) -> PutIfAbsentOutcome {
+                self.inner.put_if_absent_at(key, record, generation)
+            }
+
+            fn remove(&self, key: &str) -> Option<Record> {
+                EngineParks::pass(&self.parks.removal);
+                self.inner.remove(key)
+            }
+
+            fn remove_if(&self, key: &str, predicate: &dyn Fn(&Record) -> bool) -> Option<Record> {
+                EngineParks::pass(&self.parks.removal);
+                self.inner.remove_if(key, predicate)
+            }
+
+            fn touch(&self, key: &str, now: i64) -> Option<Record> {
+                EngineParks::pass(&self.parks.write_back);
+                self.inner.touch(key, now)
+            }
+
+            fn contains_key(&self, key: &str) -> bool {
+                self.inner.contains_key(key)
+            }
+
+            fn len(&self) -> usize {
+                self.inner.len()
+            }
+
+            fn is_empty(&self) -> bool {
+                self.inner.is_empty()
+            }
+
+            fn clear(&self) {
+                self.inner.clear();
+            }
+
+            fn destroy(&self) {
+                self.inner.destroy();
+            }
+
+            fn estimated_cost(&self) -> u64 {
+                self.inner.estimated_cost()
+            }
+
+            fn fetch_keys(&self, cursor: &IterationCursor, size: usize) -> EngineFetch<String> {
+                self.inner.fetch_keys(cursor, size)
+            }
+
+            fn fetch_entries(
+                &self,
+                cursor: &IterationCursor,
+                size: usize,
+            ) -> EngineFetch<(String, Record)> {
+                self.inner.fetch_entries(cursor, size)
+            }
+
+            fn snapshot_iter(&self) -> Vec<(String, Record)> {
+                self.inner.snapshot_iter()
+            }
+
+            fn random_samples(&self, sample_count: usize) -> Vec<(String, Record)> {
+                self.inner.random_samples(sample_count)
+            }
+        }
+
+        // AC-4: the materialize path is a residency transition then a write.
+        #[tokio::test]
+        async fn materialize_fires_on_load_then_on_update() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &["x"]), 0, 0)
+                .await
+                .expect("seed");
+            let order = Arc::new(OrderObserver::default());
+            let store = store_over(
+                Arc::clone(&ds),
+                Box::new(HashMapStorage::new()),
+                vec![order.clone() as Arc<dyn MutationObserver>],
+            );
+
+            assert!(or_add(&store, "c").await.expect("or_add"));
+
+            assert_eq!(order.take(), vec!["load", "update"]);
+            assert_eq!(durable_tags(&ds).await, Some(strings(&["a", "b", "c"])));
+
+            // A key absent everywhere keeps `on_put`.
+            let fresh = store_over(
+                redb(&tempfile::tempdir().expect("tempdir")),
+                Box::new(HashMapStorage::new()),
+                vec![order.clone() as Arc<dyn MutationObserver>],
+            );
+            assert!(or_add(&fresh, "c").await.expect("or_add"));
+            assert_eq!(order.take(), vec!["put"]);
+        }
+
+        // AC-4: the in-memory Merkle leaf after a materializing write is the
+        // leaf of old ∪ op, and equals the leaf of the durable value.
+        #[tokio::test]
+        async fn materialize_merkle_leaf_is_the_leaf_of_old_union_op() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &["x"]), 0, 0)
+                .await
+                .expect("seed");
+            let manager = Arc::new(MerkleSyncManager::new(3));
+            let merkle = Arc::new(MerkleMutationObserver::new(
+                Arc::clone(&manager),
+                MAP.to_string(),
+                0,
+            ));
+            let store = store_over(
+                Arc::clone(&ds),
+                Box::new(HashMapStorage::new()),
+                vec![merkle as Arc<dyn MutationObserver>],
+            );
+
+            assert!(or_add(&store, "c").await.expect("or_add"));
+
+            let expected_union = or_value(&["a", "b", "c"], &["x"]);
+            let expected_leaf = merkle_leaf_hash(KEY, &expected_union)
+                .expect("OrMap yields a leaf")
+                .1;
+            let reference = MerkleSyncManager::new(3);
+            reference.update_ormap(MAP, 0, KEY, expected_leaf);
+            assert_eq!(
+                manager.aggregate_ormap_root_hash(MAP),
+                reference.aggregate_ormap_root_hash(MAP),
+                "in-memory OR leaf must be the leaf of old ∪ op"
+            );
+            let durable = ds.load(MAP, KEY).await.expect("load").expect("durable row");
+            assert_eq!(
+                merkle_leaf_hash(KEY, &durable)
+                    .expect("OrMap yields a leaf")
+                    .1,
+                expected_leaf,
+                "durable leaf must equal the in-memory leaf"
+            );
+        }
+
+        // AC-5: a reader that loaded `D` before a write materialized, persisted
+        // and evicted `D+op` must not cache its stale `D` (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn reader_does_not_cache_a_load_that_an_eviction_superseded() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0, 0)
+                .await
+                .expect("seed");
+            let parking = Arc::new(ParkingStore::new(Arc::clone(&ds)));
+            let store = Arc::new(store_over(
+                parking.clone(),
+                Box::new(HashMapStorage::new()),
+                Vec::new(),
+            ));
+
+            let mut reader_park = parking.park_after_load();
+            let reader = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move { store.get(KEY, false).await })
+            };
+            reader_park.wait_parked().await;
+
+            assert!(or_add(&store, "op").await.expect("or_add"));
+            assert!(
+                store.evict_lru(u32::MAX, false) > 0,
+                "the materialized, persisted record must be evicted"
+            );
+
+            reader_park.release();
+            reader.await.expect("reader task").expect("get");
+
+            assert!(
+                !store.exists_in_memory(KEY),
+                "the reader must not cache the value it loaded before the eviction"
+            );
+            assert!(or_add(&store, "op2").await.expect("or_add"));
+            assert_eq!(
+                durable_tags(&ds).await,
+                Some(strings(&["a", "b", "op", "op2"])),
+                "no acked op may be lost to a stale cached load"
+            );
+        }
+
+        // AC-6a: a reader that loaded `D` before a REMOVE ran must not cache
+        // `D` after the REMOVE completed (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn reader_does_not_cache_a_load_that_a_remove_superseded() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0, 0)
+                .await
+                .expect("seed");
+            let parking = Arc::new(ParkingStore::new(Arc::clone(&ds)));
+            let store = Arc::new(store_over(
+                parking.clone(),
+                Box::new(HashMapStorage::new()),
+                Vec::new(),
+            ));
+
+            let mut reader_park = parking.park_after_load();
+            let reader = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move { store.get(KEY, false).await })
+            };
+            reader_park.wait_parked().await;
+
+            store
+                .remove(KEY, CallerProvenance::CrdtMerge)
+                .await
+                .expect("remove");
+
+            reader_park.release();
+            reader.await.expect("reader task").expect("get");
+
+            assert!(
+                !store.exists_in_memory(KEY),
+                "the reader must not cache a value the REMOVE superseded"
+            );
+            assert!(or_add(&store, "op2").await.expect("or_add"));
+            assert_eq!(
+                durable_tags(&ds).await,
+                Some(strings(&["op2"])),
+                "the removed value must not be resurrected"
+            );
+        }
+
+        // AC-6c: a REMOVE must stage its durable delete before it empties the
+        // engine, or a reader in between caches the value being removed.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn reader_between_the_steps_of_a_remove_does_not_resurrect_it() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0, 0)
+                .await
+                .expect("seed");
+            let parking = Arc::new(ParkingStore::new(Arc::clone(&ds)));
+            let store = Arc::new(store_over(
+                parking.clone(),
+                Box::new(HashMapStorage::new()),
+                Vec::new(),
+            ));
+
+            let mut remove_park = parking.park_before_remove();
+            let remover = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move { store.remove(KEY, CallerProvenance::CrdtMerge).await })
+            };
+            remove_park.wait_parked().await;
+
+            store.get(KEY, false).await.expect("get");
+
+            remove_park.release();
+            remover.await.expect("remover task").expect("remove");
+
+            assert!(or_add(&store, "op2").await.expect("or_add"));
+            assert_eq!(
+                durable_tags(&ds).await,
+                Some(strings(&["op2"])),
+                "the removed value must not be resurrected"
+            );
+        }
+
+        // AC-7: `evict_lru` must not remove a record that a write replaced after
+        // the eviction snapshot was taken (TG-EVI-001).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn evict_lru_keeps_a_record_written_after_its_snapshot() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            let (engine, parks) = ParkingEngine::new();
+            let store = Arc::new(store_over(Arc::clone(&ds), Box::new(engine), Vec::new()));
+            assert!(or_add(&store, "a").await.expect("or_add"));
+            assert!(
+                !store
+                    .storage()
+                    .get(KEY)
+                    .expect("resident")
+                    .metadata
+                    .is_dirty(),
+                "precondition: the record is clean, so it is an eviction candidate"
+            );
+
+            let mut removal_park = parks.park_removal();
+            let evictor = {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || store.evict_lru(u32::MAX, false))
+            };
+            removal_park.wait_parked();
+
+            assert!(or_add(&store, "op").await.expect("or_add"));
+            let written = store.storage().get(KEY).expect("the writer's record");
+
+            removal_park.release();
+            evictor.join().expect("evictor thread");
+
+            assert!(
+                store.exists_in_memory(KEY),
+                "a record written after the snapshot must not be evicted"
+            );
+            let resident = store.storage().get(KEY).expect("resident");
+            assert_eq!(tags_of(&resident.value), tags_of(&written.value));
+            assert_eq!(resident.metadata.write_token, written.metadata.write_token);
+        }
+
+        // AC-8: `get(touch = true)` must not write a stale copy back over a
+        // write that landed after its read.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn touch_does_not_overwrite_a_concurrent_write() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            let (engine, parks) = ParkingEngine::new();
+            let store = Arc::new(store_over(Arc::clone(&ds), Box::new(engine), Vec::new()));
+            assert!(or_add(&store, "a").await.expect("or_add"));
+
+            let mut write_back_park = parks.park_write_back();
+            let reader = {
+                let store = Arc::clone(&store);
+                let runtime = tokio::runtime::Handle::current();
+                std::thread::spawn(move || runtime.block_on(store.get(KEY, true)))
+            };
+            write_back_park.wait_parked();
+
+            assert!(or_add(&store, "op").await.expect("or_add"));
+            let written = store.storage().get(KEY).expect("the writer's record");
+
+            write_back_park.release();
+            reader
+                .join()
+                .expect("reader thread")
+                .expect("get")
+                .expect("resident");
+
+            let resident = store.storage().get(KEY).expect("resident");
+            assert_eq!(tags_of(&resident.value), tags_of(&written.value));
+            assert_eq!(resident.metadata.write_token, written.metadata.write_token);
+        }
+
+        // AC-9 (store half): a write in the same millisecond as the previous
+        // `mark_stored` is still dirty, so `evict_lru` keeps it (TG-EVI-001).
+        #[test]
+        fn a_write_in_the_mark_stored_millisecond_is_not_evicted() {
+            let store = make_store();
+            let t = 1_000_000;
+            let cost = |_: &RecordValue| 1;
+            let UpdateInPlaceOutcome::Written { record, .. } = store.storage().update_in_place(
+                KEY,
+                t,
+                Some(or_value(&["a"], &[])),
+                None,
+                &mut |_| true,
+                &cost,
+            ) else {
+                panic!("the first write must insert");
+            };
+            assert!(store
+                .storage()
+                .mark_stored(KEY, t, record.metadata.write_token));
+
+            let UpdateInPlaceOutcome::Written { .. } = store.storage().update_in_place(
+                KEY,
+                t,
+                None,
+                None,
+                &mut |value| {
+                    if let RecordValue::OrMap { records, .. } = value {
+                        records.push(entry("b"));
+                    }
+                    true
+                },
+                &cost,
+            ) else {
+                panic!("the second write must mutate the resident record");
+            };
+
+            store.evict_lru(u32::MAX, false);
+
+            assert!(
+                store.exists_in_memory(KEY),
+                "an unflushed write must never be evicted"
+            );
+        }
+
+        // AC-13: removing a key that was never made resident clears the
+        // in-memory Merkle leaf the boot seed gave it.
+        #[tokio::test]
+        async fn remove_of_a_non_resident_key_clears_its_merkle_leaf() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            let durable = or_value(&["a", "b"], &[]);
+            ds.add(MAP, KEY, &durable, 0, 0).await.expect("seed");
+            let other = or_value(&["z"], &[]);
+            let leaf = |key: &str, value: &RecordValue| {
+                merkle_leaf_hash(key, value).expect("OrMap yields a leaf").1
+            };
+
+            let manager = Arc::new(MerkleSyncManager::new(3));
+            manager.update_ormap(MAP, 0, KEY, leaf(KEY, &durable));
+            manager.update_ormap(MAP, 0, "other", leaf("other", &other));
+            let reference = MerkleSyncManager::new(3);
+            reference.update_ormap(MAP, 0, "other", leaf("other", &other));
+
+            let merkle = Arc::new(MerkleMutationObserver::new(
+                Arc::clone(&manager),
+                MAP.to_string(),
+                0,
+            ));
+            let store = store_over(
+                Arc::clone(&ds),
+                Box::new(HashMapStorage::new()),
+                vec![merkle as Arc<dyn MutationObserver>],
+            );
+            assert!(!store.exists_in_memory(KEY), "precondition: never resident");
+
+            store
+                .remove(KEY, CallerProvenance::CrdtMerge)
+                .await
+                .expect("remove");
+
+            assert_eq!(
+                manager.aggregate_ormap_root_hash(MAP),
+                reference.aggregate_ormap_root_hash(MAP),
+                "the removed key's leaf must be gone from the in-memory Merkle tree"
+            );
+        }
     }
 }

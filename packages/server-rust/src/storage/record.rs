@@ -339,6 +339,11 @@ pub struct RecordMetadata {
     ///
     /// LOCAL ONLY — never serialized to the wire or persisted to the datastore.
     pub write_token: u64,
+    /// The `write_token` of the write last persisted to the `MapDataStore`
+    /// (`0` = none). Set by [`on_store`](RecordMetadata::on_store).
+    ///
+    /// LOCAL ONLY — never serialized to the wire or persisted to the datastore.
+    pub stored_token: u64,
 }
 
 impl RecordMetadata {
@@ -368,6 +373,7 @@ impl RecordMetadata {
             hits: 0,
             cost,
             write_token: Self::mint_token(),
+            stored_token: 0,
         }
     }
 
@@ -397,18 +403,23 @@ impl RecordMetadata {
         self.write_token = Self::mint_token();
     }
 
-    /// Records a persistence event: updates `last_stored_time`.
+    /// Records a persistence event: updates `last_stored_time` and records the
+    /// current `write_token` as the persisted write.
     pub fn on_store(&mut self, now: i64) {
         self.last_stored_time = now;
+        self.stored_token = self.write_token;
     }
 
     /// Returns `true` if the record has been modified since it was last stored.
     ///
-    /// A record is dirty if `last_update_time > last_stored_time`, meaning
-    /// there are changes not yet persisted to the backing `MapDataStore`.
+    /// Exact by write identity rather than by clock: the record is dirty unless
+    /// its current write is the one last persisted (`stored_token ==
+    /// write_token`). A write stamped in the same millisecond as the previous
+    /// persist is therefore still dirty, so eviction never drops it
+    /// (TG-EVI-001).
     #[must_use]
     pub fn is_dirty(&self) -> bool {
-        self.last_update_time > self.last_stored_time
+        self.stored_token != self.write_token
     }
 }
 
@@ -929,6 +940,26 @@ mod or_map_tombstone_tests {
         assert!(
             warning.contains("excluded from GC") && warning.contains("recreate the datastore"),
             "the warning states the clean-slate reclamation posture"
+        );
+    }
+}
+
+#[cfg(test)]
+mod metadata_dirtiness_tests {
+    use super::*;
+
+    // AC-9 (metadata half): a write stamped in the same millisecond as the
+    // previous persist is still dirty (TG-EVI-001).
+    #[test]
+    fn a_write_in_the_stored_millisecond_is_dirty() {
+        let t = 1_000_000;
+        let mut meta = RecordMetadata::new(t, 1);
+        meta.on_store(t);
+        assert!(!meta.is_dirty(), "a just-persisted record is clean");
+        meta.on_update(t);
+        assert!(
+            meta.is_dirty(),
+            "a write after the persist must be dirty even within the same millisecond"
         );
     }
 }

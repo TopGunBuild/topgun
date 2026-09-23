@@ -463,6 +463,20 @@ impl MutationObserver for MerkleMutationObserver {
             .remove_ormap(&self.map_name, self.partition_id, key);
     }
 
+    fn on_remove_key(&self, key: &str, is_backup: bool) {
+        // The tree holds a leaf for every durable key (the boot seed builds it
+        // from the data store), resident or not, so a removed non-resident key
+        // must lose its leaf too. Same removal as `on_remove`, which needs only
+        // the key.
+        if is_backup {
+            return;
+        }
+        self.manager
+            .remove_lww(&self.map_name, self.partition_id, key);
+        self.manager
+            .remove_ormap(&self.map_name, self.partition_id, key);
+    }
+
     fn on_evict(&self, _key: &str, _record: &Record, _is_backup: bool) {
         // Eviction changes residency only, not durable truth. The durable Merkle
         // index (DurableMerkleIndex) is the authoritative source for SYNC; the

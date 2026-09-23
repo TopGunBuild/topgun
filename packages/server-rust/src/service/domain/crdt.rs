@@ -497,11 +497,17 @@ impl CrdtService {
         let is_or_remove = matches!(&op.or_tag, Some(Some(_))) && op.or_record.is_none();
 
         if is_remove {
-            // REMOVE/OR_REMOVE: no timestamp sanitization needed (removes are idempotent)
+            // REMOVE/OR_REMOVE: no timestamp sanitization needed (removes are idempotent).
+            // Held under the key's writer, the one every in-place write of the key
+            // holds: the remove stages its durable delete before it empties the
+            // engine, and an in-place write in between would mutate the still-
+            // resident slot and re-stage it over that delete (TG-OR-007).
+            let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
             store
                 .remove(&op.key, CallerProvenance::CrdtMerge)
                 .await
                 .map_err(OperationError::Internal)?;
+            drop(key_guard);
 
             Ok(ServerEventPayload {
                 map_name: op.map_name.clone(),
@@ -1867,9 +1873,11 @@ pub(crate) async fn prune_epoch_tombstones(
                     crate::storage::record::sub_tombstone_bytes(r.tag.len() as u64);
                     guard.settle(epoch, PruneExit::Dropped, r.tag.len() as u64);
                 }
-                // The closure never ran: the key was evicted between the
-                // rehydrating get and this write, so init=None mutated nothing
-                // while a durable tombstone may well still exist. Hand the ref
+                // The closure never ran: the key left memory between the
+                // rehydrating get and this write and the store could not
+                // materialize it again (the default store does, and reclaims the
+                // tag), so init=None mutated nothing while a durable tombstone
+                // may well still exist. Hand the ref
                 // back so a later sweep retries it — the drain already removed
                 // its index entry, so dropping it here would orphan the tag
                 // un-prunable forever. Keyed off `ran` and never off the
@@ -4914,9 +4922,21 @@ mod tests {
         data: Mutex<HashMap<(String, String), RecordValue>>,
         reject_keys: Mutex<HashSet<String>>,
         reject_read_keys: Mutex<HashSet<String>>,
+        /// Keys whose durable row `load` serves ONCE and then answers absent for,
+        /// with the value still present in the backing map. `true` once served.
+        absent_after_one_load: Mutex<HashMap<String, bool>>,
     }
 
     impl ArmableStore {
+        /// Serve `key`'s durable row to the next `load` only, and answer absent
+        /// to every later one while the row stays in the backing map: a store
+        /// whose rows the record store's in-place write cannot materialize.
+        fn answer_absent_after_one_load(&self, key: &str) {
+            self.absent_after_one_load
+                .lock()
+                .insert(key.to_string(), false);
+        }
+
         /// Fail every subsequent write to `key`. Reads keep working, so a test can
         /// still inspect what survived durably.
         fn reject_writes_to(&self, key: &str) {
@@ -5000,6 +5020,12 @@ mod tests {
         async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
             if self.reject_read_keys.lock().contains(key) {
                 return Err(anyhow::anyhow!("armed read rejection for {key}"));
+            }
+            if let Some(served) = self.absent_after_one_load.lock().get_mut(key) {
+                if *served {
+                    return Ok(None);
+                }
+                *served = true;
             }
             Ok(self
                 .data
@@ -6934,7 +6960,9 @@ mod tests {
     /// the rehydrating read and the in-place write" race: `on_load` fires after
     /// the hydrated record has entered the engine and before the caller's next
     /// write, so a store that evicts there leaves the following `update_in_place`
-    /// with no resident slot to mutate — exactly the state the prune has to tell
+    /// with no resident slot. With the default store that write materializes the
+    /// key again and reclaims the tag; paired with a data store that cannot serve
+    /// the second load, the closure never runs — the state the prune has to tell
     /// apart from "the tag was already gone".
     #[derive(Default)]
     struct EvictOnRehydrate {
@@ -7274,14 +7302,11 @@ mod tests {
         );
     }
 
-    /// Evicted between the rehydrating read and the in-place write: the frontier
-    /// ref is re-indexed so a later sweep retries.
-    ///
-    /// The closure never ran, so nothing was reclaimed while a durable tombstone
-    /// still exists. The drain already removed the ref's index entry, so dropping
-    /// it here would orphan that tag un-prunable forever.
+    /// Evicted between the rehydrating read and the in-place write: the write
+    /// materializes the key from the data store and reclaims the tag durably at
+    /// once (TG-OR-007), so the ref is consumed and nothing is re-indexed.
     #[tokio::test]
-    async fn prune_restores_the_tombstone_ref_when_the_key_is_evicted_mid_write() {
+    async fn prune_reclaims_a_key_evicted_between_its_read_and_its_write() {
         let store = Arc::new(ArmableStore::default());
         let evictor = Arc::new(EvictOnRehydrate::default());
         let (svc, factory, frontier) = make_service_with_frontier_and_store(
@@ -7316,6 +7341,71 @@ mod tests {
 
         let durable = store.durable("m", "k1");
         assert!(
+            matches!(&durable, Some(RecordValue::OrMap { tombstones, .. }) if !tombstones.contains(&t1.to_string())),
+            "the materializing write must reclaim the tag durably, got {durable:?}"
+        );
+        let retryable = frontier.drain_prunable_tombstones();
+        assert!(
+            !retryable.iter().any(|(_, r)| r.key == "k1"),
+            "a reclaimed tombstone must not be re-indexed, got {retryable:?}"
+        );
+    }
+
+    /// `RestoredEvicted` is reachable only through a store whose in-place write
+    /// cannot materialize the key: here the data store serves the prune's
+    /// rehydrating read and then answers absent, so after the eviction the
+    /// closure never runs while the tombstone is still durable. The ref is
+    /// re-indexed for a later sweep, and the pass still settles through exactly
+    /// one of its seven exits.
+    #[test]
+    fn prune_restores_the_ref_when_the_store_cannot_materialize_the_evicted_key() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let t1 = "T1";
+
+        // Built inside the recorder binding, so the prune record emits.
+        let (store, frontier) = metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let store = Arc::new(ArmableStore::default());
+                let evictor = Arc::new(EvictOnRehydrate::default());
+                let (svc, factory, frontier) = make_service_with_frontier_and_store(
+                    Arc::clone(&store) as Arc<dyn MapDataStore>,
+                    vec![Arc::clone(&evictor) as Arc<dyn MutationObserver>],
+                );
+                // k2 owns epoch 2, which the gates below keep pinned, so only
+                // k1's epoch drains.
+                for (key, val, tag) in [("k1", "v1", t1), ("k2", "v2", "T2")] {
+                    Arc::clone(&svc)
+                        .oneshot(or_add_op("m", key, val, tag))
+                        .await
+                        .unwrap();
+                    Arc::clone(&svc)
+                        .oneshot(or_remove_op("m", key, tag))
+                        .await
+                        .unwrap();
+                }
+                open_prune_gates_past_epoch_one(&frontier).await;
+
+                let k1_store = factory.get_or_create("m", hash_to_partition("k1"));
+                assert!(
+                    k1_store.evict("k1", false).is_some(),
+                    "precondition: k1 is resident before the modelled eviction"
+                );
+                evictor.arm(&k1_store, "k1");
+                store.answer_absent_after_one_load("k1");
+
+                prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+                (store, frontier)
+            })
+        });
+        let rendered = handle.render();
+
+        let durable = store.durable("m", "k1");
+        assert!(
             matches!(&durable, Some(RecordValue::OrMap { tombstones, .. }) if tombstones.contains(&t1.to_string())),
             "nothing was reclaimed: the tag is still durable, got {durable:?}"
         );
@@ -7326,6 +7416,26 @@ mod tests {
                 .any(|(epoch, r)| *epoch == 1 && r.key == "k1" && r.tag == t1),
             "an un-reclaimed tombstone must be re-indexed for a later sweep, got {retryable:?}"
         );
+
+        let considered = rendered_counter(&rendered, METRIC_PRUNE_CONSIDERED_TOTAL);
+        let restored_evicted = rendered_counter(&rendered, METRIC_PRUNE_RESTORED_EVICTED_TOTAL);
+        assert_eq!(
+            restored_evicted, 1,
+            "the ref leaves through RestoredEvicted; render was:\n{rendered}"
+        );
+        assert_eq!(
+            considered,
+            rendered_counter(&rendered, METRIC_PRUNE_DROPPED_TOTAL)
+                + rendered_counter(&rendered, METRIC_PRUNE_MATCHED_NOTHING_TOTAL)
+                + rendered_counter(&rendered, METRIC_PRUNE_ABSENT_TOTAL)
+                + rendered_counter(&rendered, METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL)
+                + restored_evicted
+                + rendered_counter(&rendered, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL)
+                + rendered_counter(&rendered, METRIC_PRUNE_RESTORED_CANCELLED_TOTAL),
+            "every considered ref must leave through exactly one counted exit; \
+             render was:\n{rendered}"
+        );
+        assert_eq!(considered, 1, "one ref considered; render was:\n{rendered}");
     }
 
     /// The tag was genuinely already gone: the closure RAN and removed nothing,
@@ -7508,8 +7618,14 @@ mod tests {
         }
     }
 
-    /// One fixed synthetic prune workload that drives **all six** exits of
-    /// `prune_epoch_tombstones` in a single non-empty pass.
+    /// One fixed synthetic prune workload that drives the exits of
+    /// `prune_epoch_tombstones` in a single non-empty pass: `Dropped` twice
+    /// (`kdrop`, and `kevict`, whose eviction between the read and the write
+    /// the in-place write now repairs by materializing the key), then
+    /// matched-nothing, absent, read error and write error. `RestoredEvicted`
+    /// is reachable only through a store that cannot materialize and is driven
+    /// by `prune_restores_the_ref_when_the_store_cannot_materialize_the_evicted_key`;
+    /// `RestoredCancelled` by the ledger test's second pass.
     ///
     /// Every exit has to actually fire. An exit nothing reaches contributes zero
     /// to both sides of the exhaustiveness identity, so its increment could be
@@ -7608,8 +7724,8 @@ mod tests {
 
         // The prune's durable write fails.
         store.reject_writes_to("kwrite");
-        // Evicted between the rehydrating read and the in-place write, so the
-        // mutate closure never runs.
+        // Evicted between the rehydrating read and the in-place write: the write
+        // materializes the key from the data store and reclaims the tag.
         let kevict_store = factory.get_or_create("m", hash_to_partition("kevict"));
         assert!(
             kevict_store.evict("kevict", false).is_some(),
@@ -7768,10 +7884,10 @@ mod tests {
     /// and each step is what keeps the next one honest:
     ///
     /// 1. the shared one-pass workload runs unchanged, driving six exits;
-    /// 2. its own outcome drain CONSUMES the three refs that pass restored, so
+    /// 2. its own outcome drain CONSUMES the two refs that pass restored, so
     ///    they cannot re-enter the second pass still carrying their injected
-    ///    read / write / eviction failures, settle through the wrong exit, and
-    ///    break both counts below;
+    ///    read / write failures, settle through the wrong exit, and break both
+    ///    counts below;
     /// 3. a fresh pin is stamped at epoch 8 and acked, which makes `kpinned`'s
     ///    epoch 7 eligible while the new pin holds the frontier open — leaving
     ///    the index holding exactly ONE drainable ref;
@@ -7864,9 +7980,9 @@ mod tests {
         let rendered = handle.render();
 
         assert_eq!(
-            outcome.dropped_observed, 1,
-            "exactly one seeded tag is reclaimed durably; the other three exits \
-             leave their tag in place"
+            outcome.dropped_observed, 2,
+            "two seeded tags are reclaimed durably (kdrop, and kevict through the \
+             materializing write); the read- and write-failure exits leave theirs"
         );
 
         let considered = rendered_counter(&rendered, METRIC_PRUNE_CONSIDERED_TOTAL);
@@ -7880,24 +7996,33 @@ mod tests {
             rendered_counter(&rendered, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL);
         let restored_cancelled = rendered_counter(&rendered, METRIC_PRUNE_RESTORED_CANCELLED_TOTAL);
 
-        // Each exit fired exactly once. Asserted before the sum so a workload
-        // that stopped reaching an exit fails HERE, loudly, instead of leaving
-        // the identity below vacuously true for that exit.
-        for (name, observed) in [
-            (METRIC_PRUNE_DROPPED_TOTAL, dropped),
-            (METRIC_PRUNE_MATCHED_NOTHING_TOTAL, matched_nothing),
-            (METRIC_PRUNE_ABSENT_TOTAL, absent),
-            (METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL, restored_read_error),
-            (METRIC_PRUNE_RESTORED_EVICTED_TOTAL, restored_evicted),
+        // Each exit fired the pinned number of times. Asserted before the sum so
+        // a workload that stopped reaching an exit fails HERE, loudly, instead of
+        // leaving the identity below vacuously true for that exit. `Dropped`
+        // fires twice (the evicted key is reclaimed by the materializing write);
+        // `RestoredEvicted` fires nowhere in this workload — it is driven by
+        // `prune_restores_the_ref_when_the_store_cannot_materialize_the_evicted_key`,
+        // which checks the same identity over its own pass.
+        for (name, observed, expected) in [
+            (METRIC_PRUNE_DROPPED_TOTAL, dropped, 2),
+            (METRIC_PRUNE_MATCHED_NOTHING_TOTAL, matched_nothing, 1),
+            (METRIC_PRUNE_ABSENT_TOTAL, absent, 1),
+            (
+                METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
+                restored_read_error,
+                1,
+            ),
+            (METRIC_PRUNE_RESTORED_EVICTED_TOTAL, restored_evicted, 0),
             (
                 METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
                 restored_write_error,
+                1,
             ),
-            (METRIC_PRUNE_RESTORED_CANCELLED_TOTAL, restored_cancelled),
+            (METRIC_PRUNE_RESTORED_CANCELLED_TOTAL, restored_cancelled, 1),
         ] {
             assert_eq!(
-                observed, 1,
-                "the workload must drive {name} exactly once, or the \
+                observed, expected,
+                "the workload must drive {name} exactly {expected} time(s), or the \
                  exhaustiveness identity asserts nothing about that exit; \
                  render was:\n{rendered}"
             );
@@ -7915,10 +8040,7 @@ mod tests {
             "every considered ref must leave through exactly one counted exit; \
              render was:\n{rendered}"
         );
-        assert_eq!(
-            considered, 7,
-            "seven refs considered across the two passes, one per exit"
-        );
+        assert_eq!(considered, 7, "seven refs considered across the two passes");
 
         let passes = rendered_counter(&rendered, METRIC_PRUNE_PASSES_TOTAL);
         let empty_drains = rendered_counter(&rendered, METRIC_PRUNE_EMPTY_DRAINS_TOTAL);
@@ -8163,6 +8285,7 @@ mod tests {
 
         let mut considered_sum = 0u64;
         let mut dropped_sum = 0u64;
+        let mut restored_evicted_sum = 0u64;
         for row in &settlement_rows {
             let considered = row_u64(row, "considered");
             let dropped = row_u64(row, "dropped");
@@ -8187,12 +8310,17 @@ mod tests {
             assert_eq!(considered, 1, "one ref per epoch at epoch width 1: {row:?}");
             considered_sum += considered;
             dropped_sum += dropped;
+            restored_evicted_sum += restored_evicted;
         }
         assert_eq!(considered_sum, 6, "six epochs, one ref each");
         assert_eq!(
-            dropped_sum, 1,
-            "exactly one of the six epochs reclaims durably (kdrop); the other \
-             five leave their tag in place"
+            dropped_sum, 2,
+            "two of the six epochs reclaim durably (kdrop, and kevict through the \
+             materializing write); the other four leave their tag in place"
+        );
+        assert_eq!(
+            restored_evicted_sum, 0,
+            "the evicted key is reclaimed, not restored, with the default store"
         );
     }
 
@@ -8434,7 +8562,7 @@ mod tests {
              reclaims, ref for ref"
         );
         assert_eq!(
-            armed_outcome.dropped_observed, 1,
+            armed_outcome.dropped_observed, 2,
             "the comparison is over a run that actually reclaimed something"
         );
 
@@ -9957,5 +10085,581 @@ mod tests {
              (convergence path), not re-stamp it"
         );
         assert_eq!(stored.node_id, FORGED_NODE_ID);
+    }
+
+    // -- Writes on a durable-but-non-resident key --
+    //
+    // A key can be durable without being resident: after a restart nothing
+    // re-hydrates the engine, and eviction drops clean records. An op that lands
+    // on such a key must be absorbed into the key's durable state, never replace
+    // it with a slot rebuilt from nothing.
+    mod non_resident_writes {
+        use super::*;
+        use crate::storage::datastores::RedbDataStore;
+
+        const MAP: &str = "nonres_map";
+        const KEY: &str = "doc";
+
+        fn redb_stack(
+            dir: &tempfile::TempDir,
+        ) -> (
+            Arc<CrdtService>,
+            Arc<RecordStoreFactory>,
+            Arc<dyn MapDataStore>,
+        ) {
+            let data_store: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(dir.path().join("nonres.redb")).expect("redb open"));
+            let factory = Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::clone(&data_store),
+                Vec::new(),
+            ));
+            let svc = Arc::new(CrdtService::new(
+                Arc::clone(&factory),
+                Arc::new(ConnectionRegistry::new()),
+                make_validator(),
+                Arc::new(QueryRegistry::new()),
+                Arc::new(SchemaService::new()),
+            ));
+            (svc, factory, data_store)
+        }
+
+        fn entry(tag: &str) -> OrMapEntry {
+            OrMapEntry {
+                value: rmpv_to_value(&rmpv::Value::String(format!("v-{tag}").into())),
+                tag: tag.to_string(),
+                timestamp: make_timestamp(),
+            }
+        }
+
+        /// Three live entries and one tombstone, written straight to the durable
+        /// store so the engine never sees the key.
+        async fn seed_durable_or(ds: &Arc<dyn MapDataStore>) {
+            let seeded = RecordValue::OrMap {
+                records: vec![entry("t-old-1"), entry("t-old-2"), entry("t-old-3")],
+                tombstones: vec!["t-gone".to_string()],
+            };
+            ds.add(MAP, KEY, &seeded, 0, 0)
+                .await
+                .expect("seed durable row");
+        }
+
+        async fn durable_or(ds: &Arc<dyn MapDataStore>) -> (Vec<String>, Vec<String>) {
+            match ds.load(MAP, KEY).await.expect("load durable row") {
+                Some(RecordValue::OrMap {
+                    records,
+                    tombstones,
+                }) => {
+                    let mut tags: Vec<String> = records.into_iter().map(|e| e.tag).collect();
+                    tags.sort();
+                    let mut tombs = tombstones;
+                    tombs.sort();
+                    (tags, tombs)
+                }
+                other => panic!("durable row is not an OrMap: {other:?}"),
+            }
+        }
+
+        fn assert_not_resident(factory: &Arc<RecordStoreFactory>) {
+            let store = factory.get_or_create(MAP, hash_to_partition(KEY));
+            assert!(
+                !store.exists_in_memory(KEY),
+                "precondition: the key must be durable but NOT resident"
+            );
+        }
+
+        fn strings(v: &[&str]) -> Vec<String> {
+            v.iter().map(|s| (*s).to_string()).collect()
+        }
+
+        // (a) OR_ADD on a non-resident key keeps every durable entry and tombstone.
+        #[tokio::test]
+        async fn or_add_on_non_resident_key_keeps_the_durable_entries() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, ds) = redb_stack(&dir);
+            seed_durable_or(&ds).await;
+            assert_not_resident(&factory);
+
+            svc.clone()
+                .oneshot(or_add_op(MAP, KEY, "new", "t-new"))
+                .await
+                .expect("or_add must succeed");
+
+            assert_eq!(
+                durable_or(&ds).await,
+                (
+                    strings(&["t-new", "t-old-1", "t-old-2", "t-old-3"]),
+                    strings(&["t-gone"])
+                ),
+                "durable row after OR_ADD on a non-resident key must be old ∪ new"
+            );
+        }
+
+        // (b) OR_REMOVE on a non-resident key removes one tag and keeps the rest.
+        #[tokio::test]
+        async fn or_remove_on_non_resident_key_keeps_the_other_durable_entries() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, ds) = redb_stack(&dir);
+            seed_durable_or(&ds).await;
+            assert_not_resident(&factory);
+
+            svc.clone()
+                .oneshot(or_remove_op(MAP, KEY, "t-old-1"))
+                .await
+                .expect("or_remove must succeed");
+
+            assert_eq!(
+                durable_or(&ds).await,
+                (
+                    strings(&["t-old-2", "t-old-3"]),
+                    strings(&["t-gone", "t-old-1"])
+                ),
+                "durable row after OR_REMOVE on a non-resident key must keep the untouched \
+                 entries and the earlier tombstone"
+            );
+        }
+
+        // (d) The same through the real eviction primitive instead of a seeded row.
+        #[tokio::test]
+        async fn or_add_after_eviction_keeps_the_durable_entries() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, ds) = redb_stack(&dir);
+            for tag in ["t-1", "t-2", "t-3"] {
+                svc.clone()
+                    .oneshot(or_add_op(MAP, KEY, tag, tag))
+                    .await
+                    .expect("or_add must succeed");
+            }
+            assert_eq!(
+                durable_or(&ds).await.0,
+                strings(&["t-1", "t-2", "t-3"]),
+                "precondition: the three adds are durable"
+            );
+
+            let store = factory.get_or_create(MAP, hash_to_partition(KEY));
+            assert!(
+                store.evict_lru(u32::MAX, false) > 0,
+                "the clean record must be evicted"
+            );
+            assert_not_resident(&factory);
+
+            svc.clone()
+                .oneshot(or_add_op(MAP, KEY, "t-4", "t-4"))
+                .await
+                .expect("or_add must succeed");
+
+            assert_eq!(
+                durable_or(&ds).await.0,
+                strings(&["t-1", "t-2", "t-3", "t-4"]),
+                "durable row after eviction + OR_ADD must be old ∪ new"
+            );
+        }
+
+        // (a) control: hydrate first, then OR_ADD. Separates "the write never
+        // materializes the durable row" from any other cause.
+        #[tokio::test]
+        async fn or_add_on_resident_key_keeps_the_durable_entries_control() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, ds) = redb_stack(&dir);
+            seed_durable_or(&ds).await;
+            let store = factory.get_or_create(MAP, hash_to_partition(KEY));
+            store.get(KEY, false).await.expect("hydrate");
+
+            svc.clone()
+                .oneshot(or_add_op(MAP, KEY, "new", "t-new"))
+                .await
+                .expect("or_add must succeed");
+
+            assert_eq!(
+                durable_or(&ds).await,
+                (
+                    strings(&["t-new", "t-old-1", "t-old-2", "t-old-3"]),
+                    strings(&["t-gone"])
+                ),
+                "resident control: durable row must be old ∪ new"
+            );
+        }
+
+        // AC-4 (gauge): materializing a key charges the tombstone gauge exactly
+        // what the same op charges on a resident key — the loaded tombstones are
+        // not charged again.
+        #[tokio::test]
+        async fn or_remove_on_non_resident_key_charges_the_gauge_like_a_resident_key() {
+            use crate::storage::tombstone_gauge::with_isolated_gauge;
+
+            let dir_resident = tempfile::tempdir().expect("tempdir");
+            let (svc_resident, factory_resident, ds_resident) = redb_stack(&dir_resident);
+            seed_durable_or(&ds_resident).await;
+            factory_resident
+                .get_or_create(MAP, hash_to_partition(KEY))
+                .get(KEY, false)
+                .await
+                .expect("hydrate");
+            let (result, resident_delta) = with_isolated_gauge(
+                svc_resident
+                    .clone()
+                    .oneshot(or_remove_op(MAP, KEY, "t-old-1")),
+            )
+            .await;
+            result.expect("or_remove must succeed");
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, ds) = redb_stack(&dir);
+            seed_durable_or(&ds).await;
+            assert_not_resident(&factory);
+            let (result, non_resident_delta) =
+                with_isolated_gauge(svc.clone().oneshot(or_remove_op(MAP, KEY, "t-old-1"))).await;
+            result.expect("or_remove must succeed");
+
+            assert!(resident_delta > 0, "the new tombstone must be charged");
+            assert_eq!(
+                non_resident_delta, resident_delta,
+                "a materializing OR_REMOVE must charge the gauge exactly as a resident one"
+            );
+        }
+
+        /// How long a test waits for the double to park before it declares
+        /// that the setup never reached the park point.
+        const PARK_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
+        type Gate = (
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        );
+
+        /// The test's side of a one-shot park. Dropping it releases the caller.
+        struct ParkHandle {
+            parked: Option<tokio::sync::oneshot::Receiver<()>>,
+            release: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+
+        impl ParkHandle {
+            async fn wait_parked(&mut self) {
+                let parked = self.parked.take().expect("wait_parked called once");
+                tokio::time::timeout(PARK_BOUND, parked)
+                    .await
+                    .expect("the double never parked: the setup did not reach the park point")
+                    .expect("park dropped before parking");
+            }
+
+            fn release(&mut self) {
+                if let Some(release) = self.release.take() {
+                    let _ = release.send(());
+                }
+            }
+        }
+
+        /// Forwards to `inner` and parks ONE call, armed just before the
+        /// targeted caller runs: on RETURN from `load` (holding the loaded
+        /// value) or on RETURN from `remove` (the delete applied). The first
+        /// matching call consumes the park; later calls pass unparked.
+        struct ParkingStore {
+            inner: Arc<dyn MapDataStore>,
+            after_load: std::sync::Mutex<Option<Gate>>,
+            after_remove: std::sync::Mutex<Option<Gate>>,
+        }
+
+        impl ParkingStore {
+            fn new(inner: Arc<dyn MapDataStore>) -> Self {
+                Self {
+                    inner,
+                    after_load: std::sync::Mutex::new(None),
+                    after_remove: std::sync::Mutex::new(None),
+                }
+            }
+
+            fn arm(slot: &std::sync::Mutex<Option<Gate>>) -> ParkHandle {
+                let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                *slot.lock().unwrap() = Some((parked_tx, release_rx));
+                ParkHandle {
+                    parked: Some(parked_rx),
+                    release: Some(release_tx),
+                }
+            }
+
+            fn park_after_load(&self) -> ParkHandle {
+                Self::arm(&self.after_load)
+            }
+
+            fn park_after_remove(&self) -> ParkHandle {
+                Self::arm(&self.after_remove)
+            }
+
+            async fn pass(slot: &std::sync::Mutex<Option<Gate>>) {
+                let gate = slot.lock().unwrap().take();
+                if let Some((parked, release)) = gate {
+                    let _ = parked.send(());
+                    let _ = release.await;
+                }
+            }
+        }
+
+        #[async_trait]
+        impl MapDataStore for ParkingStore {
+            async fn add(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                expiration_time: i64,
+                now: i64,
+            ) -> anyhow::Result<()> {
+                self.inner.add(map, key, value, expiration_time, now).await
+            }
+
+            async fn add_backup(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                expiration_time: i64,
+                now: i64,
+            ) -> anyhow::Result<()> {
+                self.inner
+                    .add_backup(map, key, value, expiration_time, now)
+                    .await
+            }
+
+            async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+                let result = self.inner.remove(map, key, now).await;
+                Self::pass(&self.after_remove).await;
+                result
+            }
+
+            async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+                self.inner.remove_backup(map, key, now).await
+            }
+
+            async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+                let loaded = self.inner.load(map, key).await;
+                Self::pass(&self.after_load).await;
+                loaded
+            }
+
+            async fn load_all(
+                &self,
+                map: &str,
+                keys: &[String],
+            ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+                self.inner.load_all(map, keys).await
+            }
+
+            async fn enumerate_leaves(
+                &self,
+                map: &str,
+                is_backup: bool,
+                sink: &mut dyn LeafSink,
+            ) -> anyhow::Result<()> {
+                self.inner.enumerate_leaves(map, is_backup, sink).await
+            }
+
+            async fn scan_values(
+                &self,
+                map: &str,
+                is_backup: bool,
+                max_batch_cost: u64,
+            ) -> anyhow::Result<ScanBatch> {
+                self.inner.scan_values(map, is_backup, max_batch_cost).await
+            }
+
+            async fn scan_values_batched(
+                &self,
+                map: &str,
+                is_backup: bool,
+                cursor: ScanCursor,
+                max_batch_cost: u64,
+            ) -> anyhow::Result<ScanBatch> {
+                self.inner
+                    .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                    .await
+            }
+
+            async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+                self.inner.remove_all(map, keys).await
+            }
+
+            fn is_loadable(&self, key: &str) -> bool {
+                self.inner.is_loadable(key)
+            }
+
+            fn pending_operation_count(&self) -> u64 {
+                self.inner.pending_operation_count()
+            }
+
+            async fn soft_flush(&self) -> anyhow::Result<u64> {
+                self.inner.soft_flush().await
+            }
+
+            async fn hard_flush(&self) -> anyhow::Result<()> {
+                self.inner.hard_flush().await
+            }
+
+            async fn flush_key(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                is_backup: bool,
+            ) -> anyhow::Result<()> {
+                self.inner.flush_key(map, key, value, is_backup).await
+            }
+
+            fn reset(&self) {
+                self.inner.reset();
+            }
+        }
+
+        fn remove_op(map: &str, key: &str) -> Operation {
+            Operation::ClientOp {
+                ctx: make_ctx_for_key(key),
+                payload: topgun_core::messages::ClientOpMessage {
+                    payload: topgun_core::messages::base::ClientOp {
+                        id: Some(format!("remove-{key}")),
+                        map_name: map.to_string(),
+                        key: key.to_string(),
+                        op_type: Some("REMOVE".to_string()),
+                        record: None,
+                        or_record: None,
+                        or_tag: None,
+                        write_concern: None,
+                        timeout: None,
+                    },
+                },
+            }
+        }
+
+        /// The redb stack of [`redb_stack`] with a [`ParkingStore`] between the
+        /// record stores and redb. Returns the service, the factory, redb
+        /// itself (for seeding and reading the durable row) and the double.
+        fn parking_stack(
+            dir: &tempfile::TempDir,
+        ) -> (
+            Arc<CrdtService>,
+            Arc<RecordStoreFactory>,
+            Arc<dyn MapDataStore>,
+            Arc<ParkingStore>,
+        ) {
+            let redb: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(dir.path().join("nonres.redb")).expect("redb open"));
+            let parking = Arc::new(ParkingStore::new(Arc::clone(&redb)));
+            let factory = Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                parking.clone() as Arc<dyn MapDataStore>,
+                Vec::new(),
+            ));
+            let svc = Arc::new(CrdtService::new(
+                Arc::clone(&factory),
+                Arc::new(ConnectionRegistry::new()),
+                make_validator(),
+                Arc::new(QueryRegistry::new()),
+                Arc::new(SchemaService::new()),
+            ));
+            (svc, factory, redb, parking)
+        }
+
+        /// The durable tag set, or `None` when the row is gone.
+        async fn durable_tags_or_none(ds: &Arc<dyn MapDataStore>) -> Option<Vec<String>> {
+            ds.load(MAP, KEY)
+                .await
+                .expect("load durable row")
+                .map(|value| match value {
+                    RecordValue::OrMap { records, .. } => {
+                        let mut tags: Vec<String> = records.into_iter().map(|e| e.tag).collect();
+                        tags.sort();
+                        tags
+                    }
+                    other => panic!("durable row is not an OrMap: {other:?}"),
+                })
+        }
+
+        // AC-6b: a REMOVE that lands while an OR_ADD is materializing (parked
+        // holding the loaded `D`) must not be undone by that OR_ADD (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn remove_during_a_materializing_or_add_is_not_undone() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, parking) = parking_stack(&dir);
+            seed_durable_or(&redb).await;
+            assert_not_resident(&factory);
+
+            let mut writer_park = parking.park_after_load();
+            let writer = tokio::spawn(svc.clone().oneshot(or_add_op(MAP, KEY, "new", "t-new")));
+            writer_park.wait_parked().await;
+
+            // Spawned, not awaited first: once REMOVE takes the key's writer it
+            // waits for the parked OR_ADD, so the park is released on REMOVE's
+            // completion or after the bound, whichever comes first.
+            let mut remover = tokio::spawn(svc.clone().oneshot(remove_op(MAP, KEY)));
+            let remover_done = tokio::time::timeout(PARK_BOUND, &mut remover).await;
+            writer_park.release();
+            writer
+                .await
+                .expect("writer task")
+                .expect("or_add must succeed");
+            match remover_done {
+                Ok(done) => {
+                    done.expect("remover task").expect("remove must succeed");
+                }
+                Err(_) => {
+                    remover
+                        .await
+                        .expect("remover task")
+                        .expect("remove must succeed");
+                }
+            }
+
+            let durable = durable_tags_or_none(&redb).await;
+            assert!(
+                durable == Some(strings(&["t-new"])) || durable.is_none(),
+                "durable row must be {{op}} or gone, never the removed entries plus op; got {durable:?}"
+            );
+        }
+
+        // AC-6d: an OR_ADD on a resident key must not re-stage the key over a
+        // REMOVE's pending delete; REMOVE and in-place writes share the key's
+        // writer (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn or_add_between_the_steps_of_a_remove_does_not_resurrect_it() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, parking) = parking_stack(&dir);
+            seed_durable_or(&redb).await;
+            factory
+                .get_or_create(MAP, hash_to_partition(KEY))
+                .get(KEY, false)
+                .await
+                .expect("hydrate");
+
+            let mut remove_park = parking.park_after_remove();
+            let remover = tokio::spawn(svc.clone().oneshot(remove_op(MAP, KEY)));
+            remove_park.wait_parked().await;
+
+            // Spawned, not awaited first: once REMOVE holds the key's writer the
+            // OR_ADD waits for it, so the park is released on the OR_ADD's
+            // completion or after the bound, whichever comes first.
+            let mut writer = tokio::spawn(svc.clone().oneshot(or_add_op(MAP, KEY, "new", "t-new")));
+            let writer_done = tokio::time::timeout(PARK_BOUND, &mut writer).await;
+            remove_park.release();
+            remover
+                .await
+                .expect("remover task")
+                .expect("remove must succeed");
+            match writer_done {
+                Ok(done) => {
+                    done.expect("writer task").expect("or_add must succeed");
+                }
+                Err(_) => {
+                    writer
+                        .await
+                        .expect("writer task")
+                        .expect("or_add must succeed");
+                }
+            }
+
+            let durable = durable_tags_or_none(&redb).await;
+            assert!(
+                durable == Some(strings(&["t-new"])) || durable.is_none(),
+                "durable row must be {{op}} or gone, never the removed entries plus op; got {durable:?}"
+            );
+        }
     }
 }
