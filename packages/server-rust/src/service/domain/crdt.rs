@@ -10254,6 +10254,10 @@ mod tests {
                 Self::arm(&self.after_load)
             }
 
+            fn park_after_remove(&self) -> ParkHandle {
+                Self::arm(&self.after_remove)
+            }
+
             async fn pass(slot: &std::sync::Mutex<Option<Gate>>) {
                 let gate = slot.lock().unwrap().take();
                 if let Some((parked, release)) = gate {
@@ -10473,6 +10477,53 @@ mod tests {
                         .await
                         .expect("remover task")
                         .expect("remove must succeed");
+                }
+            }
+
+            let durable = durable_tags_or_none(&redb).await;
+            assert!(
+                durable == Some(strings(&["t-new"])) || durable.is_none(),
+                "durable row must be {{op}} or gone, never the removed entries plus op; got {durable:?}"
+            );
+        }
+
+        // AC-6d: an OR_ADD on a resident key must not re-stage the key over a
+        // REMOVE's pending delete; REMOVE and in-place writes share the key's
+        // writer (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn or_add_between_the_steps_of_a_remove_does_not_resurrect_it() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, parking) = parking_stack(&dir);
+            seed_durable_or(&redb).await;
+            factory
+                .get_or_create(MAP, hash_to_partition(KEY))
+                .get(KEY, false)
+                .await
+                .expect("hydrate");
+
+            let mut remove_park = parking.park_after_remove();
+            let remover = tokio::spawn(svc.clone().oneshot(remove_op(MAP, KEY)));
+            remove_park.wait_parked().await;
+
+            // Spawned, not awaited first: once REMOVE holds the key's writer the
+            // OR_ADD waits for it, so the park is released on the OR_ADD's
+            // completion or after the bound, whichever comes first.
+            let mut writer = tokio::spawn(svc.clone().oneshot(or_add_op(MAP, KEY, "new", "t-new")));
+            let writer_done = tokio::time::timeout(PARK_BOUND, &mut writer).await;
+            remove_park.release();
+            remover
+                .await
+                .expect("remover task")
+                .expect("remove must succeed");
+            match writer_done {
+                Ok(done) => {
+                    done.expect("writer task").expect("or_add must succeed");
+                }
+                Err(_) => {
+                    writer
+                        .await
+                        .expect("writer task")
+                        .expect("or_add must succeed");
                 }
             }
 
