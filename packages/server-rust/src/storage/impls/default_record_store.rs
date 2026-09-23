@@ -1628,6 +1628,13 @@ mod tests {
     /// materializing it (TG-OR-007, TG-OR-002, TG-EVI-001).
     mod materialize {
         use std::sync::Mutex;
+        use std::time::Duration;
+
+        use crate::storage::engine::{
+            FetchResult as EngineFetch, PutIfAbsentOutcome, UpdateInPlaceOutcome,
+        };
+        use crate::storage::map_data_store::{LeafSink, ScanBatch, ScanCursor};
+        use crate::storage::wal::OrDelta;
 
         use super::*;
         use crate::storage::datastores::RedbDataStore;
@@ -1764,6 +1771,439 @@ mod tests {
             fn on_destroy(&self, _: bool) {}
         }
 
+        /// How long a test waits for a double to park before it declares that
+        /// the setup never reached the park point.
+        pub(crate) const PARK_BOUND: Duration = Duration::from_secs(2);
+
+        /// The parked side of a one-shot async gate.
+        pub(crate) struct Gate {
+            parked: tokio::sync::oneshot::Sender<()>,
+            release: tokio::sync::oneshot::Receiver<()>,
+        }
+
+        impl Gate {
+            async fn pass(self) {
+                let _ = self.parked.send(());
+                let _ = self.release.await;
+            }
+        }
+
+        /// The test's side of a one-shot async gate. Dropping it releases the
+        /// parked caller, so a failing test never leaves a task parked.
+        pub(crate) struct GateHandle {
+            parked: Option<tokio::sync::oneshot::Receiver<()>>,
+            release: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+
+        impl GateHandle {
+            /// Waits until the caller parks; panics after [`PARK_BOUND`].
+            pub(crate) async fn wait_parked(&mut self) {
+                let parked = self.parked.take().expect("wait_parked called once");
+                tokio::time::timeout(PARK_BOUND, parked)
+                    .await
+                    .expect("the double never parked: the setup did not reach the park point")
+                    .expect("gate dropped before parking");
+            }
+
+            pub(crate) fn release(&mut self) {
+                if let Some(release) = self.release.take() {
+                    let _ = release.send(());
+                }
+            }
+        }
+
+        fn gate() -> (Gate, GateHandle) {
+            let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            (
+                Gate {
+                    parked: parked_tx,
+                    release: release_rx,
+                },
+                GateHandle {
+                    parked: Some(parked_rx),
+                    release: Some(release_tx),
+                },
+            )
+        }
+
+        /// A data store that forwards to `inner` and can park ONE call, armed
+        /// just before the targeted caller runs: on RETURN from `load` (holding
+        /// the loaded value), on ENTRY to `remove` (before it delegates), or on
+        /// RETURN from `remove` (the delete applied). A park is consumed by the
+        /// first matching call, so any later call passes unparked.
+        pub(crate) struct ParkingStore {
+            inner: Arc<dyn MapDataStore>,
+            after_load: Mutex<Option<Gate>>,
+            before_remove: Mutex<Option<Gate>>,
+            after_remove: Mutex<Option<Gate>>,
+        }
+
+        impl ParkingStore {
+            pub(crate) fn new(inner: Arc<dyn MapDataStore>) -> Self {
+                Self {
+                    inner,
+                    after_load: Mutex::new(None),
+                    before_remove: Mutex::new(None),
+                    after_remove: Mutex::new(None),
+                }
+            }
+
+            fn arm(slot: &Mutex<Option<Gate>>) -> GateHandle {
+                let (parked, handle) = gate();
+                *slot.lock().unwrap() = Some(parked);
+                handle
+            }
+
+            pub(crate) fn park_after_load(&self) -> GateHandle {
+                Self::arm(&self.after_load)
+            }
+
+            pub(crate) fn park_before_remove(&self) -> GateHandle {
+                Self::arm(&self.before_remove)
+            }
+
+            pub(crate) fn park_after_remove(&self) -> GateHandle {
+                Self::arm(&self.after_remove)
+            }
+
+            fn take(slot: &Mutex<Option<Gate>>) -> Option<Gate> {
+                slot.lock().unwrap().take()
+            }
+        }
+
+        #[async_trait]
+        impl MapDataStore for ParkingStore {
+            async fn add(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                expiration_time: i64,
+                now: i64,
+            ) -> anyhow::Result<()> {
+                self.inner.add(map, key, value, expiration_time, now).await
+            }
+
+            async fn add_with_witness(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                expiration_time: i64,
+                now: i64,
+                witness: Option<&OrDelta>,
+            ) -> anyhow::Result<()> {
+                self.inner
+                    .add_with_witness(map, key, value, expiration_time, now, witness)
+                    .await
+            }
+
+            fn wants_or_witness(&self) -> bool {
+                self.inner.wants_or_witness()
+            }
+
+            async fn add_backup(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                expiration_time: i64,
+                now: i64,
+            ) -> anyhow::Result<()> {
+                self.inner
+                    .add_backup(map, key, value, expiration_time, now)
+                    .await
+            }
+
+            async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+                if let Some(parked) = Self::take(&self.before_remove) {
+                    parked.pass().await;
+                }
+                let result = self.inner.remove(map, key, now).await;
+                if let Some(parked) = Self::take(&self.after_remove) {
+                    parked.pass().await;
+                }
+                result
+            }
+
+            async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+                self.inner.remove_backup(map, key, now).await
+            }
+
+            async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+                let loaded = self.inner.load(map, key).await;
+                if let Some(parked) = Self::take(&self.after_load) {
+                    parked.pass().await;
+                }
+                loaded
+            }
+
+            async fn load_all(
+                &self,
+                map: &str,
+                keys: &[String],
+            ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+                self.inner.load_all(map, keys).await
+            }
+
+            async fn enumerate_leaves(
+                &self,
+                map: &str,
+                is_backup: bool,
+                sink: &mut dyn LeafSink,
+            ) -> anyhow::Result<()> {
+                self.inner.enumerate_leaves(map, is_backup, sink).await
+            }
+
+            async fn scan_values(
+                &self,
+                map: &str,
+                is_backup: bool,
+                max_batch_cost: u64,
+            ) -> anyhow::Result<ScanBatch> {
+                self.inner.scan_values(map, is_backup, max_batch_cost).await
+            }
+
+            async fn scan_values_batched(
+                &self,
+                map: &str,
+                is_backup: bool,
+                cursor: ScanCursor,
+                max_batch_cost: u64,
+            ) -> anyhow::Result<ScanBatch> {
+                self.inner
+                    .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                    .await
+            }
+
+            async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+                self.inner.remove_all(map, keys).await
+            }
+
+            async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+                self.inner.list_maps().await
+            }
+
+            fn is_loadable(&self, key: &str) -> bool {
+                self.inner.is_loadable(key)
+            }
+
+            fn pending_operation_count(&self) -> u64 {
+                self.inner.pending_operation_count()
+            }
+
+            async fn soft_flush(&self) -> anyhow::Result<u64> {
+                self.inner.soft_flush().await
+            }
+
+            async fn hard_flush(&self) -> anyhow::Result<()> {
+                self.inner.hard_flush().await
+            }
+
+            async fn flush_key(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                is_backup: bool,
+            ) -> anyhow::Result<()> {
+                self.inner.flush_key(map, key, value, is_backup).await
+            }
+
+            fn reset(&self) {
+                self.inner.reset();
+            }
+        }
+
+        /// The parked side of a one-shot blocking gate, for the synchronous
+        /// engine calls. It parks on ENTRY to the engine method, before any
+        /// entry lock is taken.
+        struct SyncGate {
+            parked: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+
+        /// The test's side of a [`SyncGate`]. Dropping it releases the caller.
+        pub(crate) struct SyncGateHandle {
+            parked: std::sync::mpsc::Receiver<()>,
+            release: Option<std::sync::mpsc::Sender<()>>,
+        }
+
+        impl SyncGateHandle {
+            /// Blocks until the caller parks; panics after [`PARK_BOUND`].
+            pub(crate) fn wait_parked(&self) {
+                self.parked.recv_timeout(PARK_BOUND).expect(
+                    "the engine double never parked: the setup did not reach the park point",
+                );
+            }
+
+            pub(crate) fn release(&mut self) {
+                if let Some(release) = self.release.take() {
+                    let _ = release.send(());
+                }
+            }
+        }
+
+        #[derive(Default)]
+        pub(crate) struct EngineParks {
+            removal: Mutex<Option<SyncGate>>,
+            write_back: Mutex<Option<SyncGate>>,
+        }
+
+        impl EngineParks {
+            fn arm(slot: &Mutex<Option<SyncGate>>) -> SyncGateHandle {
+                let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                *slot.lock().unwrap() = Some(SyncGate {
+                    parked: parked_tx,
+                    release: release_rx,
+                });
+                SyncGateHandle {
+                    parked: parked_rx,
+                    release: Some(release_tx),
+                }
+            }
+
+            /// Parks the next `remove` or `remove_if`.
+            pub(crate) fn park_removal(&self) -> SyncGateHandle {
+                Self::arm(&self.removal)
+            }
+
+            /// Parks the next `put` or `touch`.
+            pub(crate) fn park_write_back(&self) -> SyncGateHandle {
+                Self::arm(&self.write_back)
+            }
+
+            fn pass(slot: &Mutex<Option<SyncGate>>) {
+                let parked = slot.lock().unwrap().take();
+                if let Some(parked) = parked {
+                    let _ = parked.parked.send(());
+                    let _ = parked.release.recv();
+                }
+            }
+        }
+
+        /// A [`HashMapStorage`] that can park on entry to a removal or to a
+        /// value write-back, before delegating.
+        pub(crate) struct ParkingEngine {
+            inner: HashMapStorage,
+            parks: Arc<EngineParks>,
+        }
+
+        impl ParkingEngine {
+            pub(crate) fn new() -> (Self, Arc<EngineParks>) {
+                let parks = Arc::new(EngineParks::default());
+                (
+                    Self {
+                        inner: HashMapStorage::new(),
+                        parks: Arc::clone(&parks),
+                    },
+                    parks,
+                )
+            }
+        }
+
+        impl StorageEngine for ParkingEngine {
+            fn put(&self, key: &str, record: Record) -> Option<Record> {
+                EngineParks::pass(&self.parks.write_back);
+                self.inner.put(key, record)
+            }
+
+            fn get(&self, key: &str) -> Option<Record> {
+                self.inner.get(key)
+            }
+
+            fn mark_stored(&self, key: &str, now: i64, token: u64) -> bool {
+                self.inner.mark_stored(key, now, token)
+            }
+
+            fn update_in_place(
+                &self,
+                key: &str,
+                now: i64,
+                init: Option<RecordValue>,
+                init_generation: Option<u64>,
+                mutate: &mut dyn FnMut(&mut RecordValue) -> bool,
+                cost_of: &dyn Fn(&RecordValue) -> u64,
+            ) -> UpdateInPlaceOutcome {
+                self.inner
+                    .update_in_place(key, now, init, init_generation, mutate, cost_of)
+            }
+
+            fn vacancy_generation(&self, key: &str) -> u64 {
+                self.inner.vacancy_generation(key)
+            }
+
+            fn put_if_absent_at(
+                &self,
+                key: &str,
+                record: Record,
+                generation: u64,
+            ) -> PutIfAbsentOutcome {
+                self.inner.put_if_absent_at(key, record, generation)
+            }
+
+            fn remove(&self, key: &str) -> Option<Record> {
+                EngineParks::pass(&self.parks.removal);
+                self.inner.remove(key)
+            }
+
+            fn remove_if(&self, key: &str, predicate: &dyn Fn(&Record) -> bool) -> Option<Record> {
+                EngineParks::pass(&self.parks.removal);
+                self.inner.remove_if(key, predicate)
+            }
+
+            fn touch(&self, key: &str, now: i64) -> Option<Record> {
+                EngineParks::pass(&self.parks.write_back);
+                self.inner.touch(key, now)
+            }
+
+            fn contains_key(&self, key: &str) -> bool {
+                self.inner.contains_key(key)
+            }
+
+            fn len(&self) -> usize {
+                self.inner.len()
+            }
+
+            fn is_empty(&self) -> bool {
+                self.inner.is_empty()
+            }
+
+            fn clear(&self) {
+                self.inner.clear();
+            }
+
+            fn destroy(&self) {
+                self.inner.destroy();
+            }
+
+            fn estimated_cost(&self) -> u64 {
+                self.inner.estimated_cost()
+            }
+
+            fn fetch_keys(&self, cursor: &IterationCursor, size: usize) -> EngineFetch<String> {
+                self.inner.fetch_keys(cursor, size)
+            }
+
+            fn fetch_entries(
+                &self,
+                cursor: &IterationCursor,
+                size: usize,
+            ) -> EngineFetch<(String, Record)> {
+                self.inner.fetch_entries(cursor, size)
+            }
+
+            fn snapshot_iter(&self) -> Vec<(String, Record)> {
+                self.inner.snapshot_iter()
+            }
+
+            fn random_samples(&self, sample_count: usize) -> Vec<(String, Record)> {
+                self.inner.random_samples(sample_count)
+            }
+        }
+
         // AC-4: the materialize path is a residency transition then a write.
         #[tokio::test]
         async fn materialize_fires_on_load_then_on_update() {
@@ -1835,6 +2275,50 @@ mod tests {
                     .1,
                 expected_leaf,
                 "durable leaf must equal the in-memory leaf"
+            );
+        }
+
+        // AC-5: a reader that loaded `D` before a write materialized, persisted
+        // and evicted `D+op` must not cache its stale `D` (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn reader_does_not_cache_a_load_that_an_eviction_superseded() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0, 0)
+                .await
+                .expect("seed");
+            let parking = Arc::new(ParkingStore::new(Arc::clone(&ds)));
+            let store = Arc::new(store_over(
+                parking.clone(),
+                Box::new(HashMapStorage::new()),
+                Vec::new(),
+            ));
+
+            let mut reader_park = parking.park_after_load();
+            let reader = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move { store.get(KEY, false).await })
+            };
+            reader_park.wait_parked().await;
+
+            assert!(or_add(&store, "op").await.expect("or_add"));
+            assert!(
+                store.evict_lru(u32::MAX, false) > 0,
+                "the materialized, persisted record must be evicted"
+            );
+
+            reader_park.release();
+            reader.await.expect("reader task").expect("get");
+
+            assert!(
+                !store.exists_in_memory(KEY),
+                "the reader must not cache the value it loaded before the eviction"
+            );
+            assert!(or_add(&store, "op2").await.expect("or_add"));
+            assert_eq!(
+                durable_tags(&ds).await,
+                Some(strings(&["a", "b", "op", "op2"])),
+                "no acked op may be lost to a stale cached load"
             );
         }
     }
