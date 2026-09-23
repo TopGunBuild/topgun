@@ -2364,5 +2364,41 @@ mod tests {
                 "the removed value must not be resurrected"
             );
         }
+
+        // AC-6c: a REMOVE must stage its durable delete before it empties the
+        // engine, or a reader in between caches the value being removed.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn reader_between_the_steps_of_a_remove_does_not_resurrect_it() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0, 0)
+                .await
+                .expect("seed");
+            let parking = Arc::new(ParkingStore::new(Arc::clone(&ds)));
+            let store = Arc::new(store_over(
+                parking.clone(),
+                Box::new(HashMapStorage::new()),
+                Vec::new(),
+            ));
+
+            let mut remove_park = parking.park_before_remove();
+            let remover = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move { store.remove(KEY, CallerProvenance::CrdtMerge).await })
+            };
+            remove_park.wait_parked().await;
+
+            store.get(KEY, false).await.expect("get");
+
+            remove_park.release();
+            remover.await.expect("remover task").expect("remove");
+
+            assert!(or_add(&store, "op2").await.expect("or_add"));
+            assert_eq!(
+                durable_tags(&ds).await,
+                Some(strings(&["op2"])),
+                "the removed value must not be resurrected"
+            );
+        }
     }
 }
