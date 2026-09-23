@@ -30,6 +30,11 @@ fn now_millis() -> i64 {
         .as_millis() as i64
 }
 
+/// Attempts `update_in_place` makes to materialize a non-resident key before it
+/// gives up with a retryable error. An attempt is repeated only when a removal
+/// of a key sharing the key's vacancy-generation stripe landed during its load.
+const MATERIALIZE_MAX_ATTEMPTS: u32 = 8;
+
 /// Configuration for storage behavior, applied per-RecordStore.
 ///
 /// Controls default TTL, max-idle, and eviction thresholds. Imported from
@@ -236,6 +241,19 @@ impl RecordStore for DefaultRecordStore {
         Ok(old_record.map(|r| r.value))
     }
 
+    /// Mutates the key's record in place, materializing it from the data store
+    /// first when it is durable but not resident (TG-OR-007).
+    ///
+    /// Caller obligation: every caller holds the key's per-key writer across the
+    /// whole call — the load, the mutate and the staging of the write-through —
+    /// and every whole-key [`remove`](RecordStore::remove) of the key holds the
+    /// same writer. The vacancy generation guards against readers and eviction;
+    /// only the writer excludes a remove that stages its delete while this write
+    /// mutates a still-resident slot and re-stages it over that delete.
+    ///
+    /// Retries at most `MATERIALIZE_MAX_ATTEMPTS` times when a removal moves the
+    /// generation during the load, then returns an error the caller surfaces as
+    /// a transient failure (the client re-sends the op).
     async fn update_in_place(
         &self,
         key: &str,
@@ -256,20 +274,68 @@ impl RecordStore for DefaultRecordStore {
         // Re-borrow the `&mut (dyn FnMut + Send)` as the plain `&mut dyn FnMut`
         // the engine seam expects, and split the outcome so the engine keeps its
         // `-> bool` closure: only `changed` is what the engine decides on. The
-        // witness is stashed in a local instead of travelling through the engine
-        // because the wrapper is only ever called synchronously inside
-        // update_in_place (before any await) — so it needs no Send bound, and the
-        // closure's borrow of `witness` ends when the engine call returns, which
-        // makes the captured delta readable at the write-through below.
+        // witness is stashed in a local instead of travelling through the engine,
+        // and the closure's borrow of `witness` ends with the last engine call,
+        // which makes the captured delta readable at the write-through below.
         let mut witness: Option<OrDelta> = None;
         let mut engine_mutate = |value: &mut RecordValue| {
             let mutated = mutate(value);
             witness = mutated.witness;
             mutated.changed
         };
-        let outcome =
+
+        // The durable value loaded to materialize a non-resident key, kept as
+        // the pre-image for `on_load` when the materialized record is inserted.
+        let mut pre_image: Option<RecordValue> = None;
+        let outcome = if self.data_store.is_null() {
             self.engine
-                .update_in_place(key, now, init, None, &mut engine_mutate, &cost_of);
+                .update_in_place(key, now, init, None, &mut engine_mutate, &cost_of)
+        } else {
+            // Materialize a durable-but-non-resident key before mutating it, so the
+            // write merges into the key's durable value instead of replacing it
+            // with a slot built from `init` alone (TG-OR-007). The closure runs at
+            // most once per attempt and an attempt that runs it ends the loop:
+            // only `Absent` (resident probe) and `Stale` (generation moved during
+            // the load) continue, and both return before the closure (TG-OR-001).
+            let mut attempts = 0_u32;
+            loop {
+                if attempts == MATERIALIZE_MAX_ATTEMPTS {
+                    metrics::counter!("topgun_update_in_place_materialize_exhausted_total")
+                        .increment(1);
+                    return Err(anyhow::anyhow!("materialize retries exhausted"));
+                }
+                attempts += 1;
+
+                let resident =
+                    self.engine
+                        .update_in_place(key, now, None, None, &mut engine_mutate, &cost_of);
+                if !matches!(resident, UpdateInPlaceOutcome::Absent) {
+                    break resident;
+                }
+
+                // Read the generation BEFORE the load: a removal of the key that
+                // lands after this point moves it, and the insert below refuses a
+                // value loaded across that removal.
+                let generation = self.engine.vacancy_generation(key);
+                let loaded = self.data_store.load(&self.name, key).await?;
+                if loaded.is_none() && init.is_none() {
+                    return Ok(false);
+                }
+                pre_image.clone_from(&loaded);
+                let base = loaded.or_else(|| init.clone());
+                let attempt = self.engine.update_in_place(
+                    key,
+                    now,
+                    base,
+                    Some(generation),
+                    &mut engine_mutate,
+                    &cost_of,
+                );
+                if !matches!(attempt, UpdateInPlaceOutcome::Stale) {
+                    break attempt;
+                }
+            }
+        };
 
         let (record, inserted) = match outcome {
             UpdateInPlaceOutcome::Absent
@@ -289,16 +355,31 @@ impl RecordStore for DefaultRecordStore {
         // old value rather than re-cloning the resident slot this seam exists to
         // stop churning.
         //
+        // A record materialized from the data store is a residency transition
+        // followed by a write: `on_load` with the durable pre-image, then
+        // `on_update` with the post-image (TG-OR-002), never `on_put` — the key
+        // existed before this write.
+        //
         // CONTRACT: any observer added later that reads `old_value` for an OrMap
         // record would receive the post-image here, not the true pre-image. That
         // is only safe because this seam is OrMap-only; if a future observer needs
         // the OrMap pre-image, capture a pre-mutation clone in the engine's
         // Occupied arm and thread it through instead of reusing the new value.
-        if inserted {
-            self.observer.on_put(key, &record, None, false);
-        } else {
-            self.observer
-                .on_update(key, &record, &record.value, &record.value, false);
+        match (inserted, pre_image) {
+            (true, Some(pre)) => {
+                let loaded_record = Record {
+                    value: pre,
+                    metadata: record.metadata.clone(),
+                };
+                self.observer.on_load(key, &loaded_record, false);
+                self.observer
+                    .on_update(key, &record, &record.value, &record.value, false);
+            }
+            (true, None) => self.observer.on_put(key, &record, None, false),
+            (false, _) => {
+                self.observer
+                    .on_update(key, &record, &record.value, &record.value, false)
+            }
         }
 
         // Write-through for Client or CrdtMerge provenance — byte-identical to
@@ -1541,5 +1622,220 @@ mod tests {
             "must return the actual eviction count, not wrap or panic"
         );
         assert!(store.is_empty(), "all clean records must be evicted");
+    }
+
+    /// Writes on a key that is durable but not resident, and the races around
+    /// materializing it (TG-OR-007, TG-OR-002, TG-EVI-001).
+    mod materialize {
+        use std::sync::Mutex;
+
+        use super::*;
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::map_data_store::merkle_leaf_hash;
+        use crate::storage::merkle_sync::{MerkleMutationObserver, MerkleSyncManager};
+        use crate::storage::record::OrMapEntry;
+        use crate::storage::record_store::MutateOutcome;
+
+        pub(super) const MAP: &str = "materialize_map";
+        pub(super) const KEY: &str = "doc";
+
+        pub(super) fn redb(dir: &tempfile::TempDir) -> Arc<dyn MapDataStore> {
+            Arc::new(RedbDataStore::new(dir.path().join("materialize.redb")).expect("redb open"))
+        }
+
+        pub(super) fn entry(tag: &str) -> OrMapEntry {
+            OrMapEntry {
+                value: Value::String(format!("v-{tag}")),
+                tag: tag.to_string(),
+                timestamp: Timestamp {
+                    millis: 1_000_000,
+                    counter: 0,
+                    node_id: "node-1".to_string(),
+                },
+            }
+        }
+
+        pub(super) fn or_value(tags: &[&str], tombs: &[&str]) -> RecordValue {
+            RecordValue::OrMap {
+                records: tags.iter().map(|t| entry(t)).collect(),
+                tombstones: tombs.iter().map(|t| (*t).to_string()).collect(),
+            }
+        }
+
+        pub(super) fn store_over(
+            data_store: Arc<dyn MapDataStore>,
+            engine: Box<dyn StorageEngine>,
+            observers: Vec<Arc<dyn MutationObserver>>,
+        ) -> DefaultRecordStore {
+            DefaultRecordStore::new(
+                MAP.to_string(),
+                0,
+                engine,
+                data_store,
+                Arc::new(CompositeMutationObserver::new(observers)),
+                StorageConfig::default(),
+            )
+        }
+
+        /// An in-place OR add of `tag`, shaped like the CRDT service's OR_ADD
+        /// (empty OrMap `init`, closure appends the entry).
+        pub(super) async fn or_add(store: &DefaultRecordStore, tag: &str) -> anyhow::Result<bool> {
+            let new_entry = entry(tag);
+            let mut add = |value: &mut RecordValue| {
+                if let RecordValue::OrMap { records, .. } = value {
+                    if !records.iter().any(|e| e.tag == new_entry.tag) {
+                        records.push(new_entry.clone());
+                    }
+                }
+                MutateOutcome {
+                    changed: true,
+                    witness: None,
+                }
+            };
+            store
+                .update_in_place(
+                    KEY,
+                    Some(or_value(&[], &[])),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                    &mut add,
+                )
+                .await
+        }
+
+        pub(super) fn tags_of(value: &RecordValue) -> Vec<String> {
+            match value {
+                RecordValue::OrMap { records, .. } => {
+                    let mut tags: Vec<String> = records.iter().map(|e| e.tag.clone()).collect();
+                    tags.sort();
+                    tags
+                }
+                other => panic!("not an OrMap: {other:?}"),
+            }
+        }
+
+        /// The durable tag set of `KEY`, or `None` when no durable row exists.
+        pub(super) async fn durable_tags(ds: &Arc<dyn MapDataStore>) -> Option<Vec<String>> {
+            ds.load(MAP, KEY)
+                .await
+                .expect("load durable row")
+                .map(|v| tags_of(&v))
+        }
+
+        pub(super) fn strings(v: &[&str]) -> Vec<String> {
+            v.iter().map(|s| (*s).to_string()).collect()
+        }
+
+        /// Records the order of observer callbacks.
+        #[derive(Default)]
+        pub(super) struct OrderObserver {
+            pub(super) events: Mutex<Vec<&'static str>>,
+        }
+
+        impl OrderObserver {
+            fn push(&self, event: &'static str) {
+                self.events.lock().unwrap().push(event);
+            }
+
+            pub(super) fn take(&self) -> Vec<&'static str> {
+                std::mem::take(&mut *self.events.lock().unwrap())
+            }
+        }
+
+        impl MutationObserver for OrderObserver {
+            fn on_put(&self, _: &str, _: &Record, _: Option<&RecordValue>, _: bool) {
+                self.push("put");
+            }
+            fn on_update(&self, _: &str, _: &Record, _: &RecordValue, _: &RecordValue, _: bool) {
+                self.push("update");
+            }
+            fn on_remove(&self, _: &str, _: &Record, _: bool) {
+                self.push("remove");
+            }
+            fn on_evict(&self, _: &str, _: &Record, _: bool) {
+                self.push("evict");
+            }
+            fn on_load(&self, _: &str, _: &Record, _: bool) {
+                self.push("load");
+            }
+            fn on_replication_put(&self, _: &str, _: &Record, _: bool) {}
+            fn on_clear(&self) {}
+            fn on_reset(&self) {}
+            fn on_destroy(&self, _: bool) {}
+        }
+
+        // AC-4: the materialize path is a residency transition then a write.
+        #[tokio::test]
+        async fn materialize_fires_on_load_then_on_update() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &["x"]), 0, 0)
+                .await
+                .expect("seed");
+            let order = Arc::new(OrderObserver::default());
+            let store = store_over(
+                Arc::clone(&ds),
+                Box::new(HashMapStorage::new()),
+                vec![order.clone() as Arc<dyn MutationObserver>],
+            );
+
+            assert!(or_add(&store, "c").await.expect("or_add"));
+
+            assert_eq!(order.take(), vec!["load", "update"]);
+            assert_eq!(durable_tags(&ds).await, Some(strings(&["a", "b", "c"])));
+
+            // A key absent everywhere keeps `on_put`.
+            let fresh = store_over(
+                redb(&tempfile::tempdir().expect("tempdir")),
+                Box::new(HashMapStorage::new()),
+                vec![order.clone() as Arc<dyn MutationObserver>],
+            );
+            assert!(or_add(&fresh, "c").await.expect("or_add"));
+            assert_eq!(order.take(), vec!["put"]);
+        }
+
+        // AC-4: the in-memory Merkle leaf after a materializing write is the
+        // leaf of old ∪ op, and equals the leaf of the durable value.
+        #[tokio::test]
+        async fn materialize_merkle_leaf_is_the_leaf_of_old_union_op() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &["x"]), 0, 0)
+                .await
+                .expect("seed");
+            let manager = Arc::new(MerkleSyncManager::new(3));
+            let merkle = Arc::new(MerkleMutationObserver::new(
+                Arc::clone(&manager),
+                MAP.to_string(),
+                0,
+            ));
+            let store = store_over(
+                Arc::clone(&ds),
+                Box::new(HashMapStorage::new()),
+                vec![merkle as Arc<dyn MutationObserver>],
+            );
+
+            assert!(or_add(&store, "c").await.expect("or_add"));
+
+            let expected_union = or_value(&["a", "b", "c"], &["x"]);
+            let expected_leaf = merkle_leaf_hash(KEY, &expected_union)
+                .expect("OrMap yields a leaf")
+                .1;
+            let reference = MerkleSyncManager::new(3);
+            reference.update_ormap(MAP, 0, KEY, expected_leaf);
+            assert_eq!(
+                manager.aggregate_ormap_root_hash(MAP),
+                reference.aggregate_ormap_root_hash(MAP),
+                "in-memory OR leaf must be the leaf of old ∪ op"
+            );
+            let durable = ds.load(MAP, KEY).await.expect("load").expect("durable row");
+            assert_eq!(
+                merkle_leaf_hash(KEY, &durable)
+                    .expect("OrMap yields a leaf")
+                    .1,
+                expected_leaf,
+                "durable leaf must equal the in-memory leaf"
+            );
+        }
     }
 }

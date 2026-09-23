@@ -10151,5 +10151,43 @@ mod tests {
                 "resident control: durable row must be old ∪ new"
             );
         }
+
+        // AC-4 (gauge): materializing a key charges the tombstone gauge exactly
+        // what the same op charges on a resident key — the loaded tombstones are
+        // not charged again.
+        #[tokio::test]
+        async fn or_remove_on_non_resident_key_charges_the_gauge_like_a_resident_key() {
+            use crate::storage::tombstone_gauge::with_isolated_gauge;
+
+            let dir_resident = tempfile::tempdir().expect("tempdir");
+            let (svc_resident, factory_resident, ds_resident) = redb_stack(&dir_resident);
+            seed_durable_or(&ds_resident).await;
+            factory_resident
+                .get_or_create(MAP, hash_to_partition(KEY))
+                .get(KEY, false)
+                .await
+                .expect("hydrate");
+            let (result, resident_delta) = with_isolated_gauge(
+                svc_resident
+                    .clone()
+                    .oneshot(or_remove_op(MAP, KEY, "t-old-1")),
+            )
+            .await;
+            result.expect("or_remove must succeed");
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, ds) = redb_stack(&dir);
+            seed_durable_or(&ds).await;
+            assert_not_resident(&factory);
+            let (result, non_resident_delta) =
+                with_isolated_gauge(svc.clone().oneshot(or_remove_op(MAP, KEY, "t-old-1"))).await;
+            result.expect("or_remove must succeed");
+
+            assert!(resident_delta > 0, "the new tombstone must be charged");
+            assert_eq!(
+                non_resident_delta, resident_delta,
+                "a materializing OR_REMOVE must charge the gauge exactly as a resident one"
+            );
+        }
     }
 }
