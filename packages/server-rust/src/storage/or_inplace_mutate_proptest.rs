@@ -1185,4 +1185,303 @@ mod tests {
             );
         });
     }
+
+    // -----------------------------------------------------------------------
+    // TG-OR-001 on the materialize path: the closure still runs at most once
+    // per call when the seam has to load a non-resident key, retry a stale
+    // load, or finds nothing to load.
+    // -----------------------------------------------------------------------
+
+    /// Forwards to a [`RetainingCountingStore`], counts `load` calls, and runs
+    /// a ONE-SHOT hook inside the first `load` (after the inner read).
+    struct LoadHookStore {
+        inner: Arc<RetainingCountingStore>,
+        loads: AtomicUsize,
+        hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl LoadHookStore {
+        fn new(inner: Arc<RetainingCountingStore>) -> Self {
+            Self {
+                inner,
+                loads: AtomicUsize::new(0),
+                hook: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for LoadHookStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            exp: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner.add(map, key, value, exp, now).await
+        }
+
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            exp: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner.add_backup(map, key, value, exp, now).await
+        }
+
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove(map, key, now).await
+        }
+
+        async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove_backup(map, key, now).await
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.loads.fetch_add(1, Ordering::Relaxed);
+            let loaded = self.inner.load(map, key).await;
+            let hook = self.hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+            loaded
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.inner.load_all(map, keys).await
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.inner.remove_all(map, keys).await
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            self.inner.enumerate_leaves(map, is_backup, sink).await
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.inner.scan_values(map, is_backup, max_batch_cost).await
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: ScanCursor,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.inner
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await
+        }
+
+        fn is_loadable(&self, key: &str) -> bool {
+            self.inner.is_loadable(key)
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            self.inner.pending_operation_count()
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            self.inner.soft_flush().await
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            self.inner.hard_flush().await
+        }
+
+        async fn flush_key(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            is_backup: bool,
+        ) -> anyhow::Result<()> {
+            self.inner.flush_key(map, key, value, is_backup).await
+        }
+
+        fn reset(&self) {
+            self.inner.reset();
+        }
+    }
+
+    fn store_over_hook(datastore: &Arc<LoadHookStore>) -> Arc<DefaultRecordStore> {
+        Arc::new(DefaultRecordStore::new(
+            MAP.to_string(),
+            0,
+            Box::new(HashMapStorage::new()),
+            Arc::clone(datastore) as Arc<dyn MapDataStore>,
+            Arc::new(CompositeMutationObserver::default()),
+            StorageConfig::default(),
+        ))
+    }
+
+    fn one_entry(tag: &str) -> RecordValue {
+        RecordValue::OrMap {
+            records: vec![OrMapEntry {
+                value: Value::Int(1),
+                tag: tag.to_string(),
+                timestamp: ts(1),
+            }],
+            tombstones: Vec::new(),
+        }
+    }
+
+    fn tags(value: Option<RecordValue>) -> Vec<String> {
+        let (records, _) = read_state(value);
+        let mut tags: Vec<String> = records.into_iter().map(|e| e.tag).collect();
+        tags.sort();
+        tags
+    }
+
+    // (a) A removal of the key during the materializing load makes the insert
+    // stale; the retry reloads and inserts, and the closure ran once.
+    #[test]
+    fn a_stale_materialize_retries_without_re_invoking_the_closure() {
+        block_on_async(async {
+            let inner = Arc::new(RetainingCountingStore::default());
+            inner
+                .add(MAP, KEY, &one_entry("t-durable"), 0, 0)
+                .await
+                .unwrap();
+            let datastore = Arc::new(LoadHookStore::new(Arc::clone(&inner)));
+            let store = store_over_hook(&datastore);
+            // Removing the absent key advances its vacancy generation, exactly
+            // as a concurrent removal landing inside the load would.
+            let weak = Arc::downgrade(&store);
+            *datastore.hook.lock().unwrap() = Some(Box::new(move || {
+                if let Some(store) = weak.upgrade() {
+                    store.storage().remove(KEY);
+                }
+            }));
+
+            let calls = AtomicUsize::new(0);
+            let mut counted = |value: &mut RecordValue| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                if let RecordValue::OrMap { records, .. } = value {
+                    records.push(OrMapEntry {
+                        value: Value::Int(2),
+                        tag: "t-new".to_string(),
+                        timestamp: ts(2),
+                    });
+                }
+                write_owed(true)
+            };
+            let written = store
+                .update_in_place(
+                    KEY,
+                    Some(empty_ormap()),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                    &mut counted,
+                )
+                .await
+                .unwrap();
+
+            assert!(written);
+            assert_eq!(
+                datastore.loads.load(Ordering::Relaxed),
+                2,
+                "one stale load, one retry"
+            );
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                1,
+                "the closure runs once per call"
+            );
+            assert_eq!(
+                tags(inner.load(MAP, KEY).await.unwrap()),
+                vec!["t-durable".to_string(), "t-new".to_string()]
+            );
+        });
+    }
+
+    // (b) The prune shape: no `init`, a durable key, and a closure that owes no
+    // write. The closure runs once, nothing is written and nothing is cached.
+    #[test]
+    fn a_materialized_no_op_runs_the_closure_once_and_caches_nothing() {
+        block_on_async(async {
+            let inner = Arc::new(RetainingCountingStore::default());
+            inner
+                .add(MAP, KEY, &one_entry("t-durable"), 0, 0)
+                .await
+                .unwrap();
+            let datastore = Arc::new(LoadHookStore::new(Arc::clone(&inner)));
+            let store = store_over_hook(&datastore);
+
+            let calls = AtomicUsize::new(0);
+            let mut no_op = |_: &mut RecordValue| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                write_owed(false)
+            };
+            let written = store
+                .update_in_place(
+                    KEY,
+                    None,
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                    &mut no_op,
+                )
+                .await
+                .unwrap();
+
+            assert!(!written);
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            assert!(
+                !store.exists_in_memory(KEY),
+                "an unchanged load is not cached"
+            );
+        });
+    }
+
+    // (c) No `init` and nothing durable: no closure call and exactly one load.
+    #[test]
+    fn a_key_absent_everywhere_without_init_loads_once_and_never_mutates() {
+        block_on_async(async {
+            let datastore = Arc::new(LoadHookStore::new(Arc::new(
+                RetainingCountingStore::default(),
+            )));
+            let store = store_over_hook(&datastore);
+
+            let calls = AtomicUsize::new(0);
+            let mut counted = |_: &mut RecordValue| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                write_owed(true)
+            };
+            let written = store
+                .update_in_place(
+                    KEY,
+                    None,
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                    &mut counted,
+                )
+                .await
+                .unwrap();
+
+            assert!(!written);
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+            assert_eq!(datastore.loads.load(Ordering::Relaxed), 1);
+        });
+    }
 }
