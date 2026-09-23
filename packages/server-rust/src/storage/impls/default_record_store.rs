@@ -2519,5 +2519,48 @@ mod tests {
                 "an unflushed write must never be evicted"
             );
         }
+
+        // AC-13: removing a key that was never made resident clears the
+        // in-memory Merkle leaf the boot seed gave it.
+        #[tokio::test]
+        async fn remove_of_a_non_resident_key_clears_its_merkle_leaf() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            let durable = or_value(&["a", "b"], &[]);
+            ds.add(MAP, KEY, &durable, 0, 0).await.expect("seed");
+            let other = or_value(&["z"], &[]);
+            let leaf = |key: &str, value: &RecordValue| {
+                merkle_leaf_hash(key, value).expect("OrMap yields a leaf").1
+            };
+
+            let manager = Arc::new(MerkleSyncManager::new(3));
+            manager.update_ormap(MAP, 0, KEY, leaf(KEY, &durable));
+            manager.update_ormap(MAP, 0, "other", leaf("other", &other));
+            let reference = MerkleSyncManager::new(3);
+            reference.update_ormap(MAP, 0, "other", leaf("other", &other));
+
+            let merkle = Arc::new(MerkleMutationObserver::new(
+                Arc::clone(&manager),
+                MAP.to_string(),
+                0,
+            ));
+            let store = store_over(
+                Arc::clone(&ds),
+                Box::new(HashMapStorage::new()),
+                vec![merkle as Arc<dyn MutationObserver>],
+            );
+            assert!(!store.exists_in_memory(KEY), "precondition: never resident");
+
+            store
+                .remove(KEY, CallerProvenance::CrdtMerge)
+                .await
+                .expect("remove");
+
+            assert_eq!(
+                manager.aggregate_ormap_root_hash(MAP),
+                reference.aggregate_ormap_root_hash(MAP),
+                "the removed key's leaf must be gone from the in-memory Merkle tree"
+            );
+        }
     }
 }
