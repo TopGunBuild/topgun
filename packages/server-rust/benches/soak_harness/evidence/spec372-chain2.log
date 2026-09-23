@@ -1,0 +1,171 @@
+chain start: 2026-09-22T15:26:21Z epoch=1790090781 smoke=0 HEAD=2f81851b9fc5aabb34a5e6e03594214639688859
+stage1: STOP=FALSE S1_SURVIVORS=JE+MI S1_RANK=JE
+DISK_FREE_AT_START=81
+build SYS: CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec372-sys cargo build --release --bin topgun-server
+build SYS: rc=0 wall_s=252
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+      Timing report saved to /Users/koristuvac/Projects/topgun/topgun/target/spec372-sys/cargo-timings/cargo-timing-20260922T152624.937552Z.html
+    Finished `release` profile [optimized] target(s) in 4m 11s
+build JE: CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec372-je cargo build --release --features alloc-jemalloc --bin topgun-server
+build JE: rc=0 wall_s=269
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+      Timing report saved to /Users/koristuvac/Projects/topgun/topgun/target/spec372-je/cargo-timings/cargo-timing-20260922T153036.641408Z.html
+    Finished `release` profile [optimized] target(s) in 4m 28s
+build MI: CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec372-mi cargo build --release --features alloc-mimalloc --bin topgun-server
+build MI: rc=0 wall_s=258
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+      Timing report saved to /Users/koristuvac/Projects/topgun/topgun/target/spec372-mi/cargo-timings/cargo-timing-20260922T153505.421455Z.html
+    Finished `release` profile [optimized] target(s) in 4m 18s
+build H: CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec372-h cargo build --release --bench soak_harness
+build H: rc=0 wall_s=260
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+      Timing report saved to /Users/koristuvac/Projects/topgun/topgun/target/spec372-h/cargo-timings/cargo-timing-20260922T153924.033346Z.html
+    Finished `release` profile [optimized] target(s) in 4m 19s
+flavour=SYS path=/Users/koristuvac/Projects/topgun/topgun/target/spec372-sys/release/topgun-server sha256=963b0ca9fa741a32d1d790af337332e57430ff81d13365361fc71f0e5a82e83d mtime=1790091036 recompiled=yes marker=ok
+flavour=JE path=/Users/koristuvac/Projects/topgun/topgun/target/spec372-je/release/topgun-server sha256=fa60f730ad3dca92afaf5684942cd451a08c9672529034f15ad2451861c36dec mtime=1790091304 recompiled=yes marker=ok
+flavour=MI path=/Users/koristuvac/Projects/topgun/topgun/target/spec372-mi/release/topgun-server sha256=4a14cca32fe3ab58798e9c435bd939c7ddf605df10f59ef05d8a4deaf7461ad7 mtime=1790091563 recompiled=yes marker=ok
+flavour=H path=/Users/koristuvac/Projects/topgun/topgun/target/spec372-h/release/deps/soak_harness-0379469b8a4255d8 sha256=ed0769d00ec582a033f152fa77aa74798df338440cb5ed16a4a773ec09fbe74d mtime=1790091747 recompiled=yes marker=ok
+cells: s2 j2 m2 a2j (a2j_state=ran, a2j flavour=JE)
+--- cell s2 at 2026-09-22T15:43:43Z
+HOST uptime: 18:43  up 20:49, 2 users, load averages: 3.91 6.75 6.81
+HOST memory_pressure: System-wide memory free percentage: 75%
+HOST vm_stat: Mach Virtual Memory Statistics: (page size of 16384 bytes)
+HOST vm_stat: Pages free:                                   297957.
+HOST vm_stat: Pages active:                                 602561.
+HOST vm_stat: Pages inactive:                               630852.
+HOST vm_stat: Pages speculative:                               804.
+HOST vm_stat: Pages throttled:                                   0.
+HOST vm_stat: Pages wired down:                             156962.
+HOST vm_stat: Pages purgeable:                               10684.
+HOST therm: Note: No thermal warning level has been recorded
+HOST therm: Note: No performance warning level has been recorded
+HOST therm: Note: No CPU power status has been recorded
+cell s2: RUNNER_EXIT=0
+--- cell j2 at 2026-09-22T19:43:48Z
+HOST uptime: 22:43  up 1 day, 49 mins, 2 users, load averages: 5.67 4.99 4.98
+HOST memory_pressure: System-wide memory free percentage: 78%
+HOST vm_stat: Mach Virtual Memory Statistics: (page size of 16384 bytes)
+HOST vm_stat: Pages free:                                   216329.
+HOST vm_stat: Pages active:                                 667091.
+HOST vm_stat: Pages inactive:                               712907.
+HOST vm_stat: Pages speculative:                              1329.
+HOST vm_stat: Pages throttled:                                   0.
+HOST vm_stat: Pages wired down:                             156313.
+HOST vm_stat: Pages purgeable:                               24726.
+HOST therm: Note: No thermal warning level has been recorded
+HOST therm: Note: No performance warning level has been recorded
+HOST therm: Note: No CPU power status has been recorded
+cell j2: RUNNER_EXIT=0
+--- cell m2 at 2026-09-22T23:43:53Z
+HOST uptime:  2:43  up 1 day,  4:49, 1 user, load averages: 3.10 3.39 3.47
+HOST memory_pressure: System-wide memory free percentage: 83%
+HOST vm_stat: Mach Virtual Memory Statistics: (page size of 16384 bytes)
+HOST vm_stat: Pages free:                                   719739.
+HOST vm_stat: Pages active:                                 442825.
+HOST vm_stat: Pages inactive:                               537400.
+HOST vm_stat: Pages speculative:                               673.
+HOST vm_stat: Pages throttled:                                   0.
+HOST vm_stat: Pages wired down:                             125657.
+HOST vm_stat: Pages purgeable:                                1239.
+HOST therm: Note: No thermal warning level has been recorded
+HOST therm: Note: No performance warning level has been recorded
+HOST therm: Note: No CPU power status has been recorded
+cell m2: RUNNER_EXIT=0
+--- cell a2j at 2026-09-23T03:43:57Z
+HOST uptime:  6:43  up 1 day,  8:49, 1 user, load averages: 3.61 3.99 3.88
+HOST memory_pressure: System-wide memory free percentage: 83%
+HOST vm_stat: Mach Virtual Memory Statistics: (page size of 16384 bytes)
+HOST vm_stat: Pages free:                                   562058.
+HOST vm_stat: Pages active:                                 537099.
+HOST vm_stat: Pages inactive:                               591591.
+HOST vm_stat: Pages speculative:                             13755.
+HOST vm_stat: Pages throttled:                                   0.
+HOST vm_stat: Pages wired down:                             125784.
+HOST vm_stat: Pages purgeable:                                6212.
+HOST therm: Note: No thermal warning level has been recorded
+HOST therm: Note: No performance warning level has been recorded
+HOST therm: Note: No CPU power status has been recorded
+cell a2j: RUNNER_EXIT=0
+wrote /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-s2.predicates.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-s2.fits.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-s2.amp.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-s2.ampfp.csv
+wrote /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-j2.predicates.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-j2.fits.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-j2.amp.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-j2.ampfp.csv
+wrote /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-m2.predicates.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-m2.fits.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-m2.amp.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-m2.ampfp.csv
+wrote /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-a2j.predicates.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-a2j.fits.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-a2j.amp.txt /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec372-a2j.ampfp.csv
+k.awk stage2 rc=0
+decide.awk stage2 rc=0
+STOP=FALSE
+WRITE_ERRORS=0
+DISK_FREE_AT_START=81
+OPS_RATIO_JE_S1=1.0064
+OPS_RATIO_MI_S1=1.0144
+OPS_RATIO_JE_S2=1.0284
+OPS_RATIO_MI_S2=1.0302
+S1_SURVIVORS=JE+MI
+S1_RANK=JE
+CHURN_RATIO=0.8721 points=15 window_s=480-900
+CHURN_RATIO_DRIFT=0.8185
+K_PROVISIONAL=FALSE
+T_DECAY_UPPER_JE=8.7213
+T_DECAY_UPPER_MI=0.8721
+CV_JE=0.0913
+CV_MI=0.0395
+K_lo_JE=1.0721
+K_hi_JE=1.5525
+K_lo_MI=1.0681
+K_hi_MI=1.4270
+R_redb_s2=0.2369
+R_redb_j2=0.2305
+R_redb_m2=0.2339
+K_HI_VACUOUS_JE=TRUE
+K_HI_VACUOUS_MI=TRUE
+DIRTY_SHARE_j1a=0.264980
+DIRTY_SHARE_j1b=0.213371
+DIRTY_SHARE_j2=0.220766
+FRAG_SHARE_j1a=0.853146
+FRAG_SHARE_j1b=0.761885
+FRAG_SHARE_j2=0.808387
+EST_AGREE_900_j1a=1.2385
+EST_AGREE_900_j1b=1.1821
+UNMODELLED_REACHABLE_j1a=16.203 0.238504
+UNMODELLED_REACHABLE_j1b=12.966 0.182105
+UNMODELLED_REACHABLE_j2=67.452 0.073489
+AMP_FP_S2=0.468309
+AMP_S_S2=3.168796
+AMP_FP_JE=2.210888
+AMP_S_JE=2.210888
+AMP_JE=2.079415
+AMP_FP_MI=2.071963
+AMP_S_MI=2.305429
+TREND_JE=INCREASING slope_amp_per_hour=0.052990 se=0.021626 n=24 r2=0.214405 points_dropped=0
+TREND_MI=NON_INCREASING slope_amp_per_hour=-0.114145 se=0.039678 n=24 r2=0.273344 points_dropped=0
+TREND_JE_NATIVE=NON_INCREASING slope_amp_per_hour=-0.030113 se=0.014727 n=120 r2=0.034219
+TREND_JE_LAST_THIRD=INCREASING slope_amp_per_hour=0.121985 se=0.036996 n=16 r2=0.437117
+TREND_MI_LAST_THIRD=INCREASING slope_amp_per_hour=0.112159 se=0.045285 n=16 r2=0.304672
+RECLAIM_SEMANTICS_SYS=REUSABLE ratio=5.766459
+JE_CONFIG=je_config version=5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8 arenas_narenas=41 opt_narenas=40 opt_background_thread=false background_thread=n/a max_background_threads=n/a opt_tcache=true opt_tcache_max=32768 opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a
+LEVEL_JE=ABOVE_K_HI
+LEVEL_MI=ABOVE_K_HI
+VS_SYS_JE=4.7210 NO_GAIN
+VS_SYS_MI=4.4244 NO_GAIN
+VS_SYS_S_JE=0.6977
+VS_SYS_S_MI=0.7275
+EST_PROVISIONAL=FALSE
+OPS_a2j=183.044
+OPS_RATIO_a2j_vs_4h=1.0998
+VERDICT_JE=NOT_BOUNDED
+VERDICT_MI=BOUNDED_NO_GAIN
+RECLAIM_SEMANTICS_JE=MADV_FREE ratio=0.000000
+RECLAIM_SEMANTICS_MI=REUSABLE ratio=0.112678
+JE_ESTIMATOR_AGREE=TRUE ratio=1.073489
+JOURNAL=recorded
+PERF_JE=FAIL
+PERF_MI=FAIL
+SIZE_JE=566536 linux_x64_bytes=21560624 sys_linux_x64_bytes=20994088 darwin_delta_bytes=628224
+SIZE_HEADROOM_JE=TIGHT headroom_bytes=-589104
+SIZE_MI=190168 linux_x64_bytes=21184256 sys_linux_x64_bytes=20994088 darwin_delta_bytes=218080
+SIZE_HEADROOM_MI=TIGHT headroom_bytes=-212736
+BUILD_JE=OK
+BUILD_MI=OK
+DEFAULT_CANDIDATE=NONE
+NEXT=CONDUCTOR_RULING;BOUNDED_NO_GAIN
+chain end: 2026-09-23T03:59:02Z
+CHAIN_RC=0

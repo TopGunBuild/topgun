@@ -54,6 +54,39 @@ use traits::{
     MetricsCollector,
 };
 
+// The harness serves the server in-process, so the allocator it runs under is
+// the one declared HERE, not the binary's. Without this lattice every allocator
+// feature would still be measured on the System allocator. Same predicates and
+// ordering as the server binary: count-alloc > dhat-heap > alloc-jemalloc >
+// alloc-mimalloc > System. No dhat profiler runs here, so a dhat-heap harness
+// run serves from System behind dhat's per-call global lock — it measures that
+// lock, not an allocator candidate.
+#[cfg(all(feature = "dhat-heap", not(feature = "count-alloc")))]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+#[cfg(feature = "count-alloc")]
+#[global_allocator]
+static ALLOC: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
+
+#[cfg(all(
+    feature = "alloc-jemalloc",
+    not(any(feature = "count-alloc", feature = "dhat-heap"))
+))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(
+    feature = "alloc-mimalloc",
+    not(any(
+        feature = "count-alloc",
+        feature = "dhat-heap",
+        feature = "alloc-jemalloc"
+    ))
+))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() {

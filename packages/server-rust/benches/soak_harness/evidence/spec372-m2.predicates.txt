@@ -1,0 +1,80 @@
+== STOP: PV ==
+PV=TRUE server_sha256=4a14cca32fe3ab58798e9c435bd939c7ddf605df10f59ef05d8a4deaf7461ad7 harness_sha256=ed0769d00ec582a033f152fa77aa74798df338440cb5ed16a4a773ec09fbe74d flavour=MI
+== STOP: PR ==
+PR-crashes=TRUE crashes=0
+PR-class=TRUE
+== STOP: P5 / P6 / P7 ==
+P5=TRUE
+P5-observed: removal_rows=533 settlement_rows=533 unsettled=none
+P5-zero-return: none observed
+DECISION_SCRAPE=2026-09-23T03:43:53Z.txt
+P6=TRUE removed_refs_observed_total=533000 considered_total=533000 gap=0
+P7=TRUE restored_cancelled_total=0
+windows=533 settlement_rows=533 zero_return_removal_rows=0 scrapes=241
+== STOP: PE / PA ==
+PE=TRUE rows_with_footprint=241 rows=241 N=241 need=240
+PA=n/a reason=flavour_MI
+== STOP: PJ ==
+PJ=TRUE echoes=1 value=true
+PJ-child=n/a reason=filtered
+== STOP: PC ==
+PC=TRUE live=1068532 live_tag_bytes=36330089
+== STOP: PM1 ==
+PM1=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=14400 need_ge=14280
+== recorded: ops ==
+OPS_PER_S=185.655
+WRITE_ERRORS=0
+TOTAL_WRITES=2673624 DURATION_ACTUAL=14401
+OPS_AT_900=182.630 checkpoint_elapsed=903
+== recorded: host state before the cell (the chain writes it at the head of the runner console) ==
+HOST=load_1m=3.10 load_5m=3.39 load_15m=3.47 memory_free=83% therm=no_warning_recorded
+== readings: fits (slopes per hour; on amp series the unit is AMP per hour) ==
+FP_slope=416.336784
+FP_slope_se=9.804741
+FP_slope_n=121
+FP_slope_r2=0.938088
+S_slope=438.634981
+S_slope_se=10.197706
+S_slope_n=121
+S_slope_r2=0.939567
+TREND=-0.114145
+TREND_se=0.039678
+TREND_n=24
+TREND_r2=0.273344
+TREND3=0.112159
+TREND3_se=0.045285
+TREND3_n=16
+TREND3_r2=0.304672
+TREND_dropped=0
+TREND_points_used=48
+== readings: end levels (last row carrying a footprint) ==
+END_elapsed=14400
+FP_end=1905.174
+S_end=2119.846
+RECLAIM_end=214.672
+RECLAIM_RATIO_end=0.112678
+== readings: census points (TERMINAL, and the deciding point = the last used one) ==
+TERM_src=TERMINAL
+TERM_t=14401.6
+TERM_join_lag_s=1.6
+TERM_live=1068532
+TERM_reach_bytes=964167729
+TERM_fp_mb=1905.174
+TERM_s_mb=2119.846
+TERM_redb_mb=215.043
+TERM_AMP_FP=2.071963
+TERM_AMP_S=2.305429
+TERM_A0_share=0.018097
+TERM_R_redb=0.233869
+DECIDE_src=TERMINAL
+DECIDE_t=14401.6
+DECIDE_join_lag_s=1.6
+DECIDE_live=1068532
+DECIDE_reach_bytes=964167729
+DECIDE_fp_mb=1905.174
+DECIDE_s_mb=2119.846
+DECIDE_redb_mb=215.043
+DECIDE_AMP_FP=2.071963
+DECIDE_AMP_S=2.305429
+DECIDE_A0_share=0.018097
+DECIDE_R_redb=0.233869
