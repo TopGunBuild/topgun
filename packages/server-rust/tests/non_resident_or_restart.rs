@@ -161,3 +161,79 @@ async fn post_restart_or_add_after_a_read_keeps_every_earlier_value_control() {
         "control (read before write): missing={missing:?} observed={observed:?}"
     );
 }
+
+/// Repetitions per entry count in the cost reading.
+const COST_REPETITIONS: usize = 20;
+
+fn median_and_max(samples: &mut [Duration]) -> (Duration, Duration) {
+    samples.sort();
+    (samples[samples.len() / 2], samples[samples.len() - 1])
+}
+
+/// Cost reading, not a gate: the first OR write on a key after a restart now
+/// loads the key's durable value before it mutates it. Measures the OP_ACK
+/// latency of that first write against the write right after it (the key is
+/// then resident), for keys of 1 000 and 10 000 entries, over
+/// `COST_REPETITIONS` restarts each, and prints median and max. Run with
+/// `--ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "cost reading; run explicitly with --ignored --nocapture"]
+async fn cost_of_the_first_post_restart_or_add() {
+    for entries in [1_000_i64, 10_000] {
+        let data_dir = tempfile::tempdir().expect("create temp data dir");
+        let port = ServerSupervisor::pick_free_port().expect("pick free port");
+        let supervisor: Arc<ServerSupervisor> = ServerSupervisor::new(ServerConfig {
+            binary: resolve_server_binary(),
+            data_dir: data_dir.path().to_path_buf(),
+            port,
+            jwt_secret: JWT_SECRET.to_string(),
+            wal_fsync_policy: "per_op".to_string(),
+        });
+        supervisor.start(READY_TIMEOUT).await.expect("server start");
+
+        let mut c = SoakClient::connect(supervisor.addr(), 0, JWT_SECRET)
+            .await
+            .expect("client connect");
+        for v in 0..entries {
+            c.or_add(OR_MAP, OR_KEY, &format!("t-{v}"), v, 1, v as u32)
+                .await
+                .expect("seed or_add");
+        }
+        drop(c);
+        tokio::time::sleep(FLUSH_WAIT).await;
+
+        let mut first = Vec::with_capacity(COST_REPETITIONS);
+        let mut next = Vec::with_capacity(COST_REPETITIONS);
+        for rep in 0..COST_REPETITIONS {
+            supervisor.restart(READY_TIMEOUT).await.expect("restart");
+            let mut c = SoakClient::connect(supervisor.addr(), 0, JWT_SECRET)
+                .await
+                .expect("client connect after restart");
+            let started = std::time::Instant::now();
+            c.or_add(OR_MAP, OR_KEY, &format!("t-first-{rep}"), -1, 2, rep as u32)
+                .await
+                .expect("first post-restart or_add");
+            first.push(started.elapsed());
+            let started = std::time::Instant::now();
+            c.or_add(OR_MAP, OR_KEY, &format!("t-next-{rep}"), -2, 3, rep as u32)
+                .await
+                .expect("next or_add");
+            next.push(started.elapsed());
+            drop(c);
+            // Let the two writes reach redb so the next restart replays nothing.
+            tokio::time::sleep(FLUSH_WAIT).await;
+        }
+        supervisor.shutdown().await;
+
+        let (first_median, first_max) = median_and_max(&mut first);
+        let (next_median, next_max) = median_and_max(&mut next);
+        println!(
+            "COST entries={entries} reps={COST_REPETITIONS} \
+             first_median_us={} first_max_us={} next_median_us={} next_max_us={}",
+            first_median.as_micros(),
+            first_max.as_micros(),
+            next_median.as_micros(),
+            next_max.as_micros()
+        );
+    }
+}

@@ -337,9 +337,16 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Scope:** `evict_lru` in the record store.
 - **Statement:** a record whose latest write has not reached the durable backend is not evictable,
   regardless of memory pressure.
-- **Maintaining code:** `storage/impls/default_record_store.rs` dirty-skip.
+- **Maintaining code:** `storage/impls/default_record_store.rs` dirty-skip; `RecordMetadata::is_dirty`
+  is exact by write token (`stored_token != write_token`, set by `on_store`), not by millisecond, so a
+  write stamped in the same millisecond as the previous persist stays dirty; `evict_lru` removes each
+  snapshot candidate through `StorageEngine::remove_if`, re-checking under the key's lock that the
+  resident is still clean and still the write the snapshot saw (SPEC-374).
 - **Enforcing test:** `default_record_store.rs::evict_lru_skips_all_dirty_records` +
-  `::evict_lru_skips_dirty_in_mixed_snapshot` + assertion in `eviction_cost_test.rs`.
+  `::evict_lru_skips_dirty_in_mixed_snapshot` + assertion in `eviction_cost_test.rs`;
+  `::evict_lru_keeps_a_record_written_after_its_snapshot` (a write between the snapshot and the
+  removal), `::a_write_in_the_mark_stored_millisecond_is_not_evicted` and
+  `record.rs::a_write_in_the_stored_millisecond_is_dirty` (same-millisecond write).
 - **Violation consequence:** eviction under pressure silently drops acked writes.
 - **Discovered by:** eviction design (pre-catalog).
 - **Status:** decided, **enforced**.
@@ -347,15 +354,21 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 ### TG-OR-001: `update_in_place`'s mutate closure runs at most once per call
 
 - **Scope:** `RecordStore::update_in_place` seam (SPEC-347).
-- **Statement:** one call invokes `mutate` at most once (doc-contract, SPEC-347); gauge side
-  effects inside the closure must not double-count.
+- **Statement:** one call invokes `mutate` at most once per attempt, and at most once per call
+  (doc-contract, SPEC-347; attempts since SPEC-374): on a key that is durable but not resident the
+  seam may make several attempts (resident probe, load, generation-checked insert), but only the
+  outcomes returned BEFORE the closure (`Absent`, `Stale`) continue, and an attempt that runs the
+  closure ends the call. Gauge side effects inside the closure must not double-count.
 - **Maintaining code:** doc-contract + DashMap shard-lock path.
 - **Enforcing test:** the literal call-counter assertion now exists —
   `or_inplace_mutate_proptest.rs::update_in_place_invokes_the_mutate_closure_exactly_once_per_call`
   counts invocations per call (`AtomicUsize`) on the insert, occupied and failed-write-through
   paths, and `::update_in_place_admits_the_take_once_shape_the_or_add_path_uses` pins the OR_ADD
   `Option::take` shape; both are mutation-proven RED against a second `mutate` call in either
-  `engines/hashmap.rs` arm.
+  `engines/hashmap.rs` arm. The materialize path is counted by
+  `::a_stale_materialize_retries_without_re_invoking_the_closure` (stale load, retry, one call),
+  `::a_materialized_no_op_runs_the_closure_once_and_caches_nothing` (the prune shape) and
+  `::a_key_absent_everywhere_without_init_loads_once_and_never_mutates`.
   `::new_tombstone_counted_once_across_write_failure_and_retry` covers the gauge half (no
   double-count across fail+retry).
   Scope of that evidence, stated honestly: it counts the production pair the record-store factory
@@ -369,10 +382,13 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 - **Scope:** observer fan-out on the in-place OR write path.
 - **Statement:** `update_in_place` passes the post-image as "old value" (documented, intentional);
-  no observer may silently depend on a pre-image.
+  no observer may silently depend on a pre-image. On the materialize path (a durable key that was
+  not resident) the sequence is `on_load(pre-image)` then `on_update(post, post)`, never `on_put`.
 - **Maintaining code:** SPEC-347 doc-contracts.
 - **Enforcing test:** shape-only — the differential proptest matches notification COUNTS across
-  legacy/in-place paths; content assertion on `old_value` is `NAKED (TODO-602)`.
+  legacy/in-place paths; content assertion on `old_value` is `NAKED (TODO-602)`. The materialize
+  order is pinned by `default_record_store.rs::materialize_fires_on_load_then_on_update` and its
+  Merkle leaf by `::materialize_merkle_leaf_is_the_leaf_of_old_union_op`.
 - **Violation consequence:** a future observer reads `old_value`, silently gets wrong data.
 - **Discovered by:** extraction pilot audit.
 - **Status:** decided (scoped); enforcement shape-only.
@@ -603,6 +619,38 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   **INSTRUMENT NEUTRALITY OF THE NEW RECORD** (does adding the record change what those two
   measure). A red `TG-OR-005` is evidence against neither of the other two.
 - **Discovered by:** SPEC-356a (the instrument half of the TODO-634 prune-record family).
+- **Status:** decided, **enforced**.
+
+### TG-OR-007: A write on a durable key merges into the durable value, whatever the key's residency
+
+- **Scope:** every production insert path of the record store — the in-place write seam
+  (`DefaultRecordStore::update_in_place`) and `get`'s load path — and the removals that race them
+  (`remove`, `evict_lru`, graceful-shutdown `hard_flush`).
+- **Statement:** on every production insert path, a mutation on a durable key merges into the key's
+  durable value, and a value read from the data store is inserted into the engine only if no removal
+  of that key intervened since the read began; residency (resident, evicted, post-restart) and
+  concurrent reads never change the result. `evict`, `evict_all`, `evict_expired` and `clear` can
+  drop dirty records and are outside this invariant; none has a production caller.
+- **Maintaining code:** `DefaultRecordStore::update_in_place` (resident probe, then load and a
+  generation-checked insert, retried on `Stale` a bounded number of times, then a retryable error);
+  `get` inserting through `StorageEngine::put_if_absent_at`; the engine's striped vacancy generation,
+  advanced by every removal under the key's lock, also for an absent key; `remove` staging the
+  durable delete before it empties the engine; REMOVE holding the same per-key writer as the
+  in-place OR writes (`crdt.rs`); `hard_flush` joining the flush loop before it drains (SPEC-374).
+- **Enforcing test:** `crdt.rs::or_add_on_non_resident_key_keeps_the_durable_entries`,
+  `::or_remove_on_non_resident_key_keeps_the_other_durable_entries`,
+  `::or_add_after_eviction_keeps_the_durable_entries`,
+  `tests/non_resident_or_restart.rs::first_post_restart_or_add_keeps_every_earlier_value` (real
+  process, kill -9); `default_record_store.rs::reader_does_not_cache_a_load_that_an_eviction_superseded`,
+  `::reader_does_not_cache_a_load_that_a_remove_superseded`,
+  `::reader_between_the_steps_of_a_remove_does_not_resurrect_it`;
+  `crdt.rs::remove_during_a_materializing_or_add_is_not_undone`,
+  `::or_add_between_the_steps_of_a_remove_does_not_resurrect_it`;
+  `write_behind.rs::hard_flush_applies_a_later_remove_after_the_loops_in_flight_store`.
+- **Violation consequence:** the first OR write on a key after a restart or an eviction replaces the
+  key's durable value with a one-op slot (every earlier entry and tombstone lost, unrecoverable from
+  the WAL once its segments are collected), or a removed value is resurrected by a stale read.
+- **Discovered by:** TODO-700 (red tests), SPEC-374.
 - **Status:** decided, **enforced**.
 
 ### TG-MRK-001: The OR-Map Merkle leaf hash is set-canonical (order-independent)
