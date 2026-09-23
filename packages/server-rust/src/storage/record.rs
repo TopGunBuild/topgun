@@ -403,18 +403,23 @@ impl RecordMetadata {
         self.write_token = Self::mint_token();
     }
 
-    /// Records a persistence event: updates `last_stored_time`.
+    /// Records a persistence event: updates `last_stored_time` and records the
+    /// current `write_token` as the persisted write.
     pub fn on_store(&mut self, now: i64) {
         self.last_stored_time = now;
+        self.stored_token = self.write_token;
     }
 
     /// Returns `true` if the record has been modified since it was last stored.
     ///
-    /// A record is dirty if `last_update_time > last_stored_time`, meaning
-    /// there are changes not yet persisted to the backing `MapDataStore`.
+    /// Exact by write identity rather than by clock: the record is dirty unless
+    /// its current write is the one last persisted (`stored_token ==
+    /// write_token`). A write stamped in the same millisecond as the previous
+    /// persist is therefore still dirty, so eviction never drops it
+    /// (TG-EVI-001).
     #[must_use]
     pub fn is_dirty(&self) -> bool {
-        self.last_update_time > self.last_stored_time
+        self.stored_token != self.write_token
     }
 }
 

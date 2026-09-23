@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
-use crate::storage::engine::{FetchResult, IterationCursor, StorageEngine};
+use crate::storage::engine::{FetchResult, IterationCursor, PutIfAbsentOutcome, StorageEngine};
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
@@ -133,8 +133,11 @@ impl RecordStore for DefaultRecordStore {
             return Ok(Some(record));
         }
 
-        // Step 2: Try loading from data store if non-null
+        // Step 2: Try loading from data store if non-null. The generation is
+        // read BEFORE the load, so a removal of the key that lands during the
+        // load makes the insert below refuse the loaded value (TG-OR-007).
         if !self.data_store.is_null() {
+            let generation = self.engine.vacancy_generation(key);
             if let Some(value) = self.data_store.load(&self.name, key).await? {
                 let now = now_millis();
                 let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
@@ -144,9 +147,23 @@ impl RecordStore for DefaultRecordStore {
                 let mut metadata = RecordMetadata::new(now, cost);
                 metadata.on_store(now);
                 let record = Record { value, metadata };
-                self.engine.put(key, record.clone());
-                self.observer.on_load(key, &record, false);
-                return Ok(Some(record));
+                return Ok(Some(
+                    match self
+                        .engine
+                        .put_if_absent_at(key, record.clone(), generation)
+                    {
+                        PutIfAbsentOutcome::Inserted => {
+                            self.observer.on_load(key, &record, false);
+                            record
+                        }
+                        // A write materialized the key during the load: the
+                        // resident is newer than what was loaded.
+                        PutIfAbsentOutcome::Resident(resident) => resident,
+                        // A removal intervened: answer with what was read, but
+                        // never cache it.
+                        PutIfAbsentOutcome::Stale => record,
+                    },
+                ));
             }
         }
 
@@ -660,10 +677,18 @@ impl RecordStore for DefaultRecordStore {
         // candidates appear first. i64 is Copy + Ord so sort_by_key is idiomatic.
         candidates.sort_by_key(|(_, r)| r.metadata.last_access_time);
 
-        // Evict only up to target_count of the oldest non-dirty candidates.
+        // Evict only up to target_count of the oldest non-dirty candidates. The
+        // snapshot can be stale by the time a candidate is removed, so the
+        // removal re-checks under the key's lock that the resident is still the
+        // clean write the snapshot saw (TG-EVI-001).
         let mut evicted: usize = 0;
-        for (key, _) in candidates.into_iter().take(target_count as usize) {
-            if self.evict(&key, is_backup).is_some() {
+        for (key, snapshot) in candidates.into_iter().take(target_count as usize) {
+            let snapshot_token = snapshot.metadata.write_token;
+            let removed = self.engine.remove_if(&key, &|resident: &Record| {
+                !resident.metadata.is_dirty() && resident.metadata.write_token == snapshot_token
+            });
+            if let Some(record) = removed {
+                self.observer.on_evict(&key, &record, is_backup);
                 evicted += 1;
             }
         }
@@ -1431,7 +1456,8 @@ mod tests {
             last_stored_time: 0, // never stored => dirty
             hits: 0,
             cost: 0,
-            write_token: 0, // test helper only — not used on the mark_stored path
+            // The current write differs from the (absent) stored one => dirty.
+            write_token: 1,
             stored_token: 0,
         };
         Record {
@@ -1829,14 +1855,12 @@ mod tests {
 
         /// A data store that forwards to `inner` and can park ONE call, armed
         /// just before the targeted caller runs: on RETURN from `load` (holding
-        /// the loaded value), on ENTRY to `remove` (before it delegates), or on
-        /// RETURN from `remove` (the delete applied). A park is consumed by the
+        /// the loaded value) or on ENTRY to `remove` (before it delegates). A park is consumed by the
         /// first matching call, so any later call passes unparked.
         pub(crate) struct ParkingStore {
             inner: Arc<dyn MapDataStore>,
             after_load: Mutex<Option<Gate>>,
             before_remove: Mutex<Option<Gate>>,
-            after_remove: Mutex<Option<Gate>>,
         }
 
         impl ParkingStore {
@@ -1845,7 +1869,6 @@ mod tests {
                     inner,
                     after_load: Mutex::new(None),
                     before_remove: Mutex::new(None),
-                    after_remove: Mutex::new(None),
                 }
             }
 
@@ -1861,10 +1884,6 @@ mod tests {
 
             pub(crate) fn park_before_remove(&self) -> GateHandle {
                 Self::arm(&self.before_remove)
-            }
-
-            pub(crate) fn park_after_remove(&self) -> GateHandle {
-                Self::arm(&self.after_remove)
             }
 
             fn take(slot: &Mutex<Option<Gate>>) -> Option<Gate> {
@@ -1920,11 +1939,7 @@ mod tests {
                 if let Some(parked) = Self::take(&self.before_remove) {
                     parked.pass().await;
                 }
-                let result = self.inner.remove(map, key, now).await;
-                if let Some(parked) = Self::take(&self.after_remove) {
-                    parked.pass().await;
-                }
-                result
+                self.inner.remove(map, key, now).await
             }
 
             async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {

@@ -51,6 +51,13 @@ impl HashMapStorage {
         let index = (hasher.finish() % VACANCY_STRIPES as u64) as usize;
         &self.vacancy[index]
     }
+
+    /// Advances the key's vacancy generation. Called with the key's entry lock
+    /// held, so an insert that checks the generation under the same lock sees
+    /// either the key still present or the advanced generation (TG-OR-007).
+    fn bump(&self, key: &str) {
+        self.stripe(key).fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 impl Default for HashMapStorage {
@@ -112,7 +119,6 @@ impl StorageEngine for HashMapStorage {
         mutate: &mut dyn FnMut(&mut RecordValue) -> bool,
         cost_of: &dyn Fn(&RecordValue) -> u64,
     ) -> UpdateInPlaceOutcome {
-        let _ = init_generation;
         // `entry` holds the shard write lock across the match, so the
         // check-mutate-or-insert is atomic against any other engine op on this
         // key — there is no get()+put() window a concurrent writer could tear.
@@ -137,6 +143,12 @@ impl StorageEngine for HashMapStorage {
                 let Some(mut value) = init else {
                     return UpdateInPlaceOutcome::Absent;
                 };
+                // A removal of the key since the caller read `init` means `init`
+                // may be a value that removal superseded: refuse it before the
+                // closure runs, so the caller can re-read (TG-OR-001, TG-OR-007).
+                if init_generation.is_some_and(|g| g != self.vacancy_generation(key)) {
+                    return UpdateInPlaceOutcome::Stale;
+                }
                 if !mutate(&mut value) {
                     return UpdateInPlaceOutcome::Unchanged;
                 }
@@ -163,7 +175,9 @@ impl StorageEngine for HashMapStorage {
         match self.entries.entry(key.to_string()) {
             Entry::Occupied(occ) => PutIfAbsentOutcome::Resident(occ.get().clone()),
             Entry::Vacant(vac) => {
-                let _ = generation;
+                if generation != self.vacancy_generation(key) {
+                    return PutIfAbsentOutcome::Stale;
+                }
                 vac.insert(record);
                 PutIfAbsentOutcome::Inserted
             }
@@ -171,12 +185,30 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn remove(&self, key: &str) -> Option<Record> {
-        self.entries.remove(key).map(|(_, r)| r)
+        // Through `entry` so the bump happens under the key's lock whether or
+        // not the key is resident: removing a non-resident key must still
+        // invalidate a reader that loaded it from the data store.
+        match self.entries.entry(key.to_string()) {
+            Entry::Occupied(occ) => {
+                self.bump(key);
+                Some(occ.remove())
+            }
+            Entry::Vacant(_vac) => {
+                self.bump(key);
+                None
+            }
+        }
     }
 
     fn remove_if(&self, key: &str, predicate: &dyn Fn(&Record) -> bool) -> Option<Record> {
         self.entries
-            .remove_if(key, |_, record| predicate(record))
+            .remove_if(key, |_, record| {
+                let remove = predicate(record);
+                if remove {
+                    self.bump(key);
+                }
+                remove
+            })
             .map(|(_, r)| r)
     }
 
@@ -199,7 +231,16 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn clear(&self) {
-        self.entries.clear();
+        // Each resident key is bumped under its own lock as it is removed; the
+        // stripes are then all advanced, because `retain` never visits a key
+        // that is absent but being loaded.
+        self.entries.retain(|key, _| {
+            self.bump(key);
+            false
+        });
+        for stripe in &*self.vacancy {
+            stripe.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     fn destroy(&self) {
