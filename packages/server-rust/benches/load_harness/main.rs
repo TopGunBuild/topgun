@@ -38,6 +38,21 @@ use topgun_server::service::domain::sync::SyncService;
 use topgun_server::service::middleware::build_operation_pipeline;
 use topgun_server::service::operation::service_names;
 use topgun_server::service::router::OperationRouter;
+use topgun_server::service::security::{SecurityConfig, WriteAdmission};
+use topgun_server::service::OperationService;
+use topgun_server::storage::datastores::NullDataStore;
+use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
+use topgun_server::storage::impls::StorageConfig;
+use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
+use topgun_server::storage::mutation_observer::MutationObserver;
+
+use metrics::HdrMetricsCollector;
+use scenarios::vector_search::{VectorMode, VectorSearchConfig};
+use scenarios::{ThroughputScenario, VectorSearchScenario};
+use traits::{
+    AssertionResult, HarnessContext, JsonAssertionResult, JsonLatency, JsonReport, LoadScenario,
+    MetricsCollector,
+};
 
 // The harness serves the server in-process, so the allocator it runs under is
 // the one declared HERE, not the binary's. Without this lattice every allocator
@@ -71,21 +86,6 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 ))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
-use topgun_server::service::security::{SecurityConfig, WriteAdmission};
-use topgun_server::service::OperationService;
-use topgun_server::storage::datastores::NullDataStore;
-use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
-use topgun_server::storage::impls::StorageConfig;
-use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
-use topgun_server::storage::mutation_observer::MutationObserver;
-
-use metrics::HdrMetricsCollector;
-use scenarios::vector_search::{VectorMode, VectorSearchConfig};
-use scenarios::{ThroughputScenario, VectorSearchScenario};
-use traits::{
-    AssertionResult, HarnessContext, JsonAssertionResult, JsonLatency, JsonReport, LoadScenario,
-    MetricsCollector,
-};
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
