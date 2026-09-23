@@ -1873,9 +1873,11 @@ pub(crate) async fn prune_epoch_tombstones(
                     crate::storage::record::sub_tombstone_bytes(r.tag.len() as u64);
                     guard.settle(epoch, PruneExit::Dropped, r.tag.len() as u64);
                 }
-                // The closure never ran: the key was evicted between the
-                // rehydrating get and this write, so init=None mutated nothing
-                // while a durable tombstone may well still exist. Hand the ref
+                // The closure never ran: the key left memory between the
+                // rehydrating get and this write and the store could not
+                // materialize it again (the default store does, and reclaims the
+                // tag), so init=None mutated nothing while a durable tombstone
+                // may well still exist. Hand the ref
                 // back so a later sweep retries it — the drain already removed
                 // its index entry, so dropping it here would orphan the tag
                 // un-prunable forever. Keyed off `ran` and never off the
@@ -4920,9 +4922,21 @@ mod tests {
         data: Mutex<HashMap<(String, String), RecordValue>>,
         reject_keys: Mutex<HashSet<String>>,
         reject_read_keys: Mutex<HashSet<String>>,
+        /// Keys whose durable row `load` serves ONCE and then answers absent for,
+        /// with the value still present in the backing map. `true` once served.
+        absent_after_one_load: Mutex<HashMap<String, bool>>,
     }
 
     impl ArmableStore {
+        /// Serve `key`'s durable row to the next `load` only, and answer absent
+        /// to every later one while the row stays in the backing map: a store
+        /// whose rows the record store's in-place write cannot materialize.
+        fn answer_absent_after_one_load(&self, key: &str) {
+            self.absent_after_one_load
+                .lock()
+                .insert(key.to_string(), false);
+        }
+
         /// Fail every subsequent write to `key`. Reads keep working, so a test can
         /// still inspect what survived durably.
         fn reject_writes_to(&self, key: &str) {
@@ -5006,6 +5020,12 @@ mod tests {
         async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
             if self.reject_read_keys.lock().contains(key) {
                 return Err(anyhow::anyhow!("armed read rejection for {key}"));
+            }
+            if let Some(served) = self.absent_after_one_load.lock().get_mut(key) {
+                if *served {
+                    return Ok(None);
+                }
+                *served = true;
             }
             Ok(self
                 .data
@@ -6940,7 +6960,9 @@ mod tests {
     /// the rehydrating read and the in-place write" race: `on_load` fires after
     /// the hydrated record has entered the engine and before the caller's next
     /// write, so a store that evicts there leaves the following `update_in_place`
-    /// with no resident slot to mutate — exactly the state the prune has to tell
+    /// with no resident slot. With the default store that write materializes the
+    /// key again and reclaims the tag; paired with a data store that cannot serve
+    /// the second load, the closure never runs — the state the prune has to tell
     /// apart from "the tag was already gone".
     #[derive(Default)]
     struct EvictOnRehydrate {
@@ -7280,14 +7302,11 @@ mod tests {
         );
     }
 
-    /// Evicted between the rehydrating read and the in-place write: the frontier
-    /// ref is re-indexed so a later sweep retries.
-    ///
-    /// The closure never ran, so nothing was reclaimed while a durable tombstone
-    /// still exists. The drain already removed the ref's index entry, so dropping
-    /// it here would orphan that tag un-prunable forever.
+    /// Evicted between the rehydrating read and the in-place write: the write
+    /// materializes the key from the data store and reclaims the tag durably at
+    /// once (TG-OR-007), so the ref is consumed and nothing is re-indexed.
     #[tokio::test]
-    async fn prune_restores_the_tombstone_ref_when_the_key_is_evicted_mid_write() {
+    async fn prune_reclaims_a_key_evicted_between_its_read_and_its_write() {
         let store = Arc::new(ArmableStore::default());
         let evictor = Arc::new(EvictOnRehydrate::default());
         let (svc, factory, frontier) = make_service_with_frontier_and_store(
@@ -7322,6 +7341,67 @@ mod tests {
 
         let durable = store.durable("m", "k1");
         assert!(
+            matches!(&durable, Some(RecordValue::OrMap { tombstones, .. }) if !tombstones.contains(&t1.to_string())),
+            "the materializing write must reclaim the tag durably, got {durable:?}"
+        );
+        let retryable = frontier.drain_prunable_tombstones();
+        assert!(
+            !retryable.iter().any(|(_, r)| r.key == "k1"),
+            "a reclaimed tombstone must not be re-indexed, got {retryable:?}"
+        );
+    }
+
+    /// `RestoredEvicted` is reachable only through a store whose in-place write
+    /// cannot materialize the key: here the data store serves the prune's
+    /// rehydrating read and then answers absent, so after the eviction the
+    /// closure never runs while the tombstone is still durable. The ref is
+    /// re-indexed for a later sweep, and the pass still settles through exactly
+    /// one of its seven exits.
+    #[test]
+    fn prune_restores_the_ref_when_the_store_cannot_materialize_the_evicted_key() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let t1 = "T1";
+
+        // Built inside the recorder binding, so the prune record emits.
+        let (store, frontier) = metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let store = Arc::new(ArmableStore::default());
+                let evictor = Arc::new(EvictOnRehydrate::default());
+                let (svc, factory, frontier) = make_service_with_frontier_and_store(
+                    Arc::clone(&store) as Arc<dyn MapDataStore>,
+                    vec![Arc::clone(&evictor) as Arc<dyn MutationObserver>],
+                );
+                Arc::clone(&svc)
+                    .oneshot(or_add_op("m", "k1", "v1", t1))
+                    .await
+                    .unwrap();
+                Arc::clone(&svc)
+                    .oneshot(or_remove_op("m", "k1", t1))
+                    .await
+                    .unwrap();
+                open_prune_gates_past_epoch_one(&frontier).await;
+
+                let k1_store = factory.get_or_create("m", hash_to_partition("k1"));
+                assert!(
+                    k1_store.evict("k1", false).is_some(),
+                    "precondition: k1 is resident before the modelled eviction"
+                );
+                evictor.arm(&k1_store, "k1");
+                store.answer_absent_after_one_load("k1");
+
+                prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+                (store, frontier)
+            })
+        });
+        let rendered = handle.render();
+
+        let durable = store.durable("m", "k1");
+        assert!(
             matches!(&durable, Some(RecordValue::OrMap { tombstones, .. }) if tombstones.contains(&t1.to_string())),
             "nothing was reclaimed: the tag is still durable, got {durable:?}"
         );
@@ -7332,6 +7412,26 @@ mod tests {
                 .any(|(epoch, r)| *epoch == 1 && r.key == "k1" && r.tag == t1),
             "an un-reclaimed tombstone must be re-indexed for a later sweep, got {retryable:?}"
         );
+
+        let considered = rendered_counter(&rendered, METRIC_PRUNE_CONSIDERED_TOTAL);
+        let restored_evicted = rendered_counter(&rendered, METRIC_PRUNE_RESTORED_EVICTED_TOTAL);
+        assert_eq!(
+            restored_evicted, 1,
+            "the ref leaves through RestoredEvicted; render was:\n{rendered}"
+        );
+        assert_eq!(
+            considered,
+            rendered_counter(&rendered, METRIC_PRUNE_DROPPED_TOTAL)
+                + rendered_counter(&rendered, METRIC_PRUNE_MATCHED_NOTHING_TOTAL)
+                + rendered_counter(&rendered, METRIC_PRUNE_ABSENT_TOTAL)
+                + rendered_counter(&rendered, METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL)
+                + restored_evicted
+                + rendered_counter(&rendered, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL)
+                + rendered_counter(&rendered, METRIC_PRUNE_RESTORED_CANCELLED_TOTAL),
+            "every considered ref must leave through exactly one counted exit; \
+             render was:\n{rendered}"
+        );
+        assert_eq!(considered, 1, "one ref considered; render was:\n{rendered}");
     }
 
     /// The tag was genuinely already gone: the closure RAN and removed nothing,
@@ -7514,8 +7614,14 @@ mod tests {
         }
     }
 
-    /// One fixed synthetic prune workload that drives **all six** exits of
-    /// `prune_epoch_tombstones` in a single non-empty pass.
+    /// One fixed synthetic prune workload that drives the exits of
+    /// `prune_epoch_tombstones` in a single non-empty pass: `Dropped` twice
+    /// (`kdrop`, and `kevict`, whose eviction between the read and the write
+    /// the in-place write now repairs by materializing the key), then
+    /// matched-nothing, absent, read error and write error. `RestoredEvicted`
+    /// is reachable only through a store that cannot materialize and is driven
+    /// by `prune_restores_the_ref_when_the_store_cannot_materialize_the_evicted_key`;
+    /// `RestoredCancelled` by the ledger test's second pass.
     ///
     /// Every exit has to actually fire. An exit nothing reaches contributes zero
     /// to both sides of the exhaustiveness identity, so its increment could be
@@ -7614,8 +7720,8 @@ mod tests {
 
         // The prune's durable write fails.
         store.reject_writes_to("kwrite");
-        // Evicted between the rehydrating read and the in-place write, so the
-        // mutate closure never runs.
+        // Evicted between the rehydrating read and the in-place write: the write
+        // materializes the key from the data store and reclaims the tag.
         let kevict_store = factory.get_or_create("m", hash_to_partition("kevict"));
         assert!(
             kevict_store.evict("kevict", false).is_some(),
@@ -7774,10 +7880,10 @@ mod tests {
     /// and each step is what keeps the next one honest:
     ///
     /// 1. the shared one-pass workload runs unchanged, driving six exits;
-    /// 2. its own outcome drain CONSUMES the three refs that pass restored, so
+    /// 2. its own outcome drain CONSUMES the two refs that pass restored, so
     ///    they cannot re-enter the second pass still carrying their injected
-    ///    read / write / eviction failures, settle through the wrong exit, and
-    ///    break both counts below;
+    ///    read / write failures, settle through the wrong exit, and break both
+    ///    counts below;
     /// 3. a fresh pin is stamped at epoch 8 and acked, which makes `kpinned`'s
     ///    epoch 7 eligible while the new pin holds the frontier open — leaving
     ///    the index holding exactly ONE drainable ref;
@@ -7870,9 +7976,9 @@ mod tests {
         let rendered = handle.render();
 
         assert_eq!(
-            outcome.dropped_observed, 1,
-            "exactly one seeded tag is reclaimed durably; the other three exits \
-             leave their tag in place"
+            outcome.dropped_observed, 2,
+            "two seeded tags are reclaimed durably (kdrop, and kevict through the \
+             materializing write); the read- and write-failure exits leave theirs"
         );
 
         let considered = rendered_counter(&rendered, METRIC_PRUNE_CONSIDERED_TOTAL);
@@ -7886,24 +7992,33 @@ mod tests {
             rendered_counter(&rendered, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL);
         let restored_cancelled = rendered_counter(&rendered, METRIC_PRUNE_RESTORED_CANCELLED_TOTAL);
 
-        // Each exit fired exactly once. Asserted before the sum so a workload
-        // that stopped reaching an exit fails HERE, loudly, instead of leaving
-        // the identity below vacuously true for that exit.
-        for (name, observed) in [
-            (METRIC_PRUNE_DROPPED_TOTAL, dropped),
-            (METRIC_PRUNE_MATCHED_NOTHING_TOTAL, matched_nothing),
-            (METRIC_PRUNE_ABSENT_TOTAL, absent),
-            (METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL, restored_read_error),
-            (METRIC_PRUNE_RESTORED_EVICTED_TOTAL, restored_evicted),
+        // Each exit fired the pinned number of times. Asserted before the sum so
+        // a workload that stopped reaching an exit fails HERE, loudly, instead of
+        // leaving the identity below vacuously true for that exit. `Dropped`
+        // fires twice (the evicted key is reclaimed by the materializing write);
+        // `RestoredEvicted` fires nowhere in this workload — it is driven by
+        // `prune_restores_the_ref_when_the_store_cannot_materialize_the_evicted_key`,
+        // which checks the same identity over its own pass.
+        for (name, observed, expected) in [
+            (METRIC_PRUNE_DROPPED_TOTAL, dropped, 2),
+            (METRIC_PRUNE_MATCHED_NOTHING_TOTAL, matched_nothing, 1),
+            (METRIC_PRUNE_ABSENT_TOTAL, absent, 1),
+            (
+                METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
+                restored_read_error,
+                1,
+            ),
+            (METRIC_PRUNE_RESTORED_EVICTED_TOTAL, restored_evicted, 0),
             (
                 METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
                 restored_write_error,
+                1,
             ),
-            (METRIC_PRUNE_RESTORED_CANCELLED_TOTAL, restored_cancelled),
+            (METRIC_PRUNE_RESTORED_CANCELLED_TOTAL, restored_cancelled, 1),
         ] {
             assert_eq!(
-                observed, 1,
-                "the workload must drive {name} exactly once, or the \
+                observed, expected,
+                "the workload must drive {name} exactly {expected} time(s), or the \
                  exhaustiveness identity asserts nothing about that exit; \
                  render was:\n{rendered}"
             );
@@ -7921,10 +8036,7 @@ mod tests {
             "every considered ref must leave through exactly one counted exit; \
              render was:\n{rendered}"
         );
-        assert_eq!(
-            considered, 7,
-            "seven refs considered across the two passes, one per exit"
-        );
+        assert_eq!(considered, 7, "seven refs considered across the two passes");
 
         let passes = rendered_counter(&rendered, METRIC_PRUNE_PASSES_TOTAL);
         let empty_drains = rendered_counter(&rendered, METRIC_PRUNE_EMPTY_DRAINS_TOTAL);
@@ -8169,6 +8281,7 @@ mod tests {
 
         let mut considered_sum = 0u64;
         let mut dropped_sum = 0u64;
+        let mut restored_evicted_sum = 0u64;
         for row in &settlement_rows {
             let considered = row_u64(row, "considered");
             let dropped = row_u64(row, "dropped");
@@ -8193,12 +8306,17 @@ mod tests {
             assert_eq!(considered, 1, "one ref per epoch at epoch width 1: {row:?}");
             considered_sum += considered;
             dropped_sum += dropped;
+            restored_evicted_sum += restored_evicted;
         }
         assert_eq!(considered_sum, 6, "six epochs, one ref each");
         assert_eq!(
-            dropped_sum, 1,
-            "exactly one of the six epochs reclaims durably (kdrop); the other \
-             five leave their tag in place"
+            dropped_sum, 2,
+            "two of the six epochs reclaim durably (kdrop, and kevict through the \
+             materializing write); the other four leave their tag in place"
+        );
+        assert_eq!(
+            restored_evicted_sum, 0,
+            "the evicted key is reclaimed, not restored, with the default store"
         );
     }
 
@@ -8440,7 +8558,7 @@ mod tests {
              reclaims, ref for ref"
         );
         assert_eq!(
-            armed_outcome.dropped_observed, 1,
+            armed_outcome.dropped_observed, 2,
             "the comparison is over a run that actually reclaimed something"
         );
 

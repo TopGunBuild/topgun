@@ -603,6 +603,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   driven exactly once), `cancelled_prune_pass_restores_every_unsettled_ref` (the cancelled limb),
   `prune_guard_drop_is_panic_free_and_gauge_neutral` (guard `Drop` panic-free, naming no
   tombstone-byte counter) and `prune_record_armed_disarmed_gauge_neutral` (limb (b)), in `crdt.rs`.
+  With the default store a key evicted between the prune's read and its write completes as a durable
+  removal (`Dropped`); `restored_evicted` is reachable only for a store whose `update_in_place` cannot
+  materialize the key, and is driven by
+  `prune_restores_the_ref_when_the_store_cannot_materialize_the_evicted_key` (SPEC-374).
 - **The pass-siting premise is enforced by the identity TOGETHER WITH its two count pins, not by the
   sum alone.** `passes == empty_drains + nonempty_drains` is pinned alongside `nonempty_drains == 1`
   and `empty_drains >= 1`, because a pass observation made *conditional on work* survives the bare
