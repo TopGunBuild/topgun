@@ -444,23 +444,38 @@ impl RecordStore for DefaultRecordStore {
         self.data_store.wants_or_witness()
     }
 
+    /// Removes the key durably and from memory (TG-OR-007).
+    ///
+    /// The durable delete is staged FIRST, so from then on every data-store
+    /// load of the key returns `None`; only then is the engine entry removed,
+    /// which advances the key's vacancy generation. A reader that hits the
+    /// engine before that sees the pre-remove value (the remove has not taken
+    /// effect in memory); a reader that loaded the key before the delete was
+    /// staged either inserts before the engine removal, which then removes its
+    /// copy, or is refused by the generation. If the durable delete fails, the
+    /// engine is left untouched.
+    ///
+    /// Caller obligation: the caller holds the key's per-key writer across the
+    /// call, the same writer every in-place write of the key holds (see
+    /// [`update_in_place`](RecordStore::update_in_place)), so no in-place write
+    /// can mutate the still-resident slot and re-stage it over the delete.
     async fn remove(
         &self,
         key: &str,
         provenance: CallerProvenance,
     ) -> anyhow::Result<Option<RecordValue>> {
-        // Step 1: Remove from engine
-        let old_record = self.engine.remove(key);
-
-        // Step 2: Fire observer if removed
-        if let Some(ref record) = old_record {
-            self.observer.on_remove(key, record, false);
-        }
-
-        // Step 3: Remove from data store
+        // Step 1: Stage the durable delete.
         let now = now_millis();
         let _ = provenance; // provenance available for future use
         self.data_store.remove(&self.name, key, now).await?;
+
+        // Step 2: Remove from the engine, advancing the vacancy generation.
+        let old_record = self.engine.remove(key);
+
+        // Step 3: Fire observer if removed
+        if let Some(ref record) = old_record {
+            self.observer.on_remove(key, record, false);
+        }
 
         // Step 4: Return old value
         Ok(old_record.map(|r| r.value))
