@@ -123,13 +123,15 @@ impl RecordStore for DefaultRecordStore {
     // --- Core CRUD ---
 
     async fn get(&self, key: &str, touch: bool) -> anyhow::Result<Option<Record>> {
-        // Step 1: Check engine
-        if let Some(mut record) = self.engine.get(key) {
-            if touch {
-                let now = now_millis();
-                record.metadata.on_access(now);
-                self.engine.put(key, record.clone());
-            }
+        // Step 1: Check engine. A touch stamps the access in place under the
+        // key's lock; writing a stamped copy back would overwrite any write that
+        // landed between the read and the write-back.
+        let resident = if touch {
+            self.engine.touch(key, now_millis())
+        } else {
+            self.engine.get(key)
+        };
+        if let Some(record) = resident {
             return Ok(Some(record));
         }
 
