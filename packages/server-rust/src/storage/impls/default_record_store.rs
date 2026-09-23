@@ -567,25 +567,6 @@ impl RecordStore for DefaultRecordStore {
         }
     }
 
-    fn hydrate_loaded(&self, key: &str, value: RecordValue) -> bool {
-        // Engine-first check mirrors get(): never clobber a resident value, which
-        // may be a fresher unflushed or concurrently-merged write.
-        if self.engine.contains_key(key) {
-            return false;
-        }
-        let now = now_millis();
-        let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
-        // A record materialized from the datastore is already persisted, so it
-        // enters the engine clean (last_stored_time = now) and is immediately
-        // eligible for re-eviction — required for the evict→reload steady state.
-        let mut metadata = RecordMetadata::new(now, cost);
-        metadata.on_store(now);
-        let record = Record { value, metadata };
-        self.engine.put(key, record.clone());
-        self.observer.on_load(key, &record, false);
-        true
-    }
-
     // --- Size and cost ---
 
     fn size(&self) -> usize {
