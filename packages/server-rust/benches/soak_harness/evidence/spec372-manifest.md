@@ -311,3 +311,175 @@ Program sha256 re-printed at M2 (`ORDER=OK` clause 4; identical to the list in s
 - `606e36f23895d87c3e33ad40cdc96bbe6ddb23789b45a21f9bb8d63be0b1fc0e` `packages/server-rust/benches/soak_harness/evidence/spec372-decide.awk`
 - `d58fd6fa667fa04879340dabae64ab9486e1d4d5672e9afcfc488c7c7c10a81d` `packages/server-rust/benches/soak_harness/evidence/spec372-perf.sh`
 - `722513c725167c211ddad58981ef7b41beb1939d0841291be710b74f39d6a0d6` `packages/server-rust/benches/soak_harness/evidence/spec372-buildstory.sh`
+
+## §3 — carve 9b readout: no default candidate; the alternatives trade an unpredictable SYS residency for a stable one
+
+Appended 2026-09-23, after D2 = `5ca6ed49` (`docs(soak): record the allocator evaluation Stage-2
+cells (D2)`). Nothing above `## APPEND-ONLY BELOW` changed: the §1 command gives
+`a4213fca45b2eb6d968d565f338c33a52634320a786ecff80535237ac457626b` at M `e92fa977`, D1 `b38d3a51`,
+M2 `2f81851b` and D2 `5ca6ed49`; the eight frozen programs are byte-identical to M; each commit is an
+ancestor of the next. `ORDER=OK`. Every number below was recomputed from the committed artifacts under
+`LC_ALL=C`.
+
+Chain 1 ran `2026-09-22T11:26:14Z` → `13:32:13Z`, chain 2 `2026-09-22T15:26:21Z` → `2026-09-23T03:59:02Z`,
+each launched once; eleven `RUNNER_EXIT=0`, `CHAIN_RC=0` as the last line of both logs, `STOP=FALSE`
+in both decision files with no `STOP-reason:` line. `k.awk` and `decide.awk`, re-run over the committed
+D1 and D2 bytes, reproduce `spec372.k-stage1.txt`, `spec372.stage1.txt`, `spec372.k-stage2.txt` and
+`spec372.decision.txt` byte-for-byte (AC-6, AC-6b).
+
+### 3.1 The decision, verbatim
+
+```
+S1_SURVIVORS=JE+MI
+S1_RANK=JE
+VERDICT_JE=NOT_BOUNDED
+VERDICT_MI=BOUNDED_NO_GAIN
+PERF_JE=FAIL
+PERF_MI=FAIL
+BUILD_JE=OK
+BUILD_MI=OK
+DEFAULT_CANDIDATE=NONE
+NEXT=CONDUCTOR_RULING;BOUNDED_NO_GAIN
+```
+
+The full flag block is `spec372.decision.txt`. **The default allocator is not flipped**: `default =
+["redb"]` is untouched, and `alloc-jemalloc` / `alloc-mimalloc` land as off-by-default features — the
+instrument for the next two carves, not a production choice. **Every Stage-2 verdict is n = 1 per arm**
+(one 4 h cell each, one same-chain SYS reference).
+
+### 3.2 The four 4 h cells, with the committed 8f SYS cell on the same matrix
+
+`FP` = `phys_footprint_mb`; `S` = `FP + reclaimable_mb`; `reachable_est` and `AMP_*` are §1's
+definitions at the TERMINAL census. 8f is `spec370-plateau4h.csv` (SPEC-370's 4 h cell, the same soak
+matrix); its `reachable_est` is §1's 901.82 MiB, from its terminal census `live=1047614`.
+
+| 4 h cell | FP at 2 h | FP at 4 h | reclaimable at 2 h → 4 h | reclaimable, max over 60 s rows | S at 4 h | reachable_est | AMP_FP | AMP_S |
+|---|---|---|---|---|---|---|---|---|
+| `s2` SYS | 362 MB | 418 MB | 6421 → 2412 MB | 6834 MB (t = 8100 s) | 2830 MB | 893 MB | 0.47 | 3.17 |
+| 8f SYS (committed) | 4940 MB | 8237 MB | 4035 → 1130 MB | 4067 MB (t = 6960 s) | 9367 MB | 902 MB | 9.13 | 10.39 |
+| `j2` JE | 996 MB | 2029 MB | 0 → 0 | 0 | 2029 MB | 918 MB | 2.21 | 2.21 |
+| `m2` MI | 1111 MB | 1905 MB | 114 → 215 MB | 324 MB (t = 7740 s) | 2120 MB | 920 MB | 2.07 | 2.31 |
+
+Terminal joins: `s2` 1.8 s, `j2` 2.2 s, `m2` 1.6 s. Ops parity held on the deciding cells:
+`OPS_RATIO_JE_S2=1.0284`, `OPS_RATIO_MI_S2=1.0302` (s2 180.2, j2 185.3, m2 185.7 ops/s); `WRITE_ERRORS=0`.
+
+### 3.3 The SYS reference is bimodal at 4 h
+
+Two SYS cells on the same matrix end **20× apart on `FP`** (418 vs 8237 MB) and **3.3× apart on `S`**
+(2830 vs 9367 MB). In `s2`, libmalloc parked up to 6.8 GB in reusable pages and then returned about
+4.4 GB of them by 4 h; `FP` stayed near 0.5 × reachable. In 8f, the same allocator re-dirtied its
+reusable pages after ~2 h and `FP` climbed to 9.1 × reachable. Nothing in the configuration distinguishes
+the two cells. On this workload the macOS SYS residency at 4 h is therefore a draw from at least two
+regimes, not a number, and one SYS cell per chain cannot say which regime is typical.
+
+### 3.4 `VS_SYS` and `VS_SYS_S`, side by side — neither decides
+
+| arm | `VS_SYS` (`AMP_FP` / `AMP_FP_S2`) | `VS_SYS_S` (`AMP_S` / `AMP_S_S2`) |
+|---|---|---|
+| JE | 4.7210 `NO_GAIN` | 0.6977 |
+| MI | 4.4244 `NO_GAIN` | 0.7275 |
+
+The two accountings point in opposite directions, and **neither is a statement about the allocators**:
+both divide by a single draw of the bimodal SYS reference of 3.3, and `s2` landed in the low-`FP`,
+high-reclaimable regime. The committed 8f cell, in the other regime, would move both ratios by more
+than an order of magnitude; that cross-chain division is not computed here, because §1 forbids it as a
+verdict and the reference's own 20× spread (§3.3) already says what it would show. Both ratios are
+relative to **macOS libmalloc**, a baseline that does not exist on the Linux/glibc production target.
+This readout makes no footprint-reduction claim relative to SYS.
+
+### 3.5 Why §1's `K_HI_VACUOUS=FALSE` prediction missed
+
+§1 predicted `AMP_FP_S2 = 9.13` — the 8f cell's value — hence a `BETTER` bar of 4.57 and
+`K_HI_VACUOUS=FALSE` for both arms (`K_hi` 1.53 / 1.43 far below the bar). `s2` read
+`AMP_FP_S2 = 0.4683`, so the bar is `0.50 × 0.4683 = 0.234`, and both `K_hi` (1.5525 / 1.4270, within
+0.03 of the prediction) sit above it: `K_HI_VACUOUS_JE=TRUE`, `K_HI_VACUOUS_MI=TRUE`. The bounds were
+predicted correctly; the reference they are compared against was one draw of §3.3's bimodal SYS. The
+guard did what it exists for — it announced that `LEVEL` cannot discriminate on this chain, and both
+`LEVEL` readings (`ABOVE_K_HI`) carry no information here. Independently of that, and as AC-11 requires:
+`K_hi` carries no external-fragmentation term and the redb page cache is unmodelled in `reachable_est`
+(`R_redb` 0.23–0.24 enters `K_hi` off the file size), so `LEVEL` is biased upward by an amount `VS_SYS`
+would cancel; `ABOVE_K_HI` would not have read as failure even with a non-vacuous bound.
+
+### 3.6 What the two alternatives do instead: a stable ≈ 2.1–2.2 × reachable
+
+- **Both arms track the live set.** From 2 h to 4 h `reachable_est` grows ≈ 230 MB/h; `FP` grows
+  ≈ 516 MB/h on JE and ≈ 397 MB/h on MI, and `AMP_FP` stays at 2.18 → 2.21 (JE) and 2.38 → 2.07 (MI).
+  Last-half trends: `TREND_JE=INCREASING` (+0.053 ± 0.022 AMP/h, n = 24), `TREND_MI=NON_INCREASING`
+  (−0.114 ± 0.040, n = 24); both last-third fits read `INCREASING` (+0.122 / +0.112, recorded, not
+  gating). JE's arm-native ratio `FP / stats.allocated` is flat over 120 points: `TREND_JE_NATIVE`
+  −0.030 ± 0.015 /h.
+- **The estimator holds at the deciding timescale.** `JE_ESTIMATOR_AGREE=TRUE ratio=1.0735`
+  (`EST_PROVISIONAL=FALSE`), against 1.24 / 1.18 at 900 s: the Stage-1 under-count of ~20 % closes to
+  7 % at 4 h; `UNMODELLED_REACHABLE_j2` = 67.5 MB (0.073).
+- **Where JE's 2.2× goes (measured, not bounded).** `FRAG_SHARE` = (`stats.active − stats.allocated`) /
+  `stats.allocated`: j1a 0.853, j1b 0.762, **j2 0.808** — active pages are ≈ 1.8 × allocated.
+  `DIRTY_SHARE` = (`stats.resident − stats.active − stats.metadata`) / `stats.allocated`: j1a 0.265,
+  j1b 0.213, **j2 0.221**. `AMP_JE` (`stats.resident / stats.allocated`) = 2.079. So most of the excess
+  is page-level fragmentation of large, growing records that are cloned about once a second
+  (`CHURN_RATIO` 0.8721 /s, drift 0.8185, `K_PROVISIONAL=FALSE`), with dirty-page decay the smaller term.
+  `T_DECAY_UPPER_JE` 8.72 / `_MI` 0.87 are the no-reuse bounds and are recorded only.
+- **Reclaim semantics confirmed from the run on all three arms** (R5.2's table): `RECLAIM_SEMANTICS_SYS=
+  REUSABLE ratio=5.77`, `RECLAIM_SEMANTICS_MI=REUSABLE ratio=0.11`, `RECLAIM_SEMANTICS_JE=MADV_FREE
+  ratio=0.000000` — JE returns decayed pages outright, which is also why `S` means something different
+  per arm and could never be the cross-arm numerator. On macOS jemalloc has no background purge thread
+  at any setting (R1.4; `je_config` `opt_background_thread=false`, `arenas_narenas=41`), so decay runs
+  only on allocation paths; TODO-589 inherits that difference.
+
+### 3.7 Performance beside ops parity
+
+| reading | JE | MI | SYS |
+|---|---|---|---|
+| in-process load harness, fire-and-wait median p99 (5 × 30 s) | 17.1 ms | 15.4 ms | 6.5 / 5.8 ms (two blocks) |
+| in-process load harness, fire-and-wait median ops/s vs SYS low | 0.93 | 0.96 | 1.00 |
+| in-process load harness, fire-and-forget median ops/s vs SYS low | 1.00 | 1.00 | 1.00 |
+| `PERF_<arm>` | **FAIL** `breached=faw_p99` | **FAIL** `breached=faw_p99` | `SYS_QUIET=TRUE` |
+| out-of-process soak, `OPS_RATIO_<arm>_S1` (900 s) | 1.0064 | 1.0144 | — |
+| out-of-process soak, `OPS_RATIO_<arm>_S2` (4 h) | 1.0284 | 1.0302 | — |
+
+The in-process harness runs client and server in one process under one global allocator (200
+connections, many small short-lived allocations, 41 jemalloc arenas), so its p99 leg measures the
+harness's allocation profile together with the server's; the soak's paced workload shows parity. The
+two readings are printed together because neither alone settles the cost; an out-of-process perf
+reading is TODO-696. An earlier perf run on a loaded host (Docker Desktop still up) read the opposite
+direction and was excluded under the idle-host rule; it is not part of this evidence. `a2j` (JE, journal
+OFF, 900 s): `OPS_a2j=183.044`, `OPS_RATIO_a2j_vs_4h=1.0998`, `AMP_FP=2.456` at its TERMINAL
+(`join_lag_s=60.2`, inside the 90 s bound) — n = 1 per side, early window, no causal claim about the
+journal.
+
+### 3.8 Stage 1 was a screen and nothing more
+
+The 900 s cells are an early-window screen that never decides. Both arms survived the DROP rule on the
+`S` leg alone: on `FP_end` both were above the worst SYS cell in both replicates (JE 180 / 166, MI 252 /
+273 vs 84.5 MB), on `S_end` both were below it (JE 180 / 166, MI 276 / 301 vs 546 MB). `S1_RANK=JE`
+(mean `AMP_FP` 2.49 vs 3.80) selected `a2j` and nothing else. `CV_JE=0.0913`, `CV_MI=0.0395`.
+
+### 3.9 Build story and binary size
+
+`BUILD_JE=OK`, `BUILD_MI=OK`: darwin-arm64, linux-x64 (`cargo zigbuild`, the npm path) and the Docker
+image (linux/aarch64, no new apt package) build for both arms; the 16-subset feature lattice checks;
+`cargo audit` names no allocator crate. linux-x64 stripped sizes: SYS 20 994 088 B, JE +566 536 B,
+MI +190 168 B ⇒ `SIZE_HEADROOM_JE=TIGHT`, `SIZE_HEADROOM_MI=TIGHT` — the SYS binary at this base is
+already over the 20 MiB publish ceiling before any allocator (TODO-695), so TIGHT is not a finding
+against either arm. CI cost of jemalloc's C build: 27.3–31.7 s of `./configure` + `make`, overlapped
+with the Rust compile; cold `cargo clippy --all-targets --all-features` measured at 82 s (HEAD) vs 97 s
+(pin) in one run and +6 / +9 s in the smoke runs — within this host's noise.
+
+### 3.10 Deferred
+
+- **TODO-591** (carve 9c) — reduce the per-write clone churn behind both SYS's retention and JE/MI's
+  ≈ 0.8 fragmentation; measured on SYS **and** JE with the features built here. First.
+- **TODO-589** — the allocator decision on Linux/glibc, the production target: ≥ 2 SYS replicates at
+  4 h (the reference is bimodal, §3.3), an out-of-process perf reading, and the size ceiling fixed first.
+  `DEFAULT_CANDIDATE=NONE` here, so this carve hands it no candidate; it hands it the instrument.
+- **TODO-695** — the linux-x64 SYS binary is over the 20 MiB publish ceiling at this base; both
+  `SIZE_HEADROOM_*=TIGHT` readings are consequences of it.
+- **TODO-696** — an out-of-process perf reading, so the p99 leg of `PERF_<arm>` stops sharing one
+  allocator between client and server.
+- **Default-flip tracker** — to be opened by the conductor at `/sf:done`: the `DEFAULT_FLIP` token in
+  NEXT clause 16 names no tracker today; any flip goes through TODO-589 and at least one replicate 4 h
+  cell of the candidate.
+- **CI per-arm clippy tracker** — to be opened by the conductor at `/sf:done`: CI runs
+  `cargo clippy --all-targets --all-features` only (`.github/workflows/rust.yml:93`); under the cfg
+  lattice `alloc-jemalloc` outranks `alloc-mimalloc`, so the MI-only row is never linted in CI (the
+  build story ran it locally: `ITEM4 clippy=MI rc=0`). CI's test job runs default features
+  (`rust.yml:96`) and never pays the jemalloc C build; only clippy `--all-features` does.
