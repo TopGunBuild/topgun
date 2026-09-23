@@ -7376,14 +7376,18 @@ mod tests {
                     Arc::clone(&store) as Arc<dyn MapDataStore>,
                     vec![Arc::clone(&evictor) as Arc<dyn MutationObserver>],
                 );
-                Arc::clone(&svc)
-                    .oneshot(or_add_op("m", "k1", "v1", t1))
-                    .await
-                    .unwrap();
-                Arc::clone(&svc)
-                    .oneshot(or_remove_op("m", "k1", t1))
-                    .await
-                    .unwrap();
+                // k2 owns epoch 2, which the gates below keep pinned, so only
+                // k1's epoch drains.
+                for (key, val, tag) in [("k1", "v1", t1), ("k2", "v2", "T2")] {
+                    Arc::clone(&svc)
+                        .oneshot(or_add_op("m", key, val, tag))
+                        .await
+                        .unwrap();
+                    Arc::clone(&svc)
+                        .oneshot(or_remove_op("m", key, tag))
+                        .await
+                        .unwrap();
+                }
                 open_prune_gates_past_epoch_one(&frontier).await;
 
                 let k1_store = factory.get_or_create("m", hash_to_partition("k1"));
