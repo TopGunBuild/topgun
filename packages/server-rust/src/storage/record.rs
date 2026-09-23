@@ -938,3 +938,23 @@ mod or_map_tombstone_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod metadata_dirtiness_tests {
+    use super::*;
+
+    // AC-9 (metadata half): a write stamped in the same millisecond as the
+    // previous persist is still dirty (TG-EVI-001).
+    #[test]
+    fn a_write_in_the_stored_millisecond_is_dirty() {
+        let t = 1_000_000;
+        let mut meta = RecordMetadata::new(t, 1);
+        meta.on_store(t);
+        assert!(!meta.is_dirty(), "a just-persisted record is clean");
+        meta.on_update(t);
+        assert!(
+            meta.is_dirty(),
+            "a write after the persist must be dirty even within the same millisecond"
+        );
+    }
+}

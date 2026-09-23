@@ -2474,5 +2474,50 @@ mod tests {
             assert_eq!(tags_of(&resident.value), tags_of(&written.value));
             assert_eq!(resident.metadata.write_token, written.metadata.write_token);
         }
+
+        // AC-9 (store half): a write in the same millisecond as the previous
+        // `mark_stored` is still dirty, so `evict_lru` keeps it (TG-EVI-001).
+        #[test]
+        fn a_write_in_the_mark_stored_millisecond_is_not_evicted() {
+            let store = make_store();
+            let t = 1_000_000;
+            let cost = |_: &RecordValue| 1;
+            let UpdateInPlaceOutcome::Written { record, .. } = store.storage().update_in_place(
+                KEY,
+                t,
+                Some(or_value(&["a"], &[])),
+                None,
+                &mut |_| true,
+                &cost,
+            ) else {
+                panic!("the first write must insert");
+            };
+            assert!(store
+                .storage()
+                .mark_stored(KEY, t, record.metadata.write_token));
+
+            let UpdateInPlaceOutcome::Written { .. } = store.storage().update_in_place(
+                KEY,
+                t,
+                None,
+                None,
+                &mut |value| {
+                    if let RecordValue::OrMap { records, .. } = value {
+                        records.push(entry("b"));
+                    }
+                    true
+                },
+                &cost,
+            ) else {
+                panic!("the second write must mutate the resident record");
+            };
+
+            store.evict_lru(u32::MAX, false);
+
+            assert!(
+                store.exists_in_memory(KEY),
+                "an unflushed write must never be evicted"
+            );
+        }
     }
 }
