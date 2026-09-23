@@ -4,7 +4,7 @@
 //! Suitable for development, testing, and production workloads where
 //! all data fits in memory.
 
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::mapref::entry::Entry;
@@ -44,11 +44,9 @@ impl HashMapStorage {
     }
 
     fn stripe(&self, key: &str) -> &AtomicU64 {
-        let mut hasher = self.entries.hasher().build_hasher();
-        key.hash(&mut hasher);
         // The modulo bounds the value below VACANCY_STRIPES, so the cast is exact.
         #[allow(clippy::cast_possible_truncation)]
-        let index = (hasher.finish() % VACANCY_STRIPES as u64) as usize;
+        let index = (self.entries.hasher().hash_one(key) % VACANCY_STRIPES as u64) as usize;
         &self.vacancy[index]
     }
 

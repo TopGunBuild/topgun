@@ -397,7 +397,7 @@ impl RecordStore for DefaultRecordStore {
             (true, None) => self.observer.on_put(key, &record, None, false),
             (false, _) => {
                 self.observer
-                    .on_update(key, &record, &record.value, &record.value, false)
+                    .on_update(key, &record, &record.value, &record.value, false);
             }
         }
 
@@ -1661,7 +1661,6 @@ mod tests {
             FetchResult as EngineFetch, PutIfAbsentOutcome, UpdateInPlaceOutcome,
         };
         use crate::storage::map_data_store::{LeafSink, ScanBatch, ScanCursor};
-        use crate::storage::wal::OrDelta;
 
         use super::*;
         use crate::storage::datastores::RedbDataStore;
@@ -1711,8 +1710,8 @@ mod tests {
             )
         }
 
-        /// An in-place OR add of `tag`, shaped like the CRDT service's OR_ADD
-        /// (empty OrMap `init`, closure appends the entry).
+        /// An in-place OR add of `tag`, shaped like the CRDT service's `OR_ADD`
+        /// (empty `OrMap` `init`, closure appends the entry).
         pub(super) async fn or_add(store: &DefaultRecordStore, tag: &str) -> anyhow::Result<bool> {
             let new_entry = entry(tag);
             let mut add = |value: &mut RecordValue| {
@@ -1903,24 +1902,6 @@ mod tests {
                 now: i64,
             ) -> anyhow::Result<()> {
                 self.inner.add(map, key, value, expiration_time, now).await
-            }
-
-            async fn add_with_witness(
-                &self,
-                map: &str,
-                key: &str,
-                value: &RecordValue,
-                expiration_time: i64,
-                now: i64,
-                witness: Option<&OrDelta>,
-            ) -> anyhow::Result<()> {
-                self.inner
-                    .add_with_witness(map, key, value, expiration_time, now, witness)
-                    .await
-            }
-
-            fn wants_or_witness(&self) -> bool {
-                self.inner.wants_or_witness()
             }
 
             async fn add_backup(

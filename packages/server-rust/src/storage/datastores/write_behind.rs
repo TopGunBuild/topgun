@@ -1158,6 +1158,36 @@ impl WriteBehindDataStore {
     /// Lock the pending-sequence set, recovering from a poisoned mutex (a prior
     /// panic while holding it leaves a consistent set — a stale entry only holds
     /// the watermark back, the safe direction).
+    /// Waits, until `deadline`, for the flush loop to finish the batch it may be
+    /// applying. It checks the shutdown signal only between ticks, and draining
+    /// while it is mid-batch would apply one key's in-flight write and a later
+    /// write of the same key from two tasks, in either order. On timeout the loop
+    /// is aborted; the entries of its aborted batch are neither resolved nor
+    /// abandoned, so with a WAL they replay on the next boot. A later call finds
+    /// the handle already taken and returns at once.
+    async fn join_flush_loop(&self, deadline: tokio::time::Instant) {
+        let flush_task = self
+            .flush_loop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(mut flush_task) = flush_task else {
+            return;
+        };
+        if tokio::time::timeout_at(deadline, &mut flush_task)
+            .await
+            .is_err()
+        {
+            flush_task.abort();
+            warn!(
+                shutdown_timeout_ms = self.config.shutdown_timeout_ms,
+                "write-behind flush loop did not finish its in-flight batch within the \
+                 shutdown timeout; aborted it (its entries replay from the WAL on the \
+                 next boot when the store has one)"
+            );
+        }
+    }
+
     fn pending_seqs(&self) -> std::sync::MutexGuard<'_, BTreeSet<u64>> {
         self.pending_seqs
             .lock()
@@ -2942,31 +2972,7 @@ impl MapDataStore for WriteBehindDataStore {
         let timeout_duration = tokio::time::Duration::from_millis(self.config.shutdown_timeout_ms);
         let deadline = tokio::time::Instant::now() + timeout_duration;
 
-        // Wait for the loop to finish the batch it may be applying: it checks the
-        // signal only between ticks, and draining while it is mid-batch would
-        // apply one key's in-flight write and a later write of the same key from
-        // two tasks, in either order. On timeout the loop is aborted; the entries
-        // of its aborted batch are neither resolved nor abandoned, so with a WAL
-        // they replay on the next boot. A later call finds the handle taken.
-        let flush_task = self
-            .flush_loop
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(mut flush_task) = flush_task {
-            if tokio::time::timeout_at(deadline, &mut flush_task)
-                .await
-                .is_err()
-            {
-                flush_task.abort();
-                warn!(
-                    shutdown_timeout_ms = self.config.shutdown_timeout_ms,
-                    "write-behind flush loop did not finish its in-flight batch within the \
-                     shutdown timeout; aborted it (its entries replay from the WAL on the \
-                     next boot when the store has one)"
-                );
-            }
-        }
+        self.join_flush_loop(deadline).await;
 
         // Flush all partition queues directly to the inner store. Using i64::MAX
         // as the drain deadline ensures every buffered entry is eligible regardless

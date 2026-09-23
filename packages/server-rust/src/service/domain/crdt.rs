@@ -9986,7 +9986,7 @@ mod tests {
             Arc<dyn MapDataStore>,
         ) {
             let data_store: Arc<dyn MapDataStore> =
-                Arc::new(RedbDataStore::new(&dir.path().join("nonres.redb")).expect("redb open"));
+                Arc::new(RedbDataStore::new(dir.path().join("nonres.redb")).expect("redb open"));
             let factory = Arc::new(RecordStoreFactory::new(
                 StorageConfig::default(),
                 Arc::clone(&data_store),
@@ -10419,7 +10419,7 @@ mod tests {
             Arc<ParkingStore>,
         ) {
             let redb: Arc<dyn MapDataStore> =
-                Arc::new(RedbDataStore::new(&dir.path().join("nonres.redb")).expect("redb open"));
+                Arc::new(RedbDataStore::new(dir.path().join("nonres.redb")).expect("redb open"));
             let parking = Arc::new(ParkingStore::new(Arc::clone(&redb)));
             let factory = Arc::new(RecordStoreFactory::new(
                 StorageConfig::default(),

@@ -164,6 +164,8 @@ async fn post_restart_or_add_after_a_read_keeps_every_earlier_value_control() {
 
 /// Repetitions per entry count in the cost reading.
 const COST_REPETITIONS: usize = 20;
+/// Seed ops sent over one connection before the cost reading reconnects.
+const SEED_CHUNK: i64 = 1_000;
 
 fn median_and_max(samples: &mut [Duration]) -> (Duration, Duration) {
     samples.sort();
@@ -191,15 +193,18 @@ async fn cost_of_the_first_post_restart_or_add() {
         });
         supervisor.start(READY_TIMEOUT).await.expect("server start");
 
-        let mut c = SoakClient::connect(supervisor.addr(), 0, JWT_SECRET)
-            .await
-            .expect("client connect");
-        for v in 0..entries {
-            c.or_add(OR_MAP, OR_KEY, &format!("t-{v}"), v, 1, v as u32)
+        // Seeded over a fresh connection per chunk: the seed is setup, not the
+        // measurement, and one connection is never asked to carry every op.
+        for chunk in 0..(entries + SEED_CHUNK - 1) / SEED_CHUNK {
+            let mut c = SoakClient::connect(supervisor.addr(), 0, JWT_SECRET)
                 .await
-                .expect("seed or_add");
+                .expect("client connect");
+            for v in chunk * SEED_CHUNK..((chunk + 1) * SEED_CHUNK).min(entries) {
+                c.or_add(OR_MAP, OR_KEY, &format!("t-{v}"), v, 1, v as u32)
+                    .await
+                    .unwrap_or_else(|e| panic!("seed or_add #{v}: {e}"));
+            }
         }
-        drop(c);
         tokio::time::sleep(FLUSH_WAIT).await;
 
         let mut first = Vec::with_capacity(COST_REPETITIONS);
