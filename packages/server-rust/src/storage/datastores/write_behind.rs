@@ -6485,3 +6485,248 @@ mod prefix_watermark_proptest;
 #[cfg(test)]
 #[path = "wal_harness/mod.rs"]
 mod wal_harness;
+
+/// Graceful shutdown must apply a key's writes in the order they were staged,
+/// even when the flush loop is mid-batch when `hard_flush` starts (TG-OR-007).
+#[cfg(all(test, feature = "redb"))]
+mod hard_flush_order_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use crate::storage::datastores::RedbDataStore;
+    use crate::storage::map_data_store::{LeafSink, ScanBatch, ScanCursor};
+
+    const MAP: &str = "hard_flush_map";
+    const KEY: &str = "k";
+    const PARK_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
+    type Gate = (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    );
+
+    /// Forwards to `inner`; when armed, parks the next `add` for [`KEY`] on
+    /// ENTRY, and records the order in which `add`/`remove` for [`KEY`] were
+    /// applied to `inner`.
+    struct ParkingAddStore {
+        inner: Arc<dyn MapDataStore>,
+        park: Mutex<Option<Gate>>,
+        applied: Mutex<Vec<&'static str>>,
+    }
+
+    impl ParkingAddStore {
+        fn new(inner: Arc<dyn MapDataStore>) -> Self {
+            Self {
+                inner,
+                park: Mutex::new(None),
+                applied: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Returns the receiver that fires when the `add` parks, and the
+        /// sender that releases it.
+        fn arm(
+            &self,
+        ) -> (
+            tokio::sync::oneshot::Receiver<()>,
+            tokio::sync::oneshot::Sender<()>,
+        ) {
+            let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            *self.park.lock().unwrap() = Some((parked_tx, release_rx));
+            (parked_rx, release_tx)
+        }
+
+        fn applied(&self) -> Vec<&'static str> {
+            self.applied.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for ParkingAddStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            if key == KEY {
+                let gate = self.park.lock().unwrap().take();
+                if let Some((parked, release)) = gate {
+                    let _ = parked.send(());
+                    let _ = release.await;
+                }
+            }
+            let result = self.inner.add(map, key, value, expiration_time, now).await;
+            if key == KEY && result.is_ok() {
+                self.applied.lock().unwrap().push("add");
+            }
+            result
+        }
+
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .add_backup(map, key, value, expiration_time, now)
+                .await
+        }
+
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            let result = self.inner.remove(map, key, now).await;
+            if key == KEY && result.is_ok() {
+                self.applied.lock().unwrap().push("remove");
+            }
+            result
+        }
+
+        async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove_backup(map, key, now).await
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.inner.load(map, key).await
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.inner.load_all(map, keys).await
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            self.inner.enumerate_leaves(map, is_backup, sink).await
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.inner.scan_values(map, is_backup, max_batch_cost).await
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: ScanCursor,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.inner
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.inner.remove_all(map, keys).await
+        }
+
+        fn is_loadable(&self, key: &str) -> bool {
+            self.inner.is_loadable(key)
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            self.inner.pending_operation_count()
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            self.inner.soft_flush().await
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            self.inner.hard_flush().await
+        }
+
+        async fn flush_key(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            is_backup: bool,
+        ) -> anyhow::Result<()> {
+            self.inner.flush_key(map, key, value, is_backup).await
+        }
+
+        fn reset(&self) {
+            self.inner.reset();
+        }
+    }
+
+    // AC-15: a Remove staged after the flush loop dequeued the key's Store must
+    // land after that Store, also when `hard_flush` starts while the Store is
+    // in flight.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hard_flush_applies_a_later_remove_after_the_loops_in_flight_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let redb: Arc<dyn MapDataStore> =
+            Arc::new(RedbDataStore::new(dir.path().join("hard_flush.redb")).expect("redb open"));
+        let parking = Arc::new(ParkingAddStore::new(Arc::clone(&redb)));
+        let (parked, release) = parking.arm();
+        // The shutdown budget is well above the park bound, so the join in
+        // `hard_flush` never times out while the store is parked.
+        let wb = WriteBehindDataStore::new(
+            parking.clone(),
+            WriteBehindConfig {
+                write_delay_ms: 10,
+                flush_interval_ms: 10,
+                batch_size: 100,
+                max_retries: 3,
+                backoff_base_ms: 10,
+                backoff_cap_ms: 100,
+                capacity: 0,
+                shutdown_timeout_ms: 5_000,
+                ..WriteBehindConfig::default()
+            },
+        );
+        let value = RecordValue::OrMap {
+            records: Vec::new(),
+            tombstones: vec!["t".to_string()],
+        };
+
+        wb.add(MAP, KEY, &value, 0, now_millis())
+            .await
+            .expect("add");
+        tokio::time::timeout(PARK_BOUND, parked)
+            .await
+            .expect("the flush loop never reached the inner add")
+            .expect("park dropped");
+
+        wb.remove(MAP, KEY, now_millis()).await.expect("remove");
+        let flusher = {
+            let wb = Arc::clone(&wb);
+            tokio::spawn(async move { wb.hard_flush().await })
+        };
+        let deadline = tokio::time::Instant::now() + PARK_BOUND;
+        while tokio::time::Instant::now() < deadline && !parking.applied().contains(&"remove") {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let _ = release.send(());
+        flusher.await.expect("hard_flush task").expect("hard_flush");
+
+        assert_eq!(
+            parking.applied(),
+            vec!["add", "remove"],
+            "the later Remove must be applied after the in-flight Store"
+        );
+        assert!(
+            redb.load(MAP, KEY).await.expect("load").is_none(),
+            "the removed key must stay removed"
+        );
+    }
+}
