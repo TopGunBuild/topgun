@@ -2441,5 +2441,38 @@ mod tests {
             assert_eq!(tags_of(&resident.value), tags_of(&written.value));
             assert_eq!(resident.metadata.write_token, written.metadata.write_token);
         }
+
+        // AC-8: `get(touch = true)` must not write a stale copy back over a
+        // write that landed after its read.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn touch_does_not_overwrite_a_concurrent_write() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            let (engine, parks) = ParkingEngine::new();
+            let store = Arc::new(store_over(Arc::clone(&ds), Box::new(engine), Vec::new()));
+            assert!(or_add(&store, "a").await.expect("or_add"));
+
+            let mut write_back_park = parks.park_write_back();
+            let reader = {
+                let store = Arc::clone(&store);
+                let runtime = tokio::runtime::Handle::current();
+                std::thread::spawn(move || runtime.block_on(store.get(KEY, true)))
+            };
+            write_back_park.wait_parked();
+
+            assert!(or_add(&store, "op").await.expect("or_add"));
+            let written = store.storage().get(KEY).expect("the writer's record");
+
+            write_back_park.release();
+            reader
+                .join()
+                .expect("reader thread")
+                .expect("get")
+                .expect("resident");
+
+            let resident = store.storage().get(KEY).expect("resident");
+            assert_eq!(tags_of(&resident.value), tags_of(&written.value));
+            assert_eq!(resident.metadata.write_token, written.metadata.write_token);
+        }
     }
 }
