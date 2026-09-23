@@ -497,11 +497,17 @@ impl CrdtService {
         let is_or_remove = matches!(&op.or_tag, Some(Some(_))) && op.or_record.is_none();
 
         if is_remove {
-            // REMOVE/OR_REMOVE: no timestamp sanitization needed (removes are idempotent)
+            // REMOVE/OR_REMOVE: no timestamp sanitization needed (removes are idempotent).
+            // Held under the key's writer, the one every in-place write of the key
+            // holds: the remove stages its durable delete before it empties the
+            // engine, and an in-place write in between would mutate the still-
+            // resident slot and re-stage it over that delete (TG-OR-007).
+            let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
             store
                 .remove(&op.key, CallerProvenance::CrdtMerge)
                 .await
                 .map_err(OperationError::Internal)?;
+            drop(key_guard);
 
             Ok(ServerEventPayload {
                 map_name: op.map_name.clone(),
