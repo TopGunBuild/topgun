@@ -10189,5 +10189,298 @@ mod tests {
                 "a materializing OR_REMOVE must charge the gauge exactly as a resident one"
             );
         }
+
+        /// How long a test waits for the double to park before it declares
+        /// that the setup never reached the park point.
+        const PARK_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
+        type Gate = (
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        );
+
+        /// The test's side of a one-shot park. Dropping it releases the caller.
+        struct ParkHandle {
+            parked: Option<tokio::sync::oneshot::Receiver<()>>,
+            release: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+
+        impl ParkHandle {
+            async fn wait_parked(&mut self) {
+                let parked = self.parked.take().expect("wait_parked called once");
+                tokio::time::timeout(PARK_BOUND, parked)
+                    .await
+                    .expect("the double never parked: the setup did not reach the park point")
+                    .expect("park dropped before parking");
+            }
+
+            fn release(&mut self) {
+                if let Some(release) = self.release.take() {
+                    let _ = release.send(());
+                }
+            }
+        }
+
+        /// Forwards to `inner` and parks ONE call, armed just before the
+        /// targeted caller runs: on RETURN from `load` (holding the loaded
+        /// value) or on RETURN from `remove` (the delete applied). The first
+        /// matching call consumes the park; later calls pass unparked.
+        struct ParkingStore {
+            inner: Arc<dyn MapDataStore>,
+            after_load: std::sync::Mutex<Option<Gate>>,
+            after_remove: std::sync::Mutex<Option<Gate>>,
+        }
+
+        impl ParkingStore {
+            fn new(inner: Arc<dyn MapDataStore>) -> Self {
+                Self {
+                    inner,
+                    after_load: std::sync::Mutex::new(None),
+                    after_remove: std::sync::Mutex::new(None),
+                }
+            }
+
+            fn arm(slot: &std::sync::Mutex<Option<Gate>>) -> ParkHandle {
+                let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                *slot.lock().unwrap() = Some((parked_tx, release_rx));
+                ParkHandle {
+                    parked: Some(parked_rx),
+                    release: Some(release_tx),
+                }
+            }
+
+            fn park_after_load(&self) -> ParkHandle {
+                Self::arm(&self.after_load)
+            }
+
+            async fn pass(slot: &std::sync::Mutex<Option<Gate>>) {
+                let gate = slot.lock().unwrap().take();
+                if let Some((parked, release)) = gate {
+                    let _ = parked.send(());
+                    let _ = release.await;
+                }
+            }
+        }
+
+        #[async_trait]
+        impl MapDataStore for ParkingStore {
+            async fn add(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                expiration_time: i64,
+                now: i64,
+            ) -> anyhow::Result<()> {
+                self.inner.add(map, key, value, expiration_time, now).await
+            }
+
+            async fn add_backup(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                expiration_time: i64,
+                now: i64,
+            ) -> anyhow::Result<()> {
+                self.inner
+                    .add_backup(map, key, value, expiration_time, now)
+                    .await
+            }
+
+            async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+                let result = self.inner.remove(map, key, now).await;
+                Self::pass(&self.after_remove).await;
+                result
+            }
+
+            async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+                self.inner.remove_backup(map, key, now).await
+            }
+
+            async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+                let loaded = self.inner.load(map, key).await;
+                Self::pass(&self.after_load).await;
+                loaded
+            }
+
+            async fn load_all(
+                &self,
+                map: &str,
+                keys: &[String],
+            ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+                self.inner.load_all(map, keys).await
+            }
+
+            async fn enumerate_leaves(
+                &self,
+                map: &str,
+                is_backup: bool,
+                sink: &mut dyn LeafSink,
+            ) -> anyhow::Result<()> {
+                self.inner.enumerate_leaves(map, is_backup, sink).await
+            }
+
+            async fn scan_values(
+                &self,
+                map: &str,
+                is_backup: bool,
+                max_batch_cost: u64,
+            ) -> anyhow::Result<ScanBatch> {
+                self.inner.scan_values(map, is_backup, max_batch_cost).await
+            }
+
+            async fn scan_values_batched(
+                &self,
+                map: &str,
+                is_backup: bool,
+                cursor: ScanCursor,
+                max_batch_cost: u64,
+            ) -> anyhow::Result<ScanBatch> {
+                self.inner
+                    .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                    .await
+            }
+
+            async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+                self.inner.remove_all(map, keys).await
+            }
+
+            fn is_loadable(&self, key: &str) -> bool {
+                self.inner.is_loadable(key)
+            }
+
+            fn pending_operation_count(&self) -> u64 {
+                self.inner.pending_operation_count()
+            }
+
+            async fn soft_flush(&self) -> anyhow::Result<u64> {
+                self.inner.soft_flush().await
+            }
+
+            async fn hard_flush(&self) -> anyhow::Result<()> {
+                self.inner.hard_flush().await
+            }
+
+            async fn flush_key(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                is_backup: bool,
+            ) -> anyhow::Result<()> {
+                self.inner.flush_key(map, key, value, is_backup).await
+            }
+
+            fn reset(&self) {
+                self.inner.reset();
+            }
+        }
+
+        fn remove_op(map: &str, key: &str) -> Operation {
+            Operation::ClientOp {
+                ctx: make_ctx_for_key(key),
+                payload: topgun_core::messages::ClientOpMessage {
+                    payload: topgun_core::messages::base::ClientOp {
+                        id: Some(format!("remove-{key}")),
+                        map_name: map.to_string(),
+                        key: key.to_string(),
+                        op_type: Some("REMOVE".to_string()),
+                        record: None,
+                        or_record: None,
+                        or_tag: None,
+                        write_concern: None,
+                        timeout: None,
+                    },
+                },
+            }
+        }
+
+        /// The redb stack of [`redb_stack`] with a [`ParkingStore`] between the
+        /// record stores and redb. Returns the service, the factory, redb
+        /// itself (for seeding and reading the durable row) and the double.
+        fn parking_stack(
+            dir: &tempfile::TempDir,
+        ) -> (
+            Arc<CrdtService>,
+            Arc<RecordStoreFactory>,
+            Arc<dyn MapDataStore>,
+            Arc<ParkingStore>,
+        ) {
+            let redb: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(&dir.path().join("nonres.redb")).expect("redb open"));
+            let parking = Arc::new(ParkingStore::new(Arc::clone(&redb)));
+            let factory = Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                parking.clone() as Arc<dyn MapDataStore>,
+                Vec::new(),
+            ));
+            let svc = Arc::new(CrdtService::new(
+                Arc::clone(&factory),
+                Arc::new(ConnectionRegistry::new()),
+                make_validator(),
+                Arc::new(QueryRegistry::new()),
+                Arc::new(SchemaService::new()),
+            ));
+            (svc, factory, redb, parking)
+        }
+
+        /// The durable tag set, or `None` when the row is gone.
+        async fn durable_tags_or_none(ds: &Arc<dyn MapDataStore>) -> Option<Vec<String>> {
+            ds.load(MAP, KEY)
+                .await
+                .expect("load durable row")
+                .map(|value| match value {
+                    RecordValue::OrMap { records, .. } => {
+                        let mut tags: Vec<String> = records.into_iter().map(|e| e.tag).collect();
+                        tags.sort();
+                        tags
+                    }
+                    other => panic!("durable row is not an OrMap: {other:?}"),
+                })
+        }
+
+        // AC-6b: a REMOVE that lands while an OR_ADD is materializing (parked
+        // holding the loaded `D`) must not be undone by that OR_ADD (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn remove_during_a_materializing_or_add_is_not_undone() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, parking) = parking_stack(&dir);
+            seed_durable_or(&redb).await;
+            assert_not_resident(&factory);
+
+            let mut writer_park = parking.park_after_load();
+            let writer = tokio::spawn(svc.clone().oneshot(or_add_op(MAP, KEY, "new", "t-new")));
+            writer_park.wait_parked().await;
+
+            // Spawned, not awaited first: once REMOVE takes the key's writer it
+            // waits for the parked OR_ADD, so the park is released on REMOVE's
+            // completion or after the bound, whichever comes first.
+            let mut remover = tokio::spawn(svc.clone().oneshot(remove_op(MAP, KEY)));
+            let remover_done = tokio::time::timeout(PARK_BOUND, &mut remover).await;
+            writer_park.release();
+            writer
+                .await
+                .expect("writer task")
+                .expect("or_add must succeed");
+            match remover_done {
+                Ok(done) => {
+                    done.expect("remover task").expect("remove must succeed");
+                }
+                Err(_) => {
+                    remover
+                        .await
+                        .expect("remover task")
+                        .expect("remove must succeed");
+                }
+            }
+
+            let durable = durable_tags_or_none(&redb).await;
+            assert!(
+                durable == Some(strings(&["t-new"])) || durable.is_none(),
+                "durable row must be {{op}} or gone, never the removed entries plus op; got {durable:?}"
+            );
+        }
     }
 }
