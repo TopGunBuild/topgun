@@ -2321,5 +2321,48 @@ mod tests {
                 "no acked op may be lost to a stale cached load"
             );
         }
+
+        // AC-6a: a reader that loaded `D` before a REMOVE ran must not cache
+        // `D` after the REMOVE completed (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn reader_does_not_cache_a_load_that_a_remove_superseded() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0, 0)
+                .await
+                .expect("seed");
+            let parking = Arc::new(ParkingStore::new(Arc::clone(&ds)));
+            let store = Arc::new(store_over(
+                parking.clone(),
+                Box::new(HashMapStorage::new()),
+                Vec::new(),
+            ));
+
+            let mut reader_park = parking.park_after_load();
+            let reader = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move { store.get(KEY, false).await })
+            };
+            reader_park.wait_parked().await;
+
+            store
+                .remove(KEY, CallerProvenance::CrdtMerge)
+                .await
+                .expect("remove");
+
+            reader_park.release();
+            reader.await.expect("reader task").expect("get");
+
+            assert!(
+                !store.exists_in_memory(KEY),
+                "the reader must not cache a value the REMOVE superseded"
+            );
+            assert!(or_add(&store, "op2").await.expect("or_add"));
+            assert_eq!(
+                durable_tags(&ds).await,
+                Some(strings(&["op2"])),
+                "the removed value must not be resurrected"
+            );
+        }
     }
 }
