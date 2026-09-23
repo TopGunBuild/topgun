@@ -9958,4 +9958,198 @@ mod tests {
         );
         assert_eq!(stored.node_id, FORGED_NODE_ID);
     }
+
+    // -- Writes on a durable-but-non-resident key --
+    //
+    // A key can be durable without being resident: after a restart nothing
+    // re-hydrates the engine, and eviction drops clean records. An op that lands
+    // on such a key must be absorbed into the key's durable state, never replace
+    // it with a slot rebuilt from nothing.
+    mod non_resident_writes {
+        use super::*;
+        use crate::storage::datastores::RedbDataStore;
+
+        const MAP: &str = "nonres_map";
+        const KEY: &str = "doc";
+
+        fn redb_stack(
+            dir: &tempfile::TempDir,
+        ) -> (
+            Arc<CrdtService>,
+            Arc<RecordStoreFactory>,
+            Arc<dyn MapDataStore>,
+        ) {
+            let data_store: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(&dir.path().join("nonres.redb")).expect("redb open"));
+            let factory = Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::clone(&data_store),
+                Vec::new(),
+            ));
+            let svc = Arc::new(CrdtService::new(
+                Arc::clone(&factory),
+                Arc::new(ConnectionRegistry::new()),
+                make_validator(),
+                Arc::new(QueryRegistry::new()),
+                Arc::new(SchemaService::new()),
+            ));
+            (svc, factory, data_store)
+        }
+
+        fn entry(tag: &str) -> OrMapEntry {
+            OrMapEntry {
+                value: rmpv_to_value(&rmpv::Value::String(format!("v-{tag}").into())),
+                tag: tag.to_string(),
+                timestamp: make_timestamp(),
+            }
+        }
+
+        /// Three live entries and one tombstone, written straight to the durable
+        /// store so the engine never sees the key.
+        async fn seed_durable_or(ds: &Arc<dyn MapDataStore>) {
+            let seeded = RecordValue::OrMap {
+                records: vec![entry("t-old-1"), entry("t-old-2"), entry("t-old-3")],
+                tombstones: vec!["t-gone".to_string()],
+            };
+            ds.add(MAP, KEY, &seeded, 0, 0)
+                .await
+                .expect("seed durable row");
+        }
+
+        async fn durable_or(ds: &Arc<dyn MapDataStore>) -> (Vec<String>, Vec<String>) {
+            match ds.load(MAP, KEY).await.expect("load durable row") {
+                Some(RecordValue::OrMap {
+                    records,
+                    tombstones,
+                }) => {
+                    let mut tags: Vec<String> = records.into_iter().map(|e| e.tag).collect();
+                    tags.sort();
+                    let mut tombs = tombstones;
+                    tombs.sort();
+                    (tags, tombs)
+                }
+                other => panic!("durable row is not an OrMap: {other:?}"),
+            }
+        }
+
+        fn assert_not_resident(factory: &Arc<RecordStoreFactory>) {
+            let store = factory.get_or_create(MAP, hash_to_partition(KEY));
+            assert!(
+                !store.exists_in_memory(KEY),
+                "precondition: the key must be durable but NOT resident"
+            );
+        }
+
+        fn strings(v: &[&str]) -> Vec<String> {
+            v.iter().map(|s| (*s).to_string()).collect()
+        }
+
+        // (a) OR_ADD on a non-resident key keeps every durable entry and tombstone.
+        #[tokio::test]
+        async fn or_add_on_non_resident_key_keeps_the_durable_entries() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, ds) = redb_stack(&dir);
+            seed_durable_or(&ds).await;
+            assert_not_resident(&factory);
+
+            svc.clone()
+                .oneshot(or_add_op(MAP, KEY, "new", "t-new"))
+                .await
+                .expect("or_add must succeed");
+
+            assert_eq!(
+                durable_or(&ds).await,
+                (
+                    strings(&["t-new", "t-old-1", "t-old-2", "t-old-3"]),
+                    strings(&["t-gone"])
+                ),
+                "durable row after OR_ADD on a non-resident key must be old ∪ new"
+            );
+        }
+
+        // (b) OR_REMOVE on a non-resident key removes one tag and keeps the rest.
+        #[tokio::test]
+        async fn or_remove_on_non_resident_key_keeps_the_other_durable_entries() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, ds) = redb_stack(&dir);
+            seed_durable_or(&ds).await;
+            assert_not_resident(&factory);
+
+            svc.clone()
+                .oneshot(or_remove_op(MAP, KEY, "t-old-1"))
+                .await
+                .expect("or_remove must succeed");
+
+            assert_eq!(
+                durable_or(&ds).await,
+                (
+                    strings(&["t-old-2", "t-old-3"]),
+                    strings(&["t-gone", "t-old-1"])
+                ),
+                "durable row after OR_REMOVE on a non-resident key must keep the untouched \
+                 entries and the earlier tombstone"
+            );
+        }
+
+        // (d) The same through the real eviction primitive instead of a seeded row.
+        #[tokio::test]
+        async fn or_add_after_eviction_keeps_the_durable_entries() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, ds) = redb_stack(&dir);
+            for tag in ["t-1", "t-2", "t-3"] {
+                svc.clone()
+                    .oneshot(or_add_op(MAP, KEY, tag, tag))
+                    .await
+                    .expect("or_add must succeed");
+            }
+            assert_eq!(
+                durable_or(&ds).await.0,
+                strings(&["t-1", "t-2", "t-3"]),
+                "precondition: the three adds are durable"
+            );
+
+            let store = factory.get_or_create(MAP, hash_to_partition(KEY));
+            assert!(
+                store.evict_lru(u32::MAX, false) > 0,
+                "the clean record must be evicted"
+            );
+            assert_not_resident(&factory);
+
+            svc.clone()
+                .oneshot(or_add_op(MAP, KEY, "t-4", "t-4"))
+                .await
+                .expect("or_add must succeed");
+
+            assert_eq!(
+                durable_or(&ds).await.0,
+                strings(&["t-1", "t-2", "t-3", "t-4"]),
+                "durable row after eviction + OR_ADD must be old ∪ new"
+            );
+        }
+
+        // (a) control: hydrate first, then OR_ADD. Separates "the write never
+        // materializes the durable row" from any other cause.
+        #[tokio::test]
+        async fn or_add_on_resident_key_keeps_the_durable_entries_control() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, ds) = redb_stack(&dir);
+            seed_durable_or(&ds).await;
+            let store = factory.get_or_create(MAP, hash_to_partition(KEY));
+            store.get(KEY, false).await.expect("hydrate");
+
+            svc.clone()
+                .oneshot(or_add_op(MAP, KEY, "new", "t-new"))
+                .await
+                .expect("or_add must succeed");
+
+            assert_eq!(
+                durable_or(&ds).await,
+                (
+                    strings(&["t-new", "t-old-1", "t-old-2", "t-old-3"]),
+                    strings(&["t-gone"])
+                ),
+                "resident control: durable row must be old ∪ new"
+            );
+        }
+    }
 }
