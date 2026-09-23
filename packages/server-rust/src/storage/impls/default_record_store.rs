@@ -2400,5 +2400,46 @@ mod tests {
                 "the removed value must not be resurrected"
             );
         }
+
+        // AC-7: `evict_lru` must not remove a record that a write replaced after
+        // the eviction snapshot was taken (TG-EVI-001).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn evict_lru_keeps_a_record_written_after_its_snapshot() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            let (engine, parks) = ParkingEngine::new();
+            let store = Arc::new(store_over(Arc::clone(&ds), Box::new(engine), Vec::new()));
+            assert!(or_add(&store, "a").await.expect("or_add"));
+            assert!(
+                !store
+                    .storage()
+                    .get(KEY)
+                    .expect("resident")
+                    .metadata
+                    .is_dirty(),
+                "precondition: the record is clean, so it is an eviction candidate"
+            );
+
+            let mut removal_park = parks.park_removal();
+            let evictor = {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || store.evict_lru(u32::MAX, false))
+            };
+            removal_park.wait_parked();
+
+            assert!(or_add(&store, "op").await.expect("or_add"));
+            let written = store.storage().get(KEY).expect("the writer's record");
+
+            removal_park.release();
+            evictor.join().expect("evictor thread");
+
+            assert!(
+                store.exists_in_memory(KEY),
+                "a record written after the snapshot must not be evicted"
+            );
+            let resident = store.storage().get(KEY).expect("resident");
+            assert_eq!(tags_of(&resident.value), tags_of(&written.value));
+            assert_eq!(resident.metadata.write_token, written.metadata.write_token);
+        }
     }
 }
