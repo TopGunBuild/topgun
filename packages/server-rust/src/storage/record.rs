@@ -339,6 +339,11 @@ pub struct RecordMetadata {
     ///
     /// LOCAL ONLY — never serialized to the wire or persisted to the datastore.
     pub write_token: u64,
+    /// The `write_token` of the write last persisted to the `MapDataStore`
+    /// (`0` = none). Set by [`on_store`](RecordMetadata::on_store).
+    ///
+    /// LOCAL ONLY — never serialized to the wire or persisted to the datastore.
+    pub stored_token: u64,
 }
 
 impl RecordMetadata {
@@ -368,6 +373,7 @@ impl RecordMetadata {
             hits: 0,
             cost,
             write_token: Self::mint_token(),
+            stored_token: 0,
         }
     }
 

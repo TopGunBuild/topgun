@@ -267,12 +267,14 @@ impl RecordStore for DefaultRecordStore {
             witness = mutated.witness;
             mutated.changed
         };
-        let outcome = self
-            .engine
-            .update_in_place(key, now, init, &mut engine_mutate, &cost_of);
+        let outcome =
+            self.engine
+                .update_in_place(key, now, init, None, &mut engine_mutate, &cost_of);
 
         let (record, inserted) = match outcome {
-            UpdateInPlaceOutcome::Absent | UpdateInPlaceOutcome::Unchanged => return Ok(false),
+            UpdateInPlaceOutcome::Absent
+            | UpdateInPlaceOutcome::Unchanged
+            | UpdateInPlaceOutcome::Stale => return Ok(false),
             UpdateInPlaceOutcome::Written { record, inserted } => (record, inserted),
         };
 
@@ -1326,6 +1328,7 @@ mod tests {
             hits: 0,
             cost: 0,
             write_token: 0, // test helper only — not used on the mark_stored path
+            stored_token: 0,
         };
         Record {
             value: make_value("clean"),
@@ -1348,6 +1351,7 @@ mod tests {
             hits: 0,
             cost: 0,
             write_token: 0, // test helper only — not used on the mark_stored path
+            stored_token: 0,
         };
         Record {
             value: make_value("dirty"),

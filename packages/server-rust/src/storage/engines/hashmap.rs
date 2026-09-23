@@ -4,12 +4,22 @@
 //! Suitable for development, testing, and production workloads where
 //! all data fits in memory.
 
+use std::hash::{BuildHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use rand::Rng;
 
-use crate::storage::engine::{FetchResult, IterationCursor, StorageEngine, UpdateInPlaceOutcome};
+use crate::storage::engine::{
+    FetchResult, IterationCursor, PutIfAbsentOutcome, StorageEngine, UpdateInPlaceOutcome,
+};
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
+
+/// Number of vacancy-generation counters per engine. Keys share counters by
+/// hash, so a removal of one key can spuriously move another key's
+/// generation; 256 keeps that rare enough that a bounded retry absorbs it.
+const VACANCY_STRIPES: usize = 256;
 
 /// In-memory storage backed by [`DashMap`] for concurrent read access.
 ///
@@ -18,6 +28,9 @@ use crate::storage::record::{Record, RecordMetadata, RecordValue};
 /// read-heavy workloads typical of CRDT data grids.
 pub struct HashMapStorage {
     entries: DashMap<String, Record>,
+    /// Vacancy generations, indexed by key hash (see
+    /// [`StorageEngine::vacancy_generation`]).
+    vacancy: Box<[AtomicU64]>,
 }
 
 impl HashMapStorage {
@@ -26,7 +39,17 @@ impl HashMapStorage {
     pub fn new() -> Self {
         Self {
             entries: DashMap::new(),
+            vacancy: (0..VACANCY_STRIPES).map(|_| AtomicU64::new(0)).collect(),
         }
+    }
+
+    fn stripe(&self, key: &str) -> &AtomicU64 {
+        let mut hasher = self.entries.hasher().build_hasher();
+        key.hash(&mut hasher);
+        // The modulo bounds the value below VACANCY_STRIPES, so the cast is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        let index = (hasher.finish() % VACANCY_STRIPES as u64) as usize;
+        &self.vacancy[index]
     }
 }
 
@@ -85,9 +108,11 @@ impl StorageEngine for HashMapStorage {
         key: &str,
         now: i64,
         init: Option<RecordValue>,
+        init_generation: Option<u64>,
         mutate: &mut dyn FnMut(&mut RecordValue) -> bool,
         cost_of: &dyn Fn(&RecordValue) -> u64,
     ) -> UpdateInPlaceOutcome {
+        let _ = init_generation;
         // `entry` holds the shard write lock across the match, so the
         // check-mutate-or-insert is atomic against any other engine op on this
         // key — there is no get()+put() window a concurrent writer could tear.
@@ -113,7 +138,7 @@ impl StorageEngine for HashMapStorage {
                     return UpdateInPlaceOutcome::Absent;
                 };
                 if !mutate(&mut value) {
-                    return UpdateInPlaceOutcome::Absent;
+                    return UpdateInPlaceOutcome::Unchanged;
                 }
                 let cost = cost_of(&value);
                 let record = Record {
@@ -130,8 +155,35 @@ impl StorageEngine for HashMapStorage {
         }
     }
 
+    fn vacancy_generation(&self, key: &str) -> u64 {
+        self.stripe(key).load(Ordering::Acquire)
+    }
+
+    fn put_if_absent_at(&self, key: &str, record: Record, generation: u64) -> PutIfAbsentOutcome {
+        match self.entries.entry(key.to_string()) {
+            Entry::Occupied(occ) => PutIfAbsentOutcome::Resident(occ.get().clone()),
+            Entry::Vacant(vac) => {
+                let _ = generation;
+                vac.insert(record);
+                PutIfAbsentOutcome::Inserted
+            }
+        }
+    }
+
     fn remove(&self, key: &str) -> Option<Record> {
         self.entries.remove(key).map(|(_, r)| r)
+    }
+
+    fn remove_if(&self, key: &str, predicate: &dyn Fn(&Record) -> bool) -> Option<Record> {
+        self.entries
+            .remove_if(key, |_, record| predicate(record))
+            .map(|(_, r)| r)
+    }
+
+    fn touch(&self, key: &str, now: i64) -> Option<Record> {
+        let mut entry = self.entries.get_mut(key)?;
+        entry.metadata.on_access(now);
+        Some(entry.clone())
     }
 
     fn contains_key(&self, key: &str) -> bool {

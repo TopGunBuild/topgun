@@ -50,6 +50,12 @@ pub enum UpdateInPlaceOutcome {
     /// The key was absent and no `init` value was supplied, so nothing was
     /// mutated. No observer notification and no write-through are owed.
     Absent,
+    /// The key was absent and an `init` value was supplied together with an
+    /// `init_generation` that no longer equals the key's vacancy generation: a
+    /// removal of this key landed after the caller read `init`, so `init` may
+    /// be a value that removal already superseded. Returned BEFORE `mutate`
+    /// runs and nothing is inserted; the caller re-reads and retries (TG-OR-007).
+    Stale,
     /// The mutation closure ran but reported no durable change was needed
     /// (returned `false`), so the resident metadata was left untouched. No
     /// observer notification and no write-through are owed. Used by the prune
@@ -68,6 +74,19 @@ pub enum UpdateInPlaceOutcome {
         /// an existing resident record was mutated in place.
         inserted: bool,
     },
+}
+
+/// Outcome of [`StorageEngine::put_if_absent_at`].
+#[derive(Debug)]
+pub enum PutIfAbsentOutcome {
+    /// The key was absent and the generation matched: the record was inserted.
+    Inserted,
+    /// The key was already resident; nothing was inserted. Carries a clone of
+    /// the resident record.
+    Resident(Record),
+    /// The key was absent but its vacancy generation moved: a removal
+    /// intervened, so nothing was inserted.
+    Stale,
 }
 
 /// Low-level typed key-value storage with cursor-based iteration.
@@ -130,21 +149,59 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// `cost_of` over the mutated value, all under the same lock, then returns a
     /// clone of the mutated record in [`UpdateInPlaceOutcome::Written`].
     ///
-    /// If the key is absent: when `init` is `Some`, the value is created from it,
-    /// `mutate` is applied, and (on a `true` return) the fresh record is inserted
-    /// with metadata minted via `RecordMetadata::new`; when `init` is `None`, the
-    /// call is a no-op returning [`UpdateInPlaceOutcome::Absent`].
+    /// If the key is absent: when `init` is `None`, the call is a no-op returning
+    /// [`UpdateInPlaceOutcome::Absent`] without invoking `mutate`. When `init` is
+    /// `Some` and `init_generation` is `Some(g)` with `g` different from the
+    /// key's current [`vacancy_generation`](StorageEngine::vacancy_generation),
+    /// the call returns [`UpdateInPlaceOutcome::Stale`] without invoking
+    /// `mutate`. Otherwise the value is created from `init` and `mutate` is
+    /// applied: on `true` the fresh record is inserted with metadata minted via
+    /// `RecordMetadata::new`; on `false` nothing is inserted and the call returns
+    /// [`UpdateInPlaceOutcome::Unchanged`]. The generation check and the insert
+    /// happen under the same per-key lock, so no removal can fall between them.
     fn update_in_place(
         &self,
         key: &str,
         now: i64,
         init: Option<RecordValue>,
+        init_generation: Option<u64>,
         mutate: &mut dyn FnMut(&mut RecordValue) -> bool,
         cost_of: &dyn Fn(&RecordValue) -> u64,
     ) -> UpdateInPlaceOutcome;
 
+    /// The key's vacancy generation: a counter that every removal of the key
+    /// advances (whether or not the key was present), read BEFORE a caller
+    /// loads the key's value from the data store.
+    ///
+    /// A caller that later inserts that loaded value passes the generation back
+    /// ([`put_if_absent_at`](StorageEngine::put_if_absent_at),
+    /// [`update_in_place`](StorageEngine::update_in_place)); an unchanged
+    /// generation proves no removal of the key intervened since the read began,
+    /// so the loaded value cannot resurrect a removed or superseded one
+    /// (TG-OR-007). Counters may be shared between keys, so a change can be
+    /// spurious; that costs the caller a retry, never a wrong insert.
+    fn vacancy_generation(&self, key: &str) -> u64;
+
+    /// Insert `record` only if the key is absent AND its vacancy generation still
+    /// equals `generation`, both checked under the key's lock.
+    fn put_if_absent_at(&self, key: &str, record: Record, generation: u64) -> PutIfAbsentOutcome;
+
     /// Remove a record by key, returning the removed record.
+    ///
+    /// Advances the key's vacancy generation under the key's lock, also when the
+    /// key is absent (a removal of a non-resident key must still invalidate a
+    /// concurrent reader's load).
     fn remove(&self, key: &str) -> Option<Record>;
+
+    /// Remove the key only if `predicate` holds for the resident record,
+    /// evaluated under the key's lock; returns the removed record. Advances the
+    /// vacancy generation exactly when a record is removed.
+    fn remove_if(&self, key: &str, predicate: &dyn Fn(&Record) -> bool) -> Option<Record>;
+
+    /// Record a read access on the resident record in place (`on_access(now)`
+    /// under the key's lock) and return a clone of it, or `None` if absent.
+    /// Never writes a value back, so a concurrent write cannot be overwritten.
+    fn touch(&self, key: &str, now: i64) -> Option<Record>;
 
     /// Check if a key exists without returning the record.
     fn contains_key(&self, key: &str) -> bool;
