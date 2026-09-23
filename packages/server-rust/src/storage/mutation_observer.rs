@@ -31,6 +31,15 @@ pub trait MutationObserver: Send + Sync {
     /// Called after a record is removed.
     fn on_remove(&self, key: &str, record: &Record, is_backup: bool);
 
+    /// Called after a key that was NOT resident was removed: its durable
+    /// delete was staged, but there is no in-memory record to pass. An observer
+    /// whose state covers durable keys regardless of residency (the in-memory
+    /// Merkle tree, seeded from the data store at boot) drops the key here. The
+    /// default does nothing.
+    fn on_remove_key(&self, key: &str, is_backup: bool) {
+        let _ = (key, is_backup);
+    }
+
     /// Called after a record is evicted (e.g., due to memory pressure).
     fn on_evict(&self, key: &str, record: &Record, is_backup: bool);
 
@@ -95,6 +104,12 @@ impl MutationObserver for CompositeMutationObserver {
     fn on_remove(&self, key: &str, record: &Record, is_backup: bool) {
         for observer in &self.observers {
             observer.on_remove(key, record, is_backup);
+        }
+    }
+
+    fn on_remove_key(&self, key: &str, is_backup: bool) {
+        for observer in &self.observers {
+            observer.on_remove_key(key, is_backup);
         }
     }
 

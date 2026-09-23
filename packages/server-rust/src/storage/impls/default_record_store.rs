@@ -474,9 +474,12 @@ impl RecordStore for DefaultRecordStore {
         // Step 2: Remove from the engine, advancing the vacancy generation.
         let old_record = self.engine.remove(key);
 
-        // Step 3: Fire observer if removed
-        if let Some(ref record) = old_record {
-            self.observer.on_remove(key, record, false);
+        // Step 3: Notify observers. A key that was not resident still had its
+        // durable row deleted, so observers that track durable keys are told
+        // by key; removing a key an observer never held is a no-op there.
+        match old_record {
+            Some(ref record) => self.observer.on_remove(key, record, false),
+            None => self.observer.on_remove_key(key, false),
         }
 
         // Step 4: Return old value
