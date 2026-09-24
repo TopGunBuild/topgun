@@ -1,0 +1,71 @@
+chain start: 2026-09-24T19:20:08Z epoch=1790277608 smoke=0 HEAD=639adc1c00b5211750ffe23b380b7f21635d8e9e freeze=4998d884
+ORDER=OK manifest_commit=639adc1c prefix_sha256=6049ebe12e00f4763713e6e4133c9366b92a4ac3b705fd41ad9c1f5dcfe99a81 programs=9
+pin checkout: /Users/koristuvac/Projects/topgun/topgun/target/spec373a-src-61f84658 HEAD=61f8465868a550a81061e52b553d9d1b77fed6f1 clean; head build inputs == freeze 4998d884, clean
+build CA-pin: (cd /Users/koristuvac/Projects/topgun/topgun/target/spec373a-src-61f84658/packages/server-rust && CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec373a-ca-pin cargo build --release --features count-alloc --bin topgun-server)
+   Compiling reqwest v0.12.28
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/target/spec373a-src-61f84658/packages/server-rust)
+    Finished `release` profile [optimized] target(s) in 4m 07s
+build CA-head: (cd /Users/koristuvac/Projects/topgun/topgun/packages/server-rust && CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec373a-ca-head cargo build --release --features count-alloc --bin topgun-server)
+   Compiling reqwest v0.12.28
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+    Finished `release` profile [optimized] target(s) in 4m 08s
+build H: (cd /Users/koristuvac/Projects/topgun/topgun/packages/server-rust && CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec373a-h cargo build --release --bench soak_harness)
+   Compiling reqwest v0.12.28
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+    Finished `release` profile [optimized] target(s) in 4m 11s
+flavour=CA-pin code=61f8465868a550a81061e52b553d9d1b77fed6f1 path=/Users/koristuvac/Projects/topgun/topgun/target/spec373a-ca-pin/release/topgun-server sha256=f17f8c29c0b6ce0bcf8b3310c3c398cb62521943265b0b5fabdac7f8aeb6158f mtime=1790277856 recompiled=yes marker=ok
+flavour=CA-head code=639adc1c00b5211750ffe23b380b7f21635d8e9e path=/Users/koristuvac/Projects/topgun/topgun/target/spec373a-ca-head/release/topgun-server sha256=bf40ad79be4fec32aeb04d4b56bb48c2a2743d80fb537ec21bd36ada49f3579c mtime=1790278105 recompiled=yes marker=ok
+flavour=H code=639adc1c00b5211750ffe23b380b7f21635d8e9e path=/Users/koristuvac/Projects/topgun/topgun/target/spec373a-h/release/deps/soak_harness-0379469b8a4255d8 sha256=991a100a28218d70798a8104ced642b3192c37b30da1b87dddfcbcdbb2f1b895 mtime=1790278284 recompiled=yes marker=ok
+--- cell b1 at 2026-09-24T19:32:38Z
+22:32  up 3 days, 38 mins, 2 users, load averages: 4.43 7.19 7.12
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   290547.
+Pages active:                                 479391.
+Pages inactive:                               475184.
+Pages speculative:                              2041.
+Pages throttled:                                   0.
+Pages wired down:                             464426.
+Pages purgeable:                                1538.
+cell b1: RUNNER_EXIT=0
+--- cell a1 at 2026-09-24T19:47:40Z
+22:47  up 3 days, 53 mins, 2 users, load averages: 12.14 13.11 11.38
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   242907.
+Pages active:                                 609504.
+Pages inactive:                               604947.
+Pages speculative:                              7728.
+Pages throttled:                                   0.
+Pages wired down:                             253880.
+Pages purgeable:                                4500.
+cell a1: RUNNER_EXIT=0
+--- cell b2 at 2026-09-24T20:02:42Z
+23:02  up 3 days,  1:08, 2 users, load averages: 9.66 11.44 11.72
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   133519.
+Pages active:                                 720222.
+Pages inactive:                               627656.
+Pages speculative:                             27656.
+Pages throttled:                                   0.
+Pages wired down:                             213306.
+Pages purgeable:                                5400.
+cell b2: RUNNER_EXIT=0
+--- cell a2 at 2026-09-24T20:17:44Z
+23:17  up 3 days,  1:23, 2 users, load averages: 13.74 16.11 14.58
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                    42591.
+Pages active:                                 768029.
+Pages inactive:                               705362.
+Pages speculative:                             40908.
+Pages throttled:                                   0.
+Pages wired down:                             179370.
+Pages purgeable:                               24257.
+cell a2: RUNNER_EXIT=0
+verdict rc=0
+== flags ==
+STOP=none
+VERDICT_BYTES=CONFIRMED
+I=[0.8234,0.8596]
+S_B=0.0034
+E=0.1159
+LIVE_I=[0.9824,1.0237]
+chain end: 2026-09-24T20:32:45Z

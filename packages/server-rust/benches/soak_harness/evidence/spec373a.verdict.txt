@@ -1,0 +1,45 @@
+== pre-M' (read from the manifest, not recomputed) ==
+SHARES_STOP=none
+E_FROZEN=0.1159
+== cell b1 ==
+PA_b1=TRUE last_seq=29 min_seq=29
+PM1_b1=TRUE post_mortem_rows=0 empty_scrape_rows=0 first_empty_elapsed=none last_live_scrape_elapsed=840 need_ge=780
+RUNNER_EXIT_b1=0
+SKIPPED_b1=0
+BYTES_ALLOC_RATE_b1=55099819.133333 points=15 h=8 window_s=420-840
+ALLOC_LIVE_b1=68130048
+== cell b2 ==
+PA_b2=TRUE last_seq=31 min_seq=29
+PM1_b2=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=900 need_ge=780
+RUNNER_EXIT_b2=0
+SKIPPED_b2=0
+BYTES_ALLOC_RATE_b2=54911918.793750 points=16 h=8 window_s=420-900
+ALLOC_LIVE_b2=69319747
+== cell a1 ==
+PA_a1=TRUE last_seq=30 min_seq=29
+PM1_a1=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=900 need_ge=780
+RUNNER_EXIT_a1=0
+SKIPPED_a1=0
+BYTES_ALLOC_RATE_a1=47201569.633333 points=15 h=8 window_s=450-870
+ALLOC_LIVE_a1=69743296
+== cell a2 ==
+PA_a2=TRUE last_seq=29 min_seq=29
+PM1_a2=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=840 need_ge=780
+RUNNER_EXIT_a2=0
+SKIPPED_a2=0
+BYTES_ALLOC_RATE_a2=45371635.204762 points=15 h=8 window_s=420-840
+ALLOC_LIVE_a2=68099992
+== readings ==
+R_a1_b1=0.8567 LIVE_R_a1_b1=1.0237
+R_a1_b2=0.8596 LIVE_R_a1_b2=1.0061
+R_a2_b1=0.8234 LIVE_R_a2_b1=0.9996
+R_a2_b2=0.8263 LIVE_R_a2_b2=0.9824
+S_A=0.0395 S_B_LIVE=0.0173 S_A_LIVE=0.0238
+STOP_R_PREDICATE=FALSE (rate min I 0.8234 vs 1.0395; live min I 0.9824 vs 1.0238)
+== flags ==
+STOP=none
+VERDICT_BYTES=CONFIRMED
+I=[0.8234,0.8596]
+S_B=0.0034
+E=0.1159
+LIVE_I=[0.9824,1.0237]
