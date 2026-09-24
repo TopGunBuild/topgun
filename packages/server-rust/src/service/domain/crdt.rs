@@ -1700,8 +1700,8 @@ impl Drop for PrunePassGuard<'_> {
 /// frontier via `restore_tombstone_ref` so a later sweep retries it — dropping
 /// it here would orphan the tag un-prunable in storage forever, since the drain
 /// already removed its index entry. The same restore covers the one non-error
-/// case that also reclaimed nothing: the key was evicted between the rehydrating
-/// `get` and the in-place write, so the mutate closure never ran. That is told
+/// case that also reclaimed nothing: the key was evicted between the residency
+/// check and the in-place write, so the mutate closure never ran. That is told
 /// apart from "the closure ran and the tag was already gone" — which must NOT be
 /// restored, or the prune loop livelocks on it — by a flag the closure itself
 /// sets, because the `Ok(bool)` from `update_in_place` conflates the two.
@@ -1778,36 +1778,43 @@ pub(crate) async fn prune_epoch_tombstones(
         let store = factory.get_or_create(&r.map, hash_to_partition(&r.key));
         // Serialize the drop against concurrent OR writes on this key.
         let _key_guard = key_writer.acquire(&r.map, &r.key).await;
-        // Ensure the key is resident before the in-place drop: init=None only mutates
-        // an already-resident slot, so an evicted key's durable tombstone would
-        // otherwise never be reclaimed and its frontier ref would be consumed without
-        // retry. Hydrating first (as the prior get -> put path did) also reclaims
-        // evicted keys and surfaces a backend read error so the ref can be re-indexed.
-        match store.get(&r.key, false).await {
-            Ok(Some(_)) => {}
-            // Truly gone (no resident and no durable record): nothing to reclaim.
-            // The ref is consumed WITHOUT a tombstone-byte decrement, so it is
-            // counted apart from a drop rather than folded into a "not dropped"
-            // bucket: a growing share here is a candidate mechanism for a falling
-            // reclaim fraction that no other instrument can see.
-            Ok(None) => {
-                guard.settle(epoch, PruneExit::AbsentKey, 0);
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(map = %r.map, key = %r.key, epoch, "prune read failed, re-indexing tombstone for retry: {e}");
-                guard.settle(epoch, PruneExit::RestoredReadError, 0);
-                frontier.restore_tombstone_ref(epoch, r);
-                continue;
+        // Residency check before the in-place drop. A resident key needs no read:
+        // the in-place write below mutates it, and materializes it itself should it
+        // be evicted in between (TG-OR-007), so a read would only clone the whole
+        // slot and drop the copy. A NON-resident key still goes through the store's
+        // read, for the two roles the write cannot play: telling a key gone
+        // everywhere (`AbsentKey`, ref consumed) apart from one the write failed to
+        // reach (`RestoredEvicted`, ref re-indexed) — init=None on an absent key
+        // never runs the closure, so without the read that ref would be re-indexed on
+        // every pass forever — and surfacing a backend read error as
+        // `RestoredReadError` so the ref is retried.
+        if !store.exists_in_memory(&r.key) {
+            match store.get(&r.key, false).await {
+                Ok(Some(_)) => {}
+                // Truly gone (no resident and no durable record): nothing to reclaim.
+                // The ref is consumed WITHOUT a tombstone-byte decrement, so it is
+                // counted apart from a drop rather than folded into a "not dropped"
+                // bucket: a growing share here is a candidate mechanism for a falling
+                // reclaim fraction that no other instrument can see.
+                Ok(None) => {
+                    guard.settle(epoch, PruneExit::AbsentKey, 0);
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(map = %r.map, key = %r.key, epoch, "prune read failed, re-indexing tombstone for retry: {e}");
+                    guard.settle(epoch, PruneExit::RestoredReadError, 0);
+                    frontier.restore_tombstone_ref(epoch, r);
+                    continue;
+                }
             }
         }
-        // Drop the tag from the now-resident tombstone set IN PLACE (init=None →
-        // mutate only the present record, never create one), owing a durable write
+        // Drop the tag from the key's tombstone set IN PLACE (init=None → mutate
+        // only a record that exists, never create one), owing a durable write
         // only when a tombstone was actually removed.
         let mut dropped = false;
         // Whether the mutate closure ran at all. `update_in_place` reports only
         // `Ok(bool)` here, which cannot tell "the key was evicted between the
-        // rehydrating get above and this write, so nothing was mutated" apart from
+        // residency check above and this write, so nothing was mutated" apart from
         // "the closure ran and found no matching tag". Those two need opposite
         // dispositions below, and only the closure itself knows which happened.
         let mut ran = false;
@@ -1874,7 +1881,7 @@ pub(crate) async fn prune_epoch_tombstones(
                     guard.settle(epoch, PruneExit::Dropped, r.tag.len() as u64);
                 }
                 // The closure never ran: the key left memory between the
-                // rehydrating get and this write and the store could not
+                // residency check and this write and the store could not
                 // materialize it again (the default store does, and reclaims the
                 // tag), so init=None mutated nothing while a durable tombstone
                 // may well still exist. Hand the ref
@@ -10162,6 +10169,13 @@ mod tests {
     /// Each measured pass must settle its ref `Dropped` and remove the tombstone, so
     /// an emptied drain cannot pass the bound vacuously.
     ///
+    /// Every ref is stamped up front, followed by one record-less pin ref that is
+    /// never licensed and never drained, and the low-water mark is raised exactly
+    /// one epoch before each pass. The pin ref is load-bearing: the LWM cannot pass
+    /// the current epoch, so without a later stamp the last measured ref could
+    /// never be licensed; stepping one epoch per pass keeps each pass to its own
+    /// single ref instead of letting the warm-up drain them all.
+    ///
     /// Built on the `NullDataStore` fixture with no observers, so neither a
     /// write-behind copy nor a Merkle leaf hash enters the reading. The fixture is
     /// built inside the local recorder for the reason `six_exit_run` documents.
@@ -10173,7 +10187,7 @@ mod tests {
     #[cfg(feature = "count-alloc")]
     #[test]
     #[ignore = "local allocation proof: run single-threaded under count-alloc"]
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     fn count_alloc_prune_probe_resident() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
