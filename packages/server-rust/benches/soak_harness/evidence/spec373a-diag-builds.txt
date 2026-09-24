@@ -1,0 +1,2 @@
+flavour=DH code=61f8465868a550a81061e52b553d9d1b77fed6f1 path=/Users/koristuvac/Projects/topgun/topgun/target/spec373a-dh-pin/release-with-debug/topgun-server sha256=2ec77c39f2914ac0154f22ed3271d896201c4594b54068b8ad6d7d3d6928764f mtime=1790269561 recompiled=yes marker=ok
+flavour=H code=639a7b1977ec4d549521e77b9c1c386927c0d4c5 path=/Users/koristuvac/Projects/topgun/topgun/target/spec373a-h/release/deps/soak_harness-0379469b8a4255d8 sha256=991a100a28218d70798a8104ced642b3192c37b30da1b87dddfcbcdbb2f1b895 mtime=1790269742 recompiled=yes marker=ok

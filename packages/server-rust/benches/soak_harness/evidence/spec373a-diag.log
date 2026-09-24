@@ -1,0 +1,81 @@
+chain start: 2026-09-24T17:00:08Z epoch=1790269208 HEAD=639a7b1977ec4d549521e77b9c1c386927c0d4c5
+Preparing worktree (detached HEAD 61f84658)
+HEAD is now at 61f84658 Merge pull request #170 from TopGunBuild/spec-374-materialize-non-resident
+pin checkout: /Users/koristuvac/Projects/topgun/topgun/target/spec373a-src-61f84658 HEAD=61f8465868a550a81061e52b553d9d1b77fed6f1 clean
+build DH: (cd /Users/koristuvac/Projects/topgun/topgun/target/spec373a-src-61f84658/packages/server-rust && CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec373a-dh-pin cargo build --profile release-with-debug --features dhat-heap --bin topgun-server)
+   Compiling reqwest v0.12.28
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/target/spec373a-src-61f84658/packages/server-rust)
+    Finished `release-with-debug` profile [optimized + debuginfo] target(s) in 5m 52s
+build H: (cd /Users/koristuvac/Projects/topgun/topgun/packages/server-rust && CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec373a-h cargo build --release --bench soak_harness)
+   Compiling reqwest v0.12.28
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+    Finished `release` profile [optimized] target(s) in 4m 13s
+flavour=DH code=61f8465868a550a81061e52b553d9d1b77fed6f1 path=/Users/koristuvac/Projects/topgun/topgun/target/spec373a-dh-pin/release-with-debug/topgun-server sha256=2ec77c39f2914ac0154f22ed3271d896201c4594b54068b8ad6d7d3d6928764f mtime=1790269561 recompiled=yes marker=ok
+flavour=H code=639a7b1977ec4d549521e77b9c1c386927c0d4c5 path=/Users/koristuvac/Projects/topgun/topgun/target/spec373a-h/release/deps/soak_harness-0379469b8a4255d8 sha256=991a100a28218d70798a8104ced642b3192c37b30da1b87dddfcbcdbb2f1b895 mtime=1790269742 recompiled=yes marker=ok
+--- cell d3e at 2026-09-24T17:10:16Z
+20:10  up 2 days, 22:16, 2 users, load averages: 3.42 4.81 5.72
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   537588.
+Pages active:                                 379606.
+Pages inactive:                               620111.
+Pages speculative:                              6592.
+Pages throttled:                                   0.
+Pages wired down:                             177138.
+Pages purgeable:                                3908.
+cell d3e: RUNNER_EXIT=0
+--- cell d3l at 2026-09-24T17:15:29Z
+20:15  up 2 days, 22:21, 2 users, load averages: 8.82 7.78 6.84
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   392728.
+Pages active:                                 528639.
+Pages inactive:                               631605.
+Pages speculative:                             12204.
+Pages throttled:                                   0.
+Pages wired down:                             177425.
+Pages purgeable:                               12678.
+cell d3l: RUNNER_EXIT=0
+shares_61f.py sha256=6ab430824b6c72852f1fd49c74a220e355bfecb374c0eb54c05bc995d0e0084b
+tb2_61f.py sha256=33c3fa874aedfcf4002c55c37d08f61d06c1849e449c9b86ea59240a842707f3
+self-check rc=0
+PIN=46dcc12a
+C3E=/Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c3e.dhat.json.gz
+C3L=/Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c3l.dhat.json.gz
+WINDOW_MB=5251.3476
+LEAF_87_MB=135.3647
+LEAF_90_MB=7.3617
+LEAF_93_MB=407.4686
+LEAF_SHARE=0.104772
+PRUNE_MB=150.2835
+PRUNE_SHARE=0.028618
+OVERLAP_MB=0.0000
+E=0.133390
+P_BYTES=0.866610
+SELF_CHECK=PASS (LEAF 0.104772 vs 0.104772, PRUNE 0.028618 vs 0.028618, tol 0.000005)
+STOP=none
+E_FROZEN=0.1334
+P_BYTES_FROZEN=0.8666
+shares rc=0
+PIN=61f84658
+C3E=/Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373a-d3e.dhat.json.gz
+C3L=/Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373a-d3l.dhat.json.gz
+OLD_C3E=/Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c3e.dhat.json.gz
+OLD_C3L=/Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c3l.dhat.json.gz
+OLD_LEAF_SHARE=0.104772
+OLD_PRUNE_SHARE=0.028618
+OLD_SELF_CHECK=PASS
+WINDOW_MB=4299.2113
+LEAF_87_MB=98.3819
+LEAF_90_MB=5.8018
+LEAF_93_MB=296.3361
+LEAF_SHARE=0.093161
+PRUNE_MB=97.6507
+PRUNE_SHARE=0.022714
+OVERLAP_MB=0.0000
+E=0.115875
+P_BYTES=0.884125
+S_LEAF_REL=0.110821
+S_PRUNE_REL=0.206319
+STOP=none
+E_FROZEN=0.1159
+P_BYTES_FROZEN=0.8841
+chain end: 2026-09-24T17:30:44Z

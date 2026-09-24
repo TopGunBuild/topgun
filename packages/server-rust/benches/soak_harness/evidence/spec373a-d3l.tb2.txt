@@ -1,0 +1,12 @@
+/Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373a-d3l.dhat.json.gz total 6244 MB, 63393012 blocks, te=911983784
+   2.5%     154.4 MB    1960170 blk  engine get clone
+   7.9%     496.1 MB    7271149 blk  engine update_in_place clone
+   0.0%       0.9 MB      20580 blk  engine snapshot_iter clone
+   0.0%       0.0 MB          0 blk  engine random_samples clone
+   8.5%     529.8 MB    7603660 blk  WB queue clone
+   8.5%     529.9 MB    7603806 blk  WB staging clone
+   0.5%      32.5 MB     157351 blk  WB WAL snapshot clone
+   0.0%       0.0 MB          4 blk  WB load staged clone
+   0.3%      18.5 MB     262450 blk  WB collect_staging clone
+   9.0%     564.6 MB     465380 blk  merkle_leaf_hash
+  62.7%    3917.5 MB   38048462 blk  UNMATCHED
