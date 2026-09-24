@@ -1,6 +1,17 @@
 # SPEC-373a (carve 9c, part a) — leaf-hash stream + prune residency check: pre-registration manifest
 
-## §1 Pre-registration (frozen at commit M; nothing above the APPEND-ONLY marker changes after M)
+## §1 Pre-registration (frozen at commit M′; nothing above the APPEND-ONLY marker changes after M′)
+
+**M′ supersedes M (`677f39f8`).** M was reviewed before any count-alloc cell ran (conductor rulings v7; cross-vendor
+review over `639a7b19..677f39f8`) and found to carry real defects in the verdict program and the cell chain: the
+manifest text stated the last-half start as `floor(n/2)` while the code (byte-identical to `spec372-k.awk`) starts
+at the 1-based point `int((n-1)/2)+1`; the build freeze covered only `*.rs`; a zero after-rate crashed the verdict
+awk into a truncated file with exit 0; malformed pre-M lines were silently read as a STOP; the chain did not
+verify its own freeze; malformed probe rows were dropped without a trace; the PA/PM1 "verbatim" claim was not
+checked mechanically. No cell had run against M, so the fix and this re-freeze are pre-registration, not a
+post-hoc change. The diagnostic dhat pair, the E program and its outputs, `E_FROZEN` and `SHARES_STOP` are
+unchanged from M (same bytes, same numbers); the runner `spec373a-cells.sh` and `spec373a-diag.sh` are
+unchanged. **The cells run against M′ only.** M's history stays in git.
 
 ### Question and scope
 Does removing two per-op whole-slot copies on the OR write path — the joined/formatted strings of the OR
@@ -14,8 +25,10 @@ The mechanism is proven by tests (AC-1..AC-3, AC-3g; STOP 3/3a/3b); these cells 
 - Branch head H (after): the freeze literal of `spec373a-cells.sh`, `SPEC373A_CODE_FREEZE=4998d884` — the
   last `.rs` commit (`1177d3df` R1, `3b05b085` R2, `4998d884` test-only). Every later commit on the branch
   is `.sh`/`.md`/data only; the runner refuses a checkout whose `.rs` tree differs from the freeze.
-- After-cell rule (conductor rulings v6): a1/a2 run the server built from H. If any production `.rs` file
-  changes on the branch after the cells, a1/a2 are re-run; test/doc-only changes do not invalidate them.
+- After-cell rule (conductor rulings v6, pathspec widened by v7 item 2): a1/a2 run the server built from H. If any
+  BUILD INPUT changes on the branch after the cells — `packages/server-rust/{src,Cargo.toml,build.rs}`,
+  `packages/core-rust`, the root `Cargo.toml`, `Cargo.lock` — a1/a2 are re-run; test/doc-only changes outside that
+  pathspec do not invalidate them.
 
 ### Cells
 `spec373a-cells.sh <cell>` (runner), launched by `spec373a-diag.sh` (d3e/d3l) and `spec373a-chain.sh`
@@ -46,7 +59,9 @@ the 371 pair (d3l `totalWrites` 44 952 vs c3l 52 457; host load average 8.8 at d
 smaller in MB (4 299 vs 5 251); the shares are ratios of the same window and are read as such.
 
 ### The E program (conductor rulings v2 Critical 1, v3 items 5–6)
-`.specflow/research/spec373-dhat-attribution/shares_61f.py`, run under `LC_ALL=C`. Method, verbatim from
+`packages/server-rust/benches/soak_harness/evidence/spec373a-shares_61f.py` (committed; byte-identical to the spec's
+`.specflow/research/spec373-dhat-attribution/shares_61f.py`, which must keep hashing equal — the chain checks it),
+run under `LC_ALL=C`. The outputs quoted below were produced by the `.specflow` copy at M, with the same bytes. Method, verbatim from
 SPEC-373a Measurement: window = c3l − c3e (dhat `tb`), shares ÷ window total; `LEAF_87/90/93` = bytes of
 program points whose FIRST (innermost) `topgun_*` frame (a frame containing `topgun_server::` or
 `topgun_core::`) is `storage/map_data_store.rs:87` / `:90` / `:93`; `PRUNE` = bytes of every program point
@@ -107,7 +122,7 @@ git show <pin>:packages/server-rust/src/service/domain/crdt.rs | grep -n 'match 
   P_BYTES_FROZEN=0.8841
 ```
 
-### Frozen values (read by the verdict program; never recomputed after M)
+### Frozen values (read by the verdict program; never recomputed; unchanged from M)
 SHARES_STOP=none
 E_FROZEN=0.1159
 P_BYTES_FROZEN=0.8841
@@ -125,21 +140,52 @@ expected cut (≈ 7.0 % + 2.3 % ≈ 9.3 %) stays above the CONFIRMED margin `E/2
 is NOT_MET, the readout must quote this unit gap before NOT_MET is read as a miss.**
 
 ### Per-bucket context table (does not feed E)
-`.specflow/research/spec373-dhat-attribution/tb2_61f.py <profile>`, first-match in the frozen order of the
+`spec373a-tb2_61f.py <profile>` (committed; byte-identical to `.specflow/research/spec373-dhat-attribution/tb2_61f.py`), first-match in the frozen order of the
 SPEC-373a bucket table (rows 1–10); outputs `spec373a-d3e.tb2.txt`, `spec373a-d3l.tb2.txt`. Every row's
 regex was checked against its source line at `61f84658` (`hashmap.rs:92/136/158/255/268`,
 `write_behind.rs:1538/2428/2463/2518/2649`, `map_data_store.rs:72-97`).
 
-### Verdict program (SPEC-373a Measurement, verbatim steps; `spec373a-verdict.sh <EV> spec373a-manifest.md`)
-- **Definitions** (verbatim from `spec372-manifest.md:126-130`, `CHURN_RATIO` (k1)): "one point per
-  DISTINCT `alloc_probe` line; last half = points `floor(n/2) … n-1` … Ratio = (Δ`bytes_alloc` / Δ probe
-  seconds) / `alloc_live_bytes` at the window's LAST point". `BYTES_ALLOC_RATE` = the numerator;
-  `ALLOC_LIVE` = the denominator; distinct points are keyed on `alloc_probe_elapsed_s` exactly as
-  `spec372-k.awk` does.
-0. STOP-D/O/S: the `SHARES_STOP=` line above, read, never recomputed.
-1. STOP-V: each of b1, b2, a1, a2 passes `PA` (`spec371-manifest.md:129-130`) and `PM1`
-   (`spec371-manifest.md:142`), both evaluated with the verbatim `spec371-predicates.sh` predicates.
+### Verdict program (SPEC-373a Measurement; `spec373a-verdict.sh <EV> spec373a-manifest.md`)
+- **Definitions** (from `spec372-manifest.md:126-130`, `CHURN_RATIO` (k1), with the window start stated as the
+  code computes it). One point per DISTINCT `alloc_probe_elapsed_s` (adjacent repeats dropped), `n` points,
+  1-based. **The last half starts at point `h = int((n−1)/2) + 1`** (0-based `ceil(n/2) − 1`: `floor(n/2)` for odd
+  n, one point EARLIER for even n — with ~15–30 probe points per 900 s cell, even n is ordinary) and ends at
+  point `n`. This is byte-identical to `spec372-k.awk:104` (`h = int((n - 1) / 2) + 1`), kept for parity with
+  the SPEC-371/372 numbers; `spec372-manifest.md`'s prose "floor(n/2)" described odd n only.
+  `BYTES_ALLOC_RATE` = (`bytes_alloc`[n] − `bytes_alloc`[h]) / (`e`[n] − `e`[h]); `ALLOC_LIVE` =
+  `alloc_live_bytes`[n]; both printed `%.6f` / integer with `points=`, `h=` and `window_s=`.
+0. **Pre-M′ lines.** Exactly one `SHARES_STOP=` and one `E_FROZEN=` line (anchored at column 0),
+   `SHARES_STOP ∈ {none, D, O, S}`, `E_FROZEN` numeric — else the program exits **3 with no flags**. A missing
+   line is never read as a STOP. STOP-D/O/S = `SHARES_STOP`.
+1. **STOP-V** for each of b1, b2, a1, a2 on any of: `PA` false; `PM1` false; `SKIPPED_<cell> > 0` (rows whose
+   three probe fields `bytes_alloc`, `alloc_live_bytes`, `alloc_probe_elapsed_s` are neither all empty nor all
+   numeric; all-empty pre-first-probe rows are not counted); a `BYTES_ALLOC_RATE` or `ALLOC_LIVE` that is n/a or
+   not > 0. The STOP line names every failing clause, e.g. `STOP=V (a1:rate=0.000000 a2:rate=0.000000)`.
    `RUNNER_EXIT` is recorded per cell, not gated.
+   **PA and PM1 are executed from the frozen file, not transcribed.** The verdict asserts
+   `sha256(spec371-predicates.sh) = 7d2ca6214beff1c4c0042879823172a45452ef99c06ca49521d5c96889a61d1b`, takes
+   the PE/PA awk program from its lines 101–131 and the PM1 program from lines 154–169, strips only the closing
+   `' "$CSV"`, asserts each ends at its closing brace, and runs them with `fl=CA` / `pm=` exactly as the frozen
+   wrapper does. The mechanical proof — `diff` of the frozen invocation block against what the verdict runs,
+   where only the shell plumbing differs:
+   ```
+   $ diff <(sed -n '100,131p' spec371-predicates.sh) <(sed -n '101,131p' spec371-predicates.sh | sed '$ s/'\'' "\$CSV"$//')
+   1d0
+   <     awk -F, -v fl="$FLAVOUR" -v dur="$DURATION" -v cad="$CADENCE" '
+   32c31
+   <       }' "$CSV"
+   ---
+   >       }
+   $ diff <(sed -n '153,169p' spec371-predicates.sh) <(sed -n '154,169p' spec371-predicates.sh | sed '$ s/'\'' "\$CSV"$//')
+   1d0
+   <     awk -F, -v pm="$PM_ROWS" -v dur="$DURATION" -v cad="$CADENCE" '
+   17c16
+   <       }' "$CSV"
+   ---
+   >       }
+   ```
+   The missing-input branches around them (`PA=FALSE reason=no_matrix_or_csv`,
+   `PM1=FALSE reason=no_counter_or_csv`) are the frozen wrapper's own.
 2. `R_ij = BYTES_ALLOC_RATE(a_i) / BYTES_ALLOC_RATE(b_j)`, `I = [min, max]`; same for `ALLOC_LIVE` ⇒ `LIVE_I`.
 3. `s_b = |b1 − b2| / mean(b1, b2)`, `s_a` likewise, per metric.
 4. STOP-R: `min I > 1 + max(s_b, s_a)` or `min LIVE_I > 1 + max(s_b_live, s_a_live)`.
@@ -147,11 +193,28 @@ regex was checked against its source line at `61f84658` (`hashmap.rs:92/136/158/
    With `E = 0.1159`: `E/2 = 0.05795`, CONFIRMED needs `max I ≤ 0.94205`.
 6. Flags, after every STOP predicate: `STOP=<none|D|O|S|V|R>` (first in D > O > S > V > R), then
    `VERDICT_BYTES=<class>` (`WITHHELD` under any STOP), `I=[…]`, `S_B=…`, `E=…`, `LIVE_I=[…]`.
-7. Merge: with AC-1..AC-3 green, merge on CONFIRMED, NOT_MET or INDETERMINATE; any STOP → conductor.
+7. **Exit status:** 0 = the flags block was printed; 3 = invalid pre-M′ line or frozen predicate source; 4 = a
+   program step failed (every awk's exit status is checked; the intermediate file is kept). The chain logs the
+   status and says "NO flags" when it is non-zero.
+8. Merge: with AC-1..AC-3 green, merge on CONFIRMED, NOT_MET or INDETERMINATE; any STOP → conductor.
 
-Synthetic cases (smoke; pinned inputs and hand-derived expectations in `spec373a-synth.sh`), run before M
-against this verdict program, all seven as expected: S1 CONFIRMED, S2 NOT_MET, S3 INDETERMINATE, S4 STOP=R,
-S5 STOP=V (b2:PM1), S6 STOP=S, S7 STOP=R (live).
+**Synthetic cases** (`spec373a-synth.sh`; pinned inputs, expectations derived by hand in its header), run
+against this verdict program before M′ — all twelve as expected:
+
+| case | what it exercises | output |
+|---|---|---|
+| S1 | baseline | rc=0 STOP=none CONFIRMED I=[0.8515,0.8700] |
+| S2 | cut too small | rc=0 STOP=none NOT_MET I=[0.9505,0.9650] |
+| S3 | before-pair spread ≥ E/2 | rc=0 STOP=none INDETERMINATE S_B=0.0952 |
+| S4 | rate regression | rc=0 STOP=R WITHHELD I=[1.2871,1.3100] |
+| S5 | PM1 false on b2 | rc=0 STOP=V (b2:PM1) WITHHELD |
+| S6 | SHARES_STOP=S | rc=0 STOP=S WITHHELD |
+| S7 | live regression | rc=0 STOP=R WITHHELD LIVE_I=[1.3000,1.3000] |
+| S8 | **even n** (n=14, kink at 480 s) | rc=0 `h=7 window_s=420-840`, b 1142.857143, a 971.428571, CONFIRMED I=[0.8500,0.8500] (start `int(n/2)+1` would give 0.8000) |
+| S9 | **zero after-rates** | rc=0 STOP=V (a1:rate=0.000000 a2:rate=0.000000) WITHHELD, I=n/a |
+| S10 | one non-numeric `bytes_alloc` | rc=0 SKIPPED_b1=1, STOP=V (b1:skipped=1) WITHHELD |
+| S11 | manifest without `SHARES_STOP=` | rc=3, no flags |
+| S12 | `E_FROZEN=abc` | rc=3, no flags |
 
 ### Runner diff: every hunk maps to one of the seven items (`diff spec372-allocdiag.sh spec373a-cells.sh`)
 | hunk | item |
@@ -175,35 +238,49 @@ S5 STOP=V (b2:PM1), S6 STOP=S, S7 STOP=R (live).
 
 Item 6 (console line 1 `flavour=`) has no hunk: the line is built from `FLAVOUR`.
 
-### Programs frozen at M (sha256; `ORDER=OK` re-checks these bytes at every later commit)
+### Programs frozen at M′ (sha256; `ORDER=OK` re-checks these bytes; the chain checks them at start)
 - `8f9e99abc62160b73235bba3689b8f843013420fcdd255e99e0e4201d041bafd` `packages/server-rust/benches/soak_harness/evidence/spec373a-cells.sh`
 - `6117793832aac860d3f4bb0280f25fb918863cb6d1bb1fd0a333f4236053be01` `packages/server-rust/benches/soak_harness/evidence/spec373a-diag.sh`
-- `41e41752bab034b8f0cf8bf0f3bd25fb922aa1794a56dbbc936a9ff2c4fac45e` `packages/server-rust/benches/soak_harness/evidence/spec373a-chain.sh`
-- `d3ad601fae4b42695c5ee9c9a201085c247b8b83dceef8109af3d98e33152728` `packages/server-rust/benches/soak_harness/evidence/spec373a-verdict.sh`
-- `f004698e2ef8476f37a44317aa16b5e923768902f9533480e4715d4bb2d8a51f` `packages/server-rust/benches/soak_harness/evidence/spec373a-synth.sh`
-- `6ab430824b6c72852f1fd49c74a220e355bfecb374c0eb54c05bc995d0e0084b` `.specflow/research/spec373-dhat-attribution/shares_61f.py` (local, not in git: `.specflow/` is never committed)
-- `33c3fa874aedfcf4002c55c37d08f61d06c1849e449c9b86ea59240a842707f3` `.specflow/research/spec373-dhat-attribution/tb2_61f.py` (local, not in git)
+- `f5746bd63768fa0a9b48a4c6678df5511a2bebe270272a9c80279e5eca00970e` `packages/server-rust/benches/soak_harness/evidence/spec373a-chain.sh`
+- `6f1a87bbdfe8c7335c0f4c806f74ec5536b935fcd8cdf3ef06250b024dd06179` `packages/server-rust/benches/soak_harness/evidence/spec373a-verdict.sh`
+- `e255fb6159db914692e0c2a373af4359de4a9d1f95de0867d2d632378e8251cd` `packages/server-rust/benches/soak_harness/evidence/spec373a-synth.sh`
+- `6ab430824b6c72852f1fd49c74a220e355bfecb374c0eb54c05bc995d0e0084b` `packages/server-rust/benches/soak_harness/evidence/spec373a-shares_61f.py`
+- `33c3fa874aedfcf4002c55c37d08f61d06c1849e449c9b86ea59240a842707f3` `packages/server-rust/benches/soak_harness/evidence/spec373a-tb2_61f.py`
+- `7d2ca6214beff1c4c0042879823172a45452ef99c06ca49521d5c96889a61d1b` `packages/server-rust/benches/soak_harness/evidence/spec371-predicates.sh`
+- `814c7a3b60dffaaf232df737d7d04ae84ead9eb4bdbe54a1552c749cb674cf6c` `packages/server-rust/benches/soak_harness/evidence/spec372-allocdiag.sh`
+
+The `.specflow/research/spec373-dhat-attribution/{shares_61f,tb2_61f}.py` copies must hash equal to the two
+committed `spec373a-*` copies (the chain refuses otherwise). Changes from M: chain, verdict and synth are new
+bytes (v7 items 1–8); the two E programs are now committed; `spec371-predicates.sh` (executed by the verdict)
+and the parent runner are listed. Unchanged: cells, diag, and both E programs' bytes.
 
 Commands, verbatim:
 ```
 shasum -a 256 packages/server-rust/benches/soak_harness/evidence/spec373a-{cells,diag,chain,verdict,synth}.sh
-shasum -a 256 .specflow/research/spec373-dhat-attribution/shares_61f.py .specflow/research/spec373-dhat-attribution/tb2_61f.py
+shasum -a 256 packages/server-rust/benches/soak_harness/evidence/spec373a-{shares_61f,tb2_61f}.py .specflow/research/spec373-dhat-attribution/{shares_61f,tb2_61f}.py
+shasum -a 256 packages/server-rust/benches/soak_harness/evidence/spec371-predicates.sh packages/server-rust/benches/soak_harness/evidence/spec372-allocdiag.sh
 ```
-The parent programs `spec372-allocdiag.sh` (`814c7a3b…cf6c`), `spec371-predicates.sh` and
-`spec372-k.awk` are not edited.
+The parent programs `spec372-allocdiag.sh`, `spec371-predicates.sh` and `spec372-k.awk` are not edited.
 
 ### The §1 prefix sha256 — the command
-Computed at M and at every later commit by exactly this command (the marker line is included in the hash):
+Computed at M′ and at every later commit by exactly this command (the marker line is included in the hash). M's own
+prefix sha256 was `c457e344116e7a9db35ea1e234337cd40a93b7d37b7f9c96e6fb8eddc2305b5f`; M′'s is recorded in the
+executor report and re-computed by the chain, never written into §1 (it would change the hash):
 ```
 git show <commit>:packages/server-rust/benches/soak_harness/evidence/spec373a-manifest.md | sed '/^## APPEND-ONLY BELOW/q' | shasum -a 256
 ```
 
-### ORDER=OK (checked at the cells' data commit and at HEAD)
-1. M is an ancestor of the commit.
-2. The §1 prefix sha256 at the commit equals the one at M.
-3. `git diff --quiet M..<commit> -- packages/server-rust/benches/soak_harness/evidence/spec373a-{cells,diag,chain,verdict,synth}.sh`
-   holds, and the two `.specflow` programs still hash to the values above.
-4. `git diff --quiet 4998d884..<commit> -- '*.rs'` holds (else a1/a2 are re-run, conductor rulings v6).
+### ORDER=OK (checked by the chain at start, at the cells' data commit and at HEAD)
+1. M′ is an ancestor of the commit.
+2. The §1 prefix sha256 at the commit (and of the working-tree manifest the verdict reads) equals the one at M′.
+3. Every program listed above hashes to its listed sha256, and the two `.specflow` E-program copies hash equal to
+   the committed ones.
+4. No build input differs from the freeze and the working tree is clean over it:
+   `git diff --quiet 4998d884..<commit> -- packages/server-rust/src packages/server-rust/Cargo.toml packages/server-rust/build.rs packages/core-rust Cargo.toml Cargo.lock`
+   and an empty `git status --porcelain` over the same pathspec (else a1/a2 are re-run, rulings v6/v7).
+`spec373a-chain.sh` runs 1–4 before any build (M′ passed as `SPEC373A_MANIFEST_COMMIT`) and prints
+`ORDER=OK manifest_commit=… prefix_sha256=… programs=…` into `spec373a-chain.log`; any mismatch refuses the run.
+It also refuses an empty freeze literal and a harness glob that does not resolve to exactly one binary.
 
 ### Carried traps
 `LC_ALL=C` everywhere a number is parsed (host is `ru_RU`); literals from the code (commands above);

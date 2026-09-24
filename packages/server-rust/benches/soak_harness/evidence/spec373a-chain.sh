@@ -12,7 +12,17 @@
 #   3. runs b1 -> a1 -> b2 -> a2 through spec373a-cells.sh (interleaved, so a
 #      slow host drift lands on both sides), each 900 s, SIGKILL teardown
 #   4. runs spec373a-verdict.sh over the four cells and the manifest ->
-#      spec373a.verdict.txt
+#      spec373a.verdict.txt (its exit status is logged; non-zero = no flags)
+#
+# Before anything else the chain checks its own freeze (ORDER=OK) against the
+# manifest commit M' named by SPEC373A_MANIFEST_COMMIT (required): M' is an
+# ancestor of HEAD; the working-tree manifest's section-1 prefix sha256 equals
+# M''s; every program listed in M''s section 1 hashes to its listed sha256; and
+# the .specflow copies of the two E programs hash equal to the committed ones.
+# Any mismatch refuses the run. The build-input freeze covers every input of a
+# server build, not only .rs files: packages/server-rust/{src,Cargo.toml,build.rs},
+# packages/core-rust, the root Cargo.toml and Cargo.lock -- no diff against the
+# freeze commit and a clean working tree over that pathspec.
 #
 # SPEC373A_SMOKE=1 runs the admission smoke instead, into SPEC365_OUT_DIR (a
 # scratch dir): the same three builds, b1 and a1 at 120 s / cadence 20, the
@@ -26,6 +36,8 @@ SERVER_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"          # packages/server-
 REPO_ROOT="$(cd "$SERVER_ROOT/../.." && pwd -P)"
 PIN=61f84658
 FREEZE="$(awk -F= '/^SPEC373A_CODE_FREEZE=/ { print $2; exit }' "$SCRIPT_DIR/spec373a-cells.sh")"
+[ -n "$FREEZE" ] || { echo "FATAL: no SPEC373A_CODE_FREEZE literal in spec373a-cells.sh" >&2; exit 1; }
+BUILD_PATHS=(packages/server-rust/src packages/server-rust/Cargo.toml packages/server-rust/build.rs packages/core-rust Cargo.toml Cargo.lock)
 SMOKE="${SPEC373A_SMOKE:-0}"
 if [ "$SMOKE" = "1" ]; then
   OUT="${SPEC365_OUT_DIR:-}"
@@ -44,6 +56,30 @@ say() { echo "$*" | tee -a "$LOG"; }
 # ----------------------------------------------------------------- 1. start
 CHAIN_START_EPOCH="$(date +%s)"
 say "chain start: $(date -u +%Y-%m-%dT%H:%M:%SZ) epoch=${CHAIN_START_EPOCH} smoke=${SMOKE} HEAD=$(git -C "$REPO_ROOT" rev-parse HEAD) freeze=${FREEZE}"
+
+# ORDER=OK against M' -- refuse to run on any mismatch.
+MREL="packages/server-rust/benches/soak_harness/evidence/spec373a-manifest.md"
+MC="${SPEC373A_MANIFEST_COMMIT:-}"
+[ -n "$MC" ] || { say "FATAL: SPEC373A_MANIFEST_COMMIT (the manifest commit M') is required"; exit 1; }
+git -C "$REPO_ROOT" merge-base --is-ancestor "$MC" HEAD 2>/dev/null || { say "FATAL: ${MC} is not an ancestor of HEAD"; exit 1; }
+PFX_M="$(git -C "$REPO_ROOT" show "${MC}:${MREL}" | sed '/^## APPEND-ONLY BELOW/q' | shasum -a 256 | awk '{print $1}')"
+PFX_W="$(sed '/^## APPEND-ONLY BELOW/q' "${REPO_ROOT}/${MREL}" | shasum -a 256 | awk '{print $1}')"
+[ "$PFX_M" = "$PFX_W" ] || { say "FATAL: manifest prefix sha256 ${PFX_W} != M' ${PFX_M}"; exit 1; }
+PROGS="$(git -C "$REPO_ROOT" show "${MC}:${MREL}" | sed '/^## APPEND-ONLY BELOW/q' | sed -nE 's/^- `([0-9a-f]+)` `([^`]+)`.*/\1 \2/p')"
+NPROG=0
+while read -r want path; do
+  [ -n "$want" ] || continue
+  NPROG=$((NPROG + 1))
+  got="$(shasum -a 256 "${REPO_ROOT}/${path}" 2>/dev/null | awk '{print $1}')"
+  [ "${#want}" -eq 64 ] && [ "$got" = "$want" ] || { say "FATAL: ${path} hashes to '${got}', M' lists ${want}"; exit 1; }
+done <<< "$PROGS"
+[ "$NPROG" -ge 9 ] || { say "FATAL: M' lists ${NPROG} frozen programs, expected at least 9"; exit 1; }
+for prog in shares_61f.py tb2_61f.py; do
+  a="$(shasum -a 256 "${REPO_ROOT}/.specflow/research/spec373-dhat-attribution/${prog}" 2>/dev/null | awk '{print $1}')"
+  b="$(shasum -a 256 "${SCRIPT_DIR}/spec373a-${prog}" 2>/dev/null | awk '{print $1}')"
+  [ -n "$a" ] && [ "$a" = "$b" ] || { say "FATAL: .specflow ${prog} (${a}) != committed spec373a-${prog} (${b})"; exit 1; }
+done
+say "ORDER=OK manifest_commit=${MC} prefix_sha256=${PFX_M} programs=${NPROG}"
 if [ -z "${SDKROOT:-}" ] && [ -x /usr/bin/xcrun ]; then
   SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
   [ -n "$SDKROOT" ] && export SDKROOT
@@ -60,9 +96,9 @@ PIN_HEAD="$(git -C "$SRC_PIN" rev-parse HEAD)"
 PIN_FULL="$(git -C "$REPO_ROOT" rev-parse "${PIN}^{commit}")"
 [ "$PIN_HEAD" = "$PIN_FULL" ] || { say "FATAL: pin checkout HEAD ${PIN_HEAD} != ${PIN_FULL}"; exit 1; }
 [ -z "$(git -C "$SRC_PIN" status --porcelain)" ] || { say "FATAL: pin checkout is dirty"; exit 1; }
-[ -z "$(git -C "$REPO_ROOT" diff --stat "$FREEZE"..HEAD -- '*.rs')" ] || { say "FATAL: .rs at HEAD differs from the freeze ${FREEZE}"; exit 1; }
-[ -z "$(git -C "$REPO_ROOT" status --porcelain -- '*.rs')" ] || { say "FATAL: the .rs working tree is dirty"; exit 1; }
-say "pin checkout: ${SRC_PIN} HEAD=${PIN_HEAD} clean; head .rs == freeze ${FREEZE}"
+git -C "$REPO_ROOT" diff --quiet "$FREEZE"..HEAD -- "${BUILD_PATHS[@]}" || { say "FATAL: build inputs at HEAD differ from the freeze ${FREEZE}"; exit 1; }
+[ -z "$(git -C "$REPO_ROOT" status --porcelain -- "${BUILD_PATHS[@]}")" ] || { say "FATAL: the build-input working tree is dirty"; exit 1; }
+say "pin checkout: ${SRC_PIN} HEAD=${PIN_HEAD} clean; head build inputs == freeze ${FREEZE}, clean"
 
 guarded_rm() {
   local cand="$1" parent resolved
@@ -89,7 +125,9 @@ build H       "$SERVER_ROOT"                    "${T_ROOT}/spec373a-h"       --r
 
 BIN_CA_PIN="${T_ROOT}/spec373a-ca-pin/release/topgun-server"
 BIN_CA_HEAD="${T_ROOT}/spec373a-ca-head/release/topgun-server"
-BIN_H="$(ls -t "${T_ROOT}"/spec373a-h/release/deps/soak_harness-* 2>/dev/null | grep -vE '\.(d|o|rcgu)' | head -1 || true)"
+H_CANDS="$(ls "${T_ROOT}"/spec373a-h/release/deps/soak_harness-* 2>/dev/null | grep -vE '\.(d|o|rcgu)' || true)"
+[ "$(printf '%s\n' "$H_CANDS" | grep -c .)" -eq 1 ] || { say "FATAL: expected exactly one soak_harness binary, got: ${H_CANDS}"; exit 1; }
+BIN_H="$H_CANDS"
 HEAD_FULL="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 hits() { strings "$1" | grep -c "$2" || true; }
 BUILDS="$OUT/spec373a-builds.txt"
@@ -142,7 +180,9 @@ for c in $CELLS; do run_cell "$c"; done
 # ----------------------------------------------------------------- 4. verdict
 MANIFEST="$SCRIPT_DIR/spec373a-manifest.md"
 bash "$SCRIPT_DIR/spec373a-verdict.sh" "$OUT" "$MANIFEST" > "$OUT/spec373a.verdict.txt" 2>&1
-say "verdict rc=$?"; sed -n '/^== flags ==/,$p' "$OUT/spec373a.verdict.txt" | tee -a "$LOG"
+VRC=$?
+say "verdict rc=${VRC}$( [ "$VRC" -ne 0 ] && echo ' (NO flags: see spec373a.verdict.txt)')"
+sed -n '/^== flags ==/,$p' "$OUT/spec373a.verdict.txt" | tee -a "$LOG"
 if [ "$SMOKE" = "1" ]; then
   bash "$SCRIPT_DIR/spec373a-synth.sh" "$OUT/synthetic" 2>&1 | tee -a "$LOG"
   say "### SMOKE COMPLETE $(date -u +%Y-%m-%dT%H:%M:%SZ)"
