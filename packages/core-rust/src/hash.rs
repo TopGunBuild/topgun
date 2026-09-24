@@ -11,8 +11,9 @@
 //! surrogate pairs for characters outside the BMP). This Rust implementation
 //! converts to UTF-16 before hashing to produce identical results.
 
-/// FNV-1a offset basis (32-bit).
-const FNV_OFFSET_BASIS: u32 = 0x811c_9dc5;
+/// FNV-1a offset basis (32-bit): the hash state before any input, and the
+/// starting state for a streamed hash built with [`fnv1a_update`].
+pub const FNV1A_OFFSET_BASIS: u32 = 0x811c_9dc5;
 
 /// FNV-1a prime (32-bit).
 const FNV_PRIME: u32 = 0x0100_0193;
@@ -32,7 +33,30 @@ const FNV_PRIME: u32 = 0x0100_0193;
 /// ```
 #[must_use]
 pub fn fnv1a_hash(s: &str) -> u32 {
-    let mut hash = FNV_OFFSET_BASIS;
+    fnv1a_update(FNV1A_OFFSET_BASIS, s)
+}
+
+/// Feeds `s` into a running 32-bit FNV-1a state, iterating over UTF-16 code
+/// units exactly as [`fnv1a_hash`] does, and returns the new state.
+///
+/// FNV-1a is a left fold over the code units, and the UTF-16 encoding of a
+/// concatenation of `&str`s is the concatenation of their encodings (each part
+/// holds whole code points), so feeding the parts of a string in order from
+/// [`FNV1A_OFFSET_BASIS`] yields `fnv1a_hash` of the whole string — without ever
+/// building it.
+///
+/// # Examples
+///
+/// ```
+/// use topgun_core::hash::{fnv1a_hash, fnv1a_update, FNV1A_OFFSET_BASIS};
+///
+/// let streamed = fnv1a_update(fnv1a_update(FNV1A_OFFSET_BASIS, "hel"), "lo");
+/// assert_eq!(streamed, fnv1a_hash("hello"));
+/// assert_eq!(fnv1a_update(FNV1A_OFFSET_BASIS, ""), FNV1A_OFFSET_BASIS);
+/// ```
+#[must_use]
+pub fn fnv1a_update(state: u32, s: &str) -> u32 {
+    let mut hash = state;
     for code_unit in s.encode_utf16() {
         hash ^= u32::from(code_unit);
         hash = hash.wrapping_mul(FNV_PRIME);
@@ -217,6 +241,26 @@ mod tests {
             set.insert(fnv1a_hash(&format!("item-{i}")));
         }
         assert_eq!(set.len(), 1000);
+    }
+
+    #[test]
+    fn fnv1a_update_chained_over_parts_equals_hash_of_concatenation() {
+        // Includes empty parts, separators, a multi-byte BMP char and an astral
+        // one (a surrogate pair in UTF-16), split at part boundaries only.
+        let cases: &[&[&str]] = &[
+            &[],
+            &[""],
+            &["", "", ""],
+            &["key:", "k", "|", "t1", "|", "t2", "#", ""],
+            &["key:", "", "|", "", "#", "x"],
+            &["\u{e9}", "\u{1F600}", "|#", "\u{10FFFF}"],
+        ];
+        for parts in cases {
+            let streamed = parts
+                .iter()
+                .fold(FNV1A_OFFSET_BASIS, |state, part| fnv1a_update(state, part));
+            assert_eq!(streamed, fnv1a_hash(&parts.concat()), "parts {parts:?}");
+        }
     }
 
     // ---- combine_hashes tests ----

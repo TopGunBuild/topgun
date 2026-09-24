@@ -17,7 +17,7 @@ use async_trait::async_trait;
 
 use super::record::RecordValue;
 use super::wal::OrDelta;
-use topgun_core::hash::fnv1a_hash;
+use topgun_core::hash::{fnv1a_hash, fnv1a_update, FNV1A_OFFSET_BASIS};
 
 /// Which CRDT-kind tree a durable leaf belongs to.
 ///
@@ -82,19 +82,38 @@ pub fn merkle_leaf_hash(key: &str, value: &RecordValue) -> Option<(MerkleLeafKin
             records,
             tombstones,
         } => {
+            // Streams `"key:{key}|{tags joined by |}#{tombs joined by |}"` into the
+            // hash part by part instead of building it: the OR arm runs on every OR
+            // write, and the joined and formatted strings were whole-slot copies.
+            // Bit-identical by construction — FNV-1a is a left fold and each part
+            // is whole code points (TG-MRK-001: a rebuilt root must equal the live
+            // one). The sort stays: the leaf must not depend on slot order.
             let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
             tags.sort_unstable();
-            let joined = tags.join("|");
             let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
             tomb_tags.sort_unstable();
-            let joined_tombs = tomb_tags.join("|");
-            Some((
-                MerkleLeafKind::OrMap,
-                fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}")),
-            ))
+            let mut hash = fnv1a_update(FNV1A_OFFSET_BASIS, "key:");
+            hash = fnv1a_update(hash, key);
+            hash = fnv1a_update(hash, "|");
+            hash = fnv1a_update_joined(hash, &tags);
+            hash = fnv1a_update(hash, "#");
+            hash = fnv1a_update_joined(hash, &tomb_tags);
+            Some((MerkleLeafKind::OrMap, hash))
         }
         RecordValue::OrTombstones { .. } => None,
     }
+}
+
+/// Feeds `parts` separated by `"|"` into a running FNV-1a state — the hash of
+/// `parts.join("|")` without allocating the joined string.
+fn fnv1a_update_joined(mut hash: u32, parts: &[&str]) -> u32 {
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            hash = fnv1a_update(hash, "|");
+        }
+        hash = fnv1a_update(hash, part);
+    }
+    hash
 }
 
 /// A bounded batch of fully-loaded durable records produced by a value-streamed
