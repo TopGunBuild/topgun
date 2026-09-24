@@ -10087,6 +10087,216 @@ mod tests {
         assert_eq!(stored.node_id, FORGED_NODE_ID);
     }
 
+    /// Bytes allocated by exactly the future `f` runs to completion.
+    #[cfg(feature = "count-alloc")]
+    async fn bytes_allocated_by<F: Future>(f: F) -> (F::Output, usize) {
+        let before = stats_alloc::INSTRUMENTED_SYSTEM.stats().bytes_allocated;
+        let out = f.await;
+        let after = stats_alloc::INSTRUMENTED_SYSTEM.stats().bytes_allocated;
+        (out, after - before)
+    }
+
+    /// Seeds `key` as a RESIDENT OR slot of `n` records (29-char distinct tags) plus
+    /// one tombstone `tomb`, and stamps the tombstone's frontier ref. Returns the
+    /// ref's epoch (the fixture runs one epoch per stamp).
+    #[cfg(feature = "count-alloc")]
+    async fn seed_prunable_slot(
+        factory: &Arc<RecordStoreFactory>,
+        frontier: &TombstoneFrontier,
+        key: &str,
+        n: usize,
+        tomb: &str,
+    ) -> Epoch {
+        let ts = Timestamp {
+            millis: 1_700_000_000_000,
+            counter: 0,
+            node_id: "node-a".to_string(),
+        };
+        let records: Vec<OrMapEntry> = (0..n)
+            .map(|i| OrMapEntry {
+                value: Value::Null,
+                tag: format!("{i:020}:0:node-a"),
+                timestamp: ts.clone(),
+            })
+            .collect();
+        let store = factory.get_or_create("m", hash_to_partition(key));
+        store
+            .put(
+                key,
+                RecordValue::OrMap {
+                    records,
+                    tombstones: vec![tomb.to_string()],
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+            )
+            .await
+            .unwrap();
+        assert!(store.exists_in_memory(key), "the seeded slot is resident");
+        frontier.stamp_tombstone("m", key, tomb)
+    }
+
+    /// Raises the low-water mark strictly past `epoch` and no further, so the next
+    /// pass has exactly that epoch's ref to drain. The LWM is bounded by the
+    /// current epoch, so a later epoch must already be stamped.
+    #[cfg(feature = "count-alloc")]
+    async fn license_epoch(frontier: &TombstoneFrontier, epoch: Epoch) {
+        let client: String = "a5:alice|dev-1".into();
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, epoch + 1, ConnectionId(1))
+                .await
+        );
+        assert_eq!(frontier.low_water_mark(), epoch + 1);
+    }
+
+    /// One prune pass over a RESIDENT key allocates about one whole-record copy of
+    /// its slot (the in-place write's returned record), not two: the residency
+    /// probe must not clone the slot it only needs to know is present.
+    ///
+    /// Per slot size N, `P(N)` is the bytes one pass allocates and `C(N)` the bytes
+    /// one engine `get` of the same slot allocates (one whole-record clone). The
+    /// slopes `p` and `c` over N ∈ {1 000, 10 000} cancel every O(1) allocation of
+    /// the pass (guard, ledger emission, metrics, boxes), so `p ≈ k·c` counts the
+    /// whole-record copies the pass makes. Asserted: `p ≤ 1.2 c + 32` (one copy).
+    /// Each measured pass must settle its ref `Dropped` and remove the tombstone, so
+    /// an emptied drain cannot pass the bound vacuously.
+    ///
+    /// Built on the `NullDataStore` fixture with no observers, so neither a
+    /// write-behind copy nor a Merkle leaf hash enters the reading. The fixture is
+    /// built inside the local recorder for the reason `six_exit_run` documents.
+    ///
+    /// A local allocation proof, not a CI guard: CI never enables `count-alloc`,
+    /// and the counters are process-global, so it is meaningful only when run
+    /// alone and single-threaded:
+    /// `cargo test --release -p topgun-server --lib --features count-alloc -- --ignored --test-threads=1 count_alloc_`
+    #[cfg(feature = "count-alloc")]
+    #[test]
+    #[ignore = "local allocation proof: run single-threaded under count-alloc"]
+    #[allow(clippy::cast_precision_loss)]
+    fn count_alloc_prune_probe_resident() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let readings: Vec<(usize, usize, usize)> = metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let (readings, _gauge) = with_isolated_gauge(async {
+                    let (svc, factory, frontier) = make_service_with_frontier();
+                    frontier.set_delivered(ConnectionId(1), 1_000_000);
+                    frontier.set_durable_epoch_watermark(1_000_000);
+
+                    let restored = |rendered: &str| {
+                        [
+                            METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
+                            METRIC_PRUNE_RESTORED_EVICTED_TOTAL,
+                            METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
+                            METRIC_PRUNE_RESTORED_CANCELLED_TOTAL,
+                        ]
+                        .iter()
+                        .map(|name| rendered_counter(rendered, name))
+                        .sum::<u64>()
+                    };
+
+                    // One ref per pass, each in its own epoch, stamped up front;
+                    // the trailing pin (no record behind it) keeps the last
+                    // measured epoch licensable and is itself never drained.
+                    let warm_epoch =
+                        seed_prunable_slot(&factory, &frontier, "kwarm", 1_000, "TWARM").await;
+                    let mut measured = Vec::new();
+                    for n in [1_000_usize, 10_000] {
+                        let key = format!("k{n}");
+                        let tomb = format!("TOMB{n}");
+                        let epoch = seed_prunable_slot(&factory, &frontier, &key, n, &tomb).await;
+                        measured.push((n, key, tomb, epoch));
+                    }
+                    frontier.stamp_tombstone("m", "kpin", "TPIN");
+
+                    // Un-measured warm-up on its own key: one-time lazy
+                    // initialisation (metric handles, registry entries) lands here
+                    // and not in the first measured pass only.
+                    license_epoch(&frontier, warm_epoch).await;
+                    prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+                    let (_, warm_tombs) = read_or_map(&factory, "m", "kwarm").await;
+                    assert!(
+                        warm_tombs.is_empty(),
+                        "the warm-up pass drops its tombstone"
+                    );
+
+                    let mut readings = Vec::new();
+                    for (n, key, tomb, epoch) in measured {
+                        license_epoch(&frontier, epoch).await;
+                        let store = factory.get_or_create("m", hash_to_partition(&key));
+
+                        let (clone, c_bytes) =
+                            bytes_allocated_by(async { store.storage().get(&key) }).await;
+                        assert!(clone.is_some(), "the slot is resident in the engine");
+                        drop(clone);
+
+                        // Let anything the setup woke run to idle before the
+                        // measured call, so only the pass allocates inside it.
+                        for _ in 0..8 {
+                            tokio::task::yield_now().await;
+                        }
+                        let before = handle.render();
+                        let ((), p_bytes) = bytes_allocated_by(prune_epoch_tombstones(
+                            &frontier,
+                            &factory,
+                            &svc.key_writer,
+                        ))
+                        .await;
+                        let after = handle.render();
+
+                        assert_eq!(
+                            rendered_counter(&after, METRIC_PRUNE_DROPPED_TOTAL)
+                                - rendered_counter(&before, METRIC_PRUNE_DROPPED_TOTAL),
+                            1,
+                            "N={n}: the measured pass settles exactly one ref Dropped"
+                        );
+                        assert_eq!(
+                            restored(&after),
+                            restored(&before),
+                            "N={n}: the measured pass restores no ref"
+                        );
+                        let (tags, tombs) = read_or_map(&factory, "m", &key).await;
+                        assert!(!tombs.contains(&tomb), "N={n}: the tombstone is gone");
+                        assert_eq!(tags.len(), n, "N={n}: the live records are untouched");
+
+                        readings.push((n, p_bytes, c_bytes));
+                    }
+                    readings
+                })
+                .await;
+                readings
+            })
+        });
+
+        for (n, p_bytes, c_bytes) in &readings {
+            println!("count_alloc_prune_probe_resident N={n} P={p_bytes} C={c_bytes}");
+        }
+        let slope = |pick: fn(&(usize, usize, usize)) -> usize| {
+            (pick(&readings[1]) as f64 - pick(&readings[0]) as f64) / 9_000.0
+        };
+        let p = slope(|r| r.1);
+        let c = slope(|r| r.2);
+        let before_predicate = p >= 1.8 * c;
+        let after_predicate = p <= 1.2 * c + 32.0;
+        println!(
+            "count_alloc_prune_probe_resident p={p:.3} c={c:.3} p/c={:.3} \
+             BEFORE(p>=1.8c)={before_predicate} AFTER(p<=1.2c+32)={after_predicate}",
+            p / c
+        );
+        assert!(
+            after_predicate,
+            "one prune pass over a resident key makes more than one slot copy: \
+             p={p:.3} c={c:.3} (bound 1.2c+32 = {:.3})",
+            1.2 * c + 32.0
+        );
+    }
+
     // -- Writes on a durable-but-non-resident key --
     //
     // A key can be durable without being resident: after a restart nothing
