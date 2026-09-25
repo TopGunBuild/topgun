@@ -1700,8 +1700,8 @@ impl Drop for PrunePassGuard<'_> {
 /// frontier via `restore_tombstone_ref` so a later sweep retries it — dropping
 /// it here would orphan the tag un-prunable in storage forever, since the drain
 /// already removed its index entry. The same restore covers the one non-error
-/// case that also reclaimed nothing: the key was evicted between the rehydrating
-/// `get` and the in-place write, so the mutate closure never ran. That is told
+/// case that also reclaimed nothing: the key was evicted between the residency
+/// check and the in-place write, so the mutate closure never ran. That is told
 /// apart from "the closure ran and the tag was already gone" — which must NOT be
 /// restored, or the prune loop livelocks on it — by a flag the closure itself
 /// sets, because the `Ok(bool)` from `update_in_place` conflates the two.
@@ -1778,36 +1778,43 @@ pub(crate) async fn prune_epoch_tombstones(
         let store = factory.get_or_create(&r.map, hash_to_partition(&r.key));
         // Serialize the drop against concurrent OR writes on this key.
         let _key_guard = key_writer.acquire(&r.map, &r.key).await;
-        // Ensure the key is resident before the in-place drop: init=None only mutates
-        // an already-resident slot, so an evicted key's durable tombstone would
-        // otherwise never be reclaimed and its frontier ref would be consumed without
-        // retry. Hydrating first (as the prior get -> put path did) also reclaims
-        // evicted keys and surfaces a backend read error so the ref can be re-indexed.
-        match store.get(&r.key, false).await {
-            Ok(Some(_)) => {}
-            // Truly gone (no resident and no durable record): nothing to reclaim.
-            // The ref is consumed WITHOUT a tombstone-byte decrement, so it is
-            // counted apart from a drop rather than folded into a "not dropped"
-            // bucket: a growing share here is a candidate mechanism for a falling
-            // reclaim fraction that no other instrument can see.
-            Ok(None) => {
-                guard.settle(epoch, PruneExit::AbsentKey, 0);
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(map = %r.map, key = %r.key, epoch, "prune read failed, re-indexing tombstone for retry: {e}");
-                guard.settle(epoch, PruneExit::RestoredReadError, 0);
-                frontier.restore_tombstone_ref(epoch, r);
-                continue;
+        // Residency check before the in-place drop. A resident key needs no read:
+        // the in-place write below mutates it, and materializes it itself should it
+        // be evicted in between (TG-OR-007), so a read would only clone the whole
+        // slot and drop the copy. A NON-resident key still goes through the store's
+        // read, for the two roles the write cannot play: telling a key gone
+        // everywhere (`AbsentKey`, ref consumed) apart from one the write failed to
+        // reach (`RestoredEvicted`, ref re-indexed) — init=None on an absent key
+        // never runs the closure, so without the read that ref would be re-indexed on
+        // every pass forever — and surfacing a backend read error as
+        // `RestoredReadError` so the ref is retried.
+        if !store.exists_in_memory(&r.key) {
+            match store.get(&r.key, false).await {
+                Ok(Some(_)) => {}
+                // Truly gone (no resident and no durable record): nothing to reclaim.
+                // The ref is consumed WITHOUT a tombstone-byte decrement, so it is
+                // counted apart from a drop rather than folded into a "not dropped"
+                // bucket: a growing share here is a candidate mechanism for a falling
+                // reclaim fraction that no other instrument can see.
+                Ok(None) => {
+                    guard.settle(epoch, PruneExit::AbsentKey, 0);
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(map = %r.map, key = %r.key, epoch, "prune read failed, re-indexing tombstone for retry: {e}");
+                    guard.settle(epoch, PruneExit::RestoredReadError, 0);
+                    frontier.restore_tombstone_ref(epoch, r);
+                    continue;
+                }
             }
         }
-        // Drop the tag from the now-resident tombstone set IN PLACE (init=None →
-        // mutate only the present record, never create one), owing a durable write
+        // Drop the tag from the key's tombstone set IN PLACE (init=None → mutate
+        // only a record that exists, never create one), owing a durable write
         // only when a tombstone was actually removed.
         let mut dropped = false;
         // Whether the mutate closure ran at all. `update_in_place` reports only
         // `Ok(bool)` here, which cannot tell "the key was evicted between the
-        // rehydrating get above and this write, so nothing was mutated" apart from
+        // residency check above and this write, so nothing was mutated" apart from
         // "the closure ran and found no matching tag". Those two need opposite
         // dispositions below, and only the closure itself knows which happened.
         let mut ran = false;
@@ -1874,7 +1881,7 @@ pub(crate) async fn prune_epoch_tombstones(
                     guard.settle(epoch, PruneExit::Dropped, r.tag.len() as u64);
                 }
                 // The closure never ran: the key left memory between the
-                // rehydrating get and this write and the store could not
+                // residency check and this write and the store could not
                 // materialize it again (the default store does, and reclaims the
                 // tag), so init=None mutated nothing while a durable tombstone
                 // may well still exist. Hand the ref
@@ -4925,6 +4932,9 @@ mod tests {
         /// Keys whose durable row `load` serves ONCE and then answers absent for,
         /// with the value still present in the backing map. `true` once served.
         absent_after_one_load: Mutex<HashMap<String, bool>>,
+        /// Every `load` / `load_all` call, so a test can assert a path never
+        /// reached the backend.
+        loads: std::sync::atomic::AtomicUsize,
     }
 
     impl ArmableStore {
@@ -5018,6 +5028,7 @@ mod tests {
         }
 
         async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.reject_read_keys.lock().contains(key) {
                 return Err(anyhow::anyhow!("armed read rejection for {key}"));
             }
@@ -5039,6 +5050,7 @@ mod tests {
             map: &str,
             keys: &[String],
         ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // A read-armed key fails on every read path, not just the single-key
             // one — otherwise a batched rehydration would silently succeed
             // against a store the test believes is failing.
@@ -10085,6 +10097,343 @@ mod tests {
              (convergence path), not re-stamp it"
         );
         assert_eq!(stored.node_id, FORGED_NODE_ID);
+    }
+
+    /// Bytes allocated by exactly the future `f` runs to completion.
+    #[cfg(feature = "count-alloc")]
+    async fn bytes_allocated_by<F: Future>(f: F) -> (F::Output, usize) {
+        let before = stats_alloc::INSTRUMENTED_SYSTEM.stats().bytes_allocated;
+        let out = f.await;
+        let after = stats_alloc::INSTRUMENTED_SYSTEM.stats().bytes_allocated;
+        (out, after - before)
+    }
+
+    /// Seeds `key` as a RESIDENT OR slot of `n` records (29-char distinct tags) plus
+    /// one tombstone `tomb`, and stamps the tombstone's frontier ref. Returns the
+    /// ref's epoch (the fixture runs one epoch per stamp).
+    #[cfg(feature = "count-alloc")]
+    async fn seed_prunable_slot(
+        factory: &Arc<RecordStoreFactory>,
+        frontier: &TombstoneFrontier,
+        key: &str,
+        n: usize,
+        tomb: &str,
+    ) -> Epoch {
+        let ts = Timestamp {
+            millis: 1_700_000_000_000,
+            counter: 0,
+            node_id: "node-a".to_string(),
+        };
+        let records: Vec<OrMapEntry> = (0..n)
+            .map(|i| OrMapEntry {
+                value: Value::Null,
+                tag: format!("{i:020}:0:node-a"),
+                timestamp: ts.clone(),
+            })
+            .collect();
+        let store = factory.get_or_create("m", hash_to_partition(key));
+        store
+            .put(
+                key,
+                RecordValue::OrMap {
+                    records,
+                    tombstones: vec![tomb.to_string()],
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+            )
+            .await
+            .unwrap();
+        assert!(store.exists_in_memory(key), "the seeded slot is resident");
+        frontier.stamp_tombstone("m", key, tomb)
+    }
+
+    /// Raises the low-water mark strictly past `epoch` and no further, so the next
+    /// pass has exactly that epoch's ref to drain. The LWM is bounded by the
+    /// current epoch, so a later epoch must already be stamped.
+    async fn license_epoch(frontier: &TombstoneFrontier, epoch: Epoch) {
+        let client: String = "a5:alice|dev-1".into();
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, epoch + 1, ConnectionId(1))
+                .await
+        );
+        assert_eq!(frontier.low_water_mark(), epoch + 1);
+    }
+
+    /// One prune pass over a RESIDENT key allocates about one whole-record copy of
+    /// its slot (the in-place write's returned record), not two: the residency
+    /// probe must not clone the slot it only needs to know is present.
+    ///
+    /// Per slot size N, `P(N)` is the bytes one pass allocates and `C(N)` the bytes
+    /// one engine `get` of the same slot allocates (one whole-record clone). The
+    /// slopes `p` and `c` over N ∈ {1 000, 10 000} cancel every O(1) allocation of
+    /// the pass (guard, ledger emission, metrics, boxes), so `p ≈ k·c` counts the
+    /// whole-record copies the pass makes. Asserted: `p ≤ 1.2 c + 32` (one copy).
+    /// Each measured pass must settle its ref `Dropped` and remove the tombstone, so
+    /// an emptied drain cannot pass the bound vacuously.
+    ///
+    /// Every ref is stamped up front, followed by one record-less pin ref that is
+    /// never licensed and never drained, and the low-water mark is raised exactly
+    /// one epoch before each pass. The pin ref is load-bearing: the LWM cannot pass
+    /// the current epoch, so without a later stamp the last measured ref could
+    /// never be licensed; stepping one epoch per pass keeps each pass to its own
+    /// single ref instead of letting the warm-up drain them all.
+    ///
+    /// Built on the `NullDataStore` fixture with no observers, so neither a
+    /// write-behind copy nor a Merkle leaf hash enters the reading. The fixture is
+    /// built inside the local recorder for the reason `six_exit_run` documents.
+    ///
+    /// A local allocation proof, not a CI guard: CI never enables `count-alloc`,
+    /// and the counters are process-global, so it is meaningful only when run
+    /// alone and single-threaded:
+    /// `cargo test --release -p topgun-server --lib --features count-alloc -- --ignored --test-threads=1 count_alloc_`
+    #[cfg(feature = "count-alloc")]
+    #[test]
+    #[ignore = "local allocation proof: run single-threaded under count-alloc"]
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+    fn count_alloc_prune_probe_resident() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let readings: Vec<(usize, usize, usize)> = metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let (readings, _gauge) = with_isolated_gauge(async {
+                    let (svc, factory, frontier) = make_service_with_frontier();
+                    frontier.set_delivered(ConnectionId(1), 1_000_000);
+                    frontier.set_durable_epoch_watermark(1_000_000);
+
+                    let restored = |rendered: &str| {
+                        [
+                            METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
+                            METRIC_PRUNE_RESTORED_EVICTED_TOTAL,
+                            METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
+                            METRIC_PRUNE_RESTORED_CANCELLED_TOTAL,
+                        ]
+                        .iter()
+                        .map(|name| rendered_counter(rendered, name))
+                        .sum::<u64>()
+                    };
+
+                    // One ref per pass, each in its own epoch, stamped up front;
+                    // the trailing pin (no record behind it) keeps the last
+                    // measured epoch licensable and is itself never drained.
+                    let warm_epoch =
+                        seed_prunable_slot(&factory, &frontier, "kwarm", 1_000, "TWARM").await;
+                    let mut measured = Vec::new();
+                    for n in [1_000_usize, 10_000] {
+                        let key = format!("k{n}");
+                        let tomb = format!("TOMB{n}");
+                        let epoch = seed_prunable_slot(&factory, &frontier, &key, n, &tomb).await;
+                        measured.push((n, key, tomb, epoch));
+                    }
+                    frontier.stamp_tombstone("m", "kpin", "TPIN");
+
+                    // Un-measured warm-up on its own key: one-time lazy
+                    // initialisation (metric handles, registry entries) lands here
+                    // and not in the first measured pass only.
+                    license_epoch(&frontier, warm_epoch).await;
+                    prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+                    let (_, warm_tombs) = read_or_map(&factory, "m", "kwarm").await;
+                    assert!(
+                        warm_tombs.is_empty(),
+                        "the warm-up pass drops its tombstone"
+                    );
+
+                    let mut readings = Vec::new();
+                    for (n, key, tomb, epoch) in measured {
+                        license_epoch(&frontier, epoch).await;
+                        let store = factory.get_or_create("m", hash_to_partition(&key));
+
+                        let (clone, c_bytes) =
+                            bytes_allocated_by(async { store.storage().get(&key) }).await;
+                        assert!(clone.is_some(), "the slot is resident in the engine");
+                        drop(clone);
+
+                        // Let anything the setup woke run to idle before the
+                        // measured call, so only the pass allocates inside it.
+                        for _ in 0..8 {
+                            tokio::task::yield_now().await;
+                        }
+                        let before = handle.render();
+                        let ((), p_bytes) = bytes_allocated_by(prune_epoch_tombstones(
+                            &frontier,
+                            &factory,
+                            &svc.key_writer,
+                        ))
+                        .await;
+                        let after = handle.render();
+
+                        assert_eq!(
+                            rendered_counter(&after, METRIC_PRUNE_DROPPED_TOTAL)
+                                - rendered_counter(&before, METRIC_PRUNE_DROPPED_TOTAL),
+                            1,
+                            "N={n}: the measured pass settles exactly one ref Dropped"
+                        );
+                        assert_eq!(
+                            restored(&after),
+                            restored(&before),
+                            "N={n}: the measured pass restores no ref"
+                        );
+                        let (tags, tombs) = read_or_map(&factory, "m", &key).await;
+                        assert!(!tombs.contains(&tomb), "N={n}: the tombstone is gone");
+                        assert_eq!(tags.len(), n, "N={n}: the live records are untouched");
+
+                        readings.push((n, p_bytes, c_bytes));
+                    }
+                    readings
+                })
+                .await;
+                readings
+            })
+        });
+
+        for (n, p_bytes, c_bytes) in &readings {
+            println!("count_alloc_prune_probe_resident N={n} P={p_bytes} C={c_bytes}");
+        }
+        let slope = |pick: fn(&(usize, usize, usize)) -> usize| {
+            (pick(&readings[1]) as f64 - pick(&readings[0]) as f64) / 9_000.0
+        };
+        let p = slope(|r| r.1);
+        let c = slope(|r| r.2);
+        let before_predicate = p >= 1.8 * c;
+        let after_predicate = p <= 1.2 * c + 32.0;
+        println!(
+            "count_alloc_prune_probe_resident p={p:.3} c={c:.3} p/c={:.3} \
+             BEFORE(p>=1.8c)={before_predicate} AFTER(p<=1.2c+32)={after_predicate}",
+            p / c
+        );
+        assert!(
+            after_predicate,
+            "one prune pass over a resident key makes more than one slot copy: \
+             p={p:.3} c={c:.3} (bound 1.2c+32 = {:.3})",
+            1.2 * c + 32.0
+        );
+    }
+
+    /// The prune reaches the backend only for a key that is NOT resident.
+    ///
+    /// A resident key is dropped in place with zero `load` calls: its residency
+    /// check replaces a read that could only clone the slot (the allocation side
+    /// of that is proved by `count_alloc_prune_probe_resident`, which CI does not
+    /// run; this is the CI-visible guard). The controls keep the read where it is
+    /// still needed: a durable-only key IS loaded and its tombstone reclaimed,
+    /// and a key gone everywhere settles `AbsentKey` rather than being re-indexed
+    /// as `RestoredEvicted` on every pass (TG-OR-006).
+    ///
+    /// Refs are stamped up front with a trailing, never-drained pin ref and the
+    /// low-water mark is raised one epoch per pass, for the reason
+    /// `count_alloc_prune_probe_resident` documents.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn prune_loads_only_non_resident_keys() {
+        use std::sync::atomic::Ordering;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let store = Arc::new(ArmableStore::default());
+                let (svc, factory, frontier) = make_service_with_frontier_and_store(
+                    Arc::clone(&store) as Arc<dyn MapDataStore>,
+                    Vec::new(),
+                );
+                frontier.set_delivered(ConnectionId(1), 1_000);
+                frontier.set_durable_epoch_watermark(1_000);
+
+                // Resident: written through the service, so the slot is in memory.
+                Arc::clone(&svc)
+                    .oneshot(or_add_op("m", "kres", "v", "TRES"))
+                    .await
+                    .unwrap();
+                Arc::clone(&svc)
+                    .oneshot(or_remove_op("m", "kres", "TRES"))
+                    .await
+                    .unwrap();
+                assert_eq!(frontier.current_epoch(), 1);
+                // Durable only: no resident slot mirrors it.
+                store.seed_durable(
+                    "m",
+                    "kdur",
+                    RecordValue::OrMap {
+                        records: Vec::new(),
+                        tombstones: vec!["TDUR".to_string()],
+                    },
+                );
+                assert_eq!(frontier.stamp_tombstone("m", "kdur", "TDUR"), 2);
+                // Gone everywhere: a ref with no record behind it.
+                assert_eq!(frontier.stamp_tombstone("m", "kabs", "TABS"), 3);
+                // Pin: keeps epoch 3 licensable, never drained itself.
+                assert_eq!(frontier.stamp_tombstone("m", "kpin", "TPIN"), 4);
+
+                let pass = |epoch: Epoch| {
+                    let (store, factory, frontier, svc, handle) =
+                        (&store, &factory, &frontier, &svc, &handle);
+                    async move {
+                        license_epoch(frontier, epoch).await;
+                        let loads_before = store.loads.load(Ordering::SeqCst);
+                        let before = handle.render();
+                        prune_epoch_tombstones(frontier, factory, &svc.key_writer).await;
+                        let after = handle.render();
+                        let delta = |name: &str| {
+                            rendered_counter(&after, name) - rendered_counter(&before, name)
+                        };
+                        (
+                            store.loads.load(Ordering::SeqCst) - loads_before,
+                            delta(METRIC_PRUNE_DROPPED_TOTAL),
+                            delta(METRIC_PRUNE_ABSENT_TOTAL),
+                            delta(METRIC_PRUNE_RESTORED_EVICTED_TOTAL),
+                        )
+                    }
+                };
+
+                let kres_store = factory.get_or_create("m", hash_to_partition("kres"));
+                assert!(kres_store.exists_in_memory("kres"), "precondition: resident");
+                let (loads, dropped, absent, evicted) = pass(1).await;
+                assert_eq!(loads, 0, "a resident key must not reach the backend");
+                assert_eq!((dropped, absent, evicted), (1, 0, 0), "resident: Dropped");
+                let (_, tombs) = read_or_map(&factory, "m", "kres").await;
+                assert!(tombs.is_empty(), "resident: tombstone reclaimed in memory");
+                assert!(
+                    matches!(store.durable("m", "kres"), Some(RecordValue::OrMap { tombstones, .. }) if tombstones.is_empty()),
+                    "resident: tombstone reclaimed durably"
+                );
+
+                let kdur_store = factory.get_or_create("m", hash_to_partition("kdur"));
+                assert!(!kdur_store.exists_in_memory("kdur"), "precondition: not resident");
+                let (loads, dropped, absent, evicted) = pass(2).await;
+                assert!(loads >= 1, "a durable-only key is read from the backend");
+                assert_eq!((dropped, absent, evicted), (1, 0, 0), "durable-only: Dropped");
+                assert!(
+                    matches!(store.durable("m", "kdur"), Some(RecordValue::OrMap { tombstones, .. }) if tombstones.is_empty()),
+                    "durable-only: tombstone reclaimed durably"
+                );
+
+                let (loads, dropped, absent, evicted) = pass(3).await;
+                assert!(loads >= 1, "an absent key is looked up in the backend");
+                assert_eq!(
+                    (dropped, absent, evicted),
+                    (0, 1, 0),
+                    "gone everywhere: AbsentKey, not RestoredEvicted"
+                );
+                assert!(
+                    frontier
+                        .drain_prunable_tombstones()
+                        .iter()
+                        .all(|(_, r)| r.key != "kabs"),
+                    "the absent key's ref is consumed, not re-indexed"
+                );
+            });
+        });
     }
 
     // -- Writes on a durable-but-non-resident key --

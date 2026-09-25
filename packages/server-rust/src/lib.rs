@@ -26,6 +26,13 @@ pub use service::{
 };
 pub use traits::{MapProvider, SchemaProvider, ServerStorage};
 
+// Counting allocator for the lib's unit-test binary only, so the `count_alloc_*`
+// tests can read the bytes one call allocates. The server binary installs its own
+// allocator under the same feature; it is a different binary, so the two never meet.
+#[cfg(all(test, feature = "count-alloc"))]
+#[global_allocator]
+static TEST_ALLOC: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
+
 #[cfg(test)]
 mod tests {
     #[test]

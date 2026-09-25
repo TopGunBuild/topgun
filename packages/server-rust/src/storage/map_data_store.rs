@@ -17,7 +17,7 @@ use async_trait::async_trait;
 
 use super::record::RecordValue;
 use super::wal::OrDelta;
-use topgun_core::hash::fnv1a_hash;
+use topgun_core::hash::{fnv1a_hash, fnv1a_update, FNV1A_OFFSET_BASIS};
 
 /// Which CRDT-kind tree a durable leaf belongs to.
 ///
@@ -82,19 +82,38 @@ pub fn merkle_leaf_hash(key: &str, value: &RecordValue) -> Option<(MerkleLeafKin
             records,
             tombstones,
         } => {
+            // Streams `"key:{key}|{tags joined by |}#{tombs joined by |}"` into the
+            // hash part by part instead of building it: the OR arm runs on every OR
+            // write, and the joined and formatted strings were whole-slot copies.
+            // Bit-identical by construction — FNV-1a is a left fold and each part
+            // is whole code points (TG-MRK-001: a rebuilt root must equal the live
+            // one). The sort stays: the leaf must not depend on slot order.
             let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
             tags.sort_unstable();
-            let joined = tags.join("|");
             let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
             tomb_tags.sort_unstable();
-            let joined_tombs = tomb_tags.join("|");
-            Some((
-                MerkleLeafKind::OrMap,
-                fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}")),
-            ))
+            let mut hash = fnv1a_update(FNV1A_OFFSET_BASIS, "key:");
+            hash = fnv1a_update(hash, key);
+            hash = fnv1a_update(hash, "|");
+            hash = fnv1a_update_joined(hash, &tags);
+            hash = fnv1a_update(hash, "#");
+            hash = fnv1a_update_joined(hash, &tomb_tags);
+            Some((MerkleLeafKind::OrMap, hash))
         }
         RecordValue::OrTombstones { .. } => None,
     }
+}
+
+/// Feeds `parts` separated by `"|"` into a running FNV-1a state — the hash of
+/// `parts.join("|")` without allocating the joined string.
+fn fnv1a_update_joined(mut hash: u32, parts: &[&str]) -> u32 {
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            hash = fnv1a_update(hash, "|");
+        }
+        hash = fnv1a_update(hash, part);
+    }
+    hash
 }
 
 /// A bounded batch of fully-loaded durable records produced by a value-streamed
@@ -556,4 +575,143 @@ pub trait DurableMerkleIndex {
     /// [`MerkleSyncManager::rebuild_from_datastore`](crate::storage::merkle_sync::MerkleSyncManager::rebuild_from_datastore):
     /// propagate, never degrade to wrong leaves.
     fn build_session(&self, map: &str, store: &dyn MapDataStore) -> anyhow::Result<MerkleSession>;
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+    use topgun_core::hash::fnv1a_hash;
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    use super::{merkle_leaf_hash, MerkleLeafKind};
+    use crate::storage::record::{OrMapEntry, RecordValue};
+
+    /// The OR-Map leaf formula exactly as it was first written — joined tag sets
+    /// fed to one `format!` — kept verbatim as the oracle any cheaper rewrite of
+    /// `merkle_leaf_hash`'s OR arm must reproduce bit for bit (TG-MRK-001: a
+    /// rebuilt root must equal the live one, so the formula can never drift).
+    fn oracle_or_leaf_hash(key: &str, records: &[OrMapEntry], tombstones: &[String]) -> u32 {
+        let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
+        tags.sort_unstable();
+        let joined = tags.join("|");
+        let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
+        tomb_tags.sort_unstable();
+        let joined_tombs = tomb_tags.join("|");
+        fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}"))
+    }
+
+    fn entry(tag: String) -> OrMapEntry {
+        OrMapEntry {
+            value: Value::Null,
+            tag,
+            timestamp: Timestamp {
+                millis: 1_700_000_000_000,
+                counter: 0,
+                node_id: "node-a".to_string(),
+            },
+        }
+    }
+
+    fn or_hash(key: &str, records: Vec<OrMapEntry>, tombstones: Vec<String>) -> u32 {
+        match merkle_leaf_hash(
+            key,
+            &RecordValue::OrMap {
+                records,
+                tombstones,
+            },
+        ) {
+            Some((MerkleLeafKind::OrMap, h)) => h,
+            other => panic!("an OrMap value must yield an OrMap leaf, got {other:?}"),
+        }
+    }
+
+    /// Tags drawn from two pools: a wide one (the separators `|` and `#`, a
+    /// non-ASCII BMP code point, an astral one) and a tiny one, so duplicate tags
+    /// and separator-only tags occur often rather than by luck.
+    fn tag_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "[a-z0-9:|#\u{e9}\u{3a9}\u{1F600}\u{10FFFF}]{0,8}",
+            "[a|#\u{1F600}]{0,2}",
+        ]
+    }
+
+    fn set_and_shuffle() -> impl Strategy<Value = (Vec<String>, Vec<String>)> {
+        prop::collection::vec(tag_strategy(), 0..12)
+            .prop_flat_map(|v| (Just(v.clone()), Just(v).prop_shuffle()))
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        /// The OR leaf hash equals the oracle formula for every input, including
+        /// empty tag and/or tombstone sets, separator characters inside tags,
+        /// duplicate tags and multi-byte code points; and it is independent of
+        /// the input order of `records` and of `tombstones` (TG-MRK-001).
+        #[test]
+        fn or_leaf_hash_matches_oracle_and_ignores_input_order(
+            key in "[a-z|#\u{e9}\u{1F600}]{0,6}",
+            (tags, tags_shuffled) in set_and_shuffle(),
+            (tombs, tombs_shuffled) in set_and_shuffle(),
+        ) {
+            let records: Vec<OrMapEntry> = tags.iter().cloned().map(entry).collect();
+            let expected = oracle_or_leaf_hash(&key, &records, &tombs);
+            let hash = or_hash(&key, records, tombs);
+            prop_assert_eq!(hash, expected, "leaf hash drifted from the formula");
+
+            let shuffled: Vec<OrMapEntry> = tags_shuffled.into_iter().map(entry).collect();
+            prop_assert_eq!(
+                or_hash(&key, shuffled, tombs_shuffled),
+                hash,
+                "leaf hash depends on input order"
+            );
+        }
+    }
+
+    /// Bytes one `merkle_leaf_hash` call allocates on an OR slot of `n` records
+    /// with 29-char distinct tags and no tombstones.
+    #[cfg(feature = "count-alloc")]
+    fn leaf_hash_bytes(n: usize) -> u64 {
+        let records: Vec<OrMapEntry> = (0..n).map(|i| entry(format!("{i:020}:0:node-a"))).collect();
+        let value = RecordValue::OrMap {
+            records,
+            tombstones: Vec::new(),
+        };
+        let before = stats_alloc::INSTRUMENTED_SYSTEM.stats().bytes_allocated;
+        let leaf = merkle_leaf_hash("k", &value);
+        let after = stats_alloc::INSTRUMENTED_SYSTEM.stats().bytes_allocated;
+        std::hint::black_box(leaf);
+        (after - before) as u64
+    }
+
+    /// The OR leaf hash allocates only the tag sort buffer: with no tombstones the
+    /// tombstone buffer is empty and allocates nothing, so the whole call stays
+    /// within `n * size_of::<&str>() + 64` bytes — no joined tag string, no
+    /// formatted leaf string.
+    ///
+    /// A local allocation proof, not a CI guard: CI never enables `count-alloc`,
+    /// and the counters are process-global, so it is meaningful only when run
+    /// alone and single-threaded:
+    /// `cargo test --release -p topgun-server --lib --features count-alloc -- --ignored --test-threads=1 count_alloc_`
+    #[cfg(feature = "count-alloc")]
+    #[test]
+    #[ignore = "local allocation proof: run single-threaded under count-alloc"]
+    fn count_alloc_leaf_hash() {
+        let readings: Vec<(usize, u64, u64)> = [1_000_usize, 10_000]
+            .into_iter()
+            .map(|n| {
+                let bound = (n * std::mem::size_of::<&str>() + 64) as u64;
+                (n, leaf_hash_bytes(n), bound)
+            })
+            .collect();
+        for (n, bytes, bound) in &readings {
+            println!("count_alloc_leaf_hash N={n} bytes_allocated={bytes} bound={bound}");
+        }
+        for (n, bytes, bound) in readings {
+            assert!(
+                bytes <= bound,
+                "N={n}: merkle_leaf_hash allocated {bytes} bytes, bound {bound}"
+            );
+        }
+    }
 }

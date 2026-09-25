@@ -121,3 +121,10 @@ harness = false
 name = "soak_harness"
 path = "benches/soak_harness/main.rs"
 harness = false
+
+# Micro-bench of the OR Merkle leaf hash on the OR write hot path (one call per
+# OR op through the Merkle observer): median and p99 over 1 k / 10 k tag slots.
+[[bench]]
+name = "leaf_hash"
+path = "benches/leaf_hash.rs"
+harness = false

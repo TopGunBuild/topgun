@@ -1,0 +1,17 @@
+PIN=46dcc12a
+C3E=/Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c3e.dhat.json.gz
+C3L=/Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec371-c3l.dhat.json.gz
+WINDOW_MB=5251.3476
+LEAF_87_MB=135.3647
+LEAF_90_MB=7.3617
+LEAF_93_MB=407.4686
+LEAF_SHARE=0.104772
+PRUNE_MB=150.2835
+PRUNE_SHARE=0.028618
+OVERLAP_MB=0.0000
+E=0.133390
+P_BYTES=0.866610
+SELF_CHECK=PASS (LEAF 0.104772 vs 0.104772, PRUNE 0.028618 vs 0.028618, tol 0.000005)
+STOP=none
+E_FROZEN=0.1334
+P_BYTES_FROZEN=0.8666

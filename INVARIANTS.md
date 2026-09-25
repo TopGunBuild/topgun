@@ -603,7 +603,7 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   driven exactly once), `cancelled_prune_pass_restores_every_unsettled_ref` (the cancelled limb),
   `prune_guard_drop_is_panic_free_and_gauge_neutral` (guard `Drop` panic-free, naming no
   tombstone-byte counter) and `prune_record_armed_disarmed_gauge_neutral` (limb (b)), in `crdt.rs`.
-  With the default store a key evicted between the prune's read and its write completes as a durable
+  With the default store a key evicted between the prune's residency check and its write completes as a durable
   removal (`Dropped`); `restored_evicted` is reachable only for a store whose `update_in_place` cannot
   materialize the key, and is driven by
   `prune_restores_the_ref_when_the_store_cannot_materialize_the_evicted_key` (SPEC-374).
@@ -665,13 +665,14 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:** two OR-Map states with the same tag/tombstone SETS hash identically regardless
   of insertion order (tags and tombstones sorted before hashing).
 - **Maintaining code:** the sort in `merkle_leaf_hash`.
-- **Enforcing test:** `NAKED for the order-independence claim (TODO-602)` — adjacent coverage
-  only (buffered-vs-flushed fixed-sequence equality; LWW-arm hash format).
+- **Enforcing test:** Rust arm `or_leaf_hash_matches_oracle_and_ignores_input_order` (`map_data_store.rs`); NAKED for the TS mirror (TODO-602).
+  The proptest shuffles the input order of `records` and of `tombstones` and asserts an equal hash,
+  and pins the streamed hash to the joined-string formula it replaced.
 - **Violation consequence:** false Merkle mismatches → sync storms, or false matches → silent
   divergence; breaks the SPEC-349 semantic-set recovery warrant.
 - **Discovered by:** extraction pilot audit; load-bearing for SPEC-346/349 (the /xask
   Merkle-ordering caveat was refuted BY this sort — the sort itself deserves a test).
-- **Status:** decided (code sorts); enforcement NAKED.
+- **Status:** decided (code sorts); Rust arm enforced, TS mirror NAKED.
 
 ### TG-SYNC-001: At most one terminal verdict per op per exchange, exactly one when the exchange acks
 
