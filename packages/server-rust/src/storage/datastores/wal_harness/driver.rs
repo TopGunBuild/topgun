@@ -1321,6 +1321,22 @@ impl Driver {
                         )
                         .await
                 }
+                DelayedOp::StoreCell {
+                    cell,
+                    expiration_time,
+                } => {
+                    let value = cell.lock().value.clone();
+                    store
+                        .inner
+                        .add(
+                            &entry.map,
+                            &entry.key,
+                            &value,
+                            *expiration_time,
+                            entry.store_time,
+                        )
+                        .await
+                }
                 DelayedOp::Remove => {
                     store
                         .inner

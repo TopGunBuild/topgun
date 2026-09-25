@@ -15,8 +15,9 @@ use tokio::sync::{watch, Notify};
 use topgun_core::{fnv1a_hash, PARTITION_COUNT};
 use tracing::{error, warn};
 
+use crate::storage::engine::{new_slot_cell, SlotCell};
 use crate::storage::map_data_store::{
-    merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+    merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor, WriteSource,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{
@@ -452,6 +453,12 @@ pub(crate) enum DelayedOp {
         value: RecordValue,
         expiration_time: i64,
     },
+    /// Buffered in-place write: the flush persists the cell's value as it is
+    /// at flush time.
+    StoreCell {
+        cell: Arc<SlotCell>,
+        expiration_time: i64,
+    },
     /// Buffered remove (tombstone).
     Remove,
 }
@@ -848,7 +855,54 @@ struct StagingSlot {
     /// Sequence of the write that set this staged value (`DelayedEntry.sequence`).
     seq: u64,
     /// `Some(value)` = pending write, `None` = pending delete.
-    value: Option<RecordValue>,
+    value: Option<StagedValue>,
+}
+
+/// A pending write's value in the staging overlay: an owned value (a plain
+/// `add`), or the cell of an in-place write.
+#[derive(Clone)]
+enum StagedValue {
+    Value(RecordValue),
+    Cell(Arc<SlotCell>),
+}
+
+impl StagedValue {
+    /// An owned copy of the staged value, read under the cell's lock for a cell.
+    fn to_value(&self) -> RecordValue {
+        match self {
+            StagedValue::Value(value) => value.clone(),
+            StagedValue::Cell(cell) => cell.lock().value.clone(),
+        }
+    }
+}
+
+/// The queue operation and the staging value for one write. A value is queued
+/// and staged as two copies; an in-place write's cell is copied into a cell of
+/// its own for each.
+fn queued_and_staged(src: WriteSource<'_>, expiration_time: i64) -> (DelayedOp, StagedValue) {
+    match src {
+        WriteSource::Value(value) => (
+            DelayedOp::Store {
+                value: value.clone(),
+                expiration_time,
+            },
+            StagedValue::Value(value.clone()),
+        ),
+        WriteSource::Cell(cell) => (
+            DelayedOp::StoreCell {
+                cell: copy_cell(cell),
+                expiration_time,
+            },
+            StagedValue::Cell(copy_cell(cell)),
+        ),
+    }
+}
+
+/// A new, unshared cell holding a copy of `cell`'s record. Every hand-off of
+/// an in-place write takes one, so a queued entry and its staging slot never
+/// share a cell with the engine or with each other.
+fn copy_cell(cell: &Arc<SlotCell>) -> Arc<SlotCell> {
+    new_slot_cell(cell.lock().clone())
 }
 
 /// Per-partition `wal_seq` state: which sequences are still unresolved, why,
@@ -1202,6 +1256,31 @@ impl WriteBehindDataStore {
         self.pending_seqs().insert(seq);
     }
 
+    /// The cell of the queued in-place write for `(map, key)`, if the key's
+    /// queued entry is one. Entries already dequeued by a flush are not seen.
+    #[cfg(test)]
+    pub(crate) fn test_pending_cell(&self, map: &str, key: &str) -> Option<Arc<SlotCell>> {
+        let queue = self.queues.get(&partition_for(map, key))?;
+        match &queue
+            .entries
+            .get(&(map.to_string(), key.to_string()))?
+            .operation
+        {
+            DelayedOp::StoreCell { cell, .. } => Some(Arc::clone(cell)),
+            DelayedOp::Store { .. } | DelayedOp::Remove => None,
+        }
+    }
+
+    /// The cell staged for `(map, key)`, if its staging slot holds one.
+    #[cfg(test)]
+    pub(crate) fn test_staged_cell(&self, map: &str, key: &str) -> Option<Arc<SlotCell>> {
+        let slot = self.staging.get(&(map.to_string(), key.to_string()))?;
+        match &slot.value {
+            Some(StagedValue::Cell(cell)) => Some(Arc::clone(cell)),
+            Some(StagedValue::Value(_)) | None => None,
+        }
+    }
+
     /// Selects the watermark rule this store computes with.
     ///
     /// Reachable from sibling test modules, which Rust privacy otherwise keeps
@@ -1535,7 +1614,10 @@ impl WriteBehindDataStore {
         let mut pending = BTreeMap::new();
         for entry in &self.staging {
             if entry.key().0 == map {
-                pending.insert(entry.key().1.clone(), entry.value().value.clone());
+                pending.insert(
+                    entry.key().1.clone(),
+                    entry.value().value.as_ref().map(StagedValue::to_value),
+                );
             }
         }
         pending
@@ -1569,7 +1651,7 @@ impl WriteBehindDataStore {
     /// newer staged value (a plain `insert` is last-writer-wins by wall-clock,
     /// not by `seq`). The monotonic guard makes the slot's `seq` truthful, which
     /// is the identity [`clear_staging_if_current`] relies on.
-    fn stage(&self, map: &str, key: &str, seq: u64, value: Option<RecordValue>) {
+    fn stage(&self, map: &str, key: &str, seq: u64, value: Option<StagedValue>) {
         use dashmap::mapref::entry::Entry;
         match self.staging.entry((map.to_string(), key.to_string())) {
             Entry::Occupied(mut e) => {
@@ -2107,6 +2189,45 @@ impl WriteBehindDataStore {
 ///
 /// Runs until the shutdown signal is received. Wakes on either the configured
 /// interval or an explicit notify (from `soft_flush`/`hard_flush`).
+/// Persists one dequeued entry to the inner store — the single body the
+/// background flush and the shutdown drain share.
+async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow::Result<()> {
+    match &entry.operation {
+        DelayedOp::Store {
+            value,
+            expiration_time,
+        } => {
+            inner
+                .add(
+                    &entry.map,
+                    &entry.key,
+                    value,
+                    *expiration_time,
+                    entry.store_time,
+                )
+                .await
+        }
+        DelayedOp::StoreCell {
+            cell,
+            expiration_time,
+        } => {
+            // Copied out under the lock: the guard must not be held across the
+            // inner store's await.
+            let value = cell.lock().value.clone();
+            inner
+                .add(
+                    &entry.map,
+                    &entry.key,
+                    &value,
+                    *expiration_time,
+                    entry.store_time,
+                )
+                .await
+        }
+        DelayedOp::Remove => inner.remove(&entry.map, &entry.key, entry.store_time).await,
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Receiver<bool>) {
     let interval = tokio::time::Duration::from_millis(store.config.flush_interval_ms);
@@ -2162,29 +2283,7 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
         // Process in batches
         for batch in ready_entries.chunks(store.config.batch_size as usize) {
             for entry in batch {
-                let result = match &entry.operation {
-                    DelayedOp::Store {
-                        value,
-                        expiration_time,
-                    } => {
-                        store
-                            .inner
-                            .add(
-                                &entry.map,
-                                &entry.key,
-                                value,
-                                *expiration_time,
-                                entry.store_time,
-                            )
-                            .await
-                    }
-                    DelayedOp::Remove => {
-                        store
-                            .inner
-                            .remove(&entry.map, &entry.key, entry.store_time)
-                            .await
-                    }
-                };
+                let result = persist_entry(store.inner.as_ref(), entry).await;
 
                 let partition_id_for_wal = partition_for(&entry.map, &entry.key);
                 match result {
@@ -2326,8 +2425,15 @@ impl MapDataStore for WriteBehindDataStore {
         // LWW write, bulk and SYNC ingestion, cross-node merge, rehydration —
         // arrives here, and it is the same code the witness-bearing callers run
         // with the witness set. A second body would let the two drift.
-        self.add_with_witness(map, key, value, expiration_time, now, None)
-            .await
+        self.add_with_witness(
+            map,
+            key,
+            WriteSource::Value(value),
+            expiration_time,
+            now,
+            None,
+        )
+        .await
     }
 
     /// Whether the mutation point should build an OR witness for this store.
@@ -2346,7 +2452,7 @@ impl MapDataStore for WriteBehindDataStore {
         &self,
         map: &str,
         key: &str,
-        value: &RecordValue,
+        src: WriteSource<'_>,
         expiration_time: i64,
         now: i64,
         witness: Option<&OrDelta>,
@@ -2389,11 +2495,13 @@ impl MapDataStore for WriteBehindDataStore {
         // carry their own per-entry timestamps inside the record, so it stays
         // None for them — including for the delta framing below, whose payload
         // is an OR mutation by construction.
-        let wal_timestamp = if let RecordValue::Lww { timestamp, .. } = value {
-            Some(timestamp.clone())
-        } else {
-            None
-        };
+        let wal_timestamp = src.with_value(|value| {
+            if let RecordValue::Lww { timestamp, .. } = value {
+                Some(timestamp.clone())
+            } else {
+                None
+            }
+        });
         // FAIL-CLOSED CONJUNCTION. The config's arming flag is the AUTHORITY —
         // one flag, the same field `wants_or_witness` returns — and the
         // witness is EVIDENCE, never authority. A `Some` witness with the
@@ -2425,7 +2533,7 @@ impl MapDataStore for WriteBehindDataStore {
                 delta: delta.clone(),
             },
             _ => WalOp::Store {
-                value: WalStorePayload::Record(value.clone()),
+                value: WalStorePayload::Record(src.to_value()),
                 expiration_time: if expiration_time == 0 {
                     None
                 } else {
@@ -2456,13 +2564,11 @@ impl MapDataStore for WriteBehindDataStore {
         // Assign and track the durability sequence atomically (see
         // `assign_tracked_sequence`) BEFORE the entry enters the queue.
         let entry_seq = self.assign_tracked_sequence();
+        let (operation, staged) = queued_and_staged(src, expiration_time);
         let entry = DelayedEntry {
             map: map.to_string(),
             key: key.to_string(),
-            operation: DelayedOp::Store {
-                value: value.clone(),
-                expiration_time,
-            },
+            operation,
             store_time: now,
             sequence: entry_seq,
             retry_count: 0,
@@ -2515,7 +2621,7 @@ impl MapDataStore for WriteBehindDataStore {
 
         // Update staging area for read-your-writes
         let (smap, skey) = staging_key;
-        self.stage(&smap, &skey, entry_seq, Some(value.clone()));
+        self.stage(&smap, &skey, entry_seq, Some(staged));
 
         Ok(())
     }
@@ -2646,7 +2752,7 @@ impl MapDataStore for WriteBehindDataStore {
         // Check staging first for read-your-writes consistency
         if let Some(entry) = self.staging.get(&staging_key) {
             return match &entry.value().value {
-                Some(value) => Ok(Some(value.clone())),
+                Some(value) => Ok(Some(value.to_value())),
                 // Pending delete -- do not consult inner store
                 None => Ok(None),
             };
@@ -2668,7 +2774,7 @@ impl MapDataStore for WriteBehindDataStore {
             let staging_key = (map.to_string(), key.clone());
             if let Some(entry) = self.staging.get(&staging_key) {
                 if let Some(value) = &entry.value().value {
-                    results.push((key.clone(), value.clone()));
+                    results.push((key.clone(), value.to_value()));
                 }
                 // Pending delete (None) -- skip entirely, do not fetch from inner
             } else {
@@ -3014,29 +3120,7 @@ impl MapDataStore for WriteBehindDataStore {
                     continue;
                 }
 
-                let flush_future = async {
-                    match &entry.operation {
-                        DelayedOp::Store {
-                            value,
-                            expiration_time,
-                        } => {
-                            self.inner
-                                .add(
-                                    &entry.map,
-                                    &entry.key,
-                                    value,
-                                    *expiration_time,
-                                    entry.store_time,
-                                )
-                                .await
-                        }
-                        DelayedOp::Remove => {
-                            self.inner
-                                .remove(&entry.map, &entry.key, entry.store_time)
-                                .await
-                        }
-                    }
-                };
+                let flush_future = persist_entry(self.inner.as_ref(), &entry);
 
                 let partition_id_for_wal = partition_for(&entry.map, &entry.key);
                 match tokio::time::timeout(remaining, flush_future).await {
@@ -5451,12 +5535,12 @@ mod tests {
     async fn stage_is_monotonic_by_seq() {
         let (store, _dir) = redb_backed_store();
 
-        store.stage("m", "k", 10, Some(lww("v10", 10)));
+        store.stage("m", "k", 10, Some(StagedValue::Value(lww("v10", 10))));
         // A higher seq replaces.
-        store.stage("m", "k", 11, Some(lww("v11", 11)));
+        store.stage("m", "k", 11, Some(StagedValue::Value(lww("v11", 11))));
         assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
         // A late, lower seq is rejected (does not clobber the newer value).
-        store.stage("m", "k", 10, Some(lww("v10", 10)));
+        store.stage("m", "k", 10, Some(StagedValue::Value(lww("v10", 10))));
         assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
         // Equal seq (same write, idempotent) is allowed.
         store.stage("m", "k", 11, None);
@@ -5975,7 +6059,7 @@ mod tests {
             .add_with_witness(
                 "rooms",
                 "lobby",
-                &pinned_or_snapshot(),
+                WriteSource::Value(&pinned_or_snapshot()),
                 0,
                 1_700_000_000_000,
                 Some(&delta),
@@ -6043,7 +6127,7 @@ mod tests {
             .add_with_witness(
                 "rooms",
                 "lobby",
-                &snapshot,
+                WriteSource::Value(&snapshot),
                 0,
                 1_700_000_000_000,
                 Some(&OrDelta::Add {
@@ -6097,7 +6181,7 @@ mod tests {
                 .add_with_witness(
                     "rooms",
                     "lobby",
-                    &pinned_or_snapshot(),
+                    WriteSource::Value(&pinned_or_snapshot()),
                     0,
                     1_700_000_000_000,
                     witness,
@@ -6210,7 +6294,7 @@ mod tests {
             .add_with_witness(
                 "rooms",
                 "lobby",
-                &pinned_or_snapshot(),
+                WriteSource::Value(&pinned_or_snapshot()),
                 0,
                 1_700_000_000_000,
                 Some(&OrDelta::Add {
@@ -6283,7 +6367,7 @@ mod tests {
             .add_with_witness(
                 &golden.map,
                 &golden.key,
-                &pinned_or_snapshot(),
+                WriteSource::Value(&pinned_or_snapshot()),
                 0,
                 1_700_000_000_000,
                 Some(&golden_delta),

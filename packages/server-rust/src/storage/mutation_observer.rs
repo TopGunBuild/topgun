@@ -13,6 +13,19 @@ use super::record::{Record, RecordValue};
 /// Implementations can track statistics, maintain indexes, broadcast
 /// change events, or perform other side effects in response to data changes.
 ///
+/// # Contract: synchronous, no re-entry into the store
+///
+/// The in-place write path fires `on_load`, `on_put` and `on_update` while it
+/// holds the lock of the key's slot cell, so the observers borrow the record
+/// instead of receiving a copy. An implementation therefore MUST return
+/// without calling back into the record store or its storage engine (no
+/// `get`, `put`, `evict`, `remove`, `update_in_place`, ... on any key): the
+/// cell lock is not re-entrant, and an engine operation on the same key would
+/// wait for the lock its own caller holds. Hand work that needs the store to
+/// another task (a channel, a queue) instead. The callbacks must also stay
+/// short and must not block, since every other writer of the key waits on the
+/// same lock.
+///
 /// Used as `Arc<dyn MutationObserver>`.
 pub trait MutationObserver: Send + Sync {
     /// Called after a new record is inserted.

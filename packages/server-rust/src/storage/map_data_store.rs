@@ -12,9 +12,11 @@
 //! snapshot, so no re-enumeration is needed per query.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use super::engine::SlotCell;
 use super::record::RecordValue;
 use super::wal::OrDelta;
 use topgun_core::hash::{fnv1a_hash, fnv1a_update, FNV1A_OFFSET_BASIS};
@@ -166,6 +168,46 @@ pub trait LeafSink: Send {
 /// every mutation arrive through [`add()`](MapDataStore::add), unchanged. The
 /// implementation decides when and how to actually persist the data.
 ///
+/// The record a write-through persists: a borrowed value, or the cell the
+/// engine mutated in place.
+///
+/// A store that buffers writes can hold the cell instead of a copy of its
+/// value; any other store reads the value under the cell's lock.
+#[derive(Clone, Copy)]
+pub enum WriteSource<'a> {
+    /// A value owned by the caller.
+    Value(&'a RecordValue),
+    /// The engine's cell for the key, holding the record just written.
+    Cell(&'a Arc<SlotCell>),
+}
+
+impl WriteSource<'_> {
+    /// Runs `f` over the value, under the cell's lock for a cell. The guard
+    /// never escapes `f`, so it cannot be held across an `.await`.
+    pub fn with_value<R>(&self, f: impl FnOnce(&RecordValue) -> R) -> R {
+        match self {
+            WriteSource::Value(value) => f(value),
+            WriteSource::Cell(cell) => f(&cell.lock().value),
+        }
+    }
+
+    /// An owned copy of the value.
+    #[must_use]
+    pub fn to_value(&self) -> RecordValue {
+        self.with_value(RecordValue::clone)
+    }
+}
+
+/// A key's state as the data store answers it for materialization: a decoded
+/// value, or the cell a pending write of the key still holds.
+#[derive(Debug)]
+pub enum Loaded {
+    /// A value read (or copied) from the store.
+    Value(RecordValue),
+    /// The cell of the key's pending write.
+    Cell(Arc<SlotCell>),
+}
+
 /// Used as `Arc<dyn MapDataStore>`.
 #[async_trait]
 pub trait MapDataStore: Send + Sync {
@@ -192,14 +234,19 @@ pub trait MapDataStore: Send + Sync {
     /// every caller whenever [`wants_or_witness()`](MapDataStore::wants_or_witness)
     /// answered `false`.
     ///
+    /// `src` is the record: a borrowed value, or the engine's cell for the key
+    /// (see [`WriteSource`]).
+    ///
     /// The default body delegates to [`add()`](MapDataStore::add) and IGNORES
     /// the witness, so a backend that consumes no deltas persists exactly what
-    /// it persists without this method and needs no override.
+    /// it persists without this method and needs no override. A cell is read
+    /// by copying its value out under the lock, so the lock is never held
+    /// across the `add()` await.
     async fn add_with_witness(
         &self,
         map: &str,
         key: &str,
-        value: &RecordValue,
+        src: WriteSource<'_>,
         expiration_time: i64,
         now: i64,
         witness: Option<&OrDelta>,
@@ -208,7 +255,38 @@ pub trait MapDataStore: Send + Sync {
         // witness has nowhere to put one, and the full value below is a
         // complete record of the mutation on its own.
         let _ = witness;
-        self.add(map, key, value, expiration_time, now).await
+        match src {
+            WriteSource::Value(value) => self.add(map, key, value, expiration_time, now).await,
+            WriteSource::Cell(cell) => {
+                let value = cell.lock().value.clone();
+                self.add(map, key, &value, expiration_time, now).await
+            }
+        }
+    }
+
+    /// Whether [`add_encoded()`](MapDataStore::add_encoded) persists a record
+    /// from its msgpack encoding. A store answering `true` lets a buffering
+    /// caller encode a record under its cell lock instead of copying it out.
+    /// Defaulted to `false`.
+    fn accepts_encoded(&self) -> bool {
+        false
+    }
+
+    /// Persist a record from its msgpack encoding (`rmp_serde::to_vec_named` of
+    /// the `RecordValue`), storing exactly what [`add()`](MapDataStore::add)
+    /// stores for that value. Called only when
+    /// [`accepts_encoded()`](MapDataStore::accepts_encoded) is `true`; the
+    /// default body refuses.
+    async fn add_encoded(
+        &self,
+        map: &str,
+        key: &str,
+        bytes: &[u8],
+        expiration_time: i64,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        let _ = (bytes, expiration_time, now);
+        anyhow::bail!("this store does not accept encoded records (map={map} key={key})")
     }
 
     /// Whether this store consumes the `witness` handed to
@@ -242,6 +320,13 @@ pub trait MapDataStore: Send + Sync {
     ///
     /// Returns `None` if the key does not exist.
     async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>>;
+
+    /// Load a single key for materialization into the engine. A store that
+    /// buffers writes may answer with the cell its pending write holds, so the
+    /// engine can adopt it; the default body wraps [`load()`](MapDataStore::load).
+    async fn load_slot(&self, map: &str, key: &str) -> anyhow::Result<Option<Loaded>> {
+        Ok(self.load(map, key).await?.map(Loaded::Value))
+    }
 
     /// Load multiple records from the backing store.
     async fn load_all(

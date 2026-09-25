@@ -2120,7 +2120,9 @@ mod tests {
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
-    use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
+    use crate::storage::map_data_store::{
+        LeafSink, MapDataStore, ScanBatch, ScanCursor, WriteSource,
+    };
     use crate::storage::mutation_observer::MutationObserver;
     use crate::storage::record::Record;
     use crate::storage::record_store::RecordStore;
@@ -5220,11 +5222,12 @@ mod tests {
             &self,
             map: &str,
             key: &str,
-            value: &RecordValue,
+            src: WriteSource<'_>,
             expiration_time: i64,
             now: i64,
             witness: Option<&OrDelta>,
         ) -> anyhow::Result<()> {
+            let value = src.to_value();
             self.observed.lock().push(WitnessObservation {
                 map: map.to_string(),
                 key: key.to_string(),
@@ -5233,10 +5236,10 @@ mod tests {
             });
             if let Some(inner) = &self.inner {
                 return inner
-                    .add_with_witness(map, key, value, expiration_time, now, witness)
+                    .add_with_witness(map, key, src, expiration_time, now, witness)
                     .await;
             }
-            self.add(map, key, value, expiration_time, now).await
+            self.add(map, key, &value, expiration_time, now).await
         }
 
         fn wants_or_witness(&self) -> bool {

@@ -10,8 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
-use crate::storage::engine::{FetchResult, IterationCursor, PutIfAbsentOutcome, StorageEngine};
-use crate::storage::map_data_store::MapDataStore;
+use crate::storage::engine::{
+    FetchResult, IterationCursor, PutIfAbsentOutcome, SlotInit, StorageEngine,
+};
+use crate::storage::map_data_store::{MapDataStore, WriteSource};
 use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
 use crate::storage::record_store::{
@@ -89,6 +91,52 @@ impl DefaultRecordStore {
         }
     }
 
+    /// Fires the observers for an in-place write, matching `put()`: `on_put`
+    /// for a fresh insert, `on_update` for an existing record, and `on_load`
+    /// then `on_update` for a key materialized from the data store. Called
+    /// under the key's cell lock.
+    fn notify_in_place_write(
+        &self,
+        key: &str,
+        record: &Record,
+        inserted: bool,
+        pre_image: Option<RecordValue>,
+    ) {
+        // Fire observer notifications matching put(): on_put for a fresh insert,
+        // on_update for an existing record. The OR observers never read the
+        // pre-image (the index observer skips OrMap; search/embedding handle only
+        // Lww; merkle/query use the new value), so the new value is passed as the
+        // old value rather than re-cloning the resident slot this seam exists to
+        // stop churning.
+        //
+        // A record materialized from the data store is a residency transition
+        // followed by a write: `on_load` with the durable pre-image, then
+        // `on_update` with the post-image (TG-OR-002), never `on_put` — the key
+        // existed before this write.
+        //
+        // CONTRACT: any observer added later that reads `old_value` for an OrMap
+        // record would receive the post-image here, not the true pre-image. That
+        // is only safe because this seam is OrMap-only; if a future observer needs
+        // the OrMap pre-image, capture a pre-mutation clone in the engine's
+        // Occupied arm and thread it through instead of reusing the new value.
+        match (inserted, pre_image) {
+            (true, Some(pre)) => {
+                let loaded_record = Record {
+                    value: pre,
+                    metadata: record.metadata.clone(),
+                };
+                self.observer.on_load(key, &loaded_record, false);
+                self.observer
+                    .on_update(key, record, &record.value, &record.value, false);
+            }
+            (true, None) => self.observer.on_put(key, record, None, false),
+            (false, _) => {
+                self.observer
+                    .on_update(key, record, &record.value, &record.value, false);
+            }
+        }
+    }
+
     /// Computes `expiration_time` from the expiry policy and config defaults.
     ///
     /// Returns 0 if no TTL applies (the record does not expire based on absolute time).
@@ -150,10 +198,12 @@ impl RecordStore for DefaultRecordStore {
                 metadata.on_store(now);
                 let record = Record { value, metadata };
                 return Ok(Some(
-                    match self
-                        .engine
-                        .put_if_absent_at(key, record.clone(), generation)
-                    {
+                    match self.engine.put_if_absent_at(
+                        key,
+                        SlotInit::Value(record.value.clone()),
+                        record.metadata.clone(),
+                        generation,
+                    ) {
                         PutIfAbsentOutcome::Inserted => {
                             self.observer.on_load(key, &record, false);
                             record
@@ -307,8 +357,14 @@ impl RecordStore for DefaultRecordStore {
         // the pre-image for `on_load` when the materialized record is inserted.
         let mut pre_image: Option<RecordValue> = None;
         let outcome = if self.data_store.is_null() {
-            self.engine
-                .update_in_place(key, now, init, None, &mut engine_mutate, &cost_of)
+            self.engine.update_in_place(
+                key,
+                now,
+                init.map(SlotInit::Value),
+                None,
+                &mut engine_mutate,
+                &cost_of,
+            )
         } else {
             // Materialize a durable-but-non-resident key before mutating it, so the
             // write merges into the key's durable value instead of replacing it
@@ -341,7 +397,7 @@ impl RecordStore for DefaultRecordStore {
                     return Ok(false);
                 }
                 pre_image.clone_from(&loaded);
-                let base = loaded.or_else(|| init.clone());
+                let base = loaded.or_else(|| init.clone()).map(SlotInit::Value);
                 let attempt = self.engine.update_in_place(
                     key,
                     now,
@@ -356,50 +412,28 @@ impl RecordStore for DefaultRecordStore {
             }
         };
 
-        let (record, inserted) = match outcome {
+        let (cell, inserted) = match outcome {
             UpdateInPlaceOutcome::Absent
             | UpdateInPlaceOutcome::Unchanged
             | UpdateInPlaceOutcome::Stale => return Ok(false),
-            UpdateInPlaceOutcome::Written { record, inserted } => (record, inserted),
+            UpdateInPlaceOutcome::Written { cell, inserted } => (cell, inserted),
         };
 
-        // Capture the token off the record just written, before any concurrent
-        // writer can replace the slot — the exact-identity key for mark_stored.
-        let write_token = record.metadata.write_token;
+        // The observers borrow the record under the cell lock. The guard lives
+        // in this block only, so it is released before the write-through
+        // awaits; an observer must not call back into the engine (see
+        // `MutationObserver`).
+        let write_token = {
+            let record = cell.lock();
 
-        // Fire observer notifications matching put(): on_put for a fresh insert,
-        // on_update for an existing record. The OR observers never read the
-        // pre-image (the index observer skips OrMap; search/embedding handle only
-        // Lww; merkle/query use the new value), so the new value is passed as the
-        // old value rather than re-cloning the resident slot this seam exists to
-        // stop churning.
-        //
-        // A record materialized from the data store is a residency transition
-        // followed by a write: `on_load` with the durable pre-image, then
-        // `on_update` with the post-image (TG-OR-002), never `on_put` — the key
-        // existed before this write.
-        //
-        // CONTRACT: any observer added later that reads `old_value` for an OrMap
-        // record would receive the post-image here, not the true pre-image. That
-        // is only safe because this seam is OrMap-only; if a future observer needs
-        // the OrMap pre-image, capture a pre-mutation clone in the engine's
-        // Occupied arm and thread it through instead of reusing the new value.
-        match (inserted, pre_image) {
-            (true, Some(pre)) => {
-                let loaded_record = Record {
-                    value: pre,
-                    metadata: record.metadata.clone(),
-                };
-                self.observer.on_load(key, &loaded_record, false);
-                self.observer
-                    .on_update(key, &record, &record.value, &record.value, false);
-            }
-            (true, None) => self.observer.on_put(key, &record, None, false),
-            (false, _) => {
-                self.observer
-                    .on_update(key, &record, &record.value, &record.value, false);
-            }
-        }
+            // Capture the token off the record just written, before any
+            // concurrent writer can replace the slot — the exact-identity key for
+            // mark_stored.
+            let write_token = record.metadata.write_token;
+
+            self.notify_in_place_write(key, &record, inserted, pre_image);
+            write_token
+        };
 
         // Write-through for Client or CrdtMerge provenance — byte-identical to
         // put()'s full-snapshot durable write, so crash recovery is unchanged.
@@ -416,7 +450,7 @@ impl RecordStore for DefaultRecordStore {
                 .add_with_witness(
                     &self.name,
                     key,
-                    &record.value,
+                    WriteSource::Cell(&cell),
                     expiration_time,
                     now,
                     witness.as_ref(),
@@ -1658,7 +1692,7 @@ mod tests {
         use std::time::Duration;
 
         use crate::storage::engine::{
-            FetchResult as EngineFetch, PutIfAbsentOutcome, UpdateInPlaceOutcome,
+            FetchResult as EngineFetch, PutIfAbsentOutcome, SlotCell, UpdateInPlaceOutcome,
         };
         use crate::storage::map_data_store::{LeafSink, ScanBatch, ScanCursor};
 
@@ -2119,7 +2153,7 @@ mod tests {
                 &self,
                 key: &str,
                 now: i64,
-                init: Option<RecordValue>,
+                init: Option<SlotInit>,
                 init_generation: Option<u64>,
                 mutate: &mut dyn FnMut(&mut RecordValue) -> bool,
                 cost_of: &dyn Fn(&RecordValue) -> u64,
@@ -2135,10 +2169,11 @@ mod tests {
             fn put_if_absent_at(
                 &self,
                 key: &str,
-                record: Record,
+                init: SlotInit,
+                metadata: RecordMetadata,
                 generation: u64,
             ) -> PutIfAbsentOutcome {
-                self.inner.put_if_absent_at(key, record, generation)
+                self.inner.put_if_absent_at(key, init, metadata, generation)
             }
 
             fn remove(&self, key: &str) -> Option<Record> {
@@ -2198,6 +2233,10 @@ mod tests {
 
             fn random_samples(&self, sample_count: usize) -> Vec<(String, Record)> {
                 self.inner.random_samples(sample_count)
+            }
+
+            fn test_slot(&self, key: &str) -> Option<Arc<SlotCell>> {
+                self.inner.test_slot(key)
             }
         }
 
@@ -2479,10 +2518,10 @@ mod tests {
             let store = make_store();
             let t = 1_000_000;
             let cost = |_: &RecordValue| 1;
-            let UpdateInPlaceOutcome::Written { record, .. } = store.storage().update_in_place(
+            let UpdateInPlaceOutcome::Written { cell, .. } = store.storage().update_in_place(
                 KEY,
                 t,
-                Some(or_value(&["a"], &[])),
+                Some(SlotInit::Value(or_value(&["a"], &[]))),
                 None,
                 &mut |_| true,
                 &cost,
@@ -2491,7 +2530,7 @@ mod tests {
             };
             assert!(store
                 .storage()
-                .mark_stored(KEY, t, record.metadata.write_token));
+                .mark_stored(KEY, t, cell.lock().metadata.write_token));
 
             let UpdateInPlaceOutcome::Written { .. } = store.storage().update_in_place(
                 KEY,
@@ -2557,6 +2596,76 @@ mod tests {
                 manager.aggregate_ormap_root_hash(MAP),
                 reference.aggregate_ormap_root_hash(MAP),
                 "the removed key's leaf must be gone from the in-memory Merkle tree"
+            );
+        }
+
+        // A pending key evicted while its in-place write is still queued: the
+        // next write re-adopts the queued entry's cell through the
+        // generation-checked insert instead of materializing a copy, and the
+        // flush persists every op (TG-WB-003, TG-OR-007).
+        #[tokio::test]
+        #[ignore = "red until the staged cell is re-adopted"]
+        async fn an_evicted_cell_is_re_adopted_while_its_flush_is_pending() {
+            use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let inner = redb(&dir);
+            inner
+                .add(MAP, KEY, &or_value(&["old"], &[]), 0, 0)
+                .await
+                .expect("seed");
+            // The flush loop never fires on its own: the test drives the only
+            // flush, after the re-adoption.
+            let write_behind = WriteBehindDataStore::new(
+                Arc::clone(&inner),
+                WriteBehindConfig {
+                    write_delay_ms: 600_000,
+                    flush_interval_ms: 600_000,
+                    ..WriteBehindConfig::default()
+                },
+            );
+            let store = store_over(
+                Arc::clone(&write_behind) as Arc<dyn MapDataStore>,
+                Box::new(HashMapStorage::new()),
+                Vec::new(),
+            );
+
+            assert!(or_add(&store, "op").await.expect("or_add op"));
+            assert!(
+                write_behind.test_pending_cell(MAP, KEY).is_some(),
+                "precondition: the in-place write is queued as a cell entry"
+            );
+            assert!(
+                store.evict_lru(u32::MAX, false) > 0,
+                "precondition: the marked-clean pending key is evicted"
+            );
+            assert!(!store.exists_in_memory(KEY), "precondition: evicted");
+
+            assert!(or_add(&store, "op2").await.expect("or_add op2"));
+            let slot = store
+                .storage()
+                .test_slot(KEY)
+                .expect("op2 must materialize the key");
+            let pending = write_behind
+                .test_pending_cell(MAP, KEY)
+                .expect("op2 must queue a cell entry");
+            let staged = write_behind
+                .test_staged_cell(MAP, KEY)
+                .expect("op2 must stage a cell");
+            assert!(
+                Arc::ptr_eq(&slot, &pending),
+                "engine must hold the queued entry's cell after re-adoption"
+            );
+            assert!(
+                Arc::ptr_eq(&pending, &staged),
+                "the queued entry and its staging slot must share one cell"
+            );
+
+            write_behind.hard_flush().await.expect("hard_flush");
+            assert_eq!(
+                durable_tags(&inner).await,
+                Some(strings(&["old", "op", "op2"])),
+                "the flush must persist old, op and op2"
             );
         }
     }

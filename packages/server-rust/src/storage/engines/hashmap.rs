@@ -6,13 +6,18 @@
 
 use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::Arc;
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use rand::Rng;
 
+#[cfg(test)]
+use crate::storage::engine::SlotCell;
 use crate::storage::engine::{
-    FetchResult, IterationCursor, PutIfAbsentOutcome, StorageEngine, UpdateInPlaceOutcome,
+    new_slot_cell, FetchResult, IterationCursor, PutIfAbsentOutcome, SlotInit, StorageEngine,
+    UpdateInPlaceOutcome,
 };
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
 
@@ -112,7 +117,7 @@ impl StorageEngine for HashMapStorage {
         &self,
         key: &str,
         now: i64,
-        init: Option<RecordValue>,
+        init: Option<SlotInit>,
         init_generation: Option<u64>,
         mutate: &mut dyn FnMut(&mut RecordValue) -> bool,
         cost_of: &dyn Fn(&RecordValue) -> u64,
@@ -133,12 +138,12 @@ impl StorageEngine for HashMapStorage {
                 record.metadata.on_update(now);
                 record.metadata.cost = cost_of(&record.value);
                 UpdateInPlaceOutcome::Written {
-                    record: record.clone(),
+                    cell: new_slot_cell(record.clone()),
                     inserted: false,
                 }
             }
             Entry::Vacant(vac) => {
-                let Some(mut value) = init else {
+                let Some(init) = init else {
                     return UpdateInPlaceOutcome::Absent;
                 };
                 // A removal of the key since the caller read `init` means `init`
@@ -147,6 +152,12 @@ impl StorageEngine for HashMapStorage {
                 if init_generation.is_some_and(|g| g != self.vacancy_generation(key)) {
                     return UpdateInPlaceOutcome::Stale;
                 }
+                // Slots hold records, not cells, so a loaded cell is copied into
+                // a slot of its own.
+                let mut value = match init {
+                    SlotInit::Value(value) => value,
+                    SlotInit::Cell(cell) => cell.lock().value.clone(),
+                };
                 if !mutate(&mut value) {
                     return UpdateInPlaceOutcome::Unchanged;
                 }
@@ -155,10 +166,10 @@ impl StorageEngine for HashMapStorage {
                     value,
                     metadata: RecordMetadata::new(now, cost),
                 };
-                let clone = record.clone();
+                let cell = new_slot_cell(record.clone());
                 vac.insert(record);
                 UpdateInPlaceOutcome::Written {
-                    record: clone,
+                    cell,
                     inserted: true,
                 }
             }
@@ -169,14 +180,24 @@ impl StorageEngine for HashMapStorage {
         self.stripe(key).load(Ordering::Acquire)
     }
 
-    fn put_if_absent_at(&self, key: &str, record: Record, generation: u64) -> PutIfAbsentOutcome {
+    fn put_if_absent_at(
+        &self,
+        key: &str,
+        init: SlotInit,
+        metadata: RecordMetadata,
+        generation: u64,
+    ) -> PutIfAbsentOutcome {
         match self.entries.entry(key.to_string()) {
             Entry::Occupied(occ) => PutIfAbsentOutcome::Resident(occ.get().clone()),
             Entry::Vacant(vac) => {
                 if generation != self.vacancy_generation(key) {
                     return PutIfAbsentOutcome::Stale;
                 }
-                vac.insert(record);
+                let value = match init {
+                    SlotInit::Value(value) => value,
+                    SlotInit::Cell(cell) => cell.lock().value.clone(),
+                };
+                vac.insert(Record { value, metadata });
                 PutIfAbsentOutcome::Inserted
             }
         }
@@ -278,6 +299,11 @@ impl StorageEngine for HashMapStorage {
         }
 
         reservoir
+    }
+
+    #[cfg(test)]
+    fn test_slot(&self, key: &str) -> Option<Arc<SlotCell>> {
+        self.entries.get(key).map(|r| new_slot_cell(r.clone()))
     }
 
     fn fetch_keys(&self, cursor: &IterationCursor, size: usize) -> FetchResult<String> {
