@@ -89,6 +89,12 @@ const LEAF_HASH_SLOPE: f64 = 16.0;
 const BASE_LWW_UPDATE: (u64, u64) = (41, 3_267);
 const BASE_LWW_INSERT: (u64, u64) = (40, 3_261);
 
+/// Allowance on the LWW bytes for the write-behind store's boxed
+/// `add_with_witness` future, which grows by 24 B (360 → 384) once the write
+/// takes a `WriteSource` instead of a `&RecordValue`: same allocation count,
+/// one larger block per op.
+const LWW_FUTURE_ALLOWANCE: u64 = 32;
+
 #[derive(Clone, Copy, Debug)]
 struct Reading {
     allocations: u64,
@@ -475,10 +481,12 @@ fn count_alloc_materialize_or_add() {
             "copying path: slope {op:.3} B/entry must be at least 4.5 c = {:.3}",
             4.5 * c
         ),
+        // A materialize keeps one copy (the `on_load` pre-image) and hashes
+        // the slot twice: once for `on_load(pre)`, once for `on_update(post)`.
         Some("after") => assert!(
-            op <= 1.1 * c + LEAF_HASH_SLOPE,
-            "shared cell: slope {op:.3} B/entry must be at most 1.1 c + 16 = {:.3}",
-            1.1 * c + LEAF_HASH_SLOPE
+            op <= 1.1 * (c + 2.0 * LEAF_HASH_SLOPE),
+            "shared cell: slope {op:.3} B/entry must be at most 1.1 (c + 32) = {:.3}",
+            1.1 * (c + 2.0 * LEAF_HASH_SLOPE)
         ),
         _ => {}
     }
@@ -512,13 +520,14 @@ fn count_alloc_lww_update_and_insert() {
     );
     if side().as_deref() == Some("after") {
         assert!(
-            update.allocations <= BASE_LWW_UPDATE.0 && update.bytes <= BASE_LWW_UPDATE.1,
-            "LWW update: {update:?} must not exceed the base {BASE_LWW_UPDATE:?}"
+            update.allocations <= BASE_LWW_UPDATE.0
+                && update.bytes <= BASE_LWW_UPDATE.1 + LWW_FUTURE_ALLOWANCE,
+            "LWW update: {update:?} must be within the base {BASE_LWW_UPDATE:?} + {LWW_FUTURE_ALLOWANCE} B"
         );
         assert!(
             insert.allocations <= BASE_LWW_INSERT.0 + 1
-                && insert.bytes <= BASE_LWW_INSERT.1 + block,
-            "LWW insert: {insert:?} must be within the base {BASE_LWW_INSERT:?} + one cell block ({block} B)"
+                && insert.bytes <= BASE_LWW_INSERT.1 + LWW_FUTURE_ALLOWANCE + block,
+            "LWW insert: {insert:?} must be within the base {BASE_LWW_INSERT:?} + {LWW_FUTURE_ALLOWANCE} B + one cell block ({block} B)"
         );
     }
 }
