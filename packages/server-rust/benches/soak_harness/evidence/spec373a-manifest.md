@@ -289,3 +289,62 @@ their inputs; smoke over every path before the cells; never bisect on `rss_mb`; 
 byte-reproducible — only the sha256 of the LAUNCHED binary counts (console line 1 vs `spec373a-builds.txt`).
 
 ## APPEND-ONLY BELOW
+
+## §3 — carve 9c part a readout: the OR write path allocates 14–18 % fewer bytes per second
+
+Appended 2026-09-25, after the data commit D = `0e899efe` (`docs(soak): record the carve 9c part a count-alloc
+cells`, 45 artifacts, no program or build-input change). The cells ran once, detached, against M′ = `639adc1c`
+(`spec373a-chain.log`: chain start 2026-09-24T19:20:08Z, end 20:32:45Z), after an admission smoke over every path
+whose launch gate (`ORDER=OK`, a verdict line, `SMOKE COMPLETE`) passed. No cell was re-run.
+
+**ORDER=OK at D:** (1) M′ `639adc1c` is an ancestor of D; (2) the §1 prefix sha256 at D is
+`6049ebe12e00f4763713e6e4133c9366b92a4ac3b705fd41ad9c1f5dcfe99a81`, equal to M′'s (the §1 command); (3) the chain's
+own start-of-run check printed `ORDER=OK manifest_commit=639adc1c prefix_sha256=6049ebe1…9a81 programs=9`, and
+`git diff --quiet 639adc1c..D` holds over the nine frozen programs; (4) the build inputs at D equal `4998d884` and
+the working tree was clean over them.
+
+### 3.1 The flags, verbatim (`spec373a.verdict.txt`, exit status 0)
+```
+STOP=none
+VERDICT_BYTES=CONFIRMED
+I=[0.8234,0.8596]
+S_B=0.0034
+E=0.1159
+LIVE_I=[0.9824,1.0237]
+```
+CONFIRMED because `S_B = 0.0034 < E/2 = 0.05795` and `max I = 0.8596 ≤ 1 − E/2 = 0.94205`. STOP-R is false (rate
+`min I 0.8234` vs `1 + max(s_b, s_a) = 1.0395`; live `min LIVE_I 0.9824` vs `1.0238`). Cross ratios:
+`R_a1_b1 0.8567`, `R_a1_b2 0.8596`, `R_a2_b1 0.8234`, `R_a2_b2 0.8263`; `S_A 0.0395`.
+
+### 3.2 The cells
+| cell | server (sha256 on console line 1 = `spec373a-builds.txt`) | PA | PM1 | SKIPPED | RUNNER_EXIT | `BYTES_ALLOC_RATE` B/s (points, window) | `ALLOC_LIVE` B | totalWrites |
+|---|---|---|---|---|---|---|---|---|
+| b1 | pin `f17f8c29…158f` | TRUE | TRUE | 0 | 0 | 55 099 819.13 (15, 420–840 s) | 68 130 048 | 158 580 |
+| a1 | head `bf40ad79…579c` | TRUE | TRUE | 0 | 0 | 47 201 569.63 (15, 450–870 s) | 69 743 296 | 158 975 |
+| b2 | pin `f17f8c29…158f` | TRUE | TRUE | 0 | 0 | 54 911 918.79 (16, 420–900 s) | 69 319 747 | 154 647 |
+| a2 | head `bf40ad79…579c` | TRUE | TRUE | 0 | 0 | 45 371 635.20 (15, 420–840 s) | 68 099 992 | 158 196 |
+
+Every cell printed `RESULT: instrument sound` and `post_mortem_rows=0`. Ops parity (recorded, not gated): total
+writes within 2.8 % across the four cells. `ALLOC_LIVE` is flat (`LIVE_I` within ±2.4 %), as pre-registered: the
+removed copies are transient.
+
+**The after pair is SPEC-373b's before pair.** a1 and a2 — `spec373a-a1.*` and `spec373a-a2.*` in this directory
+(CSV, matrix, harness and runner consoles, scrapes, soak/durable/mechanism JSON), server `bf40ad79…579c` built at the
+freeze `4998d884` — are the reference SPEC-373b measures against.
+
+### 3.3 Observation: the measured cut exceeds E (recorded; decides nothing; not explained)
+The measured cut, `1 − I` = 14.0 %–17.7 %, is larger than the pre-registered `E = 11.6 %` (dhat units, §1) and than
+its stats_alloc-unit estimate of ≈ 9.3 % (§1 Units). The class does not depend on it. **No mechanism is claimed for
+the extra ≈ 3–6 pp.** Candidate mechanisms, named as HYPOTHESES only, for a later carve to test:
+- H-a: the leaf-hash `format!` string grows by several reallocations per call; stats_alloc counts each growth
+  step, and the per-call growth may be larger at the CA cells' ops rate and slot sizes than the dhat-window
+  estimate (⅔ of the dhat `:93` bytes) assumed.
+- H-b: the prune probe's clone share may be larger at the CA cells' ops rate (≈ 175 writes/s) than in the dhat
+  window, whose pin pair served fewer writes (d3l 44 952 in 900 s, §1), so a share measured there under-states it.
+Neither is tested here; the readout, the PR and INVARIANTS.md make no claim about the excess.
+
+### 3.4 Scope
+One host (macOS, M1 Max), count-alloc regime, 900 s cells, the SPEC-370/371/372 matrix. The class reads the
+allocation RATE of the whole server; the per-change mechanism is proven by the local count-alloc tests
+(`count_alloc_leaf_hash`: 106 009 → 16 000 B at N = 1 000; `count_alloc_prune_probe_resident`: p/c 2.000 → 1.000) and
+by AC-1/AC-1b and AC-3g in CI.
