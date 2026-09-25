@@ -27,6 +27,62 @@ pub fn new_slot_cell(record: Record) -> Arc<SlotCell> {
     Arc::new(parking_lot::Mutex::new(record))
 }
 
+/// Debug-build detector for a mutation observer that calls back into a storage
+/// engine while the in-place write path holds a slot-cell lock.
+///
+/// Such a call would wait on a cell lock its own thread holds — a silent hang.
+/// The write path opens a [`observer_reentry::Scope`] around the observers it
+/// runs under the lock, and every engine entry point calls
+/// [`observer_reentry::check`], which panics with a named message instead. In
+/// release builds the scope is a zero-sized value and the check is empty.
+pub mod observer_reentry {
+    #[cfg(debug_assertions)]
+    thread_local! {
+        static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Marks the current thread as running observers under a cell lock until
+    /// dropped; nests.
+    #[must_use = "the scope covers the observers only while it is alive"]
+    pub struct Scope {
+        _private: (),
+    }
+
+    /// Opens a [`Scope`] on the current thread.
+    pub fn enter() -> Scope {
+        #[cfg(debug_assertions)]
+        DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Scope { _private: () }
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            #[cfg(debug_assertions)]
+            DEPTH.with(|depth| depth.set(depth.get() - 1));
+        }
+    }
+
+    /// Guards an engine entry point; `entry` names the operation for the
+    /// message.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, when called inside a [`Scope`] on the current thread.
+    #[inline]
+    pub fn check(entry: &'static str) {
+        #[cfg(debug_assertions)]
+        DEPTH.with(|depth| {
+            assert!(
+                depth.get() == 0,
+                "storage engine re-entered from a mutation observer under a slot-cell lock: \
+                 `{entry}` would wait on the lock its own caller holds"
+            );
+        });
+        #[cfg(not(debug_assertions))]
+        let _ = entry;
+    }
+}
+
 /// What a caller hands the engine to create a key it found absent: an owned
 /// value, or a cell another holder (a pending write-behind entry) already owns.
 #[derive(Debug)]
@@ -177,7 +233,7 @@ pub trait StorageEngine: Send + Sync + 'static {
     ///
     /// On a `true` return the engine stamps `on_update(now)` (bumping version and
     /// minting a fresh per-write token) and recomputes `metadata.cost` via
-    /// `cost_of` over the mutated value, all under the same lock, then returns a
+    /// `cost_of` over the mutated value, all under the same lock, then returns
     /// the cell holding the mutated record in [`UpdateInPlaceOutcome::Written`].
     ///
     /// Caller obligation: a `mutate` closure that returns `false` MUST NOT have
@@ -191,9 +247,11 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// `Some` and `init_generation` is `Some(g)` with `g` different from the
     /// key's current [`vacancy_generation`](StorageEngine::vacancy_generation),
     /// the call returns [`UpdateInPlaceOutcome::Stale`] without invoking
-    /// `mutate`. Otherwise the value is created from `init` and `mutate` is
-    /// applied: on `true` the fresh record is inserted with metadata minted via
-    /// `RecordMetadata::new`; on `false` nothing is inserted and the call returns
+    /// `mutate`. Otherwise `mutate` is applied to `init`'s value — for a
+    /// [`SlotInit::Cell`], to the cell's own value under its lock — and on
+    /// `true` the slot is inserted with metadata minted via
+    /// `RecordMetadata::new` (a cell is inserted itself, not a copy of it); on
+    /// `false` nothing is inserted and the call returns
     /// [`UpdateInPlaceOutcome::Unchanged`]. The generation check and the insert
     /// happen under the same per-key lock, so no removal can fall between them.
     fn update_in_place(
@@ -221,6 +279,8 @@ pub trait StorageEngine: Send + Sync + 'static {
 
     /// Insert `init` with `metadata` only if the key is absent AND its vacancy
     /// generation still equals `generation`, both checked under the key's lock.
+    /// A [`SlotInit::Cell`] is inserted itself, its metadata replaced by
+    /// `metadata` under its lock.
     fn put_if_absent_at(
         &self,
         key: &str,

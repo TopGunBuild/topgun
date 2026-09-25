@@ -11,9 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 
 use crate::storage::engine::{
-    FetchResult, IterationCursor, PutIfAbsentOutcome, SlotInit, StorageEngine,
+    observer_reentry, FetchResult, IterationCursor, PutIfAbsentOutcome, SlotInit, StorageEngine,
 };
-use crate::storage::map_data_store::{MapDataStore, WriteSource};
+use crate::storage::map_data_store::{Loaded, MapDataStore, WriteSource};
 use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
 use crate::storage::record_store::{
@@ -188,34 +188,67 @@ impl RecordStore for DefaultRecordStore {
         // load makes the insert below refuse the loaded value (TG-OR-007).
         if !self.data_store.is_null() {
             let generation = self.engine.vacancy_generation(key);
-            if let Some(value) = self.data_store.load(&self.name, key).await? {
+            if let Some(loaded) = self.data_store.load_slot(&self.name, key).await? {
                 let now = now_millis();
-                let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
+                let cost_of = |value: &RecordValue| {
+                    crate::storage::record::estimated_cost(value) + key.len() as u64
+                };
                 // A record loaded from the datastore is already persisted, so it
                 // enters the engine clean (last_stored_time = now) and is
                 // immediately eligible for re-eviction in the evict→reload cycle.
-                let mut metadata = RecordMetadata::new(now, cost);
-                metadata.on_store(now);
-                let record = Record { value, metadata };
-                return Ok(Some(
-                    match self.engine.put_if_absent_at(
-                        key,
-                        SlotInit::Value(record.value.clone()),
-                        record.metadata.clone(),
-                        generation,
-                    ) {
-                        PutIfAbsentOutcome::Inserted => {
-                            self.observer.on_load(key, &record, false);
-                            record
+                let clean = |cost: u64| {
+                    let mut metadata = RecordMetadata::new(now, cost);
+                    metadata.on_store(now);
+                    metadata
+                };
+                let outcome = match loaded {
+                    Loaded::Value(value) => {
+                        let metadata = clean(cost_of(&value));
+                        let record = Record { value, metadata };
+                        match self.engine.put_if_absent_at(
+                            key,
+                            SlotInit::Value(record.value.clone()),
+                            record.metadata.clone(),
+                            generation,
+                        ) {
+                            PutIfAbsentOutcome::Inserted => Ok(record),
+                            other => Err((other, record)),
                         }
-                        // A write materialized the key during the load: the
-                        // resident is newer than what was loaded.
-                        PutIfAbsentOutcome::Resident(resident) => resident,
-                        // A removal intervened: answer with what was read, but
-                        // never cache it.
-                        PutIfAbsentOutcome::Stale => record,
-                    },
-                ));
+                    }
+                    // The pending write's cell is adopted as the slot itself;
+                    // the caller gets the one copy the API returns.
+                    Loaded::Cell(cell) => {
+                        let metadata = clean(cost_of(&cell.lock().value));
+                        match self.engine.put_if_absent_at(
+                            key,
+                            SlotInit::Cell(Arc::clone(&cell)),
+                            metadata.clone(),
+                            generation,
+                        ) {
+                            PutIfAbsentOutcome::Inserted => Ok(cell.lock().clone()),
+                            other => Err((
+                                other,
+                                Record {
+                                    value: cell.lock().value.clone(),
+                                    metadata,
+                                },
+                            )),
+                        }
+                    }
+                };
+                return Ok(Some(match outcome {
+                    // Fired outside the cell lock, on the caller's copy.
+                    Ok(record) => {
+                        self.observer.on_load(key, &record, false);
+                        record
+                    }
+                    // A write materialized the key during the load: the resident
+                    // is newer than what was loaded.
+                    Err((PutIfAbsentOutcome::Resident(resident), _)) => resident,
+                    // A removal intervened: answer with what was read, but never
+                    // cache it.
+                    Err((_, record)) => record,
+                }));
             }
         }
 
@@ -392,12 +425,25 @@ impl RecordStore for DefaultRecordStore {
                 // lands after this point moves it, and the insert below refuses a
                 // value loaded across that removal.
                 let generation = self.engine.vacancy_generation(key);
-                let loaded = self.data_store.load(&self.name, key).await?;
-                if loaded.is_none() && init.is_none() {
-                    return Ok(false);
-                }
-                pre_image.clone_from(&loaded);
-                let base = loaded.or_else(|| init.clone()).map(SlotInit::Value);
+                let base = match self.data_store.load_slot(&self.name, key).await? {
+                    Some(Loaded::Value(value)) => {
+                        pre_image = Some(value.clone());
+                        Some(SlotInit::Value(value))
+                    }
+                    // A pending write's cell is re-adopted, not copied; only the
+                    // pre-image `on_load` needs is taken from it. Nothing else
+                    // mutates it meanwhile: this caller holds the key's writer,
+                    // and a flush only reads it.
+                    Some(Loaded::Cell(cell)) => {
+                        pre_image = Some(cell.lock().value.clone());
+                        Some(SlotInit::Cell(cell))
+                    }
+                    None if init.is_none() => return Ok(false),
+                    None => {
+                        pre_image = None;
+                        init.clone().map(SlotInit::Value)
+                    }
+                };
                 let attempt = self.engine.update_in_place(
                     key,
                     now,
@@ -425,6 +471,7 @@ impl RecordStore for DefaultRecordStore {
         // `MutationObserver`).
         let write_token = {
             let record = cell.lock();
+            let _observers = observer_reentry::enter();
 
             // Capture the token off the record just written, before any
             // concurrent writer can replace the slot — the exact-identity key for
@@ -920,6 +967,105 @@ mod tests {
             observer,
             StorageConfig::default(),
         )
+    }
+
+    /// Calls back into its own store from `on_put` / `on_update`, which the
+    /// in-place write path fires under the key's cell lock.
+    #[cfg(debug_assertions)]
+    #[derive(Default)]
+    struct ReenteringObserver {
+        store: std::sync::OnceLock<std::sync::Weak<DefaultRecordStore>>,
+    }
+
+    #[cfg(debug_assertions)]
+    impl ReenteringObserver {
+        fn re_enter(&self, key: &str) {
+            if let Some(store) = self.store.get().and_then(std::sync::Weak::upgrade) {
+                store.exists_in_memory(key);
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    impl MutationObserver for ReenteringObserver {
+        fn on_put(&self, key: &str, _: &Record, _: Option<&RecordValue>, _: bool) {
+            self.re_enter(key);
+        }
+        fn on_update(&self, key: &str, _: &Record, _: &RecordValue, _: &RecordValue, _: bool) {
+            self.re_enter(key);
+        }
+        fn on_remove(&self, _: &str, _: &Record, _: bool) {}
+        fn on_evict(&self, _: &str, _: &Record, _: bool) {}
+        fn on_load(&self, _: &str, _: &Record, _: bool) {}
+        fn on_replication_put(&self, _: &str, _: &Record, _: bool) {}
+        fn on_clear(&self) {}
+        fn on_reset(&self) {}
+        fn on_destroy(&self, _: bool) {}
+    }
+
+    /// An observer that re-enters the engine from under the cell lock fails
+    /// loudly with a named message in debug builds, instead of hanging on a
+    /// lock its own thread holds.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    #[should_panic(
+        expected = "storage engine re-entered from a mutation observer under a slot-cell lock: `contains_key`"
+    )]
+    async fn an_observer_re_entering_the_engine_under_the_cell_lock_panics_by_name() {
+        let observer = Arc::new(ReenteringObserver::default());
+        let store = Arc::new(DefaultRecordStore::new(
+            "test-map".to_string(),
+            0,
+            Box::new(HashMapStorage::new()),
+            Arc::new(NullDataStore),
+            Arc::new(CompositeMutationObserver::new(vec![
+                Arc::clone(&observer) as Arc<dyn MutationObserver>
+            ])),
+            StorageConfig::default(),
+        ));
+        assert!(observer.store.set(Arc::downgrade(&store)).is_ok());
+        let mut set = |value: &mut RecordValue| {
+            *value = make_value("v");
+            MutateOutcome {
+                changed: true,
+                witness: None,
+            }
+        };
+        let _ = store
+            .update_in_place(
+                "k",
+                Some(make_value("init")),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Backup,
+                &mut set,
+            )
+            .await;
+    }
+
+    /// The same call from outside the observer fan-out is an ordinary engine
+    /// call: the detector is scoped to the observers, not to the thread.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn the_re_entry_detector_is_scoped_to_the_observer_fan_out() {
+        let store = make_store();
+        let mut set = |value: &mut RecordValue| {
+            *value = make_value("v");
+            MutateOutcome {
+                changed: true,
+                witness: None,
+            }
+        };
+        assert!(store
+            .update_in_place(
+                "k",
+                Some(make_value("init")),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Backup,
+                &mut set,
+            )
+            .await
+            .expect("in-place write"));
+        assert!(store.exists_in_memory("k"));
     }
 
     // --- AC3: Put-then-get round-trip ---
@@ -2528,9 +2674,11 @@ mod tests {
             ) else {
                 panic!("the first write must insert");
             };
-            assert!(store
-                .storage()
-                .mark_stored(KEY, t, cell.lock().metadata.write_token));
+            // Read the token in its own statement: the guard of a `lock()` in
+            // the argument list would live until the end of the call, and
+            // `mark_stored` locks the same cell.
+            let token = cell.lock().metadata.write_token;
+            assert!(store.storage().mark_stored(KEY, t, token));
 
             let UpdateInPlaceOutcome::Written { .. } = store.storage().update_in_place(
                 KEY,

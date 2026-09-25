@@ -2124,7 +2124,6 @@ mod tests {
         LeafSink, MapDataStore, ScanBatch, ScanCursor, WriteSource,
     };
     use crate::storage::mutation_observer::MutationObserver;
-    use crate::storage::record::Record;
     use crate::storage::record_store::RecordStore;
     use crate::storage::tombstone_gauge::with_isolated_gauge;
     use crate::tombstone_frontier::{
@@ -4937,6 +4936,8 @@ mod tests {
         /// Every `load` / `load_all` call, so a test can assert a path never
         /// reached the backend.
         loads: std::sync::atomic::AtomicUsize,
+        /// Evicts an armed key during its next `load` (see [`EvictOnRehydrate`]).
+        evictor: EvictOnRehydrate,
     }
 
     impl ArmableStore {
@@ -5034,6 +5035,7 @@ mod tests {
             if self.reject_read_keys.lock().contains(key) {
                 return Err(anyhow::anyhow!("armed read rejection for {key}"));
             }
+            self.evictor.on_load(key);
             if let Some(served) = self.absent_after_one_load.lock().get_mut(key) {
                 if *served {
                     return Ok(None);
@@ -6969,53 +6971,51 @@ mod tests {
         }
     }
 
-    /// Evicts named keys the instant the record store rehydrates them.
+    /// Evicts one named key from its record store during the next rehydrating
+    /// `load` of that key, once.
     ///
-    /// This is the only in-process lever that manufactures the "evicted between
-    /// the rehydrating read and the in-place write" race: `on_load` fires after
-    /// the hydrated record has entered the engine and before the caller's next
-    /// write, so a store that evicts there leaves the following `update_in_place`
-    /// with no resident slot. With the default store that write materializes the
-    /// key again and reclaims the tag; paired with a data store that cannot serve
-    /// the second load, the closure never runs — the state the prune has to tell
-    /// apart from "the tag was already gone".
+    /// This is the in-process lever that manufactures the "evicted between the
+    /// rehydrating read and the in-place write" race. The eviction lands after
+    /// the reader took its vacancy generation and before its insert, so the
+    /// read is answered but never cached (TG-OR-007), and the caller's next
+    /// in-place write finds no resident slot. With the default store that write
+    /// materializes the key again and reclaims the tag; paired with a data store
+    /// that cannot serve the second load, the closure never runs — the state the
+    /// prune has to tell apart from "the tag was already gone".
+    ///
+    /// It runs from the data store, not from a mutation observer: observers may
+    /// not call back into the store (see `MutationObserver`), and on the
+    /// in-place write path they run under the key's cell lock, where an
+    /// eviction of the same key would wait on the lock its own caller holds.
+    /// The eviction happens outside every engine lock, and only once, so the
+    /// write's own materializing load is served normally.
     #[derive(Default)]
     struct EvictOnRehydrate {
-        store: Mutex<Option<Weak<dyn RecordStore>>>,
-        keys: Mutex<HashSet<String>>,
+        armed: Mutex<Option<(Weak<dyn RecordStore>, String)>>,
     }
 
     impl EvictOnRehydrate {
-        /// Held as a `Weak` so the observer, which the store's own observer chain
-        /// owns, does not keep that store alive through a cycle.
+        /// Held as a `Weak` so the data store, which the record store owns, does
+        /// not keep that store alive through a cycle.
         fn arm(&self, store: &Arc<dyn RecordStore>, key: &str) {
-            *self.store.lock() = Some(Arc::downgrade(store));
-            self.keys.lock().insert(key.to_string());
+            *self.armed.lock() = Some((Arc::downgrade(store), key.to_string()));
         }
-    }
 
-    impl MutationObserver for EvictOnRehydrate {
-        fn on_put(&self, _: &str, _: &Record, _: Option<&RecordValue>, _: bool) {}
-        fn on_update(&self, _: &str, _: &Record, _: &RecordValue, _: &RecordValue, _: bool) {}
-        fn on_remove(&self, _: &str, _: &Record, _: bool) {}
-        fn on_evict(&self, _: &str, _: &Record, _: bool) {}
-        fn on_load(&self, key: &str, _: &Record, _: bool) {
-            // Drop both guards before evicting: the eviction re-enters the
-            // observer chain (on_evict), and holding these across that call would
-            // be a self-deadlock waiting to happen.
-            let armed = self.keys.lock().contains(key);
-            if !armed {
-                return;
-            }
-            let store = self.store.lock().clone();
-            if let Some(store) = store.and_then(|weak| weak.upgrade()) {
+        /// Evicts the armed key if `key` is it, then disarms. The guard is
+        /// released before the eviction, which re-enters the observer chain.
+        fn on_load(&self, key: &str) {
+            let armed = {
+                let mut armed = self.armed.lock();
+                if armed.as_ref().is_some_and(|(_, k)| k == key) {
+                    armed.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(store) = armed.and_then(|(weak, _)| weak.upgrade()) {
                 store.evict(key, false);
             }
         }
-        fn on_replication_put(&self, _: &str, _: &Record, _: bool) {}
-        fn on_clear(&self) {}
-        fn on_reset(&self) {}
-        fn on_destroy(&self, _: bool) {}
     }
 
     /// Open both prune gates past epoch 1 only: the low-water mark STRICTLY past
@@ -7323,10 +7323,9 @@ mod tests {
     #[tokio::test]
     async fn prune_reclaims_a_key_evicted_between_its_read_and_its_write() {
         let store = Arc::new(ArmableStore::default());
-        let evictor = Arc::new(EvictOnRehydrate::default());
         let (svc, factory, frontier) = make_service_with_frontier_and_store(
             Arc::clone(&store) as Arc<dyn MapDataStore>,
-            vec![Arc::clone(&evictor) as Arc<dyn MutationObserver>],
+            Vec::new(),
         );
         let (t1, t2) = ("T1", "T2");
 
@@ -7343,14 +7342,15 @@ mod tests {
         open_prune_gates_past_epoch_one(&frontier).await;
 
         // Model the race: drop k1 from memory (its durable tombstone survives),
-        // then evict it again the moment the sweep's rehydrating read puts it
-        // back, so the in-place write finds no resident slot.
+        // then evict it again during the sweep's rehydrating read, so the read
+        // is answered but not cached and the in-place write finds no resident
+        // slot.
         let k1_store = factory.get_or_create("m", hash_to_partition("k1"));
         assert!(
             k1_store.evict("k1", false).is_some(),
             "precondition: k1 is resident before the modelled eviction"
         );
-        evictor.arm(&k1_store, "k1");
+        store.evictor.arm(&k1_store, "k1");
 
         prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
 
@@ -7386,10 +7386,9 @@ mod tests {
         let (store, frontier) = metrics::with_local_recorder(&recorder, || {
             rt.block_on(async {
                 let store = Arc::new(ArmableStore::default());
-                let evictor = Arc::new(EvictOnRehydrate::default());
                 let (svc, factory, frontier) = make_service_with_frontier_and_store(
                     Arc::clone(&store) as Arc<dyn MapDataStore>,
-                    vec![Arc::clone(&evictor) as Arc<dyn MutationObserver>],
+                    Vec::new(),
                 );
                 // k2 owns epoch 2, which the gates below keep pinned, so only
                 // k1's epoch drains.
@@ -7410,7 +7409,7 @@ mod tests {
                     k1_store.evict("k1", false).is_some(),
                     "precondition: k1 is resident before the modelled eviction"
                 );
-                evictor.arm(&k1_store, "k1");
+                store.evictor.arm(&k1_store, "k1");
                 store.answer_absent_after_one_load("k1");
 
                 prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
@@ -7576,7 +7575,6 @@ mod tests {
     /// a recorder is bound stays a no-op for its whole lifetime.
     struct SixExitFixture {
         store: Arc<ArmableStore>,
-        evictor: Arc<EvictOnRehydrate>,
         svc: Arc<CrdtService>,
         factory: Arc<RecordStoreFactory>,
         frontier: Arc<TombstoneFrontier>,
@@ -7619,14 +7617,12 @@ mod tests {
 
     fn build_six_exit_fixture() -> SixExitFixture {
         let store = Arc::new(ArmableStore::default());
-        let evictor = Arc::new(EvictOnRehydrate::default());
         let (svc, factory, frontier) = make_service_with_frontier_and_store(
             Arc::clone(&store) as Arc<dyn MapDataStore>,
-            vec![Arc::clone(&evictor) as Arc<dyn MutationObserver>],
+            Vec::new(),
         );
         SixExitFixture {
             store,
-            evictor,
             svc,
             factory,
             frontier,
@@ -7658,7 +7654,6 @@ mod tests {
     ) -> (PruneWorkloadOutcome, SixExitHandles) {
         let SixExitFixture {
             store,
-            evictor,
             svc,
             factory,
             frontier,
@@ -7746,7 +7741,7 @@ mod tests {
             kevict_store.evict("kevict", false).is_some(),
             "precondition: kevict is resident before the modelled eviction"
         );
-        evictor.arm(&kevict_store, "kevict");
+        store.evictor.arm(&kevict_store, "kevict");
         // Non-resident with a failing backend read, so the rehydrating read is
         // the call that errors.
         let kread_store = factory.get_or_create("m", hash_to_partition("kread"));
