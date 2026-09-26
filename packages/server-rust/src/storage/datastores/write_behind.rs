@@ -6750,6 +6750,332 @@ mod tests {
             .expect("load_slot")
             .is_none());
     }
+
+    // -----------------------------------------------------------------------
+    // A cell flushed to an inner store that does not accept encoded records
+    // -----------------------------------------------------------------------
+
+    fn or_cell(tags: &[&str]) -> Arc<SlotCell> {
+        crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value: or_value(tags),
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        })
+    }
+
+    fn or_value(tags: &[&str]) -> RecordValue {
+        RecordValue::OrMap {
+            records: tags.iter().map(|tag| or_entry(tag)).collect(),
+            tombstones: Vec::new(),
+        }
+    }
+
+    fn or_entry(tag: &str) -> OrMapEntry {
+        OrMapEntry {
+            value: Value::Null,
+            tag: tag.to_string(),
+            timestamp: Timestamp {
+                millis: 1,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+        }
+    }
+
+    /// A non-encoding inner store takes the clone branch of the flush: each
+    /// flushed cell entry reaches `inner.add` exactly once, with the value the
+    /// cell holds at flush time — a mutation made after the enqueue included —
+    /// and never reaches `add_encoded`, whose default body refuses (a refused
+    /// flush would leave the entry queued and nothing persisted).
+    #[tokio::test]
+    async fn a_non_encoding_inner_receives_each_flushed_cell_once_with_its_current_value() {
+        let spy = Arc::new(SpyDataStore::new());
+        assert!(
+            !spy.accepts_encoded(),
+            "precondition: the inner store does not accept encoded records"
+        );
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 600_000,
+                flush_interval_ms: 600_000,
+                capacity: 0,
+                ..WriteBehindConfig::default()
+            },
+        );
+        let first = or_cell(&["a"]);
+        let second = or_cell(&["x"]);
+        add_cell(&store, "k1", &first).await;
+        add_cell(&store, "k2", &second).await;
+        // A second in-place write on k1 coalesces into k1's one queued entry.
+        first.lock().value = or_value(&["a", "b"]);
+        add_cell(&store, "k1", &first).await;
+        // Mutated after its last enqueue: the flush must still see it.
+        first.lock().value = or_value(&["a", "b", "c"]);
+
+        store.hard_flush().await.expect("hard_flush");
+
+        let adds: Vec<String> = spy
+            .calls()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|call| match call {
+                SpyCall::Add { key, .. } => Some(key.clone()),
+                SpyCall::Remove { .. } => None,
+            })
+            .collect();
+        let mut sorted = adds.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            vec!["k1".to_string(), "k2".to_string()],
+            "one inner add per flushed entry, got {adds:?}"
+        );
+        assert_eq!(
+            spy.persisted("m", "k1"),
+            Some(or_value(&["a", "b", "c"])),
+            "the inner store must receive the cell's value at flush time"
+        );
+        assert_eq!(spy.persisted("m", "k2"), Some(or_value(&["x"])));
+        assert_eq!(
+            Arc::strong_count(&first),
+            1,
+            "the flush must release k1's cell"
+        );
+        assert_eq!(
+            Arc::strong_count(&second),
+            1,
+            "the flush must release k2's cell"
+        );
+    }
+
+    /// An inner store that persists nothing and allocates nothing in `add`: it
+    /// counts the call and checks the value against the one it expects, so the
+    /// bytes a flush allocates are the flush's own.
+    #[cfg(feature = "count-alloc")]
+    struct ReceivingStore {
+        expected: RecordValue,
+        adds: std::sync::atomic::AtomicU32,
+        matched: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "count-alloc")]
+    #[async_trait]
+    impl MapDataStore for ReceivingStore {
+        async fn add(
+            &self,
+            _map: &str,
+            _key: &str,
+            value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            self.adds.fetch_add(1, Ordering::Relaxed);
+            self.matched
+                .store(*value == self.expected, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn add_backup(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn remove(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn remove_backup(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn load(&self, _map: &str, _key: &str) -> anyhow::Result<Option<RecordValue>> {
+            Ok(None)
+        }
+
+        async fn load_all(
+            &self,
+            _map: &str,
+            _keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            Ok(Vec::new())
+        }
+
+        async fn remove_all(&self, _map: &str, _keys: &[String]) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn scan_values(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
+        }
+
+        async fn scan_values_batched(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _cursor: ScanCursor,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
+        }
+
+        fn is_loadable(&self, _key: &str) -> bool {
+            true
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            0
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn flush_key(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &RecordValue,
+            _is_backup: bool,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn reset(&self) {}
+
+        fn is_null(&self) -> bool {
+            false
+        }
+    }
+
+    /// `(bytes, allocations)` one `value.clone()` of an OR slot of `n` entries
+    /// allocates, and the same for one `persist_entry` of a cell entry holding
+    /// that slot, flushed to a [`ReceivingStore`].
+    #[cfg(feature = "count-alloc")]
+    async fn cell_flush_allocations(n: usize) -> ((u64, u64), (u64, u64)) {
+        let tags: Vec<String> = (0..n).map(|i| format!("{i:020}:0:node-a")).collect();
+        let tags: Vec<&str> = tags.iter().map(String::as_str).collect();
+        let value = or_value(&tags);
+        let inner = ReceivingStore {
+            expected: value.clone(),
+            adds: std::sync::atomic::AtomicU32::new(0),
+            matched: std::sync::atomic::AtomicBool::new(false),
+        };
+        let cell = crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value,
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        });
+        let entry = DelayedEntry {
+            map: "m".to_string(),
+            key: "k".to_string(),
+            operation: DelayedOp::StoreCell {
+                cell: Arc::clone(&cell),
+                expiration_time: 0,
+            },
+            store_time: 0,
+            sequence: 1,
+            retry_count: 0,
+            wal_sequences: BTreeSet::new(),
+        };
+
+        let read = || {
+            let stats = stats_alloc::INSTRUMENTED_SYSTEM.stats();
+            (stats.bytes_allocated as u64, stats.allocations as u64)
+        };
+        let delta =
+            |before: (u64, u64), after: (u64, u64)| (after.0 - before.0, after.1 - before.1);
+
+        let before = read();
+        let copy = cell.lock().value.clone();
+        let clone = delta(before, read());
+        std::hint::black_box(copy);
+
+        let before = read();
+        persist_entry(&inner, &entry).await.expect("persist_entry");
+        let flush = delta(before, read());
+
+        assert_eq!(
+            inner.adds.load(Ordering::Relaxed),
+            1,
+            "N={n}: one inner add per flushed entry"
+        );
+        assert!(
+            inner.matched.load(Ordering::Relaxed),
+            "N={n}: the inner add must receive the cell's value"
+        );
+        (clone, flush)
+    }
+
+    /// Flushing a cell entry to a store that does not accept encoded records
+    /// copies the record exactly once: the flush's per-entry byte and
+    /// allocation slopes equal those of one `RecordValue::clone()` of the same
+    /// slot (a second copy would double them; the constant part — the boxed
+    /// `add` future — does not grow with the slot).
+    ///
+    /// A local allocation proof, not a CI guard: CI never enables `count-alloc`,
+    /// and the counters are process-global, so it is meaningful only when run
+    /// alone and single-threaded:
+    /// `cargo test --release -p topgun-server --lib --features count-alloc -- --ignored --test-threads=1 count_alloc_`
+    #[cfg(feature = "count-alloc")]
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "local allocation proof: run single-threaded under count-alloc"]
+    async fn count_alloc_cell_flush_to_a_non_encoding_inner_copies_once() {
+        let (small_clone, small_flush) = cell_flush_allocations(1_000).await;
+        let (large_clone, large_flush) = cell_flush_allocations(10_000).await;
+        #[allow(clippy::cast_precision_loss)]
+        let slope = |small: u64, large: u64| (large as f64 - small as f64) / 9_000.0;
+        let clone_bytes = slope(small_clone.0, large_clone.0);
+        let flush_bytes = slope(small_flush.0, large_flush.0);
+        let clone_allocs = slope(small_clone.1, large_clone.1);
+        let flush_allocs = slope(small_flush.1, large_flush.1);
+        println!(
+            "count_alloc_cell_flush clone N=1000 bytes={} allocs={} N=10000 bytes={} allocs={}",
+            small_clone.0, small_clone.1, large_clone.0, large_clone.1
+        );
+        println!(
+            "count_alloc_cell_flush flush N=1000 bytes={} allocs={} N=10000 bytes={} allocs={}",
+            small_flush.0, small_flush.1, large_flush.0, large_flush.1
+        );
+        println!(
+            "count_alloc_cell_flush slope clone={clone_bytes:.3} B/entry {clone_allocs:.3} allocs/entry \
+             flush={flush_bytes:.3} B/entry {flush_allocs:.3} allocs/entry"
+        );
+        assert!(clone_bytes > 0.0, "the clone slope must be measurable");
+        assert!(
+            (flush_bytes - clone_bytes).abs() <= 0.1 * clone_bytes,
+            "one clone per flushed entry: flush slope {flush_bytes:.3} B/entry must equal the \
+             clone slope {clone_bytes:.3} B/entry within 10 %"
+        );
+        assert!(
+            (flush_allocs - clone_allocs).abs() <= 0.1 * clone_allocs,
+            "one clone per flushed entry: flush slope {flush_allocs:.3} allocs/entry must equal \
+             the clone slope {clone_allocs:.3} allocs/entry within 10 %"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
