@@ -5,6 +5,10 @@
 // not call. The production strictness from `[workspace.lints.clippy]` remains
 // active for non-test code paths.
 #![cfg_attr(test, allow(clippy::unimplemented))]
+// The unit-test binary's harness builds one static array of test descriptors,
+// 8 bytes per test; past 2048 tests it exceeds `large_stack_arrays`' 16 KiB
+// threshold and the lint fires with no span on generated code. Test-only.
+#![cfg_attr(test, allow(clippy::large_stack_arrays))]
 
 pub mod cluster;
 pub mod dag;
