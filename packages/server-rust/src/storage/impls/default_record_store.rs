@@ -2751,6 +2751,14 @@ mod tests {
         // next write re-adopts the queued entry's cell through the
         // generation-checked insert instead of materializing a copy, and the
         // flush persists every op (TG-WB-003, TG-OR-007).
+        //
+        // What it catches: a re-adoption that puts a fresh cell in the engine
+        // beside the queued one (the pointer check fails). What it does NOT
+        // catch: a re-adoption that copies the staged value into a new cell,
+        // because `op2` then enqueues that copy and the engine and the queue
+        // agree again. `an_or_add_adopts_the_staged_cell_of_an_evicted_pending_key`
+        // is the guard for that: it compares against the cell taken before
+        // the eviction.
         #[tokio::test]
         async fn an_evicted_cell_is_re_adopted_while_its_flush_is_pending() {
             use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
