@@ -453,6 +453,8 @@ mod tests {
         }
     }
 
+    // The check exists in debug builds only, and so does its only test.
+    #[cfg(debug_assertions)]
     const HELD_LOCK_PANIC: &str = "storage engine entered while this thread holds a slot-cell lock";
 
     /// The pattern that hangs silently without the check: a cell guard passed
