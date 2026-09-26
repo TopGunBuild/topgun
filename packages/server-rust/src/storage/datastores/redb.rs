@@ -303,9 +303,9 @@ impl RedbDataStore {
 }
 
 /// Insert (or overwrite) a single record under the given `(map, key, is_backup)`
-/// tuple. Validates the map name, opens (or creates) the per-(map, `is_backup`)
-/// table inside one `WriteTransaction`, serializes the value via msgpack, and
-/// commits.
+/// tuple: serializes the value via msgpack ([`encode_record`]) and stores the
+/// bytes through [`write_encoded`], so a value and its pre-encoded bytes always
+/// land as the same row.
 ///
 /// This is a deliberately CRDT-agnostic blind insert: it does NOT merge by
 /// timestamp. Last-write-wins ordering is upheld before the store is ever
@@ -321,16 +321,37 @@ fn write_one(
     value: &RecordValue,
     is_backup: bool,
 ) -> anyhow::Result<()> {
+    let bytes = encode_record(value)?;
+    write_encoded(db, map, key, &bytes, is_backup)
+}
+
+/// The one msgpack encoding of a stored record. Callers that hand
+/// [`RedbDataStore`] pre-encoded bytes (`add_encoded`) must produce exactly
+/// this encoding.
+fn encode_record(value: &RecordValue) -> anyhow::Result<Vec<u8>> {
+    Ok(rmp_serde::to_vec_named(value)?)
+}
+
+/// Store already-encoded record bytes under `(map, key, is_backup)`. Validates
+/// the map name, opens (or creates) the per-(map, `is_backup`) table inside one
+/// `WriteTransaction`, inserts the bytes as given, and commits. The bytes are
+/// not decoded or checked here.
+fn write_encoded(
+    db: &redb::Database,
+    map: &str,
+    key: &str,
+    bytes: &[u8],
+    is_backup: bool,
+) -> anyhow::Result<()> {
     if !is_valid_map_name(map) {
         bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
     }
-    let bytes = rmp_serde::to_vec_named(value)?;
     let table_name = table_name_for(map, is_backup);
     let def = table_def(&table_name);
     let txn = db.begin_write()?;
     {
         let mut table = txn.open_table(def)?;
-        table.insert(key, bytes.as_slice())?;
+        table.insert(key, bytes)?;
     }
     txn.commit()?;
     Ok(())
@@ -384,6 +405,21 @@ impl MapDataStore for RedbDataStore {
         _now: i64,
     ) -> anyhow::Result<()> {
         write_one(&self.db, map, key, value, false)
+    }
+
+    fn accepts_encoded(&self) -> bool {
+        true
+    }
+
+    async fn add_encoded(
+        &self,
+        map: &str,
+        key: &str,
+        bytes: &[u8],
+        _expiration_time: i64,
+        _now: i64,
+    ) -> anyhow::Result<()> {
+        write_encoded(&self.db, map, key, bytes, false)
     }
 
     async fn add_backup(
@@ -614,6 +650,7 @@ impl MapDataStore for RedbDataStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::record::OrMapEntry;
     use tempfile::tempdir;
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;
@@ -882,6 +919,139 @@ mod tests {
         let (store, _dir) = fresh_store();
         let err = store.add("", "k", &dummy_value("v"), 0, 1000).await;
         assert!(err.is_err());
+    }
+
+    /// The raw bytes stored for `(map, key)` in the primary table.
+    fn raw_row(store: &RedbDataStore, map: &str, key: &str) -> Option<Vec<u8>> {
+        let table_name = table_name_for(map, false);
+        let txn = store.db.begin_read().expect("read txn");
+        let table = match txn.open_table(table_def(&table_name)) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return None,
+            Err(e) => panic!("open table: {e}"),
+        };
+        table
+            .get(key)
+            .expect("get row")
+            .map(|guard| guard.value().to_vec())
+    }
+
+    fn or_value_with_tombstones() -> RecordValue {
+        let ts = |millis| Timestamp {
+            millis,
+            counter: 3,
+            node_id: "node-a".to_string(),
+        };
+        RecordValue::OrMap {
+            records: vec![
+                OrMapEntry {
+                    value: Value::String("first".to_string()),
+                    tag: "t-1".to_string(),
+                    timestamp: ts(10),
+                },
+                OrMapEntry {
+                    value: Value::Int(42),
+                    tag: "t-2".to_string(),
+                    timestamp: ts(11),
+                },
+            ],
+            tombstones: vec!["t-0".to_string(), "t-9".to_string()],
+        }
+    }
+
+    #[test]
+    fn redb_accepts_encoded_records() {
+        let (store, _dir) = fresh_store();
+        assert!(store.accepts_encoded());
+    }
+
+    /// `add_encoded` of a value's msgpack encoding stores exactly the row `add`
+    /// stores for that value — the write-behind flush relies on this to hand
+    /// redb bytes encoded under a cell lock instead of a copied record. Checked
+    /// on a fresh row and on an overwrite, for an OR value with tombstones and
+    /// for an LWW value.
+    #[tokio::test]
+    async fn add_encoded_stores_byte_identical_rows_to_add() {
+        let (store, _dir) = fresh_store();
+        for (i, value) in [or_value_with_tombstones(), dummy_value("lww")]
+            .into_iter()
+            .enumerate()
+        {
+            let by_value = format!("by_value_{i}");
+            let by_bytes = format!("by_bytes_{i}");
+            store
+                .add("golden", &by_value, &value, 0, 1000)
+                .await
+                .unwrap();
+            let bytes = rmp_serde::to_vec_named(&value).unwrap();
+            store
+                .add_encoded("golden", &by_bytes, &bytes, 0, 1000)
+                .await
+                .unwrap();
+
+            let row_value = raw_row(&store, "golden", &by_value).expect("add row");
+            let row_bytes = raw_row(&store, "golden", &by_bytes).expect("add_encoded row");
+            assert_eq!(row_bytes, row_value, "fresh row, value #{i}");
+            assert_eq!(row_bytes, bytes, "the row is the bytes as handed over");
+            assert_eq!(
+                store.load("golden", &by_bytes).await.unwrap(),
+                Some(value.clone()),
+                "an encoded row loads back as the value"
+            );
+
+            // Overwrite both rows with a different value through the other path.
+            let next = dummy_value(&format!("next-{i}"));
+            store
+                .add_encoded(
+                    "golden",
+                    &by_value,
+                    &rmp_serde::to_vec_named(&next).unwrap(),
+                    0,
+                    1001,
+                )
+                .await
+                .unwrap();
+            store
+                .add("golden", &by_bytes, &next, 0, 1001)
+                .await
+                .unwrap();
+            assert_eq!(
+                raw_row(&store, "golden", &by_value),
+                raw_row(&store, "golden", &by_bytes),
+                "overwrite, value #{i}"
+            );
+        }
+    }
+
+    /// `add_encoded` validates the map name exactly as `add` does: the same
+    /// error, and no table created.
+    #[tokio::test]
+    async fn add_encoded_rejects_an_invalid_map_name_exactly_as_add() {
+        let (store, _dir) = fresh_store();
+        let value = dummy_value("v");
+        let bytes = rmp_serde::to_vec_named(&value).unwrap();
+        for bad in [
+            "foo; DROP TABLE x",
+            "",
+            "9starts_with_digit",
+            "has-dash",
+            "users__backup",
+        ] {
+            let via_add = store
+                .add(bad, "k", &value, 0, 1000)
+                .await
+                .expect_err("add rejects");
+            let via_encoded = store
+                .add_encoded(bad, "k", &bytes, 0, 1000)
+                .await
+                .expect_err("add_encoded rejects");
+            assert_eq!(via_encoded.to_string(), via_add.to_string(), "map {bad:?}");
+            assert!(via_encoded.to_string().contains("Invalid map name"));
+        }
+        assert!(
+            store.list_maps().await.unwrap().is_empty(),
+            "a rejected write creates no table"
+        );
     }
 
     #[tokio::test]
