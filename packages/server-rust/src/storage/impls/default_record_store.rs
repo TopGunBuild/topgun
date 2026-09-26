@@ -2752,7 +2752,6 @@ mod tests {
         // generation-checked insert instead of materializing a copy, and the
         // flush persists every op (TG-WB-003, TG-OR-007).
         #[tokio::test]
-        #[ignore = "red until the staged cell is re-adopted"]
         async fn an_evicted_cell_is_re_adopted_while_its_flush_is_pending() {
             use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
 

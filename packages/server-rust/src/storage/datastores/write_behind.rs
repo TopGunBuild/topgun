@@ -15,9 +15,10 @@ use tokio::sync::{watch, Notify};
 use topgun_core::{fnv1a_hash, PARTITION_COUNT};
 use tracing::{error, warn};
 
-use crate::storage::engine::{new_slot_cell, SlotCell};
+use crate::storage::engine::SlotCell;
 use crate::storage::map_data_store::{
-    merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor, WriteSource,
+    merkle_leaf_hash, LeafSink, Loaded, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+    WriteSource,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{
@@ -877,8 +878,9 @@ impl StagedValue {
 }
 
 /// The queue operation and the staging value for one write. A value is queued
-/// and staged as two copies; an in-place write's cell is copied into a cell of
-/// its own for each.
+/// and staged as two copies; an in-place write's cell is shared by the queued
+/// entry, its staging slot and the engine, so the flush persists whatever the
+/// cell holds at flush time and a re-adoption finds the same cell (TG-WB-003).
 fn queued_and_staged(src: WriteSource<'_>, expiration_time: i64) -> (DelayedOp, StagedValue) {
     match src {
         WriteSource::Value(value) => (
@@ -890,19 +892,12 @@ fn queued_and_staged(src: WriteSource<'_>, expiration_time: i64) -> (DelayedOp, 
         ),
         WriteSource::Cell(cell) => (
             DelayedOp::StoreCell {
-                cell: copy_cell(cell),
+                cell: Arc::clone(cell),
                 expiration_time,
             },
-            StagedValue::Cell(copy_cell(cell)),
+            StagedValue::Cell(Arc::clone(cell)),
         ),
     }
-}
-
-/// A new, unshared cell holding a copy of `cell`'s record. Every hand-off of
-/// an in-place write takes one, so a queued entry and its staging slot never
-/// share a cell with the engine or with each other.
-fn copy_cell(cell: &Arc<SlotCell>) -> Arc<SlotCell> {
-    new_slot_cell(cell.lock().clone())
 }
 
 /// Per-partition `wal_seq` state: which sequences are still unresolved, why,
@@ -2760,6 +2755,25 @@ impl MapDataStore for WriteBehindDataStore {
 
         // Not in staging -- delegate to inner store
         self.inner.load(map, key).await
+    }
+
+    /// Like [`Self::load`], but a staged in-place write answers its cell rather
+    /// than a copy, so the engine re-adopts the one cell the queued entry and
+    /// the staging slot already hold (TG-OR-007: the caller inserts it only
+    /// through the generation-checked insert).
+    async fn load_slot(&self, map: &str, key: &str) -> anyhow::Result<Option<Loaded>> {
+        let staging_key = (map.to_string(), key.to_string());
+
+        if let Some(entry) = self.staging.get(&staging_key) {
+            return Ok(match &entry.value().value {
+                Some(StagedValue::Cell(cell)) => Some(Loaded::Cell(Arc::clone(cell))),
+                Some(StagedValue::Value(value)) => Some(Loaded::Value(value.clone())),
+                // Pending delete -- do not consult inner store
+                None => None,
+            });
+        }
+
+        self.inner.load_slot(map, key).await
     }
 
     async fn load_all(
@@ -6397,6 +6411,134 @@ mod tests {
              shape change is a format decision that re-proves the reader first -- it is \
              never a reason to regenerate the fixture"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // In-place writes share one cell with the queue and staging (TG-WB-003)
+    // -----------------------------------------------------------------------
+
+    fn lww_cell(value: &str, millis: u64) -> Arc<SlotCell> {
+        crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value: lww(value, millis),
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        })
+    }
+
+    async fn add_cell(store: &WriteBehindDataStore, key: &str, cell: &Arc<SlotCell>) {
+        store
+            .add_with_witness("m", key, WriteSource::Cell(cell), 0, 1, None)
+            .await
+            .expect("add_with_witness");
+    }
+
+    /// The queued entry, the staging slot and `load_slot` all hold the writer's
+    /// cell, reads see a mutation made after the enqueue, and the flush
+    /// persists the cell's state at flush time and then drops every reference
+    /// but the writer's.
+    #[tokio::test]
+    async fn an_in_place_write_shares_its_cell_with_the_queue_and_staging() {
+        let (store, _dir) = redb_backed_store();
+        let cell = lww_cell("a", 1);
+        add_cell(&store, "k", &cell).await;
+
+        let pending = store.test_pending_cell("m", "k").expect("queued cell");
+        let staged = store.test_staged_cell("m", "k").expect("staged cell");
+        assert!(
+            Arc::ptr_eq(&pending, &cell),
+            "the queue must hold the writer's cell"
+        );
+        assert!(
+            Arc::ptr_eq(&staged, &cell),
+            "staging must hold the writer's cell"
+        );
+        drop((pending, staged));
+        match store.load_slot("m", "k").await.expect("load_slot") {
+            Some(Loaded::Cell(loaded)) => {
+                assert!(
+                    Arc::ptr_eq(&loaded, &cell),
+                    "load_slot must answer the staged cell"
+                );
+            }
+            _ => panic!("a staged in-place write must load as its cell"),
+        }
+
+        cell.lock().value = lww("b", 2);
+        assert_lww(
+            &store.load("m", "k").await.expect("load").expect("staged"),
+            "b",
+            2,
+        );
+
+        store.hard_flush().await.expect("hard_flush");
+        assert_lww(
+            &store
+                .inner
+                .load("m", "k")
+                .await
+                .expect("inner load")
+                .expect("persisted"),
+            "b",
+            2,
+        );
+        assert!(store.test_pending_cell("m", "k").is_none());
+        assert!(store.test_staged_cell("m", "k").is_none());
+        assert_eq!(
+            Arc::strong_count(&cell),
+            1,
+            "the flush must release the cell"
+        );
+    }
+
+    /// A value write over a queued cell replaces both the queue entry and the
+    /// staging slot, so neither keeps the cell and later reads load the value.
+    #[tokio::test]
+    async fn a_value_write_over_a_queued_cell_displaces_it() {
+        let (store, _dir) = redb_backed_store();
+        let cell = lww_cell("a", 1);
+        add_cell(&store, "k", &cell).await;
+        store.add("m", "k", &lww("c", 3), 0, 2).await.expect("add");
+
+        assert!(store.test_pending_cell("m", "k").is_none());
+        assert!(store.test_staged_cell("m", "k").is_none());
+        assert_eq!(
+            Arc::strong_count(&cell),
+            1,
+            "the value write must drop the cell"
+        );
+        match store.load_slot("m", "k").await.expect("load_slot") {
+            Some(Loaded::Value(value)) => assert_lww(&value, "c", 3),
+            _ => panic!("a staged value write must load as a value"),
+        }
+
+        store.hard_flush().await.expect("hard_flush");
+        assert_lww(
+            &store
+                .inner
+                .load("m", "k")
+                .await
+                .expect("inner load")
+                .expect("persisted"),
+            "c",
+            3,
+        );
+    }
+
+    /// A remove over a queued cell drops the queue's and staging's references,
+    /// and `load_slot` answers the pending delete, so the cell is never
+    /// re-adopted.
+    #[tokio::test]
+    async fn a_remove_over_a_queued_cell_drops_it() {
+        let (store, _dir) = redb_backed_store();
+        let cell = lww_cell("a", 1);
+        add_cell(&store, "k", &cell).await;
+        store.remove("m", "k", 2).await.expect("remove");
+
+        assert_eq!(Arc::strong_count(&cell), 1, "the remove must drop the cell");
+        assert!(store
+            .load_slot("m", "k")
+            .await
+            .expect("load_slot")
+            .is_none());
     }
 }
 
