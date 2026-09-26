@@ -18,8 +18,9 @@ Method (SPEC-373b Measurement, "E"):
   site, so an innermost-frame rule cannot see the copies).
   E = (engine + queue + staging) / window.
 STOP rules (precedence D > O > S; the first that fires is printed):
-  D -- a site line matches no program point in either profile of a pair, or a
-       site's window bytes are <= 0 (the literal is stale or the site is dead);
+  D -- a site line matches no program point in either profile of a pair, a
+       site's window bytes are <= 0 (the literal is stale or the site is dead),
+       or the window itself is <= 0 (the late profile is not later);
   O -- a program point whose stack contains TWO or more sites (the shares would
        double count);
   S -- the self-check misses its known answer: E = 0.322296 +/- 0.000005.
@@ -97,7 +98,11 @@ def window(early, late, pin):
     e, l = read(early, pin), read(late, pin)
     w = {k: l[k] - e[k] for k in l}
     wt = w["total"]
-    r = {"WINDOW_MB": wt / MB, "MULTI_PPS": e["multi_pps"] + l["multi_pps"]}
+    r = {"WINDOW_MB": wt / MB, "MULTI_PPS": e["multi_pps"] + l["multi_pps"],
+         "MULTI_MB": (e["multi"] + l["multi"]) / MB, "WINDOW_OK": wt > 0}
+    if wt <= 0:
+        # A non-positive window cannot carry shares: report it and let dead() fire STOP-D.
+        wt = 1
     esum = 0
     for s in SITES:
         r["PPS_" + s.upper()] = (e[s + "_pps"], l[s + "_pps"])
@@ -120,11 +125,15 @@ def emit(prefix, r, pin):
         print("%s%s_SHARE=%.6f" % (prefix, u, r[u + "_SHARE"]))
         print("%s%s_GROW_MB=%.4f" % (prefix, u, r[u + "_GROW_MB"]))
     print("%sMULTI_SITE_PPS=%d" % (prefix, r["MULTI_PPS"]))
+    print("%sMULTI_SITE_MB=%.4f" % (prefix, r["MULTI_MB"]))
+    print("%sWINDOW_OK=%s" % (prefix, "TRUE" if r["WINDOW_OK"] else "FALSE"))
     print("%sE=%.6f" % (prefix, r["E"]))
     print("%sE_UNROUNDED=%.7f" % (prefix, r["E"]))
 
 
 def dead(r):
+    if not r["WINDOW_OK"]:
+        return True
     for s in SITES:
         u = s.upper()
         if r["PPS_" + u][0] == 0 or r["PPS_" + u][1] == 0 or r[u + "_MB"] <= 0:
@@ -156,6 +165,8 @@ def main(argv):
             usage()
     if len(args) != 2:
         usage()
+    if pin == SELF_PIN and ref is not None:
+        sys.exit("--pin %s IS the self-check; --self is not accepted with it" % pin)
     if pin != SELF_PIN and ref is None:
         sys.exit("--pin %s needs --self C3E_371 C3L_371 (the self-check runs first)" % pin)
 

@@ -55,15 +55,30 @@ if [ "$#" -ne 2 ] || [ ! -d "$EV" ] || [ ! -f "$MANIFEST" ]; then
   echo "usage: spec373b-verdict.sh <EV_DIR> <MANIFEST>" >&2; exit 2
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SERVER_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
+REPO_ROOT="$(cd "$SERVER_ROOT/../.." && pwd -P)"
 EV_ABS="$(cd "$EV" && pwd -P)"
+# spec373b-order.sh cannot vouch for itself: check its bytes against M's
+# section-1 listing before it is trusted.
+order_sha_ok() {   # $1 = M; prints nothing, returns 0 iff order.sh hashes as M lists it
+  local want got
+  want="$(git -C "$REPO_ROOT" show "${1}:packages/server-rust/benches/soak_harness/evidence/spec373b-manifest.md" 2>/dev/null \
+    | sed '/^## APPEND-ONLY BELOW/q' | sed -nE 's/^- `([0-9a-f]{64})` `packages\/server-rust\/benches\/soak_harness\/evidence\/spec373b-order\.sh`.*/\1/p')"
+  got="$(shasum -a 256 "$SCRIPT_DIR/spec373b-order.sh" 2>/dev/null | awk '{print $1}')"
+  [ -n "$want" ] && [ "$want" = "$got" ]
+}
 MAN_ABS="$(cd "$(dirname "$MANIFEST")" && pwd -P)/$(basename "$MANIFEST")"
 
 # ---- 0. ORDER=OK at the verdict's own start
 if [ "${SPEC373B_SYNTHETIC:-0}" = "1" ] && [ "$EV_ABS" != "$SCRIPT_DIR" ] && [ "$(dirname "$MAN_ABS")" != "$SCRIPT_DIR" ]; then
   ORDER_LINE="ORDER=SKIPPED (synthetic)"
 else
-  ORDER_LINE="$(bash "$SCRIPT_DIR/spec373b-order.sh" "${SPEC373B_MANIFEST_COMMIT:-}" "$MAN_ABS")"
-  orc=$?
+  if order_sha_ok "${SPEC373B_MANIFEST_COMMIT:-}"; then
+    ORDER_LINE="$(bash "$SCRIPT_DIR/spec373b-order.sh" "${SPEC373B_MANIFEST_COMMIT:-}" "$MAN_ABS")"
+    orc=$?
+  else
+    ORDER_LINE="ORDER=FAIL spec373b-order.sh does not hash as M '${SPEC373B_MANIFEST_COMMIT:-}' lists it"; orc=3
+  fi
   if [ "$orc" -ne 0 ]; then echo "$ORDER_LINE"; echo "FATAL: ORDER is not OK (rc=${orc}); no flags printed" >&2; exit 3; fi
 fi
 echo "$ORDER_LINE"
@@ -101,7 +116,9 @@ echo "E_FROZEN=${E}"
 
 matrix_int() { awk -v k="$1" 'index($0, k) { s = substr($0, index($0, k) + length(k)); if (match(s, /[0-9]+/)) { print substr(s, RSTART, RLENGTH); exit } }' "$2" 2>/dev/null; }
 
-READ="$EV/.spec373b-verdict.cells"
+# The intermediate lives outside the evidence dir, in a fresh file this run
+# created, so a stale file can never be read as this run's readings.
+READ="$(mktemp "${TMPDIR:-/tmp}/spec373b-verdict.XXXXXX")" || { echo "FATAL: cannot create the intermediate file" >&2; exit 4; }
 FAILED=""
 for c in b1 b2 a1 a2; do
   BASE="spec373b-${c}"
@@ -117,6 +134,8 @@ for c in b1 b2 a1 a2; do
   fi
   echo "PA_${c}=${PA_LINE#PA=}"
   PM_ROWS="$(awk -F= '/^post_mortem_rows=/ { v = $2 } END { print (v == "" ? "NA" : v) }' "$RUNNER" 2>/dev/null || echo NA)"
+  # Only a plain count is forwarded into the frozen PM1 program.
+  printf '%s' "$PM_ROWS" | grep -Eq '^[0-9]+$' || PM_ROWS=NA
   if [ "$PM_ROWS" = "NA" ] || [ -z "$DURATION" ] || [ -z "$CADENCE" ] || [ ! -s "$CSV" ]; then
     PM_LINE="PM1=FALSE reason=no_counter_or_csv post_mortem_rows=${PM_ROWS}"
   else
@@ -154,7 +173,8 @@ for c in b1 b2 a1 a2; do
     echo "BYTES_ALLOC_RATE_${c}=n/a reason=no_csv"
     echo "ALLOC_LIVE_${c}=n/a reason=no_csv"
   fi
-done > "$READ"
+done > "$READ" || FAILED="${FAILED} WRITE_INTERMEDIATE"
+[ -s "$READ" ] || FAILED="${FAILED} EMPTY_INTERMEDIATE"
 if [ -n "$FAILED" ]; then
   cat "$READ"; echo "FATAL: a program step failed:${FAILED}; no flags printed (kept ${READ})" >&2; exit 4
 fi
@@ -202,7 +222,7 @@ OUT_FLAGS="$(awk -F= -v e="$E" -v shares="$SHARES_STOP" '
       }
       sb = ab(R["b1"] - R["b2"]) / ((R["b1"] + R["b2"]) / 2); sa = ab(R["a1"] - R["a2"]) / ((R["a1"] + R["a2"]) / 2)
       lsb = ab(L["b1"] - L["b2"]) / ((L["b1"] + L["b2"]) / 2); lsa = ab(L["a1"] - L["a2"]) / ((L["a1"] + L["a2"]) / 2)
-      printf "S_A=%.4f S_B_LIVE=%.4f S_A_LIVE=%.4f\n", sa, lsb, lsa
+      printf "S_A=%.6f S_B_LIVE=%.6f S_A_LIVE=%.6f\n", sa, lsb, lsa
       stopR = (lo > 1 + mx(sb, sa)) || (llo > 1 + mx(lsb, lsa))
       printf "STOP_R_PREDICATE=%s (rate min I %.4f vs %.4f; live min I %.4f vs %.4f)\n", (stopR ? "TRUE" : "FALSE"), lo, 1 + mx(sb, sa), llo, 1 + mx(lsb, lsa)
       ls = mx(lsb, lsa)
@@ -243,10 +263,10 @@ OUT_FLAGS="$(awk -F= -v e="$E" -v shares="$SHARES_STOP" '
     if (have) {
       print "LIVE_SIGN=" sign
       printf "I=[%.4f,%.4f]\n", lo, hi
-      printf "S_B=%.4f\n", sb
+      printf "S_B=%.6f\n", sb
       print "E=" e
       printf "LIVE_I=[%.4f,%.4f]\n", llo, lhi
-      printf "S_B_LIVE=%.4f\n", lsb
+      printf "S_B_LIVE=%.6f\n", lsb
       print "EXCESS=" excess
       print "BYTES_PER_WRITE=" bpws
     } else {

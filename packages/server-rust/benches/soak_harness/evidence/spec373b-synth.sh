@@ -19,7 +19,7 @@
 # max I <= 0.9333, EXCESS needs 1 - min I > 0.2001.
 #
 #   case  b1   b2   a1   a2   live(a)  extra                 expected
-#   S1   1000 1010  860  870  1e8      -                     rc=0 STOP=none CONFIRMED I=[0.8515,0.8700] LIVE_SIGN=flat
+#   S1   1000 1010  860  870  1e8      -                     rc=0 STOP=none CONFIRMED I=[0.8515,0.8700] S_B=0.009950 LIVE_SIGN=flat
 #                                                            EXCESS=FALSE WRITE_PARITY=OK max_dev=0.0000
 #                                                            BYTES_PER_WRITE=b1=6.0 b2=6.1 a1=5.2 a2=5.2 a/b=[0.8515,0.8700]
 #   S2   1000 1010  960  965  1e8      -                     rc=0 STOP=none NOT_MET (max I 0.9650 > 0.9333)
@@ -52,14 +52,14 @@
 #        (LIVE_I = [0.9902,1.0100], s_b_live = 0.0198)       rc=0 STOP=none CONFIRMED LIVE_SIGN=flat
 #   S18  = S1, manifest without E_FROZEN=                    rc=3, no flags
 #   S19  = S1 WITHOUT SPEC373B_SYNTHETIC (ORDER is required; no manifest commit)
-#                                                            rc=3, ORDER=FAIL no manifest commit given, no flags
+#                                                            rc=3, ORDER=FAIL (order.sh does not hash as M '' lists it), no flags
 set -uo pipefail
 export LC_ALL=C
 OUT="${1:-}"
 [ -n "$OUT" ] || { echo "usage: spec373b-synth.sh <SCRATCH_DIR>" >&2; exit 2; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd -P)"
-[ "$OUT" != "$SCRIPT_DIR" ] || { echo "FATAL: synthetic cases must not write into the evidence dir" >&2; exit 2; }
+case "$OUT/" in "$SCRIPT_DIR"/*) echo "FATAL: synthetic cases must not write into (or under) the evidence dir" >&2; exit 2 ;; esac
 
 cell() {   # $1 dir, $2 cell, $3 R1, $4 live, $5 post_mortem_rows, $6 duration, $7 kink, $8 R2, $9 totalWrites
   local d="$1" c="$2" r1="$3" live="$4" pm="$5" dur="$6" kink="$7" r2="$8" tw="$9" b="$1/spec373b-$2"
@@ -111,7 +111,9 @@ case_dir S7  "$OK"                               1000 1010  860  870 130000000 0
 case_dir S8  "$OK"                               2000 2000 2000 2000 $L        0 840 480 1000 800 $L $T; run_case S8
 case_dir S9  "$OK"                               1000 1010    0    0 $L        0 900 $NOK 0 0 $L $T;    run_case S9
 case_dir S10 "$OK"                               1000 1010  860  870 $L        0 900 $NOK 0 0 $L $T
-sed -i '' 's/^480,1.0,100,\([0-9]*\),\([0-9.]*\),480,16,[0-9]*$/480,1.0,100,\1,\2,480,16,x1/' "$OUT/S10/spec373b-b1.csv"
+sed -i '' 's/^480,1.0,100,\([0-9]*\),\([0-9.]*\),480,16,[0-9]*$/480,1.0,100,\1,\2,480,16,x1/' "$OUT/S10/spec373b-b1.csv" \
+  || { echo "FATAL: S10 setup (BSD sed -i '') failed" >&2; exit 2; }
+grep -q ',480,16,x1$' "$OUT/S10/spec373b-b1.csv" || { echo "FATAL: S10 setup did not corrupt row t=480" >&2; exit 2; }
 run_case S10
 case_dir S11 'E_FROZEN=0.1334\n'                 1000 1010  860  870 $L        0 900 $NOK 0 0 $L $T;    run_case S11
 case_dir S12 'SHARES_STOP=none\nE_FROZEN=abc\n'  1000 1010  860  870 $L        0 900 $NOK 0 0 $L $T;    run_case S12

@@ -62,9 +62,22 @@ say() { echo "$*" | tee -a "$LOG"; }
 # ----------------------------------------------------------------- 1. start
 CHAIN_START_EPOCH="$(date +%s)"
 say "chain start: $(date -u +%Y-%m-%dT%H:%M:%SZ) epoch=${CHAIN_START_EPOCH} phase=${PHASE} smoke=${SMOKE} HEAD=$(git -C "$REPO_ROOT" rev-parse HEAD) freeze=${FREEZE}"
+# spec373b-order.sh cannot vouch for itself: check its bytes against M's
+# section-1 listing before it is trusted.
+order_sha_ok() {   # $1 = M; prints nothing, returns 0 iff order.sh hashes as M lists it
+  local want got
+  want="$(git -C "$REPO_ROOT" show "${1}:packages/server-rust/benches/soak_harness/evidence/spec373b-manifest.md" 2>/dev/null \
+    | sed '/^## APPEND-ONLY BELOW/q' | sed -nE 's/^- `([0-9a-f]{64})` `packages\/server-rust\/benches\/soak_harness\/evidence\/spec373b-order\.sh`.*/\1/p')"
+  got="$(shasum -a 256 "$SCRIPT_DIR/spec373b-order.sh" 2>/dev/null | awk '{print $1}')"
+  [ -n "$want" ] && [ "$want" = "$got" ]
+}
 MC="${SPEC373B_MANIFEST_COMMIT:-}"
-ORDER_LINE="$(bash "$SCRIPT_DIR/spec373b-order.sh" "$MC")"
-orc=$?
+if order_sha_ok "$MC"; then
+  ORDER_LINE="$(bash "$SCRIPT_DIR/spec373b-order.sh" "$MC")"
+  orc=$?
+else
+  ORDER_LINE="ORDER=FAIL spec373b-order.sh does not hash as M '${MC}' lists it"; orc=3
+fi
 say "$ORDER_LINE"
 [ "$orc" -eq 0 ] || { say "FATAL: ORDER is not OK; refusing to run"; exit 1; }
 if [ -z "${SDKROOT:-}" ] && [ -x /usr/bin/xcrun ]; then
@@ -202,6 +215,7 @@ if [ "$SMOKE" = "1" ]; then
   ( cd "$SCRIPT_DIR" && python3 spec373b-shares.py --pin 46dcc12a spec371-c3e.dhat.json.gz spec371-c3l.dhat.json.gz ) > "$OUT/spec373b-selfcheck.txt" 2>&1
   say "shares self-check rc=$? $(grep '^SELF_CHECK=' "$OUT/spec373b-selfcheck.txt")"
   bash "$SCRIPT_DIR/spec373b-synth.sh" "$OUT/synthetic" 2>&1 | tee -a "$LOG"
+  say "synth rc=${PIPESTATUS[0]}"
   say "### SMOKE COMPLETE $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 fi
 say "chain end: $(date -u +%Y-%m-%dT%H:%M:%SZ)"

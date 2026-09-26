@@ -16,9 +16,13 @@
 #        git show <M>:<manifest> | sed '/^## APPEND-ONLY BELOW/q' | shasum -a 256
 #   3. Every program listed in M's section 1 (lines "- `<sha256>` `<path>`")
 #      hashes to its listed sha256, and M lists at least MIN_PROGS of them.
-#   4. The freeze gate over every build input: no diff between the freeze
-#      literal of spec373b-cells.sh and HEAD, and an empty `git status
-#      --porcelain`, over the pathspec below.
+#   4. The freeze gate over every build input: the freeze literal of
+#      spec373b-cells.sh is a hex commit id (never a movable name such as HEAD),
+#      and there is no diff between it and HEAD, and an empty `git status
+#      --porcelain`, over the pathspec below -- the spec's six paths plus the
+#      root rust-toolchain.toml, which also selects what a build compiles.
+# This file cannot vouch for itself: every caller checks its sha256 against
+# M's listing BEFORE running it (spec373b-verdict.sh, spec373b-chain.sh).
 # On success prints one line:
 #   ORDER=OK manifest_commit=<M> prefix_sha256=<sha> programs=<n> freeze=<F>
 set -uo pipefail
@@ -28,7 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SERVER_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
 REPO_ROOT="$(cd "$SERVER_ROOT/../.." && pwd -P)"
 MREL="packages/server-rust/benches/soak_harness/evidence/spec373b-manifest.md"
-BUILD_PATHS=(packages/server-rust/src packages/server-rust/Cargo.toml packages/server-rust/build.rs packages/core-rust Cargo.toml Cargo.lock)
+BUILD_PATHS=(packages/server-rust/src packages/server-rust/Cargo.toml packages/server-rust/build.rs packages/core-rust Cargo.toml Cargo.lock rust-toolchain.toml)
 MIN_PROGS=10
 
 fail() { echo "ORDER=FAIL $*"; exit 3; }
@@ -40,9 +44,12 @@ git -C "$REPO_ROOT" rev-parse --verify "${MC}^{commit}" >/dev/null 2>&1 || fail 
 git -C "$REPO_ROOT" merge-base --is-ancestor "$MC" HEAD 2>/dev/null || fail "${MC} is not an ancestor of HEAD"
 [ -f "$MFILE" ] || fail "manifest file ${MFILE} missing"
 
-PFX_M="$(git -C "$REPO_ROOT" show "${MC}:${MREL}" 2>/dev/null | sed '/^## APPEND-ONLY BELOW/q' | shasum -a 256 | awk '{print $1}')"
+MTEXT="$(git -C "$REPO_ROOT" show "${MC}:${MREL}" 2>/dev/null)" || fail "M carries no ${MREL}"
+printf '%s\n' "$MTEXT" | grep -q '^## APPEND-ONLY BELOW' || fail "M carries no APPEND-ONLY marker"
+grep -q '^## APPEND-ONLY BELOW' "$MFILE" || fail "manifest file ${MFILE} carries no APPEND-ONLY marker"
+PFX_M="$(git -C "$REPO_ROOT" show "${MC}:${MREL}" | sed '/^## APPEND-ONLY BELOW/q' | shasum -a 256 | awk '{print $1}')"
 PFX_W="$(sed '/^## APPEND-ONLY BELOW/q' "$MFILE" | shasum -a 256 | awk '{print $1}')"
-git -C "$REPO_ROOT" show "${MC}:${MREL}" 2>/dev/null | grep -q '^## APPEND-ONLY BELOW' || fail "M carries no APPEND-ONLY marker"
+[ "${#PFX_M}" -eq 64 ] && [ "${#PFX_W}" -eq 64 ] || fail "a prefix sha256 could not be computed"
 [ "$PFX_M" = "$PFX_W" ] || fail "manifest prefix sha256 ${PFX_W} != M ${PFX_M}"
 
 PROGS="$(git -C "$REPO_ROOT" show "${MC}:${MREL}" | sed '/^## APPEND-ONLY BELOW/q' | sed -nE 's/^- `([0-9a-f]+)` `([^`]+)`.*/\1 \2/p')"
@@ -57,6 +64,7 @@ done <<< "$PROGS"
 
 FREEZE="$(awk -F= '/^SPEC373B_CODE_FREEZE=/ { print $2; exit }' "$SCRIPT_DIR/spec373b-cells.sh")"
 [ -n "$FREEZE" ] || fail "no SPEC373B_CODE_FREEZE literal in spec373b-cells.sh"
+printf '%s' "$FREEZE" | grep -Eq '^[0-9a-f]{8,40}$' || fail "freeze literal '${FREEZE}' is not a hex commit id"
 git -C "$REPO_ROOT" rev-parse --verify "${FREEZE}^{commit}" >/dev/null 2>&1 || fail "freeze ${FREEZE} is not a commit"
 git -C "$REPO_ROOT" diff --quiet "$FREEZE"..HEAD -- "${BUILD_PATHS[@]}" || fail "build inputs at HEAD differ from the freeze ${FREEZE}"
 [ -z "$(git -C "$REPO_ROOT" status --porcelain -- "${BUILD_PATHS[@]}")" ] || fail "the build-input working tree is dirty"

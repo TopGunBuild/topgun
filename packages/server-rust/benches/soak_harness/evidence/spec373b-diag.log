@@ -1,0 +1,90 @@
+chain start: 2026-09-26T14:50:38Z epoch=1790434238 HEAD=0511796a5c45b51161a6a1abc7b55a59bcdd3e9d
+host load at chain start: 17:50  up 4 days, 19:56, 2 users, load averages: 2.97 3.11 3.56
+Preparing worktree (detached HEAD b166719d)
+HEAD is now at b166719d Merge pull request #171 from TopGunBuild/spec-373a-leaf-hash-prune-probe
+pin checkout: /Users/koristuvac/Projects/topgun/topgun/target/spec373b-src-b166719d HEAD=b166719d9569c14076f2211139667aabb8f71d6a clean
+build DH: (cd /Users/koristuvac/Projects/topgun/topgun/target/spec373b-src-b166719d/packages/server-rust && CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec373b-dh-pin cargo build --profile release-with-debug --features dhat-heap --bin topgun-server)
+   Compiling reqwest v0.12.28
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/target/spec373b-src-b166719d/packages/server-rust)
+    Finished `release-with-debug` profile [optimized + debuginfo] target(s) in 5m 46s
+build H: (cd /Users/koristuvac/Projects/topgun/topgun/packages/server-rust && CARGO_TARGET_DIR=/Users/koristuvac/Projects/topgun/topgun/target/spec373b-dh-h cargo build --release --bench soak_harness)
+   Compiling reqwest v0.12.28
+   Compiling topgun-server v2.0.0 (/Users/koristuvac/Projects/topgun/topgun/packages/server-rust)
+    Finished `release` profile [optimized] target(s) in 4m 14s
+flavour=DH code=b166719d9569c14076f2211139667aabb8f71d6a path=/Users/koristuvac/Projects/topgun/topgun/target/spec373b-dh-pin/release-with-debug/topgun-server sha256=69f0654ab03311ac5731ff7c814e983cff5f76534b981beaa4cdc816ea3ecde8 mtime=1790434586 recompiled=yes marker=ok
+flavour=H code=ef72aea1f38ab9ee7b96e7fec53169fad74c1dcf path=/Users/koristuvac/Projects/topgun/topgun/target/spec373b-dh-h/release/deps/soak_harness-0379469b8a4255d8 sha256=74317bd3e7076d0a90957eaa727cf28c7db3053d8b9130da08d2648f04914138 mtime=1790434767 recompiled=yes marker=ok
+--- cell de at 2026-09-26T15:00:40Z
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   664510.
+Pages active:                                 524954.
+Pages inactive:                               569248.
+Pages speculative:                              1414.
+Pages throttled:                                   0.
+Pages wired down:                             148245.
+Pages purgeable:                                5688.
+LOAD_AT_START_de=2.78 5.31 5.18
+cell de: RUNNER_EXIT=0
+--- cell dl at 2026-09-26T15:05:53Z
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   635068.
+Pages active:                                 534122.
+Pages inactive:                               565204.
+Pages speculative:                             27683.
+Pages throttled:                                   0.
+Pages wired down:                             146628.
+Pages purgeable:                                5804.
+LOAD_AT_START_dl=7.78 7.21 6.13
+cell dl: RUNNER_EXIT=0
+TOTAL_WRITES_de=20031 WRITES_PER_S_de=66.8 FLOOR_de=60.9 DH_CA_RATIO_de=0.384 (recorded, not gated)
+TOTAL_WRITES_dl=46303 WRITES_PER_S_dl=51.4 FLOOR_dl=46.6 DH_CA_RATIO_dl=0.295 (recorded, not gated)
+WRITE_RATE_STOP=FALSE
+spec373b-shares.py sha256=b12542c203e13ee618c1dd810cb18740d1b30428f581f69a7cf8ed4567175d62
+shares rc=0
+SELF_EARLY=spec371-c3e.dhat.json.gz
+SELF_LATE=spec371-c3l.dhat.json.gz
+SELF_PIN=46dcc12a
+SELF_WINDOW_MB=5251.3476
+SELF_ENGINE_SITE=storage/engines/hashmap.rs:107
+SELF_ENGINE_PPS=30/30
+SELF_ENGINE_MB=552.7394
+SELF_ENGINE_SHARE=0.105257
+SELF_ENGINE_GROW_MB=0.0000
+SELF_QUEUE_SITE=storage/datastores/write_behind.rs:2424
+SELF_QUEUE_PPS=36/36
+SELF_QUEUE_MB=569.4847
+SELF_QUEUE_SHARE=0.108445
+SELF_QUEUE_GROW_MB=0.0000
+SELF_STAGING_SITE=storage/datastores/write_behind.rs:2479
+SELF_STAGING_PPS=61/63
+SELF_STAGING_MB=570.2629
+SELF_STAGING_SHARE=0.108594
+SELF_STAGING_GROW_MB=0.0000
+SELF_MULTI_SITE_PPS=0
+SELF_E=0.322296
+SELF_E_UNROUNDED=0.3222957
+SELF_CHECK=PASS (E 0.3222957 vs 0.322296, tol 0.000005)
+EARLY=spec373b-de.dhat.json.gz
+LATE=spec373b-dl.dhat.json.gz
+PIN=b166719d
+WINDOW_MB=4004.9391
+ENGINE_SITE=storage/engines/hashmap.rs:136
+ENGINE_PPS=30/30
+ENGINE_MB=446.7137
+ENGINE_SHARE=0.111541
+ENGINE_GROW_MB=0.0000
+QUEUE_SITE=storage/datastores/write_behind.rs:2463
+QUEUE_PPS=35/36
+QUEUE_MB=440.2769
+QUEUE_SHARE=0.109933
+QUEUE_GROW_MB=0.0000
+STAGING_SITE=storage/datastores/write_behind.rs:2518
+STAGING_PPS=61/62
+STAGING_MB=440.9683
+STAGING_SHARE=0.110106
+STAGING_GROW_MB=0.0000
+MULTI_SITE_PPS=0
+E=0.331580
+E_UNROUNDED=0.3315803
+SHARES_STOP=none
+E_FROZEN=0.3316
+chain end: 2026-09-26T15:21:06Z
