@@ -2180,12 +2180,15 @@ impl WriteBehindDataStore {
 // Background flush loop (R3)
 // ---------------------------------------------------------------------------
 
-/// Background task that periodically flushes eligible entries to the inner store.
-///
-/// Runs until the shutdown signal is received. Wakes on either the configured
-/// interval or an explicit notify (from `soft_flush`/`hard_flush`).
 /// Persists one dequeued entry to the inner store — the single body the
 /// background flush and the shutdown drain share.
+///
+/// A `StoreCell` entry persists the cell's value as it is now, read under the
+/// cell lock. When the inner store accepts encoded records, the value is
+/// encoded under the lock and handed over as bytes, so no copy of the record
+/// outlives the lock; otherwise it is cloned out under the lock. Either way the
+/// guard lives only inside its block: it is `!Send`, and must not be held
+/// across the inner store's await (or into any call that takes the same lock).
 async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow::Result<()> {
     match &entry.operation {
         DelayedOp::Store {
@@ -2206,23 +2209,44 @@ async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow
             cell,
             expiration_time,
         } => {
-            // Copied out under the lock: the guard must not be held across the
-            // inner store's await.
-            let value = cell.lock().value.clone();
-            inner
-                .add(
-                    &entry.map,
-                    &entry.key,
-                    &value,
-                    *expiration_time,
-                    entry.store_time,
-                )
-                .await
+            if inner.accepts_encoded() {
+                let bytes = {
+                    let guard = cell.lock();
+                    rmp_serde::to_vec_named(&guard.value)?
+                };
+                inner
+                    .add_encoded(
+                        &entry.map,
+                        &entry.key,
+                        &bytes,
+                        *expiration_time,
+                        entry.store_time,
+                    )
+                    .await
+            } else {
+                let value = {
+                    let guard = cell.lock();
+                    guard.value.clone()
+                };
+                inner
+                    .add(
+                        &entry.map,
+                        &entry.key,
+                        &value,
+                        *expiration_time,
+                        entry.store_time,
+                    )
+                    .await
+            }
         }
         DelayedOp::Remove => inner.remove(&entry.map, &entry.key, entry.store_time).await,
     }
 }
 
+/// Background task that periodically flushes eligible entries to the inner store.
+///
+/// Runs until the shutdown signal is received. Wakes on either the configured
+/// interval or an explicit notify (from `soft_flush`/`hard_flush`).
 #[allow(clippy::too_many_lines)]
 async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Receiver<bool>) {
     let interval = tokio::time::Duration::from_millis(store.config.flush_interval_ms);

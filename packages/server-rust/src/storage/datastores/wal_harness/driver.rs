@@ -57,7 +57,8 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
 use super::super::{
-    partition_for, DelayedOp, WalBootstrap, WatermarkMode, WriteBehindConfig, WriteBehindDataStore,
+    partition_for, persist_entry, WalBootstrap, WatermarkMode, WriteBehindConfig,
+    WriteBehindDataStore,
 };
 use super::{
     BootSeedMode, Case, CaseShape, DefectMode, GcCrashPoint, IncarnationEnd, InvariantViolation,
@@ -67,8 +68,11 @@ use super::{
 use crate::service::domain::crdt::{
     apply_or_delta, normalize_to_or_map, or_map_semantic_view, OrMapSemanticView,
 };
-use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
-use crate::storage::record::{reconcile_tombstone_bytes, OrMapEntry, RecordValue};
+use crate::storage::engine::new_slot_cell;
+use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor, WriteSource};
+use crate::storage::record::{
+    reconcile_tombstone_bytes, OrMapEntry, Record, RecordMetadata, RecordValue,
+};
 use crate::storage::tombstone_gauge::with_isolated_gauge;
 use crate::storage::wal::{
     GcCrashPoint as WalGcCrashPoint, GcOrderMode as WalGcOrderMode, OrDelta, Wal, WalEntry,
@@ -140,6 +144,24 @@ impl MapDataStore for HarnessInnerStore {
             .await
             .insert((map.to_string(), key.to_string()), Some(value.clone()));
         Ok(())
+    }
+
+    /// Accepts encoded records like the default redb backend, so the harness
+    /// drives the flush's encoded hand-off of a cell rather than the clone path.
+    fn accepts_encoded(&self) -> bool {
+        true
+    }
+
+    async fn add_encoded(
+        &self,
+        map: &str,
+        key: &str,
+        bytes: &[u8],
+        exp: i64,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        let value: RecordValue = rmp_serde::from_slice(bytes)?;
+        self.add(map, key, &value, exp, now).await
     }
 
     async fn add_backup(
@@ -1169,9 +1191,14 @@ impl Driver {
         }
     }
 
-    /// Writes an OR-shaped whole-slot value through the SAME real entry point
-    /// [`WorkOp::Append`] drives: one `WalOp::Store` frame carrying the key's complete
-    /// post-state, plus a queued entry a later flush can make durable.
+    /// Writes an OR-shaped whole-slot value through the real write path the way an
+    /// in-place OR write reaches it: the post-state in a slot cell, handed over as
+    /// [`WriteSource::Cell`] with no witness. That frames one `WalOp::Store` snapshot
+    /// of the key's complete post-state (read under the cell lock) and queues a
+    /// `StoreCell` entry, so a later flush persists the cell through the production
+    /// flush body. The cell is fresh per write, like the handle of one engine write:
+    /// a write that fails before its frame leaves no mutation in a cell an older
+    /// queued entry still shares.
     async fn store_or_snapshot(
         &mut self,
         store: &Arc<WriteBehindDataStore>,
@@ -1182,7 +1209,20 @@ impl Driver {
     ) {
         let value = or_record(slot);
         let now = self.clock;
-        let res = store.add(TEST_MAP, self.key_str(key), &value, 0, now).await;
+        let cell = new_slot_cell(Record {
+            value: value.clone(),
+            metadata: RecordMetadata::new(0, 0),
+        });
+        let res = store
+            .add_with_witness(
+                TEST_MAP,
+                self.key_str(key),
+                WriteSource::Cell(&cell),
+                0,
+                now,
+                None,
+            )
+            .await;
         let observed = Self::drain_observed();
         if res.is_err() {
             return;
@@ -1191,6 +1231,14 @@ impl Driver {
             observed.len(),
             1,
             "an OR snapshot add must append exactly one WAL frame per call"
+        );
+        // The queued entry must be this write's cell, or the flush under test would
+        // be the value path and the case would not exercise a cell at all.
+        assert!(
+            store
+                .test_pending_cell(TEST_MAP, self.key_str(key))
+                .is_some_and(|queued| Arc::ptr_eq(&queued, &cell)),
+            "an OR snapshot write must queue its own slot cell"
         );
         self.model.cur_store_time = now;
         // ABSOLUTE SET in the model too: a full-snapshot OR frame carries the live set
@@ -1305,45 +1353,9 @@ impl Driver {
 
         for entry in drained {
             let p = partition_for(&entry.map, &entry.key);
-            let result = match &entry.operation {
-                DelayedOp::Store {
-                    value,
-                    expiration_time,
-                } => {
-                    store
-                        .inner
-                        .add(
-                            &entry.map,
-                            &entry.key,
-                            value,
-                            *expiration_time,
-                            entry.store_time,
-                        )
-                        .await
-                }
-                DelayedOp::StoreCell {
-                    cell,
-                    expiration_time,
-                } => {
-                    let value = cell.lock().value.clone();
-                    store
-                        .inner
-                        .add(
-                            &entry.map,
-                            &entry.key,
-                            &value,
-                            *expiration_time,
-                            entry.store_time,
-                        )
-                        .await
-                }
-                DelayedOp::Remove => {
-                    store
-                        .inner
-                        .remove(&entry.map, &entry.key, entry.store_time)
-                        .await
-                }
-            };
+            // The production flush body, so a `StoreCell` entry takes the same
+            // encoded hand-off (the inner store accepts encoded records, like redb).
+            let result = persist_entry(store.inner.as_ref(), &entry).await;
             store.resolve_pending(entry.sequence);
             if result.is_ok() {
                 // Real resolve + advance: this is where the WatermarkMode seam
