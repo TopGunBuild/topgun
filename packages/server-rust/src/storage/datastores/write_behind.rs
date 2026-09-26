@@ -706,6 +706,106 @@ impl std::fmt::Debug for ClassifierSeam {
     }
 }
 
+/// The parked side of a one-shot test park: announces the park, then waits
+/// for the release (or for the test's handle to be dropped).
+#[cfg(test)]
+struct ParkGate {
+    parked: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+impl ParkGate {
+    async fn pass(self) {
+        let _ = self.parked.send(());
+        let _ = self.release.await;
+    }
+}
+
+/// The test's side of a one-shot park on one of this store's own paths.
+/// Dropping it releases the parked caller, so a failing test never leaves a
+/// task parked.
+#[cfg(test)]
+pub(crate) struct TestParkHandle {
+    parked: Option<tokio::sync::oneshot::Receiver<()>>,
+    release: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+#[cfg(test)]
+impl TestParkHandle {
+    fn arm() -> (ParkGate, Self) {
+        let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        (
+            ParkGate {
+                parked: parked_tx,
+                release: release_rx,
+            },
+            Self {
+                parked: Some(parked_rx),
+                release: Some(release_tx),
+            },
+        )
+    }
+
+    /// Waits until the caller parks; panics after two seconds, which means the
+    /// setup never reached the park point.
+    pub(crate) async fn wait_parked(&mut self) {
+        let parked = self.parked.take().expect("wait_parked called once");
+        tokio::time::timeout(std::time::Duration::from_secs(2), parked)
+            .await
+            .expect("the store never parked: the setup did not reach the park point")
+            .expect("park dropped before parking");
+    }
+
+    pub(crate) fn release(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+/// One-shot parks on this store's own paths, for tests that must interleave a
+/// second caller at a point no wrapper can reach: a wrapper around this store
+/// would answer `load_slot` and `add_with_witness` through the trait defaults,
+/// i.e. take the value path instead of the cell path under test.
+#[cfg(test)]
+#[derive(Default)]
+struct TestParks {
+    /// Parks the next `load_slot` of the key on return, only when it answers
+    /// a cell.
+    load_slot: Mutex<Option<(String, String, ParkGate)>>,
+    /// How many `load_slot` calls parked, so a test that expected the cell
+    /// branch fails instead of passing vacuously when it was never taken.
+    load_slot_hits: AtomicU64,
+    /// Parks the next `remove` of the key once its delete is staged.
+    after_remove: Mutex<Option<(String, String, ParkGate)>>,
+    /// Parks `hard_flush` once the shutdown flag is set, before the flush
+    /// loop is joined.
+    after_shutdown_flag: Mutex<Option<ParkGate>>,
+}
+
+#[cfg(test)]
+impl TestParks {
+    fn take_keyed(
+        slot: &Mutex<Option<(String, String, ParkGate)>>,
+        map: &str,
+        key: &str,
+    ) -> Option<ParkGate> {
+        let mut slot = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot
+            .as_ref()
+            .is_some_and(|(m, k, _)| m.as_str() == map && k.as_str() == key)
+        {
+            slot.take().map(|(_, _, gate)| gate)
+        } else {
+            None
+        }
+    }
+}
+
 /// An entry in the write-behind queue representing a pending operation.
 #[derive(Debug, Clone)]
 pub(crate) struct DelayedEntry {
@@ -1090,6 +1190,9 @@ pub struct WriteBehindDataStore {
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     append_observer: Mutex<Option<Arc<dyn Fn(u32, u64) + Send + Sync>>>,
+    /// One-shot parks on `load_slot`, `remove` and `hard_flush`.
+    #[cfg(test)]
+    test_parks: TestParks,
 }
 
 /// WAL plus the live sequence counter's starting value, threaded into
@@ -1167,6 +1270,8 @@ impl WriteBehindDataStore {
             boot_seed_mode: Mutex::new(BootSeedMode::default()),
             #[cfg(test)]
             append_observer: Mutex::new(None),
+            #[cfg(test)]
+            test_parks: TestParks::default(),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -1274,6 +1379,56 @@ impl WriteBehindDataStore {
             Some(StagedValue::Cell(cell)) => Some(Arc::clone(cell)),
             Some(StagedValue::Value(_)) | None => None,
         }
+    }
+
+    /// Parks the next `load_slot` of `(map, key)` on return, but only when it
+    /// answers the staged cell: the caller then holds the cell while the test
+    /// interleaves a second caller. One-shot; each park counts one hit.
+    #[cfg(test)]
+    pub(crate) fn test_park_load_slot(&self, map: &str, key: &str) -> TestParkHandle {
+        let (gate, handle) = TestParkHandle::arm();
+        *self
+            .test_parks
+            .load_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((map.to_string(), key.to_string(), gate));
+        handle
+    }
+
+    /// How many `load_slot` calls have parked on an armed
+    /// [`test_park_load_slot`](Self::test_park_load_slot).
+    #[cfg(test)]
+    pub(crate) fn test_load_slot_park_hits(&self) -> u64 {
+        self.test_parks.load_slot_hits.load(Ordering::Relaxed)
+    }
+
+    /// Parks the next `remove` of `(map, key)` once its delete is staged and
+    /// before it returns, i.e. between the two steps of a record-store remove.
+    #[cfg(test)]
+    pub(crate) fn test_park_after_remove(&self, map: &str, key: &str) -> TestParkHandle {
+        let (gate, handle) = TestParkHandle::arm();
+        *self
+            .test_parks
+            .after_remove
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((map.to_string(), key.to_string(), gate));
+        handle
+    }
+
+    /// Parks the next `hard_flush` once the shutdown flag is set and before the
+    /// flush loop is joined, so a write can hit the shutdown gate while the
+    /// drain has not started.
+    #[cfg(test)]
+    pub(crate) fn test_park_after_shutdown_flag(&self) -> TestParkHandle {
+        let (gate, handle) = TestParkHandle::arm();
+        *self
+            .test_parks
+            .after_shutdown_flag
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
+        handle
     }
 
     /// Selects the watermark rule this store computes with.
@@ -2757,6 +2912,11 @@ impl MapDataStore for WriteBehindDataStore {
         let (smap, skey) = staging_key;
         self.stage(&smap, &skey, entry_seq, None);
 
+        #[cfg(test)]
+        if let Some(gate) = TestParks::take_keyed(&self.test_parks.after_remove, map, key) {
+            gate.pass().await;
+        }
+
         Ok(())
     }
 
@@ -2788,13 +2948,26 @@ impl MapDataStore for WriteBehindDataStore {
     async fn load_slot(&self, map: &str, key: &str) -> anyhow::Result<Option<Loaded>> {
         let staging_key = (map.to_string(), key.to_string());
 
-        if let Some(entry) = self.staging.get(&staging_key) {
-            return Ok(match &entry.value().value {
+        let staged = self
+            .staging
+            .get(&staging_key)
+            .map(|entry| match &entry.value().value {
                 Some(StagedValue::Cell(cell)) => Some(Loaded::Cell(Arc::clone(cell))),
                 Some(StagedValue::Value(value)) => Some(Loaded::Value(value.clone())),
                 // Pending delete -- do not consult inner store
                 None => None,
             });
+        if let Some(answer) = staged {
+            #[cfg(test)]
+            if matches!(answer, Some(Loaded::Cell(_))) {
+                if let Some(gate) = TestParks::take_keyed(&self.test_parks.load_slot, map, key) {
+                    self.test_parks
+                        .load_slot_hits
+                        .fetch_add(1, Ordering::Relaxed);
+                    gate.pass().await;
+                }
+            }
+            return Ok(answer);
         }
 
         self.inner.load_slot(map, key).await
@@ -3109,6 +3282,19 @@ impl MapDataStore for WriteBehindDataStore {
         // Mark the store as shutting down so any straggler writes are rejected
         // rather than queued behind the drain.
         self.is_shutdown.store(true, Ordering::Release);
+
+        #[cfg(test)]
+        {
+            let gate = self
+                .test_parks
+                .after_shutdown_flag
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(gate) = gate {
+                gate.pass().await;
+            }
+        }
 
         // Stop the background flush loop so it doesn't race with our direct drain.
         let _ = self.shutdown.send(true);

@@ -2815,5 +2815,422 @@ mod tests {
                 "the flush must persist old, op and op2"
             );
         }
+
+        // -------------------------------------------------------------------
+        // Adoption of a staged cell, and the TG-OR-007 races re-run with the
+        // key's pending write held as a cell (the write-behind store sits
+        // directly under the record store: a wrapper would answer `load_slot`
+        // and `add_with_witness` through the value-path defaults).
+        // -------------------------------------------------------------------
+
+        use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
+
+        /// A write-behind store over `inner` whose flush loop never drains on
+        /// its own; `write_delay_ms` is the delay an entry waits once a flush
+        /// is asked for.
+        fn write_behind_over(
+            inner: &Arc<dyn MapDataStore>,
+            write_delay_ms: u64,
+        ) -> Arc<WriteBehindDataStore> {
+            WriteBehindDataStore::new(
+                Arc::clone(inner),
+                WriteBehindConfig {
+                    write_delay_ms,
+                    flush_interval_ms: 600_000,
+                    ..WriteBehindConfig::default()
+                },
+            )
+        }
+
+        /// Seeds `KEY` durably as {a, b}, then leaves the pending in-place write
+        /// {a, b, c} staged as a cell and evicted from the engine. Returns that
+        /// cell.
+        async fn evict_a_staged_cell(
+            ds: &Arc<dyn MapDataStore>,
+            write_behind: &WriteBehindDataStore,
+            store: &DefaultRecordStore,
+        ) -> Arc<SlotCell> {
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0, 0)
+                .await
+                .expect("seed");
+            assert!(or_add(store, "c").await.expect("or_add c"));
+            let cell = write_behind
+                .test_staged_cell(MAP, KEY)
+                .expect("precondition: the in-place write is staged as a cell");
+            assert!(
+                store.evict_lru(u32::MAX, false) > 0,
+                "precondition: the marked-clean pending key is evicted"
+            );
+            assert!(!store.exists_in_memory(KEY), "precondition: evicted");
+            cell
+        }
+
+        /// The record store's stack for the cell variants: redb under a
+        /// write-behind store under the record store.
+        fn staged_cell_stack(
+            ds: &Arc<dyn MapDataStore>,
+            engine: Box<dyn StorageEngine>,
+        ) -> (Arc<WriteBehindDataStore>, Arc<DefaultRecordStore>) {
+            let write_behind = write_behind_over(ds, 600_000);
+            let store = Arc::new(store_over(
+                Arc::clone(&write_behind) as Arc<dyn MapDataStore>,
+                engine,
+                Vec::new(),
+            ));
+            (write_behind, store)
+        }
+
+        /// Polls `cond` until it holds; panics after [`PARK_BOUND`].
+        async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+            let deadline = tokio::time::Instant::now() + PARK_BOUND;
+            while !cond() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "timed out waiting for {what}"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        // A `get` of an evicted pending key adopts the staged cell; once the
+        // flush has persisted it and released the queue's and staging's
+        // references, only the engine holds it, and evicting it frees it.
+        #[tokio::test]
+        async fn a_get_adopts_the_staged_cell_until_the_flush_releases_it() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            // Entries are due at once, but only a requested flush drains them.
+            let write_behind = write_behind_over(&ds, 0);
+            let store = store_over(
+                Arc::clone(&write_behind) as Arc<dyn MapDataStore>,
+                Box::new(HashMapStorage::new()),
+                Vec::new(),
+            );
+            let staged = evict_a_staged_cell(&ds, &write_behind, &store).await;
+
+            let read = store.get(KEY, false).await.expect("get").expect("found");
+            assert_eq!(tags_of(&read.value), strings(&["a", "b", "c"]));
+            let slot = store
+                .storage()
+                .test_slot(KEY)
+                .expect("the get caches the key");
+            assert!(
+                Arc::ptr_eq(&slot, &staged),
+                "the engine must hold the staged cell after the get"
+            );
+            let weak = Arc::downgrade(&slot);
+            drop((slot, staged));
+
+            write_behind.soft_flush().await.expect("soft_flush");
+            eventually("the flush to release the queue and staging", || {
+                write_behind.test_pending_cell(MAP, KEY).is_none()
+                    && write_behind.test_staged_cell(MAP, KEY).is_none()
+            })
+            .await;
+            assert_eq!(durable_tags(&ds).await, Some(strings(&["a", "b", "c"])));
+            // The flush loop drops its drained batch at the end of its pass.
+            eventually("only the engine to hold the cell", || {
+                std::sync::Weak::strong_count(&weak) == 1
+            })
+            .await;
+
+            assert!(
+                store.evict_lru(u32::MAX, false) > 0,
+                "the flushed, clean key is evicted"
+            );
+            assert!(
+                weak.upgrade().is_none(),
+                "the cell must be freed once the engine drops the last reference"
+            );
+        }
+
+        // Two in-place writes of one key with a flush between them: the second
+        // write re-queues the same cell, and the second flush persists both.
+        #[tokio::test]
+        async fn two_in_place_writes_with_a_flush_between_persist_both() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            ds.add(MAP, KEY, &or_value(&["old"], &[]), 0, 0)
+                .await
+                .expect("seed");
+            // Entries are due at once, but only a requested flush drains them.
+            let write_behind = write_behind_over(&ds, 0);
+            let store = store_over(
+                Arc::clone(&write_behind) as Arc<dyn MapDataStore>,
+                Box::new(HashMapStorage::new()),
+                Vec::new(),
+            );
+            let flush = || async {
+                write_behind.soft_flush().await.expect("soft_flush");
+                eventually("the flush to drain the key", || {
+                    write_behind.pending_operation_count() == 0
+                        && write_behind.test_staged_cell(MAP, KEY).is_none()
+                })
+                .await;
+            };
+
+            assert!(or_add(&store, "op1").await.expect("or_add op1"));
+            let first = write_behind
+                .test_pending_cell(MAP, KEY)
+                .expect("op1 is queued as a cell");
+            flush().await;
+            assert_eq!(durable_tags(&ds).await, Some(strings(&["old", "op1"])));
+
+            assert!(or_add(&store, "op2").await.expect("or_add op2"));
+            let second = write_behind
+                .test_pending_cell(MAP, KEY)
+                .expect("op2 is queued as a cell");
+            assert!(
+                Arc::ptr_eq(&first, &second),
+                "the resident key's second write re-queues the same cell"
+            );
+            drop((first, second));
+            flush().await;
+            assert_eq!(
+                durable_tags(&ds).await,
+                Some(strings(&["old", "op1", "op2"])),
+                "the second flush must persist both ops"
+            );
+        }
+
+        // An OR_ADD on an evicted pending key adopts the staged cell itself and
+        // the flush persists old ∪ op.
+        #[tokio::test]
+        async fn an_or_add_adopts_the_staged_cell_of_an_evicted_pending_key() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            let (write_behind, store) = staged_cell_stack(&ds, Box::new(HashMapStorage::new()));
+            let staged = evict_a_staged_cell(&ds, &write_behind, &store).await;
+
+            assert!(or_add(&store, "op").await.expect("or_add op"));
+            let slot = store
+                .storage()
+                .test_slot(KEY)
+                .expect("op materializes the key");
+            assert!(
+                Arc::ptr_eq(&slot, &staged),
+                "the OR_ADD must adopt the staged cell, not a copy of it"
+            );
+
+            write_behind.hard_flush().await.expect("hard_flush");
+            assert_eq!(
+                durable_tags(&ds).await,
+                Some(strings(&["a", "b", "c", "op"])),
+                "the flush must persist old ∪ op"
+            );
+        }
+
+        // Path (ii) × eviction on a cell: a reader holding the staged cell must
+        // not cache it after a write re-adopted, persisted and evicted it
+        // (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn reader_does_not_cache_a_load_that_an_eviction_superseded_on_a_staged_cell() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            let (write_behind, store) = staged_cell_stack(&ds, Box::new(HashMapStorage::new()));
+            evict_a_staged_cell(&ds, &write_behind, &store).await;
+
+            let mut reader_park = write_behind.test_park_load_slot(MAP, KEY);
+            let reader = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move { store.get(KEY, false).await })
+            };
+            reader_park.wait_parked().await;
+
+            assert!(or_add(&store, "op").await.expect("or_add"));
+            assert!(
+                store.evict_lru(u32::MAX, false) > 0,
+                "the re-adopted, marked-clean record must be evicted"
+            );
+
+            reader_park.release();
+            reader.await.expect("reader task").expect("get");
+
+            assert_eq!(
+                write_behind.test_load_slot_park_hits(),
+                1,
+                "the reader must have loaded the staged cell"
+            );
+            assert!(
+                !store.exists_in_memory(KEY),
+                "the reader must not cache the cell it loaded before the eviction"
+            );
+            assert!(or_add(&store, "op2").await.expect("or_add"));
+            write_behind.hard_flush().await.expect("hard_flush");
+            assert_eq!(
+                durable_tags(&ds).await,
+                Some(strings(&["a", "b", "c", "op", "op2"])),
+                "no acked op may be lost to a stale cached load"
+            );
+        }
+
+        // Path (ii) × REMOVE on a cell, reader inserting after the removal: the
+        // generation refuses it (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn reader_does_not_cache_a_load_that_a_remove_superseded_on_a_staged_cell() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            let (write_behind, store) = staged_cell_stack(&ds, Box::new(HashMapStorage::new()));
+            evict_a_staged_cell(&ds, &write_behind, &store).await;
+
+            let mut reader_park = write_behind.test_park_load_slot(MAP, KEY);
+            let reader = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move { store.get(KEY, false).await })
+            };
+            reader_park.wait_parked().await;
+
+            store
+                .remove(KEY, CallerProvenance::CrdtMerge)
+                .await
+                .expect("remove");
+
+            reader_park.release();
+            reader.await.expect("reader task").expect("get");
+
+            assert_eq!(
+                write_behind.test_load_slot_park_hits(),
+                1,
+                "the reader must have loaded the staged cell"
+            );
+            assert!(
+                !store.exists_in_memory(KEY),
+                "the reader must not cache a cell the REMOVE superseded"
+            );
+            assert!(or_add(&store, "op2").await.expect("or_add"));
+            write_behind.hard_flush().await.expect("hard_flush");
+            assert_eq!(
+                durable_tags(&ds).await,
+                Some(strings(&["op2"])),
+                "the removed value must not be resurrected"
+            );
+        }
+
+        // Path (ii) × REMOVE on a cell, reader inserting between the staged
+        // delete and the engine removal: the engine removal takes the adopted
+        // cell out again (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn reader_between_the_steps_of_a_remove_does_not_resurrect_it_on_a_staged_cell() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            let (write_behind, store) = staged_cell_stack(&ds, Box::new(HashMapStorage::new()));
+            evict_a_staged_cell(&ds, &write_behind, &store).await;
+
+            let mut reader_park = write_behind.test_park_load_slot(MAP, KEY);
+            let reader = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move { store.get(KEY, false).await })
+            };
+            reader_park.wait_parked().await;
+
+            let mut remove_park = write_behind.test_park_after_remove(MAP, KEY);
+            let remover = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move { store.remove(KEY, CallerProvenance::CrdtMerge).await })
+            };
+            remove_park.wait_parked().await;
+
+            reader_park.release();
+            reader.await.expect("reader task").expect("get");
+            assert!(
+                store.exists_in_memory(KEY),
+                "precondition: the reader inserted the cell before the engine removal"
+            );
+
+            remove_park.release();
+            remover.await.expect("remover task").expect("remove");
+
+            assert_eq!(
+                write_behind.test_load_slot_park_hits(),
+                1,
+                "the reader must have loaded the staged cell"
+            );
+            assert!(
+                !store.exists_in_memory(KEY),
+                "the engine removal must take out the cell the reader inserted"
+            );
+            assert!(or_add(&store, "op2").await.expect("or_add"));
+            write_behind.hard_flush().await.expect("hard_flush");
+            assert_eq!(
+                durable_tags(&ds).await,
+                Some(strings(&["op2"])),
+                "the removed value must not be resurrected"
+            );
+        }
+
+        // Path (iii) on a cell: `evict_lru` must not remove a re-adopted cell a
+        // write mutated after the eviction snapshot, while the cell is pinned
+        // by its pending entry (TG-EVI-001).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn evict_lru_keeps_a_record_written_after_its_snapshot_on_a_staged_cell() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ds = redb(&dir);
+            let (engine, parks) = ParkingEngine::new();
+            let (write_behind, store) = staged_cell_stack(&ds, Box::new(engine));
+            evict_a_staged_cell(&ds, &write_behind, &store).await;
+
+            // Re-adopt the staged cell through the cell branch of `load_slot`.
+            let mut adopt_park = write_behind.test_park_load_slot(MAP, KEY);
+            let adopter = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move { or_add(&store, "a2").await })
+            };
+            adopt_park.wait_parked().await;
+            adopt_park.release();
+            assert!(adopter.await.expect("adopter task").expect("or_add"));
+            assert_eq!(
+                write_behind.test_load_slot_park_hits(),
+                1,
+                "the write must have re-adopted the staged cell"
+            );
+            assert!(
+                !store
+                    .storage()
+                    .get(KEY)
+                    .expect("resident")
+                    .metadata
+                    .is_dirty(),
+                "precondition: the record is clean, so it is an eviction candidate"
+            );
+
+            let mut removal_park = parks.park_removal();
+            let evictor = {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || store.evict_lru(u32::MAX, false))
+            };
+            removal_park.wait_parked();
+            let slot = store
+                .storage()
+                .test_slot(KEY)
+                .expect("resident at the park");
+            let pending = write_behind
+                .test_pending_cell(MAP, KEY)
+                .expect("the key's write is still queued as a cell");
+            assert!(
+                Arc::ptr_eq(&slot, &pending),
+                "at the park the engine's slot must be the cell the pending entry pins"
+            );
+            drop((slot, pending));
+
+            assert!(or_add(&store, "op").await.expect("or_add"));
+            let written = store.storage().get(KEY).expect("the writer's record");
+
+            removal_park.release();
+            evictor.join().expect("evictor thread");
+
+            assert!(
+                store.exists_in_memory(KEY),
+                "a record written after the snapshot must not be evicted"
+            );
+            let resident = store.storage().get(KEY).expect("resident");
+            assert_eq!(tags_of(&resident.value), tags_of(&written.value));
+            assert_eq!(resident.metadata.write_token, written.metadata.write_token);
+            write_behind.hard_flush().await.expect("hard_flush");
+            assert_eq!(
+                durable_tags(&ds).await,
+                Some(strings(&["a", "a2", "b", "c", "op"])),
+                "the flush must persist every op on the cell"
+            );
+        }
     }
 }
