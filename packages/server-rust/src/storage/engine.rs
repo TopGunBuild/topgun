@@ -19,47 +19,108 @@ use super::record::{Record, RecordMetadata, RecordValue};
 /// future is a compile error. There is no poisoning: a panic under the lock
 /// leaves the record as the panicking code left it, the same as the engine's
 /// shard locks.
-pub type SlotCell = parking_lot::Mutex<Record>;
+///
+/// [`SlotCell::lock`] is the only way to lock a cell. In debug builds it counts
+/// the cell locks the current thread holds, and every engine entry point calls
+/// [`held_cell_locks::check`], so an engine call made while its own thread
+/// holds a cell lock — which would wait on that lock, or take an entry lock
+/// after a cell lock against the entry → cell order — panics by name instead
+/// of hanging.
+pub struct SlotCell {
+    record: parking_lot::Mutex<Record>,
+}
+
+// The wrapper adds no state: a cell costs exactly the mutex it wraps, which is
+// what the allocation proofs price a new key at.
+const _: () =
+    assert!(std::mem::size_of::<SlotCell>() == std::mem::size_of::<parking_lot::Mutex<Record>>());
+
+impl SlotCell {
+    /// Locks the cell for the lifetime of the returned guard.
+    pub fn lock(&self) -> SlotGuard<'_> {
+        let guard = self.record.lock();
+        held_cell_locks::acquired();
+        SlotGuard { guard }
+    }
+
+    /// Consumes a cell nobody else holds and returns its record.
+    #[must_use]
+    pub fn into_inner(self) -> Record {
+        self.record.into_inner()
+    }
+}
+
+impl std::fmt::Debug for SlotCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `try_lock` inside the mutex's own formatter: formatting never waits
+        // and holds nothing past the call, so it needs no depth accounting.
+        f.debug_struct("SlotCell")
+            .field("record", &self.record)
+            .finish()
+    }
+}
+
+/// A held [`SlotCell`] lock; derefs to the record.
+#[must_use = "the cell stays locked only while the guard is alive"]
+pub struct SlotGuard<'a> {
+    guard: parking_lot::MutexGuard<'a, Record>,
+}
+
+impl std::ops::Deref for SlotGuard<'_> {
+    type Target = Record;
+
+    fn deref(&self) -> &Record {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for SlotGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Record {
+        &mut self.guard
+    }
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        // The guard is `!Send`, so it drops on the thread that counted it.
+        held_cell_locks::released();
+    }
+}
 
 /// Wraps a record in a new, unshared [`SlotCell`].
 #[must_use]
 pub fn new_slot_cell(record: Record) -> Arc<SlotCell> {
-    Arc::new(parking_lot::Mutex::new(record))
+    Arc::new(SlotCell {
+        record: parking_lot::Mutex::new(record),
+    })
 }
 
-/// Debug-build detector for a mutation observer that calls back into a storage
-/// engine while the in-place write path holds a slot-cell lock.
+/// Debug-build detector for a storage engine entered while the current thread
+/// holds a slot-cell lock.
 ///
-/// Such a call would wait on a cell lock its own thread holds — a silent hang.
-/// The write path opens a [`observer_reentry::Scope`] around the observers it
-/// runs under the lock, and every engine entry point calls
-/// [`observer_reentry::check`], which panics with a named message instead. In
-/// release builds the scope is a zero-sized value and the check is empty.
-pub mod observer_reentry {
+/// Such a call either waits on a cell lock its own thread holds (a silent
+/// hang: `parking_lot` is not reentrant) or takes an entry lock after a cell
+/// lock, against the entry → cell order. Observers running under the in-place
+/// write's cell lock, `mutate` and cost closures, `remove_if` predicates and a
+/// caller that passes `cell.lock()…` as an argument to an engine call are all
+/// covered, because the count follows the guard, not the call site. In release
+/// builds the count and the check compile to nothing.
+pub mod held_cell_locks {
     #[cfg(debug_assertions)]
     thread_local! {
         static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     }
 
-    /// Marks the current thread as running observers under a cell lock until
-    /// dropped; nests.
-    #[must_use = "the scope covers the observers only while it is alive"]
-    pub struct Scope {
-        _private: (),
-    }
-
-    /// Opens a [`Scope`] on the current thread.
-    pub fn enter() -> Scope {
+    #[inline]
+    pub(super) fn acquired() {
         #[cfg(debug_assertions)]
         DEPTH.with(|depth| depth.set(depth.get() + 1));
-        Scope { _private: () }
     }
 
-    impl Drop for Scope {
-        fn drop(&mut self) {
-            #[cfg(debug_assertions)]
-            DEPTH.with(|depth| depth.set(depth.get() - 1));
-        }
+    #[inline]
+    pub(super) fn released() {
+        #[cfg(debug_assertions)]
+        DEPTH.with(|depth| depth.set(depth.get() - 1));
     }
 
     /// Guards an engine entry point; `entry` names the operation for the
@@ -67,15 +128,15 @@ pub mod observer_reentry {
     ///
     /// # Panics
     ///
-    /// In debug builds, when called inside a [`Scope`] on the current thread.
+    /// In debug builds, when the current thread holds a slot-cell lock.
     #[inline]
     pub fn check(entry: &'static str) {
         #[cfg(debug_assertions)]
         DEPTH.with(|depth| {
             assert!(
                 depth.get() == 0,
-                "storage engine re-entered from a mutation observer under a slot-cell lock: \
-                 `{entry}` would wait on the lock its own caller holds"
+                "storage engine entered while this thread holds a slot-cell lock: \
+                 `{entry}` would wait on that lock or take an entry lock after it"
             );
         });
         #[cfg(not(debug_assertions))]

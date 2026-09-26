@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use rand::Rng;
 
 use crate::storage::engine::{
-    new_slot_cell, observer_reentry, FetchResult, IterationCursor, PutIfAbsentOutcome, SlotCell,
+    held_cell_locks, new_slot_cell, FetchResult, IterationCursor, PutIfAbsentOutcome, SlotCell,
     SlotInit, StorageEngine, UpdateInPlaceOutcome,
 };
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
@@ -102,7 +102,7 @@ fn encode_cursor_offset(offset: u64) -> Vec<u8> {
 
 impl StorageEngine for HashMapStorage {
     fn put(&self, key: &str, record: Record) -> Option<Record> {
-        observer_reentry::check("put");
+        held_cell_locks::check("put");
         match self.entries.entry(key.to_string()) {
             Entry::Occupied(mut occ) => {
                 // The strong count is read under the entry lock: every new
@@ -128,12 +128,12 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn get(&self, key: &str) -> Option<Record> {
-        observer_reentry::check("get");
+        held_cell_locks::check("get");
         self.entries.get(key).map(|cell| cell.lock().clone())
     }
 
     fn mark_stored(&self, key: &str, now: i64, token: u64) -> bool {
-        observer_reentry::check("mark_stored");
+        held_cell_locks::check("mark_stored");
         // The entry guard keeps the slot from being removed or replaced while
         // the cell lock makes the token check and the mutation atomic against
         // any in-place write. The token uniquely identifies the exact write the
@@ -159,7 +159,7 @@ impl StorageEngine for HashMapStorage {
         mutate: &mut dyn FnMut(&mut RecordValue) -> bool,
         cost_of: &dyn Fn(&RecordValue) -> u64,
     ) -> UpdateInPlaceOutcome {
-        observer_reentry::check("update_in_place");
+        held_cell_locks::check("update_in_place");
         // `entry` holds the shard write lock across the match, so the
         // check-mutate-or-insert is atomic against any other engine op on this
         // key — there is no get()+put() window a concurrent writer could tear.
@@ -229,7 +229,7 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn vacancy_generation(&self, key: &str) -> u64 {
-        observer_reentry::check("vacancy_generation");
+        held_cell_locks::check("vacancy_generation");
         self.stripe(key).load(Ordering::Acquire)
     }
 
@@ -240,7 +240,7 @@ impl StorageEngine for HashMapStorage {
         metadata: RecordMetadata,
         generation: u64,
     ) -> PutIfAbsentOutcome {
-        observer_reentry::check("put_if_absent_at");
+        held_cell_locks::check("put_if_absent_at");
         match self.entries.entry(key.to_string()) {
             Entry::Occupied(occ) => PutIfAbsentOutcome::Resident(occ.get().lock().clone()),
             Entry::Vacant(vac) => {
@@ -261,7 +261,7 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn remove(&self, key: &str) -> Option<Record> {
-        observer_reentry::check("remove");
+        held_cell_locks::check("remove");
         // Through `entry` so the bump happens under the key's lock whether or
         // not the key is resident: removing a non-resident key must still
         // invalidate a reader that loaded it from the data store.
@@ -278,7 +278,7 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn remove_if(&self, key: &str, predicate: &dyn Fn(&Record) -> bool) -> Option<Record> {
-        observer_reentry::check("remove_if");
+        held_cell_locks::check("remove_if");
         self.entries
             .remove_if(key, |_, cell| {
                 let remove = predicate(&cell.lock());
@@ -291,7 +291,7 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn touch(&self, key: &str, now: i64) -> Option<Record> {
-        observer_reentry::check("touch");
+        held_cell_locks::check("touch");
         let cell = self.entries.get(key)?;
         let mut record = cell.lock();
         record.metadata.on_access(now);
@@ -299,22 +299,22 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn contains_key(&self, key: &str) -> bool {
-        observer_reentry::check("contains_key");
+        held_cell_locks::check("contains_key");
         self.entries.contains_key(key)
     }
 
     fn len(&self) -> usize {
-        observer_reentry::check("len");
+        held_cell_locks::check("len");
         self.entries.len()
     }
 
     fn is_empty(&self) -> bool {
-        observer_reentry::check("is_empty");
+        held_cell_locks::check("is_empty");
         self.entries.is_empty()
     }
 
     fn clear(&self) {
-        observer_reentry::check("clear");
+        held_cell_locks::check("clear");
         // Each resident key is bumped under its own lock as it is removed; the
         // stripes are then all advanced, because `retain` never visits a key
         // that is absent but being loaded. A cell a pending write still holds
@@ -333,7 +333,7 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn estimated_cost(&self) -> u64 {
-        observer_reentry::check("estimated_cost");
+        held_cell_locks::check("estimated_cost");
         self.entries
             .iter()
             .map(|entry| entry.value().lock().metadata.cost)
@@ -341,7 +341,7 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn snapshot_iter(&self) -> Vec<(String, Record)> {
-        observer_reentry::check("snapshot_iter");
+        held_cell_locks::check("snapshot_iter");
         self.entries
             .iter()
             .map(|entry| (entry.key().clone(), entry.value().lock().clone()))
@@ -349,7 +349,7 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn random_samples(&self, sample_count: usize) -> Vec<(String, Record)> {
-        observer_reentry::check("random_samples");
+        held_cell_locks::check("random_samples");
         if sample_count == 0 {
             return Vec::new();
         }
@@ -375,6 +375,7 @@ impl StorageEngine for HashMapStorage {
 
     #[cfg(test)]
     fn test_slot(&self, key: &str) -> Option<Arc<SlotCell>> {
+        held_cell_locks::check("test_slot");
         self.entries.get(key).map(|cell| Arc::clone(&cell))
     }
 
@@ -450,6 +451,73 @@ mod tests {
             },
             metadata: RecordMetadata::new(0, cost),
         }
+    }
+
+    const HELD_LOCK_PANIC: &str = "storage engine entered while this thread holds a slot-cell lock";
+
+    /// The pattern that hangs silently without the check: a cell guard passed
+    /// as an argument lives until the call returns, and the engine call locks
+    /// the same cell. Run on its own thread with a deadline, so a missing check
+    /// fails the test instead of hanging the suite.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn re_locking_a_held_cell_through_the_engine_panics_by_name() {
+        let storage = HashMapStorage::new();
+        storage.put("k", make_record(1));
+        let cell = storage.test_slot("k").expect("resident");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                storage.mark_stored("k", 1, cell.lock().metadata.write_token);
+            }));
+            let message = outcome
+                .err()
+                .and_then(|payload| payload.downcast_ref::<String>().cloned());
+            let _ = tx.send(message);
+        });
+        let message = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("re-locking a held cell through the engine must panic, not hang")
+            .expect("the engine call must panic");
+        assert!(
+            message.starts_with(HELD_LOCK_PANIC) && message.contains("`mark_stored`"),
+            "unexpected panic message: {message}"
+        );
+    }
+
+    /// Entering the engine while holding any cell lock — here another key's —
+    /// takes an entry lock after a cell lock, against the entry → cell order.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(
+        expected = "storage engine entered while this thread holds a slot-cell lock: `get`"
+    )]
+    fn an_engine_call_under_another_keys_cell_lock_panics_by_name() {
+        let storage = HashMapStorage::new();
+        storage.put("a", make_record(1));
+        storage.put("b", make_record(2));
+        let cell = storage.test_slot("a").expect("resident");
+        let _held = cell.lock();
+        let _ = storage.get("b");
+    }
+
+    /// The count is per held guard: nested guards count twice, and once every
+    /// guard is dropped the engine is callable again.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn the_held_lock_count_returns_to_zero_when_the_guards_drop() {
+        let storage = HashMapStorage::new();
+        storage.put("a", make_record(1));
+        storage.put("b", make_record(2));
+        let a = storage.test_slot("a").expect("resident");
+        let b = storage.test_slot("b").expect("resident");
+        {
+            let _outer = a.lock();
+            let _inner = b.lock();
+        }
+        let token = a.lock().metadata.write_token;
+        assert!(storage.mark_stored("a", 1, token));
+        assert_eq!(storage.get("b").map(|r| r.metadata.cost), Some(2));
     }
 
     #[test]

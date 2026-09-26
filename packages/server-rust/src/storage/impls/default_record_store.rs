@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 
 use crate::storage::engine::{
-    observer_reentry, FetchResult, IterationCursor, PutIfAbsentOutcome, SlotInit, StorageEngine,
+    FetchResult, IterationCursor, PutIfAbsentOutcome, SlotInit, StorageEngine,
 };
 use crate::storage::map_data_store::{Loaded, MapDataStore, WriteSource};
 use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
@@ -468,10 +468,10 @@ impl RecordStore for DefaultRecordStore {
         // The observers borrow the record under the cell lock. The guard lives
         // in this block only, so it is released before the write-through
         // awaits; an observer must not call back into the engine (see
-        // `MutationObserver`).
+        // `MutationObserver`), which the held-lock check enforces in debug
+        // builds.
         let write_token = {
             let record = cell.lock();
-            let _observers = observer_reentry::enter();
 
             // Capture the token off the record just written, before any
             // concurrent writer can replace the slot — the exact-identity key for
@@ -1009,7 +1009,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[tokio::test]
     #[should_panic(
-        expected = "storage engine re-entered from a mutation observer under a slot-cell lock: `contains_key`"
+        expected = "storage engine entered while this thread holds a slot-cell lock: `contains_key`"
     )]
     async fn an_observer_re_entering_the_engine_under_the_cell_lock_panics_by_name() {
         let observer = Arc::new(ReenteringObserver::default());
@@ -1042,11 +1042,11 @@ mod tests {
             .await;
     }
 
-    /// The same call from outside the observer fan-out is an ordinary engine
-    /// call: the detector is scoped to the observers, not to the thread.
+    /// The same call after the observer fan-out is an ordinary engine call:
+    /// the check follows the held guard, and the fan-out releases it.
     #[cfg(debug_assertions)]
     #[tokio::test]
-    async fn the_re_entry_detector_is_scoped_to_the_observer_fan_out() {
+    async fn an_engine_call_after_the_observer_fan_out_is_ordinary() {
         let store = make_store();
         let mut set = |value: &mut RecordValue| {
             *value = make_value("v");
