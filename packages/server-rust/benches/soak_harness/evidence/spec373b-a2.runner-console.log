@@ -1,0 +1,129 @@
+provenance: server sha256=8c41d19056e15d5fbe6fcc9c338a0b29d364bd55533fab4fc1445de4f109a02d flavour=CA built=2026-09-26T16:26:17Z run_start=2026-09-26T17:15:58Z topgun_or_prune_restored_cancelled_total=present
+provenance: server sha256=8c41d19056e15d5fbe6fcc9c338a0b29d364bd55533fab4fc1445de4f109a02d flavour=CA built=2026-09-26T16:26:17Z run_start=2026-09-26T17:15:58Z topgun_or_prune_restored_cancelled_total=present harness sha256=1b9cbbd82ce02f9cd2ab3e676c3109f6c5a70ffbb76ef50c01026fd2b21c16ff harness_built=2026-09-26T16:29:38Z tombstone_level_ceiling_gate=present
+soak binary:   /Users/koristuvac/Projects/topgun/topgun/target/spec373b-h/release/deps/soak_harness-0379469b8a4255d8
+  built:       2026-09-26T16:29:38Z
+server binary: /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ca-head/release/topgun-server
+  built:       2026-09-26T16:26:17Z
+
+=== spec373b carve 9c part b run: cell a2 (flavour CA) ===
+  repo HEAD:      15e170b14194ae7f106613b0720f00afb1367be2
+  dirty tree:     yes
+  host/OS:        Darwin MacBookPro 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:22:49 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6000 arm64
+  lineage:        chain-built harness + chain-built CA server
+  chain start:    1790439446
+  data dir:       /Users/koristuvac/Projects/topgun/topgun/target/spec373b-a2-data
+  csv:            /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-a2.csv
+  soak.json:      /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-a2.soak.json
+  mechanism.json: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-a2.mechanism.json (harness writes spec373b-a2.soak.mechanism.json; renamed after the run)
+  durable.json:   /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-a2.soak.durable.json (raw basename: NOT renamed, by design)
+  progress.jsonl: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-a2.progress.jsonl
+  console log:    /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-a2.harness-console.log
+  matrix:         /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-a2.matrix.txt
+  soak binary:    /Users/koristuvac/Projects/topgun/topgun/target/spec373b-h/release/deps/soak_harness-0379469b8a4255d8
+  soak binary commit: 15e170b14194ae7f106613b0720f00afb1367be2 (HEAD; the binary itself is identified by its sha256)
+  .rs working tree:   CLEAN (asserted before the build)
+  code freeze:            e85adb1f
+  code freeze diff (.rs): EMPTY (asserted before the build)
+    built:        2026-09-26T16:29:38Z
+  server binary:  /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ca-head/release/topgun-server
+    built:        2026-09-26T16:26:17Z
+    sha256:       8c41d19056e15d5fbe6fcc9c338a0b29d364bd55533fab4fc1445de4f109a02d
+  --- varied knobs; everything else is the spec362b-durable.sh long4h
+      literal ---
+  TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
+  duration:            900s
+  csv cadence:         60s
+  extra harness flags: <none>
+  --durable-reading:   ARMED
+  --live-census-interval: 300 (ARMED: the live-copy census)
+  --sampler-jitter-seed:  20260831
+  SOAK_SERVER_LOG:     warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  SOAK_SERVER_LOG_PASSTHROUGH: 1
+  TOPGUN_PRUNE_RECORD: true
+  TOPGUN_LOG_FORMAT:   <unset: human fmt, which is what the origin parser reads>
+  server port:         47360
+  SOAK_SERVER_BINARY:  /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ca-head/release/topgun-server
+  --- pinned matrix (identical to spec362b-durable.sh's long4h cell;
+      crash-interval is per-cell and is 0 on the one cell this runner
+      ships) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 0;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+  tombstone gate: level ceiling K=2+ceil(S_A/W) epochs × W × b_max (S_A, b_max measured by the harness; A = TOPGUN_WAL_WATERMARK_STALL_BOUND_MS, not set by this runner); level stability 10 %; slope report-only
+  harness sha256: 1b9cbbd82ce02f9cd2ab3e676c3109f6c5a70ffbb76ef50c01026fd2b21c16ff
+  server flavour: CA
+  server code:    freeze = e85adb1f (SPEC373B_SERVER_COMMIT=e85adb1f, resolves e85adb1fc48936267aba66cb7aee7d32dc46b676)
+  TOPGUN_JOURNAL_ENABLED:        <unset: harness passes true>
+  TOPGUN_SOAK_GRACEFUL_SHUTDOWN: <unset: SIGKILL teardown>
+  DHAT_OUT:                      <unset>
+  post-mortem rows:              counted at the end of the run (item 17)
+
+harness pid 140; follow with: tail -f /Users/koristuvac/Projects/topgun/topgun/target/spec373b-a2-data.meta/harness-console.log
+server ready: pid 145 (t0 = server-ready)
+
+harness exited with code 0
+reading:           PLATEAU_NOT_MET
+reason:            series rss_kib rose and was still rising at the end; firing envelope BOTH
+log filter:        warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  rss_kib            shape=MONOTONE_RISING envelope=BOTH samples=168 span=836.6s
+                     peaks  h1=74400 h2=97264 q3=85312 q4=97264 last_half_mean=85997
+                     floor  h1=36160 h2=74416 q3=74416 q4=85312
+  redb_bytes         shape=MONOTONE_RISING envelope=PEAKS samples=170 span=842.4s
+                     peaks  h1=8957952 h2=17379328 q3=8957952 q4=17379328 last_half_mean=10245927
+                     floor  h1=1589248 h2=8957952 q3=8957952 q4=8957952
+  wal_bytes          shape=LEVELLED envelope=- samples=170 span=842.4s
+                     peaks  h1=1917944 h2=1840677 q3=1840677 q4=1810465 last_half_mean=1688586
+                     floor  h1=1518318 h2=1475346 q3=1475346 q4=1558195
+  wal_segment_files  shape=MONOTONE_RISING envelope=BOTH samples=170 span=842.4s
+                     peaks  h1=526 h2=552 q3=530 q4=552 last_half_mean=512
+                     floor  h1=435 h2=491 q3=491 q4=496
+writebehind lag:   14304 (observation only) scrapes total=180 read=178 absent=2 unreadable=0 malformed_samples=0 overflowed_samples=0
+censuses:          3
+  LIVE_COPY  t=300.0s copy_done=300.2386s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=18925 live_tag_bytes=643450 tombstones=1304 tombstone_bytes=27384 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=37
+  LIVE_COPY  t=600.2s copy_done=600.4419s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=38571 live_tag_bytes=1311414 tombstones=1507 tombstone_bytes=33154 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=48
+  TERMINAL   t=900.4s copy_done=n/a keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=58234 live_tag_bytes=1979957 tombstones=1360 tombstone_bytes=29920 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=42
+terminal census:   keys=96 tombstone_bytes=29920
+origin:            reading=NOT_REACHED_EQUAL_REFS matched=28 unparsed=0 dropped=0 armed=true epochs_exited=28 restarts=0 epochs_scrapes total=180 read=180 absent=0 unreadable=0 malformed_samples=0 overflowed_samples=0
+origin reason:     all 28 parsed line(s) returned exactly the refs held at entry
+first zero-return: (none)
+wrote durable reading to /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-a2.soak.durable.json
+console log: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-a2.harness-console.log
+mechanism report: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-a2.mechanism.json
+csv rows: 16
+post_mortem_rows=0
+csv columns:
+  rss_mb         n=16 empty=0 nonzero=16 min=3.484 max=95.016
+  wal_mb         n=16 empty=0 nonzero=15 min=0.000 max=3.715
+  redb_mb        n=16 empty=0 nonzero=15 min=0.000 max=16.574
+  disk_total_mb  n=16 empty=0 nonzero=15 min=0.000 max=20.137
+  tombstone_bytes n=15 empty=1 min=21932 max=41202
+  progress.jsonl checkpoints: 2
+  soak.json "walFsync": "batched",
+  soak.json "epochWidth": 1000,
+  soak.json "crashes": 0,
+  soak.json "churnClients": 6,
+  soak.json "keyspace": 200,
+  soak.json "durationSecsActual": 900,
+  mechanism.json "orDeltaFrames": 3611,
+  mechanism.json "orSnapshotFrames": 0,
+
+post-hoc OLS fits (see the SE caveat in spec349c2-fit.awk):
+  units: the field is named slope_mb_per_hour for every column; on the
+  tombstone_bytes row the fit is identical but the unit is BYTES/hour.
+  col=rss_mb window=full rows_used=16 n=16 skipped_empty=0 t_start_secs=0.0 t_end_secs=900.0 span_secs=900.0 y_first=3.484 y_last=95.016 slope_mb_per_hour=293.449059 se_mb_per_hour=27.001115 intercept_mb=28.468243 r2=0.894031 sxx_hours2=0.094444444 sse=963.979582444
+  col=wal_mb window=full rows_used=16 n=16 skipped_empty=0 t_start_secs=0.0 t_end_secs=900.0 span_secs=900.0 y_first=0.000 y_last=3.555 slope_mb_per_hour=5.660912 se_mb_per_hour=2.608540 intercept_mb=2.608449 r2=0.251718 sxx_hours2=0.094444444 sse=8.997033637
+  col=redb_mb window=full rows_used=16 n=16 skipped_empty=0 t_start_secs=0.0 t_end_secs=900.0 span_secs=900.0 y_first=0.000 y_last=16.574 slope_mb_per_hour=45.940676 se_mb_per_hour=5.893592 intercept_mb=0.823353 r2=0.812740 sxx_hours2=0.094444444 sse=45.926625672
+  col=disk_total_mb window=full rows_used=16 n=16 skipped_empty=0 t_start_secs=0.0 t_end_secs=900.0 span_secs=900.0 y_first=0.000 y_last=20.137 slope_mb_per_hour=51.617294 se_mb_per_hour=6.770127 intercept_mb=3.429963 r2=0.805905 sxx_hours2=0.094444444 sse=60.603547503
+  col=tombstone_bytes window=full rows_used=15 n=15 skipped_empty=1 t_start_secs=60.0 t_end_secs=900.0 span_secs=840.0 y_first=21932.000 y_last=33440.000 slope_mb_per_hour=18642.000000 se_mb_per_hour=21684.211633 intercept_mb=31484.866667 r2=0.053795 sxx_hours2=0.077777778 sse=475429534.533333480
+  col=rss_mb window=last_half rows_used=16 n=8 skipped_empty=0 t_start_secs=480.0 t_end_secs=900.0 span_secs=420.0 y_first=72.672 y_last=95.016 slope_mb_per_hour=173.152143 se_mb_per_hour=10.804537 intercept_mb=50.839881 r2=0.977171 sxx_hours2=0.011666667 sse=8.171661155
+  col=wal_mb window=last_half rows_used=16 n=8 skipped_empty=0 t_start_secs=480.0 t_end_secs=900.0 span_secs=420.0 y_first=3.715 y_last=3.555 slope_mb_per_hour=-0.145714 se_mb_per_hour=0.725911 intercept_mb=3.627429 r2=0.006671 sxx_hours2=0.011666667 sse=0.036886286
+  col=redb_mb window=last_half rows_used=16 n=8 skipped_empty=0 t_start_secs=480.0 t_end_secs=900.0 span_secs=420.0 y_first=8.543 y_last=16.574 slope_mb_per_hour=40.155000 se_mb_per_hour=23.183500 intercept_mb=1.850500 r2=0.333333 sxx_hours2=0.011666667 sse=37.623227250
+  col=disk_total_mb window=last_half rows_used=16 n=8 skipped_empty=0 t_start_secs=480.0 t_end_secs=900.0 span_secs=420.0 y_first=12.258 y_last=20.137 slope_mb_per_hour=40.055714 se_mb_per_hour=23.041648 intercept_mb=5.469155 r2=0.334963 sxx_hours2=0.011666667 sse=37.164227119
+  col=tombstone_bytes window=last_half rows_used=15 n=8 skipped_empty=1 t_start_secs=480.0 t_end_secs=900.0 span_secs=420.0 y_first=37896.000 y_last=33440.000 slope_mb_per_hour=-46590.000000 se_mb_per_hour=8155.185029 intercept_mb=44255.000000 r2=0.844711 sxx_hours2=0.011666667 sse=4655493.000000000
+
+RESULT: instrument sound; harness exit code 0.
+RUNNER_EXIT=0
