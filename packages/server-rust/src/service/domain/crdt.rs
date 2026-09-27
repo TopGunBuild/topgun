@@ -558,8 +558,10 @@ impl CrdtService {
             // than reading a full clone, rebuilding, and re-putting the whole
             // ~130 KB snapshot every op. The add-wins / remove-wins algebra
             // itself lives in `apply_or_delta` — the single implementation every
-            // OR path routes through, so the resident slot and any later replay
-            // of the same mutation cannot diverge.
+            // OR op path routes through, so the resident slot and any later replay
+            // of the same mutation cannot diverge. SYNC OR ingest
+            // (`handle_ormap_push_diff`) merges with its own algebra: on a same-tag
+            // conflict it keeps the stored record where `apply_or_delta` replaces it.
             //
             // `Option::take` moves the entry into the delta without a clone; the
             // closure runs exactly once (per key, under the writer lock above),
