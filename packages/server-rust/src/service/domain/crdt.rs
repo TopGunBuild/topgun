@@ -10698,12 +10698,16 @@ mod tests {
 
         /// Forwards to `inner` and parks ONE call, armed just before the
         /// targeted caller runs: on RETURN from `load` (holding the loaded
-        /// value) or on RETURN from `remove` (the delete applied). The first
-        /// matching call consumes the park; later calls pass unparked.
+        /// value), on RETURN from `remove` (the delete applied) or on ENTRY to
+        /// `add` (the caller's in-memory mutation done, its write-through not
+        /// yet staged). The first matching call consumes the park; later calls
+        /// pass unparked. It can also fail ONE `load` without reading `inner`.
         struct ParkingStore {
             inner: Arc<dyn MapDataStore>,
             after_load: std::sync::Mutex<Option<Gate>>,
             after_remove: std::sync::Mutex<Option<Gate>>,
+            before_add: std::sync::Mutex<Option<Gate>>,
+            fail_next_load: std::sync::atomic::AtomicBool,
         }
 
         impl ParkingStore {
@@ -10712,6 +10716,8 @@ mod tests {
                     inner,
                     after_load: std::sync::Mutex::new(None),
                     after_remove: std::sync::Mutex::new(None),
+                    before_add: std::sync::Mutex::new(None),
+                    fail_next_load: std::sync::atomic::AtomicBool::new(false),
                 }
             }
 
@@ -10733,6 +10739,16 @@ mod tests {
                 Self::arm(&self.after_remove)
             }
 
+            fn park_before_add(&self) -> ParkHandle {
+                Self::arm(&self.before_add)
+            }
+
+            /// The next `load` returns `Err` without reading `inner`.
+            fn fail_next_load(&self) {
+                self.fail_next_load
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+
             async fn pass(slot: &std::sync::Mutex<Option<Gate>>) {
                 let gate = slot.lock().unwrap().take();
                 if let Some((parked, release)) = gate {
@@ -10752,6 +10768,7 @@ mod tests {
                 expiration_time: i64,
                 now: i64,
             ) -> anyhow::Result<()> {
+                Self::pass(&self.before_add).await;
                 self.inner.add(map, key, value, expiration_time, now).await
             }
 
@@ -10779,6 +10796,12 @@ mod tests {
             }
 
             async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+                if self
+                    .fail_next_load
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(anyhow::anyhow!("injected load failure"));
+                }
                 let loaded = self.inner.load(map, key).await;
                 Self::pass(&self.after_load).await;
                 loaded
@@ -11181,6 +11204,398 @@ mod tests {
             assert!(
                 durable == Some(strings(&["t-new"])) || durable.is_none(),
                 "durable row must be {{op}} or gone, never the removed entries plus op; got {durable:?}"
+            );
+        }
+
+        /// A `SyncService` over `factory` that shares `svc`'s per-key writer, as
+        /// production wires the two services over one record-store factory.
+        fn sync_sharing_writer(
+            svc: &Arc<CrdtService>,
+            factory: &Arc<RecordStoreFactory>,
+        ) -> Arc<crate::service::domain::sync::SyncService> {
+            Arc::new(
+                crate::service::domain::sync::SyncService::new(
+                    Arc::new(MerkleSyncManager::default()),
+                    Arc::clone(factory),
+                    Arc::new(ConnectionRegistry::new()),
+                )
+                .with_key_writer(Arc::clone(&svc.key_writer)),
+            )
+        }
+
+        /// [`sync_sharing_writer`] with the forgotten-client gate wired over a
+        /// store-less frontier (watermark 0, gate off). The frontier is returned
+        /// so the test can turn the gate on.
+        fn gated_sync_sharing_writer(
+            svc: &Arc<CrdtService>,
+            factory: &Arc<RecordStoreFactory>,
+        ) -> (
+            Arc<crate::service::domain::sync::SyncService>,
+            Arc<crate::tombstone_frontier_impl::TombstoneFrontier>,
+        ) {
+            let frontier = Arc::new(crate::tombstone_frontier_impl::TombstoneFrontier::new(None));
+            let sync = Arc::new(
+                crate::service::domain::sync::SyncService::new(
+                    Arc::new(MerkleSyncManager::default()),
+                    Arc::clone(factory),
+                    Arc::new(ConnectionRegistry::new()),
+                )
+                .with_frontier(Arc::clone(&frontier), Arc::clone(&svc.key_writer)),
+            );
+            (sync, frontier)
+        }
+
+        /// One pushed OR-Map entry carrying live records for `tags` and no
+        /// tombstones.
+        fn push_entry(key: &str, tags: &[&str]) -> topgun_core::messages::ORMapEntry {
+            topgun_core::messages::ORMapEntry {
+                key: key.to_string(),
+                records: tags
+                    .iter()
+                    .map(|tag| topgun_core::ORMapRecord {
+                        value: rmpv::Value::String(format!("v-{tag}").into()),
+                        timestamp: make_timestamp(),
+                        tag: (*tag).to_string(),
+                        ttl_ms: None,
+                    })
+                    .collect(),
+                tombstones: Vec::new(),
+            }
+        }
+
+        /// An `ORMapPushDiff` of `entries` on [`MAP`] from a context without a
+        /// connection, so the pushing client can never be resolved.
+        fn push_op(entries: Vec<topgun_core::messages::ORMapEntry>) -> Operation {
+            Operation::ORMapPushDiff {
+                ctx: make_ctx_sync(),
+                payload: topgun_core::messages::ORMapPushDiff {
+                    payload: topgun_core::messages::ORMapPushDiffPayload {
+                        map_name: MAP.to_string(),
+                        entries,
+                    },
+                },
+            }
+        }
+
+        /// The durable row of `key` as sorted (tags, tombstones), or `None`
+        /// when the row is gone.
+        async fn durable_row(
+            ds: &Arc<dyn MapDataStore>,
+            key: &str,
+        ) -> Option<(Vec<String>, Vec<String>)> {
+            ds.load(MAP, key)
+                .await
+                .expect("load durable row")
+                .map(|value| match value {
+                    RecordValue::OrMap {
+                        records,
+                        tombstones,
+                    } => {
+                        let mut tags: Vec<String> = records.into_iter().map(|e| e.tag).collect();
+                        tags.sort();
+                        let mut tombs = tombstones;
+                        tombs.sort();
+                        (tags, tombs)
+                    }
+                    other => panic!("durable row is not an OrMap: {other:?}"),
+                })
+        }
+
+        /// The pushed tags, disjoint from the seeded `D` of [`seed_durable_or`].
+        const PUSHED: [&str; 2] = ["s-1", "s-2"];
+
+        // AC-1: a REMOVE that lands while a push is materializing the key
+        // (parked holding the loaded `D`) must not be undone by the push's
+        // write-through (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn push_during_a_remove_does_not_resurrect_it() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, parking) = parking_stack(&dir);
+            let sync = sync_sharing_writer(&svc, &factory);
+            seed_durable_or(&redb).await;
+            assert_not_resident(&factory);
+
+            let mut push_park = parking.park_after_load();
+            let pusher = tokio::spawn(
+                sync.clone()
+                    .oneshot(push_op(vec![push_entry(KEY, &PUSHED)])),
+            );
+            push_park.wait_parked().await;
+
+            // Spawned, not awaited first: once the push holds the key's writer
+            // REMOVE waits for it, so the park is released on REMOVE's
+            // completion or after the bound, whichever comes first.
+            let mut remover = tokio::spawn(svc.clone().oneshot(remove_op(MAP, KEY)));
+            let remover_done = tokio::time::timeout(PARK_BOUND, &mut remover).await;
+            push_park.release();
+            pusher.await.expect("push task").expect("push must succeed");
+            match remover_done {
+                Ok(done) => {
+                    done.expect("remover task").expect("remove must succeed");
+                }
+                Err(_) => {
+                    remover
+                        .await
+                        .expect("remover task")
+                        .expect("remove must succeed");
+                }
+            }
+
+            let durable = durable_tags_or_none(&redb).await;
+            assert!(
+                durable == Some(strings(&PUSHED)) || durable.is_none(),
+                "durable row must be the pushed entries or gone, never the removed entries \
+                 plus the pushed ones; got {durable:?}"
+            );
+        }
+
+        /// AC-2 and its resident control: a push parked holding the loaded `D`
+        /// while an OR_ADD of `op` runs; with `evict`, the OR_ADD's clean result
+        /// is evicted before the push resumes.
+        async fn push_across_an_or_add(evict: bool) -> Option<Vec<String>> {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, parking) = parking_stack(&dir);
+            let sync = sync_sharing_writer(&svc, &factory);
+            seed_durable_or(&redb).await;
+            assert_not_resident(&factory);
+
+            let mut push_park = parking.park_after_load();
+            let pusher = tokio::spawn(
+                sync.clone()
+                    .oneshot(push_op(vec![push_entry(KEY, &PUSHED)])),
+            );
+            push_park.wait_parked().await;
+
+            // Spawned, not awaited first: once the push holds the key's writer
+            // the OR_ADD waits for it, so the bound decides which branch runs.
+            let mut writer = tokio::spawn(svc.clone().oneshot(or_add_op(MAP, KEY, "op", "t-op")));
+            let writer_done = tokio::time::timeout(PARK_BOUND, &mut writer).await;
+            if evict {
+                let evicted = factory
+                    .get_or_create(MAP, hash_to_partition(KEY))
+                    .evict_lru(u32::MAX, false);
+                // Only an OR_ADD that already completed has left a clean
+                // resident to evict; one still waiting on the push's writer
+                // has left nothing resident.
+                if writer_done.is_ok() {
+                    assert!(
+                        evicted > 0,
+                        "the OR_ADD's clean record must be evicted before the push resumes"
+                    );
+                }
+            }
+            push_park.release();
+            pusher.await.expect("push task").expect("push must succeed");
+            match writer_done {
+                Ok(done) => {
+                    done.expect("writer task").expect("or_add must succeed");
+                }
+                Err(_) => {
+                    writer
+                        .await
+                        .expect("writer task")
+                        .expect("or_add must succeed");
+                }
+            }
+
+            durable_tags_or_none(&redb).await
+        }
+
+        // AC-2: an acked OR_ADD that materialized, persisted and was evicted
+        // while a push held the stale `D` must survive the push (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn push_across_an_evicted_or_add_keeps_the_acked_add() {
+            let durable = push_across_an_or_add(true).await;
+            assert_eq!(
+                durable,
+                Some(strings(&[
+                    "s-1", "s-2", "t-old-1", "t-old-2", "t-old-3", "t-op"
+                ])),
+                "durable tags must be D ∪ S ∪ {{op}}; the acked OR_ADD must not be lost"
+            );
+        }
+
+        // AC-3 (control): the same interleaving with the OR_ADD's result still
+        // resident, where the push merges into the resident value.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn push_across_a_resident_or_add_keeps_it_control() {
+            let durable = push_across_an_or_add(false).await;
+            assert_eq!(
+                durable,
+                Some(strings(&[
+                    "s-1", "s-2", "t-old-1", "t-old-2", "t-old-3", "t-op"
+                ])),
+                "resident control: durable tags must be D ∪ S ∪ {{op}}"
+            );
+        }
+
+        // AC-4: a push whose read of the durable row fails must fail, and must
+        // not overwrite the durable `D` with the pushed entries alone.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn push_with_a_failed_load_keeps_the_durable_value() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, parking) = parking_stack(&dir);
+            let sync = sync_sharing_writer(&svc, &factory);
+            seed_durable_or(&redb).await;
+            assert_not_resident(&factory);
+
+            parking.fail_next_load();
+            let result = sync
+                .clone()
+                .oneshot(push_op(vec![push_entry(KEY, &PUSHED)]))
+                .await;
+
+            let durable = durable_row(&redb, KEY).await;
+            let seeded = Some((
+                strings(&["t-old-1", "t-old-2", "t-old-3"]),
+                strings(&["t-gone"]),
+            ));
+            assert!(
+                result.is_err() && durable == seeded,
+                "a push whose load failed must return Err and leave the durable row as D; \
+                 got result {result:?}, durable {durable:?}"
+            );
+        }
+
+        // AC-6: a push on a resident key must not re-stage the key over a
+        // REMOVE's pending delete; REMOVE and the push share the key's writer
+        // (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn push_between_the_steps_of_a_remove_does_not_resurrect_it() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, parking) = parking_stack(&dir);
+            let sync = sync_sharing_writer(&svc, &factory);
+            seed_durable_or(&redb).await;
+            factory
+                .get_or_create(MAP, hash_to_partition(KEY))
+                .get(KEY, false)
+                .await
+                .expect("hydrate");
+
+            let mut remove_park = parking.park_after_remove();
+            let remover = tokio::spawn(svc.clone().oneshot(remove_op(MAP, KEY)));
+            remove_park.wait_parked().await;
+
+            // Spawned, not awaited first: once REMOVE holds the key's writer the
+            // push waits for it, so the park is released on the push's
+            // completion or after the bound, whichever comes first.
+            let mut pusher = tokio::spawn(
+                sync.clone()
+                    .oneshot(push_op(vec![push_entry(KEY, &PUSHED)])),
+            );
+            let pusher_done = tokio::time::timeout(PARK_BOUND, &mut pusher).await;
+            remove_park.release();
+            remover
+                .await
+                .expect("remover task")
+                .expect("remove must succeed");
+            match pusher_done {
+                Ok(done) => {
+                    done.expect("push task").expect("push must succeed");
+                }
+                Err(_) => {
+                    pusher.await.expect("push task").expect("push must succeed");
+                }
+            }
+
+            let durable = durable_tags_or_none(&redb).await;
+            assert!(
+                durable == Some(strings(&PUSHED)) || durable.is_none(),
+                "durable row must be the pushed entries or gone, never the removed entries \
+                 plus the pushed ones; got {durable:?}"
+            );
+        }
+
+        // AC-6b: two writers of one key must stage their write-throughs in the
+        // order of their in-memory mutations, so the durable row ends equal to
+        // the resident one (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn push_and_or_add_stage_in_mutation_order() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, parking) = parking_stack(&dir);
+            let sync = sync_sharing_writer(&svc, &factory);
+            seed_durable_or(&redb).await;
+            factory
+                .get_or_create(MAP, hash_to_partition(KEY))
+                .get(KEY, false)
+                .await
+                .expect("hydrate");
+
+            let mut add_park = parking.park_before_add();
+            let pusher = tokio::spawn(
+                sync.clone()
+                    .oneshot(push_op(vec![push_entry(KEY, &PUSHED)])),
+            );
+            add_park.wait_parked().await;
+
+            // Spawned, not awaited first: once the push holds the key's writer
+            // across its staging the OR_ADD waits for it, so the park is
+            // released on the OR_ADD's completion or after the bound.
+            let mut writer = tokio::spawn(svc.clone().oneshot(or_add_op(MAP, KEY, "op", "t-op")));
+            let writer_done = tokio::time::timeout(PARK_BOUND, &mut writer).await;
+            add_park.release();
+            pusher.await.expect("push task").expect("push must succeed");
+            match writer_done {
+                Ok(done) => {
+                    done.expect("writer task").expect("or_add must succeed");
+                }
+                Err(_) => {
+                    writer
+                        .await
+                        .expect("writer task")
+                        .expect("or_add must succeed");
+                }
+            }
+
+            assert_eq!(
+                durable_tags_or_none(&redb).await,
+                Some(strings(&[
+                    "s-1", "s-2", "t-old-1", "t-old-2", "t-old-3", "t-op"
+                ])),
+                "durable tags must be D ∪ S ∪ {{op}}, equal to the resident; a write-through \
+                 staged out of mutation order loses op"
+            );
+        }
+
+        // AC-8: the forgotten-client gate turning on while a batch is being
+        // merged must gate the entries that have not been merged yet.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn gate_turning_on_mid_batch_gates_the_rest_of_the_batch() {
+            const KEY_2: &str = "doc-2";
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, parking) = parking_stack(&dir);
+            let (sync, frontier) = gated_sync_sharing_writer(&svc, &factory);
+            seed_durable_or(&redb).await;
+            assert_not_resident(&factory);
+            assert!(
+                !frontier.is_protection_active(),
+                "precondition: the gate starts off"
+            );
+
+            let mut load_park = parking.park_after_load();
+            let pusher = tokio::spawn(sync.clone().oneshot(push_op(vec![
+                push_entry(KEY, &["s1-1"]),
+                push_entry(KEY_2, &["s2-1"]),
+            ])));
+            load_park.wait_parked().await;
+            frontier.set_durable_epoch_watermark(1000);
+            assert!(
+                frontier.is_protection_active(),
+                "precondition: the gate is on while the first entry is parked"
+            );
+            load_park.release();
+            pusher
+                .await
+                .expect("push task")
+                .expect("push must return a response");
+
+            let first = durable_row(&redb, KEY).await.map(|(tags, _)| tags);
+            let second = durable_row(&redb, KEY_2).await;
+            assert!(
+                first == Some(strings(&["s1-1", "t-old-1", "t-old-2", "t-old-3"]))
+                    && second.is_none(),
+                "the entry merged before the gate turned on must be D1 ∪ S1 and the rest of the \
+                 batch must be rejected; got first {first:?}, second {second:?}"
             );
         }
     }
