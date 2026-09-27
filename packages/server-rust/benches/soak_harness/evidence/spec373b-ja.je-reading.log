@@ -1,0 +1,10 @@
+je reading: cell=ja as spec372-j2, server JE-head sha256=5fe81092949b3148ad51a12ad1ab8b18220308046346cd8bc7147b9378c562a5, harness sha256=1b9cbbd82ce02f9cd2ab3e676c3109f6c5a70ffbb76ef50c01026fd2b21c16ff, program sha256=baf0bce7dd6c29751fb62f525153b631ec9eeb37f0ba858aed7174fd978b1c91
+wrote /var/folders/dy/35x7phnx3pz88gmkjf9560sm0000gn/T//spec373b-je.O49fZX/spec372-j2.predicates.txt /var/folders/dy/35x7phnx3pz88gmkjf9560sm0000gn/T//spec373b-je.O49fZX/spec372-j2.fits.txt /var/folders/dy/35x7phnx3pz88gmkjf9560sm0000gn/T//spec373b-je.O49fZX/spec372-j2.amp.txt /var/folders/dy/35x7phnx3pz88gmkjf9560sm0000gn/T//spec373b-je.O49fZX/spec372-j2.ampfp.csv
+TERM_AMP_FP=0.589544
+TERM_AMP_JE=1.221338
+TERM_DIRTY_SHARE=0.072690
+TERM_FRAG_SHARE=0.079546
+DECIDE_AMP_FP=0.589544
+DECIDE_AMP_JE=1.221338
+DECIDE_DIRTY_SHARE=0.072690
+DECIDE_FRAG_SHARE=0.079546

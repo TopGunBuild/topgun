@@ -1,0 +1,129 @@
+provenance: server sha256=5fe81092949b3148ad51a12ad1ab8b18220308046346cd8bc7147b9378c562a5 flavour=JE built=2026-09-26T19:52:36Z run_start=2026-09-26T19:56:46Z topgun_or_prune_restored_cancelled_total=present
+provenance: server sha256=5fe81092949b3148ad51a12ad1ab8b18220308046346cd8bc7147b9378c562a5 flavour=JE built=2026-09-26T19:52:36Z run_start=2026-09-26T19:56:46Z topgun_or_prune_restored_cancelled_total=present harness sha256=1b9cbbd82ce02f9cd2ab3e676c3109f6c5a70ffbb76ef50c01026fd2b21c16ff harness_built=2026-09-26T19:55:33Z tombstone_level_ceiling_gate=present
+soak binary:   /Users/koristuvac/Projects/topgun/topgun/target/spec373b-h/release/deps/soak_harness-0379469b8a4255d8
+  built:       2026-09-26T19:55:33Z
+server binary: /Users/koristuvac/Projects/topgun/topgun/target/spec373b-je-head/release/topgun-server
+  built:       2026-09-26T19:52:36Z
+
+=== spec373b carve 9c part b run: cell ja (flavour JE) ===
+  repo HEAD:      ebea80e35c7ba244d3cbed6205a7e93cac80bc4e
+  dirty tree:     yes
+  host/OS:        Darwin MacBookPro 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:22:49 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6000 arm64
+  lineage:        chain-built harness + chain-built JE server
+  chain start:    1790451860
+  data dir:       /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ja-data
+  csv:            /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-ja.csv
+  soak.json:      /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-ja.soak.json
+  mechanism.json: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-ja.mechanism.json (harness writes spec373b-ja.soak.mechanism.json; renamed after the run)
+  durable.json:   /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-ja.soak.durable.json (raw basename: NOT renamed, by design)
+  progress.jsonl: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-ja.progress.jsonl
+  console log:    /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-ja.harness-console.log
+  matrix:         /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-ja.matrix.txt
+  soak binary:    /Users/koristuvac/Projects/topgun/topgun/target/spec373b-h/release/deps/soak_harness-0379469b8a4255d8
+  soak binary commit: ebea80e35c7ba244d3cbed6205a7e93cac80bc4e (HEAD; the binary itself is identified by its sha256)
+  .rs working tree:   CLEAN (asserted before the build)
+  code freeze:            e85adb1f
+  code freeze diff (.rs): EMPTY (asserted before the build)
+    built:        2026-09-26T19:55:33Z
+  server binary:  /Users/koristuvac/Projects/topgun/topgun/target/spec373b-je-head/release/topgun-server
+    built:        2026-09-26T19:52:36Z
+    sha256:       5fe81092949b3148ad51a12ad1ab8b18220308046346cd8bc7147b9378c562a5
+  --- varied knobs; everything else is the spec362b-durable.sh long4h
+      literal ---
+  TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
+  duration:            14400s
+  csv cadence:         60s
+  extra harness flags: <none>
+  --durable-reading:   ARMED
+  --live-census-interval: 300 (ARMED: the live-copy census)
+  --sampler-jitter-seed:  20260831
+  SOAK_SERVER_LOG:     warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  SOAK_SERVER_LOG_PASSTHROUGH: 1
+  TOPGUN_PRUNE_RECORD: true
+  TOPGUN_LOG_FORMAT:   <unset: human fmt, which is what the origin parser reads>
+  server port:         47360
+  SOAK_SERVER_BINARY:  /Users/koristuvac/Projects/topgun/topgun/target/spec373b-je-head/release/topgun-server
+  --- pinned matrix (identical to spec362b-durable.sh's long4h cell;
+      crash-interval is per-cell and is 0 on the one cell this runner
+      ships) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 0;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+  tombstone gate: level ceiling K=2+ceil(S_A/W) epochs × W × b_max (S_A, b_max measured by the harness; A = TOPGUN_WAL_WATERMARK_STALL_BOUND_MS, not set by this runner); level stability 10 %; slope report-only
+  harness sha256: 1b9cbbd82ce02f9cd2ab3e676c3109f6c5a70ffbb76ef50c01026fd2b21c16ff
+  server flavour: JE
+  server code:    freeze = e85adb1f (SPEC373B_SERVER_COMMIT=e85adb1f, resolves e85adb1fc48936267aba66cb7aee7d32dc46b676)
+  TOPGUN_JOURNAL_ENABLED:        <unset: harness passes true>
+  TOPGUN_SOAK_GRACEFUL_SHUTDOWN: <unset: SIGKILL teardown>
+  DHAT_OUT:                      <unset>
+  post-mortem rows:              counted at the end of the run (item 17)
+
+harness pid 97172; follow with: tail -f /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ja-data.meta/harness-console.log
+server ready: pid 97186 (t0 = server-ready)
+
+harness exited with code 0
+  LIVE_COPY  t=8708.9s copy_done=8709.3155s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=631061 live_tag_bytes=21456075 tombstones=1450 tombstone_bytes=33350 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=39
+  LIVE_COPY  t=9009.3s copy_done=9009.7305s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=652741 live_tag_bytes=22193195 tombstones=1515 tombstone_bytes=34845 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=48
+  LIVE_COPY  t=9309.7s copy_done=9310.1554s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=674401 live_tag_bytes=22929635 tombstones=1308 tombstone_bytes=30084 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=45
+  LIVE_COPY  t=9610.2s copy_done=9610.6864s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=695817 live_tag_bytes=23657779 tombstones=1636 tombstone_bytes=37628 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=44
+  LIVE_COPY  t=9910.7s copy_done=9911.2204s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=717389 live_tag_bytes=24391227 tombstones=1410 tombstone_bytes=32430 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=45
+  LIVE_COPY  t=10211.2s copy_done=10211.7694s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=739183 live_tag_bytes=25132223 tombstones=1530 tombstone_bytes=35190 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=41
+  LIVE_COPY  t=10511.8s copy_done=10512.2121s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=760984 live_tag_bytes=25873457 tombstones=1401 tombstone_bytes=32223 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=36
+  LIVE_COPY  t=10812.2s copy_done=10812.6728s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=782687 live_tag_bytes=26611359 tombstones=1438 tombstone_bytes=33074 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=38
+  LIVE_COPY  t=11112.7s copy_done=11113.2203s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=804176 live_tag_bytes=27341985 tombstones=1515 tombstone_bytes=34845 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=42
+  LIVE_COPY  t=11413.2s copy_done=11413.6936s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=826192 live_tag_bytes=28090529 tombstones=1261 tombstone_bytes=29003 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=38
+  LIVE_COPY  t=11713.7s copy_done=11714.2036s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=847854 live_tag_bytes=28827037 tombstones=1253 tombstone_bytes=28819 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=40
+  LIVE_COPY  t=12014.2s copy_done=12014.7307s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=869646 live_tag_bytes=29567965 tombstones=1407 tombstone_bytes=32361 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=39
+  LIVE_COPY  t=12314.7s copy_done=12315.2892s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=891332 live_tag_bytes=30305289 tombstones=1513 tombstone_bytes=34799 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=40
+  LIVE_COPY  t=12615.3s copy_done=12615.8551s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=913185 live_tag_bytes=31048291 tombstones=1121 tombstone_bytes=25783 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=36
+  LIVE_COPY  t=12915.9s copy_done=12916.4318s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=935157 live_tag_bytes=31795339 tombstones=1196 tombstone_bytes=27508 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=37
+  LIVE_COPY  t=13216.4s copy_done=13217.0958s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=956903 live_tag_bytes=32534703 tombstones=1416 tombstone_bytes=32568 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=39
+  LIVE_COPY  t=13517.1s copy_done=13517.6798s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=978670 live_tag_bytes=33274781 tombstones=1278 tombstone_bytes=29394 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=35
+  LIVE_COPY  t=13817.7s copy_done=13818.2390s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=1000597 live_tag_bytes=34020299 tombstones=1368 tombstone_bytes=31464 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=37
+  LIVE_COPY  t=14118.2s copy_done=14118.8375s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=1022681 live_tag_bytes=34771155 tombstones=1404 tombstone_bytes=32292 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=38
+  TERMINAL   t=14402.0s copy_done=n/a keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=1043300 live_tag_bytes=35472201 tombstones=1486 tombstone_bytes=34178 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=42
+terminal census:   keys=96 tombstone_bytes=34178
+origin:            reading=NOT_REACHED_EQUAL_REFS matched=521 unparsed=0 dropped=0 armed=true epochs_exited=521 restarts=0 epochs_scrapes total=2876 read=2876 absent=0 unreadable=0 malformed_samples=0 overflowed_samples=0
+origin reason:     all 521 parsed line(s) returned exactly the refs held at entry
+first zero-return: (none)
+wrote durable reading to /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-ja.soak.durable.json
+console log: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-ja.harness-console.log
+mechanism report: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-ja.mechanism.json
+csv rows: 241
+post_mortem_rows=0
+csv columns:
+  rss_mb         n=241 empty=0 nonzero=241 min=23.172 max=645.203
+  wal_mb         n=241 empty=0 nonzero=241 min=0.234 max=3.598
+  redb_mb        n=241 empty=0 nonzero=241 min=1.516 max=213.527
+  disk_total_mb  n=241 empty=0 nonzero=241 min=1.750 max=216.961
+  tombstone_bytes n=241 empty=0 min=108 max=48760
+  progress.jsonl checkpoints: 47
+  soak.json "walFsync": "batched",
+  soak.json "epochWidth": 1000,
+  soak.json "crashes": 0,
+  soak.json "churnClients": 6,
+  soak.json "keyspace": 200,
+  soak.json "durationSecsActual": 14402,
+  mechanism.json "orDeltaFrames": 3317,
+  mechanism.json "orSnapshotFrames": 0,
+
+post-hoc OLS fits (see the SE caveat in spec349c2-fit.awk):
+  units: the field is named slope_mb_per_hour for every column; on the
+  tombstone_bytes row the fit is identical but the unit is BYTES/hour.
+  col=rss_mb window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=23.172 y_last=533.062 slope_mb_per_hour=121.106436 se_mb_per_hour=1.904669 intercept_mb=61.891034 r2=0.944184 sxx_hours2=324.011898600 sse=280929.704267506
+  col=wal_mb window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=0.234 y_last=3.176 slope_mb_per_hour=-0.003220 se_mb_per_hour=0.012495 intercept_mb=3.331859 r2=0.000278 sxx_hours2=324.011898600 sse=12.089281086
+  col=redb_mb window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=1.516 y_last=213.527 slope_mb_per_hour=49.966686 se_mb_per_hour=0.880391 intercept_mb=-3.429448 r2=0.930928 sxx_hours2=324.011898600 sse=60021.997203768
+  col=disk_total_mb window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=1.750 y_last=216.703 slope_mb_per_hour=49.963218 se_mb_per_hour=0.880285 intercept_mb=-0.096537 r2=0.930934 sxx_hours2=324.011898600 sse=60007.550721020
+  col=tombstone_bytes window=full rows_used=241 n=241 skipped_empty=0 t_start_secs=0.0 t_end_secs=14400.0 span_secs=14400.0 y_first=108.000 y_last=36271.000 slope_mb_per_hour=238.617483 se_mb_per_hour=372.828053 intercept_mb=34000.182471 r2=0.001711 sxx_hours2=324.011898600 sse=10764057922.932390213
+  col=rss_mb window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=310.094 y_last=533.062 slope_mb_per_hour=142.987755 se_mb_per_hour=6.382034 intercept_mb=-8.559546 r2=0.808365 sxx_hours2=41.005194743 sse=198748.607794467
+  col=wal_mb window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=3.145 y_last=3.176 slope_mb_per_hour=-0.030282 se_mb_per_hour=0.014170 intercept_mb=3.399151 r2=0.036958 sxx_hours2=41.005194743 sse=0.979795023
+  col=redb_mb window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=103.027 y_last=213.527 slope_mb_per_hour=67.699276 se_mb_per_hour=2.767286 intercept_mb=-59.289054 r2=0.834145 sxx_hours2=41.005194743 sse=37367.493562449
+  col=disk_total_mb window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=106.172 y_last=216.703 slope_mb_per_hour=67.668285 se_mb_per_hour=2.767619 intercept_mb=-55.887312 r2=0.833985 sxx_hours2=41.005194743 sse=37376.481340937
+  col=tombstone_bytes window=last_half rows_used=241 n=121 skipped_empty=0 t_start_secs=7200.0 t_end_secs=14400.0 span_secs=7200.0 y_first=38180.000 y_last=36271.000 slope_mb_per_hour=-154.699922 se_mb_per_hour=960.768688 intercept_mb=34927.985484 r2=0.000218 sxx_hours2=41.005194743 sse=4504260731.359106064
+
+RESULT: instrument sound; harness exit code 0.
+RUNNER_EXIT=0
