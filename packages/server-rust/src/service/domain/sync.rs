@@ -150,10 +150,13 @@ pub struct SyncService {
     /// shared with `CrdtService` so the covering epoch and low-water-mark are one
     /// authority.
     frontier: Option<Arc<TombstoneFrontier>>,
-    /// Shared per-key writer, the SAME registry `CrdtService` holds, so a
-    /// SYNC-leaf prune sweep and an OR write on a key serialize against each
-    /// other. `None` when the frontier is not wired.
-    key_writer: Option<Arc<KeyWriterRegistry>>,
+    /// Shared per-key writer (TG-OR-007). Every site that builds a `CrdtService`
+    /// and a `SyncService` over one `RecordStoreFactory` MUST pass the SAME `Arc`
+    /// to both (`with_key_writer` / `with_frontier`): a second registry would let
+    /// a sync push and an OR write on one key interleave, and a SYNC-leaf prune
+    /// sweep race an OR write. `new` installs a fresh registry so standalone
+    /// construction (tests, null-store) still has a writer.
+    key_writer: Arc<KeyWriterRegistry>,
 }
 
 /// Per-`(map_name, connection_id)` cache of materialised Merkle sync sessions.
@@ -233,17 +236,19 @@ impl SyncService {
             durable_store: None,
             session_registry,
             frontier: None,
-            key_writer: None,
+            key_writer: Arc::new(KeyWriterRegistry::new()),
         }
     }
 
     /// Wire the shared causal frontier + per-key writer so OR-Map sync responses
     /// convey the covering epoch (feeding the client ACK loop and the `342e`
-    /// `delivered_conn` clamp) and the SYNC-leaf prune can run. Production wiring
-    /// MUST pass the SAME `Arc`s held by `AppState` / `CrdtService`; a second
-    /// frontier or writer would fork the epoch authority / re-open the prune race.
-    /// `SyncService::new`'s signature is unchanged (builder, like
-    /// `with_durable_index`).
+    /// `delivered_conn` clamp) and the SYNC-leaf prune can run. Sets BOTH fields;
+    /// equivalent to `with_key_writer(key_writer)` plus wiring the frontier.
+    /// Production wiring MUST pass the SAME `Arc`s held by `AppState` /
+    /// `CrdtService`; a second frontier would fork the epoch authority, and a
+    /// second writer would let a sync push, an OR write and a prune sweep on one
+    /// key interleave (TG-OR-007). `SyncService::new`'s signature is unchanged
+    /// (builder, like `with_durable_index`).
     #[must_use]
     pub fn with_frontier(
         mut self,
@@ -251,7 +256,17 @@ impl SyncService {
         key_writer: Arc<KeyWriterRegistry>,
     ) -> Self {
         self.frontier = Some(frontier);
-        self.key_writer = Some(key_writer);
+        self.key_writer = key_writer;
+        self
+    }
+
+    /// Replace the per-key writer with the registry shared with `CrdtService`
+    /// over the same `RecordStoreFactory`, without wiring a frontier. Passing a
+    /// different registry than `CrdtService` holds would let a sync push and an
+    /// OR write on one key interleave (TG-OR-007).
+    #[must_use]
+    pub fn with_key_writer(mut self, key_writer: Arc<KeyWriterRegistry>) -> Self {
+        self.key_writer = key_writer;
         self
     }
 
@@ -1344,16 +1359,15 @@ impl SyncService {
             .as_ref()
             .is_some_and(|f| f.is_protection_active());
         let gate = if gate_active {
-            // Fail-closed (R12): an ACTIVE gate needs the shared per-key writer to hold
-            // the gate→commit TOCTOU span. Absent it, reject the whole push rather than
-            // merge under a best-effort no-lock path.
-            let (Some(frontier), Some(key_writer)) =
-                (self.frontier.as_ref(), self.key_writer.as_ref())
-            else {
+            // An ACTIVE gate holds the shared per-key writer across the gate→commit
+            // TOCTOU span. The writer is always present; the frontier is `Some`
+            // whenever the gate is active, and a missing one still rejects the push.
+            let Some(frontier) = self.frontier.as_ref() else {
                 return Ok(OperationResponse::Ack {
                     call_id: ctx.call_id,
                 });
             };
+            let key_writer = &self.key_writer;
             // Resolve the server-authenticated identity ONCE for the batch (R13:
             // per-message decision, re-checked per key under the writer lock below).
             // Unknown identity → forgotten → reject the whole push; the client is
@@ -1763,10 +1777,7 @@ mod tests {
 
         // The pass the trigger asked for, run explicitly: this fixture spawns no
         // task, so nothing else would ever consume the permit.
-        let key_writer = svc
-            .key_writer
-            .clone()
-            .expect("the fixture wires the shared per-key writer");
+        let key_writer = Arc::clone(&svc.key_writer);
         prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
 
         match store.get(key, false).await.unwrap().map(|r| r.value) {
