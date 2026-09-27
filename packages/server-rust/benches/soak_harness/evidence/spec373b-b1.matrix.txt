@@ -1,10 +1,10 @@
 
 === spec373b carve 9c part b run: cell b1 (flavour CA) ===
-  repo HEAD:      15e170b14194ae7f106613b0720f00afb1367be2
+  repo HEAD:      5c8ffe143a2127625ebb82ce836a54fbe0679217
   dirty tree:     yes
-  host/OS:        Darwin MacBookPro 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:22:49 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6000 arm64
+  host/OS:        Darwin MacBook-Pro-koristuvac.local 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:22:49 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6000 arm64
   lineage:        chain-built harness + chain-built CA server
-  chain start:    1790439446
+  chain start:    1790536705
   data dir:       /Users/koristuvac/Projects/topgun/topgun/target/spec373b-b1-data
   csv:            /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-b1.csv
   soak.json:      /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-b1.soak.json
@@ -14,14 +14,14 @@
   console log:    /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-b1.harness-console.log
   matrix:         /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec373b-b1.matrix.txt
   soak binary:    /Users/koristuvac/Projects/topgun/topgun/target/spec373b-h/release/deps/soak_harness-0379469b8a4255d8
-  soak binary commit: 15e170b14194ae7f106613b0720f00afb1367be2 (HEAD; the binary itself is identified by its sha256)
+  soak binary commit: 5c8ffe143a2127625ebb82ce836a54fbe0679217 (HEAD; the binary itself is identified by its sha256)
   .rs working tree:   CLEAN (asserted before the build)
   code freeze:            e85adb1f
   code freeze diff (.rs): EMPTY (asserted before the build)
-    built:        2026-09-26T16:29:38Z
+    built:        2026-09-27T19:29:37Z
   server binary:  /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ca-pin/release/topgun-server
-    built:        2026-09-26T16:21:58Z
-    sha256:       79021be3d6bfb546ae43edab595ee0d82edf035af886ca2a6ae40ec1158fdac3
+    built:        2026-09-27T19:22:33Z
+    sha256:       f205f64a5fedbf264cee7001495642172b7e0e52df7486a316493088d27bd543
   --- varied knobs; everything else is the spec362b-durable.sh long4h
       literal ---
   TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
@@ -48,7 +48,7 @@
   mem-sample-interval 5; wal-fsync batched;
   memory gate NEUTRALIZED (1000000/1000000/1000000)
   tombstone gate: level ceiling K=2+ceil(S_A/W) epochs × W × b_max (S_A, b_max measured by the harness; A = TOPGUN_WAL_WATERMARK_STALL_BOUND_MS, not set by this runner); level stability 10 %; slope report-only
-  harness sha256: 1b9cbbd82ce02f9cd2ab3e676c3109f6c5a70ffbb76ef50c01026fd2b21c16ff
+  harness sha256: 789d65928feb35dd2260f271676263f80f3eaad8d588881f10c60cc7ee416346
   server flavour: CA
   server code:    pin = b166719d (SPEC373B_SERVER_COMMIT=b166719d, resolves b166719d9569c14076f2211139667aabb8f71d6a)
   TOPGUN_JOURNAL_ENABLED:        <unset: harness passes true>

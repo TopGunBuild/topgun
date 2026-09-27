@@ -1,0 +1,543 @@
+# TYPE topgun_reclamation_executed_epochs_advanced_total counter
+topgun_reclamation_executed_epochs_advanced_total 6
+
+# TYPE topgun_or_prune_considered_total counter
+topgun_or_prune_considered_total 3000
+
+# TYPE topgun_or_prune_bytes_freed_total counter
+topgun_or_prune_bytes_freed_total 61355
+
+# TYPE topgun_or_prune_lwm_advances_total counter
+topgun_or_prune_lwm_advances_total 6
+
+# TYPE topgun_or_prune_conjunct_snapshots_total counter
+topgun_or_prune_conjunct_snapshots_total 27
+
+# TYPE topgun_or_prune_empty_drains_total counter
+topgun_or_prune_empty_drains_total 4241
+
+# TYPE topgun_or_prune_removed_refs_observed_total counter
+topgun_or_prune_removed_refs_observed_total 4000
+
+# TYPE topgun_or_prune_stamped_bytes_total counter
+topgun_or_prune_stamped_bytes_total 82355
+
+# TYPE topgun_or_prune_split_recomputes_total counter
+topgun_or_prune_split_recomputes_total 10
+
+# TYPE topgun_or_prune_nonempty_drains_total counter
+topgun_or_prune_nonempty_drains_total 3
+
+# TYPE topgun_or_prune_stamped_refs_total counter
+topgun_or_prune_stamped_refs_total 4000
+
+# TYPE topgun_or_prune_epochs_entered_total counter
+topgun_or_prune_epochs_entered_total 5
+
+# TYPE topgun_or_prune_restored_evicted_total counter
+topgun_or_prune_restored_evicted_total 0
+
+# TYPE topgun_or_prune_rebuild_cleared_refs_total counter
+topgun_or_prune_rebuild_cleared_refs_total 0
+
+# TYPE topgun_or_prune_restored_read_error_total counter
+topgun_or_prune_restored_read_error_total 0
+
+# TYPE topgun_or_prune_removed_bytes_observed_total counter
+topgun_or_prune_removed_bytes_observed_total 82355
+
+# TYPE topgun_or_prune_passes_total counter
+topgun_or_prune_passes_total 4244
+
+# TYPE topgun_ormap_tombstone_bytes_total counter
+topgun_ormap_tombstone_bytes_total 97118
+
+# TYPE topgun_or_prune_epochs_drained_total counter
+topgun_or_prune_epochs_drained_total 3
+
+# TYPE topgun_or_prune_dropped_total counter
+topgun_or_prune_dropped_total 3000
+
+# TYPE topgun_reclamation_ceiling_queries_total counter
+topgun_reclamation_ceiling_queries_total 6
+
+# TYPE topgun_reclamation_claims_released_total counter
+topgun_reclamation_claims_released_total 0
+
+# TYPE topgun_reclamation_claims_rejected_below_executed_total counter
+topgun_reclamation_claims_rejected_below_executed_total 0
+
+# TYPE topgun_or_prune_lwm_epochs_advanced_total counter
+topgun_or_prune_lwm_epochs_advanced_total 6
+
+# TYPE topgun_or_prune_epochs_exited_total counter
+topgun_or_prune_epochs_exited_total 4
+
+# TYPE topgun_reclamation_claims_registered_total counter
+topgun_reclamation_claims_registered_total 7
+
+# TYPE topgun_or_prune_restored_cancelled_total counter
+topgun_or_prune_restored_cancelled_total 0
+
+# TYPE topgun_or_prune_matched_nothing_total counter
+topgun_or_prune_matched_nothing_total 0
+
+# TYPE topgun_client_op_refusals_total counter
+topgun_client_op_refusals_total{transport="http",reason="forbidden"} 0
+topgun_client_op_refusals_total{transport="ws",reason="internal"} 0
+topgun_client_op_refusals_total{transport="ws",reason="unknown_service"} 0
+topgun_client_op_refusals_total{transport="http",reason="unauthorized"} 0
+topgun_client_op_refusals_total{transport="ws",reason="forbidden"} 0
+topgun_client_op_refusals_total{transport="http",reason="wrong_service"} 0
+topgun_client_op_refusals_total{transport="ws",reason="overloaded"} 0
+topgun_client_op_refusals_total{transport="ws",reason="timeout"} 0
+topgun_client_op_refusals_total{transport="http",reason="schema_invalid"} 0
+topgun_client_op_refusals_total{transport="ws",reason="wrong_service"} 0
+topgun_client_op_refusals_total{transport="http",reason="unknown_service"} 0
+topgun_client_op_refusals_total{transport="ws",reason="unauthorized"} 0
+topgun_client_op_refusals_total{transport="ws",reason="value_too_large"} 0
+topgun_client_op_refusals_total{transport="http",reason="timeout"} 0
+topgun_client_op_refusals_total{transport="http",reason="internal"} 0
+topgun_client_op_refusals_total{transport="ws",reason="schema_invalid"} 0
+topgun_client_op_refusals_total{transport="http",reason="overloaded"} 0
+topgun_client_op_refusals_total{transport="http",reason="value_too_large"} 0
+
+# TYPE topgun_or_prune_absent_total counter
+topgun_or_prune_absent_total 0
+
+# TYPE topgun_reclamation_sweeps_total counter
+topgun_reclamation_sweeps_total 2167
+
+# TYPE topgun_or_prune_drained_refs_total counter
+topgun_or_prune_drained_refs_total 4000
+
+# TYPE topgun_operations_total counter
+topgun_operations_total{service="sync",outcome="ok"} 59
+topgun_operations_total{service="crdt",outcome="ok"} 41438
+
+# TYPE topgun_reclamation_ceiling_pinned_queries_total counter
+topgun_reclamation_ceiling_pinned_queries_total 6
+
+# TYPE topgun_or_prune_restored_write_error_total counter
+topgun_or_prune_restored_write_error_total 0
+
+# TYPE topgun_or_prune_restored_refs_total counter
+topgun_or_prune_restored_refs_total 0
+
+# TYPE topgun_reclamation_executed_watermark gauge
+topgun_reclamation_executed_watermark 6
+
+# TYPE topgun_reclamation_margin_epochs gauge
+topgun_reclamation_margin_epochs 0
+
+# TYPE topgun_or_prune_conjunct_retained_refs_open_epoch gauge
+topgun_or_prune_conjunct_retained_refs_open_epoch 703
+
+# TYPE topgun_or_prune_conjunct_retained_epochs_both gauge
+topgun_or_prune_conjunct_retained_epochs_both 0
+
+# TYPE topgun_or_prune_conjunct_retained_stamped_bytes_open_epoch gauge
+topgun_or_prune_conjunct_retained_stamped_bytes_open_epoch 14763
+
+# TYPE topgun_or_prune_conjunct_claim_lag_p50 gauge
+topgun_or_prune_conjunct_claim_lag_p50 0
+
+# TYPE topgun_active_connections gauge
+topgun_active_connections 7
+
+# TYPE topgun_or_prune_tracked_claims gauge
+topgun_or_prune_tracked_claims 1
+
+# TYPE topgun_or_prune_conjunct_retained_epochs_unslotted gauge
+topgun_or_prune_conjunct_retained_epochs_unslotted 0
+
+# TYPE topgun_or_prune_split_computed_epoch gauge
+topgun_or_prune_split_computed_epoch 6
+
+# TYPE topgun_or_prune_conjunct_retained_refs_neither gauge
+topgun_or_prune_conjunct_retained_refs_neither 0
+
+# TYPE topgun_or_prune_indexed_epochs gauge
+topgun_or_prune_indexed_epochs 1
+
+# TYPE topgun_or_prune_conjunct_retained_refs_durability_only gauge
+topgun_or_prune_conjunct_retained_refs_durability_only 0
+
+# TYPE topgun_or_prune_conjunct_retained_epochs_claim_only gauge
+topgun_or_prune_conjunct_retained_epochs_claim_only 0
+
+# TYPE topgun_prune_task_alive gauge
+topgun_prune_task_alive 1
+
+# TYPE topgun_or_prune_low_water_mark gauge
+topgun_or_prune_low_water_mark 6
+
+# HELP topgun_wal_applied_watermark_lag WAL sequences assigned for a partition but not yet covered by its applied watermark
+# TYPE topgun_wal_applied_watermark_lag gauge
+topgun_wal_applied_watermark_lag{partition="251"} 4623
+topgun_wal_applied_watermark_lag{partition="252"} 0
+topgun_wal_applied_watermark_lag{partition="189"} 10319
+topgun_wal_applied_watermark_lag{partition="133"} 199
+topgun_wal_applied_watermark_lag{partition="13"} 1
+topgun_wal_applied_watermark_lag{partition="209"} 90
+topgun_wal_applied_watermark_lag{partition="128"} 12
+topgun_wal_applied_watermark_lag{partition="101"} 9900
+topgun_wal_applied_watermark_lag{partition="136"} 5113
+topgun_wal_applied_watermark_lag{partition="216"} 4780
+topgun_wal_applied_watermark_lag{partition="165"} 1
+topgun_wal_applied_watermark_lag{partition="20"} 660
+topgun_wal_applied_watermark_lag{partition="21"} 4724
+topgun_wal_applied_watermark_lag{partition="34"} 0
+topgun_wal_applied_watermark_lag{partition="65"} 9863
+topgun_wal_applied_watermark_lag{partition="127"} 152
+topgun_wal_applied_watermark_lag{partition="253"} 1
+topgun_wal_applied_watermark_lag{partition="92"} 4507
+topgun_wal_applied_watermark_lag{partition="162"} 9813
+topgun_wal_applied_watermark_lag{partition="53"} 1
+topgun_wal_applied_watermark_lag{partition="40"} 1
+topgun_wal_applied_watermark_lag{partition="124"} 3
+topgun_wal_applied_watermark_lag{partition="151"} 5242
+topgun_wal_applied_watermark_lag{partition="207"} 10257
+topgun_wal_applied_watermark_lag{partition="191"} 5183
+topgun_wal_applied_watermark_lag{partition="137"} 199
+topgun_wal_applied_watermark_lag{partition="154"} 5018
+topgun_wal_applied_watermark_lag{partition="97"} 105
+topgun_wal_applied_watermark_lag{partition="159"} 42
+topgun_wal_applied_watermark_lag{partition="181"} 1
+topgun_wal_applied_watermark_lag{partition="243"} 10176
+topgun_wal_applied_watermark_lag{partition="57"} 4835
+topgun_wal_applied_watermark_lag{partition="163"} 34
+topgun_wal_applied_watermark_lag{partition="220"} 10408
+topgun_wal_applied_watermark_lag{partition="115"} 206
+topgun_wal_applied_watermark_lag{partition="85"} 1
+topgun_wal_applied_watermark_lag{partition="1"} 228
+topgun_wal_applied_watermark_lag{partition="217"} 10341
+topgun_wal_applied_watermark_lag{partition="234"} 4642
+topgun_wal_applied_watermark_lag{partition="30"} 4802
+topgun_wal_applied_watermark_lag{partition="235"} 168
+topgun_wal_applied_watermark_lag{partition="14"} 10493
+topgun_wal_applied_watermark_lag{partition="231"} 1
+topgun_wal_applied_watermark_lag{partition="208"} 1
+topgun_wal_applied_watermark_lag{partition="266"} 4983
+topgun_wal_applied_watermark_lag{partition="100"} 1
+topgun_wal_applied_watermark_lag{partition="244"} 10495
+topgun_wal_applied_watermark_lag{partition="203"} 4480
+topgun_wal_applied_watermark_lag{partition="250"} 1
+topgun_wal_applied_watermark_lag{partition="153"} 0
+topgun_wal_applied_watermark_lag{partition="3"} 10378
+topgun_wal_applied_watermark_lag{partition="109"} 14
+topgun_wal_applied_watermark_lag{partition="71"} 1
+topgun_wal_applied_watermark_lag{partition="103"} 0
+topgun_wal_applied_watermark_lag{partition="110"} 1
+topgun_wal_applied_watermark_lag{partition="213"} 4864
+topgun_wal_applied_watermark_lag{partition="148"} 2630
+topgun_wal_applied_watermark_lag{partition="145"} 4659
+topgun_wal_applied_watermark_lag{partition="132"} 0
+topgun_wal_applied_watermark_lag{partition="150"} 4963
+topgun_wal_applied_watermark_lag{partition="138"} 1
+topgun_wal_applied_watermark_lag{partition="135"} 9838
+topgun_wal_applied_watermark_lag{partition="242"} 10304
+topgun_wal_applied_watermark_lag{partition="167"} 10255
+topgun_wal_applied_watermark_lag{partition="130"} 0
+topgun_wal_applied_watermark_lag{partition="184"} 0
+topgun_wal_applied_watermark_lag{partition="66"} 4389
+topgun_wal_applied_watermark_lag{partition="169"} 4754
+topgun_wal_applied_watermark_lag{partition="18"} 4416
+topgun_wal_applied_watermark_lag{partition="263"} 42
+topgun_wal_applied_watermark_lag{partition="204"} 4965
+topgun_wal_applied_watermark_lag{partition="54"} 9992
+topgun_wal_applied_watermark_lag{partition="88"} 15
+topgun_wal_applied_watermark_lag{partition="270"} 1
+topgun_wal_applied_watermark_lag{partition="258"} 4726
+topgun_wal_applied_watermark_lag{partition="164"} 23
+topgun_wal_applied_watermark_lag{partition="129"} 1
+topgun_wal_applied_watermark_lag{partition="249"} 10081
+topgun_wal_applied_watermark_lag{partition="79"} 1
+topgun_wal_applied_watermark_lag{partition="29"} 1
+topgun_wal_applied_watermark_lag{partition="9"} 4762
+topgun_wal_applied_watermark_lag{partition="0"} 4900
+topgun_wal_applied_watermark_lag{partition="227"} 154
+topgun_wal_applied_watermark_lag{partition="131"} 3939
+topgun_wal_applied_watermark_lag{partition="229"} 4479
+topgun_wal_applied_watermark_lag{partition="174"} 1
+topgun_wal_applied_watermark_lag{partition="78"} 1
+topgun_wal_applied_watermark_lag{partition="142"} 4910
+topgun_wal_applied_watermark_lag{partition="265"} 4113
+topgun_wal_applied_watermark_lag{partition="38"} 9956
+topgun_wal_applied_watermark_lag{partition="247"} 10083
+topgun_wal_applied_watermark_lag{partition="238"} 10425
+topgun_wal_applied_watermark_lag{partition="23"} 10428
+topgun_wal_applied_watermark_lag{partition="12"} 4607
+topgun_wal_applied_watermark_lag{partition="190"} 9054
+topgun_wal_applied_watermark_lag{partition="261"} 0
+topgun_wal_applied_watermark_lag{partition="37"} 0
+topgun_wal_applied_watermark_lag{partition="106"} 9
+topgun_wal_applied_watermark_lag{partition="27"} 4589
+topgun_wal_applied_watermark_lag{partition="108"} 0
+topgun_wal_applied_watermark_lag{partition="171"} 9832
+topgun_wal_applied_watermark_lag{partition="36"} 9772
+topgun_wal_applied_watermark_lag{partition="69"} 0
+topgun_wal_applied_watermark_lag{partition="31"} 1
+topgun_wal_applied_watermark_lag{partition="201"} 1
+topgun_wal_applied_watermark_lag{partition="232"} 1
+topgun_wal_applied_watermark_lag{partition="257"} 2
+topgun_wal_applied_watermark_lag{partition="113"} 0
+topgun_wal_applied_watermark_lag{partition="94"} 1
+topgun_wal_applied_watermark_lag{partition="91"} 2770
+topgun_wal_applied_watermark_lag{partition="146"} 3
+topgun_wal_applied_watermark_lag{partition="44"} 1405
+topgun_wal_applied_watermark_lag{partition="256"} 10077
+topgun_wal_applied_watermark_lag{partition="7"} 0
+topgun_wal_applied_watermark_lag{partition="70"} 1
+topgun_wal_applied_watermark_lag{partition="211"} 10492
+topgun_wal_applied_watermark_lag{partition="22"} 1
+topgun_wal_applied_watermark_lag{partition="254"} 5050
+topgun_wal_applied_watermark_lag{partition="83"} 4573
+topgun_wal_applied_watermark_lag{partition="186"} 4707
+topgun_wal_applied_watermark_lag{partition="32"} 4790
+topgun_wal_applied_watermark_lag{partition="149"} 9829
+topgun_wal_applied_watermark_lag{partition="223"} 51
+topgun_wal_applied_watermark_lag{partition="212"} 4612
+topgun_wal_applied_watermark_lag{partition="225"} 9786
+topgun_wal_applied_watermark_lag{partition="118"} 220
+topgun_wal_applied_watermark_lag{partition="248"} 1
+topgun_wal_applied_watermark_lag{partition="8"} 6872
+topgun_wal_applied_watermark_lag{partition="245"} 138
+topgun_wal_applied_watermark_lag{partition="246"} 1
+topgun_wal_applied_watermark_lag{partition="33"} 0
+topgun_wal_applied_watermark_lag{partition="199"} 1
+topgun_wal_applied_watermark_lag{partition="74"} 4748
+topgun_wal_applied_watermark_lag{partition="183"} 1
+topgun_wal_applied_watermark_lag{partition="206"} 3873
+topgun_wal_applied_watermark_lag{partition="233"} 4372
+topgun_wal_applied_watermark_lag{partition="84"} 0
+topgun_wal_applied_watermark_lag{partition="55"} 0
+topgun_wal_applied_watermark_lag{partition="226"} 4823
+topgun_wal_applied_watermark_lag{partition="63"} 4658
+topgun_wal_applied_watermark_lag{partition="19"} 5107
+topgun_wal_applied_watermark_lag{partition="35"} 1
+topgun_wal_applied_watermark_lag{partition="182"} 149
+topgun_wal_applied_watermark_lag{partition="177"} 4625
+topgun_wal_applied_watermark_lag{partition="219"} 0
+topgun_wal_applied_watermark_lag{partition="187"} 10093
+topgun_wal_applied_watermark_lag{partition="214"} 44
+topgun_wal_applied_watermark_lag{partition="47"} 10256
+topgun_wal_applied_watermark_lag{partition="17"} 4844
+topgun_wal_applied_watermark_lag{partition="87"} 6252
+topgun_wal_applied_watermark_lag{partition="141"} 1
+topgun_wal_applied_watermark_lag{partition="155"} 226
+topgun_wal_applied_watermark_lag{partition="45"} 4647
+topgun_wal_applied_watermark_lag{partition="4"} 1
+topgun_wal_applied_watermark_lag{partition="268"} 1
+topgun_wal_applied_watermark_lag{partition="222"} 1
+topgun_wal_applied_watermark_lag{partition="240"} 10059
+topgun_wal_applied_watermark_lag{partition="126"} 2855
+topgun_wal_applied_watermark_lag{partition="178"} 10257
+topgun_wal_applied_watermark_lag{partition="185"} 10280
+topgun_wal_applied_watermark_lag{partition="10"} 5190
+topgun_wal_applied_watermark_lag{partition="196"} 9839
+topgun_wal_applied_watermark_lag{partition="194"} 10101
+topgun_wal_applied_watermark_lag{partition="198"} 10067
+topgun_wal_applied_watermark_lag{partition="192"} 1
+topgun_wal_applied_watermark_lag{partition="50"} 1
+topgun_wal_applied_watermark_lag{partition="96"} 0
+topgun_wal_applied_watermark_lag{partition="143"} 0
+topgun_wal_applied_watermark_lag{partition="56"} 4813
+topgun_wal_applied_watermark_lag{partition="168"} 183
+topgun_wal_applied_watermark_lag{partition="205"} 4681
+topgun_wal_applied_watermark_lag{partition="147"} 1
+topgun_wal_applied_watermark_lag{partition="160"} 9899
+topgun_wal_applied_watermark_lag{partition="26"} 6090
+topgun_wal_applied_watermark_lag{partition="158"} 9810
+topgun_wal_applied_watermark_lag{partition="176"} 9955
+topgun_wal_applied_watermark_lag{partition="95"} 0
+topgun_wal_applied_watermark_lag{partition="195"} 167
+topgun_wal_applied_watermark_lag{partition="172"} 8719
+topgun_wal_applied_watermark_lag{partition="241"} 8484
+topgun_wal_applied_watermark_lag{partition="140"} 3919
+topgun_wal_applied_watermark_lag{partition="215"} 4006
+topgun_wal_applied_watermark_lag{partition="120"} 0
+topgun_wal_applied_watermark_lag{partition="218"} 6496
+topgun_wal_applied_watermark_lag{partition="82"} 2676
+topgun_wal_applied_watermark_lag{partition="62"} 1
+topgun_wal_applied_watermark_lag{partition="77"} 1
+topgun_wal_applied_watermark_lag{partition="224"} 4353
+topgun_wal_applied_watermark_lag{partition="267"} 4638
+topgun_wal_applied_watermark_lag{partition="173"} 79
+topgun_wal_applied_watermark_lag{partition="180"} 10076
+topgun_wal_applied_watermark_lag{partition="5"} 10407
+topgun_wal_applied_watermark_lag{partition="236"} 5082
+topgun_wal_applied_watermark_lag{partition="139"} 2752
+topgun_wal_applied_watermark_lag{partition="39"} 4793
+topgun_wal_applied_watermark_lag{partition="156"} 1
+topgun_wal_applied_watermark_lag{partition="48"} 4762
+topgun_wal_applied_watermark_lag{partition="119"} 5294
+
+# TYPE topgun_or_prune_current_epoch gauge
+topgun_or_prune_current_epoch 6
+
+# TYPE topgun_or_prune_conjunct_retained_stamped_bytes gauge
+topgun_or_prune_conjunct_retained_stamped_bytes 0
+
+# TYPE topgun_or_prune_conjunct_durable_watermark gauge
+topgun_or_prune_conjunct_durable_watermark 5
+
+# TYPE topgun_or_prune_conjunct_retained_epochs_durability_only gauge
+topgun_or_prune_conjunct_retained_epochs_durability_only 0
+
+# TYPE topgun_or_prune_durable_epoch_watermark gauge
+topgun_or_prune_durable_epoch_watermark 5
+
+# TYPE topgun_or_prune_conjunct_retained_refs_both gauge
+topgun_or_prune_conjunct_retained_refs_both 0
+
+# TYPE topgun_reclamation_prune_ceiling gauge
+topgun_reclamation_prune_ceiling 6
+
+# TYPE topgun_reclamation_live_claims gauge
+topgun_reclamation_live_claims 1
+
+# TYPE topgun_or_prune_conjunct_claim_lag_p99 gauge
+topgun_or_prune_conjunct_claim_lag_p99 0
+
+# TYPE topgun_or_prune_conjunct_retained_epochs_neither gauge
+topgun_or_prune_conjunct_retained_epochs_neither 0
+
+# TYPE topgun_or_prune_conjunct_retained_refs_claim_only gauge
+topgun_or_prune_conjunct_retained_refs_claim_only 0
+
+# TYPE topgun_or_prune_conjunct_claim_lag_max gauge
+topgun_or_prune_conjunct_claim_lag_max 0
+
+# TYPE topgun_reclamation_min_live_claim gauge
+topgun_reclamation_min_live_claim 6
+
+# TYPE topgun_or_prune_conjunct_ceiling gauge
+topgun_or_prune_conjunct_ceiling 6
+
+# TYPE topgun_or_prune_ineligible_refs gauge
+topgun_or_prune_ineligible_refs 619
+
+# TYPE topgun_or_prune_last_drained_epoch gauge
+topgun_or_prune_last_drained_epoch 5
+
+# TYPE topgun_ormap_tombstone_bytes gauge
+topgun_ormap_tombstone_bytes 23079
+
+# TYPE topgun_or_prune_indexed_refs gauge
+topgun_or_prune_indexed_refs 703
+
+# TYPE topgun_or_prune_conjunct_current_epoch gauge
+topgun_or_prune_conjunct_current_epoch 6
+
+# TYPE topgun_reclamation_sweep_in_progress gauge
+topgun_reclamation_sweep_in_progress 0
+
+# TYPE topgun_or_prune_eligible_refs gauge
+topgun_or_prune_eligible_refs 1000
+
+# TYPE topgun_or_prune_conjunct_claims gauge
+topgun_or_prune_conjunct_claims 1
+
+# TYPE topgun_or_prune_lwm_stall_seconds gauge
+topgun_or_prune_lwm_stall_seconds 16
+
+# TYPE topgun_or_prune_conjunct_durable_watermark_lag gauge
+topgun_or_prune_conjunct_durable_watermark_lag 1
+
+# TYPE topgun_or_prune_epoch_dropped summary
+topgun_or_prune_epoch_dropped{quantile="0"} 1000
+topgun_or_prune_epoch_dropped{quantile="0.5"} 999.9447405703887
+topgun_or_prune_epoch_dropped{quantile="0.9"} 999.9447405703887
+topgun_or_prune_epoch_dropped{quantile="0.95"} 999.9447405703887
+topgun_or_prune_epoch_dropped{quantile="0.99"} 999.9447405703887
+topgun_or_prune_epoch_dropped{quantile="0.999"} 999.9447405703887
+topgun_or_prune_epoch_dropped{quantile="1"} 1000
+topgun_or_prune_epoch_dropped_sum 3000
+topgun_or_prune_epoch_dropped_count 3
+
+# TYPE topgun_or_prune_claim_lag_epochs summary
+topgun_or_prune_claim_lag_epochs{quantile="0"} 0
+topgun_or_prune_claim_lag_epochs{quantile="0.5"} 0
+topgun_or_prune_claim_lag_epochs{quantile="0.9"} 0
+topgun_or_prune_claim_lag_epochs{quantile="0.95"} 0
+topgun_or_prune_claim_lag_epochs{quantile="0.99"} 0
+topgun_or_prune_claim_lag_epochs{quantile="0.999"} 0
+topgun_or_prune_claim_lag_epochs{quantile="1"} 0
+topgun_or_prune_claim_lag_epochs_sum 0
+topgun_or_prune_claim_lag_epochs_count 10
+
+# TYPE topgun_or_prune_claim_span_epochs summary
+topgun_or_prune_claim_span_epochs{quantile="0"} 0
+topgun_or_prune_claim_span_epochs{quantile="0.5"} 0
+topgun_or_prune_claim_span_epochs{quantile="0.9"} 0
+topgun_or_prune_claim_span_epochs{quantile="0.95"} 0
+topgun_or_prune_claim_span_epochs{quantile="0.99"} 0
+topgun_or_prune_claim_span_epochs{quantile="0.999"} 0
+topgun_or_prune_claim_span_epochs{quantile="1"} 0
+topgun_or_prune_claim_span_epochs_sum 0
+topgun_or_prune_claim_span_epochs_count 10
+
+# TYPE topgun_or_prune_epoch_considered summary
+topgun_or_prune_epoch_considered{quantile="0"} 1000
+topgun_or_prune_epoch_considered{quantile="0.5"} 999.9447405703887
+topgun_or_prune_epoch_considered{quantile="0.9"} 999.9447405703887
+topgun_or_prune_epoch_considered{quantile="0.95"} 999.9447405703887
+topgun_or_prune_epoch_considered{quantile="0.99"} 999.9447405703887
+topgun_or_prune_epoch_considered{quantile="0.999"} 999.9447405703887
+topgun_or_prune_epoch_considered{quantile="1"} 1000
+topgun_or_prune_epoch_considered_sum 3000
+topgun_or_prune_epoch_considered_count 3
+
+# TYPE topgun_or_prune_epoch_bytes_freed summary
+topgun_or_prune_epoch_bytes_freed{quantile="0"} 21000
+topgun_or_prune_epoch_bytes_freed{quantile="0.5"} 21000.468546071206
+topgun_or_prune_epoch_bytes_freed{quantile="0.9"} 21000.468546071206
+topgun_or_prune_epoch_bytes_freed{quantile="0.95"} 21000.468546071206
+topgun_or_prune_epoch_bytes_freed{quantile="0.99"} 21000.468546071206
+topgun_or_prune_epoch_bytes_freed{quantile="0.999"} 21000.468546071206
+topgun_or_prune_epoch_bytes_freed{quantile="1"} 21000
+topgun_or_prune_epoch_bytes_freed_sum 61355
+topgun_or_prune_epoch_bytes_freed_count 3
+
+# TYPE topgun_or_prune_drain_epochs summary
+topgun_or_prune_drain_epochs{quantile="0"} 1
+topgun_or_prune_drain_epochs{quantile="0.5"} 0.9998999999999999
+topgun_or_prune_drain_epochs{quantile="0.9"} 0.9998999999999999
+topgun_or_prune_drain_epochs{quantile="0.95"} 0.9998999999999999
+topgun_or_prune_drain_epochs{quantile="0.99"} 0.9998999999999999
+topgun_or_prune_drain_epochs{quantile="0.999"} 0.9998999999999999
+topgun_or_prune_drain_epochs{quantile="1"} 1
+topgun_or_prune_drain_epochs_sum 3
+topgun_or_prune_drain_epochs_count 3
+
+# TYPE topgun_operation_duration_seconds summary
+topgun_operation_duration_seconds{service="sync",quantile="0"} 0.0000045
+topgun_operation_duration_seconds{service="sync",quantile="0.5"} 0.000012832878563909705
+topgun_operation_duration_seconds{service="sync",quantile="0.9"} 0.000026290575206994124
+topgun_operation_duration_seconds{service="sync",quantile="0.95"} 0.00003346200173930352
+topgun_operation_duration_seconds{service="sync",quantile="0.99"} 0.00004258110113099112
+topgun_operation_duration_seconds{service="sync",quantile="0.999"} 0.00004258110113099112
+topgun_operation_duration_seconds{service="sync",quantile="1"} 0.003097875
+topgun_operation_duration_seconds_sum{service="sync"} 0.003958164
+topgun_operation_duration_seconds_count{service="sync"} 59
+topgun_operation_duration_seconds{service="crdt",quantile="0"} 0.000037709
+topgun_operation_duration_seconds{service="crdt",quantile="0.5"} 0.0041060243776724565
+topgun_operation_duration_seconds{service="crdt",quantile="0.9"} 0.00604635285846711
+topgun_operation_duration_seconds{service="crdt",quantile="0.95"} 0.00849311009792934
+topgun_operation_duration_seconds{service="crdt",quantile="0.99"} 0.010568260944005743
+topgun_operation_duration_seconds{service="crdt",quantile="0.999"} 0.015096384227349022
+topgun_operation_duration_seconds{service="crdt",quantile="1"} 0.053287083
+topgun_operation_duration_seconds_sum{service="crdt"} 164.733187724002
+topgun_operation_duration_seconds_count{service="crdt"} 41438
+
+# TYPE topgun_or_prune_drain_refs summary
+topgun_or_prune_drain_refs{quantile="0"} 1000
+topgun_or_prune_drain_refs{quantile="0.5"} 999.9447405703887
+topgun_or_prune_drain_refs{quantile="0.9"} 999.9447405703887
+topgun_or_prune_drain_refs{quantile="0.95"} 999.9447405703887
+topgun_or_prune_drain_refs{quantile="0.99"} 999.9447405703887
+topgun_or_prune_drain_refs{quantile="0.999"} 999.9447405703887
+topgun_or_prune_drain_refs{quantile="1"} 1000
+topgun_or_prune_drain_refs_sum 3000
+topgun_or_prune_drain_refs_count 3
