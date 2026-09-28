@@ -1,17 +1,16 @@
 == STOP: PV ==
-PV=TRUE server_sha256=5fe81092949b3148ad51a12ad1ab8b18220308046346cd8bc7147b9378c562a5 harness_sha256=1b9cbbd82ce02f9cd2ab3e676c3109f6c5a70ffbb76ef50c01026fd2b21c16ff flavour=JE
+PV=TRUE server_sha256=eb1f0729fdd1b20a7848f89bab1986537a72bad8a6f770b222ead17d37521711 harness_sha256=789d65928feb35dd2260f271676263f80f3eaad8d588881f10c60cc7ee416346 flavour=JE
 == STOP: PR ==
 PR-crashes=TRUE crashes=0
 PR-class=TRUE
 == STOP: P5 / P6 / P7 ==
 P5=TRUE
-P5-observed: removal_rows=521 settlement_rows=520 unsettled=522
-P5-carve-out: epoch 522 in_flight=yes (epoch max op_seq 522943 vs global 522943) terminal=yes
+P5-observed: removal_rows=527 settlement_rows=527 unsettled=none
 P5-zero-return: none observed
-DECISION_SCRAPE=2026-09-26T23:55:48Z.txt
-P6=TRUE removed_refs_observed_total=518000 considered_total=518000 gap=0
+DECISION_SCRAPE=2026-09-28T04:43:17Z.txt
+P6=TRUE removed_refs_observed_total=524000 considered_total=524000 gap=0
 P7=TRUE restored_cancelled_total=0
-windows=521 settlement_rows=520 zero_return_removal_rows=0 scrapes=241
+windows=527 settlement_rows=527 zero_return_removal_rows=0 scrapes=241
 == STOP: PE / PA ==
 PE=TRUE rows_with_footprint=241 rows=241 N=241 need=240
 PA=TRUE wellformed_lines=481 lines=481 need=478
@@ -19,87 +18,87 @@ PA=TRUE wellformed_lines=481 lines=481 need=478
 PJ=TRUE echoes=1 value=true
 PJ-child=n/a reason=filtered
 == STOP: PC ==
-PC=TRUE live=1043300 live_tag_bytes=35472201
+PC=TRUE live=1055283 live_tag_bytes=35879623
 == STOP: PM1 ==
-PM1=TRUE post_mortem_rows=0 empty_scrape_rows=0 first_empty_elapsed=none last_live_scrape_elapsed=14400 need_ge=14280
+PM1=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=14400 need_ge=14280
 == recorded: ops ==
-OPS_PER_S=181.232
+OPS_PER_S=183.294
 WRITE_ERRORS=0
-TOTAL_WRITES=2610102 DURATION_ACTUAL=14402
-OPS_AT_900=181.710 checkpoint_elapsed=903
+TOTAL_WRITES=2639610 DURATION_ACTUAL=14401
+OPS_AT_900=179.845 checkpoint_elapsed=903
 == recorded: host state before the cell (the chain writes it at the head of the runner console) ==
 HOST=n/a reason=no_host_record
 == recorded: je_config ==
 JE_CONFIG=je_config version=5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8 arenas_narenas=41 opt_narenas=40 opt_background_thread=false background_thread=n/a max_background_threads=n/a opt_tcache=true opt_tcache_max=32768 opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a
 == readings: fits (slopes per hour; on amp series the unit is AMP per hour) ==
-FP_slope=143.314288
-FP_slope_se=6.383694
+FP_slope=157.665144
+FP_slope_se=6.881993
 FP_slope_n=121
-FP_slope_r2=0.808990
-S_slope=143.314288
-S_slope_se=6.383694
+FP_slope_r2=0.815177
+S_slope=157.665144
+S_slope_se=6.881993
 S_slope_n=121
-S_slope_r2=0.808990
-TREND=0.010907
-TREND_se=0.019606
+S_slope_r2=0.815177
+TREND=0.027119
+TREND_se=0.022729
 TREND_n=24
-TREND_r2=0.013872
-TREND3=0.031671
-TREND3_se=0.039438
+TREND_r2=0.060777
+TREND3=0.092348
+TREND3_se=0.040394
 TREND3_n=16
-TREND3_r2=0.044036
-TREND_NATIVE=-0.078515
-TREND_NATIVE_se=0.018329
-TREND_NATIVE_n=121
-TREND_NATIVE_r2=0.133596
+TREND3_r2=0.271841
+TREND_NATIVE=-0.067629
+TREND_NATIVE_se=0.018151
+TREND_NATIVE_n=120
+TREND_NATIVE_r2=0.105258
 TREND_dropped=0
 TREND_points_used=48
 == readings: end levels (last row carrying a footprint) ==
 END_elapsed=14400
-FP_end=529.518
-S_end=529.518
-RECLAIM_end=0.000
-RECLAIM_RATIO_end=0.000000
+FP_end=523.737
+S_end=523.893
+RECLAIM_end=0.156
+RECLAIM_RATIO_end=0.000298
 == readings: census points (TERMINAL, and the deciding point = the last used one) ==
 TERM_src=TERMINAL
 TERM_t=14402.0
 TERM_join_lag_s=2.0
-TERM_live=1043300
-TERM_reach_bytes=941812089
-TERM_fp_mb=529.518
-TERM_s_mb=529.518
-TERM_redb_mb=213.527
-TERM_AMP_FP=0.589544
-TERM_AMP_S=0.589544
-TERM_A0_share=0.018526
-TERM_R_redb=0.237732
-TERM_je_allocated=469477464
-TERM_je_metadata=32441888
-TERM_AMP_JE=1.221338
-TERM_DIRTY_SHARE=0.072690
-TERM_FRAG_SHARE=0.079546
-TERM_R_meta=0.034446
-TERM_EST_AGREE=0.498483
-TERM_UNMODELLED_MB=-450.453
-TERM_UNMODELLED_SHARE=-0.501517
+TERM_live=1055283
+TERM_reach_bytes=952428921
+TERM_fp_mb=523.737
+TERM_s_mb=523.893
+TERM_redb_mb=209.527
+TERM_AMP_FP=0.576608
+TERM_AMP_S=0.576780
+TERM_A0_share=0.018320
+TERM_R_redb=0.230679
+TERM_je_allocated=466029472
+TERM_je_metadata=33265784
+TERM_AMP_JE=1.273125
+TERM_DIRTY_SHARE=0.121206
+TERM_FRAG_SHARE=0.080537
+TERM_R_meta=0.034927
+TERM_EST_AGREE=0.489306
+TERM_UNMODELLED_MB=-463.867
+TERM_UNMODELLED_SHARE=-0.510694
 DECIDE_src=TERMINAL
 DECIDE_t=14402.0
 DECIDE_join_lag_s=2.0
-DECIDE_live=1043300
-DECIDE_reach_bytes=941812089
-DECIDE_fp_mb=529.518
-DECIDE_s_mb=529.518
-DECIDE_redb_mb=213.527
-DECIDE_AMP_FP=0.589544
-DECIDE_AMP_S=0.589544
-DECIDE_A0_share=0.018526
-DECIDE_R_redb=0.237732
-DECIDE_je_allocated=469477464
-DECIDE_je_metadata=32441888
-DECIDE_AMP_JE=1.221338
-DECIDE_DIRTY_SHARE=0.072690
-DECIDE_FRAG_SHARE=0.079546
-DECIDE_R_meta=0.034446
-DECIDE_EST_AGREE=0.498483
-DECIDE_UNMODELLED_MB=-450.453
-DECIDE_UNMODELLED_SHARE=-0.501517
+DECIDE_live=1055283
+DECIDE_reach_bytes=952428921
+DECIDE_fp_mb=523.737
+DECIDE_s_mb=523.893
+DECIDE_redb_mb=209.527
+DECIDE_AMP_FP=0.576608
+DECIDE_AMP_S=0.576780
+DECIDE_A0_share=0.018320
+DECIDE_R_redb=0.230679
+DECIDE_je_allocated=466029472
+DECIDE_je_metadata=33265784
+DECIDE_AMP_JE=1.273125
+DECIDE_DIRTY_SHARE=0.121206
+DECIDE_FRAG_SHARE=0.080537
+DECIDE_R_meta=0.034927
+DECIDE_EST_AGREE=0.489306
+DECIDE_UNMODELLED_MB=-463.867
+DECIDE_UNMODELLED_SHARE=-0.510694

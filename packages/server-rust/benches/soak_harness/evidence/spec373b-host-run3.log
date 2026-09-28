@@ -159,3 +159,48 @@ absent target/spec373b-a2-data.meta
   543   3.0 /usr/sbin/coreaudiod
 30958   2.0 ffmpeg
 82070   1.7 ffmpeg
+=== JE phase run3 2026-09-27T20:31:38Z
+absent target/spec373b-jb-data
+absent target/spec373b-jb-data.meta
+absent target/spec373b-ja-data
+absent target/spec373b-ja-data.meta
+--- run3 quiet-host-before-je-chain 2026-09-27T20:31:39Z (local 23:31)
+23:31  up 6 days,  1:37, 1 user, load averages: 2.04 2.80 3.02
+  PID  %CPU COMM
+ 5054  24.0 /Users/koristuvac/.local/bin/claude
+66942  17.5 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  408   8.7 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+85345   6.1 /bin/zsh
+  378   4.1 /usr/libexec/opendirectoryd
+--- run3 start-cell-jb 2026-09-27T20:44:11Z (local 23:44)
+23:44  up 6 days,  1:49, 1 user, load averages: 2.03 2.81 3.19
+  PID  %CPU COMM
+  342   6.3 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+  543   2.5 /usr/sbin/coreaudiod
+82070   1.6 ffmpeg
+18891   1.6 ffmpeg
+30958   1.6 ffmpeg
+--- run3 start-cell-ja 2026-09-28T00:44:17Z (local 03:44)
+ 3:44  up 6 days,  5:50, 1 user, load averages: 1.57 1.88 2.08
+  PID  %CPU COMM
+82245  32.0 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-je-head/release/topgun-server
+77000   8.3 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService
+66942   3.8 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  543   3.0 /usr/sbin/coreaudiod
+  481   2.5 /usr/libexec/syspolicyd
+--- run3 after-cell-jb 2026-09-28T00:44:17Z (local 03:44)
+ 3:44  up 6 days,  5:50, 1 user, load averages: 1.52 1.86 2.07
+  PID  %CPU COMM
+82245  26.3 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-je-head/release/topgun-server
+77000   5.1 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService
+  543   3.2 /usr/sbin/coreaudiod
+66942   2.9 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  408   2.5 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+--- run3 after-cell-ja 2026-09-28T04:44:22Z (local 07:44)
+ 7:44  up 6 days,  9:50, 1 user, load averages: 3.77 3.41 2.95
+  PID  %CPU COMM
+  764  92.0 /usr/libexec/duetexpertd
+  342   3.2 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+  543   2.9 /usr/sbin/coreaudiod
+30958   1.9 ffmpeg
+86527   1.8 ffmpeg
