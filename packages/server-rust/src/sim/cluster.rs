@@ -27,6 +27,7 @@ use crate::cluster::traits::ClusterService;
 use crate::cluster::types::{ClusterConfig, ClusterHealth, MembersView};
 use crate::dag::coordinator::ClusterQueryCoordinator;
 use crate::network::connection::ConnectionRegistry;
+use crate::service::domain::key_writer::KeyWriterRegistry;
 use crate::service::domain::query::QueryRegistry;
 use crate::service::domain::search::{HybridSearchRegistry, SearchRegistry};
 use crate::service::domain::{
@@ -208,6 +209,11 @@ impl SimNode {
         // persistence service reads/subscribes from it. Same Arc handed to both.
         let journal_store = Arc::new(crate::service::domain::journal::JournalStore::new(10_000));
 
+        // One per-key writer shared by every service that writes this node's
+        // record stores, as in the production binary: the CRDT op paths and SYNC
+        // ingest must serialize on the same lock per key (TG-OR-007).
+        let key_writer = Arc::new(KeyWriterRegistry::new());
+
         // Build all 7 domain services.
         let crdt_service = Arc::new(
             CrdtService::new(
@@ -217,7 +223,8 @@ impl SimNode {
                 Arc::clone(&query_registry),
                 Arc::new(SchemaService::new()),
             )
-            .with_journal(Arc::clone(&journal_store)),
+            .with_journal(Arc::clone(&journal_store))
+            .with_key_writer(Arc::clone(&key_writer)),
         );
 
         let mut router = OperationRouter::new();
@@ -226,11 +233,14 @@ impl SimNode {
 
         router.register(
             service_names::SYNC,
-            Arc::new(SyncService::new(
-                merkle_manager,
-                Arc::clone(&record_store_factory),
-                Arc::clone(&connection_registry),
-            )),
+            Arc::new(
+                SyncService::new(
+                    merkle_manager,
+                    Arc::clone(&record_store_factory),
+                    Arc::clone(&connection_registry),
+                )
+                .with_key_writer(Arc::clone(&key_writer)),
+            ),
         );
 
         router.register(

@@ -150,10 +150,13 @@ pub struct SyncService {
     /// shared with `CrdtService` so the covering epoch and low-water-mark are one
     /// authority.
     frontier: Option<Arc<TombstoneFrontier>>,
-    /// Shared per-key writer, the SAME registry `CrdtService` holds, so a
-    /// SYNC-leaf prune sweep and an OR write on a key serialize against each
-    /// other. `None` when the frontier is not wired.
-    key_writer: Option<Arc<KeyWriterRegistry>>,
+    /// Shared per-key writer (TG-OR-007). Every site that builds a `CrdtService`
+    /// and a `SyncService` over one `RecordStoreFactory` MUST pass the SAME `Arc`
+    /// to both (`with_key_writer` / `with_frontier`): a second registry would let
+    /// a sync push and an OR write on one key interleave, and a SYNC-leaf prune
+    /// sweep race an OR write. `new` installs a fresh registry so standalone
+    /// construction (tests, null-store) still has a writer.
+    key_writer: Arc<KeyWriterRegistry>,
 }
 
 /// Per-`(map_name, connection_id)` cache of materialised Merkle sync sessions.
@@ -233,17 +236,19 @@ impl SyncService {
             durable_store: None,
             session_registry,
             frontier: None,
-            key_writer: None,
+            key_writer: Arc::new(KeyWriterRegistry::new()),
         }
     }
 
     /// Wire the shared causal frontier + per-key writer so OR-Map sync responses
     /// convey the covering epoch (feeding the client ACK loop and the `342e`
-    /// `delivered_conn` clamp) and the SYNC-leaf prune can run. Production wiring
-    /// MUST pass the SAME `Arc`s held by `AppState` / `CrdtService`; a second
-    /// frontier or writer would fork the epoch authority / re-open the prune race.
-    /// `SyncService::new`'s signature is unchanged (builder, like
-    /// `with_durable_index`).
+    /// `delivered_conn` clamp) and the SYNC-leaf prune can run. Sets BOTH fields;
+    /// equivalent to `with_key_writer(key_writer)` plus wiring the frontier.
+    /// Production wiring MUST pass the SAME `Arc`s held by `AppState` /
+    /// `CrdtService`; a second frontier would fork the epoch authority, and a
+    /// second writer would let a sync push, an OR write and a prune sweep on one
+    /// key interleave (TG-OR-007). `SyncService::new`'s signature is unchanged
+    /// (builder, like `with_durable_index`).
     #[must_use]
     pub fn with_frontier(
         mut self,
@@ -251,7 +256,17 @@ impl SyncService {
         key_writer: Arc<KeyWriterRegistry>,
     ) -> Self {
         self.frontier = Some(frontier);
-        self.key_writer = Some(key_writer);
+        self.key_writer = key_writer;
+        self
+    }
+
+    /// Replace the per-key writer with the registry shared with `CrdtService`
+    /// over the same `RecordStoreFactory`, without wiring a frontier. Passing a
+    /// different registry than `CrdtService` holds would let a sync push and an
+    /// OR write on one key interleave (TG-OR-007).
+    #[must_use]
+    pub fn with_key_writer(mut self, key_writer: Arc<KeyWriterRegistry>) -> Self {
+        self.key_writer = key_writer;
         self
     }
 
@@ -1311,90 +1326,81 @@ impl SyncService {
         )))
     }
 
+    /// Batch admission for a push while the forgotten-client gate is active:
+    /// the server-authenticated identity resolves, it is not forgotten, and the
+    /// connection has completed its sync or full-resync admission. `None` rejects
+    /// the batch. The checks run in this order, the first failure rejecting.
+    async fn admit_push_batch(
+        &self,
+        frontier: &TombstoneFrontier,
+        ctx: &crate::service::operation::OperationContext,
+    ) -> Option<ClientId> {
+        // Unknown identity -> forgotten -> reject; the client is steered to a
+        // full-snapshot REPLACE resync by the sync path.
+        let client = self.resolve_client_id(ctx.connection_id).await?;
+        if frontier.is_forgotten(&client) {
+            return None;
+        }
+        // A connection must complete its (non-gated) sync or full-resync admission
+        // before any push merges — `delivered_conn` is the post-resync admission
+        // signal, advanced only on snapshot-resync completion (or eagerly by
+        // `covering_epoch` for a NOT-gated client), never for a gated one. A
+        // not-yet-admitted connection (`delivered == 0`) that flushes a queued push
+        // BEFORE finishing its sync/resync would carry a high STORED cursor
+        // (`is_forgotten` = false) yet still be pre-admission; holding it here until
+        // REPLACE completes keeps a regressed replica's direct push out until the
+        // resync lands. `resolve_client_id` returning `Some` proves `connection_id`
+        // is `Some`; an unexpected `None` fails closed.
+        let conn_id = ctx.connection_id?;
+        if frontier.delivered(conn_id) == 0 {
+            return None;
+        }
+        Some(client)
+    }
+
     /// Handles `ORMapPushDiff` — merges incoming OR-Map entries and broadcasts changes.
+    ///
+    /// Every entry is merged under the key's shared writer through the in-place
+    /// seam, with the forgotten-client gate evaluated per entry under that writer
+    /// (TG-OR-007).
     ///
     /// `ORMapPushDiff` is a WRAPPED message: `map_name` and `entries` live in a
     /// nested `.payload` field.
-    #[allow(clippy::too_many_lines)] // gate setup + per-entry merge + broadcast + prune site in one coherent handler
+    #[allow(clippy::too_many_lines)] // per-entry writer + gate + merge + broadcast + prune site in one coherent handler
     async fn handle_ormap_push_diff(
         &self,
         ctx: &crate::service::operation::OperationContext,
         payload: messages::ORMapPushDiff,
     ) -> Result<OperationResponse, OperationError> {
-        use std::collections::BTreeSet;
+        use std::collections::HashSet;
         use topgun_core::messages::{ServerEventPayload, ServerEventType};
+
+        use crate::service::domain::crdt::normalize_to_or_map;
+        use crate::storage::MutateOutcome;
 
         let map_name = payload.payload.map_name;
         let entries = payload.payload.entries;
 
-        // ---- Forgotten-client pre-apply gate (fires BEFORE any merge) ----
+        // ---- Forgotten-client pre-apply gate, evaluated per entry ----
         //
-        // Wired but DARK by construction until SPEC-342j raises the durability
-        // watermark (`is_protection_active`): while dark, no tombstone can be pruned,
-        // so a re-admitted record is still suppressed by the live tombstone set
-        // (remove-wins) and blocking would only break an un-migrated client — the
-        // pre-342j write path is preserved verbatim. Once active, the gate blocks a
-        // forgotten/unknown client's push BEFORE the merge (gating BOTH the inbound
-        // tombstone union and the inbound records) and holds the per-key single-writer
-        // from the gate decision through the `store.put` commit to close the
-        // `.await`-window TOCTOU. It goes live TOGETHER with the prune
-        // (gate-before-activation — no prune-without-gate window).
-        let gate_active = self
-            .frontier
-            .as_ref()
-            .is_some_and(|f| f.is_protection_active());
-        let gate = if gate_active {
-            // Fail-closed (R12): an ACTIVE gate needs the shared per-key writer to hold
-            // the gate→commit TOCTOU span. Absent it, reject the whole push rather than
-            // merge under a best-effort no-lock path.
-            let (Some(frontier), Some(key_writer)) =
-                (self.frontier.as_ref(), self.key_writer.as_ref())
-            else {
-                return Ok(OperationResponse::Ack {
-                    call_id: ctx.call_id,
-                });
-            };
-            // Resolve the server-authenticated identity ONCE for the batch (R13:
-            // per-message decision, re-checked per key under the writer lock below).
-            // Unknown identity → forgotten → reject the whole push; the client is
-            // steered to a full-snapshot REPLACE resync by the sync path.
-            let Some(client) = self.resolve_client_id(ctx.connection_id).await else {
-                return Ok(OperationResponse::Ack {
-                    call_id: ctx.call_id,
-                });
-            };
-            if frontier.is_forgotten(&client) {
-                return Ok(OperationResponse::Ack {
-                    call_id: ctx.call_id,
-                });
-            }
-            // A connection must complete its (non-gated) sync or full-resync
-            // admission before any push merges — `delivered_conn` is the
-            // post-resync admission signal (R8/R9), advanced only on
-            // snapshot-resync completion (or eagerly by `covering_epoch` for a
-            // NOT-gated client), never for a gated one. A not-yet-admitted
-            // connection (`delivered == 0`) that flushes a queued push BEFORE
-            // finishing its sync/resync would carry a high STORED cursor
-            // (`is_forgotten` = false) yet still be pre-admission — holding it
-            // here until REPLACE completes closes R10 point-1 (a regressed
-            // replica's direct push is held until the resync lands).
-            let Some(conn_id) = ctx.connection_id else {
-                // `resolve_client_id` already returned Some, which proves
-                // `connection_id` is Some; an unexpected None is treated as
-                // fail-closed reject rather than admitted.
-                return Ok(OperationResponse::Ack {
-                    call_id: ctx.call_id,
-                });
-            };
-            if frontier.delivered(conn_id) == 0 {
-                return Ok(OperationResponse::Ack {
-                    call_id: ctx.call_id,
-                });
-            }
-            Some((frontier, key_writer, client))
-        } else {
-            None
-        };
+        // DARK until the durable epoch watermark leaves 0 (`is_protection_active`):
+        // while dark no tombstone can be pruned, so a re-admitted record is still
+        // suppressed by the live tombstone set (remove-wins) and blocking would only
+        // break an un-migrated client. Once active, the gate blocks a forgotten or
+        // unknown client's push BEFORE the merge (gating both the inbound tombstone
+        // union and the inbound records). It goes live together with the prune, so
+        // there is no prune-without-gate window.
+        //
+        // Activation is read per entry, under that entry's writer, not sampled once
+        // per batch: the watermark can leave 0 while a batch is in flight, and an
+        // entry merged ungated after that point could re-admit a record whose
+        // tombstone a prune has already dropped. The watermark is monotonic within a
+        // process, so once an entry has seen the gate active the answer is memoized
+        // for the rest of the batch.
+        let mut gate_seen_active = false;
+        // The batch's admitted identity, resolved lazily the first time an entry
+        // finds the gate active and cached for the rest of the batch.
+        let mut admitted_client: Option<ClientId> = None;
 
         for entry in &entries {
             // Each entry's key determines its storage partition.
@@ -1402,91 +1408,134 @@ impl SyncService {
             let store = self
                 .record_store_factory
                 .get_or_create(&map_name, key_partition);
-            // Acquire the per-key single-writer BEFORE the gate re-check and hold it
-            // through the `store.put` merge-commit below (R5/R13). The commit-time
-            // re-check re-evaluates the LAG-AWARE forgotten status under the held guard
-            // via `gate_decision_holds_at_commit`, so a client that crosses the
-            // forget-lag-K threshold mid-batch (a concurrent stamp advancing
-            // `current_epoch`, or an active forget) between the batch gate and this key
-            // is caught here and its key skipped — not merged.
-            let _key_guard = if let Some((frontier, key_writer, client)) = &gate {
-                let guard = key_writer.acquire(&map_name, &entry.key).await;
-                let token = GateToken {
-                    client: (*client).clone(),
-                };
-                if !frontier.gate_decision_holds_at_commit(token) {
-                    continue; // now forgotten → skip this key (guard drops)
-                }
-                Some(guard)
-            } else {
-                None
-            };
-            // Read-modify-write: fold inbound records + tombstones into the
-            // locally-stored OR-Map rather than blind-clobbering it. Discarding
-            // either side would resurrect removed entries (remove-wins broken) or
-            // drop concurrent additions (add-wins broken).
-            let (mut merged_records, mut tombstones): (
-                Vec<crate::storage::record::OrMapEntry>,
-                BTreeSet<String>,
-            ) = match store.get(&entry.key, false).await {
-                Ok(Some(local)) => match local.value {
-                    RecordValue::OrMap {
-                        records,
-                        tombstones,
-                    } => (records, tombstones.into_iter().collect()),
-                    // Legacy persisted blob: fold its tags into the unified view.
-                    RecordValue::OrTombstones { tags } => (Vec::new(), tags.into_iter().collect()),
-                    RecordValue::Lww { .. } => (Vec::new(), BTreeSet::new()),
-                },
-                _ => (Vec::new(), BTreeSet::new()),
-            };
 
-            // Union inbound tombstones (remove-wins) before applying records, so a
-            // tag tombstoned anywhere suppresses its record everywhere.
-            // `insert` returns true only for tags not already in the local set, so
-            // the tombstone-bytes gauge counts genuinely-new inbound tombstones —
-            // idempotent re-pushes and intra-batch duplicates don't inflate it.
-            for tag in &entry.tombstones {
-                if tombstones.insert(tag.clone()) {
-                    crate::storage::record::add_tombstone_bytes(tag.len() as u64);
+            // The shared per-key writer is held for EVERY entry, gated or not
+            // (TG-OR-007): every writer of a key must hold it across load -> mutate ->
+            // stage, or a push interleaved with an OR op, a REMOVE or the prune can
+            // stage over a delete the other writer already staged, or stage its
+            // snapshot after a later mutation's. The named binding keeps the guard
+            // alive for the whole loop body — the gate check, the merge through the
+            // seam, AND the OR_ADD broadcast below. A refactor must not hoist the
+            // broadcast out of this scope: subscribers would then be able to observe
+            // this key's events out of order with a concurrent writer's. Only one
+            // key's writer is held at a time, so no multi-key lock ordering exists.
+            let _key_guard = self.key_writer.acquire(&map_name, &entry.key).await;
+
+            if let Some(frontier) = self.frontier.as_ref() {
+                if !gate_seen_active {
+                    gate_seen_active = frontier.is_protection_active();
+                }
+                if gate_seen_active {
+                    let client = if let Some(client) = &admitted_client {
+                        client.clone()
+                    } else {
+                        // A rejected batch returns at once; entries merged earlier
+                        // in it, while the gate was still dark, stay merged.
+                        let Some(client) = self.admit_push_batch(frontier, ctx).await else {
+                            return Ok(OperationResponse::Ack {
+                                call_id: ctx.call_id,
+                            });
+                        };
+                        admitted_client = Some(client.clone());
+                        client
+                    };
+                    // Re-evaluate the LAG-AWARE forgotten status under the held
+                    // guard: a client that crosses the forget-lag threshold mid-batch
+                    // (a concurrent stamp advancing `current_epoch`, or an active
+                    // forget) is caught here and this key skipped, not merged.
+                    if !frontier.gate_decision_holds_at_commit(GateToken { client }) {
+                        continue;
+                    }
                 }
             }
 
-            // Drop any locally-stored record whose tag is now tombstoned.
-            merged_records.retain(|r| !tombstones.contains(&r.tag));
+            // Merge the inbound entry into the key's current value through the
+            // in-place seam, which materializes a non-resident key from the data
+            // store under the vacancy-generation guard (a stale load is retried, never
+            // written back) and fails the call on a load error instead of merging
+            // over an empty base. Fold inbound records and tombstones into the stored
+            // OR-Map rather than blind-clobbering it: discarding either side would
+            // resurrect removed entries (remove-wins broken) or drop concurrent
+            // additions (add-wins broken).
+            //
+            // The closure runs at most once per call (TG-OR-001), so the
+            // tombstone-bytes gauge is charged once per genuinely-new tag; because
+            // `init` is `Some` it runs exactly once on every `Ok`, so the broadcast
+            // set it records is always defined.
+            let mut tombstoned_inbound: HashSet<String> = HashSet::new();
+            let mut merge = |value: &mut RecordValue| {
+                // A legacy `OrTombstones` blob folds into an `OrMap`; an `Lww` value
+                // under a key pushed as OR becomes an empty `OrMap` and is replaced.
+                normalize_to_or_map(value);
+                if let RecordValue::OrMap {
+                    records,
+                    tombstones,
+                } = value
+                {
+                    // Union inbound tombstones (remove-wins) before applying
+                    // records, so a tag tombstoned anywhere suppresses its record
+                    // everywhere. A tag already stored, or repeated within this
+                    // entry, is neither appended again nor charged to the gauge, so
+                    // idempotent re-pushes don't inflate it. New tags are appended
+                    // in arrival order; the Merkle leaf hash is set-canonical
+                    // (TG-MRK-001), so the stored order is invisible to sync.
+                    let mut known: HashSet<&str> = tombstones.iter().map(String::as_str).collect();
+                    let mut new_tags: Vec<String> = Vec::new();
+                    for tag in &entry.tombstones {
+                        if known.insert(tag.as_str()) {
+                            crate::storage::record::add_tombstone_bytes(tag.len() as u64);
+                            new_tags.push(tag.clone());
+                        }
+                    }
 
-            // Apply inbound records (add-wins): keep a record unless its tag is
-            // tombstoned. De-duplicate by tag so repeated pushes are idempotent.
-            for r in &entry.records {
-                if tombstones.contains(&r.tag) {
-                    continue;
-                }
-                if merged_records.iter().any(|existing| existing.tag == r.tag) {
-                    continue;
-                }
-                merged_records.push(crate::storage::record::OrMapEntry {
-                    value: crate::service::domain::crdt::rmpv_to_value(&r.value),
-                    // Tag stays verbatim (OR identity — re-stamping breaks fleet tag
-                    // identity / CRDT convergence). The `timestamp` field is copied
-                    // verbatim too and is an ACCEPTED-AS-UNTRUSTED, client-supplied
-                    // value used only for LWW tie-breaking WITHIN this OR entry — the
-                    // server neither re-stamps nor clamps it (the bounded default;
-                    // authenticity of the identity is enforced by the connection-keyed
-                    // gate above, not by trusting this field).
-                    tag: r.tag.clone(),
-                    timestamp: r.timestamp.clone(),
-                });
-            }
+                    // Drop any stored record whose tag is now tombstoned.
+                    records.retain(|r| !known.contains(r.tag.as_str()));
 
+                    // Apply inbound records (add-wins): keep a record unless its tag
+                    // is tombstoned. De-duplicate by tag so repeated pushes are
+                    // idempotent; on a same-tag conflict the stored record is kept.
+                    for r in &entry.records {
+                        if known.contains(r.tag.as_str()) {
+                            tombstoned_inbound.insert(r.tag.clone());
+                            continue;
+                        }
+                        if records.iter().any(|existing| existing.tag == r.tag) {
+                            continue;
+                        }
+                        records.push(crate::storage::record::OrMapEntry {
+                            value: crate::service::domain::crdt::rmpv_to_value(&r.value),
+                            // Tag stays verbatim (OR identity — re-stamping breaks
+                            // fleet tag identity / CRDT convergence). The `timestamp`
+                            // is copied verbatim too and is an ACCEPTED-AS-UNTRUSTED,
+                            // client-supplied value used only for LWW tie-breaking
+                            // WITHIN this OR entry — the server neither re-stamps nor
+                            // clamps it (authenticity of the identity is enforced by
+                            // the connection-keyed gate above, not by this field).
+                            tag: r.tag.clone(),
+                            timestamp: r.timestamp.clone(),
+                        });
+                    }
+                    tombstones.extend(new_tags);
+                }
+                // Always write, even when the merge changed nothing: a client's
+                // re-push is what re-persists a resident whose earlier write-through
+                // failed or was cancelled, and skipping it would leave that content
+                // non-durable. `witness: None` means a full-snapshot write-through.
+                MutateOutcome {
+                    changed: true,
+                    witness: None,
+                }
+            };
             store
-                .put(
+                .update_in_place(
                     &entry.key,
-                    RecordValue::OrMap {
-                        records: merged_records,
-                        tombstones: tombstones.iter().cloned().collect(),
-                    },
+                    Some(RecordValue::OrMap {
+                        records: Vec::new(),
+                        tombstones: Vec::new(),
+                    }),
                     ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
+                    &mut merge,
                 )
                 .await
                 .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
@@ -1494,9 +1543,10 @@ impl SyncService {
             // Broadcast OR_ADD only for inbound records that actually survived the
             // merge. A record whose tag is tombstoned (remove-wins) was suppressed
             // from stored state, so emitting an OR_ADD for it would tell subscribers
-            // to resurrect a removed entry.
+            // to resurrect a removed entry. This runs while `_key_guard` is still
+            // held (see above).
             for record in &entry.records {
-                if tombstones.contains(&record.tag) {
+                if tombstoned_inbound.contains(&record.tag) {
                     continue;
                 }
                 let event_payload = ServerEventPayload {
@@ -1763,10 +1813,7 @@ mod tests {
 
         // The pass the trigger asked for, run explicitly: this fixture spawns no
         // task, so nothing else would ever consume the permit.
-        let key_writer = svc
-            .key_writer
-            .clone()
-            .expect("the fixture wires the shared per-key writer");
+        let key_writer = Arc::clone(&svc.key_writer);
         prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
 
         match store.get(key, false).await.unwrap().map(|r| r.value) {

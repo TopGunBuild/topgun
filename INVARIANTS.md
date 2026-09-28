@@ -693,7 +693,8 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 - **Scope:** every production insert path of the record store — the in-place write seam
   (`DefaultRecordStore::update_in_place`) and `get`'s load path — and the removals that race them
-  (`remove`, `evict_lru`, graceful-shutdown `hard_flush`).
+  (`remove`, `evict_lru`, graceful-shutdown `hard_flush`); SYNC OR ingest
+  (`SyncService::handle_ormap_push_diff`).
 - **Statement:** on every production insert path, a mutation on a durable key merges into the key's
   durable value, and a value read from the data store is inserted into the engine only if no removal
   of that key intervened since the read began; residency (resident, evicted, post-restart) and
@@ -724,7 +725,13 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   in-place OR writes (`crdt.rs`); `hard_flush` joining the flush loop before it drains (SPEC-374);
   for slot cells, `MapDataStore::load_slot` (the write-behind answers the staged cell,
   `Loaded::Cell`) in the materialize loop and in `get`, and the cell-aware inserts
-  `StorageEngine::put_if_absent_at` / `update_in_place` taking `SlotInit::Cell` (SPEC-373b).
+  `StorageEngine::put_if_absent_at` / `update_in_place` taking `SlotInit::Cell` (SPEC-373b);
+  SYNC OR ingest holding the shared per-key writer for every entry — across the gate check, the seam
+  call (load, mutate, staging) and the OR_ADD broadcast — and merging through `update_in_place`
+  (init an empty `OrMap`, the closure returns `changed: true`, no witness); that writer is the same
+  `Arc` as `CrdtService`'s in the server binary and in the simulation (`sync.rs`). The in-memory lost
+  update on a resident key (the thread-parallel window) is excluded by the in-place merge running
+  under the engine's per-key entry lock.
 - **Enforcing test:** `crdt.rs::or_add_on_non_resident_key_keeps_the_durable_entries`,
   `::or_remove_on_non_resident_key_keeps_the_other_durable_entries`,
   `::or_add_after_eviction_keeps_the_durable_entries`,
@@ -748,10 +755,17 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `::an_evicted_cell_is_re_adopted_while_its_flush_is_pending` (the engine holds the queued
   entry's cell after `op2` and the flush persists every op — catches a fresh cell beside the
   queued one, not a copying adoption, which AC-2b covers).
+  SYNC OR ingest (`crdt.rs::tests::non_resident_writes::`): `push_during_a_remove_does_not_resurrect_it`,
+  `::push_across_an_evicted_or_add_keeps_the_acked_add`,
+  `::push_with_a_failed_load_keeps_the_durable_value`,
+  `::push_between_the_steps_of_a_remove_does_not_resurrect_it`,
+  `::push_and_or_add_stage_in_mutation_order`.
 - **Violation consequence:** the first OR write on a key after a restart or an eviction replaces the
   key's durable value with a one-op slot (every earlier entry and tombstone lost, unrecoverable from
-  the WAL once its segments are collected), or a removed value is resurrected by a stale read.
-- **Discovered by:** TODO-700 (red tests), SPEC-374; extended to slot cells by SPEC-373b.
+  the WAL once its segments are collected), or a removed value is resurrected by a stale read; a
+  SYNC push resurrects a removed key or loses an acked OR op.
+- **Discovered by:** TODO-700 (red tests), SPEC-374; extended to slot cells by SPEC-373b; SYNC OR
+  ingest by SPEC-375.
 - **Status:** decided, **enforced**.
 
 ### TG-MRK-001: The OR-Map Merkle leaf hash is set-canonical (order-independent)
