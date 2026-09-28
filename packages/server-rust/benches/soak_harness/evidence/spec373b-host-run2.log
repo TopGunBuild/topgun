@@ -1,0 +1,72 @@
+--- quiet-host-before-ca-chain 2026-09-26T19:31:49Z
+22:31  up 5 days, 37 mins, 1 user, load averages: 2.23 2.90 6.31
+  PID  %CPU COMM
+    1  62.7 /sbin/launchd
+69309   4.9 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  543   3.7 /usr/sbin/coreaudiod
+  408   2.9 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+30958   2.8 ffmpeg
+--- after-cell-b1 2026-09-26T19:44:20Z
+22:44  up 5 days, 50 mins, 1 user, load averages: 2.40 2.97 4.47
+  PID  %CPU COMM
+  468   6.4 /usr/libexec/airportd
+  408   5.4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+69309   4.4 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  543   3.3 /usr/sbin/coreaudiod
+76650   3.0 /Users/koristuvac/.local/bin/claude
+--- after-cell-a1 2026-09-26T19:44:20Z
+22:44  up 5 days, 50 mins, 1 user, load averages: 2.40 2.97 4.47
+  PID  %CPU COMM
+  468   3.9 /usr/libexec/airportd
+  408   3.5 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+69309   3.3 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  543   3.0 /usr/sbin/coreaudiod
+76650   2.1 /Users/koristuvac/.local/bin/claude
+--- after-cell-b2 2026-09-26T19:44:20Z
+22:44  up 5 days, 50 mins, 1 user, load averages: 2.40 2.97 4.47
+  PID  %CPU COMM
+  468   3.9 /usr/libexec/airportd
+  408   3.5 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+69309   3.3 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  543   3.0 /usr/sbin/coreaudiod
+76650   2.1 /Users/koristuvac/.local/bin/claude
+--- after-cell-a2 2026-09-26T19:44:20Z
+22:44  up 5 days, 50 mins, 1 user, load averages: 2.40 2.97 4.47
+  PID  %CPU COMM
+  468   3.9 /usr/libexec/airportd
+  408   3.5 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+69309   3.3 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  543   3.0 /usr/sbin/coreaudiod
+76650   2.1 /Users/koristuvac/.local/bin/claude
+--- quiet-host-before-je-chain 2026-09-26T19:44:20Z
+22:44  up 5 days, 50 mins, 1 user, load averages: 2.40 2.97 4.47
+  PID  %CPU COMM
+  543   2.7 /usr/sbin/coreaudiod
+  468   2.4 /usr/libexec/airportd
+  408   2.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+69309   2.0 /Applications/Splitlane.app/Contents/MacOS/splitlane
+30958   1.8 ffmpeg
+--- after-cell-jb 2026-09-26T19:56:51Z
+22:56  up 5 days,  1:02, 1 user, load averages: 2.27 2.84 3.62
+  PID  %CPU COMM
+97186  20.9 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-je-head/release/topgun-server
+69309   4.0 /Applications/Splitlane.app/Contents/MacOS/splitlane
+97172   3.7 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-h/release/deps/soak_harness-0379469b8a4255d8
+  543   3.7 /usr/sbin/coreaudiod
+30958   2.8 ffmpeg
+--- after-cell-ja 2026-09-26T23:56:58Z
+ 2:56  up 5 days,  5:02, 1 user, load averages: 3.15 4.05 4.40
+  PID  %CPU COMM
+  389  76.6 /usr/libexec/dasd
+    1  20.5 /sbin/launchd
+95203  14.8 /usr/libexec/PerfPowerServices
+  402   9.0 /usr/sbin/notifyd
+  837   6.3 /System/Library/PrivateFrameworks/AppStoreDaemon.framework/Support/appstoreagent
+--- end 2026-09-26T23:56:58Z
+ 2:56  up 5 days,  5:02, 1 user, load averages: 3.15 4.05 4.40
+  PID  %CPU COMM
+  389  76.2 /usr/libexec/dasd
+    1  17.5 /sbin/launchd
+  402  14.0 /usr/sbin/notifyd
+95203   9.1 /usr/libexec/PerfPowerServices
+  837   5.2 /System/Library/PrivateFrameworks/AppStoreDaemon.framework/Support/appstoreagent

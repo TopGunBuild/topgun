@@ -4,7 +4,155 @@
 //! Hazelcast's `Storage<K,R>`). Implementations provide in-memory key-value
 //! storage with cursor-based iteration support.
 
-use super::record::{Record, RecordValue};
+use std::sync::Arc;
+
+use super::record::{Record, RecordMetadata, RecordValue};
+
+/// One key's resident record behind its own lock, shareable by `Arc` between
+/// the engine slot and whatever still owes the record a durable write (a queued
+/// write-behind entry, its staging slot, an in-flight flush).
+///
+/// `parking_lot` rather than `std`: the std mutex allocates its OS lock lazily
+/// on first `lock()` on some platforms, which would make every new key cost a
+/// second allocation beside the `Arc`. Its guard is `!Send` while the crate's
+/// `send_guard` feature is off, so a guard held across `.await` in a `Send`
+/// future is a compile error. There is no poisoning: a panic under the lock
+/// leaves the record as the panicking code left it, the same as the engine's
+/// shard locks.
+///
+/// [`SlotCell::lock`] is the only way to lock a cell. In debug builds it counts
+/// the cell locks the current thread holds, and every engine entry point calls
+/// [`held_cell_locks::check`], so an engine call made while its own thread
+/// holds a cell lock — which would wait on that lock, or take an entry lock
+/// after a cell lock against the entry → cell order — panics by name instead
+/// of hanging.
+pub struct SlotCell {
+    record: parking_lot::Mutex<Record>,
+}
+
+// The wrapper adds no state: a cell costs exactly the mutex it wraps, which is
+// what the allocation proofs price a new key at.
+const _: () =
+    assert!(std::mem::size_of::<SlotCell>() == std::mem::size_of::<parking_lot::Mutex<Record>>());
+
+impl SlotCell {
+    /// Locks the cell for the lifetime of the returned guard.
+    pub fn lock(&self) -> SlotGuard<'_> {
+        let guard = self.record.lock();
+        held_cell_locks::acquired();
+        SlotGuard { guard }
+    }
+
+    /// Consumes a cell nobody else holds and returns its record.
+    #[must_use]
+    pub fn into_inner(self) -> Record {
+        self.record.into_inner()
+    }
+}
+
+impl std::fmt::Debug for SlotCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `try_lock` inside the mutex's own formatter: formatting never waits
+        // and holds nothing past the call, so it needs no depth accounting.
+        f.debug_struct("SlotCell")
+            .field("record", &self.record)
+            .finish()
+    }
+}
+
+/// A held [`SlotCell`] lock; derefs to the record.
+#[must_use = "the cell stays locked only while the guard is alive"]
+pub struct SlotGuard<'a> {
+    guard: parking_lot::MutexGuard<'a, Record>,
+}
+
+impl std::ops::Deref for SlotGuard<'_> {
+    type Target = Record;
+
+    fn deref(&self) -> &Record {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for SlotGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Record {
+        &mut self.guard
+    }
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        // The guard is `!Send`, so it drops on the thread that counted it.
+        held_cell_locks::released();
+    }
+}
+
+/// Wraps a record in a new, unshared [`SlotCell`].
+#[must_use]
+pub fn new_slot_cell(record: Record) -> Arc<SlotCell> {
+    Arc::new(SlotCell {
+        record: parking_lot::Mutex::new(record),
+    })
+}
+
+/// Debug-build detector for a storage engine entered while the current thread
+/// holds a slot-cell lock.
+///
+/// Such a call either waits on a cell lock its own thread holds (a silent
+/// hang: `parking_lot` is not reentrant) or takes an entry lock after a cell
+/// lock, against the entry → cell order. Observers running under the in-place
+/// write's cell lock, `mutate` and cost closures, `remove_if` predicates and a
+/// caller that passes `cell.lock()…` as an argument to an engine call are all
+/// covered, because the count follows the guard, not the call site. In release
+/// builds the count and the check compile to nothing.
+pub mod held_cell_locks {
+    #[cfg(debug_assertions)]
+    thread_local! {
+        static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    #[inline]
+    pub(super) fn acquired() {
+        #[cfg(debug_assertions)]
+        DEPTH.with(|depth| depth.set(depth.get() + 1));
+    }
+
+    #[inline]
+    pub(super) fn released() {
+        #[cfg(debug_assertions)]
+        DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+
+    /// Guards an engine entry point; `entry` names the operation for the
+    /// message.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, when the current thread holds a slot-cell lock.
+    #[inline]
+    pub fn check(entry: &'static str) {
+        #[cfg(debug_assertions)]
+        DEPTH.with(|depth| {
+            assert!(
+                depth.get() == 0,
+                "storage engine entered while this thread holds a slot-cell lock: \
+                 `{entry}` would wait on that lock or take an entry lock after it"
+            );
+        });
+        #[cfg(not(debug_assertions))]
+        let _ = entry;
+    }
+}
+
+/// What a caller hands the engine to create a key it found absent: an owned
+/// value, or a cell another holder (a pending write-behind entry) already owns.
+#[derive(Debug)]
+pub enum SlotInit {
+    /// An owned value; the engine builds the slot's record around it.
+    Value(RecordValue),
+    /// A cell loaded from the data store's pending state.
+    Cell(Arc<SlotCell>),
+}
 
 /// Opaque cursor for resumable iteration over storage entries.
 ///
@@ -61,15 +209,15 @@ pub enum UpdateInPlaceOutcome {
     /// observer notification and no write-through are owed. Used by the prune
     /// sweep when the target tag was already gone from the tombstone set.
     Unchanged,
-    /// The record was created or updated in place. `record` is a clone of the
-    /// mutated resident record (for the caller's post-lock observer fan-out and
+    /// The record was created or updated in place. `cell` holds the mutated
+    /// record (for the caller's observer fan-out under the cell lock and the
     /// async write-through); `inserted` is `true` when the key was absent and a
     /// fresh record was created (fire `on_put`), `false` when an existing
     /// resident record was mutated (fire `on_update`).
     Written {
-        /// Clone of the mutated resident record — the single owned copy the
-        /// caller hands to the async write-through and observer fan-out.
-        record: Record,
+        /// The cell holding the mutated record — the handle the caller passes
+        /// to the observer fan-out and the async write-through.
+        cell: Arc<SlotCell>,
         /// `true` if a fresh record was inserted (key was absent), `false` if
         /// an existing resident record was mutated in place.
         inserted: bool,
@@ -146,24 +294,32 @@ pub trait StorageEngine: Send + Sync + 'static {
     ///
     /// On a `true` return the engine stamps `on_update(now)` (bumping version and
     /// minting a fresh per-write token) and recomputes `metadata.cost` via
-    /// `cost_of` over the mutated value, all under the same lock, then returns a
-    /// clone of the mutated record in [`UpdateInPlaceOutcome::Written`].
+    /// `cost_of` over the mutated value, all under the same lock, then returns
+    /// the cell holding the mutated record in [`UpdateInPlaceOutcome::Written`].
+    ///
+    /// Caller obligation: a `mutate` closure that returns `false` MUST NOT have
+    /// modified the value. An occupied slot keeps whatever the closure left in
+    /// it, and when `init` is a [`SlotInit::Cell`] the value belongs to a
+    /// pending write-behind entry whose flush would persist such a change with
+    /// no frame and no observer.
     ///
     /// If the key is absent: when `init` is `None`, the call is a no-op returning
     /// [`UpdateInPlaceOutcome::Absent`] without invoking `mutate`. When `init` is
     /// `Some` and `init_generation` is `Some(g)` with `g` different from the
     /// key's current [`vacancy_generation`](StorageEngine::vacancy_generation),
     /// the call returns [`UpdateInPlaceOutcome::Stale`] without invoking
-    /// `mutate`. Otherwise the value is created from `init` and `mutate` is
-    /// applied: on `true` the fresh record is inserted with metadata minted via
-    /// `RecordMetadata::new`; on `false` nothing is inserted and the call returns
+    /// `mutate`. Otherwise `mutate` is applied to `init`'s value — for a
+    /// [`SlotInit::Cell`], to the cell's own value under its lock — and on
+    /// `true` the slot is inserted with metadata minted via
+    /// `RecordMetadata::new` (a cell is inserted itself, not a copy of it); on
+    /// `false` nothing is inserted and the call returns
     /// [`UpdateInPlaceOutcome::Unchanged`]. The generation check and the insert
     /// happen under the same per-key lock, so no removal can fall between them.
     fn update_in_place(
         &self,
         key: &str,
         now: i64,
-        init: Option<RecordValue>,
+        init: Option<SlotInit>,
         init_generation: Option<u64>,
         mutate: &mut dyn FnMut(&mut RecordValue) -> bool,
         cost_of: &dyn Fn(&RecordValue) -> u64,
@@ -182,9 +338,17 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// spurious; that costs the caller a retry, never a wrong insert.
     fn vacancy_generation(&self, key: &str) -> u64;
 
-    /// Insert `record` only if the key is absent AND its vacancy generation still
-    /// equals `generation`, both checked under the key's lock.
-    fn put_if_absent_at(&self, key: &str, record: Record, generation: u64) -> PutIfAbsentOutcome;
+    /// Insert `init` with `metadata` only if the key is absent AND its vacancy
+    /// generation still equals `generation`, both checked under the key's lock.
+    /// A [`SlotInit::Cell`] is inserted itself, its metadata replaced by
+    /// `metadata` under its lock.
+    fn put_if_absent_at(
+        &self,
+        key: &str,
+        init: SlotInit,
+        metadata: RecordMetadata,
+        generation: u64,
+    ) -> PutIfAbsentOutcome;
 
     /// Remove a record by key, returning the removed record.
     ///
@@ -235,4 +399,12 @@ pub trait StorageEngine: Send + Sync + 'static {
 
     /// Return `sample_count` random entries for eviction sampling.
     fn random_samples(&self, sample_count: usize) -> Vec<(String, Record)>;
+
+    /// The cell the engine's slot for `key` holds, for identity assertions in
+    /// tests. `None` when the key is absent or the engine keeps no cells.
+    #[cfg(test)]
+    fn test_slot(&self, key: &str) -> Option<Arc<SlotCell>> {
+        let _ = key;
+        None
+    }
 }

@@ -386,8 +386,13 @@ struct FaultWal {
     /// append, so the rollback that a returned `Err` triggers never runs and the
     /// sequence stays mid-append with no entry and no frame.
     hang: std::sync::atomic::AtomicBool,
+    /// When set, a parked append that is released goes on to write its frame
+    /// instead of failing: a slow append rather than a failed one.
+    pass_on_release: std::sync::atomic::AtomicBool,
     released: std::sync::atomic::AtomicBool,
     wake: tokio::sync::Notify,
+    /// Every frame the inner WAL accepted, in append order.
+    appended: std::sync::Mutex<Vec<WalEntry>>,
 }
 
 impl FaultWal {
@@ -397,14 +402,41 @@ impl FaultWal {
             appends: FaultAtomicU64::new(0),
             fail_on_nth: std::sync::Mutex::new(None),
             hang: std::sync::atomic::AtomicBool::new(false),
+            pass_on_release: std::sync::atomic::AtomicBool::new(false),
             released: std::sync::atomic::AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
+            appended: std::sync::Mutex::new(Vec::new()),
         })
     }
 
     /// Parks every subsequent append until [`release`](Self::release).
     fn hang_appends(&self) {
         self.hang.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Parks every subsequent append until [`release`](Self::release), which
+    /// then lets each parked append write its frame.
+    fn slow_appends(&self) {
+        self.pass_on_release
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.hang_appends();
+    }
+
+    /// The frames the inner WAL accepted, in append order.
+    fn appended(&self) -> Vec<WalEntry> {
+        self.appended
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    async fn append_through(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
+        self.inner.append(partition, entry).await?;
+        self.appended
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(entry.clone());
+        Ok(())
     }
 
     fn release(&self) {
@@ -433,8 +465,22 @@ impl FaultWal {
 impl Wal for FaultWal {
     async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
         if self.hang.load(std::sync::atomic::Ordering::Relaxed) {
-            while !self.released.load(std::sync::atomic::Ordering::Relaxed) {
-                self.wake.notified().await;
+            // Registered before the flag is read, so a release that lands in
+            // between still wakes this append.
+            loop {
+                let notified = self.wake.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.released.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                notified.await;
+            }
+            if self
+                .pass_on_release
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return self.append_through(partition, entry).await;
             }
             anyhow::bail!("injected WAL append hang released");
         }
@@ -456,7 +502,7 @@ impl Wal for FaultWal {
                     ),
                 );
             }
-            None => self.inner.append(partition, entry).await,
+            None => self.append_through(partition, entry).await,
         }
     }
 
@@ -2314,5 +2360,749 @@ async fn an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_rea
         wal.test_read_applied_sequence(partition),
         3,
         "the sidecar moves 0 -> 3 — a seeded partition can reclaim its segments"
+    );
+}
+
+// ===========================================================================
+// In-place writes through a shared cell: un-framed mutations (TG-WB-003 (b)),
+// lead-not-lag against the resolved frames, and the shutdown drain
+// ===========================================================================
+
+use crate::service::domain::crdt::apply_or_delta;
+use crate::storage::engines::HashMapStorage;
+use crate::storage::impls::{DefaultRecordStore, StorageConfig};
+use crate::storage::mutation_observer::CompositeMutationObserver;
+use crate::storage::record::{OrMapEntry, Record, RecordMetadata};
+use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, MutateOutcome, RecordStore};
+
+fn or_entry(tag: &str) -> OrMapEntry {
+    OrMapEntry {
+        value: Value::String(format!("v-{tag}")),
+        tag: tag.to_string(),
+        timestamp: Timestamp {
+            millis: 1_000_000,
+            counter: 0,
+            node_id: "node-1".to_string(),
+        },
+    }
+}
+
+fn or_value(live: &[&str], tombstones: &[&str]) -> RecordValue {
+    RecordValue::OrMap {
+        records: live.iter().map(|t| or_entry(t)).collect(),
+        tombstones: tombstones.iter().map(|t| (*t).to_string()).collect(),
+    }
+}
+
+/// The live tags and the tombstones of an OR value, each sorted.
+fn or_view(value: &RecordValue) -> (Vec<String>, Vec<String>) {
+    match value {
+        RecordValue::OrMap {
+            records,
+            tombstones,
+        } => {
+            let mut live: Vec<String> = records.iter().map(|e| e.tag.clone()).collect();
+            live.sort();
+            let mut tombs = tombstones.clone();
+            tombs.sort();
+            (live, tombs)
+        }
+        other => panic!("not an OrMap: {other:?}"),
+    }
+}
+
+fn view(live: &[&str], tombstones: &[&str]) -> (Vec<String>, Vec<String>) {
+    or_view(&or_value(live, tombstones))
+}
+
+fn is_subset(sub: &[String], sup: &[String]) -> bool {
+    sub.iter().all(|t| sup.contains(t))
+}
+
+async fn inner_view(inner: &FaultStore, key: &str) -> (Vec<String>, Vec<String>) {
+    or_view(
+        &inner
+            .load(TEST_MAP, key)
+            .await
+            .expect("inner load")
+            .expect("the key has a durable row"),
+    )
+}
+
+fn record_store_over(data_store: Arc<dyn MapDataStore>) -> Arc<DefaultRecordStore> {
+    Arc::new(DefaultRecordStore::new(
+        TEST_MAP.to_string(),
+        0,
+        Box::new(HashMapStorage::new()),
+        data_store,
+        Arc::new(CompositeMutationObserver::new(Vec::new())),
+        StorageConfig::default(),
+    ))
+}
+
+/// One OR op, applied in place the way the CRDT service's key writer applies
+/// it: the closure mutates the slot and hands the write-through its witness.
+#[derive(Clone, Copy)]
+enum OrOp {
+    Add(&'static str),
+    Remove(&'static str),
+}
+
+async fn apply_or(store: &DefaultRecordStore, key: &str, op: OrOp) -> anyhow::Result<bool> {
+    let mut mutate = |value: &mut RecordValue| {
+        let RecordValue::OrMap {
+            records,
+            tombstones,
+        } = value
+        else {
+            return MutateOutcome {
+                changed: false,
+                witness: None,
+            };
+        };
+        match op {
+            OrOp::Add(tag) => {
+                if records.iter().any(|e| e.tag == tag) || tombstones.iter().any(|t| t == tag) {
+                    return MutateOutcome {
+                        changed: false,
+                        witness: None,
+                    };
+                }
+                records.push(or_entry(tag));
+                MutateOutcome {
+                    changed: true,
+                    witness: Some(OrDelta::Add {
+                        entry: or_entry(tag),
+                    }),
+                }
+            }
+            OrOp::Remove(tag) => {
+                let Some(at) = records.iter().position(|e| e.tag == tag) else {
+                    return MutateOutcome {
+                        changed: false,
+                        witness: None,
+                    };
+                };
+                records.remove(at);
+                if !tombstones.iter().any(|t| t == tag) {
+                    tombstones.push(tag.to_string());
+                }
+                MutateOutcome {
+                    changed: true,
+                    witness: Some(OrDelta::Remove {
+                        tag: tag.to_string(),
+                    }),
+                }
+            }
+        }
+    };
+    store
+        .update_in_place(
+            key,
+            Some(or_value(&[], &[])),
+            ExpiryPolicy::NONE,
+            CallerProvenance::CrdtMerge,
+            &mut mutate,
+        )
+        .await
+}
+
+/// A record store over a write-behind store over a retaining inner store, on a
+/// real WAL behind the fault layer. `key` is durable as {old-1, old-2} and
+/// resident (hydrated, not staged).
+struct CellFixture {
+    _dir: tempfile::TempDir,
+    wal: Arc<WalWriter>,
+    fault: Arc<FaultWal>,
+    inner: Arc<FaultStore>,
+    write_behind: Arc<WriteBehindDataStore>,
+    store: Arc<DefaultRecordStore>,
+    partition: u32,
+    keys: Vec<String>,
+}
+
+impl CellFixture {
+    async fn new(config: WriteBehindConfig) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).expect("wal");
+        let fault = FaultWal::new(Arc::clone(&wal));
+        let inner = FaultStore::new();
+        let write_behind = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&inner) as Arc<dyn MapDataStore>,
+            config,
+            Some(WalBootstrap {
+                wal: Arc::clone(&fault) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+        let partition = test_partition();
+        let keys = keys_in_partition(partition, 2);
+        inner
+            .add(
+                TEST_MAP,
+                &keys[0],
+                &or_value(&["old-1", "old-2"], &[]),
+                0,
+                0,
+            )
+            .await
+            .expect("seed");
+        let store = record_store_over(Arc::clone(&write_behind) as Arc<dyn MapDataStore>);
+        store
+            .get(&keys[0], false)
+            .await
+            .expect("hydrate")
+            .expect("seeded");
+        assert!(
+            store.exists_in_memory(&keys[0]),
+            "precondition: the key is resident"
+        );
+        Self {
+            _dir: dir,
+            wal,
+            fault,
+            inner,
+            write_behind,
+            store,
+            partition,
+            keys,
+        }
+    }
+
+    fn key(&self) -> &str {
+        &self.keys[0]
+    }
+
+    fn max_assigned(&self) -> u64 {
+        self.write_behind
+            .test_max_assigned_wal_sequence(self.partition)
+    }
+
+    /// No pending WAL sequence above `before` names the failed op.
+    fn assert_no_pending_sequence_above(&self, before: u64) {
+        let pending = self.write_behind.test_pending_wal_sequences(self.partition);
+        assert!(
+            pending.iter().all(|(seq, _)| *seq <= before),
+            "no pending WAL sequence may name the un-acked op; pending {pending:?}, \
+             last acked sequence {before}"
+        );
+    }
+
+    /// op1 acked as an in-place write whose entry is queued as a cell.
+    async fn ack_op1(&self) {
+        assert!(apply_or(&self.store, self.key(), OrOp::Add("op1"))
+            .await
+            .expect("op1 must be acked"));
+        assert!(
+            self.write_behind
+                .test_pending_cell(TEST_MAP, self.key())
+                .is_some(),
+            "precondition: op1 is queued as a cell entry"
+        );
+    }
+
+    /// After the older entry's flush: the inner store holds `flushed` (the
+    /// un-framed op included). Then crash, recover on the same durable store,
+    /// and check that op1 survived, nothing outside `flushed` appeared, and
+    /// that retrying `op2` on the recovered store changes nothing.
+    async fn crash_recover_and_retry(self, flushed: (Vec<String>, Vec<String>), op2: OrOp) {
+        let key = self.key().to_string();
+        assert_eq!(
+            inner_view(&self.inner, &key).await,
+            flushed,
+            "the older entry's flush persists the cell, un-framed op included"
+        );
+
+        let Self {
+            _dir,
+            wal,
+            inner,
+            write_behind,
+            store,
+            ..
+        } = self;
+        drop(store);
+        drop(write_behind);
+        WalRecovery::new(Arc::clone(&wal), Vec::new())
+            .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
+            .await
+            .expect("recovery");
+        let recovered = inner_view(&inner, &key).await;
+        assert!(
+            recovered.0.contains(&"op1".to_string()),
+            "the acked op1 must survive the crash; recovered {recovered:?}"
+        );
+        assert!(
+            is_subset(&recovered.0, &flushed.0) && is_subset(&recovered.1, &flushed.1),
+            "recovered {recovered:?} must lie within old ∪ op1 ∪ op2 = {flushed:?}"
+        );
+
+        // The retry runs on a fresh stack over the recovered store.
+        let retry_write_behind = WriteBehindDataStore::new(
+            Arc::clone(&inner) as Arc<dyn MapDataStore>,
+            never_flush_config(),
+        );
+        let retry_store =
+            record_store_over(Arc::clone(&retry_write_behind) as Arc<dyn MapDataStore>);
+        apply_or(&retry_store, &key, op2).await.expect("the retry");
+        retry_write_behind.hard_flush().await.expect("hard_flush");
+        assert_eq!(
+            inner_view(&inner, &key).await,
+            recovered,
+            "re-applying the un-acked op on the recovered store must change nothing"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unframed_mutation_after_a_pre_frame_append_error_is_unacked_and_idempotent() {
+    let fx = CellFixture::new(never_flush_config()).await;
+    fx.ack_op1().await;
+
+    let before = fx.max_assigned();
+    fx.fault.fail_on(2, FaultClass::PreFrame);
+    assert!(
+        apply_or(&fx.store, fx.key(), OrOp::Add("op2"))
+            .await
+            .is_err(),
+        "op2's append fails before its frame, so op2 is never acked"
+    );
+    fx.assert_no_pending_sequence_above(before);
+
+    fx.write_behind.hard_flush().await.expect("hard_flush");
+    fx.crash_recover_and_retry(
+        view(&["old-1", "old-2", "op1", "op2"], &[]),
+        OrOp::Add("op2"),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unframed_mutation_rejected_by_the_shutdown_gate_is_unacked_and_idempotent() {
+    let fx = CellFixture::new(never_flush_config()).await;
+    fx.ack_op1().await;
+
+    let mut park = fx.write_behind.test_park_after_shutdown_flag();
+    let drain = {
+        let write_behind = Arc::clone(&fx.write_behind);
+        tokio::spawn(async move { write_behind.hard_flush().await })
+    };
+    park.wait_parked().await;
+
+    let before = fx.max_assigned();
+    assert!(
+        apply_or(&fx.store, fx.key(), OrOp::Add("op2"))
+            .await
+            .is_err(),
+        "the shutdown gate rejects op2 after its in-place mutation"
+    );
+    fx.assert_no_pending_sequence_above(before);
+
+    park.release();
+    drain.await.expect("drain task").expect("hard_flush");
+    fx.crash_recover_and_retry(
+        view(&["old-1", "old-2", "op1", "op2"], &[]),
+        OrOp::Add("op2"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_unframed_or_remove_is_unacked_and_idempotent() {
+    let fx = CellFixture::new(never_flush_config()).await;
+    fx.ack_op1().await;
+
+    let before = fx.max_assigned();
+    fx.fault.fail_on(2, FaultClass::PreFrame);
+    assert!(
+        apply_or(&fx.store, fx.key(), OrOp::Remove("old-1"))
+            .await
+            .is_err(),
+        "the OR_REMOVE's append fails before its frame, so it is never acked"
+    );
+    fx.assert_no_pending_sequence_above(before);
+
+    fx.write_behind.hard_flush().await.expect("hard_flush");
+    fx.crash_recover_and_retry(view(&["old-2", "op1"], &["old-1"]), OrOp::Remove("old-1"))
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_append_never_lets_the_watermark_pass_its_sequence() {
+    let fx = CellFixture::new(never_flush_config()).await;
+    fx.ack_op1().await;
+
+    let before = fx.max_assigned();
+    fx.fault.hang_appends();
+    let op2 = {
+        let store = Arc::clone(&fx.store);
+        let key = fx.key().to_string();
+        tokio::spawn(async move { apply_or(&store, &key, OrOp::Add("op2")).await })
+    };
+    let partition = fx.partition;
+    wait_until("op2 to park inside its append", || {
+        fx.write_behind
+            .test_pending_wal_sequences(partition)
+            .iter()
+            .any(|(seq, origin)| *seq > before && *origin == PendingOrigin::Appending)
+    })
+    .await;
+    let op2_seq = fx.max_assigned();
+    let watermark_below_op2 = |fx: &CellFixture| {
+        matches!(
+            fx.write_behind.test_wal_watermark(partition),
+            Some(Ok(watermark)) if watermark < op2_seq
+        )
+    };
+
+    // The older entry flushes while op2 is parked inside its append.
+    fx.write_behind.hard_flush().await.expect("hard_flush");
+    assert!(
+        watermark_below_op2(&fx),
+        "the flushed watermark must not pass op2's sequence while it is appending"
+    );
+
+    op2.abort();
+    assert!(
+        op2.await.expect_err("aborted").is_cancelled(),
+        "op2's future is dropped mid-append"
+    );
+    fx.fault.release();
+    assert!(
+        fx.write_behind
+            .test_pending_wal_sequences(partition)
+            .contains(&(op2_seq, PendingOrigin::Appending)),
+        "a cancelled append's sequence stays appending for the life of the process"
+    );
+    assert!(
+        watermark_below_op2(&fx),
+        "the flushed watermark must still not pass the cancelled sequence"
+    );
+
+    fx.crash_recover_and_retry(
+        view(&["old-1", "old-2", "op1", "op2"], &[]),
+        OrOp::Add("op2"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_capacity_rejected_mutation_is_persisted_by_the_next_write_through() {
+    // Entries are due at once, but only a requested flush drains them.
+    let fx = CellFixture::new(WriteBehindConfig {
+        capacity: 1,
+        write_delay_ms: 0,
+        ..never_flush_config()
+    })
+    .await;
+    let other = fx.keys[1].clone();
+    assert!(apply_or(&fx.store, &other, OrOp::Add("other-op"))
+        .await
+        .expect("the other key's op fills the capacity"));
+
+    let before = fx.max_assigned();
+    assert!(
+        apply_or(&fx.store, fx.key(), OrOp::Add("op2"))
+            .await
+            .is_err(),
+        "a non-staged key is rejected at capacity, after its in-place mutation"
+    );
+    fx.assert_no_pending_sequence_above(before);
+
+    fx.write_behind.soft_flush().await.expect("soft_flush");
+    wait_until("the other key to flush", || {
+        fx.write_behind.pending_operation_count() == 0
+    })
+    .await;
+    assert!(apply_or(&fx.store, fx.key(), OrOp::Add("op3"))
+        .await
+        .expect("op3 must be acked once capacity is free"));
+    fx.write_behind.hard_flush().await.expect("hard_flush");
+
+    let key = fx.key().to_string();
+    let CellFixture {
+        _dir,
+        wal,
+        inner,
+        write_behind,
+        store,
+        ..
+    } = fx;
+    drop(store);
+    drop(write_behind);
+    WalRecovery::new(Arc::clone(&wal), Vec::new())
+        .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
+        .await
+        .expect("recovery");
+    assert_eq!(
+        inner_view(&inner, &other).await,
+        view(&["other-op"], &[]),
+        "the other key's acked op must survive"
+    );
+    assert_eq!(
+        inner_view(&inner, &key).await,
+        view(&["old-1", "old-2", "op2", "op3"], &[]),
+        "op3's write-through persists the resident value, the rejected op2 included"
+    );
+}
+
+/// Folds the op of every frame of `key` at or below the partition watermark
+/// onto `base` — the state the inner store must at least contain. Each frame is
+/// matched to the op it was appended for by its sequence (`ops`), so a frame
+/// this test did not write fails the fold.
+fn fold_resolved(
+    frames: &[WalEntry],
+    key: &str,
+    watermark: u64,
+    ops: &[(u64, OrOp)],
+    base: RecordValue,
+) -> (Vec<String>, Vec<String>) {
+    let mut value = base;
+    for frame in frames
+        .iter()
+        .filter(|f| f.key == key && f.sequence <= watermark)
+    {
+        let (_, op) = ops
+            .iter()
+            .find(|(seq, _)| *seq == frame.sequence)
+            .unwrap_or_else(|| panic!("an unexpected frame at sequence {}", frame.sequence));
+        let delta = match *op {
+            OrOp::Add(tag) => OrDelta::Add {
+                entry: or_entry(tag),
+            },
+            OrOp::Remove(tag) => OrDelta::Remove {
+                tag: tag.to_string(),
+            },
+        };
+        apply_or_delta(delta, &mut value);
+    }
+    or_view(&value)
+}
+
+// A flush that races an op parked in its append persists a state containing
+// every resolved frame (it may lead, never lag), and so does the next flush once
+// the op's frame lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flush_racing_an_in_flight_op_persists_every_resolved_frame() {
+    // Entries are due at once, but only a requested flush drains them.
+    let fx = CellFixture::new(WriteBehindConfig {
+        write_delay_ms: 0,
+        ..never_flush_config()
+    })
+    .await;
+    let seed = or_value(&["old-1", "old-2"], &[]);
+    let partition = fx.partition;
+    let contains_resolved = |fx: &CellFixture,
+                             ops: &[(u64, OrOp)],
+                             stored: &(Vec<String>, Vec<String>)| {
+        let Some(Ok(watermark)) = fx.write_behind.test_wal_watermark(partition) else {
+            panic!("the partition is seeded");
+        };
+        let resolved = fold_resolved(&fx.fault.appended(), fx.key(), watermark, ops, seed.clone());
+        assert!(
+            is_subset(&resolved.0, &stored.0) && is_subset(&resolved.1, &stored.1),
+            "the inner store {stored:?} must contain every resolved frame {resolved:?} \
+             (watermark {watermark})"
+        );
+        watermark
+    };
+
+    fx.ack_op1().await;
+    let before = fx.max_assigned();
+    fx.fault.slow_appends();
+    let op2 = {
+        let store = Arc::clone(&fx.store);
+        let key = fx.key().to_string();
+        tokio::spawn(async move { apply_or(&store, &key, OrOp::Add("op2")).await })
+    };
+    wait_until("op2 to park inside its append", || {
+        fx.write_behind
+            .test_pending_wal_sequences(partition)
+            .iter()
+            .any(|(seq, origin)| *seq > before && *origin == PendingOrigin::Appending)
+    })
+    .await;
+    let ops = [
+        (before, OrOp::Add("op1")),
+        (fx.max_assigned(), OrOp::Add("op2")),
+    ];
+
+    fx.write_behind.soft_flush().await.expect("soft_flush");
+    wait_until("op1's entry to flush", || {
+        fx.write_behind.pending_operation_count() == 0
+    })
+    .await;
+    let first = inner_view(&fx.inner, fx.key()).await;
+    let watermark = contains_resolved(&fx, &ops, &first);
+    assert_eq!(watermark, before, "op1's frame is resolved, op2's is not");
+    assert!(
+        first.0.contains(&"op2".to_string()),
+        "the flush may lead the resolved frames: it persisted op2 before op2's frame"
+    );
+
+    fx.fault.release();
+    assert!(op2
+        .await
+        .expect("op2 task")
+        .expect("op2 is acked once its frame lands"));
+    fx.write_behind.soft_flush().await.expect("soft_flush");
+    wait_until("op2's entry to flush", || {
+        fx.write_behind.pending_operation_count() == 0
+    })
+    .await;
+    let second = inner_view(&fx.inner, fx.key()).await;
+    assert!(
+        contains_resolved(&fx, &ops, &second) > before,
+        "op2's frame is resolved by the second flush"
+    );
+    assert_eq!(second, view(&["old-1", "old-2", "op1", "op2"], &[]));
+}
+
+/// How one pending entry for the shutdown-drain parity checks is written.
+#[derive(Clone, Copy, Debug)]
+enum EntryKind {
+    Value,
+    Cell,
+}
+
+async fn write_entry(store: &WriteBehindDataStore, key: &str, kind: EntryKind, tag: &str) {
+    let value = or_value(&[tag], &[]);
+    match kind {
+        EntryKind::Value => store.add(TEST_MAP, key, &value, 0, 1).await,
+        EntryKind::Cell => {
+            let cell = crate::storage::engine::new_slot_cell(Record {
+                value,
+                metadata: RecordMetadata::new(0, 0),
+            });
+            store
+                .add_with_witness(TEST_MAP, key, WriteSource::Cell(&cell), 0, 1, None)
+                .await
+        }
+    }
+    .expect("write");
+    assert_eq!(
+        store.test_pending_cell(TEST_MAP, key).is_some(),
+        matches!(kind, EntryKind::Cell),
+        "the entry must be queued as {kind:?}"
+    );
+}
+
+// `hard_flush` drains cell entries alongside value entries within the timeout.
+#[tokio::test]
+async fn hard_flush_drains_cell_entries_like_value_entries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_wal, _fault, inner, store) = fault_wal_store(&dir);
+    let partition = test_partition();
+    let keys = keys_in_partition(partition, 4);
+    let kinds = [
+        EntryKind::Cell,
+        EntryKind::Value,
+        EntryKind::Cell,
+        EntryKind::Cell,
+    ];
+    for (key, kind) in keys.iter().zip(kinds) {
+        write_entry(&store, key, kind, key).await;
+    }
+
+    store.hard_flush().await.expect("hard_flush");
+
+    for key in &keys {
+        assert_eq!(
+            inner_view(&inner, key).await,
+            view(&[key.as_str()], &[]),
+            "every entry is drained"
+        );
+        assert!(store.test_pending_cell(TEST_MAP, key).is_none());
+        assert!(store.test_staged_cell(TEST_MAP, key).is_none());
+    }
+    assert!(
+        store.test_pending_wal_sequences(partition).is_empty(),
+        "every drained entry resolves its WAL sequence"
+    );
+    assert_eq!(store.pending_operation_count(), 0);
+}
+
+/// Drives one entry of `kind` into a shutdown drain whose inner-store write
+/// hangs past the timeout, either in the drain itself or in the flush loop's
+/// in-flight batch (`in_loop`). Returns the entry's WAL disposition after the
+/// drain and whether its frame replays on the next boot.
+async fn timed_out_drain(kind: EntryKind, in_loop: bool) -> (Vec<PendingOrigin>, bool) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).expect("wal");
+    let inner = FaultStore::new();
+    let config = WriteBehindConfig {
+        write_delay_ms: if in_loop { 0 } else { 600_000 },
+        ..never_flush_config()
+    };
+    let store = WriteBehindDataStore::new_with_wal(
+        Arc::clone(&inner) as Arc<dyn MapDataStore>,
+        config,
+        Some(WalBootstrap {
+            wal: Arc::clone(&wal) as Arc<dyn Wal>,
+            sequence_start: 1,
+        }),
+    );
+    let partition = test_partition();
+    let key = keys_in_partition(partition, 1).remove(0);
+    inner.hang_key(&key);
+    write_entry(&store, &key, kind, "tag").await;
+    if in_loop {
+        store.soft_flush().await.expect("soft_flush");
+        wait_until("the flush loop to take the entry in flight", || {
+            !store.test_in_flight_wal_sequences(partition).is_empty()
+        })
+        .await;
+    }
+
+    store
+        .hard_flush()
+        .await
+        .expect("hard_flush returns at the timeout");
+    let disposition = store
+        .test_pending_wal_sequences(partition)
+        .into_iter()
+        .map(|(_, origin)| origin)
+        .collect();
+
+    inner.release();
+    drop(store);
+    let recovered = FaultStore::new();
+    WalRecovery::new(Arc::clone(&wal), Vec::new())
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await
+        .expect("recovery");
+    (disposition, recovered.contains(&key).await)
+}
+
+// A cell entry the drain times out on is abandoned and replayed exactly as a
+// value entry is.
+#[tokio::test]
+async fn a_timed_out_cell_entry_is_abandoned_and_replayed_like_a_value_entry() {
+    let value = timed_out_drain(EntryKind::Value, false).await;
+    let cell = timed_out_drain(EntryKind::Cell, false).await;
+    assert_eq!(
+        value,
+        (vec![PendingOrigin::Abandoned], true),
+        "control: a timed-out value entry is abandoned and its frame replays"
+    );
+    assert_eq!(
+        cell, value,
+        "a cell entry must behave exactly as a value entry"
+    );
+}
+
+// A cell entry in the flush loop's batch when the drain aborts the loop is left
+// neither resolved nor abandoned and replays, exactly as a value entry does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_aborted_in_flight_cell_entry_replays_like_a_value_entry() {
+    let value = timed_out_drain(EntryKind::Value, true).await;
+    let cell = timed_out_drain(EntryKind::Cell, true).await;
+    assert!(
+        value.1,
+        "control: an aborted in-flight value entry replays on the next boot"
+    );
+    assert_eq!(
+        cell, value,
+        "a cell entry must behave exactly as a value entry"
     );
 }

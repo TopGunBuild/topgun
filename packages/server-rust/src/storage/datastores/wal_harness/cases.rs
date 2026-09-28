@@ -39,7 +39,7 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
 use super::super::{DelayedEntry, DelayedOp, WriteBehindDataStore};
-use super::driver::{or_delta_frame, or_view_pair, run_case, RunConfig, RunOutcome};
+use super::driver::{or_delta_frame, or_view_pair, run_case, OrWriteMode, RunConfig, RunOutcome};
 use super::{
     Case, CaseShape, DefectMode, GcCrashPoint, Incarnation, IncarnationEnd, InvariantViolation,
     Key, OrMutation, OrSlot, OracleConfig, WorkOp, MAX_KEY_INDEX,
@@ -1228,11 +1228,43 @@ fn run_or_case(case: &Case) -> RunOutcome {
 ///
 /// `what` names the arm, because a case family whose arms share one assertion
 /// message cannot tell a reader WHICH shape regressed.
+///
+/// Every OR case runs twice, once per path an OR snapshot write takes in
+/// production — a value through `add()` over a non-encoding inner store, and an
+/// in-place write's slot cell over an encoding one — under the same oracle, and
+/// both runs must end in the same durable state. The cell run's outcome is
+/// returned.
 fn run_or_case_with(case: &Case, config: &RunConfig, what: &str) -> RunOutcome {
-    let outcome = block_on_async(run_case(case, config));
+    let value_run = run_or_case_in(case, config, OrWriteMode::Value, what);
+    let cell_run = run_or_case_in(case, config, OrWriteMode::Cell, what);
+    assert_eq!(
+        value_run.final_values, cell_run.final_values,
+        "TG-OR-003 ({what}): the value path and the cell path must recover the same durable state"
+    );
+    assert_eq!(
+        value_run.reconciled_tombstone_bytes, cell_run.reconciled_tombstone_bytes,
+        "TG-OR-003 ({what}): the value path and the cell path must reconcile the same gauge"
+    );
+    cell_run
+}
+
+/// Runs `case` under `config` with OR snapshot writes taking `or_write`, and
+/// asserts the oracles are silent.
+fn run_or_case_in(
+    case: &Case,
+    config: &RunConfig,
+    or_write: OrWriteMode,
+    what: &str,
+) -> RunOutcome {
+    let config = RunConfig {
+        or_write,
+        ..config.clone()
+    };
+    let outcome = block_on_async(run_case(case, &config));
     assert!(
         outcome.violations.is_empty(),
-        "TG-OR-003 ({what}): the OR delta-fold recovery path must report zero violations, got {:?}",
+        "TG-OR-003 ({what}, {or_write:?}): the OR delta-fold recovery path must report zero \
+         violations, got {:?}",
         outcome.violations
     );
     // Non-vacuity. Every assertion above expects a CLEAN run, and a seam that
@@ -1241,12 +1273,64 @@ fn run_or_case_with(case: &Case, config: &RunConfig, what: &str) -> RunOutcome {
     if matches!(config.defect, DefectMode::ReReplayOldestFrameGateOn) {
         assert!(
             outcome.re_replayed_frames >= 1,
-            "TG-OR-003 ({what}): the re-replay seam must actually FIRE — this arm's whole \
-             content is an already-applied frame being folded a second time, so a run that \
-             re-replayed nothing proves only the trivial 'no re-replay → no clobber'"
+            "TG-OR-003 ({what}, {or_write:?}): the re-replay seam must actually FIRE — this \
+             arm's whole content is an already-applied frame being folded a second time, so a \
+             run that re-replayed nothing proves only the trivial 'no re-replay → no clobber'"
         );
     }
     outcome
+}
+
+/// Mixed paths on one key before a flush: a queued cell entry replaced by a
+/// value write (SYNC / merge / rehydration racing an in-place OR write), and a
+/// queued value entry replaced by a cell write, both flushed, plus the same
+/// pair left un-flushed at the crash. The driver asserts each write queued its
+/// own kind, so the value write provably displaced the cell entry. The inner
+/// store takes no encoded records here, so the cell entries flush through the
+/// clone path. Same oracle as every other OR case.
+#[test]
+fn tg_or_003_a_value_write_over_a_queued_cell_recovers_like_either_path() {
+    // Mixed alternates cell, value, cell, … from the first snapshot write.
+    let case: Case = vec![
+        Incarnation {
+            ops: vec![
+                or_snapshot(0, &["tag-a"], &[]),          // cell
+                or_snapshot(0, &["tag-a", "tag-b"], &[]), // value over the queued cell
+                or_snapshot(1, &["tag-x"], &[]),          // cell
+                or_snapshot(2, &["tag-p"], &[]),          // value
+                or_snapshot(2, &["tag-q"], &["tag-p"]),   // cell over the queued value
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                or_add(1, "tag-y"),
+                or_snapshot(0, &["tag-b"], &["tag-a"]), // value
+                or_snapshot(0, &["tag-b", "tag-c"], &["tag-a"]), // cell over the queued value
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+
+    let outcome = run_or_case_in(
+        &case,
+        &RunConfig::baseline(),
+        OrWriteMode::Mixed,
+        "mixed paths on one key",
+    );
+
+    assert_eq!(
+        outcome.final_or_view(0),
+        expect_view(&["tag-b", "tag-c"], &["tag-a"]),
+        "the newest write of key 0 wins, whichever path queued it"
+    );
+    assert_eq!(
+        outcome.final_or_view(1),
+        expect_view(&["tag-x", "tag-y"], &[]),
+        "a flushed cell entry is a fold base for a later delta"
+    );
+    assert_eq!(
+        outcome.final_or_view(2),
+        expect_view(&["tag-q"], &["tag-p"]),
+        "a cell write over a queued value entry persists the cell's state"
+    );
 }
 
 /// The re-replay seam with the `RecordValue::Lww` merge gate left in its production

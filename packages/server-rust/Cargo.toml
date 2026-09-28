@@ -128,3 +128,11 @@ harness = false
 name = "leaf_hash"
 path = "benches/leaf_hash.rs"
 harness = false
+
+# Latency of the OR write path through the CRDT service: resident and
+# materializing OR_ADDs on 1 k / 10 k / 20 k slots, and small-key p99 while the
+# flush loop repeatedly flushes a 20 k slot.
+[[bench]]
+name = "or_write_path"
+path = "benches/or_write_path.rs"
+harness = false

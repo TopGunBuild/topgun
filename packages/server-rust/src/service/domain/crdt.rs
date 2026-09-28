@@ -2120,9 +2120,10 @@ mod tests {
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
-    use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
+    use crate::storage::map_data_store::{
+        LeafSink, MapDataStore, ScanBatch, ScanCursor, WriteSource,
+    };
     use crate::storage::mutation_observer::MutationObserver;
-    use crate::storage::record::Record;
     use crate::storage::record_store::RecordStore;
     use crate::storage::tombstone_gauge::with_isolated_gauge;
     use crate::tombstone_frontier::{
@@ -4935,6 +4936,8 @@ mod tests {
         /// Every `load` / `load_all` call, so a test can assert a path never
         /// reached the backend.
         loads: std::sync::atomic::AtomicUsize,
+        /// Evicts an armed key during its next `load` (see [`EvictOnRehydrate`]).
+        evictor: EvictOnRehydrate,
     }
 
     impl ArmableStore {
@@ -5032,6 +5035,7 @@ mod tests {
             if self.reject_read_keys.lock().contains(key) {
                 return Err(anyhow::anyhow!("armed read rejection for {key}"));
             }
+            self.evictor.on_load(key);
             if let Some(served) = self.absent_after_one_load.lock().get_mut(key) {
                 if *served {
                     return Ok(None);
@@ -5220,11 +5224,12 @@ mod tests {
             &self,
             map: &str,
             key: &str,
-            value: &RecordValue,
+            src: WriteSource<'_>,
             expiration_time: i64,
             now: i64,
             witness: Option<&OrDelta>,
         ) -> anyhow::Result<()> {
+            let value = src.to_value();
             self.observed.lock().push(WitnessObservation {
                 map: map.to_string(),
                 key: key.to_string(),
@@ -5233,10 +5238,10 @@ mod tests {
             });
             if let Some(inner) = &self.inner {
                 return inner
-                    .add_with_witness(map, key, value, expiration_time, now, witness)
+                    .add_with_witness(map, key, src, expiration_time, now, witness)
                     .await;
             }
-            self.add(map, key, value, expiration_time, now).await
+            self.add(map, key, &value, expiration_time, now).await
         }
 
         fn wants_or_witness(&self) -> bool {
@@ -6966,53 +6971,51 @@ mod tests {
         }
     }
 
-    /// Evicts named keys the instant the record store rehydrates them.
+    /// Evicts one named key from its record store during the next rehydrating
+    /// `load` of that key, once.
     ///
-    /// This is the only in-process lever that manufactures the "evicted between
-    /// the rehydrating read and the in-place write" race: `on_load` fires after
-    /// the hydrated record has entered the engine and before the caller's next
-    /// write, so a store that evicts there leaves the following `update_in_place`
-    /// with no resident slot. With the default store that write materializes the
-    /// key again and reclaims the tag; paired with a data store that cannot serve
-    /// the second load, the closure never runs — the state the prune has to tell
-    /// apart from "the tag was already gone".
+    /// This is the in-process lever that manufactures the "evicted between the
+    /// rehydrating read and the in-place write" race. The eviction lands after
+    /// the reader took its vacancy generation and before its insert, so the
+    /// read is answered but never cached (TG-OR-007), and the caller's next
+    /// in-place write finds no resident slot. With the default store that write
+    /// materializes the key again and reclaims the tag; paired with a data store
+    /// that cannot serve the second load, the closure never runs — the state the
+    /// prune has to tell apart from "the tag was already gone".
+    ///
+    /// It runs from the data store, not from a mutation observer: observers may
+    /// not call back into the store (see `MutationObserver`), and on the
+    /// in-place write path they run under the key's cell lock, where an
+    /// eviction of the same key would wait on the lock its own caller holds.
+    /// The eviction happens outside every engine lock, and only once, so the
+    /// write's own materializing load is served normally.
     #[derive(Default)]
     struct EvictOnRehydrate {
-        store: Mutex<Option<Weak<dyn RecordStore>>>,
-        keys: Mutex<HashSet<String>>,
+        armed: Mutex<Option<(Weak<dyn RecordStore>, String)>>,
     }
 
     impl EvictOnRehydrate {
-        /// Held as a `Weak` so the observer, which the store's own observer chain
-        /// owns, does not keep that store alive through a cycle.
+        /// Held as a `Weak` so the data store, which the record store owns, does
+        /// not keep that store alive through a cycle.
         fn arm(&self, store: &Arc<dyn RecordStore>, key: &str) {
-            *self.store.lock() = Some(Arc::downgrade(store));
-            self.keys.lock().insert(key.to_string());
+            *self.armed.lock() = Some((Arc::downgrade(store), key.to_string()));
         }
-    }
 
-    impl MutationObserver for EvictOnRehydrate {
-        fn on_put(&self, _: &str, _: &Record, _: Option<&RecordValue>, _: bool) {}
-        fn on_update(&self, _: &str, _: &Record, _: &RecordValue, _: &RecordValue, _: bool) {}
-        fn on_remove(&self, _: &str, _: &Record, _: bool) {}
-        fn on_evict(&self, _: &str, _: &Record, _: bool) {}
-        fn on_load(&self, key: &str, _: &Record, _: bool) {
-            // Drop both guards before evicting: the eviction re-enters the
-            // observer chain (on_evict), and holding these across that call would
-            // be a self-deadlock waiting to happen.
-            let armed = self.keys.lock().contains(key);
-            if !armed {
-                return;
-            }
-            let store = self.store.lock().clone();
-            if let Some(store) = store.and_then(|weak| weak.upgrade()) {
+        /// Evicts the armed key if `key` is it, then disarms. The guard is
+        /// released before the eviction, which re-enters the observer chain.
+        fn on_load(&self, key: &str) {
+            let armed = {
+                let mut armed = self.armed.lock();
+                if armed.as_ref().is_some_and(|(_, k)| k == key) {
+                    armed.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(store) = armed.and_then(|(weak, _)| weak.upgrade()) {
                 store.evict(key, false);
             }
         }
-        fn on_replication_put(&self, _: &str, _: &Record, _: bool) {}
-        fn on_clear(&self) {}
-        fn on_reset(&self) {}
-        fn on_destroy(&self, _: bool) {}
     }
 
     /// Open both prune gates past epoch 1 only: the low-water mark STRICTLY past
@@ -7320,10 +7323,9 @@ mod tests {
     #[tokio::test]
     async fn prune_reclaims_a_key_evicted_between_its_read_and_its_write() {
         let store = Arc::new(ArmableStore::default());
-        let evictor = Arc::new(EvictOnRehydrate::default());
         let (svc, factory, frontier) = make_service_with_frontier_and_store(
             Arc::clone(&store) as Arc<dyn MapDataStore>,
-            vec![Arc::clone(&evictor) as Arc<dyn MutationObserver>],
+            Vec::new(),
         );
         let (t1, t2) = ("T1", "T2");
 
@@ -7340,14 +7342,15 @@ mod tests {
         open_prune_gates_past_epoch_one(&frontier).await;
 
         // Model the race: drop k1 from memory (its durable tombstone survives),
-        // then evict it again the moment the sweep's rehydrating read puts it
-        // back, so the in-place write finds no resident slot.
+        // then evict it again during the sweep's rehydrating read, so the read
+        // is answered but not cached and the in-place write finds no resident
+        // slot.
         let k1_store = factory.get_or_create("m", hash_to_partition("k1"));
         assert!(
             k1_store.evict("k1", false).is_some(),
             "precondition: k1 is resident before the modelled eviction"
         );
-        evictor.arm(&k1_store, "k1");
+        store.evictor.arm(&k1_store, "k1");
 
         prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
 
@@ -7383,10 +7386,9 @@ mod tests {
         let (store, frontier) = metrics::with_local_recorder(&recorder, || {
             rt.block_on(async {
                 let store = Arc::new(ArmableStore::default());
-                let evictor = Arc::new(EvictOnRehydrate::default());
                 let (svc, factory, frontier) = make_service_with_frontier_and_store(
                     Arc::clone(&store) as Arc<dyn MapDataStore>,
-                    vec![Arc::clone(&evictor) as Arc<dyn MutationObserver>],
+                    Vec::new(),
                 );
                 // k2 owns epoch 2, which the gates below keep pinned, so only
                 // k1's epoch drains.
@@ -7407,7 +7409,7 @@ mod tests {
                     k1_store.evict("k1", false).is_some(),
                     "precondition: k1 is resident before the modelled eviction"
                 );
-                evictor.arm(&k1_store, "k1");
+                store.evictor.arm(&k1_store, "k1");
                 store.answer_absent_after_one_load("k1");
 
                 prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
@@ -7573,7 +7575,6 @@ mod tests {
     /// a recorder is bound stays a no-op for its whole lifetime.
     struct SixExitFixture {
         store: Arc<ArmableStore>,
-        evictor: Arc<EvictOnRehydrate>,
         svc: Arc<CrdtService>,
         factory: Arc<RecordStoreFactory>,
         frontier: Arc<TombstoneFrontier>,
@@ -7616,14 +7617,12 @@ mod tests {
 
     fn build_six_exit_fixture() -> SixExitFixture {
         let store = Arc::new(ArmableStore::default());
-        let evictor = Arc::new(EvictOnRehydrate::default());
         let (svc, factory, frontier) = make_service_with_frontier_and_store(
             Arc::clone(&store) as Arc<dyn MapDataStore>,
-            vec![Arc::clone(&evictor) as Arc<dyn MutationObserver>],
+            Vec::new(),
         );
         SixExitFixture {
             store,
-            evictor,
             svc,
             factory,
             frontier,
@@ -7655,7 +7654,6 @@ mod tests {
     ) -> (PruneWorkloadOutcome, SixExitHandles) {
         let SixExitFixture {
             store,
-            evictor,
             svc,
             factory,
             frontier,
@@ -7743,7 +7741,7 @@ mod tests {
             kevict_store.evict("kevict", false).is_some(),
             "precondition: kevict is resident before the modelled eviction"
         );
-        evictor.arm(&kevict_store, "kevict");
+        store.evictor.arm(&kevict_store, "kevict");
         // Non-resident with a failing backend read, so the rehydrating read is
         // the call that errors.
         let kread_store = factory.get_or_create("m", hash_to_partition("kread"));
@@ -10444,7 +10442,7 @@ mod tests {
     // it with a slot rebuilt from nothing.
     mod non_resident_writes {
         use super::*;
-        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::datastores::{RedbDataStore, WriteBehindConfig, WriteBehindDataStore};
 
         const MAP: &str = "nonres_map";
         const KEY: &str = "doc";
@@ -11004,6 +11002,181 @@ mod tests {
                 }
             }
 
+            let durable = durable_tags_or_none(&redb).await;
+            assert!(
+                durable == Some(strings(&["t-new"])) || durable.is_none(),
+                "durable row must be {{op}} or gone, never the removed entries plus op; got {durable:?}"
+            );
+        }
+
+        /// The redb stack of [`redb_stack`] with a write-behind store directly
+        /// between the record stores and redb, flushed only on request, so an
+        /// in-place write stays queued and staged as a cell. No wrapper sits in
+        /// between: one would answer `load_slot` and `add_with_witness` through
+        /// the value-path defaults.
+        fn write_behind_stack(
+            dir: &tempfile::TempDir,
+        ) -> (
+            Arc<CrdtService>,
+            Arc<RecordStoreFactory>,
+            Arc<dyn MapDataStore>,
+            Arc<WriteBehindDataStore>,
+        ) {
+            let redb: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(dir.path().join("nonres.redb")).expect("redb open"));
+            let write_behind = WriteBehindDataStore::new(
+                Arc::clone(&redb),
+                WriteBehindConfig {
+                    write_delay_ms: 600_000,
+                    flush_interval_ms: 600_000,
+                    ..WriteBehindConfig::default()
+                },
+            );
+            let factory = Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::clone(&write_behind) as Arc<dyn MapDataStore>,
+                Vec::new(),
+            ));
+            let svc = Arc::new(CrdtService::new(
+                Arc::clone(&factory),
+                Arc::new(ConnectionRegistry::new()),
+                make_validator(),
+                Arc::new(QueryRegistry::new()),
+                Arc::new(SchemaService::new()),
+            ));
+            (svc, factory, redb, write_behind)
+        }
+
+        /// Seeds the durable row, then leaves an OR_ADD of `t-pend` pending: its
+        /// write is staged as a cell and the key is evicted from the engine.
+        async fn evict_a_staged_cell(
+            svc: &Arc<CrdtService>,
+            factory: &Arc<RecordStoreFactory>,
+            redb: &Arc<dyn MapDataStore>,
+            write_behind: &WriteBehindDataStore,
+        ) {
+            seed_durable_or(redb).await;
+            svc.clone()
+                .oneshot(or_add_op(MAP, KEY, "pend", "t-pend"))
+                .await
+                .expect("or_add must succeed");
+            assert!(
+                write_behind.test_staged_cell(MAP, KEY).is_some(),
+                "precondition: the OR_ADD is staged as a cell"
+            );
+            let store = factory.get_or_create(MAP, hash_to_partition(KEY));
+            assert!(
+                store.evict_lru(u32::MAX, false) > 0,
+                "precondition: the marked-clean pending key is evicted"
+            );
+            assert_not_resident(factory);
+        }
+
+        // Path (i) × REMOVE on a cell: a REMOVE that lands while an OR_ADD is
+        // materializing the staged cell must not be undone by that OR_ADD
+        // (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn remove_during_a_materializing_or_add_is_not_undone_on_a_staged_cell() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, write_behind) = write_behind_stack(&dir);
+            evict_a_staged_cell(&svc, &factory, &redb, &write_behind).await;
+
+            let mut writer_park = write_behind.test_park_load_slot(MAP, KEY);
+            let writer = tokio::spawn(svc.clone().oneshot(or_add_op(MAP, KEY, "new", "t-new")));
+            writer_park.wait_parked().await;
+
+            // Spawned, not awaited first: once REMOVE takes the key's writer it
+            // waits for the parked OR_ADD, so the park is released on REMOVE's
+            // completion or after the bound, whichever comes first.
+            let mut remover = tokio::spawn(svc.clone().oneshot(remove_op(MAP, KEY)));
+            let remover_done = tokio::time::timeout(PARK_BOUND, &mut remover).await;
+            writer_park.release();
+            writer
+                .await
+                .expect("writer task")
+                .expect("or_add must succeed");
+            match remover_done {
+                Ok(done) => {
+                    done.expect("remover task").expect("remove must succeed");
+                }
+                Err(_) => {
+                    remover
+                        .await
+                        .expect("remover task")
+                        .expect("remove must succeed");
+                }
+            }
+
+            assert_eq!(
+                write_behind.test_load_slot_park_hits(),
+                1,
+                "the OR_ADD must have materialized the staged cell"
+            );
+            write_behind.hard_flush().await.expect("hard_flush");
+            let durable = durable_tags_or_none(&redb).await;
+            assert!(
+                durable == Some(strings(&["t-new"])) || durable.is_none(),
+                "durable row must be {{op}} or gone, never the removed entries plus op; got {durable:?}"
+            );
+        }
+
+        // Path (iv) on a cell: an OR_ADD on a key resident as its adopted cell
+        // must not re-stage the cell over a REMOVE's pending delete (TG-OR-007).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn or_add_between_the_steps_of_a_remove_does_not_resurrect_it_on_a_staged_cell() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, write_behind) = write_behind_stack(&dir);
+            evict_a_staged_cell(&svc, &factory, &redb, &write_behind).await;
+
+            // Hydrate through the cell branch, so the resident slot is the cell
+            // the pending entry pins.
+            let mut hydrate_park = write_behind.test_park_load_slot(MAP, KEY);
+            let hydrate = {
+                let store = factory.get_or_create(MAP, hash_to_partition(KEY));
+                tokio::spawn(async move { store.get(KEY, false).await })
+            };
+            hydrate_park.wait_parked().await;
+            hydrate_park.release();
+            hydrate.await.expect("hydrate task").expect("hydrate");
+            assert_eq!(
+                write_behind.test_load_slot_park_hits(),
+                1,
+                "the hydrate must have adopted the staged cell"
+            );
+            assert!(
+                factory
+                    .get_or_create(MAP, hash_to_partition(KEY))
+                    .exists_in_memory(KEY),
+                "precondition: the adopted cell is resident"
+            );
+
+            let mut remove_park = write_behind.test_park_after_remove(MAP, KEY);
+            let remover = tokio::spawn(svc.clone().oneshot(remove_op(MAP, KEY)));
+            remove_park.wait_parked().await;
+
+            // Spawned, not awaited first: once REMOVE holds the key's writer the
+            // OR_ADD waits for it, so the park is released on the OR_ADD's
+            // completion or after the bound, whichever comes first.
+            let mut writer = tokio::spawn(svc.clone().oneshot(or_add_op(MAP, KEY, "new", "t-new")));
+            let writer_done = tokio::time::timeout(PARK_BOUND, &mut writer).await;
+            remove_park.release();
+            remover
+                .await
+                .expect("remover task")
+                .expect("remove must succeed");
+            match writer_done {
+                Ok(done) => {
+                    done.expect("writer task").expect("or_add must succeed");
+                }
+                Err(_) => {
+                    writer
+                        .await
+                        .expect("writer task")
+                        .expect("or_add must succeed");
+                }
+            }
+
+            write_behind.hard_flush().await.expect("hard_flush");
             let durable = durable_tags_or_none(&redb).await;
             assert!(
                 durable == Some(strings(&["t-new"])) || durable.is_none(),

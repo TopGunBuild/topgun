@@ -57,7 +57,8 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
 use super::super::{
-    partition_for, DelayedOp, WalBootstrap, WatermarkMode, WriteBehindConfig, WriteBehindDataStore,
+    partition_for, persist_entry, WalBootstrap, WatermarkMode, WriteBehindConfig,
+    WriteBehindDataStore,
 };
 use super::{
     BootSeedMode, Case, CaseShape, DefectMode, GcCrashPoint, IncarnationEnd, InvariantViolation,
@@ -67,8 +68,11 @@ use super::{
 use crate::service::domain::crdt::{
     apply_or_delta, normalize_to_or_map, or_map_semantic_view, OrMapSemanticView,
 };
-use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
-use crate::storage::record::{reconcile_tombstone_bytes, OrMapEntry, RecordValue};
+use crate::storage::engine::new_slot_cell;
+use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor, WriteSource};
+use crate::storage::record::{
+    reconcile_tombstone_bytes, OrMapEntry, Record, RecordMetadata, RecordValue,
+};
 use crate::storage::tombstone_gauge::with_isolated_gauge;
 use crate::storage::wal::{
     GcCrashPoint as WalGcCrashPoint, GcOrderMode as WalGcOrderMode, OrDelta, Wal, WalEntry,
@@ -103,13 +107,17 @@ struct HarnessInnerStore {
     data: AsyncMutex<HashMap<(String, String), Option<RecordValue>>>,
     /// When `false`, every `add`/`remove` is rejected. Reads always succeed.
     healthy: AtomicBool,
+    /// Whether the store accepts encoded records (like redb), so a flushed cell
+    /// is encoded under its lock, or not (like Postgres), so it is cloned out.
+    encoding: bool,
 }
 
 impl HarnessInnerStore {
-    fn new() -> Arc<Self> {
+    fn new(encoding: bool) -> Arc<Self> {
         Arc::new(Self {
             data: AsyncMutex::new(HashMap::new()),
             healthy: AtomicBool::new(true),
+            encoding,
         })
     }
 
@@ -140,6 +148,24 @@ impl MapDataStore for HarnessInnerStore {
             .await
             .insert((map.to_string(), key.to_string()), Some(value.clone()));
         Ok(())
+    }
+
+    /// Answers per run: an encoding store drives the flush's encoded hand-off
+    /// of a cell, a non-encoding one its clone path.
+    fn accepts_encoded(&self) -> bool {
+        self.encoding
+    }
+
+    async fn add_encoded(
+        &self,
+        map: &str,
+        key: &str,
+        bytes: &[u8],
+        exp: i64,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        let value: RecordValue = rmp_serde::from_slice(bytes)?;
+        self.add(map, key, &value, exp, now).await
     }
 
     async fn add_backup(
@@ -303,6 +329,27 @@ pub(crate) struct RunConfig {
     pub gc_crash_point: GcCrashPoint,
     /// Case-shape constraints, including the below-floor control flags.
     pub shape: CaseShape,
+    /// How OR snapshot writes reach the store, and whether the inner store
+    /// accepts encoded records.
+    pub or_write: OrWriteMode,
+}
+
+/// How an OR snapshot write reaches the write-behind store. Production takes
+/// both paths: an in-place OR write hands over its slot cell, while SYNC, merge
+/// and rehydration write a value through `add()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrWriteMode {
+    /// `add()` with the value, over an inner store that does not accept encoded
+    /// records: the value entry and the flush's clone path.
+    Value,
+    /// A slot cell through `add_with_witness`, over an inner store that accepts
+    /// encoded records: the cell entry and the flush's encoded hand-off.
+    Cell,
+    /// Alternates cell and value writes (cell first), so back-to-back writes of
+    /// one key replace a queued cell entry by a value entry and the reverse
+    /// before the flush; over a non-encoding inner store, so its cell entries
+    /// take the flush's clone path, the one combination the other two leave out.
+    Mixed,
 }
 
 impl RunConfig {
@@ -314,6 +361,7 @@ impl RunConfig {
             oracle: OracleConfig::default(),
             gc_crash_point: GcCrashPoint::None,
             shape: CaseShape::default(),
+            or_write: OrWriteMode::Cell,
         }
     }
 
@@ -812,7 +860,7 @@ pub(crate) async fn run_case(case: &Case, config: &RunConfig) -> RunOutcome {
     // the run without changing what a crash can lose here.
     let wal =
         WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::None).expect("wal writer");
-    let inner = HarnessInnerStore::new();
+    let inner = HarnessInnerStore::new(config.or_write == OrWriteMode::Cell);
 
     let partition = harness_partition();
     let key_strings = keys_in_partition(partition, usize::from(MAX_KEY_INDEX) + 1);
@@ -839,6 +887,7 @@ pub(crate) async fn run_case(case: &Case, config: &RunConfig) -> RunOutcome {
         model: LogModel::default(),
         outcome: RunOutcome::default(),
         gc_crash_point,
+        or_writes: 0,
     };
 
     let incarnation_count = case.len();
@@ -912,6 +961,8 @@ struct Driver {
     model: LogModel,
     outcome: RunOutcome,
     gc_crash_point: GcCrashPoint,
+    /// OR snapshot writes so far, for [`OrWriteMode::Mixed`]'s alternation.
+    or_writes: usize,
 }
 
 impl Driver {
@@ -1169,9 +1220,16 @@ impl Driver {
         }
     }
 
-    /// Writes an OR-shaped whole-slot value through the SAME real entry point
-    /// [`WorkOp::Append`] drives: one `WalOp::Store` frame carrying the key's complete
-    /// post-state, plus a queued entry a later flush can make durable.
+    /// Writes an OR-shaped whole-slot value through the real write path, by the
+    /// run's [`OrWriteMode`]. A cell write hands the post-state over as
+    /// [`WriteSource::Cell`] with no witness, the way an in-place OR write reaches
+    /// the store: one `WalOp::Store` snapshot of the key's complete post-state (read
+    /// under the cell lock) and a `StoreCell` entry, which a later flush persists
+    /// through the production flush body. The cell is fresh per write, like the
+    /// handle of one engine write: a write that fails before its frame leaves no
+    /// mutation in a cell an older queued entry still shares. A value write goes
+    /// through `add()` like SYNC, merge and rehydration: the same frame, a value
+    /// entry.
     async fn store_or_snapshot(
         &mut self,
         store: &Arc<WriteBehindDataStore>,
@@ -1182,7 +1240,33 @@ impl Driver {
     ) {
         let value = or_record(slot);
         let now = self.clock;
-        let res = store.add(TEST_MAP, self.key_str(key), &value, 0, now).await;
+        let as_cell = match self.config.or_write {
+            OrWriteMode::Value => false,
+            OrWriteMode::Cell => true,
+            OrWriteMode::Mixed => self.or_writes.is_multiple_of(2),
+        };
+        self.or_writes += 1;
+        let cell = as_cell.then(|| {
+            new_slot_cell(Record {
+                value: value.clone(),
+                metadata: RecordMetadata::new(0, 0),
+            })
+        });
+        let res = match &cell {
+            Some(cell) => {
+                store
+                    .add_with_witness(
+                        TEST_MAP,
+                        self.key_str(key),
+                        WriteSource::Cell(cell),
+                        0,
+                        now,
+                        None,
+                    )
+                    .await
+            }
+            None => store.add(TEST_MAP, self.key_str(key), &value, 0, now).await,
+        };
         let observed = Self::drain_observed();
         if res.is_err() {
             return;
@@ -1192,6 +1276,19 @@ impl Driver {
             1,
             "an OR snapshot add must append exactly one WAL frame per call"
         );
+        // The queued entry must be this write's own kind, or the flush under test
+        // would take the other path and the case would not exercise the one it names.
+        let queued = store.test_pending_cell(TEST_MAP, self.key_str(key));
+        match &cell {
+            Some(cell) => assert!(
+                queued.is_some_and(|queued| Arc::ptr_eq(&queued, cell)),
+                "an OR snapshot cell write must queue its own slot cell"
+            ),
+            None => assert!(
+                queued.is_none(),
+                "an OR snapshot value write must queue a value entry, displacing any cell"
+            ),
+        }
         self.model.cur_store_time = now;
         // ABSOLUTE SET in the model too: a full-snapshot OR frame carries the live set
         // AND the tombstone set as of its own sequence, so replaying it replaces the
@@ -1305,29 +1402,9 @@ impl Driver {
 
         for entry in drained {
             let p = partition_for(&entry.map, &entry.key);
-            let result = match &entry.operation {
-                DelayedOp::Store {
-                    value,
-                    expiration_time,
-                } => {
-                    store
-                        .inner
-                        .add(
-                            &entry.map,
-                            &entry.key,
-                            value,
-                            *expiration_time,
-                            entry.store_time,
-                        )
-                        .await
-                }
-                DelayedOp::Remove => {
-                    store
-                        .inner
-                        .remove(&entry.map, &entry.key, entry.store_time)
-                        .await
-                }
-            };
+            // The production flush body, so a `StoreCell` entry takes the same
+            // encoded hand-off (the inner store accepts encoded records, like redb).
+            let result = persist_entry(store.inner.as_ref(), &entry).await;
             store.resolve_pending(entry.sequence);
             if result.is_ok() {
                 // Real resolve + advance: this is where the WatermarkMode seam

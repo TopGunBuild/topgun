@@ -1,0 +1,206 @@
+absent target/spec373b-b1-data
+absent target/spec373b-b1-data.meta
+absent target/spec373b-a1-data
+absent target/spec373b-a1-data.meta
+absent target/spec373b-b2-data
+absent target/spec373b-b2-data.meta
+absent target/spec373b-a2-data
+absent target/spec373b-a2-data.meta
+--- run3 quiet-host-before-ca-chain 2026-09-27T19:05:08Z (local 22:05)
+22:05  up 6 days, 10 mins, 1 user, load averages: 1.91 2.49 2.24
+  PID  %CPU COMM
+ 5054  16.8 /Users/koristuvac/.local/bin/claude
+28703  11.5 /bin/zsh
+66942  10.5 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  408   6.0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+70933   6.0 /usr/libexec/nfcd
+--- run3 start-cell-b1 2026-09-27T19:17:40Z (local 22:17)
+22:17  up 6 days, 23 mins, 1 user, load averages: 1.77 2.69 2.64
+  PID  %CPU COMM
+66942   4.6 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  408   3.3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  543   3.1 /usr/sbin/coreaudiod
+  694   2.4 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
+  554   2.4 /System/Library/DriverExtensions/com.apple.DriverKit-AppleBCMWLAN.dext/com.apple.DriverKit-AppleBCMWLAN
+--- run3 start-cell-a1 2026-09-27T19:17:40Z (local 22:17)
+22:17  up 6 days, 23 mins, 1 user, load averages: 1.77 2.69 2.64
+  PID  %CPU COMM
+  408   3.3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+66942   3.2 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  543   3.0 /usr/sbin/coreaudiod
+30958   2.0 ffmpeg
+  468   1.8 /usr/libexec/airportd
+--- run3 start-cell-b2 2026-09-27T19:17:40Z (local 22:17)
+22:17  up 6 days, 23 mins, 1 user, load averages: 1.77 2.69 2.64
+  PID  %CPU COMM
+  408   3.3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+66942   3.2 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  543   3.0 /usr/sbin/coreaudiod
+30958   2.0 ffmpeg
+  468   1.8 /usr/libexec/airportd
+--- run3 start-cell-a2 2026-09-27T19:17:40Z (local 22:17)
+22:17  up 6 days, 23 mins, 1 user, load averages: 1.77 2.69 2.64
+  PID  %CPU COMM
+  408   3.3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+66942   3.2 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  543   3.0 /usr/sbin/coreaudiod
+30958   2.0 ffmpeg
+  468   1.8 /usr/libexec/airportd
+--- run3 after-cell-b1 2026-09-27T19:17:40Z (local 22:17)
+22:17  up 6 days, 23 mins, 1 user, load averages: 1.77 2.69 2.64
+  PID  %CPU COMM
+66942   3.2 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  543   2.6 /usr/sbin/coreaudiod
+  408   2.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+30958   1.7 ffmpeg
+82070   1.6 ffmpeg
+--- run3 after-cell-a1 2026-09-27T19:17:40Z (local 22:17)
+22:17  up 6 days, 23 mins, 1 user, load averages: 1.77 2.69 2.64
+  PID  %CPU COMM
+28934   2.8 bash
+  543   2.6 /usr/sbin/coreaudiod
+66942   2.2 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  408   2.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+30958   1.7 ffmpeg
+--- run3 after-cell-b2 2026-09-27T19:17:40Z (local 22:17)
+22:17  up 6 days, 23 mins, 1 user, load averages: 1.77 2.69 2.64
+  PID  %CPU COMM
+28934   2.8 bash
+  543   2.6 /usr/sbin/coreaudiod
+66942   2.2 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  408   2.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+30958   1.7 ffmpeg
+--- run3 after-cell-a2 2026-09-27T19:17:40Z (local 22:17)
+22:17  up 6 days, 23 mins, 1 user, load averages: 1.77 2.69 2.64
+  PID  %CPU COMM
+28934   2.8 bash
+  543   2.6 /usr/sbin/coreaudiod
+66942   2.2 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  408   2.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+30958   1.7 ffmpeg
+=== relaunch after refusal (artifact already exists), 2026-09-27T19:18:25Z
+absent target/spec373b-b1-data
+absent target/spec373b-b1-data.meta
+absent target/spec373b-a1-data
+absent target/spec373b-a1-data.meta
+absent target/spec373b-b2-data
+absent target/spec373b-b2-data.meta
+absent target/spec373b-a2-data
+absent target/spec373b-a2-data.meta
+--- run3 quiet-host-before-ca-chain 2026-09-27T19:18:25Z (local 22:18)
+22:18  up 6 days, 24 mins, 1 user, load averages: 1.86 2.58 2.60
+  PID  %CPU COMM
+ 5054  25.1 /Users/koristuvac/.local/bin/claude
+66942   9.4 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  408   7.0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+60425   6.6 /bin/zsh
+  543   1.8 /usr/sbin/coreaudiod
+--- run3 start-cell-b1 2026-09-27T19:30:57Z (local 22:30)
+22:30  up 6 days, 36 mins, 1 user, load averages: 1.77 2.85 2.90
+  PID  %CPU COMM
+91051  15.7 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ca-pin/release/topgun-server
+66942  12.1 /Applications/Splitlane.app/Contents/MacOS/splitlane
+86452  10.6 /Users/koristuvac/.local/bin/claude
+  408   8.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  543   3.0 /usr/sbin/coreaudiod
+--- run3 start-cell-a1 2026-09-27T19:45:59Z (local 22:45)
+22:45  up 6 days, 51 mins, 1 user, load averages: 2.79 2.76 2.75
+  PID  %CPU COMM
+17105  27.7 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ca-head/release/topgun-server
+86452   7.1 /Users/koristuvac/.local/bin/claude
+17100   4.7 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-h/release/deps/soak_harness-0379469b8a4255d8
+  543   4.0 /usr/sbin/coreaudiod
+66942   3.2 /Applications/Splitlane.app/Contents/MacOS/splitlane
+--- run3 after-cell-b1 2026-09-27T19:45:59Z (local 22:45)
+22:45  up 6 days, 51 mins, 1 user, load averages: 2.79 2.76 2.75
+  PID  %CPU COMM
+17105  27.7 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ca-head/release/topgun-server
+86452   7.1 /Users/koristuvac/.local/bin/claude
+17100   4.7 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-h/release/deps/soak_harness-0379469b8a4255d8
+  543   3.4 /usr/sbin/coreaudiod
+66942   3.2 /Applications/Splitlane.app/Contents/MacOS/splitlane
+--- run3 start-cell-b2 2026-09-27T20:01:02Z (local 23:01)
+23:01  up 6 days,  1:06, 1 user, load averages: 2.43 3.29 3.08
+  PID  %CPU COMM
+39181  25.3 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ca-pin/release/topgun-server
+ 5054   9.4 /Users/koristuvac/.local/bin/claude
+66942   5.9 /Applications/Splitlane.app/Contents/MacOS/splitlane
+39176   4.7 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-h/release/deps/soak_harness-0379469b8a4255d8
+  543   3.6 /usr/sbin/coreaudiod
+--- run3 after-cell-a1 2026-09-27T20:01:02Z (local 23:01)
+23:01  up 6 days,  1:06, 1 user, load averages: 2.43 3.29 3.08
+  PID  %CPU COMM
+39181  25.3 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ca-pin/release/topgun-server
+ 5054   9.4 /Users/koristuvac/.local/bin/claude
+66942   5.9 /Applications/Splitlane.app/Contents/MacOS/splitlane
+39176   4.7 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-h/release/deps/soak_harness-0379469b8a4255d8
+  543   3.6 /usr/sbin/coreaudiod
+--- run3 start-cell-a2 2026-09-27T20:16:05Z (local 23:16)
+23:16  up 6 days,  1:21, 1 user, load averages: 3.03 3.05 2.95
+  PID  %CPU COMM
+61723  37.4 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ca-head/release/topgun-server
+66942   7.5 /Applications/Splitlane.app/Contents/MacOS/splitlane
+61718   5.1 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-h/release/deps/soak_harness-0379469b8a4255d8
+  543   3.8 /usr/sbin/coreaudiod
+69635   3.7 /Users/koristuvac/.local/bin/claude
+--- run3 after-cell-b2 2026-09-27T20:16:05Z (local 23:16)
+23:16  up 6 days,  1:21, 1 user, load averages: 3.03 3.05 2.95
+  PID  %CPU COMM
+61723  37.4 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-ca-head/release/topgun-server
+66942   7.5 /Applications/Splitlane.app/Contents/MacOS/splitlane
+61718   5.1 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-h/release/deps/soak_harness-0379469b8a4255d8
+69635   3.7 /Users/koristuvac/.local/bin/claude
+  543   3.2 /usr/sbin/coreaudiod
+--- run3 after-cell-a2 2026-09-27T20:31:08Z (local 23:31)
+23:31  up 6 days,  1:36, 1 user, load averages: 2.32 2.93 3.07
+  PID  %CPU COMM
+66942   6.7 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  408   5.7 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  543   3.0 /usr/sbin/coreaudiod
+30958   2.0 ffmpeg
+82070   1.7 ffmpeg
+=== JE phase run3 2026-09-27T20:31:38Z
+absent target/spec373b-jb-data
+absent target/spec373b-jb-data.meta
+absent target/spec373b-ja-data
+absent target/spec373b-ja-data.meta
+--- run3 quiet-host-before-je-chain 2026-09-27T20:31:39Z (local 23:31)
+23:31  up 6 days,  1:37, 1 user, load averages: 2.04 2.80 3.02
+  PID  %CPU COMM
+ 5054  24.0 /Users/koristuvac/.local/bin/claude
+66942  17.5 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  408   8.7 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+85345   6.1 /bin/zsh
+  378   4.1 /usr/libexec/opendirectoryd
+--- run3 start-cell-jb 2026-09-27T20:44:11Z (local 23:44)
+23:44  up 6 days,  1:49, 1 user, load averages: 2.03 2.81 3.19
+  PID  %CPU COMM
+  342   6.3 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+  543   2.5 /usr/sbin/coreaudiod
+82070   1.6 ffmpeg
+18891   1.6 ffmpeg
+30958   1.6 ffmpeg
+--- run3 start-cell-ja 2026-09-28T00:44:17Z (local 03:44)
+ 3:44  up 6 days,  5:50, 1 user, load averages: 1.57 1.88 2.08
+  PID  %CPU COMM
+82245  32.0 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-je-head/release/topgun-server
+77000   8.3 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService
+66942   3.8 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  543   3.0 /usr/sbin/coreaudiod
+  481   2.5 /usr/libexec/syspolicyd
+--- run3 after-cell-jb 2026-09-28T00:44:17Z (local 03:44)
+ 3:44  up 6 days,  5:50, 1 user, load averages: 1.52 1.86 2.07
+  PID  %CPU COMM
+82245  26.3 /Users/koristuvac/Projects/topgun/topgun/target/spec373b-je-head/release/topgun-server
+77000   5.1 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService
+  543   3.2 /usr/sbin/coreaudiod
+66942   2.9 /Applications/Splitlane.app/Contents/MacOS/splitlane
+  408   2.5 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+--- run3 after-cell-ja 2026-09-28T04:44:22Z (local 07:44)
+ 7:44  up 6 days,  9:50, 1 user, load averages: 3.77 3.41 2.95
+  PID  %CPU COMM
+  764  92.0 /usr/libexec/duetexpertd
+  342   3.2 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+  543   2.9 /usr/sbin/coreaudiod
+30958   1.9 ffmpeg
+86527   1.8 ffmpeg

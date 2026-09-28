@@ -15,8 +15,10 @@ use tokio::sync::{watch, Notify};
 use topgun_core::{fnv1a_hash, PARTITION_COUNT};
 use tracing::{error, warn};
 
+use crate::storage::engine::SlotCell;
 use crate::storage::map_data_store::{
-    merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+    merkle_leaf_hash, LeafSink, Loaded, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+    WriteSource,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{
@@ -452,6 +454,12 @@ pub(crate) enum DelayedOp {
         value: RecordValue,
         expiration_time: i64,
     },
+    /// Buffered in-place write: the flush persists the cell's value as it is
+    /// at flush time.
+    StoreCell {
+        cell: Arc<SlotCell>,
+        expiration_time: i64,
+    },
     /// Buffered remove (tombstone).
     Remove,
 }
@@ -698,6 +706,106 @@ impl std::fmt::Debug for ClassifierSeam {
     }
 }
 
+/// The parked side of a one-shot test park: announces the park, then waits
+/// for the release (or for the test's handle to be dropped).
+#[cfg(test)]
+struct ParkGate {
+    parked: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+impl ParkGate {
+    async fn pass(self) {
+        let _ = self.parked.send(());
+        let _ = self.release.await;
+    }
+}
+
+/// The test's side of a one-shot park on one of this store's own paths.
+/// Dropping it releases the parked caller, so a failing test never leaves a
+/// task parked.
+#[cfg(test)]
+pub(crate) struct TestParkHandle {
+    parked: Option<tokio::sync::oneshot::Receiver<()>>,
+    release: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+#[cfg(test)]
+impl TestParkHandle {
+    fn arm() -> (ParkGate, Self) {
+        let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        (
+            ParkGate {
+                parked: parked_tx,
+                release: release_rx,
+            },
+            Self {
+                parked: Some(parked_rx),
+                release: Some(release_tx),
+            },
+        )
+    }
+
+    /// Waits until the caller parks; panics after two seconds, which means the
+    /// setup never reached the park point.
+    pub(crate) async fn wait_parked(&mut self) {
+        let parked = self.parked.take().expect("wait_parked called once");
+        tokio::time::timeout(std::time::Duration::from_secs(2), parked)
+            .await
+            .expect("the store never parked: the setup did not reach the park point")
+            .expect("park dropped before parking");
+    }
+
+    pub(crate) fn release(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+/// One-shot parks on this store's own paths, for tests that must interleave a
+/// second caller at a point no wrapper can reach: a wrapper around this store
+/// would answer `load_slot` and `add_with_witness` through the trait defaults,
+/// i.e. take the value path instead of the cell path under test.
+#[cfg(test)]
+#[derive(Default)]
+struct TestParks {
+    /// Parks the next `load_slot` of the key on return, only when it answers
+    /// a cell.
+    load_slot: Mutex<Option<(String, String, ParkGate)>>,
+    /// How many `load_slot` calls parked, so a test that expected the cell
+    /// branch fails instead of passing vacuously when it was never taken.
+    load_slot_hits: AtomicU64,
+    /// Parks the next `remove` of the key once its delete is staged.
+    after_remove: Mutex<Option<(String, String, ParkGate)>>,
+    /// Parks `hard_flush` once the shutdown flag is set, before the flush
+    /// loop is joined.
+    after_shutdown_flag: Mutex<Option<ParkGate>>,
+}
+
+#[cfg(test)]
+impl TestParks {
+    fn take_keyed(
+        slot: &Mutex<Option<(String, String, ParkGate)>>,
+        map: &str,
+        key: &str,
+    ) -> Option<ParkGate> {
+        let mut slot = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot
+            .as_ref()
+            .is_some_and(|(m, k, _)| m.as_str() == map && k.as_str() == key)
+        {
+            slot.take().map(|(_, _, gate)| gate)
+        } else {
+            None
+        }
+    }
+}
+
 /// An entry in the write-behind queue representing a pending operation.
 #[derive(Debug, Clone)]
 pub(crate) struct DelayedEntry {
@@ -848,7 +956,48 @@ struct StagingSlot {
     /// Sequence of the write that set this staged value (`DelayedEntry.sequence`).
     seq: u64,
     /// `Some(value)` = pending write, `None` = pending delete.
-    value: Option<RecordValue>,
+    value: Option<StagedValue>,
+}
+
+/// A pending write's value in the staging overlay: an owned value (a plain
+/// `add`), or the cell of an in-place write.
+#[derive(Clone)]
+enum StagedValue {
+    Value(RecordValue),
+    Cell(Arc<SlotCell>),
+}
+
+impl StagedValue {
+    /// An owned copy of the staged value, read under the cell's lock for a cell.
+    fn to_value(&self) -> RecordValue {
+        match self {
+            StagedValue::Value(value) => value.clone(),
+            StagedValue::Cell(cell) => cell.lock().value.clone(),
+        }
+    }
+}
+
+/// The queue operation and the staging value for one write. A value is queued
+/// and staged as two copies; an in-place write's cell is shared by the queued
+/// entry, its staging slot and the engine, so the flush persists whatever the
+/// cell holds at flush time and a re-adoption finds the same cell (TG-WB-003).
+fn queued_and_staged(src: WriteSource<'_>, expiration_time: i64) -> (DelayedOp, StagedValue) {
+    match src {
+        WriteSource::Value(value) => (
+            DelayedOp::Store {
+                value: value.clone(),
+                expiration_time,
+            },
+            StagedValue::Value(value.clone()),
+        ),
+        WriteSource::Cell(cell) => (
+            DelayedOp::StoreCell {
+                cell: Arc::clone(cell),
+                expiration_time,
+            },
+            StagedValue::Cell(Arc::clone(cell)),
+        ),
+    }
 }
 
 /// Per-partition `wal_seq` state: which sequences are still unresolved, why,
@@ -1041,6 +1190,9 @@ pub struct WriteBehindDataStore {
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     append_observer: Mutex<Option<Arc<dyn Fn(u32, u64) + Send + Sync>>>,
+    /// One-shot parks on `load_slot`, `remove` and `hard_flush`.
+    #[cfg(test)]
+    test_parks: TestParks,
 }
 
 /// WAL plus the live sequence counter's starting value, threaded into
@@ -1118,6 +1270,8 @@ impl WriteBehindDataStore {
             boot_seed_mode: Mutex::new(BootSeedMode::default()),
             #[cfg(test)]
             append_observer: Mutex::new(None),
+            #[cfg(test)]
+            test_parks: TestParks::default(),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -1200,6 +1354,81 @@ impl WriteBehindDataStore {
     #[cfg(test)]
     fn track_pending(&self, seq: u64) {
         self.pending_seqs().insert(seq);
+    }
+
+    /// The cell of the queued in-place write for `(map, key)`, if the key's
+    /// queued entry is one. Entries already dequeued by a flush are not seen.
+    #[cfg(test)]
+    pub(crate) fn test_pending_cell(&self, map: &str, key: &str) -> Option<Arc<SlotCell>> {
+        let queue = self.queues.get(&partition_for(map, key))?;
+        match &queue
+            .entries
+            .get(&(map.to_string(), key.to_string()))?
+            .operation
+        {
+            DelayedOp::StoreCell { cell, .. } => Some(Arc::clone(cell)),
+            DelayedOp::Store { .. } | DelayedOp::Remove => None,
+        }
+    }
+
+    /// The cell staged for `(map, key)`, if its staging slot holds one.
+    #[cfg(test)]
+    pub(crate) fn test_staged_cell(&self, map: &str, key: &str) -> Option<Arc<SlotCell>> {
+        let slot = self.staging.get(&(map.to_string(), key.to_string()))?;
+        match &slot.value {
+            Some(StagedValue::Cell(cell)) => Some(Arc::clone(cell)),
+            Some(StagedValue::Value(_)) | None => None,
+        }
+    }
+
+    /// Parks the next `load_slot` of `(map, key)` on return, but only when it
+    /// answers the staged cell: the caller then holds the cell while the test
+    /// interleaves a second caller. One-shot; each park counts one hit.
+    #[cfg(test)]
+    pub(crate) fn test_park_load_slot(&self, map: &str, key: &str) -> TestParkHandle {
+        let (gate, handle) = TestParkHandle::arm();
+        *self
+            .test_parks
+            .load_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((map.to_string(), key.to_string(), gate));
+        handle
+    }
+
+    /// How many `load_slot` calls have parked on an armed
+    /// [`test_park_load_slot`](Self::test_park_load_slot).
+    #[cfg(test)]
+    pub(crate) fn test_load_slot_park_hits(&self) -> u64 {
+        self.test_parks.load_slot_hits.load(Ordering::Relaxed)
+    }
+
+    /// Parks the next `remove` of `(map, key)` once its delete is staged and
+    /// before it returns, i.e. between the two steps of a record-store remove.
+    #[cfg(test)]
+    pub(crate) fn test_park_after_remove(&self, map: &str, key: &str) -> TestParkHandle {
+        let (gate, handle) = TestParkHandle::arm();
+        *self
+            .test_parks
+            .after_remove
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((map.to_string(), key.to_string(), gate));
+        handle
+    }
+
+    /// Parks the next `hard_flush` once the shutdown flag is set and before the
+    /// flush loop is joined, so a write can hit the shutdown gate while the
+    /// drain has not started.
+    #[cfg(test)]
+    pub(crate) fn test_park_after_shutdown_flag(&self) -> TestParkHandle {
+        let (gate, handle) = TestParkHandle::arm();
+        *self
+            .test_parks
+            .after_shutdown_flag
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
+        handle
     }
 
     /// Selects the watermark rule this store computes with.
@@ -1535,7 +1764,10 @@ impl WriteBehindDataStore {
         let mut pending = BTreeMap::new();
         for entry in &self.staging {
             if entry.key().0 == map {
-                pending.insert(entry.key().1.clone(), entry.value().value.clone());
+                pending.insert(
+                    entry.key().1.clone(),
+                    entry.value().value.as_ref().map(StagedValue::to_value),
+                );
             }
         }
         pending
@@ -1569,7 +1801,7 @@ impl WriteBehindDataStore {
     /// newer staged value (a plain `insert` is last-writer-wins by wall-clock,
     /// not by `seq`). The monotonic guard makes the slot's `seq` truthful, which
     /// is the identity [`clear_staging_if_current`] relies on.
-    fn stage(&self, map: &str, key: &str, seq: u64, value: Option<RecordValue>) {
+    fn stage(&self, map: &str, key: &str, seq: u64, value: Option<StagedValue>) {
         use dashmap::mapref::entry::Entry;
         match self.staging.entry((map.to_string(), key.to_string())) {
             Entry::Occupied(mut e) => {
@@ -2103,6 +2335,69 @@ impl WriteBehindDataStore {
 // Background flush loop (R3)
 // ---------------------------------------------------------------------------
 
+/// Persists one dequeued entry to the inner store — the single body the
+/// background flush and the shutdown drain share.
+///
+/// A `StoreCell` entry persists the cell's value as it is now, read under the
+/// cell lock. When the inner store accepts encoded records, the value is
+/// encoded under the lock and handed over as bytes, so no copy of the record
+/// outlives the lock; otherwise it is cloned out under the lock. Either way the
+/// guard lives only inside its block: it is `!Send`, and must not be held
+/// across the inner store's await (or into any call that takes the same lock).
+async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow::Result<()> {
+    match &entry.operation {
+        DelayedOp::Store {
+            value,
+            expiration_time,
+        } => {
+            inner
+                .add(
+                    &entry.map,
+                    &entry.key,
+                    value,
+                    *expiration_time,
+                    entry.store_time,
+                )
+                .await
+        }
+        DelayedOp::StoreCell {
+            cell,
+            expiration_time,
+        } => {
+            if inner.accepts_encoded() {
+                let bytes = {
+                    let guard = cell.lock();
+                    rmp_serde::to_vec_named(&guard.value)?
+                };
+                inner
+                    .add_encoded(
+                        &entry.map,
+                        &entry.key,
+                        &bytes,
+                        *expiration_time,
+                        entry.store_time,
+                    )
+                    .await
+            } else {
+                let value = {
+                    let guard = cell.lock();
+                    guard.value.clone()
+                };
+                inner
+                    .add(
+                        &entry.map,
+                        &entry.key,
+                        &value,
+                        *expiration_time,
+                        entry.store_time,
+                    )
+                    .await
+            }
+        }
+        DelayedOp::Remove => inner.remove(&entry.map, &entry.key, entry.store_time).await,
+    }
+}
+
 /// Background task that periodically flushes eligible entries to the inner store.
 ///
 /// Runs until the shutdown signal is received. Wakes on either the configured
@@ -2162,29 +2457,7 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
         // Process in batches
         for batch in ready_entries.chunks(store.config.batch_size as usize) {
             for entry in batch {
-                let result = match &entry.operation {
-                    DelayedOp::Store {
-                        value,
-                        expiration_time,
-                    } => {
-                        store
-                            .inner
-                            .add(
-                                &entry.map,
-                                &entry.key,
-                                value,
-                                *expiration_time,
-                                entry.store_time,
-                            )
-                            .await
-                    }
-                    DelayedOp::Remove => {
-                        store
-                            .inner
-                            .remove(&entry.map, &entry.key, entry.store_time)
-                            .await
-                    }
-                };
+                let result = persist_entry(store.inner.as_ref(), entry).await;
 
                 let partition_id_for_wal = partition_for(&entry.map, &entry.key);
                 match result {
@@ -2326,8 +2599,15 @@ impl MapDataStore for WriteBehindDataStore {
         // LWW write, bulk and SYNC ingestion, cross-node merge, rehydration —
         // arrives here, and it is the same code the witness-bearing callers run
         // with the witness set. A second body would let the two drift.
-        self.add_with_witness(map, key, value, expiration_time, now, None)
-            .await
+        self.add_with_witness(
+            map,
+            key,
+            WriteSource::Value(value),
+            expiration_time,
+            now,
+            None,
+        )
+        .await
     }
 
     /// Whether the mutation point should build an OR witness for this store.
@@ -2346,7 +2626,7 @@ impl MapDataStore for WriteBehindDataStore {
         &self,
         map: &str,
         key: &str,
-        value: &RecordValue,
+        src: WriteSource<'_>,
         expiration_time: i64,
         now: i64,
         witness: Option<&OrDelta>,
@@ -2389,11 +2669,13 @@ impl MapDataStore for WriteBehindDataStore {
         // carry their own per-entry timestamps inside the record, so it stays
         // None for them — including for the delta framing below, whose payload
         // is an OR mutation by construction.
-        let wal_timestamp = if let RecordValue::Lww { timestamp, .. } = value {
-            Some(timestamp.clone())
-        } else {
-            None
-        };
+        let wal_timestamp = src.with_value(|value| {
+            if let RecordValue::Lww { timestamp, .. } = value {
+                Some(timestamp.clone())
+            } else {
+                None
+            }
+        });
         // FAIL-CLOSED CONJUNCTION. The config's arming flag is the AUTHORITY —
         // one flag, the same field `wants_or_witness` returns — and the
         // witness is EVIDENCE, never authority. A `Some` witness with the
@@ -2425,7 +2707,7 @@ impl MapDataStore for WriteBehindDataStore {
                 delta: delta.clone(),
             },
             _ => WalOp::Store {
-                value: WalStorePayload::Record(value.clone()),
+                value: WalStorePayload::Record(src.to_value()),
                 expiration_time: if expiration_time == 0 {
                     None
                 } else {
@@ -2456,13 +2738,11 @@ impl MapDataStore for WriteBehindDataStore {
         // Assign and track the durability sequence atomically (see
         // `assign_tracked_sequence`) BEFORE the entry enters the queue.
         let entry_seq = self.assign_tracked_sequence();
+        let (operation, staged) = queued_and_staged(src, expiration_time);
         let entry = DelayedEntry {
             map: map.to_string(),
             key: key.to_string(),
-            operation: DelayedOp::Store {
-                value: value.clone(),
-                expiration_time,
-            },
+            operation,
             store_time: now,
             sequence: entry_seq,
             retry_count: 0,
@@ -2515,7 +2795,7 @@ impl MapDataStore for WriteBehindDataStore {
 
         // Update staging area for read-your-writes
         let (smap, skey) = staging_key;
-        self.stage(&smap, &skey, entry_seq, Some(value.clone()));
+        self.stage(&smap, &skey, entry_seq, Some(staged));
 
         Ok(())
     }
@@ -2632,6 +2912,11 @@ impl MapDataStore for WriteBehindDataStore {
         let (smap, skey) = staging_key;
         self.stage(&smap, &skey, entry_seq, None);
 
+        #[cfg(test)]
+        if let Some(gate) = TestParks::take_keyed(&self.test_parks.after_remove, map, key) {
+            gate.pass().await;
+        }
+
         Ok(())
     }
 
@@ -2646,7 +2931,7 @@ impl MapDataStore for WriteBehindDataStore {
         // Check staging first for read-your-writes consistency
         if let Some(entry) = self.staging.get(&staging_key) {
             return match &entry.value().value {
-                Some(value) => Ok(Some(value.clone())),
+                Some(value) => Ok(Some(value.to_value())),
                 // Pending delete -- do not consult inner store
                 None => Ok(None),
             };
@@ -2654,6 +2939,38 @@ impl MapDataStore for WriteBehindDataStore {
 
         // Not in staging -- delegate to inner store
         self.inner.load(map, key).await
+    }
+
+    /// Like [`Self::load`], but a staged in-place write answers its cell rather
+    /// than a copy, so the engine re-adopts the one cell the queued entry and
+    /// the staging slot already hold (TG-OR-007: the caller inserts it only
+    /// through the generation-checked insert).
+    async fn load_slot(&self, map: &str, key: &str) -> anyhow::Result<Option<Loaded>> {
+        let staging_key = (map.to_string(), key.to_string());
+
+        let staged = self
+            .staging
+            .get(&staging_key)
+            .map(|entry| match &entry.value().value {
+                Some(StagedValue::Cell(cell)) => Some(Loaded::Cell(Arc::clone(cell))),
+                Some(StagedValue::Value(value)) => Some(Loaded::Value(value.clone())),
+                // Pending delete -- do not consult inner store
+                None => None,
+            });
+        if let Some(answer) = staged {
+            #[cfg(test)]
+            if matches!(answer, Some(Loaded::Cell(_))) {
+                if let Some(gate) = TestParks::take_keyed(&self.test_parks.load_slot, map, key) {
+                    self.test_parks
+                        .load_slot_hits
+                        .fetch_add(1, Ordering::Relaxed);
+                    gate.pass().await;
+                }
+            }
+            return Ok(answer);
+        }
+
+        self.inner.load_slot(map, key).await
     }
 
     async fn load_all(
@@ -2668,7 +2985,7 @@ impl MapDataStore for WriteBehindDataStore {
             let staging_key = (map.to_string(), key.clone());
             if let Some(entry) = self.staging.get(&staging_key) {
                 if let Some(value) = &entry.value().value {
-                    results.push((key.clone(), value.clone()));
+                    results.push((key.clone(), value.to_value()));
                 }
                 // Pending delete (None) -- skip entirely, do not fetch from inner
             } else {
@@ -2966,6 +3283,19 @@ impl MapDataStore for WriteBehindDataStore {
         // rather than queued behind the drain.
         self.is_shutdown.store(true, Ordering::Release);
 
+        #[cfg(test)]
+        {
+            let gate = self
+                .test_parks
+                .after_shutdown_flag
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(gate) = gate {
+                gate.pass().await;
+            }
+        }
+
         // Stop the background flush loop so it doesn't race with our direct drain.
         let _ = self.shutdown.send(true);
 
@@ -3014,29 +3344,7 @@ impl MapDataStore for WriteBehindDataStore {
                     continue;
                 }
 
-                let flush_future = async {
-                    match &entry.operation {
-                        DelayedOp::Store {
-                            value,
-                            expiration_time,
-                        } => {
-                            self.inner
-                                .add(
-                                    &entry.map,
-                                    &entry.key,
-                                    value,
-                                    *expiration_time,
-                                    entry.store_time,
-                                )
-                                .await
-                        }
-                        DelayedOp::Remove => {
-                            self.inner
-                                .remove(&entry.map, &entry.key, entry.store_time)
-                                .await
-                        }
-                    }
-                };
+                let flush_future = persist_entry(self.inner.as_ref(), &entry);
 
                 let partition_id_for_wal = partition_for(&entry.map, &entry.key);
                 match tokio::time::timeout(remaining, flush_future).await {
@@ -5451,12 +5759,12 @@ mod tests {
     async fn stage_is_monotonic_by_seq() {
         let (store, _dir) = redb_backed_store();
 
-        store.stage("m", "k", 10, Some(lww("v10", 10)));
+        store.stage("m", "k", 10, Some(StagedValue::Value(lww("v10", 10))));
         // A higher seq replaces.
-        store.stage("m", "k", 11, Some(lww("v11", 11)));
+        store.stage("m", "k", 11, Some(StagedValue::Value(lww("v11", 11))));
         assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
         // A late, lower seq is rejected (does not clobber the newer value).
-        store.stage("m", "k", 10, Some(lww("v10", 10)));
+        store.stage("m", "k", 10, Some(StagedValue::Value(lww("v10", 10))));
         assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
         // Equal seq (same write, idempotent) is allowed.
         store.stage("m", "k", 11, None);
@@ -5975,7 +6283,7 @@ mod tests {
             .add_with_witness(
                 "rooms",
                 "lobby",
-                &pinned_or_snapshot(),
+                WriteSource::Value(&pinned_or_snapshot()),
                 0,
                 1_700_000_000_000,
                 Some(&delta),
@@ -6043,7 +6351,7 @@ mod tests {
             .add_with_witness(
                 "rooms",
                 "lobby",
-                &snapshot,
+                WriteSource::Value(&snapshot),
                 0,
                 1_700_000_000_000,
                 Some(&OrDelta::Add {
@@ -6097,7 +6405,7 @@ mod tests {
                 .add_with_witness(
                     "rooms",
                     "lobby",
-                    &pinned_or_snapshot(),
+                    WriteSource::Value(&pinned_or_snapshot()),
                     0,
                     1_700_000_000_000,
                     witness,
@@ -6210,7 +6518,7 @@ mod tests {
             .add_with_witness(
                 "rooms",
                 "lobby",
-                &pinned_or_snapshot(),
+                WriteSource::Value(&pinned_or_snapshot()),
                 0,
                 1_700_000_000_000,
                 Some(&OrDelta::Add {
@@ -6283,7 +6591,7 @@ mod tests {
             .add_with_witness(
                 &golden.map,
                 &golden.key,
-                &pinned_or_snapshot(),
+                WriteSource::Value(&pinned_or_snapshot()),
                 0,
                 1_700_000_000_000,
                 Some(&golden_delta),
@@ -6312,6 +6620,460 @@ mod tests {
             "the emitter encodes different bytes than the checked-in on-disk shape. A \
              shape change is a format decision that re-proves the reader first -- it is \
              never a reason to regenerate the fixture"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // In-place writes share one cell with the queue and staging (TG-WB-003)
+    // -----------------------------------------------------------------------
+
+    fn lww_cell(value: &str, millis: u64) -> Arc<SlotCell> {
+        crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value: lww(value, millis),
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        })
+    }
+
+    async fn add_cell(store: &WriteBehindDataStore, key: &str, cell: &Arc<SlotCell>) {
+        store
+            .add_with_witness("m", key, WriteSource::Cell(cell), 0, 1, None)
+            .await
+            .expect("add_with_witness");
+    }
+
+    /// The queued entry, the staging slot and `load_slot` all hold the writer's
+    /// cell, reads see a mutation made after the enqueue, and the flush
+    /// persists the cell's state at flush time and then drops every reference
+    /// but the writer's.
+    #[tokio::test]
+    async fn an_in_place_write_shares_its_cell_with_the_queue_and_staging() {
+        let (store, _dir) = redb_backed_store();
+        let cell = lww_cell("a", 1);
+        add_cell(&store, "k", &cell).await;
+
+        let pending = store.test_pending_cell("m", "k").expect("queued cell");
+        let staged = store.test_staged_cell("m", "k").expect("staged cell");
+        assert!(
+            Arc::ptr_eq(&pending, &cell),
+            "the queue must hold the writer's cell"
+        );
+        assert!(
+            Arc::ptr_eq(&staged, &cell),
+            "staging must hold the writer's cell"
+        );
+        drop((pending, staged));
+        match store.load_slot("m", "k").await.expect("load_slot") {
+            Some(Loaded::Cell(loaded)) => {
+                assert!(
+                    Arc::ptr_eq(&loaded, &cell),
+                    "load_slot must answer the staged cell"
+                );
+            }
+            _ => panic!("a staged in-place write must load as its cell"),
+        }
+
+        cell.lock().value = lww("b", 2);
+        assert_lww(
+            &store.load("m", "k").await.expect("load").expect("staged"),
+            "b",
+            2,
+        );
+
+        store.hard_flush().await.expect("hard_flush");
+        assert_lww(
+            &store
+                .inner
+                .load("m", "k")
+                .await
+                .expect("inner load")
+                .expect("persisted"),
+            "b",
+            2,
+        );
+        assert!(store.test_pending_cell("m", "k").is_none());
+        assert!(store.test_staged_cell("m", "k").is_none());
+        assert_eq!(
+            Arc::strong_count(&cell),
+            1,
+            "the flush must release the cell"
+        );
+    }
+
+    /// A value write over a queued cell replaces both the queue entry and the
+    /// staging slot, so neither keeps the cell and later reads load the value.
+    #[tokio::test]
+    async fn a_value_write_over_a_queued_cell_displaces_it() {
+        let (store, _dir) = redb_backed_store();
+        let cell = lww_cell("a", 1);
+        add_cell(&store, "k", &cell).await;
+        store.add("m", "k", &lww("c", 3), 0, 2).await.expect("add");
+
+        assert!(store.test_pending_cell("m", "k").is_none());
+        assert!(store.test_staged_cell("m", "k").is_none());
+        assert_eq!(
+            Arc::strong_count(&cell),
+            1,
+            "the value write must drop the cell"
+        );
+        match store.load_slot("m", "k").await.expect("load_slot") {
+            Some(Loaded::Value(value)) => assert_lww(&value, "c", 3),
+            _ => panic!("a staged value write must load as a value"),
+        }
+
+        store.hard_flush().await.expect("hard_flush");
+        assert_lww(
+            &store
+                .inner
+                .load("m", "k")
+                .await
+                .expect("inner load")
+                .expect("persisted"),
+            "c",
+            3,
+        );
+    }
+
+    /// A remove over a queued cell drops the queue's and staging's references,
+    /// and `load_slot` answers the pending delete, so the cell is never
+    /// re-adopted.
+    #[tokio::test]
+    async fn a_remove_over_a_queued_cell_drops_it() {
+        let (store, _dir) = redb_backed_store();
+        let cell = lww_cell("a", 1);
+        add_cell(&store, "k", &cell).await;
+        store.remove("m", "k", 2).await.expect("remove");
+
+        assert_eq!(Arc::strong_count(&cell), 1, "the remove must drop the cell");
+        assert!(store
+            .load_slot("m", "k")
+            .await
+            .expect("load_slot")
+            .is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // A cell flushed to an inner store that does not accept encoded records
+    // -----------------------------------------------------------------------
+
+    fn or_cell(tags: &[&str]) -> Arc<SlotCell> {
+        crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value: or_value(tags),
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        })
+    }
+
+    fn or_value(tags: &[&str]) -> RecordValue {
+        RecordValue::OrMap {
+            records: tags.iter().map(|tag| or_entry(tag)).collect(),
+            tombstones: Vec::new(),
+        }
+    }
+
+    fn or_entry(tag: &str) -> OrMapEntry {
+        OrMapEntry {
+            value: Value::Null,
+            tag: tag.to_string(),
+            timestamp: Timestamp {
+                millis: 1,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+        }
+    }
+
+    /// A non-encoding inner store takes the clone branch of the flush: each
+    /// flushed cell entry reaches `inner.add` exactly once, with the value the
+    /// cell holds at flush time — a mutation made after the enqueue included —
+    /// and never reaches `add_encoded`, whose default body refuses (a refused
+    /// flush would leave the entry queued and nothing persisted).
+    #[tokio::test]
+    async fn a_non_encoding_inner_receives_each_flushed_cell_once_with_its_current_value() {
+        let spy = Arc::new(SpyDataStore::new());
+        assert!(
+            !spy.accepts_encoded(),
+            "precondition: the inner store does not accept encoded records"
+        );
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 600_000,
+                flush_interval_ms: 600_000,
+                capacity: 0,
+                ..WriteBehindConfig::default()
+            },
+        );
+        let first = or_cell(&["a"]);
+        let second = or_cell(&["x"]);
+        add_cell(&store, "k1", &first).await;
+        add_cell(&store, "k2", &second).await;
+        // A second in-place write on k1 coalesces into k1's one queued entry.
+        first.lock().value = or_value(&["a", "b"]);
+        add_cell(&store, "k1", &first).await;
+        // Mutated after its last enqueue: the flush must still see it.
+        first.lock().value = or_value(&["a", "b", "c"]);
+
+        store.hard_flush().await.expect("hard_flush");
+
+        let adds: Vec<String> = spy
+            .calls()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|call| match call {
+                SpyCall::Add { key, .. } => Some(key.clone()),
+                SpyCall::Remove { .. } => None,
+            })
+            .collect();
+        let mut sorted = adds.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            vec!["k1".to_string(), "k2".to_string()],
+            "one inner add per flushed entry, got {adds:?}"
+        );
+        assert_eq!(
+            spy.persisted("m", "k1"),
+            Some(or_value(&["a", "b", "c"])),
+            "the inner store must receive the cell's value at flush time"
+        );
+        assert_eq!(spy.persisted("m", "k2"), Some(or_value(&["x"])));
+        assert_eq!(
+            Arc::strong_count(&first),
+            1,
+            "the flush must release k1's cell"
+        );
+        assert_eq!(
+            Arc::strong_count(&second),
+            1,
+            "the flush must release k2's cell"
+        );
+    }
+
+    /// An inner store that persists nothing and allocates nothing in `add`: it
+    /// counts the call and checks the value against the one it expects, so the
+    /// bytes a flush allocates are the flush's own.
+    #[cfg(feature = "count-alloc")]
+    struct ReceivingStore {
+        expected: RecordValue,
+        adds: std::sync::atomic::AtomicU32,
+        matched: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "count-alloc")]
+    #[async_trait]
+    impl MapDataStore for ReceivingStore {
+        async fn add(
+            &self,
+            _map: &str,
+            _key: &str,
+            value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            self.adds.fetch_add(1, Ordering::Relaxed);
+            self.matched
+                .store(*value == self.expected, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn add_backup(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn remove(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn remove_backup(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn load(&self, _map: &str, _key: &str) -> anyhow::Result<Option<RecordValue>> {
+            Ok(None)
+        }
+
+        async fn load_all(
+            &self,
+            _map: &str,
+            _keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            Ok(Vec::new())
+        }
+
+        async fn remove_all(&self, _map: &str, _keys: &[String]) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn scan_values(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
+        }
+
+        async fn scan_values_batched(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _cursor: ScanCursor,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
+        }
+
+        fn is_loadable(&self, _key: &str) -> bool {
+            true
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            0
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn flush_key(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &RecordValue,
+            _is_backup: bool,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn reset(&self) {}
+
+        fn is_null(&self) -> bool {
+            false
+        }
+    }
+
+    /// `(bytes, allocations)` one `value.clone()` of an OR slot of `n` entries
+    /// allocates, and the same for one `persist_entry` of a cell entry holding
+    /// that slot, flushed to a [`ReceivingStore`].
+    #[cfg(feature = "count-alloc")]
+    async fn cell_flush_allocations(n: usize) -> ((u64, u64), (u64, u64)) {
+        let tags: Vec<String> = (0..n).map(|i| format!("{i:020}:0:node-a")).collect();
+        let tags: Vec<&str> = tags.iter().map(String::as_str).collect();
+        let value = or_value(&tags);
+        let inner = ReceivingStore {
+            expected: value.clone(),
+            adds: std::sync::atomic::AtomicU32::new(0),
+            matched: std::sync::atomic::AtomicBool::new(false),
+        };
+        let cell = crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value,
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        });
+        let entry = DelayedEntry {
+            map: "m".to_string(),
+            key: "k".to_string(),
+            operation: DelayedOp::StoreCell {
+                cell: Arc::clone(&cell),
+                expiration_time: 0,
+            },
+            store_time: 0,
+            sequence: 1,
+            retry_count: 0,
+            wal_sequences: BTreeSet::new(),
+        };
+
+        let read = || {
+            let stats = stats_alloc::INSTRUMENTED_SYSTEM.stats();
+            (stats.bytes_allocated as u64, stats.allocations as u64)
+        };
+        let delta =
+            |before: (u64, u64), after: (u64, u64)| (after.0 - before.0, after.1 - before.1);
+
+        let before = read();
+        let copy = cell.lock().value.clone();
+        let clone = delta(before, read());
+        std::hint::black_box(copy);
+
+        let before = read();
+        persist_entry(&inner, &entry).await.expect("persist_entry");
+        let flush = delta(before, read());
+
+        assert_eq!(
+            inner.adds.load(Ordering::Relaxed),
+            1,
+            "N={n}: one inner add per flushed entry"
+        );
+        assert!(
+            inner.matched.load(Ordering::Relaxed),
+            "N={n}: the inner add must receive the cell's value"
+        );
+        (clone, flush)
+    }
+
+    /// Flushing a cell entry to a store that does not accept encoded records
+    /// copies the record exactly once: the flush's per-entry byte and
+    /// allocation slopes equal those of one `RecordValue::clone()` of the same
+    /// slot (a second copy would double them; the constant part — the boxed
+    /// `add` future — does not grow with the slot).
+    ///
+    /// A local allocation proof, not a CI guard: CI never enables `count-alloc`,
+    /// and the counters are process-global, so it is meaningful only when run
+    /// alone and single-threaded:
+    /// `cargo test --release -p topgun-server --lib --features count-alloc -- --ignored --test-threads=1 count_alloc_`
+    #[cfg(feature = "count-alloc")]
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "local allocation proof: run single-threaded under count-alloc"]
+    async fn count_alloc_cell_flush_to_a_non_encoding_inner_copies_once() {
+        let (small_clone, small_flush) = cell_flush_allocations(1_000).await;
+        let (large_clone, large_flush) = cell_flush_allocations(10_000).await;
+        #[allow(clippy::cast_precision_loss)]
+        let slope = |small: u64, large: u64| (large as f64 - small as f64) / 9_000.0;
+        let clone_bytes = slope(small_clone.0, large_clone.0);
+        let flush_bytes = slope(small_flush.0, large_flush.0);
+        let clone_allocs = slope(small_clone.1, large_clone.1);
+        let flush_allocs = slope(small_flush.1, large_flush.1);
+        println!(
+            "count_alloc_cell_flush clone N=1000 bytes={} allocs={} N=10000 bytes={} allocs={}",
+            small_clone.0, small_clone.1, large_clone.0, large_clone.1
+        );
+        println!(
+            "count_alloc_cell_flush flush N=1000 bytes={} allocs={} N=10000 bytes={} allocs={}",
+            small_flush.0, small_flush.1, large_flush.0, large_flush.1
+        );
+        println!(
+            "count_alloc_cell_flush slope clone={clone_bytes:.3} B/entry {clone_allocs:.3} allocs/entry \
+             flush={flush_bytes:.3} B/entry {flush_allocs:.3} allocs/entry"
+        );
+        assert!(clone_bytes > 0.0, "the clone slope must be measurable");
+        assert!(
+            (flush_bytes - clone_bytes).abs() <= 0.1 * clone_bytes,
+            "one clone per flushed entry: flush slope {flush_bytes:.3} B/entry must equal the \
+             clone slope {clone_bytes:.3} B/entry within 10 %"
+        );
+        assert!(
+            (flush_allocs - clone_allocs).abs() <= 0.1 * clone_allocs,
+            "one clone per flushed entry: flush slope {flush_allocs:.3} allocs/entry must equal \
+             the clone slope {clone_allocs:.3} allocs/entry within 10 %"
         );
     }
 }

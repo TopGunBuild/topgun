@@ -1,0 +1,70 @@
+ORDER=OK manifest_commit=15e170b1 prefix_sha256=537a45cd70c8961249fc6174a53d3a121c1b23da1ee5dd66a2988a551e32f29b programs=14 freeze=e85adb1f
+== pre-M (read from the manifest, not recomputed) ==
+SHARES_STOP=none
+E_FROZEN=0.3316
+== cell b1 ==
+PA_b1=TRUE last_seq=29 min_seq=29
+PM1_b1=TRUE post_mortem_rows=0 empty_scrape_rows=0 first_empty_elapsed=none last_live_scrape_elapsed=840 need_ge=780
+RUNNER_EXIT_b1=0
+TOTAL_WRITES_b1=165542
+DURATION_b1=900
+SKIPPED_b1=0
+BYTES_ALLOC_RATE_b1=48286026.380952 points=15 h=8 window_s=420-840
+ALLOC_LIVE_b1=69813922
+== cell b2 ==
+PA_b2=TRUE last_seq=31 min_seq=29
+PM1_b2=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=900 need_ge=780
+RUNNER_EXIT_b2=0
+TOTAL_WRITES_b2=162158
+DURATION_b2=900
+SKIPPED_b2=0
+BYTES_ALLOC_RATE_b2=49390076.660417 points=16 h=8 window_s=420-900
+ALLOC_LIVE_b2=71390116
+== cell a1 ==
+PA_a1=TRUE last_seq=30 min_seq=29
+PM1_a1=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=900 need_ge=780
+RUNNER_EXIT_a1=0
+TOTAL_WRITES_a1=163211
+DURATION_a1=900
+SKIPPED_a1=0
+BYTES_ALLOC_RATE_a1=16683267.617949 points=15 h=8 window_s=480-870
+ALLOC_LIVE_a1=41982189
+== cell a2 ==
+PA_a2=TRUE last_seq=29 min_seq=29
+PM1_a2=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=840 need_ge=780
+RUNNER_EXIT_a2=0
+TOTAL_WRITES_a2=161459
+DURATION_a2=900
+SKIPPED_a2=0
+BYTES_ALLOC_RATE_a2=16152567.373810 points=15 h=8 window_s=420-840
+ALLOC_LIVE_a2=41995400
+== readings ==
+WRITE_DEV_b1=0.0150
+WRITE_DEV_b2=0.0057
+WRITE_DEV_a1=0.0007
+WRITE_DEV_a2=0.0100
+R_a1_b1=0.3455 LIVE_R_a1_b1=0.6013
+R_a1_b2=0.3378 LIVE_R_a1_b2=0.5881
+R_a2_b1=0.3345 LIVE_R_a2_b1=0.6015
+R_a2_b2=0.3270 LIVE_R_a2_b2=0.5883
+S_A=0.032324 S_B_LIVE=0.022325 S_A_LIVE=0.000315
+STOP_R_PREDICATE=FALSE (rate min I 0.3270 vs 1.0323; live min I 0.5881 vs 1.0223)
+EXCESS_PREDICATE=TRUE (1 - min I 0.6730 vs 1.5 E 0.4974)
+CLASS_THRESHOLDS: indeterminate s_b >= 0.0500 (min(E/2, 0.05)); confirmed max I <= 0.8342 (1 - E/2)
+BYTES_PER_WRITE_b1=262516.0
+BYTES_PER_WRITE_b2=274122.0
+BYTES_PER_WRITE_a1=91997.1
+BYTES_PER_WRITE_a2=90037.2
+== flags ==
+STOP=none
+VERDICT_BYTES=CONFIRMED
+VERDICT_LIVE=DESCRIPTIVE
+LIVE_SIGN=down
+I=[0.3270,0.3455]
+S_B=0.022606
+E=0.3316
+LIVE_I=[0.5881,0.6015]
+S_B_LIVE=0.022325
+EXCESS=TRUE
+BYTES_PER_WRITE=b1=262516.0 b2=274122.0 a1=91997.1 a2=90037.2 a/b=[0.3285,0.3504]
+WRITE_PARITY=OK max_dev=0.0150 totalWrites=165542/162158/163211/161459

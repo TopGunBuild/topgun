@@ -332,6 +332,70 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Discovered by:** SPEC-352 harness (built alongside the TG-WAL-003 crash-injection work).
 - **Status:** decided, **enforced**.
 
+### TG-WB-003: The inner store leads, never lags, the resolved frames; a pending OR key shares one slot cell
+
+- **Scope:** `WriteBehindDataStore` over any inner `MapDataStore` — what a flush persists for a key
+  relative to the WAL frames the write-behind has resolved — and the slot cell (`SlotCell`) a key
+  whose latest pending entry is a `DelayedOp::StoreCell` shares between the engine, that entry, its
+  staging slot and an in-flight flush.
+- **Statement:**
+  (a) The inner store's value for a key contains every mutation of that key whose frame the
+  write-behind has resolved. It may also contain later mutations whose frames are appended but
+  unresolved — recovery's in-order re-fold is idempotent over them (`TG-WAL-011`, `TG-OR-003`).
+  (b) It may also contain mutations that were never framed: any in-place mutation whose op ended
+  between the engine mutation and a successful append, whatever ended it (an append error, the
+  shutdown gate, the capacity rejection, cancellation of the write, a crash), and in-place writes
+  whose provenance owes no write-through. Every (b) mutation is un-acked and was already visible in
+  memory, and OR re-application is idempotent, so a retry converges. A cancelled op never promotes
+  its WAL sequence; while that sequence is `Appending`, the flushed watermark does not pass it
+  (true before and after TODO-672 items 1–2 make the append cancel-safe).
+  (c) For a key whose latest pending entry is a `StoreCell`, ONE cell is shared by the engine
+  (while resident), that entry, its staging slot and any in-flight flush. Eviction or removal drops
+  only the engine's reference; re-adoption (the materialize step of `update_in_place`, `get`'s load)
+  re-inserts the SAME cell, and only through the generation-checked insert (`TG-OR-007`); a flush
+  encodes the cell's state at flush time under the cell lock; a non-cell writer (`add()`, or engine
+  `put` on a shared cell) never mutates the cell; the cell is freed when its last reference drops.
+- **Maintaining code:** `write_behind.rs` — `add_with_witness` enqueuing and staging the caller's
+  cell (`DelayedOp::StoreCell`, `StagedValue`), `load_slot` answering `Loaded::Cell`,
+  `persist_entry` encoding the cell under its lock (`add_encoded`, else one clone into `add`),
+  `hard_flush`; `hashmap.rs` — `Arc<SlotCell>` slots, `put_if_absent_at` / `update_in_place`
+  adopting a `SlotInit::Cell`, `remove` / `remove_if` dropping only the engine's `Arc`;
+  `default_record_store.rs` — `WriteSource::Cell` on the write-through, `load_slot` in the
+  materialize loop and in `get`.
+- **Enforcing test:**
+  R6 (simulation, node failure, both `or_delta_wal` settings):
+  `sim::or_delta_recovery::tests::a_flush_that_leads_an_unresolved_frame_recovers_to_the_partition_converged_state`,
+  `sim::or_delta_recovery::tests::an_evicted_pending_key_re_adopted_before_its_flush_recovers_to_the_partition_converged_state`.
+  Re-adoption shares the cell — AC-2b and AC-2d together:
+  `storage::impls::default_record_store::tests::materialize::an_or_add_adopts_the_staged_cell_of_an_evicted_pending_key`
+  (AC-2b: the cell taken BEFORE the eviction is `Arc::ptr_eq` to the slot after the OR_ADD, so it
+  catches a re-adoption that copies the staged value into a new cell) and
+  `storage::impls::default_record_store::tests::materialize::an_evicted_cell_is_re_adopted_while_its_flush_is_pending`
+  (AC-2d: the engine's cell after `op2` is the queued entry's cell, and the flush persists
+  old ∪ op ∪ op2; it catches a re-adoption that materializes a fresh cell beside the queued one,
+  NOT a copying adoption — `op2` enqueues the copy it made, so the pointer check passes; AC-2b is
+  the guard for that); `storage::impls::default_record_store::tests::materialize::a_get_adopts_the_staged_cell_until_the_flush_releases_it`
+  (AC-2a: `get` adopts, the flush releases the queue and staging references, the cell is freed
+  after a further eviction). (b), un-framed mutations (AC-2e):
+  `storage::datastores::write_behind::prefix_watermark_proptest::an_unframed_mutation_after_a_pre_frame_append_error_is_unacked_and_idempotent`,
+  `::an_unframed_mutation_rejected_by_the_shutdown_gate_is_unacked_and_idempotent`,
+  `::an_unframed_or_remove_is_unacked_and_idempotent`,
+  `::a_cancelled_append_never_lets_the_watermark_pass_its_sequence`,
+  `::a_capacity_rejected_mutation_is_persisted_by_the_next_write_through`.
+  (a), lead-not-lag (AC-3):
+  `storage::impls::default_record_store::tests::materialize::two_in_place_writes_with_a_flush_between_persist_both`,
+  `storage::datastores::write_behind::prefix_watermark_proptest::a_flush_racing_an_in_flight_op_persists_every_resolved_frame`
+  (asserted against the WAL's resolved set). Flush of a cell to a non-encoding inner store (AC-6):
+  `storage::datastores::write_behind::tests::a_non_encoding_inner_receives_each_flushed_cell_once_with_its_current_value`
+  (one `inner.add` per flushed entry, carrying the cell's value at flush time).
+- **Violation consequence:** (a)/(b) — a flush that encodes a stale cell, or skips a pinned cell on
+  eviction, leaves the inner store behind a resolved frame whose WAL segment may then be collected:
+  acked OR ops lost after a crash. (c) — a copy where the design shares a cell reintroduces the
+  per-op whole-record copies the cell removes (engine, queue, staging), and a cell mutated by a
+  non-cell writer, or re-inserted without the generation check, can resurrect a removed value.
+- **Discovered by:** SPEC-373b (carve 9c part b — one slot cell per key).
+- **Status:** decided, **enforced**.
+
 ### TG-EVI-001: Never-evict-dirty — an unflushed write is never evicted from the resident cache
 
 - **Scope:** `evict_lru` in the record store.
@@ -634,13 +698,33 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   durable value, and a value read from the data store is inserted into the engine only if no removal
   of that key intervened since the read began; residency (resident, evicted, post-restart) and
   concurrent reads never change the result. `evict`, `evict_all`, `evict_expired` and `clear` can
-  drop dirty records and are outside this invariant; none has a production caller.
+  drop dirty records and are outside this invariant; none has a production caller. A slot cell
+  loaded from a pending write (`TG-WB-003` (c)) is re-adopted only through the same
+  generation-checked insert, so a removal that intervened between the read and the insert refuses
+  it exactly as it refuses a loaded value; a staged delete stops `load_slot` answering the cell.
+- **Per path, for the pending key's cell C** (g = the vacancy generation read before `load_slot`;
+  every insert of C is `SlotInit::Cell(C)`, generation-checked under the entry lock):
+  (i) `update_in_place` materialize — an eviction after g ⇒ `Stale` before the mutation, the retry
+  reloads the still-staged C; a reader's insert of C first ⇒ the writer mutates that same C in
+  place; REMOVE is excluded by the per-key writer; a flush of C's older entry encodes C before or
+  after the mutation (lead, never lag). (ii) `get` load (also the prune's non-resident `get`) — a
+  REMOVE staged after the load either removes the inserted C in `engine.remove` or moves g ⇒
+  `Stale`, answered but never cached; an eviction after g ⇒ `Stale`; a writer's insert first ⇒
+  `Resident`, the writer's C. (iii) eviction (`evict_lru` → `remove_if`, `evict`, `evict_all`,
+  `evict_expired`) — drops only the engine's `Arc` and bumps g; entry, staging and an in-flight
+  flush keep C; a write stamped on C after `evict_lru`'s snapshot is read under entry → cell and
+  keeps the key (`TG-EVI-001`). (iv) REMOVE — the staged delete replaces the queue entry and the
+  staging slot, both dropping C, so C is never re-adopted; `engine.remove` drops the engine's `Arc`
+  and bumps g; a reader that loaded C before the delete is removed or refused `Stale` as in (ii).
 - **Maintaining code:** `DefaultRecordStore::update_in_place` (resident probe, then load and a
   generation-checked insert, retried on `Stale` a bounded number of times, then a retryable error);
   `get` inserting through `StorageEngine::put_if_absent_at`; the engine's striped vacancy generation,
   advanced by every removal under the key's lock, also for an absent key; `remove` staging the
   durable delete before it empties the engine; REMOVE holding the same per-key writer as the
-  in-place OR writes (`crdt.rs`); `hard_flush` joining the flush loop before it drains (SPEC-374).
+  in-place OR writes (`crdt.rs`); `hard_flush` joining the flush loop before it drains (SPEC-374);
+  for slot cells, `MapDataStore::load_slot` (the write-behind answers the staged cell,
+  `Loaded::Cell`) in the materialize loop and in `get`, and the cell-aware inserts
+  `StorageEngine::put_if_absent_at` / `update_in_place` taking `SlotInit::Cell` (SPEC-373b).
 - **Enforcing test:** `crdt.rs::or_add_on_non_resident_key_keeps_the_durable_entries`,
   `::or_remove_on_non_resident_key_keeps_the_other_durable_entries`,
   `::or_add_after_eviction_keeps_the_durable_entries`,
@@ -651,10 +735,23 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `crdt.rs::remove_during_a_materializing_or_add_is_not_undone`,
   `::or_add_between_the_steps_of_a_remove_does_not_resurrect_it`;
   `write_behind.rs::hard_flush_applies_a_later_remove_after_the_loops_in_flight_store`.
+  On a staged cell (the same races, the reader or writer taking `Loaded::Cell`; each asserts the
+  `load_slot` park was hit exactly once): `default_record_store.rs::reader_does_not_cache_a_load_that_an_eviction_superseded_on_a_staged_cell`,
+  `::reader_does_not_cache_a_load_that_a_remove_superseded_on_a_staged_cell`,
+  `::reader_between_the_steps_of_a_remove_does_not_resurrect_it_on_a_staged_cell`,
+  `::evict_lru_keeps_a_record_written_after_its_snapshot_on_a_staged_cell`;
+  `crdt.rs::remove_during_a_materializing_or_add_is_not_undone_on_a_staged_cell`,
+  `::or_add_between_the_steps_of_a_remove_does_not_resurrect_it_on_a_staged_cell`. Re-adoption of
+  the cell, AC-2b together with AC-2d:
+  `default_record_store.rs::an_or_add_adopts_the_staged_cell_of_an_evicted_pending_key` (the cell
+  taken before the eviction is the slot's cell after the OR_ADD — catches a copying adoption) and
+  `::an_evicted_cell_is_re_adopted_while_its_flush_is_pending` (the engine holds the queued
+  entry's cell after `op2` and the flush persists every op — catches a fresh cell beside the
+  queued one, not a copying adoption, which AC-2b covers).
 - **Violation consequence:** the first OR write on a key after a restart or an eviction replaces the
   key's durable value with a one-op slot (every earlier entry and tombstone lost, unrecoverable from
   the WAL once its segments are collected), or a removed value is resurrected by a stale read.
-- **Discovered by:** TODO-700 (red tests), SPEC-374.
+- **Discovered by:** TODO-700 (red tests), SPEC-374; extended to slot cells by SPEC-373b.
 - **Status:** decided, **enforced**.
 
 ### TG-MRK-001: The OR-Map Merkle leaf hash is set-canonical (order-independent)

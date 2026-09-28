@@ -6,13 +6,15 @@
 
 use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use rand::Rng;
 
 use crate::storage::engine::{
-    FetchResult, IterationCursor, PutIfAbsentOutcome, StorageEngine, UpdateInPlaceOutcome,
+    held_cell_locks, new_slot_cell, FetchResult, IterationCursor, PutIfAbsentOutcome, SlotCell,
+    SlotInit, StorageEngine, UpdateInPlaceOutcome,
 };
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
 
@@ -26,8 +28,13 @@ const VACANCY_STRIPES: usize = 256;
 /// All operations are lock-free for readers and use fine-grained sharding
 /// internally (via `DashMap`) for writers. This makes it well-suited for
 /// read-heavy workloads typical of CRDT data grids.
+///
+/// Each slot is a shared [`SlotCell`], so an in-place write mutates the record
+/// the engine, a pending write-behind entry and its flush all hold, instead of
+/// copying it out. Locks are always taken entry (`DashMap` shard) first, cell
+/// second.
 pub struct HashMapStorage {
-    entries: DashMap<String, Record>,
+    entries: DashMap<String, Arc<SlotCell>>,
     /// Vacancy generations, indexed by key hash (see
     /// [`StorageEngine::vacancy_generation`]).
     vacancy: Box<[AtomicU64]>,
@@ -78,6 +85,16 @@ fn decode_cursor_offset(cursor: &IterationCursor) -> u64 {
     }
 }
 
+/// The record of a cell the engine just dropped: moved out when the engine held
+/// the only reference, else copied under the lock, leaving the cell to the
+/// holders that still owe it a write.
+fn take_record(cell: Arc<SlotCell>) -> Record {
+    match Arc::try_unwrap(cell) {
+        Ok(cell) => cell.into_inner(),
+        Err(shared) => shared.lock().clone(),
+    }
+}
+
 /// Encodes an offset into cursor state bytes (little-endian `u64`).
 fn encode_cursor_offset(offset: u64) -> Vec<u8> {
     offset.to_le_bytes().to_vec()
@@ -85,23 +102,48 @@ fn encode_cursor_offset(offset: u64) -> Vec<u8> {
 
 impl StorageEngine for HashMapStorage {
     fn put(&self, key: &str, record: Record) -> Option<Record> {
-        self.entries.insert(key.to_string(), record)
+        held_cell_locks::check("put");
+        match self.entries.entry(key.to_string()) {
+            Entry::Occupied(mut occ) => {
+                // The strong count is read under the entry lock: every new
+                // reference to a slot's cell is made by the engine under this
+                // lock or cloned from a holder, so "unshared" cannot change
+                // before the replace below.
+                if Arc::strong_count(occ.get()) == 1 {
+                    let mut current = occ.get().lock();
+                    Some(std::mem::replace(&mut *current, record))
+                } else {
+                    // A pending write still holds this cell and must persist what
+                    // it holds: the new record gets a cell of its own.
+                    let old = occ.get().lock().clone();
+                    occ.insert(new_slot_cell(record));
+                    Some(old)
+                }
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(new_slot_cell(record));
+                None
+            }
+        }
     }
 
     fn get(&self, key: &str) -> Option<Record> {
-        self.entries.get(key).map(|r| r.clone())
+        held_cell_locks::check("get");
+        self.entries.get(key).map(|cell| cell.lock().clone())
     }
 
     fn mark_stored(&self, key: &str, now: i64, token: u64) -> bool {
-        // `get_mut` holds the shard's write lock for the lifetime of the guard,
-        // so the token check and the mutation are atomic with respect to any
-        // other engine operation on this key — no separate get()+put() window.
-        // The token uniquely identifies the exact write the caller persisted:
-        // a concurrent same-key write (any timestamp, equal or newer) carries a
-        // different token and is left dirty until its own persist completes.
-        if let Some(mut entry) = self.entries.get_mut(key) {
-            if entry.metadata.write_token == token {
-                entry.metadata.on_store(now);
+        held_cell_locks::check("mark_stored");
+        // The entry guard keeps the slot from being removed or replaced while
+        // the cell lock makes the token check and the mutation atomic against
+        // any in-place write. The token uniquely identifies the exact write the
+        // caller persisted: a concurrent same-key write (any timestamp, equal or
+        // newer) carries a different token and is left dirty until its own
+        // persist completes.
+        if let Some(cell) = self.entries.get(key) {
+            let mut record = cell.lock();
+            if record.metadata.write_token == token {
+                record.metadata.on_store(now);
                 return true;
             }
         }
@@ -112,33 +154,37 @@ impl StorageEngine for HashMapStorage {
         &self,
         key: &str,
         now: i64,
-        init: Option<RecordValue>,
+        init: Option<SlotInit>,
         init_generation: Option<u64>,
         mutate: &mut dyn FnMut(&mut RecordValue) -> bool,
         cost_of: &dyn Fn(&RecordValue) -> u64,
     ) -> UpdateInPlaceOutcome {
+        held_cell_locks::check("update_in_place");
         // `entry` holds the shard write lock across the match, so the
         // check-mutate-or-insert is atomic against any other engine op on this
         // key — there is no get()+put() window a concurrent writer could tear.
         // The one owned-key allocation on the occupied path (bytes) is trivial
         // next to the per-op resident-snapshot churn this seam exists to remove.
         match self.entries.entry(key.to_string()) {
-            Entry::Occupied(mut occ) => {
-                let record = occ.get_mut();
-                if !mutate(&mut record.value) {
-                    return UpdateInPlaceOutcome::Unchanged;
+            Entry::Occupied(occ) => {
+                let cell = occ.get();
+                {
+                    let mut record = cell.lock();
+                    if !mutate(&mut record.value) {
+                        return UpdateInPlaceOutcome::Unchanged;
+                    }
+                    // Mint a fresh write token and bump version/last_update in
+                    // place, then re-cost from the mutated value.
+                    record.metadata.on_update(now);
+                    record.metadata.cost = cost_of(&record.value);
                 }
-                // Mint a fresh write token and bump version/last_update in place,
-                // then re-cost from the mutated value — no full-snapshot rebuild.
-                record.metadata.on_update(now);
-                record.metadata.cost = cost_of(&record.value);
                 UpdateInPlaceOutcome::Written {
-                    record: record.clone(),
+                    cell: Arc::clone(cell),
                     inserted: false,
                 }
             }
             Entry::Vacant(vac) => {
-                let Some(mut value) = init else {
+                let Some(init) = init else {
                     return UpdateInPlaceOutcome::Absent;
                 };
                 // A removal of the key since the caller read `init` means `init`
@@ -147,18 +193,35 @@ impl StorageEngine for HashMapStorage {
                 if init_generation.is_some_and(|g| g != self.vacancy_generation(key)) {
                     return UpdateInPlaceOutcome::Stale;
                 }
-                if !mutate(&mut value) {
-                    return UpdateInPlaceOutcome::Unchanged;
-                }
-                let cost = cost_of(&value);
-                let record = Record {
-                    value,
-                    metadata: RecordMetadata::new(now, cost),
+                let cell = match init {
+                    SlotInit::Value(mut value) => {
+                        if !mutate(&mut value) {
+                            return UpdateInPlaceOutcome::Unchanged;
+                        }
+                        let cost = cost_of(&value);
+                        new_slot_cell(Record {
+                            value,
+                            metadata: RecordMetadata::new(now, cost),
+                        })
+                    }
+                    SlotInit::Cell(cell) => {
+                        {
+                            // A pending write owns this cell: a `false` from the
+                            // closure leaves it untouched (the caller obligation
+                            // above), and nothing is inserted.
+                            let mut record = cell.lock();
+                            if !mutate(&mut record.value) {
+                                return UpdateInPlaceOutcome::Unchanged;
+                            }
+                            let cost = cost_of(&record.value);
+                            record.metadata = RecordMetadata::new(now, cost);
+                        }
+                        cell
+                    }
                 };
-                let clone = record.clone();
-                vac.insert(record);
+                vac.insert(Arc::clone(&cell));
                 UpdateInPlaceOutcome::Written {
-                    record: clone,
+                    cell,
                     inserted: true,
                 }
             }
@@ -166,30 +229,46 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn vacancy_generation(&self, key: &str) -> u64 {
+        held_cell_locks::check("vacancy_generation");
         self.stripe(key).load(Ordering::Acquire)
     }
 
-    fn put_if_absent_at(&self, key: &str, record: Record, generation: u64) -> PutIfAbsentOutcome {
+    fn put_if_absent_at(
+        &self,
+        key: &str,
+        init: SlotInit,
+        metadata: RecordMetadata,
+        generation: u64,
+    ) -> PutIfAbsentOutcome {
+        held_cell_locks::check("put_if_absent_at");
         match self.entries.entry(key.to_string()) {
-            Entry::Occupied(occ) => PutIfAbsentOutcome::Resident(occ.get().clone()),
+            Entry::Occupied(occ) => PutIfAbsentOutcome::Resident(occ.get().lock().clone()),
             Entry::Vacant(vac) => {
                 if generation != self.vacancy_generation(key) {
                     return PutIfAbsentOutcome::Stale;
                 }
-                vac.insert(record);
+                let cell = match init {
+                    SlotInit::Value(value) => new_slot_cell(Record { value, metadata }),
+                    SlotInit::Cell(cell) => {
+                        cell.lock().metadata = metadata;
+                        cell
+                    }
+                };
+                vac.insert(cell);
                 PutIfAbsentOutcome::Inserted
             }
         }
     }
 
     fn remove(&self, key: &str) -> Option<Record> {
+        held_cell_locks::check("remove");
         // Through `entry` so the bump happens under the key's lock whether or
         // not the key is resident: removing a non-resident key must still
         // invalidate a reader that loaded it from the data store.
         match self.entries.entry(key.to_string()) {
             Entry::Occupied(occ) => {
                 self.bump(key);
-                Some(occ.remove())
+                Some(take_record(occ.remove()))
             }
             Entry::Vacant(_vac) => {
                 self.bump(key);
@@ -199,39 +278,47 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn remove_if(&self, key: &str, predicate: &dyn Fn(&Record) -> bool) -> Option<Record> {
+        held_cell_locks::check("remove_if");
         self.entries
-            .remove_if(key, |_, record| {
-                let remove = predicate(record);
+            .remove_if(key, |_, cell| {
+                let remove = predicate(&cell.lock());
                 if remove {
                     self.bump(key);
                 }
                 remove
             })
-            .map(|(_, r)| r)
+            .map(|(_, cell)| take_record(cell))
     }
 
     fn touch(&self, key: &str, now: i64) -> Option<Record> {
-        let mut entry = self.entries.get_mut(key)?;
-        entry.metadata.on_access(now);
-        Some(entry.clone())
+        held_cell_locks::check("touch");
+        let cell = self.entries.get(key)?;
+        let mut record = cell.lock();
+        record.metadata.on_access(now);
+        Some(record.clone())
     }
 
     fn contains_key(&self, key: &str) -> bool {
+        held_cell_locks::check("contains_key");
         self.entries.contains_key(key)
     }
 
     fn len(&self) -> usize {
+        held_cell_locks::check("len");
         self.entries.len()
     }
 
     fn is_empty(&self) -> bool {
+        held_cell_locks::check("is_empty");
         self.entries.is_empty()
     }
 
     fn clear(&self) {
+        held_cell_locks::check("clear");
         // Each resident key is bumped under its own lock as it is removed; the
         // stripes are then all advanced, because `retain` never visits a key
-        // that is absent but being loaded.
+        // that is absent but being loaded. A cell a pending write still holds
+        // stays alive with that holder.
         self.entries.retain(|key, _| {
             self.bump(key);
             false
@@ -246,17 +333,23 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn estimated_cost(&self) -> u64 {
-        self.entries.iter().map(|r| r.value().metadata.cost).sum()
+        held_cell_locks::check("estimated_cost");
+        self.entries
+            .iter()
+            .map(|entry| entry.value().lock().metadata.cost)
+            .sum()
     }
 
     fn snapshot_iter(&self) -> Vec<(String, Record)> {
+        held_cell_locks::check("snapshot_iter");
         self.entries
             .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .map(|entry| (entry.key().clone(), entry.value().lock().clone()))
             .collect()
     }
 
     fn random_samples(&self, sample_count: usize) -> Vec<(String, Record)> {
+        held_cell_locks::check("random_samples");
         if sample_count == 0 {
             return Vec::new();
         }
@@ -265,7 +358,7 @@ impl StorageEngine for HashMapStorage {
         let mut reservoir: Vec<(String, Record)> = Vec::with_capacity(sample_count);
 
         for (i, entry) in self.entries.iter().enumerate() {
-            let pair = (entry.key().clone(), entry.value().clone());
+            let pair = (entry.key().clone(), entry.value().lock().clone());
             if i < sample_count {
                 reservoir.push(pair);
             } else {
@@ -278,6 +371,12 @@ impl StorageEngine for HashMapStorage {
         }
 
         reservoir
+    }
+
+    #[cfg(test)]
+    fn test_slot(&self, key: &str) -> Option<Arc<SlotCell>> {
+        held_cell_locks::check("test_slot");
+        self.entries.get(key).map(|cell| Arc::clone(&cell))
     }
 
     fn fetch_keys(&self, cursor: &IterationCursor, size: usize) -> FetchResult<String> {
@@ -352,6 +451,75 @@ mod tests {
             },
             metadata: RecordMetadata::new(0, cost),
         }
+    }
+
+    // The check exists in debug builds only, and so does its only test.
+    #[cfg(debug_assertions)]
+    const HELD_LOCK_PANIC: &str = "storage engine entered while this thread holds a slot-cell lock";
+
+    /// The pattern that hangs silently without the check: a cell guard passed
+    /// as an argument lives until the call returns, and the engine call locks
+    /// the same cell. Run on its own thread with a deadline, so a missing check
+    /// fails the test instead of hanging the suite.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn re_locking_a_held_cell_through_the_engine_panics_by_name() {
+        let storage = HashMapStorage::new();
+        storage.put("k", make_record(1));
+        let cell = storage.test_slot("k").expect("resident");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                storage.mark_stored("k", 1, cell.lock().metadata.write_token);
+            }));
+            let message = outcome
+                .err()
+                .and_then(|payload| payload.downcast_ref::<String>().cloned());
+            let _ = tx.send(message);
+        });
+        let message = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("re-locking a held cell through the engine must panic, not hang")
+            .expect("the engine call must panic");
+        assert!(
+            message.starts_with(HELD_LOCK_PANIC) && message.contains("`mark_stored`"),
+            "unexpected panic message: {message}"
+        );
+    }
+
+    /// Entering the engine while holding any cell lock — here another key's —
+    /// takes an entry lock after a cell lock, against the entry → cell order.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(
+        expected = "storage engine entered while this thread holds a slot-cell lock: `get`"
+    )]
+    fn an_engine_call_under_another_keys_cell_lock_panics_by_name() {
+        let storage = HashMapStorage::new();
+        storage.put("a", make_record(1));
+        storage.put("b", make_record(2));
+        let cell = storage.test_slot("a").expect("resident");
+        let _held = cell.lock();
+        let _ = storage.get("b");
+    }
+
+    /// The count is per held guard: nested guards count twice, and once every
+    /// guard is dropped the engine is callable again.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn the_held_lock_count_returns_to_zero_when_the_guards_drop() {
+        let storage = HashMapStorage::new();
+        storage.put("a", make_record(1));
+        storage.put("b", make_record(2));
+        let a = storage.test_slot("a").expect("resident");
+        let b = storage.test_slot("b").expect("resident");
+        {
+            let _outer = a.lock();
+            let _inner = b.lock();
+        }
+        let token = a.lock().metadata.write_token;
+        assert!(storage.mark_stored("a", 1, token));
+        assert_eq!(storage.get("b").map(|r| r.metadata.cost), Some(2));
     }
 
     #[test]
