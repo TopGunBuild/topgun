@@ -1,0 +1,135 @@
+# G4 Mac-side transcript (generated; scratch path -> @SCRATCH@, repo path -> @REPO@)
+
+=== context
+host: Darwin 27.0.0; awk: awk version 20200816; HEAD=a9376841; worktree HEAD=a9376841
+
+=== 1. bash -n on every G4 program
+bash -n spec376-preflight.sh: OK
+bash -n spec376-parity.sh: OK
+bash -n spec376-synth373b-linux.sh: OK
+
+=== 2. AC-7: diff spec373b-synth.sh spec376-synth373b-linux.sh (exactly one hunk)
+114,115c114,115
+< sed -i '' 's/^480,1.0,100,\([0-9]*\),\([0-9.]*\),480,16,[0-9]*$/480,1.0,100,\1,\2,480,16,x1/' "$OUT/S10/spec373b-b1.csv" \
+<   || { echo "FATAL: S10 setup (BSD sed -i '') failed" >&2; exit 2; }
+---
+> sed -i 's/^480,1.0,100,\([0-9]*\),\([0-9.]*\),480,16,[0-9]*$/480,1.0,100,\1,\2,480,16,x1/' "$OUT/S10/spec373b-b1.csv" \
+>   || { echo "FATAL: S10 setup (GNU sed -i) failed" >&2; exit 2; }
+diff rc=1
+hunks=1
+
+=== 3. AC-4: Linux-only guard of spec376-preflight.sh on macOS (no file created)
+FATAL: spec376-preflight.sh runs on Linux only (uname -s = 'Darwin')
+preflight (no args) rc=2
+FATAL: spec376-preflight.sh runs on Linux only (uname -s = 'Darwin')
+preflight (no args) LOG_DIR=scratch rc=2
+FATAL: spec376-preflight.sh runs on Linux only (uname -s = 'Darwin')
+preflight --apply rc=2
+FATAL: spec376-preflight.sh runs on Linux only (uname -s = 'Darwin')
+preflight --apply LOG_DIR=scratch rc=2
+evidence dir listing before=a0fcca3a8ea88813 after=a0fcca3a8ea88813 unchanged
+spec376-preflight-*.log in evidence dir: 0; in scratch log dir: 0
+PREFLIGHT= lines printed: 0 (the guard exits before any output but the FATAL)
+
+=== 4. F1: preflight --apply on stubs, wrong hostname (topgun-new) -> refused, nothing changed
+stubs: uname->Linux hostname->topgun-new nproc->4 ss->'exit 0' systemctl/tee->append argv to record; unit file: none; THP pre: [always] madvise never
+exit=1 logs=1 name_ok=yes
+  CHECK identity=FAIL hostname=topgun-new nproc=4 (need topgun-bench / 4)
+  CHECK isolation=PASS no dokploy/traefik/dockerd process or unit; 8080 and 47376 free
+last line: PREFLIGHT=FAIL failed=identity PREFLIGHT_AT=2026-09-28T16:54:28Z
+PREFLIGHT= lines in log: 1 (only the last)
+MUTATIONS=0
+THP enabled: cmp identical to pre-run copy
+THP defrag: cmp identical to pre-run copy
+F1 VERDICT: PASS (failed=identity, MUTATIONS=0, THP untouched)
+
+=== 5. control B: wrong host + docker.service unit + 8080 listening -> both named, nothing changed
+stubs: uname->Linux hostname->topgun-new nproc->4 ss->'echo "LISTEN 0 4096 0.0.0.0:8080 0.0.0.0:*"' systemctl/tee->append argv to record; unit file: docker.service; THP pre: [always] madvise never
+exit=1 logs=1 name_ok=yes
+  CHECK identity=FAIL hostname=topgun-new nproc=4 (need topgun-bench / 4)
+  CHECK isolation=FAIL units=@SCRATCH@/ctlB/root/lib/systemd/system/docker.service listening=8080/
+last line: PREFLIGHT=FAIL failed=identity,isolation PREFLIGHT_AT=2026-09-28T16:54:29Z
+PREFLIGHT= lines in log: 1 (only the last)
+MUTATIONS=0
+THP enabled: cmp identical to pre-run copy
+THP defrag: cmp identical to pre-run copy
+
+=== 6. control A: right identity (topgun-bench) -> --apply issues its changes ONLY through mutate (proves the F1 observation is not vacuous; the Mac has no /proc, so the later checks FAIL)
+stubs: uname->Linux hostname->topgun-bench nproc->4 ss->'exit 0' systemctl/tee->append argv to record; unit file: none; THP pre: [always] madvise never
+exit=1 logs=1 name_ok=yes
+  CHECK identity=PASS hostname=topgun-bench nproc=4
+  CHECK isolation=PASS no dokploy/traefik/dockerd process or unit; 8080 and 47376 free
+  CHECK os=FAIL uname=Linux VERSION_ID=absent
+  CHECK timers=FAIL apt-daily.timer=absent,apt-daily-upgrade.timer=absent,man-db.timer=absent,e2scrub_all.timer=absent,fstrim.timer=absent,unattended-upgrades.service=absent
+  CHECK load=FAIL load1=absent after 21 poll(s)
+  CHECK steal=FAIL steal_pct=absent
+  CHECK swap=FAIL swapon_rc=127 swapon='@REPO@/packages/server-rust/benches/soak_harness/evidence/spec376-preflight.sh: line 232: swapon: command not found' SwapTotal=absent
+  CHECK thp=FAIL enabled=always defrag=always
+  CHECK memory=FAIL MemAvailable=absent kB (need >= 14680064)
+  CHECK disk=PASS /opt free=522110220 KiB >= 41943040
+  CHECK clock=FAIL ntp='absent'
+  CHECK tools=FAIL missing=original-awk
+last line: PREFLIGHT=FAIL failed=os,timers,load,steal,swap,thp,memory,clock,tools PREFLIGHT_AT=2026-09-28T17:04:40Z
+PREFLIGHT= lines in log: 1 (only the last)
+MUTATIONS=13
+  mutate cmdlog: systemctl stop apt-daily.timer apt-daily-upgrade.timer man-db.timer e2scrub_all.timer fstrim.timer unattended-upgrades.service
+  mutate cmdlog: tee @SCRATCH@/ctlA/root/sys/kernel/mm/transparent_hugepage/enabled
+  mutate cmdlog: tee @SCRATCH@/ctlA/root/sys/kernel/mm/transparent_hugepage/defrag
+  stub record: systemctl stop apt-daily.timer apt-daily-upgrade.timer man-db.timer e2scrub_all.timer fstrim.timer unattended-upgrades.service
+  stub record: tee @SCRATCH@/ctlA/root/sys/kernel/mm/transparent_hugepage/enabled
+  stub record: tee @SCRATCH@/ctlA/root/sys/kernel/mm/transparent_hugepage/defrag
+  stub record: systemctl list-timers --all --no-pager
+  stub record: systemctl is-active apt-daily.timer
+  stub record: systemctl is-active apt-daily-upgrade.timer
+  stub record: systemctl is-active man-db.timer
+  stub record: systemctl is-active e2scrub_all.timer
+  stub record: systemctl is-active fstrim.timer
+  stub record: systemctl is-active unattended-upgrades.service
+THP enabled: cmp identical to pre-run copy
+THP defrag: cmp identical to pre-run copy
+
+=== 7. R7.3: Darwin reference from two checkout paths (main tree, git worktree), different scratch dirs
+main tree rc=0 darwin-ref: awk='awk version 20200816' sections=19 OK
+worktree rc=0 darwin-ref: awk='awk version 20200816' sections=19 OK
+cmp: identical
+cmp vs committed spec376-synth-ref-darwin.txt: identical
+sha256 5dbe02258b05ebcddfefc5be6d945d050c74597fa60edc172c2d58d1fcb87f1a lines=317 sections=19 rc_lines=19 col0_FATAL=0 indented_FATAL=4 @OUT@=0
+
+=== 8. parity main mode on the Mac (NOT binding; binding run = server step 3a): stubs original-awk -> /usr/bin/awk (BWK), sed wrapper accepting GNU -i
+SYNTH_PARITY=PASS cases=19 awk='awk version 20200816'
+SYNTH_PARITY_MAWK=n/a reason=absent
+SYNTH_PARITY_GAWK=n/a reason=absent
+rc=0
+-- N1 no original-awk
+FATAL: original-awk is not installed; no other interpreter is substituted
+SYNTH_PARITY=FAIL reason=no_original_awk
+-- N2 original-awk with a non-BWK banner
+FATAL: awk banner 'mawk 1.3.4 20200120' does not match ^awk version [0-9]{8}
+SYNTH_PARITY=FAIL reason=awk_banner
+-- N3 reference missing
+SYNTH_PARITY=FAIL reason=ref_missing
+-- N4 reference empty
+SYNTH_PARITY=FAIL reason=ref_empty
+-- N5 reference stopped at an early FATAL
+  | reference problem: sections(1)
+SYNTH_PARITY=FAIL reason=ref_invalid
+-- N6 reference with 18 sections
+  | reference problem: sections(18)
+SYNTH_PARITY=FAIL reason=ref_invalid
+-- N7 reference with a column-0 FATAL:
+  | reference problem: fatal_line
+SYNTH_PARITY=FAIL reason=ref_invalid
+-- N8 one reference value changed
+SYNTH_PARITY=FAIL reason=diff lines=44
+-- N9 scratch under the evidence dir
+FATAL: the scratch dir must not be the evidence dir or under it
+SYNTH_PARITY=FAIL reason=scratch
+N9 created under evidence: no
+-- recorded-only paths with fake mawk/gawk (both -> BWK awk; exercises the code path only)
+SYNTH_PARITY=PASS cases=19 awk='awk version 20200816'
+SYNTH_PARITY_MAWK=PASS rc=0
+SYNTH_PARITY_GAWK=PASS rc=0
+
+=== 9. AC-1: frozen parents untouched vs CAL_PIN
+git diff --quiet bee21fcd..HEAD -- spec37[0-3]* spec3{49,66}*: clean
+done
