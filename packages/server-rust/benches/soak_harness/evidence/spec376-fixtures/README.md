@@ -8,18 +8,12 @@ kernel's own identities (`Rss = Shared_Clean + Shared_Dirty + Private_Clean + Pr
 `VmRSS = RssAnon + RssFile + RssShmem`, `Pss = Pss_Anon + Pss_File + Pss_Shmem`), so a case tests the sampler and
 not an impossible input — except M5, which breaks R0.2 on purpose.
 
-## Layout (the fixture-mode contract)
+## Layout
 
-Each case directory is a proc root for pid `4242`:
-
-| path | meaning |
-|---|---|
-| `<case>/4242/smaps_rollup` | stands in for `/proc/4242/smaps_rollup` |
-| `<case>/4242/status` | stands in for `/proc/4242/status` |
-| `<case>/4242.alive` | `1` = the pid is alive, `0` = gone; replaces `kill -0 <pid>` in fixture mode |
-| `<case>/4242.ps_rss` | the literal `ps -o rss= -p 4242` output (KiB, right-aligned); absent = `ps` printed nothing |
-
-A proc root that is not `/proc` selects fixture mode; the live path never reads `*.alive` or `*.ps_rss`.
+Each case directory is a proc root for pid `4242`: `<case>/4242/{smaps_rollup,status}`, `<case>/4242.alive`,
+`<case>/4242.ps_rss`. The fixture-mode contract (what selects fixture mode, what `.alive` and `.ps_rss` mean, and
+that a proc-root override is permitted only for these fixtures) is normative in `spec376-manifest.md` §1,
+"Fixtures"; it is not restated here so the two cannot drift.
 
 ## Cases and hand-computed reference values
 
