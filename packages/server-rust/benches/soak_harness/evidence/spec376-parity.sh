@@ -32,7 +32,10 @@
 # that order, one "rc=<n>" line per section, and no column-0 "FATAL:" line
 # (the synth's own setup failures print there; the verdict program's FATALs
 # for cases S11/S12/S18/S19 are expected output and are indented by the
-# synth). Otherwise SYNTH_PARITY=FAIL reason=ref_invalid.
+# synth). Otherwise SYNTH_PARITY=FAIL reason=ref_invalid. Before that, the
+# reference's sha256 must equal the one listing of it in spec376-manifest.md
+# section 1 (reason=ref_sha_manifest|ref_sha_unlisted|ref_sha_dup|
+# ref_sha_mismatch otherwise).
 set -uo pipefail
 export LC_ALL=C
 
@@ -138,6 +141,24 @@ echo "parity awk: ${SHIM}/awk -> ${OA} banner='${BANNER}'"
 
 [ -e "$REF" ] || fail ref_missing
 [ -s "$REF" ] || fail ref_empty
+# The reference is data, not a program, but an edited reference would move
+# this verdict as surely as an edited program: its sha256 is pinned in the
+# manifest's section 1 and must match exactly one listing there before the
+# reference is trusted.
+MANIFEST="$SCRIPT_DIR/spec376-manifest.md"
+REF_RE='packages/server-rust/benches/soak_harness/evidence/spec376-synth-ref-darwin\.txt'
+if [ ! -f "$MANIFEST" ] || ! grep -q '^## APPEND-ONLY BELOW' "$MANIFEST"; then fail ref_sha_manifest; fi
+REF_WANT="$(sed '/^## APPEND-ONLY BELOW/q' "$MANIFEST" | sed -nE "s|^- \`([0-9a-f]{64})\` \`${REF_RE}\`.*|\1|p")"
+case "$(printf '%s\n' "$REF_WANT" | grep -c .)" in
+  0) fail ref_sha_unlisted ;;
+  1) ;;
+  *) fail ref_sha_dup ;;
+esac
+REF_GOT="$(shasum -a 256 "$REF" 2>/dev/null | awk '{print $1}')"
+if [ "$REF_GOT" != "$REF_WANT" ]; then
+  echo "  | reference sha256 '${REF_GOT}' != section 1 ${REF_WANT}"
+  fail ref_sha_mismatch
+fi
 P="$(ref_problem "$REF")"
 [ -z "$P" ] || { echo "  | reference problem: ${P}"; fail ref_invalid; }
 

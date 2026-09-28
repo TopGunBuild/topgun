@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Linux soak cell runner (SPEC-376, topgun-bench) -- a copy of
+# Linux soak cell runner (topgun-bench) -- a copy of
 # spec373b-cells.sh, which is NOT edited.
 #
 # A COPY EXISTS BECAUSE THE PARENT RUNNER CANNOT RUN ON LINUX. Its per-row

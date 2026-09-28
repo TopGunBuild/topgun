@@ -245,6 +245,13 @@ Every `spec376-*` program plus the frozen parents they execute: `spec373b-verdic
 `spec371-predicates.sh`, `spec349c2-fit.awk`, `spec366-p5.awk`, `spec366-p67.awk` (and `spec373b-order.sh` if
 called).
 
+### Data inputs frozen at M (sha256; `spec376-parity.sh` and `ORDER=OK` check these bytes)
+Not programs (outside the smoke's `SMOKE_PROG_SHA=` binding, which draws only `is_program` files), but inputs a
+gate trusts. `spec376-parity.sh` refuses the reference unless its sha256 equals exactly one listing below
+(`SYNTH_PARITY=FAIL reason=ref_sha_manifest|ref_sha_unlisted|ref_sha_dup|ref_sha_mismatch`); `spec376-order.sh`
+hashes every `- \`<sha256>\` \`<path>\`` line of §1, so it re-checks this one too.
+- `5dbe02258b05ebcddfefc5be6d945d050c74597fa60edc172c2d58d1fcb87f1a` `packages/server-rust/benches/soak_harness/evidence/spec376-synth-ref-darwin.txt` — Darwin reference transcript of the frozen `spec373b-synth.sh` (R7.3; captured G4)
+
 ### Hunk maps — *G2a (cells), G2b (chain, order), G3 (predicates), G4 (synth copy) filled*
 
 **`diff spec373b-cells.sh spec376-cells.sh`** (57 hunks; parent line ranges; "item" = the nine-item closed list in
@@ -431,7 +438,7 @@ comment line changed (the copy keeps the parent's header, usage text and case ta
   and that the banner matches `^awk version [0-9]{8}`; validates the reference; runs the Linux copy; substitutes the
   scratch path (as passed and physical) by `@OUT@` as a literal; prints **exactly one** `SYNTH_PARITY=` line:
   `PASS cases=19 awk='<banner>'`, or `FAIL reason=<usage|scratch|no_original_awk|awk_shim|awk_banner|ref_missing|
-  ref_empty|ref_invalid|transcript_empty|diff lines=<n>|synth_rc=<n>>` (a diff is echoed with the `  | ` prefix);
+  ref_empty|ref_sha_manifest|ref_sha_unlisted|ref_sha_dup|ref_sha_mismatch|ref_invalid|transcript_empty|diff lines=<n>|synth_rc=<n>>` (a diff is echoed with the `  | ` prefix);
   then `SYNTH_PARITY_MAWK=` / `SYNTH_PARITY_GAWK=` (`PASS rc=` / `FAIL diff_lines= rc=` / `n/a reason=absent`,
   recorded only; gawk via the two-line `exec gawk --posix "$@"` wrapper). Exit 0 PASS, 1 FAIL, 2 usage.
 - **Reference validity (interpretation of R7.4 "no line matching `FATAL:`").** Valid = the section headers are
@@ -445,8 +452,9 @@ comment line changed (the copy keeps the parent's header, usage text and case ta
   BWK `awk version 20200816`, runs the FROZEN `spec373b-synth.sh`, validates, prints the substituted transcript).
   Captured from the main tree and from a `git worktree` at `d09325fd` with different scratch dirs: `cmp` identical,
   317 lines, 19 sections, sha256 `5dbe0225…7f1a`; no `@OUT@` occurs (the frozen synth prints no path). Transcript:
-  `spec376-g4-mac.txt`. It is a data input, not a program (`is_program` does not match `.txt`); whether §1 lists
-  it for ORDER is G5's decision (G2b note).
+  `spec376-g4-mac.txt`. It is a data input, not a program (`is_program` does not match `.txt`); decided in G5
+  (conductor ruling): §1 lists its sha256 under "Data inputs frozen at M", parity checks the reference against that
+  line before trusting it, and ORDER re-hashes it.
 
 ### Predicates and calibration-reading contract (`spec376-predicates.sh`, `spec376-calib.sh`, G3)
 - **Predicates output.** `spec376-predicates.sh <EV> spec376-<cell> <BUILDS>` prints the predicates block on stdout;
@@ -529,8 +537,8 @@ Interfaces the chain fixes for later groups:
   (the runner writes it only after its flavour-marker assertion passed) together with the label's `marker=ok`
   builds line; memory rows use the cell matrix's single `  duration: <n>s` line.
 - **Program binding (G5/G6):** M's §1 must list exactly the `is_program` files the smoke printed, each once; a
-  non-program input such as `spec376-synth-ref-darwin.txt` is outside the binding (to decide in G5 whether §1
-  also lists it for ORDER).
+  non-program input such as `spec376-synth-ref-darwin.txt` is outside the binding; §1 lists it separately under
+  "Data inputs frozen at M" (parity and ORDER check it, G5).
 
 ### The §1 prefix sha256 — the command
 Computed at M and at every later commit by exactly this command (the marker line is included in the hash); M's value
