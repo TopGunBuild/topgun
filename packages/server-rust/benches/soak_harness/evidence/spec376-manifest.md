@@ -228,7 +228,10 @@ chain appends `RUNNER_EXIT=`):
 - Every run that got past launch ends its runner console with exactly these three lines, once each, in this order:
   `steal_pct=<%.4f|n/a>` (R2.6; `n/a` when a `/proc/stat` read fails or the total-tick delta is 0),
   `post_mortem_mem_reads=<n>`, `mem_invariant_violations=<n>` (R0.2). A run refused before launch prints none of
-  them (PMEM then reads `violations=absent`).
+  them (PMEM then reads `violations=absent`). A counter file that was never created (the runner deletes both before
+  launch; the helper creates one only on its first event) reads `0`; a counter file that exists but does not hold a
+  plain integer prints the literal `non_numeric` (G5, cross-vendor review), which PMEM reads as
+  `violations=non_numeric`, never as `0`.
 - A blind memory sampler on a live pid prints `SAMPLER FATAL: memory sampler blind on live pid <pid>: <field>=<absent|dup|non_numeric>[,…] at elapsed=<s>s`.
 - `post_mortem_mem_reads` counts memory reads that found the pid gone. In the runner such a read never produces a
   row: the read sits where the parent read `ps -o rss=`, so a gone pid ends sampling (run over) or is a SAMPLER FATAL
@@ -240,10 +243,27 @@ Smoke chain log excerpt; builds sha256 lines; awk banner; `SYNTH_PARITY`, `SYNTH
 `SMOKE_ADMISSION`; the smoke's `SMOKE_PROG_SHA=` lines (must equal the program list below file-for-file and
 sha-for-sha, else re-smoke before M).
 
-### Programs frozen at M (sha256; `ORDER=OK` re-checks these bytes) — *to fill (G5 candidate list, G6 at M)*
+### Programs frozen at M (sha256; `ORDER=OK` re-checks these bytes) — *G5 candidate (M0); G6 re-checks at M*
 Every `spec376-*` program plus the frozen parents they execute: `spec373b-verdict.sh`, `spec373b-shares.py`,
-`spec371-predicates.sh`, `spec349c2-fit.awk`, `spec366-p5.awk`, `spec366-p67.awk` (and `spec373b-order.sh` if
-called).
+`spec371-predicates.sh`, `spec349c2-fit.awk`, `spec366-p5.awk`, `spec366-p67.awk` (`spec373b-order.sh` is not
+called). Written at the G5 candidate commit (M0); at M, G6 confirms this list equals the admitting smoke's
+`SMOKE_PROG_SHA=` lines file-for-file and sha-for-sha (else re-smoke, not M) and rewrites it only if a program changed.
+- `7f224061e56a545c7f6f3476ed3bc7b90f5aaa49819daa4c710919dc34810801` `packages/server-rust/benches/soak_harness/evidence/spec376-calib.sh`
+- `0d5c69b594c5fd891877f74400881cbfdca0908afd59702163433239fba6c5ee` `packages/server-rust/benches/soak_harness/evidence/spec376-cells.sh`
+- `c43f8f2b1ce3ed68b1607c7798d2aa10ed37d98e2066c504e6fa3437a5d265cc` `packages/server-rust/benches/soak_harness/evidence/spec376-chain.sh`
+- `c26114169af16d4d5dd242d52fee642e10d08980a8cdf8789e5112c7b45469d9` `packages/server-rust/benches/soak_harness/evidence/spec376-order.sh`
+- `7dd646bcc0e22c6dd48bdfab5d11da628b279abecb6acec727e7e56e87a5cd61` `packages/server-rust/benches/soak_harness/evidence/spec376-parity.sh`
+- `dfbdd313d400ed78e90247690c3639a26b3ffa5c2ea9742d6bbc669027e2d476` `packages/server-rust/benches/soak_harness/evidence/spec376-predicates.sh`
+- `49eba7e94b2e8012db263f9187cd2fe93bd102e23a701dfeea70d3a68d3bd3c3` `packages/server-rust/benches/soak_harness/evidence/spec376-preflight.sh`
+- `d05727f002087cb37fb8abce8f5f935dce11af5e0e0373c873e6a393a8a6f7b4` `packages/server-rust/benches/soak_harness/evidence/spec376-procmem.sh`
+- `a42f3a225e9497ad11418588c920efd5293f00b9c9c4c9ac9cb77f6ff81c7013` `packages/server-rust/benches/soak_harness/evidence/spec376-synth.sh`
+- `5ab7bdafd3a4e9b9ef9b690bdc0865b44f245901d6963b1a93cfeaaeaebbc011` `packages/server-rust/benches/soak_harness/evidence/spec376-synth373b-linux.sh`
+- `d5cef0dfe2033f13dc8c5446a49233046a38beeaa43f5ea24817aab1d836dffa` `packages/server-rust/benches/soak_harness/evidence/spec373b-verdict.sh`
+- `e7931e2c02b11c72f98f51604c4a7428c762552be8e4d1fdfcb880e5b1247c67` `packages/server-rust/benches/soak_harness/evidence/spec373b-shares.py`
+- `7d2ca6214beff1c4c0042879823172a45452ef99c06ca49521d5c96889a61d1b` `packages/server-rust/benches/soak_harness/evidence/spec371-predicates.sh`
+- `840813461e3b1bd5c3a79291044d8ac515e09b94333ee530cd6a10de8fa0436f` `packages/server-rust/benches/soak_harness/evidence/spec349c2-fit.awk`
+- `2e3ba4f4c0429d77d7f1cf267112706ddf95b095b2a14a6b05460cfa5d018c33` `packages/server-rust/benches/soak_harness/evidence/spec366-p5.awk`
+- `ba65ffc4076307ffdbfb014565edaf1f17e185ef987ca6b3fe2565d544400215` `packages/server-rust/benches/soak_harness/evidence/spec366-p67.awk`
 
 ### Data inputs frozen at M (sha256; `spec376-parity.sh` and `ORDER=OK` check these bytes)
 Not programs (outside the smoke's `SMOKE_PROG_SHA=` binding, which draws only `is_program` files), but inputs a
@@ -287,7 +307,7 @@ the `spec376-cells.sh` header). Every hunk maps to exactly one R-item:
 | `1348,1353d1460` | the footprint call in `emit_row` removed | 2 | R2.2 |
 | `1389c1496`, `1391c1498`, `1396c1503`, `1398c1505`, `1401a1509` | row `printf`: rss from the helper; cols 7–10, 41, 56–61 from the helper | 2 | R0.1 / R2.2 |
 | `1441a1550,1551` | steal ticks at the end | 6 | R2.6 |
-| `1478a1589,1605` | read counters, compute `steal_pct`, record them in the matrix, define `emit_tail` | 2 / 6 | R0.2 / R2.6 |
+| `1478a1589,1605` | read counters (never-created file = `0`, non-integer content = `non_numeric`), compute `steal_pct`, record them in the matrix, define `emit_tail` | 2 / 6 | R0.2 / R2.6 |
 | `1533a1661,1679` | post-run check of the eleven memory columns by header name (population, not non-zero) | 2 | R2.2 |
 | `1600a1747`, `1611a1759` | `emit_tail` before both final exits (console ends with `steal_pct=`, `post_mortem_mem_reads=`, `mem_invariant_violations=`) | 2 / 6 | R0.2 / R2.6 |
 
@@ -336,7 +356,7 @@ so every line of every hunk maps to exactly one item and one R-item:
 | | 518–548 smoke: calib self-run (rc logged), `smaps_sample_check` (fixture-mode replay) | 6 | R3.3 / R6.2 |
 | | 550–588 dhat frame check (`DH_FRAME_<site>=`, `DH_FRAMES=`), shares self-check, parity, synth | 6 | R6.3–R6.5 |
 | `219c590,591` | the synth-missing branch (no `SYNTH376=` line, so admission names it) | 6 | R6.5 |
-| `220a593,678` | smoke admission: every R6 item under R0.6, one `SMOKE_ADMISSION=` line | 6 | R6 |
+| `220a593,687` | smoke admission: every R6 item under R0.6, one `SMOKE_ADMISSION=` line (G5: also `<cell>:predicates_rc=` unless the cell's `PREDICATES_EXIT_<cell>=` is exactly `0`; memory / `je_*` cells and the smaps replay row must be numbers, `non_numeric_rows=` / `non_numeric_elapsed=` named) | 6 | R6 |
 
 **`diff spec373b-order.sh spec376-order.sh`** (11 hunks; "item" = the four-item closed list in the
 `spec376-order.sh` header):
@@ -463,6 +483,10 @@ comment line changed (the copy keeps the parent's header, usage text and case ta
   frozen source (`spec371-predicates.sh` for PM1, `spec349c2-fit.awk`) failed its sha256 — the dependent lines read
   `PM1=FALSE reason=frozen_source …` / `FIT_ERROR`, never a pass; 4 = an awk step failed. The chain logs it as
   `PREDICATES_EXIT_<cell>=`.
+- **Value of a predicate line (calib STOP-V and the smoke admission, G5 cross-vendor review).** The value is the text
+  after `=` up to the first space (`empty` if that is empty), so only a line matching `^<P>=TRUE( |$)` reads TRUE:
+  `PV=  TRUE` reads `empty`, `PV=TRUEX` reads `TRUEX`. calib's `totalWrites` is an integer followed by a non-word
+  character or the end of the line (`123abc` / `12.5` read `empty`, never a truncated number).
 - **PEL.** Exactly the three substitutions on the parent's PE/PA block (column, `PE=`→`PEL=` in the awk program and in
   the `no_matrix_or_csv` line, detail name); the block's `== STOP: PE / PA ==` section header is left as the parent
   wrote it (it is not a key). No line of any predicates output starts with `PE=`.
@@ -536,6 +560,12 @@ Interfaces the chain fixes for later groups:
   marker-ok line is harness-console line 1 matching `^provenance: server sha256=<64 hex> flavour=<SYS|MI>( |$)`
   (the runner writes it only after its flavour-marker assertion passed) together with the label's `marker=ok`
   builds line; memory rows use the cell matrix's single `  duration: <n>s` line.
+- **Admission additions (G5, cross-vendor review, R0.6):** every smoke cell also needs exactly one
+  `PREDICATES_EXIT_<cell>=0` in the smoke chain log (else `<cell>:predicates_rc=<rc|absent|dup>` — a predicates run
+  that crashed after printing its TRUE lines must not admit); the eleven memory cells (and on `sje` the eight `je_*`
+  cells of a probe row) must be numbers, not merely non-empty (`fp_equiv_mb` may be negative on an
+  invariant-violating row); a row whose `elapsed_secs` is not a number is named (`non_numeric_elapsed=`); the smaps
+  replay row's twelve cells must be numbers.
 - **Program binding (G5/G6):** M's §1 must list exactly the `is_program` files the smoke printed, each once; a
   non-program input such as `spec376-synth-ref-darwin.txt` is outside the binding; §1 lists it separately under
   "Data inputs frozen at M" (parity and ORDER check it, G5).
