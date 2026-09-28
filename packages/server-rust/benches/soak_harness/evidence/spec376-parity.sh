@@ -58,11 +58,20 @@ refuse() {   # $1 = message, $2 = reason
   exit 1
 }
 
+# The physical path of $1 without creating anything: the nearest existing
+# ancestor resolved with pwd -P, plus the not-yet-existing tail.
+canon() {
+  local p="$1" tail=""
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  while [ ! -d "$p" ]; do tail="/$(basename "$p")${tail}"; p="$(dirname "$p")"; done
+  printf '%s%s\n' "$(cd "$p" && pwd -P)" "$tail"
+}
+# The synth refuses the evidence dir itself; refusing here too, BEFORE
+# anything is created, keeps parity's own files (shims, transcripts, diffs)
+# out of every path M commits.
+case "$(canon "$SCR")/" in "$SCRIPT_DIR"/*) refuse "the scratch dir must not be the evidence dir or under it" scratch ;; esac
 mkdir -p "$SCR" 2>/dev/null || refuse "cannot create scratch dir ${SCR}" scratch
 SCR="$(cd "$SCR" && pwd -P)"
-# The synth refuses the evidence dir itself; refusing here too keeps parity's
-# own files (shims, transcripts, diffs) out of every path M commits.
-case "$SCR/" in "$SCRIPT_DIR"/*) refuse "the scratch dir must not be the evidence dir or under it" scratch ;; esac
 
 # Replace every spelling of a run's scratch path by @OUT@, as a literal, so a
 # path in a message can never make two checkouts or two hosts differ.

@@ -245,7 +245,7 @@ Every `spec376-*` program plus the frozen parents they execute: `spec373b-verdic
 `spec371-predicates.sh`, `spec349c2-fit.awk`, `spec366-p5.awk`, `spec366-p67.awk` (and `spec373b-order.sh` if
 called).
 
-### Hunk maps — *G2a (cells), G2b (chain, order), G3 (predicates) filled; to fill (G4)*
+### Hunk maps — *G2a (cells), G2b (chain, order), G3 (predicates), G4 (synth copy) filled*
 
 **`diff spec373b-cells.sh spec376-cells.sh`** (57 hunks; parent line ranges; "item" = the nine-item closed list in
 the `spec376-cells.sh` header). Every hunk maps to exactly one R-item:
@@ -390,7 +390,63 @@ line range; every line maps to exactly one item and one R-item:
 | `365,371c483,494` | 483 `_AMP_JEL` (n/a without an estimator, as every `AMP_*L`); 484–485 `_DIRTY_SHAREL`, `_FRAG_SHAREL`; 486–494 `_R_meta`/`_EST_AGREE`/`_UNMODELLED_*` need an estimator | 7 ; 6 ; 7 | R4.5 ; R0.3 ; R4.5 |
 | `378,380c501,503` | census awk exit status checked; block to stdout; exit status | 9 | R4 (exit) / R3.4 |
 
-**Still to fill:** `diff spec373b-synth.sh spec376-synth373b-linux.sh` → one hunk, lines 114–115 (R7.2).
+**`diff spec373b-synth.sh spec376-synth373b-linux.sh`** (G4): exactly **one** hunk, `114,115c114,115`; no header
+comment line changed (the copy keeps the parent's header, usage text and case table verbatim).
+
+| parent hunk | what | R-item |
+|---|---|---|
+| `114,115c114,115` | S10 setup: BSD `sed -i ''` → GNU `sed -i`; the FATAL text names GNU sed (`S10 setup (GNU sed -i) failed`) | R7.2 |
+
+### Preflight and awk-parity contract (`spec376-preflight.sh`, `spec376-parity.sh`, G4)
+- **Preflight order (R9).** Linux-only guard (FATAL, exit 2, before any file) → usage → log created (noclobber) →
+  `identity` → `isolation` → if either FAILs: log `REFUSED: …`, last line `PREFLIGHT=FAIL failed=<identity|isolation|
+  identity,isolation> PREFLIGHT_AT=…`, exit 1, nothing changed, no further check → else (`--apply` only) `mutate
+  systemctl stop <5 timers + unattended-upgrades.service>` and `printf madvise | mutate tee <THP knob>` for
+  `enabled`, `defrag` (before/after recorded) → `os, timers, load, steal, swap, thp, memory, disk, clock, tools` →
+  recorded-only block → last line. Exit 0 = PASS, 1 = FAIL, 2 = guard/usage/log collision.
+- **Log.** `spec376-preflight-<YYYYMMDDTHHMMSSZ>.log` in `SPEC376_PREFLIGHT_LOG_DIR` (default: the evidence dir);
+  a second run in the same second refuses (exit 2) rather than overwrite. Per check one `CHECK <name>=PASS|FAIL
+  <detail>` line; the only column-0 `PREFLIGHT=` line is the last line. The log is written by redirection only —
+  never through `tee`, which is a mutating command here.
+- **Identity** = `hostname` prints `topgun-bench` and `nproc` prints `4`. **Isolation** = `pgrep -f
+  'dokploy|traefik|dockerd'` exits 1 (0 = found, other = command failure, both FAIL); no file named `dokploy*`,
+  `traefik*`, `docker*` (depth ≤ 2) in `/etc/systemd/system`, `/lib/systemd/system`, `/usr/lib/systemd/system`,
+  `/run/systemd/system`, of which at least one must exist (`unit_dirs=absent` otherwise); `ss -Hltn` exits 0 and no
+  local port is 8080 or 47376 (`ss` absent ⇒ FAIL). Units are read from the unit directories, not via `systemctl`,
+  so isolation stays a pure read under the F1 stubs.
+- **Test hooks.** `SPEC376_PREFLIGHT_SYS_ROOT` prefixes the THP knob dir (`<root>/sys/kernel/mm/transparent_hugepage`)
+  **and** the four systemd unit directories; `SPEC376_PREFLIGHT_CMDLOG` receives each `mutate` argv line before it
+  runs. **For G5's F1:** the scratch root must hold an (empty) `lib/systemd/system/` besides the two THP files, and
+  the stub dir needs an `ss` stub (exit 0, no output) in addition to `uname`/`hostname`/`nproc`/`systemctl`/`tee` —
+  without them isolation FAILs on the Mac and the last line reads `failed=identity,isolation`. Verified shape (G4, on
+  stubs): exit 1, last line `PREFLIGHT=FAIL failed=identity PREFLIGHT_AT=…`, `MUTATIONS=0`, both THP files `cmp`
+  identical.
+- **Thresholds** (R9 table): load1 < 0.5 (one read; `--apply`: up to 21 reads 30 s apart = 10 min); steal share of
+  `/proc/stat` `cpu` fields 2..9 over 10 s < 1 %; `swapon --show` empty with rc 0 and exactly one `SwapTotal: 0 kB`;
+  both THP knobs bracket `[madvise]`; exactly one `MemAvailable:` ≥ 14680064 kB; `df -Pk /opt` available ≥ 41943040
+  KiB; `timedatectl show -p NTPSynchronized` prints `NTPSynchronized=yes`; `command -v` for the eleven R9 tools.
+  Timers: `systemctl is-active` must print exactly `inactive` for each unit.
+- **Parity (R7.4).** `spec376-parity.sh <scratch>` refuses a scratch path in or under the evidence dir **before
+  creating anything**; builds its own shim `<scratch>/awkbin-original/awk → original-awk`, asserts it resolves first
+  and that the banner matches `^awk version [0-9]{8}`; validates the reference; runs the Linux copy; substitutes the
+  scratch path (as passed and physical) by `@OUT@` as a literal; prints **exactly one** `SYNTH_PARITY=` line:
+  `PASS cases=19 awk='<banner>'`, or `FAIL reason=<usage|scratch|no_original_awk|awk_shim|awk_banner|ref_missing|
+  ref_empty|ref_invalid|transcript_empty|diff lines=<n>|synth_rc=<n>>` (a diff is echoed with the `  | ` prefix);
+  then `SYNTH_PARITY_MAWK=` / `SYNTH_PARITY_GAWK=` (`PASS rc=` / `FAIL diff_lines= rc=` / `n/a reason=absent`,
+  recorded only; gawk via the two-line `exec gawk --posix "$@"` wrapper). Exit 0 PASS, 1 FAIL, 2 usage.
+- **Reference validity (interpretation of R7.4 "no line matching `FATAL:`").** Valid = the section headers are
+  exactly `--- synthetic S1` … `--- synthetic S19` in order, there are exactly 19 `^rc=[0-9]+$` lines, and no
+  **column-0** `FATAL:` line. The frozen synth's cases S11, S12, S18, S19 *expect* the verdict program to FATAL; the
+  synth echoes those lines indented (`  FATAL: …`), and they are four of the reference's 317 lines. A literal
+  any-position match would reject the only correct reference; the guarded hazard — a synth that stops at its own
+  setup (`FATAL: S10 setup …`, usage, evidence-dir refusal: all column 0, and each leaves < 19 sections) — is
+  caught by both the column-0 rule and the section count.
+- **Reference (R7.3).** `spec376-synth-ref-darwin.txt` = `spec376-parity.sh --darwin-ref <scratch>` (macOS only,
+  BWK `awk version 20200816`, runs the FROZEN `spec373b-synth.sh`, validates, prints the substituted transcript).
+  Captured from the main tree and from a `git worktree` at `d09325fd` with different scratch dirs: `cmp` identical,
+  317 lines, 19 sections, sha256 `5dbe0225…7f1a`; no `@OUT@` occurs (the frozen synth prints no path). Transcript:
+  `spec376-g4-mac.txt`. It is a data input, not a program (`is_program` does not match `.txt`); whether §1 lists
+  it for ORDER is G5's decision (G2b note).
 
 ### Predicates and calibration-reading contract (`spec376-predicates.sh`, `spec376-calib.sh`, G3)
 - **Predicates output.** `spec376-predicates.sh <EV> spec376-<cell> <BUILDS>` prints the predicates block on stdout;
