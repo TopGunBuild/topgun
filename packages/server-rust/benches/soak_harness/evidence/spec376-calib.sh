@@ -204,7 +204,9 @@ esac
         n="$(grep -c "^${p}=" "$PRED")"
         case "$n" in
           0) v=absent ;;
-          1) v="$(sed -n "s/^${p}=//p" "$PRED" | awk '{ print ($1 == "" ? "empty" : $1) }')" ;;
+          # The value is the text after = up to the first space, so only a
+          # line matching ^<P>=TRUE( |$) reads TRUE ("PV=  TRUE" reads empty).
+          1) v="$(sed -n "s/^${p}=//p" "$PRED")"; v="${v%% *}"; [ -n "$v" ] || v=empty ;;
           *) v=dup ;;
         esac
         echo "PRED_${c}_${p}=${v}"
@@ -220,7 +222,7 @@ esac
     n_tw="$( [ -f "$SOAK" ] && grep -c '"totalWrites":' "$SOAK")"
     case "${n_tw:-0}" in
       0) echo "TOTAL_WRITES_${c}=absent" ;;
-      1) TW="$(sed -nE 's/.*"totalWrites": *([0-9]+).*/\1/p' "$SOAK")"; echo "TOTAL_WRITES_${c}=${TW:-empty}" ;;
+      1) TW="$(sed -nE 's/.*"totalWrites": *([0-9]+)([^0-9A-Za-z.]|$).*/\1/p' "$SOAK")"; echo "TOTAL_WRITES_${c}=${TW:-empty}" ;;
       *) echo "TOTAL_WRITES_${c}=dup" ;;
     esac
     n_du="$( [ -f "$MATRIX" ] && grep -c '^  duration: ' "$MATRIX")"

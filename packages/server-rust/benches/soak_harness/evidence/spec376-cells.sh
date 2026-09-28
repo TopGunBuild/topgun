@@ -1586,10 +1586,10 @@ PM_ROWS="$(cat "$PM_FILE" 2>/dev/null || echo 0)"
 case "$PM_ROWS" in ''|*[!0-9]*) PM_ROWS=0 ;; esac
 echo "post_mortem_rows=${PM_ROWS}"
 printf '  post_mortem_rows: %s\n' "$PM_ROWS" >> "$MATRIX_OUT"
-MEM_INV="$(cat "$PROCMEM_INV_FILE" 2>/dev/null || echo 0)"
-case "$MEM_INV" in ''|*[!0-9]*) MEM_INV=0 ;; esac
-MEM_PM="$(cat "$PROCMEM_PM_FILE" 2>/dev/null || echo 0)"
-case "$MEM_PM" in ''|*[!0-9]*) MEM_PM=0 ;; esac
+MEM_INV="$(if [ -e "$PROCMEM_INV_FILE" ]; then cat "$PROCMEM_INV_FILE" 2>/dev/null; else echo 0; fi)"
+case "$MEM_INV" in ''|*[!0-9]*) MEM_INV=non_numeric ;; esac
+MEM_PM="$(if [ -e "$PROCMEM_PM_FILE" ]; then cat "$PROCMEM_PM_FILE" 2>/dev/null; else echo 0; fi)"
+case "$MEM_PM" in ''|*[!0-9]*) MEM_PM=non_numeric ;; esac
 STEAL_PCT="$(printf '%s %s\n' "${STEAL_T0:-}" "${STEAL_END:-}" | awk '
   NF == 4 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $4 - $2 > 0 {
     printf "%.4f", ($3 - $1) / ($4 - $2) * 100; ok = 1

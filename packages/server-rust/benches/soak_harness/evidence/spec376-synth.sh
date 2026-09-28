@@ -94,9 +94,9 @@ verdict() {
 has_line() { [ "$(printf '%s\n' "$1" | awk -v w="$2" '$0 == w { n++ } END { print n + 0 }')" -eq 1 ]; }
 # Exactly one line of $1 starts with $2 (a literal prefix).
 has_prefix() { [ "$(printf '%s\n' "$1" | awk -v w="$2" 'index($0, w) == 1 { n++ } END { print n + 0 }')" -eq 1 ]; }
-# No line of $1 starts with any of the flag keys calib prints only when it
-# reached its flags block.
-no_flags() { ! printf '%s\n' "$1" | grep -Eq '^(STOP|INSTRUMENT|PORT_RATIO|WRITE_PARITY)='; }
+# Calib reached no part of its flags block: neither the block's header nor
+# any of the R0.4 keys at column 0.
+no_flags() { ! printf '%s\n' "$1" | grep -Eq '^(== flags ==|(STOP|INSTRUMENT|WRITES_PER_S_REF|S_CA_RATE|S_CA_LIVE|S_CA_FPL|BYTES_ALLOC_RATE|ALLOC_LIVE|BYTES_PER_WRITE|WRITE_PARITY|WRITE_PARITY_ALL|A0_L_MIB|PORT_RATIO|PORT_BPW_RATIO|PORT_EXPECT|PORT_IN_EXPECT|STEAL|LOAD_AT_START)=)'; }
 
 # ============================================================ M1-M5: procmem
 # Reference values are the hand computations of spec376-fixtures/README.md
@@ -172,6 +172,9 @@ write_builds() {   # $1 = file
 mkcell() {
   local ev="$1" c="$2" sha="$3" rate="$4" tw="$5" b="$1/spec376-$2"
   mkdir -p "$b.scrapes"
+  # Byte counters exceed 2^31, so they are formatted with %.0f: an awk's
+  # default number-to-string may print them in exponent form, which no
+  # numeric gate downstream accepts.
   awk -v hdr="$HEADER" -v rate="$rate" 'BEGIN {
     n = split(hdr, h, ","); print hdr
     for (e = 0; e <= 900; e += 60) {
@@ -186,7 +189,7 @@ mkcell() {
       lb = 100000000 + e * 1000
       v["alloc_live_bytes"] = lb; v["alloc_live_mb"] = sprintf("%.3f", lb / 1048576)
       v["alloc_probe_elapsed_s"] = e; v["alloc_probe_seq"] = e / 60 + 1
-      v["bytes_alloc"] = rate * e; v["bytes_dealloc"] = rate * e - lb
+      v["bytes_alloc"] = sprintf("%.0f", rate * e); v["bytes_dealloc"] = sprintf("%.0f", rate * e - lb)
       line = ""
       for (i = 1; i <= n; i++) line = line (i > 1 ? "," : "") ((h[i] in v) ? v[h[i]] : "")
       print line
@@ -194,7 +197,7 @@ mkcell() {
   {
     echo "provenance: server sha256=${sha} flavour=CA built=2026-09-28T10:00:00Z run_start=2026-09-28T12:05:00Z topgun_or_prune_restored_cancelled_total=present harness sha256=${SHA_H} harness_built=2026-09-28T10:30:00Z tombstone_level_ceiling_gate=present"
     echo "soak: child TOPGUN_JOURNAL_ENABLED=true"
-    awk -v rate="$rate" 'BEGIN { for (e = 0; e <= 900; e += 30) printf "[server] alloc_probe elapsed_s=%d bytes_alloc=%d bytes_dealloc=%d\n", e, rate * e, rate * e / 2 }'
+    awk -v rate="$rate" 'BEGIN { for (e = 0; e <= 900; e += 30) printf "[server] alloc_probe elapsed_s=%d bytes_alloc=%.0f bytes_dealloc=%.0f\n", e, rate * e, rate * e / 2 }'
     echo "  LIVE_COPY  t=300.0s copy_done=300.2s live=1000 live_tag_bytes=50000"
     echo "  TERMINAL  t=900.0s live=1000 live_tag_bytes=50000"
   } > "$b.harness-console.log"

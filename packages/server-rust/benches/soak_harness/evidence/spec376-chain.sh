@@ -540,8 +540,8 @@ smaps_sample_check() {   # $1 = sample file
   prc=$?
   rm -rf "$root"
   [ "$prc" -eq 0 ] || { echo "procmem_rc=${prc}(${row})"; return; }
-  printf '%s\n' "$row" | awk -F, 'NF == 12 { for (i = 1; i <= NF; i++) if ($i == "") exit 1; exit 0 } { exit 1 }' \
-    || { echo "empty_field(${row})"; return; }
+  printf '%s\n' "$row" | awk -F, 'NF == 12 { for (i = 1; i <= NF; i++) if ($i !~ /^-?[0-9]+(\.[0-9]+)?$/) exit 1; exit 0 } { exit 1 }' \
+    || { echo "empty_or_non_numeric_field(${row})"; return; }
   echo "PASS"
 }
 SMAPS_RESULT="$(smaps_sample_check "$OUT/spec376-smaps-sample.txt")"
@@ -601,7 +601,8 @@ pred_true() {   # $1 = cell, $2 = predicate; exactly one ^P=TRUE( |$) line
   n="$(grep -c "^$2=" "$f" 2>/dev/null)"
   case "$n" in
     0) fail_item "$1:$2=absent" ;;
-    1) v="$(sed -n "s/^$2=//p" "$f" | awk '{ print ($1 == "" ? "empty" : $1) }')"
+    # The text after = up to the first space: only ^P=TRUE( |$) reads TRUE.
+    1) v="$(sed -n "s/^$2=//p" "$f")"; v="${v%% *}"; [ -n "$v" ] || v=empty
        [ "$v" = "TRUE" ] || fail_item "$1:$2=$v" ;;
     *) fail_item "$1:$2=dup" ;;
   esac
@@ -609,6 +610,10 @@ pred_true() {   # $1 = cell, $2 = predicate; exactly one ^P=TRUE( |$) line
 for c in $CELLS; do
   v="$(key_once "$OUT/spec376-${c}.runner-console.log" RUNNER_EXIT)"
   [ "$v" = "0" ] || fail_item "${c}:runner_exit=${v}"
+  # A predicates run that crashed after printing its TRUE lines left a
+  # partial file; its exit status is what names that, as in the cal reading.
+  v="$(key_once "$LOG" "PREDICATES_EXIT_${c}")"
+  [ "$v" = "0" ] || fail_item "${c}:predicates_rc=${v}"
   if [ -f "$OUT/spec376-${c}.predicates.txt" ]; then
     pred_true "$c" PEL; pred_true "$c" PMEM
     case "$c" in sc|spb) pred_true "$c" PA ;; esac
@@ -616,7 +621,9 @@ for c in $CELLS; do
     fail_item "${c}:predicates_missing"
   fi
   # Every row before the end of the run carries all eleven memory columns,
-  # located by header name, and there is at least one such row.
+  # located by header name, each a number (fp_equiv_mb may be negative on a
+  # row that breaks the invariants), and there is at least one such row; a
+  # row whose elapsed_secs is not a number cannot be placed and fails too.
   dur="$( [ -f "$OUT/spec376-${c}.matrix.txt" ] && awk '/^  duration: / { n++; v = $2 } END { if (n == 1) { sub(/s$/, "", v); print v } }' "$OUT/spec376-${c}.matrix.txt")"
   case "$dur" in ''|*[!0-9]*) fail_item "${c}:duration=absent" ;; *)
     r="$(awk -F, -v D="$dur" '
@@ -626,11 +633,13 @@ for c in $CELLS; do
         for (k in need) if (!(need[k] in h)) { print "column_missing(" need[k] ")"; bad = 1; exit }
         next
       }
+      $h["elapsed_secs"] !~ /^[0-9]+(\.[0-9]+)?$/ { badel++; next }
       $h["elapsed_secs"] + 0 < D {
         rows++
-        for (k in need) if ($h[need[k]] == "") { empty++; break }
+        for (k in need) { x = $h[need[k]]; if (x == "") { empty++; break } if (x !~ /^-?[0-9]+(\.[0-9]+)?$/) { nonnum++; break } }
       }
-      END { if (bad) exit; if (rows == 0) print "no_rows"; else if (empty > 0) print "empty_rows=" empty; else print "ok" }' "$OUT/spec376-${c}.csv" 2>/dev/null)"
+      END { if (bad) exit; if (badel > 0) print "non_numeric_elapsed=" badel; else if (rows == 0) print "no_rows"
+            else if (empty > 0) print "empty_rows=" empty; else if (nonnum > 0) print "non_numeric_rows=" nonnum; else print "ok" }' "$OUT/spec376-${c}.csv" 2>/dev/null)"
     [ "$r" = "ok" ] || fail_item "${c}:mem_rows=${r:-csv_missing}" ;;
   esac
   case "$c" in
@@ -642,8 +651,9 @@ for c in $CELLS; do
           for (k in need) if (!(need[k] in h)) { print "column_missing(" need[k] ")"; bad = 1; exit }
           next
         }
-        $h["je_probe_seq"] != "" { rows++; for (k in need) if ($h[need[k]] == "") { empty++; break } }
-        END { if (bad) exit; if (rows == 0) print "no_probe_rows"; else if (empty > 0) print "empty_rows=" empty; else print "ok" }' "$OUT/spec376-sje.csv" 2>/dev/null)"
+        $h["je_probe_seq"] != "" { rows++; for (k in need) { x = $h[need[k]]; if (x == "") { empty++; break } if (x !~ /^[0-9]+(\.[0-9]+)?$/) { nonnum++; break } } }
+        END { if (bad) exit; if (rows == 0) print "no_probe_rows"; else if (empty > 0) print "empty_rows=" empty
+              else if (nonnum > 0) print "non_numeric_rows=" nonnum; else print "ok" }' "$OUT/spec376-sje.csv" 2>/dev/null)"
       [ "$r" = "ok" ] || fail_item "sje:je_rows=${r:-csv_missing}"
       n="$(grep -c '^\[server\] je_config ' "$OUT/spec376-sje.harness-console.log" 2>/dev/null)"
       [ "$n" = "1" ] || fail_item "sje:je_config=$( [ "${n:-0}" = "0" ] && echo absent || echo dup)" ;;
