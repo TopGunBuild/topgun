@@ -360,3 +360,102 @@ byte-reproducible — only the sha256 of the LAUNCHED binary counts (console lin
 write-behind WAL partition is `fnv1a("{map}:{key}") % 271`, not `hash_to_partition(key)`.
 
 ## APPEND-ONLY BELOW
+
+## §3 — carve 9c part b readout: one slot cell per key cuts the OR write path's allocation rate to about a third
+
+Appended 2026-09-28, after the run-3 data commits `6422bfc9` (CA) and `f5c854af` (JE). Every cell ran against
+M = `15e170b1` (prefix sha256 `537a45cd…f29b`); the a-servers were built from the freeze `e85adb1f`. No frozen program,
+threshold, cell order or manifest-§1 byte changed after M.
+
+**Run history.** Run 1 (`ebea80e3`) ran on a host held at load 8–17 by a System Settings storage scan and stopped on
+write parity (`STOP=V (b1:write_parity=0.0688)`); it is void for the verdict and kept as evidence only. Run 2 carries
+no CA data: every CA cell and jb were refused by the runner because run 1's data dirs were still present (the
+runner's fresh-dir guard); its ja ran and is committed as an unpaired reading (`5c8ffe14`). Run 3 is the reading.
+Before it: Spotlight indexing off, the six data dirs renamed to `.runN` (absent before the chain), and a quiet-host
+gate (1-min load < 3, no storage/indexing process in the top five). Its first CA start was refused in one second
+(`artifact already exists` — run 1's files in the evidence dir, which git holds in `ebea80e3`); they were moved
+aside and the chain re-launched; the same was done for run 2's ja before the JE pair.
+
+**ORDER=OK** at `6422bfc9` and at `f5c854af`: `ORDER=OK manifest_commit=15e170b1
+prefix_sha256=537a45cd70c8961249fc6174a53d3a121c1b23da1ee5dd66a2988a551e32f29b programs=14 freeze=e85adb1f`.
+
+### 3.1 The flags, verbatim (`spec373b.verdict.txt`, exit status 0)
+```
+STOP=none
+VERDICT_BYTES=CONFIRMED
+VERDICT_LIVE=DESCRIPTIVE
+LIVE_SIGN=down
+I=[0.3270,0.3455]
+S_B=0.022606
+E=0.3316
+LIVE_I=[0.5881,0.6015]
+S_B_LIVE=0.022325
+EXCESS=TRUE
+BYTES_PER_WRITE=b1=262516.0 b2=274122.0 a1=91997.1 a2=90037.2 a/b=[0.3285,0.3504]
+WRITE_PARITY=OK max_dev=0.0150 totalWrites=165542/162158/163211/161459
+```
+CONFIRMED because `S_B = 0.0226 < min(E/2, 0.05) = 0.05` and `max I = 0.3455 ≤ 1 − E/2 = 0.8342`. STOP-R is false
+(rate `min I 0.3270` vs `1 + max(s_b, s_a) = 1.0323`; live `min LIVE_I 0.5881` vs `1.0223`). Cross ratios:
+`R_a1_b1 0.3455`, `R_a1_b2 0.3378`, `R_a2_b1 0.3345`, `R_a2_b2 0.3270`; `S_A 0.0323`.
+
+### 3.2 The cells (servers: pin `f205f64a…d543`, freeze `e5472e64…8865`, harness `789d6592…6346`, `spec373b-builds.txt`)
+| cell | PA | PM1 | SKIPPED | RUNNER_EXIT | totalWrites (dev) | `BYTES_ALLOC_RATE` B/s (points, window) | `ALLOC_LIVE` B | load at start |
+|---|---|---|---|---|---|---|---|---|
+| b1 | TRUE | TRUE | 0 | 0 | 165 542 (1.50 %) | 48 286 026.38 (15, 420–840 s) | 69 813 922 | 1.77 |
+| a1 | TRUE | TRUE | 0 | 0 | 163 211 (0.07 %) | 16 683 267.62 (15, 480–870 s) | 41 982 189 | 2.79 |
+| b2 | TRUE | TRUE | 0 | 0 | 162 158 (0.57 %) | 49 390 076.66 (16, 420–900 s) | 71 390 116 | 2.43 |
+| a2 | TRUE | TRUE | 0 | 0 | 161 459 (1.00 %) | 16 152 567.37 (15, 420–840 s) | 41 995 400 | 3.03 |
+
+Every cell printed `RESULT: instrument sound` and `post_mortem_rows=0`. The server-wide allocation rate falls to
+0.33–0.35 of the base, and so does the per-write figure (`BYTES_PER_WRITE` a/b 0.33–0.35), so the cut is not a
+throughput artefact. `ALLOC_LIVE` falls to ~0.59 (descriptive, `LIVE_SIGN=down`): the queue and staging copies no
+longer hold whole records, as the design predicts qualitatively; no live class exists.
+
+**Materialize path presence.** No counter at the pin or the freeze counts materializations or evictions (§1). From
+the last scrape of each cell: `topgun_or_prune_absent_total 0` and `topgun_or_prune_restored_evicted_total 0` in b1, a1, b2 and a2, and `topgun_update_in_place_materialize_exhausted_total` absent in all four (registered on first increment, so it reads as 0). The materialize path is covered by AC-1's second case, not by these cells.
+
+### 3.3 Host during run 3 (`spec373b-host-run3.log`, sidecar, not a gate)
+1-min load: 1.86 before the CA chain (re-launch); at cell starts b1 1.77, a1 2.79, b2 2.43, a2 3.03; 2.32 after a2; 2.04 before
+the JE chain, 2.03 at jb's start, 1.57 at ja's, 3.77 after ja. No storage, indexing or deletion process appeared in
+any top-five snapshot (the recurring entries are the terminal, the audio daemon, WindowServer and the cells' own
+server and harness). a2 started 0.03 above the gate's load bar; the gate is checked at chain start only, nothing
+fired, and write parity is 1.5 %.
+
+### 3.4 EXCESS — a pre-registered flag, with a hypothesis, not an explanation
+`1 − min I = 0.673 > 1.5 E = 0.4974`. The measured cut is about twice the frozen `E = 0.3316`; SPEC-373a overshot its
+own `E` in the same direction (0.14–0.18 vs 0.116). **Hypothesis (not tested here):** the DH build completes about a
+third of the CA cells' writes in the same 900 s (dl 46 303 vs ~163 000), and the cost of one whole-record copy grows
+with the slot's size, which grows with completed writes — so a share measured in the DH window understates the copy
+share at the CA write rate. The class is unaffected (the overshoot is in the safe direction). Calibrating `E` before
+the next pre-registered carve is **TODO-709**.
+
+### 3.5 The recorded JE pair — descriptive, n = 1 per side (no class, no replicate)
+| 14 400 s, `spec372-predicates.sh` via `spec373b-je.sh` | jb (pin) | ja (freeze) | run-2 ja (freeze, unpaired) |
+|---|---|---|---|
+| server sha256 | `c0848a38…3f51` | `eb1f0729…1711` | `5fe81092…62a5` |
+| PV / PE / PA | TRUE / TRUE / TRUE | TRUE / TRUE / TRUE | TRUE / TRUE / TRUE |
+| totalWrites | 2 713 939 | 2 639 610 | 2 610 102 |
+| TERM `je_allocated` | 1 047 475 056 B | 466 029 472 B | — |
+| TERM_AMP_FP | 2.1757 | 0.5766 | 0.5895 |
+| TERM_AMP_JE | 2.0569 | 1.2731 | 1.2213 |
+| TERM_DIRTY_SHARE | 0.1734 | 0.1212 | 0.0727 |
+| TERM_FRAG_SHARE | 0.8301 | 0.0805 | 0.0795 |
+
+At 4 h the freeze build holds less than half the pin's jemalloc-allocated bytes, and its fragmentation share falls
+from 0.83 to 0.08; the unpaired run-2 ja reproduces run-3 ja closely. This is **consistent with** the per-op copies
+driving jemalloc fragmentation. It does **not** show the memory-growth problem solved: that needs replicated 4 h
+cells on a stable measurement host (TODO-708, then TODO-589).
+
+### 3.6 Residuals
+- **Empty-M index read (known, fail-closed).** With an EMPTY manifest commit, `order_sha_ok` in the chain and the
+  verdict reads the manifest from the git index; `spec373b-order.sh` then refuses (`no manifest commit given`). Every
+  run passed an explicit `SPEC373B_MANIFEST_COMMIT=15e170b1`.
+- **TODO-707.** On the not-staged materialize path the redb-decoded entries `Vec` has `cap == len`, so the first OR
+  op after a materialize reallocates it (96 B/entry at the soak's shape) — not a record copy, not in AC-1's staged case.
+- **TODO-709.** The dhat-based `E` under-predicts copy removal at the CA write rate by ~2× in both carves (3.4).
+- Still in place by design: the redb encode at flush (moved under the cell lock) and the leaf-hash sort (TODO-697).
+
+### 3.7 Scope
+One host (macOS, M1 Max), count-alloc regime, 900 s cells, the SPEC-370/371/372/373a matrix. The class reads the
+allocation RATE of the whole server; the mechanism is proven by the deterministic tests (AC-1 slopes, AC-2a/2b/2d
+cell identity and lifetime, AC-6 one clone per flushed entry) and by the R6 simulation under node failure.
