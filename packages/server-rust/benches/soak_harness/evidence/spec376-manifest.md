@@ -287,10 +287,105 @@ the `spec376-cells.sh` header). Every hunk maps to exactly one R-item:
 Reproduce the hunk list with `diff spec373b-cells.sh spec376-cells.sh | grep -E '^[0-9]'`. `spec376-procmem.sh` is a new
 file with no parent (R1).
 
-**Still to fill:** `diff spec373b-chain.sh spec376-chain.sh` → R3 items
-(including the cal-phase predicates step, mapped to R3.4); `diff spec373b-order.sh spec376-order.sh`;
-`diff spec372-predicates.sh spec376-predicates.sh` → R0.3 / R4 items (including the PV hunk, mapped to R0.3);
-`diff spec373b-synth.sh spec376-synth373b-linux.sh` → one hunk, lines 114–115 (R7.2).
+**`diff spec373b-chain.sh spec376-chain.sh`** (20 hunks; "item" = the nine-item closed list in the
+`spec376-chain.sh` header). The copy is mostly new code, so `diff` anchors on generic lines (`fi`, `}`, blank) and
+several hunks span more than one item. Where a hunk does, its **new-side** line ranges are attributed separately,
+so every line of every hunk maps to exactly one item and one R-item:
+
+| parent hunk | new lines → what | item | R-item |
+|---|---|---|---|
+| `3c3,4`, `5,27c6,10`, `29,32c12,69` | header: title, why a copy exists, nine-item list, the column-0 key rule | 9 | R3 (header) |
+| `35a73,79` | `uname -s` ≠ `Linux` ⇒ FATAL exit 2, before any file is created | 1 | R3.1 |
+| `40,47c84,118` | 84–92 literals (pin, 373b freeze, port 47376, run dir, builds file outside EV, smoke OUT pin, labels) | 4 | R3.2 / R0.5 |
+| | 94–100 `CAL_PIN` read from the one `^CAL_PIN=` line of `spec376-cells.sh`, hex-checked | 4 | R3.2 / R0.5 |
+| | 102–103 `SPEC376_PHASE` ∈ build/smoke/cal, no default | 3 | R3.2–R3.4 |
+| | 105–109 inherited per-run knobs unset | 3 | R3.3 / R3.4 |
+| | 111–118 smoke OUT: textual pin to `target/spec376-run/smoke`, evidence dir and anything under it refused before any mkdir | 6 | R3.3 |
+| `49,54c120,127` | smoke OUT re-checked after resolution; `SPEC365_OUT_DIR` ← `SPEC376_OUT_DIR`; smoke cells and log | 6 | R3.3 |
+| `56,57c129,131` | cal / build OUT and log names (`spec376-chain.log`, `spec376-chain-build.log`) | 3 | R3.2 / R3.4 |
+| `64,86c138` | start line (`cal_pin=`); the parent's start-of-chain ORDER block moves to the cal gates (hunk `206,211`); the `xcrun`/`SDKROOT` block is dropped | 3 / 1 | R3.4 / R3.1 |
+| `88,110c140,151` | awk shim: `original-awk` required, `target/spec376-awkbin/awk`, `PATH` prepend, resolution + `^awk version [0-9]{8}` banner asserted, banner logged | 2 | R3.1 / R7.1 |
+| `112,118c153,164` | `cell_label`: the per-cell build-label map (R0.3 PV map) | 5 | R3.3 / R3.4 |
+| `121,129c167,172` | `label_commit`: the commit each label is built at | 4 | R3.2 |
+| `131,137c174,208` | 174–194 `builds_field` / `builds_count` / `label_sha_reason` (exactly one builds line per label, 64-hex sha, launched = built) | 5 | R3.3 / R3.4 |
+| | 195–208 `hits` / `marker_ok`: the runner's five-flavour marker rule + harness literals | 4 | R3.2 |
+| `139,153c210,223` | 210 `marker_ok` tail | 4 | R3.2 |
+| | 211–213 `is_program`: the one rule drawing both the smoke's `SMOKE_PROG_SHA=` lines and M's bound list | 6 / 7 | R3.3 / R3.4 |
+| | 214–223 `key_once`: exactly-once presence (`absent` / `dup`) | 6 | R6 / R0.6 |
+| `155,194d224` | the parent's builds-file loop and `run_cell` removed at this position (rewritten in the build phase and in `4. cells`) | 3 | R3.2 |
+| `196c226,238` | `iso_epoch`: `PREFLIGHT_AT=` → epoch by arithmetic (no `date` dialect) | 7 | R3.4 |
+| `198,204c240,324` | phase `build`: three clean detached checkouts, `guarded_rm` over the eight label dirs, eight builds with the R3.2 commands, one harness binary, builds file (`build_start_epoch=`, eight `flavour=` lines, `rustc:`, `glibc:`, `awk:`), recompiled / mtime / marker asserted per label | 4 | R3.2 |
+| `206,211c326,428` | 326–351 phase `cal`: `spec376-order.sh` sha checked against M's listing, then `ORDER=OK` required | 7 | R3.4 |
+| | 352–385 smoke → M binding (`SMOKE_BINDING=PASS|FAIL <file>=<absent|dup|changed|unlisted>`) | 7 | R3.4 |
+| | 386–404 preflight gate (newest log, last line `^PREFLIGHT=PASS( |$)`, one `PREFLIGHT_AT=`, age 0..3600 s), `PREFLIGHT_LOG=` | 7 | R3.4 |
+| | 406–423 builds file read: one `build_start_epoch=`, every needed label's sha + `marker=ok` asserted before any cell | 5 | R3.3 / R3.4 |
+| | 424–428 `SMOKE_PROG_SHA=` lines (smoke) | 6 | R3.3 / R6.6 |
+| `214,217c431,588` | 431–433 `PROC_ROOT=/proc` | 6 / 7 | R3.3 / R3.4 |
+| | 435–438 host log, `SPEC376_CHAIN_START_EPOCH` ← build start, `SPEC376_HARNESS_BIN` | 8 / 4 | R3.5 / R3.2 |
+| | 440–460 `capture_smaps` (sc's server, ~60 s after its listener appears) | 6 | R6.2 |
+| | 462–492 `run_cell`: host sidecar, `LOAD_AT_START_<cell>=`, pre-launch sha assertion (`RUNNER_EXIT=98`, not launched), launch, `RUNNER_EXIT=` | 8 / 5 | R3.5 / R3.3–R3.4 |
+| | 494–505 `run_predicates` after each cell, `PREDICATES_EXIT_<cell>=<rc>` | 7 | **R3.4** (the cal-phase predicates step; the same step runs per smoke cell, R3.3) |
+| | 507–516 cal reading: `spec376-calib.sh <EV> spec376-manifest.md <EV>/spec376-smoke` → `spec376-calib.txt`, rc logged, flags echoed indented | 7 | R3.4 |
+| | 518–548 smoke: calib self-run (rc logged), `smaps_sample_check` (fixture-mode replay) | 6 | R3.3 / R6.2 |
+| | 550–588 dhat frame check (`DH_FRAME_<site>=`, `DH_FRAMES=`), shares self-check, parity, synth | 6 | R6.3–R6.5 |
+| `219c590,591` | the synth-missing branch (no `SYNTH376=` line, so admission names it) | 6 | R6.5 |
+| `220a593,678` | smoke admission: every R6 item under R0.6, one `SMOKE_ADMISSION=` line | 6 | R6 |
+
+**`diff spec373b-order.sh spec376-order.sh`** (11 hunks; "item" = the four-item closed list in the
+`spec376-order.sh` header):
+
+| parent hunk | what | item | R-item |
+|---|---|---|---|
+| `3,4c3,5`, `6c7,28`, `9c31`, `18,20c40,43`, `25c48`, `27c50` | header: title, why a copy exists, four-item list, usage and check text | 4 | R10 (header) |
+| `34c57,58` | manifest path `spec376-manifest.md` (via `EVREL`) | 1 | R10 |
+| `36c60,63` | `MIN_PROGS` → `REQUIRED_PARENTS` (the six frozen parents the Linux programs execute) | 3 | R10 ORDER item 3 |
+| `63c90,102` | program coverage: non-empty list; every `spec376-*.{sh,awk,py}` in the evidence dir and every required parent listed exactly once | 3 | R10 ORDER item 3 |
+| `65,69c104,109` | freeze literal `CAL_PIN=` read from `spec376-cells.sh`, required exactly once, hex, a commit, `.rs`/build inputs equal to it, tree clean | 2 | R10 ORDER item 4 / R0.5 |
+| `72c112` | success line `… cal_pin=<F>` | 4 | R10 |
+
+**Still to fill:** `diff spec372-predicates.sh spec376-predicates.sh` → R0.3 / R4 items (including the PV hunk,
+mapped to R0.3); `diff spec373b-synth.sh spec376-synth373b-linux.sh` → one hunk, lines 114–115 (R7.2).
+
+### Chain log contract (`spec376-chain.sh`, G2b)
+Every line a reading keys on is printed at column 0, exactly once per log; anything echoed from another program
+that is not such a key is prefixed `  | `. Logs: build `target/spec376-run/spec376-chain-build.log`; smoke
+`target/spec376-run/smoke/spec376-chain.log` (committed at M as `evidence/spec376-smoke/spec376-chain.log`); cal
+`evidence/spec376-chain.log`. Paths derive from the checkout root (`/opt/topgun` on the server).
+
+| key | phase | value |
+|---|---|---|
+| `SMOKE_PROG_SHA=<file> sha256=<64 hex>` | smoke | one line per evidence-dir file matching `spec376-*.sh`, `spec376-*.awk`, `spec376-*.py` (the chain's `is_program`), sorted by name |
+| `PROC_ROOT=/proc` | smoke, cal | one line, before the first cell |
+| `PREFLIGHT_LOG=<basename>` | cal | the accepted preflight log (the lexicographically newest `spec376-preflight-*.log` in the evidence dir) |
+| `LOAD_AT_START_<cell>=<1-min load or n/a>` | smoke, cal | one per cell, immediately before the pre-launch assertion and launch; `n/a` when `/proc/loadavg` is unreadable (calib reads it as `<cell>=absent`) |
+| `PREDICATES_EXIT_<cell>=<rc>` | smoke, cal | one per cell, right after that cell; a non-zero rc does not stop the chain |
+| `cell <cell>: RUNNER_EXIT=<rc>` | smoke, cal | the runner console carries `RUNNER_EXIT=<rc>` as its last line; `98` = not launched (pre-launch sha assertion failed) |
+| `calib rc=<rc>` | cal | after the four `PREDICATES_EXIT_` lines |
+| `ORDER=OK …`, `SMOKE_BINDING=PASS programs=<n>` | cal | before `PREFLIGHT_LOG=`; any failure refuses the phase before any cell |
+| `DH_FRAME_<site literal>=<n>`, `DH_FRAMES=PASS|FAIL [reason=…]`, `SELF_CHECK=` | smoke | as R6.3 / R6.4 |
+| `SMOKE_ADMISSION=PASS failed=none` / `SMOKE_ADMISSION=FAIL failed=<comma list>` | smoke | one line, last before `### SMOKE COMPLETE` |
+
+Interfaces the chain fixes for later groups:
+- **Builds file** (`target/spec376-run/spec376-builds.txt`): line 1 `build_start_epoch=<epoch>` (exported to every
+  cell as `SPEC376_CHAIN_START_EPOCH`, because smoke and cal are later launches than the builds); eight lines
+  `flavour=<label> code=<full sha> path=<abs> sha256=<hex> mtime=<epoch> recompiled=yes marker=ok`; then `rustc: …`,
+  `glibc: …`, `awk: <banner>` lines. A reader selects a label's line by `$1 == "flavour=<label>"`, exactly once.
+- **Build commands:** `DH-pin`, `JE-cal`, `MI-cal` and `SYS-cal` carry `--bin topgun-server` as the CA builds do,
+  so only the server is built; `JE-cal` / `MI-cal` / `SYS-cal` build `--release`.
+- **Preflight log (G4):** named `spec376-preflight-<stamp>.log` with a stamp that sorts lexicographically in time
+  order (`YYYYMMDDTHHMMSSZ`); `PREFLIGHT_AT=` in `YYYY-MM-DDTHH:MM:SSZ`, exactly once on the last line.
+- **smaps sample (R6.2):** `spec376-smaps-sample.txt` = `== pid=<pid> captured_at=<UTC> after_listener_s=<s>`,
+  `== smaps_rollup` + the file, `== status` + the file, `== ps_rss` + `ps -o rss=`; written only whole. The admission
+  replays it by splitting the sections into a fixture proc root (`<pid>/smaps_rollup`, `<pid>/status`,
+  `<pid>.ps_rss`) and calling `procmem_row` there: rc 0 and twelve non-empty cells ⇒ PASS.
+- **Smoke admission item definitions:** a `sje` probe row is a CSV row with a non-empty `je_probe_seq`; the
+  `je_config` line is exactly one `^\[server\] je_config ` line in `spec376-sje.harness-console.log`; the `ssy`/`smi`
+  marker-ok line is harness-console line 1 matching `^provenance: server sha256=<64 hex> flavour=<SYS|MI>( |$)`
+  (the runner writes it only after its flavour-marker assertion passed) together with the label's `marker=ok`
+  builds line; memory rows use the cell matrix's single `  duration: <n>s` line.
+- **Program binding (G5/G6):** M's §1 must list exactly the `is_program` files the smoke printed, each once; a
+  non-program input such as `spec376-synth-ref-darwin.txt` is outside the binding (to decide in G5 whether §1
+  also lists it for ORDER).
 
 ### The §1 prefix sha256 — the command
 Computed at M and at every later commit by exactly this command (the marker line is included in the hash); M's value
