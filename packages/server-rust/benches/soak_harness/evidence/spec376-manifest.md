@@ -245,7 +245,7 @@ Every `spec376-*` program plus the frozen parents they execute: `spec373b-verdic
 `spec371-predicates.sh`, `spec349c2-fit.awk`, `spec366-p5.awk`, `spec366-p67.awk` (and `spec373b-order.sh` if
 called).
 
-### Hunk maps — *G2a filled (cells); to fill (G2b, G3, G4)*
+### Hunk maps — *G2a (cells), G2b (chain, order), G3 (predicates) filled; to fill (G4)*
 
 **`diff spec373b-cells.sh spec376-cells.sh`** (57 hunks; parent line ranges; "item" = the nine-item closed list in
 the `spec376-cells.sh` header). Every hunk maps to exactly one R-item:
@@ -343,8 +343,97 @@ so every line of every hunk maps to exactly one item and one R-item:
 | `65,69c104,109` | freeze literal `CAL_PIN=` read from `spec376-cells.sh`, required exactly once, hex, a commit, `.rs`/build inputs equal to it, tree clean | 2 | R10 ORDER item 4 / R0.5 |
 | `72c112` | success line `… cal_pin=<F>` | 4 | R10 |
 
-**Still to fill:** `diff spec372-predicates.sh spec376-predicates.sh` → R0.3 / R4 items (including the PV hunk,
-mapped to R0.3); `diff spec373b-synth.sh spec376-synth373b-linux.sh` → one hunk, lines 114–115 (R7.2).
+**`diff spec372-predicates.sh spec376-predicates.sh`** (49 hunks; parent line ranges; "item" = the nine-item closed
+list in the `spec376-predicates.sh` header). A hunk whose new-side lines belong to two items is split by new-side
+line range; every line maps to exactly one item and one R-item:
+
+| parent hunk | new-side lines → what | item | R-item |
+|---|---|---|---|
+| `1a2,74` | new header block (nine-item difference list, usage, exit statuses); the parent header is kept verbatim below it | 9 | R4 (header) |
+| `36c109` | usage text names `spec376-predicates.sh` | 1 | R4.1 |
+| `43c116,119` | 116–118 frozen-source paths + sha256 literals (`spec371-predicates.sh`, `spec349c2-fit.awk`); 119 base prefix `spec376-` | 4 / 6 ; 1 | R4.2 / R4.4 ; R4.1 |
+| `48d123` | no `PRED` path: the block goes to stdout | 9 | R3.4 |
+| `51,52c126,129` | 126 series file `ampfpl.csv`; 127 truncation without `PRED`; 128–129 exit-status accumulator | 6 ; 9 ; 9 | R0.3 ; R3.4 ; R4 (exit) |
+| `54,58c131,137` | M1 constants removed; `A0`/`B_live` from `SPEC376_A0_MIB`/`SPEC376_B_LIVE`, both numeric or neither | 7 | R4.5 |
+| `61,69c140,144` | cell → flavour map (sc spb c1 c2 pb pa CA, sdh DH, sje JE, ssy SYS, smi MI); a2j branch gone | 1 | R0.5 / R4.1 |
+| `72c147,156` | 147–155 cell → build-label map; 156 journal expected on every cell | 2 ; 1 | R0.3 (PV) ; R0.5 |
+| `78a163,172` | 163–169 PM1 program extracted from the frozen `spec371-predicates.sh` 154–169 (sha256, marker text, closing brace asserted); 170–171 fitter sha256 check; 172 blank | 4 ; 6 | R4.2 ; R4.4 |
+| `81,83c175` | a2j `UNKNOWN` branch gone | 1 | R4.1 |
+| `86c178`, `91c183`, `94a187,188`, `97c191`, `104c198`, `106c200` | PV by build label: label passed in, builds label counted and required exactly once (label and `H`), line-1 regex adds `DH`, server sha compared with the label's line, label printed | 2 | R0.3 (PV hunk) |
+| `108c202` | PV awk exit status checked | 9 | R4 (exit) |
+| `112,113c206,207` | `PR-crashes` reads `soak.json` with `sed` (no `jq` on the image) | 8 | R0.3 (recorded) |
+| `127c221` | `PE=FALSE reason=no_matrix_or_csv` → `PEL=` (the line outside the awk program) | 3 | R4.2 |
+| `131,132c225,226` | column `phys_footprint_mb` → `fp_equiv_mb`; label `PE=` → `PEL=` | 3 | R4.2 |
+| `136,137c230,231` | 230 label `PE=` → `PEL=`, detail `rows_with_footprint=` → `rows_with_fp_equiv=`; 231 awk exit status checked | 3 ; 9 | R4.2 ; R4 (exit) |
+| `156c250` | PA awk exit status checked | 9 | R4 (exit) |
+| `177,178c271,282` | `post_mortem_rows=` exactly once and a plain count, else named; PM1 FALSE when the frozen source fails its checks | 4 | R4.2 / R0.6 |
+| `181,197c285` | the inline PM1 program replaced by the extracted frozen text | 4 | R4.2 |
+| `199a288,302` | PMEM block | 5 | R4.3 |
+| `225,230c328,331` | `HOST` from the matrix's single `/proc/loadavg` line | 8 | R2.6 / R0.3 |
+| `236c337` | block to stdout | 9 | R3.4 |
+| `240a342` | fitter sha mismatch ⇒ `FIT_ERROR reason=frozen_fit_sha` | 6 | R4.4 |
+| `244,248c346,350` | `SL = fp_equiv_mb + lazyfree_mb` stream | 6 | R4.4 |
+| `252,254c354,356` | JE native series over `fp_equiv_mb` (`amp_nativel`) | 6 | R0.3 |
+| `255a358` | exit 3 on a fitter sha mismatch | 6 | R4.4 |
+| `257,259c360,362` | fits over `fp_equiv_mb`, `lazyfree_mb`, `sl_mb` | 6 | R4.4 |
+| `264c367` | `amp_nativel` fit | 6 | R0.3 |
+| `274,275c377,380` | census join comment + estimator flag passed in | 7 | R4.5 |
+| `281,282c386,387` | census join reads `fp_equiv_mb` / `lazyfree_mb` | 6 | R0.3 |
+| `290c395` | series header `amp_fpl` | 6 | R0.3 |
+| `302,306c407,413` | 407–408 Linux column names in the census line; 409–413 reach / `AMP_FPL` / `AMP_SL` only with an estimator | 6 ; 7 | R0.3 ; R4.5 |
+| `311,312c418,419` | 418 series point only with an estimator; 419 awk exit status checked | 7 ; 9 | R4.5 ; R4 (exit) |
+| `314c421`, `316,317c423,424` | `amp_fpl` fits (last half, last third) | 6 | R0.3 |
+| `330,336c437,452` | 437–439 `FPL_slope`, `SL_slope`, `LAZY_slope`; 440–446 `TRENDL`/`TRENDL3` or `n/a reason=no_linux_estimator`; 447 `TRENDL_NATIVE`; 448–452 `TRENDL_dropped`, `TRENDL_points_used` = rows of the `amp_fpl` series | 6 ; 7 ; 6 ; 6 | R0.3 ; R4.5 ; R0.3 ; R0.3 |
+| `338c454`, `341c457`, `343c459`, `345,348c461,466` | end levels `FPL_end`, `SL_end`, `LAZY_end`, `LAZY_RATIO_end`, `HWM_end`, `ANON_HUGE_end` | 6 | R0.3 |
+| `351c469` | estimator flag into the census-point program | 7 | R4.5 |
+| `357,361c475,479` | 475 `_fp_mb`/`_s_mb`/`_A0_share` dropped; 476 `_reach_bytes` needs an estimator; 477 `_redb_mb`; 478–479 `_AMP_FPL`/`_AMP_SL`/`_R_redb` need an estimator | 6 ; 7 ; 6 ; 7 | R0.3 ; R4.5 ; R0.3 ; R4.5 |
+| `365,371c483,494` | 483 `_AMP_JEL` (n/a without an estimator, as every `AMP_*L`); 484–485 `_DIRTY_SHAREL`, `_FRAG_SHAREL`; 486–494 `_R_meta`/`_EST_AGREE`/`_UNMODELLED_*` need an estimator | 7 ; 6 ; 7 | R4.5 ; R0.3 ; R4.5 |
+| `378,380c501,503` | census awk exit status checked; block to stdout; exit status | 9 | R4 (exit) / R3.4 |
+
+**Still to fill:** `diff spec373b-synth.sh spec376-synth373b-linux.sh` → one hunk, lines 114–115 (R7.2).
+
+### Predicates and calibration-reading contract (`spec376-predicates.sh`, `spec376-calib.sh`, G3)
+- **Predicates output.** `spec376-predicates.sh <EV> spec376-<cell> <BUILDS>` prints the predicates block on stdout;
+  the caller writes it to `spec376-<cell>.predicates.txt` (the chain: `> … 2>&1`). It writes
+  `spec376-<cell>.{fits.txt,amp.txt,ampfpl.csv}` into EV. Exit 0 = every block ran; 2 = usage / unknown cell; 3 = a
+  frozen source (`spec371-predicates.sh` for PM1, `spec349c2-fit.awk`) failed its sha256 — the dependent lines read
+  `PM1=FALSE reason=frozen_source …` / `FIT_ERROR`, never a pass; 4 = an awk step failed. The chain logs it as
+  `PREDICATES_EXIT_<cell>=`.
+- **PEL.** Exactly the three substitutions on the parent's PE/PA block (column, `PE=`→`PEL=` in the awk program and in
+  the `no_matrix_or_csv` line, detail name); the block's `== STOP: PE / PA ==` section header is left as the parent
+  wrote it (it is not a key). No line of any predicates output starts with `PE=`.
+- **PM1.** The counter `post_mortem_rows=` must occur exactly once in the runner console and be a plain count; absent
+  / dup / non-numeric ⇒ `PM1=FALSE reason=no_counter_or_csv post_mortem_rows=<absent|dup|value>`.
+- **PMEM.** `PMEM=TRUE mem_invariant_violations=0 sampler_fatal=0`, or `PMEM=FALSE reason=<console_missing|
+  violations=absent|violations=dup|violations=<value>|sampler_fatal=<n>>` (a `SAMPLER FATAL` anywhere on a line of the
+  runner console counts).
+- **Calib inputs.** EV: `spec376-chain.log` (`PROC_ROOT=`, `PREFLIGHT_LOG=`, `PREDICATES_EXIT_<cell>=`,
+  `LOAD_AT_START_<cell>=`), the preflight log it names (a basename matching `spec376-preflight-*.log`, read in EV), and per
+  cal cell `spec376-<cell>.{predicates.txt,runner-console.log,csv,matrix.txt,soak.json}`; SMOKE_DIR:
+  `spec376-chain.log`. `RUNNER_EXIT=` and `steal_pct=` are read from the runner console, `DURATION_<cell>` from the
+  matrix's single `  duration: <n>s` line, `totalWrites` from the single `"totalWrites":` of `soak.json`, `FPL_end` from
+  the predicates file; each exactly once, else named `absent` / `dup`.
+- **Manifest.** The section-1 prefix (through `## APPEND-ONLY BELOW`; a manifest without the marker is refused, exit
+  3) must carry exactly one `^CAL_PIN=` (hex, 7–40) and one `^PORT_EXPECT=[<lo>,<hi>] src=<src> not_a_gate` line.
+  The band is read from it, never written into the program; `PORT_EXPECT=` prints the manifest's value verbatim.
+- **Synthetic rule.** `SPEC376_SYNTHETIC=1` skips ORDER (printing `ORDER=SKIPPED (synthetic)`) only when EV, the
+  manifest's directory and SMOKE_DIR all lie outside the evidence dir (equal or below counts as inside). Otherwise an
+  unset `SPEC376_MANIFEST_COMMIT` is `ORDER=FAIL no manifest commit …`, exit 3.
+- **Frozen rate program.** `spec373b-verdict.sh` sha256 asserted, lines 151–170 extracted by the command above, the
+  last line must be `      }`, and the extracted text must hash to `35fb2300…01fd`; any failure exits 3.
+- **STOP clause order.** H: `preflight_log=<absent|dup|value>` or `preflight=<absent|empty|FAIL|…>` first, then
+  `<cell>:steal=<value|missing>` in cal order. V: `chain:proc_root=<value|absent|dup>` first, then per cell in cal
+  order c1 pb c2 pa: `predicates_missing` or `PV PEL PA PM1 PMEM`, `predicates_rc`, `runner_exit`, `skipped`, `rate`,
+  `live`, `totalWrites`; the pair clause `c1c2:write_parity=<%.4f|n/a>` last. `STOP=H (…)` wins over `STOP=V (…)`.
+  Before the flags the reading prints `STOP_H_CLAUSES=` and `STOP_V_CLAUSES=` (both lists, `none` when empty) and
+  `SMOKE_ADMISSION_SEEN=<PASS|FAIL|absent|dup|log_absent>`.
+- **Flag formats.** `WRITES_PER_S_REF` `%.3f`; `S_CA_*` `%.6f`; `BYTES_ALLOC_RATE` / `ALLOC_LIVE` / `BYTES_PER_WRITE`
+  (`%.1f`) / `STEAL` / `LOAD_AT_START` as `c1=<v> pb=<v> c2=<v> pa=<v>`; `WRITE_PARITY` / `WRITE_PARITY_ALL` /
+  `PORT_RATIO` / `PORT_BPW_RATIO` `%.4f`; `A0_L_MIB` `%.3f` (mean over c1/c2 of `alloc_live_mb` on the row nearest
+  t = 60 s within 30 s). Every missing input prints `n/a` (with `reason=` where one input decides it); `LOAD_AT_START`
+  prints `absent` / `dup`, never a number, for a missing line; `PORT_IN_EXPECT=FALSE` whenever `PORT_RATIO` is `n/a`.
+- **Intermediate.** A fresh `mktemp` under `TMPDIR`; a `TMPDIR` inside EV or the evidence dir exits 4. Nothing
+  follows the flags block.
 
 ### Chain log contract (`spec376-chain.sh`, G2b)
 Every line a reading keys on is printed at column 0, exactly once per log; anything echoed from another program
