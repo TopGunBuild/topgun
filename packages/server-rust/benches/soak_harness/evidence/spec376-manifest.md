@@ -193,9 +193,47 @@ duplicate, an empty value, or a non-numeric value where a number is required mak
   `rows_with_footprint= → rows_with_fp_equiv=`.
 
 ### Fixtures
-`spec376-fixtures/` (see its `README.md`): hand-built kernel-6.1 `smaps_rollup` / `status` pairs for M1–M5 in a
-proc-root layout (`<case>/4242/{smaps_rollup,status}`, `<case>/4242.alive`, `<case>/4242.ps_rss`), with
-hand-computed reference values. The real `spec376-smaps-sample.txt` from the `sc` smoke server is added at M.
+`spec376-fixtures/` (see its `README.md` for the per-case reference values): hand-built kernel-6.1 `smaps_rollup` /
+`status` pairs for M1–M5. The real `spec376-smaps-sample.txt` from the `sc` smoke server is added at M.
+
+**Fixture-mode contract (normative).** `procmem_row <pid> [<proc_root>]` (`spec376-procmem.sh`) selects fixture mode
+iff `<proc_root>` is not the literal `/proc`. Each fixture case directory is a proc root for pid `4242`:
+
+| path | meaning |
+|---|---|
+| `<root>/<pid>/smaps_rollup` | stands in for `/proc/<pid>/smaps_rollup` |
+| `<root>/<pid>/status` | stands in for `/proc/<pid>/status` |
+| `<root>/<pid>.alive` | `0` = the pid is gone; any other content (normally `1`), or no file, = alive; replaces `kill -0 <pid>`. Absence reads as ALIVE on purpose, so a malformed fixture fails closed (status 2) instead of yielding a silently empty row |
+| `<root>/<pid>.ps_rss` | the literal `ps -o rss= -p <pid>` output (KiB, right-aligned); absent = `ps` printed nothing |
+
+The live path (`/proc`) never reads `*.alive` or `*.ps_rss`. Fixture files follow Debian 12 / kernel 6.1 field layout:
+`smaps_rollup` = the `[rollup]` header line, then `%-16s%8llu kB` per field; `status` = `Key:\t%8lu kB` for the
+`Vm*`/`Rss*` lines.
+
+**Proc root: fixtures only, and the chain proves it.** Overriding the proc root is permitted **only** in the synthetic
+suite over `spec376-fixtures/`. `spec376-cells.sh` calls `procmem_row "$pid"` with no root argument (default
+`/proc`), has no knob that changes it, and records `memory proc root:    /proc (fixed; …)` in every cell's matrix.
+Requirement on the chain (implemented in G2b): every `spec376-chain.sh` phase that runs cells (smoke, cal) prints
+exactly one line `PROC_ROOT=/proc` into its chain log. Requirement on the calibration reading (implemented in G3):
+`spec376-calib.sh` reads the cal chain log (`spec376-chain.log`); unless exactly one `^PROC_ROOT=` line is present
+and its value is exactly `/proc`, it raises the STOP-V clause `chain:proc_root=<value|absent>` (a duplicate line is
+named `chain:proc_root=dup`, R0.6) — an absent line is FALSE, never a pass.
+
+### Runner console contract (`spec376-cells.sh`, G2a)
+Keys the predicates (G3) and calib read from `spec376-<cell>.runner-console.log` (the runner's stdout+stderr; the
+chain appends `RUNNER_EXIT=`):
+- Console line 1 of the harness console artifact (`spec376-<cell>.harness-console.log`) is the provenance line,
+  unchanged in shape: `provenance: server sha256=<hex> flavour=<CA|DH|JE|SYS|MI> built=… run_start=…
+  topgun_or_prune_restored_cancelled_total=present harness sha256=<hex> …`.
+- Every run that got past launch ends its runner console with exactly these three lines, once each, in this order:
+  `steal_pct=<%.4f|n/a>` (R2.6; `n/a` when a `/proc/stat` read fails or the total-tick delta is 0),
+  `post_mortem_mem_reads=<n>`, `mem_invariant_violations=<n>` (R0.2). A run refused before launch prints none of
+  them (PMEM then reads `violations=absent`).
+- A blind memory sampler on a live pid prints `SAMPLER FATAL: memory sampler blind on live pid <pid>: <field>=<absent|dup|non_numeric>[,…] at elapsed=<s>s`.
+- `post_mortem_mem_reads` counts memory reads that found the pid gone. In the runner such a read never produces a
+  row: the read sits where the parent read `ps -o rss=`, so a gone pid ends sampling (run over) or is a SAMPLER FATAL
+  (run not over), exactly as the parent's empty-RSS path. No written row carries an empty memory cell; the post-run
+  check fails the cell (`INSTRUMENT DEFECT`) if any of the eleven memory columns is missing or has an empty cell.
 
 ### Smoke admission results (pre-registration input) — *to fill (G6, from the smoke chain log)*
 Smoke chain log excerpt; builds sha256 lines; awk banner; `SYNTH_PARITY`, `SYNTH376`, `DH_FRAMES`, `SELF_CHECK`,
@@ -207,8 +245,49 @@ Every `spec376-*` program plus the frozen parents they execute: `spec373b-verdic
 `spec371-predicates.sh`, `spec349c2-fit.awk`, `spec366-p5.awk`, `spec366-p67.awk` (and `spec373b-order.sh` if
 called).
 
-### Hunk maps — *to fill (G2a, G2b, G3, G4)*
-`diff spec373b-cells.sh spec376-cells.sh` → R2 items; `diff spec373b-chain.sh spec376-chain.sh` → R3 items
+### Hunk maps — *G2a filled (cells); to fill (G2b, G3, G4)*
+
+**`diff spec373b-cells.sh spec376-cells.sh`** (57 hunks; parent line ranges; "item" = the nine-item closed list in
+the `spec376-cells.sh` header). Every hunk maps to exactly one R-item:
+
+| parent hunk | what | item | R-item |
+|---|---|---|---|
+| `1a2,67` | new header block (nine-item difference list) prepended; parent header kept verbatim below it | 9 | R2 (header) |
+| `358a425,432` | `uname -s` ≠ `Linux` ⇒ FATAL exit 2, first executable check | 1 | R2.1 |
+| `369c443`, `371,373c445,447`, `375,383c449,462`, `387,393c466,471`, `396,399c474,476` | usage text: runner name, nine items, cell list, CAL_PIN, env names | 9 | R2 (header) / R0.5 |
+| `416c493` | flavour column doc `CA\|DH\|JE\|SYS\|MI` | 3 | R2.3 |
+| `427c504,505`, `429,434c507,515`, `437c518,519` | cell table sc/spb/sdh/sje/ssy/smi (120 s, cadence 20) + c1/c2/pb/pa (900 s, 60); `CELL_SERVER` cal/pin/frz; `CELL_PHASE`; basename `spec376-<cell>` | 8 | R0.5 |
+| `443a526,539` | source `spec376-procmem.sh` before any clock; FATAL if absent or without `procmem_row` | 2 | R2.2 |
+| `519c615` | data dir `target/spec376-<cell>-data` | 8 | R0.5 |
+| `525a622,625` | counter files `PROCMEM_INV_FILE`, `PROCMEM_PM_FILE` | 2 | R2.2 / R0.2 |
+| `565a666,671` | a smoke cell refuses the tracked evidence dir | 8 | R0.5 / R3.3 |
+| `672,675c778,780` | port 47376 | 8 | R0.5 |
+| `700,702c805,807`, `713,714c818,819`, `721c826`, `1000c1107` | freeze literal `CAL_PIN=bee21fcd` and its three guards, renamed | 7 | R2.7 |
+| `736c841` | comment: the chain that builds is `spec376-chain.sh` | 9 | R2 (header) |
+| `738,739c843,844`, `742c847`, `744c849`, `829c936`, `852c959`, `882c989`, `988c1095` | env names `SPEC376_HARNESS_BIN`, `SPEC376_CHAIN_START_EPOCH` | 8 | R0.5 |
+| `750a856`, `752c858`, `755c861`, `757c863`, `1034c1141` | server code-state gate: cal→`CAL_PIN`, pin→`b166719d`, frz→`e85adb1f`; `SPEC376_SERVER_COMMIT` | 7 | R2.7 |
+| `767,768c873` | dead non-provenance build hint without `xcrun` | 9 | R2 (no macOS path) |
+| `797a903,904` | MI and SYS marker arms | 3 | R2.3 |
+| `911c1018` | counter files reset with the other sampler files | 2 | R2.2 |
+| `959c1066` | pid via `ss -Hltnp` first (pgrep second, unchanged); no lsof | 4 | R2.4 |
+| `970c1077` | pre-launch port check also refuses a pid-less `ss` listener | 4 | R2.4 |
+| `983c1090` | matrix banner names the Linux run, cell phase | 9 | R2 (header) |
+| `1038a1146,1164` | matrix host block (os-release, kernel, CPU, nproc, glibc, rustc host, THP, swap, overcommit, max_map_count, awk + banner, sampler sha, proc root) + `/proc/loadavg` + first 8 lines of `/proc/meminfo` | 5 / 6 | R2.5 / R2.6 |
+| `1118a1245,1255` | `proc_stat_steal()` + steal ticks at T0 | 6 | R2.6 |
+| `1124,1133c1261,1276` | CSV header per R0.1 (61 columns) + `MEM_COLUMNS` list | 2 | R0.1 / R2.2 |
+| `1196,1240d1338` | `footprint_row()` removed | 2 | R2.2 |
+| `1272c1370`, `1294,1302c1392,1415`, `1328c1441` | `emit_row`: `procmem_row` replaces the `ps -o rss=` read (gone ⇒ stop/fatal as parent; blind live pid ⇒ `sampler_fatal`); split into 12 cells; rss dropped from the integer loop (validated by the helper) | 2 | R2.2 / R1.2 |
+| `1348,1353d1460` | the footprint call in `emit_row` removed | 2 | R2.2 |
+| `1389c1496`, `1391c1498`, `1396c1503`, `1398c1505`, `1401a1509` | row `printf`: rss from the helper; cols 7–10, 41, 56–61 from the helper | 2 | R0.1 / R2.2 |
+| `1441a1550,1551` | steal ticks at the end | 6 | R2.6 |
+| `1478a1589,1605` | read counters, compute `steal_pct`, record them in the matrix, define `emit_tail` | 2 / 6 | R0.2 / R2.6 |
+| `1533a1661,1679` | post-run check of the eleven memory columns by header name (population, not non-zero) | 2 | R2.2 |
+| `1600a1747`, `1611a1759` | `emit_tail` before both final exits (console ends with `steal_pct=`, `post_mortem_mem_reads=`, `mem_invariant_violations=`) | 2 / 6 | R0.2 / R2.6 |
+
+Reproduce the hunk list with `diff spec373b-cells.sh spec376-cells.sh | grep -E '^[0-9]'`. `spec376-procmem.sh` is a new
+file with no parent (R1).
+
+**Still to fill:** `diff spec373b-chain.sh spec376-chain.sh` → R3 items
 (including the cal-phase predicates step, mapped to R3.4); `diff spec373b-order.sh spec376-order.sh`;
 `diff spec372-predicates.sh spec376-predicates.sh` → R0.3 / R4 items (including the PV hunk, mapped to R0.3);
 `diff spec373b-synth.sh spec376-synth373b-linux.sh` → one hunk, lines 114–115 (R7.2).
