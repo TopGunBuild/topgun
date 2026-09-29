@@ -669,7 +669,7 @@ done
 v="$(key_once "$LOG" DH_FRAMES)"
 [ "$v" = "PASS" ] || fail_item "DH_FRAMES=${v}"
 v="$(key_once "$LOG" SELF_CHECK)"
-{ [ "$v" = "PASS" ] && [ "$SRC_RC" -eq 0 ]; } || fail_item "SELF_CHECK=${v}(rc=${SRC_RC})"
+{ [ "${v%% *}" = "PASS" ] && [ "$SRC_RC" -eq 0 ]; } || fail_item "SELF_CHECK=${v%% *}(rc=${SRC_RC})"
 for k in SYNTH_PARITY SYNTH376; do
   v="$(key_once "$LOG" "$k")"
   printf '%s\n' "$v" | grep -Eq '^PASS( |$)' || fail_item "${k}=${v%% *}"

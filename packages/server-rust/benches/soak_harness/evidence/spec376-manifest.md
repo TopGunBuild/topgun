@@ -250,7 +250,7 @@ called). Written at the G5 candidate commit (M0); at M, G6 confirms this list eq
 `SMOKE_PROG_SHA=` lines file-for-file and sha-for-sha (else re-smoke, not M) and rewrites it only if a program changed.
 - `7f224061e56a545c7f6f3476ed3bc7b90f5aaa49819daa4c710919dc34810801` `packages/server-rust/benches/soak_harness/evidence/spec376-calib.sh`
 - `0d5c69b594c5fd891877f74400881cbfdca0908afd59702163433239fba6c5ee` `packages/server-rust/benches/soak_harness/evidence/spec376-cells.sh`
-- `c43f8f2b1ce3ed68b1607c7798d2aa10ed37d98e2066c504e6fa3437a5d265cc` `packages/server-rust/benches/soak_harness/evidence/spec376-chain.sh`
+- `a684737f4c84d0d9832f39b59d8b844a8aff93c54d6d83feb81f6431c0094da2` `packages/server-rust/benches/soak_harness/evidence/spec376-chain.sh`
 - `c26114169af16d4d5dd242d52fee642e10d08980a8cdf8789e5112c7b45469d9` `packages/server-rust/benches/soak_harness/evidence/spec376-order.sh`
 - `7dd646bcc0e22c6dd48bdfab5d11da628b279abecb6acec727e7e56e87a5cd61` `packages/server-rust/benches/soak_harness/evidence/spec376-parity.sh`
 - `dfbdd313d400ed78e90247690c3639a26b3ffa5c2ea9742d6bbc669027e2d476` `packages/server-rust/benches/soak_harness/evidence/spec376-predicates.sh`
@@ -356,7 +356,7 @@ so every line of every hunk maps to exactly one item and one R-item:
 | | 518–548 smoke: calib self-run (rc logged), `smaps_sample_check` (fixture-mode replay) | 6 | R3.3 / R6.2 |
 | | 550–588 dhat frame check (`DH_FRAME_<site>=`, `DH_FRAMES=`), shares self-check, parity, synth | 6 | R6.3–R6.5 |
 | `219c590,591` | the synth-missing branch (no `SYNTH376=` line, so admission names it) | 6 | R6.5 |
-| `220a593,687` | smoke admission: every R6 item under R0.6, one `SMOKE_ADMISSION=` line (G5: also `<cell>:predicates_rc=` unless the cell's `PREDICATES_EXIT_<cell>=` is exactly `0`; memory / `je_*` cells and the smaps replay row must be numbers, `non_numeric_rows=` / `non_numeric_elapsed=` named) | 6 | R6 |
+| `220a593,688` | smoke admission: every R6 item under R0.6, one `SMOKE_ADMISSION=` line (G5: also `<cell>:predicates_rc=` unless the cell's `PREDICATES_EXIT_<cell>=` is exactly `0`; memory / `je_*` cells and the smaps replay row must be numbers, `non_numeric_rows=` / `non_numeric_elapsed=` named) | 6 | R6 |
 
 **`diff spec373b-order.sh spec376-order.sh`** (11 hunks; "item" = the four-item closed list in the
 `spec376-order.sh` header):
