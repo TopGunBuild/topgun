@@ -1,0 +1,2 @@
+AMP source=LIVE_COPY t=300.0 live=1000 row=300 join_lag_s=0.0 fpl_mb=505.000 sl_mb=515.000 lazy_mb=10.000 redb_mb=2.000 reach_mb=n/a AMP_FPL=n/a AMP_SL=n/a je_allocated= je_active= je_resident= je_metadata= status=used
+AMP source=TERMINAL t=900.0 live=1000 row=900 join_lag_s=0.0 fpl_mb=515.000 sl_mb=525.000 lazy_mb=10.000 redb_mb=2.000 reach_mb=n/a AMP_FPL=n/a AMP_SL=n/a je_allocated= je_active= je_resident= je_metadata= status=used

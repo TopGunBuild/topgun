@@ -1,0 +1,76 @@
+== STOP: PV ==
+PV=TRUE server_sha256=774c2e8ed296b937b89c1328ab88ea9b015c43bed15e5057e568656571acaf3f harness_sha256=6cbe3f5dbf94366d03e6d619510bb43b2738093f2e5335cd8a608139ece3c589 flavour=SYS label=SYS-cal
+== STOP: PR ==
+PR-crashes=TRUE crashes=0
+PR-class=TRUE
+== STOP: P5 / P6 / P7 ==
+P5=TRUE
+P5-observed: removal_rows=6 settlement_rows=6 unsettled=none
+P5-zero-return: none observed
+DECISION_SCRAPE=2026-09-29T09:40:41Z.txt
+P6=TRUE removed_refs_observed_total=5000 considered_total=5000 gap=0
+P7=TRUE restored_cancelled_total=0
+windows=6 settlement_rows=6 zero_return_removal_rows=0 scrapes=6
+== STOP: PE / PA ==
+PEL=TRUE rows_with_fp_equiv=6 rows=6 N=7 need=6
+PA=n/a reason=flavour_SYS
+== STOP: PJ ==
+PJ=TRUE echoes=1 value=true
+PJ-child=n/a reason=filtered
+== STOP: PC ==
+PC=TRUE live=12394 live_tag_bytes=421397
+== STOP: PM1 ==
+PM1=TRUE post_mortem_rows=0 empty_scrape_rows=0 first_empty_elapsed=none last_live_scrape_elapsed=100 need_ge=80
+== STOP: PMEM ==
+PMEM=TRUE mem_invariant_violations=0 sampler_fatal=0
+== recorded: ops ==
+OPS_PER_S=259.675
+WRITE_ERRORS=0
+TOTAL_WRITES=31161 DURATION_ACTUAL=120
+OPS_AT_900=n/a reason=no_checkpoint_near_900
+== recorded: host state at launch (the cell matrix's /proc/loadavg line) ==
+HOST=load_1m=2.77 load_5m=2.48 load_15m=2.19
+== readings: fits (slopes per hour; on amp series the unit is AMP per hour) ==
+FPL_slope=408.238738
+FPL_slope_se=71.168617
+FPL_slope_n=3
+FPL_slope_r2=0.970505
+SL_slope=408.238738
+SL_slope_se=71.168617
+SL_slope_n=3
+SL_slope_r2=0.970505
+LAZY_slope=0.000000
+LAZY_slope_se=0.000000
+LAZY_slope_n=3
+LAZY_slope_r2=NA
+TRENDL=n/a reason=no_linux_estimator
+TRENDL3=n/a reason=no_linux_estimator
+TRENDL_dropped=0
+TRENDL_points_used=0
+== readings: end levels (last row carrying fp_equiv_mb) ==
+END_elapsed=100
+FPL_end=25.086
+SL_end=25.086
+LAZY_end=0.000
+LAZY_RATIO_end=0.000000
+HWM_end=37.500
+ANON_HUGE_end=0.000
+== readings: census points (TERMINAL, and the deciding point = the last used one) ==
+TERM_src=TERMINAL
+TERM_t=120.3
+TERM_join_lag_s=20.3
+TERM_live=12394
+TERM_reach_bytes=n/a reason=no_linux_estimator
+TERM_redb_mb=2.176
+TERM_AMP_FPL=n/a reason=no_linux_estimator
+TERM_AMP_SL=n/a reason=no_linux_estimator
+TERM_R_redb=n/a reason=no_linux_estimator
+DECIDE_src=TERMINAL
+DECIDE_t=120.3
+DECIDE_join_lag_s=20.3
+DECIDE_live=12394
+DECIDE_reach_bytes=n/a reason=no_linux_estimator
+DECIDE_redb_mb=2.176
+DECIDE_AMP_FPL=n/a reason=no_linux_estimator
+DECIDE_AMP_SL=n/a reason=no_linux_estimator
+DECIDE_R_redb=n/a reason=no_linux_estimator

@@ -1,0 +1,8 @@
+fp_equiv_mb last_half col=fp_equiv_mb window=last_half rows_used=7 n=4 skipped_empty=0 t_start_secs=60.0 t_end_secs=120.0 span_secs=60.0 y_first=53.359 y_last=50.164 slope_mb_per_hour=-162.054000 se_mb_per_hour=68.900377 intercept_mb=56.060100 r2=0.734464 sxx_hours2=0.000154321 sse=1.465204300
+fp_equiv_mb full col=fp_equiv_mb window=full rows_used=7 n=7 skipped_empty=0 t_start_secs=0.0 t_end_secs=120.0 span_secs=120.0 y_first=25.234 y_last=50.164 slope_mb_per_hour=552.291429 se_mb_per_hour=275.399224 intercept_mb=38.148286 r2=0.445782 sxx_hours2=0.000864198 sse=327.724152571
+lazyfree_mb last_half col=lazyfree_mb window=last_half rows_used=7 n=4 skipped_empty=0 t_start_secs=60.0 t_end_secs=120.0 span_secs=60.0 y_first=0.000 y_last=0.000 slope_mb_per_hour=0.000000 se_mb_per_hour=0.000000 intercept_mb=0.000000 r2=NA sxx_hours2=0.000154321 sse=0.000000000
+lazyfree_mb full col=lazyfree_mb window=full rows_used=7 n=7 skipped_empty=0 t_start_secs=0.0 t_end_secs=120.0 span_secs=120.0 y_first=0.000 y_last=0.000 slope_mb_per_hour=0.000000 se_mb_per_hour=0.000000 intercept_mb=0.000000 r2=NA sxx_hours2=0.000864198 sse=0.000000000
+sl_mb last_half col=sl_mb window=last_half rows_used=7 n=4 skipped_empty=0 t_start_secs=60.0 t_end_secs=120.0 span_secs=60.0 y_first=53.359 y_last=50.164 slope_mb_per_hour=-162.054000 se_mb_per_hour=68.900377 intercept_mb=56.060100 r2=0.734464 sxx_hours2=0.000154321 sse=1.465204300
+sl_mb full col=sl_mb window=full rows_used=7 n=7 skipped_empty=0 t_start_secs=0.0 t_end_secs=120.0 span_secs=120.0 y_first=25.234 y_last=50.164 slope_mb_per_hour=552.291429 se_mb_per_hour=275.399224 intercept_mb=38.148286 r2=0.445782 sxx_hours2=0.000864198 sse=327.724152571
+amp_fpl last_half FIT_ERROR rc=2
+amp_fpl last_third FIT_ERROR rc=2

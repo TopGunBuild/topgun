@@ -1,0 +1,10 @@
+phys_footprint_mb last_half FIT_ERROR rc=2
+phys_footprint_mb full FIT_ERROR rc=2
+reclaimable_mb last_half FIT_ERROR rc=2
+reclaimable_mb full FIT_ERROR rc=2
+s_mb last_half FIT_ERROR rc=2
+s_mb full FIT_ERROR rc=2
+alloc_live_mb last_half col=alloc_live_mb window=last_half rows_used=16 n=8 skipped_empty=0 t_start_secs=480.0 t_end_secs=900.0 span_secs=420.0 y_first=95.825 y_last=96.226 slope_mb_per_hour=3.437143 se_mb_per_hour=0.002857 intercept_mb=95.366714 r2=0.999996 sxx_hours2=0.011666667 sse=0.000000571
+alloc_live_mb full col=alloc_live_mb window=full rows_used=16 n=16 skipped_empty=0 t_start_secs=0.0 t_end_secs=900.0 span_secs=900.0 y_first=95.367 y_last=96.226 slope_mb_per_hour=3.433941 se_mb_per_hour=0.001027 intercept_mb=95.367382 r2=0.999999 sxx_hours2=0.094444444 sse=0.000001394
+amp_fp last_half FIT_ERROR rc=2
+amp_fp last_third FIT_ERROR rc=2

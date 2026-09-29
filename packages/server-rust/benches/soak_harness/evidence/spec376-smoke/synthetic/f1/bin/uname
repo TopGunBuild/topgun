@@ -1,0 +1,2 @@
+#!/bin/sh
+if [ "${1:-}" = "-s" ] || [ "$#" -eq 0 ]; then echo Linux; else echo 6.1.0-synthetic; fi

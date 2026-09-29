@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "systemctl $*" >> '/opt/topgun/target/spec376-run/smoke/synthetic/f1/record'

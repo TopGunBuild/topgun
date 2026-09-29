@@ -238,12 +238,86 @@ chain appends `RUNNER_EXIT=`):
   (run not over), exactly as the parent's empty-RSS path. No written row carries an empty memory cell; the post-run
   check fails the cell (`INSTRUMENT DEFECT`) if any of the eleven memory columns is missing or has an empty cell.
 
-### Smoke admission results (pre-registration input) — *to fill (G6, from the smoke chain log)*
+### Smoke admission results (pre-registration input) — G6, filled 2026-09-29
+Admitting smoke: attempt 2 on `topgun-bench` (Hetzner ccx23 hel1, server id 167931708), checkout `cb98bd6f`, chain
+2026-09-29T09:30:36Z → 09:43:31Z, OUT `/opt/topgun/target/spec376-run/smoke` fetched byte-for-byte to
+`evidence/spec376-smoke/` (committed at M). `spec376-smaps-sample.txt` copied into `spec376-fixtures/`.
+Attempt 1 (checkout `2bde666d`, kept on the server as `smoke.run1`, not committed) printed
+`SMOKE_ADMISSION=FAIL failed=SELF_CHECK=PASS (E 0.3222957 vs 0.322296, tol 0.000005)(rc=0)`: every other item
+passed; the chain compared the whole `SELF_CHECK=` value instead of the text before the first space. Fixed in
+`cb98bd6f` (one line of `spec376-chain.sh`; the 20 chain hunk headers unchanged), re-smoke 1 of the 2 allowed.
+
+awk: `original-awk` Debian package `2022-09-12-1`, banner `awk version 20220912` (Darwin reference: 20200816;
+`SYNTH_PARITY=PASS cases=19` under both — run first on the server at `2bde666d` and again inside the smoke).
+Toolchain: `rustc 1.93.1 (01f6ddf75 2026-02-11)`, LLVM 21.1.8, `x86_64-unknown-linux-gnu`; glibc 2.36
+(`Debian GLIBC 2.36-9+deb12u14`). Build phase 2026-09-29T08:12Z → 09:15:23Z (first launch refused with
+`FATAL: cargo is not on PATH` under `systemd-run`, relaunched with an explicit `PATH`/`HOME`; no program change).
+
+Smoke chain log excerpt (column-0 keys, verbatim):
+```
+chain start: 2026-09-29T09:30:36Z epoch=1790674236 phase=smoke HEAD=cb98bd6f8bd093770489464b7a4910497263f453 cal_pin=bee21fcd
+awk shim: /opt/topgun/target/spec376-awkbin/awk -> /usr/bin/original-awk banner='awk version 20220912'
+SMOKE_PROG_SHA=spec376-calib.sh sha256=7f224061e56a545c7f6f3476ed3bc7b90f5aaa49819daa4c710919dc34810801
+SMOKE_PROG_SHA=spec376-cells.sh sha256=0d5c69b594c5fd891877f74400881cbfdca0908afd59702163433239fba6c5ee
+SMOKE_PROG_SHA=spec376-chain.sh sha256=a684737f4c84d0d9832f39b59d8b844a8aff93c54d6d83feb81f6431c0094da2
+SMOKE_PROG_SHA=spec376-order.sh sha256=c26114169af16d4d5dd242d52fee642e10d08980a8cdf8789e5112c7b45469d9
+SMOKE_PROG_SHA=spec376-parity.sh sha256=7dd646bcc0e22c6dd48bdfab5d11da628b279abecb6acec727e7e56e87a5cd61
+SMOKE_PROG_SHA=spec376-predicates.sh sha256=dfbdd313d400ed78e90247690c3639a26b3ffa5c2ea9742d6bbc669027e2d476
+SMOKE_PROG_SHA=spec376-preflight.sh sha256=49eba7e94b2e8012db263f9187cd2fe93bd102e23a701dfeea70d3a68d3bd3c3
+SMOKE_PROG_SHA=spec376-procmem.sh sha256=d05727f002087cb37fb8abce8f5f935dce11af5e0e0373c873e6a393a8a6f7b4
+SMOKE_PROG_SHA=spec376-synth.sh sha256=a42f3a225e9497ad11418588c920efd5293f00b9c9c4c9ac9cb77f6ff81c7013
+SMOKE_PROG_SHA=spec376-synth373b-linux.sh sha256=5ab7bdafd3a4e9b9ef9b690bdc0865b44f245901d6963b1a93cfeaaeaebbc011
+PROC_ROOT=/proc
+PREDICATES_EXIT_sc=0
+PREDICATES_EXIT_spb=0
+PREDICATES_EXIT_sdh=0
+PREDICATES_EXIT_sje=0
+PREDICATES_EXIT_ssy=0
+PREDICATES_EXIT_smi=0
+calib self-run rc=3 (no M: the refusal path; not an admission input)
+smaps sample: PASS
+DH_FRAME_storage/engines/hashmap.rs:136=1
+DH_FRAME_storage/datastores/write_behind.rs:2463=1
+DH_FRAME_storage/datastores/write_behind.rs:2518=2
+DH_FRAMES=PASS
+SELF_CHECK=PASS (E 0.3222957 vs 0.322296, tol 0.000005)
+SYNTH_PARITY=PASS cases=19 awk='awk version 20220912'
+SYNTH_PARITY_MAWK=PASS rc=0
+SYNTH_PARITY_GAWK=n/a reason=absent
+SYNTH376=PASS cases=24
+SMOKE_ADMISSION=PASS failed=none
+```
+
+Builds file (`/opt/topgun/target/spec376-run/spec376-builds.txt`, verbatim):
+```
+build_start_epoch=1790669558
+flavour=CA-cal code=bee21fcdf5c5b591758a678b070d1c2dc1101a2f path=/opt/topgun/target/spec376-CA-cal/release/topgun-server sha256=4c4acf9893247c157e71993947f6baf047045ed562765b5ccfa3f3faa82b8d33 mtime=1790670003 recompiled=yes marker=ok
+flavour=CA-pin code=b166719d9569c14076f2211139667aabb8f71d6a path=/opt/topgun/target/spec376-CA-pin/release/topgun-server sha256=735404d67f63525d80b7ba422c6abfe21ca70dd646ca506d1cccb51ee194e581 mtime=1790670397 recompiled=yes marker=ok
+flavour=CA-frz code=e85adb1fc48936267aba66cb7aee7d32dc46b676 path=/opt/topgun/target/spec376-CA-frz/release/topgun-server sha256=8a19d5780b29b7772b65dd678b47d1980fbc4719d73cf886cc267ecde1b9c813 mtime=1790670847 recompiled=yes marker=ok
+flavour=DH-pin code=b166719d9569c14076f2211139667aabb8f71d6a path=/opt/topgun/target/spec376-DH-pin/release-with-debug/topgun-server sha256=7c07db0feaa285271f84cff6e14d732b025283814d9568ffa31a36ecd4f546ce mtime=1790671463 recompiled=yes marker=ok
+flavour=JE-cal code=bee21fcdf5c5b591758a678b070d1c2dc1101a2f path=/opt/topgun/target/spec376-JE-cal/release/topgun-server sha256=21cf7da96d9049ff4d4c09fe43a866fe04ddb31a7c6110c9b58f83e70d0cd750 mtime=1790671940 recompiled=yes marker=ok
+flavour=SYS-cal code=bee21fcdf5c5b591758a678b070d1c2dc1101a2f path=/opt/topgun/target/spec376-SYS-cal/release/topgun-server sha256=774c2e8ed296b937b89c1328ab88ea9b015c43bed15e5057e568656571acaf3f mtime=1790672359 recompiled=yes marker=ok
+flavour=MI-cal code=bee21fcdf5c5b591758a678b070d1c2dc1101a2f path=/opt/topgun/target/spec376-MI-cal/release/topgun-server sha256=84d98ce10e4379ba325963b26edfbb0adf4a9e3e5fc87cbd27e639bedf84eec1 mtime=1790672830 recompiled=yes marker=ok
+flavour=H code=bee21fcdf5c5b591758a678b070d1c2dc1101a2f path=/opt/topgun/target/spec376-H/release/deps/soak_harness-53b4b640053c5766 sha256=6cbe3f5dbf94366d03e6d619510bb43b2738093f2e5335cd8a608139ece3c589 mtime=1790673196 recompiled=yes marker=ok
+rustc: rustc 1.93.1 (01f6ddf75 2026-02-11)
+rustc: binary: rustc
+rustc: commit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf
+rustc: commit-date: 2026-02-11
+rustc: host: x86_64-unknown-linux-gnu
+rustc: release: 1.93.1
+rustc: LLVM version: 21.1.8
+glibc: ldd (Debian GLIBC 2.36-9+deb12u14) 2.36
+awk: awk version 20220912
+```
+
+Binding check at M (Mac, R11 step 7): the ten `SMOKE_PROG_SHA=` lines above equal the ten `spec376-*` program
+entries of the list below file-for-file and sha-for-sha, and the Mac working-tree bytes of every `spec376-*.sh`
+hash to the same ten values.
 Smoke chain log excerpt; builds sha256 lines; awk banner; `SYNTH_PARITY`, `SYNTH376`, `DH_FRAMES`, `SELF_CHECK`,
 `SMOKE_ADMISSION`; the smoke's `SMOKE_PROG_SHA=` lines (must equal the program list below file-for-file and
 sha-for-sha, else re-smoke before M).
 
-### Programs frozen at M (sha256; `ORDER=OK` re-checks these bytes) — *G5 candidate (M0); G6 re-checks at M*
+### Programs frozen at M (sha256; `ORDER=OK` re-checks these bytes) — G5 candidate (M0), confirmed at M by G6 (chain re-hashed after `cb98bd6f`)
 Every `spec376-*` program plus the frozen parents they execute: `spec373b-verdict.sh`, `spec373b-shares.py`,
 `spec371-predicates.sh`, `spec349c2-fit.awk`, `spec366-p5.awk`, `spec366-p67.awk` (`spec373b-order.sh` is not
 called). Written at the G5 candidate commit (M0); at M, G6 confirms this list equals the admitting smoke's

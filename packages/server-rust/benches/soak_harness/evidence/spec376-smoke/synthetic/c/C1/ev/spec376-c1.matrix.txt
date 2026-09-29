@@ -1,0 +1,4 @@
+cell c1 (synthetic)
+  duration:            900s
+  csv cadence:         60s
+  /proc/loadavg:       0.05 0.10 0.12 1/200 1234

@@ -1,0 +1,39 @@
+== STOP: PV ==
+PV=FALSE reason=server_sha line1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa builds=
+== STOP: PR ==
+PR-crashes=TRUE crashes=0
+PR-class=TRUE
+== STOP: P5 / P6 / P7 ==
+P5=FALSE reason=no removal row in the log
+P5-observed: removal_rows=0 settlement_rows=0 unsettled=none
+P5-zero-return: none observed
+P6=FALSE reason=no_persisted_scrape_in /opt/topgun/target/spec376-run/smoke/synthetic/p3/ev/spec372-k1.scrapes
+P7=FALSE reason=no_persisted_scrape_in /opt/topgun/target/spec376-run/smoke/synthetic/p3/ev/spec372-k1.scrapes
+== STOP: PE / PA ==
+PE=FALSE reason=missing_csv_column
+PA=TRUE wellformed_lines=31 lines=31 need=28
+== STOP: PJ ==
+PJ=TRUE echoes=1 value=true
+PJ-child=n/a reason=filtered
+== STOP: PC ==
+PC=TRUE live=1000 live_tag_bytes=50000
+== STOP: PM1 ==
+PM1=TRUE post_mortem_rows=0 empty_scrape_rows=0 first_empty_elapsed=none last_live_scrape_elapsed=900 need_ge=780
+== recorded: ops ==
+OPS_PER_S=111.111
+WRITE_ERRORS=0
+TOTAL_WRITES=100000 DURATION_ACTUAL=900
+OPS_AT_900=111.111 checkpoint_elapsed=900
+== recorded: host state before the cell (the chain writes it at the head of the runner console) ==
+HOST=n/a reason=no_host_record
+== readings: fits (slopes per hour; on amp series the unit is AMP per hour) ==
+FP_slope=FIT_ERROR
+S_slope=FIT_ERROR
+TREND=FIT_ERROR
+TREND3=FIT_ERROR
+TREND_dropped=2
+TREND_points_used=0
+== readings: end levels (last row carrying a footprint) ==
+== readings: census points (TERMINAL, and the deciding point = the last used one) ==
+TERM_src=n/a reason=terminal_dropped_or_absent
+DECIDE_src=n/a reason=no_used_census_point

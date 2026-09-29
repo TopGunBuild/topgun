@@ -1,0 +1,2 @@
+AMP source=LIVE_COPY t=300.0 live=1000 status=dropped reason=no_row_within_30s
+AMP source=TERMINAL t=900.0 live=1000 status=dropped reason=no_row_within_30s

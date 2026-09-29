@@ -1,0 +1,13 @@
+== spec376-preflight start 2026-09-29T09:43:31Z apply=1 sys_root='/opt/topgun/target/spec376-run/smoke/synthetic/f1/root' script=/opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec376-preflight.sh
+== identity
+$ hostname -> 'topgun-new'
+$ nproc -> '4'
+CHECK identity=FAIL hostname=topgun-new nproc=4 (need topgun-bench / 4)
+== isolation
+$ pgrep -f 'dokploy|traefik|dockerd' -> rc=1 pids=''
+unit dirs present=1; matching units=''
+$ ss -Hltn (rc=0)
+  
+CHECK isolation=PASS no dokploy/traefik/dockerd process or unit; 8080 and 47376 free
+REFUSED: identity/isolation failed; nothing was changed and no further check ran
+PREFLIGHT=FAIL failed=identity PREFLIGHT_AT=2026-09-29T09:43:31Z

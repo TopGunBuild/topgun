@@ -1,0 +1,96 @@
+--- cell sc at 2026-09-29T09:30:37Z
+loadavg: 0.38 1.50 1.85 1/123 73547
+%CPU COMMAND
+ 2.5 bash
+ 1.6 systemd
+ 1.0 jbd2/sda1-8
+ 0.6 sshd
+ 0.3 kworker/u8:0-flush-8:0
+MemTotal:       15985096 kB
+MemFree:         6009768 kB
+MemAvailable:   15467632 kB
+Buffers:          138600 kB
+Cached:          9257424 kB
+SwapCached:            0 kB
+Active:          4064012 kB
+Inactive:        5347960 kB
+--- cell spb at 2026-09-29T09:32:40Z
+loadavg: 1.84 1.75 1.90 1/124 74825
+%CPU COMMAND
+ 100 ps
+ 1.2 jbd2/sda1-8
+ 0.3 kworker/u8:0-ext4-rsv-conversion
+ 0.2 kworker/u8:1-events_unbound
+ 0.2 kworker/0:1H-kblockd
+MemTotal:       15985096 kB
+MemFree:         6009128 kB
+MemAvailable:   15478384 kB
+Buffers:          138812 kB
+Cached:          9262892 kB
+SwapCached:            0 kB
+Active:          4066772 kB
+Inactive:        5351208 kB
+--- cell sdh at 2026-09-29T09:34:43Z
+loadavg: 2.32 1.93 1.94 1/120 76013
+%CPU COMMAND
+ 1.3 jbd2/sda1-8
+ 0.5 kworker/u8:2-writeback
+ 0.4 kworker/u8:0-ext4-rsv-conversion
+ 0.3 kworker/u8:1-events_unbound
+ 0.2 kworker/0:1H-kblockd
+MemTotal:       15985096 kB
+MemFree:         5996268 kB
+MemAvailable:   15476904 kB
+Buffers:          138996 kB
+Cached:          9268648 kB
+SwapCached:            0 kB
+Active:          4070188 kB
+Inactive:        5353740 kB
+--- cell sje at 2026-09-29T09:36:57Z
+loadavg: 3.27 2.45 2.13 1/119 77169
+%CPU COMMAND
+ 100 ps
+ 1.4 jbd2/sda1-8
+ 0.4 kworker/u8:0-ext4-rsv-conversion
+ 0.2 kworker/0:1H-kblockd
+ 0.2 kworker/2:1H-kblockd
+MemTotal:       15985096 kB
+MemFree:         5974896 kB
+MemAvailable:   15465244 kB
+Buffers:          139212 kB
+Cached:          9273504 kB
+SwapCached:            0 kB
+Active:          4072796 kB
+Inactive:        5356528 kB
+--- cell ssy at 2026-09-29T09:38:59Z
+loadavg: 2.77 2.48 2.19 1/120 78344
+%CPU COMMAND
+ 1.5 jbd2/sda1-8
+ 0.3 kworker/u8:0-writeback
+ 0.3 kworker/0:1H-kblockd
+ 0.3 kworker/2:1H-kblockd
+ 0.3 kworker/u8:2-ext4-rsv-conversion
+MemTotal:       15985096 kB
+MemFree:         5979144 kB
+MemAvailable:   15480368 kB
+Buffers:          139396 kB
+Cached:          9279108 kB
+SwapCached:            0 kB
+Active:          4075480 kB
+Inactive:        5359408 kB
+--- cell smi at 2026-09-29T09:41:02Z
+loadavg: 2.96 2.56 2.25 1/120 79422
+%CPU COMMAND
+ 1.7 jbd2/sda1-8
+ 0.3 kworker/u8:0-writeback
+ 0.3 kworker/0:1H-kblockd
+ 0.3 kworker/2:1H-kblockd
+ 0.3 kworker/u8:1-ext4-rsv-conversion
+MemTotal:       15985096 kB
+MemFree:         5962308 kB
+MemAvailable:   15474720 kB
+Buffers:          139612 kB
+Cached:          9284604 kB
+SwapCached:            0 kB
+Active:          4078316 kB
+Inactive:        5362180 kB
