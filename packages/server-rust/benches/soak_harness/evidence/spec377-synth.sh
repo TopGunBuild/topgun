@@ -65,6 +65,9 @@ canon() {
   while [ ! -d "$p" ]; do tail="/$(basename "$p")${tail}"; p="$(dirname "$p")"; done
   printf '%s%s\n' "$(cd "$p" && pwd -P)" "$tail"
 }
+# Paths are spliced into sh -c strings and awk system() calls below, so the
+# scratch path is limited to characters no shell treats specially.
+case "$SCR" in *[!A-Za-z0-9_./-]*) echo "FATAL: the scratch dir may use only [A-Za-z0-9_./-]" >&2; exit 2 ;; esac
 case "$(canon "$SCR")/" in
   "$SCRIPT_DIR"/*) echo "FATAL: the scratch dir must not be the evidence dir or under it" >&2; exit 2 ;;
 esac
@@ -85,13 +88,13 @@ PRED="$SCRIPT_DIR/spec377-predicates.sh"
 DECIDE="$SCRIPT_DIR/spec377-decide.sh"
 CHAIN="$SCRIPT_DIR/spec377-chain.sh"
 MANIFEST_REAL="$SCRIPT_DIR/spec377-manifest.md"
-CASES="A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14
+CASES="F0 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14
 N_pv N_s1 N_s2 N_s3 N_s4 N_s5 N_s6 N_marker_control N_j1 N_j2 N_j3 N_j4 N_j5 N_j6
 N_m1 N_m2 N_m3 N_m4 N_m5 N_mi_version N_mi_thread_prefix
 B1 B2 B3 B4 B5
-P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18
+P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P18b P18c
 D1 D2 D3 D4 D5 D6 D7 D8 D9 D10 D10b D11 D11b D12 D13 D14 D14b D15 D15b D16 D18
-CR1 CR2 CR3 CR4 CR5 CR6 CR6b CR7 CR8 CR9 CR10
+CR1 CR2 CR3 CR4 CR5 CR6 CR6b CR6c CR6d CR7 CR8 CR9 CR10
 H1 H2 H3 H4 H5 V1 V2 V3 V4 V5 V6 V7 V8 V9 R11 R12 R13a R13b OOD1 LZ1 K1
 E1 E2"
 # Jobs for the E1 enumeration: one decide run per input, in parallel.
@@ -122,7 +125,8 @@ within() { awk -v x="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(x ~ /^[-+]?[0-9]+
 # these cases instead of passing against a stale copy.
 N_HDR="$(grep -c "^CSV_HEADER='" "$SCRIPT_DIR/spec377-cells.sh")"
 HEADER="$(sed -n "s/^CSV_HEADER='\(.*\)'$/\1/p" "$SCRIPT_DIR/spec377-cells.sh")"
-[ "$N_HDR" = "1" ] && [ -n "$HEADER" ] || echo "  | FATAL: spec377-cells.sh must define CSV_HEADER='...' exactly once (found ${N_HDR})"
+F0_WHY=""
+[ "$N_HDR" = "1" ] && [ -n "$HEADER" ] || F0_WHY="${F0_WHY} CSV_HEADER=${N_HDR}"
 
 # The synthetic manifest carries section 1's literal lines copied from the
 # real manifest (never retyped), so every threshold a case meets is the
@@ -135,9 +139,17 @@ SYN_MAN="$SCR/manifest-literals.md"
   echo
 } > "$SYN_MAN"
 N_LIT="$(grep -c '^[A-Z0-9_]*=' "$SYN_MAN")"
-[ "$N_LIT" = "13" ] || echo "  | FATAL: section 1 of spec377-manifest.md must carry the thirteen literals once each (copied ${N_LIT})"
+[ "$N_LIT" = "13" ] || F0_WHY="${F0_WHY} literals_copied=${N_LIT}"
 lit() { sed -n "s/^$1=//p" "$SYN_MAN" | awk '{ print $1 }'; }
 A0="$(lit A0_L_MIB)"; LW="$(lit LEVEL_WINDOW_S)"; BAR="$(lit FLAT_BAR_PER_H)"; CAP="$(lit STAGE2_MAX_H)"
+L_BETTER="$(lit BETTER_BAR)"; L_TIE="$(lit TIE_BAND)"; L_OPS="$(lit OPS_PARITY_MIN)"
+for v in "$A0" "$LW" "$BAR" "$CAP" "$L_BETTER" "$L_TIE" "$L_OPS"; do
+  printf '%s' "$v" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || F0_WHY="${F0_WHY} literal_value=${v:-empty}"
+done
+# F0: every fixture contract above held; a case below never runs on a
+# silently broken fixture (its own FAIL would follow anyway, but the cause is
+# named here).
+[ -z "$F0_WHY" ]; verdict F0 $? "fixture contract:${F0_WHY}"
 mkman() {   # $1 = file, then extra lines for section 1
   local f="$1"; shift
   { cat "$SYN_MAN"; for l in "$@"; do printf '%s\n' "$l"; done; echo "## APPEND-ONLY BELOW"; } > "$f"
@@ -518,7 +530,8 @@ p_agree() {   # $1 = expected class; sets P_WHY
   cl="$(p_class)"; rc="$(val "$P_REF" REF_CLASS)"
   lvl="$(val "$P_OUT" PE_LEVEL_s1 | awk '{ print $1 }')"; rl="$(val "$P_REF" REF_PE_LEVEL)"
   P_WHY="class=${cl} ref=${rc} want=$1 level=${lvl} ref_level=${rl}"
-  [ "$cl" = "$1" ] && [ "$rc" = "$1" ] && awk -v a="$lvl" -v b="$rl" 'BEGIN { d = a - b; exit !(a != "" && (d < 0 ? -d : d) <= 0.0001) }'
+  [ "$cl" = "$1" ] && [ "$rc" = "$1" ] && awk -v a="$lvl" -v b="$rl" 'BEGIN { re = "^-?[0-9]+([.][0-9]+)?$"; d = a - b
+    exit !(a ~ re && b ~ re && (d < 0 ? -d : d) <= 0.0001) }'
 }
 # slope_rel and se_rel_adj (fractions/h) against a nominal %/h of the spec's
 # reference run (different noise draw and window, so within a band).
@@ -531,9 +544,11 @@ p_near() {   # $1 = nominal s %/h, $2 = nominal e %/h
 }
 
 p_run P1 seed=101; p_agree FLAT; r=$?
-[ "$r" -eq 0 ] && [ "$(fld "$(val "$P_OUT" PE_LEVEL_s1)" rows)" = "26" ] && [ "$(val "$P_REF" REF_LEVEL_ROWS)" = "26" ] || r=1
 P1_DROPPED_N="$(val "$P_OUT" CENSUS_DROPPED_N_s1)"
-verdict P1 "$r" "${P_WHY} rows=$(fld "$(val "$P_OUT" PE_LEVEL_s1)" rows) (want FLAT, the reference level, 26 rows)"
+# TERMINAL (t = D + 2) is the one point dropped by construction.
+[ "$r" -eq 0 ] && [ "$(fld "$(val "$P_OUT" PE_LEVEL_s1)" rows)" = "26" ] && [ "$(val "$P_REF" REF_LEVEL_ROWS)" = "26" ] \
+  && [ "$P1_DROPPED_N" = "1" ] && [ "$(val "$P_REF" REF_DROPPED_N)" = "1" ] && [ "$(val "$P_OUT" CENSUS_DROPPED_s1)" = "21602.0" ] || r=1
+verdict P1 "$r" "${P_WHY} rows=$(fld "$(val "$P_OUT" PE_LEVEL_s1)" rows) dropped=$(val "$P_OUT" CENSUS_DROPPED_s1) (want FLAT, the reference level, 26 rows, only TERMINAL dropped)"
 p_run P2 seed=102 rise=0.03; p_agree RISING; verdict P2 $? "$P_WHY"
 p_run P3 seed=103 rise=0.003 sd=0.005; p_agree FLAT; verdict P3 $? "$P_WHY"
 # Rows blanked before 11 760 s: the first retained census is at 12 000 s, so
@@ -586,9 +601,13 @@ fc="$(val "$P_OUT" FIT_CHECK_TREND_s1)"; sp="$(fld "$(P_TREND)" slope_pe_per_h)"
 [ "${fc%% *}" = "PASS" ] && within "$sp" -1 1 || r=1
 verdict P16 "$r" "${P_WHY} FIT_CHECK=${fc} slope_pe_per_h=${sp} (want PASS and |slope| < 1 B/h)"
 p_run P17 seed=117 mc=1500 slope=15
-fc="$(val "$P_OUT" FIT_CHECK_TREND_s1)"; P17_FITTER="$(fld "$fc" fitter)"; cl="$(p_class)"
+fc="$(val "$P_OUT" FIT_CHECK_TREND_s1)"; P17_FITTER="$(fld "$fc" fitter)"; P17_PROG="$(fld "$fc" prog)"; cl="$(p_class)"
 case "$cl" in RISING|FALLING|FLAT|UNDERPOWERED|MARGINAL) r=0 ;; *) r=1 ;; esac
+# The fitter's printed slope is the six-decimal number the TREND line reports,
+# and it lies within 0.05 B/h of the reference refit (the cell's +15 B/h slope).
 [ "${fc%% *}" = "PASS" ] && [ "$cl" = "$(val "$P_REF" REF_CLASS)" ] || r=1
+printf '%s' "$P17_FITTER" | grep -Eq '^-?[0-9]+\.[0-9]{6}$' && [ "$P17_FITTER" = "$(fld "$(P_TREND)" slope_pe_per_h)" ] || r=1
+within "$P17_FITTER" "$(awk -v s="$(val "$P_REF" REF_SLOPE)" 'BEGIN { print s - 0.05 }')" "$(awk -v s="$(val "$P_REF" REF_SLOPE)" 'BEGIN { print s + 0.05 }')" || r=1
 verdict P17 "$r" "FIT_CHECK=${fc} class=${cl} ref=$(val "$P_REF" REF_CLASS)"
 # P18: P17's cell with the fitter's printed slope moved by 9e-4.
 mkdir -p "$SCR/p/P18"; cp -R "$SCR/p/P17/." "$SCR/p/P18/"
@@ -597,6 +616,22 @@ P_OUT="$(SPEC377_SYNTHETIC=1 SPEC377_MANIFEST="$SCR/p/P18/manifest.md" SPEC377_T
 printf '%s\n' "$P_OUT" | grep -E '^(FIT_CHECK_TREND_s1|TREND_s1)=' | show
 { has_prefix "$P_OUT" "TREND_s1=n/a reason=fit_mismatch" && has_prefix "$P_OUT" "FIT_CHECK_TREND_s1=FAIL "; }
 verdict P18 $? "fitter slope ${P17_FITTER} -> ${P18_SLOPE}: TREND=$(P_TREND)"
+# P18b/P18c pin the tolerance itself at 5e-7, not merely "below 9e-4": the
+# printed slope is replaced by the program's own slope + 4e-7 (must pass) and
+# + 6e-7 (must fail).
+p18x() {   # $1 = id, $2 = offset
+  mkdir -p "$SCR/p/$1"; cp -R "$SCR/p/P17/." "$SCR/p/$1/"
+  P_OUT="$(SPEC377_SYNTHETIC=1 SPEC377_MANIFEST="$SCR/p/$1/manifest.md" SPEC377_TEST_FIT_SLOPE="$(awk -v s="$P17_PROG" -v o="$2" 'BEGIN { printf "%.9f", s + o }')" \
+    bash "$PRED" "$SCR/p/$1" spec377-s1 "$SCR/p/$1/builds.txt" 2>&1)"
+  printf '%s\n' "$P_OUT" | grep -E '^(FIT_CHECK_TREND_s1|TREND_s1)=' | show
+}
+printf '%s' "$P17_PROG" | grep -Eq '^-?[0-9]+\.[0-9]{9}$'; P17_OK=$?
+p18x P18b 0.0000004
+[ "$P17_OK" -eq 0 ] && has_prefix "$P_OUT" "FIT_CHECK_TREND_s1=PASS " && case "$(p_class)" in RISING|FALLING|FLAT|UNDERPOWERED|MARGINAL) true ;; *) false ;; esac
+verdict P18b $? "prog=${P17_PROG} + 4e-7: want PASS and a numeric TREND, got $(val "$P_OUT" FIT_CHECK_TREND_s1)"
+p18x P18c 0.0000006
+[ "$P17_OK" -eq 0 ] && has_prefix "$P_OUT" "FIT_CHECK_TREND_s1=FAIL " && has_prefix "$P_OUT" "TREND_s1=n/a reason=fit_mismatch"
+verdict P18c $? "prog=${P17_PROG} + 6e-7: want fit_mismatch, got $(P_TREND)"
 
 # ============================================================ D: the decision
 # A decide world = five series cells' predicates files, matrices, soak.json
@@ -782,6 +817,10 @@ d_case CR5 "s1:TREND=$UP" "s2:TREND=$UP" "s1:STAGE2_T=>STAGE2_MAX_H" "s2:STAGE2_
   'NEXT=TODO-696+TODO-695;THEN;DEFAULT_FLIP=JE' 'CONDUCTOR_RULE=n/a reason=not_conductor_ruling'
 d_case CR6 "${CR1[@]}" "mi3:TREND=@absent" -- 'NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE' 'CONDUCTOR_RULE=n/a reason=missing:mi3:TREND'
 d_case CR6b "${CR1[@]}" "mi3:TREND=n/a reason=few_rows n=80 dropped=1" -- 'NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE' 'CONDUCTOR_RULE=n/a reason=missing:mi3:TREND'
+# Step 3a precedes the empty-Lset rule: no arm is better here, yet a missing
+# arm TREND still names itself instead of KEEP_SYSTEM.
+d_case CR6c "${CR1[@]}" "je:PE_LEVEL=950 rows=26" "mi3:TREND=@absent" -- 'VS_SYS_JE=0.9500 NO_GAIN' 'CONDUCTOR_RULE=n/a reason=missing:mi3:TREND'
+d_case CR6d "${CR1[@]}" "mi2:TREND=n/a reason=pe_nonpositive n=176 level=-3.0" -- 'CONDUCTOR_RULE=n/a reason=missing:mi2:TREND'
 d_case CR7 "${CR1[@]}" "mi2:TREND=$FL" -- 'VS_SYS_MI2=0.9500 NO_GAIN' 'VERDICT_MI2=FLAT_NO_GAIN' 'CONDUCTOR_RULE=n/a reason=judgement:CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE'
 d_case CR8 "${CR1[@]}" "je:TREND=$RI" -- 'VERDICT_JE=RISING' 'CONDUCTOR_RULE=KEEP_SYSTEM;PLATEAU=OPEN;NEXT=TODO-719'
 d_case CR9 "${CR1[@]}" "je:STAGE2_T=n/a reason=missing:je:e" -- "CONDUCTOR_RULE=PROVISIONAL_DEFAULT=JE;STAGE2_T=n/a reason=missing:je:e;${PROV}"
@@ -978,8 +1017,8 @@ awk -v seed="$E1_SEED" -v spec="$E1/worlds.txt" -v rows="$E1/rows.txt" -v root="
       a = A[i]; v = LV[FI["ST2_" a], ROW[r, FI["ST2_" a]]]
       print a ":STAGE2_T=" (v == "6" ? "6" : v == "gt" ? ">STAGE2_MAX_H" : v == "na" ? "n/a reason=missing:" a ":e" : "@absent") > spec
     }
-  }' || echo "  | E1 generator failed"
-awk -v base="$SYN_MAN" -f "$DW_AWK" "$E1/worlds.txt" || echo "  | E1 world writer failed"
+  }' || echo "E1_GENERATOR_FAILED" >> "$E1/design.txt"
+awk -v base="$SYN_MAN" -f "$DW_AWK" "$E1/worlds.txt" || echo "E1_WRITER_FAILED" >> "$E1/design.txt"
 cat "$E1/design.txt" | show
 # One decide run per world, NJ at a time; each writes <world>/out.txt.
 ( cd "$E1" && ls -d w[0-9]* ) | xargs -P "$NJ" -I{} sh -c 'SPEC377_SYNTHETIC=1 bash "$1" "$2/{}/ev" "$2/{}/manifest.md" "$2/{}/smoke" > "$2/{}/out.txt" 2>&1; echo "rc=$?" >> "$2/{}/out.txt"' _ "$DECIDE" "$E1"
@@ -987,10 +1026,10 @@ cat "$E1/design.txt" | show
 # over anything decide printed), compared with decide's NEXT,
 # DEFAULT_CANDIDATE and CONDUCTOR_RULE; plus the closed-list, one-NEXT,
 # zero-UNMATCHED and recorded-readings-never-route assertions.
-awk -v root="$E1" '
+awk -v root="$E1" -v BETTER="$L_BETTER" -v TIE="$L_TIE" -v OPSMIN="$L_OPS" '
   function pick(S, M,   i, a, m, have) {   # set-based tie over arms in S, levels M
     have = 0; for (i = 1; i <= 3; i++) { a = AR[i]; if ((a in S) && (!have || M[a] < m)) { m = M[a]; have = 1 } }
-    for (i = 1; i <= 3; i++) { a = AR[i]; if ((a in S) && M[a] <= m * 1.1) return a }
+    for (i = 1; i <= 3; i++) { a = AR[i]; if ((a in S) && M[a] <= m * (1 + TIE)) return a }
     return ""
   }
   function key(file, k,   l, n, v) { n = 0; while ((getline l < file) > 0) if (index(l, k "=") == 1) { n++; v = substr(l, length(k) + 2) } close(file); return n == 1 ? v : "<n=" n ">" }
@@ -1034,9 +1073,9 @@ awk -v root="$E1" '
         a = AR[i]; c = AC[a]
         opsmiss = (O["s1"] == "" || O["s2"] == "" || O[c] == "")
         ratio = opsmiss ? "" : O[c] / ((O["s1"] + O["s2"]) / 2)
-        vsok = (PE["s2"] != "" && PE[c] != ""); better = vsok && (PE[c] / 1000 <= 0.8)
+        vsok = (PE["s2"] != "" && PE[c] != ""); better = vsok && (PE[c] / 1000 <= BETTER + 0)
         if (opsmiss) vd = "OPSMISS"
-        else if (ratio < 0.95) vd = "OPS"
+        else if (ratio < OPSMIN + 0) vd = "OPS"
         else if (T[c] == "MISSING" || PE[c] == "" || !vsok) vd = "NA"
         else if (T[c] == "FLAT") vd = better ? "CANDIDATE" : "FLAT_NO_GAIN"
         else if (T[c] == "RISING") vd = "RISING"
@@ -1046,7 +1085,7 @@ awk -v root="$E1" '
         if (vd == "FLAT_NO_GAIN") anyfng = 1
         if (T[c] == "FLAT") anyflat = 1
         if (T[c] == "MISSING" && firstmiss == "") firstmiss = c
-        if (better && ratio != "" && ratio >= 0.95 && T[c] != "RISING") { LS[a] = 1; nL++; LEVL[a] = PE[c] }
+        if (better && ratio != "" && ratio >= OPSMIN + 0 && T[c] != "RISING") { LS[a] = 1; nL++; LEVL[a] = PE[c] }
       }
       if (nC == 0) { dc = (ps == "PLATEAU") ? "SYS" : "NONE"; oa = 1 }
       else { ch = pick(CS, LEVA); oa = (nC <= 1) ? 1 : (pick(CS, RSA) == ch); dc = oa ? ch : "NONE" }
@@ -1103,7 +1142,7 @@ for v in STOP 'CONDUCTOR_RULING;SYS_MISSING' 'CONDUCTOR_RULING;SYS_BIMODAL;SEE=T
   awk -v v="$v" '$1 == "E1_NEXT_COUNT" { s = $0; sub(/^E1_NEXT_COUNT [0-9]+ /, "", s); if (s == v) f = 1 } END { exit !f }' "$E1/check.txt" \
     || { echo "  | E1: NEXT=${v} never reached"; E1_REACH=1; }
 done
-grep -q '^E1_FACTORS=.* E1_UNCOVERED_PAIRS=0$' "$E1/design.txt" && [ "$E1_RC" -eq 0 ] && [ "$E1_REACH" -eq 0 ]
+grep -q '^E1_FACTORS=.* E1_UNCOVERED_PAIRS=0$' "$E1/design.txt" && ! grep -q 'FAILED' "$E1/design.txt" && [ "$E1_RC" -eq 0 ] && [ "$E1_REACH" -eq 0 ]
 verdict E1 $? "rc=${E1_RC} reach=${E1_REACH} design=$(cat "$E1/design.txt")"
 
 # ============================================================ verdict

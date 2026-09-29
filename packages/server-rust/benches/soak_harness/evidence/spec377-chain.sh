@@ -121,7 +121,7 @@ fi
 # ones it needs and nothing else may leak in from the caller's environment.
 unset SPEC365_OUT_DIR SPEC365_DATA_DIR SPEC365_FORCE SPEC362B_SMOKE_DURATION \
       SPEC365_SMOKE_SAMPLE_INTERVAL SPEC371_SMOKE_LIVE_CENSUS SPEC370_BASE_SUFFIX \
-      SPEC371_BASE_SUFFIX SOAK_SERVER_BINARY 2>/dev/null || true
+      SPEC371_BASE_SUFFIX SOAK_SERVER_BINARY SPEC377_SYNTHETIC SPEC377_MANIFEST SPEC377_TEST_FIT_SLOPE 2>/dev/null || true
 
 if [ "$PHASE" = "smoke" ]; then
   # The smoke OUT is pinned (gitignored target/, outside every path M commits);
@@ -508,6 +508,8 @@ if [ "$PHASE" = "series" ]; then
   S_PROGS="$( [ -f "$SMOKE_LOG" ] && sed -nE 's/^SMOKE_PROG_SHA=([^ ]+) sha256=([0-9a-f]{64})$/\1 \2/p' "$SMOKE_LOG")"
   BIND_FAIL=""
   [ -f "$SMOKE_LOG" ] || BIND_FAIL="${BIND_FAIL} smoke_log=absent"
+  # The binding is to an ADMITTING smoke: exactly one admission line, and it is PASS.
+  [ "$(grep -c '^SMOKE_ADMISSION=' "$SMOKE_LOG" 2>/dev/null)" = "1" ] && grep -qx 'SMOKE_ADMISSION=PASS failed=none' "$SMOKE_LOG" || BIND_FAIL="${BIND_FAIL} smoke_admission=not_pass"
   [ -n "$M_PROGS" ] || BIND_FAIL="${BIND_FAIL} manifest_programs=absent"
   while read -r f s; do
     [ -n "$f" ] || continue

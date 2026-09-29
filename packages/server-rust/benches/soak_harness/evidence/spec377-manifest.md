@@ -429,10 +429,18 @@ Data input (not a program; the parity run compares against it, so `spec377-order
 in this form and hashes it like a program):
 - `5dbe02258b05ebcddfefc5be6d945d050c74597fa60edc172c2d58d1fcb87f1a` `packages/server-rust/benches/soak_harness/evidence/spec376-synth-ref-darwin.txt`
 
-### Programs frozen at M — *to fill: G4 (M0 candidate), confirmed at M by G5*
-Every `spec377-*` program (`spec377-cells.sh`, `spec377-chain.sh`, `spec377-order.sh`, `spec377-preflight.sh`,
-`spec377-predicates.sh`, `spec377-decide.sh`, `spec377-decide.awk`, `spec377-synth.sh`, `spec377-power.py`) with its
-sha256, equal file-for-file to the admitting smoke's `SMOKE_PROG_SHA=` lines.
+### Programs frozen at M — M0 candidate (G4), confirmed at M by G5
+Every `spec377-*` program with its sha256; at M they must equal, file for file, the admitting smoke's
+`SMOKE_PROG_SHA=` lines (a program changed by a smoke fix loop is re-listed here before M):
+- `95e5dbe6925f6cb56534cccf786d73aee2122d64a8d72502e00bf0d723f69dc6` `packages/server-rust/benches/soak_harness/evidence/spec377-cells.sh`
+- `5ffa9cf8318d316d8477b19a20343af93e04d078ab1ec399a1f09a8a7bf0b89a` `packages/server-rust/benches/soak_harness/evidence/spec377-chain.sh`
+- `6d0f92a3c38d806061aa51e1ad231d6e64d57711448a123d886661c9b829c122` `packages/server-rust/benches/soak_harness/evidence/spec377-order.sh`
+- `a5632c595befe38c54c29b98667c353fda25689e7f375a6b620cc6033d043c79` `packages/server-rust/benches/soak_harness/evidence/spec377-preflight.sh`
+- `f3cea41238eb7f98acff52f308173d455424654b567d7064cc99298f6400ca8b` `packages/server-rust/benches/soak_harness/evidence/spec377-predicates.sh`
+- `4afa4e5fee68afbfdbe05f3705cdc258bc0b47a2219539886d91bb64f9907642` `packages/server-rust/benches/soak_harness/evidence/spec377-decide.sh`
+- `d455762484de246733a17b506ff856ab3c51415c2b1d3d747a37ef41985375ff` `packages/server-rust/benches/soak_harness/evidence/spec377-decide.awk`
+- `54e8981fc9b33ba517a3a815705c1afc68a0e551fd294c58795f79d4775fc63e` `packages/server-rust/benches/soak_harness/evidence/spec377-synth.sh`
+- `e7f6909a02b91d358d15a5cf790a4701bb602d23499ff895b0c6efb7f841abaf` `packages/server-rust/benches/soak_harness/evidence/spec377-power.py`
 
 ### Build records — *to fill: G5 (from `spec377-builds.txt`)*
 The five flavour lines (`flavour=<label> … sha256=… recompiled=yes marker=ok`), `rustc -vV`, glibc and awk banners;
@@ -444,7 +452,7 @@ The five flavour lines (`flavour=<label> … sha256=… recompiled=yes marker=ok
 `evidence/spec377-je-conf.txt` (committed byte-for-byte from the smoke), each line shown with trailing spaces rendered
 as `␠` (documentation only; the committed file is the literal `PALLOC` keys on).
 
-### Synthetic enumeration parameters (G4; `spec377-synth.sh`, 113 cases)
+### Synthetic enumeration parameters (G4; `spec377-synth.sh`, 118 cases)
 Everything is inside the committed program: fixtures are generated there (bash + awk only), expectations are written
 there or recomputed there by code that shares nothing with the program under test. Noise comes from a Park–Miller
 generator (`16807 · seed mod (2^31 − 1)`, exact in a double) and an Irwin–Hall normal (twelve uniforms − 6), so no
@@ -479,11 +487,14 @@ and the gate's census window). Printed on the Mac:
 
 P6 (AR(1) 0.9, sd 5 %): `UNDERPOWERED`, `STAGE2_T=14` equal to the reference. P8 (`F` = 60 MiB, sd 0.1 %):
 `FIXED_EST=60.773 MiB`, `positive_fixed_memory`, class = P12's. P16: `slope_pe_per_h=0.438169` B/h, `FIT_CHECK` PASS
-(absdiff 1.2e-7), `FLAT`. P17: `FIT_CHECK` PASS; P18 = P17 with the fitter's printed slope + 0.000900 ⇒
-`TREND=n/a reason=fit_mismatch`. **P5 departs from R10's literal `CENSUS_DROPPED_N=1`:** `TERMINAL` is dropped by
+(absdiff 1.2e-7), `FLAT`. P17: `FIT_CHECK` PASS, the fitter's printed slope pinned (six decimals, equal to the `TREND` line, within 0.05 B/h
+of the reference refit); P18 = P17 with the fitter's printed slope + 0.000900 ⇒ `TREND=n/a reason=fit_mismatch`;
+**P18b/P18c pin the tolerance itself**: the printed slope replaced by the program's own slope + 4e-7 passes, + 6e-7
+fails (`fit_mismatch`). CR6c (a missing arm `TREND` with no arm better) and CR6d (`mi2`) pin step 3a's precedence
+over the empty-`Lset` rule; F0 fails the suite when a fixture contract (CSV header, the thirteen literals) breaks. **P5 departs from R10's literal `CENSUS_DROPPED_N=1`:** `TERMINAL` is dropped by
 construction (R5.4), so the baseline P1 prints 1 and P5 prints 2 — the case asserts "P1 + 1", the shifted census
-`t` in the dropped list, and the interpolation between its neighbours. Liveness: widening the cross-check to 1e-3 fails
-P18 and E1; skipping step 3a on a missing arm `TREND` fails CR6, CR6b and E1 (transcript `spec377-g4-mac.txt`).
+`t` in the dropped list, and the interpolation between its neighbours. Liveness (a scratch copy with both audit-v4 fixes reverted — the cross-check widened to 1e-3 and step 3a skipped for
+a missing arm `TREND`) fails the cases that pin them; transcript `spec377-g4-mac.txt`.
 
 ### Chain log contract (`spec377-chain.sh`, G2b)
 Every line a reading keys on is printed at column 0, exactly once per log; anything echoed from another program that
@@ -609,7 +620,7 @@ runner closes the block at the end of that trailer instead (the contiguous run f
 option and trailer lines); everything after it that contains `mimalloc` or is an option line counts. The reading is
 recorded, never a STOP; the smoke's captured literals (R6.2) show the real trailer before M.
 
-**`diff spec376-chain.sh spec377-chain.sh`** (G2b; 93 hunks; parent line ranges; "item" = the eight-item closed
+**`diff spec376-chain.sh spec377-chain.sh`** (G2b; 94 hunks after the two G4 review hardenings; parent line ranges; "item" = the eight-item closed
 list in the `spec377-chain.sh` header). A hunk whose new-side lines belong to two items is split by new-side line
 range. Reproduce the list with `diff spec376-chain.sh spec377-chain.sh | grep -E '^[0-9]'`.
 
@@ -623,6 +634,7 @@ range. Reproduce the list with `diff spec376-chain.sh spec377-chain.sh | grep -E
 | `92c90,100` | 90–91 the five labels and the four server labels → item 2 (R0.5); 92–93 the one `/proc` name → item 7 (R4.4); 94–100 predicted series length, cap, disk floor, settle poll → item 7 (R4.4, R4.5, R12) | 2 / 7 | R0.5 / R4.4, R4.5, R12 |
 | `96,100c104,108` | the one commit is `SERIES_PIN`, read from `spec377-cells.sh` exactly once | 2 | R0.2 |
 | `102,103c110,111` | phases `build`, `smoke`, `series` (`SPEC377_PHASE`) | 2 | R4.2–R4.4 |
+| `109c124` | the synthetic switches `SPEC377_SYNTHETIC`, `SPEC377_MANIFEST`, `SPEC377_TEST_FIT_SLOPE` join the inherited unset list, so no smoke or series program run by the chain can honour them (the smoke OUT lies outside the evidence dir, where the predicates would otherwise accept a synthetic manifest) | 2 | R0.6, R4.3 (G4 cross-vendor review) |
 | `104a113,119` | the series phase refuses a terminal before any file exists | 7 | R4.4, G5 |
 | `114c129`, `116c131`, `118c133` | `SPEC377_OUT_DIR` | 2 | R4.3 |
 | `123,127c138,142` | smoke cells `ssy sje smi3 smi2`; the series phase and its cells `s1 je mi3 mi2 s2` | 2 | R0.5, R4.3, R4.4 |
@@ -631,7 +643,7 @@ range. Reproduce the list with `diff spec376-chain.sh spec377-chain.sh | grep -E
 | `140,141c155,156` | comment loses the parent's item number | 8 | — |
 | `144c159` | awk shim dir name | 2 | R4.1 |
 | `154c169` | comment: the label map is the cell table's | 8 | — |
-| `156,167d170`, `169,171c172,176`, `173a179` | cell → label map (`ssy s1 s2 → SYS-ser`, `sje je → JE-ser`, `smi3 mi3 → MI3-ser`, `smi2 mi2 → MI2-ser`); every label at `SERIES_PIN` | 2 | R0.5 |
+| `157,171c172,176`, `173a179` | cell → label map (`ssy s1 s2 → SYS-ser`, `sje je → JE-ser`, `smi3 mi3 → MI3-ser`, `smi2 mi2 → MI2-ser`); every label at `SERIES_PIN` | 2 | R0.5 |
 | `183,184c189,190` | comment loses the parent's item number | 8 | — |
 | `196c202,203` | comment: both mimalloc majors carry the MI literal | 8 | R1.1 |
 | `202,203d208`, `205c210` | the CA/DH marker rules are gone; the MI rule covers `MI3-ser` and `MI2-ser` | 2 | R1.1 |
@@ -650,34 +662,35 @@ range. Reproduce the list with `diff spec376-chain.sh spec377-chain.sh | grep -E
 | `327,331c460,481` | series gates header; the schedule block (`SPEC377_SERVER_CREATED_UTC` required, `SERIES_START_UTC`, `PREDICTED_END_UTC`, `CAP_CROSS_UTC`, cap headroom) | 7 | R4.4, R12, G5 |
 | `335,337c485,487`, `340,341c490,491`, `343c493`, `346c496` | `spec377-order.sh` and `spec377-manifest.md` names, `SPEC377_MANIFEST_COMMIT` | 2 | R4.4 |
 | `354,356c504,506` | smoke log path and manifest name of the binding | 2 | R4.4 |
-| `388,389c538,539` | preflight log names | 2 | R4.4 |
-| `393a544,551` | a `pending=` preflight PASS is refused; exactly one `CHECK alloc_conf=PASS` is required | 7 | R9, AC-6, R0.6 |
-| `403c561,568` | 561 the preflight line names `alloc_conf=PASS`; 562–568 `DISK_FREE_AT_START=`, refusal below the section-1 `MIN_DISK_GIB` or unreadable | 7 | R9 / R4.5 |
-| `407c572` | comment: smoke and series | 8 | — |
-| `425,427c590,593` | `SMOKE_PROG_SHA=` over `program_names`; a missing program is logged, not skipped silently | 6 | R4.3, R6.4 |
-| `432c598` | comment: the decision reading | 8 | — |
-| `435c601`, `437,438c603,604` | host log name, `SPEC377_CHAIN_START_EPOCH`, `SPEC377_HARNESS_BIN` | 2 | R0.5 |
-| `440,448c606,617`, `450,459c619` | the parent's smaps capture (dropped, item 6) is replaced by `settle` (new 606–619) | 7 | R4.4 |
-| `463c623` | `run_cell` locals: the smaps pid is gone, `ma` (MemAvailable) added | 7 | R4.4 |
-| `465,466c625,627` | 625–626 `SPEC377_SERVER_COMMIT` → item 2 (R0.5); 627 MemAvailable at the start → item 7 (R4.4) | 2 / 7 | R0.5 / R4.4 |
-| `469c630`, `471c632,633`, `473c635` | host reads go through `$PROC`; `MEM_AVAILABLE_START_<cell>=`; `LOAD_AT_START_` via `load1` | 7 | R4.4 |
-| `475c637` | comment loses the parent's item number | 8 | — |
-| `477,478c639,640`, `483c646`, `498c658` | runner console, runner and predicates names | 2 | R0.5 |
-| `479a642`, `492a651,652` | `MEM_AVAILABLE_END_<cell>=` (also on a not-launched cell) | 7 | R4.4 |
-| `485,488d647`, `490,491c649` | the smaps capture and its wait are gone (item 6); 649 the `RUNNER_EXIT` line's runner console name (item 2) | 6 / 2 | R4.3 / R0.5 |
-| `494,495c654,655` | comment: the decision reading | 8 | — |
-| `502,505c662,678` | series: settle before every cell after the first, cells in order, predicates after all five; smoke: predicates after each cell | 7 | R4.4 |
-| `508,511c681,684`, `513c686` | series reading: `spec377-decide.sh` → `spec377.decision.txt`, `decide rc=` with `NO flags`, flags indented | 7 | R4.4 |
-| `518,580c691,692` | the calibration self-run, smaps replay, dhat frame check and shares self-check are gone; the smoke comment | 6 | R4.3 |
-| `587,588c699,700`, `591c703` | `spec377-synth.sh` | 6 | R4.3, R6.3 |
-| `593a706,719` | the literal capture into `spec377-mi-literals.txt` and `spec377-je-conf.txt` | 6 | R6.2 |
-| `600c726`, `611c783`, `627c798`, `642c813` | predicates, runner console, matrix, CSV names | 2 | R0.5 |
-| `609a736,781` | `cell_lines`, `count_re`, `mi_check`, `je_conf_check` (R3.3 regexes over the captured files) | 6 | R6.2, R3.3 |
-| `614c786` | comment | 8 | — |
-| `617,619c789,790` | `PV` and `PALLOC` join `PEL`/`PMEM`; the parent's `PA` for `sc`/`spb` is gone | 6 | R6.1 |
-| `656,665c827,828` | 827 the `sje` CSV name → item 2; 828 the parent's `je_config` and `ssy`/`smi` marker items are gone (PALLOC covers them) → item 6 | 2 / 6 | R0.5 / R6.1 |
-| `668,673c831,834` | smaps/DH/self-check admission items gone; `mi_check smi3`, `mi_check smi2`, `je_conf_check`; `SYNTH377` replaces `SYNTH376` | 6 | R6.2, R6.3 |
-| `678,679c839` | the `SMOKE_PROG_SHA=` admission loop runs over `program_names` | 6 | R6.4, R0.6 |
+| `360a511,512` | the binding is to an admitting smoke: exactly one `SMOKE_ADMISSION=` line, `=PASS failed=none`, else `SMOKE_BINDING=FAIL … smoke_admission=not_pass` (G4 cross-vendor review) | 7 | R4.4, R6, R0.6 |
+| `388,389c540,541` | preflight log names | 2 | R4.4 |
+| `393a546,553` | a `pending=` preflight PASS is refused; exactly one `CHECK alloc_conf=PASS` is required | 7 | R9, AC-6, R0.6 |
+| `403c563,570` | 563 the preflight line names `alloc_conf=PASS`; 564–570 `DISK_FREE_AT_START=`, refusal below the section-1 `MIN_DISK_GIB` or unreadable | 7 | R9 / R4.5 |
+| `407c574` | comment: smoke and series | 8 | — |
+| `425,427c592,595` | `SMOKE_PROG_SHA=` over `program_names`; a missing program is logged, not skipped silently | 6 | R4.3, R6.4 |
+| `432c600` | comment: the decision reading | 8 | — |
+| `435c603`, `437,438c605,606` | host log name, `SPEC377_CHAIN_START_EPOCH`, `SPEC377_HARNESS_BIN` | 2 | R0.5 |
+| `440,448c608,619`, `450,459c621` | the parent's smaps capture (dropped, item 6) is replaced by `settle` (new 608–621) | 7 | R4.4 |
+| `463c625` | `run_cell` locals: the smaps pid is gone, `ma` (MemAvailable) added | 7 | R4.4 |
+| `465,466c627,629` | 627–628 `SPEC377_SERVER_COMMIT` → item 2 (R0.5); 629 MemAvailable at the start → item 7 (R4.4) | 2 / 7 | R0.5 / R4.4 |
+| `469c632`, `471c634,635`, `473c637` | host reads go through `$PROC`; `MEM_AVAILABLE_START_<cell>=`; `LOAD_AT_START_` via `load1` | 7 | R4.4 |
+| `475c639` | comment loses the parent's item number | 8 | — |
+| `477,478c641,642`, `483c648`, `498c660` | runner console, runner and predicates names | 2 | R0.5 |
+| `479a644`, `492a653,654` | `MEM_AVAILABLE_END_<cell>=` (also on a not-launched cell) | 7 | R4.4 |
+| `485,488d649`, `490,491c651` | the smaps capture and its wait are gone (item 6); 651 the `RUNNER_EXIT` line's runner console name (item 2) | 6 / 2 | R4.3 / R0.5 |
+| `494,495c656,657` | comment: the decision reading | 8 | — |
+| `502,505c664,680` | series: settle before every cell after the first, cells in order, predicates after all five; smoke: predicates after each cell | 7 | R4.4 |
+| `508,511c683,686`, `513c688` | series reading: `spec377-decide.sh` → `spec377.decision.txt`, `decide rc=` with `NO flags`, flags indented | 7 | R4.4 |
+| `518,580c693,694` | the calibration self-run, smaps replay, dhat frame check and shares self-check are gone; the smoke comment | 6 | R4.3 |
+| `587,588c701,702`, `591c705` | `spec377-synth.sh` | 6 | R4.3, R6.3 |
+| `593a708,721` | the literal capture into `spec377-mi-literals.txt` and `spec377-je-conf.txt` | 6 | R6.2 |
+| `600c728`, `611c785`, `627c800`, `642c815` | predicates, runner console, matrix, CSV names | 2 | R0.5 |
+| `609a738,783` | `cell_lines`, `count_re`, `mi_check`, `je_conf_check` (R3.3 regexes over the captured files) | 6 | R6.2, R3.3 |
+| `614c788` | comment | 8 | — |
+| `617,619c791,792` | `PV` and `PALLOC` join `PEL`/`PMEM`; the parent's `PA` for `sc`/`spb` is gone | 6 | R6.1 |
+| `656,665c829,830` | 829 the `sje` CSV name → item 2; 830 the parent's `je_config` and `ssy`/`smi` marker items are gone (PALLOC covers them) → item 6 | 2 / 6 | R0.5 / R6.1 |
+| `668,673c833,836` | smaps/DH/self-check admission items gone; `mi_check smi3`, `mi_check smi2`, `je_conf_check`; `SYNTH377` replaces `SYNTH376` | 6 | R6.2, R6.3 |
+| `678,679c841` | the `SMOKE_PROG_SHA=` admission loop runs over `program_names` | 6 | R6.4, R0.6 |
 
 **`diff spec376-order.sh spec377-order.sh`** (G2b; 15 hunks; "item" = the five-item closed list in the
 `spec377-order.sh` header):
