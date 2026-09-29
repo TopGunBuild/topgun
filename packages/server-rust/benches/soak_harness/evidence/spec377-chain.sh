@@ -48,7 +48,7 @@
 #      SERIES_START_UTC=, PREDICTED_END_UTC= and CAP_CROSS_UTC= (server
 #      creation, SPEC377_SERVER_CREATED_UTC, + 37 h); ORDER=OK, the smoke->M
 #      binding and the preflight gate (which must also carry exactly one
-#      CHECK alloc_conf=PASS); DISK_FREE_AT_START= >= 40 GiB on /opt; a
+#      CHECK alloc_conf=PASS); DISK_FREE_AT_START= >= MIN_DISK_GIB /opt; a
 #      settle step before every cell after the first (SETTLE_<cell>=);
 #      s1 -> je -> mi3 -> mi2 -> s2; MemAvailable at the start and end of
 #      each cell in the host sidecar; the predicates after all five cells;
@@ -95,7 +95,7 @@ PROC=/proc
 # 37 h cap counted from server creation.
 SERIES_PREDICTED_S=111900
 CAP_S=133200
-MIN_DISK_KB=41943040     # 40 GiB
+MIN_DISK_GIB="$(sed '/^## APPEND-ONLY BELOW/q' "$MANIFEST" 2>/dev/null | awk -F= '$1 == "MIN_DISK_GIB" { n++; v = $2 } END { sub(/ .*/, "", v); if (n == 1 && v ~ /^[1-9][0-9]?[0-9]?[0-9]?[0-9]?$/) print v }')"   # section 1, the floor decide's STOP-H reads too; empty = absent, dup or malformed
 SETTLE_POLL_S=15
 SETTLE_MAX_POLLS=40      # 40 x 15 s = 10 min
 
@@ -563,9 +563,9 @@ if [ "$PHASE" = "series" ]; then
   # Item 7: five 6 h cells write WAL, redb and CSVs under /opt; refuse a disk
   # that cannot hold them rather than lose a cell to ENOSPC hours in.
   DF="$(df -Pk /opt 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4 }')"
-  say "DISK_FREE_AT_START=${DF:-absent} KiB (need >= ${MIN_DISK_KB})"
+  say "DISK_FREE_AT_START=${DF:-absent} KiB (need >= ${MIN_DISK_GIB:-<section-1 MIN_DISK_GIB unusable>} GiB)"
   case "$DF" in ''|*[!0-9]*) say "FATAL: /opt free space unreadable; refusing to run"; exit 1 ;; esac
-  [ "$DF" -ge "$MIN_DISK_KB" ] || { say "FATAL: /opt has ${DF} KiB free, below ${MIN_DISK_KB}; refusing to run"; exit 1; }
+  [ -n "$MIN_DISK_GIB" ] && [ "$DF" -ge $((MIN_DISK_GIB * 1048576)) ] || { say "FATAL: /opt has ${DF} KiB free, below MIN_DISK_GIB=${MIN_DISK_GIB:-unusable} GiB; refusing to run"; exit 1; }
 fi
 
 # ----------------------------------------------------------------- 4. cells

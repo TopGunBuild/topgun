@@ -42,6 +42,7 @@ LEVEL_WINDOW_S=1800
 MI_POSTINIT_BOUND=5
 LAZY_DRIFT_BAR=0.01
 PRICE_EUR_PER_H=0.138
+MIN_DISK_GIB=40
 
 - `SERIES_PIN` — the hex of **`origin/main`** when the spec branch was created
   (`git rev-parse origin/main` = `34007e197224d4db870ba2c842716316622580de`, the merge of #174); never the local
@@ -56,12 +57,23 @@ PRICE_EUR_PER_H=0.138
 - `OPS_PARITY_MIN` — an arm whose `OPS_RATIO` is below 0.95 gets no verdict (`n/a reason=ops`).
 - `TIE_BAND` — set-based tie: every candidate within 10 % of the minimum level, then preference `JE, MI3, MI2`.
 - `STAGE2_MAX_H` — the largest Stage-2 cell length (hours) `STAGE2_FEASIBLE` accepts.
-- `LEVEL_WINDOW_S` — `PE_LEVEL` = mean of `pe` over rows with `elapsed_secs ∈ [D − 1800, D)`.
+- `LEVEL_WINDOW_S` — `PE_LEVEL` = mean of `pe` over the `pe.csv` rows with `elapsed_secs ∈ [D − 1800, D)`. Because
+  `pe.csv` only holds rows between the first and the last **retained** census point, and the last retained point is
+  the last `LIVE_COPY` at `D − 300` (`TERMINAL` is dropped by construction, see "Row and census accounting"), the
+  window that actually carries rows is `[D − 1800, D − 300]`: **26 rows** at 60 s cadence (`19800 … 21300`), not ≈ 30.
+  This is the definition (conductor ruling on the G3 question, 2026-09-29); the level reads the last 25 min of the
+  interpolable series, and `PE_LEVEL … rows=<n>` prints the count every time.
 - `MI_POSTINIT_BOUND` — more post-init `mimalloc` console lines than this in an MI cell ⇒ a recorded
   `MI_POSTINIT_NOTE`, never a STOP.
 - `LAZY_DRIFT_BAR` — `LAZY_DRIFT=TRUE` iff any series cell's `LAZY_MAX / anon` exceeds 0.01 (a config-drift canary;
   recorded).
 - `PRICE_EUR_PER_H` — CCX23 on-demand price, used for `STAGE2_COST_EUR` and the budget below.
+- `MIN_DISK_GIB` — the free-space floor on `/opt` in whole GiB. **One literal, two readers:** `spec377-chain.sh` refuses
+  the series phase when `DISK_FREE_AT_START` is below `MIN_DISK_GIB × 1048576` KiB (or the literal is absent,
+  duplicated or malformed), and `spec377-decide.sh` evaluates STOP-H's disk clause against the same literal
+  (`disk_free=<v>KiB<<MIN_DISK_GIB>GiB`). Neither program carries the number (conductor ruling on the G3 question,
+  2026-09-29; the grep is in the G4 transcript). The preflight's own `disk` row is SPEC-376's inherited host check,
+  kept verbatim in the derived copy, and is not this gate.
 
 ### R0.1 CSV header and memory columns
 SPEC-376's 61-column header (`spec376-manifest.md` §1 R0.1), **unchanged in name and position**, produced by the
@@ -323,8 +335,10 @@ estimator (R5.4–R5.7: census join ± 30 s, interpolated `live`, `pe`, `PE_LEVE
 `[int(n/2) .. n−1]`, AR(1) `e`) over the committed SPEC-372 4-hour M1 cells (`phys_footprint_mb`, 60 s rows, census
 every 300 s; M1 `A0` = 16.64 MiB used inside the program for these cells only). Every printed digit of the spec's
 R7.8 table reproduced (`s2`'s `2e₆` prints 19.24; the spec rounds it to 19.2). The committed program
-`evidence/spec377-power.py` (the seed in evidence form) and its sha256 are *to fill* before M; at M its output must
-equal the table below digit for digit, or M is not frozen.
+`evidence/spec377-power.py` (the seed in evidence form; it reads `FLAT_BAR_PER_H`, `STAGE2_MAX_H` and `LEVEL_WINDOW_S`
+from this section) prints each row below as a `TABLE ` line; G4 diffed them against this table — **empty diff, every
+digit equal** — and its `SPREAD ` line equals the Linux-spread sentence below (transcript `spec377-g4-mac.txt`; its
+sha256 is listed under "Programs frozen at M"). At M the diff must still be empty, or M is not frozen.
 
 Two ways to the 6 h window (`W` = 3 h): **projected** `e₆ = e(W=2h) × (2/3)^1.5`; **empirical** `e` over the last
 3 h of the same 4-hour cells (a cross-check, not the prediction).
@@ -389,7 +403,7 @@ If the cells contradict these predictions, the contradiction is itself a §3 fin
 - **Cost** ≈ 33 h × €0.138 ≈ **€4.55**. **Cap: 37 h (≈ €5.11), counted from server creation**
   (`CAP_CROSS_UTC` = creation + 37 h). Crossing the cap without a finished series is a STOP for the
   conductor/user, who decide whether to keep the server. The conductor records the running total at each HANDOFF.
-- **Disk:** the series phase asserts ≥ 40 GiB free on `/opt` at start (`DISK_FREE_AT_START=`).
+- **Disk:** the series phase asserts ≥ `MIN_DISK_GIB` (40) GiB free on `/opt` at start (`DISK_FREE_AT_START=`).
 - **One rule for cap and start time:** the cap is the STOP; the working-hours start is scheduling only and never
   overrides it. The conductor may delay the series launch so that `PREDICTED_END_UTC` (series start + ≈ 31 h 05 min)
   falls inside the user's working hours (the window the user states at the G5 launch, recorded in §3 with its time
@@ -430,8 +444,46 @@ The five flavour lines (`flavour=<label> … sha256=… recompiled=yes marker=ok
 `evidence/spec377-je-conf.txt` (committed byte-for-byte from the smoke), each line shown with trailing spaces rendered
 as `␠` (documentation only; the committed file is the literal `PALLOC` keys on).
 
-### Synthetic enumeration parameters — *to fill: G4*
-E1's fixed seed and case count (R10).
+### Synthetic enumeration parameters (G4; `spec377-synth.sh`, 113 cases)
+Everything is inside the committed program: fixtures are generated there (bash + awk only), expectations are written
+there or recomputed there by code that shares nothing with the program under test. Noise comes from a Park–Miller
+generator (`16807 · seed mod (2^31 − 1)`, exact in a double) and an Irwin–Hall normal (twelve uniforms − 6), so no
+libm call and no awk `rand()` enters a fixture and the Mac and the bench host build byte-identical cells.
+
+**E1** — seed `E1_SEED=20260929`; 31 input factors (`STOP`; `TREND` per cell ×5 with `n/a` and absent; SYS level
+agree / disagree / `s2` absent; arm level ×3 (0.60, 0.64, 0.75, 0.95 of the SYS minimum, absent); RSS order same /
+reversed; `FIXED_EST` sign ×5; `TREND_CORR` class ×5; `STAGE2_T` SYS ×2 (≤ cap, > cap, absent) and arm ×3 (6, > cap,
+`n/a`, absent); ops per cell ×5 (ok, 0.90, missing)). Rows: the full product `TREND_s1 × TREND_s2 × SYS level` (147),
+every `STAGE2_T_s1 × STAGE2_T_s2` pair on each SYS combination that can read `UNDERPOWERED` (45), seven route rows,
+then greedy pairwise completion — **243 inputs, 0 uncovered level pairs**, 486 decide runs (each input and its twin
+that changes only `FIXED_EST`/`FIXED_NOTE`/`TREND_CORR`/`TREND3`). Asserted per input: decide rc 0, exactly one
+`NEXT=`, the value in the closed list, zero `CONDUCTOR_RULING;UNMATCHED`, `NEXT`/`DEFAULT_CANDIDATE`/`CONDUCTOR_RULE`
+equal to an independent model of R7.5–R7.7, R8 and R8.1 (step 3a included) evaluated on the input levels, and the
+twin's `NEXT`/`CONDUCTOR_RULE`/`DEFAULT_CANDIDATE` unchanged; and over the whole set, every `NEXT` value except the
+catch-all reached at least once. Mac run 2026-09-29: 0 failures.
+
+**P cases** — synthetic 6 h cells of the reference model (`reference/SPEC-377-synth-expectations.py`: live 370 000/h
+from 0, `MC` = 1400 B, multiplicative noise on `pe`), 60 s rows, `LIVE_COPY` every 300 s to `D − 300`, `TERMINAL`
+at `D + 2`. Classes are asserted exactly (printed = spec = independent reference); magnitudes of P10–P15 against the
+spec's reference numbers within `|s − s_ref| ≤ 0.25 + 2·e_ref` %/h and `e ∈ [e_ref/2, 2·e_ref]` (different noise draw
+and the gate's census window). Printed on the Mac:
+
+| case | seed | `s` %/h (ref) | `e` %/h (ref) | class |
+|---|---|---|---|---|
+| P10 | 110 | +1.740 (+1.74) | 0.040 (0.04) | `RISING`, `FIXED_NOTE=rising_marginal_cost_suspected` |
+| P11 | 111 | −2.067 (−2.07) | 0.066 (0.064) | `FALLING` |
+| P12 | 112 | −0.598 (−0.69) | 0.053 (0.042) | `FLAT` |
+| P13 | 113 | +1.396 (+1.26) | 0.429 (0.41) | `MARGINAL` |
+| P14 | 114 | −0.202 (−0.19) | 0.064 (0.059) | `FLAT` (masking, pre-registered) |
+| P15 | 115 | +0.825 (+0.72) | 0.045 (0.041) | `FLAT` (masking, pre-registered) |
+
+P6 (AR(1) 0.9, sd 5 %): `UNDERPOWERED`, `STAGE2_T=14` equal to the reference. P8 (`F` = 60 MiB, sd 0.1 %):
+`FIXED_EST=60.773 MiB`, `positive_fixed_memory`, class = P12's. P16: `slope_pe_per_h=0.438169` B/h, `FIT_CHECK` PASS
+(absdiff 1.2e-7), `FLAT`. P17: `FIT_CHECK` PASS; P18 = P17 with the fitter's printed slope + 0.000900 ⇒
+`TREND=n/a reason=fit_mismatch`. **P5 departs from R10's literal `CENSUS_DROPPED_N=1`:** `TERMINAL` is dropped by
+construction (R5.4), so the baseline P1 prints 1 and P5 prints 2 — the case asserts "P1 + 1", the shifted census
+`t` in the dropped list, and the interpolation between its neighbours. Liveness: widening the cross-check to 1e-3 fails
+P18 and E1; skipping step 3a on a missing arm `TREND` fails CR6, CR6b and E1 (transcript `spec377-g4-mac.txt`).
 
 ### Chain log contract (`spec377-chain.sh`, G2b)
 Every line a reading keys on is printed at column 0, exactly once per log; anything echoed from another program that
@@ -450,7 +502,7 @@ is not such a key is prefixed `  | `. Logs: build `target/spec377-run/spec377-ch
 | `SERIES_START_UTC=`, `PREDICTED_END_UTC=<utc> series_s=111900`, `CAP_CROSS_UTC=<utc> created=<utc> cap_s=133200` | series | the G5 HANDOFF values, printed before any gate; `SPEC377_SERVER_CREATED_UTC` (server creation) is required |
 | `ORDER=OK …`, `SMOKE_BINDING=PASS programs=<n>` | series | before `PREFLIGHT_LOG=`; any failure refuses the phase before any cell |
 | `PREFLIGHT_LOG=<basename>` | series | the newest `spec377-preflight-*.log` in the evidence dir: last line `^PREFLIGHT=PASS( \|$)` with no `pending=` and one `PREFLIGHT_AT=` 0..3600 s old, and exactly one `CHECK alloc_conf=PASS` in the log |
-| `DISK_FREE_AT_START=<KiB> KiB` | series | `df -Pk /opt`; below 41943040 KiB or unreadable (`absent`) refuses the phase |
+| `DISK_FREE_AT_START=<KiB> KiB (need >= <MIN_DISK_GIB> GiB)` | series | `df -Pk /opt`; below `MIN_DISK_GIB × 1048576` KiB, unreadable (`absent`), or a section-1 `MIN_DISK_GIB` that is absent/dup/malformed refuses the phase |
 | `SETTLE_<cell>=<ok\|timeout> waited_s=<n> load1=<v\|n/a>` | series | before every cell after `s1`; polls `/proc/loadavg` every 15 s, at most 40 sleeps; recorded, never a STOP |
 | `LOAD_AT_START_<cell>=<1-min load or n/a>` | smoke, series | immediately before the pre-launch assertion |
 | `cell <cell>: RUNNER_EXIT=<rc>` | smoke, series | the runner console's last line is `RUNNER_EXIT=<rc>`; `98` = not launched (pre-launch sha assertion failed) |
@@ -600,7 +652,7 @@ range. Reproduce the list with `diff spec376-chain.sh spec377-chain.sh | grep -E
 | `354,356c504,506` | smoke log path and manifest name of the binding | 2 | R4.4 |
 | `388,389c538,539` | preflight log names | 2 | R4.4 |
 | `393a544,551` | a `pending=` preflight PASS is refused; exactly one `CHECK alloc_conf=PASS` is required | 7 | R9, AC-6, R0.6 |
-| `403c561,568` | 561 the preflight line names `alloc_conf=PASS`; 562–568 `DISK_FREE_AT_START=`, refusal below 40 GiB or unreadable | 7 | R9 / R4.5 |
+| `403c561,568` | 561 the preflight line names `alloc_conf=PASS`; 562–568 `DISK_FREE_AT_START=`, refusal below the section-1 `MIN_DISK_GIB` or unreadable | 7 | R9 / R4.5 |
 | `407c572` | comment: smoke and series | 8 | — |
 | `425,427c590,593` | `SMOKE_PROG_SHA=` over `program_names`; a missing program is logged, not skipped silently | 6 | R4.3, R6.4 |
 | `432c598` | comment: the decision reading | 8 | — |
@@ -705,18 +757,35 @@ line range. Reproduce the list with `diff spec376-predicates.sh spec377-predicat
   failed.
 
 **`spec377-decide.sh <EV> <MANIFEST> <SMOKE_DIR>`** — ORDER (as SPEC-376's reading, `SPEC377_SYNTHETIC=1` skip only
-outside the evidence dir), then all twelve R0.2 literals exactly once and well-formed (else exit 3, no flags); the
+outside the evidence dir), then all thirteen R0.2 literals exactly once and well-formed (else exit 3, no flags); the
 inputs are gathered with presence resolved (`absent`/`dup`) into an intermediate outside the evidence dir and echoed
 indented (`  | `), so every key at column 0 of the decision file occurs exactly once. `spec377-decide.awk` receives
 every threshold through `-v` from §1 and prints `== stop predicates ==` (`STOP_H_CLAUSES=`, `STOP_V_CLAUSES=`), then
 `== flags ==` with the R0.4 keys in order (104 lines). STOP-H: the preflight clause, per cell `steal_pct` (missing or
-`> 1`), and the disk clause — the 40 GiB floor is evaluated in `spec377-decide.sh` (`disk_free=<v>KiB<40GiB`,
-`=absent`), the series chain's own refusal bound, so the awk program carries no threshold §1 does not list. STOP-V
+`> 1`), and the disk clause — the `MIN_DISK_GIB` floor is evaluated in `spec377-decide.sh`
+(`disk_free=<v>KiB<<MIN_DISK_GIB>GiB`, `=absent`), the literal the series chain refuses on, so the awk program
+carries no threshold §1 does not list. STOP-V
 per cell in series order: `predicates_missing` or each of `PV PEL PM1 PMEM PALLOC` (+ `PA` on `je`) not `TRUE`,
 `predicates_rc`, `runner_exit`, `write_errors`, `PR-crashes`. Numeric flag values are printed rounded
 (`OPS_RATIO` and `VS_SYS` to four decimals, `SYS_AGREE value=` likewise) and every comparison reads the printed
 value, so a re-run from the file reaches the same decision. `VS_SYS_<arm>=<ratio> BETTER|NO_GAIN`;
 `ORDER_AGREE=TRUE n=<|C|>` or `FALSE reason=missing:<cell>:RSS_PE_LEVEL` / `FALSE pe_choice=<a> rss_choice=<b>`.
+
+### Conductor rulings on the G3 questions (2026-09-29; accepted as pre-registered)
+1. **`pv` is a `PALLOC` item id.** R3.3 requires `PV=TRUE` on every label but names no id; `pv` is it, and the PV line
+   keeps its own reason.
+2. **`s6` (past launch)** = exactly one `steal_pct=` line in the runner console and no
+   `FATAL: SOAK_SERVER_BINARY is not a` line (the inherited flavour-marker assertion never fired).
+3. **`r1 ≥ 0.99` ⇒ `STAGE2_T_<cell>=>STAGE2_MAX_H`.** An infinite `e` places no band anywhere, so no finite Stage-2
+   cell resolves it; `TREND` reads `UNDERPOWERED` with `se_rel_adj=r1_ge_0.99`.
+4. **`PE_LEVEL` window** = the `pe.csv` rows in `[D − LEVEL_WINDOW_S, D)`, i.e. `[D − 1800, D − 300]` = 26 rows (see
+   `LEVEL_WINDOW_S` above), not ≈ 30.
+5. **Disk floor** = the column-0 literal `MIN_DISK_GIB`, read by both `spec377-chain.sh` and `spec377-decide.sh`
+   (see the literal's bullet above).
+6. **Decide compares the rounded printed values** (`OPS_RATIO`, `VS_SYS`, `SYS_AGREE value=` at four decimals), so
+   a re-run from the decision file reaches the same decision (AC-13).
+7. The series `m5` literal file sha256 is listed at M (G5), from the smoke capture.
+8. P10–P15 run on synthetic 6 h cells of the reference model (above, "Synthetic enumeration parameters").
 
 ### The §1 prefix sha256 — the command
 Computed at M and at every later commit by exactly this command (the marker line is included in the hash); M's value

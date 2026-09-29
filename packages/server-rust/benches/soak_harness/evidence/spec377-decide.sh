@@ -32,9 +32,9 @@
 #      mistakes a missing line for a value.
 #   2. spec377-decide.awk evaluates STOP-H, STOP-V, the readings and the
 #      flags; every threshold it compares against is passed in from section 1.
-# The disk floor of STOP-H (40 GiB, the series chain's own refusal bound) is
-# evaluated here, so the awk program carries no threshold section 1 does not
-# list.
+# The disk floor of STOP-H is section 1's MIN_DISK_GIB, the same literal the
+# series chain refuses the phase on; it is evaluated here, so the awk program
+# carries no threshold section 1 does not list.
 set -uo pipefail
 export LC_ALL=C
 EV="${1:-}"; MANIFEST="${2:-}"; SMOKE="${3:-}"
@@ -51,7 +51,6 @@ if [ -d "$SMOKE" ]; then SMOKE_ABS="$(cd "$SMOKE" && pwd -P)"; else SMOKE_ABS="$
 CELLS="s1 je mi3 mi2 s2"
 CHAIN_LOG="$EV/spec377-chain.log"
 DECIDE_AWK="$SCRIPT_DIR/spec377-decide.awk"
-MIN_DISK_KB=41943040
 
 under() {   # $1 path, $2 dir: 0 iff $1 is $2 or lies below it
   case "$1/" in "$2"/*) return 0 ;; esac; return 1
@@ -103,7 +102,7 @@ if ! grep -q '^## APPEND-ONLY BELOW' "$MANIFEST"; then
   echo "FATAL: the manifest has no '## APPEND-ONLY BELOW' marker, so its section 1 is undefined" >&2; exit 3
 fi
 SEC1="$(sed '/^## APPEND-ONLY BELOW/q' "$MANIFEST")"
-LITERALS="SERIES_PIN A0_L_MIB FLAT_BAR_PER_H BETTER_BAR SYS_AGREE_BAR OPS_PARITY_MIN TIE_BAND STAGE2_MAX_H LEVEL_WINDOW_S MI_POSTINIT_BOUND LAZY_DRIFT_BAR PRICE_EUR_PER_H"
+LITERALS="SERIES_PIN A0_L_MIB FLAT_BAR_PER_H BETTER_BAR SYS_AGREE_BAR OPS_PARITY_MIN TIE_BAND STAGE2_MAX_H LEVEL_WINDOW_S MI_POSTINIT_BOUND LAZY_DRIFT_BAR PRICE_EUR_PER_H MIN_DISK_GIB"
 BAD=""
 echo "== section 1 (read from the manifest, not recomputed) =="
 for k in $LITERALS; do
@@ -112,6 +111,8 @@ for k in $LITERALS; do
   v="$(printf '%s\n' "$SEC1" | sed -n "s/^${k}=//p")"; v="${v%% *}"
   case "$k" in
     SERIES_PIN) printf '%s' "$v" | grep -Eq '^[0-9a-f]{7,40}$' || { BAD="${BAD} ${k}=${v:-empty}"; continue; } ;;
+    # A whole number of GiB, so the KiB floor below is exact shell arithmetic.
+    MIN_DISK_GIB) printf '%s' "$v" | grep -Eq '^[1-9][0-9]{0,4}$' || { BAD="${BAD} ${k}=${v:-empty}"; continue; } ;;
     *) printf '%s' "$v" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || { BAD="${BAD} ${k}=${v:-empty}"; continue; } ;;
   esac
   eval "L_${k}=\$v"
@@ -159,7 +160,7 @@ DF="$(key_once "$CHAIN_LOG" DISK_FREE_AT_START)"; DF="${DF%% *}"
 case "$DF" in
   absent|dup) H_DISK="disk_free=${DF}" ;;
   ''|*[!0-9]*) H_DISK="disk_free=${DF:-empty}" ;;
-  *) if [ "$DF" -lt "$MIN_DISK_KB" ]; then H_DISK="disk_free=${DF}KiB<40GiB"; else H_DISK=none; fi ;;
+  *) if [ "$DF" -lt $((L_MIN_DISK_GIB * 1048576)) ]; then H_DISK="disk_free=${DF}KiB<${L_MIN_DISK_GIB}GiB"; else H_DISK=none; fi ;;
 esac
 
 # The readings every cell carries, suffixed with the cell in its predicates
