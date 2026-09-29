@@ -501,7 +501,7 @@ disk, clock, tools), plus:
 - `nm` joins the required tools. Log `spec377-preflight-<YYYYMMDDTHHMMSSZ>.log` in the evidence dir; test hooks
   `SPEC377_PREFLIGHT_{SYS_ROOT,CMDLOG,LOG_DIR,T_ROOT}` (the bench host sets none).
 
-### Hunk maps — *G2a (cells), G2b (chain, order, preflight) filled; G3 (predicates) to fill*
+### Hunk maps — *G2a (cells), G2b (chain, order, preflight), G3 (predicates) filled*
 Every hunk of `diff spec376-<x> spec377-<x>` mapped to one R item.
 
 **`diff spec376-cells.sh spec377-cells.sh`** (G2a; 45 hunks; parent line ranges; "item" = the seven-item closed
@@ -657,6 +657,66 @@ range. Reproduce the list with `diff spec376-chain.sh spec377-chain.sh | grep -E
 | `116c166` | start line names this script and `t_root` | 3 | R9 |
 | `268a319,389` | the `alloc_conf` row: `/etc/_rjem_malloc.conf`, `/etc/malloc.conf`, `/etc/ld.so.preload`, `/etc` readability, the JE archive `nm` check with its weak-default control, `PENDING` before the builds | 1 | R9, AC-6, rulings v1 #13 |
 | `284a406` | `/proc/sys/vm/overcommit_*` recorded | 2 | R9 |
+
+**`diff spec376-predicates.sh spec377-predicates.sh`** (G3; 15 hunks; parent line ranges; "item" = the eight-item
+closed list in the `spec377-predicates.sh` header). A hunk whose new-side lines belong to two items is split by new-side
+line range. Reproduce the list with `diff spec376-predicates.sh spec377-predicates.sh | grep -E '^[0-9]'`.
+
+| parent hunk | new-side lines → what | item | R-item |
+|---|---|---|---|
+| `2a3,66` | the eight-item header, usage additions and the synthetic-hook rule; the parent's header follows verbatim | 8 | R5, AC-10 |
+| `109c173` | usage message names this program | 8 | R5 |
+| `119c183` | base name `spec377-<cell>` | 1 | R5.1 |
+| `140,144c204,207` | cell → flavour and label (`ssy s1 s2 → SYS-ser`, `sje je → JE-ser`, `smi3 mi3 → MI3-ser`, `smi2 mi2 → MI2-ser`) | 1 | R5.1, R0.5 |
+| `148,154c211,212` | smoke/series phase of the cell (the series MI literal check keys on it) | 1 | R6.2, R3.3 m5 |
+| `155a214,243` | the section-1 literal reader (`A0_L_MIB`, `FLAT_BAR_PER_H`, `LEVEL_WINDOW_S`, `STAGE2_MAX_H`; exactly once, numeric) and the synthetic guard (`SPEC377_MANIFEST` honoured only under `SPEC377_SYNTHETIC=1` outside the evidence dir) | 2 | R5.5, R0.6, AC-14a |
+| `176c264`, `178c266`, `202c290`, `203a292` | PV's line captured into `PV_LINE`, printed unchanged | 3 | R3.3 (common: `PV=TRUE`) |
+| `233c322` | `PA` is computed on JE cells only (the CA arm is gone) | 1 | R5.2 |
+| `253c342` | `PA=n/a reason=no_probe_arm` pre-declared on SYS/MI cells | 1 | R5.2 |
+| `335a425,577` | `PALLOC` (items `pv`, SYS `s1`–`s6` + `marker_control`, JE `j1`–`j6`, MI `m1`–`m5` + `mi_version` + `mi_thread_prefix`, one `PALLOC_ITEM_<id>=` line each), `JE_CONFIRM_CONF`, the series MI literal-file match, `MI_POSTINIT_LINES_<cell>` forwarded | 4 / 7 | R3.3 / R3.3 m6 |
+| `501a744,946` | 744–841 census join, interpolated `live`, `pe`/`rss_pe` series, `PE_END`, `PE_LEVEL`, `RSS_PE_LEVEL`, `LIVE_END`, `CENSUS_DROPPED*` → item 5; 843–946 `trend()`: the fit cross-check, AR(1) `e`, the `TREND` classes, `STAGE2_T`, `FIXED_EST`/`FIXED_NOTE`/`TREND_CORR` → item 6 | 5 / 6 | R5.4, R5.5 / R5.6–R5.9 |
+| `502a948,1028` | 948–970 the frozen fitter over `pe.csv` (last half) and the last third → item 6; 972–1027 `LAZY_MAX`, `HWM_END`, `ANON_HUGE_END`, `DISK_SLOPE`, the JE-native readings → item 7; 1028 exit 3 on an unusable literal → item 2 | 6 / 7 / 2 | R5.6–R5.8 / R5.10, R5.11 / R0.6 |
+
+### Predicates and decide contract (G3)
+**`spec377-predicates.sh <EV> spec377-<cell> <builds>`** prints on stdout (the chain writes it to
+`spec377-<cell>.predicates.txt`) every line of the parent block plus, for this series:
+- `PALLOC=TRUE label=<label>` or `PALLOC=FALSE reason=<id>[,<id>…] label=<label>`, preceded by one
+  `PALLOC_ITEM_<id>=PASS|FAIL <detail>` per item. Ids: `pv` (common: the cell's `PV=TRUE`; the PV line keeps its own
+  reason), SYS `s1`–`s6` + `marker_control`, JE `j1`–`j6`, MI `m1`–`m5` + `mi_version` + `mi_thread_prefix`. `s6`
+  (past launch) = exactly one `steal_pct=` line in the runner console and no `FATAL: SOAK_SERVER_BINARY is not a`
+  line. `marker_control` reads `BIN_MARKERS_<JE-ser|MI3-ser|MI2-ser>=` from the builds file (each exactly once,
+  `je ≥ 1` / `mi ≥ 1`). `TREE_PROOF_<label>` needs exactly one builds line, `=PASS`. A **series** MI cell's `m5` also
+  requires `spec377-mi-literals.txt` (beside the manifest) to hash to the one sha256 §1 lists for it, carry ≥ 4 lines
+  tagged `smi3 `/`smi2 `, and every such line to occur exactly once, byte for byte, in the cell's harness console.
+- JE: `JE_CONFIRM_CONF=PASS` or `=FAIL reason=<list>` (`sources=n<k>:seq<…>`, `source<k>=absent`,
+  `source<k>_nonempty`, `source4_not_cell_env`, `set_background_thread=<n>`, `set_confirm_conf=<n>`,
+  `set_lines=<n>`); `AMP_JE_<cell>=`, `FRAG_SHAREL_<cell>=`, `DIRTY_SHAREL_<cell>=` at the last probe row;
+  `REACH_PE_<cell>=` over the `TERMINAL` live count. MI: `MI_POSTINIT_LINES_<cell>=` (the runner's count).
+- Per cell: `LIVE_END_`, `CENSUS_POINTS_`, `CENSUS_DROPPED_` (`none` or the comma-joined `t` list),
+  `CENSUS_DROPPED_N_`, `PE_END_`, `PE_ROWS_`, `PE_LEVEL_` / `RSS_PE_LEVEL_` (`<v> rows=<n>`),
+  `FIT_CHECK_TREND_` / `FIT_CHECK_TREND3_` (`PASS|FAIL prog= fitter= absdiff=`), `TREND_` / `TREND3_`
+  (`<class> slope_rel= se_rel= r1= se_rel_adj=<e|r1_ge_0.99> n= r2= dropped= slope_pe_per_h= level=`, or
+  `n/a reason=few_rows|no_level|pe_nonpositive|fit_error|fit_mismatch …`), `STAGE2_T_` (hours, `>STAGE2_MAX_H`, or
+  `n/a reason=missing:<cell>:e`; an infinite `e` (`r1 ≥ 0.99`) prints `>STAGE2_MAX_H`, since no finite cell resolves
+  it), `FIXED_EST_` (`<MiB> se_mib=`), `FIXED_NOTE_`, `TREND_CORR_` (`… recorded_only`), `LAZY_MAX_`
+  (`<mb> ratio=<lazy/anon> row=`), `HWM_END_`, `ANON_HUGE_END_`, `DISK_SLOPE_` (`<MB/h> se= n=`). `<cell>` is
+  lower-case; `<BASE>.{pe,rsspe,pe-census,pe-join}.csv` are written beside the cell's artifacts.
+- Exit 0 = every block ran; 3 = a frozen source failed its sha256 or a §1 literal is unusable; 4 = a program step
+  failed.
+
+**`spec377-decide.sh <EV> <MANIFEST> <SMOKE_DIR>`** — ORDER (as SPEC-376's reading, `SPEC377_SYNTHETIC=1` skip only
+outside the evidence dir), then all twelve R0.2 literals exactly once and well-formed (else exit 3, no flags); the
+inputs are gathered with presence resolved (`absent`/`dup`) into an intermediate outside the evidence dir and echoed
+indented (`  | `), so every key at column 0 of the decision file occurs exactly once. `spec377-decide.awk` receives
+every threshold through `-v` from §1 and prints `== stop predicates ==` (`STOP_H_CLAUSES=`, `STOP_V_CLAUSES=`), then
+`== flags ==` with the R0.4 keys in order (104 lines). STOP-H: the preflight clause, per cell `steal_pct` (missing or
+`> 1`), and the disk clause — the 40 GiB floor is evaluated in `spec377-decide.sh` (`disk_free=<v>KiB<40GiB`,
+`=absent`), the series chain's own refusal bound, so the awk program carries no threshold §1 does not list. STOP-V
+per cell in series order: `predicates_missing` or each of `PV PEL PM1 PMEM PALLOC` (+ `PA` on `je`) not `TRUE`,
+`predicates_rc`, `runner_exit`, `write_errors`, `PR-crashes`. Numeric flag values are printed rounded
+(`OPS_RATIO` and `VS_SYS` to four decimals, `SYS_AGREE value=` likewise) and every comparison reads the printed
+value, so a re-run from the file reaches the same decision. `VS_SYS_<arm>=<ratio> BETTER|NO_GAIN`;
+`ORDER_AGREE=TRUE n=<|C|>` or `FALSE reason=missing:<cell>:RSS_PE_LEVEL` / `FALSE pe_choice=<a> rss_choice=<b>`.
 
 ### The §1 prefix sha256 — the command
 Computed at M and at every later commit by exactly this command (the marker line is included in the hash); M's value
