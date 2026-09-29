@@ -667,3 +667,122 @@ cells; never bisect on `rss_mb`; release builds are not byte-reproducible — on
 counts (console line 1 vs `spec376-builds.txt`); program edits happen only on the Mac, never on the server.
 
 ## APPEND-ONLY BELOW
+
+## §3 — readout: the Linux instrument is SOUND on topgun-bench (M `a0168f89`, data `026698fc`)
+
+Appended in G7 on the Mac, below the marker; the §1 prefix is unchanged (sha256
+`1d9edcedc96d0a108f28cf0667b91921cb3a36e2bb9e4ff3c1f4f12986800aed` at M, at the data commit and at the G7 commit,
+by the §1 command). The mechanical transcript for every AC is `spec376-g7-mac.txt`.
+
+### 3.1 Final flags (server `spec376-calib.txt`, reproduced byte-for-byte on macOS — AC-14)
+```
+STOP=none
+INSTRUMENT=SOUND
+WRITES_PER_S_REF=257.647
+S_CA_RATE=0.014105
+S_CA_LIVE=0.085023
+S_CA_FPL=0.136732
+BYTES_ALLOC_RATE=c1=45144706.827083 pb=101966445.826667 c2=44512397.630952 pa=44886100.872549
+ALLOC_LIVE=c1=44153448 pb=65412884 c2=40552486 pa=43888313
+BYTES_PER_WRITE=c1=175338.9 pb=404728.7 c2=172646.9 pa=174206.0
+WRITE_PARITY=0.0014
+WRITE_PARITY_ALL=0.0230
+A0_L_MIB=13.349
+PORT_RATIO=0.4402
+PORT_BPW_RATIO=0.4304
+PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+PORT_IN_EXPECT=FALSE
+STEAL=c1=0.0000 pb=0.0000 c2=0.0000 pa=0.0000
+LOAD_AT_START=c1=0.22 pb=1.76 c2=2.10 pa=1.77
+```
+Before the flags: `STOP_H_CLAUSES=none`, `STOP_V_CLAUSES=none`, `SMOKE_ADMISSION_SEEN=PASS`; cal chain `calib rc=0`.
+The Mac re-run (`SPEC376_MANIFEST_COMMIT=a0168f89…`, BWK awk 20200816, over the committed EV, the preflight log named
+by `PREFLIGHT_LOG=` and the four `spec376-<cell>.predicates.txt`) exits 0 and its whole output, not only the flags
+block, is `cmp`-identical to the server's file (server awk: `original-awk` 20220912).
+
+**Linux reference rates recorded by this series** (the anchors TODO-589 pre-registers against; Linux lineage only):
+`WRITES_PER_S_REF=257.647`, CA pair rate 44.5–45.1 MB/s with `S_CA_RATE=0.014105`, `BYTES_PER_WRITE` 172.6–175.3 KB
+on the pair, `A0_L_MIB=13.349`.
+
+### 3.2 ORDER
+`ORDER=OK manifest_commit=a0168f89… prefix_sha256=1d9edced… programs=17 cal_pin=bee21fcd` at the cal chain start
+(chain log line 3), at the calib reading's start on the server (`spec376-calib.txt` line 1), at the data commit on
+the Mac (G7 transcript), and at HEAD before merge (re-run after the last G7 commit; recorded in the PR).
+
+### 3.3 Deviations recorded in G6 (none changes a §1 value; all are in the G6 progress record and commit messages)
+1. **`cb98bd6f` — smoke `SELF_CHECK` value.** Smoke attempt 1 (checkout `2bde666d`) printed
+   `SMOKE_ADMISSION=FAIL failed=SELF_CHECK=PASS (E 0.3222957 vs 0.322296, tol 0.000005)(rc=0)`: the shares self-check
+   passed, but the chain compared the whole `SELF_CHECK=` value instead of the text before the first space, as every
+   other admission key does. One line of `spec376-chain.sh` changed; the 20 chain hunk headers are unchanged; the
+   same commit corrected the stale last chain hunk header in §1 (`220a593,687` → `220a593,688`). Re-smoke 1 of the
+   2 allowed; attempt 2 at `cb98bd6f` admitted (`SMOKE_ADMISSION=PASS failed=none`). Attempt 1's outputs stayed on
+   the server as `smoke.run1` and were not committed; the server is deleted, so they no longer exist.
+2. **`systemd-run` needs `--setenv` for `HOME`/`PATH`.** A transient unit does not inherit the login shell's
+   environment; the first detached build launch printed `FATAL: cargo is not on PATH` before any build started. It
+   was relaunched with explicit `--setenv=HOME=… --setenv=PATH=…`; the first log was kept as `.run1`. Orchestration
+   only — no program or §1 value changed. The (local) runbook carries the corrected command.
+3. **Re-smoke hygiene glob does not capture `.meta`.** The spec's re-smoke rule renames every
+   `target/spec376-s*-data` directory to `.runN`; the runner also writes a sibling file
+   `target/spec376-s*-data.meta` per smoke cell, which that glob does not match, so the `.meta` files stayed in
+   place. The re-smoke did not refuse on them and admitted. Recorded so the next series' hygiene step moves
+   `target/spec376-s*-data.meta` too (the runbook takes the wider pattern).
+
+### 3.4 Portability control: `PORT_RATIO=0.4402` vs the M1 band 0.327–0.346 (descriptive, `not_a_gate`)
+Case C2 proves `PORT_RATIO` cannot change `INSTRUMENT`; `PORT_IN_EXPECT=FALSE` is a recorded observation. The data
+side by side (M1 from `spec373b.verdict.txt`, two cells per side; Linux one cell per side):
+
+| quantity | M1, before (b1 / b2) | M1, after (a1 / a2) | Linux pb (before, `b166719d`) | Linux pa (after, `e85adb1f`) |
+|---|---|---|---|---|
+| `BYTES_ALLOC_RATE` (B/s) | 48 286 026 / 49 390 077 | 16 683 268 / 16 152 567 | 101 966 446 | 44 886 101 |
+| `BYTES_PER_WRITE` (B) | 262 516.0 / 274 122.0 | 91 997.1 / 90 037.2 | 404 728.7 | 174 206.0 |
+| writes/s (`totalWrites` / 900) | 183.9 / 180.2 | 181.3 / 179.4 | 251.9 | 257.7 |
+
+- a/b rate ratio: M1 band [0.327, 0.346] (mean-over-mean 0.3362); Linux 0.4402. a/b bytes-per-write ratio: M1
+  [0.3285, 0.3504]; Linux `PORT_BPW_RATIO=0.4304`. The Linux rate ratio is 0.094 above the band's upper edge, the
+  bytes-per-write ratio 0.080 above its band's.
+- Linux ÷ M1 per side: allocation rate ×2.09 on the "before" server and ×2.73 on the "after" server; bytes per write
+  ×1.51 before and ×1.91 after; writes/s ≈ ×1.4 on both sides. Arithmetically, both ratios rose because the "after"
+  side grew by a larger factor than the "before" side.
+- The "after" server (`e85adb1f`) and the `CAL_PIN` server (`bee21fcd`) allocate at the same rate on Linux: pa
+  44 886 101 B/s vs the c1/c2 mean 44 828 552 B/s (ratio 1.0013), within the pair's own spread (`S_CA_RATE=0.014`).
+- `pb` has the lowest `totalWrites` of the four cells (226 744 vs 231 724–232 041), which is what lifts
+  `WRITE_PARITY_ALL` to 0.0230 while the c1/c2 pair reads 0.0014.
+- Differences between the two setups, stated as facts only: host and OS (M1 macOS vs CCX23 Debian 12, x86_64);
+  toolchain; one cell per side here vs two per side on the M1; here one harness binary built at `CAL_PIN` drives both
+  servers.
+- This series does not decide which of these accounts for the difference; no conclusion about the cause is drawn
+  here. The M1 band stays a recorded M1 expectation, and no Linux threshold is derived from it (lineage, §1).
+
+### 3.5 `LOAD_AT_START` tails (recorded only, not gated)
+The four cal cells ran back to back (starts 09:45:59Z, 10:01:02Z, 10:16:05Z, 10:31:08Z — 903 s apart for 900 s
+cells), so each cell after the first starts within seconds of the previous cell's server and harness exiting.
+`spec376-host.log` at each start:
+
+| cell | 1 / 5 / 15-min load | top processes in the snapshot |
+|---|---|---|
+| c1 | 0.22 / 1.48 / 1.90 | `ps`, `bash`, `jbd2/sda1-8`, `sshd`, `systemd-timedat` |
+| pb | 1.76 / 2.10 / 2.08 | `ps`, `jbd2/sda1-8`, `kworker/*-kblockd` |
+| c2 | 2.10 / 2.14 / 2.14 | `ps`, `jbd2/sda1-8`, `kworker/*-kblockd` |
+| pa | 1.77 / 1.91 / 2.01 | `ps`, `jbd2/sda1-8`, `kworker/*-kblockd` |
+
+c1 followed the preflight 10 s earlier (its load poll read `0.31 1.58 1.95`, `CHECK load=PASS`); its 5- and 15-min
+values carry the smoke and build phases. From pb on, the 1-min value (1.76–2.10 on 4 dedicated vCPU) is the decaying
+tail of the previous cell; no other workload appears in the snapshots, and `STEAL` is 0.0000 on every cell. The c1/c2
+pair started at 0.22 and 2.10 and reads `S_CA_RATE=0.014105`, `WRITE_PARITY=0.0014`. If a later series wants
+cell-start load below a bound, the chain needs a settle step between cells; this series did not have one and did not
+gate on it.
+
+### 3.6 Server lifecycle (AC-16)
+- Server `topgun-bench`, Hetzner Cloud id **167931708**, ccx23, hel1, image `437171250`, IP 95.216.167.124.
+- **Created** 2026-09-29T08:09:19Z (API `POST /servers` by the conductor; answer `initializing`).
+- **Deleted** 2026-09-29T10:48:18Z (API `DELETE /servers/167931708` by the conductor; action `running`).
+- **Post-delete server list**, 2026-09-29T10:48:40Z: `136907332 topgun-new running` — the only server.
+- Life ≈ 2 h 39 min, ≈ €0.37. Snapshot not refreshed: only `original-awk 2022-09-12-1` was added to the image, which
+  the runbook installs as step 0 (conductor ruling, v5 addendum).
+
+### 3.7 Result
+The Linux instrument is sound on this host: every memory column is populated on every live row of all ten smoke and
+cal cells, no Linux artifact carries an M1 footprint name, the frozen awk line reproduces under `original-awk`
+(19/19 parity), preflight and provenance hold, and the calibration reading prints `STOP=none INSTRUMENT=SOUND` and
+reproduces byte-for-byte on a second host. TODO-589 can pre-register Linux allocator cells against the reference
+rates in §3.1; the portability ratio of §3.4 is carried as an open observation, not as a threshold.
