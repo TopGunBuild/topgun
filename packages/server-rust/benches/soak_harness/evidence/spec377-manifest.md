@@ -411,8 +411,9 @@ If the cells contradict these predictions, the contradiction is itself a §3 fin
 - `ba65ffc4076307ffdbfb014565edaf1f17e185ef987ca6b3fe2565d544400215` `packages/server-rust/benches/soak_harness/evidence/spec366-p67.awk`
 - `7d2ca6214beff1c4c0042879823172a45452ef99c06ca49521d5c96889a61d1b` `packages/server-rust/benches/soak_harness/evidence/spec371-predicates.sh` — unconditional: the derived predicates program executes its PM1 lines exactly as `spec376-predicates.sh:163-166` does
 
-Data input (not a program): `5dbe02258b05ebcddfefc5be6d945d050c74597fa60edc172c2d58d1fcb87f1a`
-`packages/server-rust/benches/soak_harness/evidence/spec376-synth-ref-darwin.txt`.
+Data input (not a program; the parity run compares against it, so `spec377-order.sh` requires it listed exactly once
+in this form and hashes it like a program):
+- `5dbe02258b05ebcddfefc5be6d945d050c74597fa60edc172c2d58d1fcb87f1a` `packages/server-rust/benches/soak_harness/evidence/spec376-synth-ref-darwin.txt`
 
 ### Programs frozen at M — *to fill: G4 (M0 candidate), confirmed at M by G5*
 Every `spec377-*` program (`spec377-cells.sh`, `spec377-chain.sh`, `spec377-order.sh`, `spec377-preflight.sh`,
@@ -432,7 +433,75 @@ as `␠` (documentation only; the committed file is the literal `PALLOC` keys on
 ### Synthetic enumeration parameters — *to fill: G4*
 E1's fixed seed and case count (R10).
 
-### Hunk maps — *to fill: G2a (cells), G2b (chain, order, preflight), G3 (predicates)*
+### Chain log contract (`spec377-chain.sh`, G2b)
+Every line a reading keys on is printed at column 0, exactly once per log; anything echoed from another program that
+is not such a key is prefixed `  | `. Logs: build `target/spec377-run/spec377-chain-build.log`; smoke
+`target/spec377-run/smoke/spec377-chain.log` (committed at M as `evidence/spec377-smoke/spec377-chain.log`); series
+`evidence/spec377-chain.log`. Paths derive from the checkout root (`/opt/topgun` on the server).
+
+| key | phase | value |
+|---|---|---|
+| `TREE_RC_<label>=` | build | `0` for `JE-ser`/`MI3-ser`/`MI2-ser`; `tikv-jemalloc-sys:<rc> libmimalloc-sys:<rc>` for `SYS-ser` (both must be `101`) |
+| `TREE_PROOF_<label>=PASS reason=none` / `=FAIL reason=<list>` | build | once per server label, before its build; FAIL refuses the build phase. Reasons: `rc=`, `output=empty`, `required_absent=<regex>`, `forbidden_present=<regex>`, SYS `<crate>_rc=`, `<crate>_stderr_line=absent`, `<file>_crate_lines=<n>`. stdout in `target/spec377-run/tree-<label>.txt` (SYS: `tree-SYS-ser-<crate>.txt`), stderr beside it as `.err` |
+| `BUILD_ENV_MALLOC_CONF=unset label=<label>` | build | once per build (five), after the unset; an exported `*JEMALLOC_SYS_WITH_MALLOC_CONF` / `*JEMALLOC_OVERRIDE` left after it is FATAL |
+| `BIN_MARKERS_<label>=je=<n> mi=<n>` | build | the four server labels, the SYS controls of R3.3 (`unreadable` names a failed read, never `0`) |
+| `SMOKE_PROG_SHA=<file> sha256=<64 hex>` | smoke | one line per `spec377-*.sh`/`.awk`/`.py` in the evidence dir plus the seven frozen parents (`spec349c2-fit.awk spec366-p5.awk spec366-p67.awk spec371-predicates.sh spec376-parity.sh spec376-procmem.sh spec376-synth373b-linux.sh`), sorted; a missing parent prints no line and fails the admission as `SMOKE_PROG_SHA_<file>=absent` |
+| `PROC_ROOT=/proc` | smoke, series | one line, before the first cell |
+| `SERIES_START_UTC=`, `PREDICTED_END_UTC=<utc> series_s=111900`, `CAP_CROSS_UTC=<utc> created=<utc> cap_s=133200` | series | the G5 HANDOFF values, printed before any gate; `SPEC377_SERVER_CREATED_UTC` (server creation) is required |
+| `ORDER=OK …`, `SMOKE_BINDING=PASS programs=<n>` | series | before `PREFLIGHT_LOG=`; any failure refuses the phase before any cell |
+| `PREFLIGHT_LOG=<basename>` | series | the newest `spec377-preflight-*.log` in the evidence dir: last line `^PREFLIGHT=PASS( \|$)` with no `pending=` and one `PREFLIGHT_AT=` 0..3600 s old, and exactly one `CHECK alloc_conf=PASS` in the log |
+| `DISK_FREE_AT_START=<KiB> KiB` | series | `df -Pk /opt`; below 41943040 KiB or unreadable (`absent`) refuses the phase |
+| `SETTLE_<cell>=<ok\|timeout> waited_s=<n> load1=<v\|n/a>` | series | before every cell after `s1`; polls `/proc/loadavg` every 15 s, at most 40 sleeps; recorded, never a STOP |
+| `LOAD_AT_START_<cell>=<1-min load or n/a>` | smoke, series | immediately before the pre-launch assertion |
+| `cell <cell>: RUNNER_EXIT=<rc>` | smoke, series | the runner console's last line is `RUNNER_EXIT=<rc>`; `98` = not launched (pre-launch sha assertion failed) |
+| `PREDICATES_EXIT_<cell>=<rc>` | smoke, series | smoke: after each cell; series: after all five cells |
+| `decide rc=<rc>` | series | after the five `PREDICATES_EXIT_` lines; `(NO flags …)` appended when non-zero; the flags block follows indented |
+| `SMOKE_ADMISSION=PASS failed=none` / `=FAIL failed=<list>` | smoke | one line, last before `### SMOKE COMPLETE` |
+
+Host sidecar (`spec377-host.log`, not a key-bearing log): per cell the loadavg, top-5 by CPU, the first 8 lines of
+`/proc/meminfo`, `MEM_AVAILABLE_START_<cell>=` and `MEM_AVAILABLE_END_<cell>=` (kB or `n/a`).
+
+**Builds file** (`target/spec377-run/spec377-builds.txt`): line 1 `build_start_epoch=`; five
+`flavour=<label> code=<full sha> path=<abs> sha256=<hex> mtime=<epoch> recompiled=yes marker=ok` lines (SYS-ser,
+JE-ser, MI3-ser, MI2-ser, H); four `BIN_MARKERS_<label>=` lines; the `TREE_RC_`/`TREE_PROOF_`/`BUILD_ENV_MALLOC_CONF=`
+records; `rustc:`, `glibc:`, `awk:` lines. No line other than a `flavour=` line carries a `flavour=` token (the PV
+reader keys on that token anywhere in a line).
+
+**Smoke admission items** (R6): per cell `RUNNER_EXIT=0`, `PREDICATES_EXIT_<cell>=0`, `PEL`/`PMEM`/`PV`/`PALLOC` each
+exactly one `^P=TRUE( |$)`, ≥ 1 live row with all eleven memory columns numeric, `sje` ≥ 1 probe row with the eight
+`je_*` columns numeric; the literal capture (`spec377-mi-literals.txt`: every harness-console line of `smi3`/`smi2`
+matching R6.2's capture regex, prefixed `<cell> `; `spec377-je-conf.txt`: every `^\[server\] <jemalloc>: ` line of
+`sje`, prefixed `sje `) checked by R3.3's regexes — per MI cell exactly one version line of its own major, no line of
+the other major, no `thread 0x` prefix, and for each of `purge_delay`, `arena_purge_mult`, `purge_decommits` exactly
+one line at the expected value and exactly one line of that option at any value; for `sje` the five sources `#1..#5`
+in order, `#1 #2 #3 #5` ending `: ""`, `#4` ending `: "background_thread:true,confirm_conf:true"`, exactly one
+`Set conf value` line for each of the two options and exactly two in all; `SYNTH_PARITY=PASS` and `SYNTH377=PASS`
+once each; one 64-hex `SMOKE_PROG_SHA=` per program.
+
+### Preflight contract (`spec377-preflight.sh`, G2b)
+SPEC-376 R9 unchanged in order and content (Linux guard; identity and isolation before any change; `--apply` stops the
+timers and writes `madvise` to both THP knobs through `mutate()` only; os, timers, load, steal, swap, THP, memory,
+disk, clock, tools), plus:
+- **`alloc_conf`** (a gate, one `CHECK alloc_conf=` line): `/etc/_rjem_malloc.conf` and `/etc/malloc.conf` exist
+  neither as a file nor as a symlink (a dangling symlink is present), `/etc/ld.so.preload` is absent or has no
+  non-whitespace character; `/etc` that cannot be listed and searched is `etc=unreadable`, never "absent". Once the
+  builds exist (`target/spec377-run/spec377-builds.txt`), exactly one
+  `target/spec377-JE-ser/release/build/tikv-jemalloc-sys-*/out/lib/libjemalloc_pic.a` (the archive the JE build
+  links, `tikv-jemalloc-sys` build.rs `rustc-link-lib=static=jemalloc_pic`) is read with `nm`: rc 0 and non-empty,
+  ≥ 1 weak definition (`V`/`v`/`W`/`w`) of `_rjem_malloc_conf` — jemalloc's own empty default
+  (`jemalloc.c` `je_malloc_conf JEMALLOC_ATTR(weak)`), the positive control that `nm` sees the symbol — and no
+  other definition (type not in `U V v W w`). The release binary is `strip = true`, so `nm` has nothing to read
+  there; the JE cells' `confirm_conf` printout (R3.3 j4, source #2 empty) remains the proof for the linked whole.
+  Before the builds the archive part is `PENDING` (`CHECK alloc_conf=PENDING … je_archive=not_built`), which is not
+  PASS: the last line becomes `PREFLIGHT=PASS pending=alloc_conf PREFLIGHT_AT=…` and the series chain refuses it.
+  Sub-results are logged one per line; failure reasons: `_rjem_malloc.conf=present`, `malloc.conf=present`,
+  `ld.so.preload=non_blank(<n>)|unreadable`, `etc=unreadable`, `je_archive=absent|dup(<n>)`, `nm_rc=<rc>`, `nm=empty`,
+  `nm_weak_default=absent`, `nm_defined_rjem_malloc_conf=<n>`.
+- Recorded, not gates: `/proc/sys/vm/overcommit_*` (`grep -H`); THP stays a gate at `madvise`.
+- `nm` joins the required tools. Log `spec377-preflight-<YYYYMMDDTHHMMSSZ>.log` in the evidence dir; test hooks
+  `SPEC377_PREFLIGHT_{SYS_ROOT,CMDLOG,LOG_DIR,T_ROOT}` (the bench host sets none).
+
+### Hunk maps — *G2a (cells), G2b (chain, order, preflight) filled; G3 (predicates) to fill*
 Every hunk of `diff spec376-<x> spec377-<x>` mapped to one R item.
 
 **`diff spec376-cells.sh spec377-cells.sh`** (G2a; 45 hunks; parent line ranges; "item" = the seven-item closed
@@ -487,6 +556,107 @@ therefore add a constant 3 to every MI2 cell and 0 to MI3 — lines of the start
 runner closes the block at the end of that trailer instead (the contiguous run from the first option line through
 option and trailer lines); everything after it that contains `mimalloc` or is an option line counts. The reading is
 recorded, never a STOP; the smoke's captured literals (R6.2) show the real trailer before M.
+
+**`diff spec376-chain.sh spec377-chain.sh`** (G2b; 93 hunks; parent line ranges; "item" = the eight-item closed
+list in the `spec377-chain.sh` header). A hunk whose new-side lines belong to two items is split by new-side line
+range. Reproduce the list with `diff spec376-chain.sh spec377-chain.sh | grep -E '^[0-9]'`.
+
+| parent hunk | new-side lines → what | item | R-item |
+|---|---|---|---|
+| `3c3`, `6,10c6,11`, `12,60c13,57`, `62,63c59,60` | header: title, why a copy exists, the eight-item list, the defect sentence | 8 | R4, AC-10 |
+| `66c63`, `68,69c65,69` | header: the column-0 key list gains `SETTLE_`, `TREE_*`, `BUILD_ENV_MALLOC_CONF`, the schedule keys, `DISK_FREE_AT_START` | 8 | R4 |
+| `76c76` | the Linux-only FATAL names this chain | 1 | R4.1 |
+| `83,84d82` | the calibration's second and third commits are gone | 2 | R1.1 |
+| `87,88c85,86`, `90c88` | run dir, builds file, manifest names | 2 | R0.5 |
+| `92c90,100` | 90–91 the five labels and the four server labels → item 2 (R0.5); 92–93 the one `/proc` name → item 7 (R4.4); 94–100 predicted series length, cap, disk floor, settle poll → item 7 (R4.4, R4.5, R12) | 2 / 7 | R0.5 / R4.4, R4.5, R12 |
+| `96,100c104,108` | the one commit is `SERIES_PIN`, read from `spec377-cells.sh` exactly once | 2 | R0.2 |
+| `102,103c110,111` | phases `build`, `smoke`, `series` (`SPEC377_PHASE`) | 2 | R4.2–R4.4 |
+| `104a113,119` | the series phase refuses a terminal before any file exists | 7 | R4.4, G5 |
+| `114c129`, `116c131`, `118c133` | `SPEC377_OUT_DIR` | 2 | R4.3 |
+| `123,127c138,142` | smoke cells `ssy sje smi3 smi2`; the series phase and its cells `s1 je mi3 mi2 s2` | 2 | R0.5, R4.3, R4.4 |
+| `131c146` | build log name | 2 | R4.2 |
+| `138c153` | start line prints `series_pin=` | 2 | R0.2 |
+| `140,141c155,156` | comment loses the parent's item number | 8 | — |
+| `144c159` | awk shim dir name | 2 | R4.1 |
+| `154c169` | comment: the label map is the cell table's | 8 | — |
+| `156,167d170`, `169,171c172,176`, `173a179` | cell → label map (`ssy s1 s2 → SYS-ser`, `sje je → JE-ser`, `smi3 mi3 → MI3-ser`, `smi2 mi2 → MI2-ser`); every label at `SERIES_PIN` | 2 | R0.5 |
+| `183,184c189,190` | comment loses the parent's item number | 8 | — |
+| `196c202,203` | comment: both mimalloc majors carry the MI literal | 8 | R1.1 |
+| `202,203d208`, `205c210` | the CA/DH marker rules are gone; the MI rule covers `MI3-ser` and `MI2-ser` | 2 | R1.1 |
+| `211c216,233` | 216–231 `bin_marker_counts` → item 5 (R3.3 marker_control); 232–233 comment of the program list → item 6 (R4.3) | 5 / 6 | R3.3 / R4.3 |
+| `213c235,250` | `FROZEN_PARENTS`, `is_program` (spec377 programs + the seven parents), `program_names` (a missing parent is named, not skipped) | 6 | R4.3, R6.4, R0.6 |
+| `238a276,292` | 276–289 `epoch_iso` (the printed schedule, no `date(1)` dialect); 290–292 `load1`, `below_half`, `mem_available` | 7 | G5, R4.4 |
+| `255,260c309,311` | 309–310 one checkout at `SERIES_PIN` → item 2 (R1.1); 311 the records file items 3 and 4 append to → item 3 (R1.2) | 2 / 3 | R1.1 / R1.2 |
+| `261a313,390` | 313–322 `build_env_discipline` → item 3 (R1.2); 324–390 `tree_cmd`, `lines_matching`, `need_line`, `no_line`, `tree_proof` → item 4 (R1.3) | 3 / 4 | R1.2 / R1.3 |
+| `267c396` | guarded target dir names | 2 | R0.5 |
+| `273a403,404` | 403 the feature-graph proof before each server build → item 4 (R1.3); 404 the env discipline before every build → item 3 (R1.2) | 4 / 3 | R1.3 / R1.2 |
+| `275c406`, `277c408`, `279c410`, `282c413` | build log and target dir names | 2 | R0.5 |
+| `284,291c415,419` | the five builds (SYS-ser, JE-ser, MI3-ser, MI2-ser at `--release --bin topgun-server` with the R0.5 feature strings; H) | 2 | R0.5, R1.1 |
+| `295c423`, `303,305c431,432` | harness and server binary paths (the dhat profile path is gone) | 2 | R1.1 |
+| `298,299c426,427` | comment: smoke and series are the later launches | 8 | — |
+| `318c445,451` | 445–449 `BIN_MARKERS_<label>=` into the builds file → item 5 (R3.3); 450 the env/tree records into the builds file → item 3 (R1.2, R1.3); 451 `rustc -vV` from the one checkout → item 2 (R1.1) | 5 / 3 / 2 | R3.3 / R1.2 / R1.1 |
+| `327,331c460,481` | series gates header; the schedule block (`SPEC377_SERVER_CREATED_UTC` required, `SERIES_START_UTC`, `PREDICTED_END_UTC`, `CAP_CROSS_UTC`, cap headroom) | 7 | R4.4, R12, G5 |
+| `335,337c485,487`, `340,341c490,491`, `343c493`, `346c496` | `spec377-order.sh` and `spec377-manifest.md` names, `SPEC377_MANIFEST_COMMIT` | 2 | R4.4 |
+| `354,356c504,506` | smoke log path and manifest name of the binding | 2 | R4.4 |
+| `388,389c538,539` | preflight log names | 2 | R4.4 |
+| `393a544,551` | a `pending=` preflight PASS is refused; exactly one `CHECK alloc_conf=PASS` is required | 7 | R9, AC-6, R0.6 |
+| `403c561,568` | 561 the preflight line names `alloc_conf=PASS`; 562–568 `DISK_FREE_AT_START=`, refusal below 40 GiB or unreadable | 7 | R9 / R4.5 |
+| `407c572` | comment: smoke and series | 8 | — |
+| `425,427c590,593` | `SMOKE_PROG_SHA=` over `program_names`; a missing program is logged, not skipped silently | 6 | R4.3, R6.4 |
+| `432c598` | comment: the decision reading | 8 | — |
+| `435c601`, `437,438c603,604` | host log name, `SPEC377_CHAIN_START_EPOCH`, `SPEC377_HARNESS_BIN` | 2 | R0.5 |
+| `440,448c606,617`, `450,459c619` | the parent's smaps capture (dropped, item 6) is replaced by `settle` (new 606–619) | 7 | R4.4 |
+| `463c623` | `run_cell` locals: the smaps pid is gone, `ma` (MemAvailable) added | 7 | R4.4 |
+| `465,466c625,627` | 625–626 `SPEC377_SERVER_COMMIT` → item 2 (R0.5); 627 MemAvailable at the start → item 7 (R4.4) | 2 / 7 | R0.5 / R4.4 |
+| `469c630`, `471c632,633`, `473c635` | host reads go through `$PROC`; `MEM_AVAILABLE_START_<cell>=`; `LOAD_AT_START_` via `load1` | 7 | R4.4 |
+| `475c637` | comment loses the parent's item number | 8 | — |
+| `477,478c639,640`, `483c646`, `498c658` | runner console, runner and predicates names | 2 | R0.5 |
+| `479a642`, `492a651,652` | `MEM_AVAILABLE_END_<cell>=` (also on a not-launched cell) | 7 | R4.4 |
+| `485,488d647`, `490,491c649` | the smaps capture and its wait are gone (item 6); 649 the `RUNNER_EXIT` line's runner console name (item 2) | 6 / 2 | R4.3 / R0.5 |
+| `494,495c654,655` | comment: the decision reading | 8 | — |
+| `502,505c662,678` | series: settle before every cell after the first, cells in order, predicates after all five; smoke: predicates after each cell | 7 | R4.4 |
+| `508,511c681,684`, `513c686` | series reading: `spec377-decide.sh` → `spec377.decision.txt`, `decide rc=` with `NO flags`, flags indented | 7 | R4.4 |
+| `518,580c691,692` | the calibration self-run, smaps replay, dhat frame check and shares self-check are gone; the smoke comment | 6 | R4.3 |
+| `587,588c699,700`, `591c703` | `spec377-synth.sh` | 6 | R4.3, R6.3 |
+| `593a706,719` | the literal capture into `spec377-mi-literals.txt` and `spec377-je-conf.txt` | 6 | R6.2 |
+| `600c726`, `611c783`, `627c798`, `642c813` | predicates, runner console, matrix, CSV names | 2 | R0.5 |
+| `609a736,781` | `cell_lines`, `count_re`, `mi_check`, `je_conf_check` (R3.3 regexes over the captured files) | 6 | R6.2, R3.3 |
+| `614c786` | comment | 8 | — |
+| `617,619c789,790` | `PV` and `PALLOC` join `PEL`/`PMEM`; the parent's `PA` for `sc`/`spb` is gone | 6 | R6.1 |
+| `656,665c827,828` | 827 the `sje` CSV name → item 2; 828 the parent's `je_config` and `ssy`/`smi` marker items are gone (PALLOC covers them) → item 6 | 2 / 6 | R0.5 / R6.1 |
+| `668,673c831,834` | smaps/DH/self-check admission items gone; `mi_check smi3`, `mi_check smi2`, `je_conf_check`; `SYNTH377` replaces `SYNTH376` | 6 | R6.2, R6.3 |
+| `678,679c839` | the `SMOKE_PROG_SHA=` admission loop runs over `program_names` | 6 | R6.4, R0.6 |
+
+**`diff spec376-order.sh spec377-order.sh`** (G2b; 15 hunks; "item" = the five-item closed list in the
+`spec377-order.sh` header):
+
+| parent hunk | what | item | R-item |
+|---|---|---|---|
+| `3,5c3,5`, `8,10c8,10`, `12,23c12,25`, `25,26c27,28` | header: callers, why a copy exists, the five-item list, the defect sentence | 5 | R11 (ORDER) |
+| `28c30`, `31c33`, `39,46c41,50`, `48c52`, `50c54` | usage, check descriptions (data inputs, `SERIES_PIN`), callers, success-line doc | 5 | R11 |
+| `58c62` | the manifest is `spec377-manifest.md` | 1 | R11 item 2 |
+| `60,63c64,70` | 64–68 `REQUIRED_PARENTS` = the seven parents this series executes → item 3; 69–70 `REQUIRED_DATA` → item 4 | 3 / 4 | R11 item 3 |
+| `96c103` | coverage glob `spec377-*` | 3 | R11 item 3 |
+| `102a110,112` | every `REQUIRED_DATA` file listed exactly once (and hashed by the loop above) | 4 | R11 item 3 |
+| `104,109c114,119` | the freeze literal is `SERIES_PIN=` in `spec377-cells.sh`, exactly once | 2 | R11 item 4, R0.2 |
+| `112c122` | success line `series_pin=` | 5 | R11 |
+
+**`diff spec376-preflight.sh spec377-preflight.sh`** (G2b; 18 hunks; "item" = the four-item closed list in the
+`spec377-preflight.sh` header):
+
+| parent hunk | what | item | R-item |
+|---|---|---|---|
+| `2a3,40` | the new header block (why a copy exists, the four items, the defect sentence) | 4 | R9, AC-10 |
+| `4c42`, `6c44`, `8,10c46,49` | the parent header: log name, the `pending=` last-line form, what the series chain accepts | 3 | R9 |
+| `12c51`, `44c86`, `52c94` | usage and the Linux-only / usage messages name this script | 4 | R9 |
+| `26,29c65,69`, `31,33c71,75` | test-hook docs: `SPEC377_PREFLIGHT_*`, `/etc` under `SYS_ROOT`, `SPEC377_PREFLIGHT_T_ROOT` | 3 | R9 |
+| `56,58c98,101` | the hook variables, and `T_ROOT` (default `<repo>/target`) | 3 | R9 |
+| `61c104` | `nm` joins the required tools | 2 | R9 |
+| `66c109` | log name `spec377-preflight-<stamp>.log` | 3 | R9 |
+| `90c133,134`, `93c137,143`, `98c148` | `PENDING`: `check` records it apart from `FAILED`; `finish` prints `pending=<list>` on a PASS line | 3 | R9, R0.6 |
+| `116c166` | start line names this script and `t_root` | 3 | R9 |
+| `268a319,389` | the `alloc_conf` row: `/etc/_rjem_malloc.conf`, `/etc/malloc.conf`, `/etc/ld.so.preload`, `/etc` readability, the JE archive `nm` check with its weak-default control, `PENDING` before the builds | 1 | R9, AC-6, rulings v1 #13 |
+| `284a406` | `/proc/sys/vm/overcommit_*` recorded | 2 | R9 |
 
 ### The §1 prefix sha256 — the command
 Computed at M and at every later commit by exactly this command (the marker line is included in the hash); M's value
