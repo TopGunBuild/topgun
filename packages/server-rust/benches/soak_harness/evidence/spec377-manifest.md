@@ -435,6 +435,59 @@ E1's fixed seed and case count (R10).
 ### Hunk maps — *to fill: G2a (cells), G2b (chain, order, preflight), G3 (predicates)*
 Every hunk of `diff spec376-<x> spec377-<x>` mapped to one R item.
 
+**`diff spec376-cells.sh spec377-cells.sh`** (G2a; 45 hunks; parent line ranges; "item" = the seven-item closed
+list in the `spec377-cells.sh` header). A hunk whose new-side lines belong to two items is split by new-side line
+range, so every line maps to exactly one item and one R-item. Reproduce the list with
+`diff spec376-cells.sh spec377-cells.sh | grep -E '^[0-9]'`.
+
+| parent hunk | new-side lines → what | item | R-item |
+|---|---|---|---|
+| `2a3,60` | the seven-item header; the parent's header follows verbatim | 7 | R2.5 |
+| `430c488` | the Linux-only FATAL names this runner | 7 | R2.1 |
+| `443c501`, `445,446c503,504` | usage: runner name, parent and closed-list count | 7 | R2.5 |
+| `449,450c507,508`, `452,462c510,519` | usage: the cell table (every cell SERIES_PIN + SIGKILL; smoke `ssy sje smi3 smi2`, series `s1 je mi3 mi2 s2`, labels, runtime env) | 1 | R0.5 |
+| `466,471c523,530` | usage: the refusal guards (SERIES_PIN, widened freeze paths, sampler hash, allocator env) | 7 | R2.5 |
+| `473,476c532,535` | usage: required env names and the chain that exports them | 2 | R0.5 |
+| `503,504c562,564` | table doc: `LABEL` and `ALLOC_TREATMENT` replace `CELL_SERVER` | 1 | R0.5 |
+| `507,515c567,574` | the nine cell rows (duration, cadence, label, flavour, treatment, phase) | 1 | R0.5, R2.2 |
+| `517a577` | `CELL_GRACEFUL=no` for every cell (all SIGKILL) | 1 | R0.5 |
+| `519c579` | basename `spec377-<cell>` | 2 | R0.5 |
+| `532a593,628` | `manifest_procmem_sha` + the sampler sha256 assertion against this §1 before sourcing | 4 | R2.1 |
+| `615c711` | data dir `target/spec377-<cell>-data` | 2 | R0.5 |
+| `625a722,724` | the proof hand-back file path | 6 | R3.1 |
+| `743a843,880` | the allocator env block: unset list + every exported `MIMALLOC_*`, per-treatment export, shell self-check (FATAL on mismatch) | 5 | R2.3 |
+| `805,809c942,946` | `SERIES_PIN=34007e19` + placeholder refusal | 3 | R0.2, R2.4 |
+| `818,820c955,961` | freeze diff over `'*.rs' Cargo.toml '*/Cargo.toml' Cargo.lock` | 3 | R2.4 |
+| `826c967` | freeze-diff FATAL message | 3 | R2.4 |
+| `830,831c971,977` | clean-tree check over the same paths; a failing `git status` is FATAL, never "clean" | 3 | R2.4, R0.6 |
+| `833,834c979,980`, `836c982`, `839c985` | dirty-tree messages and state echo | 3 | R2.4 |
+| `841c987` | comment names `spec377-chain.sh` | 7 | R2.5 |
+| `843,844c989,990`, `847c993`, `849c995` | `SPEC377_HARNESS_BIN`, `SPEC377_CHAIN_START_EPOCH` | 2 | R0.5 |
+| `853c999` | comment: the server code state is item 3 | 3 | R2.4 |
+| `855,859c1001` | every server is built at `SERIES_PIN` | 3 | R0.5 |
+| `861c1003`, `863c1005` | `SPEC377_SERVER_COMMIT` | 2 | R0.5 |
+| `911a1054,1084` | `bin_marker_counts` (`BIN_MARKERS`, unreadable ⇒ named, never 0) and `thp_selected` (`THP` at launch) | 6 | R0.3, R3.2 |
+| `936c1109`, `959c1132`, `989c1162` | `SPEC377_CHAIN_START_EPOCH`, `SPEC377_HARNESS_BIN` | 2 | R0.5 |
+| `1018c1191` | a stale proof file is removed before the run | 6 | R3.1 |
+| `1090c1263` | matrix banner names the runner and the cell's label | 1 | R0.5 |
+| `1095c1268` | `SPEC377_CHAIN_START_EPOCH` in the matrix | 2 | R0.5 |
+| `1107c1280` | matrix: code freeze `SERIES_PIN` | 3 | R2.4 |
+| `1141c1314` | matrix: server code `SERIES_PIN` | 3 | R0.5 |
+| `1144a1318,1325` | 1318, 1320–1322: allocator section, unset list, expected and runner-shell env → item 5 (R2.3); 1319: build label → item 1 (R0.5); 1323–1325: binary literals, THP, proof timing → item 6 (R0.3) | 5 / 1 / 6 | R2.3 / R0.5 / R0.3 |
+| `1358a1540,1588` | `ALLOC_PROOF_MIN_ELAPSED=60`, `read_alloc_env` (unreadable or empty `environ` ⇒ rc 2), `count_je_bg_threads`, `alloc_proof_read` (atomic write; rc 1 pid gone, rc 2 blind on a live pid) | 6 | R3.1, R3.2 |
+| `1416a1647,1668` | sampler hook: proof once at the first sample with `elapsed ≥ 60 s`; blind on a live pid ⇒ `SAMPLER FATAL` | 6 | R3.1 |
+| `1598a1851,1901` | `mi_postinit_lines`, the proof fields (`unread` when never written), unread proof ⇒ INSTRUMENT DEFECT, `emit_alloc_proof` (six keys) | 6 | R0.3, R3.3 m6 |
+| `1601a1905` | the six keys print immediately before the closing three lines | 6 | R0.3 |
+
+**`MI_POSTINIT_LINES` boundary (G2a reading of R3.3 m6, for M to confirm).** The startup print of both mimalloc
+majors ends with build-configuration lines after the last option line (`debug level :`, `secure level:`,
+`mem tracking:`, vendored `v3/src/options.c:247-249`, `v2/src/options.c:233-235`); v2 prints them through
+`_mi_message`, i.e. with the `mimalloc: ` prefix, v3 without. Counting strictly after the last option line would
+therefore add a constant 3 to every MI2 cell and 0 to MI3 — lines of the startup print, not post-init output. The
+runner closes the block at the end of that trailer instead (the contiguous run from the first option line through
+option and trailer lines); everything after it that contains `mimalloc` or is an option line counts. The reading is
+recorded, never a STOP; the smoke's captured literals (R6.2) show the real trailer before M.
+
 ### The §1 prefix sha256 — the command
 Computed at M and at every later commit by exactly this command (the marker line is included in the hash); M's value
 is recorded in the executor report and re-computed by `spec377-order.sh`, never written into §1:
