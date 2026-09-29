@@ -1,0 +1,64 @@
+--- cell c1 at 2026-09-29T09:45:59Z
+loadavg: 0.22 1.48 1.90 1/126 93584
+%CPU COMMAND
+ 100 ps
+ 5.3 bash
+ 1.7 jbd2/sda1-8
+ 1.4 sshd
+ 0.4 systemd-timedat
+MemTotal:       15985096 kB
+MemFree:         5918636 kB
+MemAvailable:   15463736 kB
+Buffers:          141604 kB
+Cached:          9304868 kB
+SwapCached:            0 kB
+Active:          4097724 kB
+Inactive:        5365476 kB
+--- cell pb at 2026-09-29T10:01:02Z
+loadavg: 1.76 2.10 2.08 1/120 97317
+%CPU COMMAND
+ 100 ps
+ 2.5 jbd2/sda1-8
+ 0.5 kworker/0:1H-kblockd
+ 0.5 kworker/2:1H-kblockd
+ 0.4 kworker/1:1H-kblockd
+MemTotal:       15985096 kB
+MemFree:         5878816 kB
+MemAvailable:   15480576 kB
+Buffers:          141876 kB
+Cached:          9326056 kB
+SwapCached:            0 kB
+Active:          4115048 kB
+Inactive:        5369432 kB
+--- cell c2 at 2026-09-29T10:16:05Z
+loadavg: 2.10 2.14 2.14 1/120 100964
+%CPU COMMAND
+ 100 ps
+ 3.1 jbd2/sda1-8
+ 0.6 kworker/2:1H-kblockd
+ 0.6 kworker/0:1H-kblockd
+ 0.6 kworker/1:1H-kblockd
+MemTotal:       15985096 kB
+MemFree:         5821976 kB
+MemAvailable:   15479488 kB
+Buffers:          142180 kB
+Cached:          9346272 kB
+SwapCached:            0 kB
+Active:          4131196 kB
+Inactive:        5373724 kB
+--- cell pa at 2026-09-29T10:31:08Z
+loadavg: 1.77 1.91 2.01 1/121 104613
+%CPU COMMAND
+ 100 ps
+ 3.6 jbd2/sda1-8
+ 0.7 kworker/2:1H-kblockd
+ 0.7 kworker/0:1H-kblockd
+ 0.7 kworker/1:1H-kblockd
+MemTotal:       15985096 kB
+MemFree:         5745008 kB
+MemAvailable:   15466436 kB
+Buffers:          142468 kB
+Cached:          9374508 kB
+SwapCached:            0 kB
+Active:          4148004 kB
+Inactive:        5385484 kB

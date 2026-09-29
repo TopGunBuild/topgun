@@ -1,0 +1,169 @@
+provenance: server sha256=4c4acf9893247c157e71993947f6baf047045ed562765b5ccfa3f3faa82b8d33 flavour=CA built=2026-09-29T08:20:03Z run_start=2026-09-29T10:16:05Z topgun_or_prune_restored_cancelled_total=present
+provenance: server sha256=4c4acf9893247c157e71993947f6baf047045ed562765b5ccfa3f3faa82b8d33 flavour=CA built=2026-09-29T08:20:03Z run_start=2026-09-29T10:16:05Z topgun_or_prune_restored_cancelled_total=present harness sha256=6cbe3f5dbf94366d03e6d619510bb43b2738093f2e5335cd8a608139ece3c589 harness_built=2026-09-29T09:13:16Z tombstone_level_ceiling_gate=present
+soak binary:   /opt/topgun/target/spec376-H/release/deps/soak_harness-53b4b640053c5766
+  built:       2026-09-29T09:13:16Z
+server binary: /opt/topgun/target/spec376-CA-cal/release/topgun-server
+  built:       2026-09-29T08:20:03Z
+
+=== spec376 Linux run: cell c2 (flavour CA, phase cal) ===
+  repo HEAD:      a0168f898f5987a9d7e93896ad86bedeecc241fc
+  dirty tree:     yes
+  host/OS:        Linux topgun-bench 6.1.0-52-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.180-1 (2026-08-03) x86_64 GNU/Linux
+  lineage:        chain-built harness + chain-built CA server
+  chain start:    1790669558
+  data dir:       /opt/topgun/target/spec376-c2-data
+  csv:            /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec376-c2.csv
+  soak.json:      /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec376-c2.soak.json
+  mechanism.json: /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec376-c2.mechanism.json (harness writes spec376-c2.soak.mechanism.json; renamed after the run)
+  durable.json:   /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec376-c2.soak.durable.json (raw basename: NOT renamed, by design)
+  progress.jsonl: /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec376-c2.progress.jsonl
+  console log:    /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec376-c2.harness-console.log
+  matrix:         /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec376-c2.matrix.txt
+  soak binary:    /opt/topgun/target/spec376-H/release/deps/soak_harness-53b4b640053c5766
+  soak binary commit: a0168f898f5987a9d7e93896ad86bedeecc241fc (HEAD; the binary itself is identified by its sha256)
+  .rs working tree:   CLEAN (asserted before the build)
+  code freeze:            bee21fcd
+  code freeze diff (.rs): EMPTY (asserted before the build)
+    built:        2026-09-29T09:13:16Z
+  server binary:  /opt/topgun/target/spec376-CA-cal/release/topgun-server
+    built:        2026-09-29T08:20:03Z
+    sha256:       4c4acf9893247c157e71993947f6baf047045ed562765b5ccfa3f3faa82b8d33
+  --- varied knobs; everything else is the spec362b-durable.sh long4h
+      literal ---
+  TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
+  duration:            900s
+  csv cadence:         60s
+  extra harness flags: <none>
+  --durable-reading:   ARMED
+  --live-census-interval: 300 (ARMED: the live-copy census)
+  --sampler-jitter-seed:  20260831
+  SOAK_SERVER_LOG:     warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  SOAK_SERVER_LOG_PASSTHROUGH: 1
+  TOPGUN_PRUNE_RECORD: true
+  TOPGUN_LOG_FORMAT:   <unset: human fmt, which is what the origin parser reads>
+  server port:         47376
+  SOAK_SERVER_BINARY:  /opt/topgun/target/spec376-CA-cal/release/topgun-server
+  --- pinned matrix (identical to spec362b-durable.sh's long4h cell;
+      crash-interval is per-cell and is 0 on the one cell this runner
+      ships) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 0;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+  tombstone gate: level ceiling K=2+ceil(S_A/W) epochs × W × b_max (S_A, b_max measured by the harness; A = TOPGUN_WAL_WATERMARK_STALL_BOUND_MS, not set by this runner); level stability 10 %; slope report-only
+  harness sha256: 6cbe3f5dbf94366d03e6d619510bb43b2738093f2e5335cd8a608139ece3c589
+  server flavour: CA
+  server code:    cal = bee21fcd (SPEC376_SERVER_COMMIT=bee21fcd, resolves bee21fcdf5c5b591758a678b070d1c2dc1101a2f)
+  TOPGUN_JOURNAL_ENABLED:        <unset: harness passes true>
+  TOPGUN_SOAK_GRACEFUL_SHUTDOWN: <unset: SIGKILL teardown>
+  DHAT_OUT:                      <unset>
+  post-mortem rows:              counted at the end of the run (item 17)
+  --- host (Linux) ---
+  os-release:          Debian GNU/Linux 12 (bookworm)
+  kernel:              6.1.0-52-amd64
+  cpu model:           AMD EPYC-Milan Processor
+  nproc:               4
+  glibc:               ldd (Debian GLIBC 2.36-9+deb12u14) 2.36
+  rustc host:          x86_64-unknown-linux-gnu
+  THP enabled:         always [madvise] never
+  THP defrag:          always defer defer+madvise [madvise] never
+  swapon --show:       empty (no swap)
+  vm.overcommit_memory: 0
+  vm.max_map_count:    65530
+  awk:                 /opt/topgun/target/spec376-awkbin/awk
+  awk -version:        awk version 20220912
+  memory sampler:      spec376-procmem.sh sha256=d05727f002087cb37fb8abce8f5f935dce11af5e0e0373c873e6a393a8a6f7b4
+  memory proc root:    /proc (fixed; procmem_row is called without a root, fixture roots belong to the synthetic suite only)
+  /proc/loadavg:       2.10 2.14 2.14 1/123 101152
+  /proc/meminfo (first 8 lines):
+    MemTotal:       15985096 kB
+    MemFree:         5804844 kB
+    MemAvailable:   15462384 kB
+    Buffers:          142192 kB
+    Cached:          9346284 kB
+    SwapCached:            0 kB
+    Active:          4131296 kB
+    Inactive:        5374764 kB
+
+harness pid 101155; follow with: tail -f /opt/topgun/target/spec376-c2-data.meta/harness-console.log
+server ready: pid 101166 (t0 = server-ready)
+
+harness exited with code 0
+reading:           PLATEAU_NOT_MET
+reason:            series rss_kib rose and was still rising at the end; firing envelope BOTH
+log filter:        warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  rss_kib            shape=MONOTONE_RISING envelope=BOTH samples=168 span=837.9s
+                     peaks  h1=86568 h2=151696 q3=119456 q4=151696 last_half_mean=123352
+                     floor  h1=33276 h2=86488 q3=86488 q4=118020
+  redb_bytes         shape=MONOTONE_RISING envelope=FLOOR samples=170 span=840.9s
+                     peaks  h1=13185024 h2=25833472 q3=25833472 q4=25833472 last_half_mean=24047808
+                     floor  h1=2117632 h2=13185024 q3=13185024 q4=25833472
+  wal_bytes          shape=MONOTONE_RISING envelope=PEAKS samples=170 span=840.9s
+                     peaks  h1=274348 h2=301505 q3=245709 q4=301505 last_half_mean=148340
+                     floor  h1=103437 h2=55496 q3=55496 q4=105025
+  wal_segment_files  shape=MONOTONE_RISING envelope=FLOOR samples=170 span=840.9s
+                     peaks  h1=446 h2=443 q3=424 q4=443 last_half_mean=399
+                     floor  h1=272 h2=339 q3=339 q4=363
+writebehind lag:   1989 (observation only) scrapes total=180 read=178 absent=2 unreadable=0 malformed_samples=0 overflowed_samples=0
+censuses:          3
+  LIVE_COPY  t=300.0s copy_done=300.0846s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=31061 live_tag_bytes=1056075 tombstones=531 tombstone_bytes=11682 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=15
+  LIVE_COPY  t=600.1s copy_done=600.2513s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=61788 live_tag_bytes=2100793 tombstones=894 tombstone_bytes=19668 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=24
+  TERMINAL   t=900.3s copy_done=n/a keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=92747 live_tag_bytes=3153399 tombstones=375 tombstone_bytes=8250 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=10
+terminal census:   keys=96 tombstone_bytes=8250
+origin:            reading=NOT_REACHED_EQUAL_REFS matched=46 unparsed=0 dropped=0 armed=true epochs_exited=46 restarts=0 epochs_scrapes total=180 read=180 absent=0 unreadable=0 malformed_samples=0 overflowed_samples=0
+origin reason:     all 46 parsed line(s) returned exactly the refs held at entry
+first zero-return: (none)
+wrote durable reading to /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec376-c2.soak.durable.json
+console log: /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec376-c2.harness-console.log
+mechanism report: /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec376-c2.mechanism.json
+csv rows: 15
+post_mortem_rows=0
+csv columns:
+  rss_mb         n=15 empty=0 nonzero=15 min=15.238 max=138.152
+  wal_mb         n=15 empty=0 nonzero=15 min=0.156 max=2.246
+  redb_mb        n=15 empty=0 nonzero=15 min=0.516 max=13.391
+  disk_total_mb  n=15 empty=0 nonzero=15 min=0.645 max=15.555
+  tombstone_bytes n=15 empty=0 min=72 max=22330
+  rss_mb           n=15 empty=0
+  fp_equiv_mb      n=15 empty=0
+  hwm_rss_mb       n=15 empty=0
+  lazyfree_mb      n=15 empty=0
+  swap_mb          n=15 empty=0
+  file_mb          n=15 empty=0
+  anon_mb          n=15 empty=0
+  private_dirty_mb n=15 empty=0
+  pss_mb           n=15 empty=0
+  anon_huge_mb     n=15 empty=0
+  smaps_rss_mb     n=15 empty=0
+  progress.jsonl checkpoints: 2
+  soak.json "walFsync": "batched",
+  soak.json "epochWidth": 1000,
+  soak.json "crashes": 0,
+  soak.json "churnClients": 6,
+  soak.json "keyspace": 200,
+  soak.json "durationSecsActual": 900,
+  mechanism.json "orDeltaFrames": 228,
+  mechanism.json "orSnapshotFrames": 0,
+
+post-hoc OLS fits (see the SE caveat in spec349c2-fit.awk):
+  units: the field is named slope_mb_per_hour for every column; on the
+  tombstone_bytes row the fit is identical but the unit is BYTES/hour.
+  col=rss_mb window=full rows_used=15 n=15 skipped_empty=0 t_start_secs=0.0 t_end_secs=840.0 span_secs=840.0 y_first=15.238 y_last=138.152 slope_mb_per_hour=531.177000 se_mb_per_hour=13.635618 intercept_mb=18.307483 r2=0.991506 sxx_hours2=0.077777778 sse=187.995963033
+  col=wal_mb window=full rows_used=15 n=15 skipped_empty=0 t_start_secs=0.0 t_end_secs=840.0 span_secs=840.0 y_first=0.156 y_last=2.102 slope_mb_per_hour=4.120929 se_mb_per_hour=1.539088 intercept_mb=1.373558 r2=0.355449 sxx_hours2=0.077777778 sse=2.395111044
+  col=redb_mb window=full rows_used=15 n=15 skipped_empty=0 t_start_secs=0.0 t_end_secs=840.0 span_secs=840.0 y_first=0.516 y_last=13.391 slope_mb_per_hour=62.870143 se_mb_per_hour=4.623369 intercept_mb=0.796550 r2=0.934315 sxx_hours2=0.077777778 sse=21.613050043
+  col=disk_total_mb window=full rows_used=15 n=15 skipped_empty=0 t_start_secs=0.0 t_end_secs=840.0 span_secs=840.0 y_first=0.645 y_last=15.496 slope_mb_per_hour=67.039929 se_mb_per_hour=4.824139 intercept_mb=2.168142 r2=0.936930 sxx_hours2=0.077777778 sse=23.530902844
+  col=tombstone_bytes window=full rows_used=15 n=15 skipped_empty=0 t_start_secs=0.0 t_end_secs=840.0 span_secs=840.0 y_first=72.000 y_last=6314.000 slope_mb_per_hour=52034.571429 se_mb_per_hour=23012.314651 intercept_mb=5493.833333 r2=0.282278 sxx_hours2=0.077777778 sse=535450699.219047606
+  col=rss_mb window=last_half rows_used=15 n=8 skipped_empty=0 t_start_secs=420.0 t_end_secs=840.0 span_secs=420.0 y_first=73.465 y_last=138.152 slope_mb_per_hour=582.716429 se_mb_per_hour=37.643437 intercept_mb=8.717500 r2=0.975573 sxx_hours2=0.011666667 sse=99.191982726
+  col=wal_mb window=last_half rows_used=15 n=8 skipped_empty=0 t_start_secs=420.0 t_end_secs=840.0 span_secs=420.0 y_first=2.051 y_last=2.102 slope_mb_per_hour=-0.179286 se_mb_per_hour=1.133237 intercept_mb=2.117250 r2=0.004154 sxx_hours2=0.011666667 sse=0.089895869
+  col=redb_mb window=last_half rows_used=15 n=8 skipped_empty=0 t_start_secs=420.0 t_end_secs=840.0 span_secs=420.0 y_first=6.953 y_last=13.391 slope_mb_per_hour=51.343571 se_mb_per_hour=16.289166 intercept_mb=2.905750 r2=0.623474 sxx_hours2=0.011666667 sse=18.573585726
+  col=disk_total_mb window=last_half rows_used=15 n=8 skipped_empty=0 t_start_secs=420.0 t_end_secs=840.0 span_secs=420.0 y_first=9.016 y_last=15.496 slope_mb_per_hour=51.205000 se_mb_per_hour=15.917186 intercept_mb=5.021250 r2=0.633002 sxx_hours2=0.011666667 sse=17.734976583
+  col=tombstone_bytes window=last_half rows_used=15 n=8 skipped_empty=0 t_start_secs=420.0 t_end_secs=840.0 span_secs=420.0 y_first=14740.000 y_last=6314.000 slope_mb_per_hour=-79372.857143 se_mb_per_hour=62288.210178 intercept_mb=29474.500000 r2=0.212991 sxx_hours2=0.011666667 sse=271587478.904761910
+
+RESULT: instrument sound; harness exit code 0.
+steal_pct=0.0000
+post_mortem_mem_reads=0
+mem_invariant_violations=0
+RUNNER_EXIT=0
