@@ -1,0 +1,174 @@
+WARNING: artifact dir overridden to /opt/topgun/target/spec376-run/smoke
+         A characterization run's artifacts belong in /opt/topgun/packages/server-rust/benches/soak_harness/evidence
+         (git-tracked); artifacts written elsewhere are not evidence.
+provenance: server sha256=7c07db0feaa285271f84cff6e14d732b025283814d9568ffa31a36ecd4f546ce flavour=DH built=2026-09-29T08:44:23Z run_start=2026-09-29T09:34:44Z topgun_or_prune_restored_cancelled_total=present
+provenance: server sha256=7c07db0feaa285271f84cff6e14d732b025283814d9568ffa31a36ecd4f546ce flavour=DH built=2026-09-29T08:44:23Z run_start=2026-09-29T09:34:44Z topgun_or_prune_restored_cancelled_total=present harness sha256=6cbe3f5dbf94366d03e6d619510bb43b2738093f2e5335cd8a608139ece3c589 harness_built=2026-09-29T09:13:16Z tombstone_level_ceiling_gate=present
+soak binary:   /opt/topgun/target/spec376-H/release/deps/soak_harness-53b4b640053c5766
+  built:       2026-09-29T09:13:16Z
+server binary: /opt/topgun/target/spec376-DH-pin/release-with-debug/topgun-server
+  built:       2026-09-29T08:44:23Z
+
+=== spec376 Linux run: cell sdh (flavour DH, phase smoke) ===
+  repo HEAD:      cb98bd6f8bd093770489464b7a4910497263f453
+  dirty tree:     yes
+  host/OS:        Linux topgun-bench 6.1.0-52-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.180-1 (2026-08-03) x86_64 GNU/Linux
+  lineage:        chain-built harness + chain-built DH server
+  chain start:    1790669558
+  data dir:       /opt/topgun/target/spec376-sdh-data
+  csv:            /opt/topgun/target/spec376-run/smoke/spec376-sdh.csv
+  soak.json:      /opt/topgun/target/spec376-run/smoke/spec376-sdh.soak.json
+  mechanism.json: /opt/topgun/target/spec376-run/smoke/spec376-sdh.mechanism.json (harness writes spec376-sdh.soak.mechanism.json; renamed after the run)
+  durable.json:   /opt/topgun/target/spec376-run/smoke/spec376-sdh.soak.durable.json (raw basename: NOT renamed, by design)
+  progress.jsonl: /opt/topgun/target/spec376-run/smoke/spec376-sdh.progress.jsonl
+  console log:    /opt/topgun/target/spec376-run/smoke/spec376-sdh.harness-console.log
+  matrix:         /opt/topgun/target/spec376-run/smoke/spec376-sdh.matrix.txt
+  soak binary:    /opt/topgun/target/spec376-H/release/deps/soak_harness-53b4b640053c5766
+  soak binary commit: cb98bd6f8bd093770489464b7a4910497263f453 (HEAD; the binary itself is identified by its sha256)
+  .rs working tree:   CLEAN (asserted before the build)
+  code freeze:            bee21fcd
+  code freeze diff (.rs): EMPTY (asserted before the build)
+    built:        2026-09-29T09:13:16Z
+  server binary:  /opt/topgun/target/spec376-DH-pin/release-with-debug/topgun-server
+    built:        2026-09-29T08:44:23Z
+    sha256:       7c07db0feaa285271f84cff6e14d732b025283814d9568ffa31a36ecd4f546ce
+  --- varied knobs; everything else is the spec362b-durable.sh long4h
+      literal ---
+  TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
+  duration:            120s
+  csv cadence:         20s
+  extra harness flags: <none>
+  --durable-reading:   ARMED
+  --live-census-interval: 300 (ARMED: the live-copy census)
+  --sampler-jitter-seed:  20260831
+  SOAK_SERVER_LOG:     warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  SOAK_SERVER_LOG_PASSTHROUGH: 1
+  TOPGUN_PRUNE_RECORD: true
+  TOPGUN_LOG_FORMAT:   <unset: human fmt, which is what the origin parser reads>
+  server port:         47376
+  SOAK_SERVER_BINARY:  /opt/topgun/target/spec376-DH-pin/release-with-debug/topgun-server
+  --- pinned matrix (identical to spec362b-durable.sh's long4h cell;
+      crash-interval is per-cell and is 0 on the one cell this runner
+      ships) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 0;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+  tombstone gate: level ceiling K=2+ceil(S_A/W) epochs × W × b_max (S_A, b_max measured by the harness; A = TOPGUN_WAL_WATERMARK_STALL_BOUND_MS, not set by this runner); level stability 10 %; slope report-only
+  harness sha256: 6cbe3f5dbf94366d03e6d619510bb43b2738093f2e5335cd8a608139ece3c589
+  server flavour: DH
+  server code:    pin = b166719d (SPEC376_SERVER_COMMIT=b166719d, resolves b166719d9569c14076f2211139667aabb8f71d6a)
+  TOPGUN_JOURNAL_ENABLED:        <unset: harness passes true>
+  TOPGUN_SOAK_GRACEFUL_SHUTDOWN: 1
+  DHAT_OUT:                      /opt/topgun/target/spec376-sdh-data.meta/spec376-sdh.dhat.json
+  post-mortem rows:              counted at the end of the run (item 17)
+  --- host (Linux) ---
+  os-release:          Debian GNU/Linux 12 (bookworm)
+  kernel:              6.1.0-52-amd64
+  cpu model:           AMD EPYC-Milan Processor
+  nproc:               4
+  glibc:               ldd (Debian GLIBC 2.36-9+deb12u14) 2.36
+  rustc host:          x86_64-unknown-linux-gnu
+  THP enabled:         always [madvise] never
+  THP defrag:          always defer defer+madvise [madvise] never
+  swapon --show:       empty (no swap)
+  vm.overcommit_memory: 0
+  vm.max_map_count:    65530
+  awk:                 /opt/topgun/target/spec376-awkbin/awk
+  awk -version:        awk version 20220912
+  memory sampler:      spec376-procmem.sh sha256=d05727f002087cb37fb8abce8f5f935dce11af5e0e0373c873e6a393a8a6f7b4
+  memory proc root:    /proc (fixed; procmem_row is called without a root, fixture roots belong to the synthetic suite only)
+  /proc/loadavg:       2.19 1.91 1.94 1/123 76195
+  /proc/meminfo (first 8 lines):
+    MemTotal:       15985096 kB
+    MemFree:         5992068 kB
+    MemAvailable:   15472732 kB
+    Buffers:          139004 kB
+    Cached:          9268664 kB
+    SwapCached:            0 kB
+    Active:          4070276 kB
+    Inactive:        5354812 kB
+
+harness pid 76198; follow with: tail -f /opt/topgun/target/spec376-sdh-data.meta/harness-console.log
+server ready: pid 76209 (t0 = server-ready)
+
+harness exited with code 0
+
+=== DURABLE-LAYER READING (report-only, decides nothing) ===
+reading:           INDETERMINATE_INSTRUMENT
+reason:            series rss_kib is indeterminate: retained span 105.3s below the minimum 600.0s
+log filter:        warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  rss_kib            shape=INDETERMINATE envelope=- samples=22 span=105.3s
+                     peaks  h1=0 h2=0 q3=0 q4=0 last_half_mean=0
+                     floor  h1=0 h2=0 q3=0 q4=0
+  redb_bytes         shape=INDETERMINATE envelope=- samples=22 span=107.6s
+                     peaks  h1=0 h2=0 q3=0 q4=0 last_half_mean=0
+                     floor  h1=0 h2=0 q3=0 q4=0
+  wal_bytes          shape=INDETERMINATE envelope=- samples=22 span=107.6s
+                     peaks  h1=0 h2=0 q3=0 q4=0 last_half_mean=0
+                     floor  h1=0 h2=0 q3=0 q4=0
+  wal_segment_files  shape=INDETERMINATE envelope=- samples=22 span=107.6s
+                     peaks  h1=0 h2=0 q3=0 q4=0 last_half_mean=0
+                     floor  h1=0 h2=0 q3=0 q4=0
+writebehind lag:   1154 (observation only) scrapes total=24 read=22 absent=2 unreadable=0 malformed_samples=0 overflowed_samples=0
+censuses:          1
+  TERMINAL   t=123.7s copy_done=n/a keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=8642 live_tag_bytes=293828 tombstones=385 tombstone_bytes=8085 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=10
+terminal census:   keys=96 tombstone_bytes=8085
+origin:            reading=PARTIAL_DIVERGENCE matched=5 unparsed=0 dropped=0 armed=true epochs_exited=4 restarts=0 epochs_scrapes total=24 read=24 absent=0 unreadable=0 malformed_samples=0 overflowed_samples=0
+origin reason:     epoch 5 returned 64 refs against 0 at entry
+first zero-return: (none)
+wrote durable reading to /opt/topgun/target/spec376-run/smoke/spec376-sdh.soak.durable.json
+console log: /opt/topgun/target/spec376-run/smoke/spec376-sdh.harness-console.log
+mechanism report: /opt/topgun/target/spec376-run/smoke/spec376-sdh.mechanism.json
+csv rows: 7
+post_mortem_rows=0
+csv columns:
+  rss_mb         n=7 empty=0 nonzero=7 min=16.859 max=57.555
+  wal_mb         n=7 empty=0 nonzero=7 min=0.074 max=2.172
+  redb_mb        n=7 empty=0 nonzero=7 min=0.516 max=2.176
+  disk_total_mb  n=7 empty=0 nonzero=7 min=0.586 max=4.355
+  tombstone_bytes n=7 empty=0 min=0 max=21294
+  rss_mb           n=7 empty=0
+  fp_equiv_mb      n=7 empty=0
+  hwm_rss_mb       n=7 empty=0
+  lazyfree_mb      n=7 empty=0
+  swap_mb          n=7 empty=0
+  file_mb          n=7 empty=0
+  anon_mb          n=7 empty=0
+  private_dirty_mb n=7 empty=0
+  pss_mb           n=7 empty=0
+  anon_huge_mb     n=7 empty=0
+  smaps_rss_mb     n=7 empty=0
+  progress.jsonl: not required -- duration 120s <= steady interval 300s,
+                  so the harness reached no checkpoint to snapshot.
+  soak.json "walFsync": "batched",
+  soak.json "epochWidth": 1000,
+  soak.json "crashes": 0,
+  soak.json "churnClients": 6,
+  soak.json "keyspace": 200,
+  soak.json "durationSecsActual": 123,
+  mechanism.json "orDeltaFrames": 0,
+  mechanism.json "orSnapshotFrames": 0,
+
+post-hoc OLS fits (see the SE caveat in spec349c2-fit.awk):
+  units: the field is named slope_mb_per_hour for every column; on the
+  tombstone_bytes row the fit is identical but the unit is BYTES/hour.
+  col=rss_mb window=full rows_used=7 n=7 skipped_empty=0 t_start_secs=0.0 t_end_secs=120.0 span_secs=120.0 y_first=16.859 y_last=57.555 slope_mb_per_hour=1119.870000 se_mb_per_hour=151.982036 intercept_mb=23.897929 r2=0.915674 sxx_hours2=0.000864198 sse=99.808502714
+  col=wal_mb window=full rows_used=7 n=7 skipped_empty=0 t_start_secs=0.0 t_end_secs=120.0 span_secs=120.0 y_first=0.074 y_last=2.172 slope_mb_per_hour=46.279286 se_mb_per_hour=15.798111 intercept_mb=0.824107 r2=0.631852 sxx_hours2=0.000864198 sse=1.078433393
+  col=redb_mb window=full rows_used=7 n=7 skipped_empty=0 t_start_secs=0.0 t_end_secs=120.0 span_secs=120.0 y_first=0.516 y_last=2.176 slope_mb_per_hour=51.852857 se_mb_per_hour=4.090928 intercept_mb=0.528929 r2=0.969817 sxx_hours2=0.000864198 sse=0.072314714
+  col=disk_total_mb window=full rows_used=7 n=7 skipped_empty=0 t_start_secs=0.0 t_end_secs=120.0 span_secs=120.0 y_first=0.586 y_last=4.355 slope_mb_per_hour=98.247857 se_mb_per_hour=16.637854 intercept_mb=1.351679 r2=0.874592 sxx_hours2=0.000864198 sse=1.196127964
+  col=tombstone_bytes window=full rows_used=7 n=7 skipped_empty=0 t_start_secs=0.0 t_end_secs=120.0 span_secs=120.0 y_first=0.000 y_last=11382.000 slope_mb_per_hour=290012.142857 se_mb_per_hour=226656.411671 intercept_mb=6786.321429 r2=0.246668 sxx_hours2=0.000864198 sse=221982655.964285672
+  col=rss_mb window=last_half rows_used=7 n=4 skipped_empty=0 t_start_secs=60.0 t_end_secs=120.0 span_secs=60.0 y_first=45.988 y_last=57.555 slope_mb_per_hour=698.868000 se_mb_per_hour=37.141647 intercept_mb=34.613300 r2=0.994383 sxx_hours2=0.000154321 sse=0.425772200
+  col=wal_mb window=last_half rows_used=7 n=4 skipped_empty=0 t_start_secs=60.0 t_end_secs=120.0 span_secs=60.0 y_first=1.676 y_last=2.172 slope_mb_per_hour=29.880000 se_mb_per_hour=0.623538 intercept_mb=1.182000 r2=0.999130 sxx_hours2=0.000154321 sse=0.000120000
+  col=redb_mb window=last_half rows_used=7 n=4 skipped_empty=0 t_start_secs=60.0 t_end_secs=120.0 span_secs=60.0 y_first=1.391 y_last=2.176 slope_mb_per_hour=53.568000 se_mb_per_hour=14.492873 intercept_mb=0.485300 r2=0.872299 sxx_hours2=0.000154321 sse=0.064828200
+  col=disk_total_mb window=last_half rows_used=7 n=4 skipped_empty=0 t_start_secs=60.0 t_end_secs=120.0 span_secs=60.0 y_first=3.066 y_last=4.355 slope_mb_per_hour=83.736000 se_mb_per_hour=14.463064 intercept_mb=1.661100 r2=0.943694 sxx_hours2=0.000154321 sse=0.064561800
+  col=tombstone_bytes window=last_half rows_used=7 n=4 skipped_empty=0 t_start_secs=60.0 t_end_secs=120.0 span_secs=60.0 y_first=6237.000 y_last=11382.000 slope_mb_per_hour=181818.000000 se_mb_per_hour=620264.138015 intercept_mb=9172.800000 r2=0.041193 sxx_hours2=0.000154321 sse=118743086.700000003
+dhat profile: /opt/topgun/target/spec376-run/smoke/spec376-sdh.dhat.json.gz (3031376 bytes raw)
+
+RESULT: instrument sound; harness exit code 0.
+steal_pct=0.0000
+post_mortem_mem_reads=0
+mem_invariant_violations=0
+RUNNER_EXIT=0

@@ -1,0 +1,394 @@
+chain start: 2026-09-29T09:30:36Z epoch=1790674236 phase=smoke HEAD=cb98bd6f8bd093770489464b7a4910497263f453 cal_pin=bee21fcd
+awk shim: /opt/topgun/target/spec376-awkbin/awk -> /usr/bin/original-awk banner='awk version 20220912'
+label H: sha256=6cbe3f5dbf94366d03e6d619510bb43b2738093f2e5335cd8a608139ece3c589 matches the builds file
+label CA-cal: sha256=4c4acf9893247c157e71993947f6baf047045ed562765b5ccfa3f3faa82b8d33 matches the builds file
+label CA-pin: sha256=735404d67f63525d80b7ba422c6abfe21ca70dd646ca506d1cccb51ee194e581 matches the builds file
+label DH-pin: sha256=7c07db0feaa285271f84cff6e14d732b025283814d9568ffa31a36ecd4f546ce matches the builds file
+label JE-cal: sha256=21cf7da96d9049ff4d4c09fe43a866fe04ddb31a7c6110c9b58f83e70d0cd750 matches the builds file
+label SYS-cal: sha256=774c2e8ed296b937b89c1328ab88ea9b015c43bed15e5057e568656571acaf3f matches the builds file
+label MI-cal: sha256=84d98ce10e4379ba325963b26edfbb0adf4a9e3e5fc87cbd27e639bedf84eec1 matches the builds file
+SMOKE_PROG_SHA=spec376-calib.sh sha256=7f224061e56a545c7f6f3476ed3bc7b90f5aaa49819daa4c710919dc34810801
+SMOKE_PROG_SHA=spec376-cells.sh sha256=0d5c69b594c5fd891877f74400881cbfdca0908afd59702163433239fba6c5ee
+SMOKE_PROG_SHA=spec376-chain.sh sha256=a684737f4c84d0d9832f39b59d8b844a8aff93c54d6d83feb81f6431c0094da2
+SMOKE_PROG_SHA=spec376-order.sh sha256=c26114169af16d4d5dd242d52fee642e10d08980a8cdf8789e5112c7b45469d9
+SMOKE_PROG_SHA=spec376-parity.sh sha256=7dd646bcc0e22c6dd48bdfab5d11da628b279abecb6acec727e7e56e87a5cd61
+SMOKE_PROG_SHA=spec376-predicates.sh sha256=dfbdd313d400ed78e90247690c3639a26b3ffa5c2ea9742d6bbc669027e2d476
+SMOKE_PROG_SHA=spec376-preflight.sh sha256=49eba7e94b2e8012db263f9187cd2fe93bd102e23a701dfeea70d3a68d3bd3c3
+SMOKE_PROG_SHA=spec376-procmem.sh sha256=d05727f002087cb37fb8abce8f5f935dce11af5e0e0373c873e6a393a8a6f7b4
+SMOKE_PROG_SHA=spec376-synth.sh sha256=a42f3a225e9497ad11418588c920efd5293f00b9c9c4c9ac9cb77f6ff81c7013
+SMOKE_PROG_SHA=spec376-synth373b-linux.sh sha256=5ab7bdafd3a4e9b9ef9b690bdc0865b44f245901d6963b1a93cfeaaeaebbc011
+PROC_ROOT=/proc
+LOAD_AT_START_sc=0.38
+cell sc: label=CA-cal server=/opt/topgun/target/spec376-CA-cal/release/topgun-server commit=bee21fcd
+cell sc: RUNNER_EXIT=0
+PREDICATES_EXIT_sc=0
+LOAD_AT_START_spb=1.84
+cell spb: label=CA-pin server=/opt/topgun/target/spec376-CA-pin/release/topgun-server commit=b166719d
+cell spb: RUNNER_EXIT=0
+PREDICATES_EXIT_spb=0
+LOAD_AT_START_sdh=2.32
+cell sdh: label=DH-pin server=/opt/topgun/target/spec376-DH-pin/release-with-debug/topgun-server commit=b166719d
+cell sdh: RUNNER_EXIT=0
+PREDICATES_EXIT_sdh=0
+LOAD_AT_START_sje=3.27
+cell sje: label=JE-cal server=/opt/topgun/target/spec376-JE-cal/release/topgun-server commit=bee21fcd
+cell sje: RUNNER_EXIT=0
+PREDICATES_EXIT_sje=0
+LOAD_AT_START_ssy=2.77
+cell ssy: label=SYS-cal server=/opt/topgun/target/spec376-SYS-cal/release/topgun-server commit=bee21fcd
+cell ssy: RUNNER_EXIT=0
+PREDICATES_EXIT_ssy=0
+LOAD_AT_START_smi=2.96
+cell smi: label=MI-cal server=/opt/topgun/target/spec376-MI-cal/release/topgun-server commit=bee21fcd
+cell smi: RUNNER_EXIT=0
+PREDICATES_EXIT_smi=0
+calib self-run rc=3 (no M: the refusal path; not an admission input)
+smaps sample: PASS
+DH_FRAME_storage/engines/hashmap.rs:136=1
+DH_FRAME_storage/datastores/write_behind.rs:2463=1
+DH_FRAME_storage/datastores/write_behind.rs:2518=2
+DH_FRAMES=PASS
+shares self-check rc=0
+SELF_CHECK=PASS (E 0.3222957 vs 0.322296, tol 0.000005)
+parity awk: /opt/topgun/target/spec376-run/smoke/parity/awkbin-original/awk -> /usr/bin/original-awk banner='awk version 20220912'
+SYNTH_PARITY=PASS cases=19 awk='awk version 20220912'
+SYNTH_PARITY_MAWK=PASS rc=0
+SYNTH_PARITY_GAWK=n/a reason=absent
+parity rc=0
+  | m1-alive-nolazy rc=0 inv=0 pm=0 out=597.992,576.051,640.000,0.000,0.000,21.902,576.051,576.090,593.867,336.000,597.992,3
+CASE M1 PASS
+  | m2-lazy-swap rc=0 inv=0 pm=0 out=500.000,416.750,584.000,64.000,12.000,95.250,468.750,404.750,492.188,0.000,500.000,3
+CASE M2 PASS
+  | m3-missing-lazyfree rc=2 inv=0 pm=0 out=LazyFree=absent
+CASE M3 PASS
+  | m4-gone rc=1 inv=0 pm=1 out=,,,,,,,,,,,
+CASE M4 PASS
+  | m5-lazy-gt-anon rc=0 inv=1 pm=0 out=146.484,-19.531,200.000,117.188,0.000,117.188,97.656,29.297,142.578,0.000,146.484,3
+CASE M5 PASS
+  | PV=TRUE server_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=CA label=CA-cal
+  | PEL=TRUE rows_with_fp_equiv=16 rows=16 N=16 need=15
+  | PA=TRUE wellformed_lines=31 lines=31 need=28
+  | PM1=TRUE post_mortem_rows=0 empty_scrape_rows=0 first_empty_elapsed=none last_live_scrape_elapsed=900 need_ge=780
+  | PMEM=TRUE mem_invariant_violations=0 sampler_fatal=0
+CASE P1 PASS
+  | PEL=FALSE rows_with_fp_equiv=13 rows=16 N=16 need=15
+CASE P2 PASS
+  | PE=FALSE reason=missing_csv_column
+CASE P3 PASS
+  | TERM_AMP_FPL=n/a reason=no_linux_estimator
+  | TERM_AMP_SL=n/a reason=no_linux_estimator
+  | DECIDE_AMP_FPL=n/a reason=no_linux_estimator
+  | DECIDE_AMP_SL=n/a reason=no_linux_estimator
+CASE P4 PASS
+  | ORDER=SKIPPED (synthetic)
+  | SKIPPED_c1=0
+  | SKIPPED_pb=0
+  | SKIPPED_c2=0
+  | SKIPPED_pa=0
+  | == flags ==
+  | STOP=none
+  | INSTRUMENT=SOUND
+  | WRITES_PER_S_REF=111.111
+  | S_CA_RATE=0.000000
+  | S_CA_LIVE=0.000000
+  | S_CA_FPL=0.000000
+  | BYTES_ALLOC_RATE=c1=30000000.000000 pb=45000000.000000 c2=30000000.000000 pa=15000000.000000
+  | ALLOC_LIVE=c1=100900000 pb=100900000 c2=100900000 pa=100900000
+  | BYTES_PER_WRITE=c1=270000.0 pb=405000.0 c2=270000.0 pa=135000.0
+  | WRITE_PARITY=0.0000
+  | WRITE_PARITY_ALL=0.0000
+  | A0_L_MIB=95.425
+  | PORT_RATIO=0.3333
+  | PORT_BPW_RATIO=0.3333
+  | PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+  | PORT_IN_EXPECT=TRUE
+  | STEAL=c1=0.1000 pb=0.1000 c2=0.1000 pa=0.1000
+  | LOAD_AT_START=c1=0.05 pb=0.05 c2=0.05 pa=0.05
+  | calib rc=0
+CASE C1 PASS
+  | ORDER=SKIPPED (synthetic)
+  | SKIPPED_c1=0
+  | SKIPPED_pb=0
+  | SKIPPED_c2=0
+  | SKIPPED_pa=0
+  | == flags ==
+  | STOP=none
+  | INSTRUMENT=SOUND
+  | WRITES_PER_S_REF=111.111
+  | S_CA_RATE=0.000000
+  | S_CA_LIVE=0.000000
+  | S_CA_FPL=0.000000
+  | BYTES_ALLOC_RATE=c1=30000000.000000 pb=45000000.000000 c2=30000000.000000 pa=40500000.000000
+  | ALLOC_LIVE=c1=100900000 pb=100900000 c2=100900000 pa=100900000
+  | BYTES_PER_WRITE=c1=270000.0 pb=405000.0 c2=270000.0 pa=364500.0
+  | WRITE_PARITY=0.0000
+  | WRITE_PARITY_ALL=0.0000
+  | A0_L_MIB=95.425
+  | PORT_RATIO=0.9000
+  | PORT_BPW_RATIO=0.9000
+  | PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+  | PORT_IN_EXPECT=FALSE
+  | STEAL=c1=0.1000 pb=0.1000 c2=0.1000 pa=0.1000
+  | LOAD_AT_START=c1=0.05 pb=0.05 c2=0.05 pa=0.05
+  | calib rc=0
+CASE C2 PASS
+  | ORDER=SKIPPED (synthetic)
+  | SKIPPED_c1=0
+  | SKIPPED_pb=0
+  | SKIPPED_c2=0
+  | SKIPPED_pa=0
+  | == flags ==
+  | STOP=V (c1c2:write_parity=0.0769)
+  | INSTRUMENT=NOT_SOUND reason=stop
+  | WRITES_PER_S_REF=115.556
+  | S_CA_RATE=0.000000
+  | S_CA_LIVE=0.000000
+  | S_CA_FPL=0.000000
+  | BYTES_ALLOC_RATE=c1=30000000.000000 pb=45000000.000000 c2=30000000.000000 pa=15000000.000000
+  | ALLOC_LIVE=c1=100900000 pb=100900000 c2=100900000 pa=100900000
+  | BYTES_PER_WRITE=c1=270000.0 pb=405000.0 c2=250000.0 pa=135000.0
+  | WRITE_PARITY=0.0769
+  | WRITE_PARITY_ALL=0.0784
+  | A0_L_MIB=95.425
+  | PORT_RATIO=0.3333
+  | PORT_BPW_RATIO=0.3333
+  | PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+  | PORT_IN_EXPECT=TRUE
+  | STEAL=c1=0.1000 pb=0.1000 c2=0.1000 pa=0.1000
+  | LOAD_AT_START=c1=0.05 pb=0.05 c2=0.05 pa=0.05
+  | calib rc=0
+CASE C3 PASS
+  | ORDER=SKIPPED (synthetic)
+  | SKIPPED_c1=0
+  | SKIPPED_pb=0
+  | SKIPPED_c2=0
+  | SKIPPED_pa=0
+  | == flags ==
+  | STOP=H (pb:steal=2.0000)
+  | INSTRUMENT=NOT_SOUND reason=stop
+  | WRITES_PER_S_REF=111.111
+  | S_CA_RATE=0.000000
+  | S_CA_LIVE=0.000000
+  | S_CA_FPL=0.000000
+  | BYTES_ALLOC_RATE=c1=30000000.000000 pb=45000000.000000 c2=30000000.000000 pa=15000000.000000
+  | ALLOC_LIVE=c1=100900000 pb=100900000 c2=100900000 pa=100900000
+  | BYTES_PER_WRITE=c1=270000.0 pb=405000.0 c2=270000.0 pa=135000.0
+  | WRITE_PARITY=0.0000
+  | WRITE_PARITY_ALL=0.0000
+  | A0_L_MIB=95.425
+  | PORT_RATIO=0.3333
+  | PORT_BPW_RATIO=0.3333
+  | PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+  | PORT_IN_EXPECT=TRUE
+  | STEAL=c1=0.1000 pb=2.0000 c2=0.1000 pa=0.1000
+  | LOAD_AT_START=c1=0.05 pb=0.05 c2=0.05 pa=0.05
+  | calib rc=0
+CASE C4 PASS
+  | ORDER=SKIPPED (synthetic)
+  | SKIPPED_c1=0
+  | SKIPPED_pb=0
+  | SKIPPED_c2=0
+  | SKIPPED_pa=0
+  | == flags ==
+  | STOP=H (preflight=FAIL)
+  | INSTRUMENT=NOT_SOUND reason=stop
+  | WRITES_PER_S_REF=111.111
+  | S_CA_RATE=0.000000
+  | S_CA_LIVE=0.000000
+  | S_CA_FPL=0.000000
+  | BYTES_ALLOC_RATE=c1=30000000.000000 pb=45000000.000000 c2=30000000.000000 pa=15000000.000000
+  | ALLOC_LIVE=c1=100900000 pb=100900000 c2=100900000 pa=100900000
+  | BYTES_PER_WRITE=c1=270000.0 pb=405000.0 c2=270000.0 pa=135000.0
+  | WRITE_PARITY=0.0000
+  | WRITE_PARITY_ALL=0.0000
+  | A0_L_MIB=95.425
+  | PORT_RATIO=0.3333
+  | PORT_BPW_RATIO=0.3333
+  | PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+  | PORT_IN_EXPECT=TRUE
+  | STEAL=c1=0.1000 pb=0.1000 c2=0.1000 pa=0.1000
+  | LOAD_AT_START=c1=0.05 pb=0.05 c2=0.05 pa=0.05
+  | calib rc=0
+CASE C5 PASS
+  | ORDER=SKIPPED (synthetic)
+  | SKIPPED_c1=0
+  | SKIPPED_pb=0
+  | SKIPPED_c2=0
+  | SKIPPED_pa=0
+  | == flags ==
+  | STOP=V (c1:PMEM=FALSE)
+  | INSTRUMENT=NOT_SOUND reason=stop
+  | WRITES_PER_S_REF=111.111
+  | S_CA_RATE=0.000000
+  | S_CA_LIVE=0.000000
+  | S_CA_FPL=0.000000
+  | BYTES_ALLOC_RATE=c1=30000000.000000 pb=45000000.000000 c2=30000000.000000 pa=15000000.000000
+  | ALLOC_LIVE=c1=100900000 pb=100900000 c2=100900000 pa=100900000
+  | BYTES_PER_WRITE=c1=270000.0 pb=405000.0 c2=270000.0 pa=135000.0
+  | WRITE_PARITY=0.0000
+  | WRITE_PARITY_ALL=0.0000
+  | A0_L_MIB=95.425
+  | PORT_RATIO=0.3333
+  | PORT_BPW_RATIO=0.3333
+  | PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+  | PORT_IN_EXPECT=TRUE
+  | STEAL=c1=0.1000 pb=0.1000 c2=0.1000 pa=0.1000
+  | LOAD_AT_START=c1=0.05 pb=0.05 c2=0.05 pa=0.05
+  | calib rc=0
+CASE C6 PASS
+  | ORDER=SKIPPED (synthetic)
+  | SKIPPED_c1=0
+  | SKIPPED_pb=0
+  | SKIPPED_c2=0
+  | SKIPPED_pa=0
+  | == flags ==
+  | STOP=none
+  | INSTRUMENT=NOT_SOUND reason=smoke
+  | WRITES_PER_S_REF=111.111
+  | S_CA_RATE=0.000000
+  | S_CA_LIVE=0.000000
+  | S_CA_FPL=0.000000
+  | BYTES_ALLOC_RATE=c1=30000000.000000 pb=45000000.000000 c2=30000000.000000 pa=15000000.000000
+  | ALLOC_LIVE=c1=100900000 pb=100900000 c2=100900000 pa=100900000
+  | BYTES_PER_WRITE=c1=270000.0 pb=405000.0 c2=270000.0 pa=135000.0
+  | WRITE_PARITY=0.0000
+  | WRITE_PARITY_ALL=0.0000
+  | A0_L_MIB=95.425
+  | PORT_RATIO=0.3333
+  | PORT_BPW_RATIO=0.3333
+  | PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+  | PORT_IN_EXPECT=TRUE
+  | STEAL=c1=0.1000 pb=0.1000 c2=0.1000 pa=0.1000
+  | LOAD_AT_START=c1=0.05 pb=0.05 c2=0.05 pa=0.05
+  | calib rc=0
+CASE C7 PASS
+  | ORDER=SKIPPED (synthetic)
+  | FATAL: section 1 must carry exactly one CAL_PIN= and one PORT_EXPECT= line (found 0 / 1)
+  | calib rc=3
+CASE C8 PASS
+  | ORDER=FAIL no manifest commit (SPEC376_MANIFEST_COMMIT unset)
+  | FATAL: ORDER is not OK (rc=3); no flags printed
+  | calib rc=3
+CASE C9 PASS
+  | b1 got=48286026.380952 want=48286026.380952
+  | b2 got=49390076.660417 want=49390076.660417
+  | a1 got=16683267.617949 want=16683267.617949
+  | a2 got=16152567.373810 want=16152567.373810
+CASE C10 PASS
+  | ORDER=SKIPPED (synthetic)
+  | SKIPPED_c1=0
+  | SKIPPED_pb=0
+  | SKIPPED_c2=0
+  | SKIPPED_pa=0
+  | == flags ==
+  | STOP=V (pa:PV=FALSE)
+  | INSTRUMENT=NOT_SOUND reason=stop
+  | WRITES_PER_S_REF=111.111
+  | S_CA_RATE=0.000000
+  | S_CA_LIVE=0.000000
+  | S_CA_FPL=0.000000
+  | BYTES_ALLOC_RATE=c1=30000000.000000 pb=45000000.000000 c2=30000000.000000 pa=15000000.000000
+  | ALLOC_LIVE=c1=100900000 pb=100900000 c2=100900000 pa=100900000
+  | BYTES_PER_WRITE=c1=270000.0 pb=405000.0 c2=270000.0 pa=135000.0
+  | WRITE_PARITY=0.0000
+  | WRITE_PARITY_ALL=0.0000
+  | A0_L_MIB=95.425
+  | PORT_RATIO=0.3333
+  | PORT_BPW_RATIO=0.3333
+  | PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+  | PORT_IN_EXPECT=TRUE
+  | STEAL=c1=0.1000 pb=0.1000 c2=0.1000 pa=0.1000
+  | LOAD_AT_START=c1=0.05 pb=0.05 c2=0.05 pa=0.05
+  | calib rc=0
+CASE C11 PASS
+  | ORDER=SKIPPED (synthetic)
+  | SKIPPED_c1=0
+  | SKIPPED_pb=0
+  | SKIPPED_c2=0
+  | SKIPPED_pa=0
+  | == flags ==
+  | STOP=V (pa:PEL=absent pa:PA=absent pa:PM1=absent pa:PMEM=absent pa:predicates_rc=4)
+  | INSTRUMENT=NOT_SOUND reason=stop
+  | WRITES_PER_S_REF=111.111
+  | S_CA_RATE=0.000000
+  | S_CA_LIVE=0.000000
+  | S_CA_FPL=0.000000
+  | BYTES_ALLOC_RATE=c1=30000000.000000 pb=45000000.000000 c2=30000000.000000 pa=15000000.000000
+  | ALLOC_LIVE=c1=100900000 pb=100900000 c2=100900000 pa=100900000
+  | BYTES_PER_WRITE=c1=270000.0 pb=405000.0 c2=270000.0 pa=135000.0
+  | WRITE_PARITY=0.0000
+  | WRITE_PARITY_ALL=0.0000
+  | A0_L_MIB=95.425
+  | PORT_RATIO=0.3333
+  | PORT_BPW_RATIO=0.3333
+  | PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+  | PORT_IN_EXPECT=TRUE
+  | STEAL=c1=0.1000 pb=0.1000 c2=0.1000 pa=0.1000
+  | LOAD_AT_START=c1=0.05 pb=0.05 c2=0.05 pa=0.05
+  | calib rc=0
+CASE C12 PASS
+  | ORDER=SKIPPED (synthetic)
+  | SKIPPED_c1=0
+  | SKIPPED_pb=0
+  | SKIPPED_c2=0
+  | SKIPPED_pa=0
+  | == flags ==
+  | STOP=V (pb:predicates_missing)
+  | INSTRUMENT=NOT_SOUND reason=stop
+  | WRITES_PER_S_REF=111.111
+  | S_CA_RATE=0.000000
+  | S_CA_LIVE=0.000000
+  | S_CA_FPL=0.000000
+  | BYTES_ALLOC_RATE=c1=30000000.000000 pb=45000000.000000 c2=30000000.000000 pa=15000000.000000
+  | ALLOC_LIVE=c1=100900000 pb=100900000 c2=100900000 pa=100900000
+  | BYTES_PER_WRITE=c1=270000.0 pb=405000.0 c2=270000.0 pa=135000.0
+  | WRITE_PARITY=0.0000
+  | WRITE_PARITY_ALL=0.0000
+  | A0_L_MIB=95.425
+  | PORT_RATIO=0.3333
+  | PORT_BPW_RATIO=0.3333
+  | PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+  | PORT_IN_EXPECT=TRUE
+  | STEAL=c1=0.1000 pb=0.1000 c2=0.1000 pa=0.1000
+  | LOAD_AT_START=c1=0.05 pb=0.05 c2=0.05 pa=0.05
+  | calib rc=0
+CASE C13 PASS
+  | ORDER=SKIPPED (synthetic)
+  | SKIPPED_c1=0
+  | SKIPPED_pb=0
+  | SKIPPED_c2=1
+  | SKIPPED_pa=0
+  | == flags ==
+  | STOP=V (c2:skipped=1)
+  | INSTRUMENT=NOT_SOUND reason=stop
+  | WRITES_PER_S_REF=111.111
+  | S_CA_RATE=0.000000
+  | S_CA_LIVE=0.000000
+  | S_CA_FPL=0.000000
+  | BYTES_ALLOC_RATE=c1=30000000.000000 pb=45000000.000000 c2=30000000.000000 pa=15000000.000000
+  | ALLOC_LIVE=c1=100900000 pb=100900000 c2=100900000 pa=100900000
+  | BYTES_PER_WRITE=c1=270000.0 pb=405000.0 c2=270000.0 pa=135000.0
+  | WRITE_PARITY=0.0000
+  | WRITE_PARITY_ALL=0.0000
+  | A0_L_MIB=95.425
+  | PORT_RATIO=0.3333
+  | PORT_BPW_RATIO=0.3333
+  | PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+  | PORT_IN_EXPECT=TRUE
+  | STEAL=c1=0.1000 pb=0.1000 c2=0.1000 pa=0.1000
+  | LOAD_AT_START=c1=0.05 pb=0.05 c2=0.05 pa=0.05
+  | calib rc=0
+CASE C14 PASS
+  | CHECK identity=FAIL hostname=topgun-new nproc=4 (need topgun-bench / 4)
+  | CHECK isolation=PASS no dokploy/traefik/dockerd process or unit; 8080 and 47376 free
+  | refused: identity/isolation failed; nothing changed
+  | log: @F1@/log/spec376-preflight-20260929T094331Z.log
+  | PREFLIGHT=FAIL failed=identity PREFLIGHT_AT=2026-09-29T09:43:31Z
+  | MUTATIONS=0
+  | last line: PREFLIGHT=FAIL failed=identity PREFLIGHT_AT=2026-09-29T09:43:31Z
+CASE F1 PASS
+SYNTH376=PASS cases=24
+synth rc=0
+SMOKE_ADMISSION=PASS failed=none
+### SMOKE COMPLETE 2026-09-29T09:43:31Z
+chain end: 2026-09-29T09:43:31Z

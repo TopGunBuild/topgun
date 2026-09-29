@@ -1,0 +1,74 @@
+== STOP: PV ==
+PV=TRUE server_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=CA label=CA-cal
+== STOP: PR ==
+PR-crashes=TRUE crashes=0
+PR-class=TRUE
+== STOP: P5 / P6 / P7 ==
+P5=FALSE reason=no removal row in the log
+P5-observed: removal_rows=0 settlement_rows=0 unsettled=none
+P5-zero-return: none observed
+P6=FALSE reason=no_persisted_scrape_in /opt/topgun/target/spec376-run/smoke/synthetic/c/C9/ev/spec376-c1.scrapes
+P7=FALSE reason=no_persisted_scrape_in /opt/topgun/target/spec376-run/smoke/synthetic/c/C9/ev/spec376-c1.scrapes
+== STOP: PE / PA ==
+PEL=TRUE rows_with_fp_equiv=16 rows=16 N=16 need=15
+PA=TRUE wellformed_lines=31 lines=31 need=28
+== STOP: PJ ==
+PJ=TRUE echoes=1 value=true
+PJ-child=n/a reason=filtered
+== STOP: PC ==
+PC=TRUE live=1000 live_tag_bytes=50000
+== STOP: PM1 ==
+PM1=TRUE post_mortem_rows=0 empty_scrape_rows=0 first_empty_elapsed=none last_live_scrape_elapsed=900 need_ge=780
+== STOP: PMEM ==
+PMEM=TRUE mem_invariant_violations=0 sampler_fatal=0
+== recorded: ops ==
+OPS_PER_S=111.111
+WRITE_ERRORS=0
+TOTAL_WRITES=100000 DURATION_ACTUAL=900
+OPS_AT_900=111.111 checkpoint_elapsed=900
+== recorded: host state at launch (the cell matrix's /proc/loadavg line) ==
+HOST=load_1m=0.05 load_5m=0.10 load_15m=0.12
+== readings: fits (slopes per hour; on amp series the unit is AMP per hour) ==
+FPL_slope=60.000000
+FPL_slope_se=0.000000
+FPL_slope_n=8
+FPL_slope_r2=1.000000
+SL_slope=60.000000
+SL_slope_se=0.000000
+SL_slope_n=8
+SL_slope_r2=1.000000
+LAZY_slope=0.000000
+LAZY_slope_se=0.000000
+LAZY_slope_n=8
+LAZY_slope_r2=NA
+TRENDL=n/a reason=no_linux_estimator
+TRENDL3=n/a reason=no_linux_estimator
+TRENDL_dropped=0
+TRENDL_points_used=0
+== readings: end levels (last row carrying fp_equiv_mb) ==
+END_elapsed=900
+FPL_end=515.000
+SL_end=525.000
+LAZY_end=10.000
+LAZY_RATIO_end=0.019417
+HWM_end=650.000
+ANON_HUGE_end=100.000
+== readings: census points (TERMINAL, and the deciding point = the last used one) ==
+TERM_src=TERMINAL
+TERM_t=900.0
+TERM_join_lag_s=0.0
+TERM_live=1000
+TERM_reach_bytes=n/a reason=no_linux_estimator
+TERM_redb_mb=2.000
+TERM_AMP_FPL=n/a reason=no_linux_estimator
+TERM_AMP_SL=n/a reason=no_linux_estimator
+TERM_R_redb=n/a reason=no_linux_estimator
+DECIDE_src=TERMINAL
+DECIDE_t=900.0
+DECIDE_join_lag_s=0.0
+DECIDE_live=1000
+DECIDE_reach_bytes=n/a reason=no_linux_estimator
+DECIDE_redb_mb=2.000
+DECIDE_AMP_FPL=n/a reason=no_linux_estimator
+DECIDE_AMP_SL=n/a reason=no_linux_estimator
+DECIDE_R_redb=n/a reason=no_linux_estimator

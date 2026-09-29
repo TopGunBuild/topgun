@@ -1,0 +1,10 @@
+awk: illegal field $(), name "phys_footprint_mb"
+ input record number 2, file /opt/topgun/target/spec376-run/smoke/synthetic/p3/ev/spec372-k1.csv
+ source line number 2
+awk: illegal field $(), name "phys_footprint_mb"
+ input record number 2, file /opt/topgun/target/spec376-run/smoke/synthetic/p3/ev/spec372-k1.csv
+ source line number 2
+awk: illegal field $(), name "phys_footprint_mb"
+ input record number 2, file /opt/topgun/target/spec376-run/smoke/synthetic/p3/ev/spec372-k1.csv
+ source line number 3
+wrote /opt/topgun/target/spec376-run/smoke/synthetic/p3/ev/spec372-k1.predicates.txt /opt/topgun/target/spec376-run/smoke/synthetic/p3/ev/spec372-k1.fits.txt /opt/topgun/target/spec376-run/smoke/synthetic/p3/ev/spec372-k1.amp.txt /opt/topgun/target/spec376-run/smoke/synthetic/p3/ev/spec372-k1.ampfp.csv

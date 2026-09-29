@@ -1,0 +1,35 @@
+provenance: server sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc flavour=CA built=2026-09-28T10:00:00Z run_start=2026-09-28T12:05:00Z topgun_or_prune_restored_cancelled_total=present harness sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd harness_built=2026-09-28T10:30:00Z tombstone_level_ceiling_gate=present
+soak: child TOPGUN_JOURNAL_ENABLED=true
+[server] alloc_probe elapsed_s=0 bytes_alloc=0 bytes_dealloc=0
+[server] alloc_probe elapsed_s=30 bytes_alloc=1215000000 bytes_dealloc=607500000
+[server] alloc_probe elapsed_s=60 bytes_alloc=2430000000 bytes_dealloc=1215000000
+[server] alloc_probe elapsed_s=90 bytes_alloc=3645000000 bytes_dealloc=1822500000
+[server] alloc_probe elapsed_s=120 bytes_alloc=4860000000 bytes_dealloc=2430000000
+[server] alloc_probe elapsed_s=150 bytes_alloc=6075000000 bytes_dealloc=3037500000
+[server] alloc_probe elapsed_s=180 bytes_alloc=7290000000 bytes_dealloc=3645000000
+[server] alloc_probe elapsed_s=210 bytes_alloc=8505000000 bytes_dealloc=4252500000
+[server] alloc_probe elapsed_s=240 bytes_alloc=9720000000 bytes_dealloc=4860000000
+[server] alloc_probe elapsed_s=270 bytes_alloc=10935000000 bytes_dealloc=5467500000
+[server] alloc_probe elapsed_s=300 bytes_alloc=12150000000 bytes_dealloc=6075000000
+[server] alloc_probe elapsed_s=330 bytes_alloc=13365000000 bytes_dealloc=6682500000
+[server] alloc_probe elapsed_s=360 bytes_alloc=14580000000 bytes_dealloc=7290000000
+[server] alloc_probe elapsed_s=390 bytes_alloc=15795000000 bytes_dealloc=7897500000
+[server] alloc_probe elapsed_s=420 bytes_alloc=17010000000 bytes_dealloc=8505000000
+[server] alloc_probe elapsed_s=450 bytes_alloc=18225000000 bytes_dealloc=9112500000
+[server] alloc_probe elapsed_s=480 bytes_alloc=19440000000 bytes_dealloc=9720000000
+[server] alloc_probe elapsed_s=510 bytes_alloc=20655000000 bytes_dealloc=10327500000
+[server] alloc_probe elapsed_s=540 bytes_alloc=21870000000 bytes_dealloc=10935000000
+[server] alloc_probe elapsed_s=570 bytes_alloc=23085000000 bytes_dealloc=11542500000
+[server] alloc_probe elapsed_s=600 bytes_alloc=24300000000 bytes_dealloc=12150000000
+[server] alloc_probe elapsed_s=630 bytes_alloc=25515000000 bytes_dealloc=12757500000
+[server] alloc_probe elapsed_s=660 bytes_alloc=26730000000 bytes_dealloc=13365000000
+[server] alloc_probe elapsed_s=690 bytes_alloc=27945000000 bytes_dealloc=13972500000
+[server] alloc_probe elapsed_s=720 bytes_alloc=29160000000 bytes_dealloc=14580000000
+[server] alloc_probe elapsed_s=750 bytes_alloc=30375000000 bytes_dealloc=15187500000
+[server] alloc_probe elapsed_s=780 bytes_alloc=31590000000 bytes_dealloc=15795000000
+[server] alloc_probe elapsed_s=810 bytes_alloc=32805000000 bytes_dealloc=16402500000
+[server] alloc_probe elapsed_s=840 bytes_alloc=34020000000 bytes_dealloc=17010000000
+[server] alloc_probe elapsed_s=870 bytes_alloc=35235000000 bytes_dealloc=17617500000
+[server] alloc_probe elapsed_s=900 bytes_alloc=36450000000 bytes_dealloc=18225000000
+  LIVE_COPY  t=300.0s copy_done=300.2s live=1000 live_tag_bytes=50000
+  TERMINAL  t=900.0s live=1000 live_tag_bytes=50000

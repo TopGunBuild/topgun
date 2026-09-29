@@ -1,0 +1,18 @@
+build_start_epoch=1790669558
+flavour=CA-cal code=bee21fcdf5c5b591758a678b070d1c2dc1101a2f path=/opt/topgun/target/spec376-CA-cal/release/topgun-server sha256=4c4acf9893247c157e71993947f6baf047045ed562765b5ccfa3f3faa82b8d33 mtime=1790670003 recompiled=yes marker=ok
+flavour=CA-pin code=b166719d9569c14076f2211139667aabb8f71d6a path=/opt/topgun/target/spec376-CA-pin/release/topgun-server sha256=735404d67f63525d80b7ba422c6abfe21ca70dd646ca506d1cccb51ee194e581 mtime=1790670397 recompiled=yes marker=ok
+flavour=CA-frz code=e85adb1fc48936267aba66cb7aee7d32dc46b676 path=/opt/topgun/target/spec376-CA-frz/release/topgun-server sha256=8a19d5780b29b7772b65dd678b47d1980fbc4719d73cf886cc267ecde1b9c813 mtime=1790670847 recompiled=yes marker=ok
+flavour=DH-pin code=b166719d9569c14076f2211139667aabb8f71d6a path=/opt/topgun/target/spec376-DH-pin/release-with-debug/topgun-server sha256=7c07db0feaa285271f84cff6e14d732b025283814d9568ffa31a36ecd4f546ce mtime=1790671463 recompiled=yes marker=ok
+flavour=JE-cal code=bee21fcdf5c5b591758a678b070d1c2dc1101a2f path=/opt/topgun/target/spec376-JE-cal/release/topgun-server sha256=21cf7da96d9049ff4d4c09fe43a866fe04ddb31a7c6110c9b58f83e70d0cd750 mtime=1790671940 recompiled=yes marker=ok
+flavour=SYS-cal code=bee21fcdf5c5b591758a678b070d1c2dc1101a2f path=/opt/topgun/target/spec376-SYS-cal/release/topgun-server sha256=774c2e8ed296b937b89c1328ab88ea9b015c43bed15e5057e568656571acaf3f mtime=1790672359 recompiled=yes marker=ok
+flavour=MI-cal code=bee21fcdf5c5b591758a678b070d1c2dc1101a2f path=/opt/topgun/target/spec376-MI-cal/release/topgun-server sha256=84d98ce10e4379ba325963b26edfbb0adf4a9e3e5fc87cbd27e639bedf84eec1 mtime=1790672830 recompiled=yes marker=ok
+flavour=H code=bee21fcdf5c5b591758a678b070d1c2dc1101a2f path=/opt/topgun/target/spec376-H/release/deps/soak_harness-53b4b640053c5766 sha256=6cbe3f5dbf94366d03e6d619510bb43b2738093f2e5335cd8a608139ece3c589 mtime=1790673196 recompiled=yes marker=ok
+rustc: rustc 1.93.1 (01f6ddf75 2026-02-11)
+rustc: binary: rustc
+rustc: commit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf
+rustc: commit-date: 2026-02-11
+rustc: host: x86_64-unknown-linux-gnu
+rustc: release: 1.93.1
+rustc: LLVM version: 21.1.8
+glibc: ldd (Debian GLIBC 2.36-9+deb12u14) 2.36
+awk: awk version 20220912

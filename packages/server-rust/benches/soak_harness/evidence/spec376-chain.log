@@ -1,0 +1,48 @@
+chain start: 2026-09-29T09:45:57Z epoch=1790675157 phase=cal HEAD=a0168f898f5987a9d7e93896ad86bedeecc241fc cal_pin=bee21fcd
+awk shim: /opt/topgun/target/spec376-awkbin/awk -> /usr/bin/original-awk banner='awk version 20220912'
+ORDER=OK manifest_commit=a0168f898f5987a9d7e93896ad86bedeecc241fc prefix_sha256=1d9edcedc96d0a108f28cf0667b91921cb3a36e2bb9e4ff3c1f4f12986800aed programs=17 cal_pin=bee21fcd
+SMOKE_BINDING=PASS programs=10
+PREFLIGHT_LOG=spec376-preflight-20260929T094539Z.log
+preflight: PREFLIGHT_AT=2026-09-29T09:45:49Z age=8s
+label H: sha256=6cbe3f5dbf94366d03e6d619510bb43b2738093f2e5335cd8a608139ece3c589 matches the builds file
+label CA-cal: sha256=4c4acf9893247c157e71993947f6baf047045ed562765b5ccfa3f3faa82b8d33 matches the builds file
+label CA-pin: sha256=735404d67f63525d80b7ba422c6abfe21ca70dd646ca506d1cccb51ee194e581 matches the builds file
+label CA-frz: sha256=8a19d5780b29b7772b65dd678b47d1980fbc4719d73cf886cc267ecde1b9c813 matches the builds file
+PROC_ROOT=/proc
+LOAD_AT_START_c1=0.22
+cell c1: label=CA-cal server=/opt/topgun/target/spec376-CA-cal/release/topgun-server commit=bee21fcd
+cell c1: RUNNER_EXIT=0
+PREDICATES_EXIT_c1=0
+LOAD_AT_START_pb=1.76
+cell pb: label=CA-pin server=/opt/topgun/target/spec376-CA-pin/release/topgun-server commit=b166719d
+cell pb: RUNNER_EXIT=0
+PREDICATES_EXIT_pb=0
+LOAD_AT_START_c2=2.10
+cell c2: label=CA-cal server=/opt/topgun/target/spec376-CA-cal/release/topgun-server commit=bee21fcd
+cell c2: RUNNER_EXIT=0
+PREDICATES_EXIT_c2=0
+LOAD_AT_START_pa=1.77
+cell pa: label=CA-frz server=/opt/topgun/target/spec376-CA-frz/release/topgun-server commit=e85adb1f
+cell pa: RUNNER_EXIT=0
+PREDICATES_EXIT_pa=0
+calib rc=0
+  | == flags ==
+  | STOP=none
+  | INSTRUMENT=SOUND
+  | WRITES_PER_S_REF=257.647
+  | S_CA_RATE=0.014105
+  | S_CA_LIVE=0.085023
+  | S_CA_FPL=0.136732
+  | BYTES_ALLOC_RATE=c1=45144706.827083 pb=101966445.826667 c2=44512397.630952 pa=44886100.872549
+  | ALLOC_LIVE=c1=44153448 pb=65412884 c2=40552486 pa=43888313
+  | BYTES_PER_WRITE=c1=175338.9 pb=404728.7 c2=172646.9 pa=174206.0
+  | WRITE_PARITY=0.0014
+  | WRITE_PARITY_ALL=0.0230
+  | A0_L_MIB=13.349
+  | PORT_RATIO=0.4402
+  | PORT_BPW_RATIO=0.4304
+  | PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+  | PORT_IN_EXPECT=FALSE
+  | STEAL=c1=0.0000 pb=0.0000 c2=0.0000 pa=0.0000
+  | LOAD_AT_START=c1=0.22 pb=1.76 c2=2.10 pa=1.77
+chain end: 2026-09-29T10:46:12Z

@@ -1,0 +1,192 @@
+# G7 Mac-side readout transcript (generated; scratch path -> @SCRATCH@, repo path -> @REPO@)
+
+=== context
+host: Darwin 27.0.0; awk: awk version 20200816; bash: 3.2.57(1)-release; HEAD=026698fc
+M=a0168f898f5987a9d7e93896ad86bedeecc241fc data=026698fcbfe4f31db3b0e0cb47f321c3eb8c95e4 CAL_PIN=bee21fcd
+HEAD is the data commit: yes
+working tree clean: yes
+
+=== AC-12: ORDER=OK (cal chain start, calib start on the server, data commit on the Mac)
+cal chain log:   ORDER=OK manifest_commit=a0168f898f5987a9d7e93896ad86bedeecc241fc prefix_sha256=1d9edcedc96d0a108f28cf0667b91921cb3a36e2bb9e4ff3c1f4f12986800aed programs=17 cal_pin=bee21fcd [count=1]
+server calib:    ORDER=OK manifest_commit=a0168f898f5987a9d7e93896ad86bedeecc241fc prefix_sha256=1d9edcedc96d0a108f28cf0667b91921cb3a36e2bb9e4ff3c1f4f12986800aed programs=17 cal_pin=bee21fcd [count=1]
+data commit (Mac): ORDER=OK manifest_commit=a0168f898f5987a9d7e93896ad86bedeecc241fc prefix_sha256=1d9edcedc96d0a108f28cf0667b91921cb3a36e2bb9e4ff3c1f4f12986800aed programs=17 cal_pin=bee21fcd (rc=0)
+AC12_THROUGH_DATA=PASS
+(HEAD before merge: re-run after the last G7 commit, recorded in the PR body)
+§1 prefix sha256 at M / data / HEAD:
+  a0168f898f5987a9d7e93896ad86bedeecc241fc 1d9edcedc96d0a108f28cf0667b91921cb3a36e2bb9e4ff3c1f4f12986800aed
+  026698fcbfe4f31db3b0e0cb47f321c3eb8c95e4 1d9edcedc96d0a108f28cf0667b91921cb3a36e2bb9e4ff3c1f4f12986800aed
+  HEAD 1d9edcedc96d0a108f28cf0667b91921cb3a36e2bb9e4ff3c1f4f12986800aed
+
+=== AC-14: calib re-run on macOS over the committed artifacts at the data commit
+command: TMPDIR=@SCRATCH@/tmp SPEC376_MANIFEST_COMMIT=a0168f898f5987a9d7e93896ad86bedeecc241fc bash spec376-calib.sh @REPO@/packages/server-rust/benches/soak_harness/evidence @REPO@/packages/server-rust/benches/soak_harness/evidence/spec376-manifest.md @REPO@/packages/server-rust/benches/soak_harness/evidence/spec376-smoke
+mac calib rc=0
+inputs read: PREFLIGHT_LOG=spec376-preflight-20260929T094539Z.log; predicates: spec376-c1.predicates.txt spec376-c2.predicates.txt spec376-pa.predicates.txt spec376-pb.predicates.txt 
+server flags block sha256: 1492a6a2f739e38e9cb6f1925ba2123a0871350261cfd9fe647d2029238201c3 lines=19
+mac    flags block sha256: 1492a6a2f739e38e9cb6f1925ba2123a0871350261cfd9fe647d2029238201c3 lines=19
+flags block cmp: identical
+whole spec376-calib.txt cmp: identical
+AC14=PASS
+--- flags block (Mac run)
+== flags ==
+STOP=none
+INSTRUMENT=SOUND
+WRITES_PER_S_REF=257.647
+S_CA_RATE=0.014105
+S_CA_LIVE=0.085023
+S_CA_FPL=0.136732
+BYTES_ALLOC_RATE=c1=45144706.827083 pb=101966445.826667 c2=44512397.630952 pa=44886100.872549
+ALLOC_LIVE=c1=44153448 pb=65412884 c2=40552486 pa=43888313
+BYTES_PER_WRITE=c1=175338.9 pb=404728.7 c2=172646.9 pa=174206.0
+WRITE_PARITY=0.0014
+WRITE_PARITY_ALL=0.0230
+A0_L_MIB=13.349
+PORT_RATIO=0.4402
+PORT_BPW_RATIO=0.4304
+PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate
+PORT_IN_EXPECT=FALSE
+STEAL=c1=0.0000 pb=0.0000 c2=0.0000 pa=0.0000
+LOAD_AT_START=c1=0.22 pb=1.76 c2=2.10 pa=1.77
+
+=== AC-13: flags block shape (server spec376-calib.txt)
+chain log: calib rc=0 [count=1]
+keys in order: STOP INSTRUMENT WRITES_PER_S_REF S_CA_RATE S_CA_LIVE S_CA_FPL BYTES_ALLOC_RATE ALLOC_LIVE BYTES_PER_WRITE WRITE_PARITY WRITE_PARITY_ALL A0_L_MIB PORT_RATIO PORT_BPW_RATIO PORT_EXPECT PORT_IN_EXPECT STEAL LOAD_AT_START
+STOP=none;INSTRUMENT=SOUND;PORT_EXPECT=[0.327,0.346] src=SPEC-373b-M1 not_a_gate;
+AC13=PASS
+
+=== AC-1: frozen parents untouched
+git diff bee21fcd..HEAD over spec37[0-3]* spec3{49,66}*: empty
+spec373b-manifest.md §1 sha256 listings: 14 checked, 0 mismatched
+AC1=PASS
+
+=== AC-2: no code change
+files changed bee21fcd..HEAD: 1583
+*.rs / Cargo.* / outside evidence: none
+AC2=PASS
+
+=== AC-3: name contract (exclusion form)
+CSVs: 16
+header grep over every CSV: empty
+predicates files: 10 (spec376-c1.predicates.txt spec376-c2.predicates.txt spec376-pa.predicates.txt spec376-pb.predicates.txt spec376-smoke/spec376-sc.predicates.txt spec376-smoke/spec376-sdh.predicates.txt spec376-smoke/spec376-sje.predicates.txt spec376-smoke/spec376-smi.predicates.txt spec376-smoke/spec376-spb.predicates.txt spec376-smoke/spec376-ssy.predicates.txt )
+denied predicate keys: <empty>
+AC3=PASS
+
+=== AC-4 / AC-5 / AC-15: guards, synthetic suite, lineage literals (Mac, at HEAD)
+spec376-cells.sh c1 rc=2 FATAL: spec376-cells.sh runs on Linux only (uname -s = 'Darwin') files_created=0 preflight_line=0
+spec376-chain.sh rc=2 FATAL: spec376-chain.sh runs on Linux only (uname -s = 'Darwin') files_created=0 preflight_line=0
+spec376-preflight.sh rc=2 FATAL: spec376-preflight.sh runs on Linux only (uname -s = 'Darwin') files_created=0 preflight_line=0
+AC4_GUARDS=PASS
+spec376-synth.sh rc=0; CASE PASS lines=24; CASE FAIL lines=0
+CASE C10 PASS
+CASE C11 PASS
+CASE C12 PASS
+CASE C13 PASS
+CASE C14 PASS
+CASE F1 PASS
+SYNTH376=PASS cases=24
+AC5=PASS
+literal 16.64 in predicates+calib: 0
+literal 886 in predicates+calib: 0
+literal 0.3316 in predicates+calib: 0
+literal 0.322296 in predicates+calib: 0
+lines carrying 0.327 or 0.346 in predicates+calib:
+  (none: the band is read from the manifest, calib prints it via PORT_EXPECT= only)
+CASE C2 PASS
+AC15=PASS
+
+=== AC-6: synthetic parity on Linux (smoke log) + reference validity
+SYNTH376=PASS cases=24 [count=1]
+SYNTH_PARITY=PASS cases=19 awk='awk version 20220912' [count=1]
+reference: S-sections(--- synthetic S<n>)=19 column-0 FATAL=0 sha256=5dbe02258b05ebcddfefc5be6d945d050c74597fa60edc172c2d58d1fcb87f1a
+path independence (R7.3), from committed spec376-g4-mac.txt section 7:
+  main tree rc=0 darwin-ref: awk='awk version 20200816' sections=19 OK
+  worktree rc=0 darwin-ref: awk='awk version 20200816' sections=19 OK
+  cmp: identical
+  cmp vs committed spec376-synth-ref-darwin.txt: identical
+  sha256 5dbe02258b05ebcddfefc5be6d945d050c74597fa60edc172c2d58d1fcb87f1a lines=317 sections=19 rc_lines=19 col0_FATAL=0 indented_FATAL=4 @OUT@=0
+  
+AC6=PASS
+
+=== AC-7: derivation hunks
+synth copy: 1 hunk(s): 114,115c114,115
+spec376-cells.sh: 57 hunks, map set == diff set
+spec376-chain.sh: 20 hunks, map set == diff set
+spec376-order.sh: 11 hunks, map set == diff set
+spec376-predicates.sh: 49 hunks, map set == diff set
+AC7=PASS
+
+=== AC-8: no silent blindness (every smoke and cal CSV)
+sc: duration=120 rows=6 empty_mem_cells=0 mem_invariant_violations=0 lines=1 (any=1) SAMPLER_FATAL=0
+spb: duration=120 rows=6 empty_mem_cells=0 mem_invariant_violations=0 lines=1 (any=1) SAMPLER_FATAL=0
+sdh: duration=120 rows=6 empty_mem_cells=0 mem_invariant_violations=0 lines=1 (any=1) SAMPLER_FATAL=0
+sje: duration=120 rows=6 empty_mem_cells=0 mem_invariant_violations=0 lines=1 (any=1) SAMPLER_FATAL=0
+ssy: duration=120 rows=6 empty_mem_cells=0 mem_invariant_violations=0 lines=1 (any=1) SAMPLER_FATAL=0
+smi: duration=120 rows=6 empty_mem_cells=0 mem_invariant_violations=0 lines=1 (any=1) SAMPLER_FATAL=0
+c1: duration=900 rows=15 empty_mem_cells=0 mem_invariant_violations=0 lines=1 (any=1) SAMPLER_FATAL=0
+pb: duration=900 rows=15 empty_mem_cells=0 mem_invariant_violations=0 lines=1 (any=1) SAMPLER_FATAL=0
+c2: duration=900 rows=15 empty_mem_cells=0 mem_invariant_violations=0 lines=1 (any=1) SAMPLER_FATAL=0
+pa: duration=900 rows=15 empty_mem_cells=0 mem_invariant_violations=0 lines=1 (any=1) SAMPLER_FATAL=0
+AC8=PASS
+
+=== AC-9: preflight (cal chain)
+PREFLIGHT_LOG= lines: 1 -> spec376-preflight-20260929T094539Z.log
+last line: PREFLIGHT=PASS PREFLIGHT_AT=2026-09-29T09:45:49Z
+PREFLIGHT_AT=2026-09-29T09:45:49Z chain_start=2026-09-29T09:45:57Z age_s=8
+  58:THP enabled: 'always [madvise] never'
+  59:THP defrag:  'always defer defer+madvise [madvise] never'
+  60:CHECK thp=PASS enabled=[madvise] defrag=[madvise]
+  55:SwapTotal: 0 kB
+  56:CHECK swap=PASS swapon empty, SwapTotal: 0 kB
+AC9=PASS
+
+=== AC-10: provenance (console line 1 sha256 == builds line)
+builds: flavour lines=8 recompiled=yes marker=ok=8 labels=CA-cal CA-pin CA-frz DH-pin JE-cal SYS-cal MI-cal H 
+sc: label=CA-cal console1=4c4acf9893247c15… builds=4c4acf9893247c15… lines=1 EQUAL
+spb: label=CA-pin console1=735404d67f63525d… builds=735404d67f63525d… lines=1 EQUAL
+sdh: label=DH-pin console1=7c07db0feaa28527… builds=7c07db0feaa28527… lines=1 EQUAL
+sje: label=JE-cal console1=21cf7da96d9049ff… builds=21cf7da96d9049ff… lines=1 EQUAL
+ssy: label=SYS-cal console1=774c2e8ed296b937… builds=774c2e8ed296b937… lines=1 EQUAL
+smi: label=MI-cal console1=84d98ce10e4379ba… builds=84d98ce10e4379ba… lines=1 EQUAL
+c1: label=CA-cal console1=4c4acf9893247c15… builds=4c4acf9893247c15… lines=1 EQUAL
+pb: label=CA-pin console1=735404d67f63525d… builds=735404d67f63525d… lines=1 EQUAL
+c2: label=CA-cal console1=4c4acf9893247c15… builds=4c4acf9893247c15… lines=1 EQUAL
+pa: label=CA-frz console1=8a19d5780b29b777… builds=8a19d5780b29b777… lines=1 EQUAL
+AC10=PASS
+
+=== AC-11: DH/JE smoke
+DH_FRAME_storage/engines/hashmap.rs:136=1
+DH_FRAME_storage/datastores/write_behind.rs:2463=1
+DH_FRAME_storage/datastores/write_behind.rs:2518=2
+DH_FRAMES=PASS
+SELF_CHECK=PASS (E 0.3222957 vs 0.322296, tol 0.000005)
+sje: probe_rows=7 empty_je_cells=0
+AC11=PASS
+
+=== AC-17 (part): bash -n on every spec376 program
+bash -n spec376-calib.sh: OK
+bash -n spec376-cells.sh: OK
+bash -n spec376-chain.sh: OK
+bash -n spec376-order.sh: OK
+bash -n spec376-parity.sh: OK
+bash -n spec376-predicates.sh: OK
+bash -n spec376-preflight.sh: OK
+bash -n spec376-procmem.sh: OK
+bash -n spec376-synth.sh: OK
+bash -n spec376-synth373b-linux.sh: OK
+AC17_BASH_N=PASS
+(pre-merge gate: separate section of this transcript)
+(AC-10 note: 'console line 1' is harness-console line 1, the provenance line the chain's own admission reads)
+
+=== AC-17: pre-merge gate (CLAUDE.md minimum + cargo fmt --check), macOS, tree = data commit + this manifest §3 append (markdown only)
+HEAD=026698fcbfe4f31db3b0e0cb47f321c3eb8c95e4
+### rc=0: pnpm install --frozen-lockfile
+### rc=0: pnpm -r build
+### rc=0: pnpm lint
+### rc=0: pnpm format:check
+### rc=0: cargo fmt --all -- --check
+    Finished `release` profile [optimized] target(s) in 3m 38s
+### rc=0: cargo build --release
+test result: ok. 1963 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 111.68s
+### rc=0: cargo test --release -p topgun-server --lib
+GATE=PASS
+  lint: ✖ 860 problems (0 errors, 860 warnings)
+  lint:   0 errors and 3 warnings potentially fixable with the `--fix` option.

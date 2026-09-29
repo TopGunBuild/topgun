@@ -1,0 +1,6 @@
+post_mortem_rows=0
+post_mortem_mem_reads=0
+steal_pct=2.0000
+mem_invariant_violations=0
+RESULT: instrument sound; harness exit code 0.
+RUNNER_EXIT=0

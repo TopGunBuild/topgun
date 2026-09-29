@@ -1,0 +1,1 @@
+AMP source=TERMINAL t=120.3 live=12402 row=120 join_lag_s=0.3 fpl_mb=28.113 sl_mb=28.113 lazy_mb=0.000 redb_mb=2.520 reach_mb=n/a AMP_FPL=n/a AMP_SL=n/a je_allocated=19369328 je_active=22364160 je_resident=30339072 je_metadata=5144288 status=used

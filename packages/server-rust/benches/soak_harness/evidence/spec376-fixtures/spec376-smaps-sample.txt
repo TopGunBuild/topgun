@@ -1,0 +1,84 @@
+== pid=73754 captured_at=2026-09-29T09:31:40Z after_listener_s=60
+== smaps_rollup
+55d40e28a000-7ffd0d630000 ---p 00000000 00:00 0                          [rollup]
+Rss:               35248 kB
+Pss:               33536 kB
+Pss_Dirty:         21588 kB
+Pss_Anon:          21588 kB
+Pss_File:          11948 kB
+Pss_Shmem:             0 kB
+Shared_Clean:       1940 kB
+Shared_Dirty:          0 kB
+Private_Clean:     11720 kB
+Private_Dirty:     21588 kB
+Referenced:        35248 kB
+Anonymous:         21588 kB
+LazyFree:              0 kB
+AnonHugePages:         0 kB
+ShmemPmdMapped:        0 kB
+FilePmdMapped:         0 kB
+Shared_Hugetlb:        0 kB
+Private_Hugetlb:       0 kB
+Swap:                  0 kB
+SwapPss:               0 kB
+Locked:                0 kB
+== status
+Name:	topgun-server
+Umask:	0022
+State:	S (sleeping)
+Tgid:	73754
+Ngid:	0
+Pid:	73754
+PPid:	73743
+TracerPid:	0
+Uid:	0	0	0	0
+Gid:	0	0	0	0
+FDSize:	256
+Groups:	 
+NStgid:	73754
+NSpid:	73754
+NSpgid:	73348
+NSsid:	73348
+VmPeak:	  838984 kB
+VmSize:	  772008 kB
+VmLck:	       0 kB
+VmPin:	       0 kB
+VmHWM:	   32952 kB
+VmRSS:	   32212 kB
+RssAnon:	   21064 kB
+RssFile:	   11148 kB
+RssShmem:	       0 kB
+VmData:	   47708 kB
+VmStk:	     132 kB
+VmExe:	   16388 kB
+VmLib:	    2084 kB
+VmPTE:	     208 kB
+VmSwap:	       0 kB
+HugetlbPages:	       0 kB
+CoreDumping:	0
+THP_enabled:	1
+Threads:	12
+SigQ:	2/62135
+SigPnd:	0000000000000000
+ShdPnd:	0000000000000000
+SigBlk:	0000000000000000
+SigIgn:	0000000080001004
+SigCgt:	0000000100004442
+CapInh:	0000000000000000
+CapPrm:	000001ffffffffff
+CapEff:	000001ffffffffff
+CapBnd:	000001ffffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	0
+Seccomp:	0
+Seccomp_filters:	0
+Speculation_Store_Bypass:	thread vulnerable
+SpeculationIndirectBranch:	conditional enabled
+Cpus_allowed:	f
+Cpus_allowed_list:	0-3
+Mems_allowed:	00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001
+Mems_allowed_list:	0
+voluntary_ctxt_switches:	102
+nonvoluntary_ctxt_switches:	7
+== ps_rss
+32212

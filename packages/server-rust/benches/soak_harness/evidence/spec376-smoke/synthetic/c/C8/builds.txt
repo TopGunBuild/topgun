@@ -1,0 +1,5 @@
+build_start_epoch=1790000000
+flavour=CA-cal code=0000000000000000000000000000000000000001 path=/synthetic/CA-cal sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa mtime=1790000100 recompiled=yes marker=ok
+flavour=CA-pin code=0000000000000000000000000000000000000002 path=/synthetic/CA-pin sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb mtime=1790000200 recompiled=yes marker=ok
+flavour=CA-frz code=0000000000000000000000000000000000000003 path=/synthetic/CA-frz sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc mtime=1790000300 recompiled=yes marker=ok
+flavour=H code=0000000000000000000000000000000000000001 path=/synthetic/H sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd mtime=1790000400 recompiled=yes marker=ok

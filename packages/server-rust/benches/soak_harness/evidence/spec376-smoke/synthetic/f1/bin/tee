@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "tee $*" >> '/opt/topgun/target/spec376-run/smoke/synthetic/f1/record'; cat > /dev/null

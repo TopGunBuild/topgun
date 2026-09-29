@@ -1,0 +1,3 @@
+AMP source=LIVE_COPY t=300.0 live=31070 row=300 join_lag_s=0.0 fpl_mb=53.078 sl_mb=53.078 lazy_mb=0.000 redb_mb=7.047 reach_mb=n/a AMP_FPL=n/a AMP_SL=n/a je_allocated= je_active= je_resident= je_metadata= status=used
+AMP source=LIVE_COPY t=600.1 live=61723 row=600 join_lag_s=0.1 fpl_mb=90.844 sl_mb=90.844 lazy_mb=0.000 redb_mb=13.578 reach_mb=n/a AMP_FPL=n/a AMP_SL=n/a je_allocated= je_active= je_resident= je_metadata= status=used
+AMP source=TERMINAL t=900.4 live=92523 row=900 join_lag_s=0.4 fpl_mb=145.895 sl_mb=145.895 lazy_mb=0.000 redb_mb=16.078 reach_mb=n/a AMP_FPL=n/a AMP_SL=n/a je_allocated= je_active= je_resident= je_metadata= status=used
