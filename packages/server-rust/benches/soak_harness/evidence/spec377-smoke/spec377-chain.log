@@ -1,0 +1,1701 @@
+chain start: 2026-09-30T08:43:29Z epoch=1790757809 phase=smoke HEAD=03114a764495f29499796d9535f3285af9f9fc1a series_pin=34007e19
+awk shim: /opt/topgun/target/spec377-awkbin/awk -> /usr/bin/original-awk banner='awk version 20220912'
+label H: sha256=f205d81c653a7cf09fc7a88084cbd183dfdf61443671ba2fbd3db707499c1911 matches the builds file
+label SYS-ser: sha256=c68301ec1af2b4ff60c65a2db53e9aa0717ce605a0bbcda6efb5d4462e51900e matches the builds file
+label JE-ser: sha256=5d5bc58cbedafdbb462a29782a49ad52200f10e95c07f4f9aa2c8a15abfb3d22 matches the builds file
+label MI3-ser: sha256=bc0fae31e708885db75dae12c43c5de3129398203b8d36e5e5bdf515b7a510e9 matches the builds file
+label MI2-ser: sha256=3357d04ec381426e057a32d5fe474e5f6268a7123e3df110bfe72c0360ca12b0 matches the builds file
+SMOKE_PROG_SHA=spec349c2-fit.awk sha256=840813461e3b1bd5c3a79291044d8ac515e09b94333ee530cd6a10de8fa0436f
+SMOKE_PROG_SHA=spec366-p5.awk sha256=2e3ba4f4c0429d77d7f1cf267112706ddf95b095b2a14a6b05460cfa5d018c33
+SMOKE_PROG_SHA=spec366-p67.awk sha256=ba65ffc4076307ffdbfb014565edaf1f17e185ef987ca6b3fe2565d544400215
+SMOKE_PROG_SHA=spec371-predicates.sh sha256=7d2ca6214beff1c4c0042879823172a45452ef99c06ca49521d5c96889a61d1b
+SMOKE_PROG_SHA=spec376-parity.sh sha256=7dd646bcc0e22c6dd48bdfab5d11da628b279abecb6acec727e7e56e87a5cd61
+SMOKE_PROG_SHA=spec376-procmem.sh sha256=d05727f002087cb37fb8abce8f5f935dce11af5e0e0373c873e6a393a8a6f7b4
+SMOKE_PROG_SHA=spec376-synth373b-linux.sh sha256=5ab7bdafd3a4e9b9ef9b690bdc0865b44f245901d6963b1a93cfeaaeaebbc011
+SMOKE_PROG_SHA=spec377-cells.sh sha256=95e5dbe6925f6cb56534cccf786d73aee2122d64a8d72502e00bf0d723f69dc6
+SMOKE_PROG_SHA=spec377-chain.sh sha256=5ffa9cf8318d316d8477b19a20343af93e04d078ab1ec399a1f09a8a7bf0b89a
+SMOKE_PROG_SHA=spec377-decide.awk sha256=d455762484de246733a17b506ff856ab3c51415c2b1d3d747a37ef41985375ff
+SMOKE_PROG_SHA=spec377-decide.sh sha256=4afa4e5fee68afbfdbe05f3705cdc258bc0b47a2219539886d91bb64f9907642
+SMOKE_PROG_SHA=spec377-order.sh sha256=6d0f92a3c38d806061aa51e1ad231d6e64d57711448a123d886661c9b829c122
+SMOKE_PROG_SHA=spec377-power.py sha256=e7f6909a02b91d358d15a5cf790a4701bb602d23499ff895b0c6efb7f841abaf
+SMOKE_PROG_SHA=spec377-predicates.sh sha256=f3cea41238eb7f98acff52f308173d455424654b567d7064cc99298f6400ca8b
+SMOKE_PROG_SHA=spec377-preflight.sh sha256=a5632c595befe38c54c29b98667c353fda25689e7f375a6b620cc6033d043c79
+SMOKE_PROG_SHA=spec377-synth.sh sha256=54e8981fc9b33ba517a3a815705c1afc68a0e551fd294c58795f79d4775fc63e
+PROC_ROOT=/proc
+LOAD_AT_START_ssy=0.30
+cell ssy: label=SYS-ser server=/opt/topgun/target/spec377-SYS-ser/release/topgun-server commit=34007e19
+cell ssy: RUNNER_EXIT=0
+PREDICATES_EXIT_ssy=0
+LOAD_AT_START_sje=2.23
+cell sje: label=JE-ser server=/opt/topgun/target/spec377-JE-ser/release/topgun-server commit=34007e19
+cell sje: RUNNER_EXIT=0
+PREDICATES_EXIT_sje=0
+LOAD_AT_START_smi3=2.10
+cell smi3: label=MI3-ser server=/opt/topgun/target/spec377-MI3-ser/release/topgun-server commit=34007e19
+cell smi3: RUNNER_EXIT=0
+PREDICATES_EXIT_smi3=0
+LOAD_AT_START_smi2=1.88
+cell smi2: label=MI2-ser server=/opt/topgun/target/spec377-MI2-ser/release/topgun-server commit=34007e19
+cell smi2: RUNNER_EXIT=0
+PREDICATES_EXIT_smi2=0
+parity awk: /opt/topgun/target/spec377-run/smoke/parity/awkbin-original/awk -> /usr/bin/original-awk banner='awk version 20220912'
+SYNTH_PARITY=PASS cases=19 awk='awk version 20220912'
+SYNTH_PARITY_MAWK=PASS rc=0
+SYNTH_PARITY_GAWK=n/a reason=absent
+parity rc=0
+CASE F0 PASS
+  | PV=TRUE server_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=SYS label=SYS-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_s1=PASS ALLOC_ENV=none
+  | PALLOC_ITEM_s2=PASS BIN_MARKERS=je=0,mi=0
+  | PALLOC_ITEM_s3=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_s4=PASS je_lines=0,mimalloc_lines=0
+  | PALLOC_ITEM_s5=PASS TREE_PROOF_SYS-ser=PASS
+  | PALLOC_ITEM_s6=PASS steal_pct_lines=1,flavour_fatal=0
+  | PALLOC_ITEM_marker_control=PASS JE-ser.je=3,MI3-ser.mi=5,MI2-ser.mi=5
+  | PALLOC=TRUE label=SYS-ser
+CASE A1 PASS
+  | PV=TRUE server_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=SYS label=SYS-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_s1=FAIL ALLOC_ENV=MALLOC_ARENA_MAX=2
+  | PALLOC_ITEM_s2=PASS BIN_MARKERS=je=0,mi=0
+  | PALLOC_ITEM_s3=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_s4=PASS je_lines=0,mimalloc_lines=0
+  | PALLOC_ITEM_s5=PASS TREE_PROOF_SYS-ser=PASS
+  | PALLOC_ITEM_s6=PASS steal_pct_lines=1,flavour_fatal=0
+  | PALLOC_ITEM_marker_control=PASS JE-ser.je=3,MI3-ser.mi=5,MI2-ser.mi=5
+  | PALLOC=FALSE reason=s1 label=SYS-ser
+CASE A2 PASS
+  | PV=TRUE server_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=SYS label=SYS-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_s1=PASS ALLOC_ENV=none
+  | PALLOC_ITEM_s2=PASS BIN_MARKERS=je=0,mi=0
+  | PALLOC_ITEM_s3=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_s4=PASS je_lines=0,mimalloc_lines=0
+  | PALLOC_ITEM_s5=PASS TREE_PROOF_SYS-ser=PASS
+  | PALLOC_ITEM_s6=PASS steal_pct_lines=1,flavour_fatal=0
+  | PALLOC_ITEM_marker_control=FAIL JE-ser.je=0,MI3-ser.mi=5,MI2-ser.mi=5
+  | PALLOC=FALSE reason=marker_control label=SYS-ser
+CASE A3 PASS
+  | PV=TRUE server_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=JE label=JE-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_j1=PASS ALLOC_ENV=_RJEM_MALLOC_CONF=background_thread:true,confirm_conf:true
+  | PALLOC_ITEM_j2=PASS je_config_lines=1
+  | PALLOC_ITEM_j3=PASS JE_BG_THREADS=4
+  | JE_CONFIRM_CONF=PASS
+  | PALLOC_ITEM_j4=PASS JE_CONFIRM_CONF=PASS
+  | PALLOC_ITEM_j5=PASS BIN_MARKERS=je=3,mi=0
+  | PALLOC_ITEM_j6=PASS TREE_PROOF_JE-ser=PASS
+  | PALLOC=TRUE label=JE-ser
+CASE A4 PASS
+  | PV=TRUE server_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=JE label=JE-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_j1=FAIL ALLOC_ENV=MALLOC_CONF=background_thread:true
+  | PALLOC_ITEM_j2=FAIL je_config_lines=1
+  | PALLOC_ITEM_j3=FAIL JE_BG_THREADS=0
+  | JE_CONFIRM_CONF=FAIL reason=sources=n0:seqnone,source1=absent,source2=absent,source3=absent,source4=absent,source5=absent,set_background_thread=0,set_confirm_conf=0,set_lines=0
+  | PALLOC_ITEM_j4=FAIL JE_CONFIRM_CONF=FAIL
+  | PALLOC_ITEM_j5=PASS BIN_MARKERS=je=3,mi=0
+  | PALLOC_ITEM_j6=PASS TREE_PROOF_JE-ser=PASS
+  | PALLOC=FALSE reason=j1,j2,j3,j4 label=JE-ser
+CASE A5 PASS
+  | PV=TRUE server_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=JE label=JE-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_j1=PASS ALLOC_ENV=_RJEM_MALLOC_CONF=background_thread:true,confirm_conf:true
+  | PALLOC_ITEM_j2=PASS je_config_lines=1
+  | PALLOC_ITEM_j3=PASS JE_BG_THREADS=4
+  | JE_CONFIRM_CONF=FAIL reason=source1_nonempty
+  | PALLOC_ITEM_j4=FAIL JE_CONFIRM_CONF=FAIL
+  | PALLOC_ITEM_j5=PASS BIN_MARKERS=je=3,mi=0
+  | PALLOC_ITEM_j6=PASS TREE_PROOF_JE-ser=PASS
+  | PALLOC=FALSE reason=j4 label=JE-ser
+CASE A6 PASS
+  | PV=TRUE server_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI3-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI3-ser=PASS
+  | PALLOC_ITEM_m5=PASS 
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=TRUE label=MI3-ser
+  | MI_POSTINIT_LINES_smi3=0
+CASE A7 PASS
+  | PV=TRUE server_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI2-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI2-ser=PASS
+  | PALLOC_ITEM_m5=PASS 
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=TRUE label=MI2-ser
+  | MI_POSTINIT_LINES_smi2=0
+CASE A8 PASS
+  | PV=TRUE server_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI2-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI2-ser=PASS
+  | PALLOC_ITEM_m5=FAIL version=0,purge_delay=exact0/any1,arena_purge_mult=exact0/any1,purge_decommits=exact0/any1
+  | PALLOC_ITEM_mi_version=FAIL other_major_version_lines=1
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=FALSE reason=m5,mi_version label=MI2-ser
+  | MI_POSTINIT_LINES_smi2=0
+CASE A9 PASS
+  | PV=TRUE server_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI2-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI2-ser=PASS
+  | PALLOC_ITEM_m5=FAIL purge_delay=exact0/any1,arena_purge_mult=exact0/any1,purge_decommits=exact0/any1
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=FAIL thread_prefixed_lines=4
+  | PALLOC=FALSE reason=m5,mi_thread_prefix label=MI2-ser
+  | MI_POSTINIT_LINES_smi2=0
+CASE A10 PASS
+  | PV=TRUE server_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI3-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=FAIL ALLOC_ENV=absent
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI3-ser=PASS
+  | PALLOC_ITEM_m5=PASS 
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=FALSE reason=m1 label=MI3-ser
+  | MI_POSTINIT_LINES_smi3=0
+CASE A11 PASS
+  | PV=TRUE server_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI3-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI3-ser=PASS
+  | PALLOC_ITEM_m5=PASS 
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=TRUE label=MI3-ser
+  | MI_POSTINIT_LINES_smi3=9
+  | PV=TRUE server_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI3-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI3-ser=PASS
+  | PALLOC_ITEM_m5=PASS 
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=TRUE label=MI3-ser
+  | MI_POSTINIT_LINES_mi3=0
+CASE A13 PASS
+  | PV=TRUE server_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI3-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI3-ser=PASS
+  | PALLOC_ITEM_m5=FAIL literals_sha=mismatch
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=FALSE reason=m5 label=MI3-ser
+  | MI_POSTINIT_LINES_mi3=0
+CASE A14 PASS
+  | PV=FALSE reason=server_sha line1=9999999999999999999999999999999999999999999999999999999999999999 builds=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa label=SYS-ser
+  | PALLOC_ITEM_pv=FAIL PV=FALSE
+  | PALLOC_ITEM_s1=PASS ALLOC_ENV=none
+  | PALLOC_ITEM_s2=PASS BIN_MARKERS=je=0,mi=0
+  | PALLOC_ITEM_s3=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_s4=PASS je_lines=0,mimalloc_lines=0
+  | PALLOC_ITEM_s5=PASS TREE_PROOF_SYS-ser=PASS
+  | PALLOC_ITEM_s6=PASS steal_pct_lines=1,flavour_fatal=0
+  | PALLOC_ITEM_marker_control=PASS JE-ser.je=3,MI3-ser.mi=5,MI2-ser.mi=5
+  | PALLOC=FALSE reason=pv label=SYS-ser
+CASE N_pv PASS
+  | PV=TRUE server_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=SYS label=SYS-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_s1=FAIL ALLOC_ENV=GLIBC_TUNABLES=glibc.malloc.arena_max=2
+  | PALLOC_ITEM_s2=PASS BIN_MARKERS=je=0,mi=0
+  | PALLOC_ITEM_s3=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_s4=PASS je_lines=0,mimalloc_lines=0
+  | PALLOC_ITEM_s5=PASS TREE_PROOF_SYS-ser=PASS
+  | PALLOC_ITEM_s6=PASS steal_pct_lines=1,flavour_fatal=0
+  | PALLOC_ITEM_marker_control=PASS JE-ser.je=3,MI3-ser.mi=5,MI2-ser.mi=5
+  | PALLOC=FALSE reason=s1 label=SYS-ser
+CASE N_s1 PASS
+  | PV=TRUE server_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=SYS label=SYS-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_s1=PASS ALLOC_ENV=none
+  | PALLOC_ITEM_s2=FAIL BIN_MARKERS=je=1,mi=0
+  | PALLOC_ITEM_s3=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_s4=PASS je_lines=0,mimalloc_lines=0
+  | PALLOC_ITEM_s5=PASS TREE_PROOF_SYS-ser=PASS
+  | PALLOC_ITEM_s6=PASS steal_pct_lines=1,flavour_fatal=0
+  | PALLOC_ITEM_marker_control=PASS JE-ser.je=3,MI3-ser.mi=5,MI2-ser.mi=5
+  | PALLOC=FALSE reason=s2 label=SYS-ser
+CASE N_s2 PASS
+  | PV=TRUE server_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=SYS label=SYS-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_s1=PASS ALLOC_ENV=none
+  | PALLOC_ITEM_s2=PASS BIN_MARKERS=je=0,mi=0
+  | PALLOC_ITEM_s3=FAIL JE_BG_THREADS=1
+  | PALLOC_ITEM_s4=PASS je_lines=0,mimalloc_lines=0
+  | PALLOC_ITEM_s5=PASS TREE_PROOF_SYS-ser=PASS
+  | PALLOC_ITEM_s6=PASS steal_pct_lines=1,flavour_fatal=0
+  | PALLOC_ITEM_marker_control=PASS JE-ser.je=3,MI3-ser.mi=5,MI2-ser.mi=5
+  | PALLOC=FALSE reason=s3 label=SYS-ser
+CASE N_s3 PASS
+  | PV=TRUE server_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=SYS label=SYS-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_s1=PASS ALLOC_ENV=none
+  | PALLOC_ITEM_s2=PASS BIN_MARKERS=je=0,mi=0
+  | PALLOC_ITEM_s3=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_s4=FAIL je_lines=1,mimalloc_lines=0
+  | PALLOC_ITEM_s5=PASS TREE_PROOF_SYS-ser=PASS
+  | PALLOC_ITEM_s6=PASS steal_pct_lines=1,flavour_fatal=0
+  | PALLOC_ITEM_marker_control=PASS JE-ser.je=3,MI3-ser.mi=5,MI2-ser.mi=5
+  | PALLOC=FALSE reason=s4 label=SYS-ser
+CASE N_s4 PASS
+  | PV=TRUE server_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=SYS label=SYS-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_s1=PASS ALLOC_ENV=none
+  | PALLOC_ITEM_s2=PASS BIN_MARKERS=je=0,mi=0
+  | PALLOC_ITEM_s3=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_s4=PASS je_lines=0,mimalloc_lines=0
+  | PALLOC_ITEM_s5=FAIL TREE_PROOF_SYS-ser=FAIL
+  | PALLOC_ITEM_s6=PASS steal_pct_lines=1,flavour_fatal=0
+  | PALLOC_ITEM_marker_control=PASS JE-ser.je=3,MI3-ser.mi=5,MI2-ser.mi=5
+  | PALLOC=FALSE reason=s5 label=SYS-ser
+CASE N_s5 PASS
+  | PV=TRUE server_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=SYS label=SYS-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_s1=PASS ALLOC_ENV=none
+  | PALLOC_ITEM_s2=PASS BIN_MARKERS=je=0,mi=0
+  | PALLOC_ITEM_s3=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_s4=PASS je_lines=0,mimalloc_lines=0
+  | PALLOC_ITEM_s5=PASS TREE_PROOF_SYS-ser=PASS
+  | PALLOC_ITEM_s6=FAIL steal_pct_lines=0,flavour_fatal=0
+  | PALLOC_ITEM_marker_control=PASS JE-ser.je=3,MI3-ser.mi=5,MI2-ser.mi=5
+  | PALLOC=FALSE reason=s6 label=SYS-ser
+CASE N_s6 PASS
+  | PV=TRUE server_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=SYS label=SYS-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_s1=PASS ALLOC_ENV=none
+  | PALLOC_ITEM_s2=PASS BIN_MARKERS=je=0,mi=0
+  | PALLOC_ITEM_s3=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_s4=PASS je_lines=0,mimalloc_lines=0
+  | PALLOC_ITEM_s5=PASS TREE_PROOF_SYS-ser=PASS
+  | PALLOC_ITEM_s6=PASS steal_pct_lines=1,flavour_fatal=0
+  | PALLOC_ITEM_marker_control=FAIL JE-ser.je=3,MI3-ser.mi=5,MI2-ser.mi=0
+  | PALLOC=FALSE reason=marker_control label=SYS-ser
+CASE N_marker_control PASS
+  | PV=TRUE server_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=JE label=JE-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_j1=FAIL ALLOC_ENV=_RJEM_MALLOC_CONF=background_thread:true
+  | PALLOC_ITEM_j2=PASS je_config_lines=1
+  | PALLOC_ITEM_j3=PASS JE_BG_THREADS=4
+  | JE_CONFIRM_CONF=PASS
+  | PALLOC_ITEM_j4=PASS JE_CONFIRM_CONF=PASS
+  | PALLOC_ITEM_j5=PASS BIN_MARKERS=je=3,mi=0
+  | PALLOC_ITEM_j6=PASS TREE_PROOF_JE-ser=PASS
+  | PALLOC=FALSE reason=j1 label=JE-ser
+CASE N_j1 PASS
+  | PV=TRUE server_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=JE label=JE-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_j1=PASS ALLOC_ENV=_RJEM_MALLOC_CONF=background_thread:true,confirm_conf:true
+  | PALLOC_ITEM_j2=FAIL je_config_lines=1
+  | PALLOC_ITEM_j3=PASS JE_BG_THREADS=4
+  | JE_CONFIRM_CONF=PASS
+  | PALLOC_ITEM_j4=PASS JE_CONFIRM_CONF=PASS
+  | PALLOC_ITEM_j5=PASS BIN_MARKERS=je=3,mi=0
+  | PALLOC_ITEM_j6=PASS TREE_PROOF_JE-ser=PASS
+  | PALLOC=FALSE reason=j2 label=JE-ser
+CASE N_j2 PASS
+  | PV=TRUE server_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=JE label=JE-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_j1=PASS ALLOC_ENV=_RJEM_MALLOC_CONF=background_thread:true,confirm_conf:true
+  | PALLOC_ITEM_j2=PASS je_config_lines=1
+  | PALLOC_ITEM_j3=FAIL JE_BG_THREADS=0
+  | JE_CONFIRM_CONF=PASS
+  | PALLOC_ITEM_j4=PASS JE_CONFIRM_CONF=PASS
+  | PALLOC_ITEM_j5=PASS BIN_MARKERS=je=3,mi=0
+  | PALLOC_ITEM_j6=PASS TREE_PROOF_JE-ser=PASS
+  | PALLOC=FALSE reason=j3 label=JE-ser
+CASE N_j3 PASS
+  | PV=TRUE server_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=JE label=JE-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_j1=PASS ALLOC_ENV=_RJEM_MALLOC_CONF=background_thread:true,confirm_conf:true
+  | PALLOC_ITEM_j2=PASS je_config_lines=1
+  | PALLOC_ITEM_j3=PASS JE_BG_THREADS=4
+  | JE_CONFIRM_CONF=FAIL reason=set_confirm_conf=0,set_lines=1
+  | PALLOC_ITEM_j4=FAIL JE_CONFIRM_CONF=FAIL
+  | PALLOC_ITEM_j5=PASS BIN_MARKERS=je=3,mi=0
+  | PALLOC_ITEM_j6=PASS TREE_PROOF_JE-ser=PASS
+  | PALLOC=FALSE reason=j4 label=JE-ser
+CASE N_j4 PASS
+  | PV=TRUE server_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=JE label=JE-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_j1=PASS ALLOC_ENV=_RJEM_MALLOC_CONF=background_thread:true,confirm_conf:true
+  | PALLOC_ITEM_j2=PASS je_config_lines=1
+  | PALLOC_ITEM_j3=PASS JE_BG_THREADS=4
+  | JE_CONFIRM_CONF=PASS
+  | PALLOC_ITEM_j4=PASS JE_CONFIRM_CONF=PASS
+  | PALLOC_ITEM_j5=FAIL BIN_MARKERS=je=3,mi=1
+  | PALLOC_ITEM_j6=PASS TREE_PROOF_JE-ser=PASS
+  | PALLOC=FALSE reason=j5 label=JE-ser
+CASE N_j5 PASS
+  | PV=TRUE server_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=JE label=JE-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_j1=PASS ALLOC_ENV=_RJEM_MALLOC_CONF=background_thread:true,confirm_conf:true
+  | PALLOC_ITEM_j2=PASS je_config_lines=1
+  | PALLOC_ITEM_j3=PASS JE_BG_THREADS=4
+  | JE_CONFIRM_CONF=PASS
+  | PALLOC_ITEM_j4=PASS JE_CONFIRM_CONF=PASS
+  | PALLOC_ITEM_j5=PASS BIN_MARKERS=je=3,mi=0
+  | PALLOC_ITEM_j6=FAIL TREE_PROOF_JE-ser=FAIL
+  | PALLOC=FALSE reason=j6 label=JE-ser
+CASE N_j6 PASS
+  | PV=TRUE server_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI3-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=FAIL ALLOC_ENV=MIMALLOC_VERBOSE=1;MIMALLOC_PURGE_DELAY=0
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI3-ser=PASS
+  | PALLOC_ITEM_m5=PASS 
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=FALSE reason=m1 label=MI3-ser
+  | MI_POSTINIT_LINES_smi3=0
+CASE N_m1 PASS
+  | PV=TRUE server_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI3-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=FAIL JE_BG_THREADS=2
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI3-ser=PASS
+  | PALLOC_ITEM_m5=PASS 
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=FALSE reason=m2 label=MI3-ser
+  | MI_POSTINIT_LINES_smi3=0
+CASE N_m2 PASS
+  | PV=TRUE server_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI3-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=FAIL BIN_MARKERS=je=0,mi=0
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI3-ser=PASS
+  | PALLOC_ITEM_m5=PASS 
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=FALSE reason=m3 label=MI3-ser
+  | MI_POSTINIT_LINES_smi3=0
+CASE N_m3 PASS
+  | PV=TRUE server_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI3-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=FAIL TREE_PROOF_MI3-ser=FAIL
+  | PALLOC_ITEM_m5=PASS 
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=FALSE reason=m4 label=MI3-ser
+  | MI_POSTINIT_LINES_smi3=0
+CASE N_m4 PASS
+  | PV=TRUE server_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI3-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI3-ser=PASS
+  | PALLOC_ITEM_m5=FAIL purge_delay=exact0/any1
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=FALSE reason=m5 label=MI3-ser
+  | MI_POSTINIT_LINES_smi3=0
+CASE N_m5 PASS
+  | PV=TRUE server_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI3-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI3-ser=PASS
+  | PALLOC_ITEM_m5=PASS 
+  | PALLOC_ITEM_mi_version=FAIL other_major_version_lines=1
+  | PALLOC_ITEM_mi_thread_prefix=PASS thread_prefixed_lines=0
+  | PALLOC=FALSE reason=mi_version label=MI3-ser
+  | MI_POSTINIT_LINES_smi3=0
+CASE N_mi_version PASS
+  | PV=TRUE server_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee harness_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd flavour=MI label=MI2-ser
+  | PALLOC_ITEM_pv=PASS PV=TRUE
+  | PALLOC_ITEM_m1=PASS ALLOC_ENV=MIMALLOC_VERBOSE=1
+  | PALLOC_ITEM_m2=PASS JE_BG_THREADS=0
+  | PALLOC_ITEM_m3=PASS BIN_MARKERS=je=0,mi=5
+  | PALLOC_ITEM_m4=PASS TREE_PROOF_MI2-ser=PASS
+  | PALLOC_ITEM_m5=PASS 
+  | PALLOC_ITEM_mi_version=PASS other_major_version_lines=0
+  | PALLOC_ITEM_mi_thread_prefix=FAIL thread_prefixed_lines=1
+  | PALLOC=FALSE reason=mi_thread_prefix label=MI2-ser
+  | MI_POSTINIT_LINES_smi2=0
+CASE N_mi_thread_prefix PASS
+  | TREE_RC_JE-ser=0
+  | TREE_PROOF_JE-ser=PASS reason=none
+CASE B1 PASS
+  | TREE_RC_JE-ser=0
+  | TREE_PROOF_JE-ser=FAIL reason=forbidden_present=^tikv-jemalloc-sys feature "background_threads"( \(\*\))?$
+  | FATAL: build JE-ser: the feature-graph proof failed (tree_JE-ser=forbidden_present=^tikv-jemalloc-sys feature "background_threads"( \(\*\))?$)
+CASE B2 PASS
+  | TREE_RC_MI3-ser=101
+  | TREE_PROOF_MI3-ser=FAIL reason=rc=101,output=empty,required_absent=^libmimalloc-sys v0\.1\.49$
+  | FATAL: build MI3-ser: the feature-graph proof failed (tree_MI3-ser=rc=101,output=empty,required_absent=^libmimalloc-sys v0\.1\.49$)
+CASE B3 PASS
+  | TREE_RC_SYS-ser=tikv-jemalloc-sys:101 libmimalloc-sys:101
+  | TREE_PROOF_SYS-ser=PASS reason=none
+CASE B4 PASS
+  | TREE_RC_SYS-ser=tikv-jemalloc-sys:0 libmimalloc-sys:101
+  | TREE_PROOF_SYS-ser=FAIL reason=tikv-jemalloc-sys_rc=0,tikv-jemalloc-sys_stderr_line=absent,tree-SYS-ser-tikv-jemalloc-sys.txt_crate_lines=1
+  | FATAL: build SYS-ser: the feature-graph proof failed (tree_SYS-ser=tikv-jemalloc-sys_rc=0,tikv-jemalloc-sys_stderr_line=absent,tree-SYS-ser-tikv-jemalloc-sys.txt_crate_lines=1)
+CASE B5 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1398.059119 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=-1.617104458 fitter=-1.617104 absdiff=4.58e-07
+  | TREND_s1=FLAT slope_rel=-0.001157 se_rel=0.000954 r1=-0.0572 se_rel_adj=0.000954 n=176 r2=0.008379 dropped=1 slope_pe_per_h=-1.617104 level=1398.059119
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=13.169 se_mib=9.909
+  | FIXED_NOTE_s1=none
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1398.059119 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=FLAT REF_S=-0.001157 REF_E=0.000954 REF_R1=-0.0572 REF_SLOPE=-1.617104 REF_STAGE2_T=6
+CASE P1 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1644.635685 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=44.785988161 fitter=44.785988 absdiff=1.61e-07
+  | TREND_s1=RISING slope_rel=0.027232 se_rel=0.000848 r1=-0.1689 se_rel_adj=0.000848 n=176 r2=0.855507 dropped=1 slope_pe_per_h=44.785988 level=1644.635685
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=-305.310 se_mib=11.632
+  | FIXED_NOTE_s1=rising_marginal_cost_suspected
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1644.635685 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=RISING REF_S=0.027232 REF_E=0.000848 REF_R1=-0.1689 REF_SLOPE=44.785988 REF_STAGE2_T=6
+CASE P2 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1422.079252 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=4.124698241 fitter=4.124698 absdiff=2.41e-07
+  | TREND_s1=FLAT slope_rel=0.002900 se_rel=0.000430 r1=-0.0268 se_rel_adj=0.000430 n=176 r2=0.207123 dropped=1 slope_pe_per_h=4.124698 level=1422.079252
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=-27.085 se_mib=4.578
+  | FIXED_NOTE_s1=rising_marginal_cost_suspected
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1422.079252 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=FLAT REF_S=0.002900 REF_E=0.000430 REF_R1=-0.0268 REF_SLOPE=4.124698 REF_STAGE2_T=6
+CASE P3 PASS
+  | CENSUS_DROPPED_s1=300.0,600.0,900.0,1200.0,1500.0,1800.0,2100.0,2400.0,2700.0,3000.0,3300.0,3600.0,3900.0,4200.0,4500.0,4800.0,5100.0,5400.0,5700.0,6000.0,6300.0,6600.0,6900.0,7200.0,7500.0,7800.0,8100.0,8400.0,8700.0,9000.0,9300.0,9600.0,9900.0,10200.0,10500.0,10800.0,11100.0,11400.0,11700.0,21602.0
+  | CENSUS_DROPPED_N_s1=40
+  | PE_LEVEL_s1=1398.609318 rows=26
+  | TREND_s1=n/a reason=few_rows n=78 dropped=40
+  | STAGE2_T_s1=n/a reason=missing:s1:e
+  | FIXED_EST_s1=n/a reason=few_rows
+  | FIXED_NOTE_s1=n/a reason=few_rows
+  | REF_DROPPED_N=40 REF_DROPPED=300.0,600.0,900.0,1200.0,1500.0,1800.0,2100.0,2400.0,2700.0,3000.0,3300.0,3600.0,3900.0,4200.0,4500.0,4800.0,5100.0,5400.0,5700.0,6000.0,6300.0,6600.0,6900.0,7200.0,7500.0,7800.0,8100.0,8400.0,8700.0,9000.0,9300.0,9600.0,9900.0,10200.0,10500.0,10800.0,11100.0,11400.0,11700.0,21602.0 REF_ROWS=156 REF_PE_LEVEL=1398.609318 REF_LEVEL_ROWS=26 REF_N=78 REF_CLASS=n/a reason=few_rows
+CASE P4 PASS
+  | CENSUS_DROPPED_s1=10815.0,21602.0
+  | CENSUS_DROPPED_N_s1=2
+  | PE_LEVEL_s1=1398.792637 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=0.369509983 fitter=0.369510 absdiff=1.75e-08
+  | TREND_s1=FLAT slope_rel=0.000264 se_rel=0.000874 r1=-0.0919 se_rel_adj=0.000874 n=175 r2=0.000527 dropped=2 slope_pe_per_h=0.369510 level=1398.792637
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=-2.929 se_mib=8.922
+  | FIXED_NOTE_s1=rising_marginal_cost_suspected
+  | REF_DROPPED_N=2 REF_DROPPED=10815.0,21602.0 REF_ROWS=350 REF_PE_LEVEL=1398.792637 REF_LEVEL_ROWS=26 REF_N=175 REF_CLASS=FLAT REF_S=0.000264 REF_E=0.000874 REF_R1=-0.0919 REF_SLOPE=0.369510 REF_STAGE2_T=6
+CASE P5 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1399.807325 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=36.086889569 fitter=36.086890 absdiff=4.31e-07
+  | TREND_s1=UNDERPOWERED slope_rel=0.025780 se_rel=0.004083 r1=0.8498 se_rel_adj=0.014328 n=176 r2=0.186410 dropped=1 slope_pe_per_h=36.086890 level=1399.807325
+  | STAGE2_T_s1=14
+  | FIXED_EST_s1=-249.630 se_mib=139.194
+  | FIXED_NOTE_s1=rising_marginal_cost_suspected
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1399.807325 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=UNDERPOWERED REF_S=0.025780 REF_E=0.014328 REF_R1=0.8498 REF_SLOPE=36.086890 REF_STAGE2_T=14
+CASE P6 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1399.283481 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=0.034911495 fitter=0.034911 absdiff=4.95e-07
+  | TREND_s1=FLAT slope_rel=0.000025 se_rel=0.000796 r1=-0.1851 se_rel_adj=0.000796 n=176 r2=0.000006 dropped=1 slope_pe_per_h=0.034911 level=1399.283481
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=-1.220 se_mib=8.012
+  | FIXED_NOTE_s1=rising_marginal_cost_suspected
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1399.283481 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=FLAT REF_S=0.000025 REF_E=0.000796 REF_R1=-0.1851 REF_SLOPE=0.034911 REF_STAGE2_T=6
+CASE P7 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1432.040364 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=-8.567410527 fitter=-8.567411 absdiff=4.73e-07
+  | TREND_s1=FLAT slope_rel=-0.005983 se_rel=0.000478 r1=0.0998 se_rel_adj=0.000528 n=176 r2=0.473670 dropped=1 slope_pe_per_h=-8.567411 level=1432.040364
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=53.782 se_mib=5.163
+  | FIXED_NOTE_s1=positive_fixed_memory
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1432.040364 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=FLAT REF_S=-0.005983 REF_E=0.000528 REF_R1=0.0998 REF_SLOPE=-8.567411 REF_STAGE2_T=6
+CASE P12 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1429.625511 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=-9.298516543 fitter=-9.298517 absdiff=4.57e-07
+  | TREND_s1=FLAT slope_rel=-0.006504 se_rel=0.000142 r1=0.3748 se_rel_adj=0.000211 n=176 r2=0.923419 dropped=1 slope_pe_per_h=-9.298517 level=1429.625511
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=60.773 se_mib=1.679
+  | FIXED_NOTE_s1=positive_fixed_memory
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1429.625511 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=FLAT REF_S=-0.006504 REF_E=0.000211 REF_R1=0.3748 REF_SLOPE=-9.298517 REF_STAGE2_T=6
+CASE P8 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=-3.315000 rows=26
+  | TREND_s1=n/a reason=pe_nonpositive n=176 level=-3.315000
+  | STAGE2_T_s1=n/a reason=missing:s1:e
+  | FIXED_EST_s1=n/a reason=pe_nonpositive
+  | FIXED_NOTE_s1=n/a reason=pe_nonpositive
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=-3.315000 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=n/a reason=pe_nonpositive
+CASE P9 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1558.471978 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=27.109521406 fitter=27.109521 absdiff=4.06e-07
+  | TREND_s1=RISING slope_rel=0.017395 se_rel=0.000404 r1=-0.0703 se_rel_adj=0.000404 n=176 r2=0.914080 dropped=1 slope_pe_per_h=27.109521 level=1558.471978
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=-183.309 se_mib=5.164
+  | FIXED_NOTE_s1=rising_marginal_cost_suspected
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1558.471978 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=RISING REF_S=0.017395 REF_E=0.000404 REF_R1=-0.0703 REF_SLOPE=27.109521 REF_STAGE2_T=6
+CASE P10 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1496.683992 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=-30.941191270 fitter=-30.941191 absdiff=2.7e-07
+  | TREND_s1=FALLING slope_rel=-0.020673 se_rel=0.000474 r1=0.3233 se_rel_adj=0.000663 n=176 r2=0.916096 dropped=1 slope_pe_per_h=-30.941191 level=1496.683992
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=204.093 se_mib=6.405
+  | FIXED_NOTE_s1=positive_fixed_memory
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1496.683992 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=FALLING REF_S=-0.020673 REF_E=0.000663 REF_R1=0.3233 REF_SLOPE=-30.941191 REF_STAGE2_T=6
+CASE P11 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1552.312088 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=21.669769474 fitter=21.669769 absdiff=4.74e-07
+  | TREND_s1=MARGINAL slope_rel=0.013960 se_rel=0.004289 r1=-0.0901 se_rel_adj=0.004289 n=176 r2=0.057390 dropped=1 slope_pe_per_h=21.669769 level=1552.312088
+  | STAGE2_T_s1=7
+  | FIXED_EST_s1=-153.344 se_mib=47.285
+  | FIXED_NOTE_s1=rising_marginal_cost_suspected
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1552.312088 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=MARGINAL REF_S=0.013960 REF_E=0.004289 REF_R1=-0.0901 REF_SLOPE=21.669769 REF_STAGE2_T=7
+CASE P13 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1657.203636 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=-3.347659178 fitter=-3.347659 absdiff=1.78e-07
+  | TREND_s1=FLAT slope_rel=-0.002020 se_rel=0.000502 r1=0.2403 se_rel_adj=0.000641 n=176 r2=0.085222 dropped=1 slope_pe_per_h=-3.347659 level=1657.203636
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=16.557 se_mib=7.473
+  | FIXED_NOTE_s1=positive_fixed_memory
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1657.203636 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=FLAT REF_S=-0.002020 REF_E=0.000641 REF_R1=0.2403 REF_SLOPE=-3.347659 REF_STAGE2_T=6
+CASE P14 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1550.914710 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=12.788996732 fitter=12.788997 absdiff=2.68e-07
+  | TREND_s1=FLAT slope_rel=0.008246 se_rel=0.000424 r1=0.0685 se_rel_adj=0.000454 n=176 r2=0.685124 dropped=1 slope_pe_per_h=12.788997 level=1550.914710
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=-87.450 se_mib=5.335
+  | FIXED_NOTE_s1=rising_marginal_cost_suspected
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1550.914710 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=FLAT REF_S=0.008246 REF_E=0.000454 REF_R1=0.0685 REF_SLOPE=12.788997 REF_STAGE2_T=6
+CASE P15 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1502.312682 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=0.438169115 fitter=0.438169 absdiff=1.15e-07
+  | TREND_s1=FLAT slope_rel=0.000292 se_rel=0.000085 r1=-0.0872 se_rel_adj=0.000085 n=176 r2=0.063584 dropped=1 slope_pe_per_h=0.438169 level=1502.312682
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=-2.865 se_mib=0.901
+  | FIXED_NOTE_s1=rising_marginal_cost_suspected
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1502.312682 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=FLAT REF_S=0.000292 REF_E=0.000085 REF_R1=-0.0872 REF_SLOPE=0.438169 REF_STAGE2_T=6
+CASE P16 PASS
+  | CENSUS_DROPPED_s1=21602.0
+  | CENSUS_DROPPED_N_s1=1
+  | PE_LEVEL_s1=1585.541860 rows=26
+  | FIT_CHECK_TREND_s1=PASS prog=15.276169782 fitter=15.276170 absdiff=2.18e-07
+  | TREND_s1=MARGINAL slope_rel=0.009635 se_rel=0.000840 r1=0.0889 se_rel_adj=0.000918 n=176 r2=0.430447 dropped=1 slope_pe_per_h=15.276170 level=1585.541860
+  | STAGE2_T_s1=6
+  | FIXED_EST_s1=-105.981 se_mib=11.184
+  | FIXED_NOTE_s1=rising_marginal_cost_suspected
+  | REF_DROPPED_N=1 REF_DROPPED=21602.0 REF_ROWS=351 REF_PE_LEVEL=1585.541860 REF_LEVEL_ROWS=26 REF_N=176 REF_CLASS=MARGINAL REF_S=0.009635 REF_E=0.000918 REF_R1=0.0889 REF_SLOPE=15.276170 REF_STAGE2_T=6
+CASE P17 PASS
+  | FIT_CHECK_TREND_s1=FAIL prog=15.276169782 fitter=15.277070 absdiff=0.0009
+  | TREND_s1=n/a reason=fit_mismatch n=176
+CASE P18 PASS
+  | FIT_CHECK_TREND_s1=PASS prog=15.276169782 fitter=15.276170182 absdiff=4e-07
+  | TREND_s1=MARGINAL slope_rel=0.009635 se_rel=0.000840 r1=0.0889 se_rel_adj=0.000918 n=176 r2=0.430447 dropped=1 slope_pe_per_h=15.276170182 level=1585.541860
+CASE P18b PASS
+  | FIT_CHECK_TREND_s1=FAIL prog=15.276169782 fitter=15.276170382 absdiff=6e-07
+  | TREND_s1=n/a reason=fit_mismatch n=176
+CASE P18c PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=PLATEAU
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=1
+  | VERDICT_JE=CANDIDATE
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=JE
+  | NEXT=TODO-696+TODO-695;THEN;DEFAULT_FLIP=JE
+  | CONDUCTOR_RULE=n/a reason=not_conductor_ruling
+  | decide rc=0
+CASE D1 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=PLATEAU
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.9500 NO_GAIN
+  | VS_SYS_MI3=0.9500 NO_GAIN
+  | VS_SYS_MI2=0.9600 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=FLAT_NO_GAIN
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=SYS
+  | NEXT=KEEP_SYSTEM;SYS_FLAT_WITHIN_BAR
+  | CONDUCTOR_RULE=n/a reason=not_conductor_ruling
+  | decide rc=0
+CASE D2 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=FALSE value=0.4000
+  | PLATEAU_SYS=INDETERMINATE reason=disagree
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=1
+  | VERDICT_JE=CANDIDATE
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=JE
+  | NEXT=CONDUCTOR_RULING;SYS_BIMODAL;SEE=TODO-719
+  | CONDUCTOR_RULE=n/a reason=judgement:CONDUCTOR_RULING;SYS_BIMODAL;SEE=TODO-719
+  | decide rc=0
+CASE D3 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=mi3:PALLOC=FALSE
+  | STOP=V (mi3:PALLOC=FALSE)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE D4 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=je:predicates_missing je:write_errors=absent je:PR-crashes=absent
+  | STOP=V (je:predicates_missing je:write_errors=absent je:PR-crashes=absent)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE D5 PASS
+  | STOP_H_CLAUSES=s2:steal=missing
+  | STOP_V_CLAUSES=none
+  | STOP=H (s2:steal=missing)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE D6 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=PLATEAU
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.1050 BETTER
+  | VS_SYS_MI3=0.1000 BETTER
+  | VS_SYS_MI2=0.1080 BETTER
+  | ORDER_AGREE=TRUE n=3
+  | VERDICT_JE=CANDIDATE
+  | VERDICT_MI3=CANDIDATE
+  | VERDICT_MI2=CANDIDATE
+  | DEFAULT_CANDIDATE=JE
+  | NEXT=TODO-696+TODO-695;THEN;DEFAULT_FLIP=JE
+  | CONDUCTOR_RULE=n/a reason=not_conductor_ruling
+  | decide rc=0
+CASE D7 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=PLATEAU
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.1050 BETTER
+  | VS_SYS_MI3=0.1000 BETTER
+  | VS_SYS_MI2=0.1080 BETTER
+  | ORDER_AGREE=FALSE pe_choice=JE rss_choice=MI3
+  | VERDICT_JE=CANDIDATE
+  | VERDICT_MI3=CANDIDATE
+  | VERDICT_MI2=CANDIDATE
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;ARM_ORDER_ACCOUNTING
+  | CONDUCTOR_RULE=n/a reason=judgement:CONDUCTOR_RULING;ARM_ORDER_ACCOUNTING
+  | decide rc=0
+CASE D8 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=PLATEAU
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=n/a reason=ops
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=SYS
+  | NEXT=KEEP_SYSTEM;SYS_FLAT_WITHIN_BAR
+  | CONDUCTOR_RULE=n/a reason=not_conductor_ruling
+  | decide rc=0
+CASE D9 PASS
+  | decide rc=3
+CASE D10 PASS
+  | decide rc=3
+CASE D10b PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=INDETERMINATE reason=missing:s2:TREND
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=1
+  | VERDICT_JE=CANDIDATE
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=JE
+  | NEXT=CONDUCTOR_RULING;SYS_MISSING
+  | CONDUCTOR_RULE=n/a reason=excluded:CONDUCTOR_RULING;SYS_MISSING
+  | decide rc=0
+CASE D11 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=INDETERMINATE reason=missing:s2:TREND
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=1
+  | VERDICT_JE=CANDIDATE
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=JE
+  | NEXT=CONDUCTOR_RULING;SYS_MISSING
+  | CONDUCTOR_RULE=n/a reason=excluded:CONDUCTOR_RULING;SYS_MISSING
+  | decide rc=0
+CASE D11b PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=FALSE reason=missing:s2:PE_LEVEL
+  | PLATEAU_SYS=INDETERMINATE reason=missing:s2:PE_LEVEL
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=n/a reason=missing:s2:PE_LEVEL
+  | VS_SYS_MI3=n/a reason=missing:s2:PE_LEVEL
+  | VS_SYS_MI2=n/a reason=missing:s2:PE_LEVEL
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=n/a reason=missing:s2:PE_LEVEL
+  | VERDICT_MI3=n/a reason=missing:s2:PE_LEVEL
+  | VERDICT_MI2=n/a reason=missing:s2:PE_LEVEL
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_MISSING
+  | CONDUCTOR_RULE=n/a reason=excluded:CONDUCTOR_RULING;SYS_MISSING
+  | decide rc=0
+CASE D12 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=TRUE
+  | STAGE2_COST_EUR=3.312
+  | VS_SYS_JE=0.9500 NO_GAIN
+  | VS_SYS_MI3=0.9500 NO_GAIN
+  | VS_SYS_MI2=0.9600 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=FLAT_NO_GAIN
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=STAGE2;SYS_LONG_CELLS
+  | CONDUCTOR_RULE=n/a reason=not_conductor_ruling
+  | decide rc=0
+CASE D13 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H
+  | STAGE2_COST_EUR=n/a reason=>STAGE2_MAX_H
+  | VS_SYS_JE=0.9500 NO_GAIN
+  | VS_SYS_MI3=0.9500 NO_GAIN
+  | VS_SYS_MI2=0.9600 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=FLAT_NO_GAIN
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | CONDUCTOR_RULE=KEEP_SYSTEM;PLATEAU=OPEN;NEXT=TODO-719
+  | decide rc=0
+CASE D14 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=missing:s2:STAGE2_T
+  | STAGE2_COST_EUR=n/a reason=missing:s2:STAGE2_T
+  | VS_SYS_JE=0.9500 NO_GAIN
+  | VS_SYS_MI3=0.9500 NO_GAIN
+  | VS_SYS_MI2=0.9600 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=FLAT_NO_GAIN
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | CONDUCTOR_RULE=KEEP_SYSTEM;PLATEAU=OPEN;NEXT=TODO-719
+  | decide rc=0
+CASE D14b PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=PLATEAU
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.9500 NO_GAIN
+  | VS_SYS_MI3=0.9500 NO_GAIN
+  | VS_SYS_MI2=0.9600 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=FLAT_NO_GAIN
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=SYS
+  | NEXT=KEEP_SYSTEM;SYS_FLAT_WITHIN_BAR
+  | CONDUCTOR_RULE=n/a reason=not_conductor_ruling
+  | decide rc=0
+CASE D15 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=PLATEAU
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=1
+  | VERDICT_JE=CANDIDATE
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=JE
+  | NEXT=TODO-696+TODO-695;THEN;DEFAULT_FLIP=JE
+  | CONDUCTOR_RULE=n/a reason=not_conductor_ruling
+  | decide rc=0
+CASE D15b PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=PLATEAU
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=n/a reason=missing:s2:OPS
+  | VERDICT_MI3=n/a reason=missing:s2:OPS
+  | VERDICT_MI2=n/a reason=missing:s2:OPS
+  | DEFAULT_CANDIDATE=SYS
+  | NEXT=CONDUCTOR_RULING;OPS
+  | CONDUCTOR_RULE=n/a reason=excluded:CONDUCTOR_RULING;OPS
+  | decide rc=0
+CASE D16 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=PLATEAU
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=UNRESOLVED(FALLING)
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=SYS
+  | NEXT=KEEP_SYSTEM;SYS_FLAT_WITHIN_BAR
+  | CONDUCTOR_RULE=n/a reason=not_conductor_ruling
+  | decide rc=0
+CASE D18 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H
+  | STAGE2_COST_EUR=n/a reason=>STAGE2_MAX_H
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=UNRESOLVED(MARGINAL)
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | CONDUCTOR_RULE=PROVISIONAL_DEFAULT=JE;STAGE2_T=6;THEN;TODO-696+REPLICATE_6H;THEN;STAGE2_PLATEAU;PLATEAU=OPEN
+  | decide rc=0
+CASE CR1 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H
+  | STAGE2_COST_EUR=n/a reason=>STAGE2_MAX_H
+  | VS_SYS_JE=0.9500 NO_GAIN
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=UNRESOLVED(MARGINAL)
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | CONDUCTOR_RULE=KEEP_SYSTEM;PLATEAU=OPEN;NEXT=TODO-719
+  | decide rc=0
+CASE CR2 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H
+  | STAGE2_COST_EUR=n/a reason=>STAGE2_MAX_H
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.7500 BETTER
+  | VS_SYS_MI2=0.7800 BETTER
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=n/a reason=ops
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | CONDUCTOR_RULE=PROVISIONAL_DEFAULT=MI3;STAGE2_T=12;THEN;TODO-696+REPLICATE_6H;THEN;STAGE2_PLATEAU;PLATEAU=OPEN
+  | decide rc=0
+CASE CR3 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=FALSE reason=missing:s2:PE_LEVEL
+  | PLATEAU_SYS=INDETERMINATE reason=missing:s2:PE_LEVEL
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=n/a reason=missing:s2:PE_LEVEL
+  | VS_SYS_MI3=n/a reason=missing:s2:PE_LEVEL
+  | VS_SYS_MI2=n/a reason=missing:s2:PE_LEVEL
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=n/a reason=missing:s2:PE_LEVEL
+  | VERDICT_MI3=n/a reason=missing:s2:PE_LEVEL
+  | VERDICT_MI2=n/a reason=missing:s2:PE_LEVEL
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_MISSING
+  | CONDUCTOR_RULE=n/a reason=excluded:CONDUCTOR_RULING;SYS_MISSING
+  | decide rc=0
+CASE CR4 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H
+  | STAGE2_COST_EUR=n/a reason=>STAGE2_MAX_H
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=1
+  | VERDICT_JE=CANDIDATE
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=JE
+  | NEXT=TODO-696+TODO-695;THEN;DEFAULT_FLIP=JE
+  | CONDUCTOR_RULE=n/a reason=not_conductor_ruling
+  | decide rc=0
+CASE CR5 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H
+  | STAGE2_COST_EUR=n/a reason=>STAGE2_MAX_H
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=UNRESOLVED(MARGINAL)
+  | VERDICT_MI3=n/a reason=missing:mi3:TREND
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | CONDUCTOR_RULE=n/a reason=missing:mi3:TREND
+  | decide rc=0
+CASE CR6 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H
+  | STAGE2_COST_EUR=n/a reason=>STAGE2_MAX_H
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=UNRESOLVED(MARGINAL)
+  | VERDICT_MI3=n/a reason=missing:mi3:TREND
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | CONDUCTOR_RULE=n/a reason=missing:mi3:TREND
+  | decide rc=0
+CASE CR6b PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H
+  | STAGE2_COST_EUR=n/a reason=>STAGE2_MAX_H
+  | VS_SYS_JE=0.9500 NO_GAIN
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=UNRESOLVED(MARGINAL)
+  | VERDICT_MI3=n/a reason=missing:mi3:TREND
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | CONDUCTOR_RULE=n/a reason=missing:mi3:TREND
+  | decide rc=0
+CASE CR6c PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H
+  | STAGE2_COST_EUR=n/a reason=>STAGE2_MAX_H
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=UNRESOLVED(MARGINAL)
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=n/a reason=missing:mi2:TREND
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | CONDUCTOR_RULE=n/a reason=missing:mi2:TREND
+  | decide rc=0
+CASE CR6d PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H
+  | STAGE2_COST_EUR=n/a reason=>STAGE2_MAX_H
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=UNRESOLVED(MARGINAL)
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=FLAT_NO_GAIN
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | CONDUCTOR_RULE=n/a reason=judgement:CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | decide rc=0
+CASE CR7 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H
+  | STAGE2_COST_EUR=n/a reason=>STAGE2_MAX_H
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=RISING
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | CONDUCTOR_RULE=KEEP_SYSTEM;PLATEAU=OPEN;NEXT=TODO-719
+  | decide rc=0
+CASE CR8 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=UNDERPOWERED
+  | STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H
+  | STAGE2_COST_EUR=n/a reason=>STAGE2_MAX_H
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=UNRESOLVED(MARGINAL)
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | CONDUCTOR_RULE=PROVISIONAL_DEFAULT=JE;STAGE2_T=n/a reason=missing:je:e;THEN;TODO-696+REPLICATE_6H;THEN;STAGE2_PLATEAU;PLATEAU=OPEN
+  | decide rc=0
+CASE CR9 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=PLATEAU
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.1050 BETTER
+  | VS_SYS_MI3=0.1000 BETTER
+  | VS_SYS_MI2=0.1080 BETTER
+  | ORDER_AGREE=FALSE pe_choice=JE rss_choice=MI3
+  | VERDICT_JE=CANDIDATE
+  | VERDICT_MI3=CANDIDATE
+  | VERDICT_MI2=CANDIDATE
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;ARM_ORDER_ACCOUNTING
+  | CONDUCTOR_RULE=n/a reason=judgement:CONDUCTOR_RULING;ARM_ORDER_ACCOUNTING
+  | decide rc=0
+CASE CR10 PASS
+  | STOP_H_CLAUSES=preflight=FAIL
+  | STOP_V_CLAUSES=none
+  | STOP=H (preflight=FAIL)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE H1 PASS
+  | STOP_H_CLAUSES=disk_free=1000KiB<40GiB
+  | STOP_V_CLAUSES=none
+  | STOP=H (disk_free=1000KiB<40GiB)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE H2 PASS
+  | STOP_H_CLAUSES=disk_free=absent
+  | STOP_V_CLAUSES=none
+  | STOP=H (disk_free=absent)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE H3 PASS
+  | STOP_H_CLAUSES=je:steal=1.5
+  | STOP_V_CLAUSES=none
+  | STOP=H (je:steal=1.5)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE H4 PASS
+  | STOP_H_CLAUSES=je:steal=1.5
+  | STOP_V_CLAUSES=s1:runner_exit=1
+  | STOP=H (je:steal=1.5)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE H5 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=mi2:predicates_rc=4
+  | STOP=V (mi2:predicates_rc=4)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE V1 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=mi2:predicates_rc=absent
+  | STOP=V (mi2:predicates_rc=absent)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE V2 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=s2:runner_exit=absent
+  | STOP=V (s2:runner_exit=absent)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE V3 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=s1:write_errors=3
+  | STOP=V (s1:write_errors=3)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE V4 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=s1:PR-crashes=FALSE
+  | STOP=V (s1:PR-crashes=FALSE)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE V5 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=je:PA=FALSE
+  | STOP=V (je:PA=FALSE)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE V6 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=s1:PALLOC=absent
+  | STOP=V (s1:PALLOC=absent)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE V7 PASS
+  | STOP_H_CLAUSES=je:steal=missing
+  | STOP_V_CLAUSES=s1:runner_exit=1 mi3:predicates_missing mi3:write_errors=absent mi3:PR-crashes=absent
+  | STOP=H (je:steal=missing)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE V8 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=s2:PV=FALSE
+  | STOP=V (s2:PV=FALSE)
+  | SYS_AGREE=STOP
+  | PLATEAU_SYS=STOP
+  | STAGE2_FEASIBLE=STOP
+  | STAGE2_COST_EUR=STOP
+  | VS_SYS_JE=STOP
+  | VS_SYS_MI3=STOP
+  | VS_SYS_MI2=STOP
+  | ORDER_AGREE=STOP
+  | VERDICT_JE=STOP
+  | VERDICT_MI3=STOP
+  | VERDICT_MI2=STOP
+  | DEFAULT_CANDIDATE=STOP
+  | NEXT=STOP
+  | CONDUCTOR_RULE=STOP
+  | decide rc=0
+CASE V9 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=RISING
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.9500 NO_GAIN
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=FLAT_NO_GAIN
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;FLAT_ARM_VS_RISING_SYS
+  | CONDUCTOR_RULE=KEEP_SYSTEM;PLATEAU=OPEN;NEXT=TODO-719
+  | decide rc=0
+CASE R11 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=RISING
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=UNRESOLVED(MARGINAL)
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;NOTHING_PLATEAUS;SEE=TODO-719
+  | CONDUCTOR_RULE=PROVISIONAL_DEFAULT=JE;STAGE2_T=6;THEN;TODO-696+REPLICATE_6H;THEN;STAGE2_PLATEAU;PLATEAU=OPEN
+  | decide rc=0
+CASE R12 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=INDETERMINATE reason=falling
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=UNRESOLVED(MARGINAL)
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_INDETERMINATE
+  | CONDUCTOR_RULE=PROVISIONAL_DEFAULT=JE;STAGE2_T=6;THEN;TODO-696+REPLICATE_6H;THEN;STAGE2_PLATEAU;PLATEAU=OPEN
+  | decide rc=0
+CASE R13a PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=INDETERMINATE reason=marginal
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=UNRESOLVED(MARGINAL)
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_INDETERMINATE
+  | CONDUCTOR_RULE=PROVISIONAL_DEFAULT=JE;STAGE2_T=6;THEN;TODO-696+REPLICATE_6H;THEN;STAGE2_PLATEAU;PLATEAU=OPEN
+  | decide rc=0
+CASE R13b PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=FALSE reason=out_of_domain:s1:PE_LEVEL
+  | PLATEAU_SYS=INDETERMINATE reason=out_of_domain:s1:PE_LEVEL
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=n/a reason=out_of_domain:s1:PE_LEVEL
+  | VS_SYS_MI3=n/a reason=out_of_domain:s1:PE_LEVEL
+  | VS_SYS_MI2=n/a reason=out_of_domain:s1:PE_LEVEL
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=n/a reason=out_of_domain:s1:PE_LEVEL
+  | VERDICT_MI3=n/a reason=out_of_domain:s1:PE_LEVEL
+  | VERDICT_MI2=n/a reason=out_of_domain:s1:PE_LEVEL
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;UNMATCHED
+  | CONDUCTOR_RULE=n/a reason=excluded:CONDUCTOR_RULING;UNMATCHED
+  | decide rc=0
+CASE OOD1 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=PLATEAU
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=1
+  | VERDICT_JE=CANDIDATE
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=JE
+  | NEXT=TODO-696+TODO-695;THEN;DEFAULT_FLIP=JE
+  | CONDUCTOR_RULE=n/a reason=not_conductor_ruling
+  | decide rc=0
+CASE LZ1 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=PLATEAU
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=1
+  | VERDICT_JE=CANDIDATE
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=JE
+  | NEXT=TODO-696+TODO-695;THEN;DEFAULT_FLIP=JE
+  | CONDUCTOR_RULE=n/a reason=not_conductor_ruling
+  | decide rc=0
+CASE A12 PASS
+CASE K1 PASS
+  | STOP_H_CLAUSES=none
+  | STOP_V_CLAUSES=none
+  | STOP=none
+  | SYS_AGREE=TRUE value=0.0488
+  | PLATEAU_SYS=INDETERMINATE reason=out_of_domain:s1:TREND
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=0.6000 BETTER
+  | VS_SYS_MI3=0.9000 NO_GAIN
+  | VS_SYS_MI2=0.9500 NO_GAIN
+  | ORDER_AGREE=TRUE n=1
+  | VERDICT_JE=CANDIDATE
+  | VERDICT_MI3=UNRESOLVED(MARGINAL)
+  | VERDICT_MI2=UNRESOLVED(MARGINAL)
+  | DEFAULT_CANDIDATE=JE
+  | NEXT=CONDUCTOR_RULING;UNMATCHED
+  | CONDUCTOR_RULE=n/a reason=excluded:CONDUCTOR_RULING;UNMATCHED
+  | decide rc=0
+CASE E2 PASS
+  | E1_FACTORS=31 E1_BASE_ROWS=199 E1_ROWS=243 E1_UNCOVERED_PAIRS=0
+  | E1_CR_COUNT 1 missing_TREND
+  | E1_CR_COUNT 106 excluded
+  | E1_CR_COUNT 19 judgement
+  | E1_CR_COUNT 2 KEEP_SYSTEM;PLATEAU=OPEN;NEXT=TODO-719
+  | E1_CR_COUNT 35 STOP
+  | E1_CR_COUNT 38 PROVISIONAL_DEFAULT
+  | E1_CR_COUNT 42 n/a reason=not_conductor_ruling
+  | E1_INPUTS=243 E1_DECIDE_RUNS=486 E1_FAILS=0
+  | E1_NEXT_COUNT 1 CONDUCTOR_RULING;ARM_ORDER_ACCOUNTING
+  | E1_NEXT_COUNT 1 CONDUCTOR_RULING;OPS
+  | E1_NEXT_COUNT 1 KEEP_SYSTEM;SYS_FLAT_WITHIN_BAR
+  | E1_NEXT_COUNT 10 TODO-696+TODO-695;THEN;DEFAULT_FLIP=MI3
+  | E1_NEXT_COUNT 105 CONDUCTOR_RULING;SYS_MISSING
+  | E1_NEXT_COUNT 12 STAGE2;SYS_LONG_CELLS
+  | E1_NEXT_COUNT 13 TODO-696+TODO-695;THEN;DEFAULT_FLIP=JE
+  | E1_NEXT_COUNT 2 CONDUCTOR_RULING;FLAT_ARM_VS_RISING_SYS
+  | E1_NEXT_COUNT 21 CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | E1_NEXT_COUNT 25 CONDUCTOR_RULING;SYS_BIMODAL;SEE=TODO-719
+  | E1_NEXT_COUNT 35 STOP
+  | E1_NEXT_COUNT 5 CONDUCTOR_RULING;SYS_INDETERMINATE
+  | E1_NEXT_COUNT 6 CONDUCTOR_RULING;NOTHING_PLATEAUS;SEE=TODO-719
+  | E1_NEXT_COUNT 6 TODO-696+TODO-695;THEN;DEFAULT_FLIP=MI2
+CASE E1 PASS
+SYNTH377=PASS cases=118
+synth rc=0
+literal capture: 87 mimalloc line(s) -> spec377-mi-literals.txt, 7 jemalloc line(s) -> spec377-je-conf.txt
+SMOKE_ADMISSION=PASS failed=none
+### SMOKE COMPLETE 2026-09-30T08:54:05Z
+chain end: 2026-09-30T08:54:05Z

@@ -1,0 +1,7 @@
+sje [server] <jemalloc>: malloc_conf #1 (string specified via --with-malloc-conf): ""
+sje [server] <jemalloc>: malloc_conf #2 (string pointed to by the global variable malloc_conf): ""
+sje [server] <jemalloc>: malloc_conf #3 ("name" of the file referenced by the symbolic link named /etc/malloc.conf): ""
+sje [server] <jemalloc>: malloc_conf #4 (value of the environment variable MALLOC_CONF): "background_thread:true,confirm_conf:true"
+sje [server] <jemalloc>: -- Set conf value: background_thread:true
+sje [server] <jemalloc>: -- Set conf value: confirm_conf:true
+sje [server] <jemalloc>: malloc_conf #5 (string pointed to by the global variable malloc_conf_2_conf_harder): ""

@@ -1,0 +1,70 @@
+ORDER=SKIPPED (synthetic)
+== pre-M (read from the manifest, not recomputed) ==
+SHARES_STOP=none
+E_FROZEN=0.1334
+== cell b1 ==
+PA_b1=TRUE last_seq=30 min_seq=29
+PM1_b1=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=900 need_ge=780
+RUNNER_EXIT_b1=0
+TOTAL_WRITES_b1=150000
+DURATION_b1=900
+SKIPPED_b1=0
+BYTES_ALLOC_RATE_b1=1000.000000 points=15 h=8 window_s=480-900
+ALLOC_LIVE_b1=100000000
+== cell b2 ==
+PA_b2=TRUE last_seq=30 min_seq=29
+PM1_b2=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=900 need_ge=780
+RUNNER_EXIT_b2=0
+TOTAL_WRITES_b2=150000
+DURATION_b2=900
+SKIPPED_b2=0
+BYTES_ALLOC_RATE_b2=1010.000000 points=15 h=8 window_s=480-900
+ALLOC_LIVE_b2=100000000
+== cell a1 ==
+PA_a1=TRUE last_seq=30 min_seq=29
+PM1_a1=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=900 need_ge=780
+RUNNER_EXIT_a1=0
+TOTAL_WRITES_a1=150000
+DURATION_a1=900
+SKIPPED_a1=0
+BYTES_ALLOC_RATE_a1=1300.000000 points=15 h=8 window_s=480-900
+ALLOC_LIVE_a1=100000000
+== cell a2 ==
+PA_a2=TRUE last_seq=30 min_seq=29
+PM1_a2=TRUE post_mortem_rows=0 empty_scrape_rows=1 first_empty_elapsed=0 last_live_scrape_elapsed=900 need_ge=780
+RUNNER_EXIT_a2=0
+TOTAL_WRITES_a2=150000
+DURATION_a2=900
+SKIPPED_a2=0
+BYTES_ALLOC_RATE_a2=1310.000000 points=15 h=8 window_s=480-900
+ALLOC_LIVE_a2=100000000
+== readings ==
+WRITE_DEV_b1=0.0000
+WRITE_DEV_b2=0.0000
+WRITE_DEV_a1=0.0000
+WRITE_DEV_a2=0.0000
+R_a1_b1=1.3000 LIVE_R_a1_b1=1.0000
+R_a1_b2=1.2871 LIVE_R_a1_b2=1.0000
+R_a2_b1=1.3100 LIVE_R_a2_b1=1.0000
+R_a2_b2=1.2970 LIVE_R_a2_b2=1.0000
+S_A=0.007663 S_B_LIVE=0.000000 S_A_LIVE=0.000000
+STOP_R_PREDICATE=TRUE (rate min I 1.2871 vs 1.0100; live min I 1.0000 vs 1.0000)
+EXCESS_PREDICATE=FALSE (1 - min I -0.2871 vs 1.5 E 0.2001)
+CLASS_THRESHOLDS: indeterminate s_b >= 0.0500 (min(E/2, 0.05)); confirmed max I <= 0.9333 (1 - E/2)
+BYTES_PER_WRITE_b1=6.0
+BYTES_PER_WRITE_b2=6.1
+BYTES_PER_WRITE_a1=7.8
+BYTES_PER_WRITE_a2=7.9
+== flags ==
+STOP=R
+VERDICT_BYTES=WITHHELD
+VERDICT_LIVE=DESCRIPTIVE
+LIVE_SIGN=flat
+I=[1.2871,1.3100]
+S_B=0.009950
+E=0.1334
+LIVE_I=[1.0000,1.0000]
+S_B_LIVE=0.000000
+EXCESS=FALSE
+BYTES_PER_WRITE=b1=6.0 b2=6.1 a1=7.8 a2=7.9 a/b=[1.2871,1.3100]
+WRITE_PARITY=OK max_dev=0.0000 totalWrites=150000/150000/150000/150000

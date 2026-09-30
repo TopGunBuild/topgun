@@ -1,0 +1,2 @@
+  duration:            900s
+  csv cadence:         60s

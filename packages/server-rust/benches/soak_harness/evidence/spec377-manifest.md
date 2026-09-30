@@ -442,15 +442,178 @@ Every `spec377-*` program with its sha256; at M they must equal, file for file, 
 - `54e8981fc9b33ba517a3a815705c1afc68a0e551fd294c58795f79d4775fc63e` `packages/server-rust/benches/soak_harness/evidence/spec377-synth.sh`
 - `e7f6909a02b91d358d15a5cf790a4701bb602d23499ff895b0c6efb7f841abaf` `packages/server-rust/benches/soak_harness/evidence/spec377-power.py`
 
-### Build records — *to fill: G5 (from `spec377-builds.txt`)*
-The five flavour lines (`flavour=<label> … sha256=… recompiled=yes marker=ok`), `rustc -vV`, glibc and awk banners;
-`BUILD_ENV_MALLOC_CONF=unset` × 5; `BIN_MARKERS_<label>=` for the four server labels; `TREE_RC_<label>=` and
-`TREE_PROOF_<label>=PASS` for the four labels (R1.3 whole-line regexes).
+### Build records — G5 (from `target/spec377-run/spec377-builds.txt`, committed as `evidence/spec377-smoke/spec377-builds.txt`)
+Build phase 2026-09-30T08:13:35Z → 08:42:08Z (≈ 28.5 min), HEAD `03114a76`, sources = detached worktree at `SERIES_PIN`
+`34007e197224d4db870ba2c842716316622580de` (clean). Every R1.3 check passed; the series binds to these five sha256:
+```
+  flavour=SYS-ser code=34007e197224d4db870ba2c842716316622580de path=/opt/topgun/target/spec377-SYS-ser/release/topgun-server sha256=c68301ec1af2b4ff60c65a2db53e9aa0717ce605a0bbcda6efb5d4462e51900e mtime=1790756350 recompiled=yes marker=ok
+  flavour=JE-ser code=34007e197224d4db870ba2c842716316622580de path=/opt/topgun/target/spec377-JE-ser/release/topgun-server sha256=5d5bc58cbedafdbb462a29782a49ad52200f10e95c07f4f9aa2c8a15abfb3d22 mtime=1790756720 recompiled=yes marker=ok
+  flavour=MI3-ser code=34007e197224d4db870ba2c842716316622580de path=/opt/topgun/target/spec377-MI3-ser/release/topgun-server sha256=bc0fae31e708885db75dae12c43c5de3129398203b8d36e5e5bdf515b7a510e9 mtime=1790757054 recompiled=yes marker=ok
+  flavour=MI2-ser code=34007e197224d4db870ba2c842716316622580de path=/opt/topgun/target/spec377-MI2-ser/release/topgun-server sha256=3357d04ec381426e057a32d5fe474e5f6268a7123e3df110bfe72c0360ca12b0 mtime=1790757387 recompiled=yes marker=ok
+  flavour=H code=34007e197224d4db870ba2c842716316622580de path=/opt/topgun/target/spec377-H/release/deps/soak_harness-53b4b640053c5766 sha256=f205d81c653a7cf09fc7a88084cbd183dfdf61443671ba2fbd3db707499c1911 mtime=1790757649 recompiled=yes marker=ok
+```
+```
+  BIN_MARKERS_SYS-ser=je=0 mi=0
+  BIN_MARKERS_JE-ser=je=1 mi=0
+  BIN_MARKERS_MI3-ser=je=0 mi=3
+  BIN_MARKERS_MI2-ser=je=0 mi=3
+  TREE_RC_SYS-ser=tikv-jemalloc-sys:101 libmimalloc-sys:101
+  TREE_PROOF_SYS-ser=PASS reason=none
+  BUILD_ENV_MALLOC_CONF=unset label=SYS-ser
+  TREE_RC_JE-ser=0
+  TREE_PROOF_JE-ser=PASS reason=none
+  BUILD_ENV_MALLOC_CONF=unset label=JE-ser
+  TREE_RC_MI3-ser=0
+  TREE_PROOF_MI3-ser=PASS reason=none
+  BUILD_ENV_MALLOC_CONF=unset label=MI3-ser
+  TREE_RC_MI2-ser=0
+  TREE_PROOF_MI2-ser=PASS reason=none
+  BUILD_ENV_MALLOC_CONF=unset label=MI2-ser
+  BUILD_ENV_MALLOC_CONF=unset label=H
+  rustc: rustc 1.93.1 (01f6ddf75 2026-02-11)
+  rustc: binary: rustc
+  rustc: commit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf
+  rustc: commit-date: 2026-02-11
+  rustc: host: x86_64-unknown-linux-gnu
+  rustc: release: 1.93.1
+  rustc: LLVM version: 21.1.8
+  glibc: ldd (Debian GLIBC 2.36-9+deb12u14) 2.36
+  awk: awk version 20220912
+```
+Host packages over snapshot `437171250`: only `original-awk 2022-09-12-1` (`apt-get install original-awk`, step 0);
+`nm`/`strings` (binutils), `shasum` (perl), `python3`, `cargo 1.93.1` were already present. First program on the host:
+`spec376-parity.sh` → `SYNTH_PARITY=PASS cases=19 awk='awk version 20220912'` (`SYNTH_PARITY_MAWK=PASS rc=0`,
+`SYNTH_PARITY_GAWK=n/a reason=absent`), before any build. Pre-build `preflight --apply`: `PREFLIGHT=PASS pending=alloc_conf`
+(all other checks PASS; `alloc_conf=PENDING … je_archive=not_built` as designed).
 
-### Smoke admission results and frozen allocator literals — *to fill: G5*
-`SMOKE_ADMISSION=`, `SYNTH_PARITY=`, `SYNTH377=`; the sha256 of `evidence/spec377-mi-literals.txt` and
-`evidence/spec377-je-conf.txt` (committed byte-for-byte from the smoke), each line shown with trailing spaces rendered
-as `␠` (documentation only; the committed file is the literal `PALLOC` keys on).
+### Smoke admission results and frozen allocator literals — G5
+Smoke 2026-09-30T08:42–08:54Z, attempt 1 (no re-smoke, no program change after M0 `c51e31bd`):
+```
+  SMOKE_ADMISSION=PASS failed=none
+  SYNTH_PARITY=PASS cases=19 awk='awk version 20220912'
+  SYNTH377=PASS cases=118
+  cell ssy|sje|smi3|smi2: RUNNER_EXIT=0, PREDICATES_EXIT_<cell>=0
+```
+Every `SMOKE_PROG_SHA=` line (sixteen: nine `spec377-*` + seven frozen parents) equals, file for file, the sha256 listed
+in this section ("Frozen parents executed", "Programs frozen at M") — checked mechanically on the Mac, and the
+Mac working copy hashes to the same values. The program list above is therefore confirmed unchanged at M.
+
+`MI_POSTINIT_LINES` boundary (R3.3 m6, G2a reading) — **confirmed**: the smoke consoles show the trailer
+(`debug level :`, `secure level:`, `mem tracking:`; v2 prefixed, v3 not) directly after the last option line, and the
+runner closes the block after it. What it counts is real post-init output: `smi2` = 3 (`process init: 0x…`,
+`using 1 numa regions`, `reserved 1048576 KiB memory`), `smi3` = 1 (`reserved 1048576 KiB memory`; v3 prints
+`process init` *before* its version line). Both are below `MI_POSTINIT_BOUND` = 5, so a 6 h cell with only the
+startup print reads `MI_POSTINIT_NOTE=none`.
+
+Frozen literal files (committed byte-for-byte from `target/spec377-run/smoke/`; the series `m5` item hashes the first):
+- `49784c7a2734dc37522f609601b7c84d4f23a669050b2709e271f29d2bacb663` `packages/server-rust/benches/soak_harness/evidence/spec377-mi-literals.txt`
+- `a6f6aa3806dd0cfc61fb56ac672e830e7569497af5265abf7d0b0b5610c4a770` `packages/server-rust/benches/soak_harness/evidence/spec377-je-conf.txt`
+
+The `built on …` stamp in each mimalloc version line belongs to these five builds, so the series must run exactly the
+binaries above (the chain's pre-launch sha assertion); a rebuild would fail `m5` by construction.
+
+`spec377-mi-literals.txt` (87 lines; trailing spaces as `␠`):
+```
+  smi3 [server] v3.3.2 (built on Sep 30 2026, 08:26:20)
+  smi3 [server] option 'show_errors': 0␠
+  smi3 [server] option 'show_stats': 0␠
+  smi3 [server] option 'verbose': 1␠
+  smi3 [server] option 'deprecated_eager_commit': 1␠
+  smi3 [server] option 'arena_eager_commit': 2␠
+  smi3 [server] option 'purge_decommits': 1␠
+  smi3 [server] option 'allow_large_os_pages': 0␠
+  smi3 [server] option 'reserve_huge_os_pages': 0␠
+  smi3 [server] option 'reserve_huge_os_pages_at': -1␠
+  smi3 [server] option 'reserve_os_memory': 0 KiB
+  smi3 [server] option 'deprecated_segment_cache': 0␠
+  smi3 [server] option 'deprecated_page_reset': 0␠
+  smi3 [server] option 'deprecated_abandoned_page_purge': 0␠
+  smi3 [server] option 'deprecated_segment_reset': 0␠
+  smi3 [server] option 'deprecated_eager_commit_delay': 1␠
+  smi3 [server] option 'purge_delay': 1000␠
+  smi3 [server] option 'use_numa_nodes': 0␠
+  smi3 [server] option 'disallow_os_alloc': 0␠
+  smi3 [server] option 'os_tag': 100␠
+  smi3 [server] option 'max_errors': 32␠
+  smi3 [server] option 'max_warnings': 32␠
+  smi3 [server] option 'deprecated_max_segment_reclaim': 10␠
+  smi3 [server] option 'destroy_on_exit': 0␠
+  smi3 [server] option 'arena_reserve': 1048576 KiB
+  smi3 [server] option 'arena_purge_mult': 1␠
+  smi3 [server] option 'deprecated_purge_extend_delay': 1␠
+  smi3 [server] option 'disallow_arena_alloc': 0␠
+  smi3 [server] option 'retry_on_oom': 400␠
+  smi3 [server] option 'visit_abandoned': 0␠
+  smi3 [server] option 'guarded_min': 0␠
+  smi3 [server] option 'guarded_max': 1073741824␠
+  smi3 [server] option 'guarded_precise': 0␠
+  smi3 [server] option 'guarded_sample_rate': 0␠
+  smi3 [server] option 'guarded_sample_seed': 0␠
+  smi3 [server] option 'generic_collect': 10000␠
+  smi3 [server] option 'page_reclaim_on_free': 0␠
+  smi3 [server] option 'page_full_retain': 2␠
+  smi3 [server] option 'page_max_candidates': 4␠
+  smi3 [server] option 'max_vabits': 0␠
+  smi3 [server] option 'pagemap_commit': 0␠
+  smi3 [server] option 'page_commit_on_demand': 0␠
+  smi3 [server] option 'page_max_reclaim': -1␠
+  smi3 [server] option 'page_cross_thread_max_reclaim': 32␠
+  smi3 [server] option 'allow_thp': 1␠
+  smi3 [server] option 'minimal_purge_size': 0 KiB
+  smi3 [server] option 'arena_max_object_size': 2097152 KiB
+  smi3 [server] option 'arena_is_numa_local': 0␠
+  smi2 [server] mimalloc: v2.3.2 (built on Sep 30 2026, 08:31:56)
+  smi2 [server] mimalloc: option 'show_errors': 0␠
+  smi2 [server] mimalloc: option 'show_stats': 0␠
+  smi2 [server] mimalloc: option 'verbose': 1␠
+  smi2 [server] mimalloc: option 'eager_commit': 1␠
+  smi2 [server] mimalloc: option 'arena_eager_commit': 2␠
+  smi2 [server] mimalloc: option 'purge_decommits': 1␠
+  smi2 [server] mimalloc: option 'allow_large_os_pages': 0␠
+  smi2 [server] mimalloc: option 'reserve_huge_os_pages': 0␠
+  smi2 [server] mimalloc: option 'reserve_huge_os_pages_at': -1␠
+  smi2 [server] mimalloc: option 'reserve_os_memory': 0 KiB
+  smi2 [server] mimalloc: option 'deprecated_segment_cache': 0␠
+  smi2 [server] mimalloc: option 'deprecated_page_reset': 0␠
+  smi2 [server] mimalloc: option 'abandoned_page_purge': 0␠
+  smi2 [server] mimalloc: option 'deprecated_segment_reset': 0␠
+  smi2 [server] mimalloc: option 'eager_commit_delay': 1␠
+  smi2 [server] mimalloc: option 'purge_delay': 10␠
+  smi2 [server] mimalloc: option 'use_numa_nodes': 0␠
+  smi2 [server] mimalloc: option 'disallow_os_alloc': 0␠
+  smi2 [server] mimalloc: option 'os_tag': 100␠
+  smi2 [server] mimalloc: option 'max_errors': 32␠
+  smi2 [server] mimalloc: option 'max_warnings': 32␠
+  smi2 [server] mimalloc: option 'max_segment_reclaim': 10␠
+  smi2 [server] mimalloc: option 'destroy_on_exit': 0␠
+  smi2 [server] mimalloc: option 'arena_reserve': 1048576 KiB
+  smi2 [server] mimalloc: option 'arena_purge_mult': 10␠
+  smi2 [server] mimalloc: option 'purge_extend_delay': 1␠
+  smi2 [server] mimalloc: option 'abandoned_reclaim_on_free': 0␠
+  smi2 [server] mimalloc: option 'disallow_arena_alloc': 0␠
+  smi2 [server] mimalloc: option 'retry_on_oom': 400␠
+  smi2 [server] mimalloc: option 'visit_abandoned': 0␠
+  smi2 [server] mimalloc: option 'guarded_min': 0␠
+  smi2 [server] mimalloc: option 'guarded_max': 1073741824␠
+  smi2 [server] mimalloc: option 'guarded_precise': 0␠
+  smi2 [server] mimalloc: option 'guarded_sample_rate': 0␠
+  smi2 [server] mimalloc: option 'guarded_sample_seed': 0␠
+  smi2 [server] mimalloc: option 'target_segments_per_thread': 0␠
+  smi2 [server] mimalloc: option 'generic_collect': 10000␠
+  smi2 [server] mimalloc: option 'allow_thp': 1␠
+```
+`spec377-je-conf.txt` (7 lines):
+```
+  sje [server] <jemalloc>: malloc_conf #1 (string specified via --with-malloc-conf): ""
+  sje [server] <jemalloc>: malloc_conf #2 (string pointed to by the global variable malloc_conf): ""
+  sje [server] <jemalloc>: malloc_conf #3 ("name" of the file referenced by the symbolic link named /etc/malloc.conf): ""
+  sje [server] <jemalloc>: malloc_conf #4 (value of the environment variable MALLOC_CONF): "background_thread:true,confirm_conf:true"
+  sje [server] <jemalloc>: -- Set conf value: background_thread:true
+  sje [server] <jemalloc>: -- Set conf value: confirm_conf:true
+  sje [server] <jemalloc>: malloc_conf #5 (string pointed to by the global variable malloc_conf_2_conf_harder): ""
+```
+Committed smoke tree: `evidence/spec377-smoke/` without `synthetic/{a,b,d,e1,n,p,tmp}` (≈ 62 MB of regenerable
+`spec377-synth.sh` scratch; `results.txt` — 118 `CASE … PASS` — `manifest-literals.md` and `dw.awk` are committed).
 
 ### Synthetic enumeration parameters (G4; `spec377-synth.sh`, 118 cases)
 Everything is inside the committed program: fixtures are generated there (bash + awk only), expectations are written
@@ -815,7 +978,7 @@ git show <commit>:packages/server-rust/benches/soak_harness/evidence/spec377-man
    `git diff --quiet <SERIES_PIN>..HEAD -- packages/server-rust/src packages/server-rust/Cargo.toml packages/server-rust/build.rs packages/core-rust Cargo.toml Cargo.lock rust-toolchain.toml`
    and an empty `git status --porcelain` over the same pathspec.
 
-### Carried traps — *to complete at M*
+### Carried traps (completed at M)
 `LC_ALL=C` everywhere a number is parsed (the host locale is `ru_RU`); every awk program runs under `original-awk`
 (BWK) via the chain/parity shim, whose banner must match `^awk version [0-9]{8}`; program sha binding; flags printed
 after every STOP predicate; synthetic cases pin their inputs; smoke over every program path before the cells;
@@ -824,5 +987,9 @@ ignored); mimalloc v3 prints its option block unprefixed and v2 with `mimalloc: 
 builds are not byte-reproducible — only the sha256 of the LAUNCHED binary counts; program edits happen only on the
 Mac, never on the server; `systemd-run` needs explicit `--setenv=HOME=… --setenv=PATH=…`; re-smoke hygiene moves
 `target/spec377-s*-data` **and** `target/spec377-s*-data.meta` to `.runN` (never `rm`).
+Added at M from the smoke: jemalloc's `confirm_conf` printout labels source #4 "environment variable MALLOC_CONF" even
+in this `_rjem_` build, where the value actually came from `_RJEM_MALLOC_CONF` (the label is jemalloc's fixed text, not
+the variable read); mimalloc v3 prints `mimalloc: process init` before its unprefixed version line, v2 after its
+trailer; the literal files carry the builds' `built on` stamps, so they bind to these exact binaries.
 
 ## APPEND-ONLY BELOW

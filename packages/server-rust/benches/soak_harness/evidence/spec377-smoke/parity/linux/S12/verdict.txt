@@ -1,0 +1,2 @@
+ORDER=SKIPPED (synthetic)
+FATAL: E_FROZEN='abc' is not a number

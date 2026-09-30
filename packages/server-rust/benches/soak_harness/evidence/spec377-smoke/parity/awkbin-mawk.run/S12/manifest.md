@@ -1,0 +1,2 @@
+SHARES_STOP=none
+E_FROZEN=abc
