@@ -243,8 +243,8 @@ impl ORMapMerkleTree {
 
     /// Updates a key's entry hash in the tree.
     ///
-    /// The `entry_hash` should be computed from all records for the key
-    /// (e.g., using `hashORMapEntry` logic: sorted tags, deterministic string representation).
+    /// Caller obligation: `entry_hash` is the canonical OR leaf (TG-MRK-001: sorted
+    /// live tags `#` sorted per-key tombstones; no values, timestamps or TTL).
     pub fn update(&mut self, key: &str, entry_hash: u32) {
         let path = key_to_path(key);
         trie_update_node(&mut self.root, key, entry_hash, &path, 0, self.depth);
