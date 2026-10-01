@@ -810,6 +810,89 @@ describe('ORMapSyncHandler per-key tombstone scoping', () => {
         }
       },
     );
+
+    test.each(responses)(
+      '%s: a tag that becomes tombstoned only through this entry is not a lost remove, so an emptied key is not pushed',
+      async (name, respond) => {
+        const harness = makeHarness();
+        const { map, pending, sent } = harness;
+        // The state after a full resync wiped the map: the remove survives only
+        // as a pending operation, the map-wide set no longer holds its tag, and
+        // the server, which has not received the remove yet, serves the record.
+        const record = map.add('K', 'removed-value');
+        pending.set('K', [record.tag]);
+        const leafPath = leafPathOf(map, 'K');
+        map.clear();
+        expect(map.isTombstoned(record.tag)).toBe(false);
+        const rendered = recordRendered(map, 'K');
+
+        // The key is no longer in the local tree, so the leaf's path is the one
+        // it had before the wipe rather than one looked up now.
+        await (name === 'ORMAP_SYNC_RESP_LEAF'
+          ? harness.handler.handleORMapSyncRespLeaf({
+              mapName: MAP_NAME,
+              path: leafPath,
+              entries: [{ key: 'K', records: [record], tombstones: [] }],
+            })
+          : respond(harness, { key: 'K', records: [record], tombstones: [] }));
+
+        // The pending operation itself delivers the remove; nothing is pushed.
+        expect(sent.filter((msg) => msg.type === 'ORMAP_PUSH_DIFF')).toEqual([]);
+        expect(sorted(map.getKeyTombstones('K'))).toEqual([record.tag]);
+        expect(map.get('K')).toEqual([]);
+        expect(rendered()).not.toContain('removed-value');
+      },
+    );
+
+    test.each(responses)(
+      '%s: only the key that is served a removed tag is pushed for it; a tombstone-only key beside it is not',
+      async (_name, respond) => {
+        const harness = makeHarness();
+        const { map, sent } = harness;
+        const lost = addThenRemoveAcked(harness, 'K', 'removed-value');
+        const bystander = addThenRemove(map, 'bystander', 'x');
+
+        await respond(harness, { key: 'K', records: [lost], tombstones: [] });
+
+        const pushed = sent
+          .filter((msg) => msg.type === 'ORMAP_PUSH_DIFF')
+          .flatMap((msg) => msg.payload.entries as PushDiffEntry[]);
+        expect(pushed).toEqual([{ key: 'K', records: [], tombstones: [lost.tag] }]);
+        // The other key's own tombstone is not handed out under K.
+        expect(pushed[0].tombstones).not.toContain(bystander);
+      },
+    );
+
+    test.each(responses)(
+      '%s: the kept attribution is persisted before the covering epoch is confirmed',
+      async (name) => {
+        const harness = makeHarness();
+        const { map, persistKeyTombstones, confirmedEpochs } = harness;
+        const lost: ORMapRecord<string> = {
+          value: 'removed-value',
+          tag: 'legacy-removed-tag',
+          timestamp: new HLC('server').now(),
+        };
+        map.applyTombstone(lost.tag);
+        map.add('K', 'kept');
+        const epochsAtPersist: number[][] = [];
+        persistKeyTombstones.mockImplementation(async () => {
+          epochsAtPersist.push([...confirmedEpochs]);
+        });
+
+        const payload = {
+          mapName: MAP_NAME,
+          coveringEpoch: 9,
+          entries: [{ key: 'K', records: [lost], tombstones: [] }],
+        };
+        await (name === 'ORMAP_SYNC_RESP_LEAF'
+          ? harness.handler.handleORMapSyncRespLeaf({ ...payload, path: leafPathOf(map, 'K') })
+          : harness.handler.handleORMapDiffResponse(payload));
+
+        expect(epochsAtPersist).toEqual([[]]);
+        expect(confirmedEpochs).toEqual([9]);
+      },
+    );
   });
 
   describe('pending removes are read from the op log once per response', () => {

@@ -1023,9 +1023,16 @@ export interface IORMapSyncHandler {
    * @param mapName - Map name
    * @param keys - Keys to push
    * @param map - ORMap instance
+   * @param alwaysPush - Keys to push even when they hold no live record; their
+   *   entry then carries only the tombstones attributed to the key
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- map is an ORMap<any,any>; generic params are erased at the interface level since the handler accesses entries by key, not by value type
-  pushORMapDiff(mapName: string, keys: string[], map: any): Promise<void>;
+  pushORMapDiff(
+    mapName: string,
+    keys: string[],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- map is an ORMap<any,any>; generic params are erased at the interface level since the handler accesses entries by key, not by value type
+    map: any,
+    alwaysPush?: ReadonlySet<string>,
+  ): Promise<void>;
 
   /**
    * Send ORMAP_SYNC_INIT message to server.
