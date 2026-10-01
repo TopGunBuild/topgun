@@ -1,0 +1,11 @@
+libmimalloc-sys v0.1.49
+mimalloc v0.1.52
+topgun-server v2.0.0 (/opt/topgun/target/spec377-src-34007e19/packages/server-rust)
+topgun-server feature "alloc-mimalloc" (command-line)
+topgun-server feature "default" (command-line)
+topgun-server feature "mimalloc" (command-line)
+topgun-server feature "redb"
+topgun-server feature "default" (command-line)
+mimalloc feature "v2" (command-line)
+libmimalloc-sys feature "v2"
+mimalloc feature "v2" (command-line)

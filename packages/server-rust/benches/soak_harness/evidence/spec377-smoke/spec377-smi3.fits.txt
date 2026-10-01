@@ -1,0 +1,11 @@
+fp_equiv_mb last_half col=fp_equiv_mb window=last_half rows_used=7 n=4 skipped_empty=0 t_start_secs=60.0 t_end_secs=120.0 span_secs=60.0 y_first=55.156 y_last=60.551 slope_mb_per_hour=299.484000 se_mb_per_hour=90.407924 intercept_mb=49.712900 r2=0.845836 sxx_hours2=0.000154321 sse=2.522713800
+fp_equiv_mb full col=fp_equiv_mb window=full rows_used=7 n=7 skipped_empty=0 t_start_secs=0.0 t_end_secs=120.0 span_secs=120.0 y_first=27.254 y_last=60.551 slope_mb_per_hour=940.750714 se_mb_per_hour=154.707608 intercept_mb=32.835250 r2=0.880886 sxx_hours2=0.000864198 sse=103.420437393
+lazyfree_mb last_half col=lazyfree_mb window=last_half rows_used=7 n=4 skipped_empty=0 t_start_secs=60.0 t_end_secs=120.0 span_secs=60.0 y_first=0.000 y_last=0.000 slope_mb_per_hour=0.000000 se_mb_per_hour=0.000000 intercept_mb=0.000000 r2=NA sxx_hours2=0.000154321 sse=0.000000000
+lazyfree_mb full col=lazyfree_mb window=full rows_used=7 n=7 skipped_empty=0 t_start_secs=0.0 t_end_secs=120.0 span_secs=120.0 y_first=0.000 y_last=0.000 slope_mb_per_hour=0.000000 se_mb_per_hour=0.000000 intercept_mb=0.000000 r2=NA sxx_hours2=0.000864198 sse=0.000000000
+sl_mb last_half col=sl_mb window=last_half rows_used=7 n=4 skipped_empty=0 t_start_secs=60.0 t_end_secs=120.0 span_secs=60.0 y_first=55.156 y_last=60.551 slope_mb_per_hour=299.484000 se_mb_per_hour=90.407924 intercept_mb=49.712900 r2=0.845836 sxx_hours2=0.000154321 sse=2.522713800
+sl_mb full col=sl_mb window=full rows_used=7 n=7 skipped_empty=0 t_start_secs=0.0 t_end_secs=120.0 span_secs=120.0 y_first=27.254 y_last=60.551 slope_mb_per_hour=940.750714 se_mb_per_hour=154.707608 intercept_mb=32.835250 r2=0.880886 sxx_hours2=0.000864198 sse=103.420437393
+amp_fpl last_half FIT_ERROR rc=2
+amp_fpl last_third FIT_ERROR rc=2
+pe last_half none
+pe last_third none
+disk_wr_mb last_half col=disk_wr_mb window=last_half rows_used=6 n=3 skipped_empty=0 t_start_secs=60.0 t_end_secs=100.0 span_secs=40.0 y_first=3.422 y_last=3.965 slope_mb_per_hour=48.870000 se_mb_per_hour=33.930875 intercept_mb=2.716333 r2=0.674734 sxx_hours2=0.000061728 sse=0.071068167

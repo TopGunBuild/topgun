@@ -1,0 +1,24 @@
+tikv-jemalloc-sys v0.7.1+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8
+tikv-jemallocator v0.7.0
+tikv-jemallocator feature "background_threads_runtime_support"
+tikv-jemallocator feature "default"
+topgun-server v2.0.0 (/opt/topgun/target/spec377-src-34007e19/packages/server-rust)
+topgun-server feature "alloc-jemalloc" (command-line)
+topgun-server feature "default" (command-line)
+topgun-server feature "redb"
+topgun-server feature "default" (command-line)
+tikv-jemallocator feature "default" (*)
+tikv-jemallocator feature "stats"
+topgun-server v2.0.0 (/opt/topgun/target/spec377-src-34007e19/packages/server-rust) (*)
+tikv-jemalloc-sys feature "background_threads_runtime_support"
+tikv-jemalloc-sys feature "default"
+tikv-jemalloc-ctl v0.7.0
+tikv-jemalloc-ctl feature "default"
+topgun-server v2.0.0 (/opt/topgun/target/spec377-src-34007e19/packages/server-rust) (*)
+tikv-jemalloc-ctl feature "stats"
+topgun-server v2.0.0 (/opt/topgun/target/spec377-src-34007e19/packages/server-rust) (*)
+tikv-jemallocator feature "background_threads_runtime_support" (*)
+tikv-jemalloc-sys feature "default" (*)
+tikv-jemalloc-sys feature "stats"
+tikv-jemalloc-ctl feature "stats" (*)
+tikv-jemallocator feature "stats" (*)

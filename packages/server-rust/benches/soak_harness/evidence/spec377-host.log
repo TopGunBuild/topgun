@@ -1,0 +1,90 @@
+--- cell s1 at 2026-09-30T08:59:51Z
+loadavg: 0.01 0.70 1.29 1/122 391084
+%CPU COMMAND
+ 5.9 bash
+ 3.0 systemd
+ 1.1 jbd2/sda1-8
+ 0.8 sshd
+ 0.2 kworker/2:1H-kblockd
+MemTotal:       15985096 kB
+MemFree:         9864280 kB
+MemAvailable:   15486072 kB
+Buffers:          132392 kB
+Cached:          5547636 kB
+SwapCached:            0 kB
+Active:          2761192 kB
+Inactive:        2934528 kB
+MEM_AVAILABLE_START_s1=15486072
+MEM_AVAILABLE_END_s1=15460744
+--- cell je at 2026-09-30T15:01:56Z
+loadavg: 0.40 1.72 2.30 1/114 469662
+%CPU COMMAND
+ 100 ps
+ 4.7 jbd2/sda1-8
+ 1.0 kworker/2:1H-kblockd
+ 1.0 kworker/0:1H-kblockd
+ 0.9 kworker/1:1H-kblockd
+MemTotal:       15985096 kB
+MemFree:         8312708 kB
+MemAvailable:   15460412 kB
+Buffers:          187968 kB
+Cached:          6329720 kB
+SwapCached:            0 kB
+Active:          3573856 kB
+Inactive:        2954860 kB
+MEM_AVAILABLE_START_je=15460412
+MEM_AVAILABLE_END_je=15402808
+--- cell mi3 at 2026-09-30T21:03:46Z
+loadavg: 0.44 1.82 2.35 1/117 548755
+%CPU COMMAND
+ 4.9 jbd2/sda1-8
+ 1.0 kworker/2:1H-kblockd
+ 1.0 kworker/0:1H-kblockd
+ 1.0 kworker/1:1H-kblockd
+ 1.0 kworker/3:1H-kblockd
+MemTotal:       15985096 kB
+MemFree:         6902648 kB
+MemAvailable:   15413984 kB
+Buffers:          188356 kB
+Cached:          7026600 kB
+SwapCached:            0 kB
+Active:          4245860 kB
+Inactive:        2982032 kB
+MEM_AVAILABLE_START_mi3=15415496
+MEM_AVAILABLE_END_mi3=15352808
+--- cell mi2 at 2026-10-01T03:05:37Z
+loadavg: 0.40 1.78 2.27 1/115 626015
+%CPU COMMAND
+ 100 ps
+ 5.0 jbd2/sda1-8
+ 1.0 kworker/2:1H-kblockd
+ 1.0 kworker/0:1H-kblockd
+ 1.0 kworker/1:1H-kblockd
+MemTotal:       15985096 kB
+MemFree:         5471624 kB
+MemAvailable:   15350080 kB
+Buffers:          188844 kB
+Cached:          7723092 kB
+SwapCached:            0 kB
+Active:          4926604 kB
+Inactive:        2996348 kB
+MEM_AVAILABLE_START_mi2=15350080
+MEM_AVAILABLE_END_mi2=15304120
+--- cell s2 at 2026-10-01T09:07:27Z
+loadavg: 0.39 1.77 2.32 1/119 705164
+%CPU COMMAND
+ 100 ps
+ 5.0 jbd2/sda1-8
+ 4.3 sshd
+ 1.0 kworker/2:1H-kblockd
+ 1.0 kworker/0:1H-kblockd
+MemTotal:       15985096 kB
+MemFree:         4102388 kB
+MemAvailable:   15301376 kB
+Buffers:          189236 kB
+Cached:          8422672 kB
+SwapCached:            0 kB
+Active:          5599180 kB
+Inactive:        3026912 kB
+MEM_AVAILABLE_START_s2=15301376
+MEM_AVAILABLE_END_s2=15284396

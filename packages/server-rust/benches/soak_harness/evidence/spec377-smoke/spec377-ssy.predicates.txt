@@ -1,0 +1,107 @@
+== STOP: PV ==
+PV=TRUE server_sha256=c68301ec1af2b4ff60c65a2db53e9aa0717ce605a0bbcda6efb5d4462e51900e harness_sha256=f205d81c653a7cf09fc7a88084cbd183dfdf61443671ba2fbd3db707499c1911 flavour=SYS label=SYS-ser
+== STOP: PR ==
+PR-crashes=TRUE crashes=0
+PR-class=TRUE
+== STOP: P5 / P6 / P7 ==
+P5=TRUE
+P5-observed: removal_rows=6 settlement_rows=6 unsettled=none
+P5-zero-return: none observed
+DECISION_SCRAPE=2026-09-30T08:45:12Z.txt
+P6=TRUE removed_refs_observed_total=5000 considered_total=5000 gap=0
+P7=TRUE restored_cancelled_total=0
+windows=6 settlement_rows=6 zero_return_removal_rows=0 scrapes=6
+== STOP: PE / PA ==
+PEL=TRUE rows_with_fp_equiv=6 rows=6 N=7 need=6
+PA=n/a reason=no_probe_arm
+== STOP: PJ ==
+PJ=TRUE echoes=1 value=true
+PJ-child=n/a reason=filtered
+== STOP: PC ==
+PC=TRUE live=12559 live_tag_bytes=427007
+== STOP: PM1 ==
+PM1=TRUE post_mortem_rows=0 empty_scrape_rows=0 first_empty_elapsed=none last_live_scrape_elapsed=100 need_ge=80
+== STOP: PMEM ==
+PMEM=TRUE mem_invariant_violations=0 sampler_fatal=0
+== recorded: ops ==
+OPS_PER_S=263.350
+WRITE_ERRORS=0
+TOTAL_WRITES=31602 DURATION_ACTUAL=120
+OPS_AT_900=n/a reason=no_checkpoint_near_900
+== recorded: host state at launch (the cell matrix's /proc/loadavg line) ==
+HOST=load_1m=0.30 load_5m=1.33 load_15m=1.50
+== STOP: PALLOC ==
+PALLOC_ITEM_pv=PASS PV=TRUE
+PALLOC_ITEM_s1=PASS ALLOC_ENV=none
+PALLOC_ITEM_s2=PASS BIN_MARKERS=je=0,mi=0
+PALLOC_ITEM_s3=PASS JE_BG_THREADS=0
+PALLOC_ITEM_s4=PASS je_lines=0,mimalloc_lines=0
+PALLOC_ITEM_s5=PASS TREE_PROOF_SYS-ser=PASS
+PALLOC_ITEM_s6=PASS steal_pct_lines=1,flavour_fatal=0
+PALLOC_ITEM_marker_control=PASS JE-ser.je=1,MI3-ser.mi=3,MI2-ser.mi=3
+PALLOC=TRUE label=SYS-ser
+== readings: fits (slopes per hour; on amp series the unit is AMP per hour) ==
+FPL_slope=443.700000
+FPL_slope_se=90.932667
+FPL_slope_n=3
+FPL_slope_r2=0.959692
+SL_slope=443.700000
+SL_slope_se=90.932667
+SL_slope_n=3
+SL_slope_r2=0.959692
+LAZY_slope=0.000000
+LAZY_slope_se=0.000000
+LAZY_slope_n=3
+LAZY_slope_r2=NA
+TRENDL=n/a reason=no_linux_estimator
+TRENDL3=n/a reason=no_linux_estimator
+TRENDL_dropped=0
+TRENDL_points_used=0
+== readings: end levels (last row carrying fp_equiv_mb) ==
+END_elapsed=100
+FPL_end=25.602
+SL_end=25.602
+LAZY_end=0.000
+LAZY_RATIO_end=0.000000
+HWM_end=36.789
+ANON_HUGE_end=0.000
+== readings: census points (TERMINAL, and the deciding point = the last used one) ==
+TERM_src=TERMINAL
+TERM_t=120.3
+TERM_join_lag_s=20.3
+TERM_live=12559
+TERM_reach_bytes=n/a reason=no_linux_estimator
+TERM_redb_mb=2.176
+TERM_AMP_FPL=n/a reason=no_linux_estimator
+TERM_AMP_SL=n/a reason=no_linux_estimator
+TERM_R_redb=n/a reason=no_linux_estimator
+DECIDE_src=TERMINAL
+DECIDE_t=120.3
+DECIDE_join_lag_s=20.3
+DECIDE_live=12559
+DECIDE_reach_bytes=n/a reason=no_linux_estimator
+DECIDE_redb_mb=2.176
+DECIDE_AMP_FPL=n/a reason=no_linux_estimator
+DECIDE_AMP_SL=n/a reason=no_linux_estimator
+DECIDE_R_redb=n/a reason=no_linux_estimator
+== readings: per live entry ==
+LIVE_END_ssy=12559 src=TERMINAL t=120.3
+CENSUS_POINTS_ssy=1 retained=1
+CENSUS_DROPPED_ssy=none
+CENSUS_DROPPED_N_ssy=0
+PE_END_ssy=1023.027449 t=120.3 live=12559
+PE_ROWS_ssy=0
+PE_LEVEL_ssy=n/a reason=no_rows_in_level_window
+RSS_PE_LEVEL_ssy=n/a reason=no_rows_in_level_window
+== readings: trend (per-entry, relative per hour) ==
+TREND_ssy=n/a reason=few_rows n=0 dropped=0
+STAGE2_T_ssy=n/a reason=missing:ssy:e
+FIXED_EST_ssy=n/a reason=few_rows
+FIXED_NOTE_ssy=n/a reason=few_rows
+TREND_CORR_ssy=n/a reason=few_rows
+TREND3_ssy=n/a reason=few_rows n=0 dropped=0
+== readings: recorded (never decision inputs) ==
+LAZY_MAX_ssy=0.000 ratio=0.000000 row=0
+HWM_END_ssy=36.789
+ANON_HUGE_END_ssy=0.000
+DISK_SLOPE_ssy=63.270000 se=26.760185 n=3

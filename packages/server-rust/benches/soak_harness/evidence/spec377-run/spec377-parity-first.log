@@ -1,0 +1,4 @@
+parity awk: /opt/topgun/target/spec377-run/parity-first/awkbin-original/awk -> /usr/bin/original-awk banner='awk version 20220912'
+SYNTH_PARITY=PASS cases=19 awk='awk version 20220912'
+SYNTH_PARITY_MAWK=PASS rc=0
+SYNTH_PARITY_GAWK=n/a reason=absent

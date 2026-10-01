@@ -1,0 +1,87 @@
+smi3 [server] v3.3.2 (built on Sep 30 2026, 08:26:20)
+smi3 [server] option 'show_errors': 0 
+smi3 [server] option 'show_stats': 0 
+smi3 [server] option 'verbose': 1 
+smi3 [server] option 'deprecated_eager_commit': 1 
+smi3 [server] option 'arena_eager_commit': 2 
+smi3 [server] option 'purge_decommits': 1 
+smi3 [server] option 'allow_large_os_pages': 0 
+smi3 [server] option 'reserve_huge_os_pages': 0 
+smi3 [server] option 'reserve_huge_os_pages_at': -1 
+smi3 [server] option 'reserve_os_memory': 0 KiB
+smi3 [server] option 'deprecated_segment_cache': 0 
+smi3 [server] option 'deprecated_page_reset': 0 
+smi3 [server] option 'deprecated_abandoned_page_purge': 0 
+smi3 [server] option 'deprecated_segment_reset': 0 
+smi3 [server] option 'deprecated_eager_commit_delay': 1 
+smi3 [server] option 'purge_delay': 1000 
+smi3 [server] option 'use_numa_nodes': 0 
+smi3 [server] option 'disallow_os_alloc': 0 
+smi3 [server] option 'os_tag': 100 
+smi3 [server] option 'max_errors': 32 
+smi3 [server] option 'max_warnings': 32 
+smi3 [server] option 'deprecated_max_segment_reclaim': 10 
+smi3 [server] option 'destroy_on_exit': 0 
+smi3 [server] option 'arena_reserve': 1048576 KiB
+smi3 [server] option 'arena_purge_mult': 1 
+smi3 [server] option 'deprecated_purge_extend_delay': 1 
+smi3 [server] option 'disallow_arena_alloc': 0 
+smi3 [server] option 'retry_on_oom': 400 
+smi3 [server] option 'visit_abandoned': 0 
+smi3 [server] option 'guarded_min': 0 
+smi3 [server] option 'guarded_max': 1073741824 
+smi3 [server] option 'guarded_precise': 0 
+smi3 [server] option 'guarded_sample_rate': 0 
+smi3 [server] option 'guarded_sample_seed': 0 
+smi3 [server] option 'generic_collect': 10000 
+smi3 [server] option 'page_reclaim_on_free': 0 
+smi3 [server] option 'page_full_retain': 2 
+smi3 [server] option 'page_max_candidates': 4 
+smi3 [server] option 'max_vabits': 0 
+smi3 [server] option 'pagemap_commit': 0 
+smi3 [server] option 'page_commit_on_demand': 0 
+smi3 [server] option 'page_max_reclaim': -1 
+smi3 [server] option 'page_cross_thread_max_reclaim': 32 
+smi3 [server] option 'allow_thp': 1 
+smi3 [server] option 'minimal_purge_size': 0 KiB
+smi3 [server] option 'arena_max_object_size': 2097152 KiB
+smi3 [server] option 'arena_is_numa_local': 0 
+smi2 [server] mimalloc: v2.3.2 (built on Sep 30 2026, 08:31:56)
+smi2 [server] mimalloc: option 'show_errors': 0 
+smi2 [server] mimalloc: option 'show_stats': 0 
+smi2 [server] mimalloc: option 'verbose': 1 
+smi2 [server] mimalloc: option 'eager_commit': 1 
+smi2 [server] mimalloc: option 'arena_eager_commit': 2 
+smi2 [server] mimalloc: option 'purge_decommits': 1 
+smi2 [server] mimalloc: option 'allow_large_os_pages': 0 
+smi2 [server] mimalloc: option 'reserve_huge_os_pages': 0 
+smi2 [server] mimalloc: option 'reserve_huge_os_pages_at': -1 
+smi2 [server] mimalloc: option 'reserve_os_memory': 0 KiB
+smi2 [server] mimalloc: option 'deprecated_segment_cache': 0 
+smi2 [server] mimalloc: option 'deprecated_page_reset': 0 
+smi2 [server] mimalloc: option 'abandoned_page_purge': 0 
+smi2 [server] mimalloc: option 'deprecated_segment_reset': 0 
+smi2 [server] mimalloc: option 'eager_commit_delay': 1 
+smi2 [server] mimalloc: option 'purge_delay': 10 
+smi2 [server] mimalloc: option 'use_numa_nodes': 0 
+smi2 [server] mimalloc: option 'disallow_os_alloc': 0 
+smi2 [server] mimalloc: option 'os_tag': 100 
+smi2 [server] mimalloc: option 'max_errors': 32 
+smi2 [server] mimalloc: option 'max_warnings': 32 
+smi2 [server] mimalloc: option 'max_segment_reclaim': 10 
+smi2 [server] mimalloc: option 'destroy_on_exit': 0 
+smi2 [server] mimalloc: option 'arena_reserve': 1048576 KiB
+smi2 [server] mimalloc: option 'arena_purge_mult': 10 
+smi2 [server] mimalloc: option 'purge_extend_delay': 1 
+smi2 [server] mimalloc: option 'abandoned_reclaim_on_free': 0 
+smi2 [server] mimalloc: option 'disallow_arena_alloc': 0 
+smi2 [server] mimalloc: option 'retry_on_oom': 400 
+smi2 [server] mimalloc: option 'visit_abandoned': 0 
+smi2 [server] mimalloc: option 'guarded_min': 0 
+smi2 [server] mimalloc: option 'guarded_max': 1073741824 
+smi2 [server] mimalloc: option 'guarded_precise': 0 
+smi2 [server] mimalloc: option 'guarded_sample_rate': 0 
+smi2 [server] mimalloc: option 'guarded_sample_seed': 0 
+smi2 [server] mimalloc: option 'target_segments_per_thread': 0 
+smi2 [server] mimalloc: option 'generic_collect': 10000 
+smi2 [server] mimalloc: option 'allow_thp': 1 

@@ -1,0 +1,187 @@
+WARNING: artifact dir overridden to /opt/topgun/target/spec377-run/smoke
+         A characterization run's artifacts belong in /opt/topgun/packages/server-rust/benches/soak_harness/evidence
+         (git-tracked); artifacts written elsewhere are not evidence.
+provenance: server sha256=3357d04ec381426e057a32d5fe474e5f6268a7123e3df110bfe72c0360ca12b0 flavour=MI built=2026-09-30T08:36:27Z run_start=2026-09-30T08:49:38Z topgun_or_prune_restored_cancelled_total=present
+provenance: server sha256=3357d04ec381426e057a32d5fe474e5f6268a7123e3df110bfe72c0360ca12b0 flavour=MI built=2026-09-30T08:36:27Z run_start=2026-09-30T08:49:38Z topgun_or_prune_restored_cancelled_total=present harness sha256=f205d81c653a7cf09fc7a88084cbd183dfdf61443671ba2fbd3db707499c1911 harness_built=2026-09-30T08:40:49Z tombstone_level_ceiling_gate=present
+soak binary:   /opt/topgun/target/spec377-H/release/deps/soak_harness-53b4b640053c5766
+  built:       2026-09-30T08:40:49Z
+server binary: /opt/topgun/target/spec377-MI2-ser/release/topgun-server
+  built:       2026-09-30T08:36:27Z
+
+=== spec377 Linux run: cell smi2 (label MI2-ser, flavour MI, phase smoke) ===
+  repo HEAD:      03114a764495f29499796d9535f3285af9f9fc1a
+  dirty tree:     yes
+  host/OS:        Linux topgun-bench 6.1.0-52-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.180-1 (2026-08-03) x86_64 GNU/Linux
+  lineage:        chain-built harness + chain-built MI server
+  chain start:    1790756015
+  data dir:       /opt/topgun/target/spec377-smi2-data
+  csv:            /opt/topgun/target/spec377-run/smoke/spec377-smi2.csv
+  soak.json:      /opt/topgun/target/spec377-run/smoke/spec377-smi2.soak.json
+  mechanism.json: /opt/topgun/target/spec377-run/smoke/spec377-smi2.mechanism.json (harness writes spec377-smi2.soak.mechanism.json; renamed after the run)
+  durable.json:   /opt/topgun/target/spec377-run/smoke/spec377-smi2.soak.durable.json (raw basename: NOT renamed, by design)
+  progress.jsonl: /opt/topgun/target/spec377-run/smoke/spec377-smi2.progress.jsonl
+  console log:    /opt/topgun/target/spec377-run/smoke/spec377-smi2.harness-console.log
+  matrix:         /opt/topgun/target/spec377-run/smoke/spec377-smi2.matrix.txt
+  soak binary:    /opt/topgun/target/spec377-H/release/deps/soak_harness-53b4b640053c5766
+  soak binary commit: 03114a764495f29499796d9535f3285af9f9fc1a (HEAD; the binary itself is identified by its sha256)
+  .rs working tree:   CLEAN over '*.rs' Cargo.toml '*/Cargo.toml' Cargo.lock (asserted before the build)
+  code freeze:            34007e19
+  code freeze diff (.rs): EMPTY over '*.rs' Cargo.toml '*/Cargo.toml' Cargo.lock (asserted before the build)
+    built:        2026-09-30T08:40:49Z
+  server binary:  /opt/topgun/target/spec377-MI2-ser/release/topgun-server
+    built:        2026-09-30T08:36:27Z
+    sha256:       3357d04ec381426e057a32d5fe474e5f6268a7123e3df110bfe72c0360ca12b0
+  --- varied knobs; everything else is the spec362b-durable.sh long4h
+      literal ---
+  TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
+  duration:            120s
+  csv cadence:         20s
+  extra harness flags: <none>
+  --durable-reading:   ARMED
+  --live-census-interval: 300 (ARMED: the live-copy census)
+  --sampler-jitter-seed:  20260831
+  SOAK_SERVER_LOG:     warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  SOAK_SERVER_LOG_PASSTHROUGH: 1
+  TOPGUN_PRUNE_RECORD: true
+  TOPGUN_LOG_FORMAT:   <unset: human fmt, which is what the origin parser reads>
+  server port:         47376
+  SOAK_SERVER_BINARY:  /opt/topgun/target/spec377-MI2-ser/release/topgun-server
+  --- pinned matrix (identical to spec362b-durable.sh's long4h cell;
+      crash-interval is per-cell and is 0 on the one cell this runner
+      ships) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 0;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+  tombstone gate: level ceiling K=2+ceil(S_A/W) epochs × W × b_max (S_A, b_max measured by the harness; A = TOPGUN_WAL_WATERMARK_STALL_BOUND_MS, not set by this runner); level stability 10 %; slope report-only
+  harness sha256: f205d81c653a7cf09fc7a88084cbd183dfdf61443671ba2fbd3db707499c1911
+  server flavour: MI
+  server code:    SERIES_PIN = 34007e19 (SPEC377_SERVER_COMMIT=34007e19, resolves 34007e197224d4db870ba2c842716316622580de)
+  TOPGUN_JOURNAL_ENABLED:        <unset: harness passes true>
+  TOPGUN_SOAK_GRACEFUL_SHUTDOWN: <unset: SIGKILL teardown>
+  DHAT_OUT:                      <unset>
+  --- allocator treatment (items 5 and 6) ---
+  build label:                   MI2-ser
+  allocator env unset first:     MALLOC_CONF _RJEM_MALLOC_CONF MALLOC_ARENA_MAX MALLOC_ARENA_TEST MALLOC_TOP_PAD_ MALLOC_TRIM_THRESHOLD_ MALLOC_MMAP_THRESHOLD_ MALLOC_MMAP_MAX_ MALLOC_PERTURB_ MALLOC_CHECK_ GLIBC_TUNABLES LD_PRELOAD + every exported MIMALLOC_*
+  allocator env expected:        MIMALLOC_VERBOSE=1
+  allocator env (runner shell):  MIMALLOC_VERBOSE=1
+  allocator literals in binary:  je=0 mi=3
+  THP at launch:                 madvise/madvise
+  allocator proof:               read from /proc/<pid> at the first sample with elapsed >= 60 s
+  post-mortem rows:              counted at the end of the run (item 17)
+  --- host (Linux) ---
+  os-release:          Debian GNU/Linux 12 (bookworm)
+  kernel:              6.1.0-52-amd64
+  cpu model:           AMD EPYC-Milan Processor
+  nproc:               4
+  glibc:               ldd (Debian GLIBC 2.36-9+deb12u14) 2.36
+  rustc host:          x86_64-unknown-linux-gnu
+  THP enabled:         always [madvise] never
+  THP defrag:          always defer defer+madvise [madvise] never
+  swapon --show:       empty (no swap)
+  vm.overcommit_memory: 0
+  vm.max_map_count:    65530
+  awk:                 /opt/topgun/target/spec377-awkbin/awk
+  awk -version:        awk version 20220912
+  memory sampler:      spec376-procmem.sh sha256=d05727f002087cb37fb8abce8f5f935dce11af5e0e0373c873e6a393a8a6f7b4
+  memory proc root:    /proc (fixed; procmem_row is called without a root, fixture roots belong to the synthetic suite only)
+  /proc/loadavg:       1.81 1.87 1.71 1/124 42325
+  /proc/meminfo (first 8 lines):
+    MemTotal:       15985096 kB
+    MemFree:         9981572 kB
+    MemAvailable:   15480596 kB
+    Buffers:          121984 kB
+    Cached:          5469360 kB
+    SwapCached:            0 kB
+    Active:          2663480 kB
+    Inactive:        2945004 kB
+
+harness pid 42328; follow with: tail -f /opt/topgun/target/spec377-smi2-data.meta/harness-console.log
+server ready: pid 42335 (t0 = server-ready)
+
+harness exited with code 0
+
+=== DURABLE-LAYER READING (report-only, decides nothing) ===
+reading:           INDETERMINATE_INSTRUMENT
+reason:            series rss_kib is indeterminate: retained span 105.3s below the minimum 600.0s
+log filter:        warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  rss_kib            shape=INDETERMINATE envelope=- samples=22 span=105.3s
+                     peaks  h1=0 h2=0 q3=0 q4=0 last_half_mean=0
+                     floor  h1=0 h2=0 q3=0 q4=0
+  redb_bytes         shape=INDETERMINATE envelope=- samples=22 span=107.6s
+                     peaks  h1=0 h2=0 q3=0 q4=0 last_half_mean=0
+                     floor  h1=0 h2=0 q3=0 q4=0
+  wal_bytes          shape=INDETERMINATE envelope=- samples=22 span=107.6s
+                     peaks  h1=0 h2=0 q3=0 q4=0 last_half_mean=0
+                     floor  h1=0 h2=0 q3=0 q4=0
+  wal_segment_files  shape=INDETERMINATE envelope=- samples=22 span=107.6s
+                     peaks  h1=0 h2=0 q3=0 q4=0 last_half_mean=0
+                     floor  h1=0 h2=0 q3=0 q4=0
+writebehind lag:   1879 (observation only) scrapes total=24 read=22 absent=2 unreadable=0 malformed_samples=0 overflowed_samples=0
+censuses:          1
+  TERMINAL   t=120.3s copy_done=n/a keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=12579 live_tag_bytes=427686 tombstones=290 tombstone_bytes=6090 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=9
+terminal census:   keys=96 tombstone_bytes=6090
+origin:            reading=NOT_REACHED_EQUAL_REFS matched=6 unparsed=0 dropped=0 armed=true epochs_exited=5 restarts=0 epochs_scrapes total=24 read=24 absent=0 unreadable=0 malformed_samples=0 overflowed_samples=0
+origin reason:     all 6 parsed line(s) returned exactly the refs held at entry
+first zero-return: (none)
+wrote durable reading to /opt/topgun/target/spec377-run/smoke/spec377-smi2.soak.durable.json
+console log: /opt/topgun/target/spec377-run/smoke/spec377-smi2.harness-console.log
+mechanism report: /opt/topgun/target/spec377-run/smoke/spec377-smi2.mechanism.json
+csv rows: 6
+post_mortem_rows=0
+csv columns:
+  rss_mb         n=6 empty=0 nonzero=6 min=52.887 max=74.246
+  wal_mb         n=6 empty=0 nonzero=6 min=0.129 max=1.918
+  redb_mb        n=6 empty=0 nonzero=6 min=0.516 max=2.176
+  disk_total_mb  n=6 empty=0 nonzero=6 min=0.648 max=4.094
+  tombstone_bytes n=6 empty=0 min=54 max=21242
+  rss_mb           n=6 empty=0
+  fp_equiv_mb      n=6 empty=0
+  hwm_rss_mb       n=6 empty=0
+  lazyfree_mb      n=6 empty=0
+  swap_mb          n=6 empty=0
+  file_mb          n=6 empty=0
+  anon_mb          n=6 empty=0
+  private_dirty_mb n=6 empty=0
+  pss_mb           n=6 empty=0
+  anon_huge_mb     n=6 empty=0
+  smaps_rss_mb     n=6 empty=0
+  progress.jsonl: not required -- duration 120s <= steady interval 300s,
+                  so the harness reached no checkpoint to snapshot.
+  soak.json "walFsync": "batched",
+  soak.json "epochWidth": 1000,
+  soak.json "crashes": 0,
+  soak.json "churnClients": 6,
+  soak.json "keyspace": 200,
+  soak.json "durationSecsActual": 120,
+  mechanism.json "orDeltaFrames": 211,
+  mechanism.json "orSnapshotFrames": 0,
+
+post-hoc OLS fits (see the SE caveat in spec349c2-fit.awk):
+  units: the field is named slope_mb_per_hour for every column; on the
+  tombstone_bytes row the fit is identical but the unit is BYTES/hour.
+  col=rss_mb window=full rows_used=6 n=6 skipped_empty=0 t_start_secs=0.0 t_end_secs=100.0 span_secs=100.0 y_first=52.887 y_last=74.246 slope_mb_per_hour=673.647429 se_mb_per_hour=139.189172 intercept_mb=57.265619 r2=0.854140 sxx_hours2=0.000540123 sse=41.856598705
+  col=wal_mb window=full rows_used=6 n=6 skipped_empty=0 t_start_secs=0.0 t_end_secs=100.0 span_secs=100.0 y_first=0.129 y_last=1.863 slope_mb_per_hour=47.880000 se_mb_per_hour=23.886281 intercept_mb=0.892333 r2=0.501123 sxx_hours2=0.000540123 sse=1.232679333
+  col=redb_mb window=full rows_used=6 n=6 skipped_empty=0 t_start_secs=0.0 t_end_secs=100.0 span_secs=100.0 y_first=0.516 y_last=2.176 slope_mb_per_hour=61.981714 se_mb_per_hour=6.215530 intercept_mb=0.602143 r2=0.961331 sxx_hours2=0.000540123 sse=0.083465943
+  col=disk_total_mb window=full rows_used=6 n=6 skipped_empty=0 t_start_secs=0.0 t_end_secs=100.0 span_secs=100.0 y_first=0.648 y_last=4.047 slope_mb_per_hour=109.949143 se_mb_per_hour=27.288540 intercept_mb=1.493762 r2=0.802312 sxx_hours2=0.000540123 sse=1.608842819
+  col=tombstone_bytes window=full rows_used=6 n=6 skipped_empty=0 t_start_secs=0.0 t_end_secs=100.0 span_secs=100.0 y_first=54.000 y_last=6006.000 slope_mb_per_hour=-101674.285714 se_mb_per_hour=360215.646432 intercept_mb=7761.476190 r2=0.019529 sxx_hours2=0.000540123 sse=280335550.476190567
+  col=rss_mb window=last_half rows_used=6 n=3 skipped_empty=0 t_start_secs=60.0 t_end_secs=100.0 span_secs=40.0 y_first=68.383 y_last=74.246 slope_mb_per_hour=527.670000 se_mb_per_hour=119.563467 intercept_mb=59.972000 r2=0.951165 sxx_hours2=0.000061728 sse=0.882433500
+  col=wal_mb window=last_half rows_used=6 n=3 skipped_empty=0 t_start_secs=60.0 t_end_secs=100.0 span_secs=40.0 y_first=1.879 y_last=1.863 slope_mb_per_hour=-1.440000 se_mb_per_hour=4.884383 intercept_mb=1.918667 r2=0.079967 sxx_hours2=0.000061728 sse=0.001472667
+  col=redb_mb window=last_half rows_used=6 n=3 skipped_empty=0 t_start_secs=60.0 t_end_secs=100.0 span_secs=40.0 y_first=1.551 y_last=2.176 slope_mb_per_hour=56.250000 se_mb_per_hour=32.475953 intercept_mb=0.717667 r2=0.750000 sxx_hours2=0.000061728 sse=0.065104167
+  col=disk_total_mb window=last_half rows_used=6 n=3 skipped_empty=0 t_start_secs=60.0 t_end_secs=100.0 span_secs=40.0 y_first=3.414 y_last=4.047 slope_mb_per_hour=56.970000 se_mb_per_hour=37.776028 intercept_mb=2.585667 r2=0.694597 sxx_hours2=0.000061728 sse=0.088088167
+  col=tombstone_bytes window=last_half rows_used=6 n=3 skipped_empty=0 t_start_secs=60.0 t_end_secs=100.0 span_secs=40.0 y_first=3213.000 y_last=6006.000 slope_mb_per_hour=251370.000000 se_mb_per_hour=3273.576026 intercept_mb=-966.000000 r2=0.999830 sxx_hours2=0.000061728 sse=661.500000000
+
+RESULT: instrument sound; harness exit code 0.
+ALLOC_ENV_smi2=MIMALLOC_VERBOSE=1
+JE_BG_THREADS_smi2=0
+THP_smi2=madvise/madvise
+ALLOC_PROOF_AT_smi2=60
+BIN_MARKERS_smi2=je=0 mi=3
+MI_POSTINIT_LINES_smi2=3
+steal_pct=0.0000
+post_mortem_mem_reads=0
+mem_invariant_violations=0
+RUNNER_EXIT=0

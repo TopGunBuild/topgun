@@ -1,0 +1,276 @@
+# SPEC-377 G4 transcript (macOS) — HEAD c51e31bdd84737df5e728c55ab1ff6d5a69b78cf, 2026-09-29T17:12:09Z
+# host: Darwin 27.0.0 arm64, awk version 20200816, GNU bash, version 3.2.57(1)-release (arm64-apple-darwin26)
+
+## AC-16: bash -n on every spec377 shell program; python3 -m py_compile on spec377-power.py
+spec377-cells.sh: OK
+spec377-chain.sh: OK
+spec377-decide.sh: OK
+spec377-order.sh: OK
+spec377-predicates.sh: OK
+spec377-preflight.sh: OK
+spec377-synth.sh: OK
+spec377-power.py: OK
+
+## AC-1: frozen parents untouched since SERIES_PIN
+$ git diff --quiet 34007e19..HEAD -- packages/server-rust/benches/soak_harness/evidence/spec37[0-6]* packages/server-rust/benches/soak_harness/evidence/spec3{49,66}*
+rc=0 (no change)
+
+## AC-2: nothing outside the evidence dir changed since SERIES_PIN
+$ git diff --name-only 34007e19..HEAD | grep -v '^packages/server-rust/benches/soak_harness/evidence/'
+(end: empty)
+
+## AC-3 (Linux-only guards) — macOS 27.0 arm64, 2026-09-29T17:12:06Z, HEAD c51e31bd
+$ bash packages/server-rust/benches/soak_harness/evidence/spec377-cells.sh s1
+FATAL: spec377-cells.sh runs on Linux only (uname -s = 'Darwin')
+rc=2
+$ SPEC377_PHASE=series bash packages/server-rust/benches/soak_harness/evidence/spec377-chain.sh
+FATAL: spec377-chain.sh runs on Linux only (uname -s = 'Darwin')
+rc=2
+$ SPEC377_PHASE=build bash packages/server-rust/benches/soak_harness/evidence/spec377-chain.sh
+FATAL: spec377-chain.sh runs on Linux only (uname -s = 'Darwin')
+rc=2
+$ SPEC377_PHASE=smoke bash packages/server-rust/benches/soak_harness/evidence/spec377-chain.sh
+FATAL: spec377-chain.sh runs on Linux only (uname -s = 'Darwin')
+rc=2
+$ bash packages/server-rust/benches/soak_harness/evidence/spec377-preflight.sh
+FATAL: spec377-preflight.sh runs on Linux only (uname -s = 'Darwin')
+rc=2
+$ bash packages/server-rust/benches/soak_harness/evidence/spec377-preflight.sh --apply
+FATAL: spec377-preflight.sh runs on Linux only (uname -s = 'Darwin')
+rc=2
+$ diff <(git status --porcelain --ignored, before) <(after)
+(empty: no file created or changed in the tree, ignored paths included)
+$ find . -type f -newer <stamp> (outside .git, .specflow)
+(end)
+
+## Disk floor: one section-1 literal, no number in chain/decide
+$ grep -nE '^MIN_DISK_GIB=' (section 1)
+45:MIN_DISK_GIB=40
+$ grep -nE '41943040|40 ?GiB|MIN_DISK_KB=' spec377-chain.sh spec377-decide.sh spec377-decide.awk
+(end: empty)
+$ grep -n 'MIN_DISK_GIB' spec377-chain.sh spec377-decide.sh
+packages/server-rust/benches/soak_harness/evidence/spec377-chain.sh:51:#      CHECK alloc_conf=PASS); DISK_FREE_AT_START= >= MIN_DISK_GIB /opt; a
+packages/server-rust/benches/soak_harness/evidence/spec377-chain.sh:98:MIN_DISK_GIB="$(sed '/^## APPEND-ONLY BELOW/q' "$MANIFEST" 2>/dev/null | awk -F= '$1 == "MIN_DISK_GIB" { n++; v = $2 } END { sub(/ .*/, "", v); if (n == 1 && v ~ /^[1-9][0-9]?[0-9]?[0-9]?[0-9]?$/) print v }')"   # section 1, the floor decide's STOP-H reads too; empty = absent, dup or malformed
+packages/server-rust/benches/soak_harness/evidence/spec377-chain.sh:568:  say "DISK_FREE_AT_START=${DF:-absent} KiB (need >= ${MIN_DISK_GIB:-<section-1 MIN_DISK_GIB unusable>} GiB)"
+packages/server-rust/benches/soak_harness/evidence/spec377-chain.sh:570:  [ -n "$MIN_DISK_GIB" ] && [ "$DF" -ge $((MIN_DISK_GIB * 1048576)) ] || { say "FATAL: /opt has ${DF} KiB free, below MIN_DISK_GIB=${MIN_DISK_GIB:-unusable} GiB; refusing to run"; exit 1; }
+packages/server-rust/benches/soak_harness/evidence/spec377-decide.sh:35:# The disk floor of STOP-H is section 1's MIN_DISK_GIB, the same literal the
+packages/server-rust/benches/soak_harness/evidence/spec377-decide.sh:105:LITERALS="SERIES_PIN A0_L_MIB FLAT_BAR_PER_H BETTER_BAR SYS_AGREE_BAR OPS_PARITY_MIN TIE_BAND STAGE2_MAX_H LEVEL_WINDOW_S MI_POSTINIT_BOUND LAZY_DRIFT_BAR PRICE_EUR_PER_H MIN_DISK_GIB"
+packages/server-rust/benches/soak_harness/evidence/spec377-decide.sh:115:    MIN_DISK_GIB) printf '%s' "$v" | grep -Eq '^[1-9][0-9]{0,4}$' || { BAD="${BAD} ${k}=${v:-empty}"; continue; } ;;
+packages/server-rust/benches/soak_harness/evidence/spec377-decide.sh:163:  *) if [ "$DF" -lt $((L_MIN_DISK_GIB * 1048576)) ]; then H_DISK="disk_free=${DF}KiB<${L_MIN_DISK_GIB}GiB"; else H_DISK=none; fi ;;
+(the preflight's own disk row is SPEC-376's inherited host check, verbatim from the parent:)
+packages/server-rust/benches/soak_harness/evidence/spec376-preflight.sh:63:MIN_DISK_KB=41943040     # 40 GiB
+packages/server-rust/benches/soak_harness/evidence/spec377-preflight.sh:106:MIN_DISK_KB=41943040     # 40 GiB
+
+## AC-14a: no M1 constant in predicates/decide
+$ grep -nE '16\.64|(^|[^0-9])886([^0-9]|$)|0\.3316|9\.13|13\.349' spec377-predicates.sh spec377-decide.awk
+(end: empty)
+
+## AC-14b: numeric constants in code of spec377-decide.awk
+$ sed -e 's/#.*//' -e 's/"[^"]*"//g' spec377-decide.awk | sed -E 's/\$[0-9A-Za-z_]+//g' | grep -oE '(^|[^A-Za-z0-9_.])[0-9]+(\.[0-9]+)?' | grep -oE '[0-9]+(\.[0-9]+)?' | sort -u
+0 1 2 
+$ (same pipeline on a copy with ops_min replaced by an injected 0.95)
+0 0.95 1 2 
+
+## AC-14c: each R0.2 key exactly once at column 0 of section 1
+SERIES_PIN=1 A0_L_MIB=1 FLAT_BAR_PER_H=1 BETTER_BAR=1 SYS_AGREE_BAR=1 OPS_PARITY_MIN=1 TIE_BAND=1 STAGE2_MAX_H=1 LEVEL_WINDOW_S=1 MI_POSTINIT_BOUND=1 LAZY_DRIFT_BAR=1 PRICE_EUR_PER_H=1 MIN_DISK_GIB=1 
+
+## R7.8: spec377-power.py against the section-1 table
+$ LC_ALL=C python3 spec377-power.py
+# diagnostics: 4 h gate reading (W=2h) | W=3h empirical | 6 h projected e6 = e4 x (2/3)^1.5
+spec372-j2 n=116 PE_LEVEL=2020B s=+1.34%/h r1=0.21 e4=0.56 class4=UNDERPOWERED e3=0.44 class3=MARGINAL e6=0.30 2e6=0.61 class6=MARGINAL
+TABLE | `j2` (JE) | 2 020 B | +1.34 | 0.21 | 0.56 | 0.44 | **0.30** | 0.61 < 1 | 0.39 | `MARGINAL` ⇒ `UNRESOLVED(MARGINAL)` |
+spec372-m2 n=116 PE_LEVEL=1895B s=-6.35%/h r1=0.87 e4=3.05 class4=UNDERPOWERED e3=2.59 class3=FALLING e6=1.66 2e6=3.32 class6=FALLING
+TABLE | `m2` (MI v3) | 1 895 B | −6.35 | 0.87 | 3.05 | 2.59 | **1.66** | 3.32 > 1 | none | `FALLING` ⇒ `UNRESOLVED(FALLING)` |
+spec372-s2 n=116 PE_LEVEL=430B s=-10.42%/h r1=0.91 e4=17.67 class4=UNDERPOWERED e3=8.45 class3=FALLING e6=9.62 2e6=19.24 class6=UNDERPOWERED
+TABLE | `s2` (SYS) | 430 B | −10.42 | 0.91 | 17.67 | 8.45 | **9.62** | 19.24 > 1 | none | `UNDERPOWERED`; `STAGE2_T` = 50 h ⇒ infeasible |
+# recorded: fixed-memory fit fp = F0 + MC x live over the gate window (M1 cells)
+spec372-j2 FIXED_EST=-73MiB MC=2077B/entry
+spec372-m2 FIXED_EST=+214MiB MC=1621B/entry
+spec372-s2 FIXED_EST=+42MiB MC=328B/entry
+spec376-c1 rows=7 resid_sd_rel=3.59%
+spec376-c2 rows=7 resid_sd_rel=3.22%
+spec376-pa rows=7 resid_sd_rel=3.71%
+spec376-pb rows=7 resid_sd_rel=5.76%
+SPREAD `c1` 3.59 %, `c2` 3.22 %, `pa` 3.71 %, `pb` 5.76 %
+$ diff <(sed -n 's/^TABLE //p' power output) <(grep -E '^\| `(j2|m2|s2)` \(' manifest)
+rc=0: empty diff, every digit equal
+$ SPREAD sentence found in section 1 (whitespace-normalised): 1 occurrence(s)
+
+## AC-4 / AC-4b: spec377-synth.sh on macOS (every CASE line and the E1 design/result lines; fixture echoes elided)
+$ bash spec377-synth.sh <fresh scratch>
+CASE F0 PASS
+CASE A1 PASS
+CASE A2 PASS
+CASE A3 PASS
+CASE A4 PASS
+CASE A5 PASS
+CASE A6 PASS
+CASE A7 PASS
+CASE A8 PASS
+CASE A9 PASS
+CASE A10 PASS
+CASE A11 PASS
+CASE A13 PASS
+CASE A14 PASS
+CASE N_pv PASS
+CASE N_s1 PASS
+CASE N_s2 PASS
+CASE N_s3 PASS
+CASE N_s4 PASS
+CASE N_s5 PASS
+CASE N_s6 PASS
+CASE N_marker_control PASS
+CASE N_j1 PASS
+CASE N_j2 PASS
+CASE N_j3 PASS
+CASE N_j4 PASS
+CASE N_j5 PASS
+CASE N_j6 PASS
+CASE N_m1 PASS
+CASE N_m2 PASS
+CASE N_m3 PASS
+CASE N_m4 PASS
+CASE N_m5 PASS
+CASE N_mi_version PASS
+CASE N_mi_thread_prefix PASS
+CASE B1 PASS
+CASE B2 PASS
+CASE B3 PASS
+CASE B4 PASS
+CASE B5 PASS
+CASE P1 PASS
+CASE P2 PASS
+CASE P3 PASS
+CASE P4 PASS
+CASE P5 PASS
+CASE P6 PASS
+CASE P7 PASS
+CASE P12 PASS
+CASE P8 PASS
+CASE P9 PASS
+CASE P10 PASS
+CASE P11 PASS
+CASE P13 PASS
+CASE P14 PASS
+CASE P15 PASS
+CASE P16 PASS
+CASE P17 PASS
+CASE P18 PASS
+CASE P18b PASS
+CASE P18c PASS
+CASE D1 PASS
+CASE D2 PASS
+CASE D3 PASS
+CASE D4 PASS
+CASE D5 PASS
+CASE D6 PASS
+CASE D7 PASS
+CASE D8 PASS
+CASE D9 PASS
+CASE D10 PASS
+CASE D10b PASS
+CASE D11 PASS
+CASE D11b PASS
+CASE D12 PASS
+CASE D13 PASS
+CASE D14 PASS
+CASE D14b PASS
+CASE D15 PASS
+CASE D15b PASS
+CASE D16 PASS
+CASE D18 PASS
+CASE CR1 PASS
+CASE CR2 PASS
+CASE CR3 PASS
+CASE CR4 PASS
+CASE CR5 PASS
+CASE CR6 PASS
+CASE CR6b PASS
+CASE CR6c PASS
+CASE CR6d PASS
+CASE CR7 PASS
+CASE CR8 PASS
+CASE CR9 PASS
+CASE CR10 PASS
+CASE H1 PASS
+CASE H2 PASS
+CASE H3 PASS
+CASE H4 PASS
+CASE H5 PASS
+CASE V1 PASS
+CASE V2 PASS
+CASE V3 PASS
+CASE V4 PASS
+CASE V5 PASS
+CASE V6 PASS
+CASE V7 PASS
+CASE V8 PASS
+CASE V9 PASS
+CASE R11 PASS
+CASE R12 PASS
+CASE R13a PASS
+CASE R13b PASS
+CASE OOD1 PASS
+CASE LZ1 PASS
+CASE A12 PASS
+CASE K1 PASS
+CASE E2 PASS
+  | E1_FACTORS=31 E1_BASE_ROWS=199 E1_ROWS=243 E1_UNCOVERED_PAIRS=0
+  | E1_CR_COUNT 1 missing_TREND
+  | E1_CR_COUNT 106 excluded
+  | E1_CR_COUNT 19 judgement
+  | E1_CR_COUNT 2 KEEP_SYSTEM;PLATEAU=OPEN;NEXT=TODO-719
+  | E1_CR_COUNT 35 STOP
+  | E1_CR_COUNT 38 PROVISIONAL_DEFAULT
+  | E1_CR_COUNT 42 n/a reason=not_conductor_ruling
+  | E1_INPUTS=243 E1_DECIDE_RUNS=486 E1_FAILS=0
+  | E1_NEXT_COUNT 1 CONDUCTOR_RULING;ARM_ORDER_ACCOUNTING
+  | E1_NEXT_COUNT 1 CONDUCTOR_RULING;OPS
+  | E1_NEXT_COUNT 1 KEEP_SYSTEM;SYS_FLAT_WITHIN_BAR
+  | E1_NEXT_COUNT 10 TODO-696+TODO-695;THEN;DEFAULT_FLIP=MI3
+  | E1_NEXT_COUNT 105 CONDUCTOR_RULING;SYS_MISSING
+  | E1_NEXT_COUNT 12 STAGE2;SYS_LONG_CELLS
+  | E1_NEXT_COUNT 13 TODO-696+TODO-695;THEN;DEFAULT_FLIP=JE
+  | E1_NEXT_COUNT 2 CONDUCTOR_RULING;FLAT_ARM_VS_RISING_SYS
+  | E1_NEXT_COUNT 21 CONDUCTOR_RULING;SYS_UNRESOLVABLE_BY_SLOPE
+  | E1_NEXT_COUNT 25 CONDUCTOR_RULING;SYS_BIMODAL;SEE=TODO-719
+  | E1_NEXT_COUNT 35 STOP
+  | E1_NEXT_COUNT 5 CONDUCTOR_RULING;SYS_INDETERMINATE
+  | E1_NEXT_COUNT 6 CONDUCTOR_RULING;NOTHING_PLATEAUS;SEE=TODO-719
+  | E1_NEXT_COUNT 6 TODO-696+TODO-695;THEN;DEFAULT_FLIP=MI2
+CASE E1 PASS
+SYNTH377=PASS cases=118
+rc=0 wall_s=149
+CASE P16 PASS lines: 1
+CASE P17 PASS lines: 1
+CASE P18 PASS lines: 1
+CASE CR6 PASS lines: 1
+CASE CR6b PASS lines: 1
+
+## ORDER against the M0 candidate (HEAD as M)
+$ bash spec377-order.sh $(git rev-parse HEAD)
+ORDER=OK manifest_commit=c51e31bdd84737df5e728c55ab1ff6d5a69b78cf prefix_sha256=6d64eb411ddab1cfdd1ef5db07771b4d0bcb2e96f2726868a91b0159c3fd9369 programs=17 series_pin=34007e19
+rc=0
+
+## Liveness: the two audit-v4 fixes reverted in a scratch copy of the programs
+$ diff spec377-predicates.sh <mutant>
+884,885c884,885
+<       printf "FIT_CHECK_%s=%s prog=%.9f fitter=%s absdiff=%.3g\n", key, (d <= 0.0000005 ? "PASS" : "FAIL"), b, R["slope_mb_per_hour"], d
+<       if (d > 0.0000005) { printf "%s=n/a reason=fit_mismatch n=%d\n", key, m; if (win == "last_half") { print "STAGE2_T_" c "=n/a reason=missing:" c ":e"; nofix("fit_mismatch") } exit }
+---
+>       printf "FIT_CHECK_%s=%s prog=%.9f fitter=%s absdiff=%.3g\n", key, (d <= 0.001 ? "PASS" : "FAIL"), b, R["slope_mb_per_hour"], d
+>       if (d > 0.001) { printf "%s=n/a reason=fit_mismatch n=%d\n", key, m; if (win == "last_half") { print "STAGE2_T_" c "=n/a reason=missing:" c ":e"; nofix("fit_mismatch") } exit }
+$ diff spec377-decide.awk <mutant>
+262c262
+<     for (i = 1; i <= NARM; i++) { ac = AC[ARMS[i]]; tc = trendc(ac); if (tc == "MISSING" || tc == "OOD") { cr = "n/a reason=missing:" ac ":TREND"; break } }
+---
+>     for (i = 1; i <= NARM; i++) { ac = AC[ARMS[i]]; tc = trendc(ac); if (tc == "OOD") { cr = "n/a reason=missing:" ac ":TREND"; break } }
+mutant synth rc=1
+CASE P18 FAIL
+CASE P18c FAIL
+CASE CR6 FAIL
+CASE CR6b FAIL
+CASE CR6c FAIL
+CASE CR6d FAIL
+CASE E1 FAIL
+SYNTH377=FAIL failed=P18,P18c,CR6,CR6b,CR6c,CR6d,E1
