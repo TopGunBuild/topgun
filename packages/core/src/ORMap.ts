@@ -28,10 +28,10 @@ export interface ORMapSnapshot<K, V> {
   items: Map<K, Map<string, ORMapRecord<V>>>;
   tombstones: Set<string>;
   /**
-   * Tombstone tags attributed to each key. Optional because the map does not
-   * track per-key attribution yet, so a snapshot never carries it today.
+   * Tombstone tags attributed to each key. Every tag here is also in
+   * `tombstones`; a key may appear here without appearing in `items`.
    */
-  keyTombstones?: Map<K, Set<string>>;
+  keyTombstones: Map<K, Set<string>>;
 }
 
 /**
@@ -51,7 +51,17 @@ export class ORMap<K, V> {
   private items: Map<K, Map<string, ORMapRecord<V>>>;
 
   // Set of removed tags (Tombstones).
+  // Map-wide: a tag in here is suppressed under every key (remove-wins).
   private tombstones: Set<string>;
+
+  // Key -> tombstone tags attributed to that key.
+  // An overlay on top of the map-wide set, never a replacement for it: it
+  // decides nothing about which records are visible. It exists because the
+  // server keeps tombstones per key and hashes them into that key's Merkle
+  // leaf (TG-MRK-001), so the client needs the same per-key set to compute a
+  // comparable leaf. Every tag in here is also in `tombstones`. Tombstones
+  // whose key is unknown stay in the map-wide set only.
+  private keyTombstones: Map<K, Set<string>>;
 
   // Set of expired tags (Local only cache for fast filtering)
   // Note: We don't persist this directly, but rely on filtering.
@@ -66,6 +76,7 @@ export class ORMap<K, V> {
     this.hlc = hlc;
     this.items = new Map();
     this.tombstones = new Set();
+    this.keyTombstones = new Map();
     this.merkleTree = new ORMapMerkleTree();
   }
 
@@ -158,6 +169,8 @@ export class ORMap<K, V> {
     for (const tag of tagsToRemove) {
       this.tombstones.add(tag);
       keyMap.delete(tag);
+      // The remove was observed under this key, so the tombstone belongs to it.
+      this.attribute(key, tag);
     }
 
     if (keyMap.size === 0) {
@@ -175,6 +188,7 @@ export class ORMap<K, V> {
   public clear(): void {
     this.items.clear();
     this.tombstones.clear();
+    this.keyTombstones.clear();
     this.merkleTree = new ORMapMerkleTree();
     this.notify();
   }
@@ -255,51 +269,133 @@ export class ORMap<K, V> {
   /**
    * Tombstone tags attributed to `key`.
    *
-   * The map does not track per-key attribution yet (tombstones live only in the
-   * map-wide set), so this is always empty.
+   * Returns a copy, so the caller cannot break the "attributed implies
+   * tombstoned map-wide" relation by mutating the result.
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- signature is fixed ahead of per-key attribution; nothing is attributed to any key yet
   public getKeyTombstones(key: K): Set<string> {
-    return new Set();
+    return new Set(this.keyTombstones.get(key));
   }
 
   /**
-   * Record `tags` as tombstones for `key`.
+   * Makes `tags` the complete set of tombstones attributed to `key`.
    *
-   * Without per-key attribution this only adds the tags to the map-wide set,
-   * through the same path a remote tombstone takes, so remove-wins holds for them.
+   * This is a REPLACE of the key's attribution, used to mirror the per-key set
+   * an authoritative peer reports. An empty `tags` clears the attribution, and
+   * the key then leaves the Merkle tree unless it still holds records.
+   *
+   * Every tag also goes into the map-wide tombstone set, which only ever grows
+   * here: a tag dropped from this key's attribution stays suppressed. A live
+   * record carrying a newly attributed tag is removed, under whichever key it
+   * lives, exactly as `applyTombstone` would remove it.
+   *
+   * Subscribers are notified at most once per call, and only when a live record
+   * was actually removed. A sync walk calls this for every key it visits and
+   * most of those calls change nothing a subscriber can see.
    */
   public setKeyTombstones(key: K, tags: Iterable<string>): void {
-    for (const tag of tags) {
-      this.applyTombstone(tag, key);
+    const next = new Set(tags);
+    const previous = this.keyTombstones.get(key);
+
+    // Only tags new to this key can still have a live record: a tag attributed
+    // earlier was purged when it was attributed, and no later write re-admits a
+    // tombstoned tag.
+    const added = new Set<string>();
+    for (const tag of next) {
+      this.tombstones.add(tag);
+      if (!previous || !previous.has(tag)) added.add(tag);
     }
+
+    const purged = this.purgeLiveTags(added);
+
+    if (next.size === 0) {
+      this.keyTombstones.delete(key);
+    } else {
+      this.keyTombstones.set(key, next);
+    }
+
+    this.updateMerkleTree(key);
+    const purgedKeys = new Set<K>();
+    for (const [purgedKey] of purged) {
+      if (purgedKey !== key) purgedKeys.add(purgedKey);
+    }
+    for (const purgedKey of purgedKeys) {
+      this.updateMerkleTree(purgedKey);
+    }
+
+    if (purged.length > 0) {
+      this.notify();
+    }
+  }
+
+  /**
+   * Removes the live records carrying any of `tags`, under every key, and
+   * returns what it removed. Does not touch the Merkle tree or subscribers.
+   *
+   * Protected so that a subclass keeping derived state per record (indexes)
+   * can observe the removals without scanning the map a second time.
+   */
+  protected purgeLiveTags(tags: ReadonlySet<string>): Array<[K, ORMapRecord<V>]> {
+    const purged: Array<[K, ORMapRecord<V>]> = [];
+    if (tags.size === 0) return purged;
+
+    // A tag is globally unique, so each one is looked for until it is found once.
+    const pending = new Set(tags);
+    for (const [itemKey, keyMap] of this.items) {
+      if (pending.size === 0) break;
+      for (const tag of pending) {
+        const record = keyMap.get(tag);
+        if (record) {
+          keyMap.delete(tag);
+          pending.delete(tag);
+          purged.push([itemKey, record]);
+        }
+      }
+      if (keyMap.size === 0) this.items.delete(itemKey);
+    }
+    return purged;
   }
 
   /**
    * Applies a tombstone (deletion) from a remote source.
    *
-   * `key` names the key the tombstone belongs to. It is accepted but not used:
-   * the tombstone goes into the map-wide set whichever key it came from.
+   * `key` names the key the tombstone belongs to. When it is given, the tag is
+   * also attributed to that key and so enters the key's Merkle leaf. Without
+   * it the tombstone is recorded map-wide only: it suppresses the tag exactly
+   * the same, but belongs to no key's leaf (the form used for tombstones whose
+   * key was never recorded).
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- signature is fixed ahead of per-key attribution; the key is not consulted yet
   public applyTombstone(tag: string, key?: K): void {
     this.tombstones.add(tag);
     // Cleanup active items if present
-    for (const [key, keyMap] of this.items) {
+    for (const [itemKey, keyMap] of this.items) {
       if (keyMap.has(tag)) {
         keyMap.delete(tag);
-        if (keyMap.size === 0) this.items.delete(key);
-        this.updateMerkleTree(key);
+        if (keyMap.size === 0) this.items.delete(itemKey);
+        this.updateMerkleTree(itemKey);
         // We found it, so we can stop searching (tag is unique globally)
         break;
       }
     }
+    if (key !== undefined) {
+      this.attribute(key, tag);
+      this.updateMerkleTree(key);
+    }
     this.notify();
+  }
+
+  /** Adds `tag` to the tombstones attributed to `key`. The caller updates the tree. */
+  private attribute(key: K, tag: string): void {
+    let attributed = this.keyTombstones.get(key);
+    if (!attributed) {
+      attributed = new Set();
+      this.keyTombstones.set(key, attributed);
+    }
+    attributed.add(tag);
   }
 
   /**
    * Merges state from another ORMap.
-   * - Adds all new tombstones from 'other'.
+   * - Adds all new tombstones from 'other', and its per-key attribution.
    * - Adds all new items from 'other' that are not in tombstones.
    * - Updates HLC with observed timestamps.
    */
@@ -309,6 +405,19 @@ export class ORMap<K, V> {
     // 1. Merge tombstones
     for (const tag of other.tombstones) {
       this.tombstones.add(tag);
+    }
+
+    // Attribution is a per-key union. Every attributed tag of `other` is in
+    // its map-wide set, which was just merged, so the union cannot attribute
+    // a tag this map does not suppress.
+    for (const [key, otherAttributed] of other.keyTombstones) {
+      const before = this.keyTombstones.get(key)?.size ?? 0;
+      for (const tag of otherAttributed) {
+        this.attribute(key, tag);
+      }
+      if ((this.keyTombstones.get(key)?.size ?? 0) !== before) {
+        changedKeys.add(key);
+      }
     }
 
     // 2. Merge items
@@ -371,6 +480,22 @@ export class ORMap<K, V> {
       }
     }
 
+    // A pruned tag must leave every key's attribution as well: the server
+    // drops it from the key's leaf when it prunes, and an attributed tag that
+    // is no longer suppressed map-wide would break "attributed implies
+    // tombstoned".
+    if (removedTags.length > 0) {
+      for (const [key, attributed] of this.keyTombstones) {
+        let changed = false;
+        for (const tag of removedTags) {
+          if (attributed.delete(tag)) changed = true;
+        }
+        if (!changed) continue;
+        if (attributed.size === 0) this.keyTombstones.delete(key);
+        this.updateMerkleTree(key);
+      }
+    }
+
     return removedTags;
   }
 
@@ -392,6 +517,7 @@ export class ORMap<K, V> {
     return {
       items: this.items,
       tombstones: this.tombstones,
+      keyTombstones: this.keyTombstones,
     };
   }
 
@@ -499,15 +625,18 @@ export class ORMap<K, V> {
   /**
    * Update the Merkle Tree for a specific key.
    * Called internally after any modification.
+   *
+   * The leaf covers every tag held under the key, including records whose TTL
+   * has passed (the server keeps those until they are removed), plus the
+   * tombstones attributed to the key. The tree drops the key when both are
+   * empty, so a key holding only tombstones stays in it.
    */
   private updateMerkleTree(key: K): void {
-    const keyStr = String(key);
-    const keyMap = this.items.get(key);
-
-    if (!keyMap || keyMap.size === 0) {
-      this.merkleTree.remove(keyStr);
-    } else {
-      this.merkleTree.update(keyStr, keyMap);
-    }
+    const noTags: string[] = [];
+    this.merkleTree.update(
+      String(key),
+      this.items.get(key)?.keys() ?? noTags,
+      this.keyTombstones.get(key) ?? noTags,
+    );
   }
 }

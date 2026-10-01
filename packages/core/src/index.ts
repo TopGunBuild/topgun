@@ -3,13 +3,7 @@ import { LWWMap, LWWRecord } from './LWWMap';
 import { ORMap, ORMapRecord, MergeKeyResult, ORMapSnapshot } from './ORMap';
 import { MerkleTree } from './MerkleTree';
 import { ORMapMerkleTree, ORMapMerkleNode } from './ORMapMerkleTree';
-import {
-  hashORMapEntry,
-  hashORMapLeaf,
-  hashORMapRecord,
-  timestampToString,
-  compareTimestamps,
-} from './ORMapMerkle';
+import { hashORMapLeaf, timestampToString, compareTimestamps } from './ORMapMerkle';
 import { PNCounterImpl } from './PNCounter';
 import type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig } from './PNCounter';
 import { Ringbuffer } from './Ringbuffer';
@@ -24,7 +18,7 @@ import type {
 } from './EventJournal';
 
 export { HLC, LWWMap, ORMap, MerkleTree, ORMapMerkleTree, PNCounterImpl };
-export { hashORMapEntry, hashORMapLeaf, hashORMapRecord, timestampToString, compareTimestamps };
+export { hashORMapLeaf, timestampToString, compareTimestamps };
 export type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig };
 
 // Event Journal exports

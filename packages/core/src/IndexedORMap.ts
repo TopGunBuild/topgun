@@ -546,22 +546,24 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
   /**
    * Apply a tombstone (with index updates).
    */
-  public applyTombstone(tag: string): void {
+  public applyTombstone(tag: string, key?: K): void {
     // Find the record before tombstoning
     const snapshot = this.getSnapshot();
     let removedValue: V | undefined;
     let removedKey: K | undefined;
 
-    for (const [key, tagMap] of snapshot.items) {
+    for (const [itemKey, tagMap] of snapshot.items) {
       const record = tagMap.get(tag);
       if (record) {
         removedValue = record.value;
-        removedKey = key;
+        removedKey = itemKey;
         break;
       }
     }
 
-    super.applyTombstone(tag);
+    // The key must travel with the tag, or an indexed map would silently lose
+    // the tombstone's per-key attribution.
+    super.applyTombstone(tag, key);
 
     if (removedValue !== undefined && removedKey !== undefined) {
       const compositeKey = this.createCompositeKey(removedKey, tag);
@@ -572,6 +574,28 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
         this.fullTextIndex.onRemove(compositeKey);
       }
     }
+  }
+
+  /**
+   * Purge live records by tag (with index updates).
+   *
+   * `setKeyTombstones` removes records through this instead of through
+   * `applyTombstone`, so the indexes have to follow the removals here.
+   */
+  protected purgeLiveTags(tags: ReadonlySet<string>): Array<[K, ORMapRecord<V>]> {
+    const purged = super.purgeLiveTags(tags);
+
+    for (const [key, record] of purged) {
+      const compositeKey = this.createCompositeKey(key, record.tag);
+      this.indexRegistry.onRecordRemoved(compositeKey, record.value);
+
+      // Update full-text index
+      if (this.fullTextIndex) {
+        this.fullTextIndex.onRemove(compositeKey);
+      }
+    }
+
+    return purged;
   }
 
   /**

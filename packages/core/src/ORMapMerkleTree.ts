@@ -1,6 +1,6 @@
-import { ORMap, ORMapRecord } from './ORMap';
+import { ORMap } from './ORMap';
 import { combineHashes, hashString } from './utils/hash';
-import { hashORMapEntry } from './ORMapMerkle';
+import { hashORMapLeaf } from './ORMapMerkle';
 
 /**
  * Merkle Node for ORMap.
@@ -21,7 +21,9 @@ export interface ORMapMerkleNode {
  * - Level 1..N: Buckets based on hex digits of Key Hash.
  *
  * Key difference from LWWMap MerkleTree:
- * - Each key can have multiple records (tags), so the entry hash includes all records for that key.
+ * - Each key can hold several records, so its entry hash is the canonical OR
+ *   leaf (TG-MRK-001): the key's live tags plus the tombstone tags attributed
+ *   to it. A key is present iff at least one of those two sets is non-empty.
  */
 export class ORMapMerkleTree {
   private root: ORMapMerkleNode;
@@ -40,33 +42,46 @@ export class ORMapMerkleTree {
     // Clear and rebuild
     this.root = { hash: 0, children: {} };
 
-    // Access internal items through available methods
-    // We need to iterate over all keys and get their records
     const snapshot = map.getSnapshot();
 
-    for (const [key, records] of snapshot.items) {
-      if (records.size > 0) {
-        const keyStr = String(key);
-        const entryHash = hashORMapEntry(keyStr, records);
-        const pathHash = hashString(keyStr).toString(16).padStart(8, '0');
-        this.updateNode(this.root, keyStr, entryHash, pathHash, 0);
-      }
+    // A key that holds only attributed tombstones has no items but still has a
+    // leaf on the server, so the walk covers both key sets.
+    const keys = new Set<K>(snapshot.items.keys());
+    for (const key of snapshot.keyTombstones.keys()) {
+      keys.add(key);
+    }
+
+    const noTags: string[] = [];
+    for (const key of keys) {
+      this.update(
+        String(key),
+        snapshot.items.get(key)?.keys() ?? noTags,
+        snapshot.keyTombstones.get(key) ?? noTags,
+      );
     }
   }
 
   /**
-   * Incrementally update a single key's hash.
-   * Call this when records for a key change.
+   * Incrementally update a single key's leaf.
+   * Call this when the key's records or its attributed tombstones change.
+   *
+   * The key is removed when both tag sets are empty: an empty slot has no leaf
+   * on the server either, and storing a hash for it would keep the roots apart
+   * forever.
+   *
+   * @param key The key of the entry
+   * @param liveTags Tags of every record held under the key
+   * @param tombstoneTags Tombstone tags attributed to the key
    */
-  update<V>(key: string, records: Map<string, ORMapRecord<V>>): void {
+  update(key: string, liveTags: Iterable<string>, tombstoneTags: Iterable<string>): void {
     const pathHash = hashString(key).toString(16).padStart(8, '0');
+    const live = new Set(liveTags);
+    const dead = new Set(tombstoneTags);
 
-    if (records.size === 0) {
-      // Key has no records, remove from tree
+    if (live.size === 0 && dead.size === 0) {
       this.removeNode(this.root, key, pathHash, 0);
     } else {
-      const entryHash = hashORMapEntry(key, records);
-      this.updateNode(this.root, key, entryHash, pathHash, 0);
+      this.updateNode(this.root, key, hashORMapLeaf(key, live, dead), pathHash, 0);
     }
   }
 
@@ -85,7 +100,7 @@ export class ORMapMerkleTree {
 
   /**
    * Remove a key from the tree.
-   * Called when all records for a key are removed.
+   * Called when a key has neither records nor attributed tombstones left.
    */
   remove(key: string): void {
     const pathHash = hashString(key).toString(16).padStart(8, '0');
