@@ -1,4 +1,5 @@
 import type { ORMap } from '@topgunbuild/core';
+import { logger } from './logger';
 
 /**
  * Persisted form of an OR-Map's per-key tombstone attribution: `[key, tags[]]`
@@ -58,18 +59,43 @@ export function serializeOrMapKeyTombstones(map: ORMap<any, any>): PersistedKeyT
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- restore runs at the registry level where the map's key and value types are erased; persisted keys are strings
 export function restoreOrMapKeyTombstones(map: ORMap<any, any>, persisted: unknown): void {
-  if (!Array.isArray(persisted)) return;
+  // Absent is the ordinary case (a store written before attribution existed).
+  if (persisted === undefined || persisted === null) return;
 
-  for (const pair of persisted) {
-    if (!Array.isArray(pair)) continue;
-    const [key, tags] = pair as unknown[];
-    if (typeof key !== 'string' || !Array.isArray(tags)) continue;
+  let skipped = 0;
+  if (!Array.isArray(persisted)) {
+    skipped = 1;
+  } else {
+    for (const pair of persisted) {
+      if (!Array.isArray(pair)) {
+        skipped++;
+        continue;
+      }
+      const [key, tags] = pair as unknown[];
+      if (typeof key !== 'string' || !Array.isArray(tags)) {
+        skipped++;
+        continue;
+      }
 
-    const merged = map.getKeyTombstones(key);
-    for (const tag of tags) {
-      if (typeof tag === 'string') merged.add(tag);
+      const merged = map.getKeyTombstones(key);
+      for (const tag of tags) {
+        if (typeof tag === 'string') {
+          merged.add(tag);
+        } else {
+          skipped++;
+        }
+      }
+      if (merged.size === 0) continue;
+      map.setKeyTombstones(key, merged);
     }
-    if (merged.size === 0) continue;
-    map.setKeyTombstones(key, merged);
+  }
+
+  // Skipping is safe, but it must not be silent: unreadable attribution means
+  // durable state was damaged, and the only other symptom is an extra sync walk.
+  if (skipped > 0) {
+    logger.warn(
+      { skipped },
+      'Skipped unreadable persisted OR-Map tombstone attribution; the next sync walk rewrites it',
+    );
   }
 }

@@ -2,6 +2,7 @@ import { TopGunClient } from '../TopGunClient';
 import { IStorageAdapter, OpLogEntry } from '../IStorageAdapter';
 import { HLC, LWWRecord, ORMap, ORMapRecord } from '@topgunbuild/core';
 import { restoreOrMapKeyTombstones } from '../utils/orMapKeyTombstones';
+import { logger } from '../utils/logger';
 
 // Mock Storage Adapter
 class MemoryStorageAdapter implements IStorageAdapter {
@@ -468,6 +469,57 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       expect(sorted(restored.getSnapshot().keyTombstones.keys())).toEqual(['good']);
       expect(sorted(restored.getKeyTombstones('good'))).toEqual(['t1', 't2']);
       expect(sorted(restored.getTombstones())).toEqual(['t1', 't2']);
+    });
+  });
+
+  describe('unreadable persisted attribution is reported, not skipped silently', () => {
+    let warn: jest.SpyInstance;
+
+    beforeEach(() => {
+      warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+      warn.mockRestore();
+    });
+
+    test('every skipped pair and tag is counted in one warning', () => {
+      const map = new ORMap<string, string>(new HLC('n1'));
+
+      restoreOrMapKeyTombstones(map, [
+        'not-a-pair',
+        null,
+        ['only-a-key'],
+        [42, ['numeric-key']],
+        ['tags-not-an-array', 'oops'],
+        ['empty', []],
+        ['good', ['t1', 7, 't2']],
+      ]);
+
+      expect(sorted(map.getKeyTombstones('good'))).toEqual(['t1', 't2']);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toEqual({ skipped: 6 });
+    });
+
+    test('a value that is not a list of pairs is reported', () => {
+      const map = new ORMap<string, string>(new HLC('n1'));
+
+      restoreOrMapKeyTombstones(map, { K: ['t1'] });
+
+      expect(map.getSnapshot().keyTombstones.size).toBe(0);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['an absent entry', undefined],
+      ['an empty entry', []],
+      ['a readable entry', [['K', ['t1']]]],
+    ])('%s is not reported', (_shape, persisted) => {
+      const map = new ORMap<string, string>(new HLC('n1'));
+
+      restoreOrMapKeyTombstones(map, persisted);
+
+      expect(warn).not.toHaveBeenCalled();
     });
   });
 
