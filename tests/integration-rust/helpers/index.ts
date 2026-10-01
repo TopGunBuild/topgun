@@ -133,6 +133,13 @@ export async function spawnRustServer(
 
   const port = await waitForPort(proc, timeoutMs);
 
+  // Keep draining the server's stdout for as long as it runs. The line reader
+  // that found the port pauses the stream when it closes, and the server logs
+  // to stdout: once the pipe buffer (64 KiB on macOS) fills, its next log write
+  // blocks and the whole server stops answering. A test that opens a few dozen
+  // connections to one server is enough to get there.
+  proc.stdout?.resume();
+
   const cleanup = makeCleanup(proc);
 
   return { port, process: proc, cleanup };
