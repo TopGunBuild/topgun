@@ -66,8 +66,8 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         // answer from an empty server tree, so nothing would ever clear it.
         const changed = this.resetKeyTombstonesToPending(
           map,
-          mapName,
           localKeysUnder(localTree, ''),
+          this.pendingRemoveLookup(mapName),
         );
         await this.persistAttributionIfChanged(mapName, changed);
       }
@@ -152,6 +152,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       }
 
       // Also check for buckets that exist locally but not on remote
+      const pendingFor = this.pendingRemoveLookup(mapName);
       let attributionChanged = false;
       const localOnlyPaths: string[] = [];
       for (const [bucketKey, localHash] of Object.entries(localBuckets)) {
@@ -161,7 +162,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
           // tombstone to any key there. Drop the mirrored attribution first: a
           // key held in the tree only by tombstones the server no longer has
           // would otherwise keep this bucket different on every later walk.
-          if (this.resetKeyTombstonesToPending(map, mapName, localKeysUnder(tree, newPath))) {
+          if (this.resetKeyTombstonesToPending(map, localKeysUnder(tree, newPath), pendingFor)) {
             attributionChanged = true;
           }
           localOnlyPaths.push(newPath);
@@ -197,6 +198,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       let totalAdded = 0;
       let totalUpdated = 0;
       let attributionChanged = false;
+      const pendingFor = this.pendingRemoveLookup(mapName);
 
       // The keys this client holds under the leaf's path, taken before the
       // merge so that a key the response introduces is not mistaken for one
@@ -207,7 +209,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
 
       for (const entry of entries) {
         const { key, records, tombstones } = entry;
-        if (this.mirrorKeyTombstones(map, mapName, key, tombstones)) {
+        if (this.mirrorKeyTombstones(map, key, tombstones, pendingFor)) {
           attributionChanged = true;
         }
         const result = map.mergeKey(key, records, tombstones);
@@ -222,7 +224,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       // server-attributed tombstone.
       const listed = new Set(entries.map((e: { key: string }) => e.key));
       const omitted = localKeysInScope.filter((key) => !listed.has(key));
-      if (this.resetKeyTombstonesToPending(map, mapName, omitted)) {
+      if (this.resetKeyTombstonesToPending(map, omitted, pendingFor)) {
         attributionChanged = true;
       }
 
@@ -262,10 +264,11 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       let totalAdded = 0;
       let totalUpdated = 0;
       let attributionChanged = false;
+      const pendingFor = this.pendingRemoveLookup(mapName);
 
       for (const entry of entries) {
         const { key, records, tombstones } = entry;
-        if (this.mirrorKeyTombstones(map, mapName, key, tombstones)) {
+        if (this.mirrorKeyTombstones(map, key, tombstones, pendingFor)) {
           attributionChanged = true;
         }
         const result = map.mergeKey(key, records, tombstones);
@@ -292,6 +295,23 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
   }
 
   /**
+   * The un-acknowledged local remove tags per key for one handler invocation.
+   *
+   * The op log is read at most once per invocation, on the first key that asks,
+   * however many keys the response covers: a reset can span every key of the
+   * map, and a read per key would make it keys times op-log entries. The result
+   * is held only by the returned closure, so the next invocation reads the op
+   * log again and an op acknowledged in between is no longer pending.
+   */
+  private pendingRemoveLookup(mapName: string): PendingRemoveLookup {
+    let byKey: Map<string, string[]> | undefined;
+    return (key) => {
+      byKey ??= this.config.getPendingRemoveTagsByKey(mapName);
+      return byKey.get(key) ?? NO_TAGS;
+    };
+  }
+
+  /**
    * Make the server's tombstone set for `key` this client's attributed set,
    * keeping the tags of this client's removes the server has not acknowledged
    * yet (it cannot report a remove it has not applied).
@@ -309,12 +329,12 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
   private mirrorKeyTombstones(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap value type is erased at the sync handler layer
     map: ORMap<any, any>,
-    mapName: string,
     key: string,
     serverTombstones: Iterable<string>,
+    pendingFor: PendingRemoveLookup,
   ): boolean {
     const next = new Set(serverTombstones);
-    for (const tag of this.config.getPendingRemoveTags(mapName, key)) {
+    for (const tag of pendingFor(key)) {
       next.add(tag);
     }
     const previous = map.getKeyTombstones(key);
@@ -333,12 +353,12 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
   private resetKeyTombstonesToPending(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap value type is erased at the sync handler layer
     map: ORMap<any, any>,
-    mapName: string,
     keys: string[],
+    pendingFor: PendingRemoveLookup,
   ): boolean {
     let changed = false;
     for (const key of keys) {
-      if (this.mirrorKeyTombstones(map, mapName, key, [])) {
+      if (this.mirrorKeyTombstones(map, key, [], pendingFor)) {
         changed = true;
       }
     }
@@ -464,6 +484,11 @@ function localKeysUnder(tree: ORMapMerkleTree, path: string): string[] {
   }
   return keys;
 }
+
+/** The un-acknowledged local remove tags of one key, for one handler invocation. */
+type PendingRemoveLookup = (key: string) => readonly string[];
+
+const NO_TAGS: readonly string[] = [];
 
 function sameTags(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   if (a.size !== b.size) return false;

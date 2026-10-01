@@ -34,6 +34,12 @@ function makeHarness() {
   const sent: any[] = [];
   /** Un-acknowledged local remove tags per key, as the engine would derive them. */
   const pending = new Map<string, string[]>();
+  // Hands out a copy, as the engine builds a fresh grouping on every call: a
+  // handler that kept the result of an earlier call would then be working from
+  // a stale one, and the tests can tell.
+  const getPendingRemoveTagsByKey = jest.fn<Map<string, string[]>, [string]>(
+    () => new Map(pending),
+  );
   const persistKeyTombstones = jest.fn<Promise<void>, [string]>().mockResolvedValue(undefined);
   const persistTombstones = jest.fn<Promise<void>, [string]>().mockResolvedValue(undefined);
   const persistKey = jest.fn<Promise<void>, [string, string]>().mockResolvedValue(undefined);
@@ -49,7 +55,7 @@ function makeHarness() {
     onTimestampUpdate: async () => {},
     persistKey,
     persistTombstones,
-    getPendingRemoveTags: (_mapName, key) => pending.get(key) ?? [],
+    getPendingRemoveTagsByKey,
     persistKeyTombstones,
     onCoveringEpochApplied: (_mapName, epoch) => {
       confirmedEpochs.push(epoch);
@@ -74,6 +80,7 @@ function makeHarness() {
     handler,
     sent,
     pending,
+    getPendingRemoveTagsByKey,
     persistKeyTombstones,
     persistTombstones,
     persistKey,
@@ -804,6 +811,110 @@ describe('ORMapSyncHandler per-key tombstone scoping', () => {
       },
     );
   });
+
+  describe('pending removes are read from the op log once per response', () => {
+    type Harness = ReturnType<typeof makeHarness>;
+
+    /** N keys, each emptied by a remove, so each is in the tree by attribution only. */
+    function manyTombstoneOnlyKeys(h: Harness, count: number): string[] {
+      const keys: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const key = `key-${i}`;
+        addThenRemove(h.map, key, 'v');
+        keys.push(key);
+      }
+      return keys;
+    }
+
+    test('a zero-root reset over many keys asks for the pending removes once', async () => {
+      const harness = makeHarness();
+      const { map, handler, pending, getPendingRemoveTagsByKey } = harness;
+      const keys = manyTombstoneOnlyKeys(harness, 50);
+      const stillPending = [...map.getKeyTombstones(keys[7])];
+      pending.set(keys[7], stillPending);
+
+      await handler.handleORMapSyncRespRoot({ mapName: MAP_NAME, rootHash: 0 });
+
+      expect(getPendingRemoveTagsByKey).toHaveBeenCalledTimes(1);
+      expect(getPendingRemoveTagsByKey).toHaveBeenCalledWith(MAP_NAME);
+      // The single read still served every key.
+      for (const key of keys) {
+        expect(sorted(map.getKeyTombstones(key))).toEqual(key === keys[7] ? stillPending : []);
+      }
+    });
+
+    test('a bucket response that resets several local-only children asks once', async () => {
+      const harness = makeHarness();
+      const { map, handler, getPendingRemoveTagsByKey } = harness;
+      manyTombstoneOnlyKeys(harness, 50);
+      expect(Object.keys(map.getMerkleTree().getBuckets('')).length).toBeGreaterThan(1);
+
+      await handler.handleORMapSyncRespBuckets({ mapName: MAP_NAME, path: '', buckets: {} });
+
+      expect(getPendingRemoveTagsByKey).toHaveBeenCalledTimes(1);
+      expect(map.getMerkleTree().getRootHash()).toBe(0);
+    });
+
+    test.each([
+      [
+        'leaf',
+        (h: Harness, entries: Array<{ key: string; records: never[]; tombstones: string[] }>) =>
+          h.handler.handleORMapSyncRespLeaf({ mapName: MAP_NAME, path: '', entries }),
+      ],
+      [
+        'diff',
+        (h: Harness, entries: Array<{ key: string; records: never[]; tombstones: string[] }>) =>
+          h.handler.handleORMapDiffResponse({ mapName: MAP_NAME, entries }),
+      ],
+    ] as const)('a %s response over many keys asks once', async (_name, respond) => {
+      const harness = makeHarness();
+      const keys = manyTombstoneOnlyKeys(harness, 50);
+
+      await respond(
+        harness,
+        keys.map((key) => ({ key, records: [], tombstones: ['server-tag'] })),
+      );
+
+      expect(harness.getPendingRemoveTagsByKey).toHaveBeenCalledTimes(1);
+    });
+
+    test('a response that touches no key does not ask at all', async () => {
+      const harness = makeHarness();
+      const { map, handler, getPendingRemoveTagsByKey } = harness;
+      map.add('K', 'live');
+      const root = map.getMerkleTree().getRootHash();
+
+      await handler.handleORMapSyncRespRoot({ mapName: MAP_NAME, rootHash: root });
+      await handler.handleORMapSyncRespRoot({ mapName: MAP_NAME, rootHash: root + 1 });
+      await handler.handleORMapDiffResponse({ mapName: MAP_NAME, entries: [] });
+
+      expect(getPendingRemoveTagsByKey).not.toHaveBeenCalled();
+    });
+
+    test('a remove acknowledged between two responses is no longer pending in the second', async () => {
+      const harness = makeHarness();
+      const { map, handler, pending, getPendingRemoveTagsByKey } = harness;
+      const keys = manyTombstoneOnlyKeys(harness, 5);
+      const tagOf = (key: string) => sorted(map.getKeyTombstones(key));
+      const firstTags = tagOf(keys[0]);
+      for (const key of keys) pending.set(key, tagOf(key));
+
+      await handler.handleORMapSyncRespRoot({ mapName: MAP_NAME, rootHash: 0 });
+      for (const key of keys) {
+        expect(map.getKeyTombstones(key).size).toBe(1);
+      }
+
+      // Every remove but the first key's is acknowledged before the next response.
+      for (const key of keys.slice(1)) pending.delete(key);
+      await handler.handleORMapSyncRespRoot({ mapName: MAP_NAME, rootHash: 0 });
+
+      expect(getPendingRemoveTagsByKey).toHaveBeenCalledTimes(2);
+      expect(sorted(map.getKeyTombstones(keys[0]))).toEqual(firstTags);
+      for (const key of keys.slice(1)) {
+        expect(map.getKeyTombstones(key).size).toBe(0);
+      }
+    });
+  });
 });
 
 /**
@@ -930,6 +1041,48 @@ describe('SyncEngine per-key tombstone attribution', () => {
     await handler.handleORMapSyncRespLeaf(leafFor('K', ['server-tag']));
 
     expect(sorted(map.getKeyTombstones('K'))).toEqual(['server-tag']);
+    engine.close();
+  });
+
+  test('a zero-root reset over many keys reads the op log once, and an acknowledged remove is gone from the next response', async () => {
+    const { engine, internals, handler, map } = await makeEngine();
+    const removes: Array<{ key: string; tag: string; opId: string }> = [];
+    for (let i = 0; i < 20; i++) {
+      const key = `key-${i}`;
+      removes.push({ key, ...(await localRemove(engine, map, key, 'v')) });
+    }
+
+    // Count full traversals of the op log: every way of walking an array goes
+    // through its iterator or its length, and the handler is the only reader
+    // while a root response is handled.
+    const opLog = internals.opLog as OpLogEntry[];
+    let traversals = 0;
+    const counted = new Proxy(opLog, {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator) traversals++;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    internals.opLog = counted;
+    try {
+      await handler.handleORMapSyncRespRoot({ mapName: MAP_NAME, rootHash: 0 });
+    } finally {
+      internals.opLog = opLog;
+    }
+    expect(traversals).toBe(1);
+    for (const { key, tag } of removes) {
+      expect(sorted(map.getKeyTombstones(key))).toEqual([tag]);
+    }
+
+    // The first remove is acknowledged; the next response must not see it.
+    const [acked, ...rest] = removes;
+    internals.handleOpAck({ type: 'OP_ACK', payload: { lastId: acked.opId } });
+    await handler.handleORMapSyncRespRoot({ mapName: MAP_NAME, rootHash: 0 });
+
+    expect(map.getKeyTombstones(acked.key).size).toBe(0);
+    for (const { key, tag } of rest) {
+      expect(sorted(map.getKeyTombstones(key))).toEqual([tag]);
+    }
     engine.close();
   });
 

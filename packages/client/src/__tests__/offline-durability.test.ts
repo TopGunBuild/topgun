@@ -255,7 +255,7 @@ describe('Offline durability (SPEC-321 — F3/F4/F5/F6)', () => {
         onTimestampUpdate: async () => {},
         persistKey,
         persistTombstones,
-        getPendingRemoveTags: () => [],
+        getPendingRemoveTagsByKey: () => new Map(),
         persistKeyTombstones: async () => {},
         onCoveringEpochApplied: () => {},
         onFullResync: async () => {},

@@ -1087,15 +1087,22 @@ export interface ORMapSyncHandlerConfig {
   persistTombstones: (mapName: string) => Promise<void>;
 
   /**
-   * Tags of this client's local removes for `key` in `mapName` that the server
-   * has neither acknowledged nor refused. The handler keeps these attributed to
-   * the key whenever it replaces the key's tombstone set with the server's,
-   * because the server cannot yet report a remove it has not applied.
+   * Tags of this client's local removes in `mapName` that the server has
+   * neither acknowledged nor refused, grouped by the key they were removed
+   * from. A key with no such remove has no entry. The handler keeps these
+   * attributed to their key whenever it replaces the key's tombstone set with
+   * the server's, because the server cannot yet report a remove it has not
+   * applied.
+   *
+   * Grouped for the whole map rather than asked per key so that the pending
+   * operations are scanned once per sync response, however many keys the
+   * response touches. The handler calls this at most once per response and
+   * does not keep the result.
    *
    * Must be derived from the pending operations at call time, never cached: an
    * acknowledged or refused remove has to drop out on the very next call.
    */
-  getPendingRemoveTags: (mapName: string, key: string) => string[];
+  getPendingRemoveTagsByKey: (mapName: string) => Map<string, string[]>;
 
   /**
    * Persist an ORMap's per-key tombstone attribution. Called whenever a sync

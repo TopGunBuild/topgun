@@ -540,7 +540,7 @@ export class SyncEngine {
       // reload — same canonical helpers as the local-write + applyServerEvent paths.
       persistKey: (name, key) => this.persistORMapKey(name, key),
       persistTombstones: (name) => this.persistORMapTombstones(name),
-      getPendingRemoveTags: (name, key) => this.getPendingRemoveTags(name, key),
+      getPendingRemoveTagsByKey: (name) => this.getPendingRemoveTagsByKey(name),
       persistKeyTombstones: (name) => this.persistORMapKeyTombstones(name),
       // Fold this map's covering epoch into the device-wide MIN across every
       // held OR-Map (see applyMapCoverage) AFTER its data is durably applied
@@ -2128,28 +2128,32 @@ export class SyncEngine {
   }
 
   /**
-   * Tags of this client's local removes of `key` in `mapName` that the server
-   * has neither acknowledged nor refused.
+   * Tags of this client's local removes in `mapName` that the server has
+   * neither acknowledged nor refused, grouped by the key they were removed from.
+   *
+   * Built in one pass over the op log so that a sync response covering many keys
+   * costs one scan, not one per key.
    *
    * Read from the op log on every call and never stored: an op that is
    * acknowledged, refused or discarded stops contributing at once, and one that
    * a full resync retains keeps contributing after the map's own state is wiped.
    */
-  private getPendingRemoveTags(mapName: string, key: string): string[] {
-    const tags: string[] = [];
+  private getPendingRemoveTagsByKey(mapName: string): Map<string, string[]> {
+    const tagsByKey = new Map<string, string[]>();
     for (const op of this.opLog) {
       if (
         op.mapName === mapName &&
         op.opType === 'OR_REMOVE' &&
-        op.key === key &&
         !op.synced &&
         op.rejected !== true &&
         op.orTag !== undefined
       ) {
-        tags.push(op.orTag);
+        const tags = tagsByKey.get(op.key);
+        if (tags) tags.push(op.orTag);
+        else tagsByKey.set(op.key, [op.orTag]);
       }
     }
-    return tags;
+    return tagsByKey;
   }
 
   /**
