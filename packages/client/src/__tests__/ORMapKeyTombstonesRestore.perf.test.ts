@@ -11,13 +11,13 @@ import type { PersistedKeyTombstones } from '../utils/orMapKeyTombstones';
  * tag is new to its key. If each key's restore walks the whole map, opening a
  * large map blocks the thread for minutes.
  *
- * These are regression guards, not benchmarks. Each bound sits about an order
- * of magnitude above what attributing the same tags costs on a map that holds
- * no live record at all (which is all the work that is left once nothing is
- * scanned), so it only trips when the cost grows with keys x tags again. The
- * Jest timeout is far above the bound on purpose: a regression has to fail on
- * the elapsed-time assertion, with the measured number in the message, not on a
- * runner timeout that says nothing.
+ * These are regression guards, not benchmarks. Each bound is at least ten times
+ * the time measured for the same restore once it is a single pass over the map
+ * (a 2021 laptop, under this test runner), so a slower CI machine does not
+ * trip it, and still well below what a restore that walks the map once per
+ * key used to cost. The Jest timeout is far above the bound on purpose: a
+ * regression has to fail on the elapsed-time assertion, with the measured
+ * number in the message, not on a runner timeout that says nothing.
  */
 
 /** Jest timeout for a bounded section; never the reason a run fails. */
@@ -26,15 +26,18 @@ const JEST_TIMEOUT_MS = 600_000;
 /**
  * 3 000 keys that each hold the same 3 000 tags: the shape left behind by a
  * client that used to push its map-wide tombstone set with every key.
- * Attributing those tags on a map with no live record takes about 3 s on a
- * 2021 laptop, nearly all of it hashing a 3 000-tag leaf per key, so that is
- * the floor a restore of this shape can reach without changing the leaf hash.
+ * Measured: 5 400 ms. About three quarters of it is deriving 3 000 leaves of
+ * 3 000 tags each (sorting the tags, then hashing a 70 KB string per key); the
+ * rest is building the 9 million attribution entries, which also makes this
+ * the one test here that needs a few hundred MB of heap.
+ * Bound: 60 000 ms (11x). With a walk of the map per key: 363 000 ms.
  */
-const SHARED_TAGS_RESTORE_BOUND_MS = 30_000;
+const SHARED_TAGS_RESTORE_BOUND_MS = 60_000;
 
 /**
- * 20 000 keys with 5 tags of their own each. Attributing those tags on a map
- * with no live record takes about 0.13 s on a 2021 laptop.
+ * 20 000 keys with 5 tags of their own each.
+ * Measured: 180 ms. Bound: 2 000 ms (11x). With a walk of the map per key:
+ * 20 100 ms.
  */
 const PER_KEY_RESTORE_BOUND_MS = 2_000;
 

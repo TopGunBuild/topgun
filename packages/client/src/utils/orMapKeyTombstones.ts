@@ -46,16 +46,38 @@ export function serializeOrMapKeyTombstones(map: ORMap<any, any>): PersistedKeyT
  * reload.
  *
  * Never throws, and skips whatever it cannot read. A store written before
- * attribution existed has no entry at all and loads with none. Skipping is the
- * safe direction for a malformed entry too: a missing attribution only makes
- * this client's Merkle root differ from the server's, which costs one sync walk
- * that rewrites the entry — it can never make two different states compare
- * equal. Refusing to load the map over it would be the worse outcome.
+ * attribution existed has no entry at all and loads with none.
+ *
+ * Skipping a malformed entry is not free, and it loses two different things:
+ *
+ * - The key's Merkle leaf no longer matches the server's. That alone costs one
+ *   sync walk, which mirrors the server's set and rewrites the entry. It can
+ *   never make two different states compare equal.
+ * - For some tags, the map-wide suppression itself. The `:tombstones` entry is
+ *   rewritten only when a server response adds or updates a record, so a tag
+ *   learned from a response that changed no record is durable in this entry and
+ *   nowhere else. Skip it and the tag is not suppressed after the load: a
+ *   record carrying it that storage still holds under another key is visible
+ *   again, and one that arrives later is admitted, until a sync walk reports
+ *   the tag once more. The leaf mismatch above is what triggers that walk, so
+ *   the window closes on the next successful sync; a client that stays offline
+ *   stays in it.
+ *
+ * Skipping is still the right call. The alternative is refusing to load the
+ * map, which trades a value that may be shown once too often for every value
+ * of the map being unavailable, offline included; and an entry that cannot be
+ * read cannot be repaired locally either way: only the server can say which
+ * tags it held. The loss is reported in the log rather than hidden.
  *
  * The persisted tags are merged into whatever the map already attributes to the
  * key rather than replacing it. The load is asynchronous, and a remove (local
  * or from the server) that lands on the map while it is still loading has
  * already attributed its tag; a replace would silently drop it.
+ *
+ * All readable pairs are attributed in ONE pass over the map: the live records
+ * are purged once for every persisted tag together and each key's leaf is
+ * hashed once. Attributing key by key would hash and notify per key, and the
+ * load would block its thread for as long as that takes.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- restore runs at the registry level where the map's key and value types are erased; persisted keys are strings
 export function restoreOrMapKeyTombstones(map: ORMap<any, any>, persisted: unknown): void {
@@ -63,6 +85,7 @@ export function restoreOrMapKeyTombstones(map: ORMap<any, any>, persisted: unkno
   if (persisted === undefined || persisted === null) return;
 
   let skipped = 0;
+  const readable: Array<[string, string[]]> = [];
   if (!Array.isArray(persisted)) {
     skipped = 1;
   } else {
@@ -77,25 +100,47 @@ export function restoreOrMapKeyTombstones(map: ORMap<any, any>, persisted: unkno
         continue;
       }
 
-      const merged = map.getKeyTombstones(key);
-      for (const tag of tags) {
-        if (typeof tag === 'string') {
-          merged.add(tag);
-        } else {
-          skipped++;
-        }
-      }
-      if (merged.size === 0) continue;
-      map.setKeyTombstones(key, merged);
+      const readableTags = stringsOf(tags);
+      skipped += tags.length - readableTags.length;
+      if (readableTags.length > 0) readable.push([key, readableTags]);
     }
   }
 
-  // Skipping is safe, but it must not be silent: unreadable attribution means
-  // durable state was damaged, and the only other symptom is an extra sync walk.
+  if (readable.length > 0) map.addKeyTombstones(readable);
+
+  // Skipping must not be silent: unreadable attribution means durable state
+  // was damaged, and for some tags it held the only durable copy of their
+  // suppression.
   if (skipped > 0) {
     logger.warn(
       { skipped },
-      'Skipped unreadable persisted OR-Map tombstone attribution; the next sync walk rewrites it',
+      'Skipped unreadable persisted OR-Map tombstone attribution; tags listed only there are not suppressed until the next sync walk rewrites it',
     );
   }
+}
+
+/**
+ * The string elements of `values`. Returns `values` itself when every element
+ * is a string, which is the ordinary case: a stored attribution can hold
+ * millions of tags, and copying them all just to validate them would double the
+ * memory a load needs.
+ */
+function stringsOf(values: unknown[]): string[] {
+  let allStrings = true;
+  // Indexed on purpose: a hole in a sparse array reads as `undefined` here,
+  // while the array's own iteration helpers would step over it unchecked.
+  for (let i = 0; i < values.length; i++) {
+    if (typeof values[i] !== 'string') {
+      allStrings = false;
+      break;
+    }
+  }
+  if (allStrings) return values as string[];
+
+  const strings: string[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i];
+    if (typeof value === 'string') strings.push(value);
+  }
+  return strings;
 }
