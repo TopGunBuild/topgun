@@ -427,3 +427,67 @@ describe('SyncEngine REPLACE resync — per-key tombstone attribution', () => {
     engine.close();
   });
 });
+
+/**
+ * A map reset (the server demands a fresh sync of the map) is the second path
+ * that wipes an OR-Map, next to the full-resync REPLACE, and it owes the
+ * persisted attribution the same treatment. Attribution that stays on disk
+ * after the map it describes is gone comes back on the next load as tombstones
+ * of keys the server no longer attributes anything to; and clearing memory
+ * before the durable reset has landed would leave disk claiming an attribution
+ * that memory has already lost if that write fails.
+ */
+describe('SyncEngine map reset — per-key tombstone attribution', () => {
+  const KEY_TOMBSTONES_META = '__sys__:tags:keyTombstones';
+
+  async function engineWithAttributedTombstone() {
+    const adapter = new MemoryAdapter();
+    const engine = new SyncEngine({
+      nodeId: 'n1',
+      connectionProvider: new NullConnectionProvider(),
+      storageAdapter: adapter,
+    });
+    // Let the constructor's async op-log load settle before touching the engine.
+    await new Promise((r) => setTimeout(r, 25));
+    const map = new ORMap<string, string>(engine.getHLC());
+    engine.registerMap('tags', map);
+
+    map.add('K', 'kept');
+    map.add('K', 'gone');
+    const [tag] = map.remove('K', 'gone');
+    await engine.persistORMapKey('tags', 'K');
+    await engine.persistORMapKeyTombstones('tags');
+    expect(adapter.meta.get(KEY_TOMBSTONES_META)).toEqual([['K', [tag]]]);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the reset is private to the engine and only reachable from a server reset message
+    const eng = engine as any;
+    return { adapter, engine, eng, map, tag };
+  }
+
+  test('a reset leaves no persisted attribution behind', async () => {
+    const { adapter, engine, eng, map } = await engineWithAttributedTombstone();
+
+    await eng.resetMap('tags');
+
+    expect(map.getSnapshot().keyTombstones.size).toBe(0);
+    expect(adapter.kv.has('tags:K')).toBe(false);
+    // The meta store has no delete, so "no attribution" is an empty entry.
+    expect(adapter.meta.get(KEY_TOMBSTONES_META) ?? []).toEqual([]);
+    engine.close();
+  });
+
+  test('a FAILED attribution reset aborts the map reset before the map is cleared (memory and disk both keep the old attribution)', async () => {
+    const { adapter, engine, eng, map, tag } = await engineWithAttributedTombstone();
+    const persistedBefore = adapter.meta.get(KEY_TOMBSTONES_META);
+    const clear = jest.spyOn(map, 'clear');
+    adapter.failSetMetaKeys.add(KEY_TOMBSTONES_META);
+
+    await expect(eng.resetMap('tags')).rejects.toThrow('simulated durable setMeta failure');
+
+    expect(clear).not.toHaveBeenCalled();
+    expect(map.get('K')).toEqual(['kept']);
+    expect([...map.getKeyTombstones('K')]).toEqual([tag]);
+    expect(adapter.meta.get(KEY_TOMBSTONES_META)).toEqual(persistedBefore);
+    engine.close();
+  });
+});
