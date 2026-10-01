@@ -2866,9 +2866,28 @@ Read all current tombstone tags.
 
 Apply a remote `ORMapRecord` to local state. Returns `true` if state changed.
 
-**`applyTombstone(tag)`** — `void`
+**`applyTombstone(tag, key?)`** — `void`
 
-Apply a remote tombstone tag.
+Apply a remote tombstone tag. The tag is suppressed under every key either way. Pass the `key` the removal belongs to whenever you know it: the tombstone is then also recorded against that key, which is what lets a removal that emptied the key still be compared with the server during sync. Without `key` the tombstone is only recorded map-wide.
+
+```typescript
+
+const remote = new ORMap<string, string>(new HLC('node-2'));
+const record = remote.add('post:123', 'draft');
+
+// Replaying a removal that happened elsewhere:
+remote.applyTombstone(record.tag, 'post:123');
+remote.get('post:123'); // []
+remote.getKeyTombstones('post:123'); // Set { record.tag }
+```
+
+**`getKeyTombstones(key)`** — `Set<string>`
+
+Read the tombstone tags recorded against one key. Returns a copy; every tag in it is also in `getTombstones()`. `remove(key, value)` records its tombstones against `key` automatically.
+
+**`setKeyTombstones(key, tags)`** — `void`
+
+Replace the tombstone tags recorded against one key — used to mirror the set an authoritative peer reports for that key. Any record still carrying one of the tags is removed. A tag dropped from the key's set stays in `getTombstones()`: the map-wide set only grows here. Passing no tags clears the key's set.
 
 **`merge(other)`** — `void`
 
@@ -2880,7 +2899,7 @@ Subscribe to change events. The callback receives `entries: Array<[K, V[]]>`.
 
 **`allKeys()`** — `K[]`
 
-All keys with at least one live or tombstoned value.
+All keys that currently hold at least one record. A key left with only tombstones is not listed.
 
 **`size`** / **`totalRecords`** (getters) — `number`
 
@@ -2896,11 +2915,11 @@ Reset to empty.
 
 **`getMerkleTree()`** — `ORMapMerkleTree`
 
-Underlying Merkle tree (a different shape than LWWMap's tree because ORMap stores multi-value-per-key).
+Underlying Merkle tree (a different shape than LWWMap's tree because ORMap stores multi-value-per-key). A key contributes to it while it holds at least one record or has at least one tombstone recorded against it, so a key emptied by a removal still shows up in a sync comparison.
 
 **`getSnapshot()`** — `ORMapSnapshot<K, V>`
 
-Serializable snapshot for persistence.
+The map's internal state: `items` (key → tag → record), `tombstones` (every removed tag) and `keyTombstones` (key → the tombstone tags recorded against it). All three fields are required, so code that builds an `ORMapSnapshot` by hand must supply `keyTombstones` — an empty `Map` when there are none.
 
 **`isTombstoned(tag)`** — `boolean`
 
