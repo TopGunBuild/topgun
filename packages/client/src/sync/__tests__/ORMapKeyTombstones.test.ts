@@ -624,6 +624,186 @@ describe('ORMapSyncHandler per-key tombstone scoping', () => {
       expect(requestedPaths()).toEqual([]);
     });
   });
+
+  /**
+   * A tag is created once, so a record the server still serves as live under a
+   * tag this client has tombstoned can mean only one thing: the server does not
+   * hold that tombstone. It acknowledged the remove and then lost it (an unclean
+   * stop before the write reached disk), or it never applied it.
+   *
+   * The key's attribution is otherwise a mirror of the server's set, and an
+   * acknowledged remove is no longer pending, so without a rule of its own this
+   * tag would leave the key's attributed set, the push for the key would not
+   * carry it, and the server would keep the value forever while this client
+   * hides it. The tag has to stay attributed to the key so the push hands the
+   * tombstone back, and the key has to be pushed even when the removed value was
+   * the only one it held.
+   */
+  describe('a remove the server lost is handed back to it for the key it belongs to', () => {
+    type Harness = ReturnType<typeof makeHarness>;
+    type Entry = { key: string; records: ORMapRecord<string>[]; tombstones: string[] };
+
+    const responses = [
+      [
+        'ORMAP_SYNC_RESP_LEAF',
+        (h: Harness, entry: Entry) =>
+          h.handler.handleORMapSyncRespLeaf({
+            mapName: MAP_NAME,
+            path: leafPathOf(h.map, entry.key),
+            entries: [entry],
+          }),
+      ],
+      [
+        'ORMAP_DIFF_RESPONSE',
+        (h: Harness, entry: Entry) =>
+          h.handler.handleORMapDiffResponse({ mapName: MAP_NAME, entries: [entry] }),
+      ],
+    ] as const;
+
+    /** Every value any subscriber notification showed under `key`. */
+    function recordRendered(map: ORMap<string, string>, key: string): () => string[] {
+      const rendered: string[] = [];
+      map.subscribe((entries) => {
+        for (const [entryKey, values] of entries) {
+          if (entryKey === key) rendered.push(...values);
+        }
+      });
+      return () => rendered;
+    }
+
+    /**
+     * Adds `value` under `key` and removes it, the remove being acknowledged
+     * (nothing is pending). Returns the record as the server would still serve
+     * it if it had lost the remove.
+     */
+    function addThenRemoveAcked(h: Harness, key: string, value: string): ORMapRecord<string> {
+      const record = h.map.add(key, value);
+      expect(h.map.remove(key, value)).toEqual([record.tag]);
+      expect(h.pending.get(key)).toBeUndefined();
+      return record;
+    }
+
+    test.each(responses)(
+      '%s: a live record whose tag this client removed keeps the tag attributed, and the push for the key carries it',
+      async (_name, respond) => {
+        const harness = makeHarness();
+        const { map, pushedEntriesFor } = harness;
+        const kept = map.add('K', 'kept');
+        const lost = addThenRemoveAcked(harness, 'K', 'removed-value');
+        const rendered = recordRendered(map, 'K');
+
+        // The server serves both records as live and reports no tombstone for K.
+        await respond(harness, { key: 'K', records: [kept, lost], tombstones: [] });
+
+        const entries = pushedEntriesFor('K');
+        expect(entries).toHaveLength(1);
+        expect(entries[0].tombstones).toEqual([lost.tag]);
+        expect(entries[0].records).toEqual([kept]);
+        expect(sorted(map.getKeyTombstones('K'))).toEqual([lost.tag]);
+
+        expect(map.get('K')).toEqual(['kept']);
+        expect(rendered()).not.toContain('removed-value');
+      },
+    );
+
+    test.each(responses)(
+      '%s: a tag suppressed map-wide but attributed to no key becomes attributed to the key that serves it live',
+      async (_name, respond) => {
+        const harness = makeHarness();
+        const { map, pushedEntriesFor } = harness;
+        const kept = map.add('K', 'kept');
+        // A tombstone whose key was never recorded (a store written before
+        // attribution existed).
+        const lost: ORMapRecord<string> = {
+          value: 'removed-value',
+          tag: 'legacy-removed-tag',
+          timestamp: new HLC('server').now(),
+        };
+        map.applyTombstone(lost.tag);
+        expect(map.getKeyTombstones('K').size).toBe(0);
+        const rendered = recordRendered(map, 'K');
+
+        await respond(harness, { key: 'K', records: [kept, lost], tombstones: [] });
+
+        const entries = pushedEntriesFor('K');
+        expect(entries).toHaveLength(1);
+        expect(entries[0].tombstones).toEqual([lost.tag]);
+        expect(sorted(map.getKeyTombstones('K'))).toEqual([lost.tag]);
+
+        expect(map.get('K')).toEqual(['kept']);
+        expect(rendered()).not.toContain('removed-value');
+      },
+    );
+
+    test.each(responses)(
+      '%s: the key is pushed with the tag even when this client holds no live record for it',
+      async (_name, respond) => {
+        const harness = makeHarness();
+        const { map, pushedEntriesFor } = harness;
+        const lost = addThenRemoveAcked(harness, 'K', 'removed-value');
+        expect(map.allKeys()).not.toContain('K');
+        const rendered = recordRendered(map, 'K');
+
+        await respond(harness, { key: 'K', records: [lost], tombstones: [] });
+
+        const entries = pushedEntriesFor('K');
+        expect(entries).toHaveLength(1);
+        expect(entries[0].records).toEqual([]);
+        expect(entries[0].tombstones).toEqual([lost.tag]);
+        expect(sorted(map.getKeyTombstones('K'))).toEqual([lost.tag]);
+
+        expect(map.get('K')).toEqual([]);
+        expect(rendered()).not.toContain('removed-value');
+      },
+    );
+
+    test.each(responses)(
+      '%s: a live record whose tag this client never removed is admitted and attributes nothing',
+      async (_name, respond) => {
+        const harness = makeHarness();
+        const { map, pushedEntriesFor } = harness;
+        map.add('K', 'kept');
+        // An unrelated remove elsewhere, so the map-wide set is not empty.
+        const elsewhere = addThenRemove(map, 'other', 'x');
+        const incoming: ORMapRecord<string> = {
+          value: 'from-server',
+          tag: 'server-live-tag',
+          timestamp: new HLC('server').now(),
+        };
+
+        await respond(harness, { key: 'K', records: [incoming], tombstones: [] });
+
+        expect(sorted(map.get('K'))).toEqual(['from-server', 'kept']);
+        expect(map.getKeyTombstones('K').size).toBe(0);
+        expect(map.getTombstones()).toEqual([elsewhere]);
+        for (const entry of pushedEntriesFor('K')) {
+          expect(entry.tombstones).toEqual([]);
+        }
+      },
+    );
+
+    test.each(responses)(
+      '%s: a removed tag the response does not serve live is still dropped from the key',
+      async (_name, respond) => {
+        const harness = makeHarness();
+        const { map, pushedEntriesFor } = harness;
+        const kept = map.add('K', 'kept');
+        const removed = addThenRemoveAcked(harness, 'K', 'removed-value');
+        expect(sorted(map.getKeyTombstones('K'))).toEqual([removed.tag]);
+
+        // The server neither serves the record nor attributes its tag: it has
+        // already forgotten the tombstone for good (pruned it), which is not a
+        // loss to repair.
+        await respond(harness, { key: 'K', records: [kept], tombstones: [] });
+
+        expect(map.getKeyTombstones('K').size).toBe(0);
+        expect(map.getTombstones()).toContain(removed.tag);
+        for (const entry of pushedEntriesFor('K')) {
+          expect(entry.tombstones).toEqual([]);
+        }
+      },
+    );
+  });
 });
 
 /**
