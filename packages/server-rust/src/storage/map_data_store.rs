@@ -62,6 +62,13 @@ pub struct MerkleLeaf {
 /// LWW leaves hash `"{key}:{millis}:{counter}:{node_id}"`; OR-Map leaves hash
 /// the sorted active + tombstone tag sets (`"key:{key}|{tags}#{tombs}"`), so a
 /// removal still changes the leaf and peers can observe a tombstone-only delta.
+///
+/// Presence rule (TG-MRK-001): an OR slot contributes a leaf only while it
+/// holds at least one live tag or one tombstone. A slot with neither returns
+/// `None`, because a peer that never saw the key — or pruned it once it emptied
+/// — carries no leaf for it, and a leaf on this side alone would keep the two
+/// roots apart forever. Every non-empty slot hashes exactly as before.
+///
 /// Returns `None` for `OrTombstones`: the write path removes such keys from the
 /// OR-Map tree rather than contributing a leaf, so enumeration must likewise
 /// emit no leaf to keep a rebuilt root identical to the live one.
@@ -84,6 +91,12 @@ pub fn merkle_leaf_hash(key: &str, value: &RecordValue) -> Option<(MerkleLeafKin
             records,
             tombstones,
         } => {
+            // No live tag and no tombstone means the key is absent from every
+            // peer's tree, so it must be absent from this one too (TG-MRK-001
+            // presence rule).
+            if records.is_empty() && tombstones.is_empty() {
+                return None;
+            }
             // Streams `"key:{key}|{tags joined by |}#{tombs joined by |}"` into the
             // hash part by part instead of building it: the OR arm runs on every OR
             // write, and the joined and formatted strings were whole-slot copies.
@@ -682,14 +695,22 @@ mod tests {
     /// fed to one `format!` — kept verbatim as the oracle any cheaper rewrite of
     /// `merkle_leaf_hash`'s OR arm must reproduce bit for bit (TG-MRK-001: a
     /// rebuilt root must equal the live one, so the formula can never drift).
-    fn oracle_or_leaf_hash(key: &str, records: &[OrMapEntry], tombstones: &[String]) -> u32 {
+    fn oracle_or_leaf_hash(
+        key: &str,
+        records: &[OrMapEntry],
+        tombstones: &[String],
+    ) -> Option<u32> {
+        // An OR slot with no live tags and no tombstones has no leaf (TG-MRK-001 presence rule).
+        if records.is_empty() && tombstones.is_empty() {
+            return None;
+        }
         let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
         tags.sort_unstable();
         let joined = tags.join("|");
         let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
         tomb_tags.sort_unstable();
         let joined_tombs = tomb_tags.join("|");
-        fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}"))
+        Some(fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}")))
     }
 
     fn entry(tag: String) -> OrMapEntry {
@@ -704,7 +725,7 @@ mod tests {
         }
     }
 
-    fn or_hash(key: &str, records: Vec<OrMapEntry>, tombstones: Vec<String>) -> u32 {
+    fn or_hash(key: &str, records: Vec<OrMapEntry>, tombstones: Vec<String>) -> Option<u32> {
         match merkle_leaf_hash(
             key,
             &RecordValue::OrMap {
@@ -712,8 +733,11 @@ mod tests {
                 tombstones,
             },
         ) {
-            Some((MerkleLeafKind::OrMap, h)) => h,
-            other => panic!("an OrMap value must yield an OrMap leaf, got {other:?}"),
+            Some((MerkleLeafKind::OrMap, h)) => Some(h),
+            None => None,
+            Some(other) => {
+                panic!("an OrMap value must never yield a non-OrMap leaf, got {other:?}")
+            }
         }
     }
 
@@ -736,7 +760,8 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(512))]
 
         /// The OR leaf hash equals the oracle formula for every input, including
-        /// empty tag and/or tombstone sets, separator characters inside tags,
+        /// empty tag and/or tombstone sets (no leaf when both are empty),
+        /// separator characters inside tags,
         /// duplicate tags and multi-byte code points; and it is independent of
         /// the input order of `records` and of `tombstones` (TG-MRK-001).
         #[test]
