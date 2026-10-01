@@ -664,9 +664,15 @@ pub trait DurableMerkleIndex {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::path::PathBuf;
+
     use proptest::prelude::*;
+    use serde::{Deserialize, Serialize};
     use topgun_core::hash::fnv1a_hash;
     use topgun_core::hlc::Timestamp;
+    use topgun_core::merkle::{MerkleTree, ORMapMerkleTree};
+    use topgun_core::partition::hash_to_partition;
     use topgun_core::types::Value;
 
     use super::{merkle_leaf_hash, MerkleLeafKind};
@@ -751,6 +757,419 @@ mod tests {
                 "leaf hash depends on input order"
             );
         }
+    }
+
+    /// An OR slot with no live tags and no tombstones has no leaf (TG-MRK-001
+    /// presence rule): a client drops such a key from its tree, so a server
+    /// leaf for it would keep the two roots apart for every map that ever
+    /// emptied and pruned a key.
+    #[test]
+    fn empty_or_slot_yields_no_leaf() {
+        let empty = RecordValue::OrMap {
+            records: Vec::new(),
+            tombstones: Vec::new(),
+        };
+        assert_eq!(
+            merkle_leaf_hash("k", &empty),
+            None,
+            "an OR slot with no live tags and no tombstones must not contribute a leaf"
+        );
+    }
+
+    /// The cross-language golden vector file (TG-MRK-001). Rust is the canonical
+    /// producer of every derived field; the TypeScript suite asserts against the
+    /// same file, so the two implementations cannot drift apart silently.
+    ///
+    /// Field order is the on-disk order, and unknown fields are rejected so a
+    /// regeneration can never silently drop an input it does not model.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct VectorFile {
+        version: u32,
+        or_leaf: Vec<OrLeafCase>,
+        lww_leaf: Vec<LwwLeafCase>,
+        flat_trie: Vec<FlatTrieCase>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct OrLeafCase {
+        name: String,
+        key: String,
+        records: Vec<OrRecordCase>,
+        tombstones: Vec<String>,
+        /// `None` (JSON `null`) means the slot has no leaf.
+        expected: Option<u32>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct OrRecordCase {
+        tag: String,
+        value: serde_json::Value,
+        /// Carried only so the TypeScript side can prove TTL never reaches the
+        /// leaf; the server stores no TTL on an OR entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_ms: Option<u64>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct LwwLeafCase {
+        name: String,
+        key: String,
+        millis: u64,
+        counter: u32,
+        node_id: String,
+        expected: u32,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct FlatTrieCase {
+        name: String,
+        kind: String,
+        leaves: Vec<FlatTrieLeaf>,
+        expected_root: u32,
+        /// Path (`""` and every depth-1 path present) to child hashes. Sorted
+        /// maps keep the regenerated file stable and its diffs readable.
+        expected_buckets: BTreeMap<String, BTreeMap<String, u32>>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct FlatTrieLeaf {
+        key: String,
+        leaf_hash: u32,
+        /// Recorded so the partition spread of a case can be checked by reading
+        /// the file alone.
+        partition: u32,
+    }
+
+    const REGEN_ENV: &str = "TOPGUN_REGEN_MERKLE_VECTORS";
+
+    fn vectors_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../core-rust/tests/fixtures/merkle_vectors.json")
+    }
+
+    fn load_vectors() -> VectorFile {
+        let path = vectors_path();
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let file: VectorFile = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("cannot parse {}: {e}", path.display()));
+        assert_eq!(file.version, 1, "unknown merkle vector schema version");
+        file
+    }
+
+    fn regen_requested() -> bool {
+        std::env::var(REGEN_ENV).as_deref() == Ok("1")
+    }
+
+    /// Rewrites the derived fields of one section. The file is re-read right
+    /// here, not reused from the start of the test, because the three pin tests
+    /// share it: a stale copy would undo another section's regeneration.
+    fn rewrite_vectors(apply: impl FnOnce(&mut VectorFile)) {
+        let mut file = load_vectors();
+        apply(&mut file);
+        let mut out = serde_json::to_string_pretty(&file).expect("vector file serializes");
+        out.push('\n');
+        let path = vectors_path();
+        std::fs::write(&path, out)
+            .unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
+    }
+
+    /// The value never reaches the leaf, but the slot is built with the case's
+    /// real value so the pin exercises the same shape of record the server holds.
+    fn value_from_json(json: &serde_json::Value) -> Value {
+        match json {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::Bool(b) => Value::Bool(*b),
+            serde_json::Value::Number(n) => match n.as_i64() {
+                Some(i) => Value::Int(i),
+                None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
+            },
+            serde_json::Value::String(s) => Value::String(s.clone()),
+            serde_json::Value::Array(items) => {
+                Value::Array(items.iter().map(value_from_json).collect())
+            }
+            serde_json::Value::Object(fields) => Value::Map(
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), value_from_json(v)))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn or_case_leaf(case: &OrLeafCase) -> Option<u32> {
+        let records = case
+            .records
+            .iter()
+            .map(|r| OrMapEntry {
+                value: value_from_json(&r.value),
+                ..entry(r.tag.clone())
+            })
+            .collect();
+        let slot = RecordValue::OrMap {
+            records,
+            tombstones: case.tombstones.clone(),
+        };
+        match merkle_leaf_hash(&case.key, &slot) {
+            Some((MerkleLeafKind::OrMap, hash)) => Some(hash),
+            None => None,
+            Some(other) => {
+                panic!("an OrMap value must never yield a non-OrMap leaf, got {other:?}")
+            }
+        }
+    }
+
+    /// Every OR leaf vector equals the canonical `merkle_leaf_hash` OR arm,
+    /// with `null` standing for "no leaf" (TG-MRK-001).
+    #[test]
+    fn merkle_vectors_or_leaf_cases_match_canonical_leaf() {
+        let file = load_vectors();
+        let computed: Vec<Option<u32>> = file.or_leaf.iter().map(or_case_leaf).collect();
+
+        if regen_requested() {
+            rewrite_vectors(|fresh| {
+                assert_eq!(fresh.or_leaf.len(), computed.len(), "orLeaf cases changed");
+                for (case, leaf) in fresh.or_leaf.iter_mut().zip(&computed) {
+                    case.expected = *leaf;
+                }
+            });
+            return;
+        }
+
+        // Collected rather than asserted one by one, so a single run names every
+        // case that disagrees instead of stopping at the first.
+        let mismatches: Vec<String> = file
+            .or_leaf
+            .iter()
+            .zip(&computed)
+            .enumerate()
+            .filter(|(_, (case, leaf))| case.expected != **leaf)
+            .map(|(index, (case, leaf))| {
+                format!(
+                    "orLeaf[{index}] `{}` (key {:?}): vector expects {:?}, merkle_leaf_hash returned {:?}",
+                    case.name, case.key, case.expected, leaf
+                )
+            })
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "{} orLeaf vector(s) disagree with the canonical leaf:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
+
+    fn lww_case_leaf(case: &LwwLeafCase) -> u32 {
+        let record = RecordValue::Lww {
+            value: Value::Null,
+            timestamp: Timestamp {
+                millis: case.millis,
+                counter: case.counter,
+                node_id: case.node_id.clone(),
+            },
+        };
+        match merkle_leaf_hash(&case.key, &record) {
+            Some((MerkleLeafKind::Lww, hash)) => hash,
+            other => panic!("an Lww value must yield an Lww leaf, got {other:?}"),
+        }
+    }
+
+    /// Every LWW leaf vector equals the canonical `merkle_leaf_hash` LWW arm
+    /// (TG-MRK-001).
+    #[test]
+    fn merkle_vectors_lww_leaf_cases_match_canonical_leaf() {
+        let file = load_vectors();
+        let computed: Vec<u32> = file.lww_leaf.iter().map(lww_case_leaf).collect();
+
+        if regen_requested() {
+            rewrite_vectors(|fresh| {
+                assert_eq!(
+                    fresh.lww_leaf.len(),
+                    computed.len(),
+                    "lwwLeaf cases changed"
+                );
+                for (case, leaf) in fresh.lww_leaf.iter_mut().zip(&computed) {
+                    case.expected = *leaf;
+                }
+            });
+            return;
+        }
+
+        let mismatches: Vec<String> = file
+            .lww_leaf
+            .iter()
+            .zip(&computed)
+            .enumerate()
+            .filter(|(_, (case, leaf))| case.expected != **leaf)
+            .map(|(index, (case, leaf))| {
+                format!(
+                    "lwwLeaf[{index}] `{}` (key {:?}): vector expects {}, merkle_leaf_hash returned {leaf}",
+                    case.name, case.key, case.expected
+                )
+            })
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "{} lwwLeaf vector(s) disagree with the canonical leaf:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
+
+    /// Bucket maps are compared with zero-hash children dropped on both sides:
+    /// an emptied child keeps a zero hash as residue, and the protocol reads a
+    /// missing child as zero, so the two are the same bucket.
+    fn normalised_buckets(buckets: &HashMap<char, u32>) -> BTreeMap<String, u32> {
+        buckets
+            .iter()
+            .filter(|(_, hash)| **hash != 0)
+            .map(|(child, hash)| (child.to_string(), *hash))
+            .collect()
+    }
+
+    /// What ONE flat trie over a case's leaves reports: its root, and the
+    /// buckets at `""` and at every depth-1 path present.
+    struct FlatTrieView {
+        root: u32,
+        buckets: BTreeMap<String, BTreeMap<String, u32>>,
+    }
+
+    fn flat_trie_view(case: &FlatTrieCase) -> FlatTrieView {
+        match case.kind.as_str() {
+            "lww" => {
+                let mut tree = MerkleTree::default_depth();
+                for leaf in &case.leaves {
+                    tree.update(&leaf.key, leaf.leaf_hash);
+                }
+                view_of(tree.get_root_hash(), |path| tree.get_buckets(path))
+            }
+            "or" => {
+                let mut tree = ORMapMerkleTree::default_depth();
+                for leaf in &case.leaves {
+                    tree.update(&leaf.key, leaf.leaf_hash);
+                }
+                view_of(tree.get_root_hash(), |path| tree.get_buckets(path))
+            }
+            other => panic!("flatTrie `{}`: unknown kind {other:?}", case.name),
+        }
+    }
+
+    fn view_of(root: u32, buckets_at: impl Fn(&str) -> HashMap<char, u32>) -> FlatTrieView {
+        let top = normalised_buckets(&buckets_at(""));
+        let mut buckets = BTreeMap::new();
+        for child in top.keys() {
+            buckets.insert(child.clone(), normalised_buckets(&buckets_at(child)));
+        }
+        buckets.insert(String::new(), top);
+        FlatTrieView { root, buckets }
+    }
+
+    fn normalised_expected(case: &FlatTrieCase) -> BTreeMap<String, BTreeMap<String, u32>> {
+        case.expected_buckets
+            .iter()
+            .map(|(path, children)| {
+                let kept = children
+                    .iter()
+                    .filter(|(_, hash)| **hash != 0)
+                    .map(|(child, hash)| (child.clone(), *hash))
+                    .collect();
+                (path.clone(), kept)
+            })
+            .collect()
+    }
+
+    /// Every flat-trie vector equals the root and buckets of ONE core-rust trie
+    /// folding the case's leaves, whatever partitions the keys hash to
+    /// (TG-MRK-001). A case whose keys share fewer than three partitions could
+    /// not tell a flat trie from a per-partition aggregate, so it is rejected.
+    #[test]
+    fn merkle_vectors_flat_trie_cases_match_single_trie_reference() {
+        let file = load_vectors();
+        assert!(
+            file.flat_trie.iter().any(|c| c.kind == "lww")
+                && file.flat_trie.iter().any(|c| c.kind == "or"),
+            "flatTrie needs at least one lww and one or case"
+        );
+
+        let partitions: Vec<Vec<u32>> = file
+            .flat_trie
+            .iter()
+            .map(|case| {
+                case.leaves
+                    .iter()
+                    .map(|l| hash_to_partition(&l.key))
+                    .collect()
+            })
+            .collect();
+        for (case, case_partitions) in file.flat_trie.iter().zip(&partitions) {
+            let distinct: BTreeSet<u32> = case_partitions.iter().copied().collect();
+            assert!(
+                case.leaves.len() >= 6 && distinct.len() >= 3,
+                "flatTrie `{}` must hold at least 6 keys over at least 3 distinct partitions, \
+                 got {} keys over partitions {distinct:?}",
+                case.name,
+                case.leaves.len()
+            );
+        }
+        let views: Vec<FlatTrieView> = file.flat_trie.iter().map(flat_trie_view).collect();
+
+        if regen_requested() {
+            rewrite_vectors(|fresh| {
+                assert_eq!(fresh.flat_trie.len(), views.len(), "flatTrie cases changed");
+                for ((case, view), case_partitions) in
+                    fresh.flat_trie.iter_mut().zip(views).zip(&partitions)
+                {
+                    assert_eq!(
+                        case.leaves.len(),
+                        case_partitions.len(),
+                        "flatTrie leaves changed"
+                    );
+                    for (leaf, partition) in case.leaves.iter_mut().zip(case_partitions) {
+                        leaf.partition = *partition;
+                    }
+                    case.expected_root = view.root;
+                    case.expected_buckets = view.buckets;
+                }
+            });
+            return;
+        }
+
+        let mut mismatches: Vec<String> = Vec::new();
+        for ((case, view), case_partitions) in file.flat_trie.iter().zip(&views).zip(&partitions) {
+            for (leaf, partition) in case.leaves.iter().zip(case_partitions) {
+                if leaf.partition != *partition {
+                    mismatches.push(format!(
+                        "flatTrie `{}` key {:?}: vector records partition {}, hash_to_partition returned {partition}",
+                        case.name, leaf.key, leaf.partition
+                    ));
+                }
+            }
+            if case.expected_root != view.root {
+                mismatches.push(format!(
+                    "flatTrie `{}`: vector expects root {}, single trie returned {}",
+                    case.name, case.expected_root, view.root
+                ));
+            }
+            let expected = normalised_expected(case);
+            if expected != view.buckets {
+                mismatches.push(format!(
+                    "flatTrie `{}`: vector expects buckets {expected:?}, single trie returned {:?}",
+                    case.name, view.buckets
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} flatTrie vector field(s) disagree with the single-trie reference:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
     }
 
     /// Bytes one `merkle_leaf_hash` call allocates on an OR slot of `n` records
