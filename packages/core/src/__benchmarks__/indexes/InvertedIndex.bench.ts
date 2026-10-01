@@ -60,7 +60,7 @@ beforeAll(() => {
     }
     datasets.set(size, products);
 
-    const index = new InvertedIndex(nameAttr);
+    const index = new InvertedIndex<string, Product, string>(nameAttr);
     for (const product of products) {
       index.add(product.id, product);
     }
@@ -72,7 +72,7 @@ describe('InvertedIndex Benchmarks', () => {
   describe('Indexing Performance', () => {
     for (const size of sizes) {
       bench(`add ${size.toLocaleString()} documents`, () => {
-        const index = new InvertedIndex(nameAttr);
+        const index = new InvertedIndex<string, Product, string>(nameAttr);
         const products = datasets.get(size)!;
         for (const product of products) {
           index.add(product.id, product);
