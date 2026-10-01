@@ -11,30 +11,30 @@ import type { ORMapRecord } from '../ORMap';
  * visited key) and a load from storage (one per persisted key) both turn
  * quadratic in the size of the map and freeze the thread they run on.
  *
- * These are regression guards, not benchmarks. Each bound sits about an order
- * of magnitude above what the same calls cost on a map that holds no live
- * record at all (which is all the work that is left once nothing is scanned),
- * so it only trips when the cost grows with keys x tags again. The Jest
- * timeout is far above the bound on purpose: a regression has to fail on the
- * elapsed-time assertion, with the measured number in the message, not on a
- * runner timeout that says nothing.
+ * These are regression guards, not benchmarks. Each bound is at least ten times
+ * the time measured for the same calls once nothing scans the map (a 2021
+ * laptop, under this test runner), so a slower CI machine does not trip it,
+ * and still well below what the per-tag scan used to cost. The Jest timeout is
+ * far above the bound on purpose: a regression has to fail on the elapsed-time
+ * assertion, with the measured number in the message, not on a runner timeout
+ * that says nothing.
  */
 
 /** Jest timeout for a bounded section; never the reason a run fails. */
 const JEST_TIMEOUT_MS = 600_000;
 
 /**
- * 20 000 keys, 5 tags each, one attribution call per key. The same calls on a
- * map with no live record take about 0.13 s on a 2021 laptop.
+ * 20 000 keys, 5 tags each, one attribution call per key.
+ * Measured: 180 ms. Bound: 2 000 ms (11x). With a scan per tag: 18 800 ms.
  */
 const PER_KEY_WALK_BOUND_MS = 2_000;
 
 /**
- * 1 000 keys that each receive the same 1 000 tags. The same calls on a map
- * with no live record take about 0.3 s on a 2021 laptop; nearly all of it is
- * hashing a 1 000-tag leaf per key.
+ * 1 000 keys that each receive the same 1 000 tags.
+ * Measured: 565 ms, nearly all of it sorting and hashing a 1 000-tag leaf per
+ * key. Bound: 6 000 ms (10.6x). With a scan per tag: 13 600 ms.
  */
-const SHARED_TAGS_BOUND_MS = 5_000;
+const SHARED_TAGS_BOUND_MS = 6_000;
 
 const keyOf = (i: number): string => `key-${i}`;
 

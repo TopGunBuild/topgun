@@ -544,45 +544,13 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
   }
 
   /**
-   * Apply a tombstone (with index updates).
-   */
-  public applyTombstone(tag: string, key?: K): void {
-    // Find the record before tombstoning
-    const snapshot = this.getSnapshot();
-    let removedValue: V | undefined;
-    let removedKey: K | undefined;
-
-    for (const [itemKey, tagMap] of snapshot.items) {
-      const record = tagMap.get(tag);
-      if (record) {
-        removedValue = record.value;
-        removedKey = itemKey;
-        break;
-      }
-    }
-
-    // The key must travel with the tag, or an indexed map would silently lose
-    // the tombstone's per-key attribution.
-    super.applyTombstone(tag, key);
-
-    if (removedValue !== undefined && removedKey !== undefined) {
-      const compositeKey = this.createCompositeKey(removedKey, tag);
-      this.indexRegistry.onRecordRemoved(compositeKey, removedValue);
-
-      // Update full-text index
-      if (this.fullTextIndex) {
-        this.fullTextIndex.onRemove(compositeKey);
-      }
-    }
-  }
-
-  /**
    * Purge live records by tag (with index updates).
    *
-   * `setKeyTombstones` removes records through this instead of through
-   * `applyTombstone`, so the indexes have to follow the removals here.
+   * Every removal a tombstone causes goes through here, whether it comes from
+   * `applyTombstone`, `setKeyTombstones` or `addKeyTombstones`, so this is the
+   * one place the indexes have to follow those removals.
    */
-  protected purgeLiveTags(tags: ReadonlySet<string>): Array<[K, ORMapRecord<V>]> {
+  protected purgeLiveTags(tags: Iterable<string>): Array<[K, ORMapRecord<V>]> {
     const purged = super.purgeLiveTags(tags);
 
     for (const [key, record] of purged) {
