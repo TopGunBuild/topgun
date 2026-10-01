@@ -7,6 +7,7 @@ import {
   timestampToString,
   compareTimestamps,
 } from '../ORMapMerkle';
+import { hashString } from '../utils/hash';
 
 describe('ORMapMerkle hash functions', () => {
   describe('timestampToString', () => {
@@ -479,5 +480,22 @@ describe('ORMap merge', () => {
       expect(result.added).toBe(0);
       expect(mapA.get('key1')).toHaveLength(0);
     });
+  });
+});
+
+describe('ORMap tombstone-only key', () => {
+  it('stays in the Merkle tree after its only value is removed, with a leaf that covers the tombstone', () => {
+    const map = new ORMap<string, string>(new HLC('node-1'));
+    const record = map.add('key1', 'only-value');
+    map.remove('key1', 'only-value');
+
+    const leafPath = hashString('key1').toString(16).padStart(8, '0').slice(0, 3);
+    const leaf = map.getMerkleTree().getEntryHashes(leafPath).get('key1');
+
+    // The server keeps a leaf for a key that holds only tombstones, so a client
+    // that drops the key can never agree with it on the root. The expected value
+    // is the TG-MRK-001 leaf with no live tags and the removed tag as the key's
+    // only tombstone, written out here rather than taken from the code under test.
+    expect(leaf).toBe(hashString(`key:key1|#${record.tag}`));
   });
 });

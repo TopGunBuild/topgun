@@ -1083,6 +1083,19 @@ export interface ORMapSyncHandlerConfig {
   persistTombstones: (mapName: string) => Promise<void>;
 
   /**
+   * Tags of this client's not-yet-acknowledged local removes for `key` in
+   * `mapName`. Optional and not read by the handler yet: declared ahead of the
+   * per-key tombstone scoping so existing configs keep type-checking.
+   */
+  getPendingRemoveTags?: (mapName: string, key: string) => string[];
+
+  /**
+   * Persist an ORMap's per-key tombstone attribution. Optional and not called by
+   * the handler yet, for the same reason as `getPendingRemoveTags`.
+   */
+  persistKeyTombstones?: (mapName: string) => Promise<void>;
+
+  /**
    * Confirm to the server that `mapName`'s OR-Map sync data is durably applied
    * up to `epoch` (the covering epoch conveyed on the sync response). Wired by
    * SyncEngine to `applyMapCoverage`, which folds this map's coverage into the

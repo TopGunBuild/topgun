@@ -5,6 +5,7 @@ import { MerkleTree } from './MerkleTree';
 import { ORMapMerkleTree, ORMapMerkleNode } from './ORMapMerkleTree';
 import {
   hashORMapEntry,
+  hashORMapLeaf,
   hashORMapRecord,
   timestampToString,
   compareTimestamps,
@@ -23,7 +24,7 @@ import type {
 } from './EventJournal';
 
 export { HLC, LWWMap, ORMap, MerkleTree, ORMapMerkleTree, PNCounterImpl };
-export { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps };
+export { hashORMapEntry, hashORMapLeaf, hashORMapRecord, timestampToString, compareTimestamps };
 export type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig };
 
 // Event Journal exports

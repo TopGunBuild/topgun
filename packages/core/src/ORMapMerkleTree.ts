@@ -71,6 +71,19 @@ export class ORMapMerkleTree {
   }
 
   /**
+   * Store an already-computed leaf hash for a key.
+   *
+   * Lets the trie arithmetic (bucket routing and hash combining) be checked
+   * against cross-language vectors independently of how a leaf is derived.
+   *
+   * @internal
+   */
+  updateLeafHash(key: string, leafHash: number): void {
+    const pathHash = hashString(key).toString(16).padStart(8, '0');
+    this.updateNode(this.root, key, leafHash, pathHash, 0);
+  }
+
+  /**
    * Remove a key from the tree.
    * Called when all records for a key are removed.
    */

@@ -27,6 +27,11 @@ export interface MergeKeyResult {
 export interface ORMapSnapshot<K, V> {
   items: Map<K, Map<string, ORMapRecord<V>>>;
   tombstones: Set<string>;
+  /**
+   * Tombstone tags attributed to each key. Optional because the map does not
+   * track per-key attribution yet, so a snapshot never carries it today.
+   */
+  keyTombstones?: Map<K, Set<string>>;
 }
 
 /**
@@ -248,9 +253,36 @@ export class ORMap<K, V> {
   }
 
   /**
-   * Applies a tombstone (deletion) from a remote source.
+   * Tombstone tags attributed to `key`.
+   *
+   * The map does not track per-key attribution yet (tombstones live only in the
+   * map-wide set), so this is always empty.
    */
-  public applyTombstone(tag: string): void {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- signature is fixed ahead of per-key attribution; nothing is attributed to any key yet
+  public getKeyTombstones(key: K): Set<string> {
+    return new Set();
+  }
+
+  /**
+   * Record `tags` as tombstones for `key`.
+   *
+   * Without per-key attribution this only adds the tags to the map-wide set,
+   * through the same path a remote tombstone takes, so remove-wins holds for them.
+   */
+  public setKeyTombstones(key: K, tags: Iterable<string>): void {
+    for (const tag of tags) {
+      this.applyTombstone(tag, key);
+    }
+  }
+
+  /**
+   * Applies a tombstone (deletion) from a remote source.
+   *
+   * `key` names the key the tombstone belongs to. It is accepted but not used:
+   * the tombstone goes into the map-wide set whichever key it came from.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- signature is fixed ahead of per-key attribution; the key is not consulted yet
+  public applyTombstone(tag: string, key?: K): void {
     this.tombstones.add(tag);
     // Cleanup active items if present
     for (const [key, keyMap] of this.items) {
