@@ -1,0 +1,2 @@
+ORDER=FAIL no manifest commit given
+FATAL: ORDER is not OK (rc=3); no flags printed

@@ -1,0 +1,135 @@
+== STOP: PV ==
+PV=TRUE server_sha256=5d5bc58cbedafdbb462a29782a49ad52200f10e95c07f4f9aa2c8a15abfb3d22 harness_sha256=f205d81c653a7cf09fc7a88084cbd183dfdf61443671ba2fbd3db707499c1911 flavour=JE label=JE-ser
+== STOP: PR ==
+PR-crashes=TRUE crashes=0
+PR-class=TRUE
+== STOP: P5 / P6 / P7 ==
+P5=TRUE
+P5-observed: removal_rows=1053 settlement_rows=1053 unsettled=none
+P5-zero-return: none observed
+DECISION_SCRAPE=2026-09-30T21:01:58Z.txt
+P6=TRUE removed_refs_observed_total=1053000 considered_total=1053000 gap=0
+P7=TRUE restored_cancelled_total=0
+windows=1053 settlement_rows=1053 zero_return_removal_rows=0 scrapes=361
+== STOP: PE / PA ==
+PEL=TRUE rows_with_fp_equiv=361 rows=361 N=361 need=360
+PA=TRUE wellformed_lines=721 lines=721 need=718
+== STOP: PJ ==
+PJ=TRUE echoes=1 value=true
+PJ-child=n/a reason=filtered
+== STOP: PC ==
+PC=TRUE live=2107174 live_tag_bytes=71643916
+== STOP: PM1 ==
+PM1=TRUE post_mortem_rows=0 empty_scrape_rows=0 first_empty_elapsed=none last_live_scrape_elapsed=21600 need_ge=21480
+== STOP: PMEM ==
+PMEM=TRUE mem_invariant_violations=0 sampler_fatal=0
+== recorded: ops ==
+OPS_PER_S=243.892
+WRITE_ERRORS=0
+TOTAL_WRITES=5268307 DURATION_ACTUAL=21601
+OPS_AT_900=260.421 checkpoint_elapsed=903
+== recorded: host state at launch (the cell matrix's /proc/loadavg line) ==
+HOST=load_1m=0.40 load_5m=1.72 load_15m=2.30
+== recorded: je_config ==
+JE_CONFIG=je_config version=5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8 arenas_narenas=17 opt_narenas=16 opt_background_thread=true background_thread=true max_background_threads=4 opt_tcache=true opt_tcache_max=32768 opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a
+== STOP: PALLOC ==
+PALLOC_ITEM_pv=PASS PV=TRUE
+PALLOC_ITEM_j1=PASS ALLOC_ENV=_RJEM_MALLOC_CONF=background_thread:true,confirm_conf:true
+PALLOC_ITEM_j2=PASS je_config_lines=1
+PALLOC_ITEM_j3=PASS JE_BG_THREADS=4
+JE_CONFIRM_CONF=PASS
+PALLOC_ITEM_j4=PASS JE_CONFIRM_CONF=PASS
+PALLOC_ITEM_j5=PASS BIN_MARKERS=je=1,mi=0
+PALLOC_ITEM_j6=PASS TREE_PROOF_JE-ser=PASS
+PALLOC=TRUE label=JE-ser
+== readings: fits (slopes per hour; on amp series the unit is AMP per hour) ==
+FPL_slope=205.161776
+FPL_slope_se=4.937506
+FPL_slope_n=181
+FPL_slope_r2=0.906064
+SL_slope=205.161776
+SL_slope_se=4.937506
+SL_slope_n=181
+SL_slope_r2=0.906064
+LAZY_slope=0.000000
+LAZY_slope_se=0.000000
+LAZY_slope_n=181
+LAZY_slope_r2=NA
+TRENDL=n/a reason=no_linux_estimator
+TRENDL3=n/a reason=no_linux_estimator
+TRENDL_NATIVE=-0.021731
+TRENDL_NATIVE_se=0.005294
+TRENDL_NATIVE_n=181
+TRENDL_NATIVE_r2=0.086021
+TRENDL_dropped=0
+TRENDL_points_used=0
+== readings: end levels (last row carrying fp_equiv_mb) ==
+END_elapsed=21600
+FPL_end=1041.402
+SL_end=1041.402
+LAZY_end=0.000
+LAZY_RATIO_end=0.000000
+HWM_end=1504.254
+ANON_HUGE_end=0.000
+== readings: census points (TERMINAL, and the deciding point = the last used one) ==
+TERM_src=TERMINAL
+TERM_t=21601.5
+TERM_join_lag_s=1.5
+TERM_live=2107174
+TERM_reach_bytes=n/a reason=no_linux_estimator
+TERM_redb_mb=520.523
+TERM_AMP_FPL=n/a reason=no_linux_estimator
+TERM_AMP_SL=n/a reason=no_linux_estimator
+TERM_R_redb=n/a reason=no_linux_estimator
+TERM_je_allocated=928857664
+TERM_je_metadata=57743072
+TERM_AMP_JEL=n/a reason=no_linux_estimator
+TERM_DIRTY_SHAREL=0.160031
+TERM_FRAG_SHAREL=0.011038
+TERM_R_meta=n/a reason=no_linux_estimator
+TERM_EST_AGREE=n/a reason=no_linux_estimator
+TERM_UNMODELLED_MB=n/a reason=no_linux_estimator
+TERM_UNMODELLED_SHARE=n/a reason=no_linux_estimator
+DECIDE_src=TERMINAL
+DECIDE_t=21601.5
+DECIDE_join_lag_s=1.5
+DECIDE_live=2107174
+DECIDE_reach_bytes=n/a reason=no_linux_estimator
+DECIDE_redb_mb=520.523
+DECIDE_AMP_FPL=n/a reason=no_linux_estimator
+DECIDE_AMP_SL=n/a reason=no_linux_estimator
+DECIDE_R_redb=n/a reason=no_linux_estimator
+DECIDE_je_allocated=928857664
+DECIDE_je_metadata=57743072
+DECIDE_AMP_JEL=n/a reason=no_linux_estimator
+DECIDE_DIRTY_SHAREL=0.160031
+DECIDE_FRAG_SHAREL=0.011038
+DECIDE_R_meta=n/a reason=no_linux_estimator
+DECIDE_EST_AGREE=n/a reason=no_linux_estimator
+DECIDE_UNMODELLED_MB=n/a reason=no_linux_estimator
+DECIDE_UNMODELLED_SHARE=n/a reason=no_linux_estimator
+== readings: per live entry ==
+LIVE_END_je=2107174 src=TERMINAL t=21601.5
+CENSUS_POINTS_je=14 retained=13
+CENSUS_DROPPED_je=21601.5
+CENSUS_DROPPED_N_je=1
+PE_END_je=522.693016 t=5404.3 live=554206
+PE_ROWS_je=86
+PE_LEVEL_je=n/a reason=no_rows_in_level_window
+RSS_PE_LEVEL_je=n/a reason=no_rows_in_level_window
+== readings: trend (per-entry, relative per hour) ==
+TREND_je=n/a reason=few_rows n=43 dropped=1
+STAGE2_T_je=n/a reason=missing:je:e
+FIXED_EST_je=n/a reason=few_rows
+FIXED_NOTE_je=n/a reason=few_rows
+TREND_CORR_je=n/a reason=few_rows
+TREND3_je=n/a reason=few_rows n=29 dropped=1
+== readings: recorded (never decision inputs) ==
+LAZY_MAX_je=0.000 ratio=0.000000 row=0
+HWM_END_je=1504.254
+ANON_HUGE_END_je=0.000
+DISK_SLOPE_je=107.979871 se=3.106477 n=180
+AMP_JE_je=1.233235 row=21600
+FRAG_SHAREL_je=0.011038
+DIRTY_SHAREL_je=0.160031
+REACH_PE_je=434.165 live=2107174

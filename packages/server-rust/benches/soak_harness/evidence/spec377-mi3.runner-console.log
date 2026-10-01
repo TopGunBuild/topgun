@@ -1,0 +1,183 @@
+provenance: server sha256=bc0fae31e708885db75dae12c43c5de3129398203b8d36e5e5bdf515b7a510e9 flavour=MI built=2026-09-30T08:30:54Z run_start=2026-09-30T21:03:46Z topgun_or_prune_restored_cancelled_total=present
+provenance: server sha256=bc0fae31e708885db75dae12c43c5de3129398203b8d36e5e5bdf515b7a510e9 flavour=MI built=2026-09-30T08:30:54Z run_start=2026-09-30T21:03:46Z topgun_or_prune_restored_cancelled_total=present harness sha256=f205d81c653a7cf09fc7a88084cbd183dfdf61443671ba2fbd3db707499c1911 harness_built=2026-09-30T08:40:49Z tombstone_level_ceiling_gate=present
+soak binary:   /opt/topgun/target/spec377-H/release/deps/soak_harness-53b4b640053c5766
+  built:       2026-09-30T08:40:49Z
+server binary: /opt/topgun/target/spec377-MI3-ser/release/topgun-server
+  built:       2026-09-30T08:30:54Z
+
+=== spec377 Linux run: cell mi3 (label MI3-ser, flavour MI, phase series) ===
+  repo HEAD:      3fdd929a35dccb16b07c10f47262984c14216980
+  dirty tree:     yes
+  host/OS:        Linux topgun-bench 6.1.0-52-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.180-1 (2026-08-03) x86_64 GNU/Linux
+  lineage:        chain-built harness + chain-built MI server
+  chain start:    1790756015
+  data dir:       /opt/topgun/target/spec377-mi3-data
+  csv:            /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec377-mi3.csv
+  soak.json:      /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec377-mi3.soak.json
+  mechanism.json: /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec377-mi3.mechanism.json (harness writes spec377-mi3.soak.mechanism.json; renamed after the run)
+  durable.json:   /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec377-mi3.soak.durable.json (raw basename: NOT renamed, by design)
+  progress.jsonl: /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec377-mi3.progress.jsonl
+  console log:    /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec377-mi3.harness-console.log
+  matrix:         /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec377-mi3.matrix.txt
+  soak binary:    /opt/topgun/target/spec377-H/release/deps/soak_harness-53b4b640053c5766
+  soak binary commit: 3fdd929a35dccb16b07c10f47262984c14216980 (HEAD; the binary itself is identified by its sha256)
+  .rs working tree:   CLEAN over '*.rs' Cargo.toml '*/Cargo.toml' Cargo.lock (asserted before the build)
+  code freeze:            34007e19
+  code freeze diff (.rs): EMPTY over '*.rs' Cargo.toml '*/Cargo.toml' Cargo.lock (asserted before the build)
+    built:        2026-09-30T08:40:49Z
+  server binary:  /opt/topgun/target/spec377-MI3-ser/release/topgun-server
+    built:        2026-09-30T08:30:54Z
+    sha256:       bc0fae31e708885db75dae12c43c5de3129398203b8d36e5e5bdf515b7a510e9
+  --- varied knobs; everything else is the spec362b-durable.sh long4h
+      literal ---
+  TOPGUN_EPOCH_WIDTH:  <unset: production default 1000>
+  duration:            21600s
+  csv cadence:         60s
+  extra harness flags: <none>
+  --durable-reading:   ARMED
+  --live-census-interval: 300 (ARMED: the live-copy census)
+  --sampler-jitter-seed:  20260831
+  SOAK_SERVER_LOG:     warn,topgun_server::tombstone_frontier::removal=info,topgun_server::tombstone_frontier::settlement=info,topgun_server::tombstone_frontier::conjunct=info
+  SOAK_SERVER_LOG_PASSTHROUGH: 1
+  TOPGUN_PRUNE_RECORD: true
+  TOPGUN_LOG_FORMAT:   <unset: human fmt, which is what the origin parser reads>
+  server port:         47376
+  SOAK_SERVER_BINARY:  /opt/topgun/target/spec377-MI3-ser/release/topgun-server
+  --- pinned matrix (identical to spec362b-durable.sh's long4h cell;
+      crash-interval is per-cell and is 0 on the one cell this runner
+      ships) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 0;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+  tombstone gate: level ceiling K=2+ceil(S_A/W) epochs × W × b_max (S_A, b_max measured by the harness; A = TOPGUN_WAL_WATERMARK_STALL_BOUND_MS, not set by this runner); level stability 10 %; slope report-only
+  harness sha256: f205d81c653a7cf09fc7a88084cbd183dfdf61443671ba2fbd3db707499c1911
+  server flavour: MI
+  server code:    SERIES_PIN = 34007e19 (SPEC377_SERVER_COMMIT=34007e19, resolves 34007e197224d4db870ba2c842716316622580de)
+  TOPGUN_JOURNAL_ENABLED:        <unset: harness passes true>
+  TOPGUN_SOAK_GRACEFUL_SHUTDOWN: <unset: SIGKILL teardown>
+  DHAT_OUT:                      <unset>
+  --- allocator treatment (items 5 and 6) ---
+  build label:                   MI3-ser
+  allocator env unset first:     MALLOC_CONF _RJEM_MALLOC_CONF MALLOC_ARENA_MAX MALLOC_ARENA_TEST MALLOC_TOP_PAD_ MALLOC_TRIM_THRESHOLD_ MALLOC_MMAP_THRESHOLD_ MALLOC_MMAP_MAX_ MALLOC_PERTURB_ MALLOC_CHECK_ GLIBC_TUNABLES LD_PRELOAD + every exported MIMALLOC_*
+  allocator env expected:        MIMALLOC_VERBOSE=1
+  allocator env (runner shell):  MIMALLOC_VERBOSE=1
+  allocator literals in binary:  je=0 mi=3
+  THP at launch:                 madvise/madvise
+  allocator proof:               read from /proc/<pid> at the first sample with elapsed >= 60 s
+  post-mortem rows:              counted at the end of the run (item 17)
+  --- host (Linux) ---
+  os-release:          Debian GNU/Linux 12 (bookworm)
+  kernel:              6.1.0-52-amd64
+  cpu model:           AMD EPYC-Milan Processor
+  nproc:               4
+  glibc:               ldd (Debian GLIBC 2.36-9+deb12u14) 2.36
+  rustc host:          x86_64-unknown-linux-gnu
+  THP enabled:         always [madvise] never
+  THP defrag:          always defer defer+madvise [madvise] never
+  swapon --show:       empty (no swap)
+  vm.overcommit_memory: 0
+  vm.max_map_count:    65530
+  awk:                 /opt/topgun/target/spec377-awkbin/awk
+  awk -version:        awk version 20220912
+  memory sampler:      spec376-procmem.sh sha256=d05727f002087cb37fb8abce8f5f935dce11af5e0e0373c873e6a393a8a6f7b4
+  memory proc root:    /proc (fixed; procmem_row is called without a root, fixture roots belong to the synthetic suite only)
+  /proc/loadavg:       0.44 1.82 2.35 1/120 548997
+  /proc/meminfo (first 8 lines):
+    MemTotal:       15985096 kB
+    MemFree:         6881988 kB
+    MemAvailable:   15393328 kB
+    Buffers:          188360 kB
+    Cached:          7026600 kB
+    SwapCached:            0 kB
+    Active:          4245876 kB
+    Inactive:        2982972 kB
+
+harness pid 549000; follow with: tail -f /opt/topgun/target/spec377-mi3-data.meta/harness-console.log
+server ready: pid 549011 (t0 = server-ready)
+
+harness exited with code 0
+                     floor  h1=0 h2=0 q3=0 q4=293
+  wal_segment_files  shape=MONOTONE_RISING envelope=PEAKS samples=4046 span=20245.9s
+                     peaks  h1=497 h2=506 q3=499 q4=506 last_half_mean=465
+                     floor  h1=271 h2=271 q3=271 q4=271
+writebehind lag:   2600 (observation only) scrapes total=4317 read=4315 absent=2 unreadable=0 malformed_samples=0 overflowed_samples=0
+censuses:          14
+  LIVE_COPY  t=300.0s copy_done=300.0739s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=31522 live_tag_bytes=1071748 tombstones=761 tombstone_bytes=16742 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=20
+  LIVE_COPY  t=600.1s copy_done=600.1841s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=62804 live_tag_bytes=2135336 tombstones=400 tombstone_bytes=8800 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=11
+  LIVE_COPY  t=900.2s copy_done=900.3089s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=94032 live_tag_bytes=3197090 tombstones=1016 tombstone_bytes=22352 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=27
+  LIVE_COPY  t=1200.3s copy_done=1200.4983s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=125187 live_tag_bytes=4256360 tombstones=595 tombstone_bytes=13090 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=17
+  LIVE_COPY  t=1800.6s copy_done=1800.8516s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=187308 live_tag_bytes=6368474 tombstones=654 tombstone_bytes=14388 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=18
+  LIVE_COPY  t=2701.2s copy_done=2701.5088s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=280047 live_tag_bytes=9521600 tombstones=1024 tombstone_bytes=22528 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=27
+  LIVE_COPY  t=3001.5s copy_done=3001.7857s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=310876 live_tag_bytes=10569786 tombstones=438 tombstone_bytes=10074 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=12
+  LIVE_COPY  t=3301.8s copy_done=3302.0703s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=341616 live_tag_bytes=11614946 tombstones=808 tombstone_bytes=18584 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=21
+  LIVE_COPY  t=3602.1s copy_done=3602.3763s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=372298 live_tag_bytes=12658134 tombstones=149 tombstone_bytes=3427 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=4
+  LIVE_COPY  t=3902.4s copy_done=3902.6900s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=402936 live_tag_bytes=13699826 tombstones=468 tombstone_bytes=10764 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=13
+  LIVE_COPY  t=4202.7s copy_done=4203.0214s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=433524 live_tag_bytes=14739818 tombstones=762 tombstone_bytes=17526 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=20
+  LIVE_COPY  t=4503.0s copy_done=4503.5751s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=464012 live_tag_bytes=15776410 tombstones=1006 tombstone_bytes=23138 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=26
+  LIVE_COPY  t=4803.6s copy_done=4804.0698s keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=494458 live_tag_bytes=16811574 tombstones=229 tombstone_bytes=5267 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=7
+  TERMINAL   t=21602.9s copy_done=n/a keys=96 undecodable=0 or_map=96 or_tomb=0 lww=0 live=2123004 live_tag_bytes=72182138 tombstones=501 tombstone_bytes=11523 dups=0 keys_with_tombstones=48 keys_all_dead=0 max_per_key=14
+terminal census:   keys=96 tombstone_bytes=11523
+origin:            reading=NOT_REACHED_EQUAL_REFS matched=1061 unparsed=0 dropped=0 armed=true epochs_exited=1061 restarts=0 epochs_scrapes total=4317 read=4317 absent=0 unreadable=0 malformed_samples=0 overflowed_samples=0
+origin reason:     all 1061 parsed line(s) returned exactly the refs held at entry
+first zero-return: (none)
+wrote durable reading to /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec377-mi3.soak.durable.json
+console log: /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec377-mi3.harness-console.log
+mechanism report: /opt/topgun/packages/server-rust/benches/soak_harness/evidence/spec377-mi3.mechanism.json
+csv rows: 361
+post_mortem_rows=0
+csv columns:
+  rss_mb         n=361 empty=0 nonzero=361 min=38.176 max=1149.727
+  wal_mb         n=361 empty=0 nonzero=361 min=0.102 max=2.609
+  redb_mb        n=361 empty=0 nonzero=361 min=0.516 max=534.047
+  disk_total_mb  n=361 empty=0 nonzero=361 min=0.609 max=536.602
+  tombstone_bytes n=361 empty=0 min=0 max=26312
+  rss_mb           n=361 empty=0
+  fp_equiv_mb      n=361 empty=0
+  hwm_rss_mb       n=361 empty=0
+  lazyfree_mb      n=361 empty=0
+  swap_mb          n=361 empty=0
+  file_mb          n=361 empty=0
+  anon_mb          n=361 empty=0
+  private_dirty_mb n=361 empty=0
+  pss_mb           n=361 empty=0
+  anon_huge_mb     n=361 empty=0
+  smaps_rss_mb     n=361 empty=0
+  progress.jsonl checkpoints: 71
+  soak.json "walFsync": "batched",
+  soak.json "epochWidth": 1000,
+  soak.json "crashes": 0,
+  soak.json "churnClients": 6,
+  soak.json "keyspace": 200,
+  soak.json "durationSecsActual": 21602,
+  mechanism.json "orDeltaFrames": 230,
+  mechanism.json "orSnapshotFrames": 0,
+
+post-hoc OLS fits (see the SE caveat in spec349c2-fit.awk):
+  units: the field is named slope_mb_per_hour for every column; on the
+  tombstone_bytes row the fit is identical but the unit is BYTES/hour.
+  col=rss_mb window=full rows_used=361 n=361 skipped_empty=0 t_start_secs=0.0 t_end_secs=21600.0 span_secs=21600.0 y_first=38.176 y_last=1117.879 slope_mb_per_hour=163.845471 se_mb_per_hour=1.633940 intercept_mb=156.854829 r2=0.965528 sxx_hours2=1089.015407713 sse=1043759.559997721
+  col=wal_mb window=full rows_used=361 n=361 skipped_empty=0 t_start_secs=0.0 t_end_secs=21600.0 span_secs=21600.0 y_first=0.102 y_last=2.520 slope_mb_per_hour=0.074769 se_mb_per_hour=0.003965 intercept_mb=2.111822 r2=0.497660 sxx_hours2=1089.015407713 sse=6.145354429
+  col=redb_mb window=full rows_used=361 n=361 skipped_empty=0 t_start_secs=0.0 t_end_secs=21600.0 span_secs=21600.0 y_first=0.516 y_last=534.047 slope_mb_per_hour=89.000876 se_mb_per_hour=1.077152 intercept_mb=-19.414962 r2=0.950042 sxx_hours2=1089.015407713 sse=453609.595699536
+  col=disk_total_mb window=full rows_used=361 n=361 skipped_empty=0 t_start_secs=0.0 t_end_secs=21600.0 span_secs=21600.0 y_first=0.609 y_last=536.570 slope_mb_per_hour=89.075745 se_mb_per_hour=1.076924 intercept_mb=-17.299471 r2=0.950142 sxx_hours2=1089.015407713 sse=453417.707229916
+  col=tombstone_bytes window=full rows_used=361 n=361 skipped_empty=0 t_start_secs=0.0 t_end_secs=21600.0 span_secs=21600.0 y_first=0.000 y_last=11937.000 slope_mb_per_hour=519.716148 se_mb_per_hour=187.372558 intercept_mb=14396.248848 r2=0.020981 sxx_hours2=1089.015407713 sse=13725887836.455266953
+  col=rss_mb window=last_half rows_used=361 n=181 skipped_empty=0 t_start_secs=10800.0 t_end_secs=21600.0 span_secs=10800.0 y_first=671.551 y_last=1117.879 slope_mb_per_hour=201.844937 se_mb_per_hour=4.322784 intercept_mb=-26.840084 r2=0.924129 sxx_hours2=137.257639042 sse=459109.800834855
+  col=wal_mb window=last_half rows_used=361 n=181 skipped_empty=0 t_start_secs=10800.0 t_end_secs=21600.0 span_secs=10800.0 y_first=2.402 y_last=2.520 slope_mb_per_hour=0.033298 se_mb_per_hour=0.005704 intercept_mb=2.295224 r2=0.159945 sxx_hours2=137.257639042 sse=0.799316675
+  col=redb_mb window=last_half rows_used=361 n=181 skipped_empty=0 t_start_secs=10800.0 t_end_secs=21600.0 span_secs=10800.0 y_first=288.016 y_last=534.047 slope_mb_per_hour=103.776954 se_mb_per_hour=3.493114 intercept_mb=-90.491942 r2=0.831391 sxx_hours2=137.257639042 sse=299788.490239660
+  col=disk_total_mb window=last_half rows_used=361 n=181 skipped_empty=0 t_start_secs=10800.0 t_end_secs=21600.0 span_secs=10800.0 y_first=290.422 y_last=536.570 slope_mb_per_hour=103.810248 se_mb_per_hour=3.492647 intercept_mb=-88.192401 r2=0.831518 sxx_hours2=137.257639042 sse=299708.384627670
+  col=tombstone_bytes window=last_half rows_used=361 n=181 skipped_empty=0 t_start_secs=10800.0 t_end_secs=21600.0 span_secs=10800.0 y_first=10396.000 y_last=11937.000 slope_mb_per_hour=842.398135 se_mb_per_hour=505.756058 intercept_mb=12381.128457 r2=0.015262 sxx_hours2=137.257639042 sse=6284514632.576553345
+
+RESULT: instrument sound; harness exit code 0.
+ALLOC_ENV_mi3=MIMALLOC_VERBOSE=1
+JE_BG_THREADS_mi3=0
+THP_mi3=madvise/madvise
+ALLOC_PROOF_AT_mi3=60
+BIN_MARKERS_mi3=je=0 mi=3
+MI_POSTINIT_LINES_mi3=2
+steal_pct=0.0000
+post_mortem_mem_reads=0
+mem_invariant_violations=0
+RUNNER_EXIT=0

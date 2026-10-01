@@ -1,0 +1,2 @@
+ORDER=SKIPPED (synthetic)
+FATAL: the manifest must carry exactly one SHARES_STOP= and one E_FROZEN= line (found 1 / 0)

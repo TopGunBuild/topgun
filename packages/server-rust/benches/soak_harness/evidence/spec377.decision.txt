@@ -1,0 +1,277 @@
+ORDER=OK manifest_commit=3fdd929a35dccb16b07c10f47262984c14216980 prefix_sha256=d81199758723c2043d449aa7340d66ce6a7a9b1644478bb11912a21d802212cc programs=19 series_pin=34007e19
+== section 1 (read from the manifest, not recomputed) ==
+MANIFEST_SERIES_PIN=34007e19
+MANIFEST_A0_L_MIB=13.349
+MANIFEST_FLAT_BAR_PER_H=0.010
+MANIFEST_BETTER_BAR=0.80
+MANIFEST_SYS_AGREE_BAR=0.25
+MANIFEST_OPS_PARITY_MIN=0.95
+MANIFEST_TIE_BAND=0.10
+MANIFEST_STAGE2_MAX_H=24
+MANIFEST_LEVEL_WINDOW_S=1800
+MANIFEST_MI_POSTINIT_BOUND=5
+MANIFEST_LAZY_DRIFT_BAR=0.01
+MANIFEST_PRICE_EUR_PER_H=0.138
+MANIFEST_MIN_DISK_GIB=40
+== inputs (presence resolved) ==
+  | PREFLIGHT_CLAUSE=none
+  | DISK_CLAUSE=none
+  | DISK_FREE_SEEN=140072536
+  | PRED_s1=present
+  | PRED_s1_PV=TRUE
+  | PRED_s1_PEL=TRUE
+  | PRED_s1_PM1=TRUE
+  | PRED_s1_PMEM=TRUE
+  | PRED_s1_PALLOC=TRUE
+  | PRED_s1_PA=n/a
+  | PRED_s1_PR-crashes=TRUE
+  | PRED_s1_WRITE_ERRORS=0
+  | LIVE_END_s1=2100198 src=TERMINAL t=21602.2
+  | PE_END_s1=2543.517145 t=20434.4 live=1993742
+  | PE_LEVEL_s1=2541.779016 rows=11
+  | TREND_s1=UNDERPOWERED slope_rel=0.026502 se_rel=0.003531 r1=0.7584 se_rel_adj=0.009526 n=168 r2=0.253394 dropped=1 slope_pe_per_h=67.363059 level=2541.779016
+  | TREND3_s1=RISING slope_rel=0.077354 se_rel=0.005037 r1=0.4279 se_rel_adj=0.007958 n=112 r2=0.681927 dropped=1 slope_pe_per_h=196.615710 level=2541.779016
+  | TREND_CORR_s1=UNDERPOWERED slope_rel_corr=-0.004751 fixed_bias=0.031253 recorded_only
+  | STAGE2_T_s1=10
+  | FIXED_EST_s1=-500.236 se_mib=176.650
+  | FIXED_NOTE_s1=rising_marginal_cost_suspected
+  | RSS_PE_LEVEL_s1=2547.896585 rows=11
+  | LAZY_MAX_s1=0.000 ratio=0.000000 row=0
+  | HWM_END_s1=5031.094
+  | ANON_HUGE_END_s1=0.000
+  | DISK_SLOPE_s1=118.451806 se=3.972566 n=180
+  | PREDRC_s1=0
+  | RUNNER_EXIT_s1=0
+  | STEAL_s1=0.0000
+  | TOTAL_WRITES_s1=5250755
+  | DURATION_s1=21600
+  | PRED_je=present
+  | PRED_je_PV=TRUE
+  | PRED_je_PEL=TRUE
+  | PRED_je_PM1=TRUE
+  | PRED_je_PMEM=TRUE
+  | PRED_je_PALLOC=TRUE
+  | PRED_je_PA=TRUE
+  | PRED_je_PR-crashes=TRUE
+  | PRED_je_WRITE_ERRORS=0
+  | LIVE_END_je=2107174 src=TERMINAL t=21601.5
+  | PE_END_je=522.693016 t=5404.3 live=554206
+  | PE_LEVEL_je=n/a reason=no_rows_in_level_window
+  | TREND_je=n/a reason=few_rows n=43 dropped=1
+  | TREND3_je=n/a reason=few_rows n=29 dropped=1
+  | TREND_CORR_je=n/a reason=few_rows
+  | STAGE2_T_je=n/a reason=missing:je:e
+  | FIXED_EST_je=n/a reason=few_rows
+  | FIXED_NOTE_je=n/a reason=few_rows
+  | RSS_PE_LEVEL_je=n/a reason=no_rows_in_level_window
+  | LAZY_MAX_je=0.000 ratio=0.000000 row=0
+  | HWM_END_je=1504.254
+  | ANON_HUGE_END_je=0.000
+  | DISK_SLOPE_je=107.979871 se=3.106477 n=180
+  | PREDRC_je=0
+  | RUNNER_EXIT_je=0
+  | STEAL_je=0.0000
+  | TOTAL_WRITES_je=5268307
+  | DURATION_je=21600
+  | PRED_mi3=present
+  | PRED_mi3_PV=TRUE
+  | PRED_mi3_PEL=TRUE
+  | PRED_mi3_PM1=TRUE
+  | PRED_mi3_PMEM=TRUE
+  | PRED_mi3_PALLOC=TRUE
+  | PRED_mi3_PA=n/a
+  | PRED_mi3_PR-crashes=TRUE
+  | PRED_mi3_WRITE_ERRORS=0
+  | LIVE_END_mi3=2123004 src=TERMINAL t=21602.9
+  | PE_END_mi3=822.382444 t=4803.6 live=494458
+  | PE_LEVEL_mi3=n/a reason=no_rows_in_level_window
+  | TREND_mi3=n/a reason=few_rows n=38 dropped=1
+  | TREND3_mi3=n/a reason=few_rows n=26 dropped=1
+  | TREND_CORR_mi3=n/a reason=few_rows
+  | STAGE2_T_mi3=n/a reason=missing:mi3:e
+  | FIXED_EST_mi3=n/a reason=few_rows
+  | FIXED_NOTE_mi3=n/a reason=few_rows
+  | RSS_PE_LEVEL_mi3=n/a reason=no_rows_in_level_window
+  | LAZY_MAX_mi3=0.000 ratio=0.000000 row=0
+  | HWM_END_mi3=1607.598
+  | ANON_HUGE_END_mi3=454.000
+  | DISK_SLOPE_mi3=103.788998 se=3.531651 n=180
+  | PREDRC_mi3=0
+  | RUNNER_EXIT_mi3=0
+  | STEAL_mi3=0.0000
+  | TOTAL_WRITES_mi3=5307652
+  | DURATION_mi3=21600
+  | PRED_mi2=present
+  | PRED_mi2_PV=TRUE
+  | PRED_mi2_PEL=TRUE
+  | PRED_mi2_PM1=TRUE
+  | PRED_mi2_PMEM=TRUE
+  | PRED_mi2_PALLOC=TRUE
+  | PRED_mi2_PA=n/a
+  | PRED_mi2_PR-crashes=TRUE
+  | PRED_mi2_WRITE_ERRORS=0
+  | LIVE_END_mi2=2119040 src=TERMINAL t=21603.0
+  | PE_END_mi2=1541.199463 t=5103.8 live=524246
+  | PE_LEVEL_mi2=n/a reason=no_rows_in_level_window
+  | TREND_mi2=n/a reason=few_rows n=41 dropped=1
+  | TREND3_mi2=n/a reason=few_rows n=27 dropped=1
+  | TREND_CORR_mi2=n/a reason=few_rows
+  | STAGE2_T_mi2=n/a reason=missing:mi2:e
+  | FIXED_EST_mi2=n/a reason=few_rows
+  | FIXED_NOTE_mi2=n/a reason=few_rows
+  | RSS_PE_LEVEL_mi2=n/a reason=no_rows_in_level_window
+  | LAZY_MAX_mi2=0.000 ratio=0.000000 row=0
+  | HWM_END_mi2=2871.969
+  | ANON_HUGE_END_mi2=1172.000
+  | DISK_SLOPE_mi2=124.385717 se=3.437443 n=180
+  | PREDRC_mi2=0
+  | RUNNER_EXIT_mi2=0
+  | STEAL_mi2=0.0000
+  | TOTAL_WRITES_mi2=5297820
+  | DURATION_mi2=21600
+  | PRED_s2=present
+  | PRED_s2_PV=TRUE
+  | PRED_s2_PEL=TRUE
+  | PRED_s2_PM1=TRUE
+  | PRED_s2_PMEM=TRUE
+  | PRED_s2_PALLOC=TRUE
+  | PRED_s2_PA=n/a
+  | PRED_s2_PR-crashes=TRUE
+  | PRED_s2_WRITE_ERRORS=0
+  | LIVE_END_s2=2096416 src=TERMINAL t=21602.3
+  | PE_END_s2=2204.606204 t=5104 live=523116
+  | PE_LEVEL_s2=n/a reason=no_rows_in_level_window
+  | TREND_s2=n/a reason=few_rows n=41 dropped=1
+  | TREND3_s2=n/a reason=few_rows n=27 dropped=1
+  | TREND_CORR_s2=n/a reason=few_rows
+  | STAGE2_T_s2=n/a reason=missing:s2:e
+  | FIXED_EST_s2=n/a reason=few_rows
+  | FIXED_NOTE_s2=n/a reason=few_rows
+  | RSS_PE_LEVEL_s2=n/a reason=no_rows_in_level_window
+  | LAZY_MAX_s2=0.000 ratio=0.000000 row=0
+  | HWM_END_s2=5231.461
+  | ANON_HUGE_END_s2=0.000
+  | DISK_SLOPE_s2=106.189986 se=3.586563 n=180
+  | PREDRC_s2=0
+  | RUNNER_EXIT_s2=0
+  | STEAL_s2=0.0000
+  | TOTAL_WRITES_s2=5241339
+  | DURATION_s2=21600
+  | JE_CONFIG=je_config version=5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8 arenas_narenas=17 opt_narenas=16 opt_background_thread=true background_thread=true max_background_threads=4 opt_tcache=true opt_tcache_max=32768 opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a
+  | JE_CONFIRM_CONF=PASS
+  | AMP_JE_je=1.233235 row=21600
+  | FRAG_SHAREL_je=0.011038
+  | DIRTY_SHAREL_je=0.160031
+  | REACH_PE_je=434.165 live=2107174
+  | MI_POSTINIT_LINES_mi3=2
+  | MI_POSTINIT_LINES_mi2=6
+== smoke ==
+SMOKE_ADMISSION_SEEN=PASS
+== stop predicates ==
+STOP_H_CLAUSES=none
+STOP_V_CLAUSES=none
+== flags ==
+STOP=none
+WRITE_ERRORS=0
+OPS_s1=243.091
+OPS_je=243.903
+OPS_mi3=245.725
+OPS_mi2=245.269
+OPS_s2=242.655
+OPS_RATIO_JE=1.0042
+OPS_RATIO_MI3=1.0117
+OPS_RATIO_MI2=1.0099
+LIVE_END_s1=2100198 src=TERMINAL t=21602.2
+LIVE_END_je=2107174 src=TERMINAL t=21601.5
+LIVE_END_mi3=2123004 src=TERMINAL t=21602.9
+LIVE_END_mi2=2119040 src=TERMINAL t=21603.0
+LIVE_END_s2=2096416 src=TERMINAL t=21602.3
+PE_END_s1=2543.517145 t=20434.4 live=1993742
+PE_END_je=522.693016 t=5404.3 live=554206
+PE_END_mi3=822.382444 t=4803.6 live=494458
+PE_END_mi2=1541.199463 t=5103.8 live=524246
+PE_END_s2=2204.606204 t=5104 live=523116
+PE_LEVEL_s1=2541.779016 rows=11
+PE_LEVEL_je=n/a reason=no_rows_in_level_window
+PE_LEVEL_mi3=n/a reason=no_rows_in_level_window
+PE_LEVEL_mi2=n/a reason=no_rows_in_level_window
+PE_LEVEL_s2=n/a reason=no_rows_in_level_window
+TREND_s1=UNDERPOWERED slope_rel=0.026502 se_rel=0.003531 r1=0.7584 se_rel_adj=0.009526 n=168 r2=0.253394 dropped=1 slope_pe_per_h=67.363059 level=2541.779016
+TREND_je=n/a reason=few_rows n=43 dropped=1
+TREND_mi3=n/a reason=few_rows n=38 dropped=1
+TREND_mi2=n/a reason=few_rows n=41 dropped=1
+TREND_s2=n/a reason=few_rows n=41 dropped=1
+TREND3_s1=RISING slope_rel=0.077354 se_rel=0.005037 r1=0.4279 se_rel_adj=0.007958 n=112 r2=0.681927 dropped=1 slope_pe_per_h=196.615710 level=2541.779016
+TREND3_je=n/a reason=few_rows n=29 dropped=1
+TREND3_mi3=n/a reason=few_rows n=26 dropped=1
+TREND3_mi2=n/a reason=few_rows n=27 dropped=1
+TREND3_s2=n/a reason=few_rows n=27 dropped=1
+TREND_CORR_s1=UNDERPOWERED slope_rel_corr=-0.004751 fixed_bias=0.031253 recorded_only
+TREND_CORR_je=n/a reason=few_rows
+TREND_CORR_mi3=n/a reason=few_rows
+TREND_CORR_mi2=n/a reason=few_rows
+TREND_CORR_s2=n/a reason=few_rows
+STAGE2_T_s1=10
+STAGE2_T_je=n/a reason=missing:je:e
+STAGE2_T_mi3=n/a reason=missing:mi3:e
+STAGE2_T_mi2=n/a reason=missing:mi2:e
+STAGE2_T_s2=n/a reason=missing:s2:e
+FIXED_EST_s1=-500.236 se_mib=176.650
+FIXED_EST_je=n/a reason=few_rows
+FIXED_EST_mi3=n/a reason=few_rows
+FIXED_EST_mi2=n/a reason=few_rows
+FIXED_EST_s2=n/a reason=few_rows
+FIXED_NOTE_s1=rising_marginal_cost_suspected
+FIXED_NOTE_je=n/a reason=few_rows
+FIXED_NOTE_mi3=n/a reason=few_rows
+FIXED_NOTE_mi2=n/a reason=few_rows
+FIXED_NOTE_s2=n/a reason=few_rows
+RSS_PE_LEVEL_s1=2547.896585 rows=11
+RSS_PE_LEVEL_je=n/a reason=no_rows_in_level_window
+RSS_PE_LEVEL_mi3=n/a reason=no_rows_in_level_window
+RSS_PE_LEVEL_mi2=n/a reason=no_rows_in_level_window
+RSS_PE_LEVEL_s2=n/a reason=no_rows_in_level_window
+LAZY_MAX_s1=0.000 ratio=0.000000 row=0
+LAZY_MAX_je=0.000 ratio=0.000000 row=0
+LAZY_MAX_mi3=0.000 ratio=0.000000 row=0
+LAZY_MAX_mi2=0.000 ratio=0.000000 row=0
+LAZY_MAX_s2=0.000 ratio=0.000000 row=0
+LAZY_DRIFT=FALSE
+HWM_END_s1=5031.094
+HWM_END_je=1504.254
+HWM_END_mi3=1607.598
+HWM_END_mi2=2871.969
+HWM_END_s2=5231.461
+ANON_HUGE_END_s1=0.000
+ANON_HUGE_END_je=0.000
+ANON_HUGE_END_mi3=454.000
+ANON_HUGE_END_mi2=1172.000
+ANON_HUGE_END_s2=0.000
+JE_CONFIG=je_config version=5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8 arenas_narenas=17 opt_narenas=16 opt_background_thread=true background_thread=true max_background_threads=4 opt_tcache=true opt_tcache_max=32768 opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a
+JE_CONFIRM_CONF=PASS
+AMP_JE=1.233235 row=21600
+FRAG_SHAREL_je=0.011038
+DIRTY_SHAREL_je=0.160031
+REACH_PE_je=434.165 live=2107174
+MI_POSTINIT_LINES_mi3=2
+MI_POSTINIT_LINES_mi2=6
+MI_POSTINIT_NOTE=mi2:6
+DISK_SLOPE_s1=118.451806 se=3.972566 n=180
+DISK_SLOPE_je=107.979871 se=3.106477 n=180
+DISK_SLOPE_mi3=103.788998 se=3.531651 n=180
+DISK_SLOPE_mi2=124.385717 se=3.437443 n=180
+DISK_SLOPE_s2=106.189986 se=3.586563 n=180
+SYS_AGREE=FALSE reason=missing:s2:PE_LEVEL
+PLATEAU_SYS=INDETERMINATE reason=missing:s2:TREND
+STAGE2_FEASIBLE=n/a reason=not_underpowered
+STAGE2_COST_EUR=n/a reason=not_underpowered
+VS_SYS_JE=n/a reason=missing:s2:PE_LEVEL
+VS_SYS_MI3=n/a reason=missing:s2:PE_LEVEL
+VS_SYS_MI2=n/a reason=missing:s2:PE_LEVEL
+ORDER_AGREE=TRUE n=0
+VERDICT_JE=n/a reason=missing:je:TREND
+VERDICT_MI3=n/a reason=missing:mi3:TREND
+VERDICT_MI2=n/a reason=missing:mi2:TREND
+DEFAULT_CANDIDATE=NONE
+NEXT=CONDUCTOR_RULING;SYS_MISSING
+CONDUCTOR_RULE=n/a reason=excluded:CONDUCTOR_RULING;SYS_MISSING

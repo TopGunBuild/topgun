@@ -1,0 +1,76 @@
+chain start: 2026-09-30T08:13:35Z epoch=1790756015 phase=build HEAD=03114a764495f29499796d9535f3285af9f9fc1a series_pin=34007e19
+awk shim: /opt/topgun/target/spec377-awkbin/awk -> /usr/bin/original-awk banner='awk version 20220912'
+Preparing worktree (detached HEAD 34007e19)
+HEAD is now at 34007e19 Merge pull request #174 from TopGunBuild/spec-376-linux-port
+checkout: /opt/topgun/target/spec377-src-34007e19 HEAD=34007e197224d4db870ba2c842716316622580de clean
+TREE_RC_SYS-ser=tikv-jemalloc-sys:101 libmimalloc-sys:101
+TREE_PROOF_SYS-ser=PASS reason=none
+BUILD_ENV_MALLOC_CONF=unset label=SYS-ser
+build SYS-ser: (cd /opt/topgun/target/spec377-src-34007e19/packages/server-rust && CARGO_TARGET_DIR=/opt/topgun/target/spec377-SYS-ser cargo build --release --bin topgun-server)
+  |    Compiling reqwest v0.12.28
+  |    Compiling topgun-server v2.0.0 (/opt/topgun/target/spec377-src-34007e19/packages/server-rust)
+  |     Finished `release` profile [optimized] target(s) in 5m 33s
+TREE_RC_JE-ser=0
+TREE_PROOF_JE-ser=PASS reason=none
+BUILD_ENV_MALLOC_CONF=unset label=JE-ser
+build JE-ser: (cd /opt/topgun/target/spec377-src-34007e19/packages/server-rust && CARGO_TARGET_DIR=/opt/topgun/target/spec377-JE-ser cargo build --release --features alloc-jemalloc --bin topgun-server)
+  |    Compiling tikv-jemalloc-ctl v0.7.0
+  |    Compiling topgun-server v2.0.0 (/opt/topgun/target/spec377-src-34007e19/packages/server-rust)
+  |     Finished `release` profile [optimized] target(s) in 6m 08s
+TREE_RC_MI3-ser=0
+TREE_PROOF_MI3-ser=PASS reason=none
+BUILD_ENV_MALLOC_CONF=unset label=MI3-ser
+build MI3-ser: (cd /opt/topgun/target/spec377-src-34007e19/packages/server-rust && CARGO_TARGET_DIR=/opt/topgun/target/spec377-MI3-ser cargo build --release --features alloc-mimalloc --bin topgun-server)
+  |    Compiling reqwest v0.12.28
+  |    Compiling topgun-server v2.0.0 (/opt/topgun/target/spec377-src-34007e19/packages/server-rust)
+  |     Finished `release` profile [optimized] target(s) in 5m 34s
+TREE_RC_MI2-ser=0
+TREE_PROOF_MI2-ser=PASS reason=none
+BUILD_ENV_MALLOC_CONF=unset label=MI2-ser
+build MI2-ser: (cd /opt/topgun/target/spec377-src-34007e19/packages/server-rust && CARGO_TARGET_DIR=/opt/topgun/target/spec377-MI2-ser cargo build --release --features alloc-mimalloc,mimalloc/v2 --bin topgun-server)
+  |    Compiling reqwest v0.12.28
+  |    Compiling topgun-server v2.0.0 (/opt/topgun/target/spec377-src-34007e19/packages/server-rust)
+  |     Finished `release` profile [optimized] target(s) in 5m 32s
+BUILD_ENV_MALLOC_CONF=unset label=H
+build H: (cd /opt/topgun/target/spec377-src-34007e19/packages/server-rust && CARGO_TARGET_DIR=/opt/topgun/target/spec377-H cargo build --release --bench soak_harness)
+  |    Compiling reqwest v0.12.28
+  |    Compiling topgun-server v2.0.0 (/opt/topgun/target/spec377-src-34007e19/packages/server-rust)
+  |     Finished `release` profile [optimized] target(s) in 5m 36s
+BIN_MARKERS_SYS-ser=je=0 mi=0
+BIN_MARKERS_JE-ser=je=1 mi=0
+BIN_MARKERS_MI3-ser=je=0 mi=3
+BIN_MARKERS_MI2-ser=je=0 mi=3
+  | build_start_epoch=1790756015
+  | flavour=SYS-ser code=34007e197224d4db870ba2c842716316622580de path=/opt/topgun/target/spec377-SYS-ser/release/topgun-server sha256=c68301ec1af2b4ff60c65a2db53e9aa0717ce605a0bbcda6efb5d4462e51900e mtime=1790756350 recompiled=yes marker=ok
+  | flavour=JE-ser code=34007e197224d4db870ba2c842716316622580de path=/opt/topgun/target/spec377-JE-ser/release/topgun-server sha256=5d5bc58cbedafdbb462a29782a49ad52200f10e95c07f4f9aa2c8a15abfb3d22 mtime=1790756720 recompiled=yes marker=ok
+  | flavour=MI3-ser code=34007e197224d4db870ba2c842716316622580de path=/opt/topgun/target/spec377-MI3-ser/release/topgun-server sha256=bc0fae31e708885db75dae12c43c5de3129398203b8d36e5e5bdf515b7a510e9 mtime=1790757054 recompiled=yes marker=ok
+  | flavour=MI2-ser code=34007e197224d4db870ba2c842716316622580de path=/opt/topgun/target/spec377-MI2-ser/release/topgun-server sha256=3357d04ec381426e057a32d5fe474e5f6268a7123e3df110bfe72c0360ca12b0 mtime=1790757387 recompiled=yes marker=ok
+  | flavour=H code=34007e197224d4db870ba2c842716316622580de path=/opt/topgun/target/spec377-H/release/deps/soak_harness-53b4b640053c5766 sha256=f205d81c653a7cf09fc7a88084cbd183dfdf61443671ba2fbd3db707499c1911 mtime=1790757649 recompiled=yes marker=ok
+  | BIN_MARKERS_SYS-ser=je=0 mi=0
+  | BIN_MARKERS_JE-ser=je=1 mi=0
+  | BIN_MARKERS_MI3-ser=je=0 mi=3
+  | BIN_MARKERS_MI2-ser=je=0 mi=3
+  | TREE_RC_SYS-ser=tikv-jemalloc-sys:101 libmimalloc-sys:101
+  | TREE_PROOF_SYS-ser=PASS reason=none
+  | BUILD_ENV_MALLOC_CONF=unset label=SYS-ser
+  | TREE_RC_JE-ser=0
+  | TREE_PROOF_JE-ser=PASS reason=none
+  | BUILD_ENV_MALLOC_CONF=unset label=JE-ser
+  | TREE_RC_MI3-ser=0
+  | TREE_PROOF_MI3-ser=PASS reason=none
+  | BUILD_ENV_MALLOC_CONF=unset label=MI3-ser
+  | TREE_RC_MI2-ser=0
+  | TREE_PROOF_MI2-ser=PASS reason=none
+  | BUILD_ENV_MALLOC_CONF=unset label=MI2-ser
+  | BUILD_ENV_MALLOC_CONF=unset label=H
+  | rustc: rustc 1.93.1 (01f6ddf75 2026-02-11)
+  | rustc: binary: rustc
+  | rustc: commit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf
+  | rustc: commit-date: 2026-02-11
+  | rustc: host: x86_64-unknown-linux-gnu
+  | rustc: release: 1.93.1
+  | rustc: LLVM version: 21.1.8
+  | glibc: ldd (Debian GLIBC 2.36-9+deb12u14) 2.36
+  | awk: awk version 20220912
+builds file: /opt/topgun/target/spec377-run/spec377-builds.txt
+chain end: 2026-09-30T08:42:08Z

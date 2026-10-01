@@ -1,0 +1,148 @@
+chain start: 2026-09-30T08:59:50Z epoch=1790758790 phase=series HEAD=3fdd929a35dccb16b07c10f47262984c14216980 series_pin=34007e19
+awk shim: /opt/topgun/target/spec377-awkbin/awk -> /usr/bin/original-awk banner='awk version 20220912'
+SERIES_START_UTC=2026-09-30T08:59:50Z
+PREDICTED_END_UTC=2026-10-01T16:04:50Z series_s=111900
+CAP_CROSS_UTC=2026-10-01T21:10:21Z created=2026-09-30T08:10:21Z cap_s=133200
+cap headroom after predicted end + 1 h: 14731s
+ORDER=OK manifest_commit=3fdd929a35dccb16b07c10f47262984c14216980 prefix_sha256=d81199758723c2043d449aa7340d66ce6a7a9b1644478bb11912a21d802212cc programs=19 series_pin=34007e19
+SMOKE_BINDING=PASS programs=16
+PREFLIGHT_LOG=spec377-preflight-20260930T085722Z.log
+preflight: PREFLIGHT_AT=2026-09-30T08:57:32Z age=138s alloc_conf=PASS
+DISK_FREE_AT_START=140072536 KiB (need >= 40 GiB)
+label H: sha256=f205d81c653a7cf09fc7a88084cbd183dfdf61443671ba2fbd3db707499c1911 matches the builds file
+label SYS-ser: sha256=c68301ec1af2b4ff60c65a2db53e9aa0717ce605a0bbcda6efb5d4462e51900e matches the builds file
+label JE-ser: sha256=5d5bc58cbedafdbb462a29782a49ad52200f10e95c07f4f9aa2c8a15abfb3d22 matches the builds file
+label MI3-ser: sha256=bc0fae31e708885db75dae12c43c5de3129398203b8d36e5e5bdf515b7a510e9 matches the builds file
+label MI2-ser: sha256=3357d04ec381426e057a32d5fe474e5f6268a7123e3df110bfe72c0360ca12b0 matches the builds file
+PROC_ROOT=/proc
+LOAD_AT_START_s1=0.01
+cell s1: label=SYS-ser server=/opt/topgun/target/spec377-SYS-ser/release/topgun-server commit=34007e19
+cell s1: RUNNER_EXIT=0
+SETTLE_je=ok waited_s=120 load1=0.40
+LOAD_AT_START_je=0.40
+cell je: label=JE-ser server=/opt/topgun/target/spec377-JE-ser/release/topgun-server commit=34007e19
+cell je: RUNNER_EXIT=0
+SETTLE_mi3=ok waited_s=105 load1=0.44
+LOAD_AT_START_mi3=0.44
+cell mi3: label=MI3-ser server=/opt/topgun/target/spec377-MI3-ser/release/topgun-server commit=34007e19
+cell mi3: RUNNER_EXIT=0
+SETTLE_mi2=ok waited_s=105 load1=0.40
+LOAD_AT_START_mi2=0.40
+cell mi2: label=MI2-ser server=/opt/topgun/target/spec377-MI2-ser/release/topgun-server commit=34007e19
+cell mi2: RUNNER_EXIT=0
+SETTLE_s2=ok waited_s=105 load1=0.39
+LOAD_AT_START_s2=0.39
+cell s2: label=SYS-ser server=/opt/topgun/target/spec377-SYS-ser/release/topgun-server commit=34007e19
+cell s2: RUNNER_EXIT=0
+PREDICATES_EXIT_s1=0
+PREDICATES_EXIT_je=0
+PREDICATES_EXIT_mi3=0
+PREDICATES_EXIT_mi2=0
+PREDICATES_EXIT_s2=0
+decide rc=0
+  | == flags ==
+  | STOP=none
+  | WRITE_ERRORS=0
+  | OPS_s1=243.091
+  | OPS_je=243.903
+  | OPS_mi3=245.725
+  | OPS_mi2=245.269
+  | OPS_s2=242.655
+  | OPS_RATIO_JE=1.0042
+  | OPS_RATIO_MI3=1.0117
+  | OPS_RATIO_MI2=1.0099
+  | LIVE_END_s1=2100198 src=TERMINAL t=21602.2
+  | LIVE_END_je=2107174 src=TERMINAL t=21601.5
+  | LIVE_END_mi3=2123004 src=TERMINAL t=21602.9
+  | LIVE_END_mi2=2119040 src=TERMINAL t=21603.0
+  | LIVE_END_s2=2096416 src=TERMINAL t=21602.3
+  | PE_END_s1=2543.517145 t=20434.4 live=1993742
+  | PE_END_je=522.693016 t=5404.3 live=554206
+  | PE_END_mi3=822.382444 t=4803.6 live=494458
+  | PE_END_mi2=1541.199463 t=5103.8 live=524246
+  | PE_END_s2=2204.606204 t=5104 live=523116
+  | PE_LEVEL_s1=2541.779016 rows=11
+  | PE_LEVEL_je=n/a reason=no_rows_in_level_window
+  | PE_LEVEL_mi3=n/a reason=no_rows_in_level_window
+  | PE_LEVEL_mi2=n/a reason=no_rows_in_level_window
+  | PE_LEVEL_s2=n/a reason=no_rows_in_level_window
+  | TREND_s1=UNDERPOWERED slope_rel=0.026502 se_rel=0.003531 r1=0.7584 se_rel_adj=0.009526 n=168 r2=0.253394 dropped=1 slope_pe_per_h=67.363059 level=2541.779016
+  | TREND_je=n/a reason=few_rows n=43 dropped=1
+  | TREND_mi3=n/a reason=few_rows n=38 dropped=1
+  | TREND_mi2=n/a reason=few_rows n=41 dropped=1
+  | TREND_s2=n/a reason=few_rows n=41 dropped=1
+  | TREND3_s1=RISING slope_rel=0.077354 se_rel=0.005037 r1=0.4279 se_rel_adj=0.007958 n=112 r2=0.681927 dropped=1 slope_pe_per_h=196.615710 level=2541.779016
+  | TREND3_je=n/a reason=few_rows n=29 dropped=1
+  | TREND3_mi3=n/a reason=few_rows n=26 dropped=1
+  | TREND3_mi2=n/a reason=few_rows n=27 dropped=1
+  | TREND3_s2=n/a reason=few_rows n=27 dropped=1
+  | TREND_CORR_s1=UNDERPOWERED slope_rel_corr=-0.004751 fixed_bias=0.031253 recorded_only
+  | TREND_CORR_je=n/a reason=few_rows
+  | TREND_CORR_mi3=n/a reason=few_rows
+  | TREND_CORR_mi2=n/a reason=few_rows
+  | TREND_CORR_s2=n/a reason=few_rows
+  | STAGE2_T_s1=10
+  | STAGE2_T_je=n/a reason=missing:je:e
+  | STAGE2_T_mi3=n/a reason=missing:mi3:e
+  | STAGE2_T_mi2=n/a reason=missing:mi2:e
+  | STAGE2_T_s2=n/a reason=missing:s2:e
+  | FIXED_EST_s1=-500.236 se_mib=176.650
+  | FIXED_EST_je=n/a reason=few_rows
+  | FIXED_EST_mi3=n/a reason=few_rows
+  | FIXED_EST_mi2=n/a reason=few_rows
+  | FIXED_EST_s2=n/a reason=few_rows
+  | FIXED_NOTE_s1=rising_marginal_cost_suspected
+  | FIXED_NOTE_je=n/a reason=few_rows
+  | FIXED_NOTE_mi3=n/a reason=few_rows
+  | FIXED_NOTE_mi2=n/a reason=few_rows
+  | FIXED_NOTE_s2=n/a reason=few_rows
+  | RSS_PE_LEVEL_s1=2547.896585 rows=11
+  | RSS_PE_LEVEL_je=n/a reason=no_rows_in_level_window
+  | RSS_PE_LEVEL_mi3=n/a reason=no_rows_in_level_window
+  | RSS_PE_LEVEL_mi2=n/a reason=no_rows_in_level_window
+  | RSS_PE_LEVEL_s2=n/a reason=no_rows_in_level_window
+  | LAZY_MAX_s1=0.000 ratio=0.000000 row=0
+  | LAZY_MAX_je=0.000 ratio=0.000000 row=0
+  | LAZY_MAX_mi3=0.000 ratio=0.000000 row=0
+  | LAZY_MAX_mi2=0.000 ratio=0.000000 row=0
+  | LAZY_MAX_s2=0.000 ratio=0.000000 row=0
+  | LAZY_DRIFT=FALSE
+  | HWM_END_s1=5031.094
+  | HWM_END_je=1504.254
+  | HWM_END_mi3=1607.598
+  | HWM_END_mi2=2871.969
+  | HWM_END_s2=5231.461
+  | ANON_HUGE_END_s1=0.000
+  | ANON_HUGE_END_je=0.000
+  | ANON_HUGE_END_mi3=454.000
+  | ANON_HUGE_END_mi2=1172.000
+  | ANON_HUGE_END_s2=0.000
+  | JE_CONFIG=je_config version=5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8 arenas_narenas=17 opt_narenas=16 opt_background_thread=true background_thread=true max_background_threads=4 opt_tcache=true opt_tcache_max=32768 opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a
+  | JE_CONFIRM_CONF=PASS
+  | AMP_JE=1.233235 row=21600
+  | FRAG_SHAREL_je=0.011038
+  | DIRTY_SHAREL_je=0.160031
+  | REACH_PE_je=434.165 live=2107174
+  | MI_POSTINIT_LINES_mi3=2
+  | MI_POSTINIT_LINES_mi2=6
+  | MI_POSTINIT_NOTE=mi2:6
+  | DISK_SLOPE_s1=118.451806 se=3.972566 n=180
+  | DISK_SLOPE_je=107.979871 se=3.106477 n=180
+  | DISK_SLOPE_mi3=103.788998 se=3.531651 n=180
+  | DISK_SLOPE_mi2=124.385717 se=3.437443 n=180
+  | DISK_SLOPE_s2=106.189986 se=3.586563 n=180
+  | SYS_AGREE=FALSE reason=missing:s2:PE_LEVEL
+  | PLATEAU_SYS=INDETERMINATE reason=missing:s2:TREND
+  | STAGE2_FEASIBLE=n/a reason=not_underpowered
+  | STAGE2_COST_EUR=n/a reason=not_underpowered
+  | VS_SYS_JE=n/a reason=missing:s2:PE_LEVEL
+  | VS_SYS_MI3=n/a reason=missing:s2:PE_LEVEL
+  | VS_SYS_MI2=n/a reason=missing:s2:PE_LEVEL
+  | ORDER_AGREE=TRUE n=0
+  | VERDICT_JE=n/a reason=missing:je:TREND
+  | VERDICT_MI3=n/a reason=missing:mi3:TREND
+  | VERDICT_MI2=n/a reason=missing:mi2:TREND
+  | DEFAULT_CANDIDATE=NONE
+  | NEXT=CONDUCTOR_RULING;SYS_MISSING
+  | CONDUCTOR_RULE=n/a reason=excluded:CONDUCTOR_RULING;SYS_MISSING
+chain end: 2026-10-01T15:07:40Z
