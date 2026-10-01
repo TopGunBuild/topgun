@@ -49,9 +49,10 @@ import type { HybridQueryFilter } from './HybridQueryHandle';
 import { logger } from './utils/logger';
 import { assertValidMapName, keyBelongsToLongerHeldName } from './utils/mapName';
 import {
-  orMapKeyTombstonesKey,
-  restoreOrMapKeyTombstones,
-  serializeOrMapKeyTombstones,
+  loadOrMapKeyTombstones,
+  orMapKeyTombstonesBucketKey,
+  orMapKeyTombstonesBucketOf,
+  serializeOrMapKeyTombstonesBucket,
 } from './utils/orMapKeyTombstones';
 import { SyncState } from './SyncState';
 import type { StateChangeEvent } from './SyncStateMachine';
@@ -809,7 +810,11 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       // durable KV/meta state is already captured by the first commit. The attribution
       // must not trail the op: it feeds this key's Merkle leaf, so a reload that kept the
       // remove but lost its attribution would compute a different root than before it.
+      //
+      // Only the attribution bucket this key belongs to is written, with the attribution
+      // of every key in that bucket.
       const records = orMap.getRecords(key);
+      const attributionBucket = orMapKeyTombstonesBucketOf(String(key));
       const mutations: StorageMutation[] = [
         {
           store: 'kv',
@@ -826,8 +831,8 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
         {
           store: 'meta',
           type: 'put',
-          key: orMapKeyTombstonesKey(name),
-          value: serializeOrMapKeyTombstones(orMap),
+          key: orMapKeyTombstonesBucketKey(name, attributionBucket),
+          value: serializeOrMapKeyTombstonesBucket(orMap, attributionBucket),
         },
       ];
 
@@ -894,10 +899,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
 
       // 3. Restore per-key tombstone attribution, after the items: see
       // `restoreOrMapKeyTombstones`.
-      restoreOrMapKeyTombstones(
-        orMap,
-        await this.storageAdapter.getMeta(orMapKeyTombstonesKey(name)),
-      );
+      await loadOrMapKeyTombstones(orMap, name, this.storageAdapter);
     } catch (e) {
       logger.error({ mapName: name, err: e }, 'Failed to restore ORMap');
     }

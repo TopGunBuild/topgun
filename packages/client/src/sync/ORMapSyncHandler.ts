@@ -64,12 +64,14 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         // key kept in the local tree only by stale attribution would otherwise
         // hold the roots apart, and the bucket request a mismatch sends gets no
         // answer from an empty server tree, so nothing would ever clear it.
-        const changed = this.resetKeyTombstonesToPending(
+        const changedKeys: string[] = [];
+        this.resetKeyTombstonesToPending(
           map,
           localKeysUnder(localTree, ''),
           this.pendingRemoveLookup(mapName),
+          changedKeys,
         );
-        await this.persistAttributionIfChanged(mapName, changed);
+        await this.persistAttributionIfChanged(mapName, changedKeys);
       }
       const localRootHash = localTree.getRootHash();
 
@@ -153,7 +155,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
 
       // Also check for buckets that exist locally but not on remote
       const pendingFor = this.pendingRemoveLookup(mapName);
-      let attributionChanged = false;
+      const changedKeys: string[] = [];
       const localOnlyPaths: string[] = [];
       for (const [bucketKey, localHash] of Object.entries(localBuckets)) {
         if (!serverBuckets.has(bucketKey) && localHash !== 0) {
@@ -162,14 +164,17 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
           // tombstone to any key there. Drop the mirrored attribution first: a
           // key held in the tree only by tombstones the server no longer has
           // would otherwise keep this bucket different on every later walk.
-          if (this.resetKeyTombstonesToPending(map, localKeysUnder(tree, newPath), pendingFor)) {
-            attributionChanged = true;
-          }
+          this.resetKeyTombstonesToPending(
+            map,
+            localKeysUnder(tree, newPath),
+            pendingFor,
+            changedKeys,
+          );
           localOnlyPaths.push(newPath);
         }
       }
 
-      await this.persistAttributionIfChanged(mapName, attributionChanged);
+      await this.persistAttributionIfChanged(mapName, changedKeys);
 
       for (const newPath of localOnlyPaths) {
         // Local has data that remote doesn't - need to push
@@ -197,7 +202,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
     if (map instanceof ORMap) {
       let totalAdded = 0;
       let totalUpdated = 0;
-      let attributionChanged = false;
+      const changedKeys: string[] = [];
       const pendingFor = this.pendingRemoveLookup(mapName);
       // Keys the server serves a record for under a tag this client has
       // tombstoned: each is pushed below even if it holds no live record here.
@@ -213,7 +218,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       for (const entry of entries) {
         const { key, records, tombstones } = entry;
         const mirrored = this.mirrorKeyTombstones(map, key, tombstones, pendingFor, records);
-        if (mirrored.changed) attributionChanged = true;
+        if (mirrored.changed) changedKeys.push(key);
         if (mirrored.healed) healedKeys.add(key);
         const result = map.mergeKey(key, records, tombstones);
         totalAdded += result.added;
@@ -227,11 +232,9 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       // server-attributed tombstone.
       const listed = new Set(entries.map((e: { key: string }) => e.key));
       const omitted = localKeysInScope.filter((key) => !listed.has(key));
-      if (this.resetKeyTombstonesToPending(map, omitted, pendingFor)) {
-        attributionChanged = true;
-      }
+      this.resetKeyTombstonesToPending(map, omitted, pendingFor, changedKeys);
 
-      await this.persistAttributionIfChanged(mapName, attributionChanged);
+      await this.persistAttributionIfChanged(mapName, changedKeys);
 
       if (totalAdded > 0 || totalUpdated > 0) {
         await this.config.persistTombstones(mapName);
@@ -268,14 +271,14 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
     if (map instanceof ORMap) {
       let totalAdded = 0;
       let totalUpdated = 0;
-      let attributionChanged = false;
+      const changedKeys: string[] = [];
       const pendingFor = this.pendingRemoveLookup(mapName);
       const healedKeys = new Set<string>();
 
       for (const entry of entries) {
         const { key, records, tombstones } = entry;
         const mirrored = this.mirrorKeyTombstones(map, key, tombstones, pendingFor, records);
-        if (mirrored.changed) attributionChanged = true;
+        if (mirrored.changed) changedKeys.push(key);
         if (mirrored.healed) healedKeys.add(key);
         const result = map.mergeKey(key, records, tombstones);
         totalAdded += result.added;
@@ -284,7 +287,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         await this.config.persistKey(mapName, key);
       }
 
-      await this.persistAttributionIfChanged(mapName, attributionChanged);
+      await this.persistAttributionIfChanged(mapName, changedKeys);
 
       if (totalAdded > 0 || totalUpdated > 0) {
         await this.config.persistTombstones(mapName);
@@ -388,35 +391,36 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    * not-yet-acknowledged removes. The map-wide suppression set is untouched, so
    * a tag dropped here stays removed.
    *
-   * @returns whether any key's attributed set changed
+   * Every key whose attributed set changed is appended to `changedKeys`.
    */
   private resetKeyTombstonesToPending(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap value type is erased at the sync handler layer
     map: ORMap<any, any>,
     keys: string[],
     pendingFor: PendingRemoveLookup,
-  ): boolean {
-    let changed = false;
+    changedKeys: string[],
+  ): void {
     for (const key of keys) {
       if (this.mirrorKeyTombstones(map, key, [], pendingFor).changed) {
-        changed = true;
+        changedKeys.push(key);
       }
     }
-    return changed;
   }
 
   /**
-   * Persist the per-key attribution when this invocation changed it. Separate
-   * from the record/tombstone persist because attribution changes on responses
-   * that add and update nothing, and an unchanged walk must not write at all.
+   * Persist the per-key attribution of the keys this invocation changed it for.
+   * Separate from the record/tombstone persist because attribution changes on
+   * responses that add and update nothing, and an unchanged walk must not write
+   * at all. Only the changed keys are handed over, so that storage is rewritten
+   * for them and not for the whole map.
    *
    * A rejection is not caught here: it propagates out of the handler exactly as
    * a failed record or tombstone persist does, so the covering epoch that
    * follows is not confirmed on top of attribution that never reached disk.
    */
-  private async persistAttributionIfChanged(mapName: string, changed: boolean): Promise<void> {
-    if (changed) {
-      await this.config.persistKeyTombstones(mapName);
+  private async persistAttributionIfChanged(mapName: string, changedKeys: string[]): Promise<void> {
+    if (changedKeys.length > 0) {
+      await this.config.persistKeyTombstones(mapName, changedKeys);
     }
   }
 

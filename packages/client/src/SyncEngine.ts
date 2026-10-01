@@ -25,9 +25,11 @@ import { TopicHandle } from './TopicHandle';
 import { logger } from './utils/logger';
 import { isValidMapName, keyBelongsToLongerHeldName } from './utils/mapName';
 import {
-  orMapKeyTombstonesKey,
-  restoreOrMapKeyTombstones,
-  serializeOrMapKeyTombstones,
+  loadOrMapKeyTombstones,
+  orMapKeyTombstonesBucketKey,
+  orMapKeyTombstonesBucketOf,
+  resetPersistedOrMapKeyTombstones,
+  serializeOrMapKeyTombstonesBucket,
 } from './utils/orMapKeyTombstones';
 import { SyncStateMachine, StateChangeEvent } from './SyncStateMachine';
 import { SyncState } from './SyncState';
@@ -223,8 +225,9 @@ const ORMAP_BACKFILL_DONE_KEY = '__sys__:ormapBackfillDone';
 // Discovers a held OR-Map name from either meta-marker: the eager `:ormap`
 // existence marker (post-fix + backfilled stores) OR the legacy `:tombstones`
 // key (belt-and-suspenders — a pre-fix store that HAS a tombstone but somehow
-// escaped backfill is still discoverable). The per-key attribution key
-// (`:keyTombstones`) is deliberately NOT matched — see `orMapKeyTombstonesKey`.
+// escaped backfill is still discoverable). The per-key attribution buckets
+// (`:keyTombstones:{bucket}`) are deliberately NOT matched — see
+// `orMapKeyTombstonesBucketKey`.
 const HELD_ORMAP_META_RE = /^__sys__:(.+):(?:ormap|tombstones)$/;
 
 export class SyncEngine {
@@ -541,7 +544,7 @@ export class SyncEngine {
       persistKey: (name, key) => this.persistORMapKey(name, key),
       persistTombstones: (name) => this.persistORMapTombstones(name),
       getPendingRemoveTagsByKey: (name) => this.getPendingRemoveTagsByKey(name),
-      persistKeyTombstones: (name) => this.persistORMapKeyTombstones(name),
+      persistKeyTombstones: (name, keys) => this.persistORMapKeyTombstones(name, keys),
       // Fold this map's covering epoch into the device-wide MIN across every
       // held OR-Map (see applyMapCoverage) AFTER its data is durably applied
       // (including on an empty diff), so the server's per-device cursor advances
@@ -1143,10 +1146,7 @@ export class SyncEngine {
       // Attribution last, after the records: see `restoreOrMapKeyTombstones`.
       // The map-wide set restored above stays unattributed — a tombstone whose
       // key was never recorded suppresses its tag but belongs to no key's leaf.
-      restoreOrMapKeyTombstones(
-        map,
-        await this.storageAdapter.getMeta(orMapKeyTombstonesKey(mapName)),
-      );
+      await loadOrMapKeyTombstones(map, mapName, this.storageAdapter);
     } catch (err) {
       logger.error(
         { mapName, err },
@@ -2072,7 +2072,7 @@ export class SyncEngine {
           // then the key's attribution, which also changed.
           await this.persistORMapKey(mapName, key);
           await this.persistORMapTombstones(mapName);
-          await this.persistORMapKeyTombstones(mapName);
+          await this.persistORMapKeyTombstones(mapName, [key]);
         }
       }
     }
@@ -2110,21 +2110,37 @@ export class SyncEngine {
   }
 
   /**
-   * Canonical persistence of an ORMap's per-key tombstone attribution (the
-   * `__sys__:mapName:keyTombstones` meta key).
+   * Canonical persistence of an ORMap's per-key tombstone attribution after it
+   * changed for `keys`: rewrites the storage bucket of each of those keys, and
+   * no other. A bucket is written with the attribution of every key in it, so
+   * a key whose attribution became empty simply drops out of its bucket.
    *
-   * Stored as an array of `[key, tags[]]` pairs rather than an object keyed by
-   * map key: a map key is arbitrary user data, and one named `__proto__` would
-   * not survive as an own property of a plain object.
+   * Each bucket's value is built immediately before its own write. The writes
+   * are awaited one by one, and a local remove can commit the same bucket in
+   * between; a value built up front for all buckets would then overwrite that
+   * commit with an older state.
+   *
+   * A rejection propagates. Buckets already written stay written, which leaves
+   * disk with a mix of old and new buckets while memory holds the new state:
+   * a reload then computes a root from what disk holds, so it can differ from
+   * the server's and cost a walk, but it cannot equal the server's unless the
+   * sets really are equal.
    */
-  public async persistORMapKeyTombstones(mapName: string): Promise<void> {
+  public async persistORMapKeyTombstones(mapName: string, keys: Iterable<string>): Promise<void> {
     const map = this.maps.get(mapName);
     if (!(map instanceof ORMap)) return;
+    const buckets = new Set<string>();
+    for (const key of keys) {
+      buckets.add(orMapKeyTombstonesBucketOf(key));
+    }
+    if (buckets.size === 0) return;
     await this.ensureOrMapMarker(mapName);
-    await this.storageAdapter.setMeta(
-      orMapKeyTombstonesKey(mapName),
-      serializeOrMapKeyTombstones(map),
-    );
+    for (const bucket of buckets) {
+      await this.storageAdapter.setMeta(
+        orMapKeyTombstonesBucketKey(mapName, bucket),
+        serializeOrMapKeyTombstonesBucket(map, bucket),
+      );
+    }
   }
 
   /**
@@ -2202,13 +2218,18 @@ export class SyncEngine {
     }
     if (map instanceof ORMap) {
       // Reset the persisted per-key attribution BEFORE discarding it in memory,
-      // for the same reason as the record removals above: if this write fails,
-      // REPLACE aborts with memory and disk both still holding the old
-      // attribution, and the resync retries. Written directly rather than
-      // through the persist helper, which would write back the attribution the
-      // map still holds at this point. No await separates a successful write
-      // from `clear()`, so disk never claims attribution that memory has lost.
-      await this.storageAdapter.setMeta(orMapKeyTombstonesKey(mapName), []);
+      // for the same reason as the record removals above: if a write fails,
+      // REPLACE aborts with memory still holding the old attribution, and the
+      // resync retries. Emptied directly rather than through the persist helper,
+      // which would write back the attribution the map still holds at this
+      // point, and for every bucket storage holds rather than only those of the
+      // keys in memory. The attribution is spread over several entries, so a
+      // failure part-way leaves some of them already empty on disk: less
+      // attribution on disk than in memory, which after a reload means unequal
+      // Merkle roots and one walk, never a false match. No await separates the
+      // last successful write from `clear()`, so disk never claims attribution
+      // that memory has lost.
+      await resetPersistedOrMapKeyTombstones(mapName, this.storageAdapter);
       map.clear(); // discard materialized local OR-Map state (authoritative REPLACE)
       // Reset the persisted (now-empty) tombstone set; the snapshot pull that
       // follows re-persists the server-authoritative records + tombstones.

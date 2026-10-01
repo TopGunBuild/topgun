@@ -75,7 +75,7 @@ describe('restoreOrMapKeyTombstones cost', () => {
       expect(map.apply('holder-of-a-removed-record', doomed)).toBe(true);
 
       const start = performance.now();
-      restoreOrMapKeyTombstones(map, persisted);
+      restoreOrMapKeyTombstones(map, [persisted]);
       const elapsedMs = performance.now() - start;
 
       expect(map.get('holder-of-a-removed-record')).toEqual([]);
@@ -115,7 +115,7 @@ describe('restoreOrMapKeyTombstones cost', () => {
       ]);
 
       const start = performance.now();
-      restoreOrMapKeyTombstones(map, persisted);
+      restoreOrMapKeyTombstones(map, [persisted]);
       const elapsedMs = performance.now() - start;
 
       expect(map.size).toBe(KEYS);

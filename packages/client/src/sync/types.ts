@@ -1112,11 +1112,14 @@ export interface ORMapSyncHandlerConfig {
   getPendingRemoveTagsByKey: (mapName: string) => Map<string, string[]>;
 
   /**
-   * Persist an ORMap's per-key tombstone attribution. Called whenever a sync
-   * response changed it, including responses that add or update no record.
+   * Persist an ORMap's per-key tombstone attribution for `keys`, the keys whose
+   * attributed set a sync response changed. Called once per response, and only
+   * when it changed at least one key, including responses that add or update
+   * no record. The keys are what lets the engine rewrite only the storage
+   * buckets that hold them instead of the map's whole attribution.
    * Wired by SyncEngine to `persistORMapKeyTombstones`.
    */
-  persistKeyTombstones: (mapName: string) => Promise<void>;
+  persistKeyTombstones: (mapName: string, keys: Iterable<string>) => Promise<void>;
 
   /**
    * Confirm to the server that `mapName`'s OR-Map sync data is durably applied

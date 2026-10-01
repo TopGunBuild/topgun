@@ -4,6 +4,10 @@ import { SyncEngine } from '../SyncEngine';
 import type { OpLogEntry } from '../SyncEngine';
 import { NullConnectionProvider } from '../connection/NullConnectionProvider';
 import { IStorageAdapter, OpLogEntry as StorageOpLogEntry } from '../IStorageAdapter';
+import {
+  orMapKeyTombstonesBucketKey,
+  orMapKeyTombstonesBucketOf,
+} from '../utils/orMapKeyTombstones';
 
 /**
  * SPEC-342c AC15 — on an authoritative REPLACE resync the client discards pending
@@ -95,6 +99,32 @@ class MemoryAdapter implements IStorageAdapter {
     this.meta.clear();
     this.ops = [];
   }
+}
+
+/** The meta key of the attribution bucket that map `tags` stores `key` in. */
+const attributionBucketKeyOf = (key: string): string =>
+  orMapKeyTombstonesBucketKey('tags', orMapKeyTombstonesBucketOf(key));
+
+/** The first `count` keys of `key-0, key-1, ...` that fall into `count` different buckets. */
+function keysInDistinctBuckets(count: number): string[] {
+  const byBucket = new Map<string, string>();
+  for (let i = 0; byBucket.size < count; i++) {
+    const candidate = `key-${i}`;
+    const bucket = orMapKeyTombstonesBucketOf(candidate);
+    if (!byBucket.has(bucket)) byBucket.set(bucket, candidate);
+  }
+  return Array.from(byBucket.values());
+}
+
+/**
+ * Every persisted attribution entry of map `tags` that still holds something:
+ * its buckets, and the un-bucketed entry an unreleased build wrote.
+ */
+function nonEmptyAttributionEntries(adapter: MemoryAdapter): string[] {
+  return [...adapter.meta.entries()]
+    .filter(([metaKey]) => metaKey.startsWith('__sys__:tags:keyTombstones'))
+    .filter(([, value]) => !(Array.isArray(value) && value.length === 0))
+    .map(([metaKey]) => metaKey);
 }
 
 function orOp(id: string, key: string, tag: string, ts: Timestamp): OpLogEntry {
@@ -275,7 +305,7 @@ describe('SyncEngine REPLACE resync — pending-oplog HLC discard (AC15)', () =>
  * soon as the snapshot pull reaches that key.
  */
 describe('SyncEngine REPLACE resync — per-key tombstone attribution', () => {
-  const KEY_TOMBSTONES_META = '__sys__:tags:keyTombstones';
+  const KEY_TOMBSTONES_META = attributionBucketKeyOf('K');
 
   async function makeEngine() {
     const adapter = new MemoryAdapter();
@@ -315,7 +345,7 @@ describe('SyncEngine REPLACE resync — per-key tombstone attribution', () => {
       orTag: tR,
       timestamp: hlc.now(),
     });
-    await engine.persistORMapKeyTombstones('tags');
+    await engine.persistORMapKeyTombstones('tags', ['K']);
     expect(ctx.adapter.meta.get(KEY_TOMBSTONES_META)).toEqual([['K', [tR]]]);
 
     await eng.orMapSyncHandler.handleORMapSyncRespRoot({
@@ -334,6 +364,7 @@ describe('SyncEngine REPLACE resync — per-key tombstone attribution', () => {
     const { adapter, engine, map } = await replaceRetainingUnackedRemove();
 
     expect(adapter.meta.get(KEY_TOMBSTONES_META)).toEqual([]);
+    expect(nonEmptyAttributionEntries(adapter)).toEqual([]);
     expect(map.getKeyTombstones('K').size).toBe(0);
     expect(map.getSnapshot().keyTombstones.size).toBe(0);
     engine.close();
@@ -355,6 +386,7 @@ describe('SyncEngine REPLACE resync — per-key tombstone attribution', () => {
     expect(persisted).toHaveLength(1);
     expect(persisted[0][0]).toBe('K');
     expect([...persisted[0][1]].sort()).toEqual(['server-tag-1', 'server-tag-2', tR].sort());
+    expect(nonEmptyAttributionEntries(adapter)).toEqual([KEY_TOMBSTONES_META]);
     engine.close();
   });
 
@@ -391,7 +423,7 @@ describe('SyncEngine REPLACE resync — per-key tombstone attribution', () => {
     map.add('K', 'kept');
     map.add('K', 'gone');
     map.remove('K', 'gone');
-    await engine.persistORMapKeyTombstones('tags');
+    await engine.persistORMapKeyTombstones('tags', ['K']);
     expect((adapter.meta.get(KEY_TOMBSTONES_META) as unknown[]).length).toBe(1);
 
     await eng.replaceOrMapFromSnapshot('tags', undefined);
@@ -401,12 +433,94 @@ describe('SyncEngine REPLACE resync — per-key tombstone attribution', () => {
     engine.close();
   });
 
+  test('a full-resync REPLACE empties every bucket storage holds, including one the map in memory has no key for', async () => {
+    const { adapter, engine, eng, map } = await makeEngine();
+    const [first, second, third, onDiskOnly] = keysInDistinctBuckets(4);
+    for (const key of [first, second, third]) {
+      map.add(key, 'gone');
+      map.remove(key, 'gone');
+    }
+    await engine.persistORMapKeyTombstones('tags', [first, second, third]);
+    // A bucket written by an earlier session for a key this session never saw.
+    adapter.meta.set(attributionBucketKeyOf(onDiskOnly), [[onDiskOnly, ['older-tag']]]);
+    // Another map's bucket must not be touched.
+    const foreign = orMapKeyTombstonesBucketKey('other', orMapKeyTombstonesBucketOf(first));
+    adapter.meta.set(foreign, [[first, ['foreign-tag']]]);
+    expect(nonEmptyAttributionEntries(adapter).sort()).toEqual(
+      [first, second, third, onDiskOnly].map(attributionBucketKeyOf).sort(),
+    );
+
+    const order: string[] = [];
+    const setMeta = jest.spyOn(adapter, 'setMeta').mockImplementation(async (key, value) => {
+      order.push(`setMeta ${key}`);
+      adapter.meta.set(key, value);
+    });
+    jest.spyOn(map, 'clear').mockImplementation(() => {
+      order.push('clear');
+      ORMap.prototype.clear.call(map);
+    });
+
+    await eng.replaceOrMapFromSnapshot('tags', undefined);
+    setMeta.mockRestore();
+
+    expect(nonEmptyAttributionEntries(adapter)).toEqual([]);
+    expect(adapter.meta.get(foreign)).toEqual([[first, ['foreign-tag']]]);
+    // All four buckets are emptied before the map is cleared.
+    const clearedAt = order.indexOf('clear');
+    const bucketWrites = [first, second, third, onDiskOnly].map((key) =>
+      order.indexOf(`setMeta ${attributionBucketKeyOf(key)}`),
+    );
+    for (const at of bucketWrites) {
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(at).toBeLessThan(clearedAt);
+    }
+    engine.close();
+  });
+
+  test('a reset that fails part-way aborts before the clear and leaves disk with no more attribution than memory', async () => {
+    const { adapter, engine, eng, map } = await makeEngine();
+    const keys = keysInDistinctBuckets(3);
+    const tags = new Map<string, string>();
+    for (const key of keys) {
+      map.add(key, 'gone');
+      tags.set(key, map.remove(key, 'gone')[0]);
+    }
+    await engine.persistORMapKeyTombstones('tags', keys);
+    const before = new Map(keys.map((key) => [key, adapter.meta.get(attributionBucketKeyOf(key))]));
+
+    // Fail on the second bucket the reset reaches, whichever that is.
+    let bucketWrites = 0;
+    const setMeta = jest.spyOn(adapter, 'setMeta').mockImplementation(async (key, value) => {
+      if (key.startsWith('__sys__:tags:keyTombstones:') && ++bucketWrites === 2) {
+        throw new Error('simulated durable setMeta failure');
+      }
+      adapter.meta.set(key, value);
+    });
+    const clear = jest.spyOn(map, 'clear');
+
+    await expect(eng.replaceOrMapFromSnapshot('tags', undefined)).rejects.toThrow(
+      'simulated durable setMeta failure',
+    );
+    setMeta.mockRestore();
+
+    expect(clear).not.toHaveBeenCalled();
+    for (const key of keys) {
+      expect([...map.getKeyTombstones(key)]).toEqual([tags.get(key)]);
+      // Each bucket is either emptied or exactly what it was: never anything
+      // memory does not hold.
+      const onDisk = adapter.meta.get(attributionBucketKeyOf(key));
+      expect([[], before.get(key)]).toContainEqual(onDisk);
+    }
+    expect(nonEmptyAttributionEntries(adapter)).toHaveLength(2);
+    engine.close();
+  });
+
   test('a FAILED attribution reset aborts the resync before the map is cleared (memory and disk both keep the old attribution)', async () => {
     const { adapter, engine, eng, map } = await makeEngine();
     map.add('K', 'kept');
     map.add('K', 'gone');
     const [tag] = map.remove('K', 'gone');
-    await engine.persistORMapKeyTombstones('tags');
+    await engine.persistORMapKeyTombstones('tags', ['K']);
     const persistedBefore = adapter.meta.get(KEY_TOMBSTONES_META);
     expect(persistedBefore).toEqual([['K', [tag]]]);
 
@@ -438,7 +552,7 @@ describe('SyncEngine REPLACE resync — per-key tombstone attribution', () => {
  * that memory has already lost if that write fails.
  */
 describe('SyncEngine map reset — per-key tombstone attribution', () => {
-  const KEY_TOMBSTONES_META = '__sys__:tags:keyTombstones';
+  const KEY_TOMBSTONES_META = attributionBucketKeyOf('K');
 
   async function engineWithAttributedTombstone() {
     const adapter = new MemoryAdapter();
@@ -456,7 +570,7 @@ describe('SyncEngine map reset — per-key tombstone attribution', () => {
     map.add('K', 'gone');
     const [tag] = map.remove('K', 'gone');
     await engine.persistORMapKey('tags', 'K');
-    await engine.persistORMapKeyTombstones('tags');
+    await engine.persistORMapKeyTombstones('tags', ['K']);
     expect(adapter.meta.get(KEY_TOMBSTONES_META)).toEqual([['K', [tag]]]);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the reset is private to the engine and only reachable from a server reset message
@@ -473,6 +587,7 @@ describe('SyncEngine map reset — per-key tombstone attribution', () => {
     expect(adapter.kv.has('tags:K')).toBe(false);
     // The meta store has no delete, so "no attribution" is an empty entry.
     expect(adapter.meta.get(KEY_TOMBSTONES_META) ?? []).toEqual([]);
+    expect(nonEmptyAttributionEntries(adapter)).toEqual([]);
     engine.close();
   });
 

@@ -1,7 +1,12 @@
 import { TopGunClient } from '../TopGunClient';
 import { IStorageAdapter, OpLogEntry } from '../IStorageAdapter';
 import { HLC, LWWRecord, ORMap, ORMapRecord } from '@topgunbuild/core';
-import { restoreOrMapKeyTombstones } from '../utils/orMapKeyTombstones';
+import {
+  orMapKeyTombstonesBucketKey,
+  orMapKeyTombstonesBucketKeys,
+  orMapKeyTombstonesBucketOf,
+  restoreOrMapKeyTombstones,
+} from '../utils/orMapKeyTombstones';
 import { logger } from '../utils/logger';
 
 // Mock Storage Adapter
@@ -246,9 +251,49 @@ describe('ORMap Integration & Persistence', () => {
 describe('ORMap per-key tombstone attribution persistence', () => {
   const MAP = 'tags';
   const TOMBSTONES_META = `__sys__:${MAP}:tombstones`;
-  const KEY_TOMBSTONES_META = `__sys__:${MAP}:keyTombstones`;
+  // The whole-map entry an earlier, unreleased build wrote. Nothing reads it now.
+  const UNBUCKETED_META = `__sys__:${MAP}:keyTombstones`;
+  const BUCKET_PREFIX = `${UNBUCKETED_META}:`;
+
+  /** The meta key of the attribution bucket `key` is stored in. */
+  const bucketKeyOf = (key: string) =>
+    orMapKeyTombstonesBucketKey(MAP, orMapKeyTombstonesBucketOf(key));
+
+  /** A key other than `key` that is stored in the same attribution bucket. */
+  const bucketMateOf = (key: string): string => {
+    const bucket = orMapKeyTombstonesBucketOf(key);
+    for (let i = 0; ; i++) {
+      const candidate = `mate-${i}`;
+      if (candidate !== key && orMapKeyTombstonesBucketOf(candidate) === bucket) return candidate;
+    }
+  };
+
+  /** The first `count` keys of `key-0, key-1, ...` that fall into `count` different buckets. */
+  const keysInDistinctBuckets = (count: number): string[] => {
+    const byBucket = new Map<string, string>();
+    for (let i = 0; byBucket.size < count; i++) {
+      const candidate = `key-${i}`;
+      const bucket = orMapKeyTombstonesBucketOf(candidate);
+      if (!byBucket.has(bucket)) byBucket.set(bucket, candidate);
+    }
+    return Array.from(byBucket.values());
+  };
 
   let storage: MemoryStorageAdapter;
+
+  /** Every persisted attribution meta key of the map, bucketed or not. */
+  const attributionMetaKeys = async (): Promise<string[]> =>
+    (await storage.getAllMetaKeys()).filter((k) => k.startsWith(UNBUCKETED_META)).sort();
+
+  /** The persisted attribution of the whole map: the pairs of all its buckets. */
+  const persistedAttribution = async (): Promise<Map<string, string[]>> => {
+    const pairs: Array<[string, string[]]> = [];
+    for (const metaKey of await attributionMetaKeys()) {
+      if (metaKey === UNBUCKETED_META) continue;
+      pairs.push(...((await storage.getMeta(metaKey)) as Array<[string, string[]]>));
+    }
+    return new Map(pairs);
+  };
   const clients: TopGunClient[] = [];
 
   const settle = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -298,7 +343,7 @@ describe('ORMap per-key tombstone attribution persistence', () => {
   });
 
   describe('a local remove', () => {
-    test('commits the attribution in the same batch as the key records and the map-wide tombstones', async () => {
+    test('commits the attribution bucket of the removed key in the same batch as the key records and the map-wide tombstones', async () => {
       const map = newClient().getORMap<string, string>(MAP);
       map.add('list1', 'urgent');
       map.add('list1', 'work');
@@ -325,18 +370,22 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       expect(mutations).toContainEqual({
         store: 'meta',
         type: 'put',
-        key: KEY_TOMBSTONES_META,
+        key: bucketKeyOf('list1'),
         value: [['list1', [tag]]],
       });
+      // One bucket, and nothing else of the attribution, travels with the remove.
+      expect(mutations.filter((m) => m.key.startsWith(UNBUCKETED_META))).toHaveLength(1);
+      expect(mutations).toHaveLength(3);
     });
 
-    test('commits the whole current attribution, including every tag of a multi-tag remove, with its first op', async () => {
+    test('commits the whole current bucket, including every tag of a multi-tag remove, with its first op', async () => {
+      const mate = bucketMateOf('list1');
       const map = newClient().getORMap<string, string>(MAP);
-      map.add('other', 'x');
+      map.add(mate, 'x');
       map.add('list1', 'dup');
       map.add('list1', 'dup');
       await settle();
-      const [otherTag] = map.remove('other', 'x');
+      const [mateTag] = map.remove(mate, 'x');
       await settle();
 
       const commitWrite = jest.spyOn(storage, 'commitWrite');
@@ -347,26 +396,158 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       // Two OR_REMOVE ops, one atomic commit: the second tag is an op-only append.
       const removeCommits = commitWrite.mock.calls.filter(([, op]) => isRemoveOp(op));
       expect(removeCommits).toHaveLength(1);
-      const attribution = removeCommits[0][0].find((m) => m.key === KEY_TOMBSTONES_META);
+      const attribution = removeCommits[0][0].find((m) => m.key === bucketKeyOf('list1'));
       const persisted = new Map(attribution?.value as Array<[string, string[]]>);
-      expect(sorted(persisted.keys())).toEqual(['list1', 'other']);
-      expect(persisted.get('other')).toEqual([otherTag]);
+      expect(sorted(persisted.keys())).toEqual(sorted(['list1', mate]));
+      expect(persisted.get(mate)).toEqual([mateTag]);
       expect(sorted(persisted.get('list1') ?? [])).toEqual(sorted(tags));
+    });
+
+    test('commits one bucket holding only the keys of that bucket, and leaves the other buckets as they were', async () => {
+      // Attributed keys in five buckets, one of them shared by two keys.
+      const spread = keysInDistinctBuckets(5);
+      const [target] = spread;
+      const mate = bucketMateOf(target);
+      const map = newClient().getORMap<string, string>(MAP);
+      for (const key of [...spread, mate]) {
+        map.add(key, 'first');
+        map.add(key, 'second');
+      }
+      await settle();
+      for (const key of [...spread.slice(1), mate]) {
+        map.remove(key, 'first');
+      }
+      await settle();
+      const others = spread.slice(1);
+      const otherBucketsBefore = await Promise.all(
+        others.map((k) => storage.getMeta(bucketKeyOf(k))),
+      );
+      for (const [i, key] of others.entries()) {
+        expect((otherBucketsBefore[i] as Array<[string, string[]]>).map(([k]) => k)).toEqual([key]);
+      }
+
+      const commitWrite = jest.spyOn(storage, 'commitWrite');
+      const setMeta = jest.spyOn(storage, 'setMeta');
+      const [tag] = map.remove(target, 'first');
+      await settle();
+
+      const removeCommits = commitWrite.mock.calls.filter(([, op]) => isRemoveOp(op));
+      expect(removeCommits).toHaveLength(1);
+      const [mutations] = removeCommits[0];
+      const attribution = mutations.filter((m) => m.key.startsWith(UNBUCKETED_META));
+      expect(attribution).toHaveLength(1);
+      expect(attribution[0].key).toBe(bucketKeyOf(target));
+      const committed = new Map(attribution[0].value as Array<[string, string[]]>);
+      expect(sorted(committed.keys())).toEqual(sorted([target, mate]));
+      expect(committed.get(target)).toEqual([tag]);
+      // The same batch carries the key's records and the map-wide tombstones.
+      expect(mutations.map((m) => m.key).sort()).toEqual(
+        [`${MAP}:${target}`, TOMBSTONES_META, bucketKeyOf(target)].sort(),
+      );
+      // Nothing else wrote attribution, and the other buckets are untouched.
+      expect(setMeta).not.toHaveBeenCalled();
+      expect(await Promise.all(others.map((k) => storage.getMeta(bucketKeyOf(k))))).toEqual(
+        otherBucketsBefore,
+      );
+    });
+  });
+
+  describe('bucket layout', () => {
+    /** The trie path of the leaf holding `key`, read off the map's own Merkle tree. */
+    const leafPathOf = (map: ORMap<string, string>, key: string): string => {
+      const tree = map.getMerkleTree();
+      const search = (path: string): string | undefined => {
+        if (tree.getKeysInBucket(path).includes(key)) return path;
+        for (const child of Object.keys(tree.getBuckets(path))) {
+          const found = search(path + child);
+          if (found !== undefined) return found;
+        }
+        return undefined;
+      };
+      const path = search('');
+      if (path === undefined) throw new Error(`key ${key} is not in the tree`);
+      return path;
+    };
+
+    test('a key is stored in the bucket named by the first two characters of its Merkle path', () => {
+      const map = new ORMap<string, string>(new HLC('n1'));
+      const keys = ['K', '__proto__', '', 'ключ', '🙂', ...keysInDistinctBuckets(40)];
+      for (const key of keys) {
+        map.add(key, 'v');
+        const bucket = orMapKeyTombstonesBucketOf(key);
+        expect(bucket).toMatch(/^[0-9a-f]{2}$/);
+        expect(bucket).toBe(leafPathOf(map, key).slice(0, 2));
+        expect(orMapKeyTombstonesBucketKey(MAP, bucket)).toBe(
+          `__sys__:${MAP}:keyTombstones:${bucket}`,
+        );
+      }
+    });
+
+    test('only keys made of the map prefix and one bucket id are listed as its buckets', () => {
+      const metaKeys = [
+        '__sys__:m:keyTombstones:00',
+        '__sys__:m:keyTombstones:ff',
+        // The un-bucketed entry of an unreleased build.
+        '__sys__:m:keyTombstones',
+        // Not bucket ids.
+        '__sys__:m:keyTombstones:',
+        '__sys__:m:keyTombstones:0',
+        '__sys__:m:keyTombstones:000',
+        '__sys__:m:keyTombstones:FF',
+        '__sys__:m:keyTombstones:zz',
+        // Other reserved keys of the map.
+        '__sys__:m:ormap',
+        '__sys__:m:tombstones',
+        // Buckets of maps whose names extend or are extended by this one.
+        '__sys__:m:keyTombstones:keyTombstones:ab',
+        '__sys__:mm:keyTombstones:ab',
+        '__sys__:m:x:keyTombstones:ab',
+      ];
+
+      expect(orMapKeyTombstonesBucketKeys('m', metaKeys)).toEqual([
+        '__sys__:m:keyTombstones:00',
+        '__sys__:m:keyTombstones:ff',
+      ]);
+      expect(orMapKeyTombstonesBucketKeys('m:keyTombstones', metaKeys)).toEqual([
+        '__sys__:m:keyTombstones:keyTombstones:ab',
+      ]);
+      expect(orMapKeyTombstonesBucketKeys('m:x', metaKeys)).toEqual([
+        '__sys__:m:x:keyTombstones:ab',
+      ]);
+      expect(orMapKeyTombstonesBucketKeys('absent', metaKeys)).toEqual([]);
     });
   });
 
   describe.each(restorePaths)('reload through %s', (_name, reload) => {
     test('restores the attribution, so the Merkle root equals the root before the reload', async () => {
       const map = newClient().getORMap<string, string>(MAP);
+      // Further keys, so that the attribution is spread over several buckets and
+      // one of them holds two keys.
+      const spread = [...keysInDistinctBuckets(4), bucketMateOf('gone')];
       map.add('gone', 'x');
       map.add('mixed', 'keep');
       map.add('mixed', 'drop');
+      for (const key of spread) {
+        map.add(key, 'keep');
+        map.add(key, 'drop');
+      }
       await settle();
       // `gone` ends up holding tombstones only; `mixed` holds a live record and
       // an attributed tombstone. Both leaves depend on the attribution.
       const [goneTag] = map.remove('gone', 'x');
       const [dropTag] = map.remove('mixed', 'drop');
+      const spreadTags = new Map(spread.map((key) => [key, map.remove(key, 'drop')]));
       await settle();
+
+      const nonEmptyBuckets: string[] = [];
+      for (const metaKey of await attributionMetaKeys()) {
+        if (((await storage.getMeta(metaKey)) as unknown[]).length > 0)
+          nonEmptyBuckets.push(metaKey);
+      }
+      expect(nonEmptyBuckets.length).toBeGreaterThanOrEqual(4);
+      expect(sorted((await persistedAttribution()).keys())).toEqual(
+        sorted(['gone', 'mixed', ...spread]),
+      );
 
       const rootBefore = map.getMerkleTree().getRootHash();
       expect(rootBefore).not.toBe(0);
@@ -378,6 +559,33 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       expect(sorted(restored.getKeyTombstones('gone'))).toEqual([goneTag]);
       expect(sorted(restored.getKeyTombstones('mixed'))).toEqual([dropTag]);
       expect(restored.get('mixed')).toEqual(['keep']);
+      for (const key of spread) {
+        expect(sorted(restored.getKeyTombstones(key))).toEqual(sorted(spreadTags.get(key) ?? []));
+        expect(restored.get(key)).toEqual(['keep']);
+      }
+    });
+
+    test('reads the buckets through one listing of the meta keys and applies them in one pass', async () => {
+      const keys = keysInDistinctBuckets(6);
+      const map = newClient().getORMap<string, string>(MAP);
+      for (const key of keys) map.add(key, 'v');
+      await settle();
+      for (const key of keys) map.remove(key, 'v');
+      await settle();
+      const rootBefore = map.getMerkleTree().getRootHash();
+
+      const reloaded = newClient();
+      // Let the new client's own start-up reads finish before counting.
+      await settle(50);
+      const getAllMetaKeys = jest.spyOn(storage, 'getAllMetaKeys');
+      const addKeyTombstones = jest.spyOn(ORMap.prototype, 'addKeyTombstones');
+      const restored = await reload(reloaded);
+
+      expect(restored.getMerkleTree().getRootHash()).toBe(rootBefore);
+      expect(getAllMetaKeys).toHaveBeenCalledTimes(1);
+      expect(addKeyTombstones).toHaveBeenCalledTimes(1);
+      const [pairs] = addKeyTombstones.mock.calls[0];
+      expect(sorted(Array.from(pairs, ([key]) => key as string))).toEqual(sorted(keys));
     });
 
     test('a key named __proto__ round-trips', async () => {
@@ -388,7 +596,7 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       const [tag] = map.remove('__proto__', 'v');
       await settle();
 
-      expect(await storage.getMeta(KEY_TOMBSTONES_META)).toEqual([['__proto__', [tag]]]);
+      expect(await storage.getMeta(bucketKeyOf('__proto__'))).toEqual([['__proto__', [tag]]]);
       const rootBefore = map.getMerkleTree().getRootHash();
 
       const restored = await reload(newClient());
@@ -419,14 +627,37 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       );
       expect(restored.get('elsewhere')).toEqual([]);
       // Loading wrote nothing: the store is still one without an attribution entry.
-      expect(await storage.getMeta(KEY_TOMBSTONES_META)).toBeUndefined();
+      expect(await attributionMetaKeys()).toEqual([]);
+    });
+
+    test('the un-bucketed entry of an unreleased build is neither read nor an error', async () => {
+      const timestamp = { millis: Date.now(), counter: 0, nodeId: 'A' };
+      await storage.put(`${MAP}:list`, [{ value: 'live', timestamp, tag: 'live_tag' }]);
+      await storage.put(`${MAP}:elsewhere`, [{ value: 'kept', timestamp, tag: 'stale_tag' }]);
+      await storage.setMeta(UNBUCKETED_META, [['list', ['stale_tag']]]);
+      const getMeta = jest.spyOn(storage, 'getMeta');
+      const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const error = jest.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+      const restored = await reload(newClient());
+
+      expect(restored.getSnapshot().keyTombstones.size).toBe(0);
+      expect(restored.getTombstones()).not.toContain('stale_tag');
+      expect(restored.get('list')).toEqual(['live']);
+      expect(restored.get('elsewhere')).toEqual(['kept']);
+      expect(getMeta).not.toHaveBeenCalledWith(UNBUCKETED_META);
+      expect(warn).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+      // It is left alone, not rewritten or migrated.
+      expect(await storage.getMeta(UNBUCKETED_META)).toEqual([['list', ['stale_tag']]]);
+      expect(await attributionMetaKeys()).toEqual([UNBUCKETED_META]);
     });
 
     test('a persisted record whose tag is attributed but missing from the map-wide tombstones stays removed', async () => {
       const timestamp = { millis: Date.now(), counter: 0, nodeId: 'A' };
       await storage.put(`${MAP}:elsewhere`, [{ value: 'stale', timestamp, tag: 'moved_tag' }]);
       await storage.setMeta(TOMBSTONES_META, []);
-      await storage.setMeta(KEY_TOMBSTONES_META, [['list', ['moved_tag']]]);
+      await storage.setMeta(bucketKeyOf('list'), [['list', ['moved_tag']]]);
 
       const restored = await reload(newClient());
 
@@ -436,13 +667,13 @@ describe('ORMap per-key tombstone attribution persistence', () => {
     });
 
     test.each([
-      ['a non-array entry', 'garbage'],
+      ['a non-array bucket', 'garbage'],
       ['an object keyed by map key', { list: ['t1'] }],
       ['null', null],
     ])('%s is ignored and the map still loads', async (_shape, persisted) => {
       const timestamp = { millis: Date.now(), counter: 0, nodeId: 'A' };
       await storage.put(`${MAP}:list`, [{ value: 'live', timestamp, tag: 'live_tag' }]);
-      await storage.setMeta(KEY_TOMBSTONES_META, persisted);
+      await storage.setMeta(bucketKeyOf('list'), persisted);
 
       const restored = await reload(newClient());
 
@@ -450,10 +681,21 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       expect(restored.getSnapshot().keyTombstones.size).toBe(0);
     });
 
+    test('an unreadable bucket does not keep the readable ones from being restored', async () => {
+      const [damaged, intact] = keysInDistinctBuckets(2);
+      await storage.setMeta(bucketKeyOf(damaged), 'garbage');
+      await storage.setMeta(bucketKeyOf(intact), [[intact, ['t1']]]);
+
+      const restored = await reload(newClient());
+
+      expect(sorted(restored.getSnapshot().keyTombstones.keys())).toEqual([intact]);
+      expect(sorted(restored.getKeyTombstones(intact))).toEqual(['t1']);
+    });
+
     test('malformed pairs are skipped one by one; the readable ones are restored', async () => {
       const timestamp = { millis: Date.now(), counter: 0, nodeId: 'A' };
       await storage.put(`${MAP}:list`, [{ value: 'live', timestamp, tag: 'live_tag' }]);
-      await storage.setMeta(KEY_TOMBSTONES_META, [
+      await storage.setMeta(bucketKeyOf('good'), [
         'not-a-pair',
         null,
         ['only-a-key'],
@@ -487,13 +729,15 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       const map = new ORMap<string, string>(new HLC('n1'));
 
       restoreOrMapKeyTombstones(map, [
-        'not-a-pair',
-        null,
-        ['only-a-key'],
-        [42, ['numeric-key']],
-        ['tags-not-an-array', 'oops'],
-        ['empty', []],
-        ['good', ['t1', 7, 't2']],
+        [
+          'not-a-pair',
+          null,
+          ['only-a-key'],
+          [42, ['numeric-key']],
+          ['tags-not-an-array', 'oops'],
+          ['empty', []],
+          ['good', ['t1', 7, 't2']],
+        ],
       ]);
 
       expect(sorted(map.getKeyTombstones('good'))).toEqual(['t1', 't2']);
@@ -501,23 +745,47 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       expect(warn.mock.calls[0][0]).toEqual({ skipped: 6 });
     });
 
-    test('a value that is not a list of pairs is reported', () => {
+    test('what is skipped in several buckets is still one warning, with the total', () => {
       const map = new ORMap<string, string>(new HLC('n1'));
 
-      restoreOrMapKeyTombstones(map, { K: ['t1'] });
+      restoreOrMapKeyTombstones(map, [
+        ['not-a-pair', ['a', ['t1', 7]]],
+        'not-a-bucket',
+        undefined,
+        [
+          ['b', ['t2']],
+          ['tags-not-an-array', 'oops'],
+        ],
+        { c: ['t3'] },
+      ]);
+
+      expect(sorted(map.getKeyTombstones('a'))).toEqual(['t1']);
+      expect(sorted(map.getKeyTombstones('b'))).toEqual(['t2']);
+      expect(sorted(map.getSnapshot().keyTombstones.keys())).toEqual(['a', 'b']);
+      expect(warn).toHaveBeenCalledTimes(1);
+      // One pair and one tag in the first bucket, the second bucket as a whole,
+      // one pair in the fourth, the fifth bucket as a whole.
+      expect(warn.mock.calls[0][0]).toEqual({ skipped: 5 });
+    });
+
+    test('a bucket that is not a list of pairs is reported', () => {
+      const map = new ORMap<string, string>(new HLC('n1'));
+
+      restoreOrMapKeyTombstones(map, [{ K: ['t1'] }]);
 
       expect(map.getSnapshot().keyTombstones.size).toBe(0);
       expect(warn).toHaveBeenCalledTimes(1);
     });
 
     test.each([
-      ['an absent entry', undefined],
-      ['an empty entry', []],
-      ['a readable entry', [['K', ['t1']]]],
-    ])('%s is not reported', (_shape, persisted) => {
+      ['no bucket at all', []],
+      ['an absent bucket', [undefined]],
+      ['an empty bucket', [[]]],
+      ['a readable bucket', [[['K', ['t1']]]]],
+    ])('%s is not reported', (_shape, buckets) => {
       const map = new ORMap<string, string>(new HLC('n1'));
 
-      restoreOrMapKeyTombstones(map, persisted);
+      restoreOrMapKeyTombstones(map, buckets);
 
       expect(warn).not.toHaveBeenCalled();
     });
@@ -531,10 +799,7 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       map.add('K', 'v');
       const [fresh] = map.remove('K', 'v');
 
-      restoreOrMapKeyTombstones(map, [
-        ['K', ['persisted']],
-        ['other', ['elsewhere']],
-      ]);
+      restoreOrMapKeyTombstones(map, [[['K', ['persisted']]], [['other', ['elsewhere']]]]);
 
       expect(sorted(map.getKeyTombstones('K'))).toEqual(sorted([fresh, 'persisted']));
       expect(sorted(map.getKeyTombstones('other'))).toEqual(['elsewhere']);
@@ -557,12 +822,14 @@ describe('ORMap per-key tombstone attribution persistence', () => {
         mapName: MAP,
         entries: [{ key: 'K', records: map.getRecords('K'), tombstones: ['server-tag'] }],
       });
-      expect(await storage.getMeta(KEY_TOMBSTONES_META)).toEqual([['K', ['server-tag']]]);
+      expect(await storage.getMeta(bucketKeyOf('K'))).toEqual([['K', ['server-tag']]]);
+      expect(await attributionMetaKeys()).toEqual([bucketKeyOf('K')]);
 
       // The server reports an empty map: the attribution falls back to the
       // pending local removes, of which there are none.
       await handler.handleORMapSyncRespRoot({ mapName: MAP, rootHash: 0 });
-      expect(await storage.getMeta(KEY_TOMBSTONES_META)).toEqual([]);
+      expect(await storage.getMeta(bucketKeyOf('K'))).toEqual([]);
+      expect(await attributionMetaKeys()).toEqual([bucketKeyOf('K')]);
 
       expect(map.get('K')).toEqual(['live']);
       expect(await storage.get(`${MAP}:K`)).toEqual(recordsBefore);
@@ -574,11 +841,31 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the held-set computation is private to the engine
       sorted(await (c as any).syncEngine.computeHeldOrMapNames());
 
-    test('the attribution key alone does not announce a map', async () => {
+    test('attribution keys alone do not announce a map', async () => {
       await storage.setMeta('__sys__:ormapBackfillDone', true);
-      await storage.setMeta(KEY_TOMBSTONES_META, [['K', ['t']]]);
+      await storage.setMeta(bucketKeyOf('K'), [['K', ['t']]]);
+      await storage.setMeta(`${BUCKET_PREFIX}ab`, []);
+      await storage.setMeta(UNBUCKETED_META, [['K', ['t']]]);
 
       expect(await heldNames(newClient())).toEqual([]);
+    });
+
+    test('buckets of a map whose name ends like a reserved key yield no map of their own', async () => {
+      // Such names cannot be opened (a map name may not contain a colon), but a
+      // store written before that rule can hold them. Only the keys that really
+      // are a marker or a tombstone set may announce a name, and then the
+      // map's real one.
+      await storage.setMeta('__sys__:ormapBackfillDone', true);
+      for (const name of ['x:keyTombstones', 'a:tombstones', 'b:ormap']) {
+        for (const bucket of ['00', 'ab', 'ff']) {
+          await storage.setMeta(orMapKeyTombstonesBucketKey(name, bucket), [['K', ['t']]]);
+        }
+      }
+      expect(await heldNames(newClient())).toEqual([]);
+
+      await storage.setMeta('__sys__:x:keyTombstones:ormap', 1);
+      await storage.setMeta('__sys__:a:tombstones:tombstones', []);
+      expect(await heldNames(newClient())).toEqual(['a:tombstones', 'x:keyTombstones']);
     });
 
     test('a map with a marker, tombstones and attribution is enumerated once, under its own name', async () => {
@@ -588,7 +875,7 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       map.remove('K', 'v');
       await settle();
       expect(sorted(await storage.getAllMetaKeys())).toEqual(
-        sorted([`__sys__:${MAP}:ormap`, TOMBSTONES_META, KEY_TOMBSTONES_META]),
+        sorted([`__sys__:${MAP}:ormap`, TOMBSTONES_META, bucketKeyOf('K')]),
       );
 
       // A fresh process that has not opened the map discovers it from storage.

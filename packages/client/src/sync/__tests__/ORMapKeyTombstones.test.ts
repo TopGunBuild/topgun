@@ -5,6 +5,10 @@ import { SyncEngine } from '../../SyncEngine';
 import type { OpLogEntry } from '../../SyncEngine';
 import { NullConnectionProvider } from '../../connection/NullConnectionProvider';
 import type { IStorageAdapter } from '../../IStorageAdapter';
+import {
+  orMapKeyTombstonesBucketKey,
+  orMapKeyTombstonesBucketOf,
+} from '../../utils/orMapKeyTombstones';
 
 /**
  * Per-key tombstone scoping in the OR-Map sync handler.
@@ -40,7 +44,9 @@ function makeHarness() {
   const getPendingRemoveTagsByKey = jest.fn<Map<string, string[]>, [string]>(
     () => new Map(pending),
   );
-  const persistKeyTombstones = jest.fn<Promise<void>, [string]>().mockResolvedValue(undefined);
+  const persistKeyTombstones = jest
+    .fn<Promise<void>, [string, Iterable<string>]>()
+    .mockResolvedValue(undefined);
   const persistTombstones = jest.fn<Promise<void>, [string]>().mockResolvedValue(undefined);
   const persistKey = jest.fn<Promise<void>, [string, string]>().mockResolvedValue(undefined);
   const onFullResync = jest.fn<Promise<void>, [string, unknown]>().mockResolvedValue(undefined);
@@ -482,7 +488,7 @@ describe('ORMapSyncHandler per-key tombstone scoping', () => {
       });
 
       expect(persistKeyTombstones).toHaveBeenCalledTimes(1);
-      expect(persistKeyTombstones).toHaveBeenCalledWith(MAP_NAME);
+      expect(persistKeyTombstones).toHaveBeenCalledWith(MAP_NAME, ['K']);
       // Nothing was added or updated, so the map-wide tombstone persist, which
       // is tied to record changes, did not run.
       expect(persistTombstones).not.toHaveBeenCalled();
@@ -530,6 +536,61 @@ describe('ORMapSyncHandler per-key tombstone scoping', () => {
 
         expect(harness.persistKeyTombstones).toHaveBeenCalledTimes(1);
         expect(harness.persistTombstones).not.toHaveBeenCalled();
+      },
+    );
+
+    test('only the keys whose attribution changed are handed to the persist', async () => {
+      const { map, handler, persistKeyTombstones } = makeHarness();
+      map.add('changed', 'live');
+      map.add('same', 'live');
+      const kept = addThenRemove(map, 'same', 'gone');
+      const dropped = addThenRemove(map, 'omitted', 'gone');
+      expect(dropped).toBeDefined();
+
+      // One entry changes its key's set, one repeats it, and a third local key
+      // is left out of the response, which resets it.
+      await handler.handleORMapSyncRespLeaf({
+        mapName: MAP_NAME,
+        path: '',
+        entries: [
+          { key: 'changed', records: map.getRecords('changed'), tombstones: ['server-tag'] },
+          { key: 'same', records: map.getRecords('same'), tombstones: [kept] },
+        ],
+      });
+
+      expect(persistKeyTombstones).toHaveBeenCalledTimes(1);
+      const [mapName, keys] = persistKeyTombstones.mock.calls[0];
+      expect(mapName).toBe(MAP_NAME);
+      expect(sorted(keys)).toEqual(['changed', 'omitted']);
+    });
+
+    test.each([
+      [
+        'bucket',
+        (h: ReturnType<typeof makeHarness>) =>
+          h.handler.handleORMapSyncRespBuckets({ mapName: MAP_NAME, path: '', buckets: {} }),
+      ],
+      [
+        'root',
+        (h: ReturnType<typeof makeHarness>) =>
+          h.handler.handleORMapSyncRespRoot({ mapName: MAP_NAME, rootHash: 0 }),
+      ],
+    ] as const)(
+      'an absence reset on a %s response hands over every key it reset, in one call',
+      async (_name, trigger) => {
+        const harness = makeHarness();
+        const reset: string[] = [];
+        for (let i = 0; i < 30; i++) {
+          addThenRemove(harness.map, `key-${i}`, 'v');
+          reset.push(`key-${i}`);
+        }
+        // A key with records only has no attribution to reset.
+        harness.map.add('live-only', 'v');
+
+        await trigger(harness);
+
+        expect(harness.persistKeyTombstones).toHaveBeenCalledTimes(1);
+        expect(sorted(harness.persistKeyTombstones.mock.calls[0][1])).toEqual(sorted(reset));
       },
     );
 
@@ -1005,11 +1066,15 @@ describe('ORMapSyncHandler per-key tombstone scoping', () => {
  * from the op log and the persist callbacks write to storage.
  */
 describe('SyncEngine per-key tombstone attribution', () => {
-  const KEY_TOMBSTONES_META = `__sys__:${MAP_NAME}:keyTombstones`;
+  const bucketKeyOf = (key: string) =>
+    orMapKeyTombstonesBucketKey(MAP_NAME, orMapKeyTombstonesBucketOf(key));
+  const KEY_TOMBSTONES_META = bucketKeyOf('K');
 
   function memoryAdapter() {
     const kv = new Map<string, unknown>();
     const meta = new Map<string, unknown>();
+    /** The key of every `setMeta` call, in order. */
+    const metaWrites: string[] = [];
     let nextOpId = 0;
     const adapter = {
       initialize: async () => {},
@@ -1018,7 +1083,10 @@ describe('SyncEngine per-key tombstone attribution', () => {
       put: async (key: string, value: unknown) => void kv.set(key, value),
       remove: async (key: string) => void kv.delete(key),
       getMeta: async (key: string) => meta.get(key),
-      setMeta: async (key: string, value: unknown) => void meta.set(key, value),
+      setMeta: async (key: string, value: unknown) => {
+        metaWrites.push(key);
+        meta.set(key, value);
+      },
       batchPut: async (entries: Map<string, unknown>) =>
         entries.forEach((value, key) => kv.set(key, value)),
       appendOpLog: async () => ++nextOpId,
@@ -1033,11 +1101,11 @@ describe('SyncEngine per-key tombstone attribution', () => {
         meta.clear();
       },
     };
-    return { adapter: adapter as unknown as IStorageAdapter, meta };
+    return { adapter: adapter as unknown as IStorageAdapter, meta, metaWrites };
   }
 
   async function makeEngine() {
-    const { adapter, meta } = memoryAdapter();
+    const { adapter, meta, metaWrites } = memoryAdapter();
     const engine = new SyncEngine({
       nodeId: 'n1',
       connectionProvider: new NullConnectionProvider(),
@@ -1052,7 +1120,23 @@ describe('SyncEngine per-key tombstone attribution', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the test drives the engine's private message handlers directly
     const internals = engine as any;
     const handler = internals.orMapSyncHandler as ORMapSyncHandler;
-    return { engine, internals, handler, map, meta };
+    /** The attribution buckets written since the last call, in order. */
+    const takeBucketWrites = (): string[] =>
+      metaWrites.splice(0).filter((key) => key.startsWith(`__sys__:${MAP_NAME}:keyTombstones`));
+    return { engine, internals, handler, map, meta, takeBucketWrites };
+  }
+
+  /** Two keys that share a leaf of the Merkle tree, and so a storage bucket. */
+  function twoKeysOfOneLeaf(map: ORMap<string, string>): { keys: [string, string]; path: string } {
+    const byPath = new Map<string, string>();
+    for (let i = 0; ; i++) {
+      const key = `key-${i}`;
+      map.add(key, 'live');
+      const path = leafPathOf(map, key);
+      const earlier = byPath.get(path);
+      if (earlier !== undefined) return { keys: [earlier, key], path };
+      byPath.set(path, key);
+    }
   }
 
   /**
@@ -1192,6 +1276,85 @@ describe('SyncEngine per-key tombstone attribution', () => {
     // The server stops attributing the tag: the persisted entry follows.
     await handler.handleORMapSyncRespLeaf(leafFor('K', []));
     expect(meta.get(KEY_TOMBSTONES_META)).toEqual([]);
+    engine.close();
+  });
+
+  test('a leaf response changing the attribution of keys of one Merkle path writes exactly one bucket; repeating it writes none', async () => {
+    const { engine, handler, map, meta, takeBucketWrites } = await makeEngine();
+    const { keys, path } = twoKeysOfOneLeaf(map);
+    // Every other key the search added sits in the tree as well; keep the ones
+    // under this leaf's path in the response so that none of them is reset.
+    const underPath = map.getMerkleTree().getKeysInBucket(path);
+    expect(underPath.sort()).toEqual([...keys].sort());
+    const response = {
+      mapName: MAP_NAME,
+      path,
+      entries: keys.map((key, i) => ({
+        key,
+        records: map.getRecords(key),
+        tombstones: [`server-tag-${i}`],
+      })),
+    };
+    takeBucketWrites();
+
+    await handler.handleORMapSyncRespLeaf(response);
+
+    expect(bucketKeyOf(keys[0])).toBe(bucketKeyOf(keys[1]));
+    expect(takeBucketWrites()).toEqual([bucketKeyOf(keys[0])]);
+    expect(meta.get(bucketKeyOf(keys[0]))).toEqual([
+      [keys[0], ['server-tag-0']],
+      [keys[1], ['server-tag-1']],
+    ]);
+
+    // The same response again changes nothing, and so does the rest of a walk.
+    await handler.handleORMapSyncRespLeaf(response);
+    await handler.handleORMapSyncRespRoot({
+      mapName: MAP_NAME,
+      rootHash: map.getMerkleTree().getRootHash() + 1,
+    });
+    await handler.handleORMapSyncRespBuckets({
+      mapName: MAP_NAME,
+      path: '',
+      buckets: Object.fromEntries(
+        Object.keys(map.getMerkleTree().getBuckets('')).map((child) => [child, 1]),
+      ),
+    });
+    await handler.handleORMapDiffResponse({
+      mapName: MAP_NAME,
+      entries: [{ key: keys[0], records: [], tombstones: ['server-tag-0'] }],
+    });
+
+    expect(takeBucketWrites()).toEqual([]);
+    engine.close();
+  });
+
+  test('a response over keys of several buckets writes each of those buckets once, and no other', async () => {
+    const { engine, handler, map, meta, takeBucketWrites } = await makeEngine();
+    const keys = Array.from({ length: 40 }, (_, i) => `key-${i}`);
+    for (const key of keys) addThenRemove(map, key, 'v');
+    await engine.persistORMapKeyTombstones(MAP_NAME, keys);
+    const buckets = new Set(keys.map(bucketKeyOf));
+    expect(buckets.size).toBeGreaterThanOrEqual(3);
+    expect(new Set(takeBucketWrites())).toEqual(buckets);
+
+    // The server stops attributing anything to half of the keys.
+    const changed = keys.filter((_, i) => i % 2 === 0);
+    await handler.handleORMapDiffResponse({
+      mapName: MAP_NAME,
+      entries: changed.map((key) => ({ key, records: [], tombstones: [] })),
+    });
+
+    const written = takeBucketWrites();
+    const expected = new Set(changed.map(bucketKeyOf));
+    expect(new Set(written)).toEqual(expected);
+    expect(written).toHaveLength(expected.size);
+    // What is left on disk is exactly the attribution of the untouched keys.
+    const persisted = [...buckets].flatMap(
+      (bucket) => meta.get(bucket) as Array<[string, string[]]>,
+    );
+    expect(sorted(persisted.map(([key]) => key))).toEqual(
+      sorted(keys.filter((_, i) => i % 2 === 1)),
+    );
     engine.close();
   });
 });

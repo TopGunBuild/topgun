@@ -1,41 +1,165 @@
+import { hashString } from '@topgunbuild/core';
 import type { ORMap } from '@topgunbuild/core';
+import type { IStorageAdapter } from '../IStorageAdapter';
 import { logger } from './logger';
 
 /**
- * Persisted form of an OR-Map's per-key tombstone attribution: `[key, tags[]]`
- * pairs rather than an object keyed by map key. A map key is arbitrary user
- * data, and one named `__proto__` would not survive as an own property of a
- * plain object.
+ * Persisted form of one bucket of an OR-Map's per-key tombstone attribution:
+ * `[key, tags[]]` pairs rather than an object keyed by map key. A map key is
+ * arbitrary user data, and one named `__proto__` would not survive as an own
+ * property of a plain object.
  */
 export type PersistedKeyTombstones = Array<[string, string[]]>;
 
 /**
- * Meta key holding an OR-Map's per-key tombstone attribution. The suffix is
- * deliberately one the held-map enumeration does not match: this key is always
- * written alongside the `:ormap` existence marker, so it never needs to
- * announce a map on its own, and matching it would yield a bogus map name.
+ * The attribution is stored in up to 256 meta entries per map rather than one.
+ * A single entry holding every key has to be rewritten whole on each local
+ * remove and each server-reported change, and a map whose keys share a large
+ * tombstone set makes that value tens of megabytes; a bucket holds only the
+ * keys that share the first two hex characters of their Merkle path, so one
+ * write costs about 1/256 of the map.
+ *
+ * Bucketing by Merkle path rather than, say, by insertion order is what makes
+ * a sync response cheap to persist: a leaf response covers the keys of one
+ * Merkle path, so everything it changes lands in one bucket.
  */
-export const orMapKeyTombstonesKey = (mapName: string): string =>
-  `__sys__:${mapName}:keyTombstones`;
+const BUCKET_ID_LENGTH = 2;
+const BUCKET_ID_RE = /^[0-9a-f]{2}$/;
+
+const bucketKeyPrefix = (mapName: string): string => `__sys__:${mapName}:keyTombstones:`;
 
 /**
- * The map's whole current attribution in its persisted form. Every writer
- * stores this full value (never a per-key patch), so the local-write commit and
- * the server-origin persist cannot leave the entry in two different shapes.
+ * The bucket a key's attribution is stored in: the first two hex characters of
+ * the key's path in the OR-Map Merkle tree.
+ *
+ * The path is derived exactly as `ORMapMerkleTree` derives it (the tree keeps
+ * that derivation private, so it is repeated here over the same exported
+ * `hashString`). If the two ever disagreed, nothing would be lost or mismatched:
+ * a bucket is only a storage partition, every existing bucket is read back on
+ * load, and all that would change is that one leaf response could touch more
+ * than one bucket.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- the persisted form only needs the key as a string and the tags; the map's value type is irrelevant here
-export function serializeOrMapKeyTombstones(map: ORMap<any, any>): PersistedKeyTombstones {
+export function orMapKeyTombstonesBucketOf(key: string): string {
+  return hashString(key).toString(16).padStart(8, '0').slice(0, BUCKET_ID_LENGTH);
+}
+
+/**
+ * Meta key of one attribution bucket of a map. It ends in the bucket id, never
+ * in `:ormap` or `:tombstones`, so the held-map enumeration cannot match it
+ * whatever the map is called: a bucket is always written alongside the `:ormap`
+ * existence marker and never needs to announce a map on its own, and matching
+ * it would yield a bogus map name.
+ */
+export const orMapKeyTombstonesBucketKey = (mapName: string, bucket: string): string =>
+  `${bucketKeyPrefix(mapName)}${bucket}`;
+
+/**
+ * The attribution bucket keys of `mapName` among `metaKeys`.
+ *
+ * Only a key that is the map's prefix followed by exactly one bucket id counts.
+ * That keeps two maps apart when one name extends the other with a colon
+ * (`m` and `m:keyTombstones`): the longer map's bucket keys continue with more
+ * than a bucket id after the shorter map's prefix. It also leaves out the
+ * un-bucketed `__sys__:{mapName}:keyTombstones` entry an unreleased build
+ * wrote: nothing reads that entry any more.
+ */
+export function orMapKeyTombstonesBucketKeys(
+  mapName: string,
+  metaKeys: Iterable<string>,
+): string[] {
+  const prefix = bucketKeyPrefix(mapName);
+  const bucketKeys: string[] = [];
+  for (const metaKey of metaKeys) {
+    if (metaKey.startsWith(prefix) && BUCKET_ID_RE.test(metaKey.slice(prefix.length))) {
+      bucketKeys.push(metaKey);
+    }
+  }
+  return bucketKeys;
+}
+
+/**
+ * The current attribution of every key of `map` that belongs to `bucket`, in
+ * its persisted form; empty when the bucket holds no attributed key.
+ *
+ * Every writer stores a bucket's full value (never a per-key patch), so the
+ * local-write commit and the server-origin persist cannot leave an entry in two
+ * different shapes. Build the value immediately before the storage call that
+ * writes it, with no `await` in between: a value built earlier can be
+ * overtaken by another writer of the same bucket and would then overwrite the
+ * newer one.
+ */
+export function serializeOrMapKeyTombstonesBucket(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the persisted form only needs the key as a string and the tags; the map's value type is irrelevant here
+  map: ORMap<any, any>,
+  bucket: string,
+): PersistedKeyTombstones {
   const pairs: PersistedKeyTombstones = [];
   for (const [key, tags] of map.getSnapshot().keyTombstones) {
-    pairs.push([String(key), Array.from(tags)]);
+    const name = String(key);
+    if (orMapKeyTombstonesBucketOf(name) === bucket) {
+      pairs.push([name, Array.from(tags)]);
+    }
   }
   return pairs;
 }
 
+/** The part of a storage adapter that loading and resetting the attribution need. */
+type AttributionStorage = Pick<IStorageAdapter, 'getAllMetaKeys' | 'getMeta' | 'setMeta'>;
+
 /**
- * Re-applies a persisted attribution to a map being loaded from storage. Shared
- * by both OR-Map restore seams (`TopGunClient.restoreORMap` and
+ * Loads a map's persisted attribution from storage and re-applies it. Shared by
+ * both OR-Map restore seams (`TopGunClient.restoreORMap` and
  * `SyncEngine.instantiateAndRestoreOrMap`) so they cannot diverge.
+ *
+ * The meta keys are listed once to find the buckets that exist (the adapter has
+ * no way to read several entries by prefix), and all buckets are then applied
+ * together. A storage failure rejects; unreadable content does not, see
+ * `restoreOrMapKeyTombstones`.
+ */
+export async function loadOrMapKeyTombstones(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- restore runs at the registry level where the map's key and value types are erased
+  map: ORMap<any, any>,
+  mapName: string,
+  storage: AttributionStorage,
+): Promise<void> {
+  const bucketKeys = orMapKeyTombstonesBucketKeys(mapName, await storage.getAllMetaKeys());
+  if (bucketKeys.length === 0) return;
+  const buckets = await Promise.all(bucketKeys.map((bucketKey) => storage.getMeta(bucketKey)));
+  restoreOrMapKeyTombstones(map, buckets);
+}
+
+/**
+ * Durably empties every attribution bucket the store holds for `mapName`.
+ *
+ * The buckets are found by listing the store, not derived from the map in
+ * memory: storage can hold a bucket the map no longer has a key for, and one
+ * left non-empty would come back on the next load as tombstones the server
+ * does not attribute to anything.
+ *
+ * Call it BEFORE the in-memory map is cleared. A rejection propagates, and the
+ * caller must then leave the map as it is. Buckets are written one at a time,
+ * so a failure part-way leaves some of them empty on disk while memory still
+ * holds the full attribution. That is the safe direction: a reload sees less
+ * attribution than the server has, the Merkle roots differ, and one sync walk
+ * restores it. The opposite (memory cleared, disk still attributing) would
+ * re-attribute tags after a reload that the wiped map no longer accounts for.
+ *
+ * Entries are emptied, not deleted: the adapter can delete a meta entry only
+ * as part of an op commit.
+ */
+export async function resetPersistedOrMapKeyTombstones(
+  mapName: string,
+  storage: AttributionStorage,
+): Promise<void> {
+  const bucketKeys = orMapKeyTombstonesBucketKeys(mapName, await storage.getAllMetaKeys());
+  for (const bucketKey of bucketKeys) {
+    await storage.setMeta(bucketKey, []);
+  }
+}
+
+/**
+ * Re-applies a persisted attribution, given as the values of its buckets, to a
+ * map being loaded from storage.
  *
  * Call it AFTER the map's records are loaded. Storage can hold a record whose
  * tag is listed only here: a server-reported attribution purges the record in
@@ -45,8 +169,9 @@ export function serializeOrMapKeyTombstones(map: ORMap<any, any>): PersistedKeyT
  * map-wide tombstone set, so "attributed implies tombstoned" holds after a
  * reload.
  *
- * Never throws, and skips whatever it cannot read. A store written before
- * attribution existed has no entry at all and loads with none.
+ * Never throws, and skips whatever it cannot read: a bucket that is not a list,
+ * a pair that is not `[key, tags[]]`, a tag that is not a string. A store
+ * written before attribution existed has no bucket at all and loads with none.
  *
  * Skipping a malformed entry is not free, and it loses two different things:
  *
@@ -74,21 +199,22 @@ export function serializeOrMapKeyTombstones(map: ORMap<any, any>): PersistedKeyT
  * or from the server) that lands on the map while it is still loading has
  * already attributed its tag; a replace would silently drop it.
  *
- * All readable pairs are attributed in ONE pass over the map: the live records
- * are purged once for every persisted tag together and each key's leaf is
- * hashed once. Attributing key by key would hash and notify per key, and the
+ * All readable pairs of all buckets are attributed in ONE pass over the map:
+ * the live records are purged once for every persisted tag together and each
+ * key's leaf is hashed once. Attributing key by key would hash and notify per key, and the
  * load would block its thread for as long as that takes.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- restore runs at the registry level where the map's key and value types are erased; persisted keys are strings
-export function restoreOrMapKeyTombstones(map: ORMap<any, any>, persisted: unknown): void {
-  // Absent is the ordinary case (a store written before attribution existed).
-  if (persisted === undefined || persisted === null) return;
-
+export function restoreOrMapKeyTombstones(map: ORMap<any, any>, buckets: Iterable<unknown>): void {
   let skipped = 0;
   const readable: Array<[string, string[]]> = [];
-  if (!Array.isArray(persisted)) {
-    skipped = 1;
-  } else {
+  for (const persisted of buckets) {
+    // Absent is ordinary (a bucket nothing was ever written to), not damage.
+    if (persisted === undefined || persisted === null) continue;
+    if (!Array.isArray(persisted)) {
+      skipped++;
+      continue;
+    }
     for (const pair of persisted) {
       if (!Array.isArray(pair)) {
         skipped++;
