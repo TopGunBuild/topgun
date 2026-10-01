@@ -993,3 +993,355 @@ the variable read); mimalloc v3 prints `mimalloc: process init` before its unpre
 trailer; the literal files carry the builds' `built on` stamps, so they bind to these exact binaries.
 
 ## APPEND-ONLY BELOW
+
+## §3 — readout: no allocator verdict; the live census went missing after ≈ 90 min (M `3fdd929a`, data `a1625356`)
+
+Appended in G7 on the Mac, below the marker; the §1 prefix is unchanged (sha256
+`d81199758723c2043d449aa7340d66ce6a7a9b1644478bb11912a21d802212cc` at M, at the data commit and at the G7 commit, by
+the §1 command). The mechanical transcript for every AC and for §3.4–§3.6 is `spec377-g7-mac.txt`.
+
+**Outcome in one paragraph.** All five 6 h cells ran to the end (`RUNNER_EXIT=0` ×5, `STOP=none`, `WRITE_ERRORS=0`,
+every memory column populated on every live row). The decision metric is memory **per live entry**, and its
+denominator comes from the live-copy census. The harness printed 13–17 census records per cell where §1 expects 72,
+almost all of them in the first 90 minutes, so four cells have too few `pe.csv` rows for a trend (`few_rows`) and no
+row in the level window. The pre-registered route for that is `NEXT=CONDUCTOR_RULING;SYS_MISSING` with
+`CONDUCTOR_RULE=n/a`. **The allocator default does not change on this series.** No decision flag is recomputed here
+with another window or threshold; everything in §3.5–§3.6 is a recorded reading, not a verdict.
+
+### 3.1 Final flags (server `spec377.decision.txt`, reproduced byte-for-byte on macOS — AC-13)
+```
+STOP=none
+WRITE_ERRORS=0
+OPS_s1=243.091
+OPS_je=243.903
+OPS_mi3=245.725
+OPS_mi2=245.269
+OPS_s2=242.655
+OPS_RATIO_JE=1.0042
+OPS_RATIO_MI3=1.0117
+OPS_RATIO_MI2=1.0099
+LIVE_END_s1=2100198 src=TERMINAL t=21602.2
+LIVE_END_je=2107174 src=TERMINAL t=21601.5
+LIVE_END_mi3=2123004 src=TERMINAL t=21602.9
+LIVE_END_mi2=2119040 src=TERMINAL t=21603.0
+LIVE_END_s2=2096416 src=TERMINAL t=21602.3
+PE_END_s1=2543.517145 t=20434.4 live=1993742
+PE_END_je=522.693016 t=5404.3 live=554206
+PE_END_mi3=822.382444 t=4803.6 live=494458
+PE_END_mi2=1541.199463 t=5103.8 live=524246
+PE_END_s2=2204.606204 t=5104 live=523116
+PE_LEVEL_s1=2541.779016 rows=11
+PE_LEVEL_je=n/a reason=no_rows_in_level_window
+PE_LEVEL_mi3=n/a reason=no_rows_in_level_window
+PE_LEVEL_mi2=n/a reason=no_rows_in_level_window
+PE_LEVEL_s2=n/a reason=no_rows_in_level_window
+TREND_s1=UNDERPOWERED slope_rel=0.026502 se_rel=0.003531 r1=0.7584 se_rel_adj=0.009526 n=168 r2=0.253394 dropped=1 slope_pe_per_h=67.363059 level=2541.779016
+TREND_je=n/a reason=few_rows n=43 dropped=1
+TREND_mi3=n/a reason=few_rows n=38 dropped=1
+TREND_mi2=n/a reason=few_rows n=41 dropped=1
+TREND_s2=n/a reason=few_rows n=41 dropped=1
+TREND3_s1=RISING slope_rel=0.077354 se_rel=0.005037 r1=0.4279 se_rel_adj=0.007958 n=112 r2=0.681927 dropped=1 slope_pe_per_h=196.615710 level=2541.779016
+TREND3_je=n/a reason=few_rows n=29 dropped=1
+TREND3_mi3=n/a reason=few_rows n=26 dropped=1
+TREND3_mi2=n/a reason=few_rows n=27 dropped=1
+TREND3_s2=n/a reason=few_rows n=27 dropped=1
+TREND_CORR_s1=UNDERPOWERED slope_rel_corr=-0.004751 fixed_bias=0.031253 recorded_only
+TREND_CORR_je=n/a reason=few_rows
+TREND_CORR_mi3=n/a reason=few_rows
+TREND_CORR_mi2=n/a reason=few_rows
+TREND_CORR_s2=n/a reason=few_rows
+STAGE2_T_s1=10
+STAGE2_T_je=n/a reason=missing:je:e
+STAGE2_T_mi3=n/a reason=missing:mi3:e
+STAGE2_T_mi2=n/a reason=missing:mi2:e
+STAGE2_T_s2=n/a reason=missing:s2:e
+FIXED_EST_s1=-500.236 se_mib=176.650
+FIXED_EST_je=n/a reason=few_rows
+FIXED_EST_mi3=n/a reason=few_rows
+FIXED_EST_mi2=n/a reason=few_rows
+FIXED_EST_s2=n/a reason=few_rows
+FIXED_NOTE_s1=rising_marginal_cost_suspected
+FIXED_NOTE_je=n/a reason=few_rows
+FIXED_NOTE_mi3=n/a reason=few_rows
+FIXED_NOTE_mi2=n/a reason=few_rows
+FIXED_NOTE_s2=n/a reason=few_rows
+RSS_PE_LEVEL_s1=2547.896585 rows=11
+RSS_PE_LEVEL_je=n/a reason=no_rows_in_level_window
+RSS_PE_LEVEL_mi3=n/a reason=no_rows_in_level_window
+RSS_PE_LEVEL_mi2=n/a reason=no_rows_in_level_window
+RSS_PE_LEVEL_s2=n/a reason=no_rows_in_level_window
+LAZY_MAX_s1=0.000 ratio=0.000000 row=0
+LAZY_MAX_je=0.000 ratio=0.000000 row=0
+LAZY_MAX_mi3=0.000 ratio=0.000000 row=0
+LAZY_MAX_mi2=0.000 ratio=0.000000 row=0
+LAZY_MAX_s2=0.000 ratio=0.000000 row=0
+LAZY_DRIFT=FALSE
+HWM_END_s1=5031.094
+HWM_END_je=1504.254
+HWM_END_mi3=1607.598
+HWM_END_mi2=2871.969
+HWM_END_s2=5231.461
+ANON_HUGE_END_s1=0.000
+ANON_HUGE_END_je=0.000
+ANON_HUGE_END_mi3=454.000
+ANON_HUGE_END_mi2=1172.000
+ANON_HUGE_END_s2=0.000
+JE_CONFIG=je_config version=5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8 arenas_narenas=17 opt_narenas=16 opt_background_thread=true background_thread=true max_background_threads=4 opt_tcache=true opt_tcache_max=32768 opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a
+JE_CONFIRM_CONF=PASS
+AMP_JE=1.233235 row=21600
+FRAG_SHAREL_je=0.011038
+DIRTY_SHAREL_je=0.160031
+REACH_PE_je=434.165 live=2107174
+MI_POSTINIT_LINES_mi3=2
+MI_POSTINIT_LINES_mi2=6
+MI_POSTINIT_NOTE=mi2:6
+DISK_SLOPE_s1=118.451806 se=3.972566 n=180
+DISK_SLOPE_je=107.979871 se=3.106477 n=180
+DISK_SLOPE_mi3=103.788998 se=3.531651 n=180
+DISK_SLOPE_mi2=124.385717 se=3.437443 n=180
+DISK_SLOPE_s2=106.189986 se=3.586563 n=180
+SYS_AGREE=FALSE reason=missing:s2:PE_LEVEL
+PLATEAU_SYS=INDETERMINATE reason=missing:s2:TREND
+STAGE2_FEASIBLE=n/a reason=not_underpowered
+STAGE2_COST_EUR=n/a reason=not_underpowered
+VS_SYS_JE=n/a reason=missing:s2:PE_LEVEL
+VS_SYS_MI3=n/a reason=missing:s2:PE_LEVEL
+VS_SYS_MI2=n/a reason=missing:s2:PE_LEVEL
+ORDER_AGREE=TRUE n=0
+VERDICT_JE=n/a reason=missing:je:TREND
+VERDICT_MI3=n/a reason=missing:mi3:TREND
+VERDICT_MI2=n/a reason=missing:mi2:TREND
+DEFAULT_CANDIDATE=NONE
+NEXT=CONDUCTOR_RULING;SYS_MISSING
+CONDUCTOR_RULE=n/a reason=excluded:CONDUCTOR_RULING;SYS_MISSING
+```
+Before the flags: `STOP_H_CLAUSES=none`, `STOP_V_CLAUSES=none`, `SMOKE_ADMISSION_SEEN=PASS`; series chain `decide rc=0`.
+The Mac re-run (`SPEC377_MANIFEST_COMMIT=3fdd929a…`, BWK awk 20200816, over the committed evidence dir, this manifest
+and `spec377-smoke/`) exits 0 and its whole output — 277 lines, not only the 104-key flags block — is `cmp`-identical
+to the server's file (sha256 `73720d93…dfc34e`; server awk: `original-awk` 20220912).
+
+### 3.2 ORDER
+`ORDER=OK manifest_commit=3fdd929a… prefix_sha256=d8119975… programs=19 series_pin=34007e19` at the series chain
+start (chain log line 7), at the decide reading's start on the server (`spec377.decision.txt` line 1), at the data
+commit on the Mac (G7 transcript), and at HEAD before merge (re-run after the last G7 commit; recorded in the PR).
+
+### 3.3 The pre-registered route and the ruling on it
+`PLATEAU_SYS=INDETERMINATE reason=missing:s2:TREND` matches row 2 of the closed NEXT list, so
+`NEXT=CONDUCTOR_RULING;SYS_MISSING`; R8.1 step 3 excludes that literal, so `CONDUCTOR_RULE=n/a reason=excluded:…` —
+the pre-registered rule names no default for this outcome. Conductor ruling, 2026-10-01, in line with the amendment
+quoted in §1 (an outcome the rule does not cover cannot change a default without a new pre-registered cell): **the
+allocator default stays as it is; no flag of this series is re-derived with a different window, threshold or
+denominator and read as a verdict.** The
+series' instrument defect (§3.4–§3.5) is carried to a tracked follow-up; the allocator question is re-asked by a new,
+separately pre-registered short series once the census works.
+
+### 3.4 The census gap, per cell
+§1 expects a live-copy census every 300 s, 72 instants per cell, plus `TERMINAL`. Printed by the harness
+(`censuses:` block of each harness console):
+
+| cell | `LIVE_COPY` records | absent of 72 | last `LIVE_COPY` (s) | `pe.csv` rows (`PE_ROWS`) | last-half `n` (need ≥ 90) | `TREND` | rows in the level window `[19800, 21300]` |
+|---|---|---|---|---|---|---|---|
+| `s1` | 14 | 58 | 20434.4 | 336 | 168 | `UNDERPOWERED` | 11 |
+| `je` | 13 | 59 | 5404.3 | 86 | 43 | `n/a reason=few_rows` | 0 |
+| `mi3` | 13 | 59 | 4803.6 | 76 | 38 | `n/a reason=few_rows` | 0 |
+| `mi2` | 14 | 58 | 5103.8 | 81 | 41 | `n/a reason=few_rows` | 0 |
+| `s2` | 17 | 55 | 5104.0 | 81 | 41 | `n/a reason=few_rows` | 0 |
+
+- Which instants are absent (nominal `k × 300 s`, no record within 150 s; full lists in the transcript):
+  `s1` 1500, 1800, 2400, 2700, then every instant from 5400 to 21600 except the one record at 20434.4;
+  `je` 600, 900, 1200, 2100, 2400, then 5700–21600; `mi3` 1500, 2100, 2400, then 5100–21600;
+  `mi2` 2100, 2400, 3300, then 5400–21600; `s2` none before 5400, then 5400–21600.
+- `CENSUS_DROPPED_N_<cell>=1` in every cell: that key counts census records that exist but find no CSV row to join
+  (`TERMINAL`, by construction). It does not count records the harness never produced; nothing in the predicates
+  output counts those. The absence surfaces only through `PE_ROWS`, `few_rows` and `no_rows_in_level_window`.
+- `s1` is the only cell with rows in the level window, and only because of its single late record: `live(t)` is
+  interpolated linearly between the records at 5103.7 s and 20434.4 s across a 15 330 s span. Its `TREND` and
+  `PE_LEVEL` are therefore readings over an interpolated denominator, recorded as printed and not relied on.
+- AC-8 holds by its first clause on `s1` only; on the other four cells it holds by its second clause (the
+  `few_rows` line is printed, not silent).
+
+### 3.5 Read-only confirmation of the cause (harness source + committed consoles; nothing beyond what they show)
+The harness binary was built from `SERIES_PIN`; `benches/soak_harness/main.rs` is the same blob at `SERIES_PIN` and at
+HEAD (`9d1e02ef…`). Line numbers below are that file's.
+
+**What the source does.**
+1. `--live-census-interval 300` arms one loop (`:925–950`): sleep 300 s, return if the stop flag is set (`:933–934`),
+   run `sample_live_census_via_copy` on a blocking thread and wait for it (`:942–945`), return if that task failed to
+   join (`:946–948`), repeat. The period is therefore 300 s plus the copy-and-scan time of each iteration.
+2. `sample_live_census_via_copy` (`:2198`) increments the live tally's `scans_attempted`, calls
+   `copy_and_scan_census`, and then either pushes one `LIVE_COPY` record (`Some`, `:2220–2225`) or increments the live
+   tally's `scans_failed` (`None`, `:2226`). It prints nothing in either case.
+3. `copy_and_scan_census` (`:2248`) byte-copies `topgun.redb` of the running server into a scratch directory and
+   scans the copy. It prints a line to stderr if the scratch directory cannot be created (`:2259–2262`) or the copy
+   fails (`:2268`). The scan (`scan_redb_tombstone_corpus`, `:2347`) returns `None` **without printing anything** when
+   the copy cannot be opened as a redb database (`:2352`), a read transaction cannot begin (`:2353`), the table opens
+   with an error other than "does not exist" (`:2361`), the iterator cannot be created (`:2365`) or a row read fails
+   (`:2367`).
+4. The live tally is exported at exactly one site (`:1419`), which takes its `censuses` vector and nothing else. **Its
+   `scans_attempted` and `scans_failed` counters are never written to any artifact.**
+
+**What the committed artifacts show.**
+
+| cell | live-census `scans_attempted` / `scans_failed` | durable-corpus tally (`soak.json`; console) | `cannot copy redb file` | `cannot create scratch dir` | `panicked` |
+|---|---|---|---|---|---|
+| `s1` | not recorded in any artifact | `scansAttempted=1 scansFailed=0`; `scans_ok=1 scans_failed=0` | 0 | 0 | 0 |
+| `je` | not recorded in any artifact | `scansAttempted=1 scansFailed=0`; `scans_ok=1 scans_failed=0` | 0 | 0 | 0 |
+| `mi3` | not recorded in any artifact | `scansAttempted=1 scansFailed=0`; `scans_ok=1 scans_failed=0` | 0 | 0 | 0 |
+| `mi2` | not recorded in any artifact | `scansAttempted=1 scansFailed=0`; `scans_ok=1 scans_failed=0` | 0 | 0 | 0 |
+| `s2` | not recorded in any artifact | `scansAttempted=1 scansFailed=0`; `scans_ok=1 scans_failed=0` | 0 | 0 | 0 |
+
+- The only `scans_*` counters in the artifacts are the **durable-corpus** tally's: one attempt, zero failures — the
+  `TERMINAL` scan, which reads the data dir after the server is gone. They say nothing about the live census.
+- The harness console captures stderr (`spec377-cells.sh:1395`, `> "$CONSOLE_LOG" 2>&1`). No console carries a
+  `live-census sample` line of any kind, so on no absent instant did the copy step or the scratch-directory step
+  report a failure. No console carries a panic line.
+- Record spacing. Consecutive records are 300.1–300.5 s apart. Across `s1`'s long gap, 5103.7 s → 20434.4 s is
+  15 330.7 s = 51 × 300.60 s; the shorter gaps are 2–4 × 300.08–300.20 s. This spacing is what the loop of item 1
+  produces if it kept iterating through the gap; it does not by itself show what each iteration did.
+- Copy-and-scan window (record stamp to `copy_done`): 0.05–0.58 s for every record up to 5404 s; 2.08 s for `s1`'s
+  record at 20434.4 s.
+- Store size (`redb_mb`, nearest CSV row). Early absences happen on a small store: `je` 600 s at 13.4 MB, `s1` 1500 s
+  at 26.8 MB, `mi3` 1500 s at 26.3 MB, `mi2` 2100 s at 35.5 MB. The last record before the long gap sits at
+  108.8–119.0 MB in every cell (`s1` 118.0, `je` 119.0, `mi3` 108.8, `mi2` 113.0, `s2` 113.1). `s1`'s late record was
+  taken at 536.2 MB. The stores end at 520.5–536.6 MB.
+
+**What follows from that, and what does not.**
+- Confirmed: a `LIVE_COPY` record exists only for a scan that returned `Some`; a failed live scan leaves no line and
+  no exported counter; the series' consoles hold no copy-failure line. So every absent instant either went through
+  one of the scan's silent `None` paths, or its iteration did not run.
+- Confirmed for `s1`: the sampler was still alive at 20434 s, so its loop had not ended.
+- **Not determinable from the artifacts:** which of the silent paths was taken, with what error; how many attempts
+  were made and how many failed, per cell; and, for `je`, `mi3`, `mi2` and `s2`, whether the loop kept attempting
+  after its last record or had stopped.
+- The conductor's working hypothesis — a byte copy of a store file that is being written is more often unreadable
+  as the file grows — is **consistent with** these readings (the scan is the silent step; once the store passes
+  ≈ 109–119 MB only one further record exists, in one cell) and is **neither confirmed nor refuted** by them: no
+  artifact carries the scan's error, absences also occur at 13–36 MB, and one scan succeeded at 536 MB.
+- SPEC-376's calibration cells ran 900 s: two census records each (300 s and 600 s) on a store that ends at ≈ 16 MB.
+  They could not have shown this.
+- This is a defect of the series' **instrument** (the denominator of the decision metric), not of the cells: the
+  memory columns, the write counts and the `TERMINAL` census are complete for all five.
+
+### 3.6 Descriptive readings — RECORDED ONLY, not a verdict
+None of the numbers below enters `VERDICT`, `DEFAULT_CANDIDATE`, `NEXT` or `CONDUCTOR_RULE`, and none may be read as
+one: n = 1 per candidate arm, absolute resident size is not the pre-registered quantity (§1 R0.1), and the candidate
+arms have no per-entry level.
+
+`rss_mb` at each hour (cell CSVs, MiB):
+
+| cell | 1 h | 2 h | 3 h | 4 h | 5 h | 6 h |
+|---|---|---|---|---|---|---|
+| `s1` (SYS) | 681.1 | 1503.0 | 2455.8 | 3069.0 | 4178.6 | 4998.4 |
+| `je` | 201.4 | 357.7 | 547.7 | 675.1 | 968.6 | 1053.2 |
+| `mi3` | 359.8 | 464.8 | 671.6 | 761.4 | 1079.1 | 1117.9 |
+| `mi2` | 668.6 | 978.9 | 1456.0 | 1403.7 | 2282.5 | 2496.1 |
+| `s2` (SYS) | 690.5 | 1514.5 | 2496.0 | 3174.2 | 4103.4 | 5195.9 |
+
+`fp_equiv_mb` at 6 h: `s1` 4987.0, `je` 1041.4, `mi3` 1107.4, `mi2` 2487.0, `s2` 5185.4.
+
+Peak resident set and huge pages at the end (flags `HWM_END_*`, `ANON_HUGE_END_*`, MiB):
+
+| cell | `HWM_END` | `ANON_HUGE_END` |
+|---|---|---|
+| `s1` | 5031.1 | 0.0 |
+| `je` | 1504.3 | 0.0 |
+| `mi3` | 1607.6 | 454.0 |
+| `mi2` | 2872.0 | 1172.0 |
+| `s2` | 5231.5 | 0.0 |
+
+`PE_END` (bytes of `fp_equiv` per live entry at each cell's **last census record** — the instants differ, so the rows
+are not like-for-like, `s1` least of all):
+
+| cell | `PE_END` (B/entry) | at `t` (s) | `live` at `t` |
+|---|---|---|---|
+| `s1` | 2543.5 | 20434.4 | 1 993 742 |
+| `je` | 522.7 | 5404.3 | 554 206 |
+| `mi3` | 822.4 | 4803.6 | 494 458 |
+| `mi2` | 1541.2 | 5103.8 | 524 246 |
+| `s2` | 2204.6 | 5104.0 | 523 116 |
+
+Other recorded readings: `LIVE_END` 2 096 416 – 2 123 004 on all five cells (the workload grows the data set
+linearly, ≈ 350 k live entries per hour); `OPS` 242.7–245.7 writes/s; `DISK_SLOPE` 103.8–124.4 MiB/h; `LAZY_MAX` 0 on
+every arm; on `je`, `AMP_JE=1.233`, `REACH_PE_je=434.2` B/entry at `TERMINAL`, `DIRTY_SHAREL_je=0.160`,
+`FRAG_SHAREL_je=0.011`.
+
+### 3.7 Readings against §1's predictions
+| prediction (§1) | reading | |
+|---|---|---|
+| `STOP=none` | `STOP=none` | as predicted |
+| `OPS` ≈ 258 writes/s on every cell; every `OPS_RATIO` in `[0.95, 1.05]` | 242.7–245.7 writes/s over 6 h; ratios 1.0042 / 1.0117 / 1.0099 | ratios as predicted; the 6 h mean rate is ≈ 5–6 % under the 900 s reference rate (`s2` prints `OPS_AT_900=260.164`) |
+| `LIVE_END` ≈ 2.1–2.3 M | 2.096–2.123 M | at the lower edge (`s2` 2 096 416 is just under) |
+| `CENSUS_DROPPED_N` ≥ 1 (`TERMINAL`) | 1 in every cell | as predicted |
+| 72 census instants per cell ("Row and census accounting") | 13–17 records | **contradicted** — §3.4, §3.5 |
+| `LAZY_MAX` ≈ 0, `LAZY_DRIFT=FALSE` | 0 on every arm, `FALSE` | as predicted |
+| `JE_BG_THREADS_je` = 4; `JE_CONFIRM_CONF=PASS` | 4; `PASS` | as predicted |
+| `PLATEAU_SYS` = `UNDERPOWERED` (or `INDETERMINATE reason=falling`) | `INDETERMINATE reason=missing:s2:TREND` | not reached: `s2` has no trend |
+| `STAGE2_FEASIBLE=FALSE reason=>STAGE2_MAX_H` | `n/a reason=not_underpowered` | not reached |
+| `VERDICT_JE` = `UNRESOLVED(MARGINAL)`; `VERDICT_MI3/MI2` = `UNRESOLVED(FALLING)` | all three `n/a reason=missing:<arm>:TREND` | not reached |
+| `DEFAULT_CANDIDATE=NONE` | `NONE` | same value, for a different reason (no arm has a trend) |
+| `NEXT` most likely `…SYS_UNRESOLVABLE_BY_SLOPE` or `…SYS_INDETERMINATE` | `CONDUCTOR_RULING;SYS_MISSING` | **contradicted**; cause is §3.4 |
+| `SYS_AGREE`: no transferable prediction (M1 SYS was bimodal) | `FALSE reason=missing:s2:PE_LEVEL` | not answered by the flag; recorded only: the two SYS cells' `rss_mb` are within 4 % of each other at every hour (§3.6) |
+
+### 3.8 Deviations and notes (none changes a §1 value)
+1. **`MI_POSTINIT_LINES_mi2=6` > `MI_POSTINIT_BOUND=5`**, so `MI_POSTINIT_NOTE=mi2:6`. The six lines are
+   `process init`, `using 1 numa regions` and four `reserved 1048576 KiB memory` (harness console lines 48–50, 1398,
+   4340, 6116); the smoke cell printed three. `mi3` reads 2 (two `reserved …` lines; v3 prints `process init` before
+   its version line). The note is a recorded reading by design (R0.4) and routes nothing; mimalloc reserved a further
+   1 GiB arena three times during the mi2 cell and once during the mi3 cell.
+2. **Census count** — 13–17 records against 72 (§3.4). The 72nd nominal instant coincides with the end of the cell;
+   whether the loop reaches it is not observable from the artifacts.
+3. **AC-8** holds through its `few_rows` clause on four cells (§3.4).
+4. **`A0_L_MIB` share.** The spec assumed `A0_L_MIB=13.349` MiB is under 1 % of the resident set at 6 h. Against
+   `fp_equiv_mb` at 6 h it is 0.27 % (`s1`), 1.28 % (`je`), 1.21 % (`mi3`), 0.54 % (`mi2`), 0.26 % (`s2`): the
+   assumption does not hold for `je` and `mi3`. No verdict was issued, so nothing depends on it here; a follow-up
+   series on these arms has to treat `A0` as a measured input.
+5. **Timing.** The series ended at 2026-10-01T15:07:40Z, 57 min before `PREDICTED_END_UTC` (16:04:50Z): four settle
+   steps took 105–120 s each against the 10 min allowance. The series started 49 min after server creation
+   (08:10:21Z → 08:59:50Z), which the build, the smoke and the freeze of M account for; the artifacts record no
+   launch delay. The working-hours window referred to in R12 is not recorded in any artifact available to G7.
+6. **Programs.** No program was edited after M0 (`c51e31bd`); smoke attempt 1 admitted; the 16 `SMOKE_PROG_SHA=` lines
+   equal §1 file for file (G5).
+7. **Fetch.** The data commit holds 3 392 files verified against sha256 lists written on the server
+   (`spec377-run/fetch-list-{evidence,run,target}.sha256`); those three lists are the only files written on the
+   server outside the chain's own outputs. The per-cell data directories (`target/spec377-*-data`) were not fetched
+   and no longer exist, so the live store files cannot be re-examined.
+
+### 3.9 Host sidecar
+| cell | `LOAD_AT_START` | settle before the cell | `steal_pct` | `MemAvailable` start → end (kB) | THP |
+|---|---|---|---|---|---|
+| `s1` | 0.01 | — (first cell) | 0.0000 | 15 486 072 → 15 460 744 | `madvise/madvise` |
+| `je` | 0.40 | `ok` 120 s | 0.0000 | 15 460 412 → 15 402 808 | `madvise/madvise` |
+| `mi3` | 0.44 | `ok` 105 s | 0.0000 | 15 415 496 → 15 352 808 | `madvise/madvise` |
+| `mi2` | 0.40 | `ok` 105 s | 0.0000 | 15 350 080 → 15 304 120 | `madvise/madvise` |
+| `s2` | 0.39 | `ok` 105 s | 0.0000 | 15 301 376 → 15 284 396 | `madvise/madvise` |
+
+`DISK_FREE_AT_START=140072536 KiB` (≥ 40 GiB). Preflight `spec377-preflight-20260930T085722Z.log`: `PREFLIGHT=PASS`,
+`alloc_conf=PASS`, 138 s before the chain start.
+
+### 3.10 Residuals
+- **TODO-717** stays open: `JE_CONFIG` prints `opt_dirty_decay_ms=n/a opt_muzzy_decay_ms=n/a opt_retain=n/a`. The
+  `confirm_conf` printout proves that only the environment source set anything (`JE_CONFIRM_CONF=PASS`), not the
+  effective decay values.
+- **jemalloc's > 8 MiB oversize arena** was not checked: whether any record crosses `oversize_threshold` in a 6 h
+  cell is unverified.
+- **glibc arena count** on the SYS cells was not observed.
+- **MI v2 vs v3**: `mi2` ends with 1172 MiB of anonymous huge pages and `mi3` with 454 MiB while THP is `madvise`;
+  recorded, not explained here.
+
+### 3.11 Server lifecycle (AC-15)
+- Server `topgun-bench`, Hetzner Cloud id **168061482**, dedicated 4 vCPU / 16 GB (CCX23), image `437171250`,
+  IP 95.216.167.124. Host package over the snapshot: `original-awk 2022-09-12-1` only.
+- **Created** 2026-09-30T08:10:21Z by the conductor.
+- **Deleted** 2026-10-01T15:23Z by the conductor, after the data commit `a1625356` was pushed and verified.
+- **Post-delete server list** (conductor's record): `topgun-new` only.
+- Life ≈ 31 h 13 min, ≈ €4.31 at €0.138/h — under the 37 h cap (`CAP_CROSS_UTC=2026-10-01T21:10:21Z`) and under the
+  ≈ €4.55 estimate.
+
+### 3.12 Result
+The series ran clean and proved its treatments (every cell `PALLOC=TRUE`), and it did not answer the allocator
+question: the per-entry metric lost its denominator when the live census stopped producing records. The default is
+unchanged. Two things are carried forward: (1) the live census has to produce a record or an explicit, counted
+failure line at every instant — a consistent snapshot of the store, a retry, and the failure reason on the console —
+before any further gate is built on a per-entry quantity; (2) the allocator question is then re-asked by a short,
+separately pre-registered series with a working census (candidate JE against SYS, with a replicate), on a binary
+pinned before the Merkle-session change that alters the soak workload, or with the baseline re-measured after it.
