@@ -813,28 +813,35 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       //
       // Only the attribution bucket this key belongs to is written, with the attribution
       // of every key in that bucket.
-      const records = orMap.getRecords(key);
+      //
+      // The three values are built when the commit is issued, not here. Each is a
+      // full rewrite of a storage entry that server responses also rewrite, and the
+      // commit can wait behind backpressure: a value captured now would then replace
+      // whatever a response wrote during the wait with an older state.
       const attributionBucket = orMapKeyTombstonesBucketOf(String(key));
-      const mutations: StorageMutation[] = [
-        {
-          store: 'kv',
-          type: records.length > 0 ? 'put' : 'remove',
-          key: `${name}:${key}`,
-          value: records,
-        },
-        {
-          store: 'meta',
-          type: 'put',
-          key: `__sys__:${name}:tombstones`,
-          value: orMap.getTombstones(),
-        },
-        {
-          store: 'meta',
-          type: 'put',
-          key: orMapKeyTombstonesBucketKey(name, attributionBucket),
-          value: serializeOrMapKeyTombstonesBucket(orMap, attributionBucket),
-        },
-      ];
+      const buildMutations = (): StorageMutation[] => {
+        const records = orMap.getRecords(key);
+        return [
+          {
+            store: 'kv',
+            type: records.length > 0 ? 'put' : 'remove',
+            key: `${name}:${key}`,
+            value: records,
+          },
+          {
+            store: 'meta',
+            type: 'put',
+            key: `__sys__:${name}:tombstones`,
+            value: orMap.getTombstones(),
+          },
+          {
+            store: 'meta',
+            type: 'put',
+            key: orMapKeyTombstonesBucketKey(name, attributionBucket),
+            value: serializeOrMapKeyTombstonesBucket(orMap, attributionBucket),
+          },
+        ];
+      };
 
       let first = true;
       for (const tag of tombstones) {
@@ -844,7 +851,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
             'OR_REMOVE',
             String(key),
             { orTag: tag, timestamp },
-            first ? mutations : undefined,
+            first ? buildMutations : undefined,
           )
           .catch((err) => logger.error({ err }, 'Failed to commit OR_REMOVE op'));
         first = false;

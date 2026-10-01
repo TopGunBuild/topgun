@@ -452,6 +452,80 @@ describe('ORMap per-key tombstone attribution persistence', () => {
     });
   });
 
+  describe('a local remove whose commit waits behind backpressure', () => {
+    test('commits the state at commit time, so a server response written during the wait is not overwritten', async () => {
+      const mate = bucketMateOf('K');
+      const client = newClient();
+      const map = client.getORMap<string, string>(MAP);
+      map.add('K', 'removed');
+      map.add('K', 'kept');
+      map.add(mate, 'live');
+      await settle();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the test holds the engine's backpressure wait open and injects a server response into its sync handler
+      const engine = (client as any).syncEngine;
+
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      jest.spyOn(engine.backpressureController, 'checkBackpressure').mockReturnValue(gate);
+      const commitWrite = jest.spyOn(storage, 'commitWrite');
+
+      const [tag] = map.remove('K', 'removed');
+      await settle();
+      // The remove is held before its commit: nothing of it is on disk yet.
+      expect(commitWrite).not.toHaveBeenCalled();
+      expect(await storage.getMeta(bucketKeyOf('K'))).toBeUndefined();
+
+      // While it waits, the server attributes a tombstone to another key of the
+      // same bucket and announces a further record for the removed key itself.
+      const arrived = {
+        value: 'arrived',
+        tag: 'server-record-tag',
+        timestamp: { millis: Date.now(), counter: 0, nodeId: 'server' },
+      };
+      await engine.orMapSyncHandler.handleORMapDiffResponse({
+        mapName: MAP,
+        entries: [{ key: mate, records: map.getRecords(mate), tombstones: ['server-tag'] }],
+      });
+      await engine.applyServerEvent(MAP, 'OR_ADD', 'K', undefined, arrived);
+      const bucketFromServer = new Map(
+        (await storage.getMeta(bucketKeyOf('K'))) as Array<[string, string[]]>,
+      );
+      expect(bucketFromServer.get(mate)).toEqual(['server-tag']);
+      expect(bucketFromServer.get('K')).toEqual([tag]);
+
+      release();
+      await settle();
+
+      expect(commitWrite).toHaveBeenCalledTimes(1);
+      const [mutations] = commitWrite.mock.calls[0];
+      const committedBucket = new Map(
+        mutations.find((m) => m.key === bucketKeyOf('K'))?.value as Array<[string, string[]]>,
+      );
+      expect(committedBucket.get(mate)).toEqual(['server-tag']);
+      expect(committedBucket.get('K')).toEqual([tag]);
+      // The other two values of the same commit are as current as the bucket.
+      const committedRecords = mutations.find((m) => m.key === `${MAP}:K`)?.value as Array<{
+        value: string;
+      }>;
+      expect(sorted(committedRecords.map((r) => r.value))).toEqual(['arrived', 'kept']);
+      expect(sorted(mutations.find((m) => m.key === TOMBSTONES_META)?.value as string[])).toEqual(
+        sorted(['server-tag', tag]),
+      );
+
+      // And so is what storage holds afterwards.
+      const stored = new Map(
+        (await storage.getMeta(bucketKeyOf('K'))) as Array<[string, string[]]>,
+      );
+      expect(stored.get(mate)).toEqual(['server-tag']);
+      expect(stored.get('K')).toEqual([tag]);
+      expect(
+        sorted(((await storage.get(`${MAP}:K`)) as Array<{ value: string }>).map((r) => r.value)),
+      ).toEqual(['arrived', 'kept']);
+    });
+  });
+
   describe('bucket layout', () => {
     /** The trie path of the leaf holding `key`, read off the map's own Merkle tree. */
     const leafPathOf = (map: ORMap<string, string>, key: string): string => {

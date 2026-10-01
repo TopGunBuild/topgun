@@ -1242,11 +1242,22 @@ export class SyncEngine {
      * KV/meta mutations that must commit atomically with this op (the record/records-array
      * put + ORMap tombstone meta). When provided, the op + mutations land in ONE durable
      * transaction (crash-consistent); otherwise the op is appended alone.
+     *
+     * A function is called once, after the backpressure wait and with no `await`
+     * between the call and the commit. Pass one when a mutation stores a value derived
+     * from the map's whole current state (a records list, a tombstone set): a write of
+     * the same storage entry from a server response can land during the wait, and a
+     * value built before it would overwrite that newer write with an older one.
      */
-    mutations?: StorageMutation[],
+    mutationsOrBuilder?: StorageMutation[] | (() => StorageMutation[]),
   ): Promise<string> {
     // Check backpressure before adding new operation (delegates to BackpressureController)
     await this.backpressureController.checkBackpressure();
+
+    // Everything from here to the commit call below is synchronous, so mutations built
+    // now describe the state the commit is issued against.
+    const mutations =
+      typeof mutationsOrBuilder === 'function' ? mutationsOrBuilder() : mutationsOrBuilder;
 
     const opLogEntry: Omit<OpLogEntry, 'id'> & { id?: string } = {
       mapName,
