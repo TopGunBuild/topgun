@@ -209,6 +209,11 @@ function epochOfServerEvent(payload: unknown): number {
 // device ACK can advance past its un-received tombstones (the cross-map
 // resurrection vector). See `computeHeldOrMapNames` / `ensureOrMapMarker`.
 const orMapMarkerKey = (mapName: string): string => `__sys__:${mapName}:ormap`;
+// Per-key tombstone attribution of an OR-Map. The suffix is deliberately one the
+// held-map enumeration regex below does not match: the attribution key is
+// written by the same helpers that write the `:ormap` marker, so it never needs
+// to announce a map on its own, and matching it would yield a bogus map name.
+const orMapKeyTombstonesKey = (mapName: string): string => `__sys__:${mapName}:keyTombstones`;
 // Set ONCE after the legacy-store backfill scan succeeds. Its ABSENCE forces the
 // backfill to (re-)run inside `computeHeldOrMapNames`; a scan failure leaves it
 // unset so the next connection retries — and the throw fail-closes this
@@ -534,6 +539,8 @@ export class SyncEngine {
       // reload — same canonical helpers as the local-write + applyServerEvent paths.
       persistKey: (name, key) => this.persistORMapKey(name, key),
       persistTombstones: (name) => this.persistORMapTombstones(name),
+      getPendingRemoveTags: (name, key) => this.getPendingRemoveTags(name, key),
+      persistKeyTombstones: (name) => this.persistORMapKeyTombstones(name),
       // Fold this map's covering epoch into the device-wide MIN across every
       // held OR-Map (see applyMapCoverage) AFTER its data is durably applied
       // (including on an empty diff), so the server's per-device cursor advances
@@ -2049,10 +2056,14 @@ export class SyncEngine {
           // with the LWW path above. Uses the same storage convention as local ORMap writes.
           await this.persistORMapKey(mapName, key);
         } else if (eventType === 'OR_REMOVE' && orTag) {
-          localMap.applyTombstone(orTag);
-          // The removed key's record list changed and the tombstone set grew — persist both.
+          // Keyed, so the tombstone is attributed to the key it was removed from
+          // and enters that key's Merkle leaf, as it does on the server (TG-MRK-001).
+          localMap.applyTombstone(orTag, key);
+          // The removed key's record list changed and the tombstone set grew — persist both,
+          // then the key's attribution, which also changed.
           await this.persistORMapKey(mapName, key);
           await this.persistORMapTombstones(mapName);
+          await this.persistORMapKeyTombstones(mapName);
         }
       }
     }
@@ -2087,6 +2098,50 @@ export class SyncEngine {
     if (!(map instanceof ORMap)) return;
     await this.ensureOrMapMarker(mapName);
     await this.storageAdapter.setMeta(`__sys__:${mapName}:tombstones`, map.getTombstones());
+  }
+
+  /**
+   * Canonical persistence of an ORMap's per-key tombstone attribution (the
+   * `__sys__:mapName:keyTombstones` meta key).
+   *
+   * Stored as an array of `[key, tags[]]` pairs rather than an object keyed by
+   * map key: a map key is arbitrary user data, and one named `__proto__` would
+   * not survive as an own property of a plain object.
+   */
+  public async persistORMapKeyTombstones(mapName: string): Promise<void> {
+    const map = this.maps.get(mapName);
+    if (!(map instanceof ORMap)) return;
+    await this.ensureOrMapMarker(mapName);
+    const pairs: Array<[string, string[]]> = [];
+    for (const [key, tags] of map.getSnapshot().keyTombstones) {
+      pairs.push([String(key), Array.from(tags)]);
+    }
+    await this.storageAdapter.setMeta(orMapKeyTombstonesKey(mapName), pairs);
+  }
+
+  /**
+   * Tags of this client's local removes of `key` in `mapName` that the server
+   * has neither acknowledged nor refused.
+   *
+   * Read from the op log on every call and never stored: an op that is
+   * acknowledged, refused or discarded stops contributing at once, and one that
+   * a full resync retains keeps contributing after the map's own state is wiped.
+   */
+  private getPendingRemoveTags(mapName: string, key: string): string[] {
+    const tags: string[] = [];
+    for (const op of this.opLog) {
+      if (
+        op.mapName === mapName &&
+        op.opType === 'OR_REMOVE' &&
+        op.key === key &&
+        !op.synced &&
+        op.rejected !== true &&
+        op.orTag !== undefined
+      ) {
+        tags.push(op.orTag);
+      }
+    }
+    return tags;
   }
 
   /**
@@ -2134,6 +2189,14 @@ export class SyncEngine {
       await this.storageAdapter.remove(`${mapName}:${key}`);
     }
     if (map instanceof ORMap) {
+      // Reset the persisted per-key attribution BEFORE discarding it in memory,
+      // for the same reason as the record removals above: if this write fails,
+      // REPLACE aborts with memory and disk both still holding the old
+      // attribution, and the resync retries. Written directly rather than
+      // through the persist helper, which would write back the attribution the
+      // map still holds at this point. No await separates a successful write
+      // from `clear()`, so disk never claims attribution that memory has lost.
+      await this.storageAdapter.setMeta(orMapKeyTombstonesKey(mapName), []);
       map.clear(); // discard materialized local OR-Map state (authoritative REPLACE)
       // Reset the persisted (now-empty) tombstone set; the snapshot pull that
       // follows re-persists the server-authoritative records + tombstones.

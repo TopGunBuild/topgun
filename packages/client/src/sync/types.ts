@@ -1000,6 +1000,10 @@ export interface IORMapSyncHandler {
    */
   handleORMapSyncRespLeaf(payload: {
     mapName: string;
+    // The trie path the entries were read from. Every key the server holds
+    // under it is listed, so a local key under it that is missing is absent
+    // on the server.
+    path?: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap records are raw ORMapRecord-shaped objects from msgpack; the sync handler merges them into the typed map
     entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
   }): Promise<void>;
@@ -1083,17 +1087,22 @@ export interface ORMapSyncHandlerConfig {
   persistTombstones: (mapName: string) => Promise<void>;
 
   /**
-   * Tags of this client's not-yet-acknowledged local removes for `key` in
-   * `mapName`. Optional and not read by the handler yet: declared ahead of the
-   * per-key tombstone scoping so existing configs keep type-checking.
+   * Tags of this client's local removes for `key` in `mapName` that the server
+   * has neither acknowledged nor refused. The handler keeps these attributed to
+   * the key whenever it replaces the key's tombstone set with the server's,
+   * because the server cannot yet report a remove it has not applied.
+   *
+   * Must be derived from the pending operations at call time, never cached: an
+   * acknowledged or refused remove has to drop out on the very next call.
    */
-  getPendingRemoveTags?: (mapName: string, key: string) => string[];
+  getPendingRemoveTags: (mapName: string, key: string) => string[];
 
   /**
-   * Persist an ORMap's per-key tombstone attribution. Optional and not called by
-   * the handler yet, for the same reason as `getPendingRemoveTags`.
+   * Persist an ORMap's per-key tombstone attribution. Called whenever a sync
+   * response changed it, including responses that add or update no record.
+   * Wired by SyncEngine to `persistORMapKeyTombstones`.
    */
-  persistKeyTombstones?: (mapName: string) => Promise<void>;
+  persistKeyTombstones: (mapName: string) => Promise<void>;
 
   /**
    * Confirm to the server that `mapName`'s OR-Map sync data is durably applied
