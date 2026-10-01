@@ -603,6 +603,60 @@ describe('SyncEngine map reset — per-key tombstone attribution', () => {
     expect(map.get('K')).toEqual(['kept']);
     expect([...map.getKeyTombstones('K')]).toEqual([tag]);
     expect(adapter.meta.get(KEY_TOMBSTONES_META)).toEqual(persistedBefore);
+    // Nothing of the reset happened: the key's records are still stored too.
+    expect(adapter.kv.has('tags:K')).toBe(true);
+    engine.close();
+  });
+
+  test('a reset empties every bucket storage holds, including one the map in memory has no key for', async () => {
+    const { adapter, engine, eng, map } = await engineWithAttributedTombstone();
+    const [first, second, onDiskOnly] = keysInDistinctBuckets(3);
+    for (const key of [first, second]) {
+      map.add(key, 'gone');
+      map.remove(key, 'gone');
+    }
+    await engine.persistORMapKeyTombstones('tags', [first, second]);
+    adapter.meta.set(attributionBucketKeyOf(onDiskOnly), [[onDiskOnly, ['older-tag']]]);
+    const foreign = orMapKeyTombstonesBucketKey('other', orMapKeyTombstonesBucketOf(first));
+    adapter.meta.set(foreign, [[first, ['foreign-tag']]]);
+    expect(nonEmptyAttributionEntries(adapter).length).toBeGreaterThanOrEqual(3);
+
+    const order: string[] = [];
+    const setMeta = jest.spyOn(adapter, 'setMeta').mockImplementation(async (key, value) => {
+      order.push(`setMeta ${key}`);
+      adapter.meta.set(key, value);
+    });
+    jest.spyOn(map, 'clear').mockImplementation(() => {
+      order.push('clear');
+      ORMap.prototype.clear.call(map);
+    });
+
+    await eng.resetMap('tags');
+    setMeta.mockRestore();
+
+    expect(nonEmptyAttributionEntries(adapter)).toEqual([]);
+    expect(map.getSnapshot().keyTombstones.size).toBe(0);
+    expect(adapter.meta.get(foreign)).toEqual([[first, ['foreign-tag']]]);
+    const clearedAt = order.indexOf('clear');
+    expect(clearedAt).toBeGreaterThan(0);
+    for (const key of ['K', first, second, onDiskOnly]) {
+      const at = order.indexOf(`setMeta ${attributionBucketKeyOf(key)}`);
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(at).toBeLessThan(clearedAt);
+    }
+    engine.close();
+  });
+
+  test('a reset of a name with no map in memory still empties the buckets left on disk', async () => {
+    const { adapter, engine, eng } = await engineWithAttributedTombstone();
+    const leftover = orMapKeyTombstonesBucketKey('closed', orMapKeyTombstonesBucketOf('K'));
+    adapter.meta.set(leftover, [['K', ['older-tag']]]);
+
+    await eng.resetMap('closed');
+
+    expect(adapter.meta.get(leftover)).toEqual([]);
+    // The map that was not reset keeps its attribution.
+    expect(nonEmptyAttributionEntries(adapter)).toEqual([KEY_TOMBSTONES_META]);
     engine.close();
   });
 });

@@ -2465,6 +2465,18 @@ export class SyncEngine {
 
   private async resetMap(mapName: string): Promise<void> {
     const map = this.maps.get(mapName);
+    // Empty the persisted per-key tombstone attribution BEFORE the map is cleared
+    // in memory. Left on disk, it would come back on the next load as tombstones
+    // of a map that no longer holds anything; and cleared in memory first, a
+    // failed write would leave disk claiming attribution memory has already
+    // lost. A rejection aborts the reset with the map untouched. A failure
+    // part-way leaves some buckets already empty on disk, which is the safe
+    // direction: less attribution after a reload means unequal Merkle roots and
+    // one walk, never a false match. An LWW map has no attribution; a name with
+    // no map in memory may still have buckets on disk, so only LWW is skipped.
+    if (!(map instanceof LWWMap)) {
+      await resetPersistedOrMapKeyTombstones(mapName, this.storageAdapter);
+    }
     if (map) {
       // Clear memory
       if (map instanceof LWWMap) {
@@ -2481,8 +2493,8 @@ export class SyncEngine {
       await this.storageAdapter.remove(key);
     }
     // Drop the session guard so a later write re-stamps the durable marker. The
-    // reserved OR-Map meta (`:ormap` existence marker + `:tombstones` set) is left
-    // in place: the meta interface has no delete primitive (only setMeta, which
+    // reserved OR-Map meta (`:ormap` existence marker + `:tombstones` set, and the
+    // attribution buckets emptied above) is left in place: the meta interface has no delete primitive (only setMeta, which
     // stores undefined rather than removing the key), and a lingering marker only
     // makes a fully-cleared map a self-healing PHANTOM in the next snapshot —
     // included with coverage 0, then cleared to nothing and its empty sync conveys
