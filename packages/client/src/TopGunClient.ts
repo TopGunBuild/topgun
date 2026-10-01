@@ -48,6 +48,11 @@ import { HybridQueryHandle } from './HybridQueryHandle';
 import type { HybridQueryFilter } from './HybridQueryHandle';
 import { logger } from './utils/logger';
 import { assertValidMapName, keyBelongsToLongerHeldName } from './utils/mapName';
+import {
+  orMapKeyTombstonesKey,
+  restoreOrMapKeyTombstones,
+  serializeOrMapKeyTombstones,
+} from './utils/orMapKeyTombstones';
 import { SyncState } from './SyncState';
 import type { StateChangeEvent } from './SyncStateMachine';
 import type {
@@ -797,10 +802,13 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       const tombstones = originalRemove(key, value);
       const timestamp = this.syncEngine.getHLC().now();
 
-      // The removed key's record list shrank and the tombstone set grew — commit both the KV
-      // records-array (or delete when empty) and the tombstone meta atomically with the FIRST
+      // The removed key's record list shrank, the tombstone set grew and the removed tags
+      // were attributed to this key — commit the KV records-array (or delete when empty),
+      // the tombstone meta and the per-key attribution meta atomically with the FIRST
       // OR_REMOVE op. Subsequent tombstone tags for this remove are op-only appends; the
-      // durable KV/meta state is already captured by the first commit.
+      // durable KV/meta state is already captured by the first commit. The attribution
+      // must not trail the op: it feeds this key's Merkle leaf, so a reload that kept the
+      // remove but lost its attribution would compute a different root than before it.
       const records = orMap.getRecords(key);
       const mutations: StorageMutation[] = [
         {
@@ -814,6 +822,12 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
           type: 'put',
           key: `__sys__:${name}:tombstones`,
           value: orMap.getTombstones(),
+        },
+        {
+          store: 'meta',
+          type: 'put',
+          key: orMapKeyTombstonesKey(name),
+          value: serializeOrMapKeyTombstones(orMap),
         },
       ];
 
@@ -838,7 +852,9 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
 
   private async restoreORMap<K, V>(name: string, orMap: ORMap<K, V>) {
     try {
-      // 1. Restore Tombstones
+      // 1. Restore Tombstones. Kept map-wide only: a store written before per-key
+      // attribution existed never recorded which key a tombstone belongs to, so these
+      // suppress their tags without entering any key's Merkle leaf.
       const tombstoneKey = `__sys__:${name}:tombstones`;
       const tombstones = await this.storageAdapter.getMeta(tombstoneKey);
       if (Array.isArray(tombstones)) {
@@ -875,6 +891,13 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
           }
         }
       }
+
+      // 3. Restore per-key tombstone attribution, after the items: see
+      // `restoreOrMapKeyTombstones`.
+      restoreOrMapKeyTombstones(
+        orMap,
+        await this.storageAdapter.getMeta(orMapKeyTombstonesKey(name)),
+      );
     } catch (e) {
       logger.error({ mapName: name, err: e }, 'Failed to restore ORMap');
     }

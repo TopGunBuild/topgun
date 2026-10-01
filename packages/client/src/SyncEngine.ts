@@ -24,6 +24,11 @@ import type { HybridQueryHandle, HybridQueryFilter } from './HybridQueryHandle';
 import { TopicHandle } from './TopicHandle';
 import { logger } from './utils/logger';
 import { isValidMapName, keyBelongsToLongerHeldName } from './utils/mapName';
+import {
+  orMapKeyTombstonesKey,
+  restoreOrMapKeyTombstones,
+  serializeOrMapKeyTombstones,
+} from './utils/orMapKeyTombstones';
 import { SyncStateMachine, StateChangeEvent } from './SyncStateMachine';
 import { SyncState } from './SyncState';
 import type {
@@ -209,11 +214,6 @@ function epochOfServerEvent(payload: unknown): number {
 // device ACK can advance past its un-received tombstones (the cross-map
 // resurrection vector). See `computeHeldOrMapNames` / `ensureOrMapMarker`.
 const orMapMarkerKey = (mapName: string): string => `__sys__:${mapName}:ormap`;
-// Per-key tombstone attribution of an OR-Map. The suffix is deliberately one the
-// held-map enumeration regex below does not match: the attribution key is
-// written by the same helpers that write the `:ormap` marker, so it never needs
-// to announce a map on its own, and matching it would yield a bogus map name.
-const orMapKeyTombstonesKey = (mapName: string): string => `__sys__:${mapName}:keyTombstones`;
 // Set ONCE after the legacy-store backfill scan succeeds. Its ABSENCE forces the
 // backfill to (re-)run inside `computeHeldOrMapNames`; a scan failure leaves it
 // unset so the next connection retries — and the throw fail-closes this
@@ -223,7 +223,8 @@ const ORMAP_BACKFILL_DONE_KEY = '__sys__:ormapBackfillDone';
 // Discovers a held OR-Map name from either meta-marker: the eager `:ormap`
 // existence marker (post-fix + backfilled stores) OR the legacy `:tombstones`
 // key (belt-and-suspenders — a pre-fix store that HAS a tombstone but somehow
-// escaped backfill is still discoverable).
+// escaped backfill is still discoverable). The per-key attribution key
+// (`:keyTombstones`) is deliberately NOT matched — see `orMapKeyTombstonesKey`.
 const HELD_ORMAP_META_RE = /^__sys__:(.+):(?:ormap|tombstones)$/;
 
 export class SyncEngine {
@@ -1138,6 +1139,14 @@ export class SyncEngine {
           }
         }
       }
+
+      // Attribution last, after the records: see `restoreOrMapKeyTombstones`.
+      // The map-wide set restored above stays unattributed — a tombstone whose
+      // key was never recorded suppresses its tag but belongs to no key's leaf.
+      restoreOrMapKeyTombstones(
+        map,
+        await this.storageAdapter.getMeta(orMapKeyTombstonesKey(mapName)),
+      );
     } catch (err) {
       logger.error(
         { mapName, err },
@@ -2112,11 +2121,10 @@ export class SyncEngine {
     const map = this.maps.get(mapName);
     if (!(map instanceof ORMap)) return;
     await this.ensureOrMapMarker(mapName);
-    const pairs: Array<[string, string[]]> = [];
-    for (const [key, tags] of map.getSnapshot().keyTombstones) {
-      pairs.push([String(key), Array.from(tags)]);
-    }
-    await this.storageAdapter.setMeta(orMapKeyTombstonesKey(mapName), pairs);
+    await this.storageAdapter.setMeta(
+      orMapKeyTombstonesKey(mapName),
+      serializeOrMapKeyTombstones(map),
+    );
   }
 
   /**
