@@ -801,6 +801,102 @@ mod tests {
         );
     }
 
+    fn tags(items: &[&str]) -> Vec<String> {
+        items.iter().map(|tag| (*tag).to_string()).collect()
+    }
+
+    /// The leaf of key `"k"` for the given live and tombstone tags.
+    fn or_leaf_of(live: &[&str], tombstones: &[&str]) -> Option<u32> {
+        or_hash(
+            "k",
+            tags(live).into_iter().map(entry).collect(),
+            tags(tombstones),
+        )
+    }
+
+    /// KNOWN LIMITATION (TG-MRK-001): tags are hashed verbatim and joined by
+    /// `|`, so one live tag containing `|` is indistinguishable from the two
+    /// tags it splits into. Equal leaves for different tag sets are possible
+    /// only when a tag carries a separator character; nothing rejects such a
+    /// tag today, so this pins the collision as it stands instead of leaving it
+    /// to be rediscovered. The literal is the same one the TypeScript client
+    /// pins for the same inputs.
+    #[test]
+    fn or_leaf_tag_containing_pipe_collides_with_the_split_tags() {
+        let joined = or_leaf_of(&["a|b"], &[]);
+        let split = or_leaf_of(&["a", "b"], &[]);
+
+        assert_eq!(
+            joined, split,
+            "a tag containing `|` hashes like the tags it splits into"
+        );
+        assert_eq!(joined, Some(473_285_503));
+    }
+
+    /// KNOWN LIMITATION (TG-MRK-001): `#` separates the live tags from the
+    /// tombstones, so a `#` inside a tag can move where that boundary appears
+    /// to be: live `a#b` with tombstone `c` hashes like live `a` with tombstone
+    /// `b#c`, although one side holds `a#b` live and the other never saw it.
+    ///
+    /// A set whose tags are all free of `#` hashes a string with exactly one
+    /// `#`, and a tag containing `#` adds another, so this collision needs a
+    /// `#` in a tag on BOTH sides — it cannot be produced against a peer whose
+    /// tags are clean. The second half pins that: live `a#b` with no tombstone
+    /// does not collide with live `a` plus tombstone `b`.
+    #[test]
+    fn or_leaf_tag_containing_hash_collides_with_hash_in_a_tombstone() {
+        let hash_in_live = or_leaf_of(&["a#b"], &["c"]);
+        let hash_in_tombstone = or_leaf_of(&["a"], &["b#c"]);
+
+        assert_eq!(
+            hash_in_live, hash_in_tombstone,
+            "a `#` inside a tag moves the live/tombstone boundary"
+        );
+        assert_eq!(hash_in_live, Some(2_457_121_691));
+
+        let hash_tag_alone = or_leaf_of(&["a#b"], &[]);
+        let clean_tag_and_tombstone = or_leaf_of(&["a"], &["b"]);
+
+        assert_ne!(
+            hash_tag_alone, clean_tag_and_tombstone,
+            "a tag containing `#` must not collide with separator-free tags"
+        );
+        assert_eq!(hash_tag_alone, Some(902_949_562));
+        assert_eq!(clean_tag_and_tombstone, Some(3_821_700_797));
+    }
+
+    /// Two orderings the client must reproduce exactly (TG-MRK-001), pinned as
+    /// literals shared with the TypeScript suite: a tag that is a prefix of
+    /// another sorts first, and after a shared prefix an astral character sorts
+    /// AFTER a high BMP one. The second is where code-point order (UTF-8 bytes,
+    /// used here) and UTF-16 code-unit order (a naive client sort) disagree, so
+    /// each case also shows that the opposite order hashes differently — else
+    /// the literal would not distinguish the two sorts.
+    #[test]
+    fn or_leaf_sort_cases_prefix_pair_and_shared_prefix_then_astral() {
+        let prefix_pair = or_leaf_of(&["ab", "abc"], &[]);
+        assert_eq!(prefix_pair, or_leaf_of(&["abc", "ab"], &[]));
+        assert_eq!(prefix_pair, Some(1_482_261_199));
+        assert_eq!(prefix_pair, Some(fnv1a_hash("key:k|ab|abc#")));
+        assert_ne!(prefix_pair, Some(fnv1a_hash("key:k|abc|ab#")));
+
+        let astral = "p\u{10000}";
+        let high_bmp = "p\u{FF61}";
+        let astral_pair = or_leaf_of(&[astral, high_bmp], &[]);
+        assert_eq!(astral_pair, or_leaf_of(&[high_bmp, astral], &[]));
+        assert_eq!(astral_pair, Some(2_938_983_567));
+        assert_eq!(
+            astral_pair,
+            Some(fnv1a_hash("key:k|p\u{FF61}|p\u{10000}#")),
+            "the high BMP tag sorts before the astral one"
+        );
+        assert_ne!(
+            astral_pair,
+            Some(fnv1a_hash("key:k|p\u{10000}|p\u{FF61}#")),
+            "UTF-16 code-unit order would put the astral tag first"
+        );
+    }
+
     /// The cross-language golden vector file (TG-MRK-001). Rust is the canonical
     /// producer of every derived field; the TypeScript suite asserts against the
     /// same file, so the two implementations cannot drift apart silently.
