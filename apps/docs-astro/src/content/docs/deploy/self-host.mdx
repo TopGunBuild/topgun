@@ -305,6 +305,8 @@ Deploy TopGun as a persistent service (Docker, Kubernetes, or any platform suppo
   <CodeBlock title="Edge function connecting to TopGun server" language="typescript" code={serverlessClientHttpCode} />
 </div>
 
+`HttpSyncProvider` identifies itself to the client as an HTTP transport, so there is no setting to add for it; see [custom connection providers](/docs/reference/client#advanced-http-sync-and-auto-connection-providers) in the client reference if you write a provider of your own.
+
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
   <a href="/docs/deploy" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Previous</span>
