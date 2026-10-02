@@ -5668,4 +5668,822 @@ mod tests {
         // A clock reading older than the last line counts as inside the window.
         assert_eq!(log.line_due(&refusal, at(0)), None);
     }
+
+    // -----------------------------------------------------------------------
+    // The push pre-scan's stored-tag lookup (TG-MRK-001)
+    //
+    // The pre-scan reads a slot only for a tag it would otherwise refuse, and
+    // through a store it resolves only then. Three properties need their own
+    // proof on the push path: it agrees with the op path on what a slot
+    // holds, an unreadable slot fails the whole push closed, and a push of
+    // admissible tags costs no store resolution and no read.
+    // -----------------------------------------------------------------------
+
+    /// An empty data store that logs every key it is asked to load and can fail
+    /// every load of one key. It is not a null store, so each read of a
+    /// non-resident key reaches it: the log is the list of slot reads that
+    /// missed memory.
+    struct PushLoadProbe {
+        inner: NullDataStore,
+        loaded: parking_lot::Mutex<Vec<String>>,
+        unreadable: parking_lot::Mutex<Option<String>>,
+    }
+
+    impl PushLoadProbe {
+        fn loaded(&self) -> Vec<String> {
+            self.loaded.lock().clone()
+        }
+
+        /// Makes every load of `key` fail (`None`: every load succeeds again).
+        fn set_unreadable(&self, key: Option<&str>) {
+            *self.unreadable.lock() = key.map(str::to_string);
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for PushLoadProbe {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner.add(map, key, value, expiration_time, now).await
+        }
+
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .add_backup(map, key, value, expiration_time, now)
+                .await
+        }
+
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove(map, key, now).await
+        }
+
+        async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove_backup(map, key, now).await
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.loaded.lock().push(key.to_string());
+            if self.unreadable.lock().as_deref() == Some(key) {
+                return Err(anyhow::anyhow!("injected load failure"));
+            }
+            self.inner.load(map, key).await
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.inner.load_all(map, keys).await
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn crate::storage::map_data_store::LeafSink,
+        ) -> anyhow::Result<()> {
+            self.inner.enumerate_leaves(map, is_backup, sink).await
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<crate::storage::map_data_store::ScanBatch> {
+            self.inner.scan_values(map, is_backup, max_batch_cost).await
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: crate::storage::map_data_store::ScanCursor,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<crate::storage::map_data_store::ScanBatch> {
+            self.inner
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.inner.remove_all(map, keys).await
+        }
+
+        fn is_loadable(&self, key: &str) -> bool {
+            self.inner.is_loadable(key)
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            self.inner.pending_operation_count()
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            self.inner.soft_flush().await
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            self.inner.hard_flush().await
+        }
+
+        async fn flush_key(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            is_backup: bool,
+        ) -> anyhow::Result<()> {
+            self.inner.flush_key(map, key, value, is_backup).await
+        }
+
+        fn reset(&self) {
+            self.inner.reset();
+        }
+    }
+
+    /// Logs each `(map, partition)` store the factory builds. The factory asks
+    /// its observer factories once per store it creates, so on a factory that
+    /// has built nothing yet the log shows which stores a request resolved.
+    struct PushStoreCreations(parking_lot::Mutex<Vec<(String, u32)>>);
+
+    impl PushStoreCreations {
+        fn created(&self) -> Vec<(String, u32)> {
+            self.0.lock().clone()
+        }
+    }
+
+    impl crate::storage::factory::ObserverFactory for PushStoreCreations {
+        fn create_observer(
+            &self,
+            map_name: &str,
+            partition_id: u32,
+        ) -> Option<Arc<dyn crate::storage::mutation_observer::MutationObserver>> {
+            self.0.lock().push((map_name.to_string(), partition_id));
+            None
+        }
+    }
+
+    /// A gated sync service whose slot reads and store resolutions are
+    /// observable.
+    struct ProbedPushService {
+        svc: Arc<SyncService>,
+        factory: Arc<RecordStoreFactory>,
+        loads: Arc<PushLoadProbe>,
+        stores: Arc<PushStoreCreations>,
+        frontier: Arc<TombstoneFrontier>,
+        registry: Arc<ConnectionRegistry>,
+    }
+
+    fn probed_push_service() -> ProbedPushService {
+        let loads = Arc::new(PushLoadProbe {
+            inner: NullDataStore,
+            loaded: parking_lot::Mutex::new(Vec::new()),
+            unreadable: parking_lot::Mutex::new(None),
+        });
+        let stores = Arc::new(PushStoreCreations(parking_lot::Mutex::new(Vec::new())));
+        let factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                loads.clone() as Arc<dyn MapDataStore>,
+                Vec::new(),
+            )
+            .with_observer_factories(vec![
+                stores.clone() as Arc<dyn crate::storage::factory::ObserverFactory>
+            ]),
+        );
+        let frontier = Arc::new(TombstoneFrontier::new(None));
+        frontier.set_epoch_width(1);
+        let registry = Arc::new(ConnectionRegistry::new());
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                Arc::clone(&factory),
+                Arc::clone(&registry),
+            )
+            .with_frontier(Arc::clone(&frontier), Arc::new(KeyWriterRegistry::new())),
+        );
+        ProbedPushService {
+            svc,
+            factory,
+            loads,
+            stores,
+            frontier,
+            registry,
+        }
+    }
+
+    /// The op path and the push path agree on what a slot ALREADY HOLDS: a
+    /// stored inadmissible tag is accepted by all four ways a tag can be stored
+    /// verbatim, in every shape a slot can hold it, and any other inadmissible
+    /// tag on that key is refused by all four with one error string. A path
+    /// with its own lookup would refuse a removal the other accepts, or let a
+    /// second such tag in beside the first (TG-MRK-001).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // five slot states against the four verbatim ingest paths, asserted once
+    async fn both_or_ingest_paths_agree_on_tags_a_slot_already_holds() {
+        use crate::service::domain::crdt::CrdtService;
+        use crate::service::domain::query::QueryRegistry;
+        use crate::service::domain::schema::SchemaService;
+        use crate::service::security::{SecurityConfig, WriteAdmission};
+        use crate::storage::record::OrMapEntry as StoreOrMapEntry;
+        use topgun_core::messages::base::ClientOp;
+        use topgun_core::messages::ClientOpMessage;
+        use topgun_core::{SystemClock, HLC};
+
+        const MAP: &str = "one-lookup";
+        // The shape a node whose id carried a separator wrote before the rule.
+        const HELD: &str = "1:0:n#1";
+        // Inadmissible tags no slot of this test holds: one of the stored
+        // tag's own shape, one with the other separator, and the empty one.
+        const NOT_HELD: [&str; 3] = ["2:0:n#1", "a|b", ""];
+        const PATHS: [&str; 4] = [
+            "(1) op-path OR_REMOVE",
+            "(2) trusted-branch OR_ADD",
+            "(3) pushed record tag",
+            "(4) pushed tombstone tag",
+        ];
+
+        /// A CRDT op with no connection id and a plain `Client` origin: the
+        /// branch that keeps the caller's tag verbatim.
+        fn trusted_op(key: &str, op: ClientOp) -> Operation {
+            let mut ctx = make_ctx(service_names::CRDT);
+            ctx.partition_id = Some(hash_to_partition(key));
+            Operation::ClientOp {
+                ctx,
+                payload: ClientOpMessage { payload: op },
+            }
+        }
+
+        fn bare(key: &str) -> ClientOp {
+            ClientOp {
+                id: Some(format!("op-{key}")),
+                map_name: MAP.to_string(),
+                key: key.to_string(),
+                op_type: None,
+                record: None,
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            }
+        }
+
+        // (label, the value the slot is seeded with, whether it holds HELD)
+        let slots: [(&str, Option<RecordValue>, bool); 5] = [
+            (
+                "a live record",
+                Some(RecordValue::OrMap {
+                    records: vec![StoreOrMapEntry {
+                        value: Value::Int(1),
+                        tag: HELD.to_string(),
+                        timestamp: make_timestamp(),
+                    }],
+                    tombstones: Vec::new(),
+                }),
+                true,
+            ),
+            (
+                "an OrMap tombstone",
+                Some(RecordValue::OrMap {
+                    records: Vec::new(),
+                    tombstones: vec![HELD.to_string()],
+                }),
+                true,
+            ),
+            (
+                "a legacy OrTombstones value",
+                Some(RecordValue::OrTombstones {
+                    tags: vec![HELD.to_string()],
+                }),
+                true,
+            ),
+            (
+                "an Lww value",
+                Some(RecordValue::Lww {
+                    value: Value::Int(1),
+                    timestamp: make_timestamp(),
+                }),
+                false,
+            ),
+            ("an absent key", None, false),
+        ];
+
+        // Both services write through ONE factory, so they see the same slots.
+        let (sync, factory, _frontier) = make_sync_service_with_frontier();
+        let crdt = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::new(ConnectionRegistry::new()),
+            Arc::new(WriteAdmission::new(
+                Arc::new(SecurityConfig::default()),
+                Arc::new(parking_lot::Mutex::new(HLC::new(
+                    "test-node".to_string(),
+                    Box::new(SystemClock),
+                ))),
+            )),
+            Arc::new(QueryRegistry::new()),
+            Arc::new(SchemaService::new()),
+        ));
+
+        let mut failures: Vec<String> = Vec::new();
+        let mut checked = 0_usize;
+
+        for (n, (slot_label, seed, holds)) in slots.iter().enumerate() {
+            // One key per slot state on all four paths, so the whole error
+            // string, which names the key, can be compared across them.
+            let key = format!("held-{n}");
+            let store = factory.get_or_create(MAP, hash_to_partition(&key));
+
+            for tag in std::iter::once(HELD).chain(NOT_HELD) {
+                let want_ok = *holds && tag == HELD;
+                let mut refusals: Vec<String> = Vec::new();
+
+                for (p, path) in PATHS.into_iter().enumerate() {
+                    checked += 1;
+                    // Every path meets the slot as seeded: an accepted path
+                    // changes it, and the next one must not inherit that.
+                    store
+                        .remove(&key, CallerProvenance::CrdtMerge)
+                        .await
+                        .expect("clear the key between paths");
+                    if let Some(value) = seed {
+                        store
+                            .put(
+                                &key,
+                                value.clone(),
+                                ExpiryPolicy::NONE,
+                                CallerProvenance::CrdtMerge,
+                            )
+                            .await
+                            .expect("seed the slot through the store");
+                    }
+                    let seeded = slot_image(&factory, MAP, &key).await;
+
+                    let result = match p {
+                        0 => {
+                            Arc::clone(&crdt)
+                                .oneshot(trusted_op(
+                                    &key,
+                                    ClientOp {
+                                        or_tag: Some(Some(tag.to_string())),
+                                        ..bare(&key)
+                                    },
+                                ))
+                                .await
+                        }
+                        1 => {
+                            Arc::clone(&crdt)
+                                .oneshot(trusted_op(
+                                    &key,
+                                    ClientOp {
+                                        or_record: Some(Some(WireOrRecord {
+                                            value: rmpv::Value::Integer(1.into()),
+                                            timestamp: make_timestamp(),
+                                            tag: tag.to_string(),
+                                            ttl_ms: None,
+                                        })),
+                                        ..bare(&key)
+                                    },
+                                ))
+                                .await
+                        }
+                        2 => {
+                            Arc::clone(&sync)
+                                .oneshot(push_entries(
+                                    make_ctx(service_names::SYNC),
+                                    MAP,
+                                    vec![pushed_entry(&key, &[tag], &[])],
+                                ))
+                                .await
+                        }
+                        _ => {
+                            Arc::clone(&sync)
+                                .oneshot(push_entries(
+                                    make_ctx(service_names::SYNC),
+                                    MAP,
+                                    vec![pushed_entry(&key, &[], &[tag])],
+                                ))
+                                .await
+                        }
+                    };
+
+                    if want_ok {
+                        if let Err(error) = &result {
+                            failures.push(format!(
+                                "slot holding {HELD:?} as {slot_label}, the held tag, {path}: \
+                                 Err({error:?}), want Ok"
+                            ));
+                        }
+                        continue;
+                    }
+
+                    let mut problems: Vec<String> = Vec::new();
+                    match inadmissible_tag_refusal(&result, MAP, &key, tag) {
+                        Ok(error_string) => refusals.push(error_string),
+                        Err(problem) => problems.push(problem),
+                    }
+                    let after = slot_image(&factory, MAP, &key).await;
+                    if after != seeded {
+                        problems.push(format!("the slot changed from {seeded} to {after}"));
+                    }
+                    if !problems.is_empty() {
+                        failures.push(format!(
+                            "slot seeded as {slot_label}, tag {tag:?} it does not hold, {path}: {}",
+                            problems.join("; ")
+                        ));
+                    }
+                }
+
+                if !want_ok
+                    && refusals.len() == PATHS.len()
+                    && refusals.iter().any(|other| *other != refusals[0])
+                {
+                    failures.push(format!(
+                        "slot seeded as {slot_label}, tag {tag:?}: the four paths refuse with \
+                         different error strings: {refusals:?}"
+                    ));
+                }
+            }
+        }
+
+        assert_eq!(
+            checked,
+            slots.len() * (1 + NOT_HELD.len()) * PATHS.len(),
+            "every (slot state, tag, path) triple must have been run"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} failures over {checked} (slot state, tag, path) triples:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    /// When the pre-scan cannot read a slot the push fails closed: it gets the
+    /// transient error, never an acceptance and never the permanent refusal,
+    /// nothing of any entry is merged or broadcast, and the failure is not
+    /// counted as a refused push (TG-MRK-001).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // two tag positions, their controls and the limiter, asserted once
+    async fn push_whose_tag_lookup_cannot_read_the_slot_fails_closed() {
+        use std::time::{Duration, Instant};
+
+        const MAP: &str = "push-unreadable";
+        const CLEAN: &str = "clean-first";
+        const BAD: &str = "unreadable";
+
+        let mut failures: Vec<String> = Vec::new();
+
+        for (label, tag_is_a_record) in [("a record tag", true), ("a tombstone tag", false)] {
+            // The clean entry comes FIRST: a pre-scan that ran entry by entry
+            // inside the merge loop would have merged it before the read fails.
+            let push = || {
+                let bad = if tag_is_a_record {
+                    pushed_entry(BAD, &["a#b"], &[])
+                } else {
+                    pushed_entry(BAD, &[], &["a#b"])
+                };
+                push_entries(
+                    make_ctx(service_names::SYNC),
+                    MAP,
+                    vec![pushed_entry(CLEAN, &["1:0:n-1"], &[]), bad],
+                )
+            };
+
+            // Every load of the offending key fails; neither key is resident
+            // or durable, and the clean key stays readable. The pre-scan's
+            // read of the offending key is the first read of the request. Had
+            // the pre-scan let the push through, or run inside the merge
+            // loop, the merge would have loaded and stored the clean entry
+            // before reaching the unreadable one. So: the error is
+            // `Internal`, the load log holds the offending key exactly once
+            // and nothing else, and both slots are still absent.
+            let probed = probed_push_service();
+            let (_listener, mut listener_rx) = probed
+                .registry
+                .register(ConnectionKind::Client, &ConnectionConfig::default());
+            probed.loads.set_unreadable(Some(BAD));
+            let result = Arc::clone(&probed.svc).oneshot(push()).await;
+
+            let mut problems: Vec<String> = Vec::new();
+            if !matches!(result, Err(OperationError::Internal(_))) {
+                problems.push(format!("want Err(Internal), got {result:?}"));
+            }
+            // Read before `slot_image`, which loads the keys itself and needs
+            // the offending key readable again.
+            let loaded = probed.loads.loaded();
+            probed.loads.set_unreadable(None);
+            if loaded != [BAD] {
+                problems.push(format!(
+                    "want the offending key loaded once, by the pre-scan alone, and nothing \
+                     else, got {loaded:?}"
+                ));
+            }
+            for key in [CLEAN, BAD] {
+                let slot = slot_image(&probed.factory, MAP, key).await;
+                if slot != "absent" {
+                    problems.push(format!("entry {key:?} was merged: {slot}"));
+                }
+            }
+            let mut broadcasts = 0_usize;
+            while listener_rx.try_recv().is_ok() {
+                broadcasts += 1;
+            }
+            if broadcasts != 0 {
+                problems.push(format!("{broadcasts} frames were broadcast"));
+            }
+            if !problems.is_empty() {
+                failures.push(format!(
+                    "{label} \"a#b\" on an unreadable slot: {}",
+                    problems.join("; ")
+                ));
+            }
+
+            // Control for the injected failure: the same push with a readable
+            // slot is the PERMANENT refusal, so `Internal` above is the read's
+            // doing and nothing else's.
+            let probed = probed_push_service();
+            let result = Arc::clone(&probed.svc).oneshot(push()).await;
+            if let Err(problem) = inadmissible_tag_refusal(&result, MAP, BAD, "a#b") {
+                failures.push(format!(
+                    "control, {label} \"a#b\" on a readable slot: {problem}"
+                ));
+            }
+        }
+
+        // Control for the listener: an accepted push IS broadcast to it, so the
+        // silence above is not a deaf listener.
+        {
+            let probed = probed_push_service();
+            let (_listener, mut listener_rx) = probed
+                .registry
+                .register(ConnectionKind::Client, &ConnectionConfig::default());
+            let result = Arc::clone(&probed.svc)
+                .oneshot(push_entries(
+                    make_ctx(service_names::SYNC),
+                    MAP,
+                    vec![pushed_entry(CLEAN, &["1:0:n-1"], &[])],
+                ))
+                .await;
+            let mut broadcasts = 0_usize;
+            while listener_rx.try_recv().is_ok() {
+                broadcasts += 1;
+            }
+            if result.is_err() || broadcasts != 1 {
+                failures.push(format!(
+                    "control, an accepted push: want Ok and 1 broadcast, got {result:?} and \
+                     {broadcasts}"
+                ));
+            }
+        }
+
+        // The handler hands whatever error ended the pre-scan to the limiter,
+        // and the limiter is where "is this a refused push" is decided. The
+        // process-wide limiter is shared with every other test that has a push
+        // refused, so the decision is proven on a local one: a failed read
+        // writes no line, takes no window and adds nothing to the suppressed
+        // count.
+        {
+            let unreadable = OperationError::Internal(anyhow::anyhow!("injected load failure"));
+            let reason = "key 'k': refused";
+            let refusal = OperationError::SchemaInvalid {
+                map_name: MAP.to_string(),
+                errors: vec![reason.to_string()],
+            };
+            let log = RefusedPushLog::new();
+            let start = Instant::now();
+            let at = |secs: u64| start + Duration::from_secs(secs);
+
+            let mut steps: Vec<String> = Vec::new();
+            if log.line_due(&unreadable, at(0)).is_some() {
+                steps.push("a failed read wrote the line".to_string());
+            }
+            // Had the failed read taken the window, this refusal would be
+            // suppressed.
+            let first = log.line_due(&refusal, at(0));
+            if first != Some((reason, 0)) {
+                steps.push(format!(
+                    "the first refusal after a failed read: {first:?}, want the line with 0 \
+                     suppressed"
+                ));
+            }
+            for secs in [1, 2, 3] {
+                if log.line_due(&unreadable, at(secs)).is_some() {
+                    steps.push("a failed read inside the window wrote the line".to_string());
+                }
+            }
+            let suppressed_one = log.line_due(&refusal, at(4));
+            if suppressed_one.is_some() {
+                steps.push(format!(
+                    "a refusal inside the window: {suppressed_one:?}, want no line"
+                ));
+            }
+            if log.line_due(&unreadable, at(61)).is_some() {
+                steps.push("a failed read after the window wrote the line".to_string());
+            }
+            // One refusal was suppressed; the four failed reads were not.
+            let next = log.line_due(&refusal, at(61));
+            if next != Some((reason, 1)) {
+                steps.push(format!(
+                    "the first refusal after the window: {next:?}, want the line with 1 \
+                     suppressed"
+                ));
+            }
+            if !steps.is_empty() {
+                failures.push(format!("limiter: {}", steps.join("; ")));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} sub-cases failed:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    /// A push of admissible tags is decided on their text alone: the pre-scan
+    /// resolves no store and reads no slot for it (TG-MRK-001).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // two isolations of one cost claim and their control, asserted once
+    async fn push_of_admissible_tags_costs_no_store_resolution_and_no_read_ahead_of_the_merge() {
+        use crate::storage::MutateOutcome;
+
+        const MAP: &str = "push-cost";
+
+        // Four keys in four different partitions, so a store resolved for one
+        // of them cannot be mistaken for another's.
+        let mut keys: Vec<String> = Vec::new();
+        for n in 0.. {
+            let key = format!("cost-{n}");
+            if keys
+                .iter()
+                .all(|taken| hash_to_partition(taken) != hash_to_partition(&key))
+            {
+                keys.push(key);
+            }
+            if keys.len() == 4 {
+                break;
+            }
+        }
+        let store_of = |key: &str| (MAP.to_string(), hash_to_partition(key));
+        let clean_entries = || -> Vec<ORMapEntry> {
+            keys.iter()
+                .map(|key| pushed_entry(key, &["1:0:n-1", "TOP"], &["2:0:n-1", "a:b"]))
+                .collect()
+        };
+
+        /// A service whose gate is active and a context for a client the gate
+        /// does not admit: its push is turned away at the FIRST entry, after
+        /// that entry's store was resolved and before anything is read.
+        async fn gated_out() -> (ProbedPushService, OperationContext) {
+            let probed = probed_push_service();
+            let (conn, _client) = register_device(&probed.registry, "dev-forgotten").await;
+            probed.frontier.stamp_tombstone(MAP, "seed", "seed-tag");
+            probed.frontier.set_durable_epoch_watermark(1000);
+            let mut ctx = make_ctx(service_names::SYNC);
+            ctx.connection_id = Some(conn);
+            (probed, ctx)
+        }
+
+        let mut failures: Vec<String> = Vec::new();
+
+        // (A) Isolated by the gate. COUNTED: loads the data store saw and
+        // stores the factory built during the request. The merge loop stops at
+        // its first entry, so all it contributes is that entry's store and no
+        // read at all. Whatever else is counted is the pre-scan's: a store of
+        // entries two to four would be a resolution it made, any load a read
+        // it made.
+        {
+            let (probed, ctx) = gated_out().await;
+            let before = (probed.loads.loaded(), probed.stores.created());
+            let result = Arc::clone(&probed.svc)
+                .oneshot(push_entries(ctx, MAP, clean_entries()))
+                .await;
+            let (loaded, created) = (probed.loads.loaded(), probed.stores.created());
+            if before != (Vec::new(), Vec::new()) {
+                failures.push(format!(
+                    "(A) fixture: something was loaded or built before the push: {before:?}"
+                ));
+            }
+            if !matches!(result, Ok(OperationResponse::Empty))
+                || !loaded.is_empty()
+                || created != [store_of(&keys[0])]
+            {
+                failures.push(format!(
+                    "(A) admissible push turned away by the gate: want Ok(Empty), no load and \
+                     only the first entry's store {:?}, got {result:?}, loads {loaded:?}, stores \
+                     {created:?}",
+                    store_of(&keys[0])
+                ));
+            }
+        }
+
+        // Control for (A): the probes DO see a pre-scan lookup. The same push
+        // with one inadmissible tag in its last entry is refused before the
+        // merge loop starts, so everything counted is the pre-scan's: exactly
+        // the refused key's read and the refused key's store, and nothing for
+        // the three admissible entries ahead of it.
+        {
+            let (probed, ctx) = gated_out().await;
+            let mut entries = clean_entries();
+            entries[3].tombstones.push("a|b".to_string());
+            let result = Arc::clone(&probed.svc)
+                .oneshot(push_entries(ctx, MAP, entries))
+                .await;
+            let (loaded, created) = (probed.loads.loaded(), probed.stores.created());
+            let refusal = inadmissible_tag_refusal(&result, MAP, &keys[3], "a|b");
+            if refusal.is_err() || loaded != [keys[3].clone()] || created != [store_of(&keys[3])] {
+                failures.push(format!(
+                    "(A) control, an inadmissible tag in the last entry: want the refusal, loads \
+                     [{:?}] and the one store {:?}, got {refusal:?}, loads {loaded:?}, stores \
+                     {created:?}",
+                    keys[3],
+                    store_of(&keys[3])
+                ));
+            }
+        }
+
+        // (B) For a push that IS merged, isolated by subtraction. The merge
+        // reads each slot itself, so the same keys are run through the whole
+        // request on one fresh service and through the merge's store seam
+        // alone (`update_in_place`, called directly with the handler's own
+        // arguments and no pre-scan) on an identical fresh service. The keys
+        // are neither resident nor durable, so a read by the pre-scan could
+        // not hide behind the merge's: an absent key is loaded again on every
+        // read. Equal logs mean the pre-scan added no read and no store.
+        {
+            let request = probed_push_service();
+            let result = Arc::clone(&request.svc)
+                .oneshot(push_entries(
+                    make_ctx(service_names::SYNC),
+                    MAP,
+                    clean_entries(),
+                ))
+                .await;
+
+            let merge_only = probed_push_service();
+            let mut merged = Ok(());
+            for key in &keys {
+                let mut merge = |_: &mut RecordValue| MutateOutcome {
+                    changed: true,
+                    witness: None,
+                };
+                if let Err(error) = merge_only
+                    .factory
+                    .get_or_create(MAP, hash_to_partition(key))
+                    .update_in_place(
+                        key,
+                        Some(RecordValue::OrMap {
+                            records: Vec::new(),
+                            tombstones: Vec::new(),
+                        }),
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::CrdtMerge,
+                        &mut merge,
+                    )
+                    .await
+                {
+                    merged = Err(error);
+                }
+            }
+
+            let request_cost = (request.loads.loaded(), request.stores.created());
+            let merge_cost = (merge_only.loads.loaded(), merge_only.stores.created());
+            if result.is_err() || merged.is_err() || request_cost != merge_cost {
+                failures.push(format!(
+                    "(B) admissible push that is merged: want the request to cost what its merge \
+                     alone costs; request {result:?} with (loads, stores) {request_cost:?}, merge \
+                     alone {merged:?} with {merge_cost:?}"
+                ));
+            }
+            // The comparison must not be between two empty logs.
+            if merge_cost.0.len() < keys.len() || merge_cost.1.len() != keys.len() {
+                failures.push(format!(
+                    "(B) fixture: the merge alone should load every key and build every key's \
+                     store, got {merge_cost:?}"
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} sub-cases failed:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
 }
