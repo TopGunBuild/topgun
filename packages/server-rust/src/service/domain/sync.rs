@@ -1375,11 +1375,63 @@ impl SyncService {
         use std::collections::HashSet;
         use topgun_core::messages::{ServerEventPayload, ServerEventType};
 
-        use crate::service::domain::crdt::normalize_to_or_map;
+        use crate::service::domain::crdt::{admit_or_tags, normalize_to_or_map};
         use crate::storage::MutateOutcome;
 
         let map_name = payload.payload.map_name;
         let entries = payload.payload.entries;
+
+        // ---- Tag admission, for every entry, ahead of everything else ----
+        //
+        // A push stores each record tag and each tombstone tag verbatim, and the
+        // OR-Map Merkle leaf tells two slot states apart only while every stored
+        // tag is admissible (TG-MRK-001). The whole push is checked before the
+        // first key writer is taken and before the forgotten-client gate, so a
+        // refused push merges and broadcasts nothing, not even the clean entries
+        // ahead of the offending one, and the refusal is the same whoever sends
+        // it. The store is the one the merge of that entry resolves below, handed
+        // over as a resolver: a push of admissible tags resolves no store and
+        // reads no slot here.
+        for entry in &entries {
+            // Record tags, then tombstone tags, with no allocation. Written as
+            // one argument-less closure because the iterator lives across the
+            // admission's await: an adapter that maps over borrowed records is
+            // not general enough for the handler's future to stay `Send`.
+            let (mut records, mut tombstones) = (entry.records.iter(), entry.tombstones.iter());
+            let tags = std::iter::from_fn(move || match records.next() {
+                Some(record) => Some(record.tag.as_str()),
+                None => tombstones.next().map(String::as_str),
+            });
+            let admitted = admit_or_tags(
+                || {
+                    self.record_store_factory
+                        .get_or_create(&map_name, hash_to_partition(&entry.key))
+                },
+                &map_name,
+                &entry.key,
+                tags,
+            )
+            .await;
+            if let Err(refusal) = admitted {
+                // A refused push is answered with no frame, so this line is the
+                // only place the refusal names its map and key. The tag itself is
+                // caller-chosen text and is never logged.
+                if let Some((reason, suppressed)) =
+                    REFUSED_PUSH_LOG.line_due(&refusal, std::time::Instant::now())
+                {
+                    tracing::warn!(
+                        map = %map_name,
+                        key = %entry.key,
+                        connection_id = ctx.connection_id.map(|id| id.0),
+                        reason,
+                        suppressed,
+                        "refused a pushed OR-Map difference that carries an inadmissible tag; \
+                         nothing of the push was merged"
+                    );
+                }
+                return Err(refusal);
+            }
+        }
 
         // ---- Forgotten-client pre-apply gate, evaluated per entry ----
         //
@@ -1660,6 +1712,70 @@ impl Service<Operation> for Arc<SyncService> {
         )
     }
 }
+
+// ---------------------------------------------------------------------------
+// Operator line for a refused push
+// ---------------------------------------------------------------------------
+
+/// Decides when a refused push writes its operator line.
+///
+/// A device that holds an inadmissible tag repeats the refused push on every
+/// sync, and a raw peer can send refused pushes as fast as it likes, so the
+/// line is limited to one per [`RefusedPushLog::WINDOW`] for the whole process;
+/// the refusals that wrote none are counted and reported by the next line.
+/// This decides logging only: the push is refused either way, and every
+/// refusal is still counted as an operation error.
+struct RefusedPushLog {
+    /// When the last line was written, and the refusals that have written none
+    /// since then.
+    state: std::sync::Mutex<(Option<std::time::Instant>, u64)>,
+}
+
+impl RefusedPushLog {
+    const WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+    const fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new((None, 0)),
+        }
+    }
+
+    /// `Some((reason, suppressed))` when the push that failed its tag admission
+    /// with `outcome` at `now` should write the line: `reason` is the text the
+    /// refusal itself carries, `suppressed` the refusals that wrote no line
+    /// since the previous one.
+    ///
+    /// Only the permanent tag refusal counts. A slot that could not be read is
+    /// a transient failure the caller retries, not a refusal: it writes no
+    /// line, takes no window and is not added to the suppressed count.
+    ///
+    /// The time is an argument so the decision can be driven without waiting.
+    fn line_due<'e>(
+        &self,
+        outcome: &'e OperationError,
+        now: std::time::Instant,
+    ) -> Option<(&'e str, u64)> {
+        let OperationError::SchemaInvalid { errors, .. } = outcome else {
+            return None;
+        };
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (last_line, suppressed) = &mut *state;
+        if last_line.is_some_and(|last| now.saturating_duration_since(last) < Self::WINDOW) {
+            *suppressed += 1;
+            return None;
+        }
+        *last_line = Some(now);
+        let reason = errors.first().map_or("", String::as_str);
+        Some((reason, std::mem::take(suppressed)))
+    }
+}
+
+/// The one limiter of the process: a flood of refused pushes from any number
+/// of connections writes one line per window.
+static REFUSED_PUSH_LOG: RefusedPushLog = RefusedPushLog::new();
 
 // ---------------------------------------------------------------------------
 // Tests (AC1, AC2, AC3, AC14)
@@ -5506,5 +5622,50 @@ mod tests {
             failures.len(),
             failures.join("\n  ")
         );
+    }
+
+    /// The operator line for a refused push is written at most once per
+    /// window, and the line that follows a quiet stretch reports how many
+    /// refusals wrote none.
+    #[test]
+    fn refused_push_warn_is_rate_limited() {
+        use std::time::{Duration, Instant};
+
+        let reason = "key 'k': OR tag is empty";
+        let refusal = OperationError::SchemaInvalid {
+            map_name: "m".to_string(),
+            errors: vec![reason.to_string()],
+        };
+        // A LOCAL limiter with injected times: the process-wide one is shared
+        // with every other test that has a push refused.
+        let log = RefusedPushLog::new();
+        let start = Instant::now();
+        let at = |millis: u64| start + Duration::from_millis(millis);
+
+        assert_eq!(
+            log.line_due(&refusal, at(0)),
+            Some((reason, 0)),
+            "the first refusal writes the line, with nothing suppressed before it"
+        );
+        for millis in [0, 1, 1_000, 30_000, 59_999] {
+            assert_eq!(
+                log.line_due(&refusal, at(millis)),
+                None,
+                "a refusal {millis} ms after the line is inside the window"
+            );
+        }
+        assert_eq!(
+            log.line_due(&refusal, at(60_000)),
+            Some((reason, 5)),
+            "the first refusal after the window writes the line and reports the five suppressed"
+        );
+        // The window restarts at the line just written, and the count with it.
+        assert_eq!(log.line_due(&refusal, at(60_001)), None);
+        assert_eq!(log.line_due(&refusal, at(119_999)), None);
+        assert_eq!(log.line_due(&refusal, at(120_000)), Some((reason, 2)));
+        // A refusal long after the last line has nothing to report.
+        assert_eq!(log.line_due(&refusal, at(600_000)), Some((reason, 0)));
+        // A clock reading older than the last line counts as inside the window.
+        assert_eq!(log.line_due(&refusal, at(0)), None);
     }
 }
