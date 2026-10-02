@@ -2144,6 +2144,33 @@ describe('SyncEngine', () => {
       );
     });
 
+    test('an empty acceptance set accepts nothing even when its lastId is the last id of a sent batch', async () => {
+      const ws = await bootWith([
+        pendingOp('1', 'user1'),
+        pendingOp('2', 'user2'),
+        pendingOp('3', 'user3'),
+      ]);
+
+      // The frame names the batch in flight and carries the level a real ack
+      // carries, but its acceptance set is present and empty: the server listed
+      // the ops it accepted and listed none. An op missing from `results` was not
+      // accepted, so reading this frame as "no results, hence the whole batch"
+      // would retire three writes on the word of a frame that accepts nothing.
+      await expectNotAVerdict(() =>
+        ws.simulateMessage({
+          type: 'OP_ACK',
+          payload: { lastId: '3', achievedLevel: 'APPLIED', results: [] },
+        }),
+      );
+
+      // The batch is still on record, so its real acknowledgement still lands.
+      expect([...(engine().inFlightBatches?.get('3') ?? [])]).toEqual(['1', '2', '3']);
+      ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '3', achievedLevel: 'APPLIED' } });
+      await jest.runAllTimersAsync();
+      expect(syncEngine!.getPendingOpsCount()).toBe(0);
+      expect(mockStorage.markOpsSynced.mock.calls).toEqual([[3]]);
+    });
+
     test('an ack whose max accepted id is below the last applied one marks nothing again', async () => {
       const ws = await bootWith([
         pendingOp('1', 'user1'),
@@ -2487,6 +2514,19 @@ describe('SyncEngine', () => {
         await jest.runAllTimersAsync();
 
         expectRetiredUpTo(3);
+      });
+
+      test('on HTTP, an empty acceptance set accepts nothing even when its lastId is the last id of a sent batch', async () => {
+        const http = httpMock();
+        await bootOn(http, threeOps());
+        expect(http.sentBatches()).toEqual([['1', '2', '3']]);
+
+        // Over HTTP a matching lastId alone retires a batch, which is exactly
+        // why an empty acceptance set must not be read as "no results" there.
+        await expectNotAVerdict(() =>
+          http.deliver({ type: 'OP_ACK', payload: { lastId: '3', results: [] } }),
+        );
+        expect([...(inFlight()?.get('3') ?? [])]).toEqual(['1', '2', '3']);
       });
 
       test('a results-less ack for the last id of a sent batch retires exactly that batch', async () => {
