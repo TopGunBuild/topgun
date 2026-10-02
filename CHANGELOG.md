@@ -18,9 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking (server, OR-Map):** the server refuses an OR-Map tag that is empty or
   contains `|` or `#`. A write carrying such a tag is rejected as a schema-validation
   refusal, and a pushed OR-Map difference carrying one is not merged and is not
-  answered. A client with a valid node id never produces such a tag, so this only
-  affects code that speaks the wire protocol with tags of its own. A tag the server
-  already stores can still be removed.
+  answered. The SDK builds its tags from the node id, so with a valid node id it
+  never sends such a tag; this concerns code that speaks the wire protocol with tags
+  of its own. A tag the server already stores can still be removed.
 - fix(client): creating a client with a refused node id no longer leaves `online` /
   `offline` listeners behind in the browser. The id is now checked before anything
   else is set up, so a constructor that throws leaves nothing running.
