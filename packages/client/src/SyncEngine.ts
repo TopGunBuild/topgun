@@ -1456,10 +1456,13 @@ export class SyncEngine {
 
     if (this.countNonEmptyInFlightBatches() <= SyncEngine.IN_FLIGHT_BATCH_LIMIT) return;
 
-    // Over the bound. Entries with nothing pending go first: when no ack is ever
-    // applied (every write refused, or dropped by backpressure) this is the only
-    // point that removes them, and emptying their sets instead would keep their
-    // keys for good.
+    // Over the bound. Entries none of whose ops can still be sent go first: when
+    // no ack is ever applied (every write refused, or dropped by backpressure)
+    // this is the only point that removes them, and emptying their sets instead
+    // would keep their keys for good. An entry whose op is refused but still in
+    // the op log is NOT one of them: that op is re-sent until its durable delete
+    // succeeds, so its key may be recorded again and has to stay to be
+    // intersected with.
     this.pruneInFlightBatches();
 
     let excess = this.countNonEmptyInFlightBatches() - SyncEngine.IN_FLIGHT_BATCH_LIMIT;
@@ -1485,26 +1488,36 @@ export class SyncEngine {
   }
 
   /**
-   * Delete every sent-batch entry none of whose ops is still pending: they were
-   * acknowledged, refused, or otherwise left the op log, so the entry has nothing
-   * left to retire. For an evicted key (empty set) the test is on the op the key
-   * itself names.
+   * Delete every sent-batch entry none of whose ops can still be sent: they were
+   * acknowledged or left the op log, so the entry has nothing left to retire and
+   * its key can never be recorded again. For an evicted key (empty set) the test
+   * is on the op the key itself names.
+   *
+   * The test is "still in the op log and not synced", which is exactly the set
+   * the next flush sends, and deliberately NOT "pending". A permanently refused
+   * op stays in the op log, flagged, for as long as its durable delete has not
+   * gone through, and it is re-sent meanwhile, so it can again be the last op of
+   * a frame. Were its entry deleted here, that later and wider frame would be
+   * recorded afresh instead of intersected with the earlier one, and the late
+   * ack of the earlier frame would retire ops that frame never carried
+   * (TG-SYNC-004). Holding an entry longer than needed costs a slot; dropping it
+   * early costs a write.
    */
   private pruneInFlightBatches(): void {
-    const pendingIds = new Set<string>();
+    const sendableIds = new Set<string>();
     for (const op of this.opLog) {
-      if (op.synced !== true && op.rejected !== true) pendingIds.add(op.id);
+      if (op.synced !== true) sendableIds.add(op.id);
     }
     for (const [key, batch] of this.inFlightBatches) {
-      if (pendingIds.has(key)) continue;
-      let holdsPending = false;
+      if (sendableIds.has(key)) continue;
+      let holdsSendable = false;
       for (const id of batch) {
-        if (pendingIds.has(id)) {
-          holdsPending = true;
+        if (sendableIds.has(id)) {
+          holdsSendable = true;
           break;
         }
       }
-      if (!holdsPending) this.inFlightBatches.delete(key);
+      if (!holdsSendable) this.inFlightBatches.delete(key);
     }
   }
 
