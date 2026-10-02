@@ -10,6 +10,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(sync): an OR-Map client and the server now compute the same Merkle leaf hash
+  for a key that holds the same tags on both sides. Previously the two used different
+  formulas, so an OR-Map key could never compare equal during sync. Both sides now hash
+  only the key's tags — the live ones and the removed ones — not values or timestamps.
+- **Behavior change (OR-Map sync):** a client pushes to a key only the removals that
+  belong to that key, instead of every removal it knows about for the whole map. A key
+  whose values were all removed keeps its place in the Merkle tree for as long as its
+  removals are remembered, so the removal itself is compared during sync rather than
+  the key simply looking absent.
+- **Breaking (`@topgunbuild/core`):** `hashORMapEntry` and `hashORMapRecord` are
+  removed. Use `hashORMapLeaf(key, liveTags, tombstoneTags)`, which is the one hash
+  the client and the server share.
+- **Breaking (`@topgunbuild/core`):** `ORMapMerkleTree.update(key, records)` is now
+  `update(key, liveTags, tombstoneTags)`. Passing two empty sets removes the key from
+  the tree.
+- **Breaking (`@topgunbuild/core`, types):** `ORMapSnapshot` has a new required field,
+  `keyTombstones: Map<K, Set<string>>`. Code that only reads `ORMap.getSnapshot()` is
+  unaffected; code that constructs an `ORMapSnapshot` itself must now supply it (an
+  empty `Map` when there are none).
+- feat(core): `ORMap.getKeyTombstones(key)` and `ORMap.setKeyTombstones(key, tags)`
+  read and replace the removed tags recorded against a single key, and
+  `ORMap.applyTombstone(tag, key?)` takes an optional `key` to record a remote removal
+  against the key it belongs to. `ORMap.remove(key, value)` does this automatically.
+  Omitting `key` keeps the previous behaviour: the tag is suppressed map-wide and
+  belongs to no key.
 - fix(query): a top-N page (a `limit` with no filter, cursor, or aggregation) over a
   map larger than RAM now streams the durable records through a bounded `limit+1` heap
   in the scan itself — it no longer materializes every non-resident row just to return a

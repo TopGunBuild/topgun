@@ -324,6 +324,36 @@ describe('IndexedORMap', () => {
 
       expect(results).toHaveLength(0);
     });
+
+    it('should keep the key attribution of a keyed applyTombstone', () => {
+      const record = map.add('product1', {
+        name: 'Widget',
+        category: 'Electronics',
+        price: 99.99,
+        inStock: true,
+      });
+
+      map.applyTombstone(record.tag, 'product1');
+
+      expect(map.getKeyTombstones('product1')).toEqual(new Set([record.tag]));
+    });
+
+    it('should update index when setKeyTombstones purges a live record', () => {
+      const record = map.add('product1', {
+        name: 'Widget',
+        category: 'Electronics',
+        price: 99.99,
+        inStock: true,
+      });
+
+      map.setKeyTombstones('product1', [record.tag]);
+
+      const query: Query = { type: 'eq', attribute: 'category', value: 'Electronics' };
+      const results = map.query(query);
+
+      expect(results).toHaveLength(0);
+      expect(map.get('product1')).toEqual([]);
+    });
   });
 
   describe('composite key handling', () => {

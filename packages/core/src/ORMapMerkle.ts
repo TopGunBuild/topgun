@@ -1,4 +1,3 @@
-import { ORMapRecord } from './ORMap';
 import { Timestamp } from './HLC';
 import { hashString } from './utils/hash';
 
@@ -11,62 +10,62 @@ export function timestampToString(ts: Timestamp): string {
 }
 
 /**
- * Stringify a value in a deterministic way for hashing.
+ * Orders two strings by Unicode code point.
+ *
+ * The default `Array.prototype.sort` compares UTF-16 code units, which puts an
+ * astral character (encoded as a surrogate pair, 0xD800-0xDFFF) BEFORE a BMP
+ * character at or above U+E000. The server sorts tags as UTF-8 bytes, which is
+ * code-point order, so the two would hash different strings for such tags.
  */
-function stringifyValue(value: unknown): string {
-  if (value === null || value === undefined) {
-    return String(value);
+function compareCodePoints(a: string, b: string): number {
+  const shared = Math.min(a.length, b.length);
+  for (let i = 0; i < shared; i++) {
+    const unitA = a.charCodeAt(i);
+    const unitB = b.charCodeAt(i);
+    if (unitA === unitB) continue;
+
+    // At the first differing unit, a surrogate belongs to a code point above
+    // every BMP code point, whatever its own numeric value is.
+    const surrogateA = unitA >= 0xd800 && unitA <= 0xdfff;
+    const surrogateB = unitB >= 0xd800 && unitB <= 0xdfff;
+    if (surrogateA !== surrogateB) return surrogateA ? 1 : -1;
+    return unitA - unitB;
   }
-  if (typeof value === 'object') {
-    // Sort object keys for deterministic JSON
-    return JSON.stringify(value, Object.keys(value as Record<string, unknown>).sort());
-  }
-  return String(value);
+  return a.length - b.length;
+}
+
+function sortedUnique(tags: Iterable<string>): string[] {
+  return Array.from(new Set(tags)).sort(compareCodePoints);
 }
 
 /**
- * Hash an ORMap entry (key + all its records).
- * Must be deterministic regardless of insertion order.
+ * Canonical leaf hash of one OR-Map key (TG-MRK-001), bit-identical to the
+ * leaf the server computes for the same key:
+ *
+ *   hashString("key:" + key + "|" + join("|", sort(liveTags)) + "#" + join("|", sort(tombstoneTags)))
+ *
+ * Both inputs are treated as sets (duplicates are dropped) and sorted by code
+ * point, so the result does not depend on input order. Only tags contribute:
+ * values, timestamps and TTL are deliberately left out, because the server
+ * leaf does not see them either and a tag already identifies one write.
+ *
+ * A key with no live tags and no tombstone tags has NO leaf. This function
+ * still returns a number for that input, so the caller owns the presence rule:
+ * `ORMapMerkleTree.update` removes such a key instead of storing its hash.
  *
  * @param key The key of the entry
- * @param records Map of tag -> record for this key
+ * @param liveTags Tags of every record held under the key (expired ones included)
+ * @param tombstoneTags Tombstone tags attributed to the key
  * @returns Hash as a number (FNV-1a hash)
  */
-export function hashORMapEntry<V>(key: string, records: Map<string, ORMapRecord<V>>): number {
-  // Sort records by tag for deterministic ordering
-  const sortedTags = Array.from(records.keys()).sort();
-
-  // Build deterministic string representation
-  const parts: string[] = [`key:${key}`];
-
-  for (const tag of sortedTags) {
-    const record = records.get(tag)!;
-    // Include tag, value (JSON-stringified), timestamp, and ttl if present
-    const valuePart = stringifyValue(record.value);
-
-    let recordStr = `${tag}:${valuePart}:${timestampToString(record.timestamp)}`;
-    if (record.ttlMs !== undefined) {
-      recordStr += `:ttl=${record.ttlMs}`;
-    }
-    parts.push(recordStr);
-  }
-
-  return hashString(parts.join('|'));
-}
-
-/**
- * Hash a single ORMapRecord for comparison.
- * Used when comparing individual records during merge.
- */
-export function hashORMapRecord<V>(record: ORMapRecord<V>): number {
-  const valuePart = stringifyValue(record.value);
-
-  let str = `${record.tag}:${valuePart}:${timestampToString(record.timestamp)}`;
-  if (record.ttlMs !== undefined) {
-    str += `:ttl=${record.ttlMs}`;
-  }
-
-  return hashString(str);
+export function hashORMapLeaf(
+  key: string,
+  liveTags: Iterable<string>,
+  tombstoneTags: Iterable<string>,
+): number {
+  const live = sortedUnique(liveTags).join('|');
+  const dead = sortedUnique(tombstoneTags).join('|');
+  return hashString(`key:${key}|${live}#${dead}`);
 }
 
 /**

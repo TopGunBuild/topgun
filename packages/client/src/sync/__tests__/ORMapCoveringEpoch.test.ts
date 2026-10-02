@@ -24,6 +24,8 @@ describe('ORMapSyncHandler covering-epoch ACK', () => {
       onTimestampUpdate: async () => {},
       persistKey: async () => {},
       persistTombstones: async () => {},
+      getPendingRemoveTagsByKey: () => new Map(),
+      persistKeyTombstones: async () => {},
       onCoveringEpochApplied: (mapName, epoch) => {
         acked.push(epoch);
         ackedForMap.push({ mapName, epoch });

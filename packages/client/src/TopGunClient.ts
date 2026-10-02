@@ -48,6 +48,7 @@ import { HybridQueryHandle } from './HybridQueryHandle';
 import type { HybridQueryFilter } from './HybridQueryHandle';
 import { logger } from './utils/logger';
 import { assertValidMapName, keyBelongsToLongerHeldName } from './utils/mapName';
+import { loadOrMapKeyTombstones } from './utils/orMapKeyTombstones';
 import { SyncState } from './SyncState';
 import type { StateChangeEvent } from './SyncStateMachine';
 import type {
@@ -797,25 +798,52 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       const tombstones = originalRemove(key, value);
       const timestamp = this.syncEngine.getHLC().now();
 
-      // The removed key's record list shrank and the tombstone set grew — commit both the KV
-      // records-array (or delete when empty) and the tombstone meta atomically with the FIRST
+      // The removed key's record list shrank, the tombstone set grew and the removed tags
+      // were attributed to this key — commit the KV records-array (or delete when empty),
+      // the tombstone meta and the per-key attribution meta atomically with the FIRST
       // OR_REMOVE op. Subsequent tombstone tags for this remove are op-only appends; the
-      // durable KV/meta state is already captured by the first commit.
-      const records = orMap.getRecords(key);
-      const mutations: StorageMutation[] = [
-        {
-          store: 'kv',
-          type: records.length > 0 ? 'put' : 'remove',
-          key: `${name}:${key}`,
-          value: records,
-        },
-        {
-          store: 'meta',
-          type: 'put',
-          key: `__sys__:${name}:tombstones`,
-          value: orMap.getTombstones(),
-        },
-      ];
+      // durable KV/meta state is already captured by the first commit. The attribution
+      // travels with the op because it feeds this key's Merkle leaf: a reload that kept the
+      // remove but lost its attribution would compute a different root than before it.
+      //
+      // Only the attribution bucket this key belongs to is written, with the attribution
+      // of every key in that bucket as the map holds it when the commit is issued, plus
+      // the tags of this remove under this key. Those are added by name rather than read
+      // back from the map: until the op is in the op log nothing marks them as pending,
+      // so a server response handled while the commit waits can replace the key's
+      // attribution with a set that lacks them.
+      //
+      // The three values are built when the commit is issued, not here. Each is a
+      // full rewrite of a storage entry that server responses also rewrite, and the
+      // commit can wait behind backpressure: a value captured now would then replace
+      // whatever a response wrote during the wait with an older state.
+      //
+      // The bucket is left out while the map is still loading or is being reset; the
+      // engine then writes it itself, see `orMapKeyTombstonesCommitMutation`.
+      const buildMutations = (): StorageMutation[] => {
+        const records = orMap.getRecords(key);
+        const mutations: StorageMutation[] = [
+          {
+            store: 'kv',
+            type: records.length > 0 ? 'put' : 'remove',
+            key: `${name}:${key}`,
+            value: records,
+          },
+          {
+            store: 'meta',
+            type: 'put',
+            key: `__sys__:${name}:tombstones`,
+            value: orMap.getTombstones(),
+          },
+        ];
+        const attribution = this.syncEngine.orMapKeyTombstonesCommitMutation(
+          name,
+          String(key),
+          tombstones,
+        );
+        if (attribution) mutations.push(attribution);
+        return mutations;
+      };
 
       let first = true;
       for (const tag of tombstones) {
@@ -825,7 +853,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
             'OR_REMOVE',
             String(key),
             { orTag: tag, timestamp },
-            first ? mutations : undefined,
+            first ? buildMutations : undefined,
           )
           .catch((err) => logger.error({ err }, 'Failed to commit OR_REMOVE op'));
         first = false;
@@ -837,8 +865,14 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   }
 
   private async restoreORMap<K, V>(name: string, orMap: ORMap<K, V>) {
+    // Runs synchronously inside `getORMap`, before the map is handed out: see
+    // `SyncEngine.beginOrMapRestore`.
+    this.syncEngine.beginOrMapRestore(name);
+    let attributionRestored = false;
     try {
-      // 1. Restore Tombstones
+      // 1. Restore Tombstones. Kept map-wide only: a store written before per-key
+      // attribution existed never recorded which key a tombstone belongs to, so these
+      // suppress their tags without entering any key's Merkle leaf.
       const tombstoneKey = `__sys__:${name}:tombstones`;
       const tombstones = await this.storageAdapter.getMeta(tombstoneKey);
       if (Array.isArray(tombstones)) {
@@ -875,9 +909,15 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
           }
         }
       }
+
+      // 3. Restore per-key tombstone attribution, after the items: see
+      // `restoreOrMapKeyTombstones`.
+      await loadOrMapKeyTombstones(orMap, name, this.storageAdapter);
+      attributionRestored = true;
     } catch (e) {
       logger.error({ mapName: name, err: e }, 'Failed to restore ORMap');
     }
+    await this.syncEngine.endOrMapRestore(name, attributionRestored);
   }
 
   /**

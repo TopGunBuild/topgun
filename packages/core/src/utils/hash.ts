@@ -5,6 +5,13 @@
  * with Rust core-rust/src/hash.rs implementation.
  */
 
+// Bound once instead of read off the global `Math` on every call. The hash
+// loop runs once per UTF-16 code unit of its input, and a host that resolves
+// globals through a sandboxed context (a `vm` context, which is what the test
+// runner uses) pays for that lookup each time: hashing a large Merkle leaf was
+// about forty times slower there than under plain Node.
+const imul = Math.imul;
+
 /**
  * FNV-1a Hash implementation for strings.
  * Fast, non-cryptographic, synchronous.
@@ -17,7 +24,7 @@ export function hashString(str: string): number {
   let hash = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) {
     hash ^= str.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
+    hash = imul(hash, 0x01000193);
   }
   return hash >>> 0; // Ensure positive 32-bit integer
 }
@@ -42,9 +49,9 @@ const MIX_C2 = 0xc2b2ae35;
  */
 function mix(h: number): number {
   h = (h ^ (h >>> 16)) >>> 0;
-  h = Math.imul(h, MIX_C1) >>> 0;
+  h = imul(h, MIX_C1) >>> 0;
   h = (h ^ (h >>> 13)) >>> 0;
-  h = Math.imul(h, MIX_C2) >>> 0;
+  h = imul(h, MIX_C2) >>> 0;
   h = (h ^ (h >>> 16)) >>> 0;
   return h >>> 0;
 }

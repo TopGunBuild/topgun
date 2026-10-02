@@ -5,7 +5,7 @@
 //! verifies that Rust can decode them and re-encode to identical structure.
 //!
 //! Also includes Rust-side determinism tests for `ORMap` Merkle hash
-//! consistency (`canonical_json` key-order independence).
+//! consistency (tag-set order independence).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -435,9 +435,9 @@ fn at_least_40_fixture_files_exist() {
 // `ORMap` Merkle hash determinism (Rust-side only)
 //
 // Verifies that `ORMap` instances with identical data applied in different
-// orders produce the same Merkle root hash. This exercises the `canonical_json`
-// code path through the public `ORMap` API without calling the private function
-// directly.
+// orders produce the same Merkle root hash. This exercises tag-set order
+// independence of the leaf hash through the public `ORMap` API, without calling
+// the private hashing function directly.
 // ---------------------------------------------------------------------------
 
 /// Fixed clock source for deterministic integration tests.

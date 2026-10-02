@@ -1,5 +1,5 @@
 import { ORMap } from '@topgunbuild/core';
-import type { ORMapRecord } from '@topgunbuild/core';
+import type { ORMapMerkleTree, ORMapRecord } from '@topgunbuild/core';
 import type { IORMapSyncHandler, ORMapSyncHandlerConfig } from './types';
 import { logger } from '../utils/logger';
 
@@ -58,6 +58,21 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         return;
       }
       const localTree = map.getMerkleTree();
+      if (rootHash === 0) {
+        // A zero root means the server holds no leaf for this map at all, so it
+        // attributes no tombstone to any key. Mirror that before comparing: a
+        // key kept in the local tree only by stale attribution would otherwise
+        // hold the roots apart, and the bucket request a mismatch sends gets no
+        // answer from an empty server tree, so nothing would ever clear it.
+        const changedKeys: string[] = [];
+        this.resetKeyTombstonesToPending(
+          map,
+          localKeysUnder(localTree, ''),
+          this.pendingRemoveLookup(mapName),
+          changedKeys,
+        );
+        await this.persistAttributionIfChanged(mapName, changedKeys);
+      }
       const localRootHash = localTree.getRootHash();
 
       if (localRootHash !== rootHash) {
@@ -117,7 +132,17 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       const tree = map.getMerkleTree();
       const localBuckets = tree.getBuckets(path);
 
+      // A child the server lists with hash 0 is the residue of an emptied
+      // bucket and means exactly what an unlisted child means: the server holds
+      // nothing there. Both loops read this one normalised view, so such a
+      // child is never requested (the server answers a request for an empty
+      // path with no message at all) and is treated as absent below.
+      const serverBuckets = new Map<string, number>();
       for (const [bucketKey, remoteHash] of Object.entries(buckets)) {
+        if (remoteHash !== 0) serverBuckets.set(bucketKey, remoteHash);
+      }
+
+      for (const [bucketKey, remoteHash] of serverBuckets) {
         const localHash = localBuckets[bucketKey] || 0;
         if (localHash !== remoteHash) {
           const newPath = path + bucketKey;
@@ -129,14 +154,33 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       }
 
       // Also check for buckets that exist locally but not on remote
+      const pendingFor = this.pendingRemoveLookup(mapName);
+      const changedKeys: string[] = [];
+      const localOnlyPaths: string[] = [];
       for (const [bucketKey, localHash] of Object.entries(localBuckets)) {
-        if (!(bucketKey in buckets) && localHash !== 0) {
-          // Local has data that remote doesn't - need to push
+        if (!serverBuckets.has(bucketKey) && localHash !== 0) {
           const newPath = path + bucketKey;
-          const keys = tree.getKeysInBucket(newPath);
-          if (keys.length > 0) {
-            await this.pushORMapDiff(mapName, keys, map);
-          }
+          // The server holds no leaf under this child, so it attributes no
+          // tombstone to any key there. Drop the mirrored attribution first: a
+          // key held in the tree only by tombstones the server no longer has
+          // would otherwise keep this bucket different on every later walk.
+          this.resetKeyTombstonesToPending(
+            map,
+            localKeysUnder(tree, newPath),
+            pendingFor,
+            changedKeys,
+          );
+          localOnlyPaths.push(newPath);
+        }
+      }
+
+      await this.persistAttributionIfChanged(mapName, changedKeys);
+
+      for (const newPath of localOnlyPaths) {
+        // Local has data that remote doesn't - need to push
+        const keys = tree.getKeysInBucket(newPath);
+        if (keys.length > 0) {
+          await this.pushORMapDiff(mapName, keys, map);
         }
       }
     }
@@ -148,24 +192,49 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    */
   public async handleORMapSyncRespLeaf(payload: {
     mapName: string;
+    path?: string;
     coveringEpoch?: number;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- records in the leaf entries are raw ORMapRecord objects decoded from msgpack; value type is erased at the sync protocol layer
     entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
   }): Promise<void> {
-    const { mapName, coveringEpoch, entries } = payload;
+    const { mapName, path, coveringEpoch, entries } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
       let totalAdded = 0;
       let totalUpdated = 0;
+      const changedKeys: string[] = [];
+      const pendingFor = this.pendingRemoveLookup(mapName);
+      // Keys the server serves a record for under a tag this client has
+      // tombstoned: each is pushed below even if it holds no live record here.
+      const healedKeys = new Set<string>();
+
+      // The keys this client holds under the leaf's path, taken before the
+      // merge so that a key the response introduces is not mistaken for one
+      // the server left out. Without a path the response's scope is unknown and
+      // no absence can be inferred from it.
+      const localKeysInScope =
+        typeof path === 'string' ? localKeysUnder(map.getMerkleTree(), path) : [];
 
       for (const entry of entries) {
         const { key, records, tombstones } = entry;
+        const mirrored = this.mirrorKeyTombstones(map, key, tombstones, pendingFor, records);
+        if (mirrored.changed) changedKeys.push(key);
+        if (mirrored.healed) healedKeys.add(key);
         const result = map.mergeKey(key, records, tombstones);
         totalAdded += result.added;
         totalUpdated += result.updated;
         // Persist server-origin merge so it survives an offline reload (symmetric with LWW).
         await this.config.persistKey(mapName, key);
       }
+
+      // A leaf response lists every key the server holds under its path, so a
+      // local key it leaves out has no leaf on the server and therefore no
+      // server-attributed tombstone.
+      const listed = new Set(entries.map((e: { key: string }) => e.key));
+      const omitted = localKeysInScope.filter((key) => !listed.has(key));
+      this.resetKeyTombstonesToPending(map, omitted, pendingFor, changedKeys);
+
+      await this.persistAttributionIfChanged(mapName, changedKeys);
 
       if (totalAdded > 0 || totalUpdated > 0) {
         await this.config.persistTombstones(mapName);
@@ -179,9 +248,11 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       // applied — confirm the covering epoch so the server's cursor advances.
       this.confirmCoveringEpoch(mapName, coveringEpoch);
 
-      // Now push any local records that server might not have
-      const keysToCheck = entries.map((e: { key: string }) => e.key);
-      await this.pushORMapDiff(mapName, keysToCheck, map);
+      // Now push any local records that server might not have. A healed key is
+      // one of the response's keys, so it goes out in this same single push,
+      // once, whether or not it holds a live record.
+      const keysToCheck = Array.from(listed);
+      await this.pushORMapDiff(mapName, keysToCheck, map, healedKeys);
     }
   }
 
@@ -200,15 +271,23 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
     if (map instanceof ORMap) {
       let totalAdded = 0;
       let totalUpdated = 0;
+      const changedKeys: string[] = [];
+      const pendingFor = this.pendingRemoveLookup(mapName);
+      const healedKeys = new Set<string>();
 
       for (const entry of entries) {
         const { key, records, tombstones } = entry;
+        const mirrored = this.mirrorKeyTombstones(map, key, tombstones, pendingFor, records);
+        if (mirrored.changed) changedKeys.push(key);
+        if (mirrored.healed) healedKeys.add(key);
         const result = map.mergeKey(key, records, tombstones);
         totalAdded += result.added;
         totalUpdated += result.updated;
         // Persist server-origin merge so it survives an offline reload (symmetric with LWW).
         await this.config.persistKey(mapName, key);
       }
+
+      await this.persistAttributionIfChanged(mapName, changedKeys);
 
       if (totalAdded > 0 || totalUpdated > 0) {
         await this.config.persistTombstones(mapName);
@@ -221,15 +300,145 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       // The diff entries (including tombstone tags) are now durably applied —
       // confirm the covering epoch so the server's cursor advances.
       this.confirmCoveringEpoch(mapName, coveringEpoch);
+
+      // A diff response is otherwise the end of the exchange and nothing is
+      // pushed after it. The one exception is a key the server still serves a
+      // record for under a tag this client has tombstoned: only this client can
+      // hand that tombstone back, so those keys, and no others, are pushed.
+      if (healedKeys.size > 0) {
+        await this.pushORMapDiff(mapName, Array.from(healedKeys), map, healedKeys);
+      }
+    }
+  }
+
+  /**
+   * The un-acknowledged local remove tags per key for one handler invocation.
+   *
+   * The op log is read at most once per invocation, on the first key that asks,
+   * however many keys the response covers: a reset can span every key of the
+   * map, and a read per key would make it keys times op-log entries. The result
+   * is held only by the returned closure, so the next invocation reads the op
+   * log again and an op acknowledged in between is no longer pending.
+   */
+  private pendingRemoveLookup(mapName: string): PendingRemoveLookup {
+    let byKey: Map<string, string[]> | undefined;
+    return (key) => {
+      byKey ??= this.config.getPendingRemoveTagsByKey(mapName);
+      return byKey.get(key) ?? NO_TAGS;
+    };
+  }
+
+  /**
+   * Make the server's tombstone set for `key` this client's attributed set,
+   * keeping the tags of this client's removes the server has not acknowledged
+   * yet (it cannot report a remove it has not applied).
+   *
+   * Must run BEFORE the entry's `mergeKey`: every attributed tag is then already
+   * suppressed map-wide when the records are merged, so a record carrying one is
+   * never admitted and no subscriber is shown a value that is being removed.
+   *
+   * This is a replace, not a union: a tag the server no longer attributes to the
+   * key leaves the attributed set (it stays suppressed map-wide), which is what
+   * lets the key's leaf match the server's (TG-MRK-001).
+   *
+   * One kind of tag is kept although the server does not attribute it: the tag
+   * of a record the server serves as LIVE for this key while this client already
+   * holds that tag as a tombstone. A tag is created once, by one add, so a live
+   * server record under a tag tombstoned here can only mean the server no longer
+   * holds that tombstone: it acknowledged the remove and lost it (an unclean
+   * shutdown before the remove reached disk), or it refused the remove. Nobody
+   * but a client that still holds the tombstone can give it back, so the tag
+   * stays attributed to the key that serves it live and the caller pushes that
+   * key. This cannot make two different states compare equal: the client leaf
+   * holds the tag as a tombstone where the server leaf holds it as a live
+   * record, so the leaves differ until the push lands, and agree afterwards.
+   *
+   * The map-wide set is read BEFORE this key's set is replaced. Read afterwards
+   * it would also hold the tags this very call attributes (the server's own and
+   * the pending ones), and a remove the server simply has not received yet
+   * would be mistaken for one it lost.
+   *
+   * @returns `changed`: whether the key's attributed set changed; `healed`:
+   * whether a tag was kept because the server serves it live
+   */
+  private mirrorKeyTombstones(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap value type is erased at the sync handler layer
+    map: ORMap<any, any>,
+    key: string,
+    serverTombstones: Iterable<string>,
+    pendingFor: PendingRemoveLookup,
+    serverLiveRecords: ReadonlyArray<{ tag: string }> = [],
+  ): { changed: boolean; healed: boolean } {
+    const next = new Set(serverTombstones);
+    for (const tag of pendingFor(key)) {
+      next.add(tag);
+    }
+    let healed = false;
+    for (const record of serverLiveRecords) {
+      if (map.isTombstoned(record.tag)) {
+        next.add(record.tag);
+        healed = true;
+      }
+    }
+    const previous = map.getKeyTombstones(key);
+    map.setKeyTombstones(key, next);
+    return { changed: !sameTags(previous, next), healed };
+  }
+
+  /**
+   * The server's view shows no leaf for these keys, so it attributes no
+   * tombstone to them: each key keeps only the tags of this client's own
+   * not-yet-acknowledged removes. The map-wide suppression set is untouched, so
+   * a tag dropped here stays removed.
+   *
+   * Every key whose attributed set changed is appended to `changedKeys`.
+   */
+  private resetKeyTombstonesToPending(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap value type is erased at the sync handler layer
+    map: ORMap<any, any>,
+    keys: string[],
+    pendingFor: PendingRemoveLookup,
+    changedKeys: string[],
+  ): void {
+    for (const key of keys) {
+      if (this.mirrorKeyTombstones(map, key, [], pendingFor).changed) {
+        changedKeys.push(key);
+      }
+    }
+  }
+
+  /**
+   * Persist the per-key attribution of the keys this invocation changed it for.
+   * Separate from the record/tombstone persist because attribution changes on
+   * responses that add and update nothing, and an unchanged walk must not write
+   * at all. Only the changed keys are handed over, so that storage is rewritten
+   * for them and not for the whole map.
+   *
+   * A rejection is not caught here: it propagates out of the handler exactly as
+   * a failed record or tombstone persist does, so the covering epoch that
+   * follows is not confirmed on top of attribution that never reached disk.
+   */
+  private async persistAttributionIfChanged(mapName: string, changedKeys: string[]): Promise<void> {
+    if (changedKeys.length > 0) {
+      await this.config.persistKeyTombstones(mapName, changedKeys);
     }
   }
 
   /**
    * Push local ORMap diff to server for the given keys.
-   * Sends local records and tombstones that the server might not have.
+   * Sends local records, and for each key only the tombstones attributed to it.
+   *
+   * A key with no live record is skipped unless it is in `alwaysPush`: its
+   * entry then carries no record and only the key's attributed tombstones,
+   * which is what lets the server drop a record it should no longer hold.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap value type is erased at the sync handler layer; actual V type lives in the map instance generic at TopGunClient level
-  public async pushORMapDiff(mapName: string, keys: string[], map: ORMap<any, any>): Promise<void> {
+  public async pushORMapDiff(
+    mapName: string,
+    keys: string[],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap value type is erased at the sync handler layer; actual V type lives in the map instance generic at TopGunClient level
+    map: ORMap<any, any>,
+    alwaysPush?: ReadonlySet<string>,
+  ): Promise<void> {
     const entries: Array<{
       key: string;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMapRecord value type is erased at the diff protocol layer; records are passed through to the server without inspection
@@ -237,21 +446,17 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       tombstones: string[];
     }> = [];
 
-    const snapshot = map.getSnapshot();
-
     for (const key of keys) {
       const recordsMap = map.getRecordsMap(key);
-      if (recordsMap && recordsMap.size > 0) {
-        // Get records as array
-        const records = Array.from(recordsMap.values());
+      const hasLiveRecords = recordsMap !== undefined && recordsMap.size > 0;
+      if (hasLiveRecords || alwaysPush?.has(key)) {
+        const records = recordsMap ? Array.from(recordsMap.values()) : [];
 
-        // Get tombstones relevant to this key's records
-        // (tombstones that match tags that were in this key)
-        const tombstones: string[] = [];
-        for (const tag of snapshot.tombstones) {
-          // Include all tombstones - server will filter
-          tombstones.push(tag);
-        }
+        // Only the tombstones attributed to this key. The server unions whatever
+        // an entry carries into that key's own set without filtering, so sending
+        // the map-wide set would make every key's set depend on push history,
+        // which no client can reproduce.
+        const tombstones = Array.from(map.getKeyTombstones(key));
 
         entries.push({
           key,
@@ -307,4 +512,41 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
   public getLastSyncTimestamp(): number {
     return this.lastSyncTimestamp;
   }
+}
+
+/**
+ * Every key the tree holds at or below `path`.
+ *
+ * The tree, not the map's key list, is the source: a key with no records left
+ * but tombstones still attributed to it lives only in the tree, and those are
+ * exactly the keys whose attribution an absence must be able to clear.
+ */
+function localKeysUnder(tree: ORMapMerkleTree, path: string): string[] {
+  const start = tree.getNode(path);
+  if (!start) return [];
+
+  const keys: string[] = [];
+  const pending = [start];
+  for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+    if (node.entries) {
+      for (const key of node.entries.keys()) keys.push(key);
+    }
+    if (node.children) {
+      for (const child of Object.values(node.children)) pending.push(child);
+    }
+  }
+  return keys;
+}
+
+/** The un-acknowledged local remove tags of one key, for one handler invocation. */
+type PendingRemoveLookup = (key: string) => readonly string[];
+
+const NO_TAGS: readonly string[] = [];
+
+function sameTags(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const tag of a) {
+    if (!b.has(tag)) return false;
+  }
+  return true;
 }

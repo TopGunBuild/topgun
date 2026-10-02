@@ -49,6 +49,19 @@ export class MerkleTree {
   }
 
   /**
+   * Store an already-computed leaf hash for a key.
+   *
+   * Lets the trie arithmetic (bucket routing and hash combining) be checked
+   * against cross-language vectors independently of how a leaf is derived.
+   *
+   * @internal
+   */
+  public updateLeafHash(key: string, leafHash: number) {
+    const pathHash = hashString(key).toString(16).padStart(8, '0');
+    this.updateNode(this.root, key, leafHash, pathHash, 0);
+  }
+
+  /**
    * Removes a key from the Merkle Tree.
    * Necessary for Garbage Collection of tombstones.
    */

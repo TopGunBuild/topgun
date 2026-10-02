@@ -1,0 +1,374 @@
+{
+  "version": 1,
+  "orLeaf": [
+    {
+      "name": "case 1: one tag",
+      "key": "user:1",
+      "records": [
+        {
+          "tag": "1700000000000:0:node-a",
+          "value": "alice"
+        }
+      ],
+      "tombstones": [],
+      "expected": 4159090387
+    },
+    {
+      "name": "case 2: four tags in shuffled order",
+      "key": "todo:42",
+      "records": [
+        {
+          "tag": "1700000000300:2:node-c",
+          "value": "third"
+        },
+        {
+          "tag": "1700000000100:0:node-a",
+          "value": 1
+        },
+        {
+          "tag": "1700000000200:1:node-b",
+          "value": true
+        },
+        {
+          "tag": "1700000000100:0:node-b",
+          "value": null
+        }
+      ],
+      "tombstones": [],
+      "expected": 1785486077
+    },
+    {
+      "name": "case 3: tags and tombstones in shuffled order",
+      "key": "cart:7",
+      "records": [
+        {
+          "tag": "1700000000900:0:node-b",
+          "value": "pear"
+        },
+        {
+          "tag": "1700000000500:3:node-a",
+          "value": "apple"
+        },
+        {
+          "tag": "1700000000700:0:node-c",
+          "value": "plum"
+        }
+      ],
+      "tombstones": [
+        "1700000000600:0:node-c",
+        "1700000000100:0:node-a",
+        "1700000000400:9:node-b"
+      ],
+      "expected": 3015666604
+    },
+    {
+      "name": "case 4: tombstones only",
+      "key": "removed:key",
+      "records": [],
+      "tombstones": [
+        "1700000000200:0:node-b",
+        "1700000000100:0:node-a"
+      ],
+      "expected": 19045790
+    },
+    {
+      "name": "case 5: empty slot has no leaf",
+      "key": "pruned:key",
+      "records": [],
+      "tombstones": [],
+      "expected": null
+    },
+    {
+      "name": "case 6: non-ASCII key and tag with a surrogate pair",
+      "key": "ключ-😀-鍵",
+      "records": [
+        {
+          "tag": "1700000000000:0:nœud-🚀",
+          "value": "émoji"
+        }
+      ],
+      "tombstones": [
+        "1700000000001:0:узел-😀"
+      ],
+      "expected": 4065426614
+    },
+    {
+      "name": "case 7: code-point order differs from UTF-16 code-unit order",
+      "key": "order:cp",
+      "records": [
+        {
+          "tag": "𐀀",
+          "value": "astral"
+        },
+        {
+          "tag": "｡",
+          "value": "bmp-high"
+        },
+        {
+          "tag": "a",
+          "value": "ascii"
+        }
+      ],
+      "tombstones": [
+        "😀",
+        "",
+        "z"
+      ],
+      "expected": 3215219357
+    },
+    {
+      "name": "case 8a: nested-object value twin (z = 2)",
+      "key": "twin:nested",
+      "records": [
+        {
+          "tag": "1700000000000:0:node-a",
+          "value": {
+            "a": 1,
+            "nested": {
+              "z": 2
+            }
+          }
+        }
+      ],
+      "tombstones": [],
+      "expected": 2383133558
+    },
+    {
+      "name": "case 8b: nested-object value twin (z = 999)",
+      "key": "twin:nested",
+      "records": [
+        {
+          "tag": "1700000000000:0:node-a",
+          "value": {
+            "a": 1,
+            "nested": {
+              "z": 999
+            }
+          }
+        }
+      ],
+      "tombstones": [],
+      "expected": 2383133558
+    },
+    {
+      "name": "case 9a: record with ttlMs",
+      "key": "twin:ttl",
+      "records": [
+        {
+          "tag": "1700000000000:0:node-a",
+          "value": "session",
+          "ttlMs": 60000
+        },
+        {
+          "tag": "1700000000050:0:node-b",
+          "value": "session-2"
+        }
+      ],
+      "tombstones": [],
+      "expected": 2361357581
+    },
+    {
+      "name": "case 9b: same tags without ttlMs",
+      "key": "twin:ttl",
+      "records": [
+        {
+          "tag": "1700000000000:0:node-a",
+          "value": "session"
+        },
+        {
+          "tag": "1700000000050:0:node-b",
+          "value": "session-2"
+        }
+      ],
+      "tombstones": [],
+      "expected": 2361357581
+    }
+  ],
+  "lwwLeaf": [
+    {
+      "name": "ascii key, zero counter",
+      "key": "user:1",
+      "millis": 1700000000000,
+      "counter": 0,
+      "nodeId": "node-a",
+      "expected": 1592194921
+    },
+    {
+      "name": "non-zero counter",
+      "key": "todo:42",
+      "millis": 1700000000123,
+      "counter": 17,
+      "nodeId": "client-7f3a",
+      "expected": 990770736
+    },
+    {
+      "name": "non-ASCII key and node id",
+      "key": "ключ-😀-鍵",
+      "millis": 1700000000999,
+      "counter": 1,
+      "nodeId": "nœud-🚀",
+      "expected": 2250959895
+    },
+    {
+      "name": "zero millis",
+      "key": "epoch",
+      "millis": 0,
+      "counter": 0,
+      "nodeId": "n",
+      "expected": 4016903966
+    }
+  ],
+  "flatTrie": [
+    {
+      "name": "lww: eight keys across partitions",
+      "kind": "lww",
+      "leaves": [
+        {
+          "key": "user:1",
+          "leafHash": 305419896,
+          "partition": 208
+        },
+        {
+          "key": "user:2",
+          "leafHash": 2596069104,
+          "partition": 217
+        },
+        {
+          "key": "todo:42",
+          "leafHash": 4294967295,
+          "partition": 52
+        },
+        {
+          "key": "cart:7",
+          "leafHash": 1,
+          "partition": 103
+        },
+        {
+          "key": "ключ-😀-鍵",
+          "leafHash": 3735928559,
+          "partition": 188
+        },
+        {
+          "key": "settings",
+          "leafHash": 2147483648,
+          "partition": 0
+        },
+        {
+          "key": "session:abc",
+          "leafHash": 19088743,
+          "partition": 51
+        },
+        {
+          "key": "z",
+          "leafHash": 4022250974,
+          "partition": 73
+        }
+      ],
+      "expectedRoot": 3501820274,
+      "expectedBuckets": {
+        "": {
+          "2": 2229065008,
+          "3": 4185599465,
+          "6": 3772441717,
+          "e": 1461123477,
+          "f": 616243918
+        },
+        "2": {
+          "4": 261872116
+        },
+        "3": {
+          "2": 3807975093,
+          "4": 3268920208
+        },
+        "6": {
+          "8": 596704805,
+          "d": 2396839605,
+          "e": 1623528250
+        },
+        "e": {
+          "1": 804215951
+        },
+        "f": {
+          "f": 3917852160
+        }
+      }
+    },
+    {
+      "name": "or: eight keys across partitions",
+      "kind": "or",
+      "leaves": [
+        {
+          "key": "tags:1",
+          "leafHash": 3405691582,
+          "partition": 172
+        },
+        {
+          "key": "tags:2",
+          "leafHash": 2882400001,
+          "partition": 145
+        },
+        {
+          "key": "members",
+          "leafHash": 4277009102,
+          "partition": 203
+        },
+        {
+          "key": "removed:key",
+          "leafHash": 16909060,
+          "partition": 22
+        },
+        {
+          "key": "order:cp",
+          "leafHash": 2147483647,
+          "partition": 52
+        },
+        {
+          "key": "ключ-😀-鍵",
+          "leafHash": 4294967294,
+          "partition": 188
+        },
+        {
+          "key": "likes:post:9",
+          "leafHash": 1464814662,
+          "partition": 241
+        },
+        {
+          "key": "a",
+          "leafHash": 2309737967,
+          "partition": 101
+        }
+      ],
+      "expectedRoot": 500081860,
+      "expectedBuckets": {
+        "": {
+          "0": 3172606405,
+          "1": 1323192670,
+          "3": 1894465361,
+          "a": 728917463,
+          "e": 39485058,
+          "f": 536970408
+        },
+        "0": {
+          "c": 2942812257
+        },
+        "1": {
+          "b": 1004339270
+        },
+        "3": {
+          "4": 955939122,
+          "7": 1180150911
+        },
+        "a": {
+          "a": 1580856942,
+          "d": 3210690937
+        },
+        "e": {
+          "4": 3849467682
+        },
+        "f": {
+          "f": 2576397250
+        }
+      }
+    }
+  ]
+}

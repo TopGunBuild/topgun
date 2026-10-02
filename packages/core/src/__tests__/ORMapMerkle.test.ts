@@ -1,12 +1,18 @@
 import { HLC } from '../HLC';
 import { ORMap, ORMapRecord } from '../ORMap';
 import { ORMapMerkleTree } from '../ORMapMerkleTree';
-import {
-  hashORMapEntry,
-  hashORMapRecord,
-  timestampToString,
-  compareTimestamps,
-} from '../ORMapMerkle';
+import { hashORMapLeaf, timestampToString, compareTimestamps } from '../ORMapMerkle';
+import { hashString } from '../utils/hash';
+
+/** The trie routes a key by the hex digits of its hash and keeps entries at depth 3. */
+function leafPathOf(key: string): string {
+  return hashString(key).toString(16).padStart(8, '0').slice(0, 3);
+}
+
+/** The leaf an ORMap's own tree stores for `key`, or undefined when the key is absent. */
+function storedLeaf<V>(map: ORMap<string, V>, key: string): number | undefined {
+  return map.getMerkleTree().getEntryHashes(leafPathOf(key)).get(key);
+}
 
 describe('ORMapMerkle hash functions', () => {
   describe('timestampToString', () => {
@@ -16,160 +22,172 @@ describe('ORMapMerkle hash functions', () => {
     });
   });
 
-  describe('hashORMapEntry', () => {
-    it('should produce same hash regardless of record insertion order', () => {
-      const ts1 = { millis: 1000, counter: 1, nodeId: 'node-1' };
-      const ts2 = { millis: 2000, counter: 1, nodeId: 'node-2' };
-
-      // First order: tag-a, then tag-b
-      const records1 = new Map<string, ORMapRecord<string>>();
-      records1.set('tag-a', { value: 'value-a', timestamp: ts1, tag: 'tag-a' });
-      records1.set('tag-b', { value: 'value-b', timestamp: ts2, tag: 'tag-b' });
-
-      // Second order: tag-b, then tag-a
-      const records2 = new Map<string, ORMapRecord<string>>();
-      records2.set('tag-b', { value: 'value-b', timestamp: ts2, tag: 'tag-b' });
-      records2.set('tag-a', { value: 'value-a', timestamp: ts1, tag: 'tag-a' });
-
-      const hash1 = hashORMapEntry('key1', records1);
-      const hash2 = hashORMapEntry('key1', records2);
+  describe('hashORMapLeaf', () => {
+    it('should produce same hash regardless of tag and tombstone input order', () => {
+      const hash1 = hashORMapLeaf('key1', ['tag-a', 'tag-b'], ['dead-a', 'dead-b']);
+      const hash2 = hashORMapLeaf('key1', ['tag-b', 'tag-a'], ['dead-b', 'dead-a']);
 
       expect(hash1).toBe(hash2);
     });
 
-    it('should produce different hash for different values', () => {
-      const ts = { millis: 1000, counter: 1, nodeId: 'node-1' };
+    it('should be deterministic across calls', () => {
+      expect(hashORMapLeaf('key1', ['tag-a'], ['dead-a'])).toBe(
+        hashORMapLeaf('key1', ['tag-a'], ['dead-a']),
+      );
+    });
 
-      const records1 = new Map<string, ORMapRecord<string>>();
-      records1.set('tag-1', { value: 'value-a', timestamp: ts, tag: 'tag-1' });
-
-      const records2 = new Map<string, ORMapRecord<string>>();
-      records2.set('tag-1', { value: 'value-b', timestamp: ts, tag: 'tag-1' });
-
-      const hash1 = hashORMapEntry('key1', records1);
-      const hash2 = hashORMapEntry('key1', records2);
-
-      expect(hash1).not.toBe(hash2);
+    it('should hash the documented string (TG-MRK-001)', () => {
+      // Written out by hand so a change to the formula cannot pass by changing
+      // both sides at once.
+      expect(hashORMapLeaf('key1', ['tag-b', 'tag-a'], ['dead-b', 'dead-a'])).toBe(
+        hashString('key:key1|tag-a|tag-b#dead-a|dead-b'),
+      );
+      expect(hashORMapLeaf('key1', ['tag-a'], [])).toBe(hashString('key:key1|tag-a#'));
+      expect(hashORMapLeaf('key1', [], ['dead-a'])).toBe(hashString('key:key1|#dead-a'));
     });
 
     it('should produce different hash for different tags', () => {
-      const ts = { millis: 1000, counter: 1, nodeId: 'node-1' };
-
-      const records1 = new Map<string, ORMapRecord<string>>();
-      records1.set('tag-a', { value: 'value', timestamp: ts, tag: 'tag-a' });
-
-      const records2 = new Map<string, ORMapRecord<string>>();
-      records2.set('tag-b', { value: 'value', timestamp: ts, tag: 'tag-b' });
-
-      const hash1 = hashORMapEntry('key1', records1);
-      const hash2 = hashORMapEntry('key1', records2);
-
-      expect(hash1).not.toBe(hash2);
-    });
-
-    it('should produce different hash for different timestamps', () => {
-      const records1 = new Map<string, ORMapRecord<string>>();
-      records1.set('tag-1', {
-        value: 'value',
-        timestamp: { millis: 1000, counter: 1, nodeId: 'node-1' },
-        tag: 'tag-1',
-      });
-
-      const records2 = new Map<string, ORMapRecord<string>>();
-      records2.set('tag-1', {
-        value: 'value',
-        timestamp: { millis: 2000, counter: 1, nodeId: 'node-1' },
-        tag: 'tag-1',
-      });
-
-      const hash1 = hashORMapEntry('key1', records1);
-      const hash2 = hashORMapEntry('key1', records2);
+      const hash1 = hashORMapLeaf('key1', ['tag-a'], []);
+      const hash2 = hashORMapLeaf('key1', ['tag-b'], []);
 
       expect(hash1).not.toBe(hash2);
     });
 
     it('should produce different hash for different keys', () => {
-      const ts = { millis: 1000, counter: 1, nodeId: 'node-1' };
-
-      const records = new Map<string, ORMapRecord<string>>();
-      records.set('tag-1', { value: 'value', timestamp: ts, tag: 'tag-1' });
-
-      const hash1 = hashORMapEntry('key1', records);
-      const hash2 = hashORMapEntry('key2', records);
+      const hash1 = hashORMapLeaf('key1', ['tag-1'], []);
+      const hash2 = hashORMapLeaf('key2', ['tag-1'], []);
 
       expect(hash1).not.toBe(hash2);
     });
 
-    it('should handle TTL in hash', () => {
-      const ts = { millis: 1000, counter: 1, nodeId: 'node-1' };
+    it('should produce different hash for different tombstones', () => {
+      const none = hashORMapLeaf('key1', ['tag-1'], []);
+      const one = hashORMapLeaf('key1', ['tag-1'], ['dead-a']);
+      const other = hashORMapLeaf('key1', ['tag-1'], ['dead-b']);
+      const two = hashORMapLeaf('key1', ['tag-1'], ['dead-a', 'dead-b']);
 
-      const recordsWithTtl = new Map<string, ORMapRecord<string>>();
-      recordsWithTtl.set('tag-1', {
-        value: 'value',
-        timestamp: ts,
-        tag: 'tag-1',
-        ttlMs: 5000,
-      });
-
-      const recordsNoTtl = new Map<string, ORMapRecord<string>>();
-      recordsNoTtl.set('tag-1', {
-        value: 'value',
-        timestamp: ts,
-        tag: 'tag-1',
-      });
-
-      const hash1 = hashORMapEntry('key1', recordsWithTtl);
-      const hash2 = hashORMapEntry('key1', recordsNoTtl);
-
-      expect(hash1).not.toBe(hash2);
+      expect(new Set([none, one, other, two]).size).toBe(4);
     });
 
-    it('should handle object values deterministically', () => {
+    it('should tell a live tag from the same tag as a tombstone', () => {
+      expect(hashORMapLeaf('key1', ['tag-1'], [])).not.toBe(hashORMapLeaf('key1', [], ['tag-1']));
+    });
+
+    it('should treat its inputs as sets', () => {
+      expect(hashORMapLeaf('key1', ['tag-a', 'tag-a', 'tag-b'], ['dead-a', 'dead-a'])).toBe(
+        hashORMapLeaf('key1', ['tag-a', 'tag-b'], ['dead-a']),
+      );
+      expect(hashORMapLeaf('key1', new Set(['tag-a', 'tag-b']), new Set(['dead-a']))).toBe(
+        hashORMapLeaf('key1', ['tag-a', 'tag-b'], ['dead-a']),
+      );
+      expect(hashORMapLeaf('key1', new Map([['tag-a', 1]]).keys(), [])).toBe(
+        hashORMapLeaf('key1', ['tag-a'], []),
+      );
+    });
+
+    it('should sort tags by code point, not by UTF-16 code unit', () => {
+      // U+10000 is stored as the surrogate pair D800 DC00, which a code-unit
+      // sort puts before U+FF61. By code point it comes after.
+      const astral = '\u{10000}';
+      const highBmp = '\uff61';
+
+      expect([astral, highBmp].sort()).toEqual([astral, highBmp]);
+      expect(hashORMapLeaf('key1', [astral, highBmp, 'a'], [astral, highBmp])).toBe(
+        hashString(`key:key1|a|${highBmp}|${astral}#${highBmp}|${astral}`),
+      );
+    });
+
+    it('should order a tag before any longer tag it is a prefix of', () => {
+      expect(hashORMapLeaf('key1', ['ab', 'a', ''], [])).toBe(hashString('key:key1||a|ab#'));
+    });
+
+    it('should return an unsigned 32-bit integer', () => {
+      const hash = hashORMapLeaf('key1', ['tag-1'], ['dead-1']);
+
+      expect(Number.isInteger(hash)).toBe(true);
+      expect(hash).toBeGreaterThanOrEqual(0);
+      expect(hash).toBeLessThanOrEqual(0xffffffff);
+    });
+
+    it('should not let a value contribute to the stored leaf', () => {
       const ts = { millis: 1000, counter: 1, nodeId: 'node-1' };
 
-      // Different key order in object
-      const records1 = new Map<string, ORMapRecord<{ a: number; b: string }>>();
-      records1.set('tag-1', {
-        value: { a: 1, b: 'test' },
-        timestamp: ts,
+      const map1 = new ORMap<string, string>(new HLC('node-1'));
+      map1.apply('key1', { value: 'value-a', timestamp: ts, tag: 'tag-1' });
+
+      const map2 = new ORMap<string, string>(new HLC('node-1'));
+      map2.apply('key1', { value: 'value-b', timestamp: ts, tag: 'tag-1' });
+
+      expect(storedLeaf(map1, 'key1')).toBe(storedLeaf(map2, 'key1'));
+      expect(storedLeaf(map1, 'key1')).toBe(hashORMapLeaf('key1', ['tag-1'], []));
+    });
+
+    it('should not let a timestamp contribute to the stored leaf', () => {
+      const map1 = new ORMap<string, string>(new HLC('node-1'));
+      map1.apply('key1', {
+        value: 'value',
+        timestamp: { millis: 1000, counter: 1, nodeId: 'node-1' },
         tag: 'tag-1',
       });
 
-      const records2 = new Map<string, ORMapRecord<{ b: string; a: number }>>();
-      records2.set('tag-1', {
-        value: { b: 'test', a: 1 },
-        timestamp: ts,
+      const map2 = new ORMap<string, string>(new HLC('node-1'));
+      map2.apply('key1', {
+        value: 'value',
+        timestamp: { millis: 2000, counter: 1, nodeId: 'node-1' },
         tag: 'tag-1',
       });
 
-      const hash1 = hashORMapEntry('key1', records1);
-      const hash2 = hashORMapEntry('key1', records2);
+      expect(storedLeaf(map1, 'key1')).toBe(storedLeaf(map2, 'key1'));
+    });
 
-      expect(hash1).toBe(hash2);
+    it('should not let a TTL contribute to the stored leaf', () => {
+      const ts = { millis: 1000, counter: 1, nodeId: 'node-1' };
+
+      const withTtl = new ORMap<string, string>(new HLC('node-1'));
+      withTtl.apply('key1', { value: 'value', timestamp: ts, tag: 'tag-1', ttlMs: 5000 });
+
+      const noTtl = new ORMap<string, string>(new HLC('node-1'));
+      noTtl.apply('key1', { value: 'value', timestamp: ts, tag: 'tag-1' });
+
+      expect(storedLeaf(withTtl, 'key1')).toBe(storedLeaf(noTtl, 'key1'));
+    });
+
+    it('should keep an expired record in the stored leaf', () => {
+      // The server holds a record until it is removed, whatever its TTL, so a
+      // client that dropped expired tags from the leaf could never match it.
+      const expired = new ORMap<string, string>(new HLC('node-1'));
+      expired.apply('key1', {
+        value: 'value',
+        timestamp: { millis: 1, counter: 0, nodeId: 'node-1' },
+        tag: 'tag-1',
+        ttlMs: 1,
+      });
+
+      expect(expired.get('key1')).toEqual([]);
+      expect(storedLeaf(expired, 'key1')).toBe(hashORMapLeaf('key1', ['tag-1'], []));
+    });
+
+    it('should handle object values deterministically, at every depth', () => {
+      const ts = { millis: 1000, counter: 1, nodeId: 'node-1' };
+
+      const map1 = new ORMap<string, unknown>(new HLC('node-1'));
+      map1.apply('key1', { value: { a: 1, b: { z: 2 } }, timestamp: ts, tag: 'tag-1' });
+
+      const map2 = new ORMap<string, unknown>(new HLC('node-1'));
+      map2.apply('key1', { value: { b: { z: 999 }, a: 1 }, timestamp: ts, tag: 'tag-1' });
+
+      expect(storedLeaf(map1, 'key1')).toBe(storedLeaf(map2, 'key1'));
     });
 
     it('should handle null values', () => {
-      const ts = { millis: 1000, counter: 1, nodeId: 'node-1' };
-
-      const records = new Map<string, ORMapRecord<null>>();
-      records.set('tag-1', { value: null, timestamp: ts, tag: 'tag-1' });
-
-      // Should not throw
-      const hash = hashORMapEntry('key1', records);
-      expect(typeof hash).toBe('number');
-    });
-  });
-
-  describe('hashORMapRecord', () => {
-    it('should hash individual record', () => {
-      const record: ORMapRecord<string> = {
-        value: 'test',
+      const map1 = new ORMap<string, null>(new HLC('node-1'));
+      map1.apply('key1', {
+        value: null,
         timestamp: { millis: 1000, counter: 1, nodeId: 'node-1' },
         tag: 'tag-1',
-      };
+      });
 
-      const hash = hashORMapRecord(record);
-      expect(typeof hash).toBe('number');
+      expect(storedLeaf(map1, 'key1')).toBe(hashORMapLeaf('key1', ['tag-1'], []));
     });
   });
 
@@ -268,6 +286,76 @@ describe('ORMapMerkleTree', () => {
       const hash2 = tree.getRootHash();
 
       expect(hash1).not.toBe(hash2);
+    });
+  });
+
+  describe('update', () => {
+    it('should store the canonical leaf for live tags and tombstones', () => {
+      tree.update('key1', ['tag-b', 'tag-a'], ['dead-a']);
+
+      expect(tree.getEntryHashes(leafPathOf('key1')).get('key1')).toBe(
+        hashORMapLeaf('key1', ['tag-a', 'tag-b'], ['dead-a']),
+      );
+      expect(tree.getRootHash()).not.toBe(0);
+    });
+
+    it('should keep a key that has only tombstones', () => {
+      tree.update('key1', [], ['dead-a']);
+
+      expect(tree.getEntryHashes(leafPathOf('key1')).get('key1')).toBe(
+        hashString('key:key1|#dead-a'),
+      );
+    });
+
+    it('should remove a key when both tag sets are empty', () => {
+      tree.update('key1', ['tag-a'], ['dead-a']);
+      tree.update('key1', [], []);
+
+      expect(tree.getEntryHashes(leafPathOf('key1')).has('key1')).toBe(false);
+      expect(tree.getRootHash()).toBe(0);
+    });
+
+    it('should never store a leaf for a key that was empty from the start', () => {
+      tree.update('key1', [], []);
+
+      expect(tree.getEntryHashes(leafPathOf('key1')).has('key1')).toBe(false);
+      expect(tree.getRootHash()).toBe(0);
+    });
+
+    it('should change the root when only the tombstones change', () => {
+      tree.update('key1', ['tag-a'], []);
+      const before = tree.getRootHash();
+
+      tree.update('key1', ['tag-a'], ['dead-a']);
+
+      expect(tree.getRootHash()).not.toBe(before);
+    });
+
+    it('should accept sets and iterators', () => {
+      const other = new ORMapMerkleTree();
+      tree.update('key1', new Set(['tag-a']), new Set(['dead-a']));
+      other.update('key1', new Map([['tag-a', 1]]).keys(), ['dead-a']);
+
+      expect(tree.getRootHash()).toBe(other.getRootHash());
+    });
+  });
+
+  describe('updateFromORMap parity with incremental updates', () => {
+    it('should rebuild to the same root, tombstone-only keys included', () => {
+      map.add('key1', 'value1');
+      map.add('key1', 'value2');
+      map.add('key2', 'value3');
+      map.add('key3', 'value4');
+      map.remove('key1', 'value1');
+      // key3 is left with a tombstone and no record.
+      map.remove('key3', 'value4');
+
+      tree.updateFromORMap(map);
+
+      expect(map.get('key3')).toEqual([]);
+      expect(tree.getEntryHashes(leafPathOf('key3')).get('key3')).toBe(storedLeaf(map, 'key3'));
+      expect(storedLeaf(map, 'key3')).toBeDefined();
+      expect(tree.getRootHash()).toBe(map.getMerkleTree().getRootHash());
     });
   });
 
@@ -479,5 +567,22 @@ describe('ORMap merge', () => {
       expect(result.added).toBe(0);
       expect(mapA.get('key1')).toHaveLength(0);
     });
+  });
+});
+
+describe('ORMap tombstone-only key', () => {
+  it('stays in the Merkle tree after its only value is removed, with a leaf that covers the tombstone', () => {
+    const map = new ORMap<string, string>(new HLC('node-1'));
+    const record = map.add('key1', 'only-value');
+    map.remove('key1', 'only-value');
+
+    const leafPath = hashString('key1').toString(16).padStart(8, '0').slice(0, 3);
+    const leaf = map.getMerkleTree().getEntryHashes(leafPath).get('key1');
+
+    // The server keeps a leaf for a key that holds only tombstones, so a client
+    // that drops the key can never agree with it on the root. The expected value
+    // is the TG-MRK-001 leaf with no live tags and the removed tag as the key's
+    // only tombstone, written out here rather than taken from the code under test.
+    expect(leaf).toBe(hashString(`key:key1|#${record.tag}`));
   });
 });

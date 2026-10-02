@@ -270,6 +270,10 @@ function waitForPort(
       settled = true;
       clearTimeout(timer);
       rl.close();
+      // Closing the line reader pauses stdout, and the node logs to stdout: once
+      // the pipe buffer fills, its next log write blocks and the node stops
+      // taking part in the cluster. Keep draining for as long as it runs.
+      proc.stdout?.resume();
       fn();
     };
 

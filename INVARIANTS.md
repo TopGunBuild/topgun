@@ -770,20 +770,28 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 ### TG-MRK-001: The OR-Map Merkle leaf hash is set-canonical (order-independent)
 
-- **Scope:** `merkle_leaf_hash` (`map_data_store.rs`), mirrored by the TS client
-  (`packages/core/src/ORMapMerkleTree.ts`) — the granularity is a cross-language protocol
-  contract.
+- **Scope:** `merkle_leaf_hash` (`map_data_store.rs`), mirrored bit-identically by the TS client's
+  `hashORMapLeaf` (`packages/core/src/ORMapMerkle.ts`) — the granularity is a cross-language
+  protocol contract. The core-rust `ORMap::hash_entry` (`packages/core-rust/src/or_map.rs`) is a
+  **partial** mirror: it computes the same leaf restricted to an empty tombstone set, because that
+  type carries no per-key tombstone attribution. It is on no sync path; completing or removing it
+  is tracked in TODO-726.
 - **Statement:** two OR-Map states with the same tag/tombstone SETS hash identically regardless
-  of insertion order (tags and tombstones sorted before hashing).
-- **Maintaining code:** the sort in `merkle_leaf_hash`.
-- **Enforcing test:** Rust arm `or_leaf_hash_matches_oracle_and_ignores_input_order` (`map_data_store.rs`); NAKED for the TS mirror (TODO-602).
+  of insertion order (tags and tombstones sorted by Unicode code point before hashing; values,
+  timestamps and TTL never contribute). A slot with no live tags and no tombstones has no leaf.
+- **Maintaining code:** the sort and the empty-slot early return in `merkle_leaf_hash`; the
+  code-point sort in `hashORMapLeaf`, and the presence rule in `ORMapMerkleTree.update`.
+- **Enforcing test:** Rust arm `or_leaf_hash_matches_oracle_and_ignores_input_order` and `empty_or_slot_yields_no_leaf` (`map_data_store.rs`); TS arm `hashORMapLeaf is independent of tag and tombstone input order` (`packages/core/src/__tests__/merkle-vectors.test.ts`).
   The proptest shuffles the input order of `records` and of `tombstones` and asserts an equal hash,
-  and pins the streamed hash to the joined-string formula it replaced.
+  and pins the streamed hash to the joined-string formula it replaced. Both languages are pinned to
+  one golden vector file (`packages/core-rust/tests/fixtures/merkle_vectors.json`) by
+  `merkle_vectors_or_leaf_cases_match_canonical_leaf` and the TS vector suite, including a case
+  whose code-point order differs from its UTF-16 code-unit order.
 - **Violation consequence:** false Merkle mismatches → sync storms, or false matches → silent
   divergence; breaks the SPEC-349 semantic-set recovery warrant.
 - **Discovered by:** extraction pilot audit; load-bearing for SPEC-346/349 (the /xask
   Merkle-ordering caveat was refuted BY this sort — the sort itself deserves a test).
-- **Status:** decided (code sorts); Rust arm enforced, TS mirror NAKED.
+- **Status:** decided, **enforced** (Rust and TS arms).
 
 ### TG-SYNC-001: At most one terminal verdict per op per exchange, exactly one when the exchange acks
 

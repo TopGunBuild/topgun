@@ -1000,6 +1000,10 @@ export interface IORMapSyncHandler {
    */
   handleORMapSyncRespLeaf(payload: {
     mapName: string;
+    // The trie path the entries were read from. Every key the server holds
+    // under it is listed, so a local key under it that is missing is absent
+    // on the server.
+    path?: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap records are raw ORMapRecord-shaped objects from msgpack; the sync handler merges them into the typed map
     entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
   }): Promise<void>;
@@ -1019,9 +1023,16 @@ export interface IORMapSyncHandler {
    * @param mapName - Map name
    * @param keys - Keys to push
    * @param map - ORMap instance
+   * @param alwaysPush - Keys to push even when they hold no live record; their
+   *   entry then carries only the tombstones attributed to the key
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- map is an ORMap<any,any>; generic params are erased at the interface level since the handler accesses entries by key, not by value type
-  pushORMapDiff(mapName: string, keys: string[], map: any): Promise<void>;
+  pushORMapDiff(
+    mapName: string,
+    keys: string[],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- map is an ORMap<any,any>; generic params are erased at the interface level since the handler accesses entries by key, not by value type
+    map: any,
+    alwaysPush?: ReadonlySet<string>,
+  ): Promise<void>;
 
   /**
    * Send ORMAP_SYNC_INIT message to server.
@@ -1081,6 +1092,34 @@ export interface ORMapSyncHandlerConfig {
    * Persist an ORMap's tombstone set. Wired by SyncEngine to `persistORMapTombstones`.
    */
   persistTombstones: (mapName: string) => Promise<void>;
+
+  /**
+   * Tags of this client's local removes in `mapName` that the server has
+   * neither acknowledged nor refused, grouped by the key they were removed
+   * from. A key with no such remove has no entry. The handler keeps these
+   * attributed to their key whenever it replaces the key's tombstone set with
+   * the server's, because the server cannot yet report a remove it has not
+   * applied.
+   *
+   * Grouped for the whole map rather than asked per key so that the pending
+   * operations are scanned once per sync response, however many keys the
+   * response touches. The handler calls this at most once per response and
+   * does not keep the result.
+   *
+   * Must be derived from the pending operations at call time, never cached: an
+   * acknowledged or refused remove has to drop out on the very next call.
+   */
+  getPendingRemoveTagsByKey: (mapName: string) => Map<string, string[]>;
+
+  /**
+   * Persist an ORMap's per-key tombstone attribution for `keys`, the keys whose
+   * attributed set a sync response changed. Called once per response, and only
+   * when it changed at least one key, including responses that add or update
+   * no record. The keys are what lets the engine rewrite only the storage
+   * buckets that hold them instead of the map's whole attribution.
+   * Wired by SyncEngine to `persistORMapKeyTombstones`.
+   */
+  persistKeyTombstones: (mapName: string, keys: Iterable<string>) => Promise<void>;
 
   /**
    * Confirm to the server that `mapName`'s OR-Map sync data is durably applied
