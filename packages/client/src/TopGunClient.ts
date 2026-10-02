@@ -1,4 +1,4 @@
-import { LWWMap, ORMap } from '@topgunbuild/core';
+import { HLC, LWWMap, ORMap } from '@topgunbuild/core';
 import type {
   ORMapRecord,
   LWWRecord,
@@ -229,6 +229,13 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     }
 
     this.nodeId = config.nodeId || crypto.randomUUID();
+    // Refuse a bad node id before anything is built. The sync engine's clock
+    // would refuse it anyway, but only after the connection provider exists,
+    // and a single-server provider subscribes to the global "online"/"offline"
+    // events in its constructor. A throw at that point leaves the caller no
+    // client to close(), so those listeners would stay registered and reconnect
+    // an unreachable provider on the next "online" event.
+    HLC.assertValidNodeId(this.nodeId);
     this.storageAdapter = config.storage;
     this.isClusterMode = !!config.cluster;
 

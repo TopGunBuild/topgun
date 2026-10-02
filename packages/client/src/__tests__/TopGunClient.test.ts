@@ -214,6 +214,60 @@ describe('TopGunClient', () => {
       }
     });
 
+    // In a browser the single-server provider subscribes to the global
+    // "online"/"offline" events as soon as it is built. A constructor that
+    // throws hands the caller no client to close(), so anything subscribed by
+    // then stays subscribed for the life of the page and would reconnect an
+    // unreachable provider on the next "online" event.
+    test.each([['a|b'], ['a#b'], ['a:b']])(
+      'should leave no global listener behind when nodeId %p is refused',
+      async (nodeId) => {
+        const target = globalThis as unknown as {
+          addEventListener?: unknown;
+          removeEventListener?: unknown;
+        };
+        const original = {
+          add: target.addEventListener,
+          remove: target.removeEventListener,
+        };
+        const registered: Array<{ type: string; handler: unknown }> = [];
+        target.addEventListener = (type: string, handler: unknown) => {
+          registered.push({ type, handler });
+        };
+        target.removeEventListener = (type: string, handler: unknown) => {
+          const index = registered.findIndex((r) => r.type === type && r.handler === handler);
+          if (index !== -1) registered.splice(index, 1);
+        };
+
+        let constructed: TopGunClient | undefined;
+        try {
+          expect(() => {
+            constructed = new TopGunClient({
+              nodeId,
+              serverUrl: 'ws://localhost:1234',
+              storage,
+            });
+          }).toThrow('Node ID must not contain ":"');
+          expect(registered.map((r) => r.type)).toEqual([]);
+
+          // Positive control: the stub does observe the provider's listeners, so
+          // the empty list above means "none registered", not "none seen".
+          const valid = new TopGunClient({
+            nodeId: 'a-b',
+            serverUrl: 'ws://localhost:1234',
+            storage,
+          });
+          expect(registered.map((r) => r.type).sort()).toEqual(['offline', 'online']);
+          await valid.close();
+          expect(registered).toEqual([]);
+        } finally {
+          if (constructed) await (constructed as TopGunClient).close();
+          target.addEventListener = original.add;
+          target.removeEventListener = original.remove;
+        }
+      },
+    );
+
     test('should construct with the generated nodeId when none is provided', () => {
       let constructed: TopGunClient | undefined;
       expect(() => {
