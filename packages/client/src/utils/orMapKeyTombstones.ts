@@ -113,8 +113,14 @@ type AttributionStorage = Pick<IStorageAdapter, 'getAllMetaKeys' | 'getMeta' | '
  *
  * The meta keys are listed once to find the buckets that exist (the adapter has
  * no way to read several entries by prefix), and all buckets are then applied
- * together. A storage failure rejects; unreadable content does not, see
- * `restoreOrMapKeyTombstones`.
+ * together.
+ *
+ * A failed listing rejects: nothing is known about the buckets then. A failed
+ * read of one bucket (a storage or decryption error) does not: that bucket is
+ * reported and left out, and the others are applied. What is lost with it is
+ * what `restoreOrMapKeyTombstones` describes for unreadable content, and it is
+ * confined to the keys of that bucket instead of costing the map all of its
+ * attribution.
  */
 export async function loadOrMapKeyTombstones(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- restore runs at the registry level where the map's key and value types are erased
@@ -124,7 +130,18 @@ export async function loadOrMapKeyTombstones(
 ): Promise<void> {
   const bucketKeys = orMapKeyTombstonesBucketKeys(mapName, await storage.getAllMetaKeys());
   if (bucketKeys.length === 0) return;
-  const buckets = await Promise.all(bucketKeys.map((bucketKey) => storage.getMeta(bucketKey)));
+  const reads = await Promise.allSettled(bucketKeys.map((bucketKey) => storage.getMeta(bucketKey)));
+  const buckets: unknown[] = [];
+  for (const [i, read] of reads.entries()) {
+    if (read.status === 'fulfilled') {
+      buckets.push(read.value);
+    } else {
+      logger.warn(
+        { mapName, bucketKey: bucketKeys[i], err: read.reason },
+        'Could not read a persisted OR-Map tombstone attribution bucket; its tags are not attributed, and those listed only there are not suppressed, until the next sync walk rewrites it',
+      );
+    }
+  }
   restoreOrMapKeyTombstones(map, buckets);
 }
 
