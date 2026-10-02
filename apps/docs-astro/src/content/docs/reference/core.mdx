@@ -260,6 +260,8 @@ The HLC combines physical wall-clock time (`millis`) with a logical counter (`co
 new HLC(nodeId: string, options?: HLCOptions)
 ```
 
+`nodeId` names this clock and becomes part of every timestamp it issues. It must not contain `:`, `|` or `#` — the constructor throws an `Error` if it does. Letters, digits, `-` and `_` are always fine, and so is a UUID.
+
 `HLCOptions` fields:
 
 | Field | Default | Description |
@@ -299,6 +301,10 @@ Canonical string encoding for serialization or sort keys.
 **`HLC.parse(str)`** — `Timestamp`
 
 Inverse of `toString`.
+
+**`HLC.assertValidNodeId(nodeId)`** — `void`
+
+Check a node id without creating a clock. Throws the same `Error` as the constructor if `nodeId` contains `:`, `|` or `#`, and returns nothing otherwise. Useful for validating an id that comes from configuration or user input before you build anything with it.
 
 ### Timestamp shape
 

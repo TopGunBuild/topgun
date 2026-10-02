@@ -41,7 +41,7 @@ The `topgun-server` binary exposes five `clap`-derived flags (defined in `packag
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--node-id <ID>` | string | `"topgun-server-node"` | Unique identifier for this node in a cluster. |
+| `--node-id <ID>` | string | `"topgun-server-node"` | Unique identifier for this node in a cluster. Must not contain `:`, `\|` or `#` — the server refuses to start if it does. The default is always valid. |
 | `--host <ADDR>` | string | `"127.0.0.1"` | Host name or IP that peers use to reach this node's cluster port. Also used as `MemberInfo.host` in join handshakes. |
 | `--port <PORT>` | u16 | `8080` (or env `PORT`) | Client WebSocket port. `0` means OS-assigned. Also reads the `PORT` environment variable. |
 | `--cluster-port <PORT>` | u16 | `0` (OS-assigned) | Inter-node cluster TCP port. |

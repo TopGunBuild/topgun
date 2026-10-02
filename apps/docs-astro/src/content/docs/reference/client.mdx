@@ -45,7 +45,7 @@ new TopGunClient<TSchema>(config: TopGunClientConfig)
 | `storage` | `IStorageAdapter` | Required. Local persistence (typically `new IDBAdapter()`). |
 | `serverUrl` | `string` | Optional. WebSocket URL for single-server mode. Mutually exclusive with `cluster`. |
 | `cluster` | `TopGunClusterConfig` | Optional. Cluster configuration. Mutually exclusive with `serverUrl`. |
-| `nodeId` | `string` | Optional. Auto-generated UUID if omitted. |
+| `nodeId` | `string` | Optional. Auto-generated UUID if omitted — the generated id is always valid. If you set your own, it must not contain `:`, `\|` or `#`: the constructor throws an `Error` if it does. |
 | `backoff` | `Partial<BackoffConfig>` | Optional. Reconnect backoff tuning (see [Reconnection & offline recovery](#reconnection--offline-recovery)). |
 | `backpressure` | `Partial<BackpressureConfig>` | Optional. Backpressure thresholds and strategy. |
 | `auth` | `AuthProvider` | Optional. Pluggable auth provider (Clerk, Firebase, BetterAuth, Custom). |
