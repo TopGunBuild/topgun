@@ -1340,19 +1340,18 @@ async fn dispatch_op_batch(
     let ops = &batch_msg.payload.ops;
 
     if ops.is_empty() {
-        // The only surviving `"unknown"` acknowledgement, and by construction it
-        // carries no refused operation: there is no operation to name.
-        let ack = TopGunMessage::OpAck(OpAckMessage {
-            payload: OpAckPayload {
-                last_id: "unknown".to_string(),
-                ..Default::default()
-            },
-        });
-        send_frame(&ack, tx).await;
+        // No frame at all: an empty batch has no operation to acknowledge, and an
+        // acknowledgement that names no operation id is read by a client as
+        // "every pending write was applied" and durably retires writes the server
+        // never saw (TG-SYNC-004).
         return;
     }
 
     // Compute lastId from the last op in the original batch order.
+    //
+    // The fallback is the id-less residue: only a client that sends operations
+    // without ids can reach it, and such a client has no other acknowledgement
+    // to wait for. A batch that carries ids is always answered with one of them.
     let last_id = ops
         .last()
         .and_then(|op| op.id.clone())
@@ -1580,12 +1579,16 @@ async fn unpack_and_dispatch_batch(
 
 /// Sends an `OperationResponse` as outbound WebSocket message(s).
 ///
-/// Maps each variant to the appropriate wire format:
+/// Exactly three variants put a frame on the wire:
 /// - `Message` -> serialize and send as binary frame
 /// - `Messages` -> serialize each individually and send as separate frames
-/// - `Empty` -> no response
-/// - `Ack` -> construct `OpAck` with `call_id.to_string()` as `last_id`
 /// - `NotImplemented` -> construct `Error` with code 501
+///
+/// Every other variant sends nothing. In particular this function never builds
+/// an operation acknowledgement: that frame is reserved for the answer to an
+/// operation batch and is built only where the ids of the answered operations
+/// are in hand (TG-SYNC-004). A handler-level counter is not such an id, and a
+/// client that received one would retire pending writes the server never applied.
 async fn send_operation_response(resp: OperationResponse, tx: &mpsc::Sender<OutboundMessage>) {
     match resp {
         OperationResponse::Message(msg) => {
@@ -1603,17 +1606,9 @@ async fn send_operation_response(resp: OperationResponse, tx: &mpsc::Sender<Outb
         OperationResponse::Empty => {
             // No response needed
         }
-        OperationResponse::Ack { call_id } => {
-            let ack = TopGunMessage::OpAck(OpAckMessage {
-                payload: OpAckPayload {
-                    last_id: call_id.to_string(),
-                    ..Default::default()
-                },
-            });
-            if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
-                let _ = tx.send(OutboundMessage::Binary(bytes)).await;
-            }
-        }
+        // The fixture-only acknowledgement carries a dispatcher counter, not an
+        // operation id, so it must never become a frame.
+        OperationResponse::Ack { .. } => {}
         OperationResponse::NotImplemented {
             service_name,
             call_id: _,

@@ -1430,11 +1430,13 @@ impl SyncService {
                         client.clone()
                     } else {
                         // A rejected batch returns at once; entries merged earlier
-                        // in it, while the gate was still dark, stay merged.
+                        // in it, while the gate was still dark, stay merged. The
+                        // push is answered with no frame: the refusal travels on
+                        // its own channel, and an operation acknowledgement here
+                        // would tell the client its pending writes were applied
+                        // (TG-SYNC-004).
                         let Some(client) = self.admit_push_batch(frontier, ctx).await else {
-                            return Ok(OperationResponse::Ack {
-                                call_id: ctx.call_id,
-                            });
+                            return Ok(OperationResponse::Empty);
                         };
                         admitted_client = Some(client.clone());
                         client
@@ -1574,9 +1576,10 @@ impl SyncService {
         // a pass worth asking for.
         self.run_leaf_prune();
 
-        Ok(OperationResponse::Ack {
-            call_id: ctx.call_id,
-        })
+        // A push diff is fire-and-forget: the client awaits nothing, and the only
+        // acknowledgement frame the protocol has is reserved for operation batches
+        // (TG-SYNC-004), so an applied push is answered with no frame.
+        Ok(OperationResponse::Empty)
     }
 }
 

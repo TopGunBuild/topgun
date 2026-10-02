@@ -336,9 +336,10 @@ impl CrdtService {
         let ops = &msg.payload.ops;
 
         if ops.is_empty() {
-            return Ok(OperationResponse::Ack {
-                call_id: ctx.call_id,
-            });
+            // An empty batch carries no operation id to acknowledge, so it is
+            // answered with no frame: any acknowledgement here would name an id
+            // the client never sent and retire writes nobody applied (TG-SYNC-004).
+            return Ok(OperationResponse::Empty);
         }
 
         let mut last_id = "unknown".to_string();
