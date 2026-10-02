@@ -313,9 +313,10 @@ describe('Offline durability (SPEC-321 — F3/F4/F5/F6)', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (engine as any).recordSentBatch((engine as any).opLog.map((op: { id: string }) => op.id));
 
-      // Server acks all ops up to the last id.
+      // Server acks the whole batch. Such an ack carries no `results` at all: a
+      // present-but-empty acceptance set would say the server accepted nothing.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (engine as any).handleOpAck({ payload: { lastId: '3', achievedLevel: 1, results: [] } });
+      (engine as any).handleOpAck({ payload: { lastId: '3', achievedLevel: 1 } });
       await new Promise((r) => setTimeout(r, 5));
 
       // FIX: in-memory oplog spliced AND storage rows deleted (audit: neither compacts).
