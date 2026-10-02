@@ -1607,7 +1607,9 @@ async fn send_operation_response(resp: OperationResponse, tx: &mpsc::Sender<Outb
             // No response needed
         }
         // The fixture-only acknowledgement carries a dispatcher counter, not an
-        // operation id, so it must never become a frame.
+        // operation id, so it must never become a frame. The variant exists in
+        // test builds only, hence the gate on this arm.
+        #[cfg(test)]
         OperationResponse::Ack { .. } => {}
         OperationResponse::NotImplemented {
             service_name,
