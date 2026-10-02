@@ -1930,8 +1930,8 @@ export class SyncEngine {
     // id it is given, so an accepted op with a larger id must not carry the prefix
     // past an unaccepted smaller one — that would durably destroy a write the
     // server never took. `Infinity` means "no failure seen, nothing to cap".
-    // Set-based (rather than prefix) op-log compaction removes the need for this
-    // cap entirely and is tracked as TODO-666.
+    // The cap exists only because the durable mark is a prefix delete: storage
+    // that deleted exactly the accepted ids would need no bound (TG-SYNC-001).
     let minUnacceptedId = Infinity;
     const acceptedIdNums: number[] = [];
     if (acceptanceSet) {
@@ -2536,7 +2536,7 @@ export class SyncEngine {
   }
 
   /**
-   * Authoritative full-snapshot REPLACE resync for `mapName` (SPEC-342c R10). The
+   * Authoritative full-snapshot REPLACE resync for `mapName`. The
    * server has FORGOTTEN or found this client REGRESSED, so an additive merge could
    * re-admit a record whose tombstone was already pruned. DISCARD the materialized
    * local OR-Map state (in memory AND durable per-key records + tombstone set) and
@@ -3482,8 +3482,10 @@ export class SyncEngine {
       // Keep-and-present: no path rolls a locally-applied write back because
       // the server refused it.
       keptLocally: true,
-      // No emitter produces `true` here; the acked-then-lost case arrives with
-      // the TODO-653 fix, together with `cause: 'write_lost'`.
+      // Always `false`: every refusal built here is for a write the server never
+      // acknowledged. A write that was acknowledged and then lost by the server
+      // is not detected by anything on the client yet, so no emitter can
+      // truthfully say `true`, nor give `cause: 'write_lost'`.
       previouslyAcked: false,
       timestamp,
     };
@@ -3519,8 +3521,9 @@ export class SyncEngine {
    * that op in this session and the record has not yet been evicted.
    *
    * Session-scoped: refusals do not survive a reload, so after one a refused
-   * record reads as synced while holding a value the server rejected (TODO-667
-   * owns the durable store that would close this).
+   * record reads as synced while holding a value the server rejected. The
+   * registry lives in memory only; nothing durable records a refusal, so a
+   * caller that needs the answer across reloads must persist it itself.
    */
   public getOpRejection(opId: string): RejectedOpRecord | undefined {
     return this.rejectedOps.get(opId);
