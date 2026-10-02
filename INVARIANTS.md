@@ -911,8 +911,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `CLIENT_OP`, or an `OP_BATCH` with at least one op, top-level or inside a `BATCH` envelope — and
   its `lastId` and `results` derive only from op ids of that message. Nothing else is answered with
   one: not a push diff, not an unsubscribe, not an empty batch, which get no frame at all.
-  (b) *Client.* An ack whose `results` is non-empty names the accepted ops itself and needs nothing
-  more (TG-SYNC-001, TG-SYNC-002). An ack without `results` is applied only if its `lastId` is, by
+  (b) *Client.* An ack that carries `results` names the accepted ops itself and needs nothing more
+  (TG-SYNC-001, TG-SYNC-002); an empty `results` names none, so it accepts nothing and is never
+  read as an ack without `results`. An ack without `results` is applied only if its `lastId` is, by
   exact string equality, the last id of a batch the client sent — and, on a connection provider
   that declares the WebSocket transport, only if it also carries `achievedLevel`. A provider that
   declares HTTP, or declares no transport, is decided by the match alone, because a results-less
