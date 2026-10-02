@@ -1919,9 +1919,12 @@ export class SyncEngine {
     // Per-op acceptance set. When the server sends `results` it is naming exactly
     // the ops it accepted, so the set is the authoritative coverage of the
     // acknowledgement by itself: it needs neither a sent-batch match nor a level.
-    // An EMPTY set names nothing and so has nothing to be authoritative about;
-    // such an ack is read as one without `results`.
-    const acceptanceSet = Array.isArray(results) && results.length > 0 ? results : undefined;
+    // An EMPTY set is still that statement: the server listed what it accepted
+    // and listed nothing, so the ack accepts nothing — it marks no op and leaves
+    // the sent-batch record in place for the batch's real acknowledgement. Read
+    // as "no results" it would fall through to the match on `lastId` and retire
+    // a whole batch on the word of a frame that accepts none of it (TG-SYNC-004).
+    const acceptanceSet = Array.isArray(results) ? results : undefined;
     // The smallest id in this exchange that the server did NOT accept. It bounds
     // the durable prefix below: `markOpsSynced` DELETES every row at or under the
     // id it is given, so an accepted op with a larger id must not carry the prefix
