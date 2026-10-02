@@ -12655,4 +12655,852 @@ mod tests {
             assert_eq!(or_tag_refusal(tag), want, "tag {tag:?}");
         }
     }
+
+    // -----------------------------------------------------------------------
+    // The stored-tag lookup is lazy (TG-MRK-001)
+    //
+    // An inadmissible tag is admitted only when the key's slot already holds
+    // it, which takes a read of the slot. That read is resolved lazily, so
+    // three properties need their own proof: an admissible tag costs no read,
+    // an unreadable slot refuses rather than admits, and the read never runs
+    // ahead of the checks that would have refused the op anyway.
+    // -----------------------------------------------------------------------
+
+    /// An empty data store that logs every key it is asked to load and can fail
+    /// the next load. It is not a null store, so each read of a non-resident
+    /// key reaches it: the log is the list of slot reads that missed memory.
+    struct LoadProbe {
+        inner: NullDataStore,
+        loaded: Mutex<Vec<String>>,
+        fail_next_load: std::sync::atomic::AtomicBool,
+    }
+
+    impl LoadProbe {
+        fn loaded(&self) -> Vec<String> {
+            self.loaded.lock().clone()
+        }
+
+        fn arm_load_failure(&self) {
+            self.fail_next_load
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn load_failure_armed(&self) -> bool {
+            self.fail_next_load
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for LoadProbe {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner.add(map, key, value, expiration_time, now).await
+        }
+
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .add_backup(map, key, value, expiration_time, now)
+                .await
+        }
+
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove(map, key, now).await
+        }
+
+        async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove_backup(map, key, now).await
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.loaded.lock().push(key.to_string());
+            if self
+                .fail_next_load
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(anyhow::anyhow!("injected load failure"));
+            }
+            self.inner.load(map, key).await
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.inner.load_all(map, keys).await
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            self.inner.enumerate_leaves(map, is_backup, sink).await
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.inner.scan_values(map, is_backup, max_batch_cost).await
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: ScanCursor,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.inner
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.inner.remove_all(map, keys).await
+        }
+
+        fn is_loadable(&self, key: &str) -> bool {
+            self.inner.is_loadable(key)
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            self.inner.pending_operation_count()
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            self.inner.soft_flush().await
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            self.inner.hard_flush().await
+        }
+
+        async fn flush_key(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            is_backup: bool,
+        ) -> anyhow::Result<()> {
+            self.inner.flush_key(map, key, value, is_backup).await
+        }
+
+        fn reset(&self) {
+            self.inner.reset();
+        }
+    }
+
+    /// Logs each `(map, partition)` store the factory builds. The factory asks
+    /// its observer factories once per store it creates, so on a factory that
+    /// has built nothing yet the log shows which stores a request resolved.
+    struct StoreCreations(Mutex<Vec<(String, u32)>>);
+
+    impl StoreCreations {
+        fn created(&self) -> Vec<(String, u32)> {
+            self.0.lock().clone()
+        }
+    }
+
+    impl crate::storage::factory::ObserverFactory for StoreCreations {
+        fn create_observer(
+            &self,
+            map_name: &str,
+            partition_id: u32,
+        ) -> Option<Arc<dyn MutationObserver>> {
+            self.0.lock().push((map_name.to_string(), partition_id));
+            None
+        }
+    }
+
+    /// A service whose slot reads and store resolutions are observable.
+    struct ProbedService {
+        svc: Arc<CrdtService>,
+        factory: Arc<RecordStoreFactory>,
+        loads: Arc<LoadProbe>,
+        stores: Arc<StoreCreations>,
+        conn: ConnectionId,
+        _registry: Arc<ConnectionRegistry>,
+    }
+
+    /// Builds a fresh [`ProbedService`] with one client connection. No map
+    /// carries a query subscription, so a request reads a slot only on its
+    /// write path: in the tag admission and in the apply.
+    async fn probed_service(
+        validator: Arc<WriteAdmission>,
+        schema: Arc<SchemaService>,
+        authenticated: bool,
+    ) -> ProbedService {
+        let loads = Arc::new(LoadProbe {
+            inner: NullDataStore,
+            loaded: Mutex::new(Vec::new()),
+            fail_next_load: std::sync::atomic::AtomicBool::new(false),
+        });
+        let stores = Arc::new(StoreCreations(Mutex::new(Vec::new())));
+        let factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                loads.clone() as Arc<dyn MapDataStore>,
+                Vec::new(),
+            )
+            .with_observer_factories(vec![
+                stores.clone() as Arc<dyn crate::storage::factory::ObserverFactory>
+            ]),
+        );
+        let registry = Arc::new(ConnectionRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::clone(&registry),
+            validator,
+            Arc::new(QueryRegistry::new()),
+            schema,
+        ));
+        let (handle, _rx) = registry.register(
+            ConnectionKind::Client,
+            &crate::network::config::ConnectionConfig::default(),
+        );
+        handle.metadata.write().await.authenticated = authenticated;
+        ProbedService {
+            svc,
+            factory,
+            loads,
+            stores,
+            conn: handle.id,
+            _registry: registry,
+        }
+    }
+
+    async fn plain_probed_service() -> ProbedService {
+        probed_service(make_validator(), Arc::new(SchemaService::new()), true).await
+    }
+
+    /// The four origins a write can arrive from; each takes its own admission
+    /// branch in both handlers.
+    #[derive(Clone, Copy, Debug)]
+    enum Via {
+        Connection,
+        Http,
+        Anonymous,
+        Trusted,
+    }
+
+    const EVERY_ORIGIN: [Via; 4] = [Via::Connection, Via::Http, Via::Anonymous, Via::Trusted];
+
+    fn ctx_via(via: Via, conn: ConnectionId, key: &str) -> OperationContext {
+        match via {
+            Via::Connection => {
+                let mut ctx = make_ctx_for_key(key);
+                ctx.connection_id = Some(conn);
+                ctx
+            }
+            Via::Http => make_http_ctx_for_key(key),
+            Via::Anonymous => make_anon_http_ctx_for_key(key),
+            // No connection id and a plain `Client` origin: the branch that
+            // keeps the caller's timestamp and tag verbatim.
+            Via::Trusted => make_ctx_for_key(key),
+        }
+    }
+
+    fn probe_bare_op(map: &str, key: &str) -> ClientOp {
+        ClientOp {
+            id: Some(format!("op-{key}")),
+            map_name: map.to_string(),
+            key: key.to_string(),
+            op_type: None,
+            record: None,
+            or_record: None,
+            or_tag: None,
+            write_concern: None,
+            timeout: None,
+        }
+    }
+
+    fn probe_or_remove(map: &str, key: &str, tag: &str) -> ClientOp {
+        ClientOp {
+            or_tag: Some(Some(tag.to_string())),
+            ..probe_bare_op(map, key)
+        }
+    }
+
+    fn probe_or_add(map: &str, key: &str, tag: &str) -> ClientOp {
+        ClientOp {
+            or_record: Some(Some(topgun_core::ORMapRecord {
+                value: rmpv::Value::String("value".into()),
+                timestamp: make_timestamp(),
+                tag: tag.to_string(),
+                ttl_ms: None,
+            })),
+            ..probe_bare_op(map, key)
+        }
+    }
+
+    fn probe_lww_put(map: &str, key: &str, value: rmpv::Value) -> ClientOp {
+        ClientOp {
+            record: Some(Some(topgun_core::LWWRecord {
+                value: Some(value),
+                timestamp: make_timestamp(),
+                ttl_ms: None,
+            })),
+            ..probe_bare_op(map, key)
+        }
+    }
+
+    /// One operation carrying `ops`: a `ClientOp` (exactly one op) or one
+    /// `OpBatch`.
+    fn probe_operation(as_batch: bool, ctx: OperationContext, mut ops: Vec<ClientOp>) -> Operation {
+        if as_batch {
+            Operation::OpBatch {
+                ctx,
+                payload: OpBatchMessage {
+                    payload: topgun_core::messages::sync::OpBatchPayload {
+                        ops,
+                        write_concern: None,
+                        timeout: None,
+                    },
+                },
+            }
+        } else {
+            assert_eq!(ops.len(), 1, "a ClientOp carries exactly one op");
+            Operation::ClientOp {
+                ctx,
+                payload: ClientOpMessage {
+                    payload: ops.remove(0),
+                },
+            }
+        }
+    }
+
+    fn form_name(as_batch: bool) -> &'static str {
+        if as_batch {
+            "OpBatch"
+        } else {
+            "ClientOp"
+        }
+    }
+
+    /// An admissible tag is decided on its text alone: the admission resolves no
+    /// store and reads no slot for it, at the shared function and through both
+    /// handlers on every origin (TG-MRK-001).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // three views of one cost claim, asserted once
+    async fn admissible_or_tag_costs_no_store_resolution_and_no_read() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        const MAP: &str = "tag-cost";
+
+        let mut failures: Vec<String> = Vec::new();
+
+        // (A) The shared function, driven directly. COUNTED: calls of the store
+        // resolver handed to it, loads the data store saw, stores the factory
+        // built. Nothing else runs here, so every count is the admission's.
+        {
+            let probed = plain_probed_service().await;
+            let resolutions = AtomicUsize::new(0);
+            let resolver_for = |key: &'static str| {
+                let (resolutions, factory) = (&resolutions, &probed.factory);
+                move || {
+                    resolutions.fetch_add(1, AtomicOrdering::SeqCst);
+                    factory.get_or_create(MAP, hash_to_partition(key))
+                }
+            };
+
+            // Admissible tags only: no resolution, no load, no store built.
+            let result = admit_or_tags(
+                resolver_for("fn-clean"),
+                MAP,
+                "fn-clean",
+                ["TOP", "a:b", "1:0:n-1", "a b"],
+            )
+            .await;
+            let (resolved, loaded, created) = (
+                resolutions.load(AtomicOrdering::SeqCst),
+                probed.loads.loaded(),
+                probed.stores.created(),
+            );
+            if result.is_err() || resolved != 0 || !loaded.is_empty() || !created.is_empty() {
+                failures.push(format!(
+                    "(A) admissible tags: want Ok with 0 resolutions, no load and no store built, \
+                     got {result:?}, {resolved} resolutions, loads {loaded:?}, stores {created:?}"
+                ));
+            }
+
+            // One inadmissible tag behind an admissible one, on a key that is
+            // neither resident nor durable: exactly one resolution and one read,
+            // and the call stops at that refusal (the third tag is never
+            // looked up). This is also the control for the probe: an admission
+            // read IS visible in the load log.
+            resolutions.store(0, AtomicOrdering::SeqCst);
+            let result = admit_or_tags(
+                resolver_for("fn-absent"),
+                MAP,
+                "fn-absent",
+                ["TOP", "a#b", "c|d"],
+            )
+            .await
+            .map(|()| OperationResponse::Empty);
+            let (resolved, loaded) = (
+                resolutions.load(AtomicOrdering::SeqCst),
+                probed.loads.loaded(),
+            );
+            let refusal = inadmissible_tag_refusal(&result, MAP, "fn-absent", "a#b");
+            if refusal.is_err() || resolved != 1 || loaded != ["fn-absent"] {
+                failures.push(format!(
+                    "(A) one inadmissible tag on an absent key: want the refusal with 1 \
+                     resolution and loads [\"fn-absent\"], got {refusal:?}, {resolved} \
+                     resolutions, loads {loaded:?}"
+                ));
+            }
+
+            // Several inadmissible tags the slot already holds, so every one of
+            // them reaches the lookup: still one resolution for the whole call.
+            seed_slot(
+                &probed.factory,
+                MAP,
+                "fn-held",
+                RecordValue::OrMap {
+                    records: vec![OrMapEntry {
+                        value: Value::String("seeded".into()),
+                        tag: "1:0:n#1".to_string(),
+                        timestamp: make_timestamp(),
+                    }],
+                    tombstones: vec!["2:0:n#1".to_string(), "a|b".to_string()],
+                },
+            )
+            .await;
+            resolutions.store(0, AtomicOrdering::SeqCst);
+            let result = admit_or_tags(
+                resolver_for("fn-held"),
+                MAP,
+                "fn-held",
+                ["1:0:n#1", "TOP", "2:0:n#1", "a|b"],
+            )
+            .await;
+            let resolved = resolutions.load(AtomicOrdering::SeqCst);
+            if result.is_err() || resolved != 1 {
+                failures.push(format!(
+                    "(A) three held inadmissible tags: want Ok with exactly 1 resolution, got \
+                     {result:?} with {resolved}"
+                ));
+            }
+        }
+
+        // (B) Through `handle_op_batch`, with the admission isolated by a
+        // refusal. The batch ends in an op that is refused, and a refusal is
+        // decided before the first apply, so NOTHING of this batch is applied:
+        // every load and every store built during the request is the
+        // admission's own. The admissible ops ahead of the refused one must
+        // contribute none, which leaves exactly the refused key's read and the
+        // refused key's store.
+        let (key_tag, key_put, key_add, key_refused) =
+            ("cost-tag", "cost-put", "cost-add", "cost-refused");
+        let refused_partition = hash_to_partition(key_refused);
+        assert!(
+            [key_tag, key_put, key_add]
+                .iter()
+                .all(|key| hash_to_partition(key) != refused_partition),
+            "precondition: the admissible keys must live in other partitions than the refused \
+             key, or a store resolved for them could not be told from its store"
+        );
+        for via in EVERY_ORIGIN {
+            let probed = plain_probed_service().await;
+            let mut ops = vec![
+                probe_or_remove(MAP, key_tag, "TOP"),
+                probe_lww_put(MAP, key_put, rmpv::Value::String("v".into())),
+            ];
+            if matches!(via, Via::Trusted) {
+                // The one branch that checks an OR_ADD's own tag.
+                ops.push(probe_or_add(MAP, key_add, "1:0:n-1"));
+            }
+            ops.push(probe_or_remove(MAP, key_refused, "a|b"));
+
+            let result = Arc::clone(&probed.svc)
+                .oneshot(probe_operation(
+                    true,
+                    ctx_via(via, probed.conn, key_tag),
+                    ops,
+                ))
+                .await;
+
+            let refusal = inadmissible_tag_refusal(&result, MAP, key_refused, "a|b");
+            let (loaded, created) = (probed.loads.loaded(), probed.stores.created());
+            if refusal.is_err()
+                || loaded != [key_refused]
+                || created != [(MAP.to_string(), refused_partition)]
+            {
+                failures.push(format!(
+                    "(B) {via:?} / OpBatch ending in a refused op: want the refusal, loads \
+                     [{key_refused:?}] and the one store of partition {refused_partition}, got \
+                     {refusal:?}, loads {loaded:?}, stores {created:?}"
+                ));
+            }
+        }
+
+        // (C) Through both handlers, for a request that IS applied. The apply
+        // reads the slot itself, so the admission is isolated by subtraction:
+        // the same op is run through the whole request on one fresh service and
+        // through the apply alone (`apply_single_op` / `apply_batch_op`, called
+        // directly, which contain no admission) on an identical fresh service.
+        // COUNTED: the keys each data store was asked to load and the stores
+        // each factory built. With no query subscription a request is exactly
+        // admission + apply, so equal logs mean the admission added no read and
+        // resolved no store of its own. The key is neither resident nor
+        // durable, so a read by the admission could not hide behind the
+        // apply's: an absent key is loaded again on every read.
+        for via in EVERY_ORIGIN {
+            for as_batch in [false, true] {
+                for (what, op) in [
+                    (
+                        "admissible OR_REMOVE",
+                        probe_or_remove(MAP, "cost-applied", "TOP"),
+                    ),
+                    (
+                        "LWW PUT",
+                        probe_lww_put(MAP, "cost-applied", rmpv::Value::String("v".into())),
+                    ),
+                ] {
+                    let request = plain_probed_service().await;
+                    let result = Arc::clone(&request.svc)
+                        .oneshot(probe_operation(
+                            as_batch,
+                            ctx_via(via, request.conn, &op.key),
+                            vec![op.clone()],
+                        ))
+                        .await;
+
+                    let apply_only = plain_probed_service().await;
+                    // The regenerating branches hand the apply a server stamp.
+                    let stamp = (!matches!(via, Via::Trusted)).then(make_timestamp);
+                    let applied = if as_batch {
+                        apply_only
+                            .svc
+                            .apply_batch_op(&op, stamp.as_ref(), None)
+                            .await
+                    } else {
+                        apply_only
+                            .svc
+                            .apply_single_op(&op, hash_to_partition(&op.key), stamp.as_ref())
+                            .await
+                            .map(|_| ())
+                    };
+
+                    let request_cost = (request.loads.loaded(), request.stores.created());
+                    let apply_cost = (apply_only.loads.loaded(), apply_only.stores.created());
+                    if result.is_err() || applied.is_err() || request_cost != apply_cost {
+                        failures.push(format!(
+                            "(C) {via:?} / {}, {what}: want the request to cost what its apply \
+                             alone costs; request {result:?} with (loads, stores) \
+                             {request_cost:?}, apply alone {applied:?} with {apply_cost:?}",
+                            form_name(as_batch)
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} sub-cases failed:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    /// When the slot cannot be read the admission fails closed: the request
+    /// gets the transient error, never an acceptance and never a refusal, and
+    /// nothing of it is applied (TG-MRK-001).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // the function and every ingest site, asserted once
+    async fn unreadable_slot_fails_the_or_admission_closed() {
+        const MAP: &str = "tag-unreadable";
+
+        let mut failures: Vec<String> = Vec::new();
+
+        // (A) The shared function. Its store resolver cannot fail by type (it
+        // returns the store), so the one failure there is to inject is the
+        // read's.
+        {
+            let probed = plain_probed_service().await;
+            let resolver = || {
+                probed
+                    .factory
+                    .get_or_create(MAP, hash_to_partition("fn-key"))
+            };
+
+            probed.loads.arm_load_failure();
+            let result = admit_or_tags(resolver, MAP, "fn-key", ["a#b"]).await;
+            if !matches!(result, Err(OperationError::Internal(_))) {
+                failures.push(format!(
+                    "(A) inadmissible tag, failing read: want Err(Internal), got {result:?}"
+                ));
+            }
+            if probed.loads.load_failure_armed() {
+                failures.push("(A) the inadmissible tag never read the slot".to_string());
+            }
+
+            // Control: an admissible tag never reaches the failing read.
+            probed.loads.arm_load_failure();
+            let result = admit_or_tags(resolver, MAP, "fn-key", ["TOP"]).await;
+            if result.is_err() || !probed.loads.load_failure_armed() {
+                failures.push(format!(
+                    "(A) admissible tag, failing read armed: want Ok with the failure still \
+                     armed, got {result:?}, armed {}",
+                    probed.loads.load_failure_armed()
+                ));
+            }
+        }
+
+        // (B) Through the service. ONE load is failed, on a key that is neither
+        // resident nor durable. The admission's read is the first read of the
+        // request, so it takes the failure; had the admission let the request
+        // through, the apply would have loaded the key a second time,
+        // successfully, and stored the tag. So: the error is `Internal`, the
+        // load log holds the key exactly once, and the slot is still absent.
+        let mut cases: Vec<(Via, bool, &str, ClientOp)> = Vec::new();
+        for via in EVERY_ORIGIN {
+            for as_batch in [false, true] {
+                cases.push((
+                    via,
+                    as_batch,
+                    "OR_REMOVE",
+                    probe_or_remove(MAP, "unreadable", "a#b"),
+                ));
+            }
+        }
+        for as_batch in [false, true] {
+            cases.push((
+                Via::Trusted,
+                as_batch,
+                "OR_ADD",
+                probe_or_add(MAP, "unreadable", "a#b"),
+            ));
+        }
+        for (via, as_batch, what, op) in cases {
+            let probed = plain_probed_service().await;
+            probed.loads.arm_load_failure();
+
+            let result = Arc::clone(&probed.svc)
+                .oneshot(probe_operation(
+                    as_batch,
+                    ctx_via(via, probed.conn, &op.key),
+                    vec![op],
+                ))
+                .await;
+
+            let mut problems: Vec<String> = Vec::new();
+            if !matches!(result, Err(OperationError::Internal(_))) {
+                problems.push(format!("want Err(Internal), got {result:?}"));
+            }
+            // Read before `slot_image`, which loads the key itself.
+            let loaded = probed.loads.loaded();
+            if loaded != ["unreadable"] {
+                problems.push(format!(
+                    "want the key loaded once, by the admission alone, got {loaded:?}"
+                ));
+            }
+            let slot = slot_image(&probed.factory, MAP, "unreadable").await;
+            if slot != "absent" {
+                problems.push(format!("the tag was stored: {slot}"));
+            }
+            if !problems.is_empty() {
+                failures.push(format!(
+                    "(B) {via:?} / {}, {what} \"a#b\" on an unreadable slot: {}",
+                    form_name(as_batch),
+                    problems.join("; ")
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} sub-cases failed:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    /// The tag admission runs after the checks that refuse an op outright: an
+    /// op the caller may not write keeps its authorisation error and causes no
+    /// slot read, and a batch that fails schema validation keeps its schema
+    /// error (TG-MRK-001).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // every refusing check on every branch that runs it, asserted once
+    async fn or_admission_runs_after_authorisation_and_schema_checks() {
+        const MAP: &str = "tag-order";
+        const KEY: &str = "order-key";
+
+        #[derive(Clone, Copy, Debug)]
+        enum Denied {
+            /// Strict service, connection never authenticated.
+            UnauthenticatedConnection,
+            /// A connection whose context carries the anonymous origin.
+            AnonymousOverConnection,
+            /// Strict service, HTTP origin with no validated identity.
+            HttpWithoutPrincipal,
+        }
+
+        let mut failures: Vec<String> = Vec::new();
+
+        // (A) Refused by `admit_write`. The op is an OR_REMOVE of an
+        // inadmissible tag on a key that is neither resident nor durable: run
+        // first, the tag admission would read the slot (one load, one store
+        // built) and answer `SchemaInvalid`. COUNTED: loads and stores built
+        // during the request. A refused request applies nothing, so anything
+        // counted is the admission's.
+        for denied in [
+            Denied::UnauthenticatedConnection,
+            Denied::AnonymousOverConnection,
+            Denied::HttpWithoutPrincipal,
+        ] {
+            for as_batch in [false, true] {
+                let probed = match denied {
+                    Denied::AnonymousOverConnection => plain_probed_service().await,
+                    Denied::UnauthenticatedConnection | Denied::HttpWithoutPrincipal => {
+                        probed_service(
+                            make_strict_validator(),
+                            Arc::new(SchemaService::new()),
+                            false,
+                        )
+                        .await
+                    }
+                };
+                let ctx = match denied {
+                    Denied::UnauthenticatedConnection => ctx_via(Via::Connection, probed.conn, KEY),
+                    Denied::AnonymousOverConnection => {
+                        let mut ctx = ctx_via(Via::Connection, probed.conn, KEY);
+                        ctx.caller_origin = CallerOrigin::Anonymous;
+                        ctx
+                    }
+                    Denied::HttpWithoutPrincipal => {
+                        let mut ctx = ctx_via(Via::Http, probed.conn, KEY);
+                        ctx.principal = None;
+                        ctx
+                    }
+                };
+
+                let result = Arc::clone(&probed.svc)
+                    .oneshot(probe_operation(
+                        as_batch,
+                        ctx,
+                        vec![probe_or_remove(MAP, KEY, "a|b")],
+                    ))
+                    .await;
+
+                let kept_its_error = match denied {
+                    Denied::AnonymousOverConnection => matches!(
+                        &result,
+                        Err(OperationError::Forbidden { map_name }) if map_name == MAP
+                    ),
+                    Denied::UnauthenticatedConnection | Denied::HttpWithoutPrincipal => {
+                        matches!(&result, Err(OperationError::Unauthorized))
+                    }
+                };
+                let (loaded, created) = (probed.loads.loaded(), probed.stores.created());
+                if !kept_its_error || !loaded.is_empty() || !created.is_empty() {
+                    failures.push(format!(
+                        "(A) {denied:?} / {}: want the authorisation error with no load and no \
+                         store built, got {result:?}, loads {loaded:?}, stores {created:?}",
+                        form_name(as_batch)
+                    ));
+                }
+            }
+        }
+
+        // Control for (A): the same op from a caller that may write is refused
+        // for its tag, and that refusal's read shows in the load log.
+        for as_batch in [false, true] {
+            let probed = probed_service(
+                make_strict_validator(),
+                Arc::new(SchemaService::new()),
+                true,
+            )
+            .await;
+            let result = Arc::clone(&probed.svc)
+                .oneshot(probe_operation(
+                    as_batch,
+                    ctx_via(Via::Connection, probed.conn, KEY),
+                    vec![probe_or_remove(MAP, KEY, "a|b")],
+                ))
+                .await;
+            let refusal = inadmissible_tag_refusal(&result, MAP, KEY, "a|b");
+            let loaded = probed.loads.loaded();
+            if refusal.is_err() || loaded != [KEY] {
+                failures.push(format!(
+                    "(A) control, authenticated connection / {}: want the tag refusal and loads \
+                     [{KEY:?}], got {refusal:?}, loads {loaded:?}",
+                    form_name(as_batch)
+                ));
+            }
+        }
+
+        // (B) Refused by `validate_schema_for_op`. No single op can fail both
+        // checks: the classes whose tag is checked (an OR_REMOVE, a trusted
+        // OR_ADD) carry no schema-validated value. So the order is observable
+        // across the ops of one batch: an op that fails its schema, ahead of
+        // an op whose tag would be refused, keeps the schema error, and the
+        // later op's slot is never read. A tag pass run ahead of the schema
+        // pass would answer with the tag refusal and one load instead.
+        for via in [Via::Connection, Via::Http, Via::Anonymous] {
+            let schema = Arc::new(SchemaService::new());
+            schema
+                .register_schema("typed-map", make_required_string_schema())
+                .await
+                .expect("register the schema");
+            let probed = probed_service(make_validator(), schema, true).await;
+
+            let result = Arc::clone(&probed.svc)
+                .oneshot(probe_operation(
+                    true,
+                    ctx_via(via, probed.conn, "order-typed"),
+                    vec![
+                        probe_lww_put(
+                            "typed-map",
+                            "order-typed",
+                            make_rmpv_map(vec![("name", rmpv::Value::Integer(42.into()))]),
+                        ),
+                        probe_or_remove(MAP, KEY, "a|b"),
+                    ],
+                ))
+                .await;
+
+            let kept_its_error = matches!(
+                &result,
+                Err(OperationError::SchemaInvalid { map_name, errors })
+                    if map_name == "typed-map"
+                        && errors.iter().all(|error| !error.contains("OR tag"))
+            );
+            let (loaded, created) = (probed.loads.loaded(), probed.stores.created());
+            if !kept_its_error || !loaded.is_empty() || !created.is_empty() {
+                failures.push(format!(
+                    "(B) {via:?} / OpBatch [schema-invalid PUT, OR_REMOVE \"a|b\"]: want the \
+                     schema error of the first op with no load and no store built, got \
+                     {result:?}, loads {loaded:?}, stores {created:?}"
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} sub-cases failed:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
 }
