@@ -2368,11 +2368,18 @@ mod tests {
             .unwrap();
         assert_eq!(reg.get_subscriptions_for_map("my-map").len(), 1);
 
-        svc.clone()
+        let resp = svc
+            .clone()
             .oneshot(make_unsubscribe_op("sub-1"))
             .await
             .unwrap();
         assert!(reg.get_subscriptions_for_map("my-map").is_empty());
+        // An unsubscribe is not an op batch: an acknowledgement of it would name
+        // no operation the client sent, so it must produce no frame.
+        assert!(
+            matches!(resp, OperationResponse::Empty),
+            "an unsubscribe must be answered with no frame, got {resp:?}"
+        );
     }
 
     #[tokio::test]
@@ -2634,7 +2641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_search_unsubscribe_removes_subscription_returns_ack() {
+    async fn hybrid_search_unsubscribe_removes_subscription_and_answers_with_no_frame() {
         let svc = make_service();
 
         // Subscribe first.
@@ -2656,8 +2663,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(resp, OperationResponse::Ack { .. }),
-            "expected Ack after unsubscribe"
+            matches!(resp, OperationResponse::Empty),
+            "a hybrid unsubscribe must be answered with no frame, got {resp:?}"
         );
 
         // Subscription removed.
@@ -2668,16 +2675,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_search_unsubscribe_nonexistent_returns_ack() {
-        // Unsubscribing a non-existent subscription is a no-op that still returns Ack.
+    async fn hybrid_search_unsubscribe_of_an_unknown_subscription_answers_with_no_frame() {
+        // Unsubscribing a subscription the server does not hold is a no-op, and a
+        // no-op has even less to acknowledge than a real removal.
         let svc = make_service();
         let resp = svc
             .oneshot(make_hybrid_unsub_op("no-such-sub"))
             .await
             .unwrap();
         assert!(
-            matches!(resp, OperationResponse::Ack { .. }),
-            "expected Ack even for non-existent subscription"
+            matches!(resp, OperationResponse::Empty),
+            "unsubscribing an unknown subscription must be answered with no frame, got {resp:?}"
         );
     }
 

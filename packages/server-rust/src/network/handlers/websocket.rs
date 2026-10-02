@@ -3038,4 +3038,111 @@ mod tests {
             "no ack at all, even though nothing before the transient was accepted"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // No frame where there is no client operation to give a verdict on
+    // -----------------------------------------------------------------------
+
+    /// Closes the channel and decodes every frame queued on it, in wire order.
+    async fn queued_messages(
+        tx: mpsc::Sender<OutboundMessage>,
+        mut rx: mpsc::Receiver<OutboundMessage>,
+    ) -> Vec<TopGunMessage> {
+        // The drain below ends only once every sender is gone.
+        drop(tx);
+        let mut frames = Vec::new();
+        while let Some(outbound) = rx.recv().await {
+            match outbound {
+                OutboundMessage::Binary(bytes) => frames.push(bytes),
+                OutboundMessage::Close(reason) => {
+                    panic!("the exchange must not close the connection: {reason:?}")
+                }
+            }
+        }
+        decode_frames(&frames)
+    }
+
+    /// An `OP_BATCH` with no operations is answered with no frame.
+    ///
+    /// An acknowledgement here names no operation, and a client reads a
+    /// non-numeric `lastId` as "every pending operation was accepted" — so the
+    /// one frame this exchange could send is the one that deletes writes the
+    /// server never saw.
+    #[tokio::test]
+    async fn empty_op_batch_emits_no_frame() {
+        let fx = build_fold_fixture(Vec::new(), None).await;
+
+        let msgs = decode_frames(&dispatch_batch_frames(&fx, Vec::new()).await);
+
+        assert!(
+            msgs.is_empty(),
+            "an empty op batch has no operation to give a verdict on, got {msgs:?}"
+        );
+    }
+
+    /// An empty `OP_BATCH` carried inside a `BATCH` envelope is answered with
+    /// no frame either.
+    ///
+    /// The envelope bypasses the top-level empty-batch branch: the inner message
+    /// is classified and dispatched to the domain service like any other, so its
+    /// response is mapped to a frame separately from the top-level path.
+    #[tokio::test]
+    async fn nested_empty_op_batch_emits_no_frame() {
+        let fx = build_fold_fixture(Vec::new(), None).await;
+        let inner = TopGunMessage::OpBatch(OpBatchMessage {
+            payload: OpBatchPayload {
+                ops: Vec::new(),
+                write_concern: None,
+                timeout: None,
+            },
+        });
+        let inner_bytes = rmp_serde::to_vec_named(&inner).expect("inner OP_BATCH serializes");
+        let batch = BatchMessage {
+            count: 1,
+            data: frame_inner_item(&inner_bytes),
+        };
+        let (tx, rx) = mpsc::channel(64);
+
+        unpack_and_dispatch_batch(
+            &batch,
+            fx.conn_id,
+            Some(fold_principal()),
+            &fx.classify_svc,
+            &fx.dispatcher,
+            &tx,
+        )
+        .await;
+        let msgs = queued_messages(tx, rx).await;
+
+        // Without this the test would also pass for an inner message that was
+        // dropped before dispatch, which says nothing about the response mapping.
+        assert_eq!(
+            fx.service_calls.load(Ordering::Relaxed),
+            1,
+            "precondition: the inner empty batch reached the domain service"
+        );
+        assert!(
+            msgs.is_empty(),
+            "an empty op batch has no operation to give a verdict on, got {msgs:?}"
+        );
+    }
+
+    /// The bare acknowledgement response is mapped to no frame.
+    ///
+    /// It carries only the server's call id — a counter shared by every
+    /// connection and message kind. Put on the wire as `lastId`, a client takes
+    /// it for one of its own operation ids and deletes every pending write at or
+    /// below it.
+    #[tokio::test]
+    async fn ack_response_variant_emits_no_frame() {
+        let (tx, rx) = mpsc::channel(8);
+
+        send_operation_response(OperationResponse::Ack { call_id: 7 }, &tx).await;
+        let msgs = queued_messages(tx, rx).await;
+
+        assert!(
+            msgs.is_empty(),
+            "a call id is not a client operation id and must not reach the wire, got {msgs:?}"
+        );
+    }
 }
