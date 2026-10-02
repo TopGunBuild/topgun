@@ -486,16 +486,13 @@ impl CrdtService {
             .record_store_factory
             .get_or_create(&op.map_name, partition_id);
 
-        // Determine the operation type and build the event payload.
-        // Priority: explicit op_type REMOVE / tombstone -> REMOVE
-        //           or_record present   -> OR_ADD
-        //           or_tag present      -> OR_REMOVE
-        //           otherwise           -> LWW PUT
-
-        let is_remove = op.op_type.as_deref() == Some("REMOVE") || matches!(&op.record, Some(None));
-
-        let is_or_add = matches!(&op.or_record, Some(Some(_)));
-        let is_or_remove = matches!(&op.or_tag, Some(Some(_))) && op.or_record.is_none();
+        // Determine the operation type and build the event payload. The class
+        // comes from the one classifier the write admission also reads, so an
+        // op can never be admitted as one kind and applied as another.
+        let class = classify_op(op);
+        let is_remove = class == OpClass::Remove;
+        let is_or_add = class == OpClass::OrAdd;
+        let is_or_remove = class == OpClass::OrRemove;
 
         if is_remove {
             // REMOVE/OR_REMOVE: no timestamp sanitization needed (removes are idempotent).
@@ -1161,6 +1158,45 @@ impl CrdtService {
                 })
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Op classification
+// ---------------------------------------------------------------------------
+
+/// What a `ClientOp` does to its key's slot, which decides both how it is
+/// applied and which of its tags (if any) it would store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpClass {
+    /// Whole-key remove: drops the slot and stores no tag.
+    Remove,
+    /// OR-Map add: stores one live record under a tag.
+    OrAdd,
+    /// OR-Map remove: stores its tag as a tombstone.
+    OrRemove,
+    /// Last-Write-Wins put: stores no tag.
+    Lww,
+}
+
+/// Classifies `op` by the fields it carries, in priority order:
+///
+/// 1. explicit `op_type == "REMOVE"`, or a tombstone `record: Some(None)` → [`OpClass::Remove`];
+/// 2. `or_record: Some(Some(_))` → [`OpClass::OrAdd`], whatever `or_tag` says;
+/// 3. `or_tag: Some(Some(_))` with `or_record` absent → [`OpClass::OrRemove`]
+///    (`or_record: Some(None)` beside an `or_tag` is not a remove);
+/// 4. anything else → [`OpClass::Lww`].
+///
+/// Field inspection only: it runs once per op on the write hot path.
+fn classify_op(op: &ClientOp) -> OpClass {
+    if op.op_type.as_deref() == Some("REMOVE") || matches!(&op.record, Some(None)) {
+        OpClass::Remove
+    } else if matches!(&op.or_record, Some(Some(_))) {
+        OpClass::OrAdd
+    } else if matches!(&op.or_tag, Some(Some(_))) && op.or_record.is_none() {
+        OpClass::OrRemove
+    } else {
+        OpClass::Lww
     }
 }
 
