@@ -228,6 +228,18 @@ export class AutoConnectionProvider implements IConnectionProvider {
   }
 
   /**
+   * The transport of the provider chosen by `connect()`, `undefined` while none
+   * is active (before `connect()` has chosen one and after `close()`).
+   *
+   * Taken from the active provider rather than from the HTTP-mode flag: that
+   * flag is already set for an HTTP-only configuration that has not connected
+   * yet, and says nothing about a provider being active.
+   */
+  get transport(): 'websocket' | 'http' | undefined {
+    return this.activeProvider?.transport;
+  }
+
+  /**
    * Whether currently using HTTP mode.
    */
   isUsingHttp(): boolean {
