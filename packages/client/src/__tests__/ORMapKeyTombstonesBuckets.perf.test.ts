@@ -18,10 +18,15 @@ import type { PersistedKeyTombstones } from '../utils/orMapKeyTombstones';
  * (about 60 ms) on every remove. Stored in buckets, one write carries only the
  * keys that share a bucket.
  *
- * These are regression guards, not benchmarks. Each time bound is more than
- * ten times the time measured for it (a 2021 laptop, under this test runner),
- * so a slower CI machine does not trip it, and the size bound is a ratio, so
- * it does not depend on the machine at all.
+ * These are regression guards, not benchmarks. The size bound is a ratio, so
+ * it does not depend on the machine at all. The two time bounds are wall-clock
+ * and sub-millisecond work is at the mercy of whatever else the runner is
+ * doing, so each is several hundred times the time measured for it (a 2021
+ * laptop, under this test runner): a scheduling stall on a loaded CI machine
+ * does not trip them, while the cost they guard against, a return to one
+ * whole-map entry (about 60 ms to clone on that laptop, more on a slower
+ * machine, and 100 times the bucket's size), is caught by the size bound on
+ * any machine.
  */
 
 const KEYS = 1_000;
@@ -39,17 +44,17 @@ const LARGEST_BUCKET_MAX_SHARE = 0.05;
  * Structured clone of the largest bucket value, which is what an IndexedDB
  * write of it costs on the calling thread.
  * Measured: 0.28 ms (the whole attribution in one entry: 58 to 62 ms).
- * Bound: 20 ms.
+ * Bound: 250 ms, about 900 times the measurement.
  */
-const LARGEST_BUCKET_CLONE_BOUND_MS = 20;
+const LARGEST_BUCKET_CLONE_BOUND_MS = 250;
 
 /**
  * Building the largest bucket's value from the map, as a local remove does
  * before it commits: one pass over every attributed key to find the bucket's
  * keys, then a copy of their tags.
- * Measured: 0.36 ms. Bound: 20 ms.
+ * Measured: 0.36 ms. Bound: 250 ms, about 700 times the measurement.
  */
-const BUCKET_SERIALIZE_BOUND_MS = 20;
+const BUCKET_SERIALIZE_BOUND_MS = 250;
 
 const keyOf = (i: number): string => `key-${i}`;
 
