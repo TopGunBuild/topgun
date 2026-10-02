@@ -802,12 +802,13 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:**
   (a) No op is ever both covered by an `OP_ACK` and named in an `OP_REJECTED`. (b) If the exchange
   ends in an `OP_ACK`, every id-bearing op of the batch has exactly one verdict: covered by the ack
-  (`results` when present, else the numeric prefix) or named in an `OP_REJECTED`. (b') If the
-  exchange ends with `OP_REJECTED` frames and no ack, every id-bearing op is named in exactly one of
-  them. (c) If the exchange ends in an `ERROR` frame, only the already-emitted `OP_REJECTED` verdicts
-  exist; no op may be marked synced client-side; every un-named op remains pending and is safe to
-  re-send because a Permanent-failed sub-batch applied nothing (TG-SYNC-003) and an accepted op's
-  re-apply is LWW-idempotent (OR-Map re-apply is the pre-existing hazard TODO-665 item 4 owns).
+  (`results` when present, else every id-bearing op of the answered batch) or named in an
+  `OP_REJECTED`. (b') If the exchange ends with `OP_REJECTED` frames and no ack, every id-bearing
+  op is named in exactly one of them. (c) If the exchange ends in an `ERROR` frame, only the
+  already-emitted `OP_REJECTED` verdicts exist; no op may be marked synced client-side; every
+  un-named op remains pending and is safe to re-send because a Permanent-failed sub-batch applied
+  nothing (TG-SYNC-003) and an accepted op's re-apply is LWW-idempotent (OR-Map re-apply is the
+  pre-existing hazard TODO-665 item 4 owns).
   (d) `OP_REJECTED{permanent: true}` is terminal across exchanges: the client never re-sends that op.
 - **Stated residue — id-less ops are outside (b)/(b') by construction,** because the clauses say
   "id-bearing": an id-less op cannot be named; a non-SDK client whose id-less op is permanently
@@ -898,3 +899,80 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Discovered by:** the per-op rejection work resolving TODO-662; it is the precondition R5's
   singleton re-dispatch is only safe under.
 - **Status:** decided, **enforced**.
+
+### TG-SYNC-004: An OP_ACK is a verdict only on operations of a batch the receiving client sent
+
+- **Scope:** every outbound frame of a client connection (`network/handlers/websocket.rs`), the
+  `OperationResponse` type a domain service answers a dispatched message with
+  (`service/operation.rs`), and the client's acknowledgement handler
+  (`packages/client/src/SyncEngine.ts`).
+- **Statement:**
+  (a) *Server.* An `OP_ACK` is emitted only in answer to a message that carries operations — a
+  `CLIENT_OP`, or an `OP_BATCH` with at least one op, top-level or inside a `BATCH` envelope — and
+  its `lastId` and `results` derive only from op ids of that message. Nothing else is answered with
+  one: not a push diff, not an unsubscribe, not an empty batch, which get no frame at all.
+  (b) *Client.* An ack whose `results` is non-empty names the accepted ops itself and needs nothing
+  more (TG-SYNC-001, TG-SYNC-002). An ack without `results` is applied only if its `lastId` is, by
+  exact string equality, the last id of a batch the client sent — and, on a connection provider
+  that declares the WebSocket transport, only if it also carries `achievedLevel`. A provider that
+  declares HTTP, or declares no transport, is decided by the match alone, because a results-less
+  HTTP acknowledgement never carries a level. An applied ack retires only ops of that batch — when
+  several sent batches share a last id, only the ops present in every one of them — never a
+  numeric prefix and never "everything pending". An ack that is not applied is not a verdict on
+  the op log at all: no op is marked synced, no durable row is deleted, and the matched record is
+  kept. (c) *Client.* A sent-batch record is given up only when its last op can no longer be sent
+  again. A record evicted under the size bound keeps its key with an empty set, which acknowledges
+  nothing. Either way a later, wider batch ending in the same op is intersected with the earlier
+  record instead of being recorded afresh, so a late ack of the earlier batch cannot retire an op
+  that batch never carried.
+- **Stated residue — the id-less `"unknown"`.** When the answered message offers no op id to name,
+  the ack still goes out, with the literal `"unknown"` in `lastId`: a client that sends id-less
+  ops has no other acknowledgement to wait for, and the string names no operation. The SDK always
+  assigns ids, so it never sends such a message, and under clause (b) it never applies that frame.
+- **Stated residue — a provider that declares no transport.** It gets the match alone, so over a
+  WebSocket to an already-released server that still sends the stray frame, a frame counter that
+  happens to equal the last id of a batch in flight is applied. Every built-in provider that
+  reaches a server declares its transport; only a third-party provider can be in this position.
+- **Maintaining code:** the response-to-frame mapping, which builds no acknowledgement of its own,
+  and the batch fold, which builds one from the ids of the batch it answers and sends no frame for
+  an empty batch (`network/handlers/websocket.rs`); the `Ack` response variant, compiled out of
+  every non-test build so that no handler can return one (`service/operation.rs`); the operation
+  handlers, the only domain code that answers with an `OP_ACK` message, and only for a message
+  that carried ops (`service/domain/crdt.rs`); the sent-batch registry — recorded when a batch is
+  handed to the transport, or reported per frame by a provider that splits a flush across nodes —
+  together with the ack handler's decision and the registry's prune and eviction
+  (`packages/client/src/SyncEngine.ts`); and the pool's rule that only a node's current socket
+  speaks for it, so a dropped socket cannot deliver a frame under the node's new connection
+  (`packages/client/src/cluster/ConnectionPool.ts`). Citations are kept line-number-free on
+  purpose, per `TG-OR-004`.
+- **Clauses (b) and (c) are enforced client-side, not by the Rust fns cited below,** and the gate
+  does not check them. Clause (b) is covered by four `packages/client` unit tests
+  (`packages/client/src/__tests__/SyncEngine.test.ts`), each of which injects, byte for byte, a
+  frame an already-released server really sends:
+  `old-server frame: a results-less OP_ACK whose lastId answers no sent batch is not a verdict`,
+  `old-server frame: a non-numeric lastId with no acceptance set is not a verdict`,
+  `old-server frame: on HTTP, an ack without achievedLevel retires the answered batch` and
+  `old-server frame: on WebSocket, a results-less OP_ACK without achievedLevel is not a verdict even when its lastId is the last id of a sent batch`.
+  They are permanent: once the current server stops producing these frames, nothing else in the
+  repository exercises them. Clause (c) is covered, in the same file, by
+  `a refused op that is still in the op log keeps its sent-batch entry, so a late ack cannot retire an op its batch never carried`
+  and
+  `an ack that matches a refused op's entry does not free the key while the op can still be sent`,
+  and the pool rule by
+  `a frame from a socket the pool has dropped is not delivered under the node's new connection`
+  (`packages/client/src/__tests__/ConnectionPool.test.ts`). `check-invariants.sh` greps only
+  `packages/server-rust/src` and `packages/server-rust/benches`, so a client citation cannot live
+  in the field below.
+- **Enforcing test:** clause (a) — `empty_op_batch_emits_no_frame`,
+  `nested_empty_op_batch_emits_no_frame` and `ack_response_variant_emits_no_frame` in
+  `websocket.rs`'s test module; `op_batch_empty_answers_with_no_frame` in `crdt.rs`;
+  `refused_push_diff_answers_with_no_frame` and
+  `ormap_push_diff_answers_with_no_frame_and_stores_data` in `sync.rs`.
+- **Violation consequence:** permanent client-side acked-loss. A client that applies an
+  acknowledgement no batch of its own earned marks pending writes synced and deletes their durable
+  op-log rows; the server never received them, nothing re-sends them, and they are missing after
+  the next reload — with no error on either side.
+- **Discovered by:** TODO-738 (a search unsubscribe or an OR-Map push diff, answered with an
+  `OP_ACK` carrying a dispatcher counter, retired writes made offline); closed by SPEC-380;
+  witnessed end-to-end by `tests/integration-rust/stray-op-ack.test.ts`.
+- **Status:** decided, **enforced** (clauses (b) and (c) client-side, as stated above).
