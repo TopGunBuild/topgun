@@ -125,6 +125,86 @@ export function serializeOrMapKeyTombstonesBucket(
   return pairs;
 }
 
+/**
+ * Tracks, per map, the periods in which an attribution bucket must not be
+ * written from the map in memory, because memory does not describe what the
+ * bucket should hold:
+ *
+ * - While the map is loading. Until the persisted attribution has been applied,
+ *   the map holds only what this session added, and a bucket written from it
+ *   would replace the persisted one with that fragment.
+ * - While the map is being reset. The reset empties the buckets one write at a
+ *   time and only then clears the map, so a bucket written in between would be
+ *   refilled from attribution that is about to be discarded, and stay on disk
+ *   after the clear.
+ *
+ * A writer that can wait does so (`whenReleased`) and writes afterwards. One
+ * that cannot, because its value must be built synchronously for a commit,
+ * leaves the bucket out and records it (`defer`); whoever ends the last hold
+ * gets those buckets back and decides whether they are still worth writing.
+ *
+ * Holds on one map can overlap (a reset can start while the map is loading), so
+ * they are counted.
+ */
+export class OrMapKeyTombstonesWriteHolds {
+  private readonly holds = new Map<
+    string,
+    { count: number; deferred: Set<string>; released: Promise<void>; release: () => void }
+  >();
+
+  /** Starts a hold on `mapName`. Every call must be matched by one `end`. */
+  begin(mapName: string): void {
+    const hold = this.holds.get(mapName);
+    if (hold) {
+      hold.count++;
+      return;
+    }
+    let release: () => void = () => undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.holds.set(mapName, { count: 1, deferred: new Set(), released, release });
+  }
+
+  isHeld(mapName: string): boolean {
+    return this.holds.has(mapName);
+  }
+
+  /** Records a bucket of a held map that a writer left out. */
+  defer(mapName: string, bucket: string): void {
+    this.holds.get(mapName)?.deferred.add(bucket);
+  }
+
+  /**
+   * Resolves when the hold that is on `mapName` now has ended. A new hold can
+   * begin before the waiter runs again, so a writer re-checks `isHeld` after
+   * the wait and builds its value only once that check passes, with no `await`
+   * in between.
+   */
+  whenReleased(mapName: string): Promise<void> {
+    return this.holds.get(mapName)?.released ?? Promise.resolve();
+  }
+
+  /**
+   * Ends one hold on `mapName`.
+   *
+   * `keepDeferred` false discards the buckets deferred so far: the holder knows
+   * that writing them from memory would be wrong or pointless.
+   *
+   * @returns the deferred buckets to write now, once the last hold has ended;
+   * empty while another hold is still on the map
+   */
+  end(mapName: string, keepDeferred: boolean): string[] {
+    const hold = this.holds.get(mapName);
+    if (!hold) return [];
+    if (!keepDeferred) hold.deferred.clear();
+    if (--hold.count > 0) return [];
+    this.holds.delete(mapName);
+    hold.release();
+    return Array.from(hold.deferred);
+  }
+}
+
 /** The part of a storage adapter that loading and resetting the attribution need. */
 type AttributionStorage = Pick<IStorageAdapter, 'getAllMetaKeys' | 'getMeta' | 'setMeta'>;
 
@@ -175,8 +255,11 @@ export async function loadOrMapKeyTombstones(
  * left non-empty would come back on the next load as tombstones the server
  * does not attribute to anything.
  *
- * Call it BEFORE the in-memory map is cleared. A rejection propagates, and the
- * caller must then leave the map as it is. Buckets are written one at a time,
+ * Call it BEFORE the in-memory map is cleared, and with attribution writes of
+ * the map held (`OrMapKeyTombstonesWriteHolds`) until the clear has run: the
+ * buckets are emptied over many awaited writes, and a bucket written from the
+ * not-yet-cleared map in between would be refilled and outlive the clear. A
+ * rejection propagates, and the caller must then leave the map as it is. Buckets are written one at a time,
  * so a failure part-way leaves some of them empty on disk while memory still
  * holds the full attribution. That is the safe direction: a reload sees less
  * attribution than the server has, the Merkle roots differ, and one sync walk

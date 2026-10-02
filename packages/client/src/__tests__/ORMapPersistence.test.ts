@@ -5,7 +5,9 @@ import {
   orMapKeyTombstonesBucketKey,
   orMapKeyTombstonesBucketKeys,
   orMapKeyTombstonesBucketOf,
+  OrMapKeyTombstonesWriteHolds,
   restoreOrMapKeyTombstones,
+  serializeOrMapKeyTombstonesBucket,
 } from '../utils/orMapKeyTombstones';
 import { logger } from '../utils/logger';
 
@@ -649,6 +651,158 @@ describe('ORMap per-key tombstone attribution persistence', () => {
     });
   });
 
+  describe('a local remove that commits while a reset is running that then fails', () => {
+    test('has its bucket written after all, from the map the failed reset left intact', async () => {
+      const keys = keysInDistinctBuckets(2);
+      const client = newClient();
+      const map = client.getORMap<string, string>(MAP);
+      for (const key of keys) {
+        map.add(key, 'gone');
+        map.add(key, 'kept');
+      }
+      await settle();
+      const goneTags = new Map(keys.map((key) => [key, map.remove(key, 'gone')[0]]));
+      await settle();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the full-resync REPLACE is private to the engine and only reachable from a sync response
+      const engine = (client as any).syncEngine;
+
+      // The reset empties one bucket, is held at the second, and fails there.
+      let failReset: () => void = () => undefined;
+      const resetGate = new Promise<void>((resolve) => {
+        failReset = resolve;
+      });
+      let bucketsEmptied = 0;
+      const setMeta = storage.setMeta.bind(storage);
+      const setMetaSpy = jest.spyOn(storage, 'setMeta').mockImplementation(async (key, value) => {
+        const emptiesBucket =
+          key.startsWith(BUCKET_PREFIX) && Array.isArray(value) && value.length === 0;
+        if (emptiesBucket && ++bucketsEmptied === 2) {
+          await resetGate;
+          throw new Error('simulated durable setMeta failure');
+        }
+        return setMeta(key, value);
+      });
+      jest.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+      const replaced = engine.replaceOrMapFromSnapshot(MAP, undefined);
+      const outcome = replaced.then(
+        () => 'resolved',
+        (err: Error) => err.message,
+      );
+      await settle();
+      const emptiedKeys: string[] = [];
+      for (const key of keys) {
+        if (((await storage.getMeta(bucketKeyOf(key))) as unknown[]).length === 0) {
+          emptiedKeys.push(key);
+        }
+      }
+      expect(emptiedKeys).toHaveLength(1);
+      const target = emptiedKeys[0];
+
+      const [keptTag] = map.remove(target, 'kept');
+      await settle();
+      // Left out of the commit while the reset runs.
+      expect(await storage.getMeta(bucketKeyOf(target))).toEqual([]);
+
+      failReset();
+      expect(await outcome).toBe('simulated durable setMeta failure');
+      setMetaSpy.mockRestore();
+      await settle();
+
+      // The reset failed closed: the map still holds everything, and the bucket
+      // the remove could not commit is on disk with what memory attributes.
+      for (const key of keys) {
+        expect(map.getKeyTombstones(key).has(goneTags.get(key) as string)).toBe(true);
+      }
+      const onDisk = new Map(
+        (await storage.getMeta(bucketKeyOf(target))) as Array<[string, string[]]>,
+      );
+      expect(sorted(onDisk.get(target) ?? [])).toEqual(
+        sorted([goneTags.get(target) as string, keptTag]),
+      );
+    });
+  });
+
+  describe('attribution write holds', () => {
+    test('a map is held until every overlapping hold has ended, and only then are the deferred buckets handed back', async () => {
+      const holds = new OrMapKeyTombstonesWriteHolds();
+      expect(holds.isHeld('m')).toBe(false);
+      await holds.whenReleased('m');
+
+      holds.begin('m');
+      holds.begin('m');
+      holds.defer('m', 'ab');
+      holds.defer('m', 'ab');
+      holds.defer('m', 'cd');
+      // Another map is not affected, and deferring for it records nothing.
+      expect(holds.isHeld('other')).toBe(false);
+      holds.defer('other', 'ef');
+      expect(holds.end('other', true)).toEqual([]);
+
+      let released = false;
+      void holds.whenReleased('m').then(() => {
+        released = true;
+      });
+
+      expect(holds.end('m', true)).toEqual([]);
+      await Promise.resolve();
+      expect(holds.isHeld('m')).toBe(true);
+      expect(released).toBe(false);
+
+      expect(holds.end('m', true).sort()).toEqual(['ab', 'cd']);
+      expect(holds.isHeld('m')).toBe(false);
+      await Promise.resolve();
+      expect(released).toBe(true);
+      // Ending a hold that is not there is harmless.
+      expect(holds.end('m', true)).toEqual([]);
+    });
+
+    test('a holder that ends with nothing worth writing discards what was deferred up to then', () => {
+      const holds = new OrMapKeyTombstonesWriteHolds();
+      holds.begin('m');
+      holds.begin('m');
+      holds.defer('m', 'ab');
+      expect(holds.end('m', false)).toEqual([]);
+      holds.defer('m', 'cd');
+      expect(holds.end('m', true)).toEqual(['cd']);
+    });
+  });
+
+  describe('the bucket value committed with a local remove', () => {
+    test('lists the remove tags under its key once, whether the map attributes all, some or none of them', () => {
+      const map = new ORMap<string, string>(new HLC('n1'));
+      const mate = bucketMateOf('K');
+      const bucket = orMapKeyTombstonesBucketOf('K');
+      map.addKeyTombstones([
+        [mate, ['mate-tag']],
+        ['K', ['t1']],
+      ]);
+
+      const some = new Map(
+        serializeOrMapKeyTombstonesBucket(map, bucket, { key: 'K', tags: ['t1', 't2'] }),
+      );
+      expect(some.get('K')).toEqual(['t1', 't2']);
+      expect(some.get(mate)).toEqual(['mate-tag']);
+
+      const all = new Map(
+        serializeOrMapKeyTombstonesBucket(map, bucket, { key: 'K', tags: ['t1'] }),
+      );
+      expect(all.get('K')).toEqual(['t1']);
+
+      map.setKeyTombstones('K', []);
+      const none = serializeOrMapKeyTombstonesBucket(map, bucket, { key: 'K', tags: ['t1', 't2'] });
+      expect(none.filter(([key]) => key === 'K')).toEqual([['K', ['t1', 't2']]]);
+
+      // The map itself is only read.
+      expect(map.getKeyTombstones('K').size).toBe(0);
+      // Without a remove, and for a remove that took no tag, the value is the map's own.
+      expect(serializeOrMapKeyTombstonesBucket(map, bucket)).toEqual([[mate, ['mate-tag']]]);
+      expect(serializeOrMapKeyTombstonesBucket(map, bucket, { key: 'K', tags: [] })).toEqual([
+        [mate, ['mate-tag']],
+      ]);
+    });
+  });
+
   describe('bucket layout', () => {
     /** The trie path of the leaf holding `key`, read off the map's own Merkle tree. */
     const leafPathOf = (map: ORMap<string, string>, key: string): string => {
@@ -1115,6 +1269,46 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       for (const [key, tags] of expected) {
         expect(sorted(map.getKeyTombstones(key))).toEqual(tags);
       }
+    });
+
+    test('a load whose attribution cannot be listed leaves the bucket as it was, and does not keep later writes held', async () => {
+      await firstSession();
+      const before = await bucketOnDisk();
+
+      const reloaded = newClient();
+      await settle(50);
+      let fail: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        fail = resolve;
+      });
+      const listing = jest.spyOn(storage, 'getAllMetaKeys').mockImplementation(async () => {
+        await gate;
+        throw new Error('simulated listing failure');
+      });
+      jest.spyOn(logger, 'error').mockImplementation(() => undefined);
+      const map = reloaded.getORMap<string, string>(MAP);
+      await settle(50);
+      map.add('K', 'second');
+      await settle();
+
+      map.remove('K', 'live');
+      await settle();
+      fail();
+      await settle(50);
+      listing.mockRestore();
+
+      // The map never received what the bucket holds, so the bucket the remove
+      // left out of its commit is not written from it.
+      expect(map.getSnapshot().keyTombstones.size).toBe(1);
+      expect(await bucketOnDisk()).toEqual(before);
+
+      // The hold ended with the load: the next remove commits its bucket.
+      const commitWrite = jest.spyOn(storage, 'commitWrite');
+      map.remove('K', 'second');
+      await settle();
+      const removeCommits = commitWrite.mock.calls.filter(([, op]) => isRemoveOp(op));
+      expect(removeCommits).toHaveLength(1);
+      expect(removeCommits[0][0].map((m) => m.key)).toContain(bucketKeyOf('K'));
     });
 
     test.each([

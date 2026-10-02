@@ -48,12 +48,7 @@ import { HybridQueryHandle } from './HybridQueryHandle';
 import type { HybridQueryFilter } from './HybridQueryHandle';
 import { logger } from './utils/logger';
 import { assertValidMapName, keyBelongsToLongerHeldName } from './utils/mapName';
-import {
-  loadOrMapKeyTombstones,
-  orMapKeyTombstonesBucketKey,
-  orMapKeyTombstonesBucketOf,
-  serializeOrMapKeyTombstonesBucket,
-} from './utils/orMapKeyTombstones';
+import { loadOrMapKeyTombstones } from './utils/orMapKeyTombstones';
 import { SyncState } from './SyncState';
 import type { StateChangeEvent } from './SyncStateMachine';
 import type {
@@ -822,10 +817,12 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       // full rewrite of a storage entry that server responses also rewrite, and the
       // commit can wait behind backpressure: a value captured now would then replace
       // whatever a response wrote during the wait with an older state.
-      const attributionBucket = orMapKeyTombstonesBucketOf(String(key));
+      //
+      // The bucket is left out while the map is still loading or is being reset; the
+      // engine then writes it itself, see `orMapKeyTombstonesCommitMutation`.
       const buildMutations = (): StorageMutation[] => {
         const records = orMap.getRecords(key);
-        return [
+        const mutations: StorageMutation[] = [
           {
             store: 'kv',
             type: records.length > 0 ? 'put' : 'remove',
@@ -838,16 +835,14 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
             key: `__sys__:${name}:tombstones`,
             value: orMap.getTombstones(),
           },
-          {
-            store: 'meta',
-            type: 'put',
-            key: orMapKeyTombstonesBucketKey(name, attributionBucket),
-            value: serializeOrMapKeyTombstonesBucket(orMap, attributionBucket, {
-              key: String(key),
-              tags: tombstones,
-            }),
-          },
         ];
+        const attribution = this.syncEngine.orMapKeyTombstonesCommitMutation(
+          name,
+          String(key),
+          tombstones,
+        );
+        if (attribution) mutations.push(attribution);
+        return mutations;
       };
 
       let first = true;
@@ -870,6 +865,10 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   }
 
   private async restoreORMap<K, V>(name: string, orMap: ORMap<K, V>) {
+    // Runs synchronously inside `getORMap`, before the map is handed out: see
+    // `SyncEngine.beginOrMapRestore`.
+    this.syncEngine.beginOrMapRestore(name);
+    let attributionRestored = false;
     try {
       // 1. Restore Tombstones. Kept map-wide only: a store written before per-key
       // attribution existed never recorded which key a tombstone belongs to, so these
@@ -914,9 +913,11 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       // 3. Restore per-key tombstone attribution, after the items: see
       // `restoreOrMapKeyTombstones`.
       await loadOrMapKeyTombstones(orMap, name, this.storageAdapter);
+      attributionRestored = true;
     } catch (e) {
       logger.error({ mapName: name, err: e }, 'Failed to restore ORMap');
     }
+    await this.syncEngine.endOrMapRestore(name, attributionRestored);
   }
 
   /**

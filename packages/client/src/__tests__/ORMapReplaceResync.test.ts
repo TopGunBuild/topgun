@@ -737,6 +737,19 @@ describe('SyncEngine map reset — per-key tombstone attribution', () => {
     engine.close();
   });
 
+  test('a FAILED reset does not leave attribution writes of the map held', async () => {
+    const { adapter, engine, eng, map, tag } = await engineWithAttributedTombstone();
+    adapter.failSetMetaKeys.add(KEY_TOMBSTONES_META);
+    await expect(eng.resetMap('tags')).rejects.toThrow('simulated durable setMeta failure');
+    adapter.failSetMetaKeys.clear();
+
+    map.applyTombstone('server-tag', 'K');
+    const persisted = engine.persistORMapKeyTombstones('tags', ['K']).then(() => 'persisted');
+    expect(await Promise.race([persisted, tick(200).then(() => 'still held')])).toBe('persisted');
+    expect(adapter.meta.get(KEY_TOMBSTONES_META)).toEqual([['K', [tag, 'server-tag']]]);
+    engine.close();
+  });
+
   test('a reset of a name with no map in memory still empties the buckets left on disk', async () => {
     const { adapter, engine, eng } = await engineWithAttributedTombstone();
     const leftover = orMapKeyTombstonesBucketKey('closed', orMapKeyTombstonesBucketOf('K'));
