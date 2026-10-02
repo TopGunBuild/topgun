@@ -2977,4 +2977,479 @@ mod tests {
 
         cluster.heal_partition();
     }
+
+    /// The OR-Map Merkle leaf joins a key's tags with `|` and splits live tags
+    /// from tombstones with `#` (TG-MRK-001), so a leaf identifies one slot state
+    /// only while every stored tag is non-empty and carries neither character.
+    /// This drives the rule through each node's operation pipeline while the
+    /// cluster is split, so neither side can lean on the other to refuse for it,
+    /// and then through the node-to-node copy after the heal.
+    ///
+    /// A tag that a slot already holds must stay readable and removable there,
+    /// but it is not admissible anywhere else: copying node 0's legacy tag to a
+    /// peer is an ingest on that peer and is refused, so the peers converge on
+    /// the admissible state only. That non-convergence on the legacy tag is the
+    /// intended behaviour and is pinned here.
+    ///
+    /// Every sub-case is evaluated and the fn asserts once, so one run lists
+    /// every failing sub-case and the guards are visible by their absence.
+    #[tokio::test]
+    async fn inadmissible_or_tag_is_refused_on_both_sides_of_a_partition() {
+        use crate::service::operation::{OperationError, OperationResponse};
+        use topgun_core::messages::{ORMapEntry, ORMapPushDiff, ORMapPushDiffPayload};
+
+        type Verdict = Result<OperationResponse, OperationError>;
+
+        const MAP: &str = "partitioned-tags";
+        /// Holds the legacy tag on node 0 and takes the admissible writes.
+        const KEY: &str = "k-shared";
+        /// Target of the refused tag-based removal.
+        const KEY_REMOVE: &str = "k-remove";
+        /// Target of the refused push.
+        const KEY_PUSH: &str = "k-push";
+        const KEYS: [&str; 3] = [KEY, KEY_REMOVE, KEY_PUSH];
+        /// The shape a node whose id carried a separator wrote before the rule.
+        const LEGACY: &str = "1:0:n#1";
+        const PIPE_TAG: &str = "a|b";
+        const HASH_TAG: &str = "a#b";
+        const REASON: &str = "OR tag contains a reserved character ('|' or '#')";
+
+        /// Collects one line per failing sub-case, so the single final assertion
+        /// can list all of them.
+        struct Report {
+            checked: usize,
+            failures: Vec<String>,
+        }
+
+        impl Report {
+            fn case(&mut self, name: &str, problems: &[String]) {
+                self.checked += 1;
+                if !problems.is_empty() {
+                    self.failures
+                        .push(format!("{name}: {}", problems.join("; ")));
+                }
+            }
+        }
+
+        fn admissible(tag: &str) -> bool {
+            !tag.is_empty() && !tag.contains('|') && !tag.contains('#')
+        }
+
+        /// A first-party shaped, admissible tag unique to `(counter, node)`.
+        fn tag(counter: u32, node: usize) -> String {
+            format!("{counter}:0:sim-node-{node}")
+        }
+
+        fn zero_ts(node: &SimNode) -> Timestamp {
+            Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: node.node_id.clone(),
+            }
+        }
+
+        /// Sorted live tags and sorted tombstone tags `node` holds for `key`;
+        /// both empty when the key is absent or holds no OR value.
+        async fn slot(node: &SimNode, key: &str) -> (Vec<String>, Vec<String>) {
+            let store = node
+                .record_store_factory
+                .get_or_create(MAP, topgun_core::hash_to_partition(key));
+            let record = store.get(key, false).await.expect("read the slot");
+            let (mut live, mut dead): (Vec<String>, Vec<String>) = match record.map(|r| r.value) {
+                Some(RecordValue::OrMap {
+                    records,
+                    tombstones,
+                }) => (records.into_iter().map(|r| r.tag).collect(), tombstones),
+                Some(RecordValue::OrTombstones { tags }) => (Vec::new(), tags),
+                Some(RecordValue::Lww { .. }) | None => (Vec::new(), Vec::new()),
+            };
+            live.sort();
+            dead.sort();
+            (live, dead)
+        }
+
+        fn show(slot: &(Vec<String>, Vec<String>)) -> String {
+            format!("live {:?} / tombstones {:?}", slot.0, slot.1)
+        }
+
+        /// The context `SimCluster`'s own OR writes use: no connection id, so the
+        /// op keeps its tag verbatim instead of having it regenerated.
+        fn op_ctx(node: &SimNode, key: &str) -> OperationContext {
+            let mut ctx = OperationContext::new(0, service_names::CRDT, zero_ts(node), 5000);
+            ctx.partition_id = Some(topgun_core::hash_to_partition(key));
+            ctx.caller_origin = CallerOrigin::System;
+            ctx
+        }
+
+        async fn or_add(node: &mut SimNode, key: &str, tag: &str) -> Verdict {
+            let entry = OrMapEntry {
+                value: topgun_core::Value::Int(1),
+                tag: tag.to_string(),
+                timestamp: zero_ts(node),
+            };
+            let op = Operation::ClientOp {
+                ctx: op_ctx(node, key),
+                payload: ClientOpMessage {
+                    payload: or_add_client_op(MAP, key, &entry),
+                },
+            };
+            Service::call(&mut node.operation_router, op).await
+        }
+
+        async fn or_remove(node: &mut SimNode, key: &str, tag: &str) -> Verdict {
+            let op = Operation::ClientOp {
+                ctx: op_ctx(node, key),
+                payload: ClientOpMessage {
+                    payload: or_remove_client_op(MAP, key, tag),
+                },
+            };
+            Service::call(&mut node.operation_router, op).await
+        }
+
+        /// Pushes a one-entry OR-Map difference carrying one live record.
+        async fn push_record(node: &mut SimNode, key: &str, tag: &str) -> Verdict {
+            let ctx = OperationContext::new(0, service_names::SYNC, zero_ts(node), 5000);
+            let op = Operation::ORMapPushDiff {
+                ctx,
+                payload: ORMapPushDiff {
+                    payload: ORMapPushDiffPayload {
+                        map_name: MAP.to_string(),
+                        entries: vec![ORMapEntry {
+                            key: key.to_string(),
+                            records: vec![ORMapRecord {
+                                value: rmpv::Value::from(1),
+                                timestamp: zero_ts(node),
+                                tag: tag.to_string(),
+                                ttl_ms: None,
+                            }],
+                            tombstones: Vec::new(),
+                        }],
+                    },
+                },
+            };
+            Service::call(&mut node.operation_router, op).await
+        }
+
+        /// What is wrong with `verdict` as the typed refusal of `tag` on `key`:
+        /// empty when it is exactly that refusal.
+        fn refusal_problems(verdict: &Verdict, key: &str, tag: &str) -> Vec<String> {
+            match verdict {
+                Err(OperationError::SchemaInvalid { map_name, errors }) => {
+                    let mut problems = Vec::new();
+                    if map_name != MAP {
+                        problems.push(format!("SchemaInvalid names map {map_name:?}, want {MAP:?}"));
+                    }
+                    match errors.as_slice() {
+                        [only] => {
+                            if !only.contains(key) {
+                                problems.push(format!("{only:?} does not name key {key:?}"));
+                            }
+                            if !only.contains(REASON) {
+                                problems.push(format!("{only:?} does not give the reason {REASON:?}"));
+                            }
+                            // A refused tag is attacker-chosen text and must not
+                            // be echoed back.
+                            if only.replace(REASON, "").replace(key, "").contains(tag) {
+                                problems.push(format!("{only:?} echoes the refused tag {tag:?}"));
+                            }
+                        }
+                        _ => problems.push(format!(
+                            "SchemaInvalid with {} error strings, want one: {errors:?}",
+                            errors.len()
+                        )),
+                    }
+                    problems
+                }
+                Err(other) => vec![format!(
+                    "Err({other:?}), want Err(SchemaInvalid) with reason {REASON:?}"
+                )],
+                Ok(_) => vec![format!(
+                    "Ok (the request was not refused), want Err(SchemaInvalid) with reason {REASON:?}"
+                )],
+            }
+        }
+
+        /// The refused request's target slot must have held something before
+        /// (an empty slot would make "unchanged" vacuous) and hold exactly the
+        /// same tags after.
+        fn unchanged_problems(
+            before: &(Vec<String>, Vec<String>),
+            after: &(Vec<String>, Vec<String>),
+        ) -> Vec<String> {
+            let mut problems = Vec::new();
+            if before.0.is_empty() && before.1.is_empty() {
+                problems.push("the slot was empty before the request (vacuous check)".to_string());
+            }
+            if before != after {
+                problems.push(format!("the slot changed to {}", show(after)));
+            }
+            problems
+        }
+
+        /// Every inadmissible tag a node other than node 0 holds for a key this
+        /// test wrote. An empty slot is reported too: a node that holds nothing
+        /// would pass the check without proving anything.
+        async fn peer_problems(nodes: &[SimNode]) -> Vec<String> {
+            let mut problems = Vec::new();
+            for (idx, node) in nodes.iter().enumerate().skip(1) {
+                for key in KEYS {
+                    let (live, dead) = slot(node, key).await;
+                    if live.is_empty() && dead.is_empty() {
+                        problems.push(format!(
+                            "node {idx} holds an empty slot for {key:?} (vacuous check)"
+                        ));
+                    }
+                    for held in live.iter().filter(|t| !admissible(t)) {
+                        problems.push(format!(
+                            "node {idx} holds the inadmissible live tag {held:?} for {key:?}"
+                        ));
+                    }
+                    for held in dead.iter().filter(|t| !admissible(t)) {
+                        problems.push(format!(
+                            "node {idx} holds the inadmissible tombstone {held:?} for {key:?}"
+                        ));
+                    }
+                }
+            }
+            problems
+        }
+
+        const NODES: usize = 3;
+        // Counters of the admissible tags each node writes.
+        const BASE: u32 = 2;
+        const KEPT: u32 = 3;
+        const DROPPED: u32 = 4;
+
+        let mut report = Report {
+            checked: 0,
+            failures: Vec::new(),
+        };
+
+        let mut cluster = SimCluster::new(NODES, 11);
+        cluster.start().expect("cluster start");
+
+        // ---- Before the partition ----
+
+        // The legacy tag goes straight into node 0's store: no ingest path would
+        // accept it, and the other nodes must never have seen it.
+        cluster.nodes[0]
+            .record_store_factory
+            .get_or_create(MAP, topgun_core::hash_to_partition(KEY))
+            .put(
+                KEY,
+                RecordValue::OrMap {
+                    records: vec![OrMapEntry {
+                        value: topgun_core::Value::Int(0),
+                        tag: LEGACY.to_string(),
+                        timestamp: zero_ts(&cluster.nodes[0]),
+                    }],
+                    tombstones: Vec::new(),
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
+            .await
+            .expect("seed the legacy tag in node 0's store");
+
+        // Every node gets an admissible tag of its own on every key, so each
+        // later "holds no inadmissible tag" and "slot unchanged" check inspects a
+        // slot that really holds something.
+        for (idx, node) in cluster.nodes.iter_mut().enumerate() {
+            let mut problems = Vec::new();
+            for key in KEYS {
+                if let Err(e) = or_add(node, key, &tag(BASE, idx)).await {
+                    problems.push(format!("admissible OR_ADD on {key:?} failed: {e:?}"));
+                }
+                if !slot(node, key).await.0.contains(&tag(BASE, idx)) {
+                    problems.push(format!("the admissible tag is not live on {key:?}"));
+                }
+            }
+            report.case(
+                &format!("(1) guard, node {idx}: an admissible tag of its own on every key"),
+                &problems,
+            );
+        }
+
+        let seeded = slot(&cluster.nodes[0], KEY).await;
+        report.case(
+            "(1) guard, node 0: the legacy tag is live in its slot for the shared key",
+            &if seeded.0.iter().any(|t| t == LEGACY) {
+                Vec::new()
+            } else {
+                vec![format!("node 0 holds {}", show(&seeded))]
+            },
+        );
+        report.case(
+            "(4) before the partition: no other node holds an inadmissible tag",
+            &peer_problems(&cluster.nodes).await,
+        );
+
+        // ---- During the partition: node 0 alone against nodes 1 and 2 ----
+
+        cluster.inject_partition(&[0], &[1, 2]);
+
+        for (idx, node) in cluster.nodes.iter_mut().enumerate() {
+            let before = slot(node, KEY_REMOVE).await;
+            let verdict = or_remove(node, KEY_REMOVE, PIPE_TAG).await;
+            let mut problems = refusal_problems(&verdict, KEY_REMOVE, PIPE_TAG);
+            problems.extend(unchanged_problems(&before, &slot(node, KEY_REMOVE).await));
+            report.case(
+                &format!(
+                    "(2) partitioned, node {idx}: OR_REMOVE with tag {PIPE_TAG:?} on a key that does not hold it"
+                ),
+                &problems,
+            );
+
+            let before = slot(node, KEY_PUSH).await;
+            let verdict = push_record(node, KEY_PUSH, HASH_TAG).await;
+            let mut problems = refusal_problems(&verdict, KEY_PUSH, HASH_TAG);
+            problems.extend(unchanged_problems(&before, &slot(node, KEY_PUSH).await));
+            report.case(
+                &format!("(2) partitioned, node {idx}: push-diff with record tag {HASH_TAG:?}"),
+                &problems,
+            );
+
+            // The rule must not cost a partitioned node its admissible writes,
+            // on node 0 beside the legacy tag included.
+            let before = slot(node, KEY).await;
+            let mut problems = Vec::new();
+            if before.0.is_empty() && before.1.is_empty() {
+                problems.push("the slot was empty before the writes (vacuous check)".to_string());
+            }
+            let steps = [
+                ("OR_ADD", or_add(node, KEY, &tag(KEPT, idx)).await),
+                ("OR_ADD", or_add(node, KEY, &tag(DROPPED, idx)).await),
+                ("OR_REMOVE", or_remove(node, KEY, &tag(DROPPED, idx)).await),
+            ];
+            for (name, verdict) in &steps {
+                if let Err(e) = verdict {
+                    problems.push(format!("admissible {name} failed: {e:?}"));
+                }
+            }
+            let mut want = before.clone();
+            want.0.push(tag(KEPT, idx));
+            want.0.sort();
+            want.1.push(tag(DROPPED, idx));
+            want.1.sort();
+            let after = slot(node, KEY).await;
+            if after != want {
+                problems.push(format!(
+                    "the slot is {}, want {}",
+                    show(&after),
+                    show(&want)
+                ));
+            }
+            report.case(
+                &format!(
+                    "(2) guard, partitioned, node {idx}: an admissible OR_ADD + OR_REMOVE on the shared key apply"
+                ),
+                &problems,
+            );
+        }
+
+        // A copy attempted while the cluster is split shows the fault is real:
+        // nodes 1 and 2 exchange the shared key, and nothing crosses to or from
+        // node 0.
+        cluster
+            .sync_all(MAP, KEY)
+            .await
+            .expect("sync during the partition");
+        let mut problems = Vec::new();
+        let node0 = slot(&cluster.nodes[0], KEY).await;
+        for idx in 1..NODES {
+            let peer = slot(&cluster.nodes[idx], KEY).await;
+            if node0.0.contains(&tag(KEPT, idx)) || node0.1.contains(&tag(DROPPED, idx)) {
+                problems.push(format!(
+                    "node 0 received node {idx}'s writes: {}",
+                    show(&node0)
+                ));
+            }
+            if peer.0.contains(&tag(KEPT, 0)) || peer.0.iter().any(|t| t == LEGACY) {
+                problems.push(format!(
+                    "node {idx} received node 0's writes: {}",
+                    show(&peer)
+                ));
+            }
+            let other = NODES - idx;
+            if !peer.0.contains(&tag(KEPT, other)) || !peer.1.contains(&tag(DROPPED, other)) {
+                problems.push(format!(
+                    "node {idx} did not receive node {other}'s writes: {}",
+                    show(&peer)
+                ));
+            }
+        }
+        report.case(
+            "(2) guard, partitioned: a copy of the shared key stays on its side of the split",
+            &problems,
+        );
+        report.case(
+            "(4) during the partition: no other node holds an inadmissible tag",
+            &peer_problems(&cluster.nodes).await,
+        );
+
+        // ---- After the heal ----
+
+        cluster.heal_partition();
+        cluster
+            .sync_all(MAP, KEY)
+            .await
+            .expect("sync after the heal");
+
+        let mut want_live: Vec<String> = (0..NODES)
+            .flat_map(|idx| [tag(BASE, idx), tag(KEPT, idx)])
+            .collect();
+        want_live.sort();
+        let mut want_dead: Vec<String> = (0..NODES).map(|idx| tag(DROPPED, idx)).collect();
+        want_dead.sort();
+
+        let mut converged = Vec::new();
+        let mut spread = Vec::new();
+        for (idx, node) in cluster.nodes.iter().enumerate() {
+            let (live, dead) = slot(node, KEY).await;
+            let admissible_live: Vec<String> =
+                live.iter().filter(|t| admissible(t)).cloned().collect();
+            let admissible_dead: Vec<String> =
+                dead.iter().filter(|t| admissible(t)).cloned().collect();
+            if admissible_live != want_live || admissible_dead != want_dead {
+                converged.push(format!(
+                    "node {idx} holds admissible live {admissible_live:?} / tombstones {admissible_dead:?}, want live {want_live:?} / tombstones {want_dead:?}"
+                ));
+            }
+            if idx > 0 && live.iter().chain(dead.iter()).any(|t| t == LEGACY) {
+                spread.push(format!(
+                    "node {idx} holds the legacy tag {LEGACY:?}: {}",
+                    show(&(live, dead))
+                ));
+            }
+        }
+        report.case(
+            "(3) guard, healed: every node holds the same admissible live tags and tombstones for the shared key",
+            &converged,
+        );
+        let healed = slot(&cluster.nodes[0], KEY).await;
+        report.case(
+            "(3) guard, healed: node 0 still holds the legacy tag",
+            &if healed.0.iter().any(|t| t == LEGACY) {
+                Vec::new()
+            } else {
+                vec![format!("node 0 holds {}", show(&healed))]
+            },
+        );
+        report.case(
+            "(3) healed: the legacy tag is held by node 0 and by no other node",
+            &spread,
+        );
+        report.case(
+            "(4) after the heal: no other node holds an inadmissible tag",
+            &peer_problems(&cluster.nodes).await,
+        );
+
+        assert!(
+            report.failures.is_empty(),
+            "{} of {} sub-cases failed:\n  {}",
+            report.failures.len(),
+            report.checked,
+            report.failures.join("\n  ")
+        );
+    }
 }

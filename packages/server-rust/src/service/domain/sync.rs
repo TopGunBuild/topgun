@@ -4964,4 +4964,547 @@ mod tests {
             other => panic!("expected message, got {other:?}"),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // OR-tag admissibility on the push path (TG-MRK-001)
+    //
+    // A pushed difference stores every record tag and every tombstone tag
+    // verbatim. The OR-Map Merkle leaf joins tags with one separator and splits
+    // live tags from tombstones with another, so a pushed tag that is empty or
+    // carries either separator would make two different slot states hash alike.
+    // -----------------------------------------------------------------------
+
+    /// `Ok` with the refusal's one error string when `result` is the refusal of
+    /// the inadmissible `tag` on `key`; `Err` with what is wrong otherwise.
+    ///
+    /// Pins what a caller can rely on: the typed error, the map, the key and
+    /// the reason. The wording around them is left free.
+    fn inadmissible_tag_refusal(
+        result: &Result<OperationResponse, OperationError>,
+        map: &str,
+        key: &str,
+        tag: &str,
+    ) -> Result<String, String> {
+        let reason = if tag.is_empty() {
+            "OR tag is empty"
+        } else {
+            "OR tag contains a reserved character ('|' or '#')"
+        };
+        match result {
+            Err(OperationError::SchemaInvalid { map_name, errors }) => {
+                let [only] = errors.as_slice() else {
+                    return Err(format!(
+                        "SchemaInvalid with {} error strings, want one: {errors:?}",
+                        errors.len()
+                    ));
+                };
+                let mut problems: Vec<String> = Vec::new();
+                if map_name != map {
+                    problems.push(format!("names map {map_name:?}, want {map:?}"));
+                }
+                if !only.contains(key) {
+                    problems.push(format!("does not name key {key:?}"));
+                }
+                if !only.contains(reason) {
+                    problems.push(format!("does not give the reason {reason:?}"));
+                }
+                // A refused tag is attacker-chosen text and must not be echoed.
+                // The key and the reason are taken out first: a tag as short as
+                // one separator character is part of the reason itself.
+                let residue = only.replace(reason, "").replace(key, "");
+                if !tag.is_empty() && residue.contains(tag) {
+                    problems.push(format!("echoes the refused tag {tag:?}"));
+                }
+                if problems.is_empty() {
+                    Ok(only.clone())
+                } else {
+                    Err(format!("SchemaInvalid {only:?} {}", problems.join(", ")))
+                }
+            }
+            Err(other) => Err(format!(
+                "Err({other:?}), want Err(SchemaInvalid) with reason {reason:?}"
+            )),
+            Ok(_) => Err(format!(
+                "Ok (the request was not refused), want Err(SchemaInvalid) with reason {reason:?}"
+            )),
+        }
+    }
+
+    /// A compact picture of what `key`'s slot holds, for before/after comparison.
+    async fn slot_image(factory: &RecordStoreFactory, map: &str, key: &str) -> String {
+        let store = factory.get_or_create(map, hash_to_partition(key));
+        match store
+            .get(key, false)
+            .await
+            .expect("read the slot")
+            .map(|record| record.value)
+        {
+            None => "absent".to_string(),
+            Some(RecordValue::OrMap {
+                records,
+                tombstones,
+            }) => {
+                let mut live: Vec<String> = records.into_iter().map(|entry| entry.tag).collect();
+                live.sort();
+                let mut tombstones = tombstones;
+                tombstones.sort();
+                format!("live {live:?} / tombstones {tombstones:?}")
+            }
+            Some(RecordValue::OrTombstones { mut tags }) => {
+                tags.sort();
+                format!("legacy tombstones {tags:?}")
+            }
+            Some(lww @ RecordValue::Lww { .. }) => format!("{lww:?}"),
+        }
+    }
+
+    /// One pushed entry: `records` and `tombstones` are tags.
+    fn pushed_entry(key: &str, records: &[&str], tombstones: &[&str]) -> ORMapEntry {
+        ORMapEntry {
+            key: key.to_string(),
+            records: records
+                .iter()
+                .map(|tag| WireOrRecord {
+                    value: rmpv::Value::Integer(1.into()),
+                    timestamp: make_timestamp(),
+                    tag: (*tag).to_string(),
+                    ttl_ms: None,
+                })
+                .collect(),
+            tombstones: tombstones.iter().map(|tag| (*tag).to_string()).collect(),
+        }
+    }
+
+    fn push_entries(ctx: OperationContext, map: &str, entries: Vec<ORMapEntry>) -> Operation {
+        Operation::ORMapPushDiff {
+            ctx,
+            payload: ORMapPushDiff {
+                payload: ORMapPushDiffPayload {
+                    map_name: map.to_string(),
+                    entries,
+                },
+            },
+        }
+    }
+
+    /// A push carrying one inadmissible tag is refused as a whole, before any
+    /// entry merges and ahead of the forgotten-client gate, while a tag the slot
+    /// already holds can still be re-pushed and tombstoned (TG-MRK-001).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // five push shapes against three slot states, asserted once
+    async fn push_diff_with_an_inadmissible_tag_merges_nothing() {
+        use crate::network::connection::OutboundMessage;
+        use crate::storage::record::OrMapEntry as StoreOrMapEntry;
+        use topgun_core::messages::ServerEventType;
+
+        const MAP: &str = "pushed-tags";
+        // The shape a node whose id carried a separator wrote before the rule.
+        const LEGACY: &str = "1:0:n#1";
+
+        /// Keys of the `OR_ADD` events the listener has received since the last
+        /// drain.
+        fn drain_or_adds(rx: &mut tokio::sync::mpsc::Receiver<OutboundMessage>) -> Vec<String> {
+            let mut keys = Vec::new();
+            while let Ok(message) = rx.try_recv() {
+                let OutboundMessage::Binary(bytes) = message else {
+                    continue;
+                };
+                if let Ok(Message::ServerEvent { payload }) =
+                    rmp_serde::from_slice::<Message>(&bytes)
+                {
+                    if matches!(payload.event_type, ServerEventType::OR_ADD) {
+                        keys.push(payload.key);
+                    }
+                }
+            }
+            keys
+        }
+
+        // Every sub-case is evaluated and the test asserts once, so a single run
+        // shows which push shapes are refused and which are not.
+        let mut failures: Vec<String> = Vec::new();
+        let mut checked = 0_usize;
+
+        // (A)-(D) run with the gate dark: the push is merged unless refused.
+        let (svc, factory, _frontier, registry) = make_gated_service();
+        let (_listener, mut listener_rx) =
+            registry.register(ConnectionKind::Client, &ConnectionConfig::default());
+
+        // (A)-(C) The clean entry comes FIRST, so an implementation that refuses
+        // only when it reaches the offending entry has already merged it.
+        for (label, tag, tag_is_a_record) in [
+            ("(A) a record tag \"a|b\"", "a|b", true),
+            ("(B) a tombstone tag \"a#b\"", "a#b", false),
+            ("(C) an empty tombstone tag", "", false),
+        ] {
+            checked += 1;
+            let id = &label[1..2];
+            let (clean_key, bad_key) = (format!("{id}-clean"), format!("{id}-bad"));
+            let bad_entry = if tag_is_a_record {
+                pushed_entry(&bad_key, &[tag], &[])
+            } else {
+                pushed_entry(&bad_key, &[], &[tag])
+            };
+            drain_or_adds(&mut listener_rx);
+
+            let result = Arc::clone(&svc)
+                .oneshot(push_entries(
+                    make_ctx(service_names::SYNC),
+                    MAP,
+                    vec![pushed_entry(&clean_key, &["1:0:n-1"], &[]), bad_entry],
+                ))
+                .await;
+
+            let mut problems: Vec<String> = Vec::new();
+            if let Err(problem) = inadmissible_tag_refusal(&result, MAP, &bad_key, tag) {
+                problems.push(problem);
+            }
+            let clean_slot = slot_image(&factory, MAP, &clean_key).await;
+            if clean_slot != "absent" {
+                problems.push(format!("the FIRST entry was merged: {clean_slot}"));
+            }
+            let bad_slot = slot_image(&factory, MAP, &bad_key).await;
+            if bad_slot != "absent" {
+                problems.push(format!("the offending entry was merged: {bad_slot}"));
+            }
+            let broadcast = drain_or_adds(&mut listener_rx);
+            if !broadcast.is_empty() {
+                problems.push(format!("OR_ADD was broadcast for {broadcast:?}"));
+            }
+            if !problems.is_empty() {
+                failures.push(format!(
+                    "{label} in the second of two entries: {}",
+                    problems.join("; ")
+                ));
+            }
+        }
+
+        // (D) Guard: a tag the slot already holds stays pushable, as an
+        // idempotent re-push of its record and as its tombstone.
+        factory
+            .get_or_create(MAP, hash_to_partition("D-legacy"))
+            .put(
+                "D-legacy",
+                RecordValue::OrMap {
+                    records: vec![StoreOrMapEntry {
+                        value: Value::Int(1),
+                        tag: LEGACY.to_string(),
+                        timestamp: make_timestamp(),
+                    }],
+                    tombstones: Vec::new(),
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+            )
+            .await
+            .expect("seed the legacy slot through the store");
+        for (label, entry, want_slot, want_broadcasts) in [
+            (
+                "a re-push of the stored record",
+                pushed_entry("D-legacy", &[LEGACY], &[]),
+                format!("live {:?} / tombstones []", [LEGACY]),
+                // The re-pushed record is not tombstoned, so its OR_ADD is still
+                // sent: this is also what proves the listener sees broadcasts.
+                1_usize,
+            ),
+            (
+                "the stored tag pushed as a tombstone",
+                pushed_entry("D-legacy", &[], &[LEGACY]),
+                format!("live [] / tombstones {:?}", [LEGACY]),
+                0_usize,
+            ),
+        ] {
+            checked += 1;
+            drain_or_adds(&mut listener_rx);
+            let result = Arc::clone(&svc)
+                .oneshot(push_entries(
+                    make_ctx(service_names::SYNC),
+                    MAP,
+                    vec![entry],
+                ))
+                .await;
+
+            let mut problems: Vec<String> = Vec::new();
+            if !matches!(result, Ok(OperationResponse::Empty)) {
+                problems.push(format!("{result:?}, want Ok(Empty)"));
+            }
+            let slot = slot_image(&factory, MAP, "D-legacy").await;
+            if slot != want_slot {
+                problems.push(format!("the slot is {slot}, want {want_slot}"));
+            }
+            let broadcast = drain_or_adds(&mut listener_rx);
+            if broadcast.len() != want_broadcasts {
+                problems.push(format!(
+                    "{} OR_ADD broadcasts, want {want_broadcasts}",
+                    broadcast.len()
+                ));
+            }
+            if !problems.is_empty() {
+                failures.push(format!(
+                    "(D) guard, {label} {LEGACY:?}: {}",
+                    problems.join("; ")
+                ));
+            }
+        }
+
+        // (E) With the gate active and a forgotten client, the refusal still
+        // wins: the tag check runs ahead of the gate, so the permanent refusal is
+        // reported whoever sends the push. The same client's clean push keeps
+        // the gate's answer.
+        let (svc, factory, frontier, registry) = make_gated_service();
+        let (conn, _client) = register_device(&registry, "dev-forgotten").await;
+        frontier.stamp_tombstone(MAP, "seed", "seed-tag");
+        frontier.set_durable_epoch_watermark(1000);
+        let forgotten_ctx = || {
+            let mut ctx = make_ctx(service_names::SYNC);
+            ctx.connection_id = Some(conn);
+            ctx
+        };
+
+        checked += 1;
+        {
+            let result = Arc::clone(&svc)
+                .oneshot(push_op(forgotten_ctx(), MAP, "E-bad", "a|b"))
+                .await;
+            let mut problems: Vec<String> = Vec::new();
+            if let Err(problem) = inadmissible_tag_refusal(&result, MAP, "E-bad", "a|b") {
+                problems.push(problem);
+            }
+            let slot = slot_image(&factory, MAP, "E-bad").await;
+            if slot != "absent" {
+                problems.push(format!("the entry was merged: {slot}"));
+            }
+            if !problems.is_empty() {
+                failures.push(format!(
+                    "(E) gate active, forgotten client, a record tag \"a|b\": {}",
+                    problems.join("; ")
+                ));
+            }
+        }
+
+        checked += 1;
+        {
+            let result = Arc::clone(&svc)
+                .oneshot(push_op(forgotten_ctx(), MAP, "E-clean", "R1"))
+                .await;
+            let mut problems: Vec<String> = Vec::new();
+            if !matches!(result, Ok(OperationResponse::Empty)) {
+                problems.push(format!("{result:?}, want Ok(Empty)"));
+            }
+            let slot = slot_image(&factory, MAP, "E-clean").await;
+            if slot != "absent" {
+                problems.push(format!("the gate let the push merge: {slot}"));
+            }
+            if !problems.is_empty() {
+                failures.push(format!(
+                    "(E) guard, the same forgotten client's clean push: {}",
+                    problems.join("; ")
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} of {checked} sub-cases failed:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    /// The op path and the push path apply ONE rule: every tag is refused by all
+    /// four ways a tag can be stored verbatim, with the same error string, or
+    /// accepted by all four. A path with its own idea of the rule would let in a
+    /// tag the other refuses (TG-MRK-001).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // one tag table against the four verbatim ingest paths, asserted once
+    async fn both_or_ingest_paths_refuse_the_same_tags() {
+        use crate::service::domain::crdt::CrdtService;
+        use crate::service::domain::query::QueryRegistry;
+        use crate::service::domain::schema::SchemaService;
+        use crate::service::security::{SecurityConfig, WriteAdmission};
+        use topgun_core::messages::base::ClientOp;
+        use topgun_core::messages::ClientOpMessage;
+        use topgun_core::{SystemClock, HLC};
+
+        const MAP: &str = "one-rule";
+        const PATHS: [&str; 4] = [
+            "(1) op-path OR_REMOVE",
+            "(2) trusted-branch OR_ADD",
+            "(3) pushed record tag",
+            "(4) pushed tombstone tag",
+        ];
+        // (tag, admissible)
+        const TAGS: [(&str, bool); 11] = [
+            ("", false),
+            ("|", false),
+            ("#", false),
+            ("a|b", false),
+            ("a#b", false),
+            ("a|", false),
+            ("#a", false),
+            ("TOP", true),
+            ("a:b", true),
+            ("1:0:n-1", true),
+            ("a b", true),
+        ];
+
+        /// A CRDT op with no connection id and a plain `Client` origin: the
+        /// branch that keeps the caller's tag verbatim.
+        fn trusted_op(key: &str, op: ClientOp) -> Operation {
+            let mut ctx = make_ctx(service_names::CRDT);
+            ctx.partition_id = Some(hash_to_partition(key));
+            Operation::ClientOp {
+                ctx,
+                payload: ClientOpMessage { payload: op },
+            }
+        }
+
+        fn bare(key: &str) -> ClientOp {
+            ClientOp {
+                id: Some(format!("op-{key}")),
+                map_name: MAP.to_string(),
+                key: key.to_string(),
+                op_type: None,
+                record: None,
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            }
+        }
+
+        // Both services write through ONE factory, so they see the same slots.
+        let (sync, factory, _frontier) = make_sync_service_with_frontier();
+        let crdt = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::new(ConnectionRegistry::new()),
+            Arc::new(WriteAdmission::new(
+                Arc::new(SecurityConfig::default()),
+                Arc::new(parking_lot::Mutex::new(HLC::new(
+                    "test-node".to_string(),
+                    Box::new(SystemClock),
+                ))),
+            )),
+            Arc::new(QueryRegistry::new()),
+            Arc::new(SchemaService::new()),
+        ));
+
+        // Every row is evaluated and the test asserts once, so a single run
+        // shows every (tag, path) pair on which the two paths disagree with the
+        // rule or with each other.
+        let mut failures: Vec<String> = Vec::new();
+        let mut checked = 0_usize;
+
+        for (n, (tag, admissible)) in TAGS.into_iter().enumerate() {
+            // One key name per tag on all four paths, so the whole error
+            // string, which names the key, can be compared across them.
+            let key = format!("k{n}");
+            let store = factory.get_or_create(MAP, hash_to_partition(&key));
+            let mut refusals: Vec<String> = Vec::new();
+
+            for (p, path) in PATHS.into_iter().enumerate() {
+                checked += 1;
+                // Each path meets a FRESH key: a slot that already holds the tag
+                // would be allowed to keep it, which is not what is compared.
+                store
+                    .remove(&key, CallerProvenance::CrdtMerge)
+                    .await
+                    .expect("clear the key between paths");
+                let fresh = slot_image(&factory, MAP, &key).await;
+                if fresh != "absent" {
+                    failures.push(format!(
+                        "tag {tag:?} {path}: fixture, the key is not fresh: {fresh}"
+                    ));
+                    continue;
+                }
+
+                let result = match p {
+                    0 => {
+                        Arc::clone(&crdt)
+                            .oneshot(trusted_op(
+                                &key,
+                                ClientOp {
+                                    or_tag: Some(Some(tag.to_string())),
+                                    ..bare(&key)
+                                },
+                            ))
+                            .await
+                    }
+                    1 => {
+                        Arc::clone(&crdt)
+                            .oneshot(trusted_op(
+                                &key,
+                                ClientOp {
+                                    or_record: Some(Some(WireOrRecord {
+                                        value: rmpv::Value::Integer(1.into()),
+                                        timestamp: make_timestamp(),
+                                        tag: tag.to_string(),
+                                        ttl_ms: None,
+                                    })),
+                                    ..bare(&key)
+                                },
+                            ))
+                            .await
+                    }
+                    2 => {
+                        Arc::clone(&sync)
+                            .oneshot(push_entries(
+                                make_ctx(service_names::SYNC),
+                                MAP,
+                                vec![pushed_entry(&key, &[tag], &[])],
+                            ))
+                            .await
+                    }
+                    _ => {
+                        Arc::clone(&sync)
+                            .oneshot(push_entries(
+                                make_ctx(service_names::SYNC),
+                                MAP,
+                                vec![pushed_entry(&key, &[], &[tag])],
+                            ))
+                            .await
+                    }
+                };
+
+                if admissible {
+                    if let Err(error) = &result {
+                        failures.push(format!(
+                            "admissible tag {tag:?} {path}: Err({error:?}), want Ok"
+                        ));
+                    }
+                    continue;
+                }
+
+                let mut problems: Vec<String> = Vec::new();
+                match inadmissible_tag_refusal(&result, MAP, &key, tag) {
+                    Ok(error_string) => refusals.push(error_string),
+                    Err(problem) => problems.push(problem),
+                }
+                let slot = slot_image(&factory, MAP, &key).await;
+                if slot != "absent" {
+                    problems.push(format!("the tag was stored: {slot}"));
+                }
+                if !problems.is_empty() {
+                    failures.push(format!(
+                        "inadmissible tag {tag:?} {path}: {}",
+                        problems.join("; ")
+                    ));
+                }
+            }
+
+            if refusals.len() == PATHS.len() && refusals.iter().any(|other| *other != refusals[0]) {
+                failures.push(format!(
+                    "inadmissible tag {tag:?}: the four paths refuse with different error \
+                     strings: {refusals:?}"
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} failures over {checked} (tag, path) pairs:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
 }

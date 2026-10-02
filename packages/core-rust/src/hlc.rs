@@ -1216,6 +1216,78 @@ mod tests {
         assert_eq!(hlc.node_id(), "550e8400-e29b-41d4-a716-446655440000");
     }
 
+    /// A node id ends every tag its node generates (`millis:counter:nodeId`), and
+    /// the OR-Map Merkle leaf joins tags with `|` and splits live tags from
+    /// tombstones with `#` (TG-MRK-001). An id carrying either character would
+    /// make two different tag sets hash to one leaf, so both constructors must
+    /// refuse it the way they refuse `:`.
+    #[test]
+    fn hlc_rejects_a_node_id_with_a_leaf_separator() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        const MESSAGE: &str = "Node ID must not contain ':' (used as delimiter in timestamp \
+                               format), '|' or '#' (used as delimiters in Merkle leaves)";
+
+        type Constructor = fn(String) -> HLC;
+        let constructors: [(&str, Constructor); 2] = [
+            ("HLC::new", |node_id| {
+                let (clock, _) = FixedClock::new(0);
+                HLC::new(node_id, Box::new(clock))
+            }),
+            ("HLC::with_options", |node_id| {
+                let (clock, _) = FixedClock::new(0);
+                HLC::with_options(node_id, Box::new(clock), false, 60_000)
+            }),
+        ];
+
+        // Every sub-case is evaluated and the test asserts once, so a single run
+        // names every constructor that still lets a separator through.
+        let mut failures: Vec<String> = Vec::new();
+
+        for (name, construct) in constructors {
+            for node_id in ["a|b", "a#b"] {
+                match catch_unwind(AssertUnwindSafe(|| construct(node_id.to_string()))) {
+                    Ok(_) => failures.push(format!(
+                        "{name}({node_id:?}) constructed an HLC: nothing panics"
+                    )),
+                    Err(payload) => {
+                        let message = payload
+                            .downcast_ref::<String>()
+                            .map(String::as_str)
+                            .or_else(|| payload.downcast_ref::<&'static str>().copied())
+                            .unwrap_or("<non-string panic payload>");
+                        if message != MESSAGE {
+                            failures.push(format!(
+                                "{name}({node_id:?}) panicked with {message:?}, want {MESSAGE:?}"
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Positive control: the rule must not reach past the three delimiters.
+            for node_id in ["a-b", "550e8400-e29b-41d4-a716-446655440000"] {
+                match catch_unwind(AssertUnwindSafe(|| construct(node_id.to_string()))) {
+                    Ok(hlc) if hlc.node_id() == node_id => {}
+                    Ok(hlc) => failures.push(format!(
+                        "{name}({node_id:?}) built an HLC with node id {:?}",
+                        hlc.node_id()
+                    )),
+                    Err(_) => failures.push(format!(
+                        "{name}({node_id:?}) panicked: an admissible node id must construct"
+                    )),
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} of 8 node-id sub-cases failed:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
     // ---- Display impl test ----
 
     #[test]

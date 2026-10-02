@@ -192,6 +192,41 @@ describe('TopGunClient', () => {
       expect(customClient).toBeInstanceOf(TopGunClient);
     });
 
+    // The client's nodeId ends up inside every OR-Map tag it generates, and the
+    // Merkle leaf joins tags with "|" and splits live tags from tombstones with
+    // "#" (TG-MRK-001), so such an id must never produce a working client.
+    test('should throw when nodeId contains a Merkle-leaf separator', () => {
+      let constructed: TopGunClient | undefined;
+      try {
+        expect(() => {
+          constructed = new TopGunClient({
+            nodeId: 'a|b',
+            serverUrl: 'ws://localhost:1234',
+            storage,
+          });
+        }).toThrow(
+          'Node ID must not contain ":" (used as delimiter in timestamp format), "|" or "#" (used as delimiters in Merkle leaves)',
+        );
+      } finally {
+        // A client that was built anyway holds live timers; hand it to
+        // afterEach so a failing run still tears down cleanly.
+        if (constructed) extraClients.push(constructed);
+      }
+    });
+
+    test('should construct with the generated nodeId when none is provided', () => {
+      let constructed: TopGunClient | undefined;
+      expect(() => {
+        constructed = new TopGunClient({
+          serverUrl: 'ws://localhost:1234',
+          storage,
+        });
+      }).not.toThrow();
+      if (constructed) extraClients.push(constructed);
+
+      expect(constructed).toBeInstanceOf(TopGunClient);
+    });
+
     test('start() should initialize storage', async () => {
       expect(storage.initializeCalled).toBe(false);
 
