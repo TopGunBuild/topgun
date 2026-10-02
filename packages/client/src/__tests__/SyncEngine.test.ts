@@ -2867,6 +2867,53 @@ describe('SyncEngine', () => {
         // op they share.
         expect(recordedUnderRefusedOp).toEqual(new Set(['2']));
       });
+
+      test("an ack that matches a refused op's entry does not free the key while the op can still be sent", async () => {
+        // Op 2 travels alone, twice, before anything is answered; op 1 finds no
+        // node on either flush.
+        const cluster = clusterMock();
+        cluster.script([['2']], [['2']]);
+        await bootOn(cluster, [pendingOp('1', 'user1'), pendingOp('2', 'user2')]);
+        cluster.deliver({ type: 'AUTH_ACK' });
+        await jest.runAllTimersAsync();
+        expect(cluster.frames).toEqual([['2'], ['2']]);
+
+        // Op 2 is refused for good, but storage will not delete its row, so it
+        // stays in the op log, flagged, and every later flush sends it again.
+        mockStorage.deleteOp.mockRejectedValue(new Error('storage refused the delete'));
+        cluster.deliver(refusal('2'));
+        await jest.runAllTimersAsync();
+
+        // The answer to the first frame arrives late. It matches the entry and
+        // has nothing to retire: the only op it covers is the refused one.
+        cluster.deliver(applied('2'));
+        await jest.runAllTimersAsync();
+        expect(opLogOf().map((o) => o.id)).toEqual(['1', '2']);
+
+        // Op 1 now has a node, and the frame that carries it ends in the refused
+        // op again: a wider frame under the same last id.
+        cluster.script([['1', '2']]);
+        cluster.deliver({ type: 'AUTH_ACK' });
+        await jest.runAllTimersAsync();
+        expect(cluster.frames).toEqual([['2'], ['2'], ['1', '2']]);
+        const recordedUnderRefusedOp = new Set(inFlight()?.get('2'));
+        const pendingBefore = syncEngine!.getPendingOpsCount();
+
+        // The answer to the SECOND frame arrives. That frame, too, carried op 2
+        // alone, so it says nothing about op 1.
+        cluster.deliver(applied('2'));
+        await jest.runAllTimersAsync();
+
+        expect(opLogOf().map((o) => o.id)).toEqual(['1', '2']);
+        expect(opLogOf().find((o) => o.id === '1')?.synced).toBeFalsy();
+        expect(syncEngine!.getPendingOpsCount()).toBe(pendingBefore);
+        expect(mockStorage.markOpsSynced).not.toHaveBeenCalled();
+        // The first answer did not use the entry up, so the wider frame was
+        // intersected with it instead of being recorded afresh.
+        expect(recordedUnderRefusedOp).toEqual(new Set(['2']));
+        // And it is still there for as long as the refused op can be sent.
+        expect(inFlight()?.get('2')).toEqual(new Set(['2']));
+      });
     });
   });
 });
