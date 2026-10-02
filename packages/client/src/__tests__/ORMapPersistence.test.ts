@@ -268,6 +268,19 @@ describe('ORMap per-key tombstone attribution persistence', () => {
     }
   };
 
+  /** `count` keys other than `key` that are stored in the same attribution bucket. */
+  const bucketMatesOf = (key: string, count: number): string[] => {
+    const bucket = orMapKeyTombstonesBucketOf(key);
+    const mates: string[] = [];
+    for (let i = 0; mates.length < count; i++) {
+      const candidate = `mate-${i}`;
+      if (candidate !== key && orMapKeyTombstonesBucketOf(candidate) === bucket) {
+        mates.push(candidate);
+      }
+    }
+    return mates;
+  };
+
   /** The first `count` keys of `key-0, key-1, ...` that fall into `count` different buckets. */
   const keysInDistinctBuckets = (count: number): string[] => {
     const byBucket = new Map<string, string>();
@@ -524,6 +537,116 @@ describe('ORMap per-key tombstone attribution persistence', () => {
         sorted(((await storage.get(`${MAP}:K`)) as Array<{ value: string }>).map((r) => r.value)),
       ).toEqual(['arrived', 'kept']);
     });
+
+    test('commits its own tags in the bucket even when a server response dropped them from the key during the wait', async () => {
+      const client = newClient();
+      const map = client.getORMap<string, string>(MAP);
+      map.add('K', 'removed');
+      map.add('K', 'removed');
+      map.add('K', 'kept');
+      await settle();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the test holds the engine's backpressure wait open and injects a server response into its sync handler
+      const engine = (client as any).syncEngine;
+
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      jest.spyOn(engine.backpressureController, 'checkBackpressure').mockReturnValue(gate);
+      const commitWrite = jest.spyOn(storage, 'commitWrite');
+
+      const tags = map.remove('K', 'removed');
+      expect(tags).toHaveLength(2);
+      await settle();
+      expect(commitWrite).not.toHaveBeenCalled();
+
+      // While the remove waits, the server reports the key as it holds it: the
+      // kept record and no tombstone. The remove is not in the op log yet, so
+      // nothing marks its tags as pending and the key's attribution is replaced
+      // by the server's empty set.
+      await engine.orMapSyncHandler.handleORMapDiffResponse({
+        mapName: MAP,
+        entries: [{ key: 'K', records: map.getRecords('K'), tombstones: [] }],
+      });
+      expect(map.getKeyTombstones('K').size).toBe(0);
+
+      release();
+      await settle();
+
+      // The commit that makes the removes durable carries their attribution,
+      // whatever the key's attribution in memory was reduced to in between.
+      const removeCommits = commitWrite.mock.calls.filter(([, op]) => isRemoveOp(op));
+      expect(removeCommits).toHaveLength(1);
+      const committedBucket = new Map(
+        removeCommits[0][0].find((m) => m.key === bucketKeyOf('K'))?.value as Array<
+          [string, string[]]
+        >,
+      );
+      expect(sorted(committedBucket.get('K') ?? [])).toEqual(sorted(tags));
+      const stored = new Map(
+        (await storage.getMeta(bucketKeyOf('K'))) as Array<[string, string[]]>,
+      );
+      expect(sorted(stored.get('K') ?? [])).toEqual(sorted(tags));
+    });
+  });
+
+  describe('a local remove that commits while the map is being reset', () => {
+    test('does not refill a bucket the reset has already emptied', async () => {
+      const keys = keysInDistinctBuckets(2);
+      const client = newClient();
+      const map = client.getORMap<string, string>(MAP);
+      for (const key of keys) {
+        map.add(key, 'gone');
+        map.add(key, 'kept');
+      }
+      await settle();
+      for (const key of keys) map.remove(key, 'gone');
+      await settle();
+      for (const key of keys) {
+        expect((await storage.getMeta(bucketKeyOf(key))) as unknown[]).toHaveLength(1);
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the full-resync REPLACE is private to the engine and only reachable from a sync response
+      const engine = (client as any).syncEngine;
+
+      // Hold the reset at the second bucket it empties: the first is then
+      // already empty on disk while the map in memory is not yet cleared.
+      let releaseReset: () => void = () => undefined;
+      const resetGate = new Promise<void>((resolve) => {
+        releaseReset = resolve;
+      });
+      let bucketsEmptied = 0;
+      const setMeta = storage.setMeta.bind(storage);
+      jest.spyOn(storage, 'setMeta').mockImplementation(async (key, value) => {
+        const emptiesBucket =
+          key.startsWith(BUCKET_PREFIX) && Array.isArray(value) && value.length === 0;
+        if (emptiesBucket && ++bucketsEmptied === 2) await resetGate;
+        return setMeta(key, value);
+      });
+
+      const replaced = engine.replaceOrMapFromSnapshot(MAP, undefined);
+      await settle();
+      const emptied: string[] = [];
+      for (const key of keys) {
+        if (((await storage.getMeta(bucketKeyOf(key))) as unknown[]).length === 0) {
+          emptied.push(key);
+        }
+      }
+      expect(emptied).toHaveLength(1);
+
+      // A local remove of a key in the bucket that is already emptied commits now.
+      const commitWrite = jest.spyOn(storage, 'commitWrite');
+      expect(map.remove(emptied[0], 'kept')).toHaveLength(1);
+      await settle();
+      expect(commitWrite.mock.calls.filter(([, op]) => isRemoveOp(op))).toHaveLength(1);
+
+      releaseReset();
+      await replaced;
+      await settle();
+
+      // The map is wiped, and nothing on disk attributes a tombstone any more.
+      expect(map.getSnapshot().keyTombstones.size).toBe(0);
+      expect(sorted((await persistedAttribution()).keys())).toEqual([]);
+    });
   });
 
   describe('bucket layout', () => {
@@ -766,6 +889,34 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       expect(sorted(restored.getKeyTombstones(intact))).toEqual(['t1']);
     });
 
+    test('a bucket whose read fails is reported and does not keep the readable ones from being restored', async () => {
+      const [failing, intactA, intactB] = keysInDistinctBuckets(3);
+      for (const key of [failing, intactA, intactB]) {
+        await storage.setMeta(bucketKeyOf(key), [[key, [`tag-of-${key}`]]]);
+      }
+      const getMeta = storage.getMeta.bind(storage);
+      jest.spyOn(storage, 'getMeta').mockImplementation(async (key) => {
+        if (key === bucketKeyOf(failing)) throw new Error('simulated bucket read failure');
+        return getMeta(key);
+      });
+      const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      jest.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+      const restored = await reload(newClient());
+
+      expect(sorted(restored.getSnapshot().keyTombstones.keys())).toEqual(
+        sorted([intactA, intactB]),
+      );
+      for (const key of [intactA, intactB]) {
+        expect(sorted(restored.getKeyTombstones(key))).toEqual([`tag-of-${key}`]);
+      }
+      // One warning for the one bucket that could not be read, naming it.
+      const reported = warn.mock.calls.filter(
+        ([context]) => (context as { bucketKey?: string })?.bucketKey === bucketKeyOf(failing),
+      );
+      expect(reported).toHaveLength(1);
+    });
+
     test('malformed pairs are skipped one by one; the readable ones are restored', async () => {
       const timestamp = { millis: Date.now(), counter: 0, nodeId: 'A' };
       await storage.put(`${MAP}:list`, [{ value: 'live', timestamp, tag: 'live_tag' }]);
@@ -879,6 +1030,152 @@ describe('ORMap per-key tombstone attribution persistence', () => {
       expect(sorted(map.getKeyTombstones('other'))).toEqual(['elsewhere']);
       expect(sorted(map.getTombstones())).toEqual(sorted([fresh, 'persisted', 'elsewhere']));
     });
+  });
+
+  describe('an attribution write that lands while the map is still loading', () => {
+    /**
+     * Storage as a first session leaves it: two keys of one bucket hold an
+     * attributed tombstone each, and a third key of that bucket (`K`) holds a
+     * live record.
+     */
+    const firstSession = async () => {
+      const [k1, k2] = bucketMatesOf('K', 2);
+      const map = newClient().getORMap<string, string>(MAP);
+      map.add(k1, 'gone');
+      map.add(k2, 'gone');
+      const live = map.add('K', 'live');
+      await settle();
+      const [t1] = map.remove(k1, 'gone');
+      const [t2] = map.remove(k2, 'gone');
+      await settle();
+      expect(
+        new Map((await storage.getMeta(bucketKeyOf('K'))) as Array<[string, string[]]>),
+      ).toEqual(
+        new Map([
+          [k1, [t1]],
+          [k2, [t2]],
+        ]),
+      );
+      return { k1, k2, t1, t2, liveTag: live.tag };
+    };
+
+    /**
+     * Holds every listing of the meta keys open. A load lists them once, after
+     * the records and before it reads the attribution buckets, so the map then
+     * holds its records but none of its persisted attribution.
+     */
+    const holdAttributionLoad = (): (() => void) => {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const getAllMetaKeys = storage.getAllMetaKeys.bind(storage);
+      jest.spyOn(storage, 'getAllMetaKeys').mockImplementation(async () => {
+        await gate;
+        return getAllMetaKeys();
+      });
+      return release;
+    };
+
+    const bucketOnDisk = async (): Promise<Map<string, string[]>> =>
+      new Map((await storage.getMeta(bucketKeyOf('K'))) as Array<[string, string[]]>);
+
+    test('a local remove before the load finishes leaves all three keys attributed on disk and in memory', async () => {
+      const { k1, k2, t1, t2 } = await firstSession();
+      const before = await bucketOnDisk();
+
+      const reloaded = newClient();
+      // Let the new client's own start-up reads finish before holding the listing.
+      await settle(50);
+      const release = holdAttributionLoad();
+      const map = reloaded.getORMap<string, string>(MAP);
+      await settle(50);
+      // The records are in, the attribution is not.
+      expect(map.get('K')).toEqual(['live']);
+      expect(map.getSnapshot().keyTombstones.size).toBe(0);
+
+      const commitWrite = jest.spyOn(storage, 'commitWrite');
+      const [t3] = map.remove('K', 'live');
+      await settle();
+
+      // The remove itself is durable at once; it does not wait for the load.
+      expect(commitWrite.mock.calls.filter(([, op]) => isRemoveOp(op))).toHaveLength(1);
+      // But the bucket is not written from a map that has not read it yet.
+      expect(await bucketOnDisk()).toEqual(before);
+
+      release();
+      await settle(50);
+
+      const expected = new Map([
+        [k1, [t1]],
+        [k2, [t2]],
+        ['K', [t3]],
+      ]);
+      expect(await bucketOnDisk()).toEqual(expected);
+      for (const [key, tags] of expected) {
+        expect(sorted(map.getKeyTombstones(key))).toEqual(tags);
+      }
+    });
+
+    test.each([
+      [
+        'TopGunClient.restoreORMap',
+        (reloaded: TopGunClient) => {
+          reloaded.getORMap<string, string>(MAP);
+        },
+      ],
+      [
+        'SyncEngine.instantiateAndRestoreOrMap',
+        (reloaded: TopGunClient) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the second restore seam is private to the engine and only reachable from a sync start
+          void (reloaded as any).syncEngine.instantiateAndRestoreOrMap(MAP);
+        },
+      ],
+    ])(
+      'a server-reported remove before the load through %s finishes leaves all three keys attributed',
+      async (_name, startLoad) => {
+        const { k1, k2, t1, t2, liveTag } = await firstSession();
+        const before = await bucketOnDisk();
+
+        const reloaded = newClient();
+        await settle(50);
+        const release = holdAttributionLoad();
+        startLoad(reloaded);
+        await settle(50);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the test delivers a server event straight to the engine
+        const engine = (reloaded as any).syncEngine;
+        const map = engine.maps.get(MAP) as ORMap<string, string>;
+        expect(map.get('K')).toEqual(['live']);
+        expect(map.getSnapshot().keyTombstones.size).toBe(0);
+
+        // Not awaited here: the event's persist may wait for the load to finish.
+        const applied = engine.applyServerEvent(
+          MAP,
+          'OR_REMOVE',
+          'K',
+          undefined,
+          undefined,
+          liveTag,
+        );
+        await settle();
+        expect(map.get('K')).toEqual([]);
+        expect(await bucketOnDisk()).toEqual(before);
+
+        release();
+        await applied;
+        await settle(50);
+
+        const expected = new Map([
+          [k1, [t1]],
+          [k2, [t2]],
+          ['K', [liveTag]],
+        ]);
+        expect(await bucketOnDisk()).toEqual(expected);
+        for (const [key, tags] of expected) {
+          expect(sorted(map.getKeyTombstones(key))).toEqual(tags);
+        }
+      },
+    );
   });
 
   describe('server-reported attribution that changes no record', () => {

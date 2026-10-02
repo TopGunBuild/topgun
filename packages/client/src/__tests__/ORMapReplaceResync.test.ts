@@ -127,6 +127,60 @@ function nonEmptyAttributionEntries(adapter: MemoryAdapter): string[] {
     .map(([metaKey]) => metaKey);
 }
 
+/**
+ * Holds a reset of map `tags` at the second attribution bucket it empties, so
+ * that one bucket is already empty on disk while the map in memory is not yet
+ * cleared. Returns the function that lets the reset continue.
+ */
+function holdResetAtSecondBucket(adapter: MemoryAdapter): () => void {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let bucketsEmptied = 0;
+  const setMeta = adapter.setMeta.bind(adapter);
+  jest.spyOn(adapter, 'setMeta').mockImplementation(async (key, value) => {
+    const emptiesBucket =
+      key.startsWith('__sys__:tags:keyTombstones:') && Array.isArray(value) && value.length === 0;
+    if (emptiesBucket && ++bucketsEmptied === 2) await gate;
+    return setMeta(key, value);
+  });
+  return release;
+}
+
+const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * While a reset of map `tags` is held between two of its bucket writes, the
+ * server changes the attribution of a key whose bucket is already emptied and
+ * the change is persisted. Whatever `reset` then wipes, no bucket may be left
+ * attributing a tombstone on disk.
+ */
+async function persistDuringReset(
+  adapter: MemoryAdapter,
+  engine: SyncEngine,
+  map: ORMap<string, string>,
+  keys: string[],
+  reset: () => Promise<void>,
+): Promise<void> {
+  const release = holdResetAtSecondBucket(adapter);
+  const resetDone = reset();
+  await tick();
+  const emptied = keys.filter((key) => {
+    const onDisk = adapter.meta.get(attributionBucketKeyOf(key));
+    return Array.isArray(onDisk) && onDisk.length === 0;
+  });
+  expect(emptied).toHaveLength(1);
+
+  map.applyTombstone('server-tag', emptied[0]);
+  const persisted = engine.persistORMapKeyTombstones('tags', emptied);
+  await tick();
+
+  release();
+  await resetDone;
+  await persisted;
+}
+
 function orOp(id: string, key: string, tag: string, ts: Timestamp): OpLogEntry {
   const orRecord: ORMapRecord<string> = { value: key, tag, timestamp: ts };
   return {
@@ -515,6 +569,25 @@ describe('SyncEngine REPLACE resync — per-key tombstone attribution', () => {
     engine.close();
   });
 
+  test('an attribution persist that lands during the reset does not refill a bucket already emptied', async () => {
+    const { adapter, engine, eng, map } = await makeEngine();
+    const keys = keysInDistinctBuckets(2);
+    for (const key of keys) {
+      map.add(key, 'gone');
+      map.remove(key, 'gone');
+    }
+    await engine.persistORMapKeyTombstones('tags', keys);
+    expect(nonEmptyAttributionEntries(adapter)).toHaveLength(2);
+
+    await persistDuringReset(adapter, engine, map, keys, () =>
+      eng.replaceOrMapFromSnapshot('tags', undefined),
+    );
+
+    expect(map.getSnapshot().keyTombstones.size).toBe(0);
+    expect(nonEmptyAttributionEntries(adapter)).toEqual([]);
+    engine.close();
+  });
+
   test('a FAILED attribution reset aborts the resync before the map is cleared (memory and disk both keep the old attribution)', async () => {
     const { adapter, engine, eng, map } = await makeEngine();
     map.add('K', 'kept');
@@ -644,6 +717,23 @@ describe('SyncEngine map reset — per-key tombstone attribution', () => {
       expect(at).toBeGreaterThanOrEqual(0);
       expect(at).toBeLessThan(clearedAt);
     }
+    engine.close();
+  });
+
+  test('an attribution persist that lands during the reset does not refill a bucket already emptied', async () => {
+    const { adapter, engine, eng, map } = await engineWithAttributedTombstone();
+    const [other] = keysInDistinctBuckets(2).filter(
+      (key) => attributionBucketKeyOf(key) !== KEY_TOMBSTONES_META,
+    );
+    map.add(other, 'gone');
+    map.remove(other, 'gone');
+    await engine.persistORMapKeyTombstones('tags', [other]);
+    expect(nonEmptyAttributionEntries(adapter)).toHaveLength(2);
+
+    await persistDuringReset(adapter, engine, map, ['K', other], () => eng.resetMap('tags'));
+
+    expect(map.getSnapshot().keyTombstones.size).toBe(0);
+    expect(nonEmptyAttributionEntries(adapter)).toEqual([]);
     engine.close();
   });
 
