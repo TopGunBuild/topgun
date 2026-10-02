@@ -1171,6 +1171,9 @@ describe('SyncEngine per-key tombstone attribution', () => {
     await handler.handleORMapSyncRespLeaf(leafFor('K', ['server-tag']));
     expect(sorted(map.getKeyTombstones('K'))).toEqual(sorted(['server-tag', tag]));
 
+    // No connection in this fixture, so the batch is put on record the way the
+    // send path does it: an ack retires only the ops of a batch that was sent.
+    internals.recordSentBatch([opId]);
     internals.handleOpAck({ type: 'OP_ACK', payload: { lastId: opId } });
     expect(internals.opLog.some((op: OpLogEntry) => op.id === opId)).toBe(false);
 
@@ -1243,6 +1246,9 @@ describe('SyncEngine per-key tombstone attribution', () => {
 
     // The first remove is acknowledged; the next response must not see it.
     const [acked, ...rest] = removes;
+    // Put on record as a batch of its own, the way the send path does it: an ack
+    // retires only the ops of a batch that was sent, and this fixture sends none.
+    internals.recordSentBatch([acked.opId]);
     internals.handleOpAck({ type: 'OP_ACK', payload: { lastId: acked.opId } });
     await handler.handleORMapSyncRespRoot({ mapName: MAP_NAME, rootHash: 0 });
 

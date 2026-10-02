@@ -307,6 +307,12 @@ describe('Offline durability (SPEC-321 — F3/F4/F5/F6)', () => {
       expect((engine as any).opLog.length).toBe(3);
       expect(storage.__ops.length).toBe(3);
 
+      // This fixture never authenticates, so nothing was flushed. An ack retires
+      // only the ops of a batch that was sent, so the batch is put on record
+      // exactly as the send path does it: the ids of every pending op, in order.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (engine as any).recordSentBatch((engine as any).opLog.map((op: { id: string }) => op.id));
+
       // Server acks all ops up to the last id.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (engine as any).handleOpAck({ payload: { lastId: '3', achievedLevel: 1, results: [] } });
