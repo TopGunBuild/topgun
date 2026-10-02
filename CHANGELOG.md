@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Supported servers (`@topgunbuild/client`):** this client requires a TopGun server
   `2.0.0` or later. The TypeScript server (`@topgunbuild/server` `0.11.0` and earlier)
   is not supported: against it, writes are not confirmed.
+- fix(client): in cluster mode, a message that arrives late on a node connection the
+  client has already dropped is ignored instead of being read as coming from that node's
+  new connection.
 - fix(sync): an OR-Map client and the server now compute the same Merkle leaf hash
   for a key that holds the same tags on both sides. Previously the two used different
   formulas, so an OR-Map key could never compare equal during sync. Both sides now hash
