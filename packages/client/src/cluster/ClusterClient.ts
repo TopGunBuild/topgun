@@ -67,6 +67,13 @@ export type ClusterRoutingMode = 'direct' | 'forward';
  * It provides partition-aware routing and connection management.
  */
 export class ClusterClient implements IConnectionProvider {
+  /**
+   * Every node connection of the pool is a WebSocket, and each node answers a
+   * batch the way a single server does, so the engine may hold this provider's
+   * acknowledgements to the WebSocket rule (TG-SYNC-004).
+   */
+  readonly transport = 'websocket' as const;
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- event listeners accept heterogeneous args depending on event type; a discriminated union per event would require one handler type per event
   private readonly listeners: Map<string, Set<(...args: any[]) => void>> = new Map();
   private readonly connectionPool: ConnectionPool;
@@ -526,10 +533,20 @@ export class ClusterClient implements IConnectionProvider {
   }
 
   /**
-   * Send batch of operations with routing
+   * Send batch of operations with routing.
+   *
+   * Each `OP_BATCH` frame a connection accepted is reported through
+   * `onBatchSent` before this method returns. A node acknowledges a frame by the
+   * id of its last operation only, so the engine can attribute that
+   * acknowledgement to the right operations only if it knows which ids travelled
+   * together: an acknowledgement from one node must not retire an operation that
+   * went to another (TG-SYNC-004).
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- batch message shape varies by operation type; msgpack serialization happens after routing so each message is still an untyped object
-  public sendBatch(operations: Array<{ key: string; message: any }>): Map<string, boolean> {
+  public sendBatch(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- batch message shape varies by operation type; msgpack serialization happens after routing so each message is still an untyped object
+    operations: Array<{ key: string; message: any }>,
+    onBatchSent?: (opIds: string[]) => void,
+  ): Map<string, boolean> {
     const results = new Map<string, boolean>();
 
     if (this.config.routingMode === 'direct' && this.routingActive) {
@@ -577,11 +594,13 @@ export class ClusterClient implements IConnectionProvider {
             type: 'OP_BATCH',
             payload: { ops: messages.map((m) => m.message) },
           });
+          if (success) onBatchSent?.(messages.map((m) => m.message.id));
         } else {
           success = this.connectionPool.send(nodeId, {
             type: 'OP_BATCH',
             payload: { ops: messages.map((m) => m.message) },
           });
+          if (success) onBatchSent?.(messages.map((m) => m.message.id));
         }
 
         for (const { key } of messages) {
@@ -594,6 +613,7 @@ export class ClusterClient implements IConnectionProvider {
         type: 'OP_BATCH',
         payload: { ops: operations.map((o) => o.message) },
       });
+      if (success) onBatchSent?.(operations.map((o) => o.message.id));
 
       this.routingMetrics.totalRoutes += operations.length;
       this.routingMetrics.fallbackRoutes += operations.length;

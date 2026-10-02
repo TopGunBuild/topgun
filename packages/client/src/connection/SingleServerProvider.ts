@@ -69,6 +69,13 @@ function unrefTimer(timer: ReturnType<typeof setTimeout> | null): void {
  * providing the same interface used by ClusterClient for multi-node mode.
  */
 export class SingleServerProvider implements IConnectionProvider {
+  /**
+   * Frames travel over one WebSocket, where the acknowledgement of a real batch
+   * always carries the level it reached. Declaring it lets the engine refuse an
+   * acknowledgement-shaped frame that carries none (TG-SYNC-004).
+   */
+  readonly transport = 'websocket' as const;
+
   private readonly url: string;
   private readonly config: Required<SingleServerProviderConfig>;
   private ws: WebSocket | null = null;

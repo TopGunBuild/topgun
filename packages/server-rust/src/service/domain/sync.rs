@@ -1430,11 +1430,13 @@ impl SyncService {
                         client.clone()
                     } else {
                         // A rejected batch returns at once; entries merged earlier
-                        // in it, while the gate was still dark, stay merged.
+                        // in it, while the gate was still dark, stay merged. The
+                        // push is answered with no frame: the refusal travels on
+                        // its own channel, and an operation acknowledgement here
+                        // would tell the client its pending writes were applied
+                        // (TG-SYNC-004).
                         let Some(client) = self.admit_push_batch(frontier, ctx).await else {
-                            return Ok(OperationResponse::Ack {
-                                call_id: ctx.call_id,
-                            });
+                            return Ok(OperationResponse::Empty);
                         };
                         admitted_client = Some(client.clone());
                         client
@@ -1574,9 +1576,10 @@ impl SyncService {
         // a pass worth asking for.
         self.run_leaf_prune();
 
-        Ok(OperationResponse::Ack {
-            call_id: ctx.call_id,
-        })
+        // A push diff is fire-and-forget: the client awaits nothing, and the only
+        // acknowledgement frame the protocol has is reserved for operation batches
+        // (TG-SYNC-004), so an applied push is answered with no frame.
+        Ok(OperationResponse::Empty)
     }
 }
 
@@ -2493,7 +2496,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[tokio::test]
-    async fn ac7_ormap_push_diff_returns_ack_and_stores_data() {
+    async fn ormap_push_diff_answers_with_no_frame_and_stores_data() {
         use crate::storage::merkle_sync::MerkleMutationObserver;
         use topgun_core::hlc::Timestamp;
         use topgun_core::messages::{ORMapEntry, ORMapPushDiff, ORMapPushDiffPayload};
@@ -2549,10 +2552,13 @@ mod tests {
             },
         };
 
+        // A push diff is not an op batch: the client has no pending operation
+        // that an acknowledgement of it could refer to, so the only correct
+        // answer is no frame at all.
         let resp = svc.oneshot(op).await.unwrap();
         assert!(
-            matches!(resp, OperationResponse::Ack { call_id: 1 }),
-            "expected Ack response, got {resp:?}"
+            matches!(resp, OperationResponse::Empty),
+            "a merged push diff must be answered with no frame, got {resp:?}"
         );
 
         // Verify the RecordStore put fired: the MerkleMutationObserver should
@@ -2565,7 +2571,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ac7_ormap_push_diff_empty_entries_returns_ack() {
+    async fn ormap_push_diff_with_no_entries_answers_with_no_frame() {
         use topgun_core::messages::{ORMapPushDiff, ORMapPushDiffPayload};
 
         let svc = make_sync_service();
@@ -2582,8 +2588,8 @@ mod tests {
 
         let resp = svc.oneshot(op).await.unwrap();
         assert!(
-            matches!(resp, OperationResponse::Ack { .. }),
-            "empty push diff should still return Ack, got {resp:?}"
+            matches!(resp, OperationResponse::Empty),
+            "a push diff with no entries must be answered with no frame, got {resp:?}"
         );
     }
 
@@ -4467,6 +4473,34 @@ mod tests {
             stored_record_count(&factory, "omap", "k1").await,
             0,
             "a forgotten client's push must be rejected before merge (no record stored)"
+        );
+    }
+
+    /// A push the forgotten-client gate refuses is answered with no frame.
+    ///
+    /// Acknowledging it would tell the client that a push the server dropped
+    /// was taken, and the acknowledgement would carry an id from the server's
+    /// own call counter, which the client reads as one of its operation ids.
+    #[tokio::test]
+    async fn refused_push_diff_answers_with_no_frame() {
+        let (svc, factory, frontier, registry) = make_gated_service();
+        let (conn, _client) = register_device(&registry, "dev-forgotten").await;
+        frontier.stamp_tombstone("omap", "seed", "seed-tag"); // current_epoch = 1
+        frontier.set_durable_epoch_watermark(1000); // protection active
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        let resp = Arc::clone(&svc)
+            .oneshot(push_op(ctx, "omap", "k1", "R1"))
+            .await
+            .expect("a refused push is not a service error");
+        assert_eq!(
+            stored_record_count(&factory, "omap", "k1").await,
+            0,
+            "precondition: the gate refused the push, so nothing was merged"
+        );
+        assert!(
+            matches!(resp, OperationResponse::Empty),
+            "a refused push diff must be answered with no frame, got {resp:?}"
         );
     }
 

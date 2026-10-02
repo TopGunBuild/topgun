@@ -390,7 +390,7 @@ describe('SyncEngine', () => {
       await jest.runAllTimersAsync();
 
       const ws = MockWebSocket.getLastInstance()!;
-      ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '5' } });
+      ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '5', achievedLevel: 'APPLIED' } });
       await jest.runAllTimersAsync();
 
       expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(5);
@@ -1870,6 +1870,11 @@ describe('SyncEngine', () => {
         backpressurePaused: boolean;
       };
       recordRejection: (opId: string, record: unknown) => void;
+      recordSyncStateTracker: { onAcknowledge: (op: OpLogEntry) => void };
+      // Optional: an engine that keeps no registry of the batches it sent has no
+      // such field, and a test that needs one must fail on an assertion, not on a
+      // property read.
+      inFlightBatches?: Map<string, Set<string>>;
     };
     const engine = () => syncEngine as unknown as EnginePrivates;
 
@@ -1900,6 +1905,29 @@ describe('SyncEngine', () => {
     });
 
     const opLogOf = () => engine().opLog;
+
+    // Everything a frame does when the engine reads it as a verdict on the op
+    // log, checked together. The pending count alone would miss a frame that
+    // left the count intact and still deleted durable rows, announced an
+    // acknowledgement to the per-record tracker or released backpressure.
+    async function expectNotAVerdict(inject: () => void) {
+      const acknowledgeSpy = jest.spyOn(engine().recordSyncStateTracker, 'onAcknowledge');
+      const lowWaterSpy = jest.spyOn(engine().backpressureController, 'checkLowWaterMark');
+      const pendingBefore = syncEngine!.getPendingOpsCount();
+      const opsBefore = opLogOf().map((o) => ({ id: o.id, synced: o.synced }));
+      mockStorage.markOpsSynced.mockClear();
+
+      inject();
+      await jest.runAllTimersAsync();
+
+      expect(syncEngine!.getPendingOpsCount()).toBe(pendingBefore);
+      expect(mockStorage.markOpsSynced).not.toHaveBeenCalled();
+      expect(opLogOf().map((o) => ({ id: o.id, synced: o.synced }))).toEqual(opsBefore);
+      expect(acknowledgeSpy).not.toHaveBeenCalled();
+      expect(lowWaterSpy).not.toHaveBeenCalled();
+      acknowledgeSpy.mockRestore();
+      lowWaterSpy.mockRestore();
+    }
 
     test('waitForOpSynced answers rejected for an op already retired and spliced out', async () => {
       const ws = await bootWith([pendingOp('7', 'user7')]);
@@ -1937,7 +1965,7 @@ describe('SyncEngine', () => {
       // Refusal then an ack whose numeric prefix would otherwise swallow the
       // refused op — the two arrive back to back, before the delete resolves.
       ws.simulateMessage(refusal('5'));
-      ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '5' } });
+      ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '5', achievedLevel: 'APPLIED' } });
       await jest.runAllTimersAsync();
 
       await expect(syncEngine!.waitForOpSynced('5', 100)).resolves.toBe('rejected');
@@ -2099,17 +2127,48 @@ describe('SyncEngine', () => {
       expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(1);
     });
 
-    test('an EMPTY acceptance set falls through to the numeric prefix (foreign-server compatibility)', async () => {
-      const ws = await bootWith([pendingOp('1', 'user1'), pendingOp('2', 'user2')]);
+    test('an empty acceptance set with a lastId that answers no sent batch is not a verdict', async () => {
+      const ws = await bootWith([
+        pendingOp('1', 'user1'),
+        pendingOp('2', 'user2'),
+        pendingOp('3', 'user3'),
+      ]);
 
-      // This server never sends an empty results — a batch it accepted nothing
-      // from carries no ack at all — so an empty one can only come from a foreign
-      // or future server, whose lastId is then the only verdict it sent.
-      ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '2', results: [] } });
+      // An empty results array names no op, so it accepts nothing by itself and
+      // the frame can only answer the batch whose last id it carries. The one
+      // batch the engine sent ends in op 3; nothing was ever sent that ends in
+      // op 2, so a numeric prefix read of this frame would retire ops 1 and 2 on
+      // the word of a frame that answers no batch at all.
+      await expectNotAVerdict(() =>
+        ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '2', results: [] } }),
+      );
+    });
+
+    test('an empty acceptance set accepts nothing even when its lastId is the last id of a sent batch', async () => {
+      const ws = await bootWith([
+        pendingOp('1', 'user1'),
+        pendingOp('2', 'user2'),
+        pendingOp('3', 'user3'),
+      ]);
+
+      // The frame names the batch in flight and carries the level a real ack
+      // carries, but its acceptance set is present and empty: the server listed
+      // the ops it accepted and listed none. An op missing from `results` was not
+      // accepted, so reading this frame as "no results, hence the whole batch"
+      // would retire three writes on the word of a frame that accepts nothing.
+      await expectNotAVerdict(() =>
+        ws.simulateMessage({
+          type: 'OP_ACK',
+          payload: { lastId: '3', achievedLevel: 'APPLIED', results: [] },
+        }),
+      );
+
+      // The batch is still on record, so its real acknowledgement still lands.
+      expect([...(engine().inFlightBatches?.get('3') ?? [])]).toEqual(['1', '2', '3']);
+      ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '3', achievedLevel: 'APPLIED' } });
       await jest.runAllTimersAsync();
-
-      expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(2);
       expect(syncEngine!.getPendingOpsCount()).toBe(0);
+      expect(mockStorage.markOpsSynced.mock.calls).toEqual([[3]]);
     });
 
     test('an ack whose max accepted id is below the last applied one marks nothing again', async () => {
@@ -2119,7 +2178,7 @@ describe('SyncEngine', () => {
         pendingOp('5', 'user5'),
       ]);
 
-      ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '5' } });
+      ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '5', achievedLevel: 'APPLIED' } });
       await jest.runAllTimersAsync();
       expect(mockStorage.markOpsSynced).toHaveBeenCalledTimes(1);
       expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(5);
@@ -2208,6 +2267,693 @@ describe('SyncEngine', () => {
       expect(opLogOf().find((o) => o.id === '9')?.rejected).toBeUndefined();
       expect(syncEngine!.getRejectedOpCount()).toBe(0);
       expect(syncEngine!.getPendingOpsCount()).toBe(1);
+    });
+
+    describe('An OP_ACK is a verdict only on a sent batch', () => {
+      // --- Frames ---
+
+      const ack = (payload: Record<string, unknown>) => ({ type: 'OP_ACK', payload });
+      // The results-less acknowledgement a supported server sends for a batch it
+      // applied in full: the last id of the batch and the level it reached.
+      const applied = (lastId: string) => ack({ lastId, achievedLevel: 'APPLIED' });
+
+      // --- What the engine handed to the transport ---
+
+      const batchIdsOf = (messages: any[]): string[][] =>
+        messages
+          .filter((m) => m?.type === 'OP_BATCH')
+          .map((m) => m.payload.ops.map((o: { id: string }) => o.id));
+      const batchesSentOn = (ws: MockWebSocket) => batchIdsOf(ws.sentMessages);
+      const lastOf = <T>(items: T[]): T | undefined => items[items.length - 1];
+
+      const inFlight = () => engine().inFlightBatches;
+
+      const expectRetiredUpTo = (durablePrefix: number) => {
+        expect(opLogOf()).toHaveLength(0);
+        expect(syncEngine!.getPendingOpsCount()).toBe(0);
+        expect(mockStorage.markOpsSynced.mock.calls).toEqual([[durablePrefix]]);
+      };
+
+      // --- Providers other than the default single-server WebSocket one ---
+      //
+      // Typed loosely on purpose. The engine decides what a results-less ack
+      // means from two things a provider may or may not offer: a declared
+      // `transport`, and a report of the batches `sendBatch` put on the wire.
+      // A plain record lets one mock omit either, and lets a test assign
+      // `transport` after the engine was built.
+
+      function providerMock(extra: Record<string, unknown> = {}) {
+        const handlers = new Map<string, Set<(...args: any[]) => void>>();
+        const emit = (event: string, ...args: unknown[]) =>
+          handlers.get(event)?.forEach((handler) => handler(...args));
+
+        const provider: Record<string, any> = {
+          connect: jest.fn().mockImplementation(async () => {
+            setTimeout(() => emit('connected', 'mock-node'), 0);
+          }),
+          getConnection: jest.fn(),
+          getAnyConnection: jest.fn(),
+          isConnected: jest.fn().mockReturnValue(true),
+          getConnectedNodes: jest.fn().mockReturnValue(['mock-node']),
+          on: jest.fn().mockImplementation((event: string, handler: (...args: any[]) => void) => {
+            if (!handlers.has(event)) handlers.set(event, new Set());
+            handlers.get(event)!.add(handler);
+          }),
+          off: jest.fn(),
+          send: jest.fn(),
+          forceReconnect: jest.fn(),
+          close: jest.fn().mockResolvedValue(undefined),
+          ...extra,
+        };
+
+        return {
+          provider,
+          emit,
+          /** Delivers a server frame to the engine, as the provider's `message` event. */
+          deliver: (message: unknown) =>
+            emit('message', 'mock-node', new Uint8Array(serialize(message)).buffer),
+          /** Op ids of every OP_BATCH the engine sent through `send`, in send order. */
+          sentBatches: () =>
+            batchIdsOf(provider.send.mock.calls.map(([data]: [Uint8Array]) => deserialize(data))),
+        };
+      }
+
+      /** HTTP provider: one OP_BATCH per flush through `send`; its acks carry no level. */
+      const httpMock = () => providerMock({ transport: 'http' });
+
+      /** Third-party provider that declares no transport at all. */
+      const bareMock = () => providerMock();
+
+      /**
+       * Cluster provider. `sendBatch` splits a flush into one frame per target
+       * node and reports each frame's op ids through its second argument, which
+       * an engine that keeps no registry simply does not pass.
+       *
+       * - `nodeOf` routes an op id to a node; by default every op goes to one node.
+       * - `script(...)` queues, per upcoming `sendBatch` call, the exact frames
+       *   that call puts on the wire; an op in no scripted frame fails to send.
+       * - `reportsBatches: false` models a provider that sends but never reports.
+       */
+      function clusterMock(
+        options: { nodeOf?: (opId: string) => string; reportsBatches?: boolean } = {},
+      ) {
+        const { nodeOf = () => 'mock-node', reportsBatches = true } = options;
+        const scripted: string[][][] = [];
+        const frames: string[][] = [];
+
+        const sendBatch = jest.fn(
+          (
+            operations: Array<{ key: string; message: { id: string } }>,
+            onBatchSent?: (opIds: string[]) => void,
+          ) => {
+            let callFrames = scripted.shift();
+            if (!callFrames) {
+              const byNode = new Map<string, string[]>();
+              for (const { message } of operations) {
+                const node = nodeOf(message.id);
+                if (!byNode.has(node)) byNode.set(node, []);
+                byNode.get(node)!.push(message.id);
+              }
+              callFrames = [...byNode.values()];
+            }
+
+            const sent = new Set<string>();
+            for (const frame of callFrames) {
+              frames.push(frame);
+              frame.forEach((id) => sent.add(id));
+              if (reportsBatches) onBatchSent?.(frame);
+            }
+            return new Map(operations.map((op) => [op.key, sent.has(op.message.id)]));
+          },
+        );
+
+        return {
+          ...providerMock({ transport: 'websocket', sendBatch }),
+          sendBatch,
+          /** Every frame put on the wire so far, reported or not. */
+          frames,
+          script: (...calls: string[][][]) => {
+            scripted.push(...calls);
+          },
+        };
+      }
+
+      const bootOn = (
+        mock: { provider: Record<string, any> },
+        ops: ReturnType<typeof pendingOp>[],
+      ) =>
+        bootWith(ops, {
+          connectionProvider: mock.provider as unknown as SyncEngineConfig['connectionProvider'],
+        });
+
+      // --- Local writes with distinct durable ids ---
+
+      // The default storage mock answers every append with id 1, which would put
+      // every batch of a many-write test under one and the same last id.
+      const issueOpIdsFrom = (first: number) => {
+        let next = first;
+        mockStorage.appendOpLog.mockImplementation(async () => next++);
+      };
+
+      const write = (key: string) => {
+        const timestamp = { millis: 2000, counter: 0, nodeId: 'test-node' };
+        return syncEngine!.recordOperation('users', 'PUT', key, {
+          record: { value: { key }, timestamp },
+          timestamp,
+        });
+      };
+
+      // Three hundred unanswered writes must all stay pending, so no pending-op
+      // ceiling may pause or drop any of them.
+      const roomy = { backpressure: { maxPendingOps: 100_000 } };
+
+      const range = (from: number, to: number) =>
+        Array.from({ length: to - from + 1 }, (_, i) => from + i);
+
+      const threeOps = () => [
+        pendingOp('1', 'user1'),
+        pendingOp('2', 'user2'),
+        pendingOp('3', 'user3'),
+      ];
+
+      describe('old-server frame shapes (permanent guards of TG-SYNC-004)', () => {
+        // These tests are the standing protection of the client rule against
+        // servers that are ALREADY RELEASED and will keep running in the field
+        // whatever a newer server does. Each one injects, byte for byte, a frame
+        // such a server really sends. They must never be deleted, weakened or
+        // skipped: once the current server stops producing these frames, nothing
+        // else in the repository exercises them.
+
+        test('old-server frame: a results-less OP_ACK whose lastId answers no sent batch is not a verdict', async () => {
+          const ws = await bootWith(threeOps());
+          expect(batchesSentOn(ws)).toEqual([['1', '2', '3']]);
+
+          // What a released server answers a push diff or an unsubscribe with: a
+          // frame-counter value in lastId, no level, no results. It was never an
+          // answer to an OP_BATCH.
+          await expectNotAVerdict(() =>
+            ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '900' } }),
+          );
+        });
+
+        test('old-server frame: a non-numeric lastId with no acceptance set is not a verdict', async () => {
+          const ws = await bootWith(threeOps());
+          expect(batchesSentOn(ws)).toEqual([['1', '2', '3']]);
+
+          // What a released server answers an empty batch with. Read as "the
+          // server took everything", it would retire every pending write.
+          await expectNotAVerdict(() =>
+            ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: 'unknown' } }),
+          );
+        });
+
+        test('old-server frame: on HTTP, an ack without achievedLevel retires the answered batch', async () => {
+          const http = httpMock();
+          await bootOn(http, threeOps());
+          expect(http.sentBatches()).toEqual([['1', '2', '3']]);
+
+          // The HTTP acknowledgement of every release carries lastId and nothing
+          // else. Demanding a level here would leave every HTTP write pending
+          // forever.
+          http.deliver({ type: 'OP_ACK', payload: { lastId: '3' } });
+          await jest.runAllTimersAsync();
+
+          expectRetiredUpTo(3);
+        });
+
+        test('old-server frame: on WebSocket, a results-less OP_ACK without achievedLevel is not a verdict even when its lastId is the last id of a sent batch', async () => {
+          const ws = await bootWith(threeOps());
+          expect(batchesSentOn(ws)).toEqual([['1', '2', '3']]);
+
+          // The same stray frame, at a counter value that happens to equal the
+          // last id of the batch in flight. Matching a sent batch is not enough on
+          // WebSocket: the acknowledgement of a real batch always carries the
+          // level it reached, and this frame does not.
+          await expectNotAVerdict(() =>
+            ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '3' } }),
+          );
+        });
+      });
+
+      test('an ack for a batch sent before a connection loss and re-auth still retires exactly that batch', async () => {
+        const ws = await bootWith(threeOps());
+        expect(batchesSentOn(ws)).toEqual([['1', '2', '3']]);
+
+        ws.close();
+        await jest.runAllTimersAsync();
+        const reconnected = MockWebSocket.getLastInstance()!;
+        expect(reconnected).not.toBe(ws);
+
+        reconnected.simulateMessage({ type: 'AUTH_ACK' });
+        await jest.runAllTimersAsync();
+        expect(lastOf(batchesSentOn(reconnected))).toEqual(['1', '2', '3']);
+
+        // Neither the lost connection nor the new authentication may forget the
+        // batch: this ack answers it whichever of the sends the server processed.
+        reconnected.simulateMessage(applied('3'));
+        await jest.runAllTimersAsync();
+
+        expectRetiredUpTo(3);
+      });
+
+      test('on HTTP, an empty acceptance set accepts nothing even when its lastId is the last id of a sent batch', async () => {
+        const http = httpMock();
+        await bootOn(http, threeOps());
+        expect(http.sentBatches()).toEqual([['1', '2', '3']]);
+
+        // Over HTTP a matching lastId alone retires a batch, which is exactly
+        // why an empty acceptance set must not be read as "no results" there.
+        await expectNotAVerdict(() =>
+          http.deliver({ type: 'OP_ACK', payload: { lastId: '3', results: [] } }),
+        );
+        expect([...(inFlight()?.get('3') ?? [])]).toEqual(['1', '2', '3']);
+      });
+
+      test('a results-less ack for the last id of a sent batch retires exactly that batch', async () => {
+        const ws = await bootWith(threeOps());
+        expect(batchesSentOn(ws)).toEqual([['1', '2', '3']]);
+
+        ws.simulateMessage(applied('3'));
+        await jest.runAllTimersAsync();
+
+        expectRetiredUpTo(3);
+      });
+
+      test('a single-op batch is retired by the CLIENT_OP-shaped ack', async () => {
+        const ws = await bootWith([pendingOp('1', 'user1')]);
+        expect(batchesSentOn(ws)).toEqual([['1']]);
+
+        // A lone CLIENT_OP and a one-op batch are answered with the same frame.
+        ws.simulateMessage(applied('1'));
+        await jest.runAllTimersAsync();
+
+        expectRetiredUpTo(1);
+      });
+
+      test('two in-flight batches are each retired by their own ack, in either order', async () => {
+        // Op 1 is flushed alone; a second write arrives before any answer and is
+        // flushed together with the still-pending op 1.
+        const bootTwoBatches = async () => {
+          issueOpIdsFrom(2);
+          const ws = await bootWith([pendingOp('1', 'user1')], {
+            connectionProvider: new SingleServerProvider({ url: 'ws://localhost:8080' }),
+          });
+          await write('user2');
+          expect(batchesSentOn(ws)).toEqual([['1'], ['1', '2']]);
+          mockStorage.markOpsSynced.mockClear();
+          return ws;
+        };
+
+        const inOrder = await bootTwoBatches();
+        inOrder.simulateMessage(applied('1'));
+        await jest.runAllTimersAsync();
+        expect(opLogOf().map((o) => o.id)).toEqual(['2']);
+        expect(mockStorage.markOpsSynced.mock.calls).toEqual([[1]]);
+        inOrder.simulateMessage(applied('2'));
+        await jest.runAllTimersAsync();
+        expect(opLogOf()).toHaveLength(0);
+        expect(mockStorage.markOpsSynced.mock.calls).toEqual([[1], [2]]);
+
+        syncEngine!.close();
+
+        const reversed = await bootTwoBatches();
+        reversed.simulateMessage(applied('2'));
+        await jest.runAllTimersAsync();
+        expectRetiredUpTo(2);
+        // The ack of the first batch arrives late and finds nothing left to say.
+        await expectNotAVerdict(() => reversed.simulateMessage(applied('1')));
+      });
+
+      test("an ack for one node's batch does not delete a still-pending op of another node's batch", async () => {
+        const cluster = clusterMock({
+          nodeOf: (opId) => (Number(opId) % 2 === 1 ? 'node-a' : 'node-b'),
+        });
+        await bootOn(cluster, [
+          pendingOp('1', 'user1'),
+          pendingOp('2', 'user2'),
+          pendingOp('3', 'user3'),
+          pendingOp('4', 'user4'),
+        ]);
+        expect(cluster.frames).toEqual([
+          ['1', '3'],
+          ['2', '4'],
+        ]);
+
+        // Node A acknowledges its frame. Op 2 travelled to node B and nobody has
+        // answered for it, though its id is below the acknowledged one.
+        cluster.deliver(applied('3'));
+        await jest.runAllTimersAsync();
+
+        expect(opLogOf().map((o) => o.id)).toEqual(['2', '4']);
+        expect(opLogOf().every((o) => !o.synced)).toBe(true);
+        // The durable mark deletes every row at or below its id, so it has to
+        // stop under the smallest op that is still pending.
+        expect(mockStorage.markOpsSynced.mock.calls).toEqual([[1]]);
+
+        cluster.deliver(applied('4'));
+        await jest.runAllTimersAsync();
+
+        expect(opLogOf()).toHaveLength(0);
+        expect(mockStorage.markOpsSynced.mock.calls).toEqual([[1], [4]]);
+      });
+
+      test('two in-flight batches with the same last id are covered by their intersection', async () => {
+        // Two frames ending in the same op are in flight at once and the ack does
+        // not say which one it answers, so it vouches only for the ops that are
+        // in both.
+        const covered = async (
+          ops: ReturnType<typeof pendingOp>[],
+          firstFlush: string[][],
+          secondFlush: string[][],
+          stillPending: string[],
+        ) => {
+          const cluster = clusterMock();
+          cluster.script(firstFlush, secondFlush);
+          mockStorage.markOpsSynced.mockClear();
+          await bootOn(cluster, ops);
+          cluster.deliver({ type: 'AUTH_ACK' });
+          await jest.runAllTimersAsync();
+          expect(cluster.frames).toEqual([...firstFlush, ...secondFlush]);
+
+          cluster.deliver(applied('3'));
+          await jest.runAllTimersAsync();
+
+          expect(opLogOf().map((o) => o.id)).toEqual(stillPending);
+          expect(opLogOf().every((o) => !o.synced)).toBe(true);
+          // Op 3 is retired in memory only: a smaller op is still pending, and
+          // the durable mark would delete it along with everything below 3.
+          expect(mockStorage.markOpsSynced).not.toHaveBeenCalled();
+
+          // The entry was used up by the ack it matched.
+          await expectNotAVerdict(() => cluster.deliver(applied('3')));
+        };
+
+        // A wider frame first, then a narrower one.
+        await covered(
+          [pendingOp('2', 'user2'), pendingOp('3', 'user3')],
+          [['2', '3']],
+          [['3']],
+          ['2'],
+        );
+
+        syncEngine!.close();
+
+        // The narrower frame first, then a wider one that reuses its last id.
+        await covered(threeOps(), [['3']], [['1', '2', '3']], ['1', '2']);
+      });
+
+      test('the in-flight registry is bounded', async () => {
+        await bootWith([], roomy);
+        issueOpIdsFrom(1);
+
+        // No write is ever answered, so flush n carries ops 1..n and ends in n:
+        // three hundred distinct batches.
+        for (const n of range(1, 300)) {
+          await write(`key${n}`);
+        }
+        expect(syncEngine!.getPendingOpsCount()).toBe(300);
+
+        const registry = inFlight();
+        expect(registry).toBeInstanceOf(Map);
+
+        const nonEmpty = [...registry!.values()].filter((ids) => ids.size > 0);
+        expect(nonEmpty.length).toBeLessThanOrEqual(256);
+        // The bound empties the oldest sets and keeps their keys: a key that was
+        // dropped could be registered afresh and acknowledge ops again.
+        for (const n of range(1, 44)) {
+          expect(registry!.get(String(n))).toEqual(new Set());
+        }
+        // The oldest batch inside the bound is untouched.
+        expect(registry!.get('45')).toEqual(new Set(range(1, 45).map(String)));
+      });
+
+      test('an HTTP batch re-sent by the provider after a failed poll is retired by its ack', async () => {
+        const http = httpMock();
+        await bootOn(http, [pendingOp('1', 'user1')]);
+        expect(http.sentBatches()).toEqual([['1']]);
+        const lowWaterSpy = jest.spyOn(engine().backpressureController, 'checkLowWaterMark');
+
+        // A failed poll: the provider reports the loss, re-sends the request on
+        // its own and delivers the answer. The engine sees no new connection, no
+        // new authentication and makes no new flush in between.
+        http.emit('disconnected', 'mock-node');
+        http.deliver({ type: 'OP_ACK', payload: { lastId: '1' } });
+        await jest.runAllTimersAsync();
+
+        expectRetiredUpTo(1);
+        expect(lowWaterSpy).toHaveBeenCalled();
+      });
+
+      test('a results-less OP_ACK that carries achievedLevel but answers no sent batch is not a verdict', async () => {
+        const ws = await bootWith(threeOps());
+        expect(batchesSentOn(ws)).toEqual([['1', '2', '3']]);
+
+        // A level does not turn a frame into an answer: no batch ending in op 900
+        // was ever sent.
+        await expectNotAVerdict(() => ws.simulateMessage(applied('900')));
+      });
+
+      test('a provider whose sendBatch reports no batch is warned about once', async () => {
+        const warnSpy = jest.spyOn(logger, 'warn');
+        const cluster = clusterMock({ reportsBatches: false });
+
+        await bootOn(cluster, [pendingOp('1', 'user1'), pendingOp('2', 'user2')]);
+        cluster.deliver({ type: 'AUTH_ACK' });
+        await jest.runAllTimersAsync();
+        expect(cluster.sendBatch).toHaveBeenCalledTimes(2);
+
+        // Without a report the engine cannot tell which acks answer this
+        // provider's batches, so its writes retire only through acks that name
+        // their ops. That has to be said, and said once rather than per flush.
+        const warnings = warnSpy.mock.calls.filter((args) =>
+          args.some(
+            (arg) =>
+              typeof arg === 'string' &&
+              arg.includes('sendBatch did not report the batches it sent'),
+          ),
+        );
+        warnSpy.mockRestore();
+        expect(warnings).toHaveLength(1);
+      });
+
+      test('a provider that declares no transport keeps the registry rule alone: a matched ack without achievedLevel retires the batch', async () => {
+        const bare = bareMock();
+        await bootOn(bare, threeOps());
+        expect('transport' in bare.provider).toBe(false);
+        expect(bare.sentBatches()).toEqual([['1', '2', '3']]);
+
+        // A provider written before the declaration existed must keep working:
+        // the engine cannot ask its frames for a level it never promised.
+        bare.deliver({ type: 'OP_ACK', payload: { lastId: '3' } });
+        await jest.runAllTimersAsync();
+
+        expectRetiredUpTo(3);
+      });
+
+      test('on HTTP, a non-numeric lastId with no acceptance set is not a verdict', async () => {
+        const http = httpMock();
+        await bootOn(http, threeOps());
+        expect(http.sentBatches()).toEqual([['1', '2', '3']]);
+
+        // The HTTP answer to a request whose last op carries no id. No batch is
+        // registered under that word, so it retires nothing.
+        await expectNotAVerdict(() =>
+          http.deliver({ type: 'OP_ACK', payload: { lastId: 'unknown' } }),
+        );
+      });
+
+      test('an evicted key acknowledges nothing, and registering it again keeps it empty', async () => {
+        const ws = await bootWith([], roomy);
+        issueOpIdsFrom(1);
+        for (const n of range(1, 300)) {
+          await write(`key${n}`);
+        }
+        expect(lastOf(batchesSentOn(ws))).toHaveLength(300);
+
+        // (1) The batch that ended in op 1 is far past the bound, so its set was
+        // emptied. Its late ack must retire nothing, and the key must stay: with
+        // the key gone the ack could not be told from a stray one, and with the
+        // set restored it would acknowledge again.
+        await expectNotAVerdict(() => ws.simulateMessage(applied('1')));
+        expect(inFlight()?.get('1')).toEqual(new Set());
+
+        // (2) Every other op is retired by an ack that names it, leaving op 1 as
+        // the only pending write.
+        ws.simulateMessage(
+          ack({
+            lastId: '300',
+            results: range(2, 300).map((n) => ({
+              opId: String(n),
+              success: true,
+              achievedLevel: 'APPLIED',
+            })),
+          }),
+        );
+        await jest.runAllTimersAsync();
+        expect(opLogOf().map((o) => o.id)).toEqual(['1']);
+
+        // A reconnect flushes op 1 alone, under the very key that was emptied.
+        ws.close();
+        await jest.runAllTimersAsync();
+        const reconnected = MockWebSocket.getLastInstance()!;
+        expect(reconnected).not.toBe(ws);
+        reconnected.simulateMessage({ type: 'AUTH_ACK' });
+        await jest.runAllTimersAsync();
+        expect(lastOf(batchesSentOn(reconnected))).toEqual(['1']);
+
+        // Registering under an emptied key must not refill it.
+        await expectNotAVerdict(() => reconnected.simulateMessage(applied('1')));
+        expect(inFlight()?.get('1')).toEqual(new Set());
+
+        // (3) Op 1 is not stranded: the next write flushes it under a fresh key,
+        // and that batch's ack retires both.
+        await write('key301');
+        expect(lastOf(batchesSentOn(reconnected))).toEqual(['1', '301']);
+        mockStorage.markOpsSynced.mockClear();
+        reconnected.simulateMessage(applied('301'));
+        await jest.runAllTimersAsync();
+
+        expectRetiredUpTo(301);
+      });
+
+      test('the transport is read when the ack arrives, not when the engine is built', async () => {
+        const late = bareMock();
+        await bootOn(late, threeOps());
+        expect(late.sentBatches()).toEqual([['1', '2', '3']]);
+
+        // A provider that picks its transport while connecting has none to show
+        // at construction. A value copied then would be "none declared" for the
+        // whole session, and the frame below would retire the batch.
+        late.provider.transport = 'websocket';
+
+        await expectNotAVerdict(() => late.deliver({ type: 'OP_ACK', payload: { lastId: '3' } }));
+
+        late.deliver(applied('3'));
+        await jest.runAllTimersAsync();
+
+        expectRetiredUpTo(3);
+      });
+
+      test('entries with nothing pending are pruned before an eviction, so refused writes do not grow the registry', async () => {
+        const ws = await bootWith([], roomy);
+        issueOpIdsFrom(1);
+
+        // Each write is flushed alone and refused before the next one is made, so
+        // every batch names a single op that has already left the op log, and no
+        // ack is ever applied: nothing but the bound itself can clean up.
+        for (const n of range(1, 300)) {
+          await write(`key${n}`);
+          ws.simulateMessage(refusal(String(n)));
+          await jest.advanceTimersByTimeAsync(0);
+        }
+        expect(lastOf(batchesSentOn(ws))).toEqual(['300']);
+        expect(opLogOf()).toHaveLength(0);
+        expect(mockStorage.markOpsSynced).not.toHaveBeenCalled();
+
+        const registry = inFlight();
+        expect(registry).toBeInstanceOf(Map);
+
+        const keys = [...registry!.keys()];
+        expect(keys.length).toBeLessThanOrEqual(256);
+        // Emptying the oldest set keeps its key for good when no ack ever
+        // arrives, so dead entries have to be deleted before anything is emptied.
+        expect([...registry!.values()].filter((ids) => ids.size === 0)).toHaveLength(0);
+        // The 257th batch found 256 entries with nothing pending and deleted them
+        // all; only what was recorded from then on remains.
+        expect(keys).toEqual(range(257, 300).map(String));
+      });
+
+      test('a refused op that is still in the op log keeps its sent-batch entry, so a late ack cannot retire an op its batch never carried', async () => {
+        // Op 1 finds no node on the first flush; op 2 and op 3 each travel alone.
+        const cluster = clusterMock();
+        cluster.script([['2'], ['3']]);
+        await bootOn(cluster, threeOps());
+        expect(cluster.frames).toEqual([['2'], ['3']]);
+        expect(inFlight()?.get('2')).toEqual(new Set(['2']));
+
+        // Op 2 is refused for good, but storage will not delete its row, so it
+        // stays in the op log, flagged, and every later flush sends it again.
+        mockStorage.deleteOp.mockRejectedValue(new Error('storage refused the delete'));
+        cluster.deliver(refusal('2'));
+        await jest.runAllTimersAsync();
+        expect(opLogOf().map((o) => o.id)).toEqual(['1', '2', '3']);
+        expect(opLogOf().find((o) => o.id === '2')?.rejected).toBe(true);
+
+        // Another batch is acknowledged, which is when finished entries are
+        // cleared out. Op 1 is still pending below it, so no durable row goes.
+        cluster.deliver(applied('3'));
+        await jest.runAllTimersAsync();
+        expect(opLogOf().map((o) => o.id)).toEqual(['1', '2']);
+
+        // Op 1 now has a node, the same one, and the flush that carries it ends
+        // in the refused op again: a second, wider frame under the same last id.
+        cluster.script([['1', '2']]);
+        cluster.deliver({ type: 'AUTH_ACK' });
+        await jest.runAllTimersAsync();
+        expect(cluster.frames).toEqual([['2'], ['3'], ['1', '2']]);
+        const recordedUnderRefusedOp = new Set(inFlight()?.get('2'));
+        const pendingBefore = syncEngine!.getPendingOpsCount();
+
+        // The answer to the FIRST frame arrives late. That frame carried op 2
+        // alone, so it says nothing about op 1.
+        cluster.deliver(applied('2'));
+        await jest.runAllTimersAsync();
+
+        expect(opLogOf().map((o) => o.id)).toEqual(['1', '2']);
+        expect(opLogOf().find((o) => o.id === '1')?.synced).toBeFalsy();
+        expect(syncEngine!.getPendingOpsCount()).toBe(pendingBefore);
+        expect(mockStorage.markOpsSynced).not.toHaveBeenCalled();
+        // Both frames were on record under that id, so it vouched only for the
+        // op they share.
+        expect(recordedUnderRefusedOp).toEqual(new Set(['2']));
+      });
+
+      test("an ack that matches a refused op's entry does not free the key while the op can still be sent", async () => {
+        // Op 2 travels alone, twice, before anything is answered; op 1 finds no
+        // node on either flush.
+        const cluster = clusterMock();
+        cluster.script([['2']], [['2']]);
+        await bootOn(cluster, [pendingOp('1', 'user1'), pendingOp('2', 'user2')]);
+        cluster.deliver({ type: 'AUTH_ACK' });
+        await jest.runAllTimersAsync();
+        expect(cluster.frames).toEqual([['2'], ['2']]);
+
+        // Op 2 is refused for good, but storage will not delete its row, so it
+        // stays in the op log, flagged, and every later flush sends it again.
+        mockStorage.deleteOp.mockRejectedValue(new Error('storage refused the delete'));
+        cluster.deliver(refusal('2'));
+        await jest.runAllTimersAsync();
+
+        // The answer to the first frame arrives late. It matches the entry and
+        // has nothing to retire: the only op it covers is the refused one.
+        cluster.deliver(applied('2'));
+        await jest.runAllTimersAsync();
+        expect(opLogOf().map((o) => o.id)).toEqual(['1', '2']);
+
+        // Op 1 now has a node, and the frame that carries it ends in the refused
+        // op again: a wider frame under the same last id.
+        cluster.script([['1', '2']]);
+        cluster.deliver({ type: 'AUTH_ACK' });
+        await jest.runAllTimersAsync();
+        expect(cluster.frames).toEqual([['2'], ['2'], ['1', '2']]);
+        const recordedUnderRefusedOp = new Set(inFlight()?.get('2'));
+        const pendingBefore = syncEngine!.getPendingOpsCount();
+
+        // The answer to the SECOND frame arrives. That frame, too, carried op 2
+        // alone, so it says nothing about op 1.
+        cluster.deliver(applied('2'));
+        await jest.runAllTimersAsync();
+
+        expect(opLogOf().map((o) => o.id)).toEqual(['1', '2']);
+        expect(opLogOf().find((o) => o.id === '1')?.synced).toBeFalsy();
+        expect(syncEngine!.getPendingOpsCount()).toBe(pendingBefore);
+        expect(mockStorage.markOpsSynced).not.toHaveBeenCalled();
+        // The first answer did not use the entry up, so the wider frame was
+        // intersected with it instead of being recorded afresh.
+        expect(recordedUnderRefusedOp).toEqual(new Set(['2']));
+        // And it is still there for as long as the refused op can be sent.
+        expect(inFlight()?.get('2')).toEqual(new Set(['2']));
+      });
     });
   });
 });

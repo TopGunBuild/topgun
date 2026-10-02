@@ -128,6 +128,8 @@ const engine = new SyncEngine({
 
 `AutoConnectionProvider` attempts WebSocket first, then falls back to HTTP polling. Same setup pattern.
 
+If you write your own connection provider (anything that implements `IConnectionProvider`), declare how it talks to the server by setting its `transport` member to `'websocket'` or `'http'`. The built-in providers already do this, so the snippet above needs nothing extra. A provider that leaves `transport` out keeps working, but the client is then less strict about which server acknowledgements it accepts: over a WebSocket it can no longer reliably tell a real acknowledgement of a batch it sent from one that belongs to no batch at all. If your provider also implements `sendBatch` (to split one flush of writes across several connections), it must report every batch it actually sends by calling the second argument, `onBatchSent(opIds)`, once per batch and before `sendBatch` returns — otherwise those writes are sent but never confirmed.
+
 ## Core Methods
 
 ### `start()`

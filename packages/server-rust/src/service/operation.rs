@@ -521,7 +521,17 @@ impl Operation {
 /// Successful response from an operation handler.
 #[derive(Debug)]
 pub enum OperationResponse {
-    /// Simple acknowledgement.
+    /// Test-fixture response: `Ack` exists only so echo services in unit tests
+    /// can prove a call reached them. It never reaches the wire.
+    ///
+    /// Production code cannot construct it, because the variant is compiled out
+    /// of every non-test build. That is deliberate: its only payload is the
+    /// dispatcher's call counter, which is shared by all connections and message
+    /// kinds and has no relation to a client operation id. The single
+    /// acknowledgement frame of the protocol is reserved for the answer to an
+    /// operation batch and names ids of that batch (TG-SYNC-004), so a handler
+    /// that has nothing to say returns `Empty` instead.
+    #[cfg(test)]
     Ack { call_id: u64 },
     /// Single message response.
     Message(Box<messages::Message>),

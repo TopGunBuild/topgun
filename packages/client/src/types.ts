@@ -111,11 +111,42 @@ export interface IConnectionProvider {
    * batch sending here so each operation is routed to the correct partition owner.
    * When absent, SyncEngine falls back to sending all ops in a single OP_BATCH.
    *
+   * A provider that implements this MUST call `onBatchSent` synchronously (before
+   * `sendBatch` returns), once per `OP_BATCH` frame it hands to a connection, with
+   * the ids of that frame's operations in frame order. A frame whose hand-off
+   * failed is not reported. The engine retires operations on an `OP_ACK` without
+   * `results` only by matching it to a reported batch (TG-SYNC-004), so a batch
+   * that is not reported cannot be acknowledged by such an `OP_ACK`: its
+   * operations stay pending and are re-sent on every flush.
+   *
    * @param operations - Array of { key, message } pairs where key is the routing key
+   * @param onBatchSent - Reports the operation ids of one `OP_BATCH` frame handed to a connection
    * @returns Map of key -> success boolean
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- batch message shape varies by operation type; msgpack serialization happens after routing, so the message is still an untyped object here
-  sendBatch?(operations: Array<{ key: string; message: any }>): Map<string, boolean>;
+  sendBatch?(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- batch message shape varies by operation type; msgpack serialization happens after routing, so the message is still an untyped object here
+    operations: Array<{ key: string; message: any }>,
+    onBatchSent?: (opIds: string[]) => void,
+  ): Map<string, boolean>;
+
+  /**
+   * The transport this provider's frames travel over.
+   *
+   * It decides how the engine reads an `OP_ACK` that carries no `results`
+   * (TG-SYNC-004). Over a WebSocket the acknowledgement of a real batch always
+   * carries the level it reached, so a frame without one is not applied even
+   * when its `lastId` matches a sent batch; over HTTP the acknowledgement never
+   * carries a level, so the match alone decides.
+   *
+   * Optional. A provider that omits it gets the match-a-sent-batch rule alone:
+   * it loses only the extra WebSocket protection, never the retirement of its
+   * operations.
+   *
+   * The engine reads it after `connect()`, on each acknowledgement, and never
+   * keeps a copy. A provider that chooses its transport while connecting may
+   * therefore return `undefined` before that.
+   */
+  transport?: 'websocket' | 'http';
 
   /**
    * Force-close the current connection to trigger reconnection.

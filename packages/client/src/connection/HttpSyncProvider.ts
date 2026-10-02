@@ -70,6 +70,13 @@ export interface HttpSyncProviderConfig {
  * maintaining per-client state.
  */
 export class HttpSyncProvider implements IConnectionProvider {
+  /**
+   * Frames travel over HTTP polling, whose acknowledgement carries the last
+   * operation id and never a level. Declaring it tells the engine not to demand
+   * one before it retires the answered batch (TG-SYNC-004).
+   */
+  readonly transport = 'http' as const;
+
   private readonly url: string;
   private readonly clientId: string;
   private readonly hlc: HLC;

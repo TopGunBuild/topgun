@@ -1340,19 +1340,18 @@ async fn dispatch_op_batch(
     let ops = &batch_msg.payload.ops;
 
     if ops.is_empty() {
-        // The only surviving `"unknown"` acknowledgement, and by construction it
-        // carries no refused operation: there is no operation to name.
-        let ack = TopGunMessage::OpAck(OpAckMessage {
-            payload: OpAckPayload {
-                last_id: "unknown".to_string(),
-                ..Default::default()
-            },
-        });
-        send_frame(&ack, tx).await;
+        // No frame at all: an empty batch has no operation to acknowledge, and an
+        // acknowledgement that names no operation id is read by a client as
+        // "every pending write was applied" and durably retires writes the server
+        // never saw (TG-SYNC-004).
         return;
     }
 
     // Compute lastId from the last op in the original batch order.
+    //
+    // The fallback is the id-less residue: only a client that sends operations
+    // without ids can reach it, and such a client has no other acknowledgement
+    // to wait for. A batch that carries ids is always answered with one of them.
     let last_id = ops
         .last()
         .and_then(|op| op.id.clone())
@@ -1580,12 +1579,16 @@ async fn unpack_and_dispatch_batch(
 
 /// Sends an `OperationResponse` as outbound WebSocket message(s).
 ///
-/// Maps each variant to the appropriate wire format:
+/// Exactly three variants put a frame on the wire:
 /// - `Message` -> serialize and send as binary frame
 /// - `Messages` -> serialize each individually and send as separate frames
-/// - `Empty` -> no response
-/// - `Ack` -> construct `OpAck` with `call_id.to_string()` as `last_id`
 /// - `NotImplemented` -> construct `Error` with code 501
+///
+/// Every other variant sends nothing. In particular this function never builds
+/// an operation acknowledgement: that frame is reserved for the answer to an
+/// operation batch and is built only where the ids of the answered operations
+/// are in hand (TG-SYNC-004). A handler-level counter is not such an id, and a
+/// client that received one would retire pending writes the server never applied.
 async fn send_operation_response(resp: OperationResponse, tx: &mpsc::Sender<OutboundMessage>) {
     match resp {
         OperationResponse::Message(msg) => {
@@ -1603,17 +1606,11 @@ async fn send_operation_response(resp: OperationResponse, tx: &mpsc::Sender<Outb
         OperationResponse::Empty => {
             // No response needed
         }
-        OperationResponse::Ack { call_id } => {
-            let ack = TopGunMessage::OpAck(OpAckMessage {
-                payload: OpAckPayload {
-                    last_id: call_id.to_string(),
-                    ..Default::default()
-                },
-            });
-            if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
-                let _ = tx.send(OutboundMessage::Binary(bytes)).await;
-            }
-        }
+        // The fixture-only acknowledgement carries a dispatcher counter, not an
+        // operation id, so it must never become a frame. The variant exists in
+        // test builds only, hence the gate on this arm.
+        #[cfg(test)]
+        OperationResponse::Ack { .. } => {}
         OperationResponse::NotImplemented {
             service_name,
             call_id: _,
@@ -3036,6 +3033,113 @@ mod tests {
         assert!(
             ack_payloads(&msgs).is_empty(),
             "no ack at all, even though nothing before the transient was accepted"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // No frame where there is no client operation to give a verdict on
+    // -----------------------------------------------------------------------
+
+    /// Closes the channel and decodes every frame queued on it, in wire order.
+    async fn queued_messages(
+        tx: mpsc::Sender<OutboundMessage>,
+        mut rx: mpsc::Receiver<OutboundMessage>,
+    ) -> Vec<TopGunMessage> {
+        // The drain below ends only once every sender is gone.
+        drop(tx);
+        let mut frames = Vec::new();
+        while let Some(outbound) = rx.recv().await {
+            match outbound {
+                OutboundMessage::Binary(bytes) => frames.push(bytes),
+                OutboundMessage::Close(reason) => {
+                    panic!("the exchange must not close the connection: {reason:?}")
+                }
+            }
+        }
+        decode_frames(&frames)
+    }
+
+    /// An `OP_BATCH` with no operations is answered with no frame.
+    ///
+    /// An acknowledgement here names no operation, and a client reads a
+    /// non-numeric `lastId` as "every pending operation was accepted" — so the
+    /// one frame this exchange could send is the one that deletes writes the
+    /// server never saw.
+    #[tokio::test]
+    async fn empty_op_batch_emits_no_frame() {
+        let fx = build_fold_fixture(Vec::new(), None).await;
+
+        let msgs = decode_frames(&dispatch_batch_frames(&fx, Vec::new()).await);
+
+        assert!(
+            msgs.is_empty(),
+            "an empty op batch has no operation to give a verdict on, got {msgs:?}"
+        );
+    }
+
+    /// An empty `OP_BATCH` carried inside a `BATCH` envelope is answered with
+    /// no frame either.
+    ///
+    /// The envelope bypasses the top-level empty-batch branch: the inner message
+    /// is classified and dispatched to the domain service like any other, so its
+    /// response is mapped to a frame separately from the top-level path.
+    #[tokio::test]
+    async fn nested_empty_op_batch_emits_no_frame() {
+        let fx = build_fold_fixture(Vec::new(), None).await;
+        let inner = TopGunMessage::OpBatch(OpBatchMessage {
+            payload: OpBatchPayload {
+                ops: Vec::new(),
+                write_concern: None,
+                timeout: None,
+            },
+        });
+        let inner_bytes = rmp_serde::to_vec_named(&inner).expect("inner OP_BATCH serializes");
+        let batch = BatchMessage {
+            count: 1,
+            data: frame_inner_item(&inner_bytes),
+        };
+        let (tx, rx) = mpsc::channel(64);
+
+        unpack_and_dispatch_batch(
+            &batch,
+            fx.conn_id,
+            Some(fold_principal()),
+            &fx.classify_svc,
+            &fx.dispatcher,
+            &tx,
+        )
+        .await;
+        let msgs = queued_messages(tx, rx).await;
+
+        // Without this the test would also pass for an inner message that was
+        // dropped before dispatch, which says nothing about the response mapping.
+        assert_eq!(
+            fx.service_calls.load(Ordering::Relaxed),
+            1,
+            "precondition: the inner empty batch reached the domain service"
+        );
+        assert!(
+            msgs.is_empty(),
+            "an empty op batch has no operation to give a verdict on, got {msgs:?}"
+        );
+    }
+
+    /// The bare acknowledgement response is mapped to no frame.
+    ///
+    /// It carries only the server's call id — a counter shared by every
+    /// connection and message kind. Put on the wire as `lastId`, a client takes
+    /// it for one of its own operation ids and deletes every pending write at or
+    /// below it.
+    #[tokio::test]
+    async fn ack_response_variant_emits_no_frame() {
+        let (tx, rx) = mpsc::channel(8);
+
+        send_operation_response(OperationResponse::Ack { call_id: 7 }, &tx).await;
+        let msgs = queued_messages(tx, rx).await;
+
+        assert!(
+            msgs.is_empty(),
+            "a call id is not a client operation id and must not reach the wire, got {msgs:?}"
         );
     }
 }

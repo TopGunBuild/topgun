@@ -538,17 +538,18 @@ fn send_to_connection(conn_reg: &ConnectionRegistry, conn_id: ConnectionId, msg:
 
 /// Generic unsubscribe handler used by both text-search and hybrid-search unsubscribe arms.
 ///
-/// Removes the subscription from the registry and returns an Ack response.
+/// Removes the subscription from the registry and answers with no frame: an
+/// unsubscribe is fire-and-forget on the client, and an operation acknowledgement
+/// here would be read as confirming writes it never carried (TG-SYNC-004).
 /// This is a free function (not a method on `SearchService`) to avoid borrow complications
 /// when both `self.registry` and `self.hybrid_registry` need to be called from within
 /// the same match arm.
 fn handle_unsubscribe<S: RegistryEntry>(
     registry: &SubscriptionRegistry<S>,
     subscription_id: &str,
-    call_id: u64,
 ) -> OperationResponse {
     let _ = registry.unregister(subscription_id);
-    OperationResponse::Ack { call_id }
+    OperationResponse::Empty
 }
 
 // ---------------------------------------------------------------------------
@@ -1419,11 +1420,9 @@ impl SearchService {
                 })))
             }
 
-            Operation::SearchUnsubscribe { ctx, payload } => Ok(handle_unsubscribe(
-                &self.registry,
-                &payload.subscription_id,
-                ctx.call_id,
-            )),
+            Operation::SearchUnsubscribe { payload, .. } => {
+                Ok(handle_unsubscribe(&self.registry, &payload.subscription_id))
+            }
 
             _ => Err(OperationError::WrongService),
         }
@@ -1701,10 +1700,9 @@ impl SearchService {
     /// Handle a hybrid search unsubscribe request.
     fn handle_hybrid_search_unsubscribe(
         &self,
-        ctx: &OperationContext,
         payload: &HybridSearchUnsubPayload,
     ) -> OperationResponse {
-        handle_unsubscribe(&self.hybrid_registry, &payload.subscription_id, ctx.call_id)
+        handle_unsubscribe(&self.hybrid_registry, &payload.subscription_id)
     }
 
     /// Re-evaluate all hybrid subscriptions for a map on data mutation.
@@ -1936,10 +1934,9 @@ impl Service<Operation> for Arc<SearchService> {
                         ref ctx,
                         ref payload,
                     } => svc.handle_hybrid_search_subscribe(ctx, payload).await,
-                    Operation::HybridSearchUnsubscribe {
-                        ref ctx,
-                        ref payload,
-                    } => Ok(svc.handle_hybrid_search_unsubscribe(ctx, payload)),
+                    Operation::HybridSearchUnsubscribe { ref payload, .. } => {
+                        Ok(svc.handle_hybrid_search_unsubscribe(payload))
+                    }
                     _ => svc.handle(op),
                 }
             }
@@ -2368,11 +2365,18 @@ mod tests {
             .unwrap();
         assert_eq!(reg.get_subscriptions_for_map("my-map").len(), 1);
 
-        svc.clone()
+        let resp = svc
+            .clone()
             .oneshot(make_unsubscribe_op("sub-1"))
             .await
             .unwrap();
         assert!(reg.get_subscriptions_for_map("my-map").is_empty());
+        // An unsubscribe is not an op batch: an acknowledgement of it would name
+        // no operation the client sent, so it must produce no frame.
+        assert!(
+            matches!(resp, OperationResponse::Empty),
+            "an unsubscribe must be answered with no frame, got {resp:?}"
+        );
     }
 
     #[tokio::test]
@@ -2634,7 +2638,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_search_unsubscribe_removes_subscription_returns_ack() {
+    async fn hybrid_search_unsubscribe_removes_subscription_and_answers_with_no_frame() {
         let svc = make_service();
 
         // Subscribe first.
@@ -2656,8 +2660,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(resp, OperationResponse::Ack { .. }),
-            "expected Ack after unsubscribe"
+            matches!(resp, OperationResponse::Empty),
+            "a hybrid unsubscribe must be answered with no frame, got {resp:?}"
         );
 
         // Subscription removed.
@@ -2668,16 +2672,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_search_unsubscribe_nonexistent_returns_ack() {
-        // Unsubscribing a non-existent subscription is a no-op that still returns Ack.
+    async fn hybrid_search_unsubscribe_of_an_unknown_subscription_answers_with_no_frame() {
+        // Unsubscribing a subscription the server does not hold is a no-op, and a
+        // no-op has even less to acknowledge than a real removal.
         let svc = make_service();
         let resp = svc
             .oneshot(make_hybrid_unsub_op("no-such-sub"))
             .await
             .unwrap();
         assert!(
-            matches!(resp, OperationResponse::Ack { .. }),
-            "expected Ack even for non-existent subscription"
+            matches!(resp, OperationResponse::Empty),
+            "unsubscribing an unknown subscription must be answered with no frame, got {resp:?}"
         );
     }
 

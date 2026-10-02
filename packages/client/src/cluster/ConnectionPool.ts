@@ -187,6 +187,9 @@ export class ConnectionPool {
     // Close socket
     if (connection.socket) {
       connection.socket.onclose = null; // Prevent reconnect
+      // A closing socket still delivers frames that were already in transit;
+      // nothing received on it from here on belongs to a live connection.
+      connection.socket.onmessage = null;
       connection.socket.close();
       connection.socket = null;
     }
@@ -437,6 +440,16 @@ export class ConnectionPool {
       };
 
       socket.onmessage = (event) => {
+        // Only the node's current socket speaks for it. A socket the pool has
+        // dropped keeps receiving until its closing handshake completes, and
+        // the node may by then be connected again under the same id. A late
+        // frame forwarded from here would be read as an answer on the new
+        // connection: an acknowledgement of a batch sent on the old one would
+        // be matched against batches the new one sent (TG-SYNC-004). Every path
+        // that drops or replaces a socket clears or reassigns
+        // `connection.socket`, so comparing identities covers them all,
+        // including a dispatch that was queued before the handler was detached.
+        if (connection.socket !== socket) return;
         connection.lastSeen = Date.now();
         // Use connection.nodeId (mutable) instead of captured nodeId parameter,
         // so messages route correctly after remapNodeId() updates the ID

@@ -10,6 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(sync): a write made while offline or still waiting to be sent is no longer
+  dropped after a search unsubscribe or an OR-Map sync. The server used to answer those
+  requests (and an empty batch of writes) with an operation acknowledgement, which the
+  client read as "everything pending was saved" and discarded writes the server had
+  never received. The server no longer sends an acknowledgement for them, and the client
+  now treats an acknowledgement as confirming only the writes of a batch it actually
+  sent — so it is also protected against servers that are already deployed.
+- **Breaking (`@topgunbuild/client`):** a custom connection provider that implements
+  `sendBatch` must report each batch it sends through the new second argument,
+  `onBatchSent(opIds)` — once per `OP_BATCH` it puts on the wire, with that batch's
+  operation ids in order, before `sendBatch` returns. A provider that does not report
+  its batches still sends them, but its writes are not confirmed: they stay pending and
+  are sent again. The client logs a warning the first time this happens. The built-in
+  providers, including cluster mode, already report their batches.
+- feat(client): `IConnectionProvider` has a new optional member, `transport`. A custom
+  provider may declare `transport: 'websocket'` or `transport: 'http'`; the built-in
+  providers do. A provider that omits it keeps working, without the extra check the
+  client applies to acknowledgements that arrive over a WebSocket.
+- **Supported servers (`@topgunbuild/client`):** this client requires a TopGun server
+  `2.0.0` or later. The TypeScript server (`@topgunbuild/server` `0.11.0` and earlier)
+  is not supported: against it, writes are not confirmed.
+- fix(client): in cluster mode, a message that arrives late on a node connection the
+  client has already dropped is ignored instead of being read as coming from that node's
+  new connection.
 - fix(sync): an OR-Map client and the server now compute the same Merkle leaf hash
   for a key that holds the same tags on both sides. Previously the two used different
   formulas, so an OR-Map key could never compare equal during sync. Both sides now hash

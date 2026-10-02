@@ -336,9 +336,10 @@ impl CrdtService {
         let ops = &msg.payload.ops;
 
         if ops.is_empty() {
-            return Ok(OperationResponse::Ack {
-                call_id: ctx.call_id,
-            });
+            // An empty batch carries no operation id to acknowledge, so it is
+            // answered with no frame: any acknowledgement here would name an id
+            // the client never sent and retire writes nobody applied (TG-SYNC-004).
+            return Ok(OperationResponse::Empty);
         }
 
         let mut last_id = "unknown".to_string();
@@ -3466,10 +3467,10 @@ mod tests {
         );
     }
 
-    // -- OpBatch with empty ops returns Ack --
+    // -- OpBatch with empty ops produces no frame --
 
     #[tokio::test]
-    async fn op_batch_empty_returns_ack() {
+    async fn op_batch_empty_answers_with_no_frame() {
         let svc = make_service();
         let mut ctx = make_ctx();
         ctx.call_id = 42;
@@ -3485,9 +3486,11 @@ mod tests {
         };
 
         let resp = svc.oneshot(op).await.unwrap();
+        // A batch with no operations has nothing to acknowledge, and the only id
+        // available here is the server's own call id, which is not an op id.
         assert!(
-            matches!(resp, OperationResponse::Ack { call_id: 42 }),
-            "expected Ack with call_id=42, got {resp:?}"
+            matches!(resp, OperationResponse::Empty),
+            "an empty op batch must be answered with no frame, got {resp:?}"
         );
     }
 

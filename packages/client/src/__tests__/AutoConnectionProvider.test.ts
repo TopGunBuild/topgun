@@ -184,6 +184,55 @@ describe('AutoConnectionProvider', () => {
     await provider.close();
   });
 
+  it("transport is undefined before connect and is the active provider's afterwards", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { SingleServerProvider } = require('../connection/SingleServerProvider');
+    SingleServerProvider.mockImplementationOnce(() => ({
+      transport: 'websocket',
+      connect: jest.fn().mockResolvedValue(undefined),
+      forceReconnect: jest.fn(),
+      setMaxReconnectAttempts: jest.fn(),
+      close: jest.fn().mockResolvedValue(undefined),
+      isConnected: jest.fn().mockReturnValue(true),
+      getConnectedNodes: jest.fn().mockReturnValue(['ws-node-1']),
+      on: jest.fn(),
+      off: jest.fn(),
+      send: jest.fn(),
+      getConnection: jest.fn(),
+      getAnyConnection: jest.fn(),
+    }));
+
+    const options = {
+      url: 'http://localhost:8080',
+      clientId: 'c1',
+      hlc,
+      maxWsAttempts: 1,
+      authToken: 'token',
+      fetchImpl: mockFetch,
+    };
+    // Read through a cast so the value is whatever the object answers at this
+    // moment: the transport is chosen while connecting, so a consumer that read
+    // it at construction would see "none declared" for the whole session.
+    const transportOf = (provider: AutoConnectionProvider) =>
+      (provider as { transport?: string }).transport;
+
+    // One test, not three: the before-connect expectation alone holds on a
+    // provider that declares nothing at all, and would pass for the wrong reason.
+    const overWebSocket = new AutoConnectionProvider(options);
+    expect(transportOf(overWebSocket)).toBeUndefined();
+
+    await overWebSocket.connect();
+    expect(transportOf(overWebSocket)).toBe('websocket');
+    await overWebSocket.close();
+
+    // The WebSocket probe fails (the default mock of this file), so the
+    // provider settles on HTTP.
+    const overHttp = new AutoConnectionProvider(options);
+    await overHttp.connect();
+    expect(transportOf(overHttp)).toBe('http');
+    await overHttp.close();
+  });
+
   it('httpOnly mode skips WebSocket entirely', async () => {
     const provider = new AutoConnectionProvider({
       url: 'http://localhost:8080',
