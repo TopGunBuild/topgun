@@ -46,10 +46,30 @@ export class HLC {
   private readonly maxDriftMs: number;
   private readonly clockSource: ClockSource;
 
-  constructor(nodeId: string, options: HLCOptions = {}) {
-    if (nodeId.includes(':')) {
-      throw new Error('Node ID must not contain ":" (used as delimiter in timestamp format)');
+  /**
+   * The one node-id rule: throws unless `nodeId` is free of ":", "|" and "#".
+   *
+   * A node id ends every timestamp a clock generates ("millis:counter:nodeId"),
+   * and an OR-Map tag is such a timestamp. ":" would make the timestamp
+   * unparseable; "|" and "#" are what the OR-Map Merkle leaf joins tags with and
+   * splits live tags from tombstones with (TG-MRK-001), so an id carrying either
+   * would let two different tag sets encode to the same leaf, and two replicas
+   * holding different data could compare as equal.
+   *
+   * The constructor enforces it. It is public so an owner that builds other
+   * resources before its clock can refuse a bad id first, through this same
+   * check rather than a copy of it.
+   */
+  public static assertValidNodeId(nodeId: string): void {
+    if (/[:|#]/.test(nodeId)) {
+      throw new Error(
+        'Node ID must not contain ":" (used as delimiter in timestamp format), "|" or "#" (used as delimiters in Merkle leaves)',
+      );
     }
+  }
+
+  constructor(nodeId: string, options: HLCOptions = {}) {
+    HLC.assertValidNodeId(nodeId);
     this.nodeId = nodeId;
     this.strictMode = options.strictMode ?? false;
     this.maxDriftMs = options.maxDriftMs ?? 60000;

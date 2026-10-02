@@ -249,14 +249,13 @@ impl HLC {
     /// Uses default options: non-strict mode, 60-second max drift.
     /// # Panics
     ///
-    /// Panics if `node_id` contains the `:` character, which is used as the
-    /// delimiter in the `"millis:counter:nodeId"` wire format.
+    /// Panics if `node_id` contains `:`, the delimiter of the
+    /// `"millis:counter:nodeId"` wire format, or `|` or `#`, the delimiters of
+    /// the OR-Map Merkle leaf (TG-MRK-001) that every tag this clock generates
+    /// ends up in.
     #[must_use]
     pub fn new(node_id: String, clock_source: Box<dyn ClockSource>) -> Self {
-        assert!(
-            !node_id.contains(':'),
-            "Node ID must not contain ':' (used as delimiter in timestamp format)"
-        );
+        Self::assert_node_id_has_no_delimiter(&node_id);
         Self {
             last_millis: 0,
             last_counter: 0,
@@ -271,7 +270,8 @@ impl HLC {
     ///
     /// # Panics
     ///
-    /// Panics if `node_id` contains the `:` character.
+    /// Panics if `node_id` contains `:`, `|` or `#`, for the reasons given on
+    /// [`HLC::new`].
     #[must_use]
     pub fn with_options(
         node_id: String,
@@ -279,10 +279,7 @@ impl HLC {
         strict_mode: bool,
         max_drift_ms: u64,
     ) -> Self {
-        assert!(
-            !node_id.contains(':'),
-            "Node ID must not contain ':' (used as delimiter in timestamp format)"
-        );
+        Self::assert_node_id_has_no_delimiter(&node_id);
         Self {
             last_millis: 0,
             last_counter: 0,
@@ -291,6 +288,23 @@ impl HLC {
             max_drift_ms,
             clock_source,
         }
+    }
+
+    /// The one node-id rule both constructors enforce, so they cannot drift.
+    ///
+    /// A node id ends every timestamp this clock generates
+    /// (`millis:counter:nodeId`), and an OR-Map tag is such a timestamp. `:`
+    /// would make the timestamp unparseable. `|` and `#` are what the OR-Map
+    /// Merkle leaf joins tags with and splits live tags from tombstones with
+    /// (TG-MRK-001): an id carrying either would let two different tag sets
+    /// encode to the same leaf, so two replicas holding different data could
+    /// compare as equal.
+    fn assert_node_id_has_no_delimiter(node_id: &str) {
+        assert!(
+            !node_id.contains([':', '|', '#']),
+            "Node ID must not contain ':' (used as delimiter in timestamp format), \
+             '|' or '#' (used as delimiters in Merkle leaves)"
+        );
     }
 
     /// Returns the node ID of this HLC instance.
