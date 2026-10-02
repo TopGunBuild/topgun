@@ -2822,6 +2822,51 @@ describe('SyncEngine', () => {
         // all; only what was recorded from then on remains.
         expect(keys).toEqual(range(257, 300).map(String));
       });
+
+      test('a refused op that is still in the op log keeps its sent-batch entry, so a late ack cannot retire an op its batch never carried', async () => {
+        // Op 1 finds no node on the first flush; op 2 and op 3 each travel alone.
+        const cluster = clusterMock();
+        cluster.script([['2'], ['3']]);
+        await bootOn(cluster, threeOps());
+        expect(cluster.frames).toEqual([['2'], ['3']]);
+        expect(inFlight()?.get('2')).toEqual(new Set(['2']));
+
+        // Op 2 is refused for good, but storage will not delete its row, so it
+        // stays in the op log, flagged, and every later flush sends it again.
+        mockStorage.deleteOp.mockRejectedValue(new Error('storage refused the delete'));
+        cluster.deliver(refusal('2'));
+        await jest.runAllTimersAsync();
+        expect(opLogOf().map((o) => o.id)).toEqual(['1', '2', '3']);
+        expect(opLogOf().find((o) => o.id === '2')?.rejected).toBe(true);
+
+        // Another batch is acknowledged, which is when finished entries are
+        // cleared out. Op 1 is still pending below it, so no durable row goes.
+        cluster.deliver(applied('3'));
+        await jest.runAllTimersAsync();
+        expect(opLogOf().map((o) => o.id)).toEqual(['1', '2']);
+
+        // Op 1 now has a node, the same one, and the flush that carries it ends
+        // in the refused op again: a second, wider frame under the same last id.
+        cluster.script([['1', '2']]);
+        cluster.deliver({ type: 'AUTH_ACK' });
+        await jest.runAllTimersAsync();
+        expect(cluster.frames).toEqual([['2'], ['3'], ['1', '2']]);
+        const recordedUnderRefusedOp = new Set(inFlight()?.get('2'));
+        const pendingBefore = syncEngine!.getPendingOpsCount();
+
+        // The answer to the FIRST frame arrives late. That frame carried op 2
+        // alone, so it says nothing about op 1.
+        cluster.deliver(applied('2'));
+        await jest.runAllTimersAsync();
+
+        expect(opLogOf().map((o) => o.id)).toEqual(['1', '2']);
+        expect(opLogOf().find((o) => o.id === '1')?.synced).toBeFalsy();
+        expect(syncEngine!.getPendingOpsCount()).toBe(pendingBefore);
+        expect(mockStorage.markOpsSynced).not.toHaveBeenCalled();
+        // Both frames were on record under that id, so it vouched only for the
+        // op they share.
+        expect(recordedUnderRefusedOp).toEqual(new Set(['2']));
+      });
     });
   });
 });
