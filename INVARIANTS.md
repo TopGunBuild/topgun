@@ -779,14 +779,24 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:** two OR-Map states with the same tag/tombstone SETS hash identically regardless
   of insertion order (tags and tombstones sorted by Unicode code point before hashing; values,
   timestamps and TTL never contribute). A slot with no live tags and no tombstones has no leaf.
+  For a given key, the leaf encoding is injective only because a stored tag is non-empty and
+  contains neither `|` nor `#`; node-id construction and server ingest enforce it. A slot or a
+  device replica that held such a tag before the rule is outside this note (tracker TODO-737).
 - **Maintaining code:** the sort and the empty-slot early return in `merkle_leaf_hash`; the
   code-point sort in `hashORMapLeaf`, and the presence rule in `ORMapMerkleTree.update`.
-- **Enforcing test:** Rust arm `or_leaf_hash_matches_oracle_and_ignores_input_order` and `empty_or_slot_yields_no_leaf` (`map_data_store.rs`); TS arm `hashORMapLeaf is independent of tag and tombstone input order` (`packages/core/src/__tests__/merkle-vectors.test.ts`).
+- **Enforcing test:** Rust arm `or_leaf_hash_matches_oracle_and_ignores_input_order` and `empty_or_slot_yields_no_leaf` (`map_data_store.rs`); tag-admissibility arms `or_op_with_an_inadmissible_tag_is_refused_before_the_batch_applies` and `a_stored_inadmissible_tag_stays_removable` (`service/domain/crdt.rs`), `push_diff_with_an_inadmissible_tag_merges_nothing` and `both_or_ingest_paths_refuse_the_same_tags` (`service/domain/sync.rs`); TS arm `hashORMapLeaf is independent of tag and tombstone input order` (`packages/core/src/__tests__/merkle-vectors.test.ts`).
   The proptest shuffles the input order of `records` and of `tombstones` and asserts an equal hash,
   and pins the streamed hash to the joined-string formula it replaced. Both languages are pinned to
   one golden vector file (`packages/core-rust/tests/fixtures/merkle_vectors.json`) by
   `merkle_vectors_or_leaf_cases_match_canonical_leaf` and the TS vector suite, including a case
   whose code-point order differs from its UTF-16 code-unit order.
+  Supporting arms for tag admissibility: `hlc_rejects_a_node_id_with_a_leaf_separator`
+  (`packages/core-rust/src/hlc.rs`) for the Rust node-id rule; the simulation test
+  `inadmissible_or_tag_is_refused_on_both_sides_of_a_partition` (`sim/cluster.rs`) for refusal
+  under a network partition; in TS, `should reject node ID containing a pipe` and
+  `should reject node ID containing a hash sign` (`packages/core/src/__tests__/HLC.test.ts`) and
+  `should throw when nodeId contains a Merkle-leaf separator`
+  (`packages/client/src/__tests__/TopGunClient.test.ts`).
 - **Violation consequence:** false Merkle mismatches → sync storms, or false matches → silent
   divergence; breaks the SPEC-349 semantic-set recovery warrant.
 - **Discovered by:** extraction pilot audit; load-bearing for SPEC-346/349 (the /xask
