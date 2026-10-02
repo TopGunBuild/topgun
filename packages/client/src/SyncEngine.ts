@@ -288,7 +288,42 @@ export class SyncEngine {
    */
   private static readonly REJECTED_OPS_REGISTRY_LIMIT = 1000;
 
+  /**
+   * How many sent batches may hold a non-empty id set at once. The sets are
+   * where the memory is: with nothing answered, every flush re-sends the whole
+   * pending set, so batch n holds n ids.
+   */
+  private static readonly IN_FLIGHT_BATCH_LIMIT = 256;
+
   private opLog: OpLogEntry[] = [];
+  /**
+   * The batches handed to the transport, oldest first (Map iteration is
+   * insertion-ordered): the id of a batch's LAST op, as sent, mapped to the ids
+   * of all its ops.
+   *
+   * It exists because an OP_ACK without `results` names one id and nothing else,
+   * and an id alone does not say which ops the server gave a verdict on
+   * (TG-SYNC-004). Reading it as "everything up to this id" retires ops that
+   * travelled in another frame, or in none: a released server answers frames
+   * that are not batches at all with the same message type and a frame counter
+   * in `lastId`. Such an ack therefore retires only the ops of a batch that was
+   * really sent under that id.
+   *
+   * "In flight" names the entries, not a connection. An entry outlives the
+   * connection its batch was sent on, because a provider can re-send a batch by
+   * itself after a failed request and deliver its ack with no new
+   * authentication and no new flush in between; forgetting the batch at that
+   * point would leave the ack unmatched and the ops pending for the rest of the
+   * session. Keeping it costs no safety: a batch re-sent under an id already
+   * registered is recorded as the intersection with what is stored.
+   *
+   * An entry whose set is EMPTY is a key the bound evicted. It acknowledges
+   * nothing, and it stays so that a later batch recorded under the same id
+   * cannot make it acknowledge again.
+   */
+  private inFlightBatches: Map<string, Set<string>> = new Map();
+  /** Latch: a provider that sends batches without reporting them is named once per engine. */
+  private unreportedBatchesWarned = false;
   /**
    * Terminal refusals observed in this session, oldest first (Map iteration is
    * insertion-ordered), capped at {@link SyncEngine.REJECTED_OPS_REGISTRY_LIMIT}.
@@ -1338,8 +1373,15 @@ export class SyncEngine {
     // and send separate OP_BATCH messages per node.
     const connectionProvider = this.webSocketManager.getConnectionProvider();
     if (connectionProvider.sendBatch) {
+      // The provider splits the flush into one frame per target node, so only it
+      // knows which ids travelled together; it reports each frame as it sends it.
+      let batchesReported = false;
       const results = connectionProvider.sendBatch(
         pending.map((op) => ({ key: op.key, message: op })),
+        (opIds) => {
+          batchesReported = true;
+          this.recordSentBatch(opIds);
+        },
       );
       const failedKeys = [...results.entries()]
         .filter(([, success]) => !success)
@@ -1350,16 +1392,120 @@ export class SyncEngine {
           'Some batch operations failed to send',
         );
       }
+      // A provider that sends without reporting never loses a write, but no ack
+      // without `results` can retire its ops: every flush re-sends the whole
+      // pending set and backpressure eventually pins. The only other trace would
+      // be a debug line per ignored ack, so it is said once, at a level that is
+      // read.
+      const anySent = [...results.values()].some((success) => success === true);
+      if (anySent && !batchesReported && !this.unreportedBatchesWarned) {
+        this.unreportedBatchesWarned = true;
+        logger.warn(
+          { count: pending.length },
+          'sendBatch did not report the batches it sent — their ops can only be retired by an OP_ACK that carries results; the connection provider must call onBatchSent for every OP_BATCH frame',
+        );
+      }
       return;
     }
 
     // Fallback: send all ops in a single OP_BATCH (single-server mode)
-    this.sendMessage({
+    const sent = this.sendMessage({
       type: 'OP_BATCH',
       payload: {
         ops: pending,
       },
     });
+    // Recorded only for a frame the transport accepted: a batch that never left
+    // can have no answer, and an entry for it would let an unrelated frame with
+    // the same id retire its ops.
+    if (sent) {
+      this.recordSentBatch(pending.map((op) => op.id));
+    }
+  }
+
+  /**
+   * Record a batch that was handed to the transport, so that a later OP_ACK
+   * without `results` can be attributed to it (TG-SYNC-004).
+   */
+  private recordSentBatch(opIds: string[]): void {
+    if (!Array.isArray(opIds) || opIds.length === 0) return;
+    const lastId = opIds[opIds.length - 1];
+    // An ack is matched by exact string equality on its `lastId`, so a batch
+    // whose last op has no string id could never be matched anyway.
+    if (typeof lastId !== 'string') return;
+
+    // Two batches under one last id happen whenever a flush re-sends before the
+    // first is answered (a reconnect, or per-node frames in a cluster), and the
+    // ack does not say which of them it answers. Only an id present in EVERY
+    // candidate is covered whichever one that is, hence the intersection. For
+    // an evicted key the stored set is empty and so is the result: recording
+    // again must not make it acknowledge.
+    const sent = new Set(opIds);
+    const stored = this.inFlightBatches.get(lastId);
+    let ids = sent;
+    if (stored) {
+      ids = new Set();
+      for (const id of stored) {
+        if (sent.has(id)) ids.add(id);
+      }
+      // Re-inserted, not updated in place, so the entry moves to the newest
+      // position: a key that is re-sent on every flush is never the oldest.
+      this.inFlightBatches.delete(lastId);
+    }
+    this.inFlightBatches.set(lastId, ids);
+
+    if (this.countNonEmptyInFlightBatches() <= SyncEngine.IN_FLIGHT_BATCH_LIMIT) return;
+
+    // Over the bound. Entries with nothing pending go first: when no ack is ever
+    // applied (every write refused, or dropped by backpressure) this is the only
+    // point that removes them, and emptying their sets instead would keep their
+    // keys for good.
+    this.pruneInFlightBatches();
+
+    let excess = this.countNonEmptyInFlightBatches() - SyncEngine.IN_FLIGHT_BATCH_LIMIT;
+    if (excess <= 0) return;
+    // Evict the oldest by emptying its set and KEEPING its key. A deleted key
+    // could be recorded afresh by a later, different batch ending in the same op
+    // (a cluster re-routes ops between nodes), and the late ack of the evicted
+    // batch would then retire ops that batch never carried. The ops of an
+    // evicted batch retire through a newer batch that carries them.
+    for (const [key, batch] of this.inFlightBatches) {
+      if (batch.size === 0) continue;
+      this.inFlightBatches.set(key, new Set());
+      if (--excess === 0) break;
+    }
+  }
+
+  private countNonEmptyInFlightBatches(): number {
+    let count = 0;
+    for (const batch of this.inFlightBatches.values()) {
+      if (batch.size > 0) count++;
+    }
+    return count;
+  }
+
+  /**
+   * Delete every sent-batch entry none of whose ops is still pending: they were
+   * acknowledged, refused, or otherwise left the op log, so the entry has nothing
+   * left to retire. For an evicted key (empty set) the test is on the op the key
+   * itself names.
+   */
+  private pruneInFlightBatches(): void {
+    const pendingIds = new Set<string>();
+    for (const op of this.opLog) {
+      if (op.synced !== true && op.rejected !== true) pendingIds.add(op.id);
+    }
+    for (const [key, batch] of this.inFlightBatches) {
+      if (pendingIds.has(key)) continue;
+      let holdsPending = false;
+      for (const id of batch) {
+        if (pendingIds.has(id)) {
+          holdsPending = true;
+          break;
+        }
+      }
+      if (!holdsPending) this.inFlightBatches.delete(key);
+    }
   }
 
   private async startMerkleSync(): Promise<void> {
@@ -1758,10 +1904,11 @@ export class SyncEngine {
     let ackedCount = 0;
 
     // Per-op acceptance set. When the server sends `results` it is naming exactly
-    // the ops it accepted, so this — not the numeric prefix below — is the
-    // authoritative coverage of the acknowledgement: a prefix silently covers ids
-    // the same exchange may have refused.
-    const acceptanceSet = Array.isArray(results) ? results : undefined;
+    // the ops it accepted, so the set is the authoritative coverage of the
+    // acknowledgement by itself: it needs neither a sent-batch match nor a level.
+    // An EMPTY set names nothing and so has nothing to be authoritative about;
+    // such an ack is read as one without `results`.
+    const acceptanceSet = Array.isArray(results) && results.length > 0 ? results : undefined;
     // The smallest id in this exchange that the server did NOT accept. It bounds
     // the durable prefix below: `markOpsSynced` DELETES every row at or under the
     // id it is given, so an accepted op with a larger id must not carry the prefix
@@ -1822,65 +1969,86 @@ export class SyncEngine {
         // Resolve pending Write Concern promise if exists (delegates to WriteConcernManager)
         this.writeConcernManager.resolveWriteConcernPromise(result.opId, result);
       }
-      // The durable prefix is the largest accepted id STRICTLY BELOW the smallest
-      // unaccepted one, not the largest accepted id outright. With no failure in
-      // the exchange the two are the same; with one, the difference is the whole
-      // point of the cap.
-      for (const acceptedIdNum of acceptedIdNums) {
-        if (acceptedIdNum < minUnacceptedId && acceptedIdNum > maxSyncedId) {
-          maxSyncedId = acceptedIdNum;
+    } else {
+      // No acceptance set: the frame names one id and nothing else, and an id
+      // alone is not a verdict (TG-SYNC-004). A released server answers frames
+      // that are not batches (a push diff, an unsubscribe, an empty batch) with
+      // this same message, carrying a frame counter or "unknown" in `lastId`.
+      // Read as "everything up to this id", or as "everything", such a frame
+      // retires writes the server never saw and deletes their durable rows. So
+      // the ack is applied only to the ops of a batch that was really sent under
+      // that id; there is no prefix coverage and no cover-everything reading.
+      //
+      // The transport is read at the provider on every such ack and kept
+      // nowhere: a provider that chooses its transport while connecting has none
+      // to show when the engine is built, and a copy taken then would switch the
+      // WebSocket check off for the whole session.
+      const transport = this.webSocketManager.getConnectionProvider().transport;
+      const batch = typeof lastId === 'string' ? this.inFlightBatches.get(lastId) : undefined;
+      const hasAchievedLevel = typeof achievedLevel === 'string' && achievedLevel.length > 0;
+      // Over a WebSocket the acknowledgement of a real batch always carries the
+      // level it reached, and the stray frame never does, so there a match alone
+      // is not enough: a frame counter can equal the last id of a batch in
+      // flight. Over HTTP the acknowledgement never carries a level, and a
+      // provider that declares no transport promised none, so for them the match
+      // decides.
+      if (batch === undefined || (transport === 'websocket' && !hasAchievedLevel)) {
+        // Not a verdict on the op log: nothing is marked, deleted, spliced or
+        // released, and a matched entry is kept, because a frame that failed the
+        // check is not that batch's ack. Debug, not warn: the late ack of a batch
+        // another ack already retired in full takes this path in normal operation.
+        logger.debug(
+          { lastId, inFlight: this.inFlightBatches.size, transport, hasAchievedLevel },
+          'OP_ACK without results does not answer a sent batch — ignored',
+        );
+        return;
+      }
+
+      // An empty set is an evicted key: the ack marks nothing and the key stays,
+      // so that the same id recorded again still acknowledges nothing.
+      if (batch.size > 0) {
+        for (const op of this.opLog) {
+          // Sticky terminal state (TG-SYNC-002): a refused op is never
+          // re-described as accepted, and never raises the durable prefix.
+          if (!batch.has(op.id) || op.rejected === true || this.rejectedOps.has(op.id)) continue;
+          if (!op.synced) {
+            op.synced = true;
+            ackedCount++;
+            // Per-record sync-state tracker — emit only on the actual flip.
+            this.recordSyncStateTracker.onAcknowledge(op);
+          }
+          // Only an op actually marked here counts as accepted by this ack. An
+          // id of the batch whose op was refused or has left the op log must not
+          // carry the durable prefix up to itself.
+          const opIdNum = parseInt(op.id, 10);
+          if (!isNaN(opIdNum)) {
+            acceptedIdNums.push(opIdNum);
+          }
         }
+        // Used up by the ack it matched.
+        this.inFlightBatches.delete(lastId);
       }
     }
 
-    // An EMPTY acceptance set has nothing to be authoritative about, so the prefix
-    // loop still runs on `lastId`. This server never sends one — a batch it
-    // accepted nothing from carries no acknowledgement at all — so an empty set
-    // can only come from a foreign or future server, whose `lastId` is then the
-    // only verdict it sent.
-    if (!acceptanceSet || acceptanceSet.length === 0) {
-      // Mark all ops up to lastId as synced (numeric comparison — IDs are stringified integers)
-      const lastIdNum = parseInt(lastId, 10);
-
-      if (!isNaN(lastIdNum)) {
-        // Normal path: server returned a valid numeric lastId
-        this.opLog.forEach((op) => {
-          if (op.id && op.rejected !== true) {
-            const opIdNum = parseInt(op.id, 10);
-            if (!isNaN(opIdNum) && opIdNum <= lastIdNum) {
-              if (!op.synced) {
-                ackedCount++;
-                // Per-record sync-state tracker — emit only on the actual flip.
-                op.synced = true;
-                this.recordSyncStateTracker.onAcknowledge(op);
-              } else {
-                op.synced = true;
-              }
-              if (opIdNum > maxSyncedId) {
-                maxSyncedId = opIdNum;
-              }
-            }
-          }
-        });
-      } else {
-        // Fallback: server returned non-numeric lastId (e.g. "unknown", "undefined").
-        // The server ACKed the batch, so mark ALL pending ops as synced.
-        logger.warn(
-          { lastId },
-          'OP_ACK has non-numeric lastId — marking all pending ops as synced',
-        );
-        this.opLog.forEach((op) => {
-          if (!op.synced && op.rejected !== true) {
-            ackedCount++;
-            op.synced = true;
-            // Per-record sync-state tracker — emit only on the actual flip.
-            this.recordSyncStateTracker.onAcknowledge(op);
-            const opIdNum = parseInt(op.id, 10);
-            if (!isNaN(opIdNum) && opIdNum > maxSyncedId) {
-              maxSyncedId = opIdNum;
-            }
-          }
-        });
+    // The durable mark DELETES every row at or below the id it is given, so the
+    // prefix is the largest accepted id STRICTLY BELOW two bounds, not the
+    // largest accepted id outright: the smallest id this exchange did not accept,
+    // and the smallest id still pending in the op log. The second bound is what
+    // an ack for one batch needs when a smaller op travelled in another frame
+    // (another node's batch, or a later flush) and has no verdict yet. Rows it
+    // leaves behind for ops already retired in memory are deleted by the next ack
+    // whose prefix reaches them; kept rows are re-sent after a restart, deleted
+    // ones are gone.
+    let pendingFloor = Infinity;
+    for (const op of this.opLog) {
+      if (op.synced === true || op.rejected === true) continue;
+      const opIdNum = parseInt(op.id, 10);
+      if (!isNaN(opIdNum) && opIdNum < pendingFloor) pendingFloor = opIdNum;
+    }
+    const prefixBound = Math.min(minUnacceptedId, pendingFloor);
+    for (const acceptedIdNum of acceptedIdNums) {
+      if (acceptedIdNum < prefixBound && acceptedIdNum > maxSyncedId) {
+        maxSyncedId = acceptedIdNum;
       }
     }
 
@@ -1910,6 +2078,10 @@ export class SyncEngine {
     if (ackedCount > 0) {
       this.backpressureController.checkLowWaterMark();
     }
+
+    // This ack may have retired the ops of other sent batches too (a newer batch
+    // carries every op of an older one); their entries have nothing left to say.
+    this.pruneInFlightBatches();
   }
 
   /**
@@ -2500,6 +2672,11 @@ export class SyncEngine {
     // emits nothing, and a retained listener set would keep the application's
     // closures alive for no reason.
     this.writeRejectionEmitter.clear();
+
+    // The one place the sent-batch registry is emptied. Neither a lost
+    // connection nor a new authentication does it: an ack for a batch sent
+    // before either can still arrive and has to find its entry.
+    this.inFlightBatches.clear();
 
     this.stateMachine.transition(SyncState.DISCONNECTED);
     logger.info('SyncEngine closed');
