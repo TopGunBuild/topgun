@@ -394,7 +394,7 @@ The `BATCH` message type carries multiple inner messages in a single binary fram
   </div>
   <div className="bg-card border border-card-border rounded-lg p-4">
     <h4 className="font-mono text-sm text-green-600 dark:text-green-400 mb-2">OP_ACK</h4>
-    <p className="text-xs text-neutral-300 mb-2">Confirms which of your operations the server took, with the Write Concern level actually achieved. When <code>results</code> is present it lists <strong>only the accepted</strong> operations; an operation missing from it was not accepted. When it is absent, every operation up to and including <code>lastId</code> was accepted.</p>
+    <p className="text-xs text-neutral-300 mb-2">Confirms which of your operations the server took, with the Write Concern level actually achieved. When <code>results</code> is present it lists <strong>only the accepted</strong> operations; an operation missing from it was not accepted. When it is absent, every operation of the batch being answered was accepted: <code>lastId</code> is the id of that batch's last operation, and the acknowledgement says nothing about operations you sent in any other batch. The server sends <code>OP_ACK</code> only in answer to a <code>CLIENT_OP</code> or a non-empty <code>OP_BATCH</code> — no other message is acknowledged this way.</p>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{opAckCode}</pre>
   </div>
   <div className="bg-card border border-card-border rounded-lg p-4">
