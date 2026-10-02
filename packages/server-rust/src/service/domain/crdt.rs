@@ -35,7 +35,9 @@ use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::security::WriteAdmission;
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::wal::OrDelta;
-use crate::storage::{CallerProvenance, ExpiryPolicy, MutateOutcome, RecordStoreFactory};
+use crate::storage::{
+    CallerProvenance, ExpiryPolicy, MutateOutcome, RecordStore, RecordStoreFactory,
+};
 use crate::tombstone_frontier::{Epoch, PruneEpochRecord, PruneExit, PrunePassRecord};
 use crate::tombstone_frontier_impl::{TombstoneFrontier, TombstoneRef};
 use crate::traits::SchemaProvider;
@@ -250,6 +252,8 @@ impl CrdtService {
                 .admit_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
             // Schema validation runs after auth/size admission checks.
             self.validate_schema_for_op(op)?;
+            // Last, so an unauthorised op is refused before its slot is read.
+            self.admit_or_op(op, Some(partition_id), true).await?;
             Some(self.write_validator.sanitize_hlc())
         } else if ctx.caller_origin == CallerOrigin::HttpClient {
             // HTTP /sync carries no per-connection handle, but the JWT-validated
@@ -267,6 +271,7 @@ impl CrdtService {
             self.write_validator
                 .admit_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
             self.validate_schema_for_op(op)?;
+            self.admit_or_op(op, Some(partition_id), true).await?;
             Some(self.write_validator.sanitize_hlc())
         } else if ctx.caller_origin == CallerOrigin::Anonymous {
             // Anonymous HTTP /sync write (no connection_id, no JWT identity).
@@ -279,10 +284,22 @@ impl CrdtService {
             // re-stamp is an integrity control gated on transport (client/http),
             // not on auth state.
             self.validate_schema_for_op(op)?;
+            self.admit_or_op(op, Some(partition_id), true).await?;
             Some(self.write_validator.sanitize_hlc())
         } else {
             // Genuine internal/system/forwarded call (trusted origin) — preserve
             // the caller's HLC so cross-node convergence is not perturbed.
+            //
+            // A trusted OR_ADD keeps its tag verbatim, so this branch is an
+            // ingest path and runs the tag admission like the others: the OR-Map
+            // Merkle leaf identifies a key's state only while no stored tag is
+            // empty or carries a leaf separator (TG-MRK-001). The price falls on
+            // whatever copies stored records between nodes: a tag stored before
+            // the rule is refused on a node whose slot does not hold it. A
+            // future replication, migration or backup-ingest path must therefore
+            // not re-validate tags already stored on its source — it either does
+            // not route through this admission or carries an explicit exemption.
+            self.admit_or_op(op, Some(partition_id), false).await?;
             None
         };
 
@@ -358,6 +375,8 @@ impl CrdtService {
                 )?;
                 // Schema validation runs after auth/ACL/size checks, before any apply.
                 self.validate_schema_for_op(op)?;
+                // Last, so an unauthorised op is refused before its slot is read.
+                self.admit_or_op(op, None, true).await?;
             }
             // All ops validated — apply them sequentially with sanitized timestamps.
             // Each op gets its own partition based on its key (OpBatch ctx has
@@ -392,6 +411,8 @@ impl CrdtService {
                 )?;
                 // Schema validation runs after auth/ACL/size checks, before any apply.
                 self.validate_schema_for_op(op)?;
+                // Last, so an unauthorised op is refused before its slot is read.
+                self.admit_or_op(op, None, true).await?;
             }
             // All ops validated — apply them sequentially with sanitized timestamps.
             for op in ops {
@@ -411,6 +432,7 @@ impl CrdtService {
             // transport, not auth.
             for op in ops {
                 self.validate_schema_for_op(op)?;
+                self.admit_or_op(op, None, true).await?;
             }
             for op in ops {
                 let sanitized_ts = self.write_validator.sanitize_hlc();
@@ -423,6 +445,19 @@ impl CrdtService {
         } else {
             // Genuine internal/system/forwarded call (trusted origin) — preserve
             // the caller's HLC so cross-node convergence is not perturbed.
+            //
+            // A trusted OR_ADD keeps its tag verbatim, so this branch is an
+            // ingest path and runs the tag admission like the others (TG-MRK-001),
+            // for every op before the first one applies: a refused batch must
+            // have applied nothing. The price falls on whatever copies stored
+            // records between nodes: a tag stored before the rule is refused on
+            // a node whose slot does not hold it. A future replication, migration
+            // or backup-ingest path must therefore not re-validate tags already
+            // stored on its source — it either does not route through this
+            // admission or carries an explicit exemption.
+            for op in ops {
+                self.admit_or_op(op, None, false).await?;
+            }
             for op in ops {
                 self.apply_batch_op(op, None, ctx.connection_id).await?;
                 if let Some(id) = &op.id {
@@ -1112,6 +1147,61 @@ impl CrdtService {
         }
     }
 
+    /// Refuses `op` when it would store an OR tag the Merkle leaf cannot encode
+    /// unambiguously (TG-MRK-001), unless the key's slot already holds that tag.
+    ///
+    /// Which tag is checked follows the op's class, read from the same
+    /// classifier the apply uses, so the admission inspects exactly the tag the
+    /// apply would store:
+    ///
+    /// - a whole-key remove and an LWW put store no tag: nothing is checked;
+    /// - an OR add stores the record's tag only when `regenerates` is `false`
+    ///   (the trusted branch); on a regenerating branch the server replaces the
+    ///   client's tag, so nothing is checked. A co-present `or_tag` is ignored,
+    ///   as the apply ignores it;
+    /// - an OR remove stores `or_tag` as a tombstone on every branch.
+    ///
+    /// `partition_id` is the partition the apply will use when the caller
+    /// already knows it (`Some`, the single-op path). `None` means the apply
+    /// derives it from the key (the batch path), and then so does the lookup —
+    /// but only inside the store resolver, which runs for an inadmissible tag
+    /// alone. An op that checks nothing, and an op whose tag is admissible,
+    /// therefore hash no key, resolve no store and read nothing: the LWW hot
+    /// path pays the classification and one branch.
+    ///
+    /// Must run after the op's own authorisation and schema checks (an
+    /// unauthorised op must not cause a store read) and, for a batch, for every
+    /// op before the first one applies.
+    async fn admit_or_op(
+        &self,
+        op: &ClientOp,
+        partition_id: Option<u32>,
+        regenerates: bool,
+    ) -> Result<(), OperationError> {
+        let tag = match classify_op(op) {
+            OpClass::OrAdd if !regenerates => match &op.or_record {
+                Some(Some(record)) => record.tag.as_str(),
+                _ => return Ok(()),
+            },
+            OpClass::OrRemove => match &op.or_tag {
+                Some(Some(tag)) => tag.as_str(),
+                _ => return Ok(()),
+            },
+            OpClass::Remove | OpClass::OrAdd | OpClass::Lww => return Ok(()),
+        };
+        admit_or_tags(
+            || {
+                let partition_id = partition_id.unwrap_or_else(|| hash_to_partition(&op.key));
+                self.record_store_factory
+                    .get_or_create(&op.map_name, partition_id)
+            },
+            &op.map_name,
+            &op.key,
+            std::iter::once(tag),
+        )
+        .await
+    }
+
     /// Validates a single `ClientOp` against the registered schema for its map.
     ///
     /// Returns `Ok(())` immediately for:
@@ -1340,6 +1430,129 @@ pub(crate) fn normalize_to_or_map(value: &mut RecordValue) -> bool {
         tombstones,
     };
     true
+}
+
+/// Why `tag` may not enter a slot as an OR-Map tag, or `None` when it may.
+///
+/// The OR-Map Merkle leaf joins a key's tags with `|` and separates its live
+/// tags from its tombstones with `#`. Equal leaves imply equal (live set,
+/// tombstone set) for a key only while every stored tag is non-empty and
+/// carries neither character (TG-MRK-001), so a tag is admissible iff it is
+/// non-empty and contains neither `|` nor `#`.
+///
+/// This is the only definition of the rule and of its two reason strings;
+/// every ingest path reaches it through [`admit_or_tags`]. Pure, and it never
+/// returns the tag: a refused tag is caller-chosen text.
+#[must_use]
+pub(crate) fn or_tag_refusal(tag: &str) -> Option<&'static str> {
+    if tag.is_empty() {
+        Some("OR tag is empty")
+    } else if tag.contains(['|', '#']) {
+        Some("OR tag contains a reserved character ('|' or '#')")
+    } else {
+        None
+    }
+}
+
+/// Whether a slot's value holds `tag`: as the tag of a live record or as a
+/// tombstone of an `OrMap` value, or as a tag of a legacy `OrTombstones` value.
+/// An absent key and an `Lww` value hold no tag.
+fn slot_holds_or_tag(value: Option<&RecordValue>, tag: &str) -> bool {
+    match value {
+        Some(RecordValue::OrMap {
+            records,
+            tombstones,
+        }) => {
+            records.iter().any(|entry| entry.tag == tag)
+                || tombstones.iter().any(|held| held == tag)
+        }
+        Some(RecordValue::OrTombstones { tags }) => tags.iter().any(|held| held == tag),
+        Some(RecordValue::Lww { .. }) | None => false,
+    }
+}
+
+/// Admits the OR `tags` a request would store verbatim under `key`, refusing
+/// the request at the first tag that is inadmissible (see [`or_tag_refusal`])
+/// and that `key`'s slot does not already hold.
+///
+/// A tag the slot already holds is admitted whatever it contains: a tag stored
+/// before the rule existed must stay removable and idempotently re-sendable,
+/// and admitting it adds nothing the slot did not have. "Holds" is decided on
+/// the slot as read here, once, with `RecordStore::get(key, false)`, which
+/// also sees a key that is durable but not resident.
+///
+/// # Cost
+///
+/// Everything the lookup needs is resolved lazily. For admissible tags the
+/// whole call is an emptiness check and a character search per tag: `store` is
+/// not called and nothing is read. `store` is called at most once per call,
+/// and only once some tag has a refusal reason; the slot is read at most once
+/// per call, however many inadmissible tags follow.
+///
+/// # Contract for the caller
+///
+/// - Call it for every key of the request **before anything of that request
+///   is applied** and before the key's writer is taken. It takes no writer and
+///   makes no durable write, so it is safe ahead of the apply; it is not
+///   strictly read-only, because reading a non-resident key brings its record
+///   into memory.
+/// - `store` must resolve the **same store the apply of this request will use
+///   for `key`** (the same map and the same partition), or the lookup inspects
+///   a slot the apply never touches. It is a plain closure and cannot fail:
+///   resolving a store only looks up, or builds in memory, the map's partition
+///   store, and involves no I/O. The one fallible step is the read, and this
+///   function owns it.
+/// - `tags` must yield every tag the request would store verbatim under `key`
+///   (for a pushed entry: its record tags, then its tombstone tags), and no tag
+///   the server will replace with one it generates.
+/// - Return the error as the request's result. Neither error may be turned
+///   into a success, and the two must not be confused: one is permanent, the
+///   other is retried.
+///
+/// The verdict describes the slot at the time of the read. A writer that drops
+/// the tag between this call and the apply can let the request re-add a tag
+/// the slot held at admission; no interleaving lets in a tag it did not hold.
+///
+/// # Errors
+///
+/// - [`OperationError::SchemaInvalid`] naming `map_name`, with one error string
+///   that gives the key and the reason and never echoes the tag: an
+///   inadmissible tag the slot does not hold.
+/// - [`OperationError::Internal`]: the slot could not be read. An unreadable
+///   slot is never treated as holding the tag, and never as a refusal.
+pub(crate) async fn admit_or_tags<'t, S, T>(
+    store: S,
+    map_name: &str,
+    key: &str,
+    tags: T,
+) -> Result<(), OperationError>
+where
+    S: FnOnce() -> Arc<dyn RecordStore>,
+    T: IntoIterator<Item = &'t str>,
+{
+    // Taken on the first inadmissible tag, so the store is resolved and the
+    // slot read at most once per call.
+    let mut resolve = Some(store);
+    let mut slot: Option<RecordValue> = None;
+    for tag in tags {
+        let Some(reason) = or_tag_refusal(tag) else {
+            continue;
+        };
+        if let Some(resolve) = resolve.take() {
+            slot = resolve()
+                .get(key, false)
+                .await
+                .map_err(OperationError::Internal)?
+                .map(|record| record.value);
+        }
+        if !slot_holds_or_tag(slot.as_ref(), tag) {
+            return Err(OperationError::SchemaInvalid {
+                map_name: map_name.to_string(),
+                errors: vec![format!("key '{key}': {reason}")],
+            });
+        }
+    }
+    Ok(())
 }
 
 /// What one [`apply_or_delta`] call did.
@@ -12416,5 +12629,30 @@ mod tests {
             failures.len(),
             failures.join("\n  ")
         );
+    }
+
+    /// The predicate itself, on the table both ingest paths are held to: the
+    /// reserved inputs are refused with their own reason, and a tag that only
+    /// looks unusual is not (TG-MRK-001).
+    #[test]
+    fn or_tag_refusal_names_exactly_the_reserved_inputs() {
+        const EMPTY: &str = "OR tag is empty";
+        const RESERVED: &str = "OR tag contains a reserved character ('|' or '#')";
+
+        for (tag, want) in [
+            ("", Some(EMPTY)),
+            ("|", Some(RESERVED)),
+            ("#", Some(RESERVED)),
+            ("a|b", Some(RESERVED)),
+            ("a#b", Some(RESERVED)),
+            ("a|", Some(RESERVED)),
+            ("#a", Some(RESERVED)),
+            ("TOP", None),
+            ("a:b", None),
+            ("1:0:n-1", None),
+            ("a b", None),
+        ] {
+            assert_eq!(or_tag_refusal(tag), want, "tag {tag:?}");
+        }
     }
 }
