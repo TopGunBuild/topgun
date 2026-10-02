@@ -2038,8 +2038,22 @@ export class SyncEngine {
             acceptedIdNums.push(opIdNum);
           }
         }
-        // Used up by the ack it matched.
-        this.inFlightBatches.delete(lastId);
+        // Used up by the ack it matched, unless the op its key names can still
+        // be sent. One invariant holds at every point that removes a key (here,
+        // the prune, the eviction): a key leaves the registry only when its op
+        // can no longer be the last op of a frame. The one op that survives its
+        // own batch's ack unsynced is a refused op whose durable delete has not
+        // gone through: it stays in the op log and every flush sends it again.
+        // Were its key freed here, a later and wider frame ending in it would be
+        // recorded afresh instead of intersected with this entry, and the ack of
+        // another earlier frame under the same id would retire ops that frame
+        // never carried (TG-SYNC-004). The entry is kept exactly as it is, not
+        // emptied: nothing it holds can be retired by mistake, and the prune
+        // drops it once the op has left the op log.
+        const keyCanBeSentAgain = this.opLog.some((op) => op.id === lastId && op.synced !== true);
+        if (!keyCanBeSentAgain) {
+          this.inFlightBatches.delete(lastId);
+        }
       }
     }
 
