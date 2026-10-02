@@ -87,17 +87,39 @@ export function orMapKeyTombstonesBucketKeys(
  * writes it, with no `await` in between: a value built earlier can be
  * overtaken by another writer of the same bucket and would then overwrite the
  * newer one.
+ *
+ * `removed` names a key of this bucket and the tags a local remove took from
+ * it, for the commit that makes that remove durable. They are listed under the
+ * key whether or not the map still attributes them to it. The commit can wait,
+ * and a server response handled during the wait finds no pending remove in the
+ * op log yet, so it may replace the key's attribution with a set that lacks
+ * these tags; the bucket written with the op must still carry them, or a
+ * reload would hold the remove without its attribution.
  */
 export function serializeOrMapKeyTombstonesBucket(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the persisted form only needs the key as a string and the tags; the map's value type is irrelevant here
   map: ORMap<any, any>,
   bucket: string,
+  removed?: { key: string; tags: readonly string[] },
 ): PersistedKeyTombstones {
   const pairs: PersistedKeyTombstones = [];
+  let removedPair: [string, string[]] | undefined;
   for (const [key, tags] of map.getSnapshot().keyTombstones) {
     const name = String(key);
     if (orMapKeyTombstonesBucketOf(name) === bucket) {
-      pairs.push([name, Array.from(tags)]);
+      const pair: [string, string[]] = [name, Array.from(tags)];
+      if (removed !== undefined && name === removed.key) removedPair = pair;
+      pairs.push(pair);
+    }
+  }
+  if (removed !== undefined && removed.tags.length > 0) {
+    if (removedPair === undefined) {
+      pairs.push([removed.key, Array.from(removed.tags)]);
+    } else {
+      const listed = new Set(removedPair[1]);
+      for (const tag of removed.tags) {
+        if (!listed.has(tag)) removedPair[1].push(tag);
+      }
     }
   }
   return pairs;

@@ -808,11 +808,15 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       // the tombstone meta and the per-key attribution meta atomically with the FIRST
       // OR_REMOVE op. Subsequent tombstone tags for this remove are op-only appends; the
       // durable KV/meta state is already captured by the first commit. The attribution
-      // must not trail the op: it feeds this key's Merkle leaf, so a reload that kept the
+      // travels with the op because it feeds this key's Merkle leaf: a reload that kept the
       // remove but lost its attribution would compute a different root than before it.
       //
       // Only the attribution bucket this key belongs to is written, with the attribution
-      // of every key in that bucket.
+      // of every key in that bucket as the map holds it when the commit is issued, plus
+      // the tags of this remove under this key. Those are added by name rather than read
+      // back from the map: until the op is in the op log nothing marks them as pending,
+      // so a server response handled while the commit waits can replace the key's
+      // attribution with a set that lacks them.
       //
       // The three values are built when the commit is issued, not here. Each is a
       // full rewrite of a storage entry that server responses also rewrite, and the
@@ -838,7 +842,10 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
             store: 'meta',
             type: 'put',
             key: orMapKeyTombstonesBucketKey(name, attributionBucket),
-            value: serializeOrMapKeyTombstonesBucket(orMap, attributionBucket),
+            value: serializeOrMapKeyTombstonesBucket(orMap, attributionBucket, {
+              key: String(key),
+              tags: tombstones,
+            }),
           },
         ];
       };
