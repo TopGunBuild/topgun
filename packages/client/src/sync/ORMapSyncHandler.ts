@@ -45,7 +45,19 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         // covering epoch is deliberately NOT confirmed here — it is confirmed only
         // after the snapshot leaves are durably applied, which is what re-enables
         // this client's ACKs server-side (delivered_conn set on resync completion).
+        // Read before the first await, as the bucket and leaf handlers do.
+        const generationAtEntry = this.walkFor(mapName).generation;
         await this.config.onFullResync(mapName, timestamp);
+        if (this.walkFor(mapName).generation !== generationAtEntry) {
+          // The connection this root arrived on was replaced while the local
+          // state was being discarded. A request sent now would reach the next
+          // connection outside the walk its own root opens, and its answer
+          // would be taken for one of that walk's, ending the count one
+          // response early (TG-MRK-002). The next root finds the map empty and
+          // pulls the snapshot itself.
+          logger.info({ mapName }, 'ORMap full-resync root outlived its connection; not pulling');
+          return;
+        }
         logger.info(
           { mapName },
           'ORMap full-resync REPLACE: discarded local state, pulling snapshot',
@@ -121,6 +133,20 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
   private confirmCoveringEpoch(mapName: string, coveringEpoch?: number): void {
     if (typeof coveringEpoch === 'number' && Number.isFinite(coveringEpoch) && coveringEpoch > 0) {
       this.config.onCoveringEpochApplied(mapName, coveringEpoch);
+    }
+  }
+
+  /**
+   * The connection the current walks ran on is gone.
+   *
+   * Every walk is moved to a new generation at once, without waiting for the
+   * next sync init: an invocation still parked on storage is stale from this
+   * moment, so whatever it does after it resumes cannot be counted into a walk
+   * of the next connection, nor send a request on it ahead of that walk.
+   */
+  public onConnectionLost(): void {
+    for (const [mapName, walk] of this.walks) {
+      this.walks.set(mapName, newWalkState(walk.generation + 1));
     }
   }
 

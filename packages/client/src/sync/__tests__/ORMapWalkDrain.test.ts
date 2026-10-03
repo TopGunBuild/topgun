@@ -421,4 +421,39 @@ describe('ORMapSyncHandler confirms a covering epoch only for a drained walk', (
       rootConveysNoEpoch: [],
     });
   });
+
+  it('a full-resync root still discarding local state when the connection is lost opens no walk on the next connection', async () => {
+    const staged = stageClientBehindServer();
+    const { map, handler, onFullResync, onCoveringEpochApplied, requestedPaths } = staged;
+
+    // The root of the first connection orders a full resync, and the discard of
+    // the local state parks on storage.
+    const parked = deferred();
+    onFullResync.mockImplementationOnce(async () => {
+      await parked.promise;
+      map.clear();
+    });
+    const rootOfTheLostConnection = handler.handleORMapSyncRespRoot({
+      ...staged.rootFrame(2),
+      fullResync: true,
+    });
+    expect(onFullResync).toHaveBeenCalledTimes(1);
+
+    // The connection drops and the discard finishes afterwards. A request sent
+    // now would go out on the next connection ahead of its sync init, and its
+    // answer would be taken for an answer of the walk that init opens.
+    handler.onConnectionLost();
+    parked.resolve();
+    await rootOfTheLostConnection;
+    expect(requestedPaths()).toEqual([]);
+
+    // The next connection's own root opens the only walk, and that walk
+    // confirms once, when its single request has been answered.
+    handler.sendSyncInit(MAP_NAME, 0);
+    await handler.handleORMapSyncRespRoot(staged.rootFrame(3));
+    expect(requestedPaths()).toEqual(['']);
+    expect(onCoveringEpochApplied).not.toHaveBeenCalled();
+    await handler.handleORMapSyncRespLeaf(staged.leafFrameAt('', [K, J], 3));
+    expect(onCoveringEpochApplied.mock.calls).toEqual([[MAP_NAME, 3]]);
+  });
 });

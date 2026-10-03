@@ -713,6 +713,9 @@ export class SyncEngine {
     }
     // WebSocketManager already stopped heartbeat and transitioned state
     // SyncEngine can do additional cleanup if needed
+    // A sync response still being handled must not be counted into, or send a
+    // request ahead of, the Merkle walk the next connection opens.
+    this.orMapSyncHandler.onConnectionLost();
   }
 
   /**
