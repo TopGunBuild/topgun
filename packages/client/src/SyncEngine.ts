@@ -276,6 +276,12 @@ export class SyncEngine {
 
   // ORMapSyncHandler handles ORMap sync protocol messages
   private readonly orMapSyncHandler: ORMapSyncHandler;
+  /**
+   * Raised each time the connection is lost. An async sync path reads it before
+   * it first awaits and again afterwards: if it moved, the connection the path
+   * started on is gone and it must send nothing on the one that replaced it.
+   */
+  private connectionGeneration = 0;
 
   // MessageRouter handles type-based message routing
   private readonly messageRouter: IMessageRouter;
@@ -715,6 +721,7 @@ export class SyncEngine {
     // SyncEngine can do additional cleanup if needed
     // A sync response still being handled must not be counted into, or send a
     // request ahead of, the Merkle walk the next connection opens.
+    this.connectionGeneration += 1;
     this.orMapSyncHandler.onConnectionLost();
   }
 
@@ -1535,9 +1542,17 @@ export class SyncEngine {
     this.heldOrMapNames = null;
     this.heldSetIncomplete = false;
     this.heldSetIncompleteWarned = false;
+    // The connection this sync start belongs to. After each await below, a
+    // different value means that connection was lost meanwhile: the next one
+    // runs its own sync start, and an init sent from here would open a second
+    // round for the map while that one's walk is in flight (TG-MRK-002).
+    const connection = this.connectionGeneration;
     try {
-      this.heldOrMapNames = await this.computeHeldOrMapNames();
+      const held = await this.computeHeldOrMapNames();
+      if (this.connectionGeneration !== connection) return;
+      this.heldOrMapNames = held;
     } catch (err) {
+      if (this.connectionGeneration !== connection) return;
       // Fail-closed: NEVER run the barrier over a partial snapshot. Data sync
       // for the maps this process HAS open still proceeds below (safe — sync
       // only pulls state, the barrier only gates the confirmed-apply ACK);
@@ -1561,6 +1576,7 @@ export class SyncEngine {
       for (const mapName of this.heldOrMapNames) {
         if (!(this.maps.get(mapName) instanceof ORMap)) {
           await this.instantiateAndRestoreOrMap(mapName);
+          if (this.connectionGeneration !== connection) return;
         }
       }
     }
