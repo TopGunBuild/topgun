@@ -6520,6 +6520,7 @@ mod tests {
         svc: Arc<SyncService>,
         factory: Arc<RecordStoreFactory>,
         frontier: Arc<TombstoneFrontier>,
+        registry: Arc<ConnectionRegistry>,
         /// The store the durable index enumerates; `None` on the fallback.
         durable: Option<Arc<dyn MapDataStore>>,
         /// Keeps the redb file alive for as long as the rig is.
@@ -6542,12 +6543,13 @@ mod tests {
         ));
         let frontier = Arc::new(TombstoneFrontier::new(None));
         frontier.set_epoch_width(1);
+        let registry = Arc::new(ConnectionRegistry::new());
         let index: Arc<dyn DurableMerkleIndex + Send + Sync> = Arc::new(DurableMerkle);
         let svc = Arc::new(
             SyncService::new(
                 Arc::new(MerkleSyncManager::default()),
                 Arc::clone(&factory),
-                Arc::new(ConnectionRegistry::new()),
+                Arc::clone(&registry),
             )
             .with_durable_index(index, Arc::clone(&store))
             .with_frontier(Arc::clone(&frontier), Arc::new(KeyWriterRegistry::new())),
@@ -6556,6 +6558,7 @@ mod tests {
             svc,
             factory,
             frontier,
+            registry,
             durable: Some(store),
             _dir: Some(dir),
         }
@@ -6578,18 +6581,16 @@ mod tests {
         );
         let frontier = Arc::new(TombstoneFrontier::new(None));
         frontier.set_epoch_width(1);
+        let registry = Arc::new(ConnectionRegistry::new());
         let svc = Arc::new(
-            SyncService::new(
-                manager,
-                Arc::clone(&factory),
-                Arc::new(ConnectionRegistry::new()),
-            )
-            .with_frontier(Arc::clone(&frontier), Arc::new(KeyWriterRegistry::new())),
+            SyncService::new(manager, Arc::clone(&factory), Arc::clone(&registry))
+                .with_frontier(Arc::clone(&frontier), Arc::new(KeyWriterRegistry::new())),
         );
         RoundRig {
             svc,
             factory,
             frontier,
+            registry,
             durable: None,
             _dir: None,
         }
@@ -6670,6 +6671,23 @@ mod tests {
             .expect("remove write");
         assert!(written, "fixture: {key} is seeded before it is removed");
         rig.frontier.stamp_tombstone(map, key, tag)
+    }
+
+    /// `(live tags, tombstones)` of `key`'s stored OR slot, each sorted.
+    async fn round_slot(rig: &RoundRig, map: &str, key: &str) -> (Vec<String>, Vec<String>) {
+        let store = rig.factory.get_or_create(map, hash_to_partition(key));
+        match store.get(key, false).await.expect("read").map(|r| r.value) {
+            Some(RecordValue::OrMap {
+                records,
+                mut tombstones,
+            }) => {
+                let mut live: Vec<String> = records.into_iter().map(|r| r.tag).collect();
+                live.sort();
+                tombstones.sort();
+                (live, tombstones)
+            }
+            other => panic!("expected an OR slot for {key}, got {other:?}"),
+        }
     }
 
     /// Sends `ORMapSyncInit` on `conn` and returns the root payload.
@@ -7053,5 +7071,191 @@ mod tests {
         case_iv().await;
         case_epoch_zero_at_build().await;
         case_no_round().await;
+    }
+
+    /// A client that repeats OR sync rounds on ONE connection while the epoch
+    /// advances sees its delivered cursor advance with it (TG-MRK-002).
+    ///
+    /// Bounding a round by the epoch its session was built at must not freeze
+    /// that client at the build epoch of its first session: a cursor that
+    /// stops moving pins the fleet low-water mark, and no tombstone stamped
+    /// after it is ever pruned. Each init therefore conveys the epoch read
+    /// just before it, and a repeat at an unchanged epoch reuses the session
+    /// instead of paying for another enumeration.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_ormap_sync_init_advances_delivered_per_epoch_advance() {
+        const MAP: &str = "omap";
+
+        let rig = round_rig_durable();
+        let (conn, client) = register_device(&rig.registry, "dev-repeated-init").await;
+
+        let removable: Vec<String> = (0..4).map(|i| format!("repeat-{i}")).collect();
+        for key in &removable {
+            round_seed(&rig, MAP, key, &["tag"]).await;
+        }
+        round_seed(&rig, MAP, "repeat-seed", &["seed-tag"]).await;
+        round_or_remove(&rig, MAP, "repeat-seed", "seed-tag").await;
+        let e0 = rig.frontier.current_epoch();
+        assert!(
+            e0 >= 1,
+            "fixture: an epoch is stamped before the first round"
+        );
+
+        let mut delivered_per_round = Vec::new();
+        for (round, key) in removable.iter().enumerate() {
+            let epoch = rig.frontier.current_epoch();
+            let claimed = rig.frontier.delivered(conn);
+            let root = round_init(&rig.svc, MAP, conn, Some(claimed)).await;
+            assert!(!root.full_resync, "round {round}: the client is not gated");
+            assert_eq!(
+                root.covering_epoch,
+                Some(epoch),
+                "round {round}: the root conveys the epoch read just before the init"
+            );
+            assert_eq!(
+                rig.frontier.delivered(conn),
+                epoch,
+                "round {round}: delivered follows the conveyed epoch"
+            );
+            assert!(
+                rig.frontier.confirm_apply_ack(&client, epoch, conn).await,
+                "round {round}: the acknowledgement advances the stored cursor"
+            );
+            delivered_per_round.push(rig.frontier.delivered(conn));
+
+            // The gate goes live once the client is tracked, so every later
+            // round runs with re-admission protection active.
+            if round == 0 {
+                rig.frontier.set_durable_epoch_watermark(1000);
+            }
+
+            assert_eq!(
+                round_or_remove(&rig, MAP, key, "tag").await,
+                epoch + 1,
+                "fixture: one remove advances the epoch by one"
+            );
+        }
+        assert_eq!(
+            delivered_per_round,
+            vec![e0, e0 + 1, e0 + 2, e0 + 3],
+            "delivered grows strictly, once per epoch advance"
+        );
+
+        // A repeat at an unchanged epoch is a cache hit.
+        let last = rig.frontier.current_epoch();
+        let rebuilt = round_init(&rig.svc, MAP, conn, Some(last - 1)).await;
+        assert_eq!(rebuilt.covering_epoch, Some(last));
+        assert_eq!(rig.frontier.delivered(conn), last);
+        let session = rig
+            .svc
+            .session_registry
+            .get(MAP, conn)
+            .expect("the init caches a session");
+        let repeat = round_init(&rig.svc, MAP, conn, Some(last - 1)).await;
+        assert!(
+            Arc::ptr_eq(
+                &session,
+                &rig.svc.session_registry.get(MAP, conn).expect("cached")
+            ),
+            "a repeat at an unchanged epoch reuses the cached session"
+        );
+        assert_eq!(repeat.covering_epoch, Some(last));
+        assert_eq!(
+            rig.frontier.delivered(conn),
+            last,
+            "a repeat at an unchanged epoch leaves delivered unchanged"
+        );
+    }
+
+    /// A merged `ORMAP_PUSH_DIFF` conveys no epoch, marks none delivered,
+    /// stamps none and leaves the connection's round alone (TG-MRK-002).
+    ///
+    /// The client confirms an epoch only from a root, a leaf or a diff
+    /// response. A push that moved any of these would let a client confirm an
+    /// epoch newer than the snapshot its walk descended by — and the push that
+    /// heals a lost remove is sent in the middle of exactly such a walk. A
+    /// pushed tombstone is stored unstamped, so it belongs to no epoch and no
+    /// acknowledgement can make it prune-eligible. The merge keeps the slot's
+    /// live tags unique: it skips an inbound record whose tag is already
+    /// stored, and de-duplicates tombstones through its `known` set.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ormap_push_diff_neither_conveys_nor_delivers_an_epoch() {
+        const MAP: &str = "omap";
+
+        let rig = round_rig_durable();
+        let (conn, client) = register_device(&rig.registry, "dev-pushing").await;
+
+        round_seed(&rig, MAP, "push-seed", &["seed-tag"]).await;
+        round_seed(&rig, MAP, "push-other", &["other-tag"]).await;
+        round_or_remove(&rig, MAP, "push-seed", "seed-tag").await;
+        let e0 = rig.frontier.current_epoch();
+        assert!(e0 >= 1, "fixture: an epoch is stamped before the round");
+
+        // Tracked on an earlier connection, so the client is known and not
+        // regressed when the gate goes live and its push is admitted on merit.
+        let earlier = ConnectionId(999_999);
+        rig.frontier.set_delivered(earlier, e0);
+        assert!(rig.frontier.confirm_apply_ack(&client, e0, earlier).await);
+        rig.frontier.set_durable_epoch_watermark(1000);
+
+        let root = round_init(&rig.svc, MAP, conn, Some(e0)).await;
+        assert!(!root.full_resync, "the client is not gated");
+        assert_eq!(root.covering_epoch, Some(e0), "the round is fixed at e0");
+        assert_eq!(rig.frontier.delivered(conn), e0);
+        let session = rig
+            .svc
+            .session_registry
+            .get(MAP, conn)
+            .expect("the init caches a session");
+
+        let e1 = round_or_remove(&rig, MAP, "push-other", "other-tag").await;
+        assert_eq!(e1, e0 + 1, "fixture: the remove advances the epoch");
+
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        let response = Arc::clone(&rig.svc)
+            .oneshot(push_entries(
+                ctx,
+                MAP,
+                vec![pushed_entry(
+                    "push-third",
+                    &["pushed-live"],
+                    &["pushed-dead"],
+                )],
+            ))
+            .await
+            .expect("push");
+        assert!(
+            matches!(response, OperationResponse::Empty),
+            "a push is answered with no frame, so no field of it can be an epoch; got {response:?}"
+        );
+        // A refused push is answered the same way, so the answer alone does
+        // not show that this one was merged.
+        assert_eq!(
+            round_slot(&rig, MAP, "push-third").await,
+            (
+                vec!["pushed-live".to_string()],
+                vec!["pushed-dead".to_string()]
+            ),
+            "the pushed record and the pushed tombstone are both stored"
+        );
+
+        assert_eq!(
+            rig.frontier.delivered(conn),
+            e0,
+            "a push marks no epoch delivered"
+        );
+        assert_eq!(
+            rig.frontier.current_epoch(),
+            e1,
+            "a pushed tombstone is stored unstamped"
+        );
+        assert!(
+            Arc::ptr_eq(
+                &session,
+                &rig.svc.session_registry.get(MAP, conn).expect("cached")
+            ),
+            "a push leaves the connection's session in place"
+        );
     }
 }
