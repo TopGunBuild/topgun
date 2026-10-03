@@ -6486,4 +6486,572 @@ mod tests {
             failures.join("\n  ")
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Covering epoch vs the snapshot an OR sync round descends by (TG-MRK-002)
+    // -----------------------------------------------------------------------
+
+    /// The per-partition Merkle observer pairing a node wires in production: one
+    /// `MerkleMutationObserver` per `(map, partition)` store over the manager
+    /// the sync service reads, so a fallback rig's trees follow its record
+    /// stores the way a running node's do.
+    struct RoundMerkleObservers(Arc<MerkleSyncManager>);
+
+    impl crate::storage::factory::ObserverFactory for RoundMerkleObservers {
+        fn create_observer(
+            &self,
+            map_name: &str,
+            partition_id: u32,
+        ) -> Option<Arc<dyn crate::storage::mutation_observer::MutationObserver>> {
+            Some(Arc::new(
+                crate::storage::merkle_sync::MerkleMutationObserver::new(
+                    Arc::clone(&self.0),
+                    map_name.to_string(),
+                    partition_id,
+                ),
+            ))
+        }
+    }
+
+    /// A sync service with a frontier that mints one epoch per stamp, on either
+    /// read source of an OR sync round: the durable index (a cached session per
+    /// connection) or the in-memory fallback (trees recomputed per request).
+    struct RoundRig {
+        svc: Arc<SyncService>,
+        factory: Arc<RecordStoreFactory>,
+        frontier: Arc<TombstoneFrontier>,
+        /// The store the durable index enumerates; `None` on the fallback.
+        durable: Option<Arc<dyn MapDataStore>>,
+        /// Keeps the redb file alive for as long as the rig is.
+        _dir: Option<tempfile::TempDir>,
+    }
+
+    /// Durable read source: the record stores write through to the same redb
+    /// file the durable index enumerates, as the server's wiring does.
+    fn round_rig_durable() -> RoundRig {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::durable_merkle::DurableMerkle;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn MapDataStore> =
+            Arc::new(RedbDataStore::new(dir.path().join("round.redb")).expect("redb open"));
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::clone(&store),
+            Vec::new(),
+        ));
+        let frontier = Arc::new(TombstoneFrontier::new(None));
+        frontier.set_epoch_width(1);
+        let index: Arc<dyn DurableMerkleIndex + Send + Sync> = Arc::new(DurableMerkle);
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                Arc::clone(&factory),
+                Arc::new(ConnectionRegistry::new()),
+            )
+            .with_durable_index(index, Arc::clone(&store))
+            .with_frontier(Arc::clone(&frontier), Arc::new(KeyWriterRegistry::new())),
+        );
+        RoundRig {
+            svc,
+            factory,
+            frontier,
+            durable: Some(store),
+            _dir: Some(dir),
+        }
+    }
+
+    /// Fallback read source: no durable index, a null data store, and the OR
+    /// trees fed by the per-partition Merkle observer on every record-store
+    /// write. `ormap_push_diff_answers_with_no_frame_and_stores_data` seeds its
+    /// fallback tree through the same observer type.
+    fn round_rig_fallback() -> RoundRig {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            )
+            .with_observer_factories(vec![Arc::new(RoundMerkleObservers(Arc::clone(&manager)))
+                as Arc<dyn crate::storage::factory::ObserverFactory>]),
+        );
+        let frontier = Arc::new(TombstoneFrontier::new(None));
+        frontier.set_epoch_width(1);
+        let svc = Arc::new(
+            SyncService::new(
+                manager,
+                Arc::clone(&factory),
+                Arc::new(ConnectionRegistry::new()),
+            )
+            .with_frontier(Arc::clone(&frontier), Arc::new(KeyWriterRegistry::new())),
+        );
+        RoundRig {
+            svc,
+            factory,
+            frontier,
+            durable: None,
+            _dir: None,
+        }
+    }
+
+    /// The trie path of `key`'s leaf: the first three hex digits of its hash,
+    /// on the durable session and on the fallback trees alike.
+    fn round_leaf_path(key: &str) -> String {
+        format!("{:08x}", topgun_core::hash::fnv1a_hash(key))[..3].to_string()
+    }
+
+    /// The first `{prefix}-{i}` key whose depth-1 bucket differs from `other`'s,
+    /// so a walk can descend to one of the two keys and skip the other.
+    fn round_key_outside_bucket_of(other: &str, prefix: &str) -> String {
+        let taken = round_leaf_path(other)[..1].to_string();
+        (0..1_000)
+            .map(|i| format!("{prefix}-{i}"))
+            .find(|key| round_leaf_path(key)[..1] != taken)
+            .expect("some key hashes outside one of sixteen buckets")
+    }
+
+    /// Stores `key` as an OR slot holding one live record per tag.
+    async fn round_seed(rig: &RoundRig, map: &str, key: &str, tags: &[&str]) {
+        use crate::storage::record::OrMapEntry as StoreOrMapEntry;
+        rig.factory
+            .get_or_create(map, hash_to_partition(key))
+            .put(
+                key,
+                RecordValue::OrMap {
+                    records: tags
+                        .iter()
+                        .map(|tag| StoreOrMapEntry {
+                            value: Value::Int(1),
+                            tag: (*tag).to_string(),
+                            timestamp: make_timestamp(),
+                        })
+                        .collect(),
+                    tombstones: Vec::new(),
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+            )
+            .await
+            .expect("seed");
+    }
+
+    /// Removes `tag` from `key` in the order the op path uses: the store write
+    /// under the key's writer first, the epoch stamp after it. Returns the
+    /// stamped epoch.
+    async fn round_or_remove(rig: &RoundRig, map: &str, key: &str, tag: &str) -> u64 {
+        use crate::storage::MutateOutcome;
+        let _guard = rig.svc.key_writer.acquire(map, key).await;
+        let mut apply = |value: &mut RecordValue| {
+            if let RecordValue::OrMap {
+                records,
+                tombstones,
+            } = value
+            {
+                records.retain(|record| record.tag != tag);
+                tombstones.push(tag.to_string());
+            }
+            MutateOutcome {
+                changed: true,
+                witness: None,
+            }
+        };
+        let written = rig
+            .factory
+            .get_or_create(map, hash_to_partition(key))
+            .update_in_place(
+                key,
+                None,
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+                &mut apply,
+            )
+            .await
+            .expect("remove write");
+        assert!(written, "fixture: {key} is seeded before it is removed");
+        rig.frontier.stamp_tombstone(map, key, tag)
+    }
+
+    /// Sends `ORMapSyncInit` on `conn` and returns the root payload.
+    async fn round_init(
+        svc: &Arc<SyncService>,
+        map: &str,
+        conn: ConnectionId,
+        claimed_epoch: Option<u64>,
+    ) -> ORMapSyncRespRootPayload {
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        match Arc::clone(svc)
+            .oneshot(Operation::ORMapSyncInit {
+                ctx,
+                payload: topgun_core::messages::ORMapSyncInit {
+                    map_name: map.to_string(),
+                    root_hash: 0,
+                    bucket_hashes: HashMap::new(),
+                    last_sync_timestamp: None,
+                    claimed_epoch,
+                },
+            })
+            .await
+            .expect("ORMapSyncInit")
+        {
+            OperationResponse::Message(message) => match *message {
+                Message::ORMapSyncRespRoot(root) => root.payload,
+                other => panic!("expected ORMapSyncRespRoot, got {other:?}"),
+            },
+            other => panic!("expected a message, got {other:?}"),
+        }
+    }
+
+    /// Sends an LWW `SYNC_INIT` on `conn`; on the durable path it builds and
+    /// caches the session the OR handlers then find for the same `(map, conn)`.
+    async fn round_lww_init(svc: &Arc<SyncService>, map: &str, conn: ConnectionId) {
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        Arc::clone(svc)
+            .oneshot(Operation::SyncInit {
+                ctx,
+                payload: topgun_core::messages::SyncInitMessage {
+                    map_name: map.to_string(),
+                    last_sync_timestamp: None,
+                },
+            })
+            .await
+            .expect("SyncInit");
+    }
+
+    /// Sends `ORMapMerkleReqBucket` for `path` and returns the handler's answer.
+    async fn round_bucket(
+        svc: &Arc<SyncService>,
+        map: &str,
+        conn: Option<ConnectionId>,
+        path: &str,
+    ) -> Result<OperationResponse, OperationError> {
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = conn;
+        Arc::clone(svc)
+            .oneshot(Operation::ORMapMerkleReqBucket {
+                ctx,
+                payload: topgun_core::messages::ORMapMerkleReqBucket {
+                    payload: topgun_core::messages::ORMapMerkleReqBucketPayload {
+                        map_name: map.to_string(),
+                        path: path.to_string(),
+                    },
+                },
+            })
+            .await
+    }
+
+    /// The leaf payload of a bucket answer; any other answer fails the test.
+    fn round_leaf(response: OperationResponse) -> ORMapSyncRespLeafPayload {
+        match response {
+            OperationResponse::Message(message) => match *message {
+                Message::ORMapSyncRespLeaf(leaf) => leaf.payload,
+                other => panic!("expected ORMapSyncRespLeaf, got {other:?}"),
+            },
+            other => panic!("expected a leaf message, got {other:?}"),
+        }
+    }
+
+    /// No response of an OR sync round conveys, or marks delivered, an epoch
+    /// newer than the snapshot the round's walk descends by (TG-MRK-002).
+    ///
+    /// A client skips every subtree whose hash matches. If a leaf of that walk
+    /// conveyed an epoch stamped after the hashes were taken, the client would
+    /// confirm an epoch whose tombstone sits in a subtree it skipped, and a
+    /// prune could then drop a tombstone that client never applied.
+    ///
+    /// The bound rests on a tombstone being readable by the round's hashes no
+    /// later than its epoch is readable, which holds on both read sources
+    /// because `OR_REMOVE` awaits the store write before it stamps (the order
+    /// `round_or_remove` reproduces):
+    ///
+    /// - durable: `DefaultRecordStore::update_in_place` awaits
+    ///   `add_with_witness` before it returns; under write-behind that call
+    ///   stages the value (`WriteBehindDataStore::add_with_witness` ends in
+    ///   `stage`), and `WriteBehindDataStore::enumerate_leaves` overlays the
+    ///   durable leaves with `collect_staging_for_map`, so a session built
+    ///   after the write holds the tombstone. This rig writes through to redb
+    ///   directly, which a later enumeration reads as well.
+    /// - fallback: `update_in_place` calls `notify_in_place_write` under the
+    ///   cell lock before the write-through, so the Merkle observer has
+    ///   updated the tree by the time the call returns.
+    ///
+    /// An OR slot never holds one live tag twice — the push merge skips an
+    /// inbound record whose tag is stored (`existing.tag == r.tag` in
+    /// `handle_ormap_push_diff`) and an op-path add is stored under a tag the
+    /// server regenerates — so a leaf hash over a tag set reflects the slot.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)] // six cases, each its own nested fn so one can be run first
+    #[allow(clippy::items_after_statements)] // the cases sit under the constants they share
+    async fn ormap_sync_init_epoch_never_postdates_cached_session() {
+        use crate::storage::durable_merkle::DurableMerkle;
+
+        const MAP: &str = "omap";
+        const K_TAG: &str = "k-tag";
+
+        /// Seeds keys K and J in different depth-1 buckets, each with one live
+        /// tag, plus a third key that is NOT removed here.
+        async fn seed_keys(rig: &RoundRig) -> (String, String) {
+            let k = "round-k".to_string();
+            let j = round_key_outside_bucket_of(&k, "round-j");
+            assert_ne!(
+                round_leaf_path(&k)[..1],
+                round_leaf_path(&j)[..1],
+                "fixture: K and J sit in different depth-1 buckets"
+            );
+            round_seed(rig, MAP, &k, &[K_TAG]).await;
+            round_seed(rig, MAP, &j, &["j-tag"]).await;
+            round_seed(rig, MAP, "round-seed", &["seed-tag"]).await;
+            (k, j)
+        }
+
+        /// `seed_keys`, then one remove on the third key, so the epoch is
+        /// already `e0 >= 1` before any session is built.
+        async fn seed_at_stamped_epoch(rig: &RoundRig) -> (String, String, u64) {
+            let (k, j) = seed_keys(rig).await;
+            round_or_remove(rig, MAP, "round-seed", "seed-tag").await;
+            let e0 = rig.frontier.current_epoch();
+            assert!(e0 >= 1, "fixture: an epoch is stamped before the build");
+            (k, j, e0)
+        }
+
+        /// The OR root of a session built now, independently of the service.
+        fn fresh_or_root(rig: &RoundRig) -> u32 {
+            let store = rig.durable.as_ref().expect("durable rig");
+            DurableMerkle
+                .build_session(MAP, store.as_ref())
+                .expect("fresh session")
+                .ormap_root()
+        }
+
+        // (i) The cached session was built by an LWW SYNC_INIT at e0; a remove
+        // then moves the epoch. The OR init must not pair the new epoch with
+        // the old root: it rebuilds.
+        async fn case_i() {
+            let rig = round_rig_durable();
+            let conn = ConnectionId(61);
+            let (k, _j, e0) = seed_at_stamped_epoch(&rig).await;
+
+            round_lww_init(&rig.svc, MAP, conn).await;
+            let root_at_e0 = rig
+                .svc
+                .session_registry
+                .get(MAP, conn)
+                .expect("SYNC_INIT caches a session")
+                .ormap_root();
+
+            let e1 = round_or_remove(&rig, MAP, &k, K_TAG).await;
+            assert!(e1 > e0, "fixture: the remove advances the epoch");
+            let fresh_root = fresh_or_root(&rig);
+            assert_ne!(
+                root_at_e0, fresh_root,
+                "(i) fixture: the remove changes the OR root"
+            );
+
+            let root = round_init(&rig.svc, MAP, conn, None).await;
+            assert!(!root.full_resync, "(i) the client is not gated");
+            assert_eq!(root.covering_epoch, Some(e1), "(i) root conveys e1");
+            assert_eq!(rig.frontier.delivered(conn), e1, "(i) delivered is e1");
+            assert_eq!(
+                root.root_hash, fresh_root,
+                "(i) a root that conveys e1 is taken from a session built at e1"
+            );
+        }
+
+        // (ii) The cached session was built by an OR init at e0. A repeat at
+        // the same epoch reuses it; a repeat after the epoch moved rebuilds.
+        async fn case_ii() {
+            let rig = round_rig_durable();
+            let conn = ConnectionId(62);
+            let (k, _j, e0) = seed_at_stamped_epoch(&rig).await;
+
+            let first = round_init(&rig.svc, MAP, conn, None).await;
+            assert_eq!(first.covering_epoch, Some(e0), "(ii) first root conveys e0");
+            assert_eq!(rig.frontier.delivered(conn), e0, "(ii) delivered is e0");
+            let session_at_e0 = rig
+                .svc
+                .session_registry
+                .get(MAP, conn)
+                .expect("the init caches a session");
+
+            // (ii-a) unchanged epoch: a cache hit.
+            let repeat = round_init(&rig.svc, MAP, conn, None).await;
+            assert!(
+                Arc::ptr_eq(
+                    &session_at_e0,
+                    &rig.svc.session_registry.get(MAP, conn).expect("cached")
+                ),
+                "(ii-a) a repeat at an unchanged epoch reuses the cached session"
+            );
+            assert_eq!(repeat.covering_epoch, Some(e0), "(ii-a) root conveys e0");
+            assert_eq!(rig.frontier.delivered(conn), e0, "(ii-a) delivered is e0");
+
+            // (ii-b) advanced epoch: a rebuild.
+            let e1 = round_or_remove(&rig, MAP, &k, K_TAG).await;
+            assert!(e1 > e0, "fixture: the remove advances the epoch");
+            let fresh_root = fresh_or_root(&rig);
+            assert_ne!(
+                session_at_e0.ormap_root(),
+                fresh_root,
+                "(ii-b) fixture: the remove changes the OR root"
+            );
+
+            let third = round_init(&rig.svc, MAP, conn, None).await;
+            assert_eq!(third.covering_epoch, Some(e1), "(ii-b) root conveys e1");
+            assert_eq!(rig.frontier.delivered(conn), e1, "(ii-b) delivered is e1");
+            assert_eq!(
+                third.root_hash, fresh_root,
+                "(ii-b) a root that conveys e1 is taken from a session built at e1"
+            );
+            assert!(
+                !Arc::ptr_eq(
+                    &session_at_e0,
+                    &rig.svc.session_registry.get(MAP, conn).expect("cached")
+                ),
+                "(ii-b) the stale session is replaced"
+            );
+        }
+
+        // (iii)/(iv) A remove on K lands after the round's root. The walk
+        // descends to J only; neither its bucket answer nor J's leaf may carry
+        // the round past e0.
+        async fn walk_past_a_later_remove(rig: &RoundRig, conn: ConnectionId, case: &str) {
+            let (k, j, e0) = seed_at_stamped_epoch(rig).await;
+
+            let root = round_init(&rig.svc, MAP, conn, None).await;
+            assert_eq!(root.covering_epoch, Some(e0), "{case} root conveys e0");
+            assert_eq!(rig.frontier.delivered(conn), e0, "{case} delivered is e0");
+
+            let e1 = round_or_remove(rig, MAP, &k, K_TAG).await;
+            assert!(e1 > e0, "fixture: the remove advances the epoch");
+
+            let top = round_bucket(&rig.svc, MAP, Some(conn), "")
+                .await
+                .expect("bucket request");
+            assert!(
+                matches!(
+                    &top,
+                    OperationResponse::Message(message)
+                        if matches!(**message, Message::ORMapSyncRespBuckets(_))
+                ),
+                "{case} fixture: the root path answers with buckets, got {top:?}"
+            );
+            assert_eq!(
+                rig.frontier.delivered(conn),
+                e0,
+                "{case} a bucket answer leaves delivered at the round epoch"
+            );
+
+            let leaf = round_leaf(
+                round_bucket(&rig.svc, MAP, Some(conn), &round_leaf_path(&j))
+                    .await
+                    .expect("leaf request"),
+            );
+            assert!(
+                leaf.entries.iter().any(|entry| entry.key == j),
+                "{case} fixture: J's leaf lists J"
+            );
+            assert_eq!(
+                leaf.covering_epoch,
+                Some(e0),
+                "{case} J's leaf conveys the round epoch"
+            );
+            assert_eq!(
+                rig.frontier.delivered(conn),
+                e0,
+                "{case} J's leaf leaves delivered at the round epoch"
+            );
+        }
+
+        async fn case_iii() {
+            walk_past_a_later_remove(&round_rig_durable(), ConnectionId(63), "(iii)").await;
+        }
+
+        async fn case_iv() {
+            walk_past_a_later_remove(&round_rig_fallback(), ConnectionId(64), "(iv)").await;
+        }
+
+        // A round whose root conveyed nothing (built at epoch 0) stays at
+        // nothing even when a stamp lands mid-round; the next init starts a
+        // round at the new epoch.
+        async fn case_epoch_zero_at_build() {
+            let rig = round_rig_durable();
+            let conn = ConnectionId(65);
+            let (k, j) = seed_keys(&rig).await;
+            assert_eq!(rig.frontier.current_epoch(), 0, "fixture: nothing stamped");
+
+            let root = round_init(&rig.svc, MAP, conn, None).await;
+            assert_eq!(root.covering_epoch, None, "(epoch 0) root conveys nothing");
+            assert_eq!(
+                rig.frontier.delivered(conn),
+                0,
+                "(epoch 0) nothing delivered"
+            );
+
+            let e = round_or_remove(&rig, MAP, &k, K_TAG).await;
+            assert!(e >= 1, "fixture: the remove stamps an epoch");
+
+            let leaf = round_leaf(
+                round_bucket(&rig.svc, MAP, Some(conn), &round_leaf_path(&j))
+                    .await
+                    .expect("leaf request"),
+            );
+            assert_eq!(
+                leaf.covering_epoch, None,
+                "(epoch 0) a leaf of a round fixed at no epoch conveys none"
+            );
+            assert_eq!(
+                rig.frontier.delivered(conn),
+                0,
+                "(epoch 0) that leaf leaves delivered unchanged"
+            );
+
+            let repeat = round_init(&rig.svc, MAP, conn, None).await;
+            assert_eq!(
+                repeat.covering_epoch,
+                Some(e),
+                "(epoch 0) a repeat init starts a round at the new epoch"
+            );
+            assert_eq!(rig.frontier.delivered(conn), e, "(epoch 0) delivered is e");
+        }
+
+        // A leaf request with no init on this `(map, conn)` belongs to no
+        // round, so there is no snapshot its epoch could be bounded by.
+        async fn case_no_round() {
+            for (rig, source, conn) in [
+                (round_rig_durable(), "durable", ConnectionId(66)),
+                (round_rig_fallback(), "fallback", ConnectionId(67)),
+            ] {
+                let (_k, j, e) = seed_at_stamped_epoch(&rig).await;
+                assert!(e >= 1, "fixture: an epoch is stamped");
+
+                let leaf = round_leaf(
+                    round_bucket(&rig.svc, MAP, Some(conn), &round_leaf_path(&j))
+                        .await
+                        .expect("leaf request"),
+                );
+                assert!(
+                    leaf.entries.iter().any(|entry| entry.key == j),
+                    "(no round, {source}) fixture: J's leaf lists J"
+                );
+                assert_eq!(
+                    leaf.covering_epoch, None,
+                    "(no round, {source}) a leaf outside any round conveys no epoch"
+                );
+                assert_eq!(
+                    rig.frontier.delivered(conn),
+                    0,
+                    "(no round, {source}) that leaf leaves delivered unchanged"
+                );
+            }
+        }
+
+        case_i().await;
+        case_ii().await;
+        case_iii().await;
+        case_iv().await;
+        case_epoch_zero_at_build().await;
+        case_no_round().await;
+    }
 }
