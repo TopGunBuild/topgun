@@ -1617,6 +1617,32 @@ describe('SyncEngine', () => {
       expect((syncEngine as any).heldOrMapNames.has('other_map')).toBe(true);
     });
 
+    test('a sync start still enumerating held maps when the connection is lost sends no sync init afterwards', async () => {
+      const ws = await startEngineWithOrMaps(['tags']);
+
+      // The sync start of this connection parks on the held-map enumeration.
+      let release: ((keys: string[]) => void) | undefined;
+      mockStorage.getAllMetaKeys.mockImplementationOnce(
+        () =>
+          new Promise<string[]>((resolve) => {
+            release = resolve;
+          }),
+      );
+      const start = (syncEngine as any).startMerkleSync();
+      for (let i = 0; i < 50 && !release; i++) await Promise.resolve();
+      expect(release).toBeDefined();
+
+      // The connection drops and the enumeration finishes afterwards. A sync
+      // init sent now would reach the next connection as a second init for the
+      // map, next to the one that connection's own sync start sends: a second
+      // round opened while the first one's walk is in flight.
+      (syncEngine as any).handleConnectionLost();
+      release!([]);
+      await start;
+
+      expect(ws.sentMessages.filter((m: any) => m.type === 'ORMAP_SYNC_INIT')).toEqual([]);
+    });
+
     test('held-set enumeration failure fail-closes ALL ACKs on the connection (never a partial barrier)', async () => {
       // A storage-adapter failure must never degrade to an in-memory-only
       // held-set: a persisted store the snapshot silently missed could hold
