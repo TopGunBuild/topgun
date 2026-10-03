@@ -2,22 +2,23 @@
 //!
 //! [`DurableMerkle`] implements [`DurableMerkleIndex`] by enumerating durable
 //! leaves from a [`MapDataStore`] in a single streaming pass and folding them
-//! into per-partition LWW + OR-Map Merkle trees that exactly mirror the
-//! write-path observer's tree layout. The resulting [`MerkleSession`] snapshot
-//! serves repeated `root` / `buckets` / `leaf_keys` queries from the
-//! already-materialised trees — no additional storage round-trips per query.
+//! into ONE flat LWW trie and ONE flat OR-Map trie over every key of the map,
+//! whichever partition the key routes to. The resulting [`MerkleSession`]
+//! snapshot serves repeated `root` / `buckets` / `leaf_keys` queries from the
+//! already-materialised tries — no additional storage round-trips per query.
 //!
-//! All hash and routing decisions delegate to the same primitives the write
-//! path uses (`merkle_leaf_hash`, `hash_to_partition`, `combine_hashes`) so
-//! the session root is byte-identical to the live in-memory root for the same
-//! record set, regardless of whether those records are resident in memory.
+//! The flat shape is what makes the reported numbers comparable with a
+//! client's (TG-MRK-002): a client keeps one trie per map and kind and knows
+//! nothing about partitions, so a fold of per-partition trees could never
+//! equal its root. Leaf hashes come from the same primitive the write path
+//! uses (`merkle_leaf_hash`), and the tries are the core `MerkleTree` /
+//! `ORMapMerkleTree` constructions, so the session root is byte-identical to
+//! the flat root over the same record set, regardless of whether those records
+//! are resident in memory.
 
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
-use topgun_core::hash::combine_hashes;
-use topgun_core::hash_to_partition;
 use topgun_core::merkle::{MerkleTree, ORMapMerkleTree};
 
 use super::map_data_store::{
@@ -49,13 +50,17 @@ impl DurableMerkleIndex for DurableMerkle {
     }
 }
 
-/// Async inner: enumerate leaves and fold into per-partition trees.
+/// Tree depth of the session tries. Must match `MerkleSyncManager`'s default
+/// depth and the client's, or no path would line up between the two sides.
+const SESSION_TREE_DEPTH: usize = 3;
+
+/// Async inner: enumerate leaves and fold them into the flat per-kind tries.
 async fn build_session_async(map: &str, store: &dyn MapDataStore) -> anyhow::Result<MerkleSession> {
     let mut sink = SessionBuildSink {
-        lww_trees: HashMap::new(),
-        ormap_trees: HashMap::new(),
+        lww_tree: MerkleTree::new(SESSION_TREE_DEPTH),
+        ormap_tree: ORMapMerkleTree::new(SESSION_TREE_DEPTH),
         leaf_keys_by_path: HashMap::new(),
-        depth: 3,
+        depth: SESSION_TREE_DEPTH,
     };
     // A single streaming pass — no values are loaded, only (key, kind, hash).
     //
@@ -73,17 +78,22 @@ async fn build_session_async(map: &str, store: &dyn MapDataStore) -> anyhow::Res
 // SessionBuildSink
 // ---------------------------------------------------------------------------
 
-/// [`LeafSink`] that accumulates leaves into per-partition LWW and OR-Map trees,
-/// reproducing the write-path observer's routing exactly.
+/// [`LeafSink`] that accumulates every leaf of a map into one flat LWW trie and
+/// one flat OR-Map trie, selected by the leaf's kind.
+///
+/// Partition routing plays no part here: the session is the client-facing view,
+/// and a client's trie is addressed by `fnv1a(key)` alone (TG-MRK-002). The
+/// tries are built fresh per session and only ever inserted into, so no node
+/// carries the zero-hash residue a removal would leave behind.
 struct SessionBuildSink {
-    /// `partition_id` → LWW tree.
-    lww_trees: HashMap<u32, Mutex<MerkleTree>>,
-    /// `partition_id` → OR-Map tree.
-    ormap_trees: HashMap<u32, Mutex<ORMapMerkleTree>>,
+    /// Flat LWW trie over every LWW key of the map.
+    lww_tree: MerkleTree,
+    /// Flat OR-Map trie over every OR-Map key of the map.
+    ormap_tree: ORMapMerkleTree,
     /// Leaf key membership by hex-path for `leaf_keys` queries.
     /// Key: hex-path prefix; value: sorted record keys at that leaf level.
     leaf_keys_by_path: HashMap<String, Vec<String>>,
-    /// Tree depth — must match `MerkleSyncManager::depth` (default 3).
+    /// Tree depth — must match the depth both tries were created with.
     depth: usize,
 }
 
@@ -91,22 +101,9 @@ struct SessionBuildSink {
 impl LeafSink for SessionBuildSink {
     async fn consume(&mut self, batch: Vec<MerkleLeaf>) -> anyhow::Result<()> {
         for leaf in batch {
-            let partition_id = hash_to_partition(&leaf.key);
             match leaf.kind {
-                MerkleLeafKind::Lww => {
-                    self.lww_trees
-                        .entry(partition_id)
-                        .or_insert_with(|| Mutex::new(MerkleTree::new(self.depth)))
-                        .lock()
-                        .update(&leaf.key, leaf.leaf_hash);
-                }
-                MerkleLeafKind::OrMap => {
-                    self.ormap_trees
-                        .entry(partition_id)
-                        .or_insert_with(|| Mutex::new(ORMapMerkleTree::new(self.depth)))
-                        .lock()
-                        .update(&leaf.key, leaf.leaf_hash);
-                }
+                MerkleLeafKind::Lww => self.lww_tree.update(&leaf.key, leaf.leaf_hash),
+                MerkleLeafKind::OrMap => self.ormap_tree.update(&leaf.key, leaf.leaf_hash),
             }
             // Record the hex-path prefix so leaf_keys() can answer without
             // re-enumerating. We store the key under its depth-length prefix.
@@ -124,103 +121,37 @@ impl LeafSink for SessionBuildSink {
 impl SessionBuildSink {
     /// Consume the sink and produce the immutable [`MerkleSession`] snapshot.
     fn into_session(self) -> MerkleSession {
-        // Materialise LWW aggregate buckets for every path that any partition
-        // exposes. Paths are discovered by walking `get_buckets` at each depth
-        // level from root, descending the hex trie to enumerate every internal
-        // node exactly once.
-
-        // ---- LWW bucket map ------------------------------------------------
-        let mut lww_nodes: HashMap<String, HashMap<char, u32>> = HashMap::new();
-        materialise_aggregate_buckets(
-            &self.lww_trees,
-            &mut lww_nodes,
-            |trees, path| {
-                let mut per_char: HashMap<char, Vec<u32>> = HashMap::new();
-                for tree in trees.values() {
-                    let buckets = tree.lock().get_buckets(path);
-                    for (c, h) in buckets {
-                        per_char.entry(c).or_default().push(h);
-                    }
-                }
-                per_char
-                    .into_iter()
-                    .map(|(c, hashes)| (c, combine_hashes(&hashes)))
-                    .collect()
-            },
-            self.depth,
-        );
-
-        // ---- OR-Map bucket map --------------------------------------------
-        let mut ormap_nodes: HashMap<String, HashMap<char, u32>> = HashMap::new();
-        materialise_aggregate_buckets(
-            &self.ormap_trees,
-            &mut ormap_nodes,
-            |trees, path| {
-                let mut per_char: HashMap<char, Vec<u32>> = HashMap::new();
-                for tree in trees.values() {
-                    let buckets = tree.lock().get_buckets(path);
-                    for (c, h) in buckets {
-                        per_char.entry(c).or_default().push(h);
-                    }
-                }
-                per_char
-                    .into_iter()
-                    .map(|(c, hashes)| (c, combine_hashes(&hashes)))
-                    .collect()
-            },
-            self.depth,
-        );
-
-        // ---- Aggregate roots ---------------------------------------------
-        let lww_root = {
-            let hashes: Vec<u32> = self
-                .lww_trees
-                .values()
-                .map(|t| t.lock().get_root_hash())
-                .collect();
-            combine_hashes(&hashes)
-        };
-        let ormap_root = {
-            let hashes: Vec<u32> = self
-                .ormap_trees
-                .values()
-                .map(|t| t.lock().get_root_hash())
-                .collect();
-            combine_hashes(&hashes)
-        };
+        let lww_nodes = materialise_buckets(|path| self.lww_tree.get_buckets(path), self.depth);
+        let ormap_nodes = materialise_buckets(|path| self.ormap_tree.get_buckets(path), self.depth);
 
         MerkleSession::from_materialised(
             lww_nodes,
             ormap_nodes,
-            lww_root,
-            ormap_root,
+            self.lww_tree.get_root_hash(),
+            self.ormap_tree.get_root_hash(),
             self.leaf_keys_by_path,
         )
     }
 }
 
-/// Walk a set of per-partition trees and materialise the aggregate
-/// per-hex-bucket hashes for every reachable internal node into `out_nodes`.
+/// Walk one flat trie and materialise the per-hex-bucket child hashes of every
+/// reachable internal node, keyed by the node's path.
 ///
-/// `bucket_fn` computes the aggregate `HashMap<char, u32>` for a given path
-/// by combining per-partition buckets with `combine_hashes`. `max_depth` is a
-/// hard bound: internal nodes live at paths of length `0..max_depth`, so once a
-/// path reaches `max_depth` its children are leaf-level and must not be
-/// expanded. The trie self-terminates today (leaf nodes expose no children via
+/// `buckets_at` returns the trie's children at a path. `max_depth` is a hard
+/// bound: internal nodes live at paths of length `0..max_depth`, so once a path
+/// reaches `max_depth` its children are leaf-level and must not be expanded.
+/// The trie self-terminates today (leaf nodes expose no children via
 /// `get_buckets`), but enforcing the bound keeps the snapshot correct even if
 /// `MerkleTree` leaf enumeration changes — never publish a node the live tree
 /// would not.
-fn materialise_aggregate_buckets<T>(
-    trees: &HashMap<u32, Mutex<T>>,
-    out_nodes: &mut HashMap<String, HashMap<char, u32>>,
-    bucket_fn: impl Fn(&HashMap<u32, Mutex<T>>, &str) -> HashMap<char, u32>,
+fn materialise_buckets(
+    buckets_at: impl Fn(&str) -> HashMap<char, u32>,
     max_depth: usize,
-) where
-    T: Send,
-{
+) -> HashMap<String, HashMap<char, u32>> {
+    let mut nodes: HashMap<String, HashMap<char, u32>> = HashMap::new();
     // Depth-first walk from root ("") down through all reachable children,
     // visiting each internal node exactly once.
-    let mut stack: Vec<String> = vec![String::new()]; // start at root path ""
+    let mut stack: Vec<String> = vec![String::new()];
     while let Some(path) = stack.pop() {
         // Hard bound: paths of length `max_depth` address leaf nodes, which are
         // served via `leaf_keys`, never `buckets`. Never call `get_buckets` on
@@ -230,15 +161,16 @@ fn materialise_aggregate_buckets<T>(
         if path.len() >= max_depth {
             continue;
         }
-        let children = bucket_fn(trees, &path);
+        let children = buckets_at(&path);
         if children.is_empty() {
             continue;
         }
         for c in children.keys() {
             stack.push(format!("{path}{c}"));
         }
-        out_nodes.insert(path, children);
+        nodes.insert(path, children);
     }
+    nodes
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +183,7 @@ fn materialise_aggregate_buckets<T>(
 // materialised per-kind trie snapshots.
 
 impl MerkleSession {
-    /// Construct a fully materialised session snapshot from the aggregated trie data.
+    /// Construct a fully materialised session snapshot from the flat trie data.
     ///
     /// Called exclusively from [`DurableMerkle::build_session`] after folding all
     /// enumerated leaves; no other code should construct `MerkleSession` directly.
@@ -724,14 +656,13 @@ mod tests {
             .build_session("m", store.as_ref())
             .expect("build_session");
 
-        // Independently compute what the root should be via the same primitives.
+        // Independently compute what the root should be via the same primitives:
+        // one flat trie holding the key, with no partition anywhere in the
+        // construction.
         let leaf_hash = fnv1a_hash(&format!("{key}:{millis}:0:n1"));
-        let partition_id = hash_to_partition(key);
-        // Build a fresh MerkleTree for that one partition and read its root.
         let mut tree = topgun_core::merkle::MerkleTree::new(3);
         tree.update(key, leaf_hash);
-        let partition_root = tree.get_root_hash();
-        let expected_lww_root = topgun_core::hash::combine_hashes(&[partition_root]);
+        let expected_lww_root = tree.get_root_hash();
 
         assert_eq!(
             session.lww_root(),
@@ -739,8 +670,6 @@ mod tests {
             "session root must equal the independently computed hash (AC-IM)"
         );
         assert_ne!(session.root(), 0);
-        // Prove MerkleSyncManager was never needed — no reference to it anywhere here.
-        let _ = partition_id; // used in construction above, silence unused warning
     }
 
     // -----------------------------------------------------------------------
@@ -940,8 +869,8 @@ mod tests {
             );
 
             let mut sink = SessionBuildSink {
-                lww_trees: HashMap::new(),
-                ormap_trees: HashMap::new(),
+                lww_tree: MerkleTree::new(3),
+                ormap_tree: ORMapMerkleTree::new(3),
                 leaf_keys_by_path: HashMap::new(),
                 depth: 3,
             };
