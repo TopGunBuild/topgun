@@ -571,4 +571,76 @@ describe('ORMapSyncHandler confirms a covering epoch only for a drained walk', (
       diffConfirms: [],
     });
   });
+
+  it('a leaf still being applied when the connection is lost applies nothing more once the next connection has replaced the map', async () => {
+    const staged = stageClientBehindServer();
+    const { map, handler, sent, persistKey, onFullResync, onCoveringEpochApplied } = staged;
+
+    // One leaf carries both keys, J last. K's entry is merged, and the leaf
+    // parks on the persist of K before it reaches J's.
+    await handler.handleORMapSyncRespRoot(staged.rootFrame(2));
+    const frame = staged.leafFrameAt('', [K, J], 2);
+    frame.entries.sort((a: { key: string }, b: { key: string }) =>
+      a.key === J ? 1 : b.key === J ? -1 : 0,
+    );
+    const parked = deferred();
+    persistKey.mockImplementationOnce(() => parked.promise);
+    const leafOfTheLostConnection = handler.handleORMapSyncRespLeaf(frame);
+    expect(persistKey.mock.calls).toEqual([[MAP_NAME, K]]);
+
+    // The connection drops. The next one is answered with a full resync, which
+    // discards the local map: the server no longer vouches for what this
+    // client held, the old leaf's snapshot included.
+    handler.onConnectionLost();
+    handler.sendSyncInit(MAP_NAME, 0);
+    onFullResync.mockImplementationOnce(async () => {
+      map.clear();
+    });
+    await handler.handleORMapSyncRespRoot({ ...staged.rootFrame(3), fullResync: true });
+    expect(map.get(J)).toEqual([]);
+    const sentBeforeTheResume = sent.length;
+
+    // The old leaf resumes. J's record comes from a snapshot older than the
+    // replace; merged now, it would sit in the map as a record the server may
+    // have removed and pruned since, and a later push would hand it back.
+    parked.resolve();
+    await leafOfTheLostConnection;
+
+    expect({
+      valuesOfJ: map.get(J),
+      attributionOfJ: sorted(map.getKeyTombstones(J)),
+      persistsAfterTheLoss: persistKey.mock.calls.slice(1),
+      sentAfterTheResume: sent.slice(sentBeforeTheResume).map((msg) => msg.type),
+      confirms: onCoveringEpochApplied.mock.calls,
+    }).toEqual({
+      valuesOfJ: [],
+      attributionOfJ: [],
+      persistsAfterTheLoss: [],
+      sentAfterTheResume: [],
+      confirms: [],
+    });
+  });
+
+  it('a diff response still being applied when the connection is lost applies nothing more', async () => {
+    const staged = stageClientBehindServer();
+    const { map, handler, persistKey } = staged;
+
+    const entries = staged.leafFrameAt('', [K, J], 2).entries;
+    entries.sort((a: { key: string }, b: { key: string }) =>
+      a.key === J ? 1 : b.key === J ? -1 : 0,
+    );
+    const parked = deferred();
+    persistKey.mockImplementationOnce(() => parked.promise);
+    const diff = handler.handleORMapDiffResponse({ mapName: MAP_NAME, coveringEpoch: 2, entries });
+
+    handler.onConnectionLost();
+    parked.resolve();
+    await diff;
+
+    expect({
+      valuesOfJ: map.get(J),
+      attributionOfJ: sorted(map.getKeyTombstones(J)),
+      persistsAfterTheLoss: persistKey.mock.calls.slice(1),
+    }).toEqual({ valuesOfJ: [], attributionOfJ: [], persistsAfterTheLoss: [] });
+  });
 });
