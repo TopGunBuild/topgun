@@ -205,9 +205,9 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
   /** The walk an invocation may still account to, or nothing if it is stale or uncounted. */
   private walkOfEntry(mapName: string, entry: WalkEntry): WalkState | undefined {
     const walk = this.walkFor(mapName);
-    // An invocation that entered under an earlier generation is applied as
-    // data only: its epoch and its completion belong to a walk that no longer
-    // exists, and must neither lower nor shorten the current one.
+    // An invocation that entered under an earlier generation accounts to no
+    // walk: its epoch and its completion belong to one that no longer exists,
+    // and must neither lower nor shorten the current one.
     if (walk.generation !== entry.generation) return undefined;
     return entry.counted ? walk : undefined;
   }
@@ -389,7 +389,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- records in the leaf entries are raw ORMapRecord objects decoded from msgpack; value type is erased at the sync protocol layer
       entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
     },
-    entry: WalkEntry,
+    walkEntry: WalkEntry,
   ): Promise<void> {
     const { mapName, path, coveringEpoch, entries } = payload;
     const map = this.config.getMap(mapName);
@@ -409,6 +409,16 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       const localKeysInScope =
         typeof path === 'string' ? localKeysUnder(map.getMerkleTree(), path) : [];
 
+      // After every await below the generation is read again, and a leaf whose
+      // connection was replaced meanwhile stops there: it merges, attributes,
+      // persists and pushes nothing more. What it carries is the server's state
+      // as of the lost connection. The next connection may have been answered
+      // with a full resync and have discarded the map since, precisely so that
+      // a record whose tombstone the server has pruned is not held here; merged
+      // now, such a record would differ from the server and be pushed back to
+      // it (TG-MRK-002). Nothing is lost by dropping the rest: it came from the
+      // server, and the current walk fetches whatever still differs.
+
       for (const entry of entries) {
         const { key, records, tombstones } = entry;
         const mirrored = this.mirrorKeyTombstones(map, key, tombstones, pendingFor, records);
@@ -419,6 +429,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         totalUpdated += result.updated;
         // Persist server-origin merge so it survives an offline reload (symmetric with LWW).
         await this.config.persistKey(mapName, key);
+        if (this.outlivedItsConnection(mapName, walkEntry.generation)) return;
       }
 
       // A leaf response lists every key the server holds under its path, so a
@@ -429,9 +440,11 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       this.resetKeyTombstonesToPending(map, omitted, pendingFor, changedKeys);
 
       await this.persistAttributionIfChanged(mapName, changedKeys);
+      if (this.outlivedItsConnection(mapName, walkEntry.generation)) return;
 
       if (totalAdded > 0 || totalUpdated > 0) {
         await this.config.persistTombstones(mapName);
+        if (this.outlivedItsConnection(mapName, walkEntry.generation)) return;
         logger.info(
           { mapName, added: totalAdded, updated: totalUpdated },
           'Synced ORMap records from server',
@@ -441,14 +454,11 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       // The leaf entries (including their tombstone tags) are now durably
       // applied. Their epoch is not confirmed here: it only lowers the walk's
       // bound, and the walk confirms once, when its last response has ended.
-      this.foldLeafEpoch(mapName, entry, coveringEpoch);
+      this.foldLeafEpoch(mapName, walkEntry, coveringEpoch);
 
       // Now push any local records that server might not have. A healed key is
       // one of the response's keys, so it goes out in this same single push,
       // once, whether or not it holds a live record.
-      // Not on a connection that replaced the one this leaf arrived on: the
-      // next walk finds the same difference and pushes it in its own turn.
-      if (this.outlivedItsConnection(mapName, entry.generation)) return;
       const keysToCheck = Array.from(listed);
       await this.pushORMapDiff(mapName, keysToCheck, map, healedKeys);
     }
@@ -485,22 +495,22 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         totalUpdated += result.updated;
         // Persist server-origin merge so it survives an offline reload (symmetric with LWW).
         await this.config.persistKey(mapName, key);
+        // As in the leaf handler: once its connection was replaced, a response
+        // applies nothing more, confirms nothing and pushes nothing.
+        if (this.outlivedItsConnection(mapName, generationAtEntry)) return;
       }
 
       await this.persistAttributionIfChanged(mapName, changedKeys);
+      if (this.outlivedItsConnection(mapName, generationAtEntry)) return;
 
       if (totalAdded > 0 || totalUpdated > 0) {
         await this.config.persistTombstones(mapName);
+        if (this.outlivedItsConnection(mapName, generationAtEntry)) return;
         logger.info(
           { mapName, added: totalAdded, updated: totalUpdated },
           'Merged ORMap diff from server',
         );
       }
-
-      // The entries are applied, but an epoch conveyed on a connection that is
-      // gone is not acknowledged on the one that replaced it, and nothing is
-      // pushed there on this response's behalf.
-      if (this.outlivedItsConnection(mapName, generationAtEntry)) return;
 
       // The diff entries (including tombstone tags) are now durably applied —
       // confirm the covering epoch so the server's cursor advances.
