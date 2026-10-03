@@ -1833,4 +1833,55 @@ mod tests {
             "the remove must replay after the store it follows"
         );
     }
+
+    /// What the store spends, per call, turning a map name into a table name —
+    /// the name check plus the mapping. Every store call pays it, so it is
+    /// measured here on its own, where a change to either function shows up
+    /// undiluted by I/O.
+    ///
+    /// Both functions run for every name so the loop does the same work
+    /// whatever the name is. For a name the check turns away the store itself
+    /// would stop after the check, so only the figure for `users` is a per-call
+    /// store cost; the other two are the price of the same two functions on
+    /// longer input.
+    ///
+    /// A measurement, not a verdict: it asserts nothing about speed and is kept
+    /// out of the default run.
+    #[test]
+    #[ignore = "measurement: run with --ignored --nocapture"]
+    fn map_name_cost_table_mapping() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const CALLS: u32 = 1_000_000;
+        const REPEATS: usize = 5;
+
+        let long_name = format!("-{}", "a".repeat(511));
+        let cases = [
+            ("users", "users"),
+            ("todo/<uuid>", "todo/123e4567-e89b-12d3-a456-426614174000"),
+            ("512-byte name", long_name.as_str()),
+        ];
+
+        for (label, name) in cases {
+            let mut ns_per_call: Vec<f64> = (0..REPEATS)
+                .map(|_| {
+                    let started = Instant::now();
+                    for _ in 0..CALLS {
+                        let name = black_box(name);
+                        black_box(is_valid_map_name(name));
+                        black_box(table_name_for(name, false));
+                    }
+                    started.elapsed().as_secs_f64() * 1e9 / f64::from(CALLS)
+                })
+                .collect();
+            ns_per_call.sort_by(f64::total_cmp);
+            let median = ns_per_call[REPEATS / 2];
+            eprintln!(
+                "map_name_cost_table_mapping {label} ({} bytes): median {median:.1} ns/call \
+                 over {CALLS} calls x {REPEATS} repeats; repeats = {ns_per_call:.1?}",
+                name.len()
+            );
+        }
+    }
 }
