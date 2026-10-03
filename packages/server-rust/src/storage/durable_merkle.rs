@@ -845,4 +845,148 @@ mod tests {
         assert!(session.buckets("").is_empty());
         assert!(session.leaf_keys("000").is_empty());
     }
+
+    // -----------------------------------------------------------------------
+    // Client comparability (TG-MRK-002): the session reports the flat trie
+    // -----------------------------------------------------------------------
+
+    /// A client keeps ONE trie per map and kind, so the root and the buckets a
+    /// session reports are only comparable with the client's when they are the
+    /// root and buckets of one flat trie over every key (TG-MRK-002). The shared
+    /// golden vectors pin that flat shape for keys spread over several
+    /// partitions, where a fold of per-partition trees gives different numbers.
+    ///
+    /// The sink is driven directly with the vector's leaf hashes: the leaf
+    /// formula is pinned elsewhere (TG-MRK-001), so this isolates the shape.
+    /// The buckets are read per kind, the way the sync handlers serve them.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn session_reports_flat_trie_root_and_buckets_for_vectors() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct VectorFile {
+            flat_trie: Vec<FlatTrieCase>,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FlatTrieCase {
+            name: String,
+            kind: String,
+            leaves: Vec<FlatTrieLeaf>,
+            expected_root: u32,
+            expected_buckets: BTreeMap<String, BTreeMap<String, u32>>,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FlatTrieLeaf {
+            key: String,
+            leaf_hash: u32,
+        }
+
+        /// Root and buckets compared as one value, so a single failure shows
+        /// both halves of the reported shape.
+        #[derive(Debug, PartialEq)]
+        struct FlatView {
+            root: u32,
+            buckets: BTreeMap<String, BTreeMap<String, u32>>,
+        }
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../core-rust/tests/fixtures/merkle_vectors.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let file: VectorFile = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("cannot parse {}: {e}", path.display()));
+
+        let kinds: BTreeSet<&str> = file.flat_trie.iter().map(|c| c.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            BTreeSet::from(["lww", "or"]),
+            "precondition: the vectors hold a flat-trie case for each kind"
+        );
+
+        for case in &file.flat_trie {
+            let kind = match case.kind.as_str() {
+                "lww" => MerkleLeafKind::Lww,
+                "or" => MerkleLeafKind::OrMap,
+                other => panic!("{}: unknown kind {other:?}", case.name),
+            };
+
+            // A case whose keys share one partition, or whose root is 0, could
+            // not tell the flat shape from a per-partition fold.
+            let partitions: BTreeSet<u32> = case
+                .leaves
+                .iter()
+                .map(|l| hash_to_partition(&l.key))
+                .collect();
+            assert!(
+                partitions.len() >= 2,
+                "{}: precondition: the keys span at least two partitions",
+                case.name
+            );
+            assert_ne!(
+                case.expected_root, 0,
+                "{}: precondition: the expected root is non-zero",
+                case.name
+            );
+            assert!(
+                case.expected_buckets.contains_key(""),
+                "{}: precondition: the expected buckets include the root level",
+                case.name
+            );
+
+            let mut sink = SessionBuildSink {
+                lww_trees: HashMap::new(),
+                ormap_trees: HashMap::new(),
+                leaf_keys_by_path: HashMap::new(),
+                depth: 3,
+            };
+            let batch: Vec<MerkleLeaf> = case
+                .leaves
+                .iter()
+                .map(|l| MerkleLeaf {
+                    key: l.key.clone(),
+                    kind,
+                    leaf_hash: l.leaf_hash,
+                })
+                .collect();
+            sink.consume(batch)
+                .await
+                .expect("consume the case's leaves");
+            let session = sink.into_session();
+
+            let (root, nodes) = match kind {
+                MerkleLeafKind::Lww => (session.lww_root(), &session.lww_nodes),
+                MerkleLeafKind::OrMap => (session.ormap_root(), &session.ormap_nodes),
+            };
+            let reported = FlatView {
+                root,
+                buckets: case
+                    .expected_buckets
+                    .keys()
+                    .map(|path| {
+                        let children = nodes
+                            .get(path)
+                            .map(|m| m.iter().map(|(c, h)| (c.to_string(), *h)).collect())
+                            .unwrap_or_default();
+                        (path.clone(), children)
+                    })
+                    .collect(),
+            };
+            let expected = FlatView {
+                root: case.expected_root,
+                buckets: case.expected_buckets.clone(),
+            };
+
+            assert_eq!(
+                reported, expected,
+                "{}: the session must report the flat trie's root and buckets",
+                case.name
+            );
+        }
+    }
 }
