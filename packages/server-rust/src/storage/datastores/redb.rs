@@ -1612,4 +1612,101 @@ mod tests {
             "the reopened catalog must list every probe table byte-identically"
         );
     }
+
+    /// Everything a map needs from the store, for one name: a value written is
+    /// the value read, the map shows up in the durable map set under its own
+    /// bytes exactly once, a backup write does not disturb that set, and a
+    /// removed key is gone.
+    async fn store_round_trips(store: &RedbDataStore, name: &str, tag: &str) -> Result<(), String> {
+        const KEY: &str = "k1";
+        let value = dummy_value(tag);
+
+        store
+            .add(name, KEY, &value, 0, 1000)
+            .await
+            .map_err(|e| format!("add: {e}"))?;
+        let loaded = store
+            .load(name, KEY)
+            .await
+            .map_err(|e| format!("load: {e}"))?;
+        if loaded.as_ref() != Some(&value) {
+            return Err(format!("load returned {loaded:?}, not the value written"));
+        }
+
+        let listed = store
+            .list_maps()
+            .await
+            .map_err(|e| format!("list_maps: {e}"))?;
+        let occurrences = listed
+            .iter()
+            .filter(|m| m.as_bytes() == name.as_bytes())
+            .count();
+        if occurrences != 1 {
+            return Err(format!(
+                "list_maps names the map {occurrences} times, expected exactly once"
+            ));
+        }
+
+        store
+            .add_backup(name, KEY, &dummy_value("backup"), 0, 1000)
+            .await
+            .map_err(|e| format!("add_backup: {e}"))?;
+        let listed_after_backup = store
+            .list_maps()
+            .await
+            .map_err(|e| format!("list_maps after add_backup: {e}"))?;
+        if listed_after_backup != listed {
+            return Err("a backup write changed the durable map set".to_string());
+        }
+
+        store
+            .remove(name, KEY, 1001)
+            .await
+            .map_err(|e| format!("remove: {e}"))?;
+        match store.load(name, KEY).await {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) => Err("the key is still readable after remove".to_string()),
+            Err(e) => Err(format!("load after remove: {e}")),
+        }
+    }
+
+    /// TG-NAME-001, the round trip: a map whose name is outside the identifier
+    /// class is as durable and as visible as one inside it. The server acks a
+    /// write before the store sees the name, so a name the store turns away is
+    /// an acknowledged write that is gone after a restart.
+    ///
+    /// All probe names share one store, so a name that aliased another's table
+    /// would show up as a wrong value or a wrong map set, not pass by luck.
+    #[tokio::test]
+    async fn map_names_outside_the_identifier_class_round_trip() {
+        let (store, _dir) = fresh_store();
+        let names = probe_names();
+        let mut failing: Vec<String> = Vec::new();
+
+        for (i, name) in names.iter().enumerate() {
+            match store_round_trips(&store, name, &format!("v{i}")).await {
+                Ok(()) => eprintln!("probe {}: round-tripped through the store", shown(name)),
+                Err(why) => {
+                    eprintln!("probe {}: FAILED — {why}", shown(name));
+                    failing.push(format!("{}: {why}", shown(name)));
+                }
+            }
+        }
+
+        assert!(
+            failing.is_empty(),
+            "{} of {} names did not round-trip through the store:\n{}",
+            failing.len(),
+            names.len(),
+            failing.join("\n")
+        );
+
+        let mut expected = names;
+        expected.sort();
+        assert_eq!(
+            store.list_maps().await.expect("list_maps"),
+            expected,
+            "the durable map set must be exactly the probe names, each once"
+        );
+    }
 }
