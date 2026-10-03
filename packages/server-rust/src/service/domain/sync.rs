@@ -1117,7 +1117,20 @@ impl SyncService {
                     let store = self
                         .record_store_factory
                         .get_or_create(&map_name, key_partition);
-                    if let Ok(Some(record)) = store.get(&key, false).await {
+                    // A leaf must list every key of its path that could be read: leaving
+                    // one out on a read error would tell the client the key is absent. A
+                    // key with no value now is still left out, which is the truth.
+                    let record = match store.get(&key, false).await {
+                        Ok(record) => record,
+                        Err(e) => {
+                            tracing::error!(map = %map_name, key = %key, partition = key_partition, error = %e,
+                                "OR-Map Merkle leaf (durable): store.get() error; failing the request");
+                            return Err(OperationError::Internal(anyhow::anyhow!(
+                                "OR-Map leaf read failed for map {map_name}, key {key}: {e}"
+                            )));
+                        }
+                    };
+                    if let Some(record) = record {
                         match record.value {
                             RecordValue::OrMap {
                                 records,
@@ -1202,7 +1215,20 @@ impl SyncService {
                         let store = self
                             .record_store_factory
                             .get_or_create(&map_name, key_partition);
-                        if let Ok(Some(record)) = store.get(&key, false).await {
+                        // A leaf must list every key of its path that could be read: leaving
+                        // one out on a read error would tell the client the key is absent. A
+                        // key with no value now is still left out, which is the truth.
+                        let record = match store.get(&key, false).await {
+                            Ok(record) => record,
+                            Err(e) => {
+                                tracing::error!(map = %map_name, key = %key, partition = key_partition, error = %e,
+                                    "OR-Map Merkle leaf (routed): store.get() error; failing the request");
+                                return Err(OperationError::Internal(anyhow::anyhow!(
+                                    "OR-Map leaf read failed for map {map_name}, key {key}: {e}"
+                                )));
+                            }
+                        };
+                        if let Some(record) = record {
                             match record.value {
                                 RecordValue::OrMap {
                                     records,
@@ -1298,7 +1324,20 @@ impl SyncService {
                 let store = self
                     .record_store_factory
                     .get_or_create(&map_name, key_partition);
-                if let Ok(Some(record)) = store.get(&key, false).await {
+                // A leaf must list every key of its path that could be read: leaving
+                // one out on a read error would tell the client the key is absent. A
+                // key with no value now is still left out, which is the truth.
+                let record = match store.get(&key, false).await {
+                    Ok(record) => record,
+                    Err(e) => {
+                        tracing::error!(map = %map_name, key = %key, partition = key_partition, error = %e,
+                            "OR-Map Merkle leaf (aggregate): store.get() error; failing the request");
+                        return Err(OperationError::Internal(anyhow::anyhow!(
+                            "OR-Map leaf read failed for map {map_name}, key {key}: {e}"
+                        )));
+                    }
+                };
+                if let Some(record) = record {
                     match record.value {
                         RecordValue::OrMap {
                             records,
