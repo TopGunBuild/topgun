@@ -7258,4 +7258,175 @@ mod tests {
             "a push leaves the connection's session in place"
         );
     }
+
+    /// An OR leaf answer never leaves a key out because its read failed
+    /// (TG-MRK-002).
+    ///
+    /// The client reads a key's absence from a leaf as "the server holds
+    /// nothing for this key" and drops what it holds for it, while the same
+    /// leaf lets it confirm a covering epoch. A read error is not absence:
+    /// the request has to fail, so the walk does not drain and nothing is
+    /// confirmed. A key that has no value now is still left out — that is the
+    /// absence the client is entitled to act on.
+    ///
+    /// The seam is the data store beneath the record store: `get` on a key
+    /// that is not resident loads it, and `PushLoadProbe` fails that load for
+    /// one chosen key (and reports no value for any other).
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)] // three leaf loops, each driven through the same control and failure
+    #[allow(clippy::items_after_statements)] // the branches sit under the fixture they share
+    async fn ormap_leaf_request_fails_when_a_key_cannot_be_read() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::durable_merkle::DurableMerkle;
+        use crate::storage::map_data_store::merkle_leaf_hash;
+        use crate::storage::record::OrMapEntry as StoreOrMapEntry;
+
+        const MAP: &str = "omap";
+        const A: &str = "leaf-a";
+
+        /// A key that shares A's partition and A's leaf path, so one leaf
+        /// request reaches both on every branch, the routed one included.
+        fn key_beside_a() -> String {
+            (0..100_000_000)
+                .map(|i| format!("leaf-b-{i}"))
+                .find(|key| {
+                    hash_to_partition(key) == hash_to_partition(A)
+                        && round_leaf_path(key) == round_leaf_path(A)
+                })
+                .expect("some key shares A's partition and leaf path")
+        }
+
+        fn or_value(tag: &str) -> RecordValue {
+            RecordValue::OrMap {
+                records: vec![StoreOrMapEntry {
+                    value: Value::Int(1),
+                    tag: tag.to_string(),
+                    timestamp: make_timestamp(),
+                }],
+                tombstones: Vec::new(),
+            }
+        }
+
+        /// Record stores over a probe: A is resident, B is not, so every read
+        /// of B reaches the probe's `load`.
+        async fn stores_holding_a() -> (Arc<PushLoadProbe>, Arc<RecordStoreFactory>) {
+            let probe = Arc::new(PushLoadProbe {
+                inner: NullDataStore,
+                loaded: parking_lot::Mutex::new(Vec::new()),
+                unreadable: parking_lot::Mutex::new(None),
+            });
+            let factory = Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                probe.clone() as Arc<dyn MapDataStore>,
+                Vec::new(),
+            ));
+            factory
+                .get_or_create(MAP, hash_to_partition(A))
+                .put(
+                    A,
+                    or_value("a-tag"),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                )
+                .await
+                .expect("seed A");
+            (probe, factory)
+        }
+
+        /// The control, then the failing read, for one leaf loop.
+        async fn assert_branch(
+            svc: &Arc<SyncService>,
+            probe: &PushLoadProbe,
+            path: &str,
+            b: &str,
+            branch: &str,
+        ) {
+            // Control: B has no value. The leaf lists A and leaves B out.
+            let leaf = round_leaf(
+                round_bucket(svc, MAP, None, path)
+                    .await
+                    .expect("leaf request"),
+            );
+            let listed: Vec<&str> = leaf.entries.iter().map(|e| e.key.as_str()).collect();
+            assert_eq!(
+                listed,
+                vec![A],
+                "{branch}: a key with no value is left out of the leaf"
+            );
+            assert!(
+                probe.loaded().iter().any(|key| key == b),
+                "{branch} fixture: the leaf loop read B through the data store"
+            );
+
+            probe.set_unreadable(Some(b));
+            let result = round_bucket(svc, MAP, None, path).await;
+            assert!(
+                result.is_err(),
+                "{branch}: a key that cannot be read fails the request, got {result:?}"
+            );
+        }
+
+        // Durable index: the session's leaf keys come from the durable
+        // enumeration, the values from the record stores.
+        async fn branch_durable(b: &str) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let durable: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(dir.path().join("leaf.redb")).expect("redb open"));
+            durable
+                .add(MAP, A, &or_value("a-tag"), 0, 1)
+                .await
+                .expect("durable A");
+            durable
+                .add(MAP, b, &or_value("b-tag"), 0, 1)
+                .await
+                .expect("durable B");
+            let (probe, factory) = stores_holding_a().await;
+            let index: Arc<dyn DurableMerkleIndex + Send + Sync> = Arc::new(DurableMerkle);
+            let svc = Arc::new(
+                SyncService::new(
+                    Arc::new(MerkleSyncManager::default()),
+                    factory,
+                    Arc::new(ConnectionRegistry::new()),
+                )
+                .with_durable_index(index, durable),
+            );
+            assert_branch(&svc, &probe, &round_leaf_path(A), b, "durable").await;
+        }
+
+        /// A fallback service whose partition tree holds A and B.
+        async fn fallback_service(b: &str) -> (Arc<SyncService>, Arc<PushLoadProbe>) {
+            let manager = Arc::new(MerkleSyncManager::default());
+            for (key, tag) in [(A, "a-tag"), (b, "b-tag")] {
+                let (_kind, hash) =
+                    merkle_leaf_hash(key, &or_value(tag)).expect("an OR slot has a leaf");
+                manager.update_ormap(MAP, hash_to_partition(key), key, hash);
+            }
+            let (probe, factory) = stores_holding_a().await;
+            let svc = Arc::new(SyncService::new(
+                manager,
+                factory,
+                Arc::new(ConnectionRegistry::new()),
+            ));
+            (svc, probe)
+        }
+
+        // Routed fallback: the path names the partition tree by a three-digit
+        // prefix.
+        async fn branch_routed(b: &str) {
+            let (svc, probe) = fallback_service(b).await;
+            let path = format!("{:03}/{}", hash_to_partition(A), round_leaf_path(A));
+            assert_branch(&svc, &probe, &path, b, "routed fallback").await;
+        }
+
+        // Aggregate fallback: a plain hex path, answered across partitions.
+        async fn branch_aggregate(b: &str) {
+            let (svc, probe) = fallback_service(b).await;
+            assert_branch(&svc, &probe, &round_leaf_path(A), b, "aggregate fallback").await;
+        }
+
+        let b = key_beside_a();
+        branch_durable(&b).await;
+        branch_routed(&b).await;
+        branch_aggregate(&b).await;
+    }
 }
