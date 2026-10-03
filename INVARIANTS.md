@@ -853,7 +853,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   (1) the generation is raised on every sync init AND at the moment the connection is lost
   (`SyncEngine.handleConnectionLost` → `ORMapSyncHandler.onConnectionLost`), and every handler
   reads it at entry and again after each await that precedes a request, a count change, a push or
-  a confirm, so a response resumed after a connection loss sends, counts and confirms nothing on
+  a confirm, and after each await inside the loop that merges a response's entries: a response
+  resumed under a changed generation applies nothing more (no record, tombstone or attribution),
+  so a snapshot served before the loss cannot be written over a map the next connection has
+  replaced by a full resync; it likewise sends, counts and confirms nothing on
   the next connection, and the sync start (`SyncEngine.startMerkleSync`) checks the engine's
   connection generation after each await, so it sends no sync init on a connection it did not
   start on; (2) a handler is entered synchronously when its frame arrives. A
@@ -916,7 +919,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `counts the epoch of the root that opened the walk: a lower one is what is confirmed, a missing one confirms nothing`,
   `a full-resync root still discarding local state when the connection is lost opens no walk on the next connection`,
   `a zero root still clearing stale attribution when the connection is lost opens no walk on the next connection`,
-  `a response still being applied when the connection is lost sends and confirms nothing afterwards`;
+  `a response still being applied when the connection is lost sends and confirms nothing afterwards`,
+  `a leaf still being applied when the connection is lost applies nothing more once the next connection has replaced the map`,
+  `a diff response still being applied when the connection is lost applies nothing more`;
   and in `packages/client/src/__tests__/SyncEngine.test.ts`,
   `a sync start still enumerating held maps when the connection is lost sends no sync init afterwards`.
   TS, per-key tombstones (`packages/client/src/sync/__tests__/ORMapKeyTombstones.test.ts`) — under
