@@ -497,4 +497,78 @@ describe('ORMapSyncHandler confirms a covering epoch only for a drained walk', (
     expect(onCoveringEpochApplied.mock.calls).toEqual([[MAP_NAME, 3]]);
     expect(map.isTombstoned(tK)).toBe(true);
   });
+
+  it('a response still being applied when the connection is lost sends and confirms nothing afterwards', async () => {
+    const pushes = (sent: Array<{ type: string }>): number =>
+      sent.filter((msg) => msg.type === 'ORMAP_PUSH_DIFF').length;
+
+    // A leaf: parked on the persist of the record it merged, it would push the
+    // key back once that persist ends.
+    const leafCase = stageClientBehindServer();
+    await openTwoRequestWalk(leafCase, 4);
+    const leafParked = deferred();
+    leafCase.persistKey.mockImplementationOnce(() => leafParked.promise);
+    const leaf = leafCase.handler.handleORMapSyncRespLeaf(leafCase.leafFrame(J, 4));
+    const leafPushesBeforeTheLoss = pushes(leafCase.sent);
+    leafCase.handler.onConnectionLost();
+    leafParked.resolve();
+    await leaf;
+
+    // A bucket response: parked on the attribution persist, it would push the
+    // key only this client holds. The key has one live value and one removed
+    // one, so the response has attribution to clear, and the response is for
+    // the node just above the key's leaf, where a local-only child is pushed.
+    const bucketCase = stageClientBehindServer();
+    let localOnly = '';
+    for (let i = 0; localOnly === ''; i++) {
+      const candidate = `local-only-${i}`;
+      if (![K, J].some((key) => rootBucketOf(key) === rootBucketOf(candidate))) {
+        localOnly = candidate;
+      }
+    }
+    bucketCase.map.add(localOnly, 'kept');
+    bucketCase.map.add(localOnly, 'removed');
+    bucketCase.map.remove(localOnly, 'removed');
+    const tree = bucketCase.map.getMerkleTree();
+    const first = rootBucketOf(localOnly);
+    const second = Object.keys(tree.getBuckets(first))[0];
+    await bucketCase.handler.handleORMapSyncRespRoot(bucketCase.rootFrame(4));
+    const bucketParked = deferred();
+    bucketCase.persistKeyTombstones.mockImplementationOnce(() => bucketParked.promise);
+    const buckets = bucketCase.handler.handleORMapSyncRespBuckets({
+      mapName: MAP_NAME,
+      path: first + second,
+      buckets: {},
+    });
+    expect(bucketCase.persistKeyTombstones.mock.calls).toEqual([[MAP_NAME, [localOnly]]]);
+    const bucketPushesBeforeTheLoss = pushes(bucketCase.sent);
+    bucketCase.handler.onConnectionLost();
+    bucketParked.resolve();
+    await buckets;
+
+    // A diff response: parked on the persist of the record it merged, it would
+    // confirm its epoch once that persist ends.
+    const diffCase = stageClientBehindServer();
+    const diffParked = deferred();
+    diffCase.persistKey.mockImplementationOnce(() => diffParked.promise);
+    const diff = diffCase.handler.handleORMapDiffResponse({
+      mapName: MAP_NAME,
+      coveringEpoch: 4,
+      entries: diffCase.leafFrame(J, 4).entries,
+    });
+    diffCase.handler.onConnectionLost();
+    diffParked.resolve();
+    await diff;
+
+    // One comparison, so that a failure shows what each of the three did.
+    expect({
+      leafPushesAfterTheLoss: pushes(leafCase.sent) - leafPushesBeforeTheLoss,
+      bucketPushesAfterTheLoss: pushes(bucketCase.sent) - bucketPushesBeforeTheLoss,
+      diffConfirms: diffCase.onCoveringEpochApplied.mock.calls,
+    }).toEqual({
+      leafPushesAfterTheLoss: 0,
+      bucketPushesAfterTheLoss: 0,
+      diffConfirms: [],
+    });
+  });
 });
