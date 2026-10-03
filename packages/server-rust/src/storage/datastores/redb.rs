@@ -8,22 +8,29 @@
 //! # Storage layout
 //!
 //! One `redb::TableDefinition<&str, &[u8]>` per `(map_name, is_backup)` tuple.
-//! Table names follow `map__{map_name}` for primary tables and
-//! `map__{map_name}__backup` for backup partitions. Map names are validated
-//! against `^[a-zA-Z_][a-zA-Z0-9_]*$` before use to prevent table-name
-//! collisions via metacharacters (parity with `PostgresDataStore`).
+//! The table name carries the map name verbatim behind a prefix that depends on
+//! the name's class (TG-NAME-001):
 //!
-//! The `__backup` suffix is **reserved**: a map name ending in `__backup` is
-//! rejected by [`is_valid_map_name`]. Without this, a primary map literally
+//! | Map name | Primary table | Backup table |
+//! |---|---|---|
+//! | identifier class (`^[a-zA-Z_][a-zA-Z0-9_]*$`) | `map__{name}` | `map__{name}__backup` |
+//! | any other storable name | `mapr__{name}` | `maprb__{name}` |
+//!
+//! The character class is NOT a gate: it only picks the prefix. Identifier-class
+//! names keep the tables they have always had, so nothing on disk is renamed;
+//! every other name gets a prefix no identifier-class table can carry (byte 3 is
+//! `r`, not `_`), so the two classes never share a table.
+//!
+//! What the store does refuse is decided by the shared rule
+//! [`check_map_name`]: an empty name, a name containing U+0000, and a name ending
+//! in the **reserved** `__backup` suffix. The suffix is reserved because the
+//! identifier-class backup table is spelled with it: a primary map literally
 //! named `foo__backup` would encode to table `map__foo__backup` — byte-identical
 //! to the backup partition of map `foo` — so `list_maps` (which derives the
-//! durable map set from the table catalog and skips `__backup` tables) would
-//! silently drop it, leaving its post-restart Merkle root at 0. That is exactly
-//! the durable-but-invisible silent-divergence class this index exists to
-//! close, so the ambiguity is forbidden at the validation boundary rather than
-//! papered over at enumeration. Postgres stores `is_backup` as a key column
-//! (not in the name) and so never had this collision; reserving the suffix in
-//! both validators keeps the accepted-name set identical across backends.
+//! durable map set from the table catalog and skips backup tables) would
+//! silently drop it, leaving its post-restart Merkle root at 0. The rule's
+//! length bound is an ingress concern and is deliberately NOT applied here: the
+//! store must keep reading every table that already exists.
 //!
 //! Values are msgpack-serialized [`RecordValue`] (via
 //! [`rmp_serde::to_vec_named`]), matching the on-disk format the Postgres
@@ -66,7 +73,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::storage::map_data_store::{
-    merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+    check_map_name, merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
 };
 use crate::storage::record::RecordValue;
 use anyhow::bail;
@@ -90,24 +97,14 @@ const LEAF_BATCH_SIZE: usize = 1024;
 /// the total scanned volume.
 const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
 
-/// Validate that a map name matches `^[a-zA-Z_][a-zA-Z0-9_]*$` and does not end
-/// in the reserved `__backup` suffix.
+/// Whether a map name is in the identifier class `^[a-zA-Z_][a-zA-Z0-9_]*$`.
 ///
-/// Map names are interpolated into redb table-definition strings via
-/// `format!("map__{name}")`; rejecting metacharacters prevents collision
-/// between user-supplied maps and reserved table names. The `__backup` suffix
-/// is reserved because `table_name_for` encodes `is_backup` into the name —
-/// a primary map named `foo__backup` would be indistinguishable from the
-/// backup partition of map `foo`, so `list_maps` would silently drop it and
-/// serve Merkle root 0 for durable data. Mirrors the `is_valid_table_name`
-/// check in `PostgresDataStore` so both backends accept the same name set.
-fn is_valid_map_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    if name.ends_with("__backup") {
-        return false;
-    }
+/// This validates nothing. It is the class predicate of TG-NAME-001, used only
+/// by [`table_name_for`] to pick the table prefix: names in the class keep the
+/// `map__` tables they have always had, every other storable name goes under
+/// `mapr__` / `maprb__`. Which names the store refuses is decided separately,
+/// by [`refuse_unstorable`].
+fn is_identifier_class(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
@@ -116,14 +113,39 @@ fn is_valid_map_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Build the redb table name for a `(map, is_backup)` tuple.
+/// Refuse a map name the store cannot hold, per the shared rule
+/// [`check_map_name`]: empty, ending in the reserved `__backup` suffix, or
+/// containing U+0000.
 ///
-/// Caller must have already validated `map` via `is_valid_map_name`.
+/// The rule's length bound is not a store refusal (`refused_by_store()` is
+/// false for it): a boot path lists and scans every table that already exists,
+/// and a name that is merely long must stay readable.
+fn refuse_unstorable(map: &str) -> anyhow::Result<()> {
+    match check_map_name(map) {
+        Err(violation) if violation.refused_by_store() => {
+            bail!("Invalid map name {map:?}: {violation}")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Build the redb table name for a `(map, is_backup)` tuple (TG-NAME-001).
+///
+/// Identifier-class names map to `map__{map}` / `map__{map}__backup`, exactly
+/// the tables earlier versions created; every other name maps to
+/// `mapr__{map}` / `maprb__{map}`. The mapping is injective over storable
+/// names: byte 3 separates the two classes (`_` vs `r`), byte 4 separates the
+/// raw-name primary from its backup (`_` vs `b`), and an identifier-class
+/// primary never ends in `__backup` because no storable name does.
+///
+/// Caller must have already passed `map` through [`refuse_unstorable`]; the
+/// injectivity argument does not hold for a name ending in `__backup`.
 fn table_name_for(map: &str, is_backup: bool) -> String {
-    if is_backup {
-        format!("map__{map}__backup")
-    } else {
-        format!("map__{map}")
+    match (is_identifier_class(map), is_backup) {
+        (true, false) => format!("map__{map}"),
+        (true, true) => format!("map__{map}__backup"),
+        (false, false) => format!("mapr__{map}"),
+        (false, true) => format!("maprb__{map}"),
     }
 }
 
@@ -234,9 +256,7 @@ impl RedbDataStore {
         start_after_key: Option<&str>,
         max_batch_cost: u64,
     ) -> anyhow::Result<ScanBatch> {
-        if !is_valid_map_name(map) {
-            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-        }
+        refuse_unstorable(map)?;
         let budget = if max_batch_cost == 0 {
             DEFAULT_SCAN_BATCH_COST
         } else {
@@ -332,8 +352,8 @@ fn encode_record(value: &RecordValue) -> anyhow::Result<Vec<u8>> {
     Ok(rmp_serde::to_vec_named(value)?)
 }
 
-/// Store already-encoded record bytes under `(map, key, is_backup)`. Validates
-/// the map name, opens (or creates) the per-(map, `is_backup`) table inside one
+/// Store already-encoded record bytes under `(map, key, is_backup)`. Refuses a
+/// name the store cannot hold, opens (or creates) the per-(map, `is_backup`) table inside one
 /// `WriteTransaction`, inserts the bytes as given, and commits. The bytes are
 /// not decoded or checked here.
 fn write_encoded(
@@ -343,9 +363,7 @@ fn write_encoded(
     bytes: &[u8],
     is_backup: bool,
 ) -> anyhow::Result<()> {
-    if !is_valid_map_name(map) {
-        bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-    }
+    refuse_unstorable(map)?;
     let table_name = table_name_for(map, is_backup);
     let def = table_def(&table_name);
     let txn = db.begin_write()?;
@@ -360,9 +378,7 @@ fn write_encoded(
 /// Delete a single record under the given `(map, key, is_backup)` tuple.
 /// No-op if the table or key does not exist.
 fn delete_one(db: &redb::Database, map: &str, key: &str, is_backup: bool) -> anyhow::Result<()> {
-    if !is_valid_map_name(map) {
-        bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-    }
+    refuse_unstorable(map)?;
     let table_name = table_name_for(map, is_backup);
     let def = table_def(&table_name);
 
@@ -442,9 +458,7 @@ impl MapDataStore for RedbDataStore {
     }
 
     async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
-        if !is_valid_map_name(map) {
-            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-        }
+        refuse_unstorable(map)?;
         let table_name = table_name_for(map, false);
         let def = table_def(&table_name);
         let txn = self.db.begin_read()?;
@@ -468,9 +482,7 @@ impl MapDataStore for RedbDataStore {
         map: &str,
         keys: &[String],
     ) -> anyhow::Result<Vec<(String, RecordValue)>> {
-        if !is_valid_map_name(map) {
-            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-        }
+        refuse_unstorable(map)?;
         let table_name = table_name_for(map, false);
         let def = table_def(&table_name);
         let txn = self.db.begin_read()?;
@@ -490,9 +502,7 @@ impl MapDataStore for RedbDataStore {
     }
 
     async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
-        if !is_valid_map_name(map) {
-            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-        }
+        refuse_unstorable(map)?;
         if keys.is_empty() {
             return Ok(());
         }
@@ -521,14 +531,25 @@ impl MapDataStore for RedbDataStore {
     async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
         // Derive the durable map set from the redb table catalog rather than
         // any in-memory cache, so a map that was persisted before a restart but
-        // is not yet resident is still discovered. Only primary tables
-        // (`map__{name}`) feed the SYNC_INIT root; backup tables
-        // (`map__{name}__backup`) are deliberately skipped.
+        // is not yet resident is still discovered. Only primary tables feed the
+        // SYNC_INIT root; backup tables are deliberately skipped.
+        //
+        // This is the inverse of `table_name_for` on primaries (TG-NAME-001).
+        // The three prefixes are mutually exclusive — none is a prefix of
+        // another — so a catalog name takes at most one branch whatever the
+        // order. Only the identifier-class branch has suffix logic: a raw name
+        // is returned as the bytes after its prefix, untouched, so a raw name
+        // that merely contains `__backup` or looks like a table prefix decodes
+        // to itself.
         let read_txn = self.db.begin_read()?;
         let mut names: Vec<String> = Vec::new();
         for handle in read_txn.list_tables()? {
             let table = handle.name();
-            if let Some(rest) = table.strip_prefix("map__") {
+            if let Some(raw) = table.strip_prefix("mapr__") {
+                names.push(raw.to_string());
+            } else if table.starts_with("maprb__") {
+                // Backup partition of a raw-name map.
+            } else if let Some(rest) = table.strip_prefix("map__") {
                 if !rest.ends_with("__backup") {
                     names.push(rest.to_string());
                 }
@@ -545,9 +566,7 @@ impl MapDataStore for RedbDataStore {
         is_backup: bool,
         sink: &mut dyn LeafSink,
     ) -> anyhow::Result<()> {
-        if !is_valid_map_name(map) {
-            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-        }
+        refuse_unstorable(map)?;
         let table_name = table_name_for(map, is_backup);
         let def = table_def(&table_name);
         let txn = self.db.begin_read()?;
@@ -901,17 +920,24 @@ mod tests {
         );
     }
 
+    /// A name full of metacharacters is data, not syntax: redb table names are
+    /// opaque strings, so the name is stored verbatim under the raw-name prefix
+    /// and comes back from the catalog byte-identical.
     #[tokio::test]
-    async fn map_name_injection_rejected() {
+    async fn metacharacter_map_name_is_stored_verbatim() {
         let (store, _dir) = fresh_store();
-        let bad = "foo; DROP TABLE x";
-        let err = store.add(bad, "k", &dummy_value("v"), 0, 1000).await;
-        assert!(err.is_err(), "metacharacter map name must be rejected");
-        let msg = format!("{}", err.unwrap_err());
-        assert!(
-            msg.contains("Invalid map name"),
-            "error message names the violation"
+        let name = "foo; DROP TABLE x";
+        store
+            .add(name, "k", &dummy_value("v"), 0, 1000)
+            .await
+            .expect("a metacharacter map name is storable");
+        assert_eq!(
+            store.load(name, "k").await.unwrap(),
+            Some(dummy_value("v")),
+            "the value reads back under the same name"
         );
+        assert_eq!(store.list_maps().await.unwrap(), vec![name.to_string()]);
+        assert_eq!(catalog(&store), vec![format!("mapr__{name}")]);
     }
 
     #[tokio::test]
@@ -919,6 +945,18 @@ mod tests {
         let (store, _dir) = fresh_store();
         let err = store.add("", "k", &dummy_value("v"), 0, 1000).await;
         assert!(err.is_err());
+    }
+
+    /// Every table name in the store's catalog, sorted.
+    fn catalog(store: &RedbDataStore) -> Vec<String> {
+        let txn = store.db.begin_read().expect("read txn");
+        let mut tables: Vec<String> = txn
+            .list_tables()
+            .expect("list_tables")
+            .map(|handle| handle.name().to_string())
+            .collect();
+        tables.sort();
+        tables
     }
 
     /// The raw bytes stored for `(map, key)` in the primary table.
@@ -1023,35 +1061,47 @@ mod tests {
         }
     }
 
-    /// `add_encoded` validates the map name exactly as `add` does: the same
-    /// error, and no table created.
+    /// `add_encoded` refuses a name the store cannot hold exactly as `add` does:
+    /// the same error, and no table created. And a name outside the identifier
+    /// class, which both paths take, lands in the same table through either.
     #[tokio::test]
-    async fn add_encoded_rejects_an_invalid_map_name_exactly_as_add() {
+    async fn add_encoded_refuses_a_store_refused_map_name_exactly_as_add() {
         let (store, _dir) = fresh_store();
         let value = dummy_value("v");
         let bytes = rmp_serde::to_vec_named(&value).unwrap();
-        for bad in [
-            "foo; DROP TABLE x",
-            "",
-            "9starts_with_digit",
-            "has-dash",
-            "users__backup",
-        ] {
+        for bad in ["", "users__backup", "has-dash__backup", "a\0b"] {
             let via_add = store
                 .add(bad, "k", &value, 0, 1000)
                 .await
-                .expect_err("add rejects");
+                .expect_err("add refuses");
             let via_encoded = store
                 .add_encoded(bad, "k", &bytes, 0, 1000)
                 .await
-                .expect_err("add_encoded rejects");
+                .expect_err("add_encoded refuses");
             assert_eq!(via_encoded.to_string(), via_add.to_string(), "map {bad:?}");
             assert!(via_encoded.to_string().contains("Invalid map name"));
         }
         assert!(
-            store.list_maps().await.unwrap().is_empty(),
-            "a rejected write creates no table"
+            catalog(&store).is_empty(),
+            "a refused write creates no table"
         );
+
+        for name in ["foo; DROP TABLE x", "9starts_with_digit", "has-dash"] {
+            store
+                .add(name, "by_value", &value, 0, 1000)
+                .await
+                .expect("add stores a name outside the identifier class");
+            store
+                .add_encoded(name, "by_bytes", &bytes, 0, 1000)
+                .await
+                .expect("add_encoded stores it too");
+            assert_eq!(
+                raw_row(&store, name, "by_bytes"),
+                raw_row(&store, name, "by_value"),
+                "map {name:?}"
+            );
+            assert_eq!(raw_row(&store, name, "by_bytes"), Some(bytes.clone()));
+        }
     }
 
     #[tokio::test]
@@ -1090,33 +1140,54 @@ mod tests {
     }
 
     #[test]
-    fn is_valid_map_name_accepts_canonical() {
-        assert!(is_valid_map_name("users"));
-        assert!(is_valid_map_name("_internal"));
-        assert!(is_valid_map_name("Users123"));
+    fn is_identifier_class_holds_for_identifiers() {
+        assert!(is_identifier_class("users"));
+        assert!(is_identifier_class("_internal"));
+        assert!(is_identifier_class("Users123"));
+        // Text that looks like a table prefix or the backup suffix is still an
+        // identifier: the predicate reads characters, not meaning.
+        assert!(is_identifier_class("r__x"));
+        assert!(is_identifier_class("mapr__x"));
+        assert!(is_identifier_class("__backup_data"));
+        assert!(is_identifier_class("backup"));
     }
 
     #[test]
-    fn is_valid_map_name_rejects_metacharacters() {
-        assert!(!is_valid_map_name(""));
-        assert!(!is_valid_map_name("123leading_digit"));
-        assert!(!is_valid_map_name("foo bar"));
-        assert!(!is_valid_map_name("foo;DROP"));
-        assert!(!is_valid_map_name("foo--backup"));
+    fn is_identifier_class_excludes_everything_else() {
+        assert!(!is_identifier_class(""));
+        assert!(!is_identifier_class("123leading_digit"));
+        assert!(!is_identifier_class("foo bar"));
+        assert!(!is_identifier_class("foo;DROP"));
+        assert!(!is_identifier_class("foo--backup"));
+        assert!(!is_identifier_class("user-profiles"));
+        assert!(!is_identifier_class("users/profiles"));
+        assert!(!is_identifier_class("notes:abc"));
+        assert!(!is_identifier_class("é"));
     }
 
+    /// The class predicate decides the prefix and nothing else: being outside
+    /// the class is not a refusal, and the refusals do not depend on the class.
     #[test]
-    fn is_valid_map_name_rejects_reserved_backup_suffix() {
+    fn the_class_predicate_is_not_the_store_gate() {
+        // Outside the class, storable.
+        for name in ["123leading_digit", "foo bar", "foo;DROP", "foo--backup"] {
+            assert!(!is_identifier_class(name), "{name:?}");
+            assert!(refuse_unstorable(name).is_ok(), "{name:?}");
+        }
         // A primary map named `foo__backup` would encode to table
         // `map__foo__backup`, indistinguishable from the backup partition of
         // map `foo`, so `list_maps` would silently drop it and serve Merkle
-        // root 0 for durable data. The suffix must be reserved at the
-        // validation boundary.
-        assert!(!is_valid_map_name("foo__backup"));
-        assert!(!is_valid_map_name("__backup"));
+        // root 0 for durable data. The suffix is refused in either class.
+        for name in ["foo__backup", "__backup", "a-b__backup"] {
+            let err = refuse_unstorable(name).expect_err("reserved suffix");
+            assert!(err.to_string().contains("__backup"), "{err}");
+        }
         // But `__backup` elsewhere in the name is fine — only the suffix is reserved.
-        assert!(is_valid_map_name("__backup_data"));
-        assert!(is_valid_map_name("backup"));
+        assert!(refuse_unstorable("__backup_data").is_ok());
+        assert!(refuse_unstorable("backup").is_ok());
+        // The length bound belongs to the ingress, not to the store.
+        assert!(refuse_unstorable(&"a".repeat(600)).is_ok());
+        assert!(refuse_unstorable(&format!("-{}", "a".repeat(599))).is_ok());
     }
 
     #[test]
@@ -1834,16 +1905,228 @@ mod tests {
         );
     }
 
+    /// Identifier-class names every earlier version could store, including the
+    /// server's own fixed maps and names shaped like the raw-name prefixes.
+    const IDENTIFIER_NAMES: [&str; 9] = [
+        "users",
+        "_internal",
+        "Users123",
+        "r__x",
+        "rb__x",
+        "x__backup_data",
+        "_topgun_tombstone_cursors_v2",
+        "_topgun_device_credentials",
+        "__topgun_policies",
+    ];
+
+    /// TG-NAME-001: an identifier-class name keeps the exact table names it has
+    /// always had, every other name goes under the raw-name prefixes, the four
+    /// ranges never meet, and the catalog decodes back to the primary names.
+    ///
+    /// All names share one store and both tables of each are written, so a
+    /// name that aliased another's table, or a backup read as a primary, shows
+    /// up as a wrong catalog or a wrong map set.
+    #[tokio::test]
+    async fn table_names_keep_the_old_class_and_prefix_the_new_class() {
+        let raw_names = probe_names();
+
+        for n in IDENTIFIER_NAMES {
+            assert_eq!(table_name_for(n, false), format!("map__{n}"));
+            assert_eq!(table_name_for(n, true), format!("map__{n}__backup"));
+        }
+        for n in &raw_names {
+            assert_eq!(
+                table_name_for(n, false),
+                format!("mapr__{n}"),
+                "{}",
+                shown(n)
+            );
+            assert_eq!(
+                table_name_for(n, true),
+                format!("maprb__{n}"),
+                "{}",
+                shown(n)
+            );
+        }
+
+        // What keeps the ranges apart: byte 3 tells the classes apart, byte 4
+        // tells a raw-name primary from its backup, and an identifier-class
+        // primary never carries the backup suffix.
+        for n in IDENTIFIER_NAMES {
+            for backup in [false, true] {
+                assert_eq!(table_name_for(n, backup).as_bytes()[3], b'_', "{n}");
+            }
+            assert!(!table_name_for(n, false).ends_with("__backup"), "{n}");
+        }
+        for n in &raw_names {
+            assert_eq!(table_name_for(n, false).as_bytes()[3], b'r');
+            assert_eq!(table_name_for(n, true).as_bytes()[3], b'r');
+            assert_eq!(table_name_for(n, false).as_bytes()[4], b'_');
+            assert_eq!(table_name_for(n, true).as_bytes()[4], b'b');
+        }
+
+        let all_names: Vec<String> = IDENTIFIER_NAMES
+            .iter()
+            .map(ToString::to_string)
+            .chain(raw_names.iter().cloned())
+            .collect();
+
+        let (store, _dir) = fresh_store();
+        for (i, n) in all_names.iter().enumerate() {
+            store
+                .add(n, "k", &dummy_value(&format!("primary-{i}")), 0, 1000)
+                .await
+                .unwrap_or_else(|e| panic!("add {}: {e}", shown(n)));
+            store
+                .add_backup(n, "k", &dummy_value(&format!("backup-{i}")), 0, 1000)
+                .await
+                .unwrap_or_else(|e| panic!("add_backup {}: {e}", shown(n)));
+        }
+
+        let mut expected_tables: Vec<String> = all_names
+            .iter()
+            .flat_map(|n| [table_name_for(n, false), table_name_for(n, true)])
+            .collect();
+        expected_tables.sort();
+        let distinct = expected_tables
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        assert_eq!(
+            distinct,
+            all_names.len() * 2,
+            "the mapping is injective over (name, is_backup)"
+        );
+        assert_eq!(catalog(&store), expected_tables);
+
+        let mut expected_maps = all_names.clone();
+        expected_maps.sort();
+        assert_eq!(
+            store.list_maps().await.expect("list_maps"),
+            expected_maps,
+            "the durable map set is exactly the primary names, each once"
+        );
+
+        // No table was shared: every primary still holds its own value.
+        for (i, n) in all_names.iter().enumerate() {
+            assert_eq!(
+                store.load(n, "k").await.expect("load"),
+                Some(dummy_value(&format!("primary-{i}"))),
+                "{}",
+                shown(n)
+            );
+        }
+    }
+
+    /// TG-NAME-001, primary vs backup: a name the store refuses reaches no
+    /// table through any entry point, so nothing can be written where a backup
+    /// partition lives, and backup tables never show up as maps. The length
+    /// bound is not one of the store's refusals — except that a long name which
+    /// is ALSO refused must still be refused.
+    #[tokio::test]
+    async fn store_refused_names_reach_no_table_and_backups_stay_unlisted() {
+        let (store, _dir) = fresh_store();
+        let value = dummy_value("v");
+
+        store.add("foo", "k", &value, 0, 1000).await.unwrap();
+        store
+            .add_backup("foo", "k", &dummy_value("backup"), 0, 1000)
+            .await
+            .unwrap();
+        assert_eq!(store.list_maps().await.unwrap(), vec!["foo".to_string()]);
+        let tables_before = catalog(&store);
+        assert_eq!(tables_before, vec!["map__foo", "map__foo__backup"]);
+
+        for refused in ["foo__backup", "a-b__backup", "", "a\0b"] {
+            assert!(
+                store.add(refused, "k", &value, 0, 1000).await.is_err(),
+                "add {refused:?}"
+            );
+            assert!(store.load(refused, "k").await.is_err(), "load {refused:?}");
+            for is_backup in [false, true] {
+                assert!(
+                    store.scan_values(refused, is_backup, 0).await.is_err(),
+                    "scan_values {refused:?} backup={is_backup}"
+                );
+                let mut sink = CollectingSink { leaves: Vec::new() };
+                assert!(
+                    store
+                        .enumerate_leaves(refused, is_backup, &mut sink)
+                        .await
+                        .is_err(),
+                    "enumerate_leaves {refused:?} backup={is_backup}"
+                );
+                assert!(sink.leaves.is_empty(), "no leaf for {refused:?}");
+            }
+            // The remaining entry points take the same check.
+            assert!(store
+                .add_backup(refused, "k", &value, 0, 1000)
+                .await
+                .is_err());
+            assert!(store.remove(refused, "k", 1000).await.is_err());
+            assert!(store.remove_backup(refused, "k", 1000).await.is_err());
+            assert!(store.load_all(refused, &["k".to_string()]).await.is_err());
+            assert!(store.remove_all(refused, &["k".to_string()]).await.is_err());
+        }
+
+        assert_eq!(
+            catalog(&store),
+            tables_before,
+            "a refused name creates no table"
+        );
+        // The backup partition of `foo` was not read or overwritten as a map.
+        assert_eq!(store.load("foo", "k").await.unwrap(), Some(value.clone()));
+        assert_eq!(store.list_maps().await.unwrap(), vec!["foo".to_string()]);
+
+        // Longer than the ingress bound, in either class: the store takes it.
+        let long_identifier = "a".repeat(600);
+        let long_raw = format!("-{}", "a".repeat(599));
+        for name in [&long_identifier, &long_raw] {
+            assert_eq!(name.len(), 600);
+            store
+                .add(name, "k", &value, 0, 1000)
+                .await
+                .unwrap_or_else(|e| panic!("add {}: {e}", shown(name)));
+            assert_eq!(
+                store.load(name, "k").await.expect("load"),
+                Some(value.clone()),
+                "{}",
+                shown(name)
+            );
+        }
+
+        // Too long AND reserved: the reserved suffix decides. Were the length
+        // reported instead, the store would let the name through and it would
+        // land on a backup table.
+        let long_reserved = format!("{}__backup", "a".repeat(592));
+        assert_eq!(long_reserved.len(), 600);
+        let err = store
+            .add(&long_reserved, "k", &value, 0, 1000)
+            .await
+            .expect_err("a long name with the reserved suffix is refused");
+        assert!(err.to_string().contains("__backup"), "{err}");
+        assert!(store.load(&long_reserved, "k").await.is_err());
+        assert_eq!(
+            catalog(&store),
+            vec![
+                table_name_for(&long_identifier, false),
+                "map__foo".to_string(),
+                "map__foo__backup".to_string(),
+                table_name_for(&long_raw, false),
+            ],
+            "only the two storable long names gained a table"
+        );
+    }
+
     /// What the store spends, per call, turning a map name into a table name —
     /// the name check plus the mapping. Every store call pays it, so it is
     /// measured here on its own, where a change to either function shows up
     /// undiluted by I/O.
     ///
-    /// Both functions run for every name so the loop does the same work
-    /// whatever the name is. For a name the check turns away the store itself
-    /// would stop after the check, so only the figure for `users` is a per-call
-    /// store cost; the other two are the price of the same two functions on
-    /// longer input.
+    /// Both functions run for every name, as they do in the store: none of the
+    /// three names is one the store refuses. `users` is the identifier-class
+    /// case; the other two take the raw-name branch, on a typical and on the
+    /// longest name the ingress admits.
     ///
     /// A measurement, not a verdict: it asserts nothing about speed and is kept
     /// out of the default run.
@@ -1869,7 +2152,7 @@ mod tests {
                     let started = Instant::now();
                     for _ in 0..CALLS {
                         let name = black_box(name);
-                        black_box(is_valid_map_name(name));
+                        black_box(check_map_name(name).is_ok());
                         black_box(table_name_for(name, false));
                     }
                     started.elapsed().as_secs_f64() * 1e9 / f64::from(CALLS)
