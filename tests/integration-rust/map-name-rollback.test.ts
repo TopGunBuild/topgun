@@ -130,7 +130,10 @@ interface OldRun {
   controlValue?: unknown;
   /** Exit status at the end of the stay-up window; `null` means still running. */
   exitDuringWindow: BinaryExit | null;
-  /** Recorded, not asserted: whether the control map is still answered at the end of the window. */
+  /**
+   * The control map read again at the end of the window. A hung process has not
+   * exited either, so only an answered read shows the binary is still serving.
+   */
   controlValueAtEndOfWindow?: unknown;
   stop?: BinaryExit | null;
 }
@@ -259,9 +262,10 @@ describe('Integration: rollback to the older server binary after a clean stop', 
     expect(o.old?.controlValue).toEqual(VALUE_CONTROL);
   });
 
-  test('R8-4: the older binary stays up for the 10 s of the check', () => {
+  test('R8-4: the older binary is still serving at the end of the 10 s of the check', () => {
     expect(typeof o.old?.port).toBe('number');
     expect(o.old?.exitDuringWindow).toBeNull();
+    expect(o.old?.controlValueAtEndOfWindow).toEqual(VALUE_CONTROL);
   });
 
   test.each([
@@ -393,9 +397,10 @@ describe('Integration: rollback to the older server binary after kill -9', () =>
     expect(o.old?.unreplayed.length).toBeGreaterThanOrEqual(1);
   });
 
-  test('R8b-4: the older binary returns the identifier-named map and stays up for the 10 s of the check', () => {
+  test('R8b-4: the older binary returns the identifier-named map and is still serving at the end of the 10 s of the check', () => {
     expect(o.old?.controlValue).toEqual(VALUE_CONTROL);
     expect(o.old?.exitDuringWindow).toBeNull();
+    expect(o.old?.controlValueAtEndOfWindow).toEqual(VALUE_CONTROL);
   });
 
   test('R8b-5: back on the newer binary, a query and a Merkle sync return the LWW value', () => {
