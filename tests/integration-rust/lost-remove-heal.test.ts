@@ -422,7 +422,17 @@ describe('Integration: a server that lost an acknowledged OR-Map remove', () => 
     server = await startServer(dataDir);
     current = await connect(server.port);
     map = current.getORMap<string, string>(MAP_NAME);
-    expect(await walkSettledForBothKeys()).toBe(true);
+    // Step 2 left the client and the server holding the same tags, so this
+    // connection has nothing to exchange and no leaf to wait for: its sync ends
+    // at equal roots, or at equal buckets when the root was compared before the
+    // map had loaded from storage. The removes need the loaded map, so the wait
+    // is on the values the client persisted.
+    const restored = (): boolean =>
+      map.get(KEY_KEEPING_A_VALUE).includes(REMOVED) &&
+      map.get(KEY_KEEPING_A_VALUE).includes(KEPT) &&
+      map.get(KEY_EMPTIED).includes(REMOVED);
+    await waitUntil(restored, SIGNAL_TIMEOUT_MS);
+    expect(restored()).toBe(true);
 
     recordedOps.mockClear();
     expect(map.remove(KEY_KEEPING_A_VALUE, REMOVED).length).toBeGreaterThanOrEqual(1);
