@@ -13,8 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking (`@topgunbuild/client`, `@topgunbuild/core`, server):** a node id may no
   longer contain `|` or `#` (`:` was already refused). `new TopGunClient({ nodeId })`
   and `new HLC(nodeId)` throw for such an id, and a server started with such a
-  `--node-id` does not boot. Ids you did not choose are unaffected: the client's
-  auto-generated id and the server's default id are always valid.
+  `--node-id` exits at startup with a `FATAL:` line, before it opens a port. Ids you
+  did not choose are unaffected: the client's auto-generated id and the server's
+  default id are always valid. New in `@topgunbuild/core`: `HLC.assertValidNodeId(nodeId)`
+  checks an id without creating a clock and throws the same error as the constructor.
 - **Breaking (server, OR-Map):** the server refuses an OR-Map tag that is empty or
   contains `|` or `#`. A write carrying such a tag is rejected as a schema-validation
   refusal, and a pushed OR-Map difference carrying one is not merged and is not
