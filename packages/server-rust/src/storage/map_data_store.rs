@@ -137,6 +137,86 @@ fn fnv1a_update_joined(mut hash: u32, parts: &[&str]) -> u32 {
     hash
 }
 
+/// Longest map name the server admits, in bytes of UTF-8.
+pub const MAX_MAP_NAME_BYTES: usize = 512;
+
+/// Suffix a store appends to a map's name to address its backup partition. A
+/// map name ending in it would be indistinguishable from another map's backup.
+const RESERVED_BACKUP_SUFFIX: &str = "__backup";
+
+/// Why a map name is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapNameViolation {
+    /// The name is the empty string.
+    Empty,
+    /// The name ends in the suffix reserved for backup partitions.
+    ReservedBackupSuffix,
+    /// The name contains U+0000.
+    ContainsNul,
+    /// The name is longer than [`MAX_MAP_NAME_BYTES`].
+    TooLong,
+}
+
+impl MapNameViolation {
+    /// Whether a store must refuse the name too (every clause except the length bound).
+    ///
+    /// The length bound is an ingress rule only: a store has to keep reading
+    /// every table that already exists, whatever the length of its name, so it
+    /// never applies the bound itself.
+    #[must_use]
+    pub fn refused_by_store(self) -> bool {
+        match self {
+            Self::Empty | Self::ReservedBackupSuffix | Self::ContainsNul => true,
+            Self::TooLong => false,
+        }
+    }
+}
+
+impl std::fmt::Display for MapNameViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("the name is empty"),
+            Self::ReservedBackupSuffix => {
+                write!(f, "the suffix `{RESERVED_BACKUP_SUFFIX}` is reserved")
+            }
+            Self::ContainsNul => f.write_str("the name contains U+0000"),
+            Self::TooLong => write!(f, "the name is longer than {MAX_MAP_NAME_BYTES} bytes"),
+        }
+    }
+}
+
+/// The one map-name rule the ingress and every backend share.
+///
+/// Nothing but the four clauses is refused: there is no character class, and
+/// no prefix is reserved.
+///
+/// The clause order is load-bearing (TG-NAME-001): the three clauses a store
+/// must enforce are evaluated before the length bound, so a name that is both
+/// too long and store-refused reports the store-refused clause. Were the length
+/// bound first, a store — which lets [`MapNameViolation::TooLong`] through —
+/// would accept an over-long name ending in the reserved suffix and write it
+/// into another map's backup table.
+///
+/// # Errors
+///
+/// Returns the first clause the name violates, in the order `Empty`,
+/// `ReservedBackupSuffix`, `ContainsNul`, `TooLong`.
+pub fn check_map_name(name: &str) -> Result<(), MapNameViolation> {
+    if name.is_empty() {
+        return Err(MapNameViolation::Empty);
+    }
+    if name.ends_with(RESERVED_BACKUP_SUFFIX) {
+        return Err(MapNameViolation::ReservedBackupSuffix);
+    }
+    if name.contains('\0') {
+        return Err(MapNameViolation::ContainsNul);
+    }
+    if name.len() > MAX_MAP_NAME_BYTES {
+        return Err(MapNameViolation::TooLong);
+    }
+    Ok(())
+}
+
 /// A bounded batch of fully-loaded durable records produced by a value-streamed
 /// scan.
 ///
@@ -708,8 +788,84 @@ mod tests {
     use topgun_core::partition::hash_to_partition;
     use topgun_core::types::Value;
 
-    use super::{merkle_leaf_hash, MerkleLeafKind};
+    use super::{
+        check_map_name, merkle_leaf_hash, MapNameViolation, MerkleLeafKind, MAX_MAP_NAME_BYTES,
+    };
     use crate::storage::record::{OrMapEntry, RecordValue};
+
+    /// Pins the rule clause by clause, and the order between clauses
+    /// (TG-NAME-001): a name violating a store-enforced clause AND the length
+    /// bound must report the store-enforced one, because a store lets `TooLong`
+    /// through and would otherwise write an over-long `…__backup` name into
+    /// another map's backup table.
+    #[test]
+    fn check_map_name_clause_order_and_store_refusal() {
+        assert_eq!(check_map_name(""), Err(MapNameViolation::Empty));
+        assert_eq!(
+            check_map_name("x__backup"),
+            Err(MapNameViolation::ReservedBackupSuffix)
+        );
+        assert_eq!(check_map_name("a\0b"), Err(MapNameViolation::ContainsNul));
+
+        let at_bound = "a".repeat(MAX_MAP_NAME_BYTES);
+        assert_eq!(at_bound.len(), 512);
+        assert_eq!(check_map_name(&at_bound), Ok(()));
+        let over_bound = "a".repeat(MAX_MAP_NAME_BYTES + 1);
+        assert_eq!(over_bound.len(), 513);
+        assert_eq!(check_map_name(&over_bound), Err(MapNameViolation::TooLong));
+
+        // No character class: `:` and the other characters the old identifier
+        // pattern excluded are admitted.
+        assert_eq!(check_map_name("notes:abc"), Ok(()));
+        assert_eq!(check_map_name("user-profiles"), Ok(()));
+        assert_eq!(check_map_name("users/profiles"), Ok(()));
+        // The bound counts bytes of UTF-8, not characters.
+        assert_eq!(check_map_name(&"\u{e9}".repeat(256)), Ok(()));
+        assert_eq!(
+            check_map_name(&"\u{e9}".repeat(257)),
+            Err(MapNameViolation::TooLong)
+        );
+        // Only the suffix is reserved, and only as a suffix.
+        assert_eq!(check_map_name("x__backup_data"), Ok(()));
+        assert_eq!(check_map_name("mapr__x"), Ok(()));
+
+        // Clause order: a store-enforced clause wins over the length bound.
+        let long_backup = format!("{}__backup", "a".repeat(592));
+        assert_eq!(long_backup.len(), 600);
+        assert_eq!(
+            check_map_name(&long_backup),
+            Err(MapNameViolation::ReservedBackupSuffix)
+        );
+        let long_nul = format!("{}\0{}", "a".repeat(299), "b".repeat(300));
+        assert_eq!(long_nul.len(), 600);
+        assert_eq!(
+            check_map_name(&long_nul),
+            Err(MapNameViolation::ContainsNul)
+        );
+        // Clause order among the store-enforced clauses themselves.
+        assert_eq!(
+            check_map_name("a\0b__backup"),
+            Err(MapNameViolation::ReservedBackupSuffix)
+        );
+
+        assert!(MapNameViolation::Empty.refused_by_store());
+        assert!(MapNameViolation::ReservedBackupSuffix.refused_by_store());
+        assert!(MapNameViolation::ContainsNul.refused_by_store());
+        assert!(!MapNameViolation::TooLong.refused_by_store());
+
+        // Each clause has its own human-readable text, with no line break in it.
+        let texts: BTreeSet<String> = [
+            MapNameViolation::Empty,
+            MapNameViolation::ReservedBackupSuffix,
+            MapNameViolation::ContainsNul,
+            MapNameViolation::TooLong,
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        assert_eq!(texts.len(), 4, "one distinct text per clause: {texts:?}");
+        assert!(texts.iter().all(|t| !t.is_empty() && !t.contains('\n')));
+    }
 
     /// The OR-Map leaf formula exactly as it was first written — joined tag sets
     /// fed to one `format!` — kept verbatim as the oracle any cheaper rewrite of
