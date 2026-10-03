@@ -849,7 +849,15 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement (drained walk):** a client confirms a map's covering epoch only when the walk that
   conveyed it has drained, and then the minimum its root and its leaves conveyed; a leaf response
   never omits a key whose read failed. The confirm sites pass only an epoch taken from a sync
-  response; this depends on server events carrying no epoch. A walk whose handling failed, whose
+  response; this depends on server events carrying no epoch. **Premises of the walk generation:**
+  (1) the generation is raised on every sync init AND at the moment the connection is lost
+  (`SyncEngine.handleConnectionLost` → `ORMapSyncHandler.onConnectionLost`), and every handler
+  reads it at entry and again after each await that precedes a request, a count change, a push or
+  a confirm, so a response resumed after a connection loss sends, counts and confirms nothing on
+  the next connection; (2) a handler is entered synchronously when its frame arrives. A
+  server-sent `BATCH` would break (2): `SyncEngine.handleBatch` awaits each inner message, so a
+  later frame of the batch could enter after the connection changed. The Rust server sends no
+  outbound `BATCH` today. A walk whose handling failed, whose
   root or one of whose leaves conveyed no epoch, or one of whose requests is never answered,
   confirms nothing (fail closed). **Reload limit:** a reloaded device claims epoch 0 (its confirmed
   epoch is not persisted), so under active protection it is answered with a full resync, not the
@@ -903,7 +911,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `a leaf of an earlier walk that finishes during the next walk neither confirms nor shortens that walk`,
   `confirms at the end of a bucket response when that is the last response of the walk to finish`,
   `confirms nothing when the handling of a bucket response failed`,
-  `counts the epoch of the root that opened the walk: a lower one is what is confirmed, a missing one confirms nothing`.
+  `counts the epoch of the root that opened the walk: a lower one is what is confirmed, a missing one confirms nothing`,
+  `a full-resync root still discarding local state when the connection is lost opens no walk on the next connection`,
+  `a zero root still clearing stale attribution when the connection is lost opens no walk on the next connection`,
+  `a response still being applied when the connection is lost sends and confirms nothing afterwards`.
   TS, per-key tombstones (`packages/client/src/sync/__tests__/ORMapKeyTombstones.test.ts`) — under
   `pushORMapDiff`: `the entry for key B carries no tag that was removed from key A` and
   `the entry for key B carries the tag that was removed from key B`; under
