@@ -1709,4 +1709,128 @@ mod tests {
             "the durable map set must be exactly the probe names, each once"
         );
     }
+
+    /// A WAL written before the store accepted a name must not stay stuck once
+    /// it does. An earlier server acked writes to a map the store then refused;
+    /// their frames were never applied and never dropped — recovery keeps a
+    /// frame it could not replay and tries again on every boot. So the first
+    /// boot whose store takes the name has to replay them, in the order they
+    /// were written, and let the watermark move past them.
+    ///
+    /// The fixture is such a log: two stores and then a remove of the first
+    /// key, with no applied watermark. The remove is what makes the order
+    /// observable — replayed before its store, or skipped, it would leave the
+    /// first key readable (TG-WAL-011).
+    #[tokio::test]
+    async fn recovery_replays_frames_abandoned_for_a_previously_refused_map_name() {
+        use crate::storage::wal::{
+            Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery, WalStorePayload, WalWriter,
+        };
+
+        const MAP: &str = "user-profiles";
+        const PARTITION: u32 = 7;
+
+        let stamped = |tag: &str, millis: u64| RecordValue::Lww {
+            value: Value::String(tag.to_string()),
+            timestamp: Timestamp {
+                millis,
+                counter: 0,
+                node_id: "writer".to_string(),
+            },
+        };
+        let store_frame = |key: &str, value: &RecordValue, sequence: u64| WalEntry {
+            map: MAP.to_string(),
+            key: key.to_string(),
+            op: WalOp::Store {
+                value: WalStorePayload::Record(value.clone()),
+                expiration_time: None,
+            },
+            timestamp: match value {
+                RecordValue::Lww { timestamp, .. } => Some(timestamp.clone()),
+                _ => None,
+            },
+            sequence,
+        };
+
+        let k1_value = stamped("first", 100);
+        let k2_value = stamped("second", 200);
+        let frames = [
+            store_frame("k1", &k1_value, 1),
+            store_frame("k2", &k2_value, 2),
+            WalEntry {
+                map: MAP.to_string(),
+                key: "k1".to_string(),
+                op: WalOp::Remove,
+                timestamp: None,
+                sequence: 3,
+            },
+        ];
+        let highest_sequence = 3;
+
+        let dir = tempdir().expect("tempdir");
+        let wal_dir = dir.path().join("wal");
+
+        // The log as the earlier process left it: frames durable, nothing
+        // marked applied. The writer is dropped so recovery reads the files
+        // the way a new process would.
+        {
+            let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("wal open");
+            for frame in &frames {
+                wal.append(PARTITION, frame).await.expect("wal append");
+            }
+        }
+
+        let wal = WalWriter::new(wal_dir, WalFsyncPolicy::PerOp).expect("wal reopen");
+        let before = wal.unapplied(PARTITION).await.expect("unapplied");
+        assert_eq!(
+            before.as_slice(),
+            frames.as_slice(),
+            "fixture: the reopened log holds exactly the three frames, in order, all un-applied"
+        );
+
+        let store = Arc::new(RedbDataStore::new(dir.path().join("store.redb")).expect("redb open"));
+        let inner: Arc<dyn MapDataStore> = store.clone();
+        WalRecovery::new(Arc::clone(&wal), Vec::new())
+            .run(inner)
+            .await
+            .expect("recovery itself never refuses to boot over un-replayable frames");
+
+        let unreplayed: Vec<(String, u64)> = wal
+            .unapplied(PARTITION)
+            .await
+            .expect("unapplied after recovery")
+            .into_iter()
+            .map(|e| (e.key, e.sequence))
+            .collect();
+        let watermark = wal.test_applied_watermark(PARTITION);
+        let k1 = store.load(MAP, "k1").await.map_err(|e| e.to_string());
+        let k2 = store.load(MAP, "k2").await.map_err(|e| e.to_string());
+        eprintln!(
+            "after recovery: unreplayed (key, sequence) = {unreplayed:?}, applied watermark = \
+             {watermark} (highest frame sequence {highest_sequence}), load k1 = {k1:?}, \
+             load k2 = {k2:?}"
+        );
+
+        assert!(
+            unreplayed.is_empty(),
+            "recovery left {} of {} frames for map {MAP:?} unreplayed: {unreplayed:?}; \
+             load k2 = {k2:?}",
+            unreplayed.len(),
+            frames.len()
+        );
+        assert_eq!(
+            watermark, highest_sequence,
+            "the applied watermark must reach the highest frame sequence written"
+        );
+        assert_eq!(
+            k2,
+            Ok(Some(k2_value)),
+            "the stored value of the key that was never removed"
+        );
+        assert_eq!(
+            k1,
+            Ok(None),
+            "the remove must replay after the store it follows"
+        );
+    }
 }
