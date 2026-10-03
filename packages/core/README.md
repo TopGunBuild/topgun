@@ -30,7 +30,7 @@ npm install @topgunbuild/core
 ```typescript
 import { HLC, LWWMap } from '@topgunbuild/core';
 
-const hlc = new HLC({ nodeId: 'node-1' });
+const hlc = new HLC('node-1');
 const map = new LWWMap<string, { text: string }>(hlc);
 
 map.subscribe((entries) => {
@@ -69,7 +69,7 @@ Available operators (verbose names only):
 ```typescript
 import { HLC } from '@topgunbuild/core';
 
-const hlc = new HLC({ nodeId: 'node-1' });
+const hlc = new HLC('node-1');
 const ts1 = hlc.now();
 const ts2 = hlc.now();
 // ts2 is guaranteed to sort after ts1, even under wall-clock skew.

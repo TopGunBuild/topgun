@@ -14,9 +14,11 @@ const KEY = 'k';
 
 describe('OR leaf: separator characters inside tags (known limitation)', () => {
   // Tags are hashed verbatim and joined by `|`, with `#` between the live tags
-  // and the tombstones. Nothing rejects a tag containing either character
-  // today, so different tag sets can share a leaf. Equal leaves for different
-  // sets are possible ONLY when a tag carries a separator character.
+  // and the tombstones, so tag sets that differ can share a leaf, but ONLY
+  // when a tag carries a separator character. Node-id construction and server
+  // ingest refuse such tags, which is what keeps the encoding injective for a
+  // key (TG-MRK-001). The leaf function itself still accepts them: these cases
+  // pin what it does with a tag that was stored before the rule existed.
 
   it('a tag containing `|` collides with the tags it splits into', () => {
     const joined = hashORMapLeaf(KEY, ['a|b'], []);

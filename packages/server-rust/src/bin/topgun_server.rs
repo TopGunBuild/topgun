@@ -440,6 +440,13 @@ const ALLOCATOR_NAME: &str = "mimalloc";
 )))]
 const ALLOCATOR_NAME: &str = "system";
 
+/// The `FATAL:` line a server started with `--node-id node_id` exits on, or
+/// `None` when the id is usable. The rule is the HLC's own, so the boot check
+/// and the constructor cannot disagree.
+fn node_id_fatal(node_id: &str) -> Option<String> {
+    HLC::node_id_refusal(node_id).map(|reason| format!("FATAL: invalid --node-id: {reason}"))
+}
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
@@ -559,6 +566,13 @@ async fn main() -> anyhow::Result<()> {
     let observability = Arc::new(topgun_server::service::middleware::init_observability());
 
     let args = Args::parse();
+    // Refused here, before any listener is bound or the WAL is recovered: the
+    // HLC built from this id much later would otherwise panic with a half-started
+    // server behind it.
+    if let Some(fatal) = node_id_fatal(&args.node_id) {
+        eprintln!("{fatal}");
+        std::process::exit(1);
+    }
     let node_id = args.node_id.clone();
 
     // When set to 1 or true, omit the JWT secret so templates and QA harness
@@ -2217,6 +2231,48 @@ mod tests {
     use super::{EvictionConfig, WriteBehindConfig};
     use std::io;
     use std::sync::{Arc, Mutex};
+
+    /// A node id the HLC would refuse is refused as soon as the arguments are
+    /// parsed, with one `FATAL:` line, instead of by a panic after the listeners
+    /// are bound and the WAL is recovered. Driven through the real argument
+    /// parser, so the value checked is the one `main` reads.
+    #[test]
+    fn a_node_id_the_hlc_refuses_is_fatal_at_argument_parsing() {
+        use clap::Parser;
+
+        let id_of = |argv: &[&str]| {
+            super::Args::try_parse_from(argv)
+                .expect("the arguments parse")
+                .node_id
+        };
+
+        let mut failures: Vec<String> = Vec::new();
+        for bad in ["a|b", "a#b", "a:b"] {
+            let node_id = id_of(&["topgun-server", "--node-id", bad]);
+            match super::node_id_fatal(&node_id) {
+                Some(line)
+                    if line.starts_with("FATAL: invalid --node-id: ")
+                        && line.ends_with(topgun_core::HLC::node_id_refusal(bad).unwrap())
+                        && !line.contains('\n') => {}
+                other => failures.push(format!("--node-id {bad:?}: got {other:?}")),
+            }
+        }
+        // Positive controls: the default id and a UUID boot.
+        for argv in [
+            &["topgun-server"][..],
+            &[
+                "topgun-server",
+                "--node-id",
+                "550e8400-e29b-41d4-a716-446655440000",
+            ][..],
+        ] {
+            let node_id = id_of(argv);
+            if let Some(line) = super::node_id_fatal(&node_id) {
+                failures.push(format!("{node_id:?} must boot, got {line:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 
     /// A `tracing` writer that keeps the captured bytes in the test's own buffer.
     #[derive(Clone, Default)]

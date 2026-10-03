@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Breaking (`@topgunbuild/client`, `@topgunbuild/core`, server):** a node id may no
+  longer contain `|` or `#` (`:` was already refused). `new TopGunClient({ nodeId })`
+  and `new HLC(nodeId)` throw for such an id, and a server started with such a
+  `--node-id` exits at startup with a `FATAL:` line, before it opens a port. Ids you
+  did not choose are unaffected: the client's auto-generated id and the server's
+  default id are always valid. New in `@topgunbuild/core`: `HLC.assertValidNodeId(nodeId)`
+  checks an id without creating a clock and throws the same error as the constructor.
+- **Breaking (server, OR-Map):** the server refuses an OR-Map tag that is empty or
+  contains `|` or `#`. A write carrying such a tag is rejected as a schema-validation
+  refusal, and a pushed OR-Map difference carrying one is not merged and is not
+  answered. The SDK builds its tags from the node id, so with a valid node id it
+  never sends such a tag; this concerns code that speaks the wire protocol with tags
+  of its own. A tag the server already stores can still be removed.
+- fix(client): creating a client with a refused node id no longer leaves `online` /
+  `offline` listeners behind in the browser. The id is now checked before anything
+  else is set up, so a constructor that throws leaves nothing running.
 - fix(sync): a write made while offline or still waiting to be sent is no longer
   dropped after a search unsubscribe or an OR-Map sync. The server used to answer those
   requests (and an empty batch of writes) with an operation acknowledgement, which the

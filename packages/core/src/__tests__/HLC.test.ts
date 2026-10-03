@@ -240,6 +240,26 @@ describe('HLC (Hybrid Logical Clock)', () => {
       expect(() => new HLC('bad:id')).toThrow('Node ID must not contain ":"');
     });
 
+    // A node ID ends up inside every OR-Map tag the node generates, and the
+    // Merkle leaf joins tags with "|" and splits live tags from tombstones with
+    // "#" (TG-MRK-001): a node ID carrying either would make two different slot
+    // states hash to the same leaf.
+    test('should reject node ID containing a pipe', () => {
+      expect(() => new HLC('a|b')).toThrow(
+        'Node ID must not contain ":" (used as delimiter in timestamp format), "|" or "#" (used as delimiters in Merkle leaves)',
+      );
+    });
+
+    test('should reject node ID containing a hash sign', () => {
+      expect(() => new HLC('a#b')).toThrow(
+        'Node ID must not contain ":" (used as delimiter in timestamp format), "|" or "#" (used as delimiters in Merkle leaves)',
+      );
+    });
+
+    test('should accept node ID with a dash where a separator is refused', () => {
+      expect(() => new HLC('a-b')).not.toThrow();
+    });
+
     test('should accept node ID with dashes and underscores', () => {
       expect(() => new HLC('valid-node_id')).not.toThrow();
     });

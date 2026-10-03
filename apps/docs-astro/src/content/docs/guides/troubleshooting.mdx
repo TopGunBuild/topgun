@@ -20,7 +20,7 @@ This guide covers common issues you may encounter when using TopGun, organized b
 
 **Solutions:**
 - Ensure system clocks are reasonably synchronized (NTP). TopGun tolerates moderate clock skew, but large drift (minutes+) can cause unexpected ordering
-- Check that `nodeId` is unique per client instance -- duplicate node IDs cause HLC collisions
+- Check that `nodeId` is unique per client instance -- duplicate node IDs cause HLC collisions. A custom `nodeId` must also not contain `:`, `|` or `#` -- the client throws at construction if it does
 - Remember that LWW is per-field, not per-record. Only the conflicting fields revert; other fields retain their values
 
 ### Concurrent edits lost
