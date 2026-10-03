@@ -919,10 +919,14 @@ impl SyncService {
     ///
     /// When a durable index is wired, reuses the `MerkleSession` cached during
     /// the preceding LWW `SYNC_INIT` (if any) — one `enumerate_leaves` pass covers
-    /// both LWW and OR-Map roots. If no LWW `SYNC_INIT` has yet run for this map,
-    /// builds a fresh session now (`force_rebuild=false` with a cache miss triggers
-    /// a build). Falls back to the in-memory `MerkleSyncManager` aggregate when no
-    /// durable index is configured.
+    /// both LWW and OR-Map roots — as long as the frontier epoch has not advanced
+    /// since that session was built; a stale session is rebuilt, and a cache miss
+    /// builds a fresh one. Falls back to the in-memory `MerkleSyncManager`
+    /// aggregate when no durable index is configured.
+    ///
+    /// The epoch the root conveys opens the connection's OR sync round for the
+    /// map: it bounds every later bucket and leaf response of that walk
+    /// (TG-MRK-002).
     async fn handle_ormap_sync_init(
         &self,
         ctx: &crate::service::operation::OperationContext,
@@ -972,23 +976,32 @@ impl SyncService {
         // rides with (see `live_epoch` — ordering is load-bearing).
         let live = self.live_epoch();
 
-        // Reuse any session already built by the LWW SYNC_INIT for this map; build
-        // one now if not yet cached. force_rebuild=false so a concurrent or prior
-        // LWW SYNC_INIT's session is shared rather than discarded.
-        let (root_hash, covering_epoch) =
-            if let Some(built) = self.get_or_build_session(&map_name, ctx.connection_id, false)? {
-                // The root is the session's, so the session's build epoch bounds it.
-                let conveyed =
-                    self.covering_epoch(ctx.connection_id, gated, live, &[built.epoch_at_build]);
-                (built.session.ormap_root(), conveyed)
-            } else {
-                // The fallback root is computed live, after `live` was read.
-                let conveyed = self.covering_epoch(ctx.connection_id, gated, live, &[]);
-                (
-                    self.merkle_manager.aggregate_ormap_root_hash(&map_name),
-                    conveyed,
-                )
-            };
+        // Reuse the session cached for this connection (by an LWW SYNC_INIT or an
+        // earlier OR round) unless the epoch moved since it was built. A stale
+        // session would cap this root at its own build epoch forever, so a client
+        // repeating OR rounds on one connection would never advance its delivered
+        // cursor and would pin the fleet low-water mark. Rebuilding only when
+        // stale bounds the cost at one enumeration per epoch advance; a repeat at
+        // an unchanged epoch stays a cache hit. `None` compares as epoch 0.
+        let force_rebuild = ctx
+            .connection_id
+            .and_then(|conn| self.session_registry.built(&map_name, conn))
+            .is_some_and(|cached| cached.epoch_at_build.unwrap_or(0) < live.unwrap_or(0));
+        let (root_hash, covering_epoch) = if let Some(built) =
+            self.get_or_build_session(&map_name, ctx.connection_id, force_rebuild)?
+        {
+            // The root is the session's, so the session's build epoch bounds it.
+            let conveyed =
+                self.covering_epoch(ctx.connection_id, gated, live, &[built.epoch_at_build]);
+            (built.session.ormap_root(), conveyed)
+        } else {
+            // The fallback root is computed live, after `live` was read.
+            let conveyed = self.covering_epoch(ctx.connection_id, gated, live, &[]);
+            (
+                self.merkle_manager.aggregate_ormap_root_hash(&map_name),
+                conveyed,
+            )
+        };
 
         // This root opens the connection's round for the map: every later
         // bucket and leaf response of the walk is bounded by what it conveyed,
