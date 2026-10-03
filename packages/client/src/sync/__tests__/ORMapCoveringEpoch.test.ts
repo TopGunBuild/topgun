@@ -69,6 +69,16 @@ describe('ORMapSyncHandler covering-epoch ACK', () => {
     const map = new ORMap<string, string>(new HLC('n1'));
     const { handler, acked } = makeHandler(map);
 
+    // A leaf is confirmed as part of the walk it answers, so the leaf is given
+    // one: a sync init, then a differing root that sends the single request
+    // this leaf is the reply to.
+    handler.sendSyncInit('tags', 0);
+    await handler.handleORMapSyncRespRoot({
+      mapName: 'tags',
+      rootHash: map.getMerkleTree().getRootHash() + 12345,
+      coveringEpoch: 7,
+    });
+
     await handler.handleORMapSyncRespLeaf({
       mapName: 'tags',
       coveringEpoch: 7,

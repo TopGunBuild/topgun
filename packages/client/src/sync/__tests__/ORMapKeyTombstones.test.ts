@@ -941,6 +941,18 @@ describe('ORMapSyncHandler per-key tombstone scoping', () => {
           epochsAtPersist.push([...confirmedEpochs]);
         });
 
+        if (name === 'ORMAP_SYNC_RESP_LEAF') {
+          // A leaf is confirmed as part of the walk it answers, so the leaf is
+          // given one: a sync init, then a differing root that sends the single
+          // request this leaf is the reply to.
+          harness.handler.sendSyncInit(MAP_NAME, 0);
+          await harness.handler.handleORMapSyncRespRoot({
+            mapName: MAP_NAME,
+            rootHash: map.getMerkleTree().getRootHash() + 12345,
+            coveringEpoch: 9,
+          });
+        }
+
         const payload = {
           mapName: MAP_NAME,
           coveringEpoch: 9,
