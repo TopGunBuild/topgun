@@ -803,6 +803,126 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   Merkle-ordering caveat was refuted BY this sort — the sort itself deserves a test).
 - **Status:** decided, **enforced** (Rust and TS arms).
 
+### TG-MRK-002: Client and server Merkle roots are comparable, and equal OR roots imply the client holds the covered tombstones
+
+- **Scope:** `RecordValue::OrMap` slots whose stored tags are all admissible (non-empty, no `|`,
+  no `#`; `TG-MRK-001`), and LWW records, on the client-facing sync responses `SYNC_RESP_ROOT`,
+  `SYNC_RESP_BUCKETS`, `ORMAP_SYNC_RESP_ROOT`, `ORMAP_SYNC_RESP_BUCKETS` and `ORMAP_SYNC_RESP_LEAF`,
+  on the durable path and on the in-memory fallback. **Excluded:** legacy
+  `RecordValue::OrTombstones` slots; `OrMap` slots that hold a tag stored before the admissibility
+  rule that contains `|` or `#` (known gap, tracker TODO-737); routed-mode responses (paths with a
+  3-digit partition prefix), which keep their per-partition shape; `ORMAP_DIFF_RESPONSE`, which is
+  not session-served (tracker TODO-729). The LWW half claims comparable SHAPE only: a client holding
+  a locally removed LWW key, or a timestamp newer than the server's re-stamp, does not reach equal
+  roots (tracker TODO-736; no soundness effect, LWW responses carry no epoch).
+- **Statement:** every root and bucket reported to a client is the root or bucket of ONE trie per
+  (map, kind) over all keys of that kind — depth 3, path = lowercase 8-hex `fnv1a(key)`, node hash =
+  `combine_hashes` of its children — the same construction the TS client builds; a server bucket map
+  never carries a child whose hash is 0. Per-partition trees remain the write-path structure. The OR
+  leaf is canonical (`TG-MRK-001`): no leaf iff the key has no live tag and no per-key tombstone,
+  otherwise a hash over the key, its sorted live tags and its sorted per-key tombstones. A key is in
+  the client OR tree iff it holds a live record or an attributed tombstone, and the tombstones the
+  client attributes to a key are the server's per-key set plus its own pending removes, replaced on
+  every leaf or diff entry and cleared down to the pending removes when the server reports the key
+  absent. Equal OR roots therefore imply, for every key whose server slot is an `OrMap` with
+  admissible tags, that the client holds every tombstone of the server snapshot the round descends
+  by (up to FNV-32 collision), and the client confirms the conveyed covering epoch on equal roots.
+  For a given key, the leaf encoding is injective because no stored tag is empty or contains `|` or
+  `#`; ingest and node-id construction enforce it (see TG-MRK-001's note). The "for a given key" is
+  required: a key containing `|` is ambiguous ACROSS keys — key `a` with tags {b, c} encodes like
+  key `a|b` with tag {c} — which hides no tombstone, since the text after the single `#` is
+  identical. **Known gap:** legacy `OrTombstones` slots have no leaf, so equal roots do not imply the
+  client holds their tags; harmless because they are never epoch-stamped; tracker TODO-559.
+  `ac2_untouched_legacy_ortombstones_never_prune_eligible` is the test that keeps the gap harmless.
+- **Statement (epoch vs snapshot):** every covering epoch conveyed or marked delivered in an OR sync
+  round — root, bucket and leaf, durable path and fallback — is ≤ the round epoch fixed at that
+  round's `ORMapSyncInit`, and a root served from a session is ≤ that session's build epoch. A cached
+  session older than the live epoch is rebuilt on `ORMapSyncInit`, so the delivered cursor advances
+  at least once per epoch advance; a bucket request never rebuilds, so a walk keeps its snapshot. A
+  continuation request on a connection with no open round conveys no epoch and delivers nothing.
+  `ORMAP_PUSH_DIFF` conveys no covering epoch and marks nothing delivered. **Precondition:** OR sync
+  rounds on one (map, connection) do not overlap: no second ORMapSyncInit for a map is sent while
+  that map's walk on the same connection is in flight (first-party TS client: one init per map per
+  connection, SyncEngine.startMerkleSync on !wasAuthenticated; soak tracker: serial). **Known
+  limit:** a client that overlaps rounds can have an old walk's leaf replies confirm the newer
+  round's epoch; tracker TODO-730.
+- **Statement (drained walk):** a client confirms a map's covering epoch only when the walk that
+  conveyed it has drained, and then the minimum its root and its leaves conveyed; a leaf response
+  never omits a key whose read failed. The confirm sites pass only an epoch taken from a sync
+  response; this depends on server events carrying no epoch. A walk whose handling failed, whose
+  root or one of whose leaves conveyed no epoch, or one of whose requests is never answered,
+  confirms nothing (fail closed). **Reload limit:** a reloaded device claims epoch 0 (its confirmed
+  epoch is not persisted), so under active protection it is answered with a full resync, not the
+  in-sync branch; tracker TODO-739.
+- **Maintaining code:** the flat session build in `durable_merkle.rs` (`build_session`, one trie per
+  map and kind inside `MerkleSession`, `map_data_store.rs`); the on-demand flat fold of the
+  in-memory fallback (`MerkleSyncManager::aggregate_lww_root_hash` / `aggregate_ormap_root_hash` /
+  `aggregate_lww_buckets` / `aggregate_ormap_buckets`, `merkle_sync.rs`); in `sync.rs`, the session
+  registry's per-(map, connection) round epoch (`round_epoch` / `set_round_epoch`) and per-session
+  `epoch_at_build`, the stale check in `handle_ormap_sync_init`, the cap applied by
+  `covering_epoch` to every continuation response of `handle_ormap_merkle_req_bucket`, and the leaf
+  loops returning an error when a `store.get` fails; tag admissibility (`or_tag_refusal` /
+  `admit_or_tags`, `crdt.rs`, and HLC node-id validation). Client: the per-map walk state and
+  generation in `ORMapSyncHandler` (`packages/client/src/sync/ORMapSyncHandler.ts`: `enterWalk`,
+  `countRequest`, `foldLeafEpoch`, `leaveWalk`), the per-key tombstone attribution it mirrors and
+  persists, and `ORMapMerkleTree` / `hashORMapLeaf` (`packages/core/src`).
+- **Enforcing test:** Rust, flat shape — `session_reports_flat_trie_root_and_buckets_for_vectors`
+  (`storage/durable_merkle.rs`), `aggregate_roots_and_buckets_equal_flat_trie_for_vectors`
+  (`storage/merkle_sync.rs`), both pinned to the golden vector file
+  `packages/core-rust/tests/fixtures/merkle_vectors.json`, and the simulation test
+  `sync_root_is_the_flat_trie_root_across_partition_and_heal` (`sim/cluster.rs`).
+  Rust, epoch vs snapshot (`service/domain/sync.rs`) —
+  `ormap_sync_init_epoch_never_postdates_cached_session`,
+  `repeated_ormap_sync_init_advances_delivered_per_epoch_advance`,
+  `ormap_push_diff_neither_conveys_nor_delivers_an_epoch`,
+  `ormap_leaf_request_fails_when_a_key_cannot_be_read`, and the simulation test
+  `partial_walk_never_confirms_a_tombstone_in_a_skipped_subtree` (`sim/tombstone_gc_proof.rs`).
+  Rust, known gap — `ac2_untouched_legacy_ortombstones_never_prune_eligible`
+  (`tombstone_frontier_impl.rs`). Rust, tag admissibility —
+  `hlc_rejects_a_node_id_with_a_leaf_separator` (`packages/core-rust/src/hlc.rs`),
+  `or_op_with_an_inadmissible_tag_is_refused_before_the_batch_applies` and
+  `a_stored_inadmissible_tag_stays_removable` (`service/domain/crdt.rs`),
+  `push_diff_with_an_inadmissible_tag_merges_nothing` (`service/domain/sync.rs`).
+  Integration, real server (`tests/integration-rust/merkle-comparability.test.ts`) —
+  `R3a: converged client reconnect takes the in-sync branch for LWW and OR`,
+  `R3b: fresh device after a full walk reconnects in sync`,
+  `R3c: attribution restored from its buckets yields the server's root`,
+  `R11: the covering epoch is acknowledged only after the walk has drained`; and, under
+  `Integration: OR-Map push scoping during a forced-divergence walk`,
+  `the pushed entry for key B carries no tag that was removed from key A` and
+  `the pushed entry for key B carries the tag that was removed from key B`.
+  TS, drained walk (`packages/client/src/sync/__tests__/ORMapWalkDrain.test.ts`, describe
+  `ORMapSyncHandler confirms a covering epoch only for a drained walk`) —
+  `does not confirm after the first of two leaves, and confirms once after the leaf that carries the missing tombstone`,
+  `confirms the lowest epoch its leaves conveyed, once`,
+  `confirms nothing when one of its leaves conveyed no epoch`,
+  `confirms nothing for a walk cut short by a new sync init, and a late leaf of it is applied without confirming`,
+  `confirms nothing when the handling of one of its leaves failed`,
+  `confirms nothing while one of its requests is never answered`,
+  `still confirms at once on equal roots, once on a one-leaf walk, and once when a full-resync walk drains`,
+  `a leaf of an earlier walk that finishes during the next walk neither confirms nor shortens that walk`,
+  `confirms at the end of a bucket response when that is the last response of the walk to finish`,
+  `confirms nothing when the handling of a bucket response failed`,
+  `counts the epoch of the root that opened the walk: a lower one is what is confirmed, a missing one confirms nothing`.
+  TS, per-key tombstones (`packages/client/src/sync/__tests__/ORMapKeyTombstones.test.ts`) — under
+  `pushORMapDiff`: `the entry for key B carries no tag that was removed from key A` and
+  `the entry for key B carries the tag that was removed from key B`; under
+  `equal roots require the same per-key tombstones`:
+  `a client whose key lacks a tag the server leaf includes does not take the equal-roots confirm path`;
+  every test of the describe `server absence clears the attribution down to the pending removes`;
+  every test of the describe `a remove the server lost is handed back to it for the key it belongs to`,
+  with its real-server counterpart `tests/integration-rust/lost-remove-heal.test.ts` (describe
+  `Integration: a server that lost an acknowledged OR-Map remove`).
+- **Violation consequence:** a mismatch between roots that should be equal ⇒ a full walk on every
+  sync, O(keys × tombstones) rewrites. A false match ⇒ a covering epoch confirmed without its
+  tombstones ⇒ a prune drops a tombstone that client never applied, and the removed value can be
+  resurrected.
+- **Discovered by:** SPEC-378 (client and server roots were never comparable once the non-linear
+  `combine_hashes` replaced the summed aggregate); landed as SPEC-378a (canonical leaf and client
+  attribution), SPEC-379 (tag admissibility) and SPEC-378b (flat shape, epoch vs snapshot, drained
+  walk).
+- **Status:** decided, **enforced** (Rust, TS and integration arms).
+
 ### TG-SYNC-001: At most one terminal verdict per op per exchange, exactly one when the exchange acks
 
 - **Scope:** one client→server operation exchange on either transport — a WebSocket `OP_BATCH`
