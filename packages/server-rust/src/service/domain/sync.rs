@@ -177,29 +177,76 @@ pub struct SyncService {
 /// a narrowed TODO-544. `release_on_disconnect` is O(total sessions) (a full
 /// `retain` scan); cheap at demo-tier connection counts — a per-connection
 /// reverse index is tracked as a scale follow-up (see `/sf:todo`).
+///
+/// Besides the sessions the registry keeps, per `(map_name, ConnectionId)`, the
+/// epoch the connection's current OR sync round was fixed at (TG-MRK-002). It is
+/// a SEPARATE map on purpose: the session entry is shared with the LWW kind, so
+/// an LWW `SYNC_INIT` that replaces the session mid-round must not be able to
+/// raise the bound the OR round's remaining responses are capped by.
 #[derive(Default)]
 struct SyncSessionRegistry {
-    sessions: DashMap<(String, ConnectionId), Arc<MerkleSession>>,
+    sessions: DashMap<(String, ConnectionId), BuiltSession>,
+    /// The value conveyed by the most recent `ORMAP_SYNC_RESP_ROOT` per
+    /// `(map, connection)`. A recorded `None` (the root conveyed no epoch) is
+    /// distinct from an absent entry (no OR sync init ran on this connection).
+    round_epochs: DashMap<(String, ConnectionId), Option<u64>>,
+}
+
+/// A materialised session together with the frontier epoch read immediately
+/// before it was built: no tombstone stamped after that epoch is guaranteed to
+/// be in the session's hashes, so the session may vouch for nothing newer.
+#[derive(Clone)]
+struct BuiltSession {
+    session: Arc<MerkleSession>,
+    /// `None` when the epoch was 0 or no frontier is wired.
+    epoch_at_build: Option<u64>,
 }
 
 impl SyncSessionRegistry {
     /// Returns the cached session for `(map_name, conn_id)`, if any.
+    #[cfg(test)]
     fn get(&self, map_name: &str, conn_id: ConnectionId) -> Option<Arc<MerkleSession>> {
+        self.built(map_name, conn_id).map(|built| built.session)
+    }
+
+    /// Returns the cached session for `(map_name, conn_id)` with the epoch it
+    /// was built at, if any.
+    fn built(&self, map_name: &str, conn_id: ConnectionId) -> Option<BuiltSession> {
         self.sessions
             .get(&(map_name.to_string(), conn_id))
-            .map(|entry| Arc::clone(entry.value()))
+            .map(|entry| entry.value().clone())
     }
 
     /// Inserts (replacing any prior entry) the session for `(map_name, conn_id)`.
-    fn insert(&self, map_name: &str, conn_id: ConnectionId, session: Arc<MerkleSession>) {
-        self.sessions
-            .insert((map_name.to_string(), conn_id), session);
+    fn insert(&self, map_name: &str, conn_id: ConnectionId, built: BuiltSession) {
+        self.sessions.insert((map_name.to_string(), conn_id), built);
     }
 
-    /// Drops every session belonging to `conn_id`. Invoked on disconnect via the
-    /// `ConnectionRegistry` observer so a connection's sessions do not outlive it.
+    /// The epoch the current OR sync round of `(map_name, conn_id)` was fixed
+    /// at. The outer `None` means no round was opened on this connection; the
+    /// inner `None` means a round was opened and its root conveyed no epoch.
+    // The two levels carry different facts (no round vs. a round fixed at no
+    // epoch) and the caller must tell them apart, so they are not flattened.
+    #[allow(clippy::option_option)]
+    fn round_epoch(&self, map_name: &str, conn_id: ConnectionId) -> Option<Option<u64>> {
+        self.round_epochs
+            .get(&(map_name.to_string(), conn_id))
+            .map(|entry| *entry.value())
+    }
+
+    /// Fixes the OR sync round of `(map_name, conn_id)` at `epoch`, replacing
+    /// the previous round's value.
+    fn set_round_epoch(&self, map_name: &str, conn_id: ConnectionId, epoch: Option<u64>) {
+        self.round_epochs
+            .insert((map_name.to_string(), conn_id), epoch);
+    }
+
+    /// Drops every session and round epoch belonging to `conn_id`. Invoked on
+    /// disconnect via the `ConnectionRegistry` observer so a connection's
+    /// sessions do not outlive it.
     fn release_on_disconnect(&self, conn_id: ConnectionId) {
         self.sessions.retain(|(_, c), _| *c != conn_id);
+        self.round_epochs.retain(|(_, c), _| *c != conn_id);
     }
 
     /// Number of cached sessions across all connections (test-only bound check).
@@ -270,41 +317,68 @@ impl SyncService {
         self
     }
 
-    /// The covering epoch to convey on an OR-Map sync response for `conn`: the
-    /// server's current max stamped epoch (`None` when nothing stamped yet or no
-    /// frontier is wired). Also records it as delivered on `conn` so the client's
-    /// subsequent `CLIENT_APPLY_ACK` passes the `342e` delivered-clamp. Conveying
-    /// it on EVERY OR-Map response (root/leaf/diff) — including the empty-diff
-    /// root — is what lets an up-to-date client still advance its cursor instead
-    /// of pinning the low-water-mark forever (empty-diff liveness).
+    /// The frontier's current epoch, `None` when nothing is stamped yet or no
+    /// frontier is wired. A pure read: it marks nothing delivered.
     ///
-    /// ORDERING IS LOAD-BEARING: every caller MUST read the covering epoch BEFORE
-    /// computing the root hash / collecting the entries it rides with. The
-    /// conveyed epoch must never postdate the state snapshot in the same response:
-    /// a concurrent `OR_REMOVE` stamped between the data read and a later epoch
-    /// read would make the client ACK an epoch whose tombstones it never received,
-    /// breaking the cursor-implies-delivered invariant the prune rests on. Reading
-    /// the epoch first errs conservative (the data may be NEWER than the epoch,
-    /// so the client under-claims — safe).
-    fn covering_epoch(&self, conn: Option<ConnectionId>, gated: bool) -> Option<u64> {
-        let frontier = self.frontier.as_ref()?;
-        let epoch = frontier.current_epoch();
-        if epoch == 0 {
-            return None;
-        }
-        // Convey the epoch as metadata for EVERY client, but ADVANCE `delivered_conn`
-        // ONLY for a not-gated (tracked, non-forgotten, non-regressed) client. For a
-        // gated (forgotten/unknown/regressed) client `set_delivered` is DEFERRED to
-        // post-snapshot-resync completion (its `CLIENT_APPLY_ACK`): eagerly advancing
-        // it here would re-enable the client's ACKs before it received the full
-        // snapshot, re-admitting it via the sync path BEFORE any push (independent of
-        // the push-diff gate). `delivered_conn` must advance only on resync completion.
+    /// ORDERING IS LOAD-BEARING: every OR-Map handler MUST call this BEFORE it
+    /// takes any hash or collects any entry. A concurrent `OR_REMOVE` stamped
+    /// between the data read and a later epoch read would otherwise let the
+    /// client confirm an epoch whose tombstone it never received. Reading the
+    /// epoch first errs conservative (the data may be NEWER than the epoch, so
+    /// the client under-claims — safe).
+    fn live_epoch(&self) -> Option<u64> {
+        let epoch = self.frontier.as_ref()?.current_epoch();
+        (epoch != 0).then_some(epoch)
+    }
+
+    /// The covering epoch to convey on an OR-Map sync response for `conn`, and
+    /// the only place a sync response marks an epoch delivered (TG-MRK-002).
+    ///
+    /// No response of an OR sync round may convey, or mark delivered, an epoch
+    /// newer than the snapshot the round's walk descends by. A client skips
+    /// every subtree whose hash matches; an epoch stamped after those hashes
+    /// were taken may own a tombstone inside a skipped subtree, and confirming
+    /// it would let the prune drop a tombstone that client never applied. The
+    /// conveyed value is therefore the minimum of `live` (see [`Self::live_epoch`])
+    /// and every bound in `caps`, where a `None` operand makes the result `None`:
+    ///
+    /// - root, durable: `caps` = the build epoch of the session the root is
+    ///   taken from; root, fallback: no cap (the root is computed after `live`).
+    /// - continuation (buckets, leaf, empty), durable: `caps` = the round epoch
+    ///   and the build epoch of the session used; fallback: the round epoch.
+    ///   With no round open for `(map, conn)` the caller conveys `None`.
+    ///
+    /// Callers follow one order: read `live` first, acquire the session (or
+    /// read the round epoch), then call this — so `delivered_conn` is advanced
+    /// exactly once per response, to the CAPPED value and never to `live`.
+    ///
+    /// The epoch is conveyed as metadata for EVERY client, but `delivered_conn`
+    /// is advanced ONLY for a not-gated (tracked, non-forgotten, non-regressed)
+    /// one. For a gated client it is deferred to post-snapshot-resync
+    /// completion (its `CLIENT_APPLY_ACK`): advancing it here would re-enable
+    /// the client's ACKs before it received the full snapshot. Conveying an
+    /// epoch on the empty-diff root too is what lets an up-to-date client still
+    /// advance its cursor instead of pinning the low-water-mark.
+    ///
+    /// Known gap: `handle_ormap_diff_request` is not session-served and passes
+    /// no cap — the `ORMAP_DIFF_REQUEST` path still conveys the live epoch with a
+    /// key-scoped response; tracked by TODO-729.
+    fn covering_epoch(
+        &self,
+        conn: Option<ConnectionId>,
+        gated: bool,
+        live: Option<u64>,
+        caps: &[Option<u64>],
+    ) -> Option<u64> {
+        let conveyed = caps
+            .iter()
+            .try_fold(live?, |bound, cap| cap.map(|cap| bound.min(cap)))?;
         if !gated {
-            if let Some(c) = conn {
-                frontier.set_delivered(c, epoch);
+            if let (Some(frontier), Some(c)) = (self.frontier.as_ref(), conn) {
+                frontier.set_delivered(c, conveyed);
             }
         }
-        Some(epoch)
+        Some(conveyed)
     }
 
     /// Resolve the server-authenticated `(principal, deviceId)` frontier identity for
@@ -427,7 +501,9 @@ impl SyncService {
     // Session helpers
     // -----------------------------------------------------------------------
 
-    /// Build (or return the cached) `MerkleSession` for `map_name`.
+    /// Build (or return the cached) `MerkleSession` for `map_name`, together
+    /// with the frontier epoch read immediately before it was built (on a cache
+    /// hit: the value recorded when the cached session was built).
     ///
     /// When called from `handle_sync_init` the caller passes `force_rebuild =
     /// true` so a fresh session is always constructed for the start of a new
@@ -456,7 +532,7 @@ impl SyncService {
         map_name: &str,
         conn_id: Option<ConnectionId>,
         force_rebuild: bool,
-    ) -> Result<Option<Arc<MerkleSession>>, OperationError> {
+    ) -> Result<Option<BuiltSession>, OperationError> {
         let (Some(index), Some(store)) = (&self.durable_index, &self.durable_store) else {
             return Ok(None);
         };
@@ -466,9 +542,17 @@ impl SyncService {
         // resident keys and would hand the client a root omitting evicted-but-
         // persisted records); surfacing the Err lets the client retry against
         // durable truth — the "propagate, never degrade to wrong leaves" contract.
-        let build = || -> Result<Arc<MerkleSession>, OperationError> {
+        //
+        // The epoch is read immediately BEFORE the enumeration: a tombstone is
+        // stored before its epoch is stamped, so every tombstone of an epoch at
+        // or below this value is already visible to the build (TG-MRK-002).
+        let build = || -> Result<BuiltSession, OperationError> {
+            let epoch_at_build = self.live_epoch();
             match index.build_session(map_name, store.as_ref()) {
-                Ok(session) => Ok(Arc::new(session)),
+                Ok(session) => Ok(BuiltSession {
+                    session: Arc::new(session),
+                    epoch_at_build,
+                }),
                 Err(err) => {
                     tracing::error!(
                         map = %map_name,
@@ -490,14 +574,13 @@ impl SyncService {
             // security/authorization identity the field's doc-comment refers to.
             Some(cid) => {
                 if !force_rebuild {
-                    if let Some(cached) = self.session_registry.get(map_name, cid) {
+                    if let Some(cached) = self.session_registry.built(map_name, cid) {
                         return Ok(Some(cached));
                     }
                 }
-                let arc = build()?;
-                self.session_registry
-                    .insert(map_name, cid, Arc::clone(&arc));
-                Ok(Some(arc))
+                let fresh = build()?;
+                self.session_registry.insert(map_name, cid, fresh.clone());
+                Ok(Some(fresh))
             }
             // Internal/forwarded ops carry no connection identity. Build fresh and
             // return WITHOUT caching: collapsing all None callers onto one shared
@@ -542,15 +625,16 @@ impl SyncService {
         // Build a fresh session at the start of each sync round so the snapshot
         // reflects the current durable state. force_rebuild=true replaces any
         // cached session from a previous round for the same map.
-        let root_hash =
-            if let Some(session) = self.get_or_build_session(&map_name, ctx.connection_id, true)? {
-                // Return the LWW-only root so the client drives the LWW tree walk.
-                // The combined root would mix LWW and OR-Map hashes, changing the
-                // wire protocol that the existing client expects for SYNC_INIT.
-                session.lww_root()
-            } else {
-                self.merkle_manager.aggregate_lww_root_hash(&map_name)
-            };
+        let root_hash = if let Some(BuiltSession { session, .. }) =
+            self.get_or_build_session(&map_name, ctx.connection_id, true)?
+        {
+            // Return the LWW-only root so the client drives the LWW tree walk.
+            // The combined root would mix LWW and OR-Map hashes, changing the
+            // wire protocol that the existing client expects for SYNC_INIT.
+            session.lww_root()
+        } else {
+            self.merkle_manager.aggregate_lww_root_hash(&map_name)
+        };
 
         Ok(OperationResponse::Message(Box::new(Message::SyncRespRoot(
             SyncRespRootMessage {
@@ -589,7 +673,9 @@ impl SyncService {
         // Durable-index path: reuse the session built during SYNC_INIT for THIS
         // connection (force_rebuild=false) so no second enumerate_leaves pass is
         // needed. Paths in this branch are pure hex aggregate paths — no prefix.
-        if let Some(session) = self.get_or_build_session(&map_name, ctx.connection_id, false)? {
+        if let Some(BuiltSession { session, .. }) =
+            self.get_or_build_session(&map_name, ctx.connection_id, false)?
+        {
             // Check for internal node (has children in the LWW trie at this path).
             let lww_children = session.lww_nodes.get(&path).cloned().unwrap_or_default();
             if !lww_children.is_empty() {
@@ -836,10 +922,14 @@ impl SyncService {
     ///
     /// When a durable index is wired, reuses the `MerkleSession` cached during
     /// the preceding LWW `SYNC_INIT` (if any) — one `enumerate_leaves` pass covers
-    /// both LWW and OR-Map roots. If no LWW `SYNC_INIT` has yet run for this map,
-    /// builds a fresh session now (`force_rebuild=false` with a cache miss triggers
-    /// a build). Falls back to the in-memory `MerkleSyncManager` aggregate when no
-    /// durable index is configured.
+    /// both LWW and OR-Map roots — as long as the frontier epoch has not advanced
+    /// since that session was built; a stale session is rebuilt, and a cache miss
+    /// builds a fresh one. Falls back to the in-memory `MerkleSyncManager`
+    /// aggregate when no durable index is configured.
+    ///
+    /// The epoch the root conveys opens the connection's OR sync round for the
+    /// map: it bounds every later bucket and leaf response of that walk
+    /// (TG-MRK-002).
     async fn handle_ormap_sync_init(
         &self,
         ctx: &crate::service::operation::OperationContext,
@@ -886,19 +976,43 @@ impl SyncService {
         }
 
         // Epoch BEFORE data: the conveyed epoch must never postdate the root it
-        // rides with (see `covering_epoch` — ordering is load-bearing).
-        let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
+        // rides with (see `live_epoch` — ordering is load-bearing).
+        let live = self.live_epoch();
 
-        // Reuse any session already built by the LWW SYNC_INIT for this map; build
-        // one now if not yet cached. force_rebuild=false so a concurrent or prior
-        // LWW SYNC_INIT's session is shared rather than discarded.
-        let root_hash = if let Some(session) =
-            self.get_or_build_session(&map_name, ctx.connection_id, false)?
+        // Reuse the session cached for this connection (by an LWW SYNC_INIT or an
+        // earlier OR round) unless the epoch moved since it was built. A stale
+        // session would cap this root at its own build epoch forever, so a client
+        // repeating OR rounds on one connection would never advance its delivered
+        // cursor and would pin the fleet low-water mark. Rebuilding only when
+        // stale bounds the cost at one enumeration per epoch advance; a repeat at
+        // an unchanged epoch stays a cache hit. `None` compares as epoch 0.
+        let force_rebuild = ctx
+            .connection_id
+            .and_then(|conn| self.session_registry.built(&map_name, conn))
+            .is_some_and(|cached| cached.epoch_at_build.unwrap_or(0) < live.unwrap_or(0));
+        let (root_hash, covering_epoch) = if let Some(built) =
+            self.get_or_build_session(&map_name, ctx.connection_id, force_rebuild)?
         {
-            session.ormap_root()
+            // The root is the session's, so the session's build epoch bounds it.
+            let conveyed =
+                self.covering_epoch(ctx.connection_id, gated, live, &[built.epoch_at_build]);
+            (built.session.ormap_root(), conveyed)
         } else {
-            self.merkle_manager.aggregate_ormap_root_hash(&map_name)
+            // The fallback root is computed live, after `live` was read.
+            let conveyed = self.covering_epoch(ctx.connection_id, gated, live, &[]);
+            (
+                self.merkle_manager.aggregate_ormap_root_hash(&map_name),
+                conveyed,
+            )
         };
+
+        // This root opens the connection's round for the map: every later
+        // bucket and leaf response of the walk is bounded by what it conveyed,
+        // for a gated client as well (TG-MRK-002).
+        if let Some(conn) = ctx.connection_id {
+            self.session_registry
+                .set_round_epoch(&map_name, conn, covering_epoch);
+        }
 
         Ok(OperationResponse::Message(Box::new(
             Message::ORMapSyncRespRoot(ORMapSyncRespRoot {
@@ -948,15 +1062,31 @@ impl SyncService {
         // is also gated via the not-yet-admitted `delivered == 0` signal.
         let gated = self.sync_gated_continuation(ctx.connection_id).await;
 
-        // Epoch BEFORE data: read once here, before any leaf entries are collected,
-        // so the conveyed epoch can never postdate the entry sets the leaf
-        // responses below carry (see `covering_epoch` — ordering is load-bearing).
-        let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
+        // Epoch BEFORE data: read once here, before any hash or leaf entry is
+        // read, so the conveyed epoch can never postdate the entry sets the leaf
+        // responses below carry (see `live_epoch` — ordering is load-bearing).
+        let live = self.live_epoch();
+
+        // The epoch the round's root fixed. Without an open round nothing bounds
+        // what the client compared against, so the response conveys no epoch and
+        // advances no cursor.
+        let round = ctx
+            .connection_id
+            .and_then(|conn| self.session_registry.round_epoch(&map_name, conn));
 
         // Durable-index path: reuse the session built during ORMapSyncInit (or
         // SYNC_INIT) for THIS connection. OR-Map tombstones yield no leaf in the
         // session (parity with write path: SPEC-324 R4).
-        if let Some(session) = self.get_or_build_session(&map_name, ctx.connection_id, false)? {
+        if let Some(BuiltSession {
+            session,
+            epoch_at_build,
+        }) = self.get_or_build_session(&map_name, ctx.connection_id, false)?
+        {
+            // Capped by the round AND by the session actually served from: an
+            // LWW SYNC_INIT may have replaced the session since the root.
+            let covering_epoch = round.and_then(|round| {
+                self.covering_epoch(ctx.connection_id, gated, live, &[round, epoch_at_build])
+            });
             // Check for OR-Map internal node at this path.
             let ormap_children = session.ormap_nodes.get(&path).cloned().unwrap_or_default();
             if !ormap_children.is_empty() {
@@ -990,7 +1120,20 @@ impl SyncService {
                     let store = self
                         .record_store_factory
                         .get_or_create(&map_name, key_partition);
-                    if let Ok(Some(record)) = store.get(&key, false).await {
+                    // A leaf must list every key of its path that could be read: leaving
+                    // one out on a read error would tell the client the key is absent. A
+                    // key with no value now is still left out, which is the truth.
+                    let record = match store.get(&key, false).await {
+                        Ok(record) => record,
+                        Err(e) => {
+                            tracing::error!(map = %map_name, key = %key, partition = key_partition, error = %e,
+                                "OR-Map Merkle leaf (durable): store.get() error; failing the request");
+                            return Err(OperationError::Internal(anyhow::anyhow!(
+                                "OR-Map leaf read failed for map {map_name}, key {key}: {e}"
+                            )));
+                        }
+                    };
+                    if let Some(record) = record {
                         match record.value {
                             RecordValue::OrMap {
                                 records,
@@ -1044,6 +1187,11 @@ impl SyncService {
         }
 
         // Fallback: no durable index wired — use the in-memory MerkleSyncManager.
+        // Both modes below read their hashes live, after the round was fixed, so
+        // the round epoch is the bound.
+        let covering_epoch =
+            round.and_then(|round| self.covering_epoch(ctx.connection_id, gated, live, &[round]));
+
         if let Some((partition_id, sub_path)) = parse_partition_prefix(&path) {
             // Routed mode: route directly to the specific OR-Map partition tree.
             let node_data = self
@@ -1070,7 +1218,20 @@ impl SyncService {
                         let store = self
                             .record_store_factory
                             .get_or_create(&map_name, key_partition);
-                        if let Ok(Some(record)) = store.get(&key, false).await {
+                        // A leaf must list every key of its path that could be read: leaving
+                        // one out on a read error would tell the client the key is absent. A
+                        // key with no value now is still left out, which is the truth.
+                        let record = match store.get(&key, false).await {
+                            Ok(record) => record,
+                            Err(e) => {
+                                tracing::error!(map = %map_name, key = %key, partition = key_partition, error = %e,
+                                    "OR-Map Merkle leaf (routed): store.get() error; failing the request");
+                                return Err(OperationError::Internal(anyhow::anyhow!(
+                                    "OR-Map leaf read failed for map {map_name}, key {key}: {e}"
+                                )));
+                            }
+                        };
+                        if let Some(record) = record {
                             match record.value {
                                 RecordValue::OrMap {
                                     records,
@@ -1166,7 +1327,20 @@ impl SyncService {
                 let store = self
                     .record_store_factory
                     .get_or_create(&map_name, key_partition);
-                if let Ok(Some(record)) = store.get(&key, false).await {
+                // A leaf must list every key of its path that could be read: leaving
+                // one out on a read error would tell the client the key is absent. A
+                // key with no value now is still left out, which is the truth.
+                let record = match store.get(&key, false).await {
+                    Ok(record) => record,
+                    Err(e) => {
+                        tracing::error!(map = %map_name, key = %key, partition = key_partition, error = %e,
+                            "OR-Map Merkle leaf (aggregate): store.get() error; failing the request");
+                        return Err(OperationError::Internal(anyhow::anyhow!(
+                            "OR-Map leaf read failed for map {map_name}, key {key}: {e}"
+                        )));
+                    }
+                };
+                if let Some(record) = record {
                     match record.value {
                         RecordValue::OrMap {
                             records,
@@ -1246,8 +1420,10 @@ impl SyncService {
         let gated = self.sync_gated_continuation(ctx.connection_id).await;
 
         // Epoch BEFORE data: the conveyed epoch must never postdate the entries
-        // collected below (see `covering_epoch` — ordering is load-bearing).
-        let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
+        // collected below (see `live_epoch` — ordering is load-bearing). No cap:
+        // this response is not served from a round's snapshot (see the known gap
+        // in `covering_epoch`).
+        let covering_epoch = self.covering_epoch(ctx.connection_id, gated, self.live_epoch(), &[]);
 
         let mut entries = Vec::new();
 
@@ -3883,7 +4059,8 @@ mod tests {
         let fresh = svc
             .get_or_build_session("tmap", Some(ConnectionId(2)), false)
             .expect("fresh session build")
-            .expect("durable index present");
+            .expect("durable index present")
+            .session;
         let fresh_bucket = fresh
             .lww_nodes
             .get(&target_path[..2])
@@ -4336,7 +4513,8 @@ mod tests {
         let fresh = svc
             .get_or_build_session("omap", Some(ConnectionId(2)), false)
             .expect("fresh OR-Map session build")
-            .expect("durable index present");
+            .expect("durable index present")
+            .session;
         assert_ne!(
             cached.ormap_nodes.get(&add_path[..2]),
             fresh.ormap_nodes.get(&add_path[..2]),
@@ -6485,5 +6663,948 @@ mod tests {
             failures.len(),
             failures.join("\n  ")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Covering epoch vs the snapshot an OR sync round descends by (TG-MRK-002)
+    // -----------------------------------------------------------------------
+
+    /// The per-partition Merkle observer pairing a node wires in production: one
+    /// `MerkleMutationObserver` per `(map, partition)` store over the manager
+    /// the sync service reads, so a fallback rig's trees follow its record
+    /// stores the way a running node's do.
+    struct RoundMerkleObservers(Arc<MerkleSyncManager>);
+
+    impl crate::storage::factory::ObserverFactory for RoundMerkleObservers {
+        fn create_observer(
+            &self,
+            map_name: &str,
+            partition_id: u32,
+        ) -> Option<Arc<dyn crate::storage::mutation_observer::MutationObserver>> {
+            Some(Arc::new(
+                crate::storage::merkle_sync::MerkleMutationObserver::new(
+                    Arc::clone(&self.0),
+                    map_name.to_string(),
+                    partition_id,
+                ),
+            ))
+        }
+    }
+
+    /// A sync service with a frontier that mints one epoch per stamp, on either
+    /// read source of an OR sync round: the durable index (a cached session per
+    /// connection) or the in-memory fallback (trees recomputed per request).
+    struct RoundRig {
+        svc: Arc<SyncService>,
+        factory: Arc<RecordStoreFactory>,
+        frontier: Arc<TombstoneFrontier>,
+        registry: Arc<ConnectionRegistry>,
+        /// The store the durable index enumerates; `None` on the fallback.
+        durable: Option<Arc<dyn MapDataStore>>,
+        /// Keeps the redb file alive for as long as the rig is.
+        _dir: Option<tempfile::TempDir>,
+    }
+
+    /// Durable read source: the record stores write through to the same redb
+    /// file the durable index enumerates, as the server's wiring does.
+    fn round_rig_durable() -> RoundRig {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::durable_merkle::DurableMerkle;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn MapDataStore> =
+            Arc::new(RedbDataStore::new(dir.path().join("round.redb")).expect("redb open"));
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::clone(&store),
+            Vec::new(),
+        ));
+        let frontier = Arc::new(TombstoneFrontier::new(None));
+        frontier.set_epoch_width(1);
+        let registry = Arc::new(ConnectionRegistry::new());
+        let index: Arc<dyn DurableMerkleIndex + Send + Sync> = Arc::new(DurableMerkle);
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                Arc::clone(&factory),
+                Arc::clone(&registry),
+            )
+            .with_durable_index(index, Arc::clone(&store))
+            .with_frontier(Arc::clone(&frontier), Arc::new(KeyWriterRegistry::new())),
+        );
+        RoundRig {
+            svc,
+            factory,
+            frontier,
+            registry,
+            durable: Some(store),
+            _dir: Some(dir),
+        }
+    }
+
+    /// Fallback read source: no durable index, a null data store, and the OR
+    /// trees fed by the per-partition Merkle observer on every record-store
+    /// write. `ormap_push_diff_answers_with_no_frame_and_stores_data` seeds its
+    /// fallback tree through the same observer type.
+    fn round_rig_fallback() -> RoundRig {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            )
+            .with_observer_factories(vec![Arc::new(RoundMerkleObservers(Arc::clone(&manager)))
+                as Arc<dyn crate::storage::factory::ObserverFactory>]),
+        );
+        let frontier = Arc::new(TombstoneFrontier::new(None));
+        frontier.set_epoch_width(1);
+        let registry = Arc::new(ConnectionRegistry::new());
+        let svc = Arc::new(
+            SyncService::new(manager, Arc::clone(&factory), Arc::clone(&registry))
+                .with_frontier(Arc::clone(&frontier), Arc::new(KeyWriterRegistry::new())),
+        );
+        RoundRig {
+            svc,
+            factory,
+            frontier,
+            registry,
+            durable: None,
+            _dir: None,
+        }
+    }
+
+    /// The trie path of `key`'s leaf: the first three hex digits of its hash,
+    /// on the durable session and on the fallback trees alike.
+    fn round_leaf_path(key: &str) -> String {
+        format!("{:08x}", topgun_core::hash::fnv1a_hash(key))[..3].to_string()
+    }
+
+    /// The first `{prefix}-{i}` key whose depth-1 bucket differs from `other`'s,
+    /// so a walk can descend to one of the two keys and skip the other.
+    fn round_key_outside_bucket_of(other: &str, prefix: &str) -> String {
+        let taken = round_leaf_path(other)[..1].to_string();
+        (0..1_000)
+            .map(|i| format!("{prefix}-{i}"))
+            .find(|key| round_leaf_path(key)[..1] != taken)
+            .expect("some key hashes outside one of sixteen buckets")
+    }
+
+    /// Stores `key` as an OR slot holding one live record per tag.
+    async fn round_seed(rig: &RoundRig, map: &str, key: &str, tags: &[&str]) {
+        use crate::storage::record::OrMapEntry as StoreOrMapEntry;
+        rig.factory
+            .get_or_create(map, hash_to_partition(key))
+            .put(
+                key,
+                RecordValue::OrMap {
+                    records: tags
+                        .iter()
+                        .map(|tag| StoreOrMapEntry {
+                            value: Value::Int(1),
+                            tag: (*tag).to_string(),
+                            timestamp: make_timestamp(),
+                        })
+                        .collect(),
+                    tombstones: Vec::new(),
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+            )
+            .await
+            .expect("seed");
+    }
+
+    /// Removes `tag` from `key` in the order the op path uses: the store write
+    /// under the key's writer first, the epoch stamp after it. Returns the
+    /// stamped epoch.
+    async fn round_or_remove(rig: &RoundRig, map: &str, key: &str, tag: &str) -> u64 {
+        use crate::storage::MutateOutcome;
+        let _guard = rig.svc.key_writer.acquire(map, key).await;
+        let mut apply = |value: &mut RecordValue| {
+            if let RecordValue::OrMap {
+                records,
+                tombstones,
+            } = value
+            {
+                records.retain(|record| record.tag != tag);
+                tombstones.push(tag.to_string());
+            }
+            MutateOutcome {
+                changed: true,
+                witness: None,
+            }
+        };
+        let written = rig
+            .factory
+            .get_or_create(map, hash_to_partition(key))
+            .update_in_place(
+                key,
+                None,
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+                &mut apply,
+            )
+            .await
+            .expect("remove write");
+        assert!(written, "fixture: {key} is seeded before it is removed");
+        rig.frontier.stamp_tombstone(map, key, tag)
+    }
+
+    /// `(live tags, tombstones)` of `key`'s stored OR slot, each sorted.
+    async fn round_slot(rig: &RoundRig, map: &str, key: &str) -> (Vec<String>, Vec<String>) {
+        let store = rig.factory.get_or_create(map, hash_to_partition(key));
+        match store.get(key, false).await.expect("read").map(|r| r.value) {
+            Some(RecordValue::OrMap {
+                records,
+                mut tombstones,
+            }) => {
+                let mut live: Vec<String> = records.into_iter().map(|r| r.tag).collect();
+                live.sort();
+                tombstones.sort();
+                (live, tombstones)
+            }
+            other => panic!("expected an OR slot for {key}, got {other:?}"),
+        }
+    }
+
+    /// Sends `ORMapSyncInit` on `conn` and returns the root payload.
+    async fn round_init(
+        svc: &Arc<SyncService>,
+        map: &str,
+        conn: ConnectionId,
+        claimed_epoch: Option<u64>,
+    ) -> ORMapSyncRespRootPayload {
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        match Arc::clone(svc)
+            .oneshot(Operation::ORMapSyncInit {
+                ctx,
+                payload: topgun_core::messages::ORMapSyncInit {
+                    map_name: map.to_string(),
+                    root_hash: 0,
+                    bucket_hashes: HashMap::new(),
+                    last_sync_timestamp: None,
+                    claimed_epoch,
+                },
+            })
+            .await
+            .expect("ORMapSyncInit")
+        {
+            OperationResponse::Message(message) => match *message {
+                Message::ORMapSyncRespRoot(root) => root.payload,
+                other => panic!("expected ORMapSyncRespRoot, got {other:?}"),
+            },
+            other => panic!("expected a message, got {other:?}"),
+        }
+    }
+
+    /// Sends an LWW `SYNC_INIT` on `conn`; on the durable path it builds and
+    /// caches the session the OR handlers then find for the same `(map, conn)`.
+    async fn round_lww_init(svc: &Arc<SyncService>, map: &str, conn: ConnectionId) {
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        Arc::clone(svc)
+            .oneshot(Operation::SyncInit {
+                ctx,
+                payload: topgun_core::messages::SyncInitMessage {
+                    map_name: map.to_string(),
+                    last_sync_timestamp: None,
+                },
+            })
+            .await
+            .expect("SyncInit");
+    }
+
+    /// Sends `ORMapMerkleReqBucket` for `path` and returns the handler's answer.
+    async fn round_bucket(
+        svc: &Arc<SyncService>,
+        map: &str,
+        conn: Option<ConnectionId>,
+        path: &str,
+    ) -> Result<OperationResponse, OperationError> {
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = conn;
+        Arc::clone(svc)
+            .oneshot(Operation::ORMapMerkleReqBucket {
+                ctx,
+                payload: topgun_core::messages::ORMapMerkleReqBucket {
+                    payload: topgun_core::messages::ORMapMerkleReqBucketPayload {
+                        map_name: map.to_string(),
+                        path: path.to_string(),
+                    },
+                },
+            })
+            .await
+    }
+
+    /// The leaf payload of a bucket answer; any other answer fails the test.
+    fn round_leaf(response: OperationResponse) -> ORMapSyncRespLeafPayload {
+        match response {
+            OperationResponse::Message(message) => match *message {
+                Message::ORMapSyncRespLeaf(leaf) => leaf.payload,
+                other => panic!("expected ORMapSyncRespLeaf, got {other:?}"),
+            },
+            other => panic!("expected a leaf message, got {other:?}"),
+        }
+    }
+
+    /// No response of an OR sync round conveys, or marks delivered, an epoch
+    /// newer than the snapshot the round's walk descends by (TG-MRK-002).
+    ///
+    /// A client skips every subtree whose hash matches. If a leaf of that walk
+    /// conveyed an epoch stamped after the hashes were taken, the client would
+    /// confirm an epoch whose tombstone sits in a subtree it skipped, and a
+    /// prune could then drop a tombstone that client never applied.
+    ///
+    /// The bound rests on a tombstone being readable by the round's hashes no
+    /// later than its epoch is readable, which holds on both read sources
+    /// because `OR_REMOVE` awaits the store write before it stamps (the order
+    /// `round_or_remove` reproduces):
+    ///
+    /// - durable: `DefaultRecordStore::update_in_place` awaits
+    ///   `add_with_witness` before it returns; under write-behind that call
+    ///   stages the value (`WriteBehindDataStore::add_with_witness` ends in
+    ///   `stage`), and `WriteBehindDataStore::enumerate_leaves` overlays the
+    ///   durable leaves with `collect_staging_for_map`, so a session built
+    ///   after the write holds the tombstone. This rig writes through to redb
+    ///   directly, which a later enumeration reads as well.
+    /// - fallback: `update_in_place` calls `notify_in_place_write` under the
+    ///   cell lock before the write-through, so the Merkle observer has
+    ///   updated the tree by the time the call returns.
+    ///
+    /// An OR slot never holds one live tag twice — the push merge skips an
+    /// inbound record whose tag is stored (`existing.tag == r.tag` in
+    /// `handle_ormap_push_diff`) and an op-path add is stored under a tag the
+    /// server regenerates — so a leaf hash over a tag set reflects the slot.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)] // six cases, each its own nested fn so one can be run first
+    #[allow(clippy::items_after_statements)] // the cases sit under the constants they share
+    async fn ormap_sync_init_epoch_never_postdates_cached_session() {
+        use crate::storage::durable_merkle::DurableMerkle;
+
+        const MAP: &str = "omap";
+        const K_TAG: &str = "k-tag";
+
+        /// Seeds keys K and J in different depth-1 buckets, each with one live
+        /// tag, plus a third key that is NOT removed here.
+        async fn seed_keys(rig: &RoundRig) -> (String, String) {
+            let k = "round-k".to_string();
+            let j = round_key_outside_bucket_of(&k, "round-j");
+            assert_ne!(
+                round_leaf_path(&k)[..1],
+                round_leaf_path(&j)[..1],
+                "fixture: K and J sit in different depth-1 buckets"
+            );
+            round_seed(rig, MAP, &k, &[K_TAG]).await;
+            round_seed(rig, MAP, &j, &["j-tag"]).await;
+            round_seed(rig, MAP, "round-seed", &["seed-tag"]).await;
+            (k, j)
+        }
+
+        /// `seed_keys`, then one remove on the third key, so the epoch is
+        /// already `e0 >= 1` before any session is built.
+        async fn seed_at_stamped_epoch(rig: &RoundRig) -> (String, String, u64) {
+            let (k, j) = seed_keys(rig).await;
+            round_or_remove(rig, MAP, "round-seed", "seed-tag").await;
+            let e0 = rig.frontier.current_epoch();
+            assert!(e0 >= 1, "fixture: an epoch is stamped before the build");
+            (k, j, e0)
+        }
+
+        /// The OR root of a session built now, independently of the service.
+        fn fresh_or_root(rig: &RoundRig) -> u32 {
+            let store = rig.durable.as_ref().expect("durable rig");
+            DurableMerkle
+                .build_session(MAP, store.as_ref())
+                .expect("fresh session")
+                .ormap_root()
+        }
+
+        // (i) The cached session was built by an LWW SYNC_INIT at e0; a remove
+        // then moves the epoch. The OR init must not pair the new epoch with
+        // the old root: it rebuilds.
+        async fn case_i() {
+            let rig = round_rig_durable();
+            let conn = ConnectionId(61);
+            let (k, _j, e0) = seed_at_stamped_epoch(&rig).await;
+
+            round_lww_init(&rig.svc, MAP, conn).await;
+            let root_at_e0 = rig
+                .svc
+                .session_registry
+                .get(MAP, conn)
+                .expect("SYNC_INIT caches a session")
+                .ormap_root();
+
+            let e1 = round_or_remove(&rig, MAP, &k, K_TAG).await;
+            assert!(e1 > e0, "fixture: the remove advances the epoch");
+            let fresh_root = fresh_or_root(&rig);
+            assert_ne!(
+                root_at_e0, fresh_root,
+                "(i) fixture: the remove changes the OR root"
+            );
+
+            let root = round_init(&rig.svc, MAP, conn, None).await;
+            assert!(!root.full_resync, "(i) the client is not gated");
+            assert_eq!(root.covering_epoch, Some(e1), "(i) root conveys e1");
+            assert_eq!(rig.frontier.delivered(conn), e1, "(i) delivered is e1");
+            assert_eq!(
+                root.root_hash, fresh_root,
+                "(i) a root that conveys e1 is taken from a session built at e1"
+            );
+        }
+
+        // (ii) The cached session was built by an OR init at e0. A repeat at
+        // the same epoch reuses it; a repeat after the epoch moved rebuilds.
+        async fn case_ii() {
+            let rig = round_rig_durable();
+            let conn = ConnectionId(62);
+            let (k, _j, e0) = seed_at_stamped_epoch(&rig).await;
+
+            let first = round_init(&rig.svc, MAP, conn, None).await;
+            assert_eq!(first.covering_epoch, Some(e0), "(ii) first root conveys e0");
+            assert_eq!(rig.frontier.delivered(conn), e0, "(ii) delivered is e0");
+            let session_at_e0 = rig
+                .svc
+                .session_registry
+                .get(MAP, conn)
+                .expect("the init caches a session");
+
+            // (ii-a) unchanged epoch: a cache hit.
+            let repeat = round_init(&rig.svc, MAP, conn, None).await;
+            assert!(
+                Arc::ptr_eq(
+                    &session_at_e0,
+                    &rig.svc.session_registry.get(MAP, conn).expect("cached")
+                ),
+                "(ii-a) a repeat at an unchanged epoch reuses the cached session"
+            );
+            assert_eq!(repeat.covering_epoch, Some(e0), "(ii-a) root conveys e0");
+            assert_eq!(rig.frontier.delivered(conn), e0, "(ii-a) delivered is e0");
+
+            // (ii-b) advanced epoch: a rebuild.
+            let e1 = round_or_remove(&rig, MAP, &k, K_TAG).await;
+            assert!(e1 > e0, "fixture: the remove advances the epoch");
+            let fresh_root = fresh_or_root(&rig);
+            assert_ne!(
+                session_at_e0.ormap_root(),
+                fresh_root,
+                "(ii-b) fixture: the remove changes the OR root"
+            );
+
+            let third = round_init(&rig.svc, MAP, conn, None).await;
+            assert_eq!(third.covering_epoch, Some(e1), "(ii-b) root conveys e1");
+            assert_eq!(rig.frontier.delivered(conn), e1, "(ii-b) delivered is e1");
+            assert_eq!(
+                third.root_hash, fresh_root,
+                "(ii-b) a root that conveys e1 is taken from a session built at e1"
+            );
+            assert!(
+                !Arc::ptr_eq(
+                    &session_at_e0,
+                    &rig.svc.session_registry.get(MAP, conn).expect("cached")
+                ),
+                "(ii-b) the stale session is replaced"
+            );
+        }
+
+        // (iii)/(iv) A remove on K lands after the round's root. The walk
+        // descends to J only; neither its bucket answer nor J's leaf may carry
+        // the round past e0.
+        async fn walk_past_a_later_remove(rig: &RoundRig, conn: ConnectionId, case: &str) {
+            let (k, j, e0) = seed_at_stamped_epoch(rig).await;
+
+            let root = round_init(&rig.svc, MAP, conn, None).await;
+            assert_eq!(root.covering_epoch, Some(e0), "{case} root conveys e0");
+            assert_eq!(rig.frontier.delivered(conn), e0, "{case} delivered is e0");
+
+            let e1 = round_or_remove(rig, MAP, &k, K_TAG).await;
+            assert!(e1 > e0, "fixture: the remove advances the epoch");
+
+            let top = round_bucket(&rig.svc, MAP, Some(conn), "")
+                .await
+                .expect("bucket request");
+            assert!(
+                matches!(
+                    &top,
+                    OperationResponse::Message(message)
+                        if matches!(**message, Message::ORMapSyncRespBuckets(_))
+                ),
+                "{case} fixture: the root path answers with buckets, got {top:?}"
+            );
+            assert_eq!(
+                rig.frontier.delivered(conn),
+                e0,
+                "{case} a bucket answer leaves delivered at the round epoch"
+            );
+
+            let leaf = round_leaf(
+                round_bucket(&rig.svc, MAP, Some(conn), &round_leaf_path(&j))
+                    .await
+                    .expect("leaf request"),
+            );
+            assert!(
+                leaf.entries.iter().any(|entry| entry.key == j),
+                "{case} fixture: J's leaf lists J"
+            );
+            assert_eq!(
+                leaf.covering_epoch,
+                Some(e0),
+                "{case} J's leaf conveys the round epoch"
+            );
+            assert_eq!(
+                rig.frontier.delivered(conn),
+                e0,
+                "{case} J's leaf leaves delivered at the round epoch"
+            );
+        }
+
+        async fn case_iii() {
+            walk_past_a_later_remove(&round_rig_durable(), ConnectionId(63), "(iii)").await;
+        }
+
+        async fn case_iv() {
+            walk_past_a_later_remove(&round_rig_fallback(), ConnectionId(64), "(iv)").await;
+        }
+
+        // A round whose root conveyed nothing (built at epoch 0) stays at
+        // nothing even when a stamp lands mid-round; the next init starts a
+        // round at the new epoch.
+        async fn case_epoch_zero_at_build() {
+            let rig = round_rig_durable();
+            let conn = ConnectionId(65);
+            let (k, j) = seed_keys(&rig).await;
+            assert_eq!(rig.frontier.current_epoch(), 0, "fixture: nothing stamped");
+
+            let root = round_init(&rig.svc, MAP, conn, None).await;
+            assert_eq!(root.covering_epoch, None, "(epoch 0) root conveys nothing");
+            assert_eq!(
+                rig.frontier.delivered(conn),
+                0,
+                "(epoch 0) nothing delivered"
+            );
+
+            let e = round_or_remove(&rig, MAP, &k, K_TAG).await;
+            assert!(e >= 1, "fixture: the remove stamps an epoch");
+
+            let leaf = round_leaf(
+                round_bucket(&rig.svc, MAP, Some(conn), &round_leaf_path(&j))
+                    .await
+                    .expect("leaf request"),
+            );
+            assert_eq!(
+                leaf.covering_epoch, None,
+                "(epoch 0) a leaf of a round fixed at no epoch conveys none"
+            );
+            assert_eq!(
+                rig.frontier.delivered(conn),
+                0,
+                "(epoch 0) that leaf leaves delivered unchanged"
+            );
+
+            let repeat = round_init(&rig.svc, MAP, conn, None).await;
+            assert_eq!(
+                repeat.covering_epoch,
+                Some(e),
+                "(epoch 0) a repeat init starts a round at the new epoch"
+            );
+            assert_eq!(rig.frontier.delivered(conn), e, "(epoch 0) delivered is e");
+        }
+
+        // A leaf request with no init on this `(map, conn)` belongs to no
+        // round, so there is no snapshot its epoch could be bounded by.
+        async fn case_no_round() {
+            for (rig, source, conn) in [
+                (round_rig_durable(), "durable", ConnectionId(66)),
+                (round_rig_fallback(), "fallback", ConnectionId(67)),
+            ] {
+                let (_k, j, e) = seed_at_stamped_epoch(&rig).await;
+                assert!(e >= 1, "fixture: an epoch is stamped");
+
+                let leaf = round_leaf(
+                    round_bucket(&rig.svc, MAP, Some(conn), &round_leaf_path(&j))
+                        .await
+                        .expect("leaf request"),
+                );
+                assert!(
+                    leaf.entries.iter().any(|entry| entry.key == j),
+                    "(no round, {source}) fixture: J's leaf lists J"
+                );
+                assert_eq!(
+                    leaf.covering_epoch, None,
+                    "(no round, {source}) a leaf outside any round conveys no epoch"
+                );
+                assert_eq!(
+                    rig.frontier.delivered(conn),
+                    0,
+                    "(no round, {source}) that leaf leaves delivered unchanged"
+                );
+            }
+        }
+
+        case_i().await;
+        case_ii().await;
+        case_iii().await;
+        case_iv().await;
+        case_epoch_zero_at_build().await;
+        case_no_round().await;
+    }
+
+    /// A client that repeats OR sync rounds on ONE connection while the epoch
+    /// advances sees its delivered cursor advance with it (TG-MRK-002).
+    ///
+    /// Bounding a round by the epoch its session was built at must not freeze
+    /// that client at the build epoch of its first session: a cursor that
+    /// stops moving pins the fleet low-water mark, and no tombstone stamped
+    /// after it is ever pruned. Each init therefore conveys the epoch read
+    /// just before it, and a repeat at an unchanged epoch reuses the session
+    /// instead of paying for another enumeration.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_ormap_sync_init_advances_delivered_per_epoch_advance() {
+        const MAP: &str = "omap";
+
+        let rig = round_rig_durable();
+        let (conn, client) = register_device(&rig.registry, "dev-repeated-init").await;
+
+        let removable: Vec<String> = (0..4).map(|i| format!("repeat-{i}")).collect();
+        for key in &removable {
+            round_seed(&rig, MAP, key, &["tag"]).await;
+        }
+        round_seed(&rig, MAP, "repeat-seed", &["seed-tag"]).await;
+        round_or_remove(&rig, MAP, "repeat-seed", "seed-tag").await;
+        let e0 = rig.frontier.current_epoch();
+        assert!(
+            e0 >= 1,
+            "fixture: an epoch is stamped before the first round"
+        );
+
+        let mut delivered_per_round = Vec::new();
+        for (round, key) in removable.iter().enumerate() {
+            let epoch = rig.frontier.current_epoch();
+            let claimed = rig.frontier.delivered(conn);
+            let root = round_init(&rig.svc, MAP, conn, Some(claimed)).await;
+            assert!(!root.full_resync, "round {round}: the client is not gated");
+            assert_eq!(
+                root.covering_epoch,
+                Some(epoch),
+                "round {round}: the root conveys the epoch read just before the init"
+            );
+            assert_eq!(
+                rig.frontier.delivered(conn),
+                epoch,
+                "round {round}: delivered follows the conveyed epoch"
+            );
+            assert!(
+                rig.frontier.confirm_apply_ack(&client, epoch, conn).await,
+                "round {round}: the acknowledgement advances the stored cursor"
+            );
+            delivered_per_round.push(rig.frontier.delivered(conn));
+
+            // The gate goes live once the client is tracked, so every later
+            // round runs with re-admission protection active.
+            if round == 0 {
+                rig.frontier.set_durable_epoch_watermark(1000);
+            }
+
+            assert_eq!(
+                round_or_remove(&rig, MAP, key, "tag").await,
+                epoch + 1,
+                "fixture: one remove advances the epoch by one"
+            );
+        }
+        assert_eq!(
+            delivered_per_round,
+            vec![e0, e0 + 1, e0 + 2, e0 + 3],
+            "delivered grows strictly, once per epoch advance"
+        );
+
+        // A repeat at an unchanged epoch is a cache hit.
+        let last = rig.frontier.current_epoch();
+        let rebuilt = round_init(&rig.svc, MAP, conn, Some(last - 1)).await;
+        assert_eq!(rebuilt.covering_epoch, Some(last));
+        assert_eq!(rig.frontier.delivered(conn), last);
+        let session = rig
+            .svc
+            .session_registry
+            .get(MAP, conn)
+            .expect("the init caches a session");
+        let repeat = round_init(&rig.svc, MAP, conn, Some(last - 1)).await;
+        assert!(
+            Arc::ptr_eq(
+                &session,
+                &rig.svc.session_registry.get(MAP, conn).expect("cached")
+            ),
+            "a repeat at an unchanged epoch reuses the cached session"
+        );
+        assert_eq!(repeat.covering_epoch, Some(last));
+        assert_eq!(
+            rig.frontier.delivered(conn),
+            last,
+            "a repeat at an unchanged epoch leaves delivered unchanged"
+        );
+    }
+
+    /// A merged `ORMAP_PUSH_DIFF` conveys no epoch, marks none delivered,
+    /// stamps none and leaves the connection's round alone (TG-MRK-002).
+    ///
+    /// The client confirms an epoch only from a root, a leaf or a diff
+    /// response. A push that moved any of these would let a client confirm an
+    /// epoch newer than the snapshot its walk descended by — and the push that
+    /// heals a lost remove is sent in the middle of exactly such a walk. A
+    /// pushed tombstone is stored unstamped, so it belongs to no epoch and no
+    /// acknowledgement can make it prune-eligible. The merge keeps the slot's
+    /// live tags unique: it skips an inbound record whose tag is already
+    /// stored, and de-duplicates tombstones through its `known` set.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ormap_push_diff_neither_conveys_nor_delivers_an_epoch() {
+        const MAP: &str = "omap";
+
+        let rig = round_rig_durable();
+        let (conn, client) = register_device(&rig.registry, "dev-pushing").await;
+
+        round_seed(&rig, MAP, "push-seed", &["seed-tag"]).await;
+        round_seed(&rig, MAP, "push-other", &["other-tag"]).await;
+        round_or_remove(&rig, MAP, "push-seed", "seed-tag").await;
+        let e0 = rig.frontier.current_epoch();
+        assert!(e0 >= 1, "fixture: an epoch is stamped before the round");
+
+        // Tracked on an earlier connection, so the client is known and not
+        // regressed when the gate goes live and its push is admitted on merit.
+        let earlier = ConnectionId(999_999);
+        rig.frontier.set_delivered(earlier, e0);
+        assert!(rig.frontier.confirm_apply_ack(&client, e0, earlier).await);
+        rig.frontier.set_durable_epoch_watermark(1000);
+
+        let root = round_init(&rig.svc, MAP, conn, Some(e0)).await;
+        assert!(!root.full_resync, "the client is not gated");
+        assert_eq!(root.covering_epoch, Some(e0), "the round is fixed at e0");
+        assert_eq!(rig.frontier.delivered(conn), e0);
+        let session = rig
+            .svc
+            .session_registry
+            .get(MAP, conn)
+            .expect("the init caches a session");
+
+        let e1 = round_or_remove(&rig, MAP, "push-other", "other-tag").await;
+        assert_eq!(e1, e0 + 1, "fixture: the remove advances the epoch");
+
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        let response = Arc::clone(&rig.svc)
+            .oneshot(push_entries(
+                ctx,
+                MAP,
+                vec![pushed_entry(
+                    "push-third",
+                    &["pushed-live"],
+                    &["pushed-dead"],
+                )],
+            ))
+            .await
+            .expect("push");
+        assert!(
+            matches!(response, OperationResponse::Empty),
+            "a push is answered with no frame, so no field of it can be an epoch; got {response:?}"
+        );
+        // A refused push is answered the same way, so the answer alone does
+        // not show that this one was merged.
+        assert_eq!(
+            round_slot(&rig, MAP, "push-third").await,
+            (
+                vec!["pushed-live".to_string()],
+                vec!["pushed-dead".to_string()]
+            ),
+            "the pushed record and the pushed tombstone are both stored"
+        );
+
+        assert_eq!(
+            rig.frontier.delivered(conn),
+            e0,
+            "a push marks no epoch delivered"
+        );
+        assert_eq!(
+            rig.frontier.current_epoch(),
+            e1,
+            "a pushed tombstone is stored unstamped"
+        );
+        assert!(
+            Arc::ptr_eq(
+                &session,
+                &rig.svc.session_registry.get(MAP, conn).expect("cached")
+            ),
+            "a push leaves the connection's session in place"
+        );
+    }
+
+    /// An OR leaf answer never leaves a key out because its read failed
+    /// (TG-MRK-002).
+    ///
+    /// The client reads a key's absence from a leaf as "the server holds
+    /// nothing for this key" and drops what it holds for it, while the same
+    /// leaf lets it confirm a covering epoch. A read error is not absence:
+    /// the request has to fail, so the walk does not drain and nothing is
+    /// confirmed. A key that has no value now is still left out — that is the
+    /// absence the client is entitled to act on.
+    ///
+    /// The seam is the data store beneath the record store: `get` on a key
+    /// that is not resident loads it, and `PushLoadProbe` fails that load for
+    /// one chosen key (and reports no value for any other).
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)] // three leaf loops, each driven through the same control and failure
+    #[allow(clippy::items_after_statements)] // the branches sit under the fixture they share
+    async fn ormap_leaf_request_fails_when_a_key_cannot_be_read() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::durable_merkle::DurableMerkle;
+        use crate::storage::map_data_store::merkle_leaf_hash;
+        use crate::storage::record::OrMapEntry as StoreOrMapEntry;
+
+        const MAP: &str = "omap";
+        const A: &str = "leaf-a";
+
+        /// A key that shares A's partition and A's leaf path, so one leaf
+        /// request reaches both on every branch, the routed one included.
+        fn key_beside_a() -> String {
+            (0..100_000_000)
+                .map(|i| format!("leaf-b-{i}"))
+                .find(|key| {
+                    hash_to_partition(key) == hash_to_partition(A)
+                        && round_leaf_path(key) == round_leaf_path(A)
+                })
+                .expect("some key shares A's partition and leaf path")
+        }
+
+        fn or_value(tag: &str) -> RecordValue {
+            RecordValue::OrMap {
+                records: vec![StoreOrMapEntry {
+                    value: Value::Int(1),
+                    tag: tag.to_string(),
+                    timestamp: make_timestamp(),
+                }],
+                tombstones: Vec::new(),
+            }
+        }
+
+        /// Record stores over a probe: A is resident, B is not, so every read
+        /// of B reaches the probe's `load`.
+        async fn stores_holding_a() -> (Arc<PushLoadProbe>, Arc<RecordStoreFactory>) {
+            let probe = Arc::new(PushLoadProbe {
+                inner: NullDataStore,
+                loaded: parking_lot::Mutex::new(Vec::new()),
+                unreadable: parking_lot::Mutex::new(None),
+            });
+            let factory = Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                probe.clone() as Arc<dyn MapDataStore>,
+                Vec::new(),
+            ));
+            factory
+                .get_or_create(MAP, hash_to_partition(A))
+                .put(
+                    A,
+                    or_value("a-tag"),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                )
+                .await
+                .expect("seed A");
+            (probe, factory)
+        }
+
+        /// The control, then the failing read, for one leaf loop.
+        async fn assert_branch(
+            svc: &Arc<SyncService>,
+            probe: &PushLoadProbe,
+            path: &str,
+            b: &str,
+            branch: &str,
+        ) {
+            // Control: B has no value. The leaf lists A and leaves B out.
+            let leaf = round_leaf(
+                round_bucket(svc, MAP, None, path)
+                    .await
+                    .expect("leaf request"),
+            );
+            let listed: Vec<&str> = leaf.entries.iter().map(|e| e.key.as_str()).collect();
+            assert_eq!(
+                listed,
+                vec![A],
+                "{branch}: a key with no value is left out of the leaf"
+            );
+            assert!(
+                probe.loaded().iter().any(|key| key == b),
+                "{branch} fixture: the leaf loop read B through the data store"
+            );
+
+            probe.set_unreadable(Some(b));
+            let result = round_bucket(svc, MAP, None, path).await;
+            assert!(
+                result.is_err(),
+                "{branch}: a key that cannot be read fails the request, got {result:?}"
+            );
+        }
+
+        // Durable index: the session's leaf keys come from the durable
+        // enumeration, the values from the record stores.
+        async fn branch_durable(b: &str) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let durable: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(dir.path().join("leaf.redb")).expect("redb open"));
+            durable
+                .add(MAP, A, &or_value("a-tag"), 0, 1)
+                .await
+                .expect("durable A");
+            durable
+                .add(MAP, b, &or_value("b-tag"), 0, 1)
+                .await
+                .expect("durable B");
+            let (probe, factory) = stores_holding_a().await;
+            let index: Arc<dyn DurableMerkleIndex + Send + Sync> = Arc::new(DurableMerkle);
+            let svc = Arc::new(
+                SyncService::new(
+                    Arc::new(MerkleSyncManager::default()),
+                    factory,
+                    Arc::new(ConnectionRegistry::new()),
+                )
+                .with_durable_index(index, durable),
+            );
+            assert_branch(&svc, &probe, &round_leaf_path(A), b, "durable").await;
+        }
+
+        /// A fallback service whose partition tree holds A and B.
+        async fn fallback_service(b: &str) -> (Arc<SyncService>, Arc<PushLoadProbe>) {
+            let manager = Arc::new(MerkleSyncManager::default());
+            for (key, tag) in [(A, "a-tag"), (b, "b-tag")] {
+                let (_kind, hash) =
+                    merkle_leaf_hash(key, &or_value(tag)).expect("an OR slot has a leaf");
+                manager.update_ormap(MAP, hash_to_partition(key), key, hash);
+            }
+            let (probe, factory) = stores_holding_a().await;
+            let svc = Arc::new(SyncService::new(
+                manager,
+                factory,
+                Arc::new(ConnectionRegistry::new()),
+            ));
+            (svc, probe)
+        }
+
+        // Routed fallback: the path names the partition tree by a three-digit
+        // prefix.
+        async fn branch_routed(b: &str) {
+            let (svc, probe) = fallback_service(b).await;
+            let path = format!("{:03}/{}", hash_to_partition(A), round_leaf_path(A));
+            assert_branch(&svc, &probe, &path, b, "routed fallback").await;
+        }
+
+        // Aggregate fallback: a plain hex path, answered across partitions.
+        async fn branch_aggregate(b: &str) {
+            let (svc, probe) = fallback_service(b).await;
+            assert_branch(&svc, &probe, &round_leaf_path(A), b, "aggregate fallback").await;
+        }
+
+        let b = key_beside_a();
+        branch_durable(&b).await;
+        branch_routed(&b).await;
+        branch_aggregate(&b).await;
     }
 }

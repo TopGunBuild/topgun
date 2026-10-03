@@ -2299,4 +2299,290 @@ mod tests {
             quiescent.len()
         );
     }
+
+    // ==================================================================
+    // A walk that skips a subtree must not confirm an epoch stamped in it.
+    // ==================================================================
+
+    /// A walk that descends to one key and skips another confirms no epoch
+    /// whose tombstone sits under the key it skipped (TG-MRK-002).
+    ///
+    /// Fault scenario: a writer interleaved with the walk (an `OR_REMOVE` on
+    /// the skipped key, landing after the round's root), then the client's
+    /// connection dropping before the walk reaches that key. The client has
+    /// by then acknowledged whatever the one leaf it received conveyed. If
+    /// that leaf conveyed the live epoch, the acknowledgement moves the
+    /// client's cursor past the remove it never saw, the prune drops the
+    /// tombstone, and the client's stale live record can come back.
+    ///
+    /// The scaffold is nested here because the module's `gated_sync` builds
+    /// its record stores without observers, which leaves the in-memory Merkle
+    /// trees empty, and `track_client` forces `delivered` to a fixed value,
+    /// which would mask the value under test. This one pairs every record
+    /// store with a per-partition `MerkleMutationObserver` over the manager
+    /// the `SyncService` reads — the pairing a `SimNode` sets up through
+    /// `MerkleObserverFactory` and `with_observer_factories` in
+    /// `sim/cluster.rs` — so the fallback trees follow the stores.
+    ///
+    /// Why a tombstone is in the trees no later than its epoch is readable:
+    /// `OR_REMOVE` awaits `update_in_place` before it stamps, and
+    /// `DefaultRecordStore::update_in_place` fires the record-store observers
+    /// (`notify_in_place_write`) under the cell lock before it returns. The
+    /// nested `or_remove` keeps that order. A slot never holds one live tag
+    /// twice (the module doc explains the op path's regenerated tags; the
+    /// push merge skips an inbound record whose tag is stored), so a leaf
+    /// hash over the tag set reflects the slot.
+    ///
+    /// The last step is the control: the same device on a fresh connection
+    /// starts a new round after the remove, legitimately confirms the newer
+    /// epoch, and the prune then does drop the tombstone — so "still stored"
+    /// above is not a prune that never runs.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)] // one scenario read top to bottom: seed, round, fault, prune, control
+    #[allow(clippy::items_after_statements)] // the scaffold sits under the imports it needs
+    async fn partial_walk_never_confirms_a_tombstone_in_a_skipped_subtree() {
+        use crate::storage::factory::ObserverFactory;
+        use crate::storage::merkle_sync::MerkleMutationObserver;
+        use crate::storage::mutation_observer::MutationObserver;
+        use crate::storage::MutateOutcome;
+        use topgun_core::messages::{
+            ORMapMerkleReqBucket, ORMapMerkleReqBucketPayload, ORMapSyncRespRootPayload,
+        };
+
+        const MAP: &str = "omap";
+        const K: &str = "walk-k";
+        const K_TAG: &str = "k-tag";
+
+        /// One Merkle observer per `(map, partition)` record store.
+        struct PartitionMerkleObservers(Arc<MerkleSyncManager>);
+
+        impl ObserverFactory for PartitionMerkleObservers {
+            fn create_observer(
+                &self,
+                map_name: &str,
+                partition_id: u32,
+            ) -> Option<Arc<dyn MutationObserver>> {
+                Some(Arc::new(MerkleMutationObserver::new(
+                    Arc::clone(&self.0),
+                    map_name.to_string(),
+                    partition_id,
+                )))
+            }
+        }
+
+        /// The trie path of a key's leaf: the first three hex digits of its hash.
+        fn leaf_path(key: &str) -> String {
+            format!("{:08x}", topgun_core::hash::fnv1a_hash(key))[..3].to_string()
+        }
+
+        /// Removes `tag` from `key` in the op path's order: the store write
+        /// under the key's writer, then the epoch stamp.
+        async fn or_remove(
+            factory: &RecordStoreFactory,
+            frontier: &TombstoneFrontier,
+            key_writer: &KeyWriterRegistry,
+            key: &str,
+            tag: &str,
+        ) -> Epoch {
+            let _guard = key_writer.acquire(MAP, key).await;
+            let mut apply = |value: &mut RecordValue| {
+                if let RecordValue::OrMap {
+                    records,
+                    tombstones,
+                } = value
+                {
+                    records.retain(|record| record.tag != tag);
+                    tombstones.push(tag.to_string());
+                }
+                MutateOutcome {
+                    changed: true,
+                    witness: None,
+                }
+            };
+            let written = factory
+                .get_or_create(MAP, hash_to_partition(key))
+                .update_in_place(
+                    key,
+                    None,
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                    &mut apply,
+                )
+                .await
+                .expect("remove write");
+            assert!(written, "fixture: {key} is seeded before it is removed");
+            frontier.stamp_tombstone(MAP, key, tag)
+        }
+
+        async fn sync_init(
+            svc: &Arc<SyncService>,
+            conn: ConnectionId,
+            claimed_epoch: Epoch,
+        ) -> ORMapSyncRespRootPayload {
+            match Arc::clone(svc)
+                .oneshot(Operation::ORMapSyncInit {
+                    ctx: make_ctx_conn(conn),
+                    payload: ORMapSyncInit {
+                        map_name: MAP.to_string(),
+                        root_hash: 0,
+                        bucket_hashes: std::collections::HashMap::new(),
+                        last_sync_timestamp: None,
+                        claimed_epoch: Some(claimed_epoch),
+                    },
+                })
+                .await
+                .expect("ORMapSyncInit")
+            {
+                OperationResponse::Message(message) => match *message {
+                    Message::ORMapSyncRespRoot(root) => root.payload,
+                    other => panic!("expected ORMapSyncRespRoot, got {other:?}"),
+                },
+                other => panic!("expected a message, got {other:?}"),
+            }
+        }
+
+        async fn request_bucket(svc: &Arc<SyncService>, conn: ConnectionId, path: &str) -> Message {
+            match Arc::clone(svc)
+                .oneshot(Operation::ORMapMerkleReqBucket {
+                    ctx: make_ctx_conn(conn),
+                    payload: ORMapMerkleReqBucket {
+                        payload: ORMapMerkleReqBucketPayload {
+                            map_name: MAP.to_string(),
+                            path: path.to_string(),
+                        },
+                    },
+                })
+                .await
+                .expect("ORMapMerkleReqBucket")
+            {
+                OperationResponse::Message(message) => *message,
+                other => panic!("expected a message for path {path:?}, got {other:?}"),
+            }
+        }
+
+        // The fallback read source: a null data store, no durable index, and
+        // the trees kept by the observers.
+        let manager = Arc::new(MerkleSyncManager::default());
+        let factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            )
+            .with_observer_factories(vec![Arc::new(PartitionMerkleObservers(
+                Arc::clone(&manager),
+            )) as Arc<dyn ObserverFactory>]),
+        );
+        let frontier = Arc::new(TombstoneFrontier::new(None));
+        frontier.set_epoch_width(1); // one epoch per stamp
+        let key_writer = Arc::new(KeyWriterRegistry::new());
+        let registry = Arc::new(ConnectionRegistry::new());
+        let svc = Arc::new(
+            SyncService::new(manager, Arc::clone(&factory), Arc::clone(&registry))
+                .with_frontier(Arc::clone(&frontier), Arc::clone(&key_writer)),
+        );
+
+        // ---- 1. K and J under different depth-1 buckets; an epoch is stamped.
+        let j = (0..1_000)
+            .map(|i| format!("walk-j-{i}"))
+            .find(|key| leaf_path(key)[..1] != leaf_path(K)[..1])
+            .expect("some key hashes outside one of sixteen buckets");
+        seed_or_map(&factory, MAP, K, &[K_TAG], &[]).await;
+        seed_or_map(&factory, MAP, &j, &["j-tag"], &[]).await;
+        seed_or_map(&factory, MAP, "walk-seed", &["seed-tag"], &[]).await;
+        seed_or_map(&factory, MAP, "walk-other", &["other-tag"], &[]).await;
+        or_remove(&factory, &frontier, &key_writer, "walk-seed", "seed-tag").await;
+        let e0 = frontier.current_epoch();
+        assert!(e0 >= 1, "fixture: an epoch is stamped before the round");
+
+        // ---- 2. C is tracked at c0 = e0 on an earlier connection, then the
+        // gate goes live; its init is neither regressed nor gated.
+        let (conn, client) = register_device(&registry, "dev-partial-walk").await;
+        let earlier = ConnectionId(999_999);
+        frontier.set_delivered(earlier, e0);
+        assert!(frontier.confirm_apply_ack(&client, e0, earlier).await);
+        assert_eq!(frontier.cursor(&client), Some(e0), "fixture: c0 = e0");
+        frontier.set_durable_epoch_watermark(1000); // protection active
+        assert!(!frontier.is_forgotten(&client));
+
+        let root = sync_init(&svc, conn, e0).await;
+        assert!(!root.full_resync, "fixture: C is not gated");
+        assert_ne!(root.root_hash, 0, "fixture: the trees hold the seeded keys");
+        assert_eq!(root.covering_epoch, Some(e0), "the round is fixed at e0");
+
+        // ---- 3. The root path: a client would compare K's bucket, find it
+        // equal to its own and skip it.
+        match request_bucket(&svc, conn, "").await {
+            Message::ORMapSyncRespBuckets(buckets) => assert!(
+                buckets.payload.buckets.contains_key(&leaf_path(K)[..1])
+                    && buckets.payload.buckets.contains_key(&leaf_path(&j)[..1]),
+                "fixture: K and J each have a depth-1 bucket"
+            ),
+            other => panic!("expected buckets at the root path, got {other:?}"),
+        }
+
+        // ---- 4. Fault: a writer removes K's tag after the round's root; a
+        // second stamp lets an acknowledgement move strictly past the first.
+        let e1 = or_remove(&factory, &frontier, &key_writer, K, K_TAG).await;
+        let e2 = or_remove(&factory, &frontier, &key_writer, "walk-other", "other-tag").await;
+        assert_eq!((e1, e2), (e0 + 1, e0 + 2), "fixture: one epoch per remove");
+
+        // ---- 5. J's leaf, the only leaf this walk asks for.
+        let (conveyed, lists_j) = match request_bucket(&svc, conn, &leaf_path(&j)).await {
+            Message::ORMapSyncRespLeaf(leaf) => (
+                leaf.payload.covering_epoch,
+                leaf.payload.entries.iter().any(|entry| entry.key == j),
+            ),
+            other => panic!("expected J's leaf, got {other:?}"),
+        };
+        assert!(lists_j, "fixture: J's leaf lists J");
+        assert_eq!(
+            conveyed,
+            Some(e0),
+            "J's leaf conveys the epoch the round was fixed at"
+        );
+        assert_eq!(
+            frontier.delivered(conn),
+            e0,
+            "J's leaf leaves delivered at the round epoch"
+        );
+
+        // ---- 6. Fault: C acknowledges what the leaf conveyed, as a client
+        // does on a leaf, and its connection drops before the walk reaches K.
+        if let Some(epoch) = conveyed {
+            frontier.confirm_apply_ack(&client, epoch, conn).await;
+        }
+        frontier.remove_connection(conn);
+
+        // ---- 7. One prune pass: C never received K's tombstone, so it stays.
+        prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
+        assert!(
+            stored_or_map(&factory, MAP, K)
+                .await
+                .1
+                .contains(&K_TAG.to_string()),
+            "K's tombstone is still stored: no acknowledgement of this walk covers it"
+        );
+
+        // ---- 8. Control: a new round on a fresh connection starts after the
+        // remove, so it may convey e2; acknowledging that makes e1 eligible.
+        let (conn2, client2) = register_device(&registry, "dev-partial-walk").await;
+        assert_eq!(client2, client, "fixture: the same device reconnects");
+        let root2 = sync_init(&svc, conn2, e0).await;
+        assert!(!root2.full_resync, "fixture: C is still not gated");
+        assert_eq!(
+            root2.covering_epoch,
+            Some(e2),
+            "a round started after the removes conveys their epoch"
+        );
+        assert!(frontier.confirm_apply_ack(&client, e2, conn2).await);
+        prune_epoch_tombstones(&frontier, &factory, &key_writer).await;
+        assert!(
+            !stored_or_map(&factory, MAP, K)
+                .await
+                .1
+                .contains(&K_TAG.to_string()),
+            "once C has confirmed e2 the prune drops K's tombstone"
+        );
+    }
 }

@@ -3452,4 +3452,365 @@ mod tests {
             report.failures.join("\n  ")
         );
     }
+
+    /// A client keeps ONE trie per map and kind, so the root a node reports at
+    /// sync-init is only comparable with the client's when it is the root of one
+    /// flat trie over every key the node holds (TG-MRK-002). A node that folds
+    /// its per-partition trees instead never reports a root a client can match,
+    /// and every reconnect walks the whole map.
+    ///
+    /// The nodes here have no durable index, so the roots come from the
+    /// in-memory fallback. The property must hold on whatever a node holds at
+    /// the moment it is asked — replicated state, one side of a split, the
+    /// healed union — so it is checked on every node before a partition, during
+    /// it and after the heal, with LWW writes, OR adds and OR removes landing on
+    /// both sides of the split.
+    ///
+    /// Every checkpoint first requires a non-zero reported root and a non-zero
+    /// reference root, so two empty trees cannot pass as equal. The comparison
+    /// itself is made once, over all checkpoints, so one run lists every node
+    /// and phase that disagrees.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_root_is_the_flat_trie_root_across_partition_and_heal() {
+        use crate::service::operation::OperationResponse;
+        use crate::storage::map_data_store::{merkle_leaf_hash, MerkleLeafKind};
+        use topgun_core::merkle::{MerkleTree, ORMapMerkleTree};
+        use topgun_core::messages::{Message, ORMapSyncInit, SyncInitMessage};
+
+        const LWW_MAP: &str = "flat-root-lww";
+        const OR_MAP: &str = "flat-root-or";
+        const NODES: usize = 3;
+        /// The client trie's depth; the reference must use the same one.
+        const DEPTH: usize = 3;
+
+        const LWW_SEED: [&str; 4] = ["user:1", "user:2", "todo:42", "cart:7"];
+        const LWW_LEFT: &str = "left:new";
+        const LWW_RIGHT: &str = "right:new";
+
+        /// Holds two tags; node 0 removes one of them while partitioned.
+        const OR_TWO: &str = "tags:two";
+        /// Holds one tag; node 1 removes it while partitioned, which leaves a
+        /// key with a tombstone and no live tag.
+        const OR_ONE: &str = "tags:one";
+        const OR_KEPT: &str = "tags:kept";
+        const OR_LEFT: &str = "tags:left";
+        const OR_RIGHT: &str = "tags:right";
+
+        /// (LWW root, OR root).
+        type Roots = (u32, u32);
+
+        /// A first-party shaped tag unique to `(counter, node)`.
+        fn tag(counter: u32, node: usize) -> String {
+            format!("{counter}:0:sim-node-{node}")
+        }
+
+        /// Roots of ONE flat trie per kind over every primary record `node`
+        /// holds for `map`, folded with the canonical leaf hash. Built from the
+        /// record stores, independently of the trees the node maintains.
+        fn flat_roots(node: &SimNode, map: &str) -> Roots {
+            let mut lww = MerkleTree::new(DEPTH);
+            let mut or = ORMapMerkleTree::new(DEPTH);
+            for store in node.record_store_factory.get_all_for_map(map) {
+                store.for_each_boxed(
+                    &mut |key, record| match merkle_leaf_hash(key, &record.value) {
+                        Some((MerkleLeafKind::Lww, hash)) => lww.update(key, hash),
+                        Some((MerkleLeafKind::OrMap, hash)) => or.update(key, hash),
+                        None => {}
+                    },
+                    false,
+                );
+            }
+            (lww.get_root_hash(), or.get_root_hash())
+        }
+
+        /// The roots `node` reports to a client, through its operation pipeline.
+        async fn reported_roots(node: &mut SimNode) -> Roots {
+            let ts = Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: node.node_id.clone(),
+            };
+
+            let lww_op = Operation::SyncInit {
+                ctx: OperationContext::new(0, service_names::SYNC, ts.clone(), 5000),
+                payload: SyncInitMessage {
+                    map_name: LWW_MAP.to_string(),
+                    last_sync_timestamp: None,
+                },
+            };
+            let lww = match Service::call(&mut node.operation_router, lww_op)
+                .await
+                .expect("SyncInit is served")
+            {
+                OperationResponse::Message(msg) => match *msg {
+                    Message::SyncRespRoot(root) => root.payload.root_hash,
+                    other => panic!("expected SyncRespRoot, got {other:?}"),
+                },
+                other => panic!("expected a message, got {other:?}"),
+            };
+
+            let or_op = Operation::ORMapSyncInit {
+                ctx: OperationContext::new(0, service_names::SYNC, ts, 5000),
+                payload: ORMapSyncInit {
+                    map_name: OR_MAP.to_string(),
+                    root_hash: 0,
+                    bucket_hashes: HashMap::new(),
+                    last_sync_timestamp: None,
+                    claimed_epoch: None,
+                },
+            };
+            let or = match Service::call(&mut node.operation_router, or_op)
+                .await
+                .expect("ORMapSyncInit is served")
+            {
+                OperationResponse::Message(msg) => match *msg {
+                    Message::ORMapSyncRespRoot(root) => {
+                        assert!(
+                            !root.payload.full_resync,
+                            "precondition: an ungated sync-init is not a full resync"
+                        );
+                        root.payload.root_hash
+                    }
+                    other => panic!("expected ORMapSyncRespRoot, got {other:?}"),
+                },
+                other => panic!("expected a message, got {other:?}"),
+            };
+
+            (lww, or)
+        }
+
+        /// Reads every node's reported and reference roots, refuses a zero on
+        /// either side, and records both for the final comparison. Returns the
+        /// reference roots per node, for the guards on the scenario itself.
+        async fn checkpoint(
+            phase: &str,
+            nodes: &mut [SimNode],
+            reported: &mut Vec<(String, u32)>,
+            reference: &mut Vec<(String, u32)>,
+        ) -> Vec<Roots> {
+            let mut per_node = Vec::new();
+            for (idx, node) in nodes.iter_mut().enumerate() {
+                let (reported_lww, reported_or) = reported_roots(node).await;
+                let flat_lww = flat_roots(node, LWW_MAP).0;
+                let flat_or = flat_roots(node, OR_MAP).1;
+                for (kind, reported_root, flat_reference_root) in [
+                    ("LWW", reported_lww, flat_lww),
+                    ("OR", reported_or, flat_or),
+                ] {
+                    let label = format!("{phase}, node {idx}, {kind}");
+                    assert_ne!(
+                        reported_root, 0,
+                        "{label}: precondition: the reported root is non-zero"
+                    );
+                    assert_ne!(
+                        flat_reference_root, 0,
+                        "{label}: precondition: the flat reference root is non-zero"
+                    );
+                    reported.push((label.clone(), reported_root));
+                    reference.push((label, flat_reference_root));
+                }
+                per_node.push((flat_lww, flat_or));
+            }
+            per_node
+        }
+
+        /// Sorted live tags and sorted tombstones `node` holds for an OR key.
+        async fn slot(node: &SimNode, key: &str) -> (Vec<String>, Vec<String>) {
+            let store = node
+                .record_store_factory
+                .get_or_create(OR_MAP, topgun_core::hash_to_partition(key));
+            let record = store.get(key, false).await.expect("read the slot");
+            let (mut live, mut dead): (Vec<String>, Vec<String>) = match record.map(|r| r.value) {
+                Some(RecordValue::OrMap {
+                    records,
+                    tombstones,
+                }) => (records.into_iter().map(|r| r.tag).collect(), tombstones),
+                Some(RecordValue::OrTombstones { tags }) => (Vec::new(), tags),
+                Some(RecordValue::Lww { .. }) | None => (Vec::new(), Vec::new()),
+            };
+            live.sort();
+            dead.sort();
+            (live, dead)
+        }
+
+        /// Copies every key of both maps between the nodes that can reach
+        /// each other.
+        async fn replicate(cluster: &SimCluster) {
+            for key in LWW_SEED.into_iter().chain([LWW_LEFT, LWW_RIGHT]) {
+                cluster.sync_all(LWW_MAP, key).await.expect("copy LWW key");
+            }
+            for key in [OR_TWO, OR_ONE, OR_KEPT, OR_LEFT, OR_RIGHT] {
+                cluster.sync_all(OR_MAP, key).await.expect("copy OR key");
+            }
+        }
+
+        let mut reported: Vec<(String, u32)> = Vec::new();
+        let mut reference: Vec<(String, u32)> = Vec::new();
+
+        let mut cluster = SimCluster::new(NODES, 23);
+        cluster.start().expect("cluster start");
+
+        // ---- Before the partition: node 0 writes, every node receives ----
+
+        // Keys of one partition would make a per-partition tree and the flat
+        // trie hold the same keys; the seed has to span several.
+        let lww_partitions: std::collections::BTreeSet<u32> = LWW_SEED
+            .iter()
+            .map(|k| topgun_core::hash_to_partition(k))
+            .collect();
+        let or_partitions: std::collections::BTreeSet<u32> = [OR_TWO, OR_ONE, OR_KEPT]
+            .iter()
+            .map(|k| topgun_core::hash_to_partition(k))
+            .collect();
+        assert!(
+            lww_partitions.len() >= 2 && or_partitions.len() >= 2,
+            "precondition: the seed keys of each map span at least two partitions \
+             (LWW {lww_partitions:?}, OR {or_partitions:?})"
+        );
+
+        for (n, key) in LWW_SEED.into_iter().enumerate() {
+            cluster
+                .write(0, LWW_MAP, key, rmpv::Value::from(n as u64))
+                .await
+                .expect("seed LWW write");
+        }
+        cluster
+            .or_write(0, OR_MAP, OR_TWO, tag(1, 0), rmpv::Value::from("a"))
+            .await
+            .expect("seed OR add");
+        cluster
+            .or_write(0, OR_MAP, OR_TWO, tag(2, 0), rmpv::Value::from("b"))
+            .await
+            .expect("seed OR add");
+        cluster
+            .or_write(0, OR_MAP, OR_ONE, tag(3, 0), rmpv::Value::from("c"))
+            .await
+            .expect("seed OR add");
+        cluster
+            .or_write(0, OR_MAP, OR_KEPT, tag(4, 0), rmpv::Value::from("d"))
+            .await
+            .expect("seed OR add");
+        replicate(&cluster).await;
+
+        let before = checkpoint(
+            "before the partition",
+            &mut cluster.nodes,
+            &mut reported,
+            &mut reference,
+        )
+        .await;
+        assert!(
+            before.iter().all(|roots| *roots == before[0]),
+            "precondition: every node holds the seed before the partition: {before:?}"
+        );
+
+        // ---- During the partition: node 0 alone against nodes 1 and 2 ----
+
+        cluster.inject_partition(&[0], &[1, 2]);
+
+        cluster
+            .write(0, LWW_MAP, LWW_LEFT, rmpv::Value::from("left"))
+            .await
+            .expect("LWW write on the left side");
+        cluster
+            .or_write(0, OR_MAP, OR_LEFT, tag(5, 0), rmpv::Value::from("e"))
+            .await
+            .expect("OR add on the left side");
+        cluster
+            .or_remove(0, OR_MAP, OR_TWO, tag(1, 0))
+            .await
+            .expect("OR remove on the left side");
+
+        cluster
+            .write(1, LWW_MAP, LWW_RIGHT, rmpv::Value::from("right"))
+            .await
+            .expect("LWW write on the right side");
+        cluster
+            .or_write(1, OR_MAP, OR_RIGHT, tag(5, 1), rmpv::Value::from("f"))
+            .await
+            .expect("OR add on the right side");
+        cluster
+            .or_remove(1, OR_MAP, OR_ONE, tag(3, 0))
+            .await
+            .expect("OR remove on the right side");
+
+        // A copy attempted while split reaches node 2 from node 1 and nothing
+        // crosses to or from node 0.
+        replicate(&cluster).await;
+
+        assert_eq!(
+            slot(&cluster.nodes[0], OR_TWO).await,
+            (vec![tag(2, 0)], vec![tag(1, 0)]),
+            "precondition: the left side's remove left one live tag and one tombstone"
+        );
+        for idx in [1, 2] {
+            assert_eq!(
+                slot(&cluster.nodes[idx], OR_ONE).await,
+                (Vec::new(), vec![tag(3, 0)]),
+                "precondition: node {idx} holds the emptied key as a tombstone only"
+            );
+        }
+
+        let during = checkpoint(
+            "during the partition",
+            &mut cluster.nodes,
+            &mut reported,
+            &mut reference,
+        )
+        .await;
+        assert!(
+            during[0].0 != during[1].0 && during[0].1 != during[1].1,
+            "precondition: the two sides hold different state while split: {during:?}"
+        );
+        assert_eq!(
+            during[1], during[2],
+            "precondition: the two nodes of the right side hold the same state"
+        );
+        assert!(
+            during[0].0 != before[0].0
+                && during[0].1 != before[0].1
+                && during[1].0 != before[1].0
+                && during[1].1 != before[1].1,
+            "precondition: the writes made while split changed both roots on both sides"
+        );
+
+        // ---- After the heal ----
+
+        cluster.heal_partition();
+        replicate(&cluster).await;
+
+        let after = checkpoint(
+            "after the heal",
+            &mut cluster.nodes,
+            &mut reported,
+            &mut reference,
+        )
+        .await;
+        assert!(
+            after.iter().all(|roots| *roots == after[0]),
+            "precondition: every node holds the same state after the heal: {after:?}"
+        );
+        assert!(
+            after[0] != during[0] && after[0] != during[1],
+            "precondition: the healed state is the union, not either side's"
+        );
+        for (idx, node) in cluster.nodes.iter().enumerate() {
+            assert_eq!(
+                slot(node, OR_TWO).await,
+                (vec![tag(2, 0)], vec![tag(1, 0)]),
+                "precondition: node {idx} holds the left side's remove after the heal"
+            );
+            assert_eq!(
+                slot(node, OR_ONE).await,
+                (Vec::new(), vec![tag(3, 0)]),
+                "precondition: node {idx} holds the right side's remove after the heal"
+            );
+        }
+
+        assert_eq!(
+            reported, reference,
+            "the root a node reports at sync-init (left) must be the root of one flat \
+             trie over the records it holds (right), at every checkpoint"
+        );
+    }
 }

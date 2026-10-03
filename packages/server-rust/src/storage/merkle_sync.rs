@@ -10,9 +10,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use topgun_core::hash::combine_hashes;
 use topgun_core::hash_to_partition;
-use topgun_core::merkle::{MerkleTree, ORMapMerkleTree};
+use topgun_core::merkle::{MerkleNode, MerkleTree, ORMapMerkleTree};
 
 use super::factory::ObserverFactory;
 use super::map_data_store::{merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, MerkleLeafKind};
@@ -136,83 +135,88 @@ impl MerkleSyncManager {
         self.ormap_trees.clear();
     }
 
-    /// Aggregates LWW root hashes across all partitions for `map_name`.
+    /// Root of the flat LWW trie over every partition's keys for `map_name`.
     ///
-    /// Combines all per-partition root hashes with the collision-resistant
-    /// `combine_hashes`. Returns 0 when no partitions exist for the given map.
-    /// `combine_hashes` is commutative and associative, so the result is
-    /// independent of `DashMap`'s non-deterministic iteration order, while
-    /// avoiding the compensating-pair collisions a plain additive fold admits.
+    /// This is the client-facing root: a client keeps ONE trie per map and
+    /// kind, addressed by `fnv1a(key)` alone, so only the root of that same
+    /// flat trie is comparable with the client's (TG-MRK-002). It is NOT a
+    /// fold of the per-partition roots. Returns 0 when the map holds no LWW
+    /// leaf.
+    ///
+    /// Computed on demand from the per-partition trees — O(keys of the map) —
+    /// because the write path deliberately keeps no flat tree: a shared one
+    /// would put every write of the map behind a single mutex.
     #[must_use]
     pub fn aggregate_lww_root_hash(&self, map_name: &str) -> u32 {
-        let hashes: Vec<u32> = self
-            .lww_trees
-            .iter()
-            .filter(|entry| entry.key().0 == map_name)
-            .map(|entry| entry.value().lock().get_root_hash())
-            .collect();
-        combine_hashes(&hashes)
+        self.flat_lww_tree_under(map_name, "").get_root_hash()
     }
 
-    /// Aggregates OR-Map root hashes across all partitions for `map_name`.
+    /// Root of the flat OR-Map trie over every partition's keys for `map_name`.
     ///
-    /// Same aggregation strategy as `aggregate_lww_root_hash`.
+    /// Same construction and cost as `aggregate_lww_root_hash`.
     #[must_use]
     pub fn aggregate_ormap_root_hash(&self, map_name: &str) -> u32 {
-        let hashes: Vec<u32> = self
-            .ormap_trees
-            .iter()
-            .filter(|entry| entry.key().0 == map_name)
-            .map(|entry| entry.value().lock().get_root_hash())
-            .collect();
-        combine_hashes(&hashes)
+        self.flat_ormap_tree_under(map_name, "").get_root_hash()
     }
 
-    /// Aggregates LWW bucket hashes at `path` across all partitions for `map_name`.
+    /// Child hashes of the flat LWW trie's node at `path` for `map_name`.
     ///
-    /// For each hex bucket character, combines partition values with the
-    /// collision-resistant `combine_hashes`. Returns a `HashMap<char, u32>` with
-    /// the combined hashes, suitable for returning as a `SyncRespBuckets` response
-    /// covering all partitions. Per-character hashes are gathered into a list and
-    /// folded once via `combine_hashes`, whose commutativity + associativity make
-    /// the result independent of `DashMap`'s non-deterministic iteration order.
+    /// Each hex digit maps to the hash of that child in the ONE trie holding
+    /// every partition's keys — the same number a client computes for the same
+    /// keys (TG-MRK-002) — suitable for a `SyncRespBuckets` response. Only the
+    /// entries under `path` are read, so the cost is O(entries under `path`).
+    ///
+    /// The trie is folded fresh from the entries present, so a child with no
+    /// entry left is absent from the map rather than present with hash 0, and
+    /// a leaf-depth `path` (whose node holds entries, not children) yields an
+    /// empty map.
     #[must_use]
     pub fn aggregate_lww_buckets(&self, map_name: &str, path: &str) -> HashMap<char, u32> {
-        let mut per_char: HashMap<char, Vec<u32>> = HashMap::new();
+        self.flat_lww_tree_under(map_name, path).get_buckets(path)
+    }
+
+    /// Child hashes of the flat OR-Map trie's node at `path` for `map_name`.
+    ///
+    /// Same construction and cost as `aggregate_lww_buckets`.
+    #[must_use]
+    pub fn aggregate_ormap_buckets(&self, map_name: &str, path: &str) -> HashMap<char, u32> {
+        self.flat_ormap_tree_under(map_name, path).get_buckets(path)
+    }
+
+    /// Folds every LWW leaf entry under `path`, from all of `map_name`'s
+    /// partition trees, into one fresh flat trie.
+    ///
+    /// The result holds only the subtree at `path`, which is all a caller
+    /// asking about `path` may read from it: the node at `path` and everything
+    /// below it are exactly those of the full flat trie, while its ancestors
+    /// are not. With an empty `path` it is the full flat trie.
+    fn flat_lww_tree_under(&self, map_name: &str, path: &str) -> MerkleTree {
+        let mut flat = MerkleTree::new(self.depth);
         for entry in &self.lww_trees {
             if entry.key().0 != map_name {
                 continue;
             }
-            let buckets = entry.value().lock().get_buckets(path);
-            for (c, h) in buckets {
-                per_char.entry(c).or_default().push(h);
+            let tree = entry.value().lock();
+            if let Some(node) = tree.get_node(path) {
+                for_each_leaf_entry(node, &mut |key, hash| flat.update(key, hash));
             }
         }
-        per_char
-            .into_iter()
-            .map(|(c, hashes)| (c, combine_hashes(&hashes)))
-            .collect()
+        flat
     }
 
-    /// Aggregates OR-Map bucket hashes at `path` across all partitions for `map_name`.
-    ///
-    /// Same aggregation strategy as `aggregate_lww_buckets`.
-    #[must_use]
-    pub fn aggregate_ormap_buckets(&self, map_name: &str, path: &str) -> HashMap<char, u32> {
-        let mut per_char: HashMap<char, Vec<u32>> = HashMap::new();
+    /// OR-Map counterpart of `flat_lww_tree_under`.
+    fn flat_ormap_tree_under(&self, map_name: &str, path: &str) -> ORMapMerkleTree {
+        let mut flat = ORMapMerkleTree::new(self.depth);
         for entry in &self.ormap_trees {
             if entry.key().0 != map_name {
                 continue;
             }
-            let buckets = entry.value().lock().get_buckets(path);
-            for (c, h) in buckets {
-                per_char.entry(c).or_default().push(h);
+            let tree = entry.value().lock();
+            if let Some(node) = tree.get_node(path) {
+                for_each_leaf_entry(node, &mut |key, hash| flat.update(key, hash));
             }
         }
-        per_char
-            .into_iter()
-            .map(|(c, hashes)| (c, combine_hashes(&hashes)))
-            .collect()
+        flat
     }
 
     /// Returns all partition IDs that have a LWW tree for `map_name`.
@@ -256,7 +260,8 @@ impl MerkleSyncManager {
     /// by the leaf's `MerkleLeafKind`. Because the per-partition combine
     /// (`combine_hashes`/`fnv1a_hash`) is commutative and associative, replaying
     /// the persisted leaf set in any order yields the identical partition root,
-    /// and the cross-partition aggregate matches the live root.
+    /// and the flat client-facing view folded from those partitions matches the
+    /// live one.
     ///
     /// Both CRDT kinds are rebuilt here. The datastore derives each leaf via the
     /// shared `merkle_leaf_hash` helper — the same function the write-path
@@ -283,6 +288,20 @@ impl MerkleSyncManager {
         // Backup partitions never participate in client sync, mirroring the
         // observer's `is_backup` early-returns; rebuild the primary leaves only.
         data_store.enumerate_leaves(map, false, &mut sink).await
+    }
+}
+
+/// Visits every leaf entry `(key, leaf hash)` in the subtree rooted at `node`.
+///
+/// Walking the entries rather than the node hashes is what lets a flat trie be
+/// folded from per-partition trees: node hashes of different partitions cannot
+/// be merged into the hash a single trie would have, the entries can.
+fn for_each_leaf_entry(node: &MerkleNode, visit: &mut impl FnMut(&str, u32)) {
+    for (key, &hash) in &node.entries {
+        visit(key, hash);
+    }
+    for child in node.children.values() {
+        for_each_leaf_entry(child, visit);
     }
 }
 
@@ -394,10 +413,11 @@ impl MerkleMutationObserver {
 
     /// Updates the appropriate Merkle tree based on the `RecordValue` variant.
     ///
-    /// Writes only to `self.partition_id`. The aggregate root hash for client sync
-    /// is computed on demand via `MerkleSyncManager::aggregate_lww_root_hash()` /
-    /// `aggregate_ormap_root_hash()`, eliminating the Mutex contention on a shared
-    /// partition 0 that previously bottlenecked concurrent writes.
+    /// Writes only to `self.partition_id`. The flat trie a client compares
+    /// against is not maintained here: `MerkleSyncManager::aggregate_lww_root_hash()`
+    /// / `aggregate_ormap_root_hash()` and the bucket counterparts fold it on
+    /// demand from the per-partition trees, so concurrent writes to different
+    /// partitions never contend on one shared tree's Mutex.
     fn update_tree(&self, key: &str, value: &RecordValue) {
         // Route on the shared leaf-hash helper so the live write path and the
         // durable enumeration rebuild always agree on the leaf hash and kind.
@@ -411,7 +431,9 @@ impl MerkleMutationObserver {
                     .update_ormap(&self.map_name, self.partition_id, key, hash);
             }
             None => {
-                // Tombstones represent deletions — remove from OR-Map tree.
+                // No leaf: either a legacy tombstone-only blob or an OR slot
+                // with no live tag and no tombstone left. Neither contributes to
+                // the tree, so any leaf this key had is removed.
                 self.manager
                     .remove_ormap(&self.map_name, self.partition_id, key);
             }
@@ -519,6 +541,7 @@ impl MutationObserver for MerkleMutationObserver {
 
 #[cfg(test)]
 mod tests {
+    use topgun_core::hash::combine_hashes;
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;
 
@@ -774,7 +797,7 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     // ---------------------------------------------------------------------------
-    // Aggregate methods: scatter-gather root hash and buckets
+    // Aggregate methods: flat client-facing root hash and buckets
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -791,14 +814,17 @@ mod tests {
         manager.update_lww("users", 1, "alice", 111);
         manager.update_lww("users", 2, "bob", 222);
 
-        let hash_1 = manager.with_lww_tree("users", 1, |tree| tree.get_root_hash());
-        let hash_2 = manager.with_lww_tree("users", 2, |tree| tree.get_root_hash());
-        let expected = combine_hashes(&[hash_1, hash_2]);
+        // One flat tree holding the same keys with the same leaf hashes, built
+        // without the manager: the partitions must leave no trace in the root.
+        let mut flat = MerkleTree::new(3);
+        flat.update("alice", 111);
+        flat.update("bob", 222);
+        let expected = flat.get_root_hash();
 
         let aggregate = manager.aggregate_lww_root_hash("users");
         assert_eq!(
             aggregate, expected,
-            "aggregate should equal combine_hashes of all partition hashes"
+            "aggregate should equal the root of one flat tree over all partitions' keys"
         );
         assert_ne!(
             aggregate, 0,
@@ -810,9 +836,10 @@ mod tests {
     fn aggregate_lww_root_hash_resists_compensating_partition_pairs() {
         // Two per-partition hash sets that are equal under a plain additive fold
         // (0xAAAA0000 + 0x00005555 == 0xAAAA5555 + 0x00000000 == 0xAAAA5555).
-        // The cross-partition aggregate folds these with combine_hashes, which
-        // must keep them distinct so compensating per-partition hashes can never
-        // produce an identical server root (which the client treats as "in sync").
+        // Every trie node folds its children with combine_hashes, so two child-hash
+        // sets that collide under a plain additive fold must still produce different
+        // node hashes; otherwise compensating subtrees could yield an identical root,
+        // which the client treats as in sync.
         let set_a = [0xAAAA_0000u32, 0x0000_5555u32];
         let set_b = [0xAAAA_5555u32, 0x0000_0000u32];
 
@@ -837,11 +864,13 @@ mod tests {
         // Aggregate for "users" should not include "orders" data.
         let users_hash = manager.aggregate_lww_root_hash("users");
         let orders_hash = manager.aggregate_lww_root_hash("orders");
-        let users_p1 = manager.with_lww_tree("users", 1, |tree| tree.get_root_hash());
+        // The flat tree of "users" alone, built without the manager.
+        let mut users_flat = MerkleTree::new(3);
+        users_flat.update("alice", 111);
         assert_eq!(
             users_hash,
-            combine_hashes(&[users_p1]),
-            "users aggregate should combine only its own partition"
+            users_flat.get_root_hash(),
+            "users aggregate should cover only its own map's keys"
         );
         assert_ne!(
             users_hash, orders_hash,
@@ -862,14 +891,17 @@ mod tests {
         manager.update_ormap("tags", 1, "tag-1", 111);
         manager.update_ormap("tags", 2, "tag-2", 222);
 
-        let hash_1 = manager.with_ormap_tree("tags", 1, |tree| tree.get_root_hash());
-        let hash_2 = manager.with_ormap_tree("tags", 2, |tree| tree.get_root_hash());
-        let expected = combine_hashes(&[hash_1, hash_2]);
+        // One flat tree holding the same keys with the same leaf hashes, built
+        // without the manager: the partitions must leave no trace in the root.
+        let mut flat = ORMapMerkleTree::new(3);
+        flat.update("tag-1", 111);
+        flat.update("tag-2", 222);
+        let expected = flat.get_root_hash();
 
         let aggregate = manager.aggregate_ormap_root_hash("tags");
         assert_eq!(
             aggregate, expected,
-            "OR-Map aggregate should equal combine_hashes of partition hashes"
+            "OR-Map aggregate should equal the root of one flat tree over all partitions' keys"
         );
     }
 
@@ -1003,6 +1035,151 @@ mod tests {
         assert_eq!(h1, 0, "partition (users, 0) should be cleared");
         assert_eq!(h2, 0, "partition (users, 1) should be cleared");
         assert_eq!(h3, 0, "partition (tags, 0) should be cleared");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Client comparability (TG-MRK-002): the fallback reports the flat trie
+    // ---------------------------------------------------------------------------
+
+    /// A client keeps ONE trie per map and kind, so what the in-memory fallback
+    /// reports is only comparable with the client's when it is the root and the
+    /// buckets of one flat trie over every partition's keys (TG-MRK-002). The
+    /// leaves are routed to the partition each key hashes to, as the write-path
+    /// observer routes them, so the trees the manager holds are the real
+    /// per-partition ones.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn aggregate_roots_and_buckets_equal_flat_trie_for_vectors() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        const MAP: &str = "flat-trie-vectors";
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct VectorFile {
+            flat_trie: Vec<FlatTrieCase>,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FlatTrieCase {
+            name: String,
+            kind: String,
+            leaves: Vec<FlatTrieLeaf>,
+            expected_root: u32,
+            expected_buckets: BTreeMap<String, BTreeMap<String, u32>>,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FlatTrieLeaf {
+            key: String,
+            leaf_hash: u32,
+            partition: u32,
+        }
+
+        /// Root and buckets compared as one value, so a single failure shows
+        /// both halves of the reported shape.
+        #[derive(Debug, PartialEq)]
+        struct FlatView {
+            root: u32,
+            buckets: BTreeMap<String, BTreeMap<String, u32>>,
+        }
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../core-rust/tests/fixtures/merkle_vectors.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let file: VectorFile = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("cannot parse {}: {e}", path.display()));
+
+        let kinds: BTreeSet<&str> = file.flat_trie.iter().map(|c| c.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            BTreeSet::from(["lww", "or"]),
+            "precondition: the vectors hold a flat-trie case for each kind"
+        );
+
+        for case in &file.flat_trie {
+            let is_lww = match case.kind.as_str() {
+                "lww" => true,
+                "or" => false,
+                other => panic!("{}: unknown kind {other:?}", case.name),
+            };
+
+            // A fresh manager per case: both cases share one map name, and a
+            // leftover tree of the other kind must not be able to leak in.
+            let manager = MerkleSyncManager::default();
+            let mut partitions = BTreeSet::new();
+            for leaf in &case.leaves {
+                let partition = hash_to_partition(&leaf.key);
+                assert_eq!(
+                    partition, leaf.partition,
+                    "{}: precondition: key {:?} hashes to the partition the vector records",
+                    case.name, leaf.key
+                );
+                partitions.insert(partition);
+                if is_lww {
+                    manager.update_lww(MAP, partition, &leaf.key, leaf.leaf_hash);
+                } else {
+                    manager.update_ormap(MAP, partition, &leaf.key, leaf.leaf_hash);
+                }
+            }
+
+            // A case whose keys share one partition, or whose root is 0, could
+            // not tell the flat shape from a per-partition fold.
+            assert!(
+                partitions.len() >= 2,
+                "{}: precondition: the keys span at least two partitions",
+                case.name
+            );
+            assert_ne!(
+                case.expected_root, 0,
+                "{}: precondition: the expected root is non-zero",
+                case.name
+            );
+            assert!(
+                case.expected_buckets.contains_key(""),
+                "{}: precondition: the expected buckets include the root level",
+                case.name
+            );
+
+            let reported = FlatView {
+                root: if is_lww {
+                    manager.aggregate_lww_root_hash(MAP)
+                } else {
+                    manager.aggregate_ormap_root_hash(MAP)
+                },
+                buckets: case
+                    .expected_buckets
+                    .keys()
+                    .map(|path| {
+                        let children = if is_lww {
+                            manager.aggregate_lww_buckets(MAP, path)
+                        } else {
+                            manager.aggregate_ormap_buckets(MAP, path)
+                        };
+                        (
+                            path.clone(),
+                            children
+                                .into_iter()
+                                .map(|(c, h)| (c.to_string(), h))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            };
+            let expected = FlatView {
+                root: case.expected_root,
+                buckets: case.expected_buckets.clone(),
+            };
+
+            assert_eq!(
+                reported, expected,
+                "{}: the fallback must report the flat trie's root and buckets",
+                case.name
+            );
+        }
     }
 }
 

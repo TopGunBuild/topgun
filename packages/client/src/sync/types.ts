@@ -1035,6 +1035,12 @@ export interface IORMapSyncHandler {
   ): Promise<void>;
 
   /**
+   * The connection was lost: responses still being handled belong to no walk
+   * of the next connection.
+   */
+  onConnectionLost(): void;
+
+  /**
    * Send ORMAP_SYNC_INIT message to server.
    * @param mapName - Map name to sync
    * @param lastSyncTimestamp - Last sync timestamp
