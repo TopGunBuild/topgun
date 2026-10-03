@@ -73,6 +73,12 @@ pub struct MerkleLeaf {
 /// OR-Map tree rather than contributing a leaf, so enumeration must likewise
 /// emit no leaf to keep a rebuilt root identical to the live one.
 ///
+/// Known gap (tracked by TODO-559): because a legacy `OrTombstones` slot has no
+/// leaf, the equal-roots guarantee of TG-MRK-002 does not extend to its tags —
+/// two sides can report equal roots while only one of them holds those tags.
+/// This is harmless today because such tags are never epoch-stamped, so no
+/// covering epoch is ever confirmed on their behalf.
+///
 /// Keeping this in one place is load-bearing: a Merkle root rebuilt from
 /// persistence must be byte-identical to the live root, so this formula must
 /// never drift between the observer and the storage backends. Callers that
@@ -511,11 +517,14 @@ pub trait MapDataStore: Send + Sync {
 /// trips are needed per call. This avoids re-enumeration when a sync peer
 /// drills down through multiple trie levels in one session.
 ///
-/// Holds two independent trie views (LWW and OR-Map) mirroring the dual-tree
-/// structure the write-path observer maintains in `MerkleSyncManager`. The
-/// `root()` method returns the cross-kind combined root so a single hash is
-/// sufficient for the `SYNC_INIT` comparison; `buckets()` and `leaf_keys()`
-/// merge both trees at the requested path.
+/// Holds two independent trie views, one per CRDT kind (LWW and OR-Map). Each
+/// is ONE flat trie over every key of that kind in the map — depth 3, addressed
+/// by the lowercase hex of `fnv1a(key)`, whichever partition the key routes to
+/// — which is the shape a client keeps, so the roots and buckets reported here
+/// are directly comparable with the client's (TG-MRK-002). The per-partition
+/// trees `MerkleSyncManager` maintains on the write path are not visible
+/// through a session. The `root()` method returns the cross-kind combined root;
+/// `buckets()` and `leaf_keys()` merge both tries at the requested path.
 ///
 /// Created by [`DurableMerkleIndex::build_session`]; the caller is responsible
 /// for deciding when to discard the snapshot (e.g. after the sync round-trip
@@ -524,9 +533,9 @@ pub trait MapDataStore: Send + Sync {
 /// # Consistency contract: pins structure, not values
 ///
 /// A session pins ONLY the trie STRUCTURE captured at build time:
-/// - the per-path aggregate bucket hashes (`lww_nodes` / `ormap_nodes`),
+/// - the per-path bucket hashes of each flat trie (`lww_nodes` / `ormap_nodes`),
 /// - the leaf-KEY membership (`leaf_keys_by_path`), and
-/// - the aggregate roots (`lww_root` / `ormap_root`).
+/// - the flat-trie roots (`lww_root` / `ormap_root`).
 ///
 /// It deliberately does NOT pin per-leaf record VALUES. During a sync drill-down
 /// the leaf-serving handlers fetch each record's bytes LIVE from the store
@@ -552,21 +561,31 @@ pub trait MapDataStore: Send + Sync {
 /// property of that protocol, NOT an invariant enforced by this struct — a peer
 /// that treated the bucket hash as authoritative state would not get it.
 ///
+/// Flat-shape corollary: because the trie has the client's shape, a pinned
+/// bucket can MATCH the peer's, and a match lets the peer skip that bucket's
+/// whole subtree. A key written after the build under a matching bucket is
+/// therefore not served this round either. Whoever conveys a covering epoch
+/// alongside a round served from this session must bound that epoch to what
+/// the snapshot can vouch for (TG-MRK-002): an epoch newer than the snapshot
+/// would claim delivery of a change the peer was just allowed to skip.
+///
 /// One bounded-staleness corollary: a key created AFTER the build is absent from
 /// the pinned `leaf_keys_by_path` and is not served this round; the peer learns
 /// it on the next `SYNC_INIT`, whose fresh snapshot includes it. That is delayed
 /// visibility, not divergence. Pinning per-leaf values here would buy nothing for
 /// correctness while inflating the snapshot to the full value set.
 pub struct MerkleSession {
-    /// Pre-computed per-path aggregate bucket hashes for the LWW tree.
+    /// Pre-computed per-path bucket hashes of the flat LWW trie.
     /// `""` maps to the root-level children; each child path maps to its own
-    /// children, following the same BFS expansion the write-path observer uses.
+    /// children, for every internal node of the trie. A child absent from a
+    /// map is absent from the trie: no entry carries a zero hash.
     pub(crate) lww_nodes: HashMap<String, HashMap<char, u32>>,
-    /// Pre-computed per-path aggregate bucket hashes for the OR-Map tree.
+    /// Pre-computed per-path bucket hashes of the flat OR-Map trie, with the
+    /// same layout as `lww_nodes`.
     pub(crate) ormap_nodes: HashMap<String, HashMap<char, u32>>,
-    /// Aggregate LWW root hash (mirrors `MerkleSyncManager::aggregate_lww_root_hash`).
+    /// Root of the flat LWW trie over every LWW key of the map.
     pub(crate) lww_root: u32,
-    /// Aggregate OR-Map root hash (mirrors `MerkleSyncManager::aggregate_ormap_root_hash`).
+    /// Root of the flat OR-Map trie over every OR-Map key of the map.
     pub(crate) ormap_root: u32,
     /// Leaf key membership by hex-path prefix (depth-length) for `leaf_keys` queries.
     /// Key: hex-path of length `tree_depth`; value: record keys hashing to that path.
@@ -574,11 +593,11 @@ pub struct MerkleSession {
 }
 
 impl MerkleSession {
-    /// Return the aggregate root hash for the map.
+    /// Return the cross-kind root hash for the map.
     ///
-    /// Combines the LWW and OR-Map aggregate roots with the same
-    /// `combine_hashes` function used across all partition aggregation sites,
-    /// producing a single hash byte-compatible with the live in-memory root.
+    /// Folds the flat LWW root and the flat OR-Map root with `combine_hashes`
+    /// into a single hash. Clients compare per kind, against `lww_root()` or
+    /// `ormap_root()`; this combined value is a server-side summary of both.
     #[must_use]
     pub fn root(&self) -> u32 {
         topgun_core::hash::combine_hashes(&[self.lww_root, self.ormap_root])
@@ -588,10 +607,11 @@ impl MerkleSession {
     /// `path`.
     ///
     /// `path` encodes the route from the root to this node as a sequence of
-    /// hex nibble characters, following the same convention as
-    /// `aggregate_lww_buckets` / `get_buckets` in `merkle_sync.rs` (e.g.
-    /// `""` = root level, `"a"` = bucket `'a'` under root, `"a3"` = sub-bucket
-    /// `'3'` under `'a'`). Returns a merged view of LWW + OR-Map children.
+    /// hex nibble characters, following the same convention as the core
+    /// `MerkleTree::get_buckets` (e.g. `""` = root level, `"a"` = bucket `'a'`
+    /// under root, `"a3"` = sub-bucket `'3'` under `'a'`). Returns a merged
+    /// view of the two flat tries' children: a hex digit present in both kinds
+    /// carries the `combine_hashes` fold of the two child hashes.
     /// Returns an empty map if the path does not exist in the snapshot.
     #[must_use]
     pub fn buckets(&self, path: &str) -> HashMap<char, u32> {
@@ -611,19 +631,19 @@ impl MerkleSession {
             .collect()
     }
 
-    /// Return the LWW aggregate root hash only.
+    /// Return the root of the flat LWW trie only.
     ///
-    /// Useful for tests that need to compare against
-    /// `MerkleSyncManager::aggregate_lww_root_hash` independently.
+    /// This is the value a client's LWW trie root is compared against
+    /// (TG-MRK-002).
     #[must_use]
     pub fn lww_root(&self) -> u32 {
         self.lww_root
     }
 
-    /// Return the OR-Map aggregate root hash only.
+    /// Return the root of the flat OR-Map trie only.
     ///
-    /// Useful for tests that need to compare against
-    /// `MerkleSyncManager::aggregate_ormap_root_hash` independently.
+    /// This is the value a client's OR-Map trie root is compared against
+    /// (TG-MRK-002).
     #[must_use]
     pub fn ormap_root(&self) -> u32 {
         self.ormap_root
