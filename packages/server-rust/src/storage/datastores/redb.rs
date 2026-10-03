@@ -1350,4 +1350,112 @@ mod tests {
             "post-fix accounting respects the budget ({post_fix_cost} <= {budget})"
         );
     }
+
+    /// A write the store refuses on every attempt must not disappear quietly:
+    /// once the write-behind layer gives up, the operator has to be able to see
+    /// WHICH write was dropped, and within a time short enough to act on.
+    ///
+    /// The store underneath is the real embedded one and the retry settings are
+    /// the defaults a server boots with, so the wait below is the wall-clock an
+    /// operator would actually sit through. A map name carrying the reserved
+    /// backup suffix is used because the store refuses it unconditionally.
+    ///
+    /// Current-thread runtime on purpose: the line is emitted by the spawned
+    /// flush task, and a thread-local subscriber only reaches that task when it
+    /// runs on this test's own thread.
+    #[tokio::test]
+    async fn a_store_rejected_write_is_reported_within_a_bounded_time() {
+        use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+        const REFUSED_MAP: &str = "probe__backup";
+        const KEY: &str = "k1";
+        const BOUND: Duration = Duration::from_secs(15);
+
+        #[derive(Clone)]
+        struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for CapturedLog {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let writer = CapturedLog(Arc::clone(&captured));
+        // Scoped, never a global install: this test binary is shared and runs in
+        // parallel, so a global subscriber would leak into every other test.
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let (redb, _dir) = fresh_store();
+        let redb = Arc::new(redb);
+        let value = dummy_value("v");
+        #[allow(clippy::cast_possible_truncation)]
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis() as i64;
+
+        // The premise: the store itself refuses this name outright.
+        let direct = redb
+            .add(REFUSED_MAP, KEY, &value, 0, now)
+            .await
+            .expect_err("the embedded store refuses the reserved suffix");
+        assert!(direct.to_string().contains("Invalid map name"), "{direct}");
+
+        let inner: Arc<dyn MapDataStore> = redb;
+        let store = WriteBehindDataStore::new(inner, WriteBehindConfig::default());
+
+        // The write is accepted: the buffering layer does not look at the name.
+        store
+            .add(REFUSED_MAP, KEY, &value, 0, now)
+            .await
+            .expect("write-behind accepts the write");
+        let accepted_at = Instant::now();
+
+        let snapshot = |buf: &Arc<Mutex<Vec<u8>>>| {
+            String::from_utf8_lossy(
+                &buf.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+            .into_owned()
+        };
+        let names_the_write = |line: &str| {
+            (line.contains(" WARN ") || line.contains("ERROR"))
+                && line.contains(REFUSED_MAP)
+                && line.contains(KEY)
+        };
+
+        // Measured from acceptance, which is earlier than the first refused store
+        // call, so passing here is the stricter claim.
+        let mut reported_after = None;
+        while accepted_at.elapsed() < BOUND {
+            if snapshot(&captured).lines().any(names_the_write) {
+                reported_after = Some(accepted_at.elapsed());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        let log = snapshot(&captured);
+        eprintln!(
+            "--- captured log ({} lines, reported_after={reported_after:?}, waited={:?}) ---\n{log}--- end of captured log ---",
+            log.lines().count(),
+            accepted_at.elapsed(),
+        );
+        assert!(
+            reported_after.is_some(),
+            "no WARN-or-higher event naming map {REFUSED_MAP:?} and key {KEY:?} within {BOUND:?} of the write being accepted"
+        );
+    }
 }
