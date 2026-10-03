@@ -35,6 +35,8 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
     const { mapName, rootHash, coveringEpoch, fullResync, timestamp } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
+      // Read before the first await, as the bucket and leaf handlers do.
+      const generationAtEntry = this.walkFor(mapName).generation;
       if (fullResync) {
         // Authoritative REPLACE resync: the server has FORGOTTEN or found this
         // client REGRESSED, so an incremental delta could re-admit a record whose
@@ -45,10 +47,8 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         // covering epoch is deliberately NOT confirmed here — it is confirmed only
         // after the snapshot leaves are durably applied, which is what re-enables
         // this client's ACKs server-side (delivered_conn set on resync completion).
-        // Read before the first await, as the bucket and leaf handlers do.
-        const generationAtEntry = this.walkFor(mapName).generation;
         await this.config.onFullResync(mapName, timestamp);
-        if (this.walkFor(mapName).generation !== generationAtEntry) {
+        if (this.outlivedItsConnection(mapName, generationAtEntry)) {
           // The connection this root arrived on was replaced while the local
           // state was being discarded. A request sent now would reach the next
           // connection outside the walk its own root opens, and its answer
@@ -87,6 +87,14 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
           changedKeys,
         );
         await this.persistAttributionIfChanged(mapName, changedKeys);
+        if (this.outlivedItsConnection(mapName, generationAtEntry)) {
+          // Neither branch below may run for a connection that is gone: the
+          // request of a mismatch would reach the next connection outside the
+          // walk its own root opens, and a confirm would be acknowledged there
+          // for a root that connection never served (TG-MRK-002).
+          logger.info({ mapName }, 'ORMap zero root outlived its connection; not comparing');
+          return;
+        }
       }
       const localRootHash = localTree.getRootHash();
 
@@ -184,6 +192,16 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
     return { generation: walk.generation, counted };
   }
 
+  /**
+   * Whether the connection an invocation arrived on has been replaced since it
+   * read `generation` at entry. Past this point the invocation must not send,
+   * count or confirm: whatever it sends would go out on the next connection,
+   * outside the walk that connection opens.
+   */
+  private outlivedItsConnection(mapName: string, generation: number): boolean {
+    return this.walkFor(mapName).generation !== generation;
+  }
+
   /** The walk an invocation may still account to, or nothing if it is stale or uncounted. */
   private walkOfEntry(mapName: string, entry: WalkEntry): WalkState | undefined {
     const walk = this.walkFor(mapName);
@@ -258,7 +276,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
     const entry = this.enterWalk(payload.mapName);
     let threw = false;
     try {
-      await this.applyBucketsResponse(payload);
+      await this.applyBucketsResponse(payload, entry);
     } catch (error) {
       threw = true;
       throw error;
@@ -267,11 +285,14 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
     }
   }
 
-  private async applyBucketsResponse(payload: {
-    mapName: string;
-    path: string;
-    buckets: Record<string, number>;
-  }): Promise<void> {
+  private async applyBucketsResponse(
+    payload: {
+      mapName: string;
+      path: string;
+      buckets: Record<string, number>;
+    },
+    entry: WalkEntry,
+  ): Promise<void> {
     const { mapName, path, buckets } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
@@ -324,6 +345,9 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       await this.persistAttributionIfChanged(mapName, changedKeys);
 
       for (const newPath of localOnlyPaths) {
+        // Checked per push: each one awaits, and the next walk repeats any
+        // push a lost connection made this response skip.
+        if (this.outlivedItsConnection(mapName, entry.generation)) return;
         // Local has data that remote doesn't - need to push
         const keys = tree.getKeysInBucket(newPath);
         if (keys.length > 0) {
@@ -422,6 +446,9 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       // Now push any local records that server might not have. A healed key is
       // one of the response's keys, so it goes out in this same single push,
       // once, whether or not it holds a live record.
+      // Not on a connection that replaced the one this leaf arrived on: the
+      // next walk finds the same difference and pushes it in its own turn.
+      if (this.outlivedItsConnection(mapName, entry.generation)) return;
       const keysToCheck = Array.from(listed);
       await this.pushORMapDiff(mapName, keysToCheck, map, healedKeys);
     }
@@ -440,6 +467,8 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
     const { mapName, coveringEpoch, entries } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
+      // Read before the first await, as the bucket and leaf handlers do.
+      const generationAtEntry = this.walkFor(mapName).generation;
       let totalAdded = 0;
       let totalUpdated = 0;
       const changedKeys: string[] = [];
@@ -467,6 +496,11 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
           'Merged ORMap diff from server',
         );
       }
+
+      // The entries are applied, but an epoch conveyed on a connection that is
+      // gone is not acknowledged on the one that replaced it, and nothing is
+      // pushed there on this response's behalf.
+      if (this.outlivedItsConnection(mapName, generationAtEntry)) return;
 
       // The diff entries (including tombstone tags) are now durably applied —
       // confirm the covering epoch so the server's cursor advances.
