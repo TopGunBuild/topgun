@@ -225,6 +225,9 @@ impl SyncSessionRegistry {
     /// The epoch the current OR sync round of `(map_name, conn_id)` was fixed
     /// at. The outer `None` means no round was opened on this connection; the
     /// inner `None` means a round was opened and its root conveyed no epoch.
+    // The two levels carry different facts (no round vs. a round fixed at no
+    // epoch) and the caller must tell them apart, so they are not flattened.
+    #[allow(clippy::option_option)]
     fn round_epoch(&self, map_name: &str, conn_id: ConnectionId) -> Option<Option<u64>> {
         self.round_epochs
             .get(&(map_name.to_string(), conn_id))
@@ -575,9 +578,9 @@ impl SyncService {
                         return Ok(Some(cached));
                     }
                 }
-                let built = build()?;
-                self.session_registry.insert(map_name, cid, built.clone());
-                Ok(Some(built))
+                let fresh = build()?;
+                self.session_registry.insert(map_name, cid, fresh.clone());
+                Ok(Some(fresh))
             }
             // Internal/forwarded ops carry no connection identity. Build fresh and
             // return WITHOUT caching: collapsing all None callers onto one shared
