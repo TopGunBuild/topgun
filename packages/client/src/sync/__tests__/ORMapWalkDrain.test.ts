@@ -456,4 +456,45 @@ describe('ORMapSyncHandler confirms a covering epoch only for a drained walk', (
     await handler.handleORMapSyncRespLeaf(staged.leafFrameAt('', [K, J], 3));
     expect(onCoveringEpochApplied.mock.calls).toEqual([[MAP_NAME, 3]]);
   });
+
+  it('a zero root still clearing stale attribution when the connection is lost opens no walk on the next connection', async () => {
+    const staged = stageClientBehindServer({ localOnlyKey: true });
+    const { map, handler, persistKeyTombstones, onCoveringEpochApplied, requestedPaths, tK } =
+      staged;
+
+    // The root of the first connection says the server holds nothing. The
+    // attribution this client mirrors for L is cleared, and its persist parks.
+    const parked = deferred();
+    persistKeyTombstones.mockImplementationOnce(() => parked.promise);
+    const rootOfTheLostConnection = handler.handleORMapSyncRespRoot({
+      mapName: MAP_NAME,
+      rootHash: 0,
+      coveringEpoch: 2,
+    });
+    expect(persistKeyTombstones.mock.calls).toEqual([[MAP_NAME, [L]]]);
+
+    // The connection drops and the persist finishes afterwards. K is still
+    // held locally, so the roots differ; a request sent now would go out on the
+    // next connection ahead of its sync init, and its answer would be taken
+    // for an answer of the walk that init opens.
+    handler.onConnectionLost();
+    parked.resolve();
+    await rootOfTheLostConnection;
+    expect(requestedPaths()).toEqual([]);
+    expect(onCoveringEpochApplied).not.toHaveBeenCalled();
+
+    // The next connection's own root opens the only walk. It confirms once,
+    // after the leaf that carries K's tombstone, and not while K is still live.
+    handler.sendSyncInit(MAP_NAME, 0);
+    await handler.handleORMapSyncRespRoot(staged.rootFrame(3));
+    expect(requestedPaths()).toEqual(['']);
+    await handler.handleORMapSyncRespBuckets(staged.bucketsFrame());
+    await handler.handleORMapSyncRespLeaf(staged.leafFrame(J, 3));
+    expect(map.get(K)).toEqual(['k-value']);
+    expect(onCoveringEpochApplied).not.toHaveBeenCalled();
+
+    await handler.handleORMapSyncRespLeaf(staged.leafFrame(K, 3));
+    expect(onCoveringEpochApplied.mock.calls).toEqual([[MAP_NAME, 3]]);
+    expect(map.isTombstoned(tK)).toBe(true);
+  });
 });
