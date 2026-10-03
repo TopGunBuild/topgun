@@ -228,11 +228,12 @@ impl PostgresDataStore {
 ///
 /// Postgres stores `is_backup` as a key column (not in the name), so it does
 /// not itself collide on a map named `foo__backup` the way the redb backend's
-/// name-encoded tables do. This guard exists for **cross-backend parity**: the
-/// accepted map-name set must be identical regardless of `STORAGE_BACKEND`, so
-/// a name that redb must reject (to avoid silently dropping a durable map from
-/// its Merkle-index rebuild) is rejected here too. Mirrors the `__backup`
-/// reservation in the redb `is_valid_map_name` check.
+/// name-encoded tables do (TG-NAME-001). The suffix is reserved all the same:
+/// client operations carrying such a name are refused at ingress, before the
+/// write is acknowledged (TG-NAME-002), and this guard remains as the store's
+/// own check for the writes that do not pass through that ingress check. It
+/// covers the reserved suffix only; the two backends' own checks are not
+/// otherwise the same.
 fn reject_reserved_map_name(map: &str) -> anyhow::Result<()> {
     if map.ends_with("__backup") {
         bail!("Invalid map name '{map}': the '__backup' suffix is reserved");
@@ -777,10 +778,10 @@ mod tests {
 
     #[test]
     fn reject_reserved_map_name_enforces_backup_suffix_parity() {
-        // Cross-backend parity with redb: the `__backup` suffix is reserved so
-        // the accepted map-name set is identical regardless of backend, even
-        // though postgres stores `is_backup` as a column and would not itself
-        // collide.
+        // The `__backup` suffix is reserved on every backend (refused for
+        // client operations at ingress, TG-NAME-002), and this guard is the
+        // store's own check for it, even though postgres stores `is_backup`
+        // as a column and would not itself collide.
         assert!(reject_reserved_map_name("foo__backup").is_err());
         assert!(reject_reserved_map_name("__backup").is_err());
         assert!(reject_reserved_map_name("users").is_ok());
