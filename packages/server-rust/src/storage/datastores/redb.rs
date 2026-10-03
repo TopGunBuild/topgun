@@ -1458,4 +1458,158 @@ mod tests {
             "no WARN-or-higher event naming map {REFUSED_MAP:?} and key {KEY:?} within {BOUND:?} of the write being accepted"
         );
     }
+
+    /// Names the identifier-class rule turns away, chosen to cover each way a
+    /// raw name can go wrong as a table name: separators, whitespace, a leading
+    /// digit, text that looks like one of the store's own prefixes or its backup
+    /// suffix, non-ASCII, and the two longest names an ingress bound of 512
+    /// bytes admits (one ASCII, one multi-byte).
+    fn probe_names() -> Vec<String> {
+        let mut names: Vec<String> = [
+            "user-profiles",
+            "users/profiles",
+            "users.profiles",
+            "$sys/stats",
+            "foo bar",
+            " ",
+            "notes:abc",
+            "123leading",
+            "foo;DROP",
+            "foo--backup",
+            "map__a-b",
+            "mapr__a-b",
+            "maprb__a-b",
+            "a-b__backup_data",
+            "заметки-ユーザー-📝",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let long_ascii = format!("-{}", "a".repeat(511));
+        let long_multibyte = "é".repeat(256);
+        assert_eq!(long_ascii.len(), 512);
+        assert_eq!(long_multibyte.len(), 512);
+        names.push(long_ascii);
+        names.push(long_multibyte);
+        names
+    }
+
+    /// Short, log-friendly rendering of a probe name: the 512-byte ones would
+    /// otherwise drown the per-name report.
+    fn shown(name: &str) -> String {
+        if name.len() > 40 {
+            let head: String = name.chars().take(8).collect();
+            format!("{head:?}… ({} bytes)", name.len())
+        } else {
+            format!("{name:?}")
+        }
+    }
+
+    /// One table, through redb alone: a row goes in, the transaction commits,
+    /// the row reads back, and the catalog lists the table under the very bytes
+    /// it was created with, exactly once.
+    fn raw_table_round_trips(db: &redb::Database, table: &str) -> Result<(), String> {
+        const KEY: &str = "k";
+        let payload = table.as_bytes();
+
+        let txn = db.begin_write().map_err(|e| format!("begin_write: {e}"))?;
+        {
+            let mut t = txn
+                .open_table(table_def(table))
+                .map_err(|e| format!("open_table for write: {e}"))?;
+            t.insert(KEY, payload).map_err(|e| format!("insert: {e}"))?;
+        }
+        txn.commit().map_err(|e| format!("commit: {e}"))?;
+
+        let txn = db.begin_read().map_err(|e| format!("begin_read: {e}"))?;
+        let t = txn
+            .open_table(table_def(table))
+            .map_err(|e| format!("open_table for read: {e}"))?;
+        let got = t
+            .get(KEY)
+            .map_err(|e| format!("get: {e}"))?
+            .map(|guard| guard.value().to_vec());
+        if got.as_deref() != Some(payload) {
+            return Err("the row did not read back as written".to_string());
+        }
+        let listed = txn
+            .list_tables()
+            .map_err(|e| format!("list_tables: {e}"))?
+            .filter(|handle| handle.name().as_bytes() == table.as_bytes())
+            .count();
+        if listed != 1 {
+            return Err(format!(
+                "the catalog lists the table {listed} times, expected exactly once"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The premise the raw-name table mapping stands on, checked against redb
+    /// itself and not through the store: a table may be named with a fixed
+    /// prefix followed by ANY of the probe names, verbatim, and the catalog
+    /// hands that name back unchanged. If redb normalised, truncated or refused
+    /// any of them, deriving the map set from the catalog would be unsound and
+    /// the names would have to be encoded instead.
+    ///
+    /// Every name is tried and reported before the verdict, so a failure names
+    /// the whole failing set and not just its first member.
+    #[test]
+    fn redb_accepts_the_probe_names_under_both_new_prefixes() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("premise.redb");
+        let names = probe_names();
+        let mut failing: Vec<String> = Vec::new();
+
+        {
+            let db = redb::Database::create(&path).expect("redb create");
+            for name in &names {
+                let mut verdict = Ok(());
+                for prefix in ["mapr__", "maprb__"] {
+                    let table = format!("{prefix}{name}");
+                    if let Err(why) = raw_table_round_trips(&db, &table) {
+                        verdict = Err(format!("under {prefix:?}: {why}"));
+                        break;
+                    }
+                }
+                match verdict {
+                    Ok(()) => eprintln!("probe {}: accepted, round-tripped", shown(name)),
+                    Err(why) => {
+                        eprintln!("probe {}: FAILED — {why}", shown(name));
+                        failing.push(shown(name));
+                    }
+                }
+            }
+        }
+
+        // A catalog that only agrees with itself inside one process would not
+        // help a restarted server, so the names are read again from the file.
+        let db = redb::Database::create(&path).expect("redb reopen");
+        let txn = db.begin_read().expect("begin_read");
+        let mut on_disk: Vec<String> = txn
+            .list_tables()
+            .expect("list_tables")
+            .map(|handle| handle.name().to_string())
+            .collect();
+        on_disk.sort();
+        let mut expected: Vec<String> = names
+            .iter()
+            .flat_map(|n| [format!("mapr__{n}"), format!("maprb__{n}")])
+            .collect();
+        expected.sort();
+        eprintln!(
+            "after reopen: {} tables in the catalog, {} expected, failing set = {failing:?}",
+            on_disk.len(),
+            expected.len()
+        );
+
+        assert!(
+            failing.is_empty(),
+            "redb did not hold these probe names verbatim: {failing:?}"
+        );
+        assert_eq!(
+            on_disk, expected,
+            "the reopened catalog must list every probe table byte-identically"
+        );
+    }
 }
