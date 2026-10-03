@@ -13,6 +13,8 @@ import { logger } from '../utils/logger';
 export class ORMapSyncHandler implements IORMapSyncHandler {
   private readonly config: ORMapSyncHandlerConfig;
   private lastSyncTimestamp: number = 0;
+  /** The Merkle walk in progress per map name; see {@link WalkState}. */
+  private readonly walks = new Map<string, WalkState>();
 
   constructor(config: ORMapSyncHandlerConfig) {
     this.config = config;
@@ -48,6 +50,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
           { mapName },
           'ORMap full-resync REPLACE: discarded local state, pulling snapshot',
         );
+        this.openWalk(mapName, coveringEpoch);
         this.config.sendMessage({
           type: 'ORMAP_MERKLE_REQ_BUCKET',
           payload: { mapName, path: '' },
@@ -80,19 +83,24 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
           { mapName, localRootHash, remoteRootHash: rootHash },
           'ORMap root hash mismatch, requesting buckets',
         );
+        this.openWalk(mapName, coveringEpoch);
         this.config.sendMessage({
           type: 'ORMAP_MERKLE_REQ_BUCKET',
           payload: { mapName, path: '' },
         });
         // Empty-diff liveness does NOT apply here: the roots differ, so the
         // client does not yet hold the covering-epoch tombstone set. It ACKs the
-        // covering epoch only AFTER applying the leaves/diff that follow.
+        // covering epoch only once the walk this request opens has drained.
       } else {
         logger.info({ mapName }, 'ORMap is in sync');
-        // Empty diff: the roots match, so the client demonstrably already holds
-        // the full tombstone set up to the covering epoch (the OR-Map leaf hash
-        // covers the tombstone tags). Confirm it now so an up-to-date client
-        // still advances its cursor instead of pinning the server low-water-mark.
+        // Empty diff: the roots match, and a root is a function of every key's
+        // records and attributed tombstones, so this client holds the state the
+        // server's walk snapshot holds. The epoch a response conveys never
+        // postdates the snapshot its round's walk descends by, so every
+        // tombstone stamped at or below it is in that state, and confirming it
+        // cannot let the server prune one this client lacks (TG-MRK-002).
+        // Confirm it now so an up-to-date client still advances its cursor
+        // instead of pinning the server low-water-mark.
         this.confirmCoveringEpoch(mapName, coveringEpoch);
       }
     }
@@ -116,12 +124,124 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
     }
   }
 
+  private walkFor(mapName: string): WalkState {
+    let walk = this.walks.get(mapName);
+    if (!walk) {
+      walk = newWalkState(0);
+      this.walks.set(mapName, walk);
+    }
+    return walk;
+  }
+
+  /**
+   * Capture, synchronously at handler entry, which walk a bucket or leaf
+   * response belongs to.
+   *
+   * The transport does not await handlers and one handler serves every
+   * connection, so a response parked on storage can outlive the connection it
+   * arrived on and finish inside the walk of the next one. The generation read
+   * here, before the invocation first yields, is the only thing that still
+   * tells the two apart at that point.
+   *
+   * A response that arrives while nothing is outstanding answers no request of
+   * the current walk (a late frame of a walk a new sync init has replaced, or
+   * one after the walk already drained). What it carries cannot be placed in
+   * the walk's accounting, so the generation is voided: nothing is confirmed
+   * for the map until the next sync init.
+   */
+  private enterWalk(mapName: string): WalkEntry {
+    const walk = this.walkFor(mapName);
+    const counted = walk.outstanding > 0;
+    if (!counted) {
+      walk.voided = true;
+    }
+    return { generation: walk.generation, counted };
+  }
+
+  /** The walk an invocation may still account to, or nothing if it is stale or uncounted. */
+  private walkOfEntry(mapName: string, entry: WalkEntry): WalkState | undefined {
+    const walk = this.walkFor(mapName);
+    // An invocation that entered under an earlier generation is applied as
+    // data only: its epoch and its completion belong to a walk that no longer
+    // exists, and must neither lower nor shorten the current one.
+    if (walk.generation !== entry.generation) return undefined;
+    return entry.counted ? walk : undefined;
+  }
+
+  /** One more ORMAP_MERKLE_REQ_BUCKET of the map's walk is out. */
+  private countRequest(mapName: string): void {
+    this.walkFor(mapName).outstanding += 1;
+  }
+
+  /**
+   * Count the request that opens a walk and bound the walk by the epoch its
+   * root conveyed. A root without a usable epoch voids the walk: there is then
+   * no bound under which its leaves could be confirmed.
+   */
+  private openWalk(mapName: string, rootEpoch?: number): void {
+    const walk = this.walkFor(mapName);
+    walk.outstanding += 1;
+    foldEpoch(walk, rootEpoch);
+  }
+
+  private foldLeafEpoch(mapName: string, entry: WalkEntry, coveringEpoch?: number): void {
+    const walk = this.walkOfEntry(mapName, entry);
+    if (!walk) return;
+    foldEpoch(walk, coveringEpoch);
+    walk.foldedLeaf = true;
+  }
+
+  /**
+   * The end of a bucket or leaf invocation: its merges and persists are done
+   * and every request it sent has been counted, so its own request is no
+   * longer outstanding.
+   */
+  private leaveWalk(mapName: string, entry: WalkEntry, threw: boolean): void {
+    const walk = this.walkOfEntry(mapName, entry);
+    if (!walk) return;
+    if (threw) {
+      // Part of this response may not have reached disk, so the walk can never
+      // claim to hold everything up to its epoch.
+      walk.failed = true;
+    }
+    walk.outstanding -= 1;
+
+    // Confirm only a drained walk. An epoch acknowledged while part of the
+    // walk is still outstanding moves this client's cursor on the server, which
+    // may then prune a tombstone this client has not applied yet; the value
+    // that tombstone removed would come back on this client's next push
+    // (TG-MRK-002).
+    if (walk.outstanding !== 0 || walk.failed || walk.voided || !walk.foldedLeaf) return;
+    const confirmed = walk.minEpoch;
+    walk.minEpoch = undefined;
+    walk.foldedLeaf = false;
+    this.confirmCoveringEpoch(mapName, confirmed);
+  }
+
   /**
    * Handle ORMAP_SYNC_RESP_BUCKETS message from server.
    * Compares bucket hashes and requests mismatched buckets.
    * Also pushes local data that server doesn't have.
    */
   public async handleORMapSyncRespBuckets(payload: {
+    mapName: string;
+    path: string;
+    buckets: Record<string, number>;
+  }): Promise<void> {
+    // Read before the first await: see `enterWalk`.
+    const entry = this.enterWalk(payload.mapName);
+    let threw = false;
+    try {
+      await this.applyBucketsResponse(payload);
+    } catch (error) {
+      threw = true;
+      throw error;
+    } finally {
+      this.leaveWalk(payload.mapName, entry, threw);
+    }
+  }
+
+  private async applyBucketsResponse(payload: {
     mapName: string;
     path: string;
     buckets: Record<string, number>;
@@ -146,6 +266,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         const localHash = localBuckets[bucketKey] || 0;
         if (localHash !== remoteHash) {
           const newPath = path + bucketKey;
+          this.countRequest(mapName);
           this.config.sendMessage({
             type: 'ORMAP_MERKLE_REQ_BUCKET',
             payload: { mapName, path: newPath },
@@ -197,6 +318,29 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- records in the leaf entries are raw ORMapRecord objects decoded from msgpack; value type is erased at the sync protocol layer
     entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
   }): Promise<void> {
+    // Read before the first await: see `enterWalk`.
+    const entry = this.enterWalk(payload.mapName);
+    let threw = false;
+    try {
+      await this.applyLeafResponse(payload, entry);
+    } catch (error) {
+      threw = true;
+      throw error;
+    } finally {
+      this.leaveWalk(payload.mapName, entry, threw);
+    }
+  }
+
+  private async applyLeafResponse(
+    payload: {
+      mapName: string;
+      path?: string;
+      coveringEpoch?: number;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- records in the leaf entries are raw ORMapRecord objects decoded from msgpack; value type is erased at the sync protocol layer
+      entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
+    },
+    entry: WalkEntry,
+  ): Promise<void> {
     const { mapName, path, coveringEpoch, entries } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
@@ -245,8 +389,9 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       }
 
       // The leaf entries (including their tombstone tags) are now durably
-      // applied — confirm the covering epoch so the server's cursor advances.
-      this.confirmCoveringEpoch(mapName, coveringEpoch);
+      // applied. Their epoch is not confirmed here: it only lowers the walk's
+      // bound, and the walk confirms once, when its last response has ended.
+      this.foldLeafEpoch(mapName, entry, coveringEpoch);
 
       // Now push any local records that server might not have. A healed key is
       // one of the response's keys, so it goes out in this same single push,
@@ -484,6 +629,9 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    */
   public sendSyncInit(mapName: string, lastSyncTimestamp: number): void {
     this.lastSyncTimestamp = lastSyncTimestamp;
+    // A sync init starts a new walk: nothing of an earlier connection or round
+    // survives it, and a response still being handled from before it is stale.
+    this.walks.set(mapName, newWalkState((this.walks.get(mapName)?.generation ?? 0) + 1));
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
       logger.info({ mapName }, 'Starting Merkle sync for ORMap');
@@ -536,6 +684,50 @@ function localKeysUnder(tree: ORMapMerkleTree, path: string): string[] {
     }
   }
   return keys;
+}
+
+/**
+ * One map's Merkle walk: the requests sent since the last sync init and the
+ * lowest covering epoch their responses (the opening root included) conveyed.
+ */
+interface WalkState {
+  /** Raised by every sync init; tells a response of an earlier walk from one of this walk. */
+  generation: number;
+  /** ORMAP_MERKLE_REQ_BUCKET requests sent whose response has not finished being handled. */
+  outstanding: number;
+  minEpoch: number | undefined;
+  /** Whether a leaf has contributed: a walk that applied no leaf has nothing to confirm. */
+  foldedLeaf: boolean;
+  /** A response of the walk threw while being handled. */
+  failed: boolean;
+  /** A response conveyed no usable epoch, or arrived answering no outstanding request. */
+  voided: boolean;
+}
+
+/** What a bucket or leaf invocation read about its map's walk before first yielding. */
+interface WalkEntry {
+  generation: number;
+  /** False when nothing was outstanding at entry: the invocation is not part of the count. */
+  counted: boolean;
+}
+
+function newWalkState(generation: number): WalkState {
+  return {
+    generation,
+    outstanding: 0,
+    minEpoch: undefined,
+    foldedLeaf: false,
+    failed: false,
+    voided: false,
+  };
+}
+
+function foldEpoch(walk: WalkState, epoch: number | undefined): void {
+  if (typeof epoch === 'number' && Number.isFinite(epoch) && epoch > 0) {
+    walk.minEpoch = walk.minEpoch === undefined ? epoch : Math.min(walk.minEpoch, epoch);
+  } else {
+    walk.voided = true;
+  }
 }
 
 /** The un-acknowledged local remove tags of one key, for one handler invocation. */
