@@ -7,6 +7,7 @@ use topgun_core::messages;
 use topgun_core::Timestamp;
 
 use crate::network::connection::ConnectionId;
+use crate::storage::map_data_store::MapNameViolation;
 
 // ---------------------------------------------------------------------------
 // OperationPipeline type alias
@@ -574,7 +575,22 @@ pub enum OperationError {
         map_name: String,
         errors: Vec<String>,
     },
+    /// The operation names a map the server does not admit (TG-NAME-002).
+    ///
+    /// The name is formatted with `Debug` inside the message itself, so control
+    /// characters, line breaks and U+0000 arrive escaped in every frame and log
+    /// line no matter how a call site prints the error. Build it with
+    /// [`OperationError::invalid_map_name`], which bounds the stored name.
+    #[error("invalid map name {map_name:?}: {violation}")]
+    InvalidMapName {
+        map_name: String,
+        violation: MapNameViolation,
+    },
 }
+
+/// How many bytes of a refused map name an [`OperationError::InvalidMapName`]
+/// keeps.
+const INVALID_MAP_NAME_ECHO_BYTES: usize = 128;
 
 // ---------------------------------------------------------------------------
 // ErrorDisposition
@@ -603,7 +619,7 @@ pub enum ErrorDisposition {
 /// incremented is invisible to a scrape, which is indistinguishable from
 /// "nothing was refused"). Kept beside `error_kind()` so the two cannot drift
 /// without the drift being visible in one screen.
-pub(crate) const ALL_ERROR_KINDS: [&str; 9] = [
+pub(crate) const ALL_ERROR_KINDS: [&str; 10] = [
     "unknown_service",
     "timeout",
     "overloaded",
@@ -613,9 +629,28 @@ pub(crate) const ALL_ERROR_KINDS: [&str; 9] = [
     "forbidden",
     "value_too_large",
     "schema_invalid",
+    "invalid_map_name",
 ];
 
 impl OperationError {
+    /// Builds the refusal for a map name the server does not admit.
+    ///
+    /// Only the first 128 bytes of the name are kept (cut back to a `char`
+    /// boundary): the refused name can be arbitrarily large — being too long is
+    /// one of the reasons to refuse it — and it must never be echoed whole into
+    /// a frame or a log line.
+    #[must_use]
+    pub fn invalid_map_name(map_name: &str, violation: MapNameViolation) -> Self {
+        let mut end = map_name.len().min(INVALID_MAP_NAME_ECHO_BYTES);
+        while !map_name.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self::InvalidMapName {
+            map_name: map_name[..end].to_string(),
+            violation,
+        }
+    }
+
     /// Classifies whether retrying the identical operation can ever succeed.
     ///
     /// Exhaustive with no `_` arm on purpose: a new `OperationError` variant must
@@ -631,10 +666,17 @@ impl OperationError {
     #[must_use]
     pub fn disposition(&self) -> ErrorDisposition {
         match self {
-            Self::Forbidden { .. } | Self::ValueTooLarge { .. } | Self::SchemaInvalid { .. } => {
-                ErrorDisposition::Permanent
-            }
-            Self::UnknownService { .. } | Self::WrongService => ErrorDisposition::Permanent,
+            // Two groups, one answer. The admission refusals reject something
+            // the operation itself carries — a map name is part of the operation,
+            // so the identical operation is refused again however often it is
+            // sent. The misrouting pair names a service this server does not
+            // have, which no retry changes either.
+            Self::Forbidden { .. }
+            | Self::ValueTooLarge { .. }
+            | Self::SchemaInvalid { .. }
+            | Self::InvalidMapName { .. }
+            | Self::UnknownService { .. }
+            | Self::WrongService => ErrorDisposition::Permanent,
             Self::Unauthorized | Self::Overloaded | Self::Timeout { .. } | Self::Internal(_) => {
                 ErrorDisposition::Transient
             }
@@ -649,6 +691,7 @@ impl OperationError {
     #[must_use]
     pub fn wire_code(&self) -> u32 {
         match self {
+            Self::InvalidMapName { .. } => 400,
             Self::Unauthorized => 401,
             Self::Forbidden { .. } => 403,
             Self::ValueTooLarge { .. } => 413,
@@ -663,7 +706,7 @@ impl OperationError {
     /// The stable, low-cardinality label used for metrics and for the client's
     /// closed set of refusal causes.
     ///
-    /// These nine strings are one vocabulary shared with the operation-error
+    /// These ten strings are one vocabulary shared with the operation-error
     /// metric emitted by the pipeline middleware; the strings are byte-identical
     /// on both sides and [`ALL_ERROR_KINDS`] is their enumerable form. Never
     /// derive a label from `format!("{e}")` — variant messages interpolate
@@ -682,6 +725,7 @@ impl OperationError {
             Self::Forbidden { .. } => "forbidden",
             Self::ValueTooLarge { .. } => "value_too_large",
             Self::SchemaInvalid { .. } => "schema_invalid",
+            Self::InvalidMapName { .. } => "invalid_map_name",
         }
     }
 }
@@ -862,6 +906,7 @@ mod tests {
                 map_name: "m".to_string(),
                 errors: vec!["bad".to_string()],
             },
+            OperationError::invalid_map_name("", MapNameViolation::Empty),
         ];
         // Exhaustiveness guard: a new variant breaks this match, which is what
         // forces the list above to be extended too.
@@ -875,14 +920,15 @@ mod tests {
                 | OperationError::Unauthorized
                 | OperationError::Forbidden { .. }
                 | OperationError::ValueTooLarge { .. }
-                | OperationError::SchemaInvalid { .. } => {}
+                | OperationError::SchemaInvalid { .. }
+                | OperationError::InvalidMapName { .. } => {}
             }
         }
         all
     }
 
     /// The label vocabulary is one vocabulary, not two that can drift: the same
-    /// nine strings are emitted by the pipeline middleware's own exhaustive
+    /// ten strings are emitted by the pipeline middleware's own exhaustive
     /// match, and `ALL_ERROR_KINDS` is their enumerable form.
     #[test]
     fn error_kind_matches_metrics_middleware_vocabulary() {
@@ -891,7 +937,10 @@ mod tests {
             .map(OperationError::error_kind)
             .collect();
         from_fn.sort_unstable();
-        assert_eq!(from_fn.len(), 9, "one label per variant, no duplicates");
+        assert_eq!(from_fn.len(), 10, "one label per variant, no duplicates");
+        from_fn.dedup();
+        assert_eq!(from_fn.len(), 10, "one label per variant, no duplicates");
+        assert_eq!(ALL_ERROR_KINDS.len(), 10);
 
         let mut from_const: Vec<&str> = ALL_ERROR_KINDS.to_vec();
         from_const.sort_unstable();
@@ -900,6 +949,7 @@ mod tests {
         let mut expected = vec![
             "forbidden",
             "internal",
+            "invalid_map_name",
             "overloaded",
             "schema_invalid",
             "timeout",
@@ -930,12 +980,77 @@ mod tests {
             ("forbidden", ErrorDisposition::Permanent, 403),
             ("value_too_large", ErrorDisposition::Permanent, 413),
             ("schema_invalid", ErrorDisposition::Permanent, 422),
+            ("invalid_map_name", ErrorDisposition::Permanent, 400),
         ];
         let actual: Vec<(&str, ErrorDisposition, u32)> = one_of_every_error_variant()
             .iter()
             .map(|e| (e.error_kind(), e.disposition(), e.wire_code()))
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    /// A refused map name is a permanent, client-attributable refusal, and the
+    /// error never carries more of the name than a frame or a log line should
+    /// repeat, nor any of it unescaped (TG-NAME-002).
+    #[test]
+    fn invalid_map_name_is_permanent_with_wire_code_400() {
+        let err =
+            OperationError::invalid_map_name("x__backup", MapNameViolation::ReservedBackupSuffix);
+        assert_eq!(
+            (err.error_kind(), err.disposition(), err.wire_code()),
+            ("invalid_map_name", ErrorDisposition::Permanent, 400)
+        );
+        assert!(ALL_ERROR_KINDS.contains(&"invalid_map_name"));
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "invalid map name \"x__backup\": {}",
+                MapNameViolation::ReservedBackupSuffix
+            )
+        );
+
+        // 400 is this variant's alone: no other refusal shares the code.
+        let codes_400 = one_of_every_error_variant()
+            .iter()
+            .filter(|e| e.wire_code() == 400)
+            .count();
+        assert_eq!(codes_400, 1);
+
+        // An oversized name is stored cut down to its first 128 bytes.
+        let stored_name = |e: &OperationError| match e {
+            OperationError::InvalidMapName { map_name, .. } => map_name.clone(),
+            other => panic!("expected InvalidMapName, got {other:?}"),
+        };
+        let huge = "a".repeat(4096);
+        let err = OperationError::invalid_map_name(&huge, MapNameViolation::TooLong);
+        assert_eq!(stored_name(&err), "a".repeat(128));
+        assert!(
+            err.to_string().len() < 256,
+            "the message must not echo the whole name"
+        );
+
+        // The cut never splits a character: 127 ASCII bytes followed by a
+        // two-byte character straddling byte 128 keep only the 127.
+        let straddling = format!("{}{}", "a".repeat(127), "\u{e9}".repeat(2000));
+        let err = OperationError::invalid_map_name(&straddling, MapNameViolation::TooLong);
+        assert_eq!(stored_name(&err), "a".repeat(127));
+        // A name of exactly 128 bytes, and a shorter one, are kept whole.
+        let exact = "b".repeat(128);
+        let err = OperationError::invalid_map_name(&exact, MapNameViolation::ContainsNul);
+        assert_eq!(stored_name(&err), exact);
+        let err = OperationError::invalid_map_name("", MapNameViolation::Empty);
+        assert_eq!(stored_name(&err), "");
+
+        // The name is escaped inside the message itself, so a line break or a
+        // U+0000 in it cannot forge a second log line or truncate a frame.
+        let err = OperationError::invalid_map_name("a\nb", MapNameViolation::ContainsNul);
+        let text = err.to_string();
+        assert!(text.contains("a\\nb"), "escaped form expected in {text:?}");
+        assert!(!text.contains('\n'), "no raw line break in {text:?}");
+        let err = OperationError::invalid_map_name("a\0b", MapNameViolation::ContainsNul);
+        let text = err.to_string();
+        assert!(text.contains("a\\0b"), "escaped form expected in {text:?}");
+        assert!(!text.contains('\0'), "no raw U+0000 in {text:?}");
     }
 
     #[test]

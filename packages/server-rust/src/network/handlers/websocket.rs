@@ -996,6 +996,7 @@ fn transient_precedence(error: &OperationError) -> u8 {
         // Permanent variants never reach the transient sink. Ranking them last
         // keeps the match exhaustive without a catch-all arm.
         OperationError::Forbidden { .. }
+        | OperationError::InvalidMapName { .. }
         | OperationError::SchemaInvalid { .. }
         | OperationError::ValueTooLarge { .. }
         | OperationError::WrongService
@@ -1005,7 +1006,7 @@ fn transient_precedence(error: &OperationError) -> u8 {
 
 /// Precedence of a non-attributed permanent error for the single `ERROR` frame.
 ///
-/// `Forbidden > SchemaInvalid > ValueTooLarge > WrongService > UnknownService`.
+/// `Forbidden > InvalidMapName > SchemaInvalid > ValueTooLarge > WrongService > UnknownService`.
 /// The last two are unreachable for an operation batch — the classifier hardcodes
 /// the CRDT service name and the server registers it unconditionally — and are
 /// kept in the order so the match needs no `_` arm, which is what makes a future
@@ -1013,10 +1014,11 @@ fn transient_precedence(error: &OperationError) -> u8 {
 fn batch_error_precedence(error: &OperationError) -> u8 {
     match error {
         OperationError::Forbidden { .. } => 0,
-        OperationError::SchemaInvalid { .. } => 1,
-        OperationError::ValueTooLarge { .. } => 2,
-        OperationError::WrongService => 3,
-        OperationError::UnknownService { .. } => 4,
+        OperationError::InvalidMapName { .. } => 1,
+        OperationError::SchemaInvalid { .. } => 2,
+        OperationError::ValueTooLarge { .. } => 3,
+        OperationError::WrongService => 4,
+        OperationError::UnknownService { .. } => 5,
         // Transient variants have their own sink and their own order.
         OperationError::Unauthorized
         | OperationError::Overloaded
@@ -1045,7 +1047,8 @@ fn keep_by_precedence(
 
 /// Whether a permanently failed sub-batch may be re-dispatched one op at a time.
 ///
-/// Only the three admission refusals qualify. Each is decided before the batch
+/// Only the four admission refusals qualify — `Forbidden`, `InvalidMapName`,
+/// `SchemaInvalid` and `ValueTooLarge`. Each is decided before the batch
 /// applies anything, so re-dispatching an operation of that sub-batch cannot
 /// apply a write twice (TG-SYNC-003). `UnknownService` / `WrongService` describe
 /// server misrouting rather than a defect in any one operation, so splitting them
@@ -1061,6 +1064,7 @@ fn keep_by_precedence(
 fn is_redispatchable(error: &OperationError) -> bool {
     match error {
         OperationError::Forbidden { .. }
+        | OperationError::InvalidMapName { .. }
         | OperationError::SchemaInvalid { .. }
         | OperationError::ValueTooLarge { .. } => true,
         // One arm, two reasons: the misrouting pair above, and the transient
