@@ -1004,6 +1004,151 @@ mod tests {
         assert_eq!(h2, 0, "partition (users, 1) should be cleared");
         assert_eq!(h3, 0, "partition (tags, 0) should be cleared");
     }
+
+    // ---------------------------------------------------------------------------
+    // Client comparability (TG-MRK-002): the fallback reports the flat trie
+    // ---------------------------------------------------------------------------
+
+    /// A client keeps ONE trie per map and kind, so what the in-memory fallback
+    /// reports is only comparable with the client's when it is the root and the
+    /// buckets of one flat trie over every partition's keys (TG-MRK-002). The
+    /// leaves are routed to the partition each key hashes to, as the write-path
+    /// observer routes them, so the trees the manager holds are the real
+    /// per-partition ones.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn aggregate_roots_and_buckets_equal_flat_trie_for_vectors() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        const MAP: &str = "flat-trie-vectors";
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct VectorFile {
+            flat_trie: Vec<FlatTrieCase>,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FlatTrieCase {
+            name: String,
+            kind: String,
+            leaves: Vec<FlatTrieLeaf>,
+            expected_root: u32,
+            expected_buckets: BTreeMap<String, BTreeMap<String, u32>>,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FlatTrieLeaf {
+            key: String,
+            leaf_hash: u32,
+            partition: u32,
+        }
+
+        /// Root and buckets compared as one value, so a single failure shows
+        /// both halves of the reported shape.
+        #[derive(Debug, PartialEq)]
+        struct FlatView {
+            root: u32,
+            buckets: BTreeMap<String, BTreeMap<String, u32>>,
+        }
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../core-rust/tests/fixtures/merkle_vectors.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let file: VectorFile = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("cannot parse {}: {e}", path.display()));
+
+        let kinds: BTreeSet<&str> = file.flat_trie.iter().map(|c| c.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            BTreeSet::from(["lww", "or"]),
+            "precondition: the vectors hold a flat-trie case for each kind"
+        );
+
+        for case in &file.flat_trie {
+            let is_lww = match case.kind.as_str() {
+                "lww" => true,
+                "or" => false,
+                other => panic!("{}: unknown kind {other:?}", case.name),
+            };
+
+            // A fresh manager per case: both cases share one map name, and a
+            // leftover tree of the other kind must not be able to leak in.
+            let manager = MerkleSyncManager::default();
+            let mut partitions = BTreeSet::new();
+            for leaf in &case.leaves {
+                let partition = hash_to_partition(&leaf.key);
+                assert_eq!(
+                    partition, leaf.partition,
+                    "{}: precondition: key {:?} hashes to the partition the vector records",
+                    case.name, leaf.key
+                );
+                partitions.insert(partition);
+                if is_lww {
+                    manager.update_lww(MAP, partition, &leaf.key, leaf.leaf_hash);
+                } else {
+                    manager.update_ormap(MAP, partition, &leaf.key, leaf.leaf_hash);
+                }
+            }
+
+            // A case whose keys share one partition, or whose root is 0, could
+            // not tell the flat shape from a per-partition fold.
+            assert!(
+                partitions.len() >= 2,
+                "{}: precondition: the keys span at least two partitions",
+                case.name
+            );
+            assert_ne!(
+                case.expected_root, 0,
+                "{}: precondition: the expected root is non-zero",
+                case.name
+            );
+            assert!(
+                case.expected_buckets.contains_key(""),
+                "{}: precondition: the expected buckets include the root level",
+                case.name
+            );
+
+            let reported = FlatView {
+                root: if is_lww {
+                    manager.aggregate_lww_root_hash(MAP)
+                } else {
+                    manager.aggregate_ormap_root_hash(MAP)
+                },
+                buckets: case
+                    .expected_buckets
+                    .keys()
+                    .map(|path| {
+                        let children = if is_lww {
+                            manager.aggregate_lww_buckets(MAP, path)
+                        } else {
+                            manager.aggregate_ormap_buckets(MAP, path)
+                        };
+                        (
+                            path.clone(),
+                            children
+                                .into_iter()
+                                .map(|(c, h)| (c.to_string(), h))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            };
+            let expected = FlatView {
+                root: case.expected_root,
+                buckets: case.expected_buckets.clone(),
+            };
+
+            assert_eq!(
+                reported, expected,
+                "{}: the fallback must report the flat trie's root and buckets",
+                case.name
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
