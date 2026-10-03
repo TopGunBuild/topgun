@@ -300,11 +300,24 @@ impl HLC {
     /// encode to the same leaf, so two replicas holding different data could
     /// compare as equal.
     fn assert_node_id_has_no_delimiter(node_id: &str) {
-        assert!(
-            !node_id.contains([':', '|', '#']),
+        if let Some(refusal) = Self::node_id_refusal(node_id) {
+            panic!("{refusal}");
+        }
+    }
+
+    /// Why `node_id` cannot name an HLC, or `None` when it can.
+    ///
+    /// This is the rule both constructors enforce (see
+    /// [`assert_node_id_has_no_delimiter`](Self::assert_node_id_has_no_delimiter)
+    /// for the reasons). It is public so that a caller holding a node id from
+    /// configuration can refuse it cleanly before doing any work that a panic in
+    /// the constructor would interrupt halfway.
+    #[must_use]
+    pub fn node_id_refusal(node_id: &str) -> Option<&'static str> {
+        node_id.contains([':', '|', '#']).then_some(
             "Node ID must not contain ':' (used as delimiter in timestamp format), \
-             '|' or '#' (used as delimiters in Merkle leaves)"
-        );
+             '|' or '#' (used as delimiters in Merkle leaves)",
+        )
     }
 
     /// Returns the node ID of this HLC instance.
