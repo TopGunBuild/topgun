@@ -177,29 +177,73 @@ pub struct SyncService {
 /// a narrowed TODO-544. `release_on_disconnect` is O(total sessions) (a full
 /// `retain` scan); cheap at demo-tier connection counts — a per-connection
 /// reverse index is tracked as a scale follow-up (see `/sf:todo`).
+///
+/// Besides the sessions the registry keeps, per `(map_name, ConnectionId)`, the
+/// epoch the connection's current OR sync round was fixed at (TG-MRK-002). It is
+/// a SEPARATE map on purpose: the session entry is shared with the LWW kind, so
+/// an LWW `SYNC_INIT` that replaces the session mid-round must not be able to
+/// raise the bound the OR round's remaining responses are capped by.
 #[derive(Default)]
 struct SyncSessionRegistry {
-    sessions: DashMap<(String, ConnectionId), Arc<MerkleSession>>,
+    sessions: DashMap<(String, ConnectionId), BuiltSession>,
+    /// The value conveyed by the most recent `ORMAP_SYNC_RESP_ROOT` per
+    /// `(map, connection)`. A recorded `None` (the root conveyed no epoch) is
+    /// distinct from an absent entry (no OR sync init ran on this connection).
+    round_epochs: DashMap<(String, ConnectionId), Option<u64>>,
+}
+
+/// A materialised session together with the frontier epoch read immediately
+/// before it was built: no tombstone stamped after that epoch is guaranteed to
+/// be in the session's hashes, so the session may vouch for nothing newer.
+#[derive(Clone)]
+struct BuiltSession {
+    session: Arc<MerkleSession>,
+    /// `None` when the epoch was 0 or no frontier is wired.
+    epoch_at_build: Option<u64>,
 }
 
 impl SyncSessionRegistry {
     /// Returns the cached session for `(map_name, conn_id)`, if any.
+    #[cfg(test)]
     fn get(&self, map_name: &str, conn_id: ConnectionId) -> Option<Arc<MerkleSession>> {
+        self.built(map_name, conn_id).map(|built| built.session)
+    }
+
+    /// Returns the cached session for `(map_name, conn_id)` with the epoch it
+    /// was built at, if any.
+    fn built(&self, map_name: &str, conn_id: ConnectionId) -> Option<BuiltSession> {
         self.sessions
             .get(&(map_name.to_string(), conn_id))
-            .map(|entry| Arc::clone(entry.value()))
+            .map(|entry| entry.value().clone())
     }
 
     /// Inserts (replacing any prior entry) the session for `(map_name, conn_id)`.
-    fn insert(&self, map_name: &str, conn_id: ConnectionId, session: Arc<MerkleSession>) {
-        self.sessions
-            .insert((map_name.to_string(), conn_id), session);
+    fn insert(&self, map_name: &str, conn_id: ConnectionId, built: BuiltSession) {
+        self.sessions.insert((map_name.to_string(), conn_id), built);
     }
 
-    /// Drops every session belonging to `conn_id`. Invoked on disconnect via the
-    /// `ConnectionRegistry` observer so a connection's sessions do not outlive it.
+    /// The epoch the current OR sync round of `(map_name, conn_id)` was fixed
+    /// at. The outer `None` means no round was opened on this connection; the
+    /// inner `None` means a round was opened and its root conveyed no epoch.
+    fn round_epoch(&self, map_name: &str, conn_id: ConnectionId) -> Option<Option<u64>> {
+        self.round_epochs
+            .get(&(map_name.to_string(), conn_id))
+            .map(|entry| *entry.value())
+    }
+
+    /// Fixes the OR sync round of `(map_name, conn_id)` at `epoch`, replacing
+    /// the previous round's value.
+    fn set_round_epoch(&self, map_name: &str, conn_id: ConnectionId, epoch: Option<u64>) {
+        self.round_epochs
+            .insert((map_name.to_string(), conn_id), epoch);
+    }
+
+    /// Drops every session and round epoch belonging to `conn_id`. Invoked on
+    /// disconnect via the `ConnectionRegistry` observer so a connection's
+    /// sessions do not outlive it.
     fn release_on_disconnect(&self, conn_id: ConnectionId) {
         self.sessions.retain(|(_, c), _| *c != conn_id);
+        self.round_epochs.retain(|(_, c), _| *c != conn_id);
     }
 
     /// Number of cached sessions across all connections (test-only bound check).
@@ -270,41 +314,68 @@ impl SyncService {
         self
     }
 
-    /// The covering epoch to convey on an OR-Map sync response for `conn`: the
-    /// server's current max stamped epoch (`None` when nothing stamped yet or no
-    /// frontier is wired). Also records it as delivered on `conn` so the client's
-    /// subsequent `CLIENT_APPLY_ACK` passes the `342e` delivered-clamp. Conveying
-    /// it on EVERY OR-Map response (root/leaf/diff) — including the empty-diff
-    /// root — is what lets an up-to-date client still advance its cursor instead
-    /// of pinning the low-water-mark forever (empty-diff liveness).
+    /// The frontier's current epoch, `None` when nothing is stamped yet or no
+    /// frontier is wired. A pure read: it marks nothing delivered.
     ///
-    /// ORDERING IS LOAD-BEARING: every caller MUST read the covering epoch BEFORE
-    /// computing the root hash / collecting the entries it rides with. The
-    /// conveyed epoch must never postdate the state snapshot in the same response:
-    /// a concurrent `OR_REMOVE` stamped between the data read and a later epoch
-    /// read would make the client ACK an epoch whose tombstones it never received,
-    /// breaking the cursor-implies-delivered invariant the prune rests on. Reading
-    /// the epoch first errs conservative (the data may be NEWER than the epoch,
-    /// so the client under-claims — safe).
-    fn covering_epoch(&self, conn: Option<ConnectionId>, gated: bool) -> Option<u64> {
-        let frontier = self.frontier.as_ref()?;
-        let epoch = frontier.current_epoch();
-        if epoch == 0 {
-            return None;
-        }
-        // Convey the epoch as metadata for EVERY client, but ADVANCE `delivered_conn`
-        // ONLY for a not-gated (tracked, non-forgotten, non-regressed) client. For a
-        // gated (forgotten/unknown/regressed) client `set_delivered` is DEFERRED to
-        // post-snapshot-resync completion (its `CLIENT_APPLY_ACK`): eagerly advancing
-        // it here would re-enable the client's ACKs before it received the full
-        // snapshot, re-admitting it via the sync path BEFORE any push (independent of
-        // the push-diff gate). `delivered_conn` must advance only on resync completion.
+    /// ORDERING IS LOAD-BEARING: every OR-Map handler MUST call this BEFORE it
+    /// takes any hash or collects any entry. A concurrent `OR_REMOVE` stamped
+    /// between the data read and a later epoch read would otherwise let the
+    /// client confirm an epoch whose tombstone it never received. Reading the
+    /// epoch first errs conservative (the data may be NEWER than the epoch, so
+    /// the client under-claims — safe).
+    fn live_epoch(&self) -> Option<u64> {
+        let epoch = self.frontier.as_ref()?.current_epoch();
+        (epoch != 0).then_some(epoch)
+    }
+
+    /// The covering epoch to convey on an OR-Map sync response for `conn`, and
+    /// the only place a sync response marks an epoch delivered (TG-MRK-002).
+    ///
+    /// No response of an OR sync round may convey, or mark delivered, an epoch
+    /// newer than the snapshot the round's walk descends by. A client skips
+    /// every subtree whose hash matches; an epoch stamped after those hashes
+    /// were taken may own a tombstone inside a skipped subtree, and confirming
+    /// it would let the prune drop a tombstone that client never applied. The
+    /// conveyed value is therefore the minimum of `live` (see [`Self::live_epoch`])
+    /// and every bound in `caps`, where a `None` operand makes the result `None`:
+    ///
+    /// - root, durable: `caps` = the build epoch of the session the root is
+    ///   taken from; root, fallback: no cap (the root is computed after `live`).
+    /// - continuation (buckets, leaf, empty), durable: `caps` = the round epoch
+    ///   and the build epoch of the session used; fallback: the round epoch.
+    ///   With no round open for `(map, conn)` the caller conveys `None`.
+    ///
+    /// Callers follow one order: read `live` first, acquire the session (or
+    /// read the round epoch), then call this — so `delivered_conn` is advanced
+    /// exactly once per response, to the CAPPED value and never to `live`.
+    ///
+    /// The epoch is conveyed as metadata for EVERY client, but `delivered_conn`
+    /// is advanced ONLY for a not-gated (tracked, non-forgotten, non-regressed)
+    /// one. For a gated client it is deferred to post-snapshot-resync
+    /// completion (its `CLIENT_APPLY_ACK`): advancing it here would re-enable
+    /// the client's ACKs before it received the full snapshot. Conveying an
+    /// epoch on the empty-diff root too is what lets an up-to-date client still
+    /// advance its cursor instead of pinning the low-water-mark.
+    ///
+    /// Known gap: `handle_ormap_diff_request` is not session-served and passes
+    /// no cap — the `ORMAP_DIFF_REQUEST` path still conveys the live epoch with a
+    /// key-scoped response; tracked by TODO-729.
+    fn covering_epoch(
+        &self,
+        conn: Option<ConnectionId>,
+        gated: bool,
+        live: Option<u64>,
+        caps: &[Option<u64>],
+    ) -> Option<u64> {
+        let conveyed = caps
+            .iter()
+            .try_fold(live?, |bound, cap| cap.map(|cap| bound.min(cap)))?;
         if !gated {
-            if let Some(c) = conn {
-                frontier.set_delivered(c, epoch);
+            if let (Some(frontier), Some(c)) = (self.frontier.as_ref(), conn) {
+                frontier.set_delivered(c, conveyed);
             }
         }
-        Some(epoch)
+        Some(conveyed)
     }
 
     /// Resolve the server-authenticated `(principal, deviceId)` frontier identity for
@@ -427,7 +498,9 @@ impl SyncService {
     // Session helpers
     // -----------------------------------------------------------------------
 
-    /// Build (or return the cached) `MerkleSession` for `map_name`.
+    /// Build (or return the cached) `MerkleSession` for `map_name`, together
+    /// with the frontier epoch read immediately before it was built (on a cache
+    /// hit: the value recorded when the cached session was built).
     ///
     /// When called from `handle_sync_init` the caller passes `force_rebuild =
     /// true` so a fresh session is always constructed for the start of a new
@@ -456,7 +529,7 @@ impl SyncService {
         map_name: &str,
         conn_id: Option<ConnectionId>,
         force_rebuild: bool,
-    ) -> Result<Option<Arc<MerkleSession>>, OperationError> {
+    ) -> Result<Option<BuiltSession>, OperationError> {
         let (Some(index), Some(store)) = (&self.durable_index, &self.durable_store) else {
             return Ok(None);
         };
@@ -466,9 +539,17 @@ impl SyncService {
         // resident keys and would hand the client a root omitting evicted-but-
         // persisted records); surfacing the Err lets the client retry against
         // durable truth — the "propagate, never degrade to wrong leaves" contract.
-        let build = || -> Result<Arc<MerkleSession>, OperationError> {
+        //
+        // The epoch is read immediately BEFORE the enumeration: a tombstone is
+        // stored before its epoch is stamped, so every tombstone of an epoch at
+        // or below this value is already visible to the build (TG-MRK-002).
+        let build = || -> Result<BuiltSession, OperationError> {
+            let epoch_at_build = self.live_epoch();
             match index.build_session(map_name, store.as_ref()) {
-                Ok(session) => Ok(Arc::new(session)),
+                Ok(session) => Ok(BuiltSession {
+                    session: Arc::new(session),
+                    epoch_at_build,
+                }),
                 Err(err) => {
                     tracing::error!(
                         map = %map_name,
@@ -490,14 +571,13 @@ impl SyncService {
             // security/authorization identity the field's doc-comment refers to.
             Some(cid) => {
                 if !force_rebuild {
-                    if let Some(cached) = self.session_registry.get(map_name, cid) {
+                    if let Some(cached) = self.session_registry.built(map_name, cid) {
                         return Ok(Some(cached));
                     }
                 }
-                let arc = build()?;
-                self.session_registry
-                    .insert(map_name, cid, Arc::clone(&arc));
-                Ok(Some(arc))
+                let built = build()?;
+                self.session_registry.insert(map_name, cid, built.clone());
+                Ok(Some(built))
             }
             // Internal/forwarded ops carry no connection identity. Build fresh and
             // return WITHOUT caching: collapsing all None callers onto one shared
@@ -542,15 +622,16 @@ impl SyncService {
         // Build a fresh session at the start of each sync round so the snapshot
         // reflects the current durable state. force_rebuild=true replaces any
         // cached session from a previous round for the same map.
-        let root_hash =
-            if let Some(session) = self.get_or_build_session(&map_name, ctx.connection_id, true)? {
-                // Return the LWW-only root so the client drives the LWW tree walk.
-                // The combined root would mix LWW and OR-Map hashes, changing the
-                // wire protocol that the existing client expects for SYNC_INIT.
-                session.lww_root()
-            } else {
-                self.merkle_manager.aggregate_lww_root_hash(&map_name)
-            };
+        let root_hash = if let Some(BuiltSession { session, .. }) =
+            self.get_or_build_session(&map_name, ctx.connection_id, true)?
+        {
+            // Return the LWW-only root so the client drives the LWW tree walk.
+            // The combined root would mix LWW and OR-Map hashes, changing the
+            // wire protocol that the existing client expects for SYNC_INIT.
+            session.lww_root()
+        } else {
+            self.merkle_manager.aggregate_lww_root_hash(&map_name)
+        };
 
         Ok(OperationResponse::Message(Box::new(Message::SyncRespRoot(
             SyncRespRootMessage {
@@ -589,7 +670,9 @@ impl SyncService {
         // Durable-index path: reuse the session built during SYNC_INIT for THIS
         // connection (force_rebuild=false) so no second enumerate_leaves pass is
         // needed. Paths in this branch are pure hex aggregate paths — no prefix.
-        if let Some(session) = self.get_or_build_session(&map_name, ctx.connection_id, false)? {
+        if let Some(BuiltSession { session, .. }) =
+            self.get_or_build_session(&map_name, ctx.connection_id, false)?
+        {
             // Check for internal node (has children in the LWW trie at this path).
             let lww_children = session.lww_nodes.get(&path).cloned().unwrap_or_default();
             if !lww_children.is_empty() {
@@ -886,19 +969,34 @@ impl SyncService {
         }
 
         // Epoch BEFORE data: the conveyed epoch must never postdate the root it
-        // rides with (see `covering_epoch` — ordering is load-bearing).
-        let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
+        // rides with (see `live_epoch` — ordering is load-bearing).
+        let live = self.live_epoch();
 
         // Reuse any session already built by the LWW SYNC_INIT for this map; build
         // one now if not yet cached. force_rebuild=false so a concurrent or prior
         // LWW SYNC_INIT's session is shared rather than discarded.
-        let root_hash = if let Some(session) =
-            self.get_or_build_session(&map_name, ctx.connection_id, false)?
-        {
-            session.ormap_root()
-        } else {
-            self.merkle_manager.aggregate_ormap_root_hash(&map_name)
-        };
+        let (root_hash, covering_epoch) =
+            if let Some(built) = self.get_or_build_session(&map_name, ctx.connection_id, false)? {
+                // The root is the session's, so the session's build epoch bounds it.
+                let conveyed =
+                    self.covering_epoch(ctx.connection_id, gated, live, &[built.epoch_at_build]);
+                (built.session.ormap_root(), conveyed)
+            } else {
+                // The fallback root is computed live, after `live` was read.
+                let conveyed = self.covering_epoch(ctx.connection_id, gated, live, &[]);
+                (
+                    self.merkle_manager.aggregate_ormap_root_hash(&map_name),
+                    conveyed,
+                )
+            };
+
+        // This root opens the connection's round for the map: every later
+        // bucket and leaf response of the walk is bounded by what it conveyed,
+        // for a gated client as well (TG-MRK-002).
+        if let Some(conn) = ctx.connection_id {
+            self.session_registry
+                .set_round_epoch(&map_name, conn, covering_epoch);
+        }
 
         Ok(OperationResponse::Message(Box::new(
             Message::ORMapSyncRespRoot(ORMapSyncRespRoot {
@@ -948,15 +1046,31 @@ impl SyncService {
         // is also gated via the not-yet-admitted `delivered == 0` signal.
         let gated = self.sync_gated_continuation(ctx.connection_id).await;
 
-        // Epoch BEFORE data: read once here, before any leaf entries are collected,
-        // so the conveyed epoch can never postdate the entry sets the leaf
-        // responses below carry (see `covering_epoch` — ordering is load-bearing).
-        let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
+        // Epoch BEFORE data: read once here, before any hash or leaf entry is
+        // read, so the conveyed epoch can never postdate the entry sets the leaf
+        // responses below carry (see `live_epoch` — ordering is load-bearing).
+        let live = self.live_epoch();
+
+        // The epoch the round's root fixed. Without an open round nothing bounds
+        // what the client compared against, so the response conveys no epoch and
+        // advances no cursor.
+        let round = ctx
+            .connection_id
+            .and_then(|conn| self.session_registry.round_epoch(&map_name, conn));
 
         // Durable-index path: reuse the session built during ORMapSyncInit (or
         // SYNC_INIT) for THIS connection. OR-Map tombstones yield no leaf in the
         // session (parity with write path: SPEC-324 R4).
-        if let Some(session) = self.get_or_build_session(&map_name, ctx.connection_id, false)? {
+        if let Some(BuiltSession {
+            session,
+            epoch_at_build,
+        }) = self.get_or_build_session(&map_name, ctx.connection_id, false)?
+        {
+            // Capped by the round AND by the session actually served from: an
+            // LWW SYNC_INIT may have replaced the session since the root.
+            let covering_epoch = round.and_then(|round| {
+                self.covering_epoch(ctx.connection_id, gated, live, &[round, epoch_at_build])
+            });
             // Check for OR-Map internal node at this path.
             let ormap_children = session.ormap_nodes.get(&path).cloned().unwrap_or_default();
             if !ormap_children.is_empty() {
@@ -1044,6 +1158,11 @@ impl SyncService {
         }
 
         // Fallback: no durable index wired — use the in-memory MerkleSyncManager.
+        // Both modes below read their hashes live, after the round was fixed, so
+        // the round epoch is the bound.
+        let covering_epoch =
+            round.and_then(|round| self.covering_epoch(ctx.connection_id, gated, live, &[round]));
+
         if let Some((partition_id, sub_path)) = parse_partition_prefix(&path) {
             // Routed mode: route directly to the specific OR-Map partition tree.
             let node_data = self
@@ -1246,8 +1365,10 @@ impl SyncService {
         let gated = self.sync_gated_continuation(ctx.connection_id).await;
 
         // Epoch BEFORE data: the conveyed epoch must never postdate the entries
-        // collected below (see `covering_epoch` — ordering is load-bearing).
-        let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
+        // collected below (see `live_epoch` — ordering is load-bearing). No cap:
+        // this response is not served from a round's snapshot (see the known gap
+        // in `covering_epoch`).
+        let covering_epoch = self.covering_epoch(ctx.connection_id, gated, self.live_epoch(), &[]);
 
         let mut entries = Vec::new();
 
@@ -3883,7 +4004,8 @@ mod tests {
         let fresh = svc
             .get_or_build_session("tmap", Some(ConnectionId(2)), false)
             .expect("fresh session build")
-            .expect("durable index present");
+            .expect("durable index present")
+            .session;
         let fresh_bucket = fresh
             .lww_nodes
             .get(&target_path[..2])
@@ -4336,7 +4458,8 @@ mod tests {
         let fresh = svc
             .get_or_build_session("omap", Some(ConnectionId(2)), false)
             .expect("fresh OR-Map session build")
-            .expect("durable index present");
+            .expect("durable index present")
+            .session;
         assert_ne!(
             cached.ormap_nodes.get(&add_path[..2]),
             fresh.ormap_nodes.get(&add_path[..2]),
