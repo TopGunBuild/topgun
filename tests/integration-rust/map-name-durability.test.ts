@@ -4,9 +4,10 @@
  *
  * The client accepts any map name without a ":" and its own error text
  * recommends "-" and "/" as separators. The embedded store (the default
- * backend) accepts only identifier-shaped names, so a write to `user-profiles`
- * is applied in memory and acknowledged while the store refuses every attempt
- * to persist it. This test pins what a restart then does to that write.
+ * backend) keeps identifier-shaped names in the tables it always used and
+ * every other name in tables of their own (TG-NAME-001), so a write to
+ * `user-profiles` that was applied in memory and acknowledged is persisted
+ * too. This test pins what a restart then does to that write.
  *
  * `per_op` makes every acknowledged write durable in the WAL at once, so a
  * missing record after the restart cannot be an fsync race. The server is given
