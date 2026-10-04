@@ -8,13 +8,15 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use tower::{Layer, Service};
 
 use crate::service::operation::{CallerOrigin, Operation, OperationError, OperationResponse};
 use crate::service::policy::{GateDecision, PermissionAction, PolicyDecision, PolicyEvaluator};
+use crate::storage::map_data_store::{check_map_name, MapNameViolation};
 
 // ---------------------------------------------------------------------------
 // AuthorizationLayer
@@ -94,6 +96,20 @@ where
         // non-first position must still be rejected.
         if let Some(reserved) = reserved_target_map_name(&op, &map_name) {
             return Box::pin(async move { Err(OperationError::Forbidden { map_name: reserved }) });
+        }
+        // Map-name admission (TG-NAME-002). A name the shared rule refuses must
+        // not reach a domain service: the write would be appended to the WAL and
+        // acknowledged, and then refused by the store. Like the guard above this
+        // sits BEFORE the `should_evaluate` gate, so the NO_AUTH
+        // `GateDecision::AllowAll` passthrough cannot skip it, and it reads the
+        // operation itself rather than the classified name, so an `OpBatch` is
+        // refused for an inadmissible name in any position.
+        if let Some((name, violation)) = inadmissible_map_name(&op) {
+            let refusal = OperationError::invalid_map_name(name, violation);
+            // The single-message paths answer a refusal with no frame, so this
+            // line is the only place an operator sees it.
+            MAP_NAME_REFUSAL_LOG.record(&refusal, Instant::now());
+            return Box::pin(async move { Err(refusal) });
         }
         let Some(action) = action else {
             return Box::pin(self.inner.call(op));
@@ -268,6 +284,140 @@ fn reserved_target_map_name(op: &Operation, classified_map_name: &str) -> Option
     }
     is_reserved_map_name(classified_map_name).then(|| classified_map_name.to_string())
 }
+
+/// The first map name `op` carries that the shared rule refuses, with the
+/// clause it violates (TG-NAME-002).
+///
+/// Keyed by variant, with no `_` arm on purpose: a new `Operation` variant must
+/// fail to compile here until someone decides whether the name it carries can
+/// reach a store. The names are borrowed — an admitted operation allocates
+/// nothing here.
+fn inadmissible_map_name(op: &Operation) -> Option<(&str, MapNameViolation)> {
+    let name: &str = match op {
+        // Each op of a batch is applied under its own map name, so every one
+        // is checked, not just the first.
+        Operation::OpBatch { payload, .. } => {
+            return payload.payload.ops.iter().find_map(|client_op| {
+                check_map_name(&client_op.map_name)
+                    .err()
+                    .map(|violation| (client_op.map_name.as_str(), violation))
+            });
+        }
+
+        Operation::ClientOp { payload, .. } => &payload.payload.map_name,
+        Operation::ORMapPushDiff { payload, .. } => &payload.payload.map_name,
+        Operation::QuerySubscribe { payload, .. } => &payload.payload.map_name,
+        Operation::MerkleReqBucket { payload, .. } => &payload.payload.map_name,
+        Operation::ORMapMerkleReqBucket { payload, .. } => &payload.payload.map_name,
+        Operation::ORMapDiffRequest { payload, .. } => &payload.payload.map_name,
+        Operation::EntryProcess { payload, .. } => &payload.map_name,
+        Operation::EntryProcessBatch { payload, .. } => &payload.map_name,
+        Operation::Search { payload, .. } => &payload.map_name,
+        Operation::SearchSubscribe { payload, .. } => &payload.map_name,
+        Operation::HybridSearch { payload, .. } => &payload.map_name,
+        Operation::HybridSearchSubscribe { payload, .. } => &payload.map_name,
+        Operation::SyncInit { payload, .. } => &payload.map_name,
+        Operation::ORMapSyncInit { payload, .. } => &payload.map_name,
+
+        // Not checked. A topic and a counter are named, but not by a map name;
+        // `QuerySyncInit` and `SqlQuery` name no map; `VectorSearch`,
+        // `RegisterResolver` and `JournalSubscribe` carry one but make no
+        // durable store write under it, so a refused shape there cannot become
+        // an acknowledged write the store then drops. The rest name no map.
+        Operation::TopicPublish { .. }
+        | Operation::CounterSync { .. }
+        | Operation::QuerySyncInit { .. }
+        | Operation::SqlQuery { .. }
+        | Operation::VectorSearch { .. }
+        | Operation::Ping { .. }
+        | Operation::PartitionMapRequest { .. }
+        | Operation::GarbageCollect { .. }
+        | Operation::LockRequest { .. }
+        | Operation::LockRelease { .. }
+        | Operation::TopicSubscribe { .. }
+        | Operation::TopicUnsubscribe { .. }
+        | Operation::QueryUnsubscribe { .. }
+        | Operation::SearchUnsubscribe { .. }
+        | Operation::HybridSearchUnsubscribe { .. }
+        | Operation::JournalSubscribe { .. }
+        | Operation::JournalUnsubscribe { .. }
+        | Operation::JournalRead { .. }
+        | Operation::RegisterResolver { .. }
+        | Operation::UnregisterResolver { .. }
+        | Operation::ListResolvers { .. }
+        | Operation::CounterRequest { .. } => return None,
+    };
+    check_map_name(name)
+        .err()
+        .map(|violation| (name, violation))
+}
+
+/// Decides when a refused map name writes its operator line, and writes it.
+///
+/// A client holding an inadmissible name repeats the refused operation on
+/// every sync, and a raw peer can send refusals as fast as it likes, so the
+/// line is limited to one per [`MapNameRefusalLog::WINDOW`] for the whole
+/// process; the refusals that wrote none are counted and reported by the next
+/// line. This decides logging only: the operation is refused either way, and
+/// every refusal is still counted as an operation error.
+struct MapNameRefusalLog {
+    /// When the last line was written, and the refusals that have written none
+    /// since then.
+    state: Mutex<(Option<Instant>, u64)>,
+}
+
+impl MapNameRefusalLog {
+    const WINDOW: Duration = Duration::from_secs(60);
+
+    const fn new() -> Self {
+        Self {
+            state: Mutex::new((None, 0)),
+        }
+    }
+
+    /// `Some(suppressed)` when a refusal at `now` should write the line:
+    /// the refusals that wrote no line since the previous one.
+    ///
+    /// The time is an argument so the decision can be driven without waiting.
+    fn line_due(&self, now: Instant) -> Option<u64> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let (last_line, suppressed) = &mut *state;
+        if last_line.is_some_and(|last| now.saturating_duration_since(last) < Self::WINDOW) {
+            *suppressed += 1;
+            return None;
+        }
+        *last_line = Some(now);
+        Some(std::mem::take(suppressed))
+    }
+
+    /// Writes the operator line for `refusal` if one is due at `now`.
+    ///
+    /// The name is chosen by the client, so it is written with `Debug`
+    /// formatting — control characters, line breaks and U+0000 arrive escaped
+    /// and cannot break or forge a log line — and it is the copy the error
+    /// already cut short, never the whole name.
+    fn record(&self, refusal: &OperationError, now: Instant) {
+        let OperationError::InvalidMapName {
+            map_name,
+            violation,
+        } = refusal
+        else {
+            return;
+        };
+        if let Some(suppressed) = self.line_due(now) {
+            tracing::warn!(
+                map_name = ?map_name,
+                violation = ?violation,
+                suppressed,
+                "refused a client operation that names an inadmissible map"
+            );
+        }
+    }
+}
+
+/// The one limiter of the process: a flood of refused names from any number of
+/// connections writes one line per window.
+static MAP_NAME_REFUSAL_LOG: MapNameRefusalLog = MapNameRefusalLog::new();
 
 /// Maps an `Operation` variant to a `PermissionAction` and a `map_name`.
 ///
@@ -1153,5 +1303,601 @@ mod tests {
             resp.is_ok(),
             "all-non-reserved batch must pass, got {resp:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Map-name admission at the authz checkpoint (TG-NAME-002).
+    // -----------------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use topgun_core::messages::{base, hybrid, messaging, query, search, sync, vector};
+
+    /// Inner service that counts the operations that reach it.
+    struct CountingService(Arc<AtomicUsize>);
+
+    impl Service<Operation> for CountingService {
+        type Response = OperationResponse;
+        type Error = OperationError;
+        type Future =
+            Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, op: Operation) -> Self::Future {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let call_id = op.ctx().call_id;
+            let name = op.ctx().service_name;
+            Box::pin(async move {
+                Ok(OperationResponse::NotImplemented {
+                    service_name: name,
+                    call_id,
+                })
+            })
+        }
+    }
+
+    /// The layer over a counting inner service, under a policy store that was
+    /// never configured (`AllowAll`, the NO_AUTH posture) or under a configured
+    /// one whose single policy allows everything — so in both a refusal can
+    /// only come from the name check, never from a policy.
+    async fn counted_service(
+        configured: bool,
+    ) -> (AuthorizationService<CountingService>, Arc<AtomicUsize>) {
+        let store = Arc::new(InMemoryPolicyStore::new());
+        if configured {
+            store
+                .upsert_policy(PermissionPolicy {
+                    id: "allow-all".to_string(),
+                    map_pattern: "*".to_string(),
+                    action: PermissionAction::All,
+                    effect: PolicyEffect::Allow,
+                    condition: None,
+                })
+                .await
+                .unwrap();
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let svc = AuthorizationLayer::new(Arc::new(PolicyEvaluator::new(store)))
+            .layer(CountingService(Arc::clone(&calls)));
+        (svc, calls)
+    }
+
+    fn client_ctx(service_name: &'static str, origin: CallerOrigin) -> OperationContext {
+        let mut ctx = OperationContext::new(40, service_name, make_timestamp(), 5000);
+        ctx.caller_origin = origin;
+        ctx
+    }
+
+    fn noop_processor() -> messaging::EntryProcessor {
+        messaging::EntryProcessor {
+            name: "noop".to_string(),
+            code: String::new(),
+            args: None,
+        }
+    }
+
+    /// One operation of every family the name check covers, each naming `map`.
+    // One literal per family, kept in one list so the count is checkable.
+    #[allow(clippy::too_many_lines)]
+    fn checked_family_ops(map: &str, origin: CallerOrigin) -> Vec<(&'static str, Operation)> {
+        let map_name = map.to_string();
+        vec![
+            (
+                "ClientOp",
+                Operation::ClientOp {
+                    ctx: client_ctx(service_names::CRDT, origin),
+                    payload: sync::ClientOpMessage {
+                        payload: base::ClientOp {
+                            map_name: map_name.clone(),
+                            key: "k".to_string(),
+                            ..Default::default()
+                        },
+                    },
+                },
+            ),
+            (
+                "OpBatch",
+                Operation::OpBatch {
+                    ctx: client_ctx(service_names::CRDT, origin),
+                    payload: sync::OpBatchMessage {
+                        payload: sync::OpBatchPayload {
+                            ops: vec![base::ClientOp {
+                                map_name: map_name.clone(),
+                                key: "k".to_string(),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        },
+                    },
+                },
+            ),
+            (
+                "EntryProcess",
+                Operation::EntryProcess {
+                    ctx: client_ctx(service_names::PERSISTENCE, origin),
+                    payload: messaging::EntryProcessData {
+                        request_id: "r".to_string(),
+                        map_name: map_name.clone(),
+                        key: "k".to_string(),
+                        processor: noop_processor(),
+                    },
+                },
+            ),
+            (
+                "EntryProcessBatch",
+                Operation::EntryProcessBatch {
+                    ctx: client_ctx(service_names::PERSISTENCE, origin),
+                    payload: messaging::EntryProcessBatchData {
+                        request_id: "r".to_string(),
+                        map_name: map_name.clone(),
+                        keys: vec!["k".to_string()],
+                        processor: noop_processor(),
+                    },
+                },
+            ),
+            (
+                "ORMapPushDiff",
+                Operation::ORMapPushDiff {
+                    ctx: client_ctx(service_names::SYNC, origin),
+                    payload: sync::ORMapPushDiff {
+                        payload: sync::ORMapPushDiffPayload {
+                            map_name: map_name.clone(),
+                            entries: Vec::new(),
+                        },
+                    },
+                },
+            ),
+            (
+                "QuerySubscribe",
+                Operation::QuerySubscribe {
+                    ctx: client_ctx(service_names::QUERY, origin),
+                    payload: query::QuerySubMessage {
+                        payload: query::QuerySubPayload {
+                            query_id: "q".to_string(),
+                            map_name: map_name.clone(),
+                            query: base::Query::default(),
+                            fields: None,
+                        },
+                    },
+                },
+            ),
+            (
+                "Search",
+                Operation::Search {
+                    ctx: client_ctx(service_names::SEARCH, origin),
+                    payload: search::SearchPayload {
+                        request_id: "r".to_string(),
+                        map_name: map_name.clone(),
+                        query: "text".to_string(),
+                        options: None,
+                    },
+                },
+            ),
+            (
+                "SearchSubscribe",
+                Operation::SearchSubscribe {
+                    ctx: client_ctx(service_names::SEARCH, origin),
+                    payload: search::SearchSubPayload {
+                        subscription_id: "s".to_string(),
+                        map_name: map_name.clone(),
+                        query: "text".to_string(),
+                        options: None,
+                    },
+                },
+            ),
+            (
+                "HybridSearch",
+                Operation::HybridSearch {
+                    ctx: client_ctx(service_names::SEARCH, origin),
+                    payload: hybrid::HybridSearchPayload {
+                        request_id: "r".to_string(),
+                        map_name: map_name.clone(),
+                        query_text: "text".to_string(),
+                        methods: vec![hybrid::SearchMethod::Exact],
+                        k: 1,
+                        query_vector: None,
+                        predicate: None,
+                        include_value: None,
+                        min_score: None,
+                    },
+                },
+            ),
+            (
+                "HybridSearchSubscribe",
+                Operation::HybridSearchSubscribe {
+                    ctx: client_ctx(service_names::SEARCH, origin),
+                    payload: hybrid::HybridSearchSubPayload {
+                        subscription_id: "s".to_string(),
+                        map_name: map_name.clone(),
+                        query_text: "text".to_string(),
+                        methods: vec![hybrid::SearchMethod::Exact],
+                        k: 1,
+                        query_vector: None,
+                        predicate: None,
+                        include_value: None,
+                        min_score: None,
+                    },
+                },
+            ),
+            (
+                "SyncInit",
+                Operation::SyncInit {
+                    ctx: client_ctx(service_names::SYNC, origin),
+                    payload: sync::SyncInitMessage {
+                        map_name: map_name.clone(),
+                        last_sync_timestamp: None,
+                    },
+                },
+            ),
+            (
+                "MerkleReqBucket",
+                Operation::MerkleReqBucket {
+                    ctx: client_ctx(service_names::SYNC, origin),
+                    payload: sync::MerkleReqBucketMessage {
+                        payload: sync::MerkleReqBucketPayload {
+                            map_name: map_name.clone(),
+                            path: String::new(),
+                        },
+                    },
+                },
+            ),
+            (
+                "ORMapSyncInit",
+                Operation::ORMapSyncInit {
+                    ctx: client_ctx(service_names::SYNC, origin),
+                    payload: sync::ORMapSyncInit {
+                        map_name: map_name.clone(),
+                        root_hash: 0,
+                        bucket_hashes: std::collections::HashMap::new(),
+                        last_sync_timestamp: None,
+                        claimed_epoch: None,
+                    },
+                },
+            ),
+            (
+                "ORMapMerkleReqBucket",
+                Operation::ORMapMerkleReqBucket {
+                    ctx: client_ctx(service_names::SYNC, origin),
+                    payload: sync::ORMapMerkleReqBucket {
+                        payload: sync::ORMapMerkleReqBucketPayload {
+                            map_name: map_name.clone(),
+                            path: String::new(),
+                        },
+                    },
+                },
+            ),
+            (
+                "ORMapDiffRequest",
+                Operation::ORMapDiffRequest {
+                    ctx: client_ctx(service_names::SYNC, origin),
+                    payload: sync::ORMapDiffRequest {
+                        payload: sync::ORMapDiffRequestPayload {
+                            map_name,
+                            keys: vec!["k".to_string()],
+                        },
+                    },
+                },
+            ),
+        ]
+    }
+
+    /// One name per clause of the shared rule, in the rule's order.
+    fn refused_names() -> Vec<(String, MapNameViolation)> {
+        vec![
+            (String::new(), MapNameViolation::Empty),
+            (
+                "x__backup".to_string(),
+                MapNameViolation::ReservedBackupSuffix,
+            ),
+            ("a\0b".to_string(), MapNameViolation::ContainsNul),
+            ("a".repeat(513), MapNameViolation::TooLong),
+        ]
+    }
+
+    const CLIENT_ORIGINS: [CallerOrigin; 3] = [
+        CallerOrigin::Client,
+        CallerOrigin::HttpClient,
+        CallerOrigin::Anonymous,
+    ];
+
+    /// TG-NAME-002: for every checked family, every refused name and every
+    /// client origin, the operation is refused with `InvalidMapName` and the
+    /// inner service is never called — whether the policy store was never
+    /// configured (where the layer otherwise passes everything through) or is
+    /// configured with a policy that allows everything.
+    #[tokio::test]
+    async fn a_name_outside_the_admissible_set_never_reaches_the_inner_service() {
+        for configured in [false, true] {
+            let (mut svc, calls) = counted_service(configured).await;
+            for (name, expected) in refused_names() {
+                for origin in CLIENT_ORIGINS {
+                    let ops = checked_family_ops(&name, origin);
+                    assert_eq!(ops.len(), 15, "every checked family is exercised");
+                    for (family, op) in ops {
+                        let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+                        let case = format!(
+                            "{family} / {expected:?} / {origin:?} / configured={configured}"
+                        );
+                        match result {
+                            Err(OperationError::InvalidMapName {
+                                map_name,
+                                violation,
+                            }) => {
+                                assert_eq!(violation, expected, "{case}");
+                                assert!(map_name.len() <= 128, "{case}: echoed name is cut");
+                                assert!(name.starts_with(&map_name), "{case}");
+                            }
+                            other => panic!("{case}: expected InvalidMapName, got {other:?}"),
+                        }
+                        assert_eq!(calls.load(Ordering::SeqCst), 0, "{case}: inner was called");
+                    }
+                }
+            }
+        }
+    }
+
+    /// TG-NAME-002: each op of a batch is applied under its own map name, so an
+    /// inadmissible name in a non-first position refuses the whole dispatch —
+    /// the admissible ops ahead of it must not shield it, and none of them
+    /// reaches the inner service in that dispatch.
+    #[tokio::test]
+    async fn a_refused_op_in_any_batch_position_refuses_the_whole_dispatch() {
+        for configured in [false, true] {
+            let (mut svc, calls) = counted_service(configured).await;
+            for (name, expected) in refused_names() {
+                for maps in [
+                    vec!["tags", name.as_str()],
+                    vec!["tags", name.as_str(), "notes"],
+                    vec!["tags", "user-profiles", "notes", name.as_str()],
+                ] {
+                    let result = ServiceExt::ready(&mut svc)
+                        .await
+                        .unwrap()
+                        .call(anon_op_batch_multi(&maps))
+                        .await;
+                    let case = format!("{expected:?} at {} of {}", maps.len(), configured);
+                    assert!(
+                        matches!(
+                            result,
+                            Err(OperationError::InvalidMapName { violation, .. })
+                                if violation == expected
+                        ),
+                        "{case}: got {result:?}"
+                    );
+                    assert_eq!(calls.load(Ordering::SeqCst), 0, "{case}: inner was called");
+                }
+            }
+
+            // The same batches without the offending op are dispatched.
+            let result = ServiceExt::ready(&mut svc)
+                .await
+                .unwrap()
+                .call(anon_op_batch_multi(&["tags", "user-profiles", "notes"]))
+                .await;
+            assert!(result.is_ok(), "an admissible batch passes, got {result:?}");
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// The families outside the check carry a topic, a counter name, no name at
+    /// all, or a map name no durable write is made under. An empty name there
+    /// is not a violation: the operation reaches the inner service.
+    #[tokio::test]
+    async fn unchecked_families_pass_an_empty_classified_name() {
+        let (mut svc, calls) = counted_service(false).await;
+        let origin = CallerOrigin::Anonymous;
+        let ops = vec![
+            (
+                "TopicPublish",
+                Operation::TopicPublish {
+                    ctx: client_ctx(service_names::MESSAGING, origin),
+                    payload: messaging::TopicPubPayload {
+                        topic: String::new(),
+                        data: rmpv::Value::Nil,
+                    },
+                },
+            ),
+            (
+                "CounterSync",
+                Operation::CounterSync {
+                    ctx: client_ctx(service_names::PERSISTENCE, origin),
+                    payload: messaging::CounterStatePayload {
+                        name: String::new(),
+                        state: messaging::PNCounterState {
+                            p: std::collections::HashMap::new(),
+                            n: std::collections::HashMap::new(),
+                        },
+                    },
+                },
+            ),
+            (
+                "QuerySyncInit",
+                Operation::QuerySyncInit {
+                    ctx: client_ctx(service_names::QUERY, origin),
+                    payload: query::QuerySyncInitMessage {
+                        payload: query::QuerySyncInitPayload {
+                            query_id: "q".to_string(),
+                            root_hash: 0,
+                        },
+                    },
+                },
+            ),
+            (
+                "SqlQuery",
+                Operation::SqlQuery {
+                    ctx: client_ctx(service_names::QUERY, origin),
+                    payload: query::SqlQueryPayload {
+                        sql: "SELECT 1".to_string(),
+                        query_id: "q".to_string(),
+                    },
+                },
+            ),
+            (
+                "VectorSearch",
+                Operation::VectorSearch {
+                    ctx: client_ctx(service_names::SEARCH, origin),
+                    payload: vector::VectorSearchPayload {
+                        id: "v".to_string(),
+                        map_name: String::new(),
+                        index_name: None,
+                        query_vector: Vec::new(),
+                        k: 1,
+                        ef_search: None,
+                        options: None,
+                    },
+                },
+            ),
+            (
+                "JournalSubscribe",
+                Operation::JournalSubscribe {
+                    ctx: client_ctx(service_names::COORDINATION, origin),
+                    payload: messaging::JournalSubscribeData {
+                        request_id: "j".to_string(),
+                        map_name: Some(String::new()),
+                        ..Default::default()
+                    },
+                },
+            ),
+        ];
+        for (expected_calls, (family, op)) in ops.into_iter().enumerate() {
+            let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+            assert!(result.is_ok(), "{family}: got {result:?}");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                expected_calls + 1,
+                "{family}: inner was not called"
+            );
+        }
+    }
+
+    /// The rule refuses four things and nothing else: no character class, and
+    /// the length bound admits a name of exactly 512 bytes.
+    #[tokio::test]
+    async fn admissible_names_reach_the_inner_service() {
+        let (mut svc, calls) = counted_service(false).await;
+        let at_bound = "a".repeat(512);
+        let mut expected_calls = 0;
+        for name in [
+            "user-profiles",
+            "users/profiles",
+            "notes:abc",
+            at_bound.as_str(),
+        ] {
+            for (family, op) in checked_family_ops(name, CallerOrigin::Client) {
+                let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+                expected_calls += 1;
+                assert!(result.is_ok(), "{family} on {name:?}: got {result:?}");
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    expected_calls,
+                    "{family} on {name:?}: inner was not called"
+                );
+            }
+        }
+    }
+
+    /// The operator line is limited to one per window, reports what the
+    /// limiter dropped, and cannot be broken or forged by the client-chosen
+    /// name. Driven on its own limiter with injected instants: the process-wide
+    /// one is shared with every other test that refuses a name.
+    #[test]
+    fn map_name_refusals_log_once_per_window_with_a_suppressed_count() {
+        #[derive(Clone)]
+        struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for CapturedLog {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let writer = CapturedLog(Arc::clone(&captured));
+        // Scoped, never a global install: this test binary is shared and runs in
+        // parallel, so a global subscriber would leak into every other test.
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let lines = || -> Vec<String> {
+            let bytes = captured
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            String::from_utf8(bytes)
+                .expect("utf-8 log")
+                .lines()
+                .map(str::to_string)
+                .collect()
+        };
+
+        let log = MapNameRefusalLog::new();
+        let start = Instant::now();
+        let at = |millis: u64| start + Duration::from_millis(millis);
+
+        let hostile = "a\nb\0c__backup";
+        let refusal =
+            OperationError::invalid_map_name(hostile, MapNameViolation::ReservedBackupSuffix);
+        let oversized =
+            OperationError::invalid_map_name(&"z".repeat(4096), MapNameViolation::TooLong);
+
+        tracing::subscriber::with_default(subscriber, || {
+            // 100 refusals inside one window: the first writes, 99 do not.
+            for i in 0..100 {
+                log.record(&refusal, at(i * 500));
+            }
+            assert_eq!(lines().len(), 1, "one line per window: {:#?}", lines());
+
+            // An error that is not a refused name writes nothing and takes no window.
+            log.record(
+                &OperationError::Forbidden {
+                    map_name: "m".to_string(),
+                },
+                at(60_000),
+            );
+            assert_eq!(lines().len(), 1);
+
+            // The next window's line reports the 99 the limiter dropped.
+            log.record(&refusal, at(60_000));
+            assert_eq!(lines().len(), 2);
+            log.record(&refusal, at(60_001));
+            assert_eq!(lines().len(), 2);
+
+            // A later window: one suppressed, and an oversized name is cut.
+            log.record(&oversized, at(120_000));
+        });
+
+        let lines = lines();
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+        for line in &lines {
+            assert!(line.contains("WARN"), "{line}");
+        }
+        // The line break and the NUL of the name arrive escaped, on one line.
+        assert!(
+            lines[0].contains(r#"map_name="a\nb\0c__backup""#),
+            "{}",
+            lines[0]
+        );
+        assert!(!lines[0].contains('\0'), "{}", lines[0]);
+        assert!(
+            lines[0].contains("violation=ReservedBackupSuffix"),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].contains("suppressed=0"), "{}", lines[0]);
+        assert!(lines[1].contains("suppressed=99"), "{}", lines[1]);
+        assert!(lines[2].contains("violation=TooLong"), "{}", lines[2]);
+        assert!(lines[2].contains("suppressed=1"), "{}", lines[2]);
+        assert!(lines[2].contains(&"z".repeat(128)), "{}", lines[2]);
+        assert!(!lines[2].contains(&"z".repeat(129)), "{}", lines[2]);
     }
 }
