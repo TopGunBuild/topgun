@@ -1233,6 +1233,21 @@ impl WriteBehindDataStore {
         config: WriteBehindConfig,
         bootstrap: Option<WalBootstrap>,
     ) -> Arc<Self> {
+        // A build that can refuse store writes on demand must say so at boot,
+        // whether or not the seam is configured: such a binary must never be
+        // mistaken for a production one.
+        #[cfg(feature = "fault-injection")]
+        if let Some(path) = fault_store_refuse_path() {
+            warn!(
+                refuse_file = %path.display(),
+                "fault-injection build: store writes are refused while the sentinel file exists"
+            );
+        } else {
+            warn!(
+                "fault-injection build: no sentinel file is configured, store writes are never refused"
+            );
+        }
+
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let flush_notify = Arc::new(Notify::new());
 
@@ -2335,6 +2350,29 @@ impl WriteBehindDataStore {
 // Background flush loop (R3)
 // ---------------------------------------------------------------------------
 
+/// Environment variable naming the sentinel file of the store-refusal seam.
+#[cfg(feature = "fault-injection")]
+const FAULT_STORE_REFUSE_FILE_ENV: &str = "TOPGUN_FAULT_STORE_REFUSE_FILE";
+
+/// The sentinel path of the store-refusal seam, read from the environment once
+/// per process: the arming gate and the boot line must not observe different
+/// answers, and a path that could change mid-run would make a refusal
+/// unattributable.
+#[cfg(feature = "fault-injection")]
+fn fault_store_refuse_path() -> Option<&'static std::path::Path> {
+    static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var_os(FAULT_STORE_REFUSE_FILE_ENV).map(PathBuf::from))
+        .as_deref()
+}
+
+/// Whether the store-refusal seam is armed right now: a sentinel path is
+/// configured AND a file exists there. The file is checked on every call so a
+/// test can let writes through, then start refusing them, inside one process.
+#[cfg(feature = "fault-injection")]
+fn fault_store_refusal_armed() -> bool {
+    fault_store_refuse_path().is_some_and(std::path::Path::exists)
+}
+
 /// Persists one dequeued entry to the inner store — the single body the
 /// background flush and the shutdown drain share.
 ///
@@ -2345,6 +2383,16 @@ impl WriteBehindDataStore {
 /// guard lives only inside its block: it is `!Send`, and must not be held
 /// across the inner store's await (or into any call that takes the same lock).
 async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow::Result<()> {
+    // Refuse here, before the inner store is reached, so the background flush
+    // and the shutdown drain both see the refusal exactly as they would see an
+    // inner-store error.
+    #[cfg(feature = "fault-injection")]
+    if fault_store_refusal_armed() {
+        return Err(anyhow::anyhow!(
+            "fault injection: the inner store refused the write"
+        ));
+    }
+
     match &entry.operation {
         DelayedOp::Store {
             value,
