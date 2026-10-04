@@ -14,7 +14,9 @@
  *   so the batch gets one error (code 400), nothing of it is applied and
  *   nothing is acknowledged;
  * - a single write, a query subscription and a sync request get no frame at
- *   all — the operator's log line is the signal there;
+ *   all — the operator's log line is the signal there — and the same request
+ *   for a storable name, sent next on the same socket, is answered, so the
+ *   silence is a refusal and not a connection that stopped being served;
  * - over HTTP the refusal is one entry of the response's error list;
  * - on the embedded store, the write-ahead log never holds the refused
  *   operation.
@@ -79,6 +81,14 @@ function serverBinary(): string {
   return binary;
 }
 
+/** What one of the silent paths showed: the frames of the silence window, then whether the socket still answers. */
+interface Silence {
+  /** Types of every frame received within the silence window. */
+  frames: string[];
+  /** Type of the answer to the same request for a storable name, sent afterwards on the same socket; `null` when none came. */
+  control: string | null;
+}
+
 interface Frames {
   acks: any[];
   rejected: any[];
@@ -113,10 +123,10 @@ interface Observed {
   /** A batch of [valid without id, refused with id] on one key. */
   idless?: Frames | string;
   idlessValue?: unknown;
-  /** Types of every frame received within the silence window, per single-message path. */
-  clientOp?: string[] | string;
-  querySub?: string[] | string;
-  syncInit?: string[] | string;
+  /** Per single-message path: the silence window, and the control request that follows it. */
+  clientOp?: Silence | string;
+  querySub?: Silence | string;
+  syncInit?: Silence | string;
   http?: { status: number; errors: any[] | undefined; ack: any } | string;
   /** The operator's log lines for refused names, from the server's stdout. */
   refusalLogLines?: string[];
@@ -176,18 +186,29 @@ describe.each(BACKENDS)(
         return spawnBinary({ binaryPath: serverBinary(), label, env });
       }
 
-      /** Sends one message on a fresh connection and returns the types of every frame that came back in the window. */
+      /**
+       * Sends one message on a fresh connection and records the types of every
+       * frame that came back in the window. Then, on the same socket, sends the
+       * same kind of request for a storable name and records its answer: an
+       * empty window alone would look the same if the connection had stopped
+       * being served.
+       */
       async function framesAfter(
         port: number,
         nodeId: string,
         message: Record<string, unknown>,
-      ): Promise<string[]> {
+        control: { message: Record<string, unknown>; answer: string },
+      ): Promise<Silence> {
         const client = await connectWithin(port, nodeId);
         try {
           client.messages.length = 0;
           client.send(message);
           await sleep(SILENCE_MS);
-          return client.messages.map((m) => m.type);
+          const frames = client.messages.map((m) => m.type);
+          client.messages.length = 0;
+          client.send(control.message);
+          const answer = await firstFrame(client, [control.answer], FRAME_WAIT_MS);
+          return { frames, control: answer ? answer.type : null };
         } finally {
           client.close();
         }
@@ -295,19 +316,43 @@ describe.each(BACKENDS)(
         // one window of the operator's log limiter.
         [o.clientOp, o.querySub, o.syncInit] = await Promise.all([
           observe(() =>
-            framesAfter(port, `refusal-op-${tag}`, {
-              type: 'CLIENT_OP',
-              payload: put(name, 'single', refusedValue(), '7'),
-            }),
+            framesAfter(
+              port,
+              `refusal-op-${tag}`,
+              { type: 'CLIENT_OP', payload: put(name, 'single', refusedValue(), '7') },
+              {
+                message: {
+                  type: 'CLIENT_OP',
+                  payload: put(VALID_MAP, 'control', { control: true }, '8'),
+                },
+                answer: 'OP_ACK',
+              },
+            ),
           ),
           observe(() =>
-            framesAfter(port, `refusal-query-${tag}`, {
-              type: 'QUERY_SUB',
-              payload: { queryId: `q-refused-${tag}`, mapName: name, query: {} },
-            }),
+            framesAfter(
+              port,
+              `refusal-query-${tag}`,
+              {
+                type: 'QUERY_SUB',
+                payload: { queryId: `q-refused-${tag}`, mapName: name, query: {} },
+              },
+              {
+                message: {
+                  type: 'QUERY_SUB',
+                  payload: { queryId: `q-control-${tag}`, mapName: VALID_MAP, query: {} },
+                },
+                answer: 'QUERY_RESP',
+              },
+            ),
           ),
           observe(() =>
-            framesAfter(port, `refusal-sync-${tag}`, { type: 'SYNC_INIT', mapName: name }),
+            framesAfter(
+              port,
+              `refusal-sync-${tag}`,
+              { type: 'SYNC_INIT', mapName: name },
+              { message: { type: 'SYNC_INIT', mapName: VALID_MAP }, answer: 'SYNC_RESP_ROOT' },
+            ),
           ),
         ]);
 
@@ -383,16 +428,16 @@ describe.each(BACKENDS)(
         expect(o.idlessValue).toBeUndefined();
       });
 
-      test('a single write gets no frame of any type', () => {
-        expect(o.clientOp).toEqual([]);
+      test('a single write gets no frame of any type, and a write to a storable name on the same socket is then acknowledged', () => {
+        expect(o.clientOp).toEqual({ frames: [], control: 'OP_ACK' });
       });
 
-      test('a query subscription gets no frame of any type', () => {
-        expect(o.querySub).toEqual([]);
+      test('a query subscription gets no frame of any type, and a query for a storable name on the same socket is then answered', () => {
+        expect(o.querySub).toEqual({ frames: [], control: 'QUERY_RESP' });
       });
 
-      test('a sync request gets no frame of any type', () => {
-        expect(o.syncInit).toEqual([]);
+      test('a sync request gets no frame of any type, and a sync request for a storable name on the same socket is then answered', () => {
+        expect(o.syncInit).toEqual({ frames: [], control: 'SYNC_RESP_ROOT' });
       });
 
       test('the server logs exactly one warning for the refusals, naming the violation', () => {
