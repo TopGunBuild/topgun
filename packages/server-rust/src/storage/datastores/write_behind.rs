@@ -7124,6 +7124,125 @@ mod tests {
              the clone slope {clone_allocs:.3} allocs/entry within 10 %"
         );
     }
+
+    /// TG-WB-004: while a refused entry waits out its retry backoff, the queue
+    /// shard it was put back on must stay usable. A write takes that shard lock
+    /// synchronously, so a guard kept alive across the backoff parks the
+    /// writer's worker thread for the whole backoff — the first step of a node
+    /// that stops serving.
+    ///
+    /// The probe write runs as a task of its own and the JOIN is bounded: a
+    /// timeout polled around the write itself would block inside the write and
+    /// never look at its timer, so the test would hang instead of failing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_queue_shard_is_free_during_a_retry_backoff() {
+        use std::time::{Duration, Instant};
+
+        let spy = Arc::new(SpyDataStore::new());
+        spy.set_fail_add(true);
+        let calls = spy.calls();
+        // First backoff = min(2000 * 2^1, 5000) = 4000 ms: long enough that the
+        // probe and every later assertion run inside it.
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 50,
+                backoff_base_ms: 2000,
+                ..WriteBehindConfig::default()
+            },
+        );
+
+        // A second key of the same partition: the same DashMap key, hence the
+        // same shard. Not the refused key itself, which would coalesce with the
+        // entry under retry and reset it.
+        let partition = partition_for("m", "k");
+        let probe_key = (0..100_000_u32)
+            .map(|i| format!("probe-{i}"))
+            .find(|candidate| partition_for("m", candidate) == partition)
+            .expect("no probe key shares the partition of the refused entry");
+        let refused = ("m".to_string(), "k".to_string());
+        let attempts = || {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(
+                    |call| matches!(call, SpyCall::Add { map, key } if map == "m" && key == "k"),
+                )
+                .count()
+        };
+
+        store
+            .add("m", "k", &dummy_value(), 0, now_millis())
+            .await
+            .expect("the refused entry is accepted into the buffer");
+
+        // Wait until the first attempt has failed and the entry is back on its
+        // queue. `try_get` never blocks: with the guard held across the backoff
+        // it reads `Locked` for the whole backoff, otherwise it reads the
+        // reinserted entry.
+        let poll_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let back_on_queue = match store.queues.try_get(&partition) {
+                dashmap::try_result::TryResult::Locked => true,
+                dashmap::try_result::TryResult::Present(queue) => queue
+                    .entries
+                    .get(&refused)
+                    .is_some_and(|entry| entry.retry_count == 1),
+                dashmap::try_result::TryResult::Absent => false,
+            };
+            if attempts() >= 1 && back_on_queue {
+                break;
+            }
+            assert!(
+                Instant::now() < poll_deadline,
+                "the retry entry was never observed back on its queue"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let reached_backoff = Instant::now();
+
+        let probe = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .add("m", &probe_key, &dummy_value(), 0, now_millis())
+                    .await
+            })
+        };
+        let joined = tokio::time::timeout(Duration::from_millis(1000), probe).await;
+        assert!(
+            joined.is_ok(),
+            "a write to the partition under retry backoff did not complete within 1000 ms: \
+             the queue shard guard is held across the backoff await"
+        );
+
+        joined
+            .expect("bounded join")
+            .expect("the probe task panicked")
+            .expect("the probe write failed");
+
+        assert_eq!(
+            attempts(),
+            1,
+            "the probe must run inside the first backoff, before a second attempt"
+        );
+        assert!(
+            reached_backoff.elapsed() < Duration::from_millis(3000),
+            "the probe must finish inside the first backoff (4000 ms)"
+        );
+
+        let retry_count = store
+            .queues
+            .get(&partition)
+            .and_then(|queue| queue.entries.get(&refused).map(|entry| entry.retry_count));
+        assert_eq!(
+            retry_count,
+            Some(1),
+            "the refused entry must still be queued for its second attempt"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
