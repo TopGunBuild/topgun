@@ -405,6 +405,13 @@ impl MapNameRefusalLog {
             violation,
         } = refusal
         else {
+            // The one call site passes the error it has just built for a refused
+            // name; any other variant here is a wiring mistake, and release
+            // builds stay silent rather than write a line about the wrong thing.
+            debug_assert!(
+                false,
+                "MapNameRefusalLog::record called with {refusal:?}, not InvalidMapName"
+            );
             return;
         };
         if let Some(suppressed) = self.line_due(now) {
@@ -570,6 +577,7 @@ mod tests {
     use super::*;
     use crate::service::operation::{service_names, OperationContext};
     use crate::service::policy::{InMemoryPolicyStore, PolicyStore};
+    use crate::storage::map_data_store::MAX_MAP_NAME_BYTES;
 
     /// Stub inner service that always succeeds.
     struct AlwaysOkService;
@@ -1596,7 +1604,10 @@ mod tests {
                 MapNameViolation::ReservedBackupSuffix,
             ),
             ("a\0b".to_string(), MapNameViolation::ContainsNul),
-            ("a".repeat(513), MapNameViolation::TooLong),
+            (
+                "a".repeat(MAX_MAP_NAME_BYTES + 1),
+                MapNameViolation::TooLong,
+            ),
         ]
     }
 
@@ -1685,6 +1696,62 @@ mod tests {
         }
     }
 
+    /// The journal read and the three resolver operations: each carries a map
+    /// name and makes no durable write under it, so the check leaves them alone.
+    fn unchecked_read_family_ops(origin: CallerOrigin) -> Vec<(&'static str, Operation)> {
+        vec![
+            (
+                "JournalRead",
+                Operation::JournalRead {
+                    ctx: client_ctx(service_names::PERSISTENCE, origin),
+                    payload: messaging::JournalReadData {
+                        request_id: "j".to_string(),
+                        from_sequence: "0".to_string(),
+                        limit: None,
+                        map_name: Some(String::new()),
+                    },
+                },
+            ),
+            (
+                "RegisterResolver",
+                Operation::RegisterResolver {
+                    ctx: client_ctx(service_names::PERSISTENCE, origin),
+                    payload: messaging::RegisterResolverData {
+                        request_id: "r".to_string(),
+                        map_name: String::new(),
+                        resolver: messaging::ConflictResolver {
+                            name: "noop".to_string(),
+                            code: String::new(),
+                            priority: None,
+                            key_pattern: None,
+                        },
+                    },
+                },
+            ),
+            (
+                "UnregisterResolver",
+                Operation::UnregisterResolver {
+                    ctx: client_ctx(service_names::PERSISTENCE, origin),
+                    payload: messaging::UnregisterResolverData {
+                        request_id: "r".to_string(),
+                        map_name: String::new(),
+                        resolver_name: "noop".to_string(),
+                    },
+                },
+            ),
+            (
+                "ListResolvers",
+                Operation::ListResolvers {
+                    ctx: client_ctx(service_names::PERSISTENCE, origin),
+                    payload: messaging::ListResolversData {
+                        request_id: "r".to_string(),
+                        map_name: Some(String::new()),
+                    },
+                },
+            ),
+        ]
+    }
+
     /// The families outside the check carry a topic, a counter name, no name at
     /// all, or a map name no durable write is made under. An empty name there
     /// is not a violation: the operation reaches the inner service.
@@ -1765,7 +1832,8 @@ mod tests {
                 },
             ),
         ];
-        for (expected_calls, (family, op)) in ops.into_iter().enumerate() {
+        let ops = ops.into_iter().chain(unchecked_read_family_ops(origin));
+        for (expected_calls, (family, op)) in ops.enumerate() {
             let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
             assert!(result.is_ok(), "{family}: got {result:?}");
             assert_eq!(
@@ -1777,11 +1845,11 @@ mod tests {
     }
 
     /// The rule refuses four things and nothing else: no character class, and
-    /// the length bound admits a name of exactly 512 bytes.
+    /// the length bound admits a name of exactly `MAX_MAP_NAME_BYTES` bytes.
     #[tokio::test]
     async fn admissible_names_reach_the_inner_service() {
         let (mut svc, calls) = counted_service(false).await;
-        let at_bound = "a".repeat(512);
+        let at_bound = "a".repeat(MAX_MAP_NAME_BYTES);
         let mut expected_calls = 0;
         for name in [
             "user-profiles",
@@ -1853,21 +1921,33 @@ mod tests {
         let oversized =
             OperationError::invalid_map_name(&"z".repeat(4096), MapNameViolation::TooLong);
 
-        tracing::subscriber::with_default(subscriber, || {
+        // While this subscriber is the only one alive, a test on another thread
+        // that reaches the same `warn!` first settles it as "nobody listens"
+        // from its own (empty) scope, and the lines below are never written. A
+        // second live dispatcher makes every thread ask all subscribers.
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _second_dispatcher = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new());
+
+        tracing::dispatcher::with_default(&dispatch, || {
             // 100 refusals inside one window: the first writes, 99 do not.
             for i in 0..100 {
                 log.record(&refusal, at(i * 500));
             }
             assert_eq!(lines().len(), 1, "one line per window: {:#?}", lines());
 
-            // An error that is not a refused name writes nothing and takes no window.
-            log.record(
-                &OperationError::Forbidden {
-                    map_name: "m".to_string(),
-                },
-                at(60_000),
-            );
-            assert_eq!(lines().len(), 1);
+            // An error that is not a refused name writes nothing and takes no
+            // window. Only a release build can show that: a debug build stops
+            // on the assertion instead (the test below).
+            #[cfg(not(debug_assertions))]
+            {
+                log.record(
+                    &OperationError::Forbidden {
+                        map_name: "m".to_string(),
+                    },
+                    at(60_000),
+                );
+                assert_eq!(lines().len(), 1);
+            }
 
             // The next window's line reports the 99 the limiter dropped.
             log.record(&refusal, at(60_000));
@@ -1902,5 +1982,19 @@ mod tests {
         assert!(lines[2].contains("suppressed=1"), "{}", lines[2]);
         assert!(lines[2].contains(&"z".repeat(128)), "{}", lines[2]);
         assert!(!lines[2].contains(&"z".repeat(129)), "{}", lines[2]);
+    }
+
+    /// The limiter is for refused names only: handing it any other error is a
+    /// wiring mistake, and a debug build stops on it.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "not InvalidMapName")]
+    fn map_name_refusal_log_asserts_on_another_error_in_debug() {
+        MapNameRefusalLog::new().record(
+            &OperationError::Forbidden {
+                map_name: "m".to_string(),
+            },
+            Instant::now(),
+        );
     }
 }
