@@ -2544,9 +2544,18 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             // retry.
                             store.deregister_in_flight(partition_id_for_wal, &entry.wal_sequences);
 
+                            // One statement, so the shard guard is a temporary that
+                            // is gone before the backoff below. Held across that
+                            // await it would block every synchronous access to the
+                            // shard — a client write, the stall watchdog — for the
+                            // whole backoff, and a runtime worker blocked there can
+                            // stop the node (TG-WB-004).
                             let partition_id = partition_for(&entry.map, &entry.key);
-                            let mut queue = store.queues.entry(partition_id).or_default();
-                            queue.reinsert_front(vec![retry_entry]);
+                            store
+                                .queues
+                                .entry(partition_id)
+                                .or_default()
+                                .reinsert_front(vec![retry_entry]);
 
                             // Backoff before processing next retry-eligible entry
                             let backoff = std::cmp::min(
