@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Breaking (server, map names):** map names that are empty, longer than 512 bytes,
+  end in `__backup` or contain a NUL character are now refused for client operations.
+  Data already stored under such a name is not deleted: it stays in the store, but
+  clients can no longer address it. No rename tool is provided. How a client sees the
+  refusal depends on the request. A batched write (what the SDK sends) and an HTTP
+  `/sync` operation are refused explicitly with `InvalidMapName` (code 400). A query, a
+  subscription, a sync request or a single un-batched operation on such a name gets
+  **no response**: the server refuses it and logs a warning, but sends nothing back, so
+  an older SDK keeps waiting. In particular `query('')` used to get an empty answer and
+  now gets none.
+- **Fixed (server, embedded backend):** names with `-`, `/`, `.` and other characters
+  outside the identifier class (`^[a-zA-Z_][a-zA-Z0-9_]*$`) are now durable on the
+  embedded (redb) backend. Before, a write to such a map was acknowledged and then
+  missing after a restart.
+- **Behavior change (server, upgrade):** maps whose writes were stranded reappear after
+  the upgrade. Writes the previous version acknowledged for such names and could not
+  store are replayed from the WAL on first boot. An application that renamed its map
+  since then will see the old map's data come back under the old name. The first boot
+  after the upgrade replays every stranded write, so it can take longer than usual, and
+  it creates one table per stranded map name.
 - **Breaking (`@topgunbuild/client`, `@topgunbuild/core`, server):** a node id may no
   longer contain `|` or `#` (`:` was already refused). `new TopGunClient({ nodeId })`
   and `new HLC(nodeId)` throw for such an id, and a server started with such a
