@@ -227,6 +227,25 @@ A node running the default `TOPGUN_OR_DELTA_WAL=true` writes OR delta frames. Th
 
 A rollback to a pre-reader binary that must not hit either the refusal or the silent drop has to drain the WAL under the new binary first, or run with `TOPGUN_OR_DELTA_WAL=false` long enough for every delta frame already on disk to be applied and garbage-collected.
 
+### Rolling a node BACK across the redb map-name tables (`mapr__` / `maprb__`)
+
+A binary that carries the map-name contract (TG-NAME-001) stores a map whose name is outside the identifier class `^[a-zA-Z_][a-zA-Z0-9_]*$` — any name containing `-`, `/`, `.`, `:` and so on — in the redb tables `mapr__{name}` / `maprb__{name}`. Identifier-class names keep their `map__{name}` / `map__{name}__backup` tables byte for byte, so nothing on disk is renamed. Rollback was tested across **exactly one boundary**: back to the binary built from `07d009f0`. Nothing is claimed about earlier binaries.
+
+There are two cases, and they behave differently. Only the first is safe.
+
+**Case 1 — booting the `07d009f0` binary on a store that holds such tables or WAL frames: it starts and serves every identifier-class map.** Measured after a clean stop and after `kill -9` of the newer binary: a control read at the start **and** at the end of a 10 s window answers with the stored value.
+
+- The older binary does not see the other maps. To a client, a map whose name is outside the identifier class reads as empty on the rolled-back binary, and its sync round is rejected. Its tables are left untouched and its data returns when the newer binary does.
+- After an unclean stop, WAL frames for such names that were not yet applied make the older binary log `replay failed for entry` / `BootUnreplayed` and continue. The frames stay in the WAL and are replayed when the newer binary returns.
+
+**Case 2 — WARNING: a live client write to such a name makes the `07d009f0` binary hang.** Before starting the older binary, **stop every client write to a map name outside the identifier class**. Every client version allows `-` and `/` in map names, so any application that uses such names will send these writes the moment it reconnects.
+
+- What happens: the LWW write is acknowledged and its frame is in the WAL; the store then refuses it; about 6 s after the ack the process logs nothing more, answers no new connection and ignores `SIGTERM`. It has to be killed with `kill -9`. Measured in 4 of 4 runs that waited at least 6 s after the ack, with 2 of 2 control runs (identifier-class name) healthy.
+- Why case 1 does not hang and case 2 does: at boot the older binary only *replays* those frames, and a store refusal during recovery is a warning outside the write-behind retry loop. A live write goes through that loop, where the refusal is retried while a lock is held.
+- This is a defect of every pre-fix binary on **any** store refusal, not only a map name. It is tracked as TODO-756 and is not fixed by the map-name change, which only removes this one trigger from newer binaries.
+- The acknowledged frame survives the kill — it was fsynced before the ack under `per_op`; under `batched` the usual group-commit window applies — and is replayed when the newer binary returns.
+- This is stated for LWW writes. An OR-Map write to such a name is not acknowledged by the older binary at all, so no frame is written. That no hang follows an unacknowledged OR write was not measured separately.
+
 Note (write-behind flush, distinct from the fsync policy above): Write-Behind buffers acked writes for ~1s before persisting to the durable backend. Acceptable for the demo server tier; crash-safe shutdown drain + WAL recovery land separately (TODO-339, post-HN). Until that lands, an unclean shutdown can lose buffered writes that have not yet been flushed.
 
 ## Simulation Testing

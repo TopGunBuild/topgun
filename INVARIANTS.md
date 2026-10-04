@@ -7,7 +7,7 @@ that every cited enforcing test still exists and that no new entry lands without
 an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", not "zero NAKED".
 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
-EVI eviction, SYNC). Cite the ID verbatim in code comments and test names. Statuses:
+EVI eviction, SYNC, NAME map names). Cite the ID verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -1127,3 +1127,125 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `OP_ACK` carrying a dispatcher counter, retired writes made offline); closed by SPEC-380;
   witnessed end-to-end by `tests/integration-rust/stray-op-ack.test.ts`.
 - **Status:** decided, **enforced** (clauses (b) and (c) client-side, as stated above).
+
+### TG-NAME-001: The redb table-name mapping is injective, class-disjoint and renames nothing
+
+- **Scope:** `RedbDataStore`: the mapping from a `(map name, is_backup)` pair to a redb table name
+  (`table_name_for`) and its inverse on primaries (`list_maps`), for every name the store accepts.
+  Postgres is outside it — there the map name is a column value, not a table name.
+- **Definitions:** `S` (storable) = names that are non-empty, do not end in `__backup` and contain
+  no U+0000. `V` (identifier class) = members of `S` matching `^[a-zA-Z_][a-zA-Z0-9_]*$` — exactly
+  the set the store accepted before this invariant. `W` = `S \ V`. `table(n, backup)`: for
+  `n ∈ V` → `"map__"+n` / `"map__"+n+"__backup"`; for `n ∈ W` → `"mapr__"+n` / `"maprb__"+n`.
+- **Statement:** for all `n ∈ S` and both values of `backup`:
+  1. *Four ranges.* `P_old = "map__"·V`, `B_old = "map__"·V·"__backup"`, `P_new = "mapr__"·W`,
+     `B_new = "maprb__"·W`.
+  2. *Old vs new, primary vs backup (new).* Every string of `P_old ∪ B_old` has `_` at byte index
+     3; every string of `P_new ∪ B_new` has `r` there. Every string of `P_new` has `_` at byte
+     index 4; every string of `B_new` has `b` there. So `(P_old ∪ B_old)`, `P_new` and `B_new`
+     are pairwise disjoint.
+  3. *Primary vs backup (old).* `"map__"+a == "map__"+b+"__backup"` ⇒ `a == b+"__backup"`, which
+     is not in `S`. So `P_old ∩ B_old = ∅`, and a table of `P_old` never ends in `__backup`.
+  4. *Within a range* the mapping is a constant prefix (plus, for `B_old`, a constant suffix)
+     around `n`, hence injective. With 2 and 3: `table` is injective on `S × {primary, backup}`.
+  5. *`list_maps` is the total, unambiguous inverse on primaries.* The three prefixes are mutually
+     exclusive (step 2: none is a prefix of another), so each catalog name takes at most one
+     branch, in any order: `mapr__` → strip 6 bytes → the raw name; `maprb__` → skipped; `map__` →
+     strip 5 bytes, skipped if the rest ends in `__backup`, else the name; anything else →
+     ignored. Sharp cases:
+     - `V`-name `r__x` → `map__r__x` (index 3 is `_`) — decodes to `r__x`, not to a `W`-name `x`;
+     - `V`-name `rb__x` → `map__rb__x` — decodes to `rb__x`, is not a `W` backup;
+     - `W`-names `map__a-b`, `mapr__a-b`, `maprb__a-b` → `mapr__map__a-b`, `mapr__mapr__a-b`,
+       `mapr__maprb__a-b` — each decodes to itself (only the first 6 bytes are stripped; index 4
+       is `_`, so none is read as a backup);
+     - `W`-name `a-b__backup_data` → `mapr__a-b__backup_data` — the `W` branch has no suffix logic;
+     - `V`-name `x__backup_data` → `map__x__backup_data` — does not end in `__backup`, listed;
+     - a name ending in `__backup` (either class) is not in `S` and reaches no table.
+  6. *Nothing is renamed.* For `n ∈ V` both table names are byte-identical to the ones the binary
+     built from `07d009f0` uses. The three fixed internal maps (`_topgun_tombstone_cursors_v2`,
+     `_topgun_device_credentials`, `__topgun_policies`) are in `V`. No table with byte `r` at
+     index 3 can exist in a store written only by earlier binaries, whose only table constructor
+     was `format!("map__…")`.
+- **Maintaining code:** `packages/server-rust/src/storage/datastores/redb.rs` — `table_name_for`
+  (refusal plus mapping in one call: it applies the shared rule `check_map_name` of
+  `storage/map_data_store.rs`, refuses a name outside `S` and returns the table name, so no path
+  to a table can skip the refusal) and `list_maps`. Citations are kept line-number-free on
+  purpose, per `TG-OR-004`.
+- **Enforcing test:** `table_names_keep_the_old_class_and_prefix_the_new_class` (steps 1-6 and the
+  sharp cases of step 5), `store_refused_names_reach_no_table_and_backups_stay_unlisted` (step 3)
+  and `map_names_outside_the_identifier_class_round_trip` (the round trip over the probe set) —
+  all in `redb.rs`'s test module. The old-binary consequence of step 2 is proven outside the Rust
+  tree, by the two-binary run `tests/integration-rust/map-name-rollback.test.ts`: the `07d009f0`
+  binary starts and serves every `V` map on a store that holds `mapr__` / `maprb__` tables, after
+  a clean stop and after `kill -9`. That run needs the older binary, so CI excludes it and it is
+  run locally; the rollback note in `CLAUDE.md` states what was measured.
+- **Violation consequence:** two maps, or a map and another map's backup partition, share one
+  table: one silently overwrites the other, or a primary is read as a backup and dropped from
+  `list_maps`, so the boot serves Merkle root 0 for durable data. Or an existing table is renamed
+  and its data is unreachable after an upgrade. Or an earlier binary lists a table it cannot scan
+  and refuses to start, which breaks rollback.
+- **Discovered by:** the map-name durability investigation of TODO-751 (acked writes to
+  `user-profiles` / `users/profiles` gone after a restart on redb); SPEC-381a.
+- **Status:** decided, **enforced**.
+
+### TG-NAME-002: A name outside the admissible set is refused before the WAL append and before the ack
+
+- **Scope:** the server binary's operation pipeline, which always installs the authorization
+  layer (`bin/topgun_server.rs`: `build_operation_pipeline(router, &config,
+  evaluator_for_factory.clone())`, the evaluator always passed as `Some`), for operations of
+  origin `Client`, `HttpClient` or `Anonymous` in the enumerated families. **Excluded:** a pipeline
+  built without the layer (the bench load harness and the test callers that pass `None`); trusted
+  origins; HTTP `/sync` queries.
+- **Definitions:** `S` as in TG-NAME-001. `N` (admissible at ingress) = members of `S` of at most
+  512 bytes of UTF-8; `N ⊆ S`.
+- **Statement:** for every operation of origin `CallerOrigin::Client | HttpClient | Anonymous`
+  dispatched through that pipeline and belonging to one of the **enumerated families** — `ClientOp`
+  (LWW `PUT`/`REMOVE`, OR `OR_ADD`/`OR_REMOVE`), `OpBatch` (every op), `EntryProcess`,
+  `EntryProcessBatch`, `ORMapPushDiff`, `QuerySubscribe`, `Search`, `SearchSubscribe`,
+  `HybridSearch`, `HybridSearchSubscribe`, `SyncInit`, `MerkleReqBucket`, `ORMapSyncInit`,
+  `ORMapMerkleReqBucket`, `ORMapDiffRequest` — if any carried map name `n ∉ N`, then: the operation
+  returns `OperationError::InvalidMapName` (disposition `Permanent`), the inner service is never
+  called, no WAL frame is appended and no `OP_ACK` is sent for the refused operation. For an
+  `OpBatch` the unit is the **sub-batch** (the ops of the batch that share a partition), and the
+  outcome depends on whether its ops carry ids (`ClientOp.id` is an `Option`):
+  - *every op of the refused sub-batch carries an id* — the sub-batch is re-dispatched one op at a
+    time; the refusal is attributed to the offending op(s), and each valid op of that sub-batch is
+    applied exactly once (the first dispatch applied nothing — TG-SYNC-003);
+  - *any op of the refused sub-batch has no id* — the sub-batch is NOT re-dispatched: it is refused
+    whole, **none of its ops is applied**, valid ones included, and the batch is answered with one
+    batch-level `ERROR` carrying code 400, which names no operation.
+
+  Sub-batches of the same batch that hold no name outside `N` are dispatched as before.
+- **Not covered, and why none is a durability hole:** three families carry a `map_name` field and
+  are not checked — `VectorSearch`, `RegisterResolver` and `JournalSubscribe` (an `Option`). None
+  of them makes a durable store write under that name (read / registration / subscription paths),
+  so a refused-shape name there cannot become an acked-then-lost write. Their siblings in the
+  authorization bypass group (`JournalRead`, `UnregisterResolver`, `ListResolvers`) are in the
+  same position. `TopicPublish` and `CounterSync` carry a topic / counter name, not a map name.
+- **Stated boundaries:** (a) Trusted origins (`Forwarded`, `Backup`, `Wan`, `System`) early-return
+  in `AuthorizationService::call`; for them the store's own check (TG-NAME-001, `table_name_for`)
+  is the last line. (b) HTTP `/sync` **queries** do not pass through the pipeline; they read
+  resident records only and write nothing. HTTP `/sync` **operations** do pass through it, by the
+  same per-op fold as an `OpBatch`, and are covered. (c) The invariant states what the server
+  does, not what the client is told: on the single-message WebSocket path a refusal produces no
+  frame. (d) A pipeline built **without** the authorization layer is outside the invariant:
+  `build_operation_pipeline` installs `AuthorizationLayer` only when it is given an evaluator. The
+  callers that pass `None` are the bench load harness and tests; no shipped path builds such a
+  pipeline.
+- **Maintaining code:** `service/middleware/authorization.rs` ingress check;
+  `network/handlers/websocket.rs` `is_redispatchable`; the layer is installed by
+  `service/middleware/pipeline.rs` `build_operation_pipeline` when it is given an evaluator, which
+  the server binary always does. Citations are kept line-number-free on purpose, per `TG-OR-004`.
+- **Enforcing test:** `a_name_outside_the_admissible_set_never_reaches_the_inner_service` (every
+  checked family × every refused name, under both policy-store states) and
+  `a_refused_op_in_any_batch_position_refuses_the_whole_dispatch` (an offending op in a non-first
+  position), both in `authorization.rs`'s test module. The two `OpBatch` outcomes (with ids / with
+  an id-less op) and the per-path wire behaviour are proven at the wire by
+  `tests/integration-rust/map-name-refusal.test.ts`.
+- **Violation consequence:** a write the store cannot hold is acknowledged and then lost at flush
+  — acked-then-not-durable — and its WAL frame fails replay on every boot and pins that
+  partition's WAL GC.
+- **Discovered by:** the same investigation as TG-NAME-001: nothing checked a map name before the
+  ack; SPEC-381a.
+- **Status:** decided, **enforced**. Stated limit, not a gap in the invariant: on the
+  single-message paths the refusal sends no frame (tracker TODO-744).

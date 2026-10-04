@@ -120,6 +120,9 @@ where
                         OperationError::Forbidden { .. } => "forbidden",
                         OperationError::ValueTooLarge { .. } => "value_too_large",
                         OperationError::SchemaInvalid { .. } => "schema_invalid",
+                        // Same label `error_kind()` returns, so one refused name
+                        // is one vocabulary entry on both counters.
+                        OperationError::InvalidMapName { .. } => "invalid_map_name",
                     };
                     metrics::counter!("topgun_operation_errors_total", "service" => service_name, "error" => error_kind).increment(1);
                 }

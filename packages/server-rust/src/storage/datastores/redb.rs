@@ -8,22 +8,29 @@
 //! # Storage layout
 //!
 //! One `redb::TableDefinition<&str, &[u8]>` per `(map_name, is_backup)` tuple.
-//! Table names follow `map__{map_name}` for primary tables and
-//! `map__{map_name}__backup` for backup partitions. Map names are validated
-//! against `^[a-zA-Z_][a-zA-Z0-9_]*$` before use to prevent table-name
-//! collisions via metacharacters (parity with `PostgresDataStore`).
+//! The table name carries the map name verbatim behind a prefix that depends on
+//! the name's class (TG-NAME-001):
 //!
-//! The `__backup` suffix is **reserved**: a map name ending in `__backup` is
-//! rejected by [`is_valid_map_name`]. Without this, a primary map literally
+//! | Map name | Primary table | Backup table |
+//! |---|---|---|
+//! | identifier class (`^[a-zA-Z_][a-zA-Z0-9_]*$`) | `map__{name}` | `map__{name}__backup` |
+//! | any other storable name | `mapr__{name}` | `maprb__{name}` |
+//!
+//! The character class is NOT a gate: it only picks the prefix. Identifier-class
+//! names keep the tables they have always had, so nothing on disk is renamed;
+//! every other name gets a prefix no identifier-class table can carry (byte 3 is
+//! `r`, not `_`), so the two classes never share a table.
+//!
+//! What the store does refuse is decided by the shared rule
+//! [`check_map_name`]: an empty name, a name containing U+0000, and a name ending
+//! in the **reserved** `__backup` suffix. The suffix is reserved because the
+//! identifier-class backup table is spelled with it: a primary map literally
 //! named `foo__backup` would encode to table `map__foo__backup` — byte-identical
 //! to the backup partition of map `foo` — so `list_maps` (which derives the
-//! durable map set from the table catalog and skips `__backup` tables) would
-//! silently drop it, leaving its post-restart Merkle root at 0. That is exactly
-//! the durable-but-invisible silent-divergence class this index exists to
-//! close, so the ambiguity is forbidden at the validation boundary rather than
-//! papered over at enumeration. Postgres stores `is_backup` as a key column
-//! (not in the name) and so never had this collision; reserving the suffix in
-//! both validators keeps the accepted-name set identical across backends.
+//! durable map set from the table catalog and skips backup tables) would
+//! silently drop it, leaving its post-restart Merkle root at 0. The rule's
+//! length bound is an ingress concern and is deliberately NOT applied here: the
+//! store must keep reading every table that already exists.
 //!
 //! Values are msgpack-serialized [`RecordValue`] (via
 //! [`rmp_serde::to_vec_named`]), matching the on-disk format the Postgres
@@ -66,7 +73,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::storage::map_data_store::{
-    merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+    check_map_name, merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
 };
 use crate::storage::record::RecordValue;
 use anyhow::bail;
@@ -90,24 +97,14 @@ const LEAF_BATCH_SIZE: usize = 1024;
 /// the total scanned volume.
 const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
 
-/// Validate that a map name matches `^[a-zA-Z_][a-zA-Z0-9_]*$` and does not end
-/// in the reserved `__backup` suffix.
+/// Whether a map name is in the identifier class `^[a-zA-Z_][a-zA-Z0-9_]*$`.
 ///
-/// Map names are interpolated into redb table-definition strings via
-/// `format!("map__{name}")`; rejecting metacharacters prevents collision
-/// between user-supplied maps and reserved table names. The `__backup` suffix
-/// is reserved because `table_name_for` encodes `is_backup` into the name —
-/// a primary map named `foo__backup` would be indistinguishable from the
-/// backup partition of map `foo`, so `list_maps` would silently drop it and
-/// serve Merkle root 0 for durable data. Mirrors the `is_valid_table_name`
-/// check in `PostgresDataStore` so both backends accept the same name set.
-fn is_valid_map_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    if name.ends_with("__backup") {
-        return false;
-    }
+/// This validates nothing. It is the class predicate of TG-NAME-001, used only
+/// by [`table_name_for`] to pick the table prefix: names in the class keep the
+/// `map__` tables they have always had, every other storable name goes under
+/// `mapr__` / `maprb__`. Which names the store refuses is decided by the
+/// shared rule, which [`table_name_for`] applies before it consults this.
+fn is_identifier_class(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
@@ -116,15 +113,38 @@ fn is_valid_map_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Build the redb table name for a `(map, is_backup)` tuple.
+/// Build the redb table name for a `(map, is_backup)` tuple, or refuse the
+/// name (TG-NAME-001).
 ///
-/// Caller must have already validated `map` via `is_valid_map_name`.
-fn table_name_for(map: &str, is_backup: bool) -> String {
-    if is_backup {
-        format!("map__{map}__backup")
-    } else {
-        format!("map__{map}")
+/// The refusal and the mapping are one call on purpose. The mapping is
+/// injective only over storable names — a primary map named `foo__backup`
+/// would land on the backup table of `foo` — so a table name must not be
+/// obtainable for a name the shared rule [`check_map_name`] makes the store
+/// refuse: empty, ending in the reserved `__backup` suffix, or containing
+/// U+0000. Every path to a table goes through here, so none can skip it.
+///
+/// The rule's length bound is not a store refusal (`refused_by_store()` is
+/// false for it): a boot path lists and scans every table that already exists,
+/// and a name that is merely long must stay readable.
+///
+/// Identifier-class names map to `map__{map}` / `map__{map}__backup`, exactly
+/// the tables earlier versions created; every other name maps to
+/// `mapr__{map}` / `maprb__{map}`. Byte 3 separates the two classes (`_` vs
+/// `r`), byte 4 separates the raw-name primary from its backup (`_` vs `b`),
+/// and an identifier-class primary never ends in `__backup` because no
+/// storable name does.
+fn table_name_for(map: &str, is_backup: bool) -> anyhow::Result<String> {
+    if let Err(violation) = check_map_name(map) {
+        if violation.refused_by_store() {
+            bail!("Invalid map name {map:?}: {violation}");
+        }
     }
+    Ok(match (is_identifier_class(map), is_backup) {
+        (true, false) => format!("map__{map}"),
+        (true, true) => format!("map__{map}__backup"),
+        (false, false) => format!("mapr__{map}"),
+        (false, true) => format!("maprb__{map}"),
+    })
 }
 
 /// Module-level intern cache: maps a table name string to a leaked `&'static str`.
@@ -234,15 +254,12 @@ impl RedbDataStore {
         start_after_key: Option<&str>,
         max_batch_cost: u64,
     ) -> anyhow::Result<ScanBatch> {
-        if !is_valid_map_name(map) {
-            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-        }
+        let table_name = table_name_for(map, is_backup)?;
         let budget = if max_batch_cost == 0 {
             DEFAULT_SCAN_BATCH_COST
         } else {
             max_batch_cost
         };
-        let table_name = table_name_for(map, is_backup);
         let def = table_def(&table_name);
         let txn = self.db.begin_read()?;
         let table = match txn.open_table(def) {
@@ -332,8 +349,8 @@ fn encode_record(value: &RecordValue) -> anyhow::Result<Vec<u8>> {
     Ok(rmp_serde::to_vec_named(value)?)
 }
 
-/// Store already-encoded record bytes under `(map, key, is_backup)`. Validates
-/// the map name, opens (or creates) the per-(map, `is_backup`) table inside one
+/// Store already-encoded record bytes under `(map, key, is_backup)`. Refuses a
+/// name the store cannot hold, opens (or creates) the per-(map, `is_backup`) table inside one
 /// `WriteTransaction`, inserts the bytes as given, and commits. The bytes are
 /// not decoded or checked here.
 fn write_encoded(
@@ -343,10 +360,7 @@ fn write_encoded(
     bytes: &[u8],
     is_backup: bool,
 ) -> anyhow::Result<()> {
-    if !is_valid_map_name(map) {
-        bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-    }
-    let table_name = table_name_for(map, is_backup);
+    let table_name = table_name_for(map, is_backup)?;
     let def = table_def(&table_name);
     let txn = db.begin_write()?;
     {
@@ -360,10 +374,7 @@ fn write_encoded(
 /// Delete a single record under the given `(map, key, is_backup)` tuple.
 /// No-op if the table or key does not exist.
 fn delete_one(db: &redb::Database, map: &str, key: &str, is_backup: bool) -> anyhow::Result<()> {
-    if !is_valid_map_name(map) {
-        bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-    }
-    let table_name = table_name_for(map, is_backup);
+    let table_name = table_name_for(map, is_backup)?;
     let def = table_def(&table_name);
 
     // Cheap pre-check: is this table even known to the database? If not,
@@ -442,10 +453,7 @@ impl MapDataStore for RedbDataStore {
     }
 
     async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
-        if !is_valid_map_name(map) {
-            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-        }
-        let table_name = table_name_for(map, false);
+        let table_name = table_name_for(map, false)?;
         let def = table_def(&table_name);
         let txn = self.db.begin_read()?;
         let table = match txn.open_table(def) {
@@ -468,10 +476,7 @@ impl MapDataStore for RedbDataStore {
         map: &str,
         keys: &[String],
     ) -> anyhow::Result<Vec<(String, RecordValue)>> {
-        if !is_valid_map_name(map) {
-            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-        }
-        let table_name = table_name_for(map, false);
+        let table_name = table_name_for(map, false)?;
         let def = table_def(&table_name);
         let txn = self.db.begin_read()?;
         let table = match txn.open_table(def) {
@@ -490,13 +495,12 @@ impl MapDataStore for RedbDataStore {
     }
 
     async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
-        if !is_valid_map_name(map) {
-            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-        }
+        // Before the empty-keys return: a refused name is refused whatever
+        // the key list holds.
+        let table_name = table_name_for(map, false)?;
         if keys.is_empty() {
             return Ok(());
         }
-        let table_name = table_name_for(map, false);
         let def = table_def(&table_name);
 
         // Skip the WriteTransaction if the table has never been created.
@@ -521,14 +525,25 @@ impl MapDataStore for RedbDataStore {
     async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
         // Derive the durable map set from the redb table catalog rather than
         // any in-memory cache, so a map that was persisted before a restart but
-        // is not yet resident is still discovered. Only primary tables
-        // (`map__{name}`) feed the SYNC_INIT root; backup tables
-        // (`map__{name}__backup`) are deliberately skipped.
+        // is not yet resident is still discovered. Only primary tables feed the
+        // SYNC_INIT root; backup tables are deliberately skipped.
+        //
+        // This is the inverse of `table_name_for` on primaries (TG-NAME-001).
+        // The three prefixes are mutually exclusive — none is a prefix of
+        // another — so a catalog name takes at most one branch whatever the
+        // order. Only the identifier-class branch has suffix logic: a raw name
+        // is returned as the bytes after its prefix, untouched, so a raw name
+        // that merely contains `__backup` or looks like a table prefix decodes
+        // to itself.
         let read_txn = self.db.begin_read()?;
         let mut names: Vec<String> = Vec::new();
         for handle in read_txn.list_tables()? {
             let table = handle.name();
-            if let Some(rest) = table.strip_prefix("map__") {
+            if let Some(raw) = table.strip_prefix("mapr__") {
+                names.push(raw.to_string());
+            } else if table.starts_with("maprb__") {
+                // Backup partition of a raw-name map.
+            } else if let Some(rest) = table.strip_prefix("map__") {
                 if !rest.ends_with("__backup") {
                     names.push(rest.to_string());
                 }
@@ -545,10 +560,7 @@ impl MapDataStore for RedbDataStore {
         is_backup: bool,
         sink: &mut dyn LeafSink,
     ) -> anyhow::Result<()> {
-        if !is_valid_map_name(map) {
-            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
-        }
-        let table_name = table_name_for(map, is_backup);
+        let table_name = table_name_for(map, is_backup)?;
         let def = table_def(&table_name);
         let txn = self.db.begin_read()?;
         let table = match txn.open_table(def) {
@@ -901,17 +913,24 @@ mod tests {
         );
     }
 
+    /// A name full of metacharacters is data, not syntax: redb table names are
+    /// opaque strings, so the name is stored verbatim under the raw-name prefix
+    /// and comes back from the catalog byte-identical.
     #[tokio::test]
-    async fn map_name_injection_rejected() {
+    async fn metacharacter_map_name_is_stored_verbatim() {
         let (store, _dir) = fresh_store();
-        let bad = "foo; DROP TABLE x";
-        let err = store.add(bad, "k", &dummy_value("v"), 0, 1000).await;
-        assert!(err.is_err(), "metacharacter map name must be rejected");
-        let msg = format!("{}", err.unwrap_err());
-        assert!(
-            msg.contains("Invalid map name"),
-            "error message names the violation"
+        let name = "foo; DROP TABLE x";
+        store
+            .add(name, "k", &dummy_value("v"), 0, 1000)
+            .await
+            .expect("a metacharacter map name is storable");
+        assert_eq!(
+            store.load(name, "k").await.unwrap(),
+            Some(dummy_value("v")),
+            "the value reads back under the same name"
         );
+        assert_eq!(store.list_maps().await.unwrap(), vec![name.to_string()]);
+        assert_eq!(catalog(&store), vec![format!("mapr__{name}")]);
     }
 
     #[tokio::test]
@@ -921,9 +940,21 @@ mod tests {
         assert!(err.is_err());
     }
 
+    /// Every table name in the store's catalog, sorted.
+    fn catalog(store: &RedbDataStore) -> Vec<String> {
+        let txn = store.db.begin_read().expect("read txn");
+        let mut tables: Vec<String> = txn
+            .list_tables()
+            .expect("list_tables")
+            .map(|handle| handle.name().to_string())
+            .collect();
+        tables.sort();
+        tables
+    }
+
     /// The raw bytes stored for `(map, key)` in the primary table.
     fn raw_row(store: &RedbDataStore, map: &str, key: &str) -> Option<Vec<u8>> {
-        let table_name = table_name_for(map, false);
+        let table_name = table_name_for(map, false).unwrap();
         let txn = store.db.begin_read().expect("read txn");
         let table = match txn.open_table(table_def(&table_name)) {
             Ok(t) => t,
@@ -1023,35 +1054,47 @@ mod tests {
         }
     }
 
-    /// `add_encoded` validates the map name exactly as `add` does: the same
-    /// error, and no table created.
+    /// `add_encoded` refuses a name the store cannot hold exactly as `add` does:
+    /// the same error, and no table created. And a name outside the identifier
+    /// class, which both paths take, lands in the same table through either.
     #[tokio::test]
-    async fn add_encoded_rejects_an_invalid_map_name_exactly_as_add() {
+    async fn add_encoded_refuses_a_store_refused_map_name_exactly_as_add() {
         let (store, _dir) = fresh_store();
         let value = dummy_value("v");
         let bytes = rmp_serde::to_vec_named(&value).unwrap();
-        for bad in [
-            "foo; DROP TABLE x",
-            "",
-            "9starts_with_digit",
-            "has-dash",
-            "users__backup",
-        ] {
+        for bad in ["", "users__backup", "has-dash__backup", "a\0b"] {
             let via_add = store
                 .add(bad, "k", &value, 0, 1000)
                 .await
-                .expect_err("add rejects");
+                .expect_err("add refuses");
             let via_encoded = store
                 .add_encoded(bad, "k", &bytes, 0, 1000)
                 .await
-                .expect_err("add_encoded rejects");
+                .expect_err("add_encoded refuses");
             assert_eq!(via_encoded.to_string(), via_add.to_string(), "map {bad:?}");
             assert!(via_encoded.to_string().contains("Invalid map name"));
         }
         assert!(
-            store.list_maps().await.unwrap().is_empty(),
-            "a rejected write creates no table"
+            catalog(&store).is_empty(),
+            "a refused write creates no table"
         );
+
+        for name in ["foo; DROP TABLE x", "9starts_with_digit", "has-dash"] {
+            store
+                .add(name, "by_value", &value, 0, 1000)
+                .await
+                .expect("add stores a name outside the identifier class");
+            store
+                .add_encoded(name, "by_bytes", &bytes, 0, 1000)
+                .await
+                .expect("add_encoded stores it too");
+            assert_eq!(
+                raw_row(&store, name, "by_bytes"),
+                raw_row(&store, name, "by_value"),
+                "map {name:?}"
+            );
+            assert_eq!(raw_row(&store, name, "by_bytes"), Some(bytes.clone()));
+        }
     }
 
     #[tokio::test]
@@ -1090,33 +1133,70 @@ mod tests {
     }
 
     #[test]
-    fn is_valid_map_name_accepts_canonical() {
-        assert!(is_valid_map_name("users"));
-        assert!(is_valid_map_name("_internal"));
-        assert!(is_valid_map_name("Users123"));
+    fn is_identifier_class_holds_for_identifiers() {
+        assert!(is_identifier_class("users"));
+        assert!(is_identifier_class("_internal"));
+        assert!(is_identifier_class("Users123"));
+        // Text that looks like a table prefix or the backup suffix is still an
+        // identifier: the predicate reads characters, not meaning.
+        assert!(is_identifier_class("r__x"));
+        assert!(is_identifier_class("mapr__x"));
+        assert!(is_identifier_class("__backup_data"));
+        assert!(is_identifier_class("backup"));
     }
 
     #[test]
-    fn is_valid_map_name_rejects_metacharacters() {
-        assert!(!is_valid_map_name(""));
-        assert!(!is_valid_map_name("123leading_digit"));
-        assert!(!is_valid_map_name("foo bar"));
-        assert!(!is_valid_map_name("foo;DROP"));
-        assert!(!is_valid_map_name("foo--backup"));
+    fn is_identifier_class_excludes_everything_else() {
+        assert!(!is_identifier_class(""));
+        assert!(!is_identifier_class("123leading_digit"));
+        assert!(!is_identifier_class("foo bar"));
+        assert!(!is_identifier_class("foo;DROP"));
+        assert!(!is_identifier_class("foo--backup"));
+        assert!(!is_identifier_class("user-profiles"));
+        assert!(!is_identifier_class("users/profiles"));
+        assert!(!is_identifier_class("notes:abc"));
+        assert!(!is_identifier_class("é"));
     }
 
+    /// The class predicate decides the prefix and nothing else: being outside
+    /// the class is not a refusal, and the refusals do not depend on the class.
+    /// The refusal lives in `table_name_for` itself, so no table name exists
+    /// for a refused name.
     #[test]
-    fn is_valid_map_name_rejects_reserved_backup_suffix() {
+    fn the_class_predicate_is_not_the_store_gate() {
+        // Outside the class, storable.
+        for name in ["123leading_digit", "foo bar", "foo;DROP", "foo--backup"] {
+            assert!(!is_identifier_class(name), "{name:?}");
+            for backup in [false, true] {
+                assert!(table_name_for(name, backup).is_ok(), "{name:?}");
+            }
+        }
         // A primary map named `foo__backup` would encode to table
         // `map__foo__backup`, indistinguishable from the backup partition of
         // map `foo`, so `list_maps` would silently drop it and serve Merkle
-        // root 0 for durable data. The suffix must be reserved at the
-        // validation boundary.
-        assert!(!is_valid_map_name("foo__backup"));
-        assert!(!is_valid_map_name("__backup"));
+        // root 0 for durable data. The suffix is refused in either class, and
+        // for the backup table as much as for the primary.
+        for name in ["foo__backup", "__backup", "a-b__backup"] {
+            for backup in [false, true] {
+                let err = table_name_for(name, backup).expect_err("reserved suffix");
+                assert!(err.to_string().contains("__backup"), "{err}");
+            }
+        }
+        // The class predicate alone would have let the first of them through.
+        assert!(is_identifier_class("foo__backup"));
+        // The other two store refusals.
+        for name in ["", "a\0b"] {
+            for backup in [false, true] {
+                let err = table_name_for(name, backup).expect_err("store-refused name");
+                assert!(err.to_string().starts_with("Invalid map name"), "{err}");
+            }
+        }
         // But `__backup` elsewhere in the name is fine — only the suffix is reserved.
-        assert!(is_valid_map_name("__backup_data"));
-        assert!(is_valid_map_name("backup"));
+        assert!(table_name_for("__backup_data", false).is_ok());
+        assert!(table_name_for("backup", false).is_ok());
+        // The length bound belongs to the ingress, not to the store.
+        assert!(table_name_for(&"a".repeat(600), false).is_ok());
+        assert!(table_name_for(&format!("-{}", "a".repeat(599)), false).is_ok());
     }
 
     #[test]
@@ -1349,5 +1429,765 @@ mod tests {
             post_fix_cost <= budget,
             "post-fix accounting respects the budget ({post_fix_cost} <= {budget})"
         );
+    }
+
+    /// A write the store refuses on every attempt must not disappear quietly:
+    /// once the write-behind layer gives up, the operator has to be able to see
+    /// WHICH write was dropped, and within a time short enough to act on.
+    ///
+    /// The store underneath is the real embedded one and the retry settings are
+    /// the defaults a server boots with, so the wait below is the wall-clock an
+    /// operator would actually sit through. A map name carrying the reserved
+    /// backup suffix is used because the store refuses it unconditionally.
+    ///
+    /// Current-thread runtime on purpose: the line is emitted by the spawned
+    /// flush task, and a thread-local subscriber only reaches that task when it
+    /// runs on this test's own thread.
+    #[tokio::test]
+    async fn a_store_rejected_write_is_reported_within_a_bounded_time() {
+        use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+        const REFUSED_MAP: &str = "probe__backup";
+        const KEY: &str = "k1";
+        const BOUND: Duration = Duration::from_secs(15);
+
+        #[derive(Clone)]
+        struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for CapturedLog {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let writer = CapturedLog(Arc::clone(&captured));
+        // Scoped, never a global install: this test binary is shared and runs in
+        // parallel, so a global subscriber would leak into every other test.
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let (redb, _dir) = fresh_store();
+        let redb = Arc::new(redb);
+        let value = dummy_value("v");
+        #[allow(clippy::cast_possible_truncation)]
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis() as i64;
+
+        // The premise: the store itself refuses this name outright.
+        let direct = redb
+            .add(REFUSED_MAP, KEY, &value, 0, now)
+            .await
+            .expect_err("the embedded store refuses the reserved suffix");
+        assert!(direct.to_string().contains("Invalid map name"), "{direct}");
+
+        let inner: Arc<dyn MapDataStore> = redb;
+        let store = WriteBehindDataStore::new(inner, WriteBehindConfig::default());
+
+        // The write is accepted: the buffering layer does not look at the name.
+        store
+            .add(REFUSED_MAP, KEY, &value, 0, now)
+            .await
+            .expect("write-behind accepts the write");
+        let accepted_at = Instant::now();
+
+        let snapshot = |buf: &Arc<Mutex<Vec<u8>>>| {
+            String::from_utf8_lossy(
+                &buf.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+            .into_owned()
+        };
+        let names_the_write = |line: &str| {
+            (line.contains(" WARN ") || line.contains("ERROR"))
+                && line.contains(REFUSED_MAP)
+                && line.contains(KEY)
+        };
+
+        // Measured from acceptance, which is earlier than the first refused store
+        // call, so passing here is the stricter claim.
+        let mut reported_after = None;
+        while accepted_at.elapsed() < BOUND {
+            if snapshot(&captured).lines().any(names_the_write) {
+                reported_after = Some(accepted_at.elapsed());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        let log = snapshot(&captured);
+        eprintln!(
+            "--- captured log ({} lines, reported_after={reported_after:?}, waited={:?}) ---\n{log}--- end of captured log ---",
+            log.lines().count(),
+            accepted_at.elapsed(),
+        );
+        assert!(
+            reported_after.is_some(),
+            "no WARN-or-higher event naming map {REFUSED_MAP:?} and key {KEY:?} within {BOUND:?} of the write being accepted"
+        );
+    }
+
+    /// Names the identifier-class rule turns away, chosen to cover each way a
+    /// raw name can go wrong as a table name: separators, whitespace, a leading
+    /// digit, text that looks like one of the store's own prefixes or its backup
+    /// suffix, non-ASCII, and the two longest names an ingress bound of 512
+    /// bytes admits (one ASCII, one multi-byte).
+    fn probe_names() -> Vec<String> {
+        let mut names: Vec<String> = [
+            "user-profiles",
+            "users/profiles",
+            "users.profiles",
+            "$sys/stats",
+            "foo bar",
+            " ",
+            "notes:abc",
+            "123leading",
+            "foo;DROP",
+            "foo--backup",
+            "map__a-b",
+            "mapr__a-b",
+            "maprb__a-b",
+            "a-b__backup_data",
+            "заметки-ユーザー-📝",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let long_ascii = format!("-{}", "a".repeat(511));
+        let long_multibyte = "é".repeat(256);
+        assert_eq!(long_ascii.len(), 512);
+        assert_eq!(long_multibyte.len(), 512);
+        names.push(long_ascii);
+        names.push(long_multibyte);
+        names
+    }
+
+    /// Short, log-friendly rendering of a probe name: the 512-byte ones would
+    /// otherwise drown the per-name report.
+    fn shown(name: &str) -> String {
+        if name.len() > 40 {
+            let head: String = name.chars().take(8).collect();
+            format!("{head:?}… ({} bytes)", name.len())
+        } else {
+            format!("{name:?}")
+        }
+    }
+
+    /// One table, through redb alone: a row goes in, the transaction commits,
+    /// the row reads back, and the catalog lists the table under the very bytes
+    /// it was created with, exactly once.
+    fn raw_table_round_trips(db: &redb::Database, table: &str) -> Result<(), String> {
+        const KEY: &str = "k";
+        let payload = table.as_bytes();
+
+        let txn = db.begin_write().map_err(|e| format!("begin_write: {e}"))?;
+        {
+            let mut t = txn
+                .open_table(table_def(table))
+                .map_err(|e| format!("open_table for write: {e}"))?;
+            t.insert(KEY, payload).map_err(|e| format!("insert: {e}"))?;
+        }
+        txn.commit().map_err(|e| format!("commit: {e}"))?;
+
+        let txn = db.begin_read().map_err(|e| format!("begin_read: {e}"))?;
+        let t = txn
+            .open_table(table_def(table))
+            .map_err(|e| format!("open_table for read: {e}"))?;
+        let got = t
+            .get(KEY)
+            .map_err(|e| format!("get: {e}"))?
+            .map(|guard| guard.value().to_vec());
+        if got.as_deref() != Some(payload) {
+            return Err("the row did not read back as written".to_string());
+        }
+        let listed = txn
+            .list_tables()
+            .map_err(|e| format!("list_tables: {e}"))?
+            .filter(|handle| handle.name().as_bytes() == table.as_bytes())
+            .count();
+        if listed != 1 {
+            return Err(format!(
+                "the catalog lists the table {listed} times, expected exactly once"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The premise the raw-name table mapping stands on, checked against redb
+    /// itself and not through the store: a table may be named with a fixed
+    /// prefix followed by ANY of the probe names, verbatim, and the catalog
+    /// hands that name back unchanged. If redb normalised, truncated or refused
+    /// any of them, deriving the map set from the catalog would be unsound and
+    /// the names would have to be encoded instead.
+    ///
+    /// Every name is tried and reported before the verdict, so a failure names
+    /// the whole failing set and not just its first member.
+    #[test]
+    fn redb_accepts_the_probe_names_under_both_new_prefixes() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("premise.redb");
+        let names = probe_names();
+        let mut failing: Vec<String> = Vec::new();
+
+        {
+            let db = redb::Database::create(&path).expect("redb create");
+            for name in &names {
+                let mut verdict = Ok(());
+                for prefix in ["mapr__", "maprb__"] {
+                    let table = format!("{prefix}{name}");
+                    if let Err(why) = raw_table_round_trips(&db, &table) {
+                        verdict = Err(format!("under {prefix:?}: {why}"));
+                        break;
+                    }
+                }
+                match verdict {
+                    Ok(()) => eprintln!("probe {}: accepted, round-tripped", shown(name)),
+                    Err(why) => {
+                        eprintln!("probe {}: FAILED — {why}", shown(name));
+                        failing.push(shown(name));
+                    }
+                }
+            }
+        }
+
+        // A catalog that only agrees with itself inside one process would not
+        // help a restarted server, so the names are read again from the file.
+        let db = redb::Database::create(&path).expect("redb reopen");
+        let txn = db.begin_read().expect("begin_read");
+        let mut on_disk: Vec<String> = txn
+            .list_tables()
+            .expect("list_tables")
+            .map(|handle| handle.name().to_string())
+            .collect();
+        on_disk.sort();
+        let mut expected: Vec<String> = names
+            .iter()
+            .flat_map(|n| [format!("mapr__{n}"), format!("maprb__{n}")])
+            .collect();
+        expected.sort();
+        eprintln!(
+            "after reopen: {} tables in the catalog, {} expected, failing set = {failing:?}",
+            on_disk.len(),
+            expected.len()
+        );
+
+        assert!(
+            failing.is_empty(),
+            "redb did not hold these probe names verbatim: {failing:?}"
+        );
+        assert_eq!(
+            on_disk, expected,
+            "the reopened catalog must list every probe table byte-identically"
+        );
+    }
+
+    /// Everything a map needs from the store, for one name: a value written is
+    /// the value read, the map shows up in the durable map set under its own
+    /// bytes exactly once, a backup write does not disturb that set, and a
+    /// removed key is gone.
+    async fn store_round_trips(store: &RedbDataStore, name: &str, tag: &str) -> Result<(), String> {
+        const KEY: &str = "k1";
+        let value = dummy_value(tag);
+
+        store
+            .add(name, KEY, &value, 0, 1000)
+            .await
+            .map_err(|e| format!("add: {e}"))?;
+        let loaded = store
+            .load(name, KEY)
+            .await
+            .map_err(|e| format!("load: {e}"))?;
+        if loaded.as_ref() != Some(&value) {
+            return Err(format!("load returned {loaded:?}, not the value written"));
+        }
+
+        let listed = store
+            .list_maps()
+            .await
+            .map_err(|e| format!("list_maps: {e}"))?;
+        let occurrences = listed
+            .iter()
+            .filter(|m| m.as_bytes() == name.as_bytes())
+            .count();
+        if occurrences != 1 {
+            return Err(format!(
+                "list_maps names the map {occurrences} times, expected exactly once"
+            ));
+        }
+
+        store
+            .add_backup(name, KEY, &dummy_value("backup"), 0, 1000)
+            .await
+            .map_err(|e| format!("add_backup: {e}"))?;
+        let listed_after_backup = store
+            .list_maps()
+            .await
+            .map_err(|e| format!("list_maps after add_backup: {e}"))?;
+        if listed_after_backup != listed {
+            return Err("a backup write changed the durable map set".to_string());
+        }
+
+        store
+            .remove(name, KEY, 1001)
+            .await
+            .map_err(|e| format!("remove: {e}"))?;
+        match store.load(name, KEY).await {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) => Err("the key is still readable after remove".to_string()),
+            Err(e) => Err(format!("load after remove: {e}")),
+        }
+    }
+
+    /// TG-NAME-001, the round trip: a map whose name is outside the identifier
+    /// class is as durable and as visible as one inside it. The server acks a
+    /// write before the store sees the name, so a name the store turns away is
+    /// an acknowledged write that is gone after a restart.
+    ///
+    /// All probe names share one store, so a name that aliased another's table
+    /// would show up as a wrong value or a wrong map set, not pass by luck.
+    #[tokio::test]
+    async fn map_names_outside_the_identifier_class_round_trip() {
+        let (store, _dir) = fresh_store();
+        let names = probe_names();
+        let mut failing: Vec<String> = Vec::new();
+
+        for (i, name) in names.iter().enumerate() {
+            match store_round_trips(&store, name, &format!("v{i}")).await {
+                Ok(()) => eprintln!("probe {}: round-tripped through the store", shown(name)),
+                Err(why) => {
+                    eprintln!("probe {}: FAILED — {why}", shown(name));
+                    failing.push(format!("{}: {why}", shown(name)));
+                }
+            }
+        }
+
+        assert!(
+            failing.is_empty(),
+            "{} of {} names did not round-trip through the store:\n{}",
+            failing.len(),
+            names.len(),
+            failing.join("\n")
+        );
+
+        let mut expected = names;
+        expected.sort();
+        assert_eq!(
+            store.list_maps().await.expect("list_maps"),
+            expected,
+            "the durable map set must be exactly the probe names, each once"
+        );
+    }
+
+    /// A WAL written before the store accepted a name must not stay stuck once
+    /// it does. An earlier server acked writes to a map the store then refused;
+    /// their frames were never applied and never dropped — recovery keeps a
+    /// frame it could not replay and tries again on every boot. So the first
+    /// boot whose store takes the name has to replay them, in the order they
+    /// were written, and let the watermark move past them.
+    ///
+    /// The fixture is such a log: two stores and then a remove of the first
+    /// key, with no applied watermark. The remove is what makes the order
+    /// observable — replayed before its store, or skipped, it would leave the
+    /// first key readable (TG-WAL-011).
+    #[tokio::test]
+    async fn recovery_replays_frames_abandoned_for_a_previously_refused_map_name() {
+        use crate::storage::wal::{
+            Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery, WalStorePayload, WalWriter,
+        };
+
+        const MAP: &str = "user-profiles";
+        const PARTITION: u32 = 7;
+
+        let stamped = |tag: &str, millis: u64| RecordValue::Lww {
+            value: Value::String(tag.to_string()),
+            timestamp: Timestamp {
+                millis,
+                counter: 0,
+                node_id: "writer".to_string(),
+            },
+        };
+        let store_frame = |key: &str, value: &RecordValue, sequence: u64| WalEntry {
+            map: MAP.to_string(),
+            key: key.to_string(),
+            op: WalOp::Store {
+                value: WalStorePayload::Record(value.clone()),
+                expiration_time: None,
+            },
+            timestamp: match value {
+                RecordValue::Lww { timestamp, .. } => Some(timestamp.clone()),
+                _ => None,
+            },
+            sequence,
+        };
+
+        let k1_value = stamped("first", 100);
+        let k2_value = stamped("second", 200);
+        let frames = [
+            store_frame("k1", &k1_value, 1),
+            store_frame("k2", &k2_value, 2),
+            WalEntry {
+                map: MAP.to_string(),
+                key: "k1".to_string(),
+                op: WalOp::Remove,
+                timestamp: None,
+                sequence: 3,
+            },
+        ];
+        let highest_sequence = 3;
+
+        let dir = tempdir().expect("tempdir");
+        let wal_dir = dir.path().join("wal");
+
+        // The log as the earlier process left it: frames durable, nothing
+        // marked applied. The writer is dropped so recovery reads the files
+        // the way a new process would.
+        {
+            let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("wal open");
+            for frame in &frames {
+                wal.append(PARTITION, frame).await.expect("wal append");
+            }
+        }
+
+        let wal = WalWriter::new(wal_dir, WalFsyncPolicy::PerOp).expect("wal reopen");
+        let before = wal.unapplied(PARTITION).await.expect("unapplied");
+        assert_eq!(
+            before.as_slice(),
+            frames.as_slice(),
+            "fixture: the reopened log holds exactly the three frames, in order, all un-applied"
+        );
+
+        let store = Arc::new(RedbDataStore::new(dir.path().join("store.redb")).expect("redb open"));
+        let inner: Arc<dyn MapDataStore> = store.clone();
+        WalRecovery::new(Arc::clone(&wal), Vec::new())
+            .run(inner)
+            .await
+            .expect("recovery itself never refuses to boot over un-replayable frames");
+
+        let unreplayed: Vec<(String, u64)> = wal
+            .unapplied(PARTITION)
+            .await
+            .expect("unapplied after recovery")
+            .into_iter()
+            .map(|e| (e.key, e.sequence))
+            .collect();
+        let watermark = wal.test_applied_watermark(PARTITION);
+        let k1 = store.load(MAP, "k1").await.map_err(|e| e.to_string());
+        let k2 = store.load(MAP, "k2").await.map_err(|e| e.to_string());
+        eprintln!(
+            "after recovery: unreplayed (key, sequence) = {unreplayed:?}, applied watermark = \
+             {watermark} (highest frame sequence {highest_sequence}), load k1 = {k1:?}, \
+             load k2 = {k2:?}"
+        );
+
+        assert!(
+            unreplayed.is_empty(),
+            "recovery left {} of {} frames for map {MAP:?} unreplayed: {unreplayed:?}; \
+             load k2 = {k2:?}",
+            unreplayed.len(),
+            frames.len()
+        );
+        assert_eq!(
+            watermark, highest_sequence,
+            "the applied watermark must reach the highest frame sequence written"
+        );
+        assert_eq!(
+            k2,
+            Ok(Some(k2_value)),
+            "the stored value of the key that was never removed"
+        );
+        assert_eq!(
+            k1,
+            Ok(None),
+            "the remove must replay after the store it follows"
+        );
+    }
+
+    /// Identifier-class names every earlier version could store, including the
+    /// server's own fixed maps and names shaped like the raw-name prefixes.
+    const IDENTIFIER_NAMES: [&str; 9] = [
+        "users",
+        "_internal",
+        "Users123",
+        "r__x",
+        "rb__x",
+        "x__backup_data",
+        "_topgun_tombstone_cursors_v2",
+        "_topgun_device_credentials",
+        "__topgun_policies",
+    ];
+
+    /// TG-NAME-001: an identifier-class name keeps the exact table names it has
+    /// always had, every other name goes under the raw-name prefixes, the four
+    /// ranges never meet, and the catalog decodes back to the primary names.
+    ///
+    /// All names share one store and both tables of each are written, so a
+    /// name that aliased another's table, or a backup read as a primary, shows
+    /// up as a wrong catalog or a wrong map set.
+    #[tokio::test]
+    async fn table_names_keep_the_old_class_and_prefix_the_new_class() {
+        let raw_names = probe_names();
+
+        for n in IDENTIFIER_NAMES {
+            assert_eq!(table_name_for(n, false).unwrap(), format!("map__{n}"));
+            assert_eq!(
+                table_name_for(n, true).unwrap(),
+                format!("map__{n}__backup")
+            );
+        }
+        for n in &raw_names {
+            assert_eq!(
+                table_name_for(n, false).unwrap(),
+                format!("mapr__{n}"),
+                "{}",
+                shown(n)
+            );
+            assert_eq!(
+                table_name_for(n, true).unwrap(),
+                format!("maprb__{n}"),
+                "{}",
+                shown(n)
+            );
+        }
+
+        // What keeps the ranges apart: byte 3 tells the classes apart, byte 4
+        // tells a raw-name primary from its backup, and an identifier-class
+        // primary never carries the backup suffix.
+        for n in IDENTIFIER_NAMES {
+            for backup in [false, true] {
+                assert_eq!(
+                    table_name_for(n, backup).unwrap().as_bytes()[3],
+                    b'_',
+                    "{n}"
+                );
+            }
+            assert!(
+                !table_name_for(n, false).unwrap().ends_with("__backup"),
+                "{n}"
+            );
+        }
+        for n in &raw_names {
+            assert_eq!(table_name_for(n, false).unwrap().as_bytes()[3], b'r');
+            assert_eq!(table_name_for(n, true).unwrap().as_bytes()[3], b'r');
+            assert_eq!(table_name_for(n, false).unwrap().as_bytes()[4], b'_');
+            assert_eq!(table_name_for(n, true).unwrap().as_bytes()[4], b'b');
+        }
+
+        let all_names: Vec<String> = IDENTIFIER_NAMES
+            .iter()
+            .map(ToString::to_string)
+            .chain(raw_names.iter().cloned())
+            .collect();
+
+        let (store, _dir) = fresh_store();
+        for (i, n) in all_names.iter().enumerate() {
+            store
+                .add(n, "k", &dummy_value(&format!("primary-{i}")), 0, 1000)
+                .await
+                .unwrap_or_else(|e| panic!("add {}: {e}", shown(n)));
+            store
+                .add_backup(n, "k", &dummy_value(&format!("backup-{i}")), 0, 1000)
+                .await
+                .unwrap_or_else(|e| panic!("add_backup {}: {e}", shown(n)));
+        }
+
+        let mut expected_tables: Vec<String> = all_names
+            .iter()
+            .flat_map(|n| {
+                [
+                    table_name_for(n, false).unwrap(),
+                    table_name_for(n, true).unwrap(),
+                ]
+            })
+            .collect();
+        expected_tables.sort();
+        let distinct = expected_tables
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        assert_eq!(
+            distinct,
+            all_names.len() * 2,
+            "the mapping is injective over (name, is_backup)"
+        );
+        assert_eq!(catalog(&store), expected_tables);
+
+        let mut expected_maps = all_names.clone();
+        expected_maps.sort();
+        assert_eq!(
+            store.list_maps().await.expect("list_maps"),
+            expected_maps,
+            "the durable map set is exactly the primary names, each once"
+        );
+
+        // No table was shared: every primary still holds its own value.
+        for (i, n) in all_names.iter().enumerate() {
+            assert_eq!(
+                store.load(n, "k").await.expect("load"),
+                Some(dummy_value(&format!("primary-{i}"))),
+                "{}",
+                shown(n)
+            );
+        }
+    }
+
+    /// TG-NAME-001, primary vs backup: a name the store refuses reaches no
+    /// table through any entry point, so nothing can be written where a backup
+    /// partition lives, and backup tables never show up as maps. The length
+    /// bound is not one of the store's refusals — except that a long name which
+    /// is ALSO refused must still be refused.
+    #[tokio::test]
+    async fn store_refused_names_reach_no_table_and_backups_stay_unlisted() {
+        let (store, _dir) = fresh_store();
+        let value = dummy_value("v");
+
+        store.add("foo", "k", &value, 0, 1000).await.unwrap();
+        store
+            .add_backup("foo", "k", &dummy_value("backup"), 0, 1000)
+            .await
+            .unwrap();
+        assert_eq!(store.list_maps().await.unwrap(), vec!["foo".to_string()]);
+        let tables_before = catalog(&store);
+        assert_eq!(tables_before, vec!["map__foo", "map__foo__backup"]);
+
+        for refused in ["foo__backup", "a-b__backup", "", "a\0b"] {
+            assert!(
+                store.add(refused, "k", &value, 0, 1000).await.is_err(),
+                "add {refused:?}"
+            );
+            assert!(store.load(refused, "k").await.is_err(), "load {refused:?}");
+            for is_backup in [false, true] {
+                assert!(
+                    store.scan_values(refused, is_backup, 0).await.is_err(),
+                    "scan_values {refused:?} backup={is_backup}"
+                );
+                let mut sink = CollectingSink { leaves: Vec::new() };
+                assert!(
+                    store
+                        .enumerate_leaves(refused, is_backup, &mut sink)
+                        .await
+                        .is_err(),
+                    "enumerate_leaves {refused:?} backup={is_backup}"
+                );
+                assert!(sink.leaves.is_empty(), "no leaf for {refused:?}");
+            }
+            // The remaining entry points take the same check.
+            assert!(store
+                .add_backup(refused, "k", &value, 0, 1000)
+                .await
+                .is_err());
+            assert!(store.remove(refused, "k", 1000).await.is_err());
+            assert!(store.remove_backup(refused, "k", 1000).await.is_err());
+            assert!(store.load_all(refused, &["k".to_string()]).await.is_err());
+            assert!(store.remove_all(refused, &["k".to_string()]).await.is_err());
+        }
+
+        assert_eq!(
+            catalog(&store),
+            tables_before,
+            "a refused name creates no table"
+        );
+        // The backup partition of `foo` was not read or overwritten as a map.
+        assert_eq!(store.load("foo", "k").await.unwrap(), Some(value.clone()));
+        assert_eq!(store.list_maps().await.unwrap(), vec!["foo".to_string()]);
+
+        // Longer than the ingress bound, in either class: the store takes it.
+        let long_identifier = "a".repeat(600);
+        let long_raw = format!("-{}", "a".repeat(599));
+        for name in [&long_identifier, &long_raw] {
+            assert_eq!(name.len(), 600);
+            store
+                .add(name, "k", &value, 0, 1000)
+                .await
+                .unwrap_or_else(|e| panic!("add {}: {e}", shown(name)));
+            assert_eq!(
+                store.load(name, "k").await.expect("load"),
+                Some(value.clone()),
+                "{}",
+                shown(name)
+            );
+        }
+
+        // Too long AND reserved: the reserved suffix decides. Were the length
+        // reported instead, the store would let the name through and it would
+        // land on a backup table.
+        let long_reserved = format!("{}__backup", "a".repeat(592));
+        assert_eq!(long_reserved.len(), 600);
+        let err = store
+            .add(&long_reserved, "k", &value, 0, 1000)
+            .await
+            .expect_err("a long name with the reserved suffix is refused");
+        assert!(err.to_string().contains("__backup"), "{err}");
+        assert!(store.load(&long_reserved, "k").await.is_err());
+        assert_eq!(
+            catalog(&store),
+            vec![
+                table_name_for(&long_identifier, false).unwrap(),
+                "map__foo".to_string(),
+                "map__foo__backup".to_string(),
+                table_name_for(&long_raw, false).unwrap(),
+            ],
+            "only the two storable long names gained a table"
+        );
+    }
+
+    /// What the store spends, per call, turning a map name into a table name —
+    /// the name check plus the mapping, which `table_name_for` does in one
+    /// call. Every store call pays it, so it is measured here on its own,
+    /// where a change to either half shows up undiluted by I/O.
+    ///
+    /// Both halves run for every name, as they do in the store: none of the
+    /// three names is one the store refuses. `users` is the identifier-class
+    /// case; the other two take the raw-name branch, on a typical and on the
+    /// longest name the ingress admits.
+    ///
+    /// A measurement, not a verdict: it asserts nothing about speed and is kept
+    /// out of the default run.
+    #[test]
+    #[ignore = "measurement: run with --ignored --nocapture"]
+    fn map_name_cost_table_mapping() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const CALLS: u32 = 1_000_000;
+        const REPEATS: usize = 5;
+
+        let long_name = format!("-{}", "a".repeat(511));
+        let cases = [
+            ("users", "users"),
+            ("todo/<uuid>", "todo/123e4567-e89b-12d3-a456-426614174000"),
+            ("512-byte name", long_name.as_str()),
+        ];
+
+        for (label, name) in cases {
+            let mut ns_per_call: Vec<f64> = (0..REPEATS)
+                .map(|_| {
+                    let started = Instant::now();
+                    for _ in 0..CALLS {
+                        let name = black_box(name);
+                        black_box(table_name_for(name, false).is_ok());
+                    }
+                    started.elapsed().as_secs_f64() * 1e9 / f64::from(CALLS)
+                })
+                .collect();
+            ns_per_call.sort_by(f64::total_cmp);
+            let median = ns_per_call[REPEATS / 2];
+            eprintln!(
+                "map_name_cost_table_mapping {label} ({} bytes): median {median:.1} ns/call \
+                 over {CALLS} calls x {REPEATS} repeats; repeats = {ns_per_call:.1?}",
+                name.len()
+            );
+        }
     }
 }

@@ -124,13 +124,20 @@ jobs:
         # spawnRustServer() at the prebuilt binary (skips cargo). --runInBand keeps
         # per-file fixtures from contending on the fixed server ports (CLAUDE.md).
         # cluster-routing is excluded here and gated separately (non-blocking) below.
+        # map-name-upgrade and map-name-rollback are excluded too: each drives two
+        # server binaries, the current one and the one built from 07d009f0, and CI
+        # does not build the older one. Rollback across that one boundary is a
+        # one-time property, not a regression surface, so both files are run
+        # locally and their output is carried in the pull request. Without the
+        # older binary they fail by design rather than skip.
         env:
           RUST_SERVER_BINARY: ${{ github.workspace }}/target/release/topgun-server
         run: |
+          echo "EXCLUDED in CI: map-name-upgrade, map-name-rollback — they need the 07d009f0 binary; run locally, evidence in the PR body"
           pnpm exec jest \
             --config tests/integration-rust/jest.config.js \
             --runInBand \
-            --testPathIgnorePatterns '/node_modules/' '/dist/' '\.d\.ts$' 'cluster-routing\.test\.ts$'
+            --testPathIgnorePatterns '/node_modules/' '/dist/' '\.d\.ts$' 'cluster-routing\.test\.ts$' 'map-name-(upgrade|rollback)\.test\.ts$'
 
   # NON-BLOCKING. The 3-node cluster suite intermittently fails to converge
   # (one node sometimes never joins → nodeCount stuck at 2) even from a cold

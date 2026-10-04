@@ -252,9 +252,9 @@ pub struct IndexConservationSnapshot {
 ///
 /// A NEW additive keyspace — it does NOT repurpose the delta-sync
 /// `last_sync_timestamp` hint. Kept clear of the user-map namespace by the
-/// `_topgun_` convention (matches `is_valid_map_name`, does not end in
-/// `__backup`). The record KEY is the opaque `ClientId` (`frontier_client_id`
-/// encoding).
+/// `_topgun_` convention. The name is in the identifier class and does not
+/// end in `__backup`, so it keeps its `map__…` table (TG-NAME-001). The record
+/// KEY is the opaque `ClientId` (`frontier_client_id` encoding).
 ///
 /// `_v2`: one-shot poison-purge, version-bumped by the cross-map
 /// covering-epoch fix. Before that fix a client's device-wide cursor could be
