@@ -102,8 +102,8 @@ const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
 /// This validates nothing. It is the class predicate of TG-NAME-001, used only
 /// by [`table_name_for`] to pick the table prefix: names in the class keep the
 /// `map__` tables they have always had, every other storable name goes under
-/// `mapr__` / `maprb__`. Which names the store refuses is decided separately,
-/// by [`refuse_unstorable`].
+/// `mapr__` / `maprb__`. Which names the store refuses is decided by the
+/// shared rule, which [`table_name_for`] applies before it consults this.
 fn is_identifier_class(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -113,40 +113,38 @@ fn is_identifier_class(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Refuse a map name the store cannot hold, per the shared rule
-/// [`check_map_name`]: empty, ending in the reserved `__backup` suffix, or
-/// containing U+0000.
+/// Build the redb table name for a `(map, is_backup)` tuple, or refuse the
+/// name (TG-NAME-001).
+///
+/// The refusal and the mapping are one call on purpose. The mapping is
+/// injective only over storable names — a primary map named `foo__backup`
+/// would land on the backup table of `foo` — so a table name must not be
+/// obtainable for a name the shared rule [`check_map_name`] makes the store
+/// refuse: empty, ending in the reserved `__backup` suffix, or containing
+/// U+0000. Every path to a table goes through here, so none can skip it.
 ///
 /// The rule's length bound is not a store refusal (`refused_by_store()` is
 /// false for it): a boot path lists and scans every table that already exists,
 /// and a name that is merely long must stay readable.
-fn refuse_unstorable(map: &str) -> anyhow::Result<()> {
-    match check_map_name(map) {
-        Err(violation) if violation.refused_by_store() => {
-            bail!("Invalid map name {map:?}: {violation}")
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Build the redb table name for a `(map, is_backup)` tuple (TG-NAME-001).
 ///
 /// Identifier-class names map to `map__{map}` / `map__{map}__backup`, exactly
 /// the tables earlier versions created; every other name maps to
-/// `mapr__{map}` / `maprb__{map}`. The mapping is injective over storable
-/// names: byte 3 separates the two classes (`_` vs `r`), byte 4 separates the
-/// raw-name primary from its backup (`_` vs `b`), and an identifier-class
-/// primary never ends in `__backup` because no storable name does.
-///
-/// Caller must have already passed `map` through [`refuse_unstorable`]; the
-/// injectivity argument does not hold for a name ending in `__backup`.
-fn table_name_for(map: &str, is_backup: bool) -> String {
-    match (is_identifier_class(map), is_backup) {
+/// `mapr__{map}` / `maprb__{map}`. Byte 3 separates the two classes (`_` vs
+/// `r`), byte 4 separates the raw-name primary from its backup (`_` vs `b`),
+/// and an identifier-class primary never ends in `__backup` because no
+/// storable name does.
+fn table_name_for(map: &str, is_backup: bool) -> anyhow::Result<String> {
+    if let Err(violation) = check_map_name(map) {
+        if violation.refused_by_store() {
+            bail!("Invalid map name {map:?}: {violation}");
+        }
+    }
+    Ok(match (is_identifier_class(map), is_backup) {
         (true, false) => format!("map__{map}"),
         (true, true) => format!("map__{map}__backup"),
         (false, false) => format!("mapr__{map}"),
         (false, true) => format!("maprb__{map}"),
-    }
+    })
 }
 
 /// Module-level intern cache: maps a table name string to a leaked `&'static str`.
@@ -256,13 +254,12 @@ impl RedbDataStore {
         start_after_key: Option<&str>,
         max_batch_cost: u64,
     ) -> anyhow::Result<ScanBatch> {
-        refuse_unstorable(map)?;
+        let table_name = table_name_for(map, is_backup)?;
         let budget = if max_batch_cost == 0 {
             DEFAULT_SCAN_BATCH_COST
         } else {
             max_batch_cost
         };
-        let table_name = table_name_for(map, is_backup);
         let def = table_def(&table_name);
         let txn = self.db.begin_read()?;
         let table = match txn.open_table(def) {
@@ -363,8 +360,7 @@ fn write_encoded(
     bytes: &[u8],
     is_backup: bool,
 ) -> anyhow::Result<()> {
-    refuse_unstorable(map)?;
-    let table_name = table_name_for(map, is_backup);
+    let table_name = table_name_for(map, is_backup)?;
     let def = table_def(&table_name);
     let txn = db.begin_write()?;
     {
@@ -378,8 +374,7 @@ fn write_encoded(
 /// Delete a single record under the given `(map, key, is_backup)` tuple.
 /// No-op if the table or key does not exist.
 fn delete_one(db: &redb::Database, map: &str, key: &str, is_backup: bool) -> anyhow::Result<()> {
-    refuse_unstorable(map)?;
-    let table_name = table_name_for(map, is_backup);
+    let table_name = table_name_for(map, is_backup)?;
     let def = table_def(&table_name);
 
     // Cheap pre-check: is this table even known to the database? If not,
@@ -458,8 +453,7 @@ impl MapDataStore for RedbDataStore {
     }
 
     async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
-        refuse_unstorable(map)?;
-        let table_name = table_name_for(map, false);
+        let table_name = table_name_for(map, false)?;
         let def = table_def(&table_name);
         let txn = self.db.begin_read()?;
         let table = match txn.open_table(def) {
@@ -482,8 +476,7 @@ impl MapDataStore for RedbDataStore {
         map: &str,
         keys: &[String],
     ) -> anyhow::Result<Vec<(String, RecordValue)>> {
-        refuse_unstorable(map)?;
-        let table_name = table_name_for(map, false);
+        let table_name = table_name_for(map, false)?;
         let def = table_def(&table_name);
         let txn = self.db.begin_read()?;
         let table = match txn.open_table(def) {
@@ -502,11 +495,12 @@ impl MapDataStore for RedbDataStore {
     }
 
     async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
-        refuse_unstorable(map)?;
+        // Before the empty-keys return: a refused name is refused whatever
+        // the key list holds.
+        let table_name = table_name_for(map, false)?;
         if keys.is_empty() {
             return Ok(());
         }
-        let table_name = table_name_for(map, false);
         let def = table_def(&table_name);
 
         // Skip the WriteTransaction if the table has never been created.
@@ -566,8 +560,7 @@ impl MapDataStore for RedbDataStore {
         is_backup: bool,
         sink: &mut dyn LeafSink,
     ) -> anyhow::Result<()> {
-        refuse_unstorable(map)?;
-        let table_name = table_name_for(map, is_backup);
+        let table_name = table_name_for(map, is_backup)?;
         let def = table_def(&table_name);
         let txn = self.db.begin_read()?;
         let table = match txn.open_table(def) {
@@ -961,7 +954,7 @@ mod tests {
 
     /// The raw bytes stored for `(map, key)` in the primary table.
     fn raw_row(store: &RedbDataStore, map: &str, key: &str) -> Option<Vec<u8>> {
-        let table_name = table_name_for(map, false);
+        let table_name = table_name_for(map, false).unwrap();
         let txn = store.db.begin_read().expect("read txn");
         let table = match txn.open_table(table_def(&table_name)) {
             Ok(t) => t,
@@ -1167,27 +1160,43 @@ mod tests {
 
     /// The class predicate decides the prefix and nothing else: being outside
     /// the class is not a refusal, and the refusals do not depend on the class.
+    /// The refusal lives in `table_name_for` itself, so no table name exists
+    /// for a refused name.
     #[test]
     fn the_class_predicate_is_not_the_store_gate() {
         // Outside the class, storable.
         for name in ["123leading_digit", "foo bar", "foo;DROP", "foo--backup"] {
             assert!(!is_identifier_class(name), "{name:?}");
-            assert!(refuse_unstorable(name).is_ok(), "{name:?}");
+            for backup in [false, true] {
+                assert!(table_name_for(name, backup).is_ok(), "{name:?}");
+            }
         }
         // A primary map named `foo__backup` would encode to table
         // `map__foo__backup`, indistinguishable from the backup partition of
         // map `foo`, so `list_maps` would silently drop it and serve Merkle
-        // root 0 for durable data. The suffix is refused in either class.
+        // root 0 for durable data. The suffix is refused in either class, and
+        // for the backup table as much as for the primary.
         for name in ["foo__backup", "__backup", "a-b__backup"] {
-            let err = refuse_unstorable(name).expect_err("reserved suffix");
-            assert!(err.to_string().contains("__backup"), "{err}");
+            for backup in [false, true] {
+                let err = table_name_for(name, backup).expect_err("reserved suffix");
+                assert!(err.to_string().contains("__backup"), "{err}");
+            }
+        }
+        // The class predicate alone would have let the first of them through.
+        assert!(is_identifier_class("foo__backup"));
+        // The other two store refusals.
+        for name in ["", "a\0b"] {
+            for backup in [false, true] {
+                let err = table_name_for(name, backup).expect_err("store-refused name");
+                assert!(err.to_string().starts_with("Invalid map name"), "{err}");
+            }
         }
         // But `__backup` elsewhere in the name is fine — only the suffix is reserved.
-        assert!(refuse_unstorable("__backup_data").is_ok());
-        assert!(refuse_unstorable("backup").is_ok());
+        assert!(table_name_for("__backup_data", false).is_ok());
+        assert!(table_name_for("backup", false).is_ok());
         // The length bound belongs to the ingress, not to the store.
-        assert!(refuse_unstorable(&"a".repeat(600)).is_ok());
-        assert!(refuse_unstorable(&format!("-{}", "a".repeat(599))).is_ok());
+        assert!(table_name_for(&"a".repeat(600), false).is_ok());
+        assert!(table_name_for(&format!("-{}", "a".repeat(599)), false).is_ok());
     }
 
     #[test]
@@ -1931,18 +1940,21 @@ mod tests {
         let raw_names = probe_names();
 
         for n in IDENTIFIER_NAMES {
-            assert_eq!(table_name_for(n, false), format!("map__{n}"));
-            assert_eq!(table_name_for(n, true), format!("map__{n}__backup"));
+            assert_eq!(table_name_for(n, false).unwrap(), format!("map__{n}"));
+            assert_eq!(
+                table_name_for(n, true).unwrap(),
+                format!("map__{n}__backup")
+            );
         }
         for n in &raw_names {
             assert_eq!(
-                table_name_for(n, false),
+                table_name_for(n, false).unwrap(),
                 format!("mapr__{n}"),
                 "{}",
                 shown(n)
             );
             assert_eq!(
-                table_name_for(n, true),
+                table_name_for(n, true).unwrap(),
                 format!("maprb__{n}"),
                 "{}",
                 shown(n)
@@ -1954,15 +1966,22 @@ mod tests {
         // primary never carries the backup suffix.
         for n in IDENTIFIER_NAMES {
             for backup in [false, true] {
-                assert_eq!(table_name_for(n, backup).as_bytes()[3], b'_', "{n}");
+                assert_eq!(
+                    table_name_for(n, backup).unwrap().as_bytes()[3],
+                    b'_',
+                    "{n}"
+                );
             }
-            assert!(!table_name_for(n, false).ends_with("__backup"), "{n}");
+            assert!(
+                !table_name_for(n, false).unwrap().ends_with("__backup"),
+                "{n}"
+            );
         }
         for n in &raw_names {
-            assert_eq!(table_name_for(n, false).as_bytes()[3], b'r');
-            assert_eq!(table_name_for(n, true).as_bytes()[3], b'r');
-            assert_eq!(table_name_for(n, false).as_bytes()[4], b'_');
-            assert_eq!(table_name_for(n, true).as_bytes()[4], b'b');
+            assert_eq!(table_name_for(n, false).unwrap().as_bytes()[3], b'r');
+            assert_eq!(table_name_for(n, true).unwrap().as_bytes()[3], b'r');
+            assert_eq!(table_name_for(n, false).unwrap().as_bytes()[4], b'_');
+            assert_eq!(table_name_for(n, true).unwrap().as_bytes()[4], b'b');
         }
 
         let all_names: Vec<String> = IDENTIFIER_NAMES
@@ -1985,7 +2004,12 @@ mod tests {
 
         let mut expected_tables: Vec<String> = all_names
             .iter()
-            .flat_map(|n| [table_name_for(n, false), table_name_for(n, true)])
+            .flat_map(|n| {
+                [
+                    table_name_for(n, false).unwrap(),
+                    table_name_for(n, true).unwrap(),
+                ]
+            })
             .collect();
         expected_tables.sort();
         let distinct = expected_tables
@@ -2109,21 +2133,21 @@ mod tests {
         assert_eq!(
             catalog(&store),
             vec![
-                table_name_for(&long_identifier, false),
+                table_name_for(&long_identifier, false).unwrap(),
                 "map__foo".to_string(),
                 "map__foo__backup".to_string(),
-                table_name_for(&long_raw, false),
+                table_name_for(&long_raw, false).unwrap(),
             ],
             "only the two storable long names gained a table"
         );
     }
 
     /// What the store spends, per call, turning a map name into a table name —
-    /// the name check plus the mapping. Every store call pays it, so it is
-    /// measured here on its own, where a change to either function shows up
-    /// undiluted by I/O.
+    /// the name check plus the mapping, which `table_name_for` does in one
+    /// call. Every store call pays it, so it is measured here on its own,
+    /// where a change to either half shows up undiluted by I/O.
     ///
-    /// Both functions run for every name, as they do in the store: none of the
+    /// Both halves run for every name, as they do in the store: none of the
     /// three names is one the store refuses. `users` is the identifier-class
     /// case; the other two take the raw-name branch, on a typical and on the
     /// longest name the ingress admits.
@@ -2152,8 +2176,7 @@ mod tests {
                     let started = Instant::now();
                     for _ in 0..CALLS {
                         let name = black_box(name);
-                        black_box(check_map_name(name).is_ok());
-                        black_box(table_name_for(name, false));
+                        black_box(table_name_for(name, false).is_ok());
                     }
                     started.elapsed().as_secs_f64() * 1e9 / f64::from(CALLS)
                 })
