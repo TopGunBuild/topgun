@@ -360,6 +360,9 @@ fn inadmissible_map_name(op: &Operation) -> Option<(&str, MapNameViolation)> {
 /// process; the refusals that wrote none are counted and reported by the next
 /// line. This decides logging only: the operation is refused either way, and
 /// every refusal is still counted as an operation error.
+///
+/// It counts ingress refusal events; an op refused inside a batch is seen
+/// twice (batch, then singleton re-dispatch).
 struct MapNameRefusalLog {
     /// When the last line was written, and the refusals that have written none
     /// since then.
