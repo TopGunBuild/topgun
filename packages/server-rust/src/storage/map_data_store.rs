@@ -867,6 +867,54 @@ mod tests {
         assert!(texts.iter().all(|t| !t.is_empty() && !t.contains('\n')));
     }
 
+    /// What the ingress spends, per map name, deciding whether to admit it —
+    /// `check_map_name` alone. Every client operation that names a map pays it
+    /// once per name, so it is measured here on its own, undiluted by the rest
+    /// of the dispatch.
+    ///
+    /// All three names are admissible, so each call runs every clause of the
+    /// rule: an identifier name, a typical name outside the identifier class,
+    /// and the longest name the rule admits.
+    ///
+    /// A measurement, not a verdict: it asserts nothing about speed and is kept
+    /// out of the default run.
+    #[test]
+    #[ignore = "measurement: run with --ignored --nocapture"]
+    fn map_name_cost_ingest_check() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const CALLS: u32 = 1_000_000;
+        const REPEATS: usize = 5;
+
+        let long_name = format!("-{}", "a".repeat(MAX_MAP_NAME_BYTES - 1));
+        let cases = [
+            ("users", "users"),
+            ("todo/<uuid>", "todo/123e4567-e89b-12d3-a456-426614174000"),
+            ("512-byte name", long_name.as_str()),
+        ];
+
+        for (label, name) in cases {
+            assert_eq!(check_map_name(name), Ok(()), "{label} must be admissible");
+            let mut ns_per_call: Vec<f64> = (0..REPEATS)
+                .map(|_| {
+                    let started = Instant::now();
+                    for _ in 0..CALLS {
+                        black_box(check_map_name(black_box(name)).is_ok());
+                    }
+                    started.elapsed().as_secs_f64() * 1e9 / f64::from(CALLS)
+                })
+                .collect();
+            ns_per_call.sort_by(f64::total_cmp);
+            let median = ns_per_call[REPEATS / 2];
+            eprintln!(
+                "map_name_cost_ingest_check {label} ({} bytes): median {median:.1} ns/call \
+                 over {CALLS} calls x {REPEATS} repeats; repeats = {ns_per_call:.1?}",
+                name.len()
+            );
+        }
+    }
+
     /// The OR-Map leaf formula exactly as it was first written — joined tag sets
     /// fed to one `format!` — kept verbatim as the oracle any cheaper rewrite of
     /// `merkle_leaf_hash`'s OR arm must reproduce bit for bit (TG-MRK-001: a
