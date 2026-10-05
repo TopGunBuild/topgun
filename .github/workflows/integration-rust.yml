@@ -123,28 +123,26 @@ jobs:
         # drives the workspace source, not a stale published dist). RUST_SERVER_BINARY points
         # spawnRustServer() at the prebuilt binary (skips cargo). --runInBand keeps
         # per-file fixtures from contending on the fixed server ports (CLAUDE.md).
-        # cluster-routing is excluded here and gated separately (non-blocking) below.
-        # map-name-upgrade and map-name-rollback are excluded too: each drives two
-        # server binaries, the current one and the one built from 07d009f0, and CI
-        # does not build the older one. Rollback across that one boundary is a
-        # one-time property, not a regression surface, so both files are run
-        # locally and their output is carried in the pull request. Without the
-        # older binary they fail by design rather than skip.
-        # store-refusal-liveness is excluded as well: it needs a server built with
-        # the `fault-injection` cargo feature, and this job builds one binary
-        # without it. The exclusion below is the only thing that keeps the file
-        # out: the test fails, never skips, when its binary is not given, and
-        # this job must not point it at the default binary. What guards the
-        # defect in CI is the in-process test in `cargo test` and the clippy gate.
+        # This is the same script a developer runs locally. What it leaves out,
+        # and why, is listed in one place — tests/integration-rust/opt-in-suites.js —
+        # and printed at the start of the run:
+        # - map-name-upgrade and map-name-rollback each drive two server binaries,
+        #   the current one and the one built from 07d009f0, and CI does not build
+        #   the older one. Rollback across that one boundary is a one-time
+        #   property, not a regression surface, so both files are run locally
+        #   (`pnpm test:integration-rust:two-binary`) and their output is carried
+        #   in the pull request.
+        # - store-refusal-liveness needs a server built with the `fault-injection`
+        #   cargo feature, and this job builds one binary without it. It is run
+        #   locally (`pnpm test:integration-rust:liveness`). What guards the
+        #   defect in CI is the in-process test in `cargo test` and the clippy gate.
+        # - cluster-routing is left out by the variable below and gated separately
+        #   (non-blocking) in the next job.
+        # Each of these files fails, never skips, when its binary is not given.
         env:
           RUST_SERVER_BINARY: ${{ github.workspace }}/target/release/topgun-server
-        run: |
-          echo "EXCLUDED in CI: map-name-upgrade, map-name-rollback — they need the 07d009f0 binary; run locally, evidence in the PR body"
-          echo "EXCLUDED in CI: store-refusal-liveness — it needs a server built with --features fault-injection, which this job does not build; run locally, evidence in the PR body"
-          pnpm exec jest \
-            --config tests/integration-rust/jest.config.js \
-            --runInBand \
-            --testPathIgnorePatterns '/node_modules/' '/dist/' '\.d\.ts$' 'cluster-routing\.test\.ts$' 'map-name-(upgrade|rollback)\.test\.ts$' 'store-refusal-liveness\.test\.ts$'
+          INTEGRATION_RUST_SKIP_CLUSTER_ROUTING: '1'
+        run: pnpm test:integration-rust --runInBand
 
   # NON-BLOCKING. The 3-node cluster suite intermittently fails to converge
   # (one node sometimes never joins → nodeCount stuck at 2) even from a cold
@@ -186,8 +184,4 @@ jobs:
       - name: Run cluster-routing suite
         env:
           RUST_SERVER_BINARY: ${{ github.workspace }}/target/release/topgun-server
-        run: |
-          pnpm exec jest \
-            --config tests/integration-rust/jest.config.js \
-            --runInBand \
-            cluster-routing
+        run: pnpm test:integration-rust --runInBand cluster-routing
