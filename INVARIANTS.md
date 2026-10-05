@@ -396,6 +396,74 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Discovered by:** SPEC-373b (carve 9c part b — one slot cell per key).
 - **Status:** decided, **enforced**.
 
+### TG-WB-004: No write-behind queue shard guard is held across an await
+
+- **Scope:** every guard on `queues` (the per-partition write-behind queue map, a `DashMap`) in
+  `write_behind.rs`.
+- **Statement:** a `queues` shard guard never lives across an `.await`. A store refusal therefore
+  never blocks a synchronous `queues` access — a client write, a remove, the stall watchdog — for
+  longer than a synchronous critical section.
+- **Maintaining code:** `write_behind.rs` `flush_loop`, retry branch: the refused entry is put back
+  on its queue in one statement, so the guard is a temporary that is gone before the retry backoff
+  is awaited.
+- **Enforcing test:** `write_behind.rs::the_queue_shard_is_free_during_a_retry_backoff` — a write to
+  the partition under retry backoff must complete within 1000 ms. Two more enforcers cover other
+  parts; the table below says which covers what.
+- **Violation consequence:** the node stops. The flush task sleeps on a timer while it holds the
+  shard lock; the stall watchdog (or any writer of that partition) blocks a runtime worker on the
+  lock; if that worker was the one driving the runtime's timer and I/O driver, the timer never
+  fires and the lock is never released. No new connection is answered, nothing is logged and
+  SIGTERM is ignored — signals are delivered through the same driver — so the process has to be
+  killed. Measured with the store refusing from the start and the default configuration: 5 of 5
+  runs hung before the fix, 5 of 5 healthy after it.
+- **Discovered by:** SPEC-381a wave A0 (rollback testing); fixed and catalogued by SPEC-382.
+- **Status:** decided, **enforced** — at the one site the test covers and for the guard shapes the
+  lint reports; see the blind spots.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `the_queue_shard_is_free_during_a_retry_backoff` | ONE site: the retry branch of `flush_loop`. No other `queues` guard, no other map | CI (`cargo test`) |
+| lint gate: `clippy::await_holding_invalid_type` over the type list in the root `clippy.toml`, and `clippy::await_holding_lock` | WIDER than the statement: every listed DashMap/DashSet guard type in every target of both workspace crates — within the shapes the table below shows it reports | CI (`cargo clippy`) |
+| `tests/integration-rust/store-refusal-liveness.test.ts` | the CONSEQUENCE at node level for a store refusal — reads and new connections answered, exactly one discard line per refused key, clean exit on SIGTERM within 15 s. No site in particular. Its `STORE-DOWN-FROM-START` arm is the one that goes red under the default configuration | local only — excluded from blocking CI because it needs a second server build with the `fault-injection` feature (TODO-770) |
+
+**What the lint reports, as measured** (clippy 0.1.93; one fixture per shape, each holding a
+DashMap guard across an await):
+
+| Shape | Reported |
+|-------|----------|
+| `let g = map.get(&k).unwrap();` — a `Ref` binding | yes |
+| `let e = map.entry(k);` — an `Entry` binding | yes |
+| `let it = map.iter();` — an `Iter` binding | yes |
+| `let g = set.get(&k).unwrap();` — a `DashSet` `Ref` binding | yes |
+| a guard that is a temporary of the awaiting statement | yes |
+| `let g = map.get(&k);` — an `Option<Ref>` binding | **no** |
+| `match map.get(&k) { Some(ref r) => { ….await } None => {} }` | **no** |
+| `if let Some(r) = map.get(&k) { ….await }` | yes |
+| `if let Some(v) = map.get(&k).as_deref() { ….await }` | **no** |
+| `let g = map.try_get(&k);` — a `TryResult` binding | yes |
+
+**Blind spots.**
+
+- The three shapes the lint does not report (the `Option<Ref>` binding, the `match` scrutinee and
+  the `as_deref` scrutinee) were covered ONCE, by reading: every `get` / `get_mut` / `try_get` /
+  `try_get_mut` / `iter` / `iter_mut` / `try_entry` call on a DashMap or DashSet name in both
+  crates was classified (326 calls, none live across an await). Nothing re-runs that reading, so a
+  new guard of one of these shapes is not caught by any gate.
+- That reading keys on declared names. It does not see a receiver reached through a method call or
+  a field path whose last segment is not a declared DashMap/DashSet name, or macro-generated code.
+  It does not look at `entry(..)` or at `for … in &map` either; those hold a listed type directly,
+  which the lint reports.
+- A guard held across a blocking call that is not an `.await`.
+- A guard moved into another type — a struct, a tuple, a closure capture: the lint matches the
+  type's path.
+- A hand-written `Future::poll`.
+- Code that is not compiled on the CI platform or under any enabled feature.
+- Lock types that are not listed: redb transactions, `arc_swap` and `quick_cache` guards
+  (TODO-767).
+- The blocked side. A synchronous `queues.get` on a runtime worker is legal and stays legal; the
+  invariant only forbids the holder from suspending. A shutdown path that does not depend on the
+  runtime driver is TODO-767.
+
 ### TG-EVI-001: Never-evict-dirty — an unflushed write is never evicted from the resident cache
 
 - **Scope:** `evict_lru` in the record store.

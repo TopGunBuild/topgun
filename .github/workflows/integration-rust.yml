@@ -130,14 +130,21 @@ jobs:
         # one-time property, not a regression surface, so both files are run
         # locally and their output is carried in the pull request. Without the
         # older binary they fail by design rather than skip.
+        # store-refusal-liveness is excluded as well: it needs a server built with
+        # the `fault-injection` cargo feature, and this job builds one binary
+        # without it. The exclusion below is the only thing that keeps the file
+        # out: the test fails, never skips, when its binary is not given, and
+        # this job must not point it at the default binary. What guards the
+        # defect in CI is the in-process test in `cargo test` and the clippy gate.
         env:
           RUST_SERVER_BINARY: ${{ github.workspace }}/target/release/topgun-server
         run: |
           echo "EXCLUDED in CI: map-name-upgrade, map-name-rollback — they need the 07d009f0 binary; run locally, evidence in the PR body"
+          echo "EXCLUDED in CI: store-refusal-liveness — it needs a server built with --features fault-injection, which this job does not build; run locally, evidence in the PR body"
           pnpm exec jest \
             --config tests/integration-rust/jest.config.js \
             --runInBand \
-            --testPathIgnorePatterns '/node_modules/' '/dist/' '\.d\.ts$' 'cluster-routing\.test\.ts$' 'map-name-(upgrade|rollback)\.test\.ts$'
+            --testPathIgnorePatterns '/node_modules/' '/dist/' '\.d\.ts$' 'cluster-routing\.test\.ts$' 'map-name-(upgrade|rollback)\.test\.ts$' 'store-refusal-liveness\.test\.ts$'
 
   # NON-BLOCKING. The 3-node cluster suite intermittently fails to converge
   # (one node sometimes never joins → nodeCount stuck at 2) even from a cold

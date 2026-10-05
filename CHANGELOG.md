@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server):** a storage failure — the database unreachable, the disk full — could
+  stop the whole server. It answered no new connection, logged nothing more, ignored
+  SIGTERM and had to be killed. Now the write the store could not take is reported in
+  the log (`Write-behind entry discarded after max retries`, with its map and key) and
+  the server keeps serving and stops when told to. The cause was a lock kept during the
+  wait between two store retries. The discarded write is still not stored: it stays
+  readable from memory until it is evicted or the server restarts, and it stays in the
+  WAL.
 - **Breaking (server, map names):** map names that are empty, longer than 512 bytes,
   end in `__backup` or contain a NUL character are now refused for client operations.
   Data already stored under such a name is not deleted: it stays in the store, but

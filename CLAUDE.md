@@ -242,7 +242,7 @@ There are two cases, and they behave differently. Only the first is safe.
 
 - What happens: the LWW write is acknowledged and its frame is in the WAL; the store then refuses it; about 6 s after the ack the process logs nothing more, answers no new connection and ignores `SIGTERM`. It has to be killed with `kill -9`. Measured in 4 of 4 runs that waited at least 6 s after the ack, with 2 of 2 control runs (identifier-class name) healthy.
 - Why case 1 does not hang and case 2 does: at boot the older binary only *replays* those frames, and a store refusal during recovery is a warning outside the write-behind retry loop. A live write goes through that loop, where the refusal is retried while a lock is held.
-- This is a defect of every pre-fix binary on **any** store refusal, not only a map name. It is tracked as TODO-756 and is not fixed by the map-name change, which only removes this one trigger from newer binaries.
+- This is a defect of every pre-fix binary on **any** store refusal, not only a map name. It is fixed in binaries that carry `TG-WB-004`; the map-name change only removed this one trigger. Every earlier binary — `07d009f0` included — still hangs on any store refusal, so the warning above stands for a rollback.
 - The acknowledged frame survives the kill — it was fsynced before the ack under `per_op`; under `batched` the usual group-commit window applies — and is replayed when the newer binary returns.
 - This is stated for LWW writes. An OR-Map write to such a name is not acknowledged by the older binary at all, so no frame is written. That no hang follows an unacknowledged OR write was not measured separately.
 
