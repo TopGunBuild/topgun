@@ -2,9 +2,10 @@
  * Child-process body for AbandonedClientExit.test.ts.
  *
  * Builds a client, brings it to the state named by the scenario, prints
- * RELEASED and returns WITHOUT closing it. Whether the process then exits is
- * decided only by what the client left on the event loop, so the parent can
- * assert that an abandoned client never holds a Node process open.
+ * RELEASED and returns — in most scenarios WITHOUT closing it. Whether the
+ * process then exits is decided only by what the client left on the event
+ * loop, so the parent can assert which of the client's timers hold a Node
+ * process open and which do not.
  *
  * Nothing here opens a real socket: a real open socket is a handle of its own
  * and would keep the process alive whatever the timers do. The question this
@@ -171,8 +172,11 @@ async function main(): Promise<void> {
       break;
     }
 
-    // HTTP transport: the polling interval.
-    case 'http-polling': {
+    // HTTP transport. Between polls there is no handle, so the polling interval
+    // is what keeps an open client's process alive ('http-open'), and close()
+    // has to be all it takes to let the process go ('http-closed').
+    case 'http-open':
+    case 'http-closed': {
       const body = serialize({});
       const fetchImpl = (async () => ({
         ok: true,
@@ -191,6 +195,7 @@ async function main(): Promise<void> {
       await provider.connect();
       // Long enough for the interval to have ticked, so it is armed for certain.
       await sleep(200);
+      if (scenario === 'http-closed') await provider.close();
       break;
     }
 

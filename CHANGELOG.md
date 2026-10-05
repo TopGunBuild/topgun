@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (`@topgunbuild/client`):** a client closed before its socket had opened no
+  longer comes back to life. Before, a socket that reported "open" after `close()`
+  made the closed client authenticate, start its heartbeat and then reconnect for
+  ever. In Node, the client's background timers (heartbeat, reconnect, token refresh,
+  cluster health check) also no longer keep a process running by themselves; an open
+  connection still does.
 - **Breaking (server, map names):** map names that are empty, longer than 512 bytes,
   end in `__backup` or contain a NUL character are now refused for client operations.
   Data already stored under such a name is not deleted: it stays in the store, but

@@ -2,10 +2,15 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 
 /**
- * A client that is built and then abandoned — never closed — must not keep a
- * Node process alive. Jest cannot see this from inside a test (the worker stays
- * up for other reasons and tears timers down itself), so each case runs the
- * client in a child process and checks that the child exits by itself.
+ * The background timers of a client that is built and then abandoned — never
+ * closed — must not keep a Node process alive. Jest cannot see this from inside
+ * a test (the worker stays up for other reasons and tears timers down itself),
+ * so each case runs the client in a child process and checks that the child
+ * exits by itself.
+ *
+ * What may keep the process alive is an open transport, and only that: a real
+ * socket (not exercised here, the socket is mocked) or, on HTTP, the polling
+ * interval that stands in for one. That case is pinned the other way round.
  */
 
 const PACKAGE_ROOT = path.resolve(__dirname, '..', '..');
@@ -112,14 +117,14 @@ function expectOutcome(
   }
 }
 
-describe('an abandoned client does not keep a Node process alive', () => {
+describe("a client's background timers do not keep a Node process alive", () => {
   jest.setTimeout(RELEASE_WITHIN_MS + 30_000);
 
   test.each([
     ['heartbeat', 'connected and idle, heartbeat armed'],
     ['device-credential-grace', 'waiting for the device credential'],
     ['closed-before-open', 'closed before the socket reported open'],
-    ['http-polling', 'HTTP transport, polling armed'],
+    ['http-closed', 'HTTP transport, closed after polling was armed'],
   ])('%s: %s', async (scenario) => {
     const outcome = await runScenario(scenario, EXIT_WITHIN_MS);
 
@@ -133,6 +138,15 @@ describe('an abandoned client does not keep a Node process alive', () => {
     const outcome = await runScenario('cluster', 10_000 + EXIT_WITHIN_MS);
 
     expectOutcome(outcome, { released: true, exitCode: 0 });
+  });
+
+  // The one background timer that is ref'd on purpose. An open WebSocket client
+  // holds its process through the socket; on HTTP there is no handle between
+  // polls, so the polling interval has to do it. The process is killed here.
+  test('http-open: an open HTTP client does keep the process alive', async () => {
+    const outcome = await runScenario('http-open', EXIT_WITHIN_MS);
+
+    expectOutcome(outcome, { released: true, exitCode: null });
   });
 
   test("control: a ref'd handle does keep the process alive, so the cases above can fail", async () => {
