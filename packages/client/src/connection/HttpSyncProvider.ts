@@ -8,6 +8,7 @@ import type {
 } from '../types';
 import { ConnectionReadyState } from './WebSocketConnection';
 import { logger } from '../utils/logger';
+import { unrefTimer } from '../utils/unrefTimer';
 
 /**
  * No-op IConnection for HTTP mode. Delegates send() to the provider's
@@ -491,13 +492,17 @@ export class HttpSyncProvider implements IConnectionProvider {
   private startPolling(): void {
     if (this.pollTimer) return;
 
-    this.pollTimer = setInterval(async () => {
-      try {
-        await this.doSyncRequest();
-      } catch (err) {
-        logger.debug({ err }, 'HTTP sync poll failed');
-      }
-    }, this.pollIntervalMs);
+    // Unref'd: polling is background work. A request that is in flight still
+    // holds the process until it settles; only the idle gap between polls does not.
+    this.pollTimer = unrefTimer(
+      setInterval(async () => {
+        try {
+          await this.doSyncRequest();
+        } catch (err) {
+          logger.debug({ err }, 'HTTP sync poll failed');
+        }
+      }, this.pollIntervalMs),
+    );
   }
 
   /**

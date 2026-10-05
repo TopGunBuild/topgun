@@ -21,6 +21,7 @@ import {
 import type { IConnection } from '../types';
 import { ConnectionPool } from './ConnectionPool';
 import { logger } from '../utils/logger';
+import { unrefTimer } from '../utils/unrefTimer';
 
 export interface RoutingResult {
   nodeId: string;
@@ -356,14 +357,16 @@ export class PartitionRouter {
   public startPeriodicRefresh(): void {
     if (this.refreshTimer) return;
 
-    this.refreshTimer = setInterval(() => {
-      if (this.isMapStale()) {
-        this.emit('partitionMap:stale', this.getMapVersion(), this.lastRefreshTime);
-        this.refreshPartitionMap().catch((err) => {
-          logger.error({ error: err }, 'Failed to refresh partition map');
-        });
-      }
-    }, this.config.mapRefreshIntervalMs);
+    this.refreshTimer = unrefTimer(
+      setInterval(() => {
+        if (this.isMapStale()) {
+          this.emit('partitionMap:stale', this.getMapVersion(), this.lastRefreshTime);
+          this.refreshPartitionMap().catch((err) => {
+            logger.error({ error: err }, 'Failed to refresh partition map');
+          });
+        }
+      }, this.config.mapRefreshIntervalMs),
+    );
   }
 
   /**

@@ -17,6 +17,7 @@ import type {
 } from '../types';
 import { SyncState } from '../SyncState';
 import { logger } from '../utils/logger';
+import { unrefTimer } from '../utils/unrefTimer';
 import type { IWebSocketManager, WebSocketManagerConfig } from './types';
 
 /**
@@ -292,10 +293,14 @@ export class WebSocketManager implements IWebSocketManager {
     this.stopHeartbeat(); // Clear any existing interval
     this.lastPongReceived = Date.now();
 
-    this.heartbeatInterval = setInterval(() => {
-      this.sendPing();
-      this.checkHeartbeatTimeout();
-    }, this.config.heartbeatConfig.intervalMs);
+    // Unref'd: the interval lives for as long as the connection does, so a
+    // client that is never closed would otherwise hold the process open for ever.
+    this.heartbeatInterval = unrefTimer(
+      setInterval(() => {
+        this.sendPing();
+        this.checkHeartbeatTimeout();
+      }, this.config.heartbeatConfig.intervalMs),
+    );
 
     logger.info({ intervalMs: this.config.heartbeatConfig.intervalMs }, 'Heartbeat started');
   }

@@ -18,6 +18,7 @@ import { serialize, deserialize } from '@topgunbuild/core';
 import type { IConnection } from '../types';
 import { WebSocketConnection } from '../connection/WebSocketConnection';
 import { logger } from '../utils/logger';
+import { unrefTimer } from '../utils/unrefTimer';
 
 export type ConnectionPoolEventType =
   | 'node:connected'
@@ -369,9 +370,11 @@ export class ConnectionPool {
   public startHealthCheck(): void {
     if (this.healthCheckTimer) return;
 
-    this.healthCheckTimer = setInterval(() => {
-      this.performHealthCheck();
-    }, this.config.healthCheckIntervalMs);
+    this.healthCheckTimer = unrefTimer(
+      setInterval(() => {
+        this.performHealthCheck();
+      }, this.config.healthCheckIntervalMs),
+    );
   }
 
   /**
@@ -606,10 +609,12 @@ export class ConnectionPool {
 
     logger.info({ nodeId, delay, attempt: connection.reconnectAttempts }, 'Scheduling reconnect');
 
-    connection.reconnectTimer = setTimeout(() => {
-      connection.reconnectTimer = null;
-      this.connect(nodeId);
-    }, delay);
+    connection.reconnectTimer = unrefTimer(
+      setTimeout(() => {
+        connection.reconnectTimer = null;
+        this.connect(nodeId);
+      }, delay),
+    );
   }
 
   private performHealthCheck(): void {
