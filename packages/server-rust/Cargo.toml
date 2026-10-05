@@ -36,6 +36,11 @@ count-alloc = ["dep:stats_alloc"]
 # (jemalloc wins); never enabled in production builds.
 alloc-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 alloc-mimalloc = ["dep:mimalloc"]
+# Store-refusal seam (off by default): lets a test make the write-behind flush
+# fail on demand, as an unreachable database or a full disk would, by creating a
+# sentinel file named in the environment. Used to prove the node keeps serving
+# when the store refuses a write; never enabled in production builds.
+fault-injection = []
 
 [dependencies]
 topgun-core = { path = "../core-rust", features = ["arrow"] }

@@ -12,8 +12,10 @@ license = "Apache-2.0"
 repository = "https://github.com/topgunbuild/topgun"
 
 [workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
+# The groups sit one priority below the individual entries, so an entry that names
+# a single lint (the two `deny` lines below) overrides the group it belongs to.
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
 # Adopted per project lint-strictness policy; rationale in CONTRIBUTING.md
 # § Lint strictness policy (clippy). All three guard against unfinished /
 # debug-leftover code reaching production paths; zero existing fires in
@@ -21,6 +23,13 @@ pedantic = "warn"
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+# Denied explicitly, so the rule depends neither on group membership nor on
+# `-D warnings`: a lock guard alive across an `.await` can block a runtime worker
+# thread, and one blocked worker can stop the whole server. The guard types
+# `await_holding_invalid_type` looks for are listed in the root `clippy.toml`.
+# Rationale and measured limits in CONTRIBUTING.md § Lint strictness policy.
+await_holding_lock = "deny"
+await_holding_invalid_type = "deny"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

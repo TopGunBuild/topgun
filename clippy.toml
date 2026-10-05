@@ -1,0 +1,24 @@
+# Types that must not be alive across an `.await` (clippy::await_holding_invalid_type).
+#
+# Every type below holds a DashMap shard lock. A task that suspends while it holds
+# one keeps the shard locked for as long as it is suspended, and any thread that
+# then touches the same shard synchronously blocks a runtime worker; one blocked
+# worker can stop the whole server. Rationale and measured limits: CONTRIBUTING.md
+# § Lint strictness policy (clippy).
+await-holding-invalid-types = [
+    { path = "dashmap::mapref::one::Ref", reason = "holds a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::mapref::one::RefMut", reason = "holds a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::mapref::one::MappedRef", reason = "holds a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::mapref::one::MappedRefMut", reason = "holds a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::mapref::multiple::RefMulti", reason = "holds a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::mapref::multiple::RefMutMulti", reason = "holds a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::mapref::entry::Entry", reason = "holds a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::mapref::entry::VacantEntry", reason = "holds a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::mapref::entry::OccupiedEntry", reason = "holds a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::iter::Iter", reason = "holds a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::iter::IterMut", reason = "holds a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::setref::one::Ref", reason = "holds a DashSet shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::setref::multiple::RefMulti", reason = "holds a DashSet shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::iter_set::Iter", reason = "holds a DashSet shard lock; a worker blocked on that lock can stall the runtime" },
+    { path = "dashmap::try_result::TryResult", reason = "may hold a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
+]

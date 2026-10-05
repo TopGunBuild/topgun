@@ -10,6 +10,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server):** a write the store refused could stop the whole server. It answered
+  no new connection, logged nothing more, ignored SIGTERM and had to be killed. The
+  cause was a lock kept during the wait between two store retries; the lock is now
+  released before that wait. What was measured is narrower than "any storage failure":
+  a refusal injected into the embedded (redb) backend, with one or two refused keys. In
+  that case the server keeps answering reads and new connections, reports each write it
+  gave up on in the log (`Write-behind entry discarded after max retries`, with its map
+  and key) and exits on SIGTERM. Limits that remain:
+  - **Accounting can leak after an outage under live traffic.** When a key is written
+    again while its earlier refused write is being retried, the earlier entry can be
+    dropped without being accounted for. From then until the server is restarted the
+    flushed watermark does not advance (so tombstone pruning stops), that partition's
+    WAL is not collected, one slot of the write-behind buffer stays taken per dropped
+    entry, and the stall watchdog reports a tracker leak. No acknowledged write is lost
+    by this: the newer entry carries the value and the WAL frame is replayed at restart.
+  - **A discarded write is not stored.** After the maximum number of retries it stays
+    readable from memory until it is evicted or the server restarts, and it stays in
+    the WAL. Only a restart applies it again; until then that partition's WAL is not
+    collected.
+  - **Shutdown during an outage can take the full
+    `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`.** Measured with 40 refused entries and
+    the default 30 s: 30.00 s. With one or two refused entries it took under 2 s. A
+    supervisor with a shorter grace period (`docker stop` waits 10 s) will kill the
+    process first.
+  - **Postgres was not measured.**
 - **Fixed (`@topgunbuild/client`):** a client closed before its socket had opened no
   longer comes back to life. Before, a socket that reported "open" after `close()`
   made the closed client authenticate, start its heartbeat and then reconnect for

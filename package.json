@@ -11,6 +11,8 @@
     "test:sim": "cargo test --profile ci-sim --features simulation -p topgun-server -- sim",
     "test:cli": "pnpm --filter @topgunbuild/cli test",
     "test:integration-rust": "jest --config tests/integration-rust/jest.config.js",
+    "test:integration-rust:two-binary": "jest --config tests/integration-rust/jest.opt-in.config.js --runInBand map-name-upgrade map-name-rollback",
+    "test:integration-rust:liveness": "jest --config tests/integration-rust/jest.opt-in.config.js --runInBand store-refusal-liveness",
     "test:docs": "jest --config tests/doc-tests/jest.config.js --runInBand",
     "test:coverage": "pnpm -r test:coverage",
     "test:coverage:core": "pnpm --filter @topgunbuild/core test:coverage",
