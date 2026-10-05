@@ -841,6 +841,23 @@ pub(crate) struct DelayedEntry {
 // Partition queue
 // ---------------------------------------------------------------------------
 
+/// What [`PartitionQueue::reinsert_front`] did with a retry entry.
+///
+/// The flush loop holds a drained entry outside every queue while it persists
+/// it, so a newer write of the same key can be queued in the meantime. The
+/// caller has to know which case it met: an entry that is not put back has left
+/// the queue for good, and its count and sequences still need a disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reinsert {
+    /// No entry for the key was queued; the retry entry is back on the queue.
+    Requeued,
+    /// A newer write for the key was queued while the retry entry was out of the queue.
+    Superseded {
+        /// The entry sequence (`DelayedEntry::sequence`) of the retry entry.
+        retired_sequence: u64,
+    },
+}
+
 /// Per-partition queue that coalesces writes by (map, key).
 ///
 /// Only the latest value per key is stored; frequently-updated keys
@@ -886,14 +903,23 @@ impl PartitionQueue {
         ready
     }
 
-    /// Re-inserts entries that failed flush and need retry.
+    /// Re-inserts an entry that failed flush and needs retry, and reports
+    /// whether it went back on the queue.
     ///
     /// Preserves original `store_time` so the entry retains its flush priority.
-    pub fn reinsert_front(&mut self, entries: Vec<DelayedEntry>) {
-        for entry in entries {
-            let key = (entry.map.clone(), entry.key.clone());
+    pub fn reinsert_front(&mut self, entry: DelayedEntry) -> Reinsert {
+        use std::collections::hash_map::Entry;
+
+        let key = (entry.map.clone(), entry.key.clone());
+        match self.entries.entry(key) {
+            Entry::Vacant(slot) => {
+                slot.insert(entry);
+                Reinsert::Requeued
+            }
             // Only reinsert if no newer entry exists for this key
-            self.entries.entry(key).or_insert(entry);
+            Entry::Occupied(_) => Reinsert::Superseded {
+                retired_sequence: entry.sequence,
+            },
         }
     }
 
@@ -2551,11 +2577,11 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             // whole backoff, and a runtime worker blocked there can
                             // stop the node (TG-WB-004).
                             let partition_id = partition_for(&entry.map, &entry.key);
-                            store
+                            let _outcome = store
                                 .queues
                                 .entry(partition_id)
                                 .or_default()
-                                .reinsert_front(vec![retry_entry]);
+                                .reinsert_front(retry_entry);
 
                             // Backoff before processing next retry-eligible entry
                             let backoff = std::cmp::min(
