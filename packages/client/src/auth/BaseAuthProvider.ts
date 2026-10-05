@@ -1,5 +1,6 @@
 import type { AuthProvider, AuthEvent, TokenExchangeConfig, TokenExchangeResponse } from './types';
 import type { IStorageAdapter } from '../IStorageAdapter';
+import { unrefTimer } from '../utils/unrefTimer';
 
 export interface BaseAuthProviderConfig {
   tokenExchangeConfig?: TokenExchangeConfig;
@@ -259,15 +260,18 @@ export abstract class BaseAuthProvider implements AuthProvider {
 
     if (delay <= 0) return;
 
-    this.refreshTimer = setTimeout(() => {
-      // Trigger a background refresh; discard the result
-      // (next getToken() call will use the refreshed value)
-      this.inflightPromise = null;
-      this.cachedToken = null;
-      this.getToken().catch(() => {
-        // Error already emitted via auth:error event
-      });
-    }, delay);
+    // Unref'd: the delay is the token's remaining lifetime, which can be hours.
+    this.refreshTimer = unrefTimer(
+      setTimeout(() => {
+        // Trigger a background refresh; discard the result
+        // (next getToken() call will use the refreshed value)
+        this.inflightPromise = null;
+        this.cachedToken = null;
+        this.getToken().catch(() => {
+          // Error already emitted via auth:error event
+        });
+      }, delay),
+    );
   }
 
   private clearRefreshTimer(): void {

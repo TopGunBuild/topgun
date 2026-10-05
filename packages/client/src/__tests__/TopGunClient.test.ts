@@ -257,6 +257,9 @@ describe('TopGunClient', () => {
             serverUrl: 'ws://localhost:1234',
             storage,
           });
+          // Handed to afterEach as well, so a failing expectation below cannot
+          // leave this client open.
+          extraClients.push(valid);
           expect(registered.map((r) => r.type).sort()).toEqual(['offline', 'online']);
           await valid.close();
           expect(registered).toEqual([]);

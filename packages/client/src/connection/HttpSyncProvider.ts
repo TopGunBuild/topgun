@@ -491,6 +491,12 @@ export class HttpSyncProvider implements IConnectionProvider {
   private startPolling(): void {
     if (this.pollTimer) return;
 
+    // Deliberately ref'd. On this transport the polling interval is the only
+    // thing that says "the client is open": there is no socket between polls.
+    // An open WebSocket client holds a Node process through its socket handle;
+    // an open HTTP client has to hold it the same way, or a process that only
+    // listens for changes would exit in the gap between two polls. close()
+    // clears it (stopPolling), and then nothing of this provider is left.
     this.pollTimer = setInterval(async () => {
       try {
         await this.doSyncRequest();

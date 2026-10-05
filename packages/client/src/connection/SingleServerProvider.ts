@@ -7,6 +7,7 @@ import type {
 } from '../types';
 import { WebSocketConnection } from './WebSocketConnection';
 import { logger } from '../utils/logger';
+import { unrefTimer } from '../utils/unrefTimer';
 
 /**
  * Default configuration values for SingleServerProvider.
@@ -50,16 +51,6 @@ export class ReconnectExhaustedError extends Error {
     this.name = 'ReconnectExhaustedError';
     this.attempts = attempts;
   }
-}
-
-/**
- * Detach a background timer from the host event loop. A pending reconnect or
- * connection-timeout is background machinery — it must never be the sole reason
- * a Node process (or a Jest worker) stays alive. Node timers expose unref();
- * in browsers setTimeout returns a number with no unref(), so this is a no-op there.
- */
-function unrefTimer(timer: ReturnType<typeof setTimeout> | null): void {
-  (timer as unknown as { unref?: () => void } | null)?.unref?.();
 }
 
 /**
@@ -151,6 +142,11 @@ export class SingleServerProvider implements IConnectionProvider {
         ws.binaryType = 'arraybuffer';
 
         const succeed = () => {
+          // close() ran while this attempt was in flight and already rejected it.
+          // An "open" that still arrives must not announce a connection: the
+          // engine would authenticate and arm its heartbeat on a closed client,
+          // and the heartbeat timeout would then reconnect it for ever.
+          if (this.isClosing) return;
           if (settled) return;
           settled = true;
           opened = true;
@@ -330,7 +326,9 @@ export class SingleServerProvider implements IConnectionProvider {
     }
 
     if (this.ws) {
-      // Remove onclose handler to prevent reconnect
+      // Detach every handler: onclose so the close below does not reconnect,
+      // onopen so a socket closed mid-CONNECTING cannot report "open" afterwards.
+      this.ws.onopen = null;
       this.ws.onclose = null;
       this.ws.onerror = null;
       this.ws.onmessage = null;

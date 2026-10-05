@@ -80,12 +80,20 @@ jobs:
 
       - name: Unit tests
         # pnpm -r runs jest in every workspace package (--runInBand so per-package
-        # fixtures don't contend on ports/files — CLAUDE.md guidance). Open-handle
-        # leaks that previously prevented clean Jest exit were fixed at the source:
-        # SingleServerProvider unref()s its connection-timeout and reconnect timers
-        # so an unclosed client can never keep the worker alive, mcp-server tests
-        # mock WebSocket, and pino disables the thread-stream transport in tests —
-        # so the run exits on its own with no force-exit stopgap. CLI tests that
+        # fixtures don't contend on ports/files — CLAUDE.md guidance). The run
+        # exits on its own with no force-exit stopgap, and that rests on the
+        # client, not on test hygiene: every background timer a client holds
+        # (heartbeat, device-credential grace, reconnect, connection timeout,
+        # cluster health check and refresh, token refresh) is unref()'d, and a
+        # provider closed mid-connect ignores a late "open", so neither an
+        # unclosed WebSocket client nor a closed one can keep the worker alive.
+        # AbandonedClientExit.test.ts holds that contract in a child process.
+        # Two things stay ref'd on purpose: timeouts of calls a test awaits
+        # (bounded), and the HTTP polling interval, which is what keeps an open
+        # HTTP client's process alive — an HttpSyncProvider a test connects
+        # must be closed.
+        # mcp-server tests mock WebSocket, and pino disables the thread-stream
+        # transport in tests. CLI tests that
         # invoke the foreground `dev` server force an absent binary so they never
         # boot a real server that would block execSync.
         run: pnpm -r exec jest --runInBand --passWithNoTests

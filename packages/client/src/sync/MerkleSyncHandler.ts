@@ -1,6 +1,7 @@
 import { LWWMap } from '@topgunbuild/core';
 import type { IMerkleSyncHandler, MerkleSyncHandlerConfig } from './types';
 import { logger } from '../utils/logger';
+import { unrefTimer } from '../utils/unrefTimer';
 
 /**
  * MerkleSyncHandler
@@ -128,10 +129,12 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- timer field is set immediately after this line; undefined cast to any avoids requiring a non-null assertion on the optional timer field
         const stats = existing ?? { count: updateCount, timer: undefined as any };
         if (!existing) this.syncStats.set(mapName, stats);
-        stats.timer = setTimeout(() => {
-          logger.info({ mapName, count: stats.count }, 'Synced records from server');
-          this.syncStats.delete(mapName);
-        }, 100);
+        stats.timer = unrefTimer(
+          setTimeout(() => {
+            logger.info({ mapName, count: stats.count }, 'Synced records from server');
+            this.syncStats.delete(mapName);
+          }, 100),
+        );
       }
     }
   }
