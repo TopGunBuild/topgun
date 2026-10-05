@@ -114,13 +114,16 @@ Why: a lock guard that stays alive while a task is suspended keeps the lock for 
 
 **Neither rule may be allowed in production code.** In `#[cfg(test)]` code an `#[allow]` of either needs a WHY-comment. The test-scope override below (`#![cfg_attr(test, allow(...))]` in `lib.rs`) does not extend to these two rules.
 
-**Measured limits of `await_holding_invalid_type`** (clippy 0.1.93, one fixture per shape). The rule looks at the type of each value that is alive across the await, so a guard wrapped in another type can pass unreported. It does **not** report these three shapes:
+**Measured limits of `await_holding_invalid_type`** (clippy 0.1.93, one fixture per shape). The rule looks at the type of each value that is alive across the await, so a guard wrapped in another type passes unreported. The shapes below were measured as **not** reported. They are examples, not the whole gap — treat any guard that is not a plain binding of a listed type as unchecked:
 
-- `let g = map.get(&k);` held across an await — the value is an `Option<Ref>`, not a `Ref`;
+- `let g = map.get(&k);` or `let g = map.get_mut(&k);` held across an await — the value is an `Option<Ref>` / `Option<RefMut>`, not a guard;
 - `match map.get(&k) { Some(ref r) => { ….await } None => {} }`;
-- `if let Some(v) = map.get(&k).as_deref() { ….await }`.
+- `if let Some(v) = map.get(&k).as_deref() { ….await }`;
+- any iterator adaptor over `iter()`, bound with `let` or used as a `for` iterable — `for k in map.iter().map(|e| *e.key()) { ….await }` is the usual way to walk a DashMap and is not reported;
+- `let found = map.iter().find(..);` (`Option<RefMulti>`) and `let v: Vec<_> = map.iter().collect();` (`Vec<RefMulti>`);
+- a guard inside a tuple or a struct field.
 
-It does report a guard bound with `let` (`Ref`, `Entry`, `Iter`, a DashSet `Ref`, a `TryResult` from `try_get`), a guard that is a temporary of the awaiting statement, and `if let Some(r) = map.get(&k) { ….await }`. The three unreported shapes were checked once by reading every accessor call in both crates; nothing repeats that check, so review them by eye. The full table and the other blind spots are in the `TG-WB-004` row.
+Measured as reported: a guard bound with `let` (`Ref`, `Entry`, `Iter`, a DashSet `Ref`, a `TryResult` from `try_get`), a guard that is a temporary of the awaiting statement, `if let Some(r) = map.get(&k) { ….await }`, `if let Some(mut q) = map.get_mut(&k) { ….await }`, `let Some(g) = map.get(&k) else { return };` and `match map.get(&k) { Some(r) => { ….await } … }` with a by-value binding. The unreported shapes were looked for by reading the accessor calls in both crates and no instance was found; no gate repeats that, so review them by eye. The full table and the other blind spots are in the `TG-WB-004` row.
 
 **CI enforcement:** every rule in `[workspace.lints.clippy]` is enforced by the CI `check` job at `cargo clippy --all-targets --all-features -- -D warnings` (see [`.github/workflows/rust.yml`](.github/workflows/rust.yml)). A new `dbg!()`, `todo!()`, or `unimplemented!()` in a non-test path will fail the PR — `warn` is upgraded to `error` by the `-D warnings` flag in CI.
 
@@ -225,6 +228,13 @@ pnpm --filter @topgunbuild/core test:coverage
 
 ```bash
 pnpm test:integration-rust
+```
+
+The default run leaves out three files that need a server binary a clean checkout does not have, and prints which ones and why. Each has its own script, and fails rather than skips when its binary is not given:
+
+```bash
+pnpm test:integration-rust:two-binary   # map-name-upgrade, map-name-rollback: OLD_SERVER_BINARY, OLD_SERVER_COMMIT, NEW_SERVER_COMMIT
+pnpm test:integration-rust:liveness     # store-refusal-liveness: FAULT_SERVER_BINARY, FAULT_SERVER_COMMIT
 ```
 
 ### Load Tests (k6)
