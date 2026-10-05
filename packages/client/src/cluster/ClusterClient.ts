@@ -21,6 +21,7 @@ import {
 import { ConnectionPool } from './ConnectionPool';
 import { PartitionRouter } from './PartitionRouter';
 import { logger } from '../utils/logger';
+import { unrefTimer } from '../utils/unrefTimer';
 import type { IConnectionProvider, IConnection } from '../types';
 
 export interface ClusterClientEvents {
@@ -261,10 +262,12 @@ export class ClusterClient implements IConnectionProvider {
     if (this.partitionMapRequestTimer) {
       clearTimeout(this.partitionMapRequestTimer);
     }
-    this.partitionMapRequestTimer = setTimeout(() => {
-      this.partitionMapRequestTimer = null;
-      this.requestPartitionMapFromNode(nodeId);
-    }, ClusterClient.PARTITION_MAP_REQUEST_DEBOUNCE_MS);
+    this.partitionMapRequestTimer = unrefTimer(
+      setTimeout(() => {
+        this.partitionMapRequestTimer = null;
+        this.requestPartitionMapFromNode(nodeId);
+      }, ClusterClient.PARTITION_MAP_REQUEST_DEBOUNCE_MS),
+    );
   }
 
   /**

@@ -23,6 +23,7 @@ import type { QueryFilter } from './QueryHandle';
 import type { HybridQueryHandle, HybridQueryFilter } from './HybridQueryHandle';
 import { TopicHandle } from './TopicHandle';
 import { logger } from './utils/logger';
+import { unrefTimer } from './utils/unrefTimer';
 import { isValidMapName, keyBelongsToLongerHeldName } from './utils/mapName';
 import {
   loadOrMapKeyTombstones,
@@ -700,11 +701,15 @@ export class SyncEngine {
     this.stateMachine.transition(SyncState.AUTHENTICATING);
     this.deviceAckPending = true;
     this.sendDeviceHello();
-    this.authRequiredGraceTimer = setTimeout(() => {
-      this.authRequiredGraceTimer = null;
-      this.deviceAckPending = false;
-      this.completeAuthOptionalConnection();
-    }, this.AUTH_REQUIRED_GRACE_MS);
+    // Unref'd: nobody awaits this window, and what it leads to (the heartbeat)
+    // is background machinery too.
+    this.authRequiredGraceTimer = unrefTimer(
+      setTimeout(() => {
+        this.authRequiredGraceTimer = null;
+        this.deviceAckPending = false;
+        this.completeAuthOptionalConnection();
+      }, this.AUTH_REQUIRED_GRACE_MS),
+    );
   }
 
   /**

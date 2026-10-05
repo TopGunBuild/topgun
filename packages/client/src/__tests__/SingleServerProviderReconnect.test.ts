@@ -237,3 +237,40 @@ describe('SingleServerProvider reconnect honesty (F2)', () => {
     }
   });
 });
+
+describe('SingleServerProvider closed while connecting', () => {
+  beforeEach(() => {
+    MockWebSocket.reset();
+  });
+
+  afterEach(() => {
+    MockWebSocket.reset();
+  });
+
+  // A socket closed mid-handshake is not obliged to stay silent: this mock, like
+  // some non-browser clients, still reports "open". Announcing that connection
+  // would have the engine authenticate and arm a heartbeat on a closed client,
+  // whose timeout then reconnects it for ever.
+  it('does not announce a connection when "open" arrives after close()', async () => {
+    const provider = new SingleServerProvider({
+      url: 'ws://localhost:9999',
+      listenNetworkEvents: false,
+    });
+    const events: string[] = [];
+    provider.on('connected', () => events.push('connected'));
+    provider.on('reconnected', () => events.push('reconnected'));
+
+    const connecting = provider.connect();
+    const socket = MockWebSocket.last();
+    await provider.close();
+    await expect(connecting).rejects.toThrow('Provider closed');
+
+    // Positive control: the mock really does deliver the late "open".
+    await waitUntil(() => socket.readyState === MockWebSocket.OPEN);
+    await waitMs(20);
+
+    expect(events).toEqual([]);
+    expect(provider.isConnected()).toBe(false);
+    expect(MockWebSocket.instances).toHaveLength(1);
+  });
+});
