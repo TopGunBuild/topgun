@@ -7324,6 +7324,162 @@ mod tests {
             "the refused entry must still be queued for its second attempt"
         );
     }
+
+    /// TG-WB-005: a refused entry that finds a newer write of its key on the
+    /// queue is retired into it.
+    ///
+    /// While an entry is out of the queue — drained into the flush batch and
+    /// waiting behind another key's backoff — a write to the same key has
+    /// nothing to coalesce with, so it is queued and counted as a new entry.
+    /// When the older entry's attempt then fails, its count, its entry sequence
+    /// and its WAL sequences must pass to that queued write. Dropping the entry
+    /// instead strands all three until restart: the capacity check reads an
+    /// inflated count, the flushed watermark stops, and the partition's WAL is
+    /// never collected.
+    ///
+    /// Idle is read through `test_is_idle`, never as "every queue empty": a
+    /// drained batch is in no queue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::too_many_lines)]
+    async fn a_refused_entry_superseded_by_a_newer_write_is_retired_into_it() {
+        use std::time::{Duration, Instant};
+
+        let wal = InMemoryTestWal::new();
+        let spy = Arc::new(SpyDataStore::new());
+        spy.set_fail_add(true);
+        let calls = spy.calls();
+        // First backoff = min(500 * 2^1, 5000) = 1000 ms: the window in which
+        // the older `b` entry sits in the batch behind `a`.
+        //
+        // The stall bound puts the watchdog's first tick 60 s out, past every
+        // wait below. The watchdog shares its leak-candidate state with the two
+        // classifier samples at the end, so a background sample taken first
+        // would change what those two report.
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 200,
+                backoff_base_ms: 500,
+                backoff_cap_ms: 5000,
+                max_retries: 3,
+                capacity: 0,
+                wal_watermark_stall_bound_ms: 600_000,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+        let attempts = |wanted: &str| {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(
+                    |call| matches!(call, SpyCall::Add { map, key } if map == "m" && key == wanted),
+                )
+                .count()
+        };
+        let pb = partition_for("m", "b");
+        let b = ("m".to_string(), "b".to_string());
+
+        // `a` is the older of the two, so it is first in the batch and `b`
+        // waits behind its backoff.
+        let t = now_millis();
+        store
+            .add("m", "a", &dummy_value_with(1), 0, t - 10)
+            .await
+            .expect("a is accepted into the buffer");
+        store
+            .add("m", "b", &dummy_value_with(2), 0, t - 5)
+            .await
+            .expect("b is accepted into the buffer");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while attempts("a") < 1 {
+            assert!(Instant::now() < deadline, "a was never attempted");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let b_queued = store
+            .queues
+            .get(&pb)
+            .is_some_and(|queue| queue.entries.contains_key(&b));
+        assert!(
+            !b_queued && attempts("b") == 0,
+            "setup: b must be in the flush batch, out of its queue and not yet attempted"
+        );
+
+        // The newer write, acked while the older `b` entry is in the batch.
+        let newer = dummy_value_with(3);
+        store
+            .add("m", "b", &newer, 0, now_millis())
+            .await
+            .expect("the newer b is accepted into the buffer");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while attempts("b") < 1 {
+            assert!(Instant::now() < deadline, "the older b was never attempted");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // What the queued newer write owns once the older entry's attempt has
+        // failed. Recorded, not asserted yet: the accounting below must be the
+        // first thing a failing run reports.
+        let mut carried = BTreeSet::new();
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            if let Some(owned) = store.queues.get(&pb).and_then(|queue| {
+                queue
+                    .entries
+                    .get(&b)
+                    .map(|entry| entry.wal_sequences.clone())
+            }) {
+                carried = owned;
+            }
+            if carried == BTreeSet::from([2, 3]) || Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        spy.set_fail_add(false);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !store.test_is_idle() {
+            assert!(
+                Instant::now() < deadline,
+                "the store never became idle after the inner store healed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let first_sample = store.test_run_classifier_sample(pb);
+        let second_sample = store.test_run_classifier_sample(pb);
+
+        assert_eq!(
+            (
+                store.pending_operation_count(),
+                (store.flushed_watermark(), store.assigned_write_sequence()),
+                store.test_pending_wal_sequences(pb),
+                (first_sample, second_sample),
+            ),
+            (0, (3, 3), Vec::new(), (None, None)),
+            "on a healed, idle store nothing may stay counted, fenced or pending: \
+             (pending count, (flushed watermark, assigned sequence), pending WAL \
+             sequences of b's partition, two classifier samples)"
+        );
+        assert_eq!(
+            carried,
+            BTreeSet::from([2, 3]),
+            "the queued newer write must own the superseded entry's WAL sequence \
+             while both are unresolved"
+        );
+        assert_eq!(
+            spy.persisted("m", "b"),
+            Some(newer),
+            "the inner store must hold the newer write's value"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
