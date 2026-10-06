@@ -2834,6 +2834,23 @@ impl MapDataStore for WriteBehindDataStore {
         self.config.or_delta_wal
     }
 
+    /// # Precondition: one writer per key at a time (NOT upheld by every caller)
+    ///
+    /// The entry sequence is assigned and the entry is queued in two separate
+    /// steps, with no lock held across both. Two concurrent writers of one
+    /// `(map, key)` can therefore interleave so that the write with the higher
+    /// sequence is queued first and the one with the lower sequence then
+    /// replaces it: the queue is left holding the lower-sequence write while
+    /// staging keeps the higher one.
+    ///
+    /// This store's accounting (`TG-WB-005`) is proven for one writer per key
+    /// at a time. The component that serialises writers of a key is
+    /// `service::domain::key_writer::KeyWriterRegistry`, and it is a caller's
+    /// obligation to take it. That obligation is not met by every caller
+    /// today: a write that reaches `RecordStore::put` arrives here without the
+    /// per-key writer, so the interleaving above is possible in production
+    /// (tracked as TODO-776). `remove` and `remove_all` rest on the same
+    /// precondition.
     async fn add_with_witness(
         &self,
         map: &str,
@@ -3747,6 +3764,16 @@ impl MapDataStore for WriteBehindDataStore {
         // writer; the invariant that no writer races reset is what guarantees
         // consistency, and the lock is defense-in-depth that keeps the counter/pending
         // pair coherent.
+        //
+        // What is NOT cleared, and why the precondition also needs empty queues on a
+        // WAL-backed store (TG-WB-005 does not cover `reset`; tracked as TODO-775):
+        // the WAL-sequence tracker is left as it is, because the frames are still on
+        // disk and forgetting them would let the watermark pass writes that were
+        // never applied. Entries queued at this moment therefore leave their WAL
+        // sequences `Live` with no owner, which pins the partition's log until
+        // restart. And an entry the flush loop holds in a drained batch at this
+        // moment is not in any queue cleared here: its terminal later decrements a
+        // pending count that was already set to zero.
         let mut pending = self.pending_seqs();
         self.queues.clear();
         self.staging.clear();
