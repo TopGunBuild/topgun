@@ -204,6 +204,62 @@ struct EmbeddingEvent {
     partition_id: u32,
     /// Concatenated text from all configured fields for this record.
     text: String,
+    #[cfg(test)]
+    /// The park a test armed for this record, carried to the write-back of
+    /// exactly this event.
+    write_back_park: Option<WriteBackPark>,
+}
+
+#[cfg(test)]
+/// One armed park of a write-back: a "parked" signal the write-back sends and
+/// a "release" signal it then waits for. The pair sits behind a mutex because
+/// the write-back only borrows its event; taking it out is what makes the park
+/// fire once.
+struct WriteBackPark(Mutex<Option<WriteBackParkSignals>>);
+
+#[cfg(test)]
+/// The write-back's ends of the two signals: it sends "parked" and awaits
+/// "release".
+type WriteBackParkSignals = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(test)]
+impl WriteBackPark {
+    /// Parks the caller if `park` is armed: reports "parked", then waits until
+    /// the test releases it or drops its end.
+    async fn pass(park: Option<&Self>) {
+        let signals = park.and_then(|park| park.0.lock().take());
+        if let Some((parked, release)) = signals {
+            let _ = parked.send(());
+            let _ = release.await;
+        }
+    }
+}
+
+#[cfg(test)]
+/// At most one armed park, for one `(map_name, record_key)`. It belongs to one
+/// factory, so tests running side by side in one process cannot consume each
+/// other's park.
+struct WriteBackParkSlot(Mutex<Option<((String, String), WriteBackPark)>>);
+
+#[cfg(test)]
+impl WriteBackParkSlot {
+    /// Hands out the armed park iff it was armed for this record, leaving the
+    /// slot empty: the first event of that record carries the park, every
+    /// later event carries none.
+    fn take_for(&self, map_name: &str, key: &str) -> Option<WriteBackPark> {
+        let mut slot = self.0.lock();
+        let armed_for_this_record = slot
+            .as_ref()
+            .is_some_and(|((map, record_key), _)| map == map_name && record_key == key);
+        if armed_for_this_record {
+            slot.take().map(|(_, park)| park)
+        } else {
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +280,10 @@ pub struct EmbeddingMutationObserver {
     /// Shared with the batch processor to prevent re-entrancy on write-back.
     /// Keys are `(map_name, record_key)`.
     in_flight: Arc<DashSet<(String, String)>>,
+    #[cfg(test)]
+    /// The park slot of the factory that created this observer; `None` for an
+    /// observer built without a factory.
+    write_back_park: Option<Arc<WriteBackParkSlot>>,
 }
 
 impl EmbeddingMutationObserver {
@@ -243,7 +303,17 @@ impl EmbeddingMutationObserver {
             fields,
             event_tx,
             in_flight,
+            #[cfg(test)]
+            write_back_park: None,
         }
+    }
+
+    #[cfg(test)]
+    /// Gives the observer its factory's park slot, so an event it enqueues can
+    /// carry the park armed for its record.
+    fn with_write_back_park(mut self, slot: Arc<WriteBackParkSlot>) -> Self {
+        self.write_back_park = Some(slot);
+        self
     }
 
     /// Extracts text from configured fields in the rmpv value and enqueues
@@ -268,6 +338,11 @@ impl EmbeddingMutationObserver {
             key: key.to_owned(),
             partition_id: self.partition_id,
             text,
+            #[cfg(test)]
+            write_back_park: self
+                .write_back_park
+                .as_ref()
+                .and_then(|slot| slot.take_for(&self.map_name, key)),
         });
     }
 }
@@ -573,6 +648,9 @@ async fn write_back_one_embedding(
         }
     };
 
+    #[cfg(test)]
+    WriteBackPark::pass(evt.write_back_park.as_ref()).await;
+
     // Serialize the embedding in the canonical `Vector` wire form
     // (`{"type":"f32","data":<LE bytes>}`) so the vector index's
     // `decode_vector_from_record` can read it back. A bare `Vec<f32>` would
@@ -700,6 +778,9 @@ pub struct EmbeddingObserverFactory {
     health: EmbeddingHealth,
     /// Set during `init()`. Panics on double-init.
     record_store_factory: OnceLock<Arc<RecordStoreFactory>>,
+    #[cfg(test)]
+    /// The one park a test may arm on this factory's write-backs.
+    write_back_park: Arc<WriteBackParkSlot>,
 }
 
 impl EmbeddingObserverFactory {
@@ -726,6 +807,8 @@ impl EmbeddingObserverFactory {
             in_flight: Arc::new(DashSet::new()),
             health: EmbeddingHealth::new(),
             record_store_factory: OnceLock::new(),
+            #[cfg(test)]
+            write_back_park: Arc::new(WriteBackParkSlot(Mutex::new(None))),
         }
     }
 
@@ -790,6 +873,30 @@ impl EmbeddingObserverFactory {
     }
 }
 
+#[cfg(test)]
+impl EmbeddingObserverFactory {
+    /// Arms the park for the next event of `(map_name, key)` that one of this
+    /// factory's observers enqueues: the write-back of that event stops right
+    /// after it has read the record, before it marks the record in-flight.
+    /// Returns the test's ends: "parked" to wait on and "release" to send.
+    fn arm_write_back_park(
+        &self,
+        map_name: &str,
+        key: &str,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.write_back_park.0.lock() = Some((
+            (map_name.to_string(), key.to_string()),
+            WriteBackPark(Mutex::new(Some((parked_tx, release_rx)))),
+        ));
+        (parked_rx, release_tx)
+    }
+}
+
 impl ObserverFactory for EmbeddingObserverFactory {
     fn create_observer(
         &self,
@@ -805,6 +912,8 @@ impl ObserverFactory for EmbeddingObserverFactory {
             self.event_tx.clone(),
             Arc::clone(&self.in_flight),
         );
+        #[cfg(test)]
+        let observer = observer.with_write_back_park(Arc::clone(&self.write_back_park));
         Some(Arc::new(observer))
     }
 }
