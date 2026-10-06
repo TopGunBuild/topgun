@@ -12216,6 +12216,589 @@ mod tests {
                 "the second writer must have waited for the key's writer while the first was parked"
             );
         }
+
+        // ---- Two writers of one key and a refused flush -------------------
+        //
+        // The buffered store hands the WAL frames of a refused entry to the
+        // entry queued behind it for the same key. That is sound only when the
+        // queued entry is the newer write of the key. The two tests below let
+        // the inner store refuse one attempt while two writes of one key are
+        // under way, and then read what a crash at that moment would leave:
+        // the inner store as it stands plus whatever recovery replays from the
+        // WAL. As above, no sleep orders anything.
+
+        /// What a test decides for one parked store call.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Verdict {
+            /// Record the value and return `Ok`.
+            Accept,
+            /// Return `Err` and record nothing.
+            Refuse,
+        }
+
+        /// A store call that is waiting for its verdict.
+        struct ParkedCall {
+            /// The stamp of the value the call carries; `None` for a delete.
+            stamp: Option<Timestamp>,
+            verdict: tokio::sync::oneshot::Sender<Verdict>,
+        }
+
+        #[derive(Default)]
+        struct VerdictGate {
+            parked: Option<ParkedCall>,
+            /// The stamp each refused call carried, in the order of refusal.
+            refused: Vec<Option<Timestamp>>,
+        }
+
+        fn lww_stamp(value: Option<&RecordValue>) -> Option<Timestamp> {
+            match value {
+                Some(RecordValue::Lww { timestamp, .. }) => Some(timestamp.clone()),
+                _ => None,
+            }
+        }
+
+        /// An in-memory store that RETAINS what it is told, so that a lost
+        /// write and a recovered one read differently. For one key it parks
+        /// every `add` and `remove` until the test grants a verdict: a refusing
+        /// store alone could not place a second write inside the flush window,
+        /// because the window is open only while the flush loop holds a drained
+        /// entry. It can also park ONE `load` of that key on return. An
+        /// instance that gates no key is a plain store, which is what the
+        /// crash image is.
+        struct RefusingStore {
+            /// `(map, key)` -> value, or `None` for a delete.
+            data: std::sync::Mutex<HashMap<(String, String), Option<RecordValue>>>,
+            /// The key whose store calls park; `None` parks nothing.
+            gated: Option<(String, String)>,
+            gate: std::sync::Mutex<VerdictGate>,
+            after_load: std::sync::Mutex<Option<Gate>>,
+        }
+
+        impl RefusingStore {
+            fn with(
+                data: HashMap<(String, String), Option<RecordValue>>,
+                gated: Option<(String, String)>,
+            ) -> Self {
+                Self {
+                    data: std::sync::Mutex::new(data),
+                    gated,
+                    gate: std::sync::Mutex::new(VerdictGate::default()),
+                    after_load: std::sync::Mutex::new(None),
+                }
+            }
+
+            /// An empty store whose every store call of `(map, key)` parks.
+            fn gating(map: &str, key: &str) -> Self {
+                Self::with(HashMap::new(), Some((map.to_string(), key.to_string())))
+            }
+
+            /// What a crash would leave of `live`: its content, and no gate.
+            fn image_of(live: &Self) -> Self {
+                Self::with(live.data.lock().unwrap().clone(), None)
+            }
+
+            fn is_gated(&self, map: &str, key: &str) -> bool {
+                self.gated
+                    .as_ref()
+                    .is_some_and(|(gated_map, gated_key)| gated_map == map && gated_key == key)
+            }
+
+            /// Parks the next `load` of the gated key on return.
+            fn park_after_load(&self) -> ParkHandle {
+                ParkingStore::arm(&self.after_load)
+            }
+
+            fn has_parked_call(&self) -> bool {
+                self.gate.lock().unwrap().parked.is_some()
+            }
+
+            /// The stamp carried by the store call that is parked right now;
+            /// `None` when no call is parked or the parked one is a delete.
+            fn parked_stamp(&self) -> Option<Timestamp> {
+                self.gate
+                    .lock()
+                    .unwrap()
+                    .parked
+                    .as_ref()
+                    .and_then(|call| call.stamp.clone())
+            }
+
+            fn refused(&self) -> Vec<Option<Timestamp>> {
+                self.gate.lock().unwrap().refused.clone()
+            }
+
+            /// Answers the parked call. The parked mark is cleared here rather
+            /// than by the released call, so a `settle` issued right after
+            /// cannot take that call for a new one.
+            fn grant(&self, verdict: Verdict) {
+                let call = self
+                    .gate
+                    .lock()
+                    .unwrap()
+                    .parked
+                    .take()
+                    .expect("a verdict was granted with no store call parked");
+                let _ = call.verdict.send(verdict);
+            }
+
+            /// Parks the calling store call until the test grants its verdict.
+            async fn verdict_for(&self, map: &str, key: &str, stamp: Option<Timestamp>) -> Verdict {
+                if !self.is_gated(map, key) {
+                    return Verdict::Accept;
+                }
+                let (verdict_tx, verdict_rx) = tokio::sync::oneshot::channel();
+                {
+                    let mut gate = self.gate.lock().unwrap();
+                    assert!(
+                        gate.parked.is_none(),
+                        "two store calls of the key reached the inner store at once"
+                    );
+                    gate.parked = Some(ParkedCall {
+                        stamp: stamp.clone(),
+                        verdict: verdict_tx,
+                    });
+                }
+                // The sender lives in this store, which the call borrows, so
+                // the channel cannot close under it; a closed one is accepted.
+                let verdict = verdict_rx.await.unwrap_or(Verdict::Accept);
+                if verdict == Verdict::Refuse {
+                    self.gate.lock().unwrap().refused.push(stamp);
+                }
+                verdict
+            }
+
+            /// Waits until a store call of the key is parked. The flush loop
+            /// drains a queued entry by itself, so this is reached whenever an
+            /// entry of the key is queued; the bound only reports that none was.
+            async fn wait_store_call_parked(&self) {
+                tokio::time::timeout(PARK_BOUND, async {
+                    while !self.has_parked_call() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("no store call of the key reached the inner store");
+            }
+
+            /// Where the buffered store stands once nothing further happens
+            /// without the test: `true` when a store call is parked, `false`
+            /// when the store is idle. A flush pass stays open for as long as
+            /// one of its calls is parked or running, so idle cannot be
+            /// reported in front of a call that is still to come; the writers
+            /// must have returned.
+            async fn settle(&self, write_behind: &WriteBehindDataStore) -> bool {
+                tokio::time::timeout(PARK_BOUND, async {
+                    loop {
+                        if self.has_parked_call() {
+                            return true;
+                        }
+                        if write_behind.test_is_idle() {
+                            return false;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the buffered store neither parked a store call nor went idle")
+            }
+
+            /// Refuses the first parked store call of the key, accepts every
+            /// later one, and returns once the buffered store is idle.
+            async fn refuse_first_then_accept(&self, write_behind: &WriteBehindDataStore) {
+                let mut verdict = Verdict::Refuse;
+                while self.settle(write_behind).await {
+                    self.grant(verdict);
+                    verdict = Verdict::Accept;
+                }
+            }
+        }
+
+        #[async_trait]
+        impl MapDataStore for RefusingStore {
+            async fn add(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                _expiration_time: i64,
+                _now: i64,
+            ) -> anyhow::Result<()> {
+                if self.verdict_for(map, key, lww_stamp(Some(value))).await == Verdict::Refuse {
+                    anyhow::bail!("the inner store refused the write of key={key}");
+                }
+                self.data
+                    .lock()
+                    .unwrap()
+                    .insert((map.to_string(), key.to_string()), Some(value.clone()));
+                Ok(())
+            }
+
+            async fn add_backup(
+                &self,
+                _map: &str,
+                _key: &str,
+                _value: &RecordValue,
+                _expiration_time: i64,
+                _now: i64,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+                if self.verdict_for(map, key, None).await == Verdict::Refuse {
+                    anyhow::bail!("the inner store refused the delete of key={key}");
+                }
+                self.data
+                    .lock()
+                    .unwrap()
+                    .insert((map.to_string(), key.to_string()), None);
+                Ok(())
+            }
+
+            async fn remove_backup(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+                let loaded = self
+                    .data
+                    .lock()
+                    .unwrap()
+                    .get(&(map.to_string(), key.to_string()))
+                    .cloned()
+                    .flatten();
+                if self.is_gated(map, key) {
+                    ParkingStore::pass(&self.after_load).await;
+                }
+                Ok(loaded)
+            }
+
+            async fn load_all(
+                &self,
+                _map: &str,
+                _keys: &[String],
+            ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+                Ok(Vec::new())
+            }
+
+            async fn enumerate_leaves(
+                &self,
+                _map: &str,
+                _is_backup: bool,
+                _sink: &mut dyn LeafSink,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn scan_values(
+                &self,
+                _map: &str,
+                _is_backup: bool,
+                _max_batch_cost: u64,
+            ) -> anyhow::Result<ScanBatch> {
+                Ok(ScanBatch::default())
+            }
+
+            async fn scan_values_batched(
+                &self,
+                _map: &str,
+                _is_backup: bool,
+                _cursor: ScanCursor,
+                _max_batch_cost: u64,
+            ) -> anyhow::Result<ScanBatch> {
+                Ok(ScanBatch::default())
+            }
+
+            async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+                for key in keys {
+                    self.remove(map, key, 0).await?;
+                }
+                Ok(())
+            }
+
+            fn is_loadable(&self, _key: &str) -> bool {
+                true
+            }
+
+            fn pending_operation_count(&self) -> u64 {
+                0
+            }
+
+            async fn soft_flush(&self) -> anyhow::Result<u64> {
+                Ok(0)
+            }
+
+            async fn hard_flush(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn flush_key(
+                &self,
+                map: &str,
+                key: &str,
+                value: &RecordValue,
+                _is_backup: bool,
+            ) -> anyhow::Result<()> {
+                self.add(map, key, value, 0, 0).await
+            }
+
+            fn reset(&self) {}
+        }
+
+        /// What [`refusing_stack`] builds.
+        struct RefusingStack {
+            svc: Arc<CrdtService>,
+            factory: Arc<RecordStoreFactory>,
+            write_behind: Arc<WriteBehindDataStore>,
+            wal: Arc<crate::storage::wal::WalWriter>,
+            inner: Arc<RefusingStore>,
+            journal: Arc<JournalStore>,
+            /// Keeps the subscribed connection's channel open, when there is one.
+            _listener:
+                Option<tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>>,
+        }
+
+        /// The service over the buffered store with a real WAL, on a
+        /// [`RefusingStore`] gating `(MAP, KEY)`, with a journal attached.
+        /// Every frame is fsynced before its write returns, the flush loop
+        /// drains by itself within milliseconds, and a refused entry is retried
+        /// rather than discarded. `subscribed` registers one query subscription
+        /// on the map, so a write reads the key's previous value before it
+        /// applies.
+        fn refusing_stack(wal_dir: &tempfile::TempDir, subscribed: bool) -> RefusingStack {
+            use crate::storage::datastores::WalBootstrap;
+            use crate::storage::wal::{Wal, WalFsyncPolicy, WalWriter};
+
+            let inner = Arc::new(RefusingStore::gating(MAP, KEY));
+            let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
+                .expect("wal open");
+            let write_behind = WriteBehindDataStore::new_with_wal(
+                Arc::clone(&inner) as Arc<dyn MapDataStore>,
+                WriteBehindConfig {
+                    write_delay_ms: 0,
+                    flush_interval_ms: 5,
+                    max_retries: 3,
+                    backoff_base_ms: 1,
+                    backoff_cap_ms: 2,
+                    ..WriteBehindConfig::default()
+                },
+                Some(WalBootstrap {
+                    wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                    sequence_start: 1,
+                }),
+            );
+            let factory = Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::clone(&write_behind) as Arc<dyn MapDataStore>,
+                Vec::new(),
+            ));
+            let conn_registry = Arc::new(ConnectionRegistry::new());
+            let query_registry = Arc::new(QueryRegistry::new());
+            let listener =
+                subscribed.then(|| subscribe_listener(&conn_registry, &query_registry, MAP));
+            let journal = Arc::new(JournalStore::new(100));
+            let svc = Arc::new(
+                CrdtService::new(
+                    Arc::clone(&factory),
+                    conn_registry,
+                    make_validator(),
+                    query_registry,
+                    Arc::new(SchemaService::new()),
+                )
+                .with_journal(Arc::clone(&journal)),
+            );
+            RefusingStack {
+                svc,
+                factory,
+                write_behind,
+                wal,
+                inner,
+                journal,
+                _listener: listener,
+            }
+        }
+
+        /// The key's stamp after a crash at this moment: the inner store's
+        /// content is copied into a fresh image, recovery runs over the same
+        /// WAL into that image, and the key is read from it.
+        async fn stamp_recovered_after_a_crash(
+            inner: &RefusingStore,
+            wal: &Arc<crate::storage::wal::WalWriter>,
+        ) -> Option<Timestamp> {
+            use crate::storage::wal::WalRecovery;
+
+            let image = Arc::new(RefusingStore::image_of(inner));
+            WalRecovery::new(Arc::clone(wal), Vec::new())
+                .run(Arc::clone(&image) as Arc<dyn MapDataStore>)
+                .await
+                .expect("recovery");
+            lww_stamp(image.load(MAP, KEY).await.expect("read the image").as_ref())
+        }
+
+        // Two routes write one key while the first writer is parked between
+        // taking its entry sequence and entering the queue, and the first
+        // flush attempt of the key is refused. Whichever entry the refusal
+        // meets, the entry queued behind it must be the newer write: what is
+        // served and what a crash recovers must both be the higher stamp.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn two_routes_and_a_refused_flush_recover_the_later_stamp_after_a_crash() {
+            let wal_dir = tempfile::tempdir().expect("wal tempdir");
+            let RefusingStack {
+                svc,
+                factory,
+                write_behind,
+                wal,
+                inner,
+                journal,
+                _listener,
+            } = refusing_stack(&wal_dir, false);
+
+            let mut park = write_behind.test_park_before_queue_insert(MAP, KEY);
+            let x = tokio::spawn(svc.clone().oneshot(route_x(VX)));
+            // X has its stamp, its engine write and its WAL frame, holds the
+            // lower entry sequence and is in no queue yet.
+            park.wait_parked().await;
+
+            let y = tokio::spawn(svc.clone().oneshot(route_y(VY)));
+            let y_waited = second_writer_waited(&svc, &y).await;
+            if !y_waited {
+                // Y returned, so its entry is queued alone. Its flush attempt
+                // must be in flight before X is let into the queue: only then
+                // does X arrive as a new entry behind it.
+                inner.wait_store_call_parked().await;
+            }
+            park.release();
+            x.await.expect("X task").expect("X must succeed");
+            y.await.expect("Y task").expect("Y must succeed");
+
+            inner.refuse_first_then_accept(&write_behind).await;
+            let refused = inner.refused();
+            assert_eq!(
+                refused.len(),
+                1,
+                "exactly one store call of the key must have been refused; got {refused:?}"
+            );
+
+            let served = read_lww_timestamp(&factory, MAP, KEY).await;
+            let recovered = stamp_recovered_after_a_crash(&inner, &wal).await;
+
+            let journal_order = journal_stamps(&journal);
+            assert_eq!(
+                journal_order.len(),
+                2,
+                "the journal must hold both writes of the key"
+            );
+            let a = journal_order.iter().min().expect("two stamps").clone();
+            let b = journal_order.iter().max().expect("two stamps").clone();
+            assert!(a < b, "the two writes must carry distinct stamps");
+
+            println!(
+                "two_routes/refused_flush: y_waited={y_waited} served={served:?} \
+                 recovered={recovered:?} a={a:?} b={b:?} journal={journal_order:?} \
+                 refused_calls={} refused={refused:?}",
+                refused.len()
+            );
+            assert_eq!(
+                (served, recovered),
+                (Some(b.clone()), Some(b.clone())),
+                "(stamp served by the live store, stamp recovered after a crash): both must be \
+                 the higher of the two stamps"
+            );
+            assert!(
+                journal_order == vec![a, b],
+                "the journal must record the two writes of the key in stamp order"
+            );
+            assert!(
+                y_waited,
+                "the second writer must have waited for the key's writer while the first was parked"
+            );
+        }
+
+        // A writer is parked in the read of the key's previous value while a
+        // second write of the key completes and its flush attempt is in
+        // flight; that attempt is then refused, with the parked writer's entry
+        // queued behind it. The entry that takes over the refused one's frames
+        // must not hold an older value: what is served and what a crash
+        // recovers must both be the higher stamp.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn an_older_value_arriving_behind_a_refused_newer_one_does_not_win_after_a_crash() {
+            let wal_dir = tempfile::tempdir().expect("wal tempdir");
+            let RefusingStack {
+                svc,
+                factory,
+                write_behind,
+                wal,
+                inner,
+                journal,
+                _listener,
+            } = refusing_stack(&wal_dir, true);
+            assert_not_resident(&factory);
+
+            let mut park = inner.park_after_load();
+            let o = tokio::spawn(svc.clone().oneshot(route_x(VX)));
+            // O is parked in the load of the previous value.
+            park.wait_parked().await;
+
+            // The park is one-shot, so N's own read passes; N writes, queues
+            // and returns.
+            let n = tokio::spawn(svc.clone().oneshot(route_y(VY)));
+            n.await.expect("N task").expect("N must succeed");
+            let journal_after_n = journal_stamps(&journal);
+            assert_eq!(
+                journal_after_n.len(),
+                1,
+                "only N may have written while O is parked; got {journal_after_n:?}"
+            );
+            // N's entry is drained and its flush attempt is in flight, so O's
+            // entry will be queued behind it as a new one.
+            inner.wait_store_call_parked().await;
+            let in_flight = inner.parked_stamp();
+            assert_eq!(
+                in_flight,
+                Some(journal_after_n[0].clone()),
+                "the store call parked before O is released must carry N's value"
+            );
+            park.release();
+            o.await.expect("O task").expect("O must succeed");
+
+            inner.refuse_first_then_accept(&write_behind).await;
+            let refused = inner.refused();
+            assert_eq!(
+                refused.len(),
+                1,
+                "exactly one store call of the key must have been refused; got {refused:?}"
+            );
+
+            let served = read_lww_timestamp(&factory, MAP, KEY).await;
+            let recovered = stamp_recovered_after_a_crash(&inner, &wal).await;
+
+            let journal_order = journal_stamps(&journal);
+            assert_eq!(
+                journal_order.len(),
+                2,
+                "the journal must hold both writes of the key"
+            );
+            let a = journal_order.iter().min().expect("two stamps").clone();
+            let b = journal_order.iter().max().expect("two stamps").clone();
+            assert!(a < b, "the two writes must carry distinct stamps");
+
+            println!(
+                "older_behind_refused_newer: served={served:?} recovered={recovered:?} a={a:?} \
+                 b={b:?} journal={journal_order:?} refused_calls={} refused={refused:?} \
+                 in_flight_before_release={in_flight:?}",
+                refused.len()
+            );
+            assert_eq!(
+                (served, recovered),
+                (Some(b.clone()), Some(b.clone())),
+                "(stamp served by the live store, stamp recovered after a crash): both must be \
+                 the higher of the two stamps"
+            );
+            assert!(
+                journal_order == vec![a, b],
+                "the journal must record the two writes of the key in stamp order"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
