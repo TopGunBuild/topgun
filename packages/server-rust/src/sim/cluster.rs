@@ -3818,4 +3818,209 @@ mod tests {
              trie over the records it holds (right), at every checkpoint"
         );
     }
+
+    // Two LWW puts of one key from two tasks on one node must wait on the
+    // node's shared per-key writer and be applied in stamp order. Around a
+    // partition the harness's sync call moves nothing across the cut, and after
+    // the heal the same calls bring every node to the highest-stamped value.
+    //
+    // The nodes run over a null data store with no write-behind and no
+    // dispatcher, so this says nothing about store, staging or restart
+    // divergence, nor about how an operation is routed to a worker.
+    #[tokio::test]
+    async fn concurrent_same_key_puts_wait_on_the_shared_writer_and_converge_across_a_partition() {
+        const MAP: &str = "events";
+        const KEY: &str = "k";
+        /// How long the test waits for a point both the unfixed and the fixed
+        /// code reach before it declares the setup broken.
+        const WAIT_BOUND: Duration = Duration::from_secs(5);
+
+        /// An LWW put of [`KEY`] from an anonymous caller without a
+        /// connection, so the node that receives it mints the stamp.
+        fn anonymous_put(payload: &str) -> Operation {
+            let forged = Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: "client".to_string(),
+            };
+            let mut ctx = OperationContext::new(0, service_names::CRDT, forged.clone(), 5000);
+            ctx.partition_id = Some(topgun_core::hash_to_partition(KEY));
+            ctx.caller_origin = CallerOrigin::Anonymous;
+            Operation::ClientOp {
+                ctx,
+                payload: ClientOpMessage {
+                    payload: ClientOp {
+                        id: Some(format!("{MAP}/{KEY}/{payload}")),
+                        map_name: MAP.to_string(),
+                        key: KEY.to_string(),
+                        op_type: None,
+                        record: Some(Some(LWWRecord {
+                            value: Some(rmpv::Value::String(payload.into())),
+                            timestamp: forged,
+                            ttl_ms: None,
+                        })),
+                        or_record: None,
+                        or_tag: None,
+                        write_concern: None,
+                        timeout: None,
+                    },
+                },
+            }
+        }
+
+        fn stamp_of(value: Option<&RecordValue>) -> Option<Timestamp> {
+            match value {
+                Some(RecordValue::Lww { timestamp, .. }) => Some(timestamp.clone()),
+                _ => None,
+            }
+        }
+
+        // Compared in serialised form: `RecordValue` has no `PartialEq`.
+        fn encoded(value: Option<&RecordValue>) -> Vec<u8> {
+            rmp_serde::to_vec_named(&value).expect("encode record value")
+        }
+
+        let mut cluster = SimCluster::new(3, 384);
+        cluster.start().expect("cluster start");
+
+        // 1. The test holds the key's writer on node 0.
+        let held = cluster.nodes[0].key_writer.acquire(MAP, KEY).await;
+
+        // 2. Two puts of the key on node 0, each from its own task.
+        let spawn_put = |payload: &'static str| {
+            let mut svc = Arc::clone(&cluster.nodes[0].crdt_service);
+            tokio::spawn(async move { Service::call(&mut svc, anonymous_put(payload)).await })
+        };
+        let first = spawn_put("node0-first");
+        let second = spawn_put("node0-second");
+
+        // 3. Either both puts return (they take no writer), or both are counted
+        // as waiting for the writer the test holds. Exactly one of the two
+        // happens, so the loop needs no timing margin.
+        let both_waited = tokio::time::timeout(WAIT_BOUND, async {
+            loop {
+                let finished = (first.is_finished(), second.is_finished());
+                if finished == (true, true) {
+                    return false;
+                }
+                if finished == (false, false) && cluster.nodes[0].key_writer.test_waiting() == 2 {
+                    return true;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the two puts neither returned nor waited for the key's writer");
+
+        // 4. Cut node 0 off and write the key on node 1, which has its own
+        // registry and so does not see the writer held on node 0.
+        cluster.inject_partition(&[0], &[1, 2]);
+        let mut svc1 = Arc::clone(&cluster.nodes[1].crdt_service);
+        Service::call(&mut svc1, anonymous_put("node1-isolated"))
+            .await
+            .expect("the put on node 1 must succeed");
+        let node1_stamp = stamp_of(
+            cluster
+                .read(1, MAP, KEY)
+                .await
+                .expect("read node 1")
+                .as_ref(),
+        )
+        .expect("node 1 holds its own write");
+
+        // 5. Release the writer and let both puts finish.
+        drop(held);
+        first
+            .await
+            .expect("first put task")
+            .expect("the first put must succeed");
+        second
+            .await
+            .expect("second put task")
+            .expect("the second put must succeed");
+        let node0_stamps: Vec<Timestamp> = cluster.nodes[0]
+            .journal_store
+            .read(0, 100, Some(MAP))
+            .0
+            .into_iter()
+            .filter(|event| event.key == KEY)
+            .map(|event| event.timestamp)
+            .collect();
+        let node0_stamp = stamp_of(
+            cluster
+                .read(0, MAP, KEY)
+                .await
+                .expect("read node 0")
+                .as_ref(),
+        );
+        let journal_ascending = node0_stamps.len() == 2
+            && node0_stamps[0] < node0_stamps[1]
+            && node0_stamp.as_ref() == Some(&node0_stamps[1]);
+
+        // 6. With the partition still up, attempt a sync across it in both
+        // directions.
+        cluster
+            .merkle_sync_pair(1, 0, MAP)
+            .await
+            .expect("sync 1 -> 0 across the partition");
+        cluster
+            .merkle_sync_pair(0, 1, MAP)
+            .await
+            .expect("sync 0 -> 1 across the partition");
+        let cut_node0 = cluster.read(0, MAP, KEY).await.expect("read node 0");
+        let cut_node1 = cluster.read(1, MAP, KEY).await.expect("read node 1");
+        let differ_under_partition = cut_node0.is_some()
+            && cut_node1.is_some()
+            && encoded(cut_node0.as_ref()) != encoded(cut_node1.as_ref());
+
+        // 7. Heal and run the same sync call over every pair.
+        cluster.heal_partition();
+        for src in 0..3 {
+            for dst in 0..3 {
+                if src != dst {
+                    cluster
+                        .merkle_sync_pair(src, dst, MAP)
+                        .await
+                        .expect("sync after the heal");
+                }
+            }
+        }
+        let highest = node0_stamps
+            .iter()
+            .chain(std::iter::once(&node1_stamp))
+            .max()
+            .cloned();
+        let mut healed = Vec::new();
+        for node in 0..3 {
+            healed.push(
+                cluster
+                    .read(node, MAP, KEY)
+                    .await
+                    .expect("read after the heal"),
+            );
+        }
+        let converged = highest.is_some()
+            && healed.iter().all(|value| {
+                stamp_of(value.as_ref()) == highest
+                    && encoded(value.as_ref()) == encoded(healed[0].as_ref())
+            });
+
+        println!(
+            "sim/same_key_puts: both_waited={both_waited} journal_ascending={journal_ascending} \
+             differ_under_partition={differ_under_partition} converged={converged} \
+             node0_journal={node0_stamps:?} node0_store={node0_stamp:?} node1={node1_stamp:?} \
+             highest={highest:?}"
+        );
+        assert_eq!(
+            (
+                both_waited,
+                journal_ascending,
+                differ_under_partition,
+                converged
+            ),
+            (true, true, true, true),
+            "(both puts waited for the held writer, node 0 applied them in stamp order, the two \
+             sides differ while partitioned, every node holds the highest stamp after the heal)"
+        );
+    }
 }
