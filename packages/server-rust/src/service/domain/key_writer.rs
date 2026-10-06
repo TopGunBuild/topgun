@@ -83,6 +83,9 @@ pub type WriterKey = (String, String);
 /// no-eviction lifecycle contract.
 pub struct KeyWriterRegistry {
     locks: DashMap<WriterKey, Arc<Mutex<()>>>,
+    #[cfg(test)]
+    /// How many tasks are inside `acquire` and do not hold their guard yet.
+    waiting: std::sync::atomic::AtomicUsize,
 }
 
 impl KeyWriterRegistry {
@@ -91,6 +94,8 @@ impl KeyWriterRegistry {
     pub fn new() -> Self {
         Self {
             locks: DashMap::new(),
+            #[cfg(test)]
+            waiting: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -113,7 +118,11 @@ impl KeyWriterRegistry {
     /// from `store.get` through the single `store.put` merge-commit.
     pub async fn acquire(&self, map_name: &str, key: &str) -> KeyWriterGuard {
         let lock = self.entry_lock(map_name, key);
+        #[cfg(test)]
+        let waiting = WaitingProbe::enter(&self.waiting);
         let guard = lock.lock_owned().await;
+        #[cfg(test)]
+        drop(waiting);
         KeyWriterGuard { _guard: guard }
     }
 
@@ -124,6 +133,41 @@ impl KeyWriterRegistry {
     #[must_use]
     pub fn tracked_key_count(&self) -> usize {
         self.locks.len()
+    }
+}
+
+#[cfg(test)]
+impl KeyWriterRegistry {
+    /// How many tasks are waiting in `acquire` on this registry, whatever
+    /// their key. A test may rely on the number only while the holder it
+    /// waits behind is known to be parked and it has started no other writer
+    /// on this registry: the counted writers then cannot leave `acquire`.
+    pub(crate) fn test_waiting(&self) -> usize {
+        self.waiting.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+/// Counts one task as waiting from just before it asks for the lock until it
+/// has it. Leaving is done in `Drop`, so an `acquire` future dropped while it
+/// still waits (a cancelled operation) never leaves the count raised.
+struct WaitingProbe<'a> {
+    waiting: &'a std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl<'a> WaitingProbe<'a> {
+    fn enter(waiting: &'a std::sync::atomic::AtomicUsize) -> Self {
+        waiting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self { waiting }
+    }
+}
+
+#[cfg(test)]
+impl Drop for WaitingProbe<'_> {
+    fn drop(&mut self) {
+        self.waiting
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
