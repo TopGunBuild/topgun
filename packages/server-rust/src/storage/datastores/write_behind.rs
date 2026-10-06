@@ -1219,6 +1219,12 @@ pub struct WriteBehindDataStore {
     /// One-shot parks on `load_slot`, `remove` and `hard_flush`.
     #[cfg(test)]
     test_parks: TestParks,
+    /// Bumped when the flush loop opens a pass and again when it closes one, so
+    /// it is odd exactly while the loop may hold a drained batch. "Every queue
+    /// empty" alone cannot tell a test that nothing is outstanding: a drained
+    /// batch is in no queue.
+    #[cfg(test)]
+    flush_pass_epoch: AtomicU64,
 }
 
 /// WAL plus the live sequence counter's starting value, threaded into
@@ -1313,6 +1319,8 @@ impl WriteBehindDataStore {
             append_observer: Mutex::new(None),
             #[cfg(test)]
             test_parks: TestParks::default(),
+            #[cfg(test)]
+            flush_pass_epoch: AtomicU64::new(0),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -2347,6 +2355,38 @@ impl WriteBehindDataStore {
         })
     }
 
+    /// Whether nothing is outstanding: no entry queued, no flush pass open, no
+    /// sequence in flight.
+    ///
+    /// The epoch is read on both sides of the scan and must be even and
+    /// unchanged, so the flush loop was outside a pass for the whole scan and
+    /// held no drained batch. That makes the answer exact rather than a matter
+    /// of timing, provided the caller is the store's only writer. A pass that
+    /// never closes leaves the epoch odd, so this fails closed.
+    #[cfg(test)]
+    pub(crate) fn test_is_idle(&self) -> bool {
+        let before = self.flush_pass_epoch.load(Ordering::SeqCst);
+        if before % 2 == 1 {
+            return false;
+        }
+        if self.queues.iter().any(|queue| !queue.entries.is_empty()) {
+            return false;
+        }
+        if let Some(tracking) = &self.wal {
+            let partitions: Vec<u32> = tracking
+                .partitions
+                .iter()
+                .map(|entry| *entry.key())
+                .collect();
+            for partition in partitions {
+                if !tracking.with_partition(partition, |state| state.in_flight.is_empty()) {
+                    return false;
+                }
+            }
+        }
+        self.flush_pass_epoch.load(Ordering::SeqCst) == before
+    }
+
     /// The prefix-complete watermark `partition` would advance to right now.
     ///
     /// `None` means no WAL exists, so the watermark has no subject at all; an
@@ -2504,12 +2544,16 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
 
         // Collect eligible entries from all partition queues
         let mut ready_entries = Vec::new();
+        #[cfg(test)]
+        store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
         for mut queue_ref in store.queues.iter_mut() {
             let drained = queue_ref.value_mut().drain_ready(deadline);
             ready_entries.extend(drained);
         }
 
         if ready_entries.is_empty() {
+            #[cfg(test)]
+            store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
             continue;
         }
 
@@ -2629,6 +2673,8 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                 }
             }
         }
+        #[cfg(test)]
+        store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
     }
 }
 
