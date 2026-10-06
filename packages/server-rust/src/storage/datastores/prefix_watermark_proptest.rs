@@ -3764,6 +3764,21 @@ async fn a_subsuming_write_over_a_survivor_resolves_the_carried_sequences() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
+    // The hand-over is visible, so the loop has suspended since, and the first
+    // place it can suspend is the backoff sleep. The retired entry's count and
+    // entry sequence must be settled by then: a task can be dropped only where
+    // it suspends, so settling them after the sleep would leave both wrong for
+    // the whole backoff, and for good if the task were aborted in it.
+    assert_eq!(
+        (
+            stepped.store.pending_operation_count(),
+            stepped.store.flushed_watermark(),
+        ),
+        (1, 1),
+        "inside the backoff one entry is queued and counted, and the flushed \
+         watermark stands at the queued entry's sequence (entry sequences start \
+         at 0), no longer held at the retired one"
+    );
 
     stepped
         .store
@@ -3848,5 +3863,153 @@ async fn a_discarded_entry_with_a_queued_newer_write_is_retired_into_it() {
     assert_eq!(
         stepped.inner.load(TEST_MAP, &key).await.unwrap(),
         Some(lww(2))
+    );
+}
+
+#[tokio::test]
+async fn a_discarded_delta_entry_stays_replayable_until_its_survivor_is_durable() {
+    // One attempt only, so every refusal is a discard.
+    let config = WriteBehindConfig {
+        or_delta_wal: true,
+        ..stepped_config(1)
+    };
+    let stepped = Stepped::new(270, config);
+    let partition = stepped.partition;
+    let (key, other_key) = (stepped.keys[0].as_str(), stepped.keys[1].as_str());
+    let add_tag = |tag: &str| OrDelta::Add {
+        entry: or_entry(tag),
+    };
+
+    // Real delta frames, as in the retry-path test above: the second frame
+    // does not repeat the first one's mutation, so a lost frame is a lost tag.
+    stepped
+        .store
+        .add_with_witness(
+            TEST_MAP,
+            key,
+            WriteSource::Value(&or_value(&["a"], &[])),
+            0,
+            0,
+            Some(&add_tag("a")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stepped.settle("the first add").await, parked_on(key));
+    stepped
+        .store
+        .add_with_witness(
+            TEST_MAP,
+            key,
+            WriteSource::Value(&or_value(&["a", "b"], &[])),
+            0,
+            0,
+            Some(&add_tag("b")),
+        )
+        .await
+        .unwrap();
+
+    // The first entry is discarded with the second one queued, and is retired
+    // into it.
+    stepped.inner.grant(Verdict::Refuse);
+    assert_eq!(stepped.settle("the discard").await, parked_on(key));
+    let pending_after_discard = stepped.pending();
+
+    // A second key of the same partition: its flush is what can move the
+    // partition's watermark past a sequence that was resolved too early.
+    stepped
+        .store
+        .add(TEST_MAP, other_key, &lww(1), 0, 0)
+        .await
+        .unwrap();
+    // The survivor is discarded too, with nothing queued for its key.
+    stepped.inner.grant(Verdict::Refuse);
+    assert_eq!(
+        stepped.settle("the survivor's discard").await,
+        parked_on(other_key)
+    );
+    stepped.inner.grant(Verdict::Accept);
+    assert_eq!(stepped.settle("the other key's flush").await, Settled::Idle);
+
+    let pending_at_idle = stepped.pending();
+    let applied = stepped.wal.test_read_applied_sequence(partition);
+
+    // Crash: only the WAL survives.
+    let wal = Arc::clone(&stepped.wal);
+    let key = key.to_string();
+    let Stepped {
+        _dir: wal_dir,
+        store,
+        ..
+    } = stepped;
+    drop(store);
+    let recovered_store = FaultStore::new();
+    WalRecovery::new(wal, Vec::new())
+        .run(Arc::clone(&recovered_store) as Arc<dyn MapDataStore>)
+        .await
+        .expect("recovery");
+    let recovered = inner_view(&recovered_store, &key).await;
+    drop(wal_dir);
+
+    assert_eq!(
+        (pending_after_discard, pending_at_idle, applied, recovered),
+        (
+            vec![(1, PendingOrigin::Live), (2, PendingOrigin::Live)],
+            vec![(1, PendingOrigin::Abandoned), (2, PendingOrigin::Abandoned)],
+            0,
+            view(&["a", "b"], &[]),
+        ),
+        "the discarded frame must stay pending, un-applied and replayable for as \
+         long as the entry that took it over is not durable; resolving it at the \
+         discard lets the other key's flush move the watermark past it, and the \
+         acked `a` is then filtered out of replay"
+    );
+}
+
+/// A queued entry of key `k` with the given due time and WAL sequence.
+fn queued_entry(store_time: i64, sequence: u64) -> DelayedEntry {
+    DelayedEntry {
+        map: TEST_MAP.to_string(),
+        key: "k".to_string(),
+        operation: DelayedOp::Store {
+            value: lww(sequence),
+            expiration_time: 0,
+        },
+        store_time,
+        sequence,
+        retry_count: 0,
+        wal_sequences: BTreeSet::from([sequence]),
+    }
+}
+
+#[test]
+fn a_retired_entry_hands_its_earlier_due_time_to_the_queued_write() {
+    // The outage case: the first write was due at 1000 and was refused; the
+    // key was written again at 9000 while the first entry was out of the queue.
+    let mut queue = PartitionQueue::default();
+    queue.insert(queued_entry(9_000, 2));
+    assert!(queue.retire_into_queued(&queued_entry(1_000, 1)));
+    let due = queue.drain_ready(1_000);
+    assert_eq!(
+        due.iter()
+            .map(|entry| (entry.sequence, entry.store_time))
+            .collect::<Vec<_>>(),
+        vec![(2, 1_000)],
+        "the queued write is due when the retired one was: left at its own later \
+         time, a key rewritten during an outage would lose its original flush \
+         schedule"
+    );
+
+    // The earlier time wins, whichever entry holds it: a retired entry that
+    // was enqueued later does not push the queued one back.
+    let mut queue = PartitionQueue::default();
+    queue.insert(queued_entry(1_000, 2));
+    assert!(queue.retire_into_queued(&queued_entry(9_000, 1)));
+    let due = queue.drain_ready(1_000);
+    assert_eq!(
+        due.iter()
+            .map(|entry| (entry.sequence, entry.store_time))
+            .collect::<Vec<_>>(),
+        vec![(2, 1_000)],
+        "the queued write keeps its own earlier due time"
     );
 }
