@@ -907,20 +907,54 @@ impl PartitionQueue {
     /// whether it went back on the queue.
     ///
     /// Preserves original `store_time` so the entry retains its flush priority.
+    ///
+    /// When a newer write of the key is already queued the retry entry is not
+    /// put back: the newer entry carries the value that has to become durable,
+    /// so the retry entry is retired into it (see
+    /// [`retire_into_queued`](Self::retire_into_queued)) and the caller is told,
+    /// because the retired entry's count and entry sequence are the caller's to
+    /// settle once the shard guard is gone.
     pub fn reinsert_front(&mut self, entry: DelayedEntry) -> Reinsert {
-        use std::collections::hash_map::Entry;
-
-        let key = (entry.map.clone(), entry.key.clone());
-        match self.entries.entry(key) {
-            Entry::Vacant(slot) => {
-                slot.insert(entry);
-                Reinsert::Requeued
-            }
-            // Only reinsert if no newer entry exists for this key
-            Entry::Occupied(_) => Reinsert::Superseded {
+        if self.retire_into_queued(&entry) {
+            return Reinsert::Superseded {
                 retired_sequence: entry.sequence,
-            },
+            };
         }
+        self.entries
+            .insert((entry.map.clone(), entry.key.clone()), entry);
+        Reinsert::Requeued
+    }
+
+    /// Hands the WAL sequences of `retired` — an entry that left the queue and
+    /// will not come back — to the entry queued for the same key, and reports
+    /// whether there was one.
+    ///
+    /// The sequences are carried, not resolved: the retired frame's effect is
+    /// not durable yet, and it becomes durable only through the queued entry.
+    /// Carried, they resolve at that entry's own terminal, so the frame stays
+    /// replayable for exactly as long as it is needed. Resolving them here
+    /// would let another key's flush move the partition watermark past a frame
+    /// whose mutation a non-subsuming survivor does not re-carry, and a crash
+    /// would then lose it.
+    ///
+    /// The queued entry also takes the earlier `store_time`, as a coalesce
+    /// does, so a key rewritten during a store outage keeps its original flush
+    /// schedule.
+    ///
+    /// Runs under the caller's shard guard, which is what stops the queued
+    /// entry being drained between the lookup and the merge.
+    pub fn retire_into_queued(&mut self, retired: &DelayedEntry) -> bool {
+        let Some(survivor) = self
+            .entries
+            .get_mut(&(retired.map.clone(), retired.key.clone()))
+        else {
+            return false;
+        };
+        survivor
+            .wal_sequences
+            .extend(retired.wal_sequences.iter().copied());
+        survivor.store_time = survivor.store_time.min(retired.store_time);
+        true
     }
 
     /// Returns the number of entries in this partition queue.
@@ -2621,11 +2655,31 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             // whole backoff, and a runtime worker blocked there can
                             // stop the node (TG-WB-004).
                             let partition_id = partition_for(&entry.map, &entry.key);
-                            let _outcome = store
+                            let outcome = store
                                 .queues
                                 .entry(partition_id)
                                 .or_default()
                                 .reinsert_front(retry_entry);
+
+                            // A newer write of the key was queued while this
+                            // entry was out of the queue, so the entry is gone
+                            // for good and two increments stand for one queued
+                            // entry. Settle its count and entry sequence here:
+                            // after the shard guard, so the pending-set lock is
+                            // never nested under it, and before the backoff,
+                            // because a task can be dropped only where it
+                            // suspends and the count and the durability fence
+                            // would otherwise stay wrong for the whole backoff
+                            // — or for good, if the task is aborted in it.
+                            if let Reinsert::Superseded { retired_sequence } = outcome {
+                                store.pending_count.fetch_sub(1, Ordering::Relaxed);
+                                store.resolve_pending(retired_sequence);
+                                tracing::debug!(
+                                    map = %entry.map,
+                                    key = %entry.key,
+                                    "Write-behind retry entry superseded by a newer write"
+                                );
+                            }
 
                             // Backoff before processing next retry-eligible entry
                             let backoff = std::cmp::min(
@@ -2664,10 +2718,39 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             // write is in neither the inner store nor, once the WAL
                             // watermark passes it, the WAL. Resolving would license
                             // the watermark past an acked, non-durable write.
-                            // Abandoning holds the watermark below the frame, keeps
-                            // it replayable on the next restart, and raises the
-                            // abandoned-write alarm so the stall is never silent.
-                            store.abandon_wal_sequences(partition_id_for_wal, &entry.wal_sequences);
+                            //
+                            // Which non-resolving disposition depends on whether a
+                            // newer write of the key was queued while this entry
+                            // was out of the queue. If one was, the key will still
+                            // become durable through it, so it takes the sequences
+                            // over and resolves them at its own terminal; pinning
+                            // the partition's log until restart for such a key
+                            // would be a stall with no lost write behind it. The
+                            // hand-over comes first and the release of this
+                            // worker's ownership second, so the sequences have an
+                            // owner at every instant. The shard guard is a
+                            // temporary of the one statement that finds the queued
+                            // entry, and a missing queue is not created.
+                            let carried = store
+                                .queues
+                                .get_mut(&partition_id_for_wal)
+                                .is_some_and(|mut queue| queue.retire_into_queued(entry));
+                            if carried {
+                                store.deregister_in_flight(
+                                    partition_id_for_wal,
+                                    &entry.wal_sequences,
+                                );
+                            } else {
+                                // Nothing queued will make this write durable.
+                                // Abandoning holds the watermark below the frame,
+                                // keeps it replayable on the next restart, and
+                                // raises the abandoned-write alarm so the stall is
+                                // never silent.
+                                store.abandon_wal_sequences(
+                                    partition_id_for_wal,
+                                    &entry.wal_sequences,
+                                );
+                            }
                         }
                     }
                 }
