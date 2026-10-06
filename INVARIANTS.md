@@ -429,29 +429,22 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 |----------|----------------|---------------|
 | `the_queue_shard_is_free_during_a_retry_backoff` | ONE site: the retry branch of `flush_loop`. No other `queues` guard, no other map | CI (`cargo test`) |
 | lint gate: `clippy::await_holding_invalid_type` over the type list in the root `clippy.toml`, and `clippy::await_holding_lock` | WIDER than the statement: every listed DashMap/DashSet guard type in every target of both workspace crates — within the shapes the table below shows it reports | CI (`cargo clippy`) |
-| `tests/integration-rust/store-refusal-liveness.test.ts` | the CONSEQUENCE at node level for a store refusal — reads and new connections answered, exactly one discard line per refused key, clean exit on SIGTERM within 15 s — with one or two refused keys per arm, not more. No site in particular. Its `STORE-DOWN-FROM-START` arm is the one that goes red under the default configuration | local only (`pnpm test:integration-rust:liveness`) — left out of the default `pnpm test:integration-rust` run, locally and in CI, because it needs a second server build with the `fault-injection` feature (TODO-770) |
+| `tests/integration-rust/store-refusal-liveness.test.ts` | the CONSEQUENCE at node level for a store refusal — reads and new connections answered, exactly one discard line per refused key, clean exit on SIGTERM within 15 s — with one or two refused keys in each of its first four arms. No site in particular. Its `STORE-DOWN-FROM-START` arm is the one that goes red under the default configuration. The file now has five arms; the fifth, `REFUSAL-LIFTED-UNDER-LOAD`, refuses six load keys while they are still being written and belongs to `TG-WB-005` | local only (`pnpm test:integration-rust:liveness`) — left out of the default `pnpm test:integration-rust` run, locally and in CI, because it needs a second server build with the `fault-injection` feature (TODO-770) |
 
 **After a store refusal — what this invariant does not cover.** Before the fix the node hung
 within seconds of a refusal, so none of the states below was reached in practice. They are
 reachable now. None of them is a violation of the statement above.
 
-- **Write-behind accounting can leak until restart** (known gap, tracked as TODO-773). The flush
-  loop drains ready entries into a local batch and retries them one at a time. A write to a key
-  whose earlier entry sits in that batch finds nothing to coalesce with and queues a new entry.
-  When the earlier entry is then refused, putting it back finds the newer one and drops the
-  earlier one with no accounting: the pending counter is not decremented, the entry sequence is
-  not resolved, its WAL sequences are neither carried forward nor resolved. Until restart the
-  pending counter is one too high per dropped entry (the capacity check reads it), the flushed
-  watermark is frozen (tombstone pruning stops), the partition's WAL watermark is pinned and the
-  watchdog reports `TrackerLeak`. Measured on a healthy store with empty queues afterwards:
-  `pending_count=1`, `flushed_watermark=1` of 3 assigned, one WAL sequence still `Live`. The
-  same output with the fix reverted: the gap predates the fix. No acknowledged write is lost —
-  the newer entry carries the value and the pinned frame is replayed at boot.
+- **Write-behind accounting no longer leaks after a refusal.** This gap is closed: a refused
+  entry that meets a newer write of its key is retired into that write, with its count, its
+  entry sequence and its WAL sequences all disposed of. The contract, its one-writer-per-key
+  precondition and what it still leaves out are in `TG-WB-005`.
 - **A discarded write is re-applied only by a restart.** After max retries the entry sequence is
   resolved, so the tombstone fence moves, and the WAL sequences are abandoned on purpose, so the
   frame is replayed at the next boot. Until that restart the partition's WAL watermark stays
   below the frame, its WAL is not collected and, under continued writes, the watchdog reports
-  `AbandonedWrite`.
+  `AbandonedWrite`. This holds when no newer write of the key is queued at the discard; when one
+  is, the discarded entry's WAL sequences go to that write instead (`TG-WB-005`).
 - **Shutdown can take the full `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`.** The flush loop looks
   at the shutdown signal once per batch and sleeps a backoff per refused entry. Measured with 40
   refused entries and the default ladder: 30.00 s, the whole timeout.
@@ -512,6 +505,79 @@ measured; do not read it as reported.
 - The blocked side. A synchronous `queues.get` on a runtime worker is legal and stays legal; the
   invariant only forbids the holder from suspending. A shutdown path that does not depend on the
   runtime driver is TODO-767.
+
+### TG-WB-005: Every write-behind entry that leaves a queue or a flush batch is accounted
+
+- **Scope:** `WriteBehindDataStore` — the pending counter (`pending_count`), the entry-sequence
+  set (`pending_seqs`) and the per-partition WAL-sequence tracker, on a node that is not shutting
+  down and whose flush task is alive.
+- **Precondition — known NOT to hold for every caller (tracker TODO-776):** the predicate below
+  is proven for one writer per `(map, key)` at a time. That is not guaranteed today. The LWW PUT
+  path writes a key without taking the per-key writer, and two production paths can write one
+  key concurrently. What is known about accounting when they do: by reading it converges, and
+  one deterministic test runs one such interleaving (listed below). That is evidence for that
+  one interleaving, not a proof for concurrent writers in general.
+- **Not claimed:** which VALUE the store keeps. Under two concurrent writers of one key the
+  durable store can hold the older value while memory serves the newer one, and the older value
+  wins after a restart. This row does not address that and nothing that enforces it tests it
+  (TODO-776).
+- **Statement:** an entry leaves a partition queue or a flush batch only through a site that
+  disposes of all three: its count, its entry sequence, and its WAL sequences — resolved,
+  carried onto a queued entry of the same key, or, only when no such entry exists, abandoned
+  with the `Abandoned` tag. In particular a refused entry that finds a newer write of its key on
+  the queue is retired into that write: the count goes down by one, the entry sequence is
+  resolved, and the WAL sequences move to the newer entry under the same shard lock, so they
+  resolve when it becomes durable and are replayed at boot if it never does. This happens before
+  the retry backoff is awaited, so a cancelled flush task cannot leave it half done.
+- **Mechanical predicate:** once the store accepts writes again and the write-behind store is
+  idle — no entry is queued AND the flush loop is between passes, holding no drained batch
+  ("every queue empty" alone is not idle: the loop may hold a batch it has just drained) —
+  `pending_operation_count() == 0`, `flushed_watermark() == assigned_write_sequence()`, and no
+  WAL sequence is `Live`.
+- **Maintaining code:** `write_behind.rs` — `PartitionQueue::retire_into_queued`, called from
+  `reinsert_front` (retry branch of `flush_loop`) and from the discard branch.
+- **Enforcing test:** `prefix_watermark_proptest.rs::interleaved_refusals_and_writes_to_one_key_leave_nothing_unaccounted`
+  (property: refusals, accepts, writes and removes of one key in generated order, 64 cases) and
+  `write_behind.rs::a_refused_entry_superseded_by_a_newer_write_is_retired_into_it`. Both run in CI
+  (`cargo test`). The table below lists the others and what each one covers.
+- **Violation consequence:** all three last until the node is restarted. The write buffer loses
+  one slot per dropped entry, because the capacity check reads the inflated counter. The cleanup
+  of deleted records stops for the whole store, because the flushed watermark it waits for no
+  longer advances. That partition's write-ahead log is not collected, and the stall watchdog
+  reports `TrackerLeak`. No acknowledged write is lost: the newer entry carries the value and
+  the pinned frame is replayed at boot.
+- **Discovered by:** the SPEC-382 implementation review (TODO-773); fixed and catalogued by
+  SPEC-383.
+- **Status:** decided, **enforced** — under the one-writer precondition above, which is not yet
+  guaranteed by every caller.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `interleaved_refusals_and_writes_to_one_key_leave_nothing_unaccounted` | the predicate, for one key and one writer, over generated orders of refusals and writes; both the retry path and the discard path | CI (`cargo test`) |
+| `a_refused_entry_superseded_by_a_newer_write_is_retired_into_it` | the retry path, one fixed order: counter, watermark, WAL sequences, watchdog class | CI (`cargo test`) |
+| `a_write_in_the_flush_window_then_a_refusal_leaves_nothing_unaccounted` | the retry path at its smallest: one write in the flush window, one refusal | CI (`cargo test`) |
+| `a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable` | WHY the WAL sequences are carried and not resolved at once: with a second key in the same partition, a crash before the newer entry is durable must still replay the retired frame | CI (`cargo test`) |
+| `a_subsuming_write_over_a_survivor_resolves_the_carried_sequences` | a later write that subsumes the newer entry resolves the sequences that entry carried | CI (`cargo test`) |
+| `a_discarded_entry_with_a_queued_newer_write_is_retired_into_it` | the discard path: an entry on its last attempt, with a newer write queued, is not tagged `Abandoned` | CI (`cargo test`) |
+| `two_writers_of_one_key_interleaved_between_sequence_and_insert_leave_nothing_unaccounted` | NOT an enforcer of the precondition. Evidence for accounting only, under one interleaving of two writers that the precondition excludes. It asserts nothing about the stored value | CI (`cargo test`) |
+| `tests/integration-rust/store-refusal-liveness.test.ts`, arm `REFUSAL-LIFTED-UNDER-LOAD` | the predicate at node level: six keys refused while they are still written; after the refusal is lifted every partition's WAL lag returns to 0 | local only (`pnpm test:integration-rust:liveness`), for the reason given under `TG-WB-004` (TODO-770) |
+
+**Not covered.** Each of these is an exit the statement names but no test above reaches, or a
+case outside the precondition.
+
+- **A discard with no newer write queued.** The frame stays pinned by design until a restart
+  replays it (TODO-757).
+- **Shutdown.** The flush task aborted at the shutdown timeout, the error, timeout and
+  final-sweep exits of `hard_flush`, and a `hard_flush` future dropped mid-drain (TODO-768).
+- **The flush task ending by a panic** on a node that keeps running (TODO-775).
+- **`flush_key`** cancelled at either of its two awaits (the store call, the watermark advance),
+  and `flush_key` against a key whose entry is in a flush batch. Latent: every caller is test
+  code (TODO-775, with TODO-628).
+- **`reset`** on a WAL-backed store with queued entries (TODO-775).
+- **A write cancelled inside the WAL append** (`TG-WB-003` (b), TODO-672).
+- **Two concurrent writers of one key.** Outside the proven precondition, and a
+  value-correctness defect in its own right (TODO-776). One interleaving is tested, for
+  accounting only.
 
 ### TG-EVI-001: Never-evict-dirty — an unflushed write is never evicted from the resident cache
 

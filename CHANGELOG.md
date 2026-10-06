@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server):** after a storage outage with clients still writing, the server could
+  keep counting writes that had already been replaced by newer ones. Over time that shrank
+  its write buffer, stopped the cleanup of deleted records and kept part of its
+  write-ahead log from being collected, until the server was restarted. It now returns to
+  a clean state when the storage recovers. The cause was a write the store had refused:
+  if its key was written again while the refused write was being retried, the older
+  write was dropped without its bookkeeping. It is now folded into the newer write. No
+  acknowledged write was lost by the defect. Measured on the embedded (redb) backend with
+  six keys refused while they were still being written: before the fix, three partitions
+  stayed behind their log for the whole 15 s that were measured, in 3 of 3 runs; after
+  it, every partition caught up within about 2 s, in 5 of 5 runs. What remains:
+  - **This is a bookkeeping fix only.** It is proven for one writer of a key at a time.
+    Two writes to the same key that reach the server at the same moment by different
+    paths are a separate, open defect: which of the two values ends up stored is not
+    changed by this fix.
+  - **A discarded write with no newer write of its key** is still applied again only by
+    a restart, as described in the next entry.
+  - **Shutdown during an outage, and a crash of the background flush task,** are not
+    covered by this fix.
+  - **Postgres was not measured.**
 - **Fixed (server):** a write the store refused could stop the whole server. It answered
   no new connection, logged nothing more, ignored SIGTERM and had to be killed. The
   cause was a lock kept during the wait between two store retries; the lock is now
@@ -18,13 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that case the server keeps answering reads and new connections, reports each write it
   gave up on in the log (`Write-behind entry discarded after max retries`, with its map
   and key) and exits on SIGTERM. Limits that remain:
-  - **Accounting can leak after an outage under live traffic.** When a key is written
-    again while its earlier refused write is being retried, the earlier entry can be
-    dropped without being accounted for. From then until the server is restarted the
-    flushed watermark does not advance (so tombstone pruning stops), that partition's
-    WAL is not collected, one slot of the write-behind buffer stays taken per dropped
-    entry, and the stall watchdog reports a tracker leak. No acknowledged write is lost
-    by this: the newer entry carries the value and the WAL frame is replayed at restart.
   - **A discarded write is not stored.** After the maximum number of retries it stays
     readable from memory until it is evicted or the server restarts, and it stays in
     the WAL. Only a restart applies it again; until then that partition's WAL is not
