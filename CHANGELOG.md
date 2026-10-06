@@ -15,18 +15,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its write buffer, stopped the cleanup of deleted records and kept part of its
   write-ahead log from being collected, until the server was restarted. It now returns to
   a clean state when the storage recovers. The cause was a write the store had refused:
-  if its key was written again while the refused write was being retried, the older
-  write was dropped without its bookkeeping. It is now folded into the newer write. No
+  if a newer write of its key was already waiting in the write buffer when the refused
+  write came up for its retry, the older write was dropped without its bookkeeping. It
+  is now folded into that newer write. No
   acknowledged write was lost by the defect. Measured on the embedded (redb) backend with
   six keys refused while they were still being written: before the fix, three partitions
   stayed behind their log for the whole 15 s that were measured, in 3 of 3 runs; after
   it, every partition caught up within about 2 s, in 5 of 5 runs. What remains:
   - **This is a bookkeeping fix only.** It is proven for one writer of a key at a time.
     Two writes to the same key that reach the server at the same moment by different
-    paths are a separate, open defect: which of the two values ends up stored is not
-    changed by this fix.
-  - **A discarded write with no newer write of its key** is still applied again only by
-    a restart, as described in the next entry.
+    paths are a separate, open defect: the server could already end up storing the
+    older of the two values. This fix does not repair that, and it makes one such case
+    worse. If the store refuses the newer value while the older one is waiting in the
+    write buffer behind it, a restart used to bring the newer value back. It no longer
+    does: the older value stays.
+  - **A write the server gives up on is folded into a newer write only if that newer
+    write is already waiting in the write buffer at that moment.** If the newer write
+    has been logged but has not reached the buffer yet, if it arrives later, or if
+    there is none, the write the server gave up on is still applied again only by a
+    restart, and until then that partition's write-ahead log is not collected, as
+    described in the next entry.
   - **Shutdown during an outage, and a crash of the background flush task,** are not
     covered by this fix.
   - **Postgres was not measured.**

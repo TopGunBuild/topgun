@@ -940,6 +940,21 @@ impl PartitionQueue {
     /// whose mutation a non-subsuming survivor does not re-carry, and a crash
     /// would then lose it.
     ///
+    /// # Assumption: the queued entry covers the retired one (NOT upheld by every caller)
+    ///
+    /// "Durable only through the queued entry" is true only when storing the
+    /// queued entry also stores the retired mutation — that is, when the
+    /// queued entry is the NEWER write of the key. One writer per key at a
+    /// time guarantees it: the entry queued while this one was out of the
+    /// queue was then written after it. Without that precondition the queued
+    /// entry can hold the OLDER value. Its flush then resolves the carried
+    /// sequences although the newer value was never stored, and a restart
+    /// recovers the older one. Nothing here can tell the two cases apart:
+    /// the entries do not carry the value's own timestamp, and a later
+    /// arrival with an older value has the higher entry sequence. The
+    /// precondition is not met by every caller today (`TG-WB-005`, tracked as
+    /// TODO-776; see `add_with_witness`).
+    ///
     /// The queued entry also takes the earlier `store_time`, as a coalesce
     /// does, so a key rewritten during a store outage keeps its original flush
     /// schedule.

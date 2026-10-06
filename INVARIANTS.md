@@ -520,7 +520,15 @@ measured; do not read it as reported.
 - **Not claimed:** which VALUE the store keeps. Under two concurrent writers of one key the
   durable store can hold the older value while memory serves the newer one, and the older value
   wins after a restart. This row does not address that and nothing that enforces it tests it
-  (TODO-776).
+  (TODO-776). The carry below does not leave that class as it found it; it widens it in one
+  case. Carrying a retired entry's WAL sequences onto the queued entry is safe only if the
+  queued entry covers the retired one, which means it is the newer write of the key — the
+  one-writer precondition. When two writers break it and the queued entry holds the OLDER
+  value, storing that entry resolves the newer write's frame although the newer value was
+  never stored, and a restart recovers the older value. Before the carry existed that frame
+  was leaked `Live` and a restart replayed the newer value. Nothing in the write-behind store
+  can tell the two cases apart: an entry does not carry the value's own timestamp, and a later
+  arrival with an older value has the higher entry sequence.
 - **Statement:** an entry leaves a partition queue or a flush batch only through a site that
   disposes of all three: its count, its entry sequence, and its WAL sequences — resolved,
   carried onto a queued entry of the same key, or, only when no such entry exists, abandoned
@@ -557,8 +565,10 @@ measured; do not read it as reported.
 | `a_refused_entry_superseded_by_a_newer_write_is_retired_into_it` | the retry path, one fixed order: counter, watermark, WAL sequences, watchdog class | CI (`cargo test`) |
 | `a_write_in_the_flush_window_then_a_refusal_leaves_nothing_unaccounted` | the retry path at its smallest: one write in the flush window, one refusal | CI (`cargo test`) |
 | `a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable` | WHY the WAL sequences are carried and not resolved at once: with a second key in the same partition, a crash before the newer entry is durable must still replay the retired frame | CI (`cargo test`) |
-| `a_subsuming_write_over_a_survivor_resolves_the_carried_sequences` | a later write that subsumes the newer entry resolves the sequences that entry carried | CI (`cargo test`) |
+| `a_subsuming_write_over_a_survivor_resolves_the_carried_sequences` | a later write that subsumes the newer entry resolves the sequences that entry carried. Also the ORDER on the retry path: inside the retry backoff the count and the flushed watermark already have their settled values, so accounting moved behind the backoff fails it | CI (`cargo test`) |
 | `a_discarded_entry_with_a_queued_newer_write_is_retired_into_it` | the discard path: an entry on its last attempt, with a newer write queued, is not tagged `Abandoned` | CI (`cargo test`) |
+| `a_discarded_delta_entry_stays_replayable_until_its_survivor_is_durable` | WHY the discard path carries too: with a second key in the same partition, a crash before the newer entry is durable must still replay the discarded frame | CI (`cargo test`) |
+| `a_retired_entry_hands_its_earlier_due_time_to_the_queued_write` | the queued entry takes the earlier due time of the two, so a key rewritten during an outage keeps its flush schedule | CI (`cargo test`) |
 | `two_writers_of_one_key_interleaved_between_sequence_and_insert_leave_nothing_unaccounted` | NOT an enforcer of the precondition. Evidence for accounting only, under one interleaving of two writers that the precondition excludes. It asserts nothing about the stored value | CI (`cargo test`) |
 | `tests/integration-rust/store-refusal-liveness.test.ts`, arm `REFUSAL-LIFTED-UNDER-LOAD` | the predicate at node level: six keys refused while they are still written; after the refusal is lifted every partition's WAL lag returns to 0 | local only (`pnpm test:integration-rust:liveness`), for the reason given under `TG-WB-004` (TODO-770) |
 
@@ -577,7 +587,8 @@ case outside the precondition.
 - **A write cancelled inside the WAL append** (`TG-WB-003` (b), TODO-672).
 - **Two concurrent writers of one key.** Outside the proven precondition, and a
   value-correctness defect in its own right (TODO-776). One interleaving is tested, for
-  accounting only.
+  accounting only. The case in which the carry makes the outcome after a restart worse (see
+  "Not claimed") has no committed test.
 
 ### TG-EVI-001: Never-evict-dirty — an unflushed write is never evicted from the resident cache
 
