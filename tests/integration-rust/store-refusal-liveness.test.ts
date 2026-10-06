@@ -14,7 +14,7 @@
  * (FAULT_SERVER_COMMIT). With either missing the test fails; it never skips
  * and never falls back to another binary.
  *
- * Four arms, one server process each:
+ * Five arms, one server process each:
  *
  * - PINNED   — the stall watchdog ticks every 600 ms, so it meets every retry
  *              backoff of the refused write;
@@ -23,6 +23,10 @@
  *              nothing is refused. It shows the probes pass on a healthy node.
  * - STORE-DOWN-FROM-START — the shipped configuration again, with the store
  *              refusing from the first flush on. See below.
+ * - REFUSAL-LIFTED-UNDER-LOAD — the PINNED configuration; the store refuses
+ *              for five seconds while six keys are rewritten four times a
+ *              second, and the refusal is lifted while the writes continue.
+ *              See below.
  *
  * STORE-DOWN-FROM-START differs from the other arms on purpose. In PINNED and
  * DEFAULTS a control write is flushed while the store is healthy, which puts
@@ -38,9 +42,22 @@
  *   record the server itself writes when the first connection authenticates.
  *   Each is reported by exactly one discard line.
  *
+ * REFUSAL-LIFTED-UNDER-LOAD asks a different question: once the store accepts
+ * writes again, does the server finish accounting for every write it
+ * acknowledged during the outage? A refused write that is waiting for its next
+ * attempt can be overtaken by a newer write of the same key; the older one is
+ * then dropped, and what it still owed the write-ahead log has to pass to the
+ * newer one. The observable is the per-partition gauge
+ * `topgun_wal_applied_watermark_lag` on `/metrics`: it is zero before the
+ * outage, above zero during it, and has to be zero again on every partition
+ * soon after the load stops. A partition that stays above zero keeps its log
+ * from being reclaimed until the next restart. Nothing is discarded in this
+ * arm — no write is refused three times in five seconds — so the discard
+ * report must stay empty, and each key must read back its last written value.
+ *
  * Environment:
  *
- * - LIVENESS_ARMS    — comma-separated arms to run (default: all four);
+ * - LIVENESS_ARMS    — comma-separated arms to run (default: all five);
  * - LIVENESS_OUT_DIR — where each run writes its notes and both server
  *                      streams; unset, nothing is written;
  * - LIVENESS_RUN     — label of the run in those file names;
@@ -66,8 +83,19 @@ import {
   BinaryExit,
 } from './helpers/two-binary';
 
-type Arm = 'PINNED' | 'DEFAULTS' | 'CONTROL' | 'STORE-DOWN-FROM-START';
-const ALL_ARMS: Arm[] = ['CONTROL', 'PINNED', 'DEFAULTS', 'STORE-DOWN-FROM-START'];
+type Arm =
+  | 'PINNED'
+  | 'DEFAULTS'
+  | 'CONTROL'
+  | 'STORE-DOWN-FROM-START'
+  | 'REFUSAL-LIFTED-UNDER-LOAD';
+const ALL_ARMS: Arm[] = [
+  'CONTROL',
+  'PINNED',
+  'DEFAULTS',
+  'STORE-DOWN-FROM-START',
+  'REFUSAL-LIFTED-UNDER-LOAD',
+];
 
 const BUILD_COMMAND =
   'cargo build --release -p topgun-server --features fault-injection --target-dir target/fault-injection';
@@ -82,8 +110,14 @@ const REFUSED_VALUE = { name: 'Bob', written: 'while the store refuses' };
 /** The map the server keeps its own per-device record in; it writes one when a connection authenticates. */
 const DEVICE_CREDENTIALS_MAP = '_topgun_device_credentials';
 
+const LOAD_MAP = 'liveness_load';
+const LOAD_KEYS = ['load-0', 'load-1', 'load-2', 'load-3', 'load-4', 'load-5'];
+
 const SEAM_BOOT_TEXT = 'fault-injection build';
 const DISCARD_TEXT = 'Write-behind entry discarded after max retries';
+/** Logged at debug level when a refused write waiting for its next attempt is overtaken by a newer write of its key. */
+const SUPERSEDED_TEXT = 'Write-behind retry entry superseded by a newer write';
+const LAG_GAUGE = 'topgun_wal_applied_watermark_lag';
 
 const ACK_WAIT_MS = 5_000;
 const PROBE_WAIT_MS = 5_000;
@@ -95,6 +129,20 @@ const SIGTERM_EXIT_MS = 15_000;
 const SIGTERM_OBSERVE_MS = 10_000;
 const CLIENT_CLOSE_MS = 2_000;
 const TEST_TIMEOUT_MS = 120_000;
+
+/** How long a baseline scrape with every lag at zero is waited for; the gauge is refreshed every 600 ms in this arm. */
+const BASELINE_WAIT_MS = 3_000;
+const BASELINE_POLL_MS = 200;
+/**
+ * The store refuses for this long. The first batch is drained one to two
+ * seconds in and each failure backs off for at least a second, so some writes
+ * have failed once by the end while none can have failed three times.
+ */
+const OUTAGE_MS = 5_000;
+const LOAD_AFTER_LIFT_MS = 2_000;
+const LOAD_ROUND_MS = 250;
+const SETTLE_WAIT_MS = 15_000;
+const SETTLE_POLL_MS = 500;
 
 function selectedArms(): Arm[] {
   const raw = process.env.LIVENESS_ARMS;
@@ -207,6 +255,47 @@ function takeSample(pid: number, file: string): Promise<string> {
   });
 }
 
+/** One scrape of the lag gauge: partition id to lag. */
+type LagScrape = Record<string, number>;
+
+async function scrapeLag(port: number): Promise<LagScrape> {
+  const resp = await fetch(`http://localhost:${port}/metrics`);
+  const body = await resp.text();
+  const lags: LagScrape = {};
+  for (const line of body.split('\n')) {
+    if (!line.startsWith(`${LAG_GAUGE}{`)) continue;
+    const partition = /partition="(\d+)"/.exec(line);
+    const value = Number(line.trim().split(/\s+/).pop());
+    if (partition && Number.isFinite(value)) lags[partition[1]] = value;
+  }
+  return lags;
+}
+
+/** True for a scrape that has at least one sample and every sample at zero; an empty scrape says nothing. */
+function allZero(scrape: LagScrape): boolean {
+  const values = Object.values(scrape);
+  return values.length > 0 && values.every((lag) => lag === 0);
+}
+
+/** What the arm that lifts the refusal under load saw, beyond the probes every arm has. */
+interface LoadObserved {
+  lagSamplesAtBaseline: number;
+  lagAtBaseline: LagScrape;
+  /** The largest lag of any partition just before the refusal was lifted. */
+  maxLagDuringOutage: number;
+  rounds: number;
+  allLagsZeroWithinBound: boolean;
+  /** Time from the last load write to the first scrape with every lag at zero, or `null`. */
+  settledAfterMs: number | null;
+  lastScrapes: LagScrape[];
+  /** Partitions whose lag was 2 or more in each of the last five scrapes. */
+  stuckPartitions: string[];
+  supersededLines: number;
+  /** For each load key, the last value written and the value read back afterwards. */
+  written: Record<string, unknown>;
+  readBack: Record<string, unknown>;
+}
+
 /** How many discard lines one refused key got. */
 interface DiscardedKey {
   map: string;
@@ -233,6 +322,8 @@ interface Observed {
   /** Time from sending SIGTERM to the process being gone (after a SIGKILL, if it took one). */
   exitMs: number;
   verdict: 'HUNG' | 'HEALTHY' | 'OTHER';
+  /** Set in the arm that lifts the refusal under load, `null` in every other. */
+  load: LoadObserved | null;
 }
 
 /** Groups the discard lines of a capture by the key they name. */
@@ -257,6 +348,7 @@ function isEqual(a: unknown, b: unknown): boolean {
 async function runArm(arm: Arm): Promise<Observed> {
   const env = requireFaultEnv();
   const fromStart = arm === 'STORE-DOWN-FROM-START';
+  const liftedUnderLoad = arm === 'REFUSAL-LIFTED-UNDER-LOAD';
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-store-refusal-'));
   const sentinel = path.join(dataDir, 'refuse');
   const startedAt = Date.now();
@@ -276,8 +368,12 @@ async function runArm(arm: Arm): Promise<Observed> {
       TOPGUN_WAL_FSYNC_POLICY: 'per_op',
       TOPGUN_FAULT_STORE_REFUSE_FILE: sentinel,
     };
-    if (arm === 'PINNED' || arm === 'CONTROL') {
+    if (arm === 'PINNED' || arm === 'CONTROL' || liftedUnderLoad) {
       serverEnv.TOPGUN_WAL_WATERMARK_STALL_BOUND_MS = '6000';
+    }
+    if (liftedUnderLoad) {
+      // The line that reports an overtaken retry is logged at debug level.
+      serverEnv.RUST_LOG = 'info,topgun_server::storage::datastores::write_behind=debug';
     }
 
     // Step 1: boot, and make sure this is a binary that has the seam at all.
@@ -334,29 +430,129 @@ async function runArm(arm: Arm): Promise<Observed> {
         abort(`the control write was answered with ${controlAck}, not OP_ACK`);
       await sleep(CONTROL_FLUSH_WAIT_MS);
 
-      // Step 3: from here on the store refuses every write.
-      if (arm !== 'CONTROL') {
+      // Step 3: from here on the store refuses every write. The arm that
+      // lifts the refusal under load arms it further down, after its baseline
+      // scrape.
+      if (arm === 'CONTROL') {
+        note('CONTROL: sentinel not created');
+      } else if (!liftedUnderLoad) {
         fs.writeFileSync(sentinel, '');
         note('sentinel created: store writes are refused');
-      } else {
-        note('CONTROL: sentinel not created');
       }
     }
 
-    // Step 4: the write the store will refuse. It is acknowledged all the same: the WAL has it.
-    const refusedAck = await writeOn(writer, lwwPut('2', REFUSED_MAP, REFUSED_KEY, REFUSED_VALUE));
-    const ackedAt = Date.now();
-    const delaySpawnMs = ackedAt - spawnCallAt;
-    note(`refused-map write answered with ${refusedAck}, ${delaySpawnMs} ms after the spawn call`);
-    if (refusedAck !== 'OP_ACK') {
-      abort(
-        `the write to ${REFUSED_MAP} was answered with ${refusedAck}, not OP_ACK within ${ACK_WAIT_MS} ms: the seam disturbs the acknowledgement path`,
-      );
-    }
+    let delaySpawnMs: number | null = null;
+    let load: LoadObserved | null = null;
+    if (liftedUnderLoad) {
+      // A clean start: the gauge is being published and no partition lags. An
+      // empty scrape must not pass for "all zero".
+      let baseline: LagScrape = {};
+      const baselineDeadline = Date.now() + BASELINE_WAIT_MS;
+      for (;;) {
+        baseline = await scrapeLag(port);
+        if (allZero(baseline) || Date.now() >= baselineDeadline) break;
+        await sleep(BASELINE_POLL_MS);
+      }
+      note(`baseline lag ${JSON.stringify(baseline)}`);
+      if (!allZero(baseline)) {
+        abort(
+          `no scrape within ${BASELINE_WAIT_MS} ms had a lag sample with every sample at 0 (last: ${JSON.stringify(baseline)}): the run does not start clean, or the gauge is not published`,
+        );
+      }
 
-    // Step 5: let the retries run their course.
-    await sleep(Math.max(0, ackedAt + WINDOW_MS - Date.now()));
-    note('end of the window');
+      fs.writeFileSync(sentinel, '');
+      const t0 = Date.now();
+      note('sentinel created: store writes are refused');
+
+      // Every key is rewritten once a round on the one open connection; a new
+      // connection would make the server write a record of its own.
+      const written: Record<string, unknown> = {};
+      let maxLagDuringOutage = 0;
+      let liftedAt: number | null = null;
+      let round = 0;
+      for (;;) {
+        if (liftedAt === null && Date.now() >= t0 + OUTAGE_MS) {
+          const outage = await scrapeLag(port);
+          maxLagDuringOutage = Math.max(0, ...Object.values(outage));
+          fs.rmSync(sentinel);
+          liftedAt = Date.now();
+          note(
+            `sentinel removed after round ${round}: store writes are accepted again; lag just before ${JSON.stringify(outage)}`,
+          );
+        }
+        if (liftedAt !== null && Date.now() >= liftedAt + LOAD_AFTER_LIFT_MS) break;
+        for (const key of LOAD_KEYS) {
+          const value = { round };
+          const ack = await writeOn(writer, lwwPut(`load-${round}-${key}`, LOAD_MAP, key, value));
+          if (ack !== 'OP_ACK') {
+            abort(`round ${round}: the write to ${key} was answered with ${ack}, not OP_ACK`);
+          }
+          written[key] = value;
+        }
+        round += 1;
+        await sleep(Math.max(0, t0 + round * LOAD_ROUND_MS - Date.now()));
+      }
+      const tEnd = Date.now();
+      note(`load stopped after ${round} rounds`);
+
+      // A sequence nothing accounts for never resolves, so its partition never
+      // returns to zero: waiting longer cannot turn a leak into a pass.
+      const scrapes: LagScrape[] = [];
+      let settledAfterMs: number | null = null;
+      while (settledAfterMs === null && Date.now() < tEnd + SETTLE_WAIT_MS) {
+        await sleep(SETTLE_POLL_MS);
+        const scrape = await scrapeLag(port);
+        scrapes.push(scrape);
+        if (allZero(scrape)) settledAfterMs = Date.now() - tEnd;
+      }
+      const lastScrapes = scrapes.slice(-5);
+      const stuckPartitions = Object.keys(lastScrapes[0] ?? {})
+        .filter((partition) => lastScrapes.every((scrape) => scrape[partition] >= 2))
+        .sort((a, b) => Number(a) - Number(b));
+      note(
+        `lag settled after ${settledAfterMs} ms; ${scrapes.length} scrapes, the last ${lastScrapes.length}: ${JSON.stringify(lastScrapes)}`,
+      );
+      note(`partitions at lag 2 or more in each of those: ${JSON.stringify(stuckPartitions)}`);
+
+      // Counted before any probe connects, like the discard lines below.
+      const supersededLines = plainLines(launched.stdout()).filter((line) =>
+        line.includes(SUPERSEDED_TEXT),
+      ).length;
+      note(`superseded lines ${supersededLines}`);
+      load = {
+        lagSamplesAtBaseline: Object.keys(baseline).length,
+        lagAtBaseline: baseline,
+        maxLagDuringOutage,
+        rounds: round,
+        allLagsZeroWithinBound: settledAfterMs !== null,
+        settledAfterMs,
+        lastScrapes,
+        stuckPartitions,
+        supersededLines,
+        written,
+        readBack: {},
+      };
+    } else {
+      // Step 4: the write the store will refuse. It is acknowledged all the same: the WAL has it.
+      const refusedAck = await writeOn(
+        writer,
+        lwwPut('2', REFUSED_MAP, REFUSED_KEY, REFUSED_VALUE),
+      );
+      const ackedAt = Date.now();
+      delaySpawnMs = ackedAt - spawnCallAt;
+      note(
+        `refused-map write answered with ${refusedAck}, ${delaySpawnMs} ms after the spawn call`,
+      );
+      if (refusedAck !== 'OP_ACK') {
+        abort(
+          `the write to ${REFUSED_MAP} was answered with ${refusedAck}, not OP_ACK within ${ACK_WAIT_MS} ms: the seam disturbs the acknowledgement path`,
+        );
+      }
+
+      // Step 5: let the retries run their course.
+      await sleep(Math.max(0, ackedAt + WINDOW_MS - Date.now()));
+      note('end of the window');
+    }
 
     // Step 6: probes, collected first and asserted together by the caller.
     const controlDiscards = plainLines(launched.stdout()).filter(
@@ -391,6 +587,16 @@ async function runArm(arm: Arm): Promise<Observed> {
         line.includes('retries=3'),
     ).length;
     note(`L0 ${l0} L3 ${l3} discarded keys ${JSON.stringify(discarded)}`);
+    if (load) {
+      for (const key of LOAD_KEYS) {
+        load.readBack[key] = await observe(() =>
+          queryKey(port, LOAD_MAP, key, 'liveness-read', PROBE_WAIT_MS),
+        );
+      }
+      note(
+        `load keys written ${JSON.stringify(load.written)} read ${JSON.stringify(load.readBack)}`,
+      );
+    }
 
     // Step 7: the test's own connections go first, so the shutdown below is
     // not measured while it waits for them. The read probe closed its own
@@ -440,11 +646,18 @@ async function runArm(arm: Arm): Promise<Observed> {
     const discardLines = discarded.reduce((sum, key) => sum + key.lines, 0);
     summary =
       `store-refusal-liveness arm=${arm} sha256=${launched.sha256} commit=${env.commit} ` +
-      `delay_spawn_ms=${delaySpawnMs} ` +
+      `delay_spawn_ms=${delaySpawnMs ?? 'n/a'} ` +
       `L0=${l0Shown} L1=${l1Ok ? 'ok' : 'fail'} L2=${l2 === 'ok' ? 'ok' : 'fail'} L3=${l3} ` +
       `discarded_keys=${discarded.length} discard_lines=${discardLines} ` +
       `S0=${s0} S10=${s10} X10=${x10} L4=${JSON.stringify(l4)} exit_ms=${exitMs} ` +
       `sample=${sampleName} verdict=${verdict}`;
+    if (load) {
+      summary +=
+        ` lagSamplesAtBaseline=${load.lagSamplesAtBaseline} maxLagDuringOutage=${load.maxLagDuringOutage} ` +
+        `rounds=${load.rounds} allLagsZeroWithinBound=${load.allLagsZeroWithinBound} ` +
+        `settledAfterMs=${load.settledAfterMs} stuckPartitions=${JSON.stringify(load.stuckPartitions)} ` +
+        `supersededLines=${load.supersededLines}`;
+    }
 
     return {
       arm,
@@ -460,6 +673,7 @@ async function runArm(arm: Arm): Promise<Observed> {
       l4,
       exitMs,
       verdict,
+      load,
     };
   } finally {
     for (const client of clients) client.close();
@@ -484,12 +698,15 @@ describe('Integration: the server keeps serving after the store refuses an ackno
     } else if (arm === 'STORE-DOWN-FROM-START') {
       title =
         'STORE-DOWN-FROM-START: the store refuses from the start, default watchdog tick — the server keeps serving, reports each refused key once and exits on SIGTERM';
+    } else if (arm === 'REFUSAL-LIFTED-UNDER-LOAD') {
+      title =
+        'REFUSAL-LIFTED-UNDER-LOAD: once the store accepts writes again, every partition catches up with its log and nothing was discarded';
     }
     // One discard line per refused key, and no key beyond the ones this arm
     // refuses. With the store down from the start the server's own
     // device-credentials record is refused alongside the test's key.
     let expectedDiscards: DiscardedKey[] = [{ map: REFUSED_MAP, lines: 1 }];
-    if (arm === 'CONTROL') expectedDiscards = [];
+    if (arm === 'CONTROL' || arm === 'REFUSAL-LIFTED-UNDER-LOAD') expectedDiscards = [];
     if (arm === 'STORE-DOWN-FROM-START') {
       expectedDiscards = [
         { map: DEVICE_CREDENTIALS_MAP, lines: 1 },
@@ -500,6 +717,43 @@ describe('Integration: the server keeps serving after the store refuses an ackno
       title,
       async () => {
         const o = await runArm(arm);
+        if (arm === 'REFUSAL-LIFTED-UNDER-LOAD') {
+          const load = o.load as LoadObserved;
+          expect({
+            lagSamplesAtBaseline: load.lagSamplesAtBaseline >= 1,
+            lagAtBaselineAllZero: allZero(load.lagAtBaseline),
+            lagDuringOutage: load.maxLagDuringOutage >= 1,
+            discardLinesPerRefusedKey: o.discarded,
+            discardLinesForRefusedWrite: o.l3,
+            supersededLines: load.supersededLines >= 1,
+            allLagsZeroWithinBound: load.allLagsZeroWithinBound,
+            controlWriteDiscarded: o.l0 === 'fail',
+            read: o.l1,
+            newConnection: o.l2,
+            loadKeys: load.readBack,
+            runningBeforeSigterm: o.runningBeforeSigterm,
+            exitOnSigterm: o.l4,
+            exitedWithinBound: o.exitMs < SIGTERM_EXIT_MS,
+            verdict: o.verdict,
+          }).toEqual({
+            lagSamplesAtBaseline: true,
+            lagAtBaselineAllZero: true,
+            lagDuringOutage: true,
+            discardLinesPerRefusedKey: [],
+            discardLinesForRefusedWrite: 0,
+            supersededLines: true,
+            allLagsZeroWithinBound: true,
+            controlWriteDiscarded: false,
+            read: CONTROL_VALUE,
+            newConnection: 'ok',
+            loadKeys: load.written,
+            runningBeforeSigterm: true,
+            exitOnSigterm: { code: 0, signal: null },
+            exitedWithinBound: true,
+            verdict: 'HEALTHY',
+          });
+          return;
+        }
         expect({
           controlWriteDiscarded: o.l0 === 'fail',
           read: o.l1,
