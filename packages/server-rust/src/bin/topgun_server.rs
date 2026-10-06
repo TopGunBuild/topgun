@@ -1940,8 +1940,13 @@ fn build_services(
         });
     }
 
+    // One per-key writer for every writer of this node's record stores. Built
+    // before the embedding task starts so that task is handed the same
+    // registry as the CRDT, SYNC and prune paths below.
+    let key_writer = Arc::new(topgun_server::service::domain::key_writer::KeyWriterRegistry::new());
+
     // Phase 2: inject the factory Arc and spawn the background embedding task.
-    embedding_factory.init(Arc::clone(&record_store_factory));
+    embedding_factory.init(Arc::clone(&record_store_factory), Arc::clone(&key_writer));
 
     let write_validator = {
         let wv_hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
@@ -2016,7 +2021,6 @@ fn build_services(
         epoch_width = frontier.epoch_width(),
         "tombstone epoch counter initialized (the epoch prune runs on the background task)"
     );
-    let key_writer = Arc::new(topgun_server::service::domain::key_writer::KeyWriterRegistry::new());
 
     // Arc-wrap all domain services so they can be shared across N+1 worker pipelines.
     let crdt_svc = Arc::new(

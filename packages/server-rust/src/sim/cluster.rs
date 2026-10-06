@@ -147,6 +147,10 @@ pub struct SimNode {
     /// Shared Event Journal store, written by the CRDT path and read/subscribed
     /// by the persistence service. Exposed so sim tests can read appended events.
     pub journal_store: Arc<crate::service::domain::journal::JournalStore>,
+    /// The per-key writer registry shared by this node's CRDT and SYNC
+    /// services. Exposed so sim tests can hold a key's writer and observe
+    /// that a write of that key waits on it.
+    pub key_writer: Arc<KeyWriterRegistry>,
     /// Handle for the dispatch loop background task. Aborted on `kill()`.
     dispatch_handle: tokio::task::JoinHandle<()>,
     /// Whether this node is currently alive.
@@ -337,6 +341,7 @@ impl SimNode {
             completion_registry,
             coordinator,
             journal_store,
+            key_writer,
             dispatch_handle,
             alive: true,
         })

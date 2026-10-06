@@ -23,6 +23,7 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
 use crate::service::domain::embedding::{EmbeddingProvider, VectorConfig};
+use crate::service::domain::key_writer::KeyWriterRegistry;
 use crate::service::domain::predicate::value_to_rmpv;
 use crate::storage::factory::ObserverFactory;
 use crate::storage::factory::RecordStoreFactory;
@@ -745,10 +746,19 @@ impl EmbeddingObserverFactory {
     /// embedding batch processor task. Must be called exactly once after the
     /// `Arc<RecordStoreFactory>` has been created.
     ///
+    /// `key_writer` is the node's one per-key writer registry, the same
+    /// instance every other writer of the record stores is built with. It is
+    /// mandatory so the binary cannot wire this task without it; the
+    /// write-back does not take the writer yet.
+    ///
     /// # Panics
     ///
     /// Panics if called more than once.
-    pub fn init(&self, record_store_factory: Arc<RecordStoreFactory>) {
+    pub fn init(
+        &self,
+        record_store_factory: Arc<RecordStoreFactory>,
+        _key_writer: Arc<KeyWriterRegistry>,
+    ) {
         self.record_store_factory
             .set(record_store_factory.clone())
             .expect("EmbeddingObserverFactory::init called twice");
@@ -816,6 +826,7 @@ mod tests {
     use crate::service::domain::embedding::{
         EmbeddingProvider, MapVectorConfig, NoopConfig, VectorConfig,
     };
+    use crate::service::domain::key_writer::KeyWriterRegistry;
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::{ObserverFactory, RecordStoreFactory};
     use crate::storage::impls::StorageConfig;
@@ -1014,7 +1025,10 @@ mod tests {
         );
 
         // Phase 2: inject RecordStoreFactory and spawn background task.
-        embedding_factory.init(Arc::clone(&record_store_factory));
+        embedding_factory.init(
+            Arc::clone(&record_store_factory),
+            Arc::new(KeyWriterRegistry::new()),
+        );
 
         // Write a record to a configured map.
         let store = record_store_factory.get_or_create("docs", 0);
@@ -1111,7 +1125,10 @@ mod tests {
             .with_observer_factories(vec![embedding_factory.clone() as Arc<dyn ObserverFactory>]),
         );
 
-        embedding_factory.init(Arc::clone(&record_store_factory));
+        embedding_factory.init(
+            Arc::clone(&record_store_factory),
+            Arc::new(KeyWriterRegistry::new()),
+        );
 
         // Write a record so an embedding event is enqueued.
         let store = record_store_factory.get_or_create("docs", 0);
@@ -1188,7 +1205,10 @@ mod tests {
             )
             .with_observer_factories(vec![embedding_factory.clone() as Arc<dyn ObserverFactory>]),
         );
-        embedding_factory.init(Arc::clone(&record_store_factory));
+        embedding_factory.init(
+            Arc::clone(&record_store_factory),
+            Arc::new(KeyWriterRegistry::new()),
+        );
 
         // Health is clean before any write.
         let before = embedding_factory.health();
@@ -1300,7 +1320,10 @@ mod tests {
             )
             .with_observer_factories(vec![embedding_factory.clone() as Arc<dyn ObserverFactory>]),
         );
-        embedding_factory.init(Arc::clone(&record_store_factory));
+        embedding_factory.init(
+            Arc::clone(&record_store_factory),
+            Arc::new(KeyWriterRegistry::new()),
+        );
 
         let store = record_store_factory.get_or_create("docs", 0);
         let mut fields = BTreeMap::new();
