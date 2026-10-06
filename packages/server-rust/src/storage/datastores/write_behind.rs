@@ -780,6 +780,9 @@ struct TestParks {
     load_slot_hits: AtomicU64,
     /// Parks the next `remove` of the key once its delete is staged.
     after_remove: Mutex<Option<(String, String, ParkGate)>>,
+    /// Parks the next write of the key once it holds its entry sequence and
+    /// before it takes the queue.
+    before_queue_insert: Mutex<Option<(String, String, ParkGate)>>,
     /// Parks `hard_flush` once the shutdown flag is set, before the flush
     /// loop is joined.
     after_shutdown_flag: Mutex<Option<ParkGate>>,
@@ -841,6 +844,23 @@ pub(crate) struct DelayedEntry {
 // Partition queue
 // ---------------------------------------------------------------------------
 
+/// What [`PartitionQueue::reinsert_front`] did with a retry entry.
+///
+/// The flush loop holds a drained entry outside every queue while it persists
+/// it, so a newer write of the same key can be queued in the meantime. The
+/// caller has to know which case it met: an entry that is not put back has left
+/// the queue for good, and its count and sequences still need a disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reinsert {
+    /// No entry for the key was queued; the retry entry is back on the queue.
+    Requeued,
+    /// A newer write for the key was queued while the retry entry was out of the queue.
+    Superseded {
+        /// The entry sequence (`DelayedEntry::sequence`) of the retry entry.
+        retired_sequence: u64,
+    },
+}
+
 /// Per-partition queue that coalesces writes by (map, key).
 ///
 /// Only the latest value per key is stored; frequently-updated keys
@@ -886,15 +906,73 @@ impl PartitionQueue {
         ready
     }
 
-    /// Re-inserts entries that failed flush and need retry.
+    /// Re-inserts an entry that failed flush and needs retry, and reports
+    /// whether it went back on the queue.
     ///
     /// Preserves original `store_time` so the entry retains its flush priority.
-    pub fn reinsert_front(&mut self, entries: Vec<DelayedEntry>) {
-        for entry in entries {
-            let key = (entry.map.clone(), entry.key.clone());
-            // Only reinsert if no newer entry exists for this key
-            self.entries.entry(key).or_insert(entry);
+    ///
+    /// When a newer write of the key is already queued the retry entry is not
+    /// put back: the newer entry carries the value that has to become durable,
+    /// so the retry entry is retired into it (see
+    /// [`retire_into_queued`](Self::retire_into_queued)) and the caller is told,
+    /// because the retired entry's count and entry sequence are the caller's to
+    /// settle once the shard guard is gone.
+    pub fn reinsert_front(&mut self, entry: DelayedEntry) -> Reinsert {
+        if self.retire_into_queued(&entry) {
+            return Reinsert::Superseded {
+                retired_sequence: entry.sequence,
+            };
         }
+        self.entries
+            .insert((entry.map.clone(), entry.key.clone()), entry);
+        Reinsert::Requeued
+    }
+
+    /// Hands the WAL sequences of `retired` — an entry that left the queue and
+    /// will not come back — to the entry queued for the same key, and reports
+    /// whether there was one.
+    ///
+    /// The sequences are carried, not resolved: the retired frame's effect is
+    /// not durable yet, and it becomes durable only through the queued entry.
+    /// Carried, they resolve at that entry's own terminal, so the frame stays
+    /// replayable for exactly as long as it is needed. Resolving them here
+    /// would let another key's flush move the partition watermark past a frame
+    /// whose mutation a non-subsuming survivor does not re-carry, and a crash
+    /// would then lose it.
+    ///
+    /// # Assumption: the queued entry covers the retired one (NOT upheld by every caller)
+    ///
+    /// "Durable only through the queued entry" is true only when storing the
+    /// queued entry also stores the retired mutation — that is, when the
+    /// queued entry is the NEWER write of the key. One writer per key at a
+    /// time guarantees it: the entry queued while this one was out of the
+    /// queue was then written after it. Without that precondition the queued
+    /// entry can hold the OLDER value. Its flush then resolves the carried
+    /// sequences although the newer value was never stored, and a restart
+    /// recovers the older one. Nothing here can tell the two cases apart:
+    /// the entries do not carry the value's own timestamp, and a later
+    /// arrival with an older value has the higher entry sequence. The
+    /// precondition is not met by every caller today (`TG-WB-005`, tracked as
+    /// TODO-776; see `add_with_witness`).
+    ///
+    /// The queued entry also takes the earlier `store_time`, as a coalesce
+    /// does, so a key rewritten during a store outage keeps its original flush
+    /// schedule.
+    ///
+    /// Runs under the caller's shard guard, which is what stops the queued
+    /// entry being drained between the lookup and the merge.
+    pub fn retire_into_queued(&mut self, retired: &DelayedEntry) -> bool {
+        let Some(survivor) = self
+            .entries
+            .get_mut(&(retired.map.clone(), retired.key.clone()))
+        else {
+            return false;
+        };
+        survivor
+            .wal_sequences
+            .extend(retired.wal_sequences.iter().copied());
+        survivor.store_time = survivor.store_time.min(retired.store_time);
+        true
     }
 
     /// Returns the number of entries in this partition queue.
@@ -1193,6 +1271,12 @@ pub struct WriteBehindDataStore {
     /// One-shot parks on `load_slot`, `remove` and `hard_flush`.
     #[cfg(test)]
     test_parks: TestParks,
+    /// Bumped when the flush loop opens a pass and again when it closes one, so
+    /// it is odd exactly while the loop may hold a drained batch. "Every queue
+    /// empty" alone cannot tell a test that nothing is outstanding: a drained
+    /// batch is in no queue.
+    #[cfg(test)]
+    flush_pass_epoch: AtomicU64,
 }
 
 /// WAL plus the live sequence counter's starting value, threaded into
@@ -1287,6 +1371,8 @@ impl WriteBehindDataStore {
             append_observer: Mutex::new(None),
             #[cfg(test)]
             test_parks: TestParks::default(),
+            #[cfg(test)]
+            flush_pass_epoch: AtomicU64::new(0),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -1426,6 +1512,22 @@ impl WriteBehindDataStore {
         *self
             .test_parks
             .after_remove
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((map.to_string(), key.to_string(), gate));
+        handle
+    }
+
+    /// Parks the next write of `(map, key)` between its sequence assignment
+    /// and its queue insert, so a second writer of the same key can be queued
+    /// first with a higher sequence. One-shot and held by this store instance:
+    /// the first writer of the key to reach the point parks, later ones pass.
+    #[cfg(test)]
+    pub(crate) fn test_park_before_queue_insert(&self, map: &str, key: &str) -> TestParkHandle {
+        let (gate, handle) = TestParkHandle::arm();
+        *self
+            .test_parks
+            .before_queue_insert
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some((map.to_string(), key.to_string(), gate));
@@ -2321,6 +2423,38 @@ impl WriteBehindDataStore {
         })
     }
 
+    /// Whether nothing is outstanding: no entry queued, no flush pass open, no
+    /// sequence in flight.
+    ///
+    /// The epoch is read on both sides of the scan and must be even and
+    /// unchanged, so the flush loop was outside a pass for the whole scan and
+    /// held no drained batch. That makes the answer exact rather than a matter
+    /// of timing, provided the caller is the store's only writer. A pass that
+    /// never closes leaves the epoch odd, so this fails closed.
+    #[cfg(test)]
+    pub(crate) fn test_is_idle(&self) -> bool {
+        let before = self.flush_pass_epoch.load(Ordering::SeqCst);
+        if before % 2 == 1 {
+            return false;
+        }
+        if self.queues.iter().any(|queue| !queue.entries.is_empty()) {
+            return false;
+        }
+        if let Some(tracking) = &self.wal {
+            let partitions: Vec<u32> = tracking
+                .partitions
+                .iter()
+                .map(|entry| *entry.key())
+                .collect();
+            for partition in partitions {
+                if !tracking.with_partition(partition, |state| state.in_flight.is_empty()) {
+                    return false;
+                }
+            }
+        }
+        self.flush_pass_epoch.load(Ordering::SeqCst) == before
+    }
+
     /// The prefix-complete watermark `partition` would advance to right now.
     ///
     /// `None` means no WAL exists, so the watermark has no subject at all; an
@@ -2478,12 +2612,16 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
 
         // Collect eligible entries from all partition queues
         let mut ready_entries = Vec::new();
+        #[cfg(test)]
+        store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
         for mut queue_ref in store.queues.iter_mut() {
             let drained = queue_ref.value_mut().drain_ready(deadline);
             ready_entries.extend(drained);
         }
 
         if ready_entries.is_empty() {
+            #[cfg(test)]
+            store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
             continue;
         }
 
@@ -2551,11 +2689,31 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             // whole backoff, and a runtime worker blocked there can
                             // stop the node (TG-WB-004).
                             let partition_id = partition_for(&entry.map, &entry.key);
-                            store
+                            let outcome = store
                                 .queues
                                 .entry(partition_id)
                                 .or_default()
-                                .reinsert_front(vec![retry_entry]);
+                                .reinsert_front(retry_entry);
+
+                            // A newer write of the key was queued while this
+                            // entry was out of the queue, so the entry is gone
+                            // for good and two increments stand for one queued
+                            // entry. Settle its count and entry sequence here:
+                            // after the shard guard, so the pending-set lock is
+                            // never nested under it, and before the backoff,
+                            // because a task can be dropped only where it
+                            // suspends and the count and the durability fence
+                            // would otherwise stay wrong for the whole backoff
+                            // — or for good, if the task is aborted in it.
+                            if let Reinsert::Superseded { retired_sequence } = outcome {
+                                store.pending_count.fetch_sub(1, Ordering::Relaxed);
+                                store.resolve_pending(retired_sequence);
+                                tracing::debug!(
+                                    map = %entry.map,
+                                    key = %entry.key,
+                                    "Write-behind retry entry superseded by a newer write"
+                                );
+                            }
 
                             // Backoff before processing next retry-eligible entry
                             let backoff = std::cmp::min(
@@ -2594,15 +2752,46 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             // write is in neither the inner store nor, once the WAL
                             // watermark passes it, the WAL. Resolving would license
                             // the watermark past an acked, non-durable write.
-                            // Abandoning holds the watermark below the frame, keeps
-                            // it replayable on the next restart, and raises the
-                            // abandoned-write alarm so the stall is never silent.
-                            store.abandon_wal_sequences(partition_id_for_wal, &entry.wal_sequences);
+                            //
+                            // Which non-resolving disposition depends on whether a
+                            // newer write of the key was queued while this entry
+                            // was out of the queue. If one was, the key will still
+                            // become durable through it, so it takes the sequences
+                            // over and resolves them at its own terminal; pinning
+                            // the partition's log until restart for such a key
+                            // would be a stall with no lost write behind it. The
+                            // hand-over comes first and the release of this
+                            // worker's ownership second, so the sequences have an
+                            // owner at every instant. The shard guard is a
+                            // temporary of the one statement that finds the queued
+                            // entry, and a missing queue is not created.
+                            let carried = store
+                                .queues
+                                .get_mut(&partition_id_for_wal)
+                                .is_some_and(|mut queue| queue.retire_into_queued(entry));
+                            if carried {
+                                store.deregister_in_flight(
+                                    partition_id_for_wal,
+                                    &entry.wal_sequences,
+                                );
+                            } else {
+                                // Nothing queued will make this write durable.
+                                // Abandoning holds the watermark below the frame,
+                                // keeps it replayable on the next restart, and
+                                // raises the abandoned-write alarm so the stall is
+                                // never silent.
+                                store.abandon_wal_sequences(
+                                    partition_id_for_wal,
+                                    &entry.wal_sequences,
+                                );
+                            }
                         }
                     }
                 }
             }
         }
+        #[cfg(test)]
+        store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -2679,6 +2868,23 @@ impl MapDataStore for WriteBehindDataStore {
         self.config.or_delta_wal
     }
 
+    /// # Precondition: one writer per key at a time (NOT upheld by every caller)
+    ///
+    /// The entry sequence is assigned and the entry is queued in two separate
+    /// steps, with no lock held across both. Two concurrent writers of one
+    /// `(map, key)` can therefore interleave so that the write with the higher
+    /// sequence is queued first and the one with the lower sequence then
+    /// replaces it: the queue is left holding the lower-sequence write while
+    /// staging keeps the higher one.
+    ///
+    /// This store's accounting (`TG-WB-005`) is proven for one writer per key
+    /// at a time. The component that serialises writers of a key is
+    /// `service::domain::key_writer::KeyWriterRegistry`, and it is a caller's
+    /// obligation to take it. That obligation is not met by every caller
+    /// today: a write that reaches `RecordStore::put` arrives here without the
+    /// per-key writer, so the interleaving above is possible in production
+    /// (tracked as TODO-776). `remove` and `remove_all` rest on the same
+    /// precondition.
     async fn add_with_witness(
         &self,
         map: &str,
@@ -2795,6 +3001,10 @@ impl MapDataStore for WriteBehindDataStore {
         // Assign and track the durability sequence atomically (see
         // `assign_tracked_sequence`) BEFORE the entry enters the queue.
         let entry_seq = self.assign_tracked_sequence();
+        #[cfg(test)]
+        if let Some(gate) = TestParks::take_keyed(&self.test_parks.before_queue_insert, map, key) {
+            gate.pass().await;
+        }
         let (operation, staged) = queued_and_staged(src, expiration_time);
         let entry = DelayedEntry {
             map: map.to_string(),
@@ -3592,6 +3802,16 @@ impl MapDataStore for WriteBehindDataStore {
         // writer; the invariant that no writer races reset is what guarantees
         // consistency, and the lock is defense-in-depth that keeps the counter/pending
         // pair coherent.
+        //
+        // What is NOT cleared, and why the precondition also needs empty queues on a
+        // WAL-backed store (TG-WB-005 does not cover `reset`; tracked as TODO-775):
+        // the WAL-sequence tracker is left as it is, because the frames are still on
+        // disk and forgetting them would let the watermark pass writes that were
+        // never applied. Entries queued at this moment therefore leave their WAL
+        // sequences `Live` with no owner, which pins the partition's log until
+        // restart. And an entry the flush loop holds in a drained batch at this
+        // moment is not in any queue cleared here: its terminal later decrements a
+        // pending count that was already set to zero.
         let mut pending = self.pending_seqs();
         self.queues.clear();
         self.staging.clear();
@@ -7250,6 +7470,252 @@ mod tests {
             retry_count,
             Some(1),
             "the refused entry must still be queued for its second attempt"
+        );
+    }
+
+    /// TG-WB-005: a refused entry that finds a newer write of its key on the
+    /// queue is retired into it.
+    ///
+    /// While an entry is out of the queue — drained into the flush batch and
+    /// waiting behind another key's backoff — a write to the same key has
+    /// nothing to coalesce with, so it is queued and counted as a new entry.
+    /// When the older entry's attempt then fails, its count, its entry sequence
+    /// and its WAL sequences must pass to that queued write. Dropping the entry
+    /// instead strands all three until restart: the capacity check reads an
+    /// inflated count, the flushed watermark stops, and the partition's WAL is
+    /// never collected.
+    ///
+    /// Idle is read through `test_is_idle`, never as "every queue empty": a
+    /// drained batch is in no queue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::too_many_lines)]
+    async fn a_refused_entry_superseded_by_a_newer_write_is_retired_into_it() {
+        use std::time::{Duration, Instant};
+
+        let wal = InMemoryTestWal::new();
+        let spy = Arc::new(SpyDataStore::new());
+        spy.set_fail_add(true);
+        let calls = spy.calls();
+        // First backoff = min(500 * 2^1, 5000) = 1000 ms: the window in which
+        // the older `b` entry sits in the batch behind `a`.
+        //
+        // The stall bound puts the watchdog's first tick 60 s out, past every
+        // wait below. The watchdog shares its leak-candidate state with the two
+        // classifier samples at the end, so a background sample taken first
+        // would change what those two report.
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 200,
+                backoff_base_ms: 500,
+                backoff_cap_ms: 5000,
+                max_retries: 3,
+                capacity: 0,
+                wal_watermark_stall_bound_ms: 600_000,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+        let attempts = |wanted: &str| {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(
+                    |call| matches!(call, SpyCall::Add { map, key } if map == "m" && key == wanted),
+                )
+                .count()
+        };
+        let pb = partition_for("m", "b");
+        let b = ("m".to_string(), "b".to_string());
+
+        // `a` is the older of the two, so it is first in the batch and `b`
+        // waits behind its backoff.
+        let t = now_millis();
+        store
+            .add("m", "a", &dummy_value_with(1), 0, t - 10)
+            .await
+            .expect("a is accepted into the buffer");
+        store
+            .add("m", "b", &dummy_value_with(2), 0, t - 5)
+            .await
+            .expect("b is accepted into the buffer");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while attempts("a") < 1 {
+            assert!(Instant::now() < deadline, "a was never attempted");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let b_queued = store
+            .queues
+            .get(&pb)
+            .is_some_and(|queue| queue.entries.contains_key(&b));
+        assert!(
+            !b_queued && attempts("b") == 0,
+            "setup: b must be in the flush batch, out of its queue and not yet attempted"
+        );
+
+        // The newer write, acked while the older `b` entry is in the batch.
+        let newer = dummy_value_with(3);
+        store
+            .add("m", "b", &newer, 0, now_millis())
+            .await
+            .expect("the newer b is accepted into the buffer");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while attempts("b") < 1 {
+            assert!(Instant::now() < deadline, "the older b was never attempted");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // What the queued newer write owns once the older entry's attempt has
+        // failed. Recorded, not asserted yet: the accounting below must be the
+        // first thing a failing run reports.
+        let mut carried = BTreeSet::new();
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            if let Some(owned) = store.queues.get(&pb).and_then(|queue| {
+                queue
+                    .entries
+                    .get(&b)
+                    .map(|entry| entry.wal_sequences.clone())
+            }) {
+                carried = owned;
+            }
+            if carried == BTreeSet::from([2, 3]) || Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        spy.set_fail_add(false);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !store.test_is_idle() {
+            assert!(
+                Instant::now() < deadline,
+                "the store never became idle after the inner store healed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let first_sample = store.test_run_classifier_sample(pb);
+        let second_sample = store.test_run_classifier_sample(pb);
+
+        assert_eq!(
+            (
+                store.pending_operation_count(),
+                (store.flushed_watermark(), store.assigned_write_sequence()),
+                store.test_pending_wal_sequences(pb),
+                (first_sample, second_sample),
+            ),
+            (0, (3, 3), Vec::new(), (None, None)),
+            "on a healed, idle store nothing may stay counted, fenced or pending: \
+             (pending count, (flushed watermark, assigned sequence), pending WAL \
+             sequences of b's partition, two classifier samples)"
+        );
+        assert_eq!(
+            carried,
+            BTreeSet::from([2, 3]),
+            "the queued newer write must own the superseded entry's WAL sequence \
+             while both are unresolved"
+        );
+        assert_eq!(
+            spy.persisted("m", "b"),
+            Some(newer),
+            "the inner store must hold the newer write's value"
+        );
+    }
+
+    /// Two writers of one key, interleaved so that the write holding the
+    /// HIGHER entry sequence is queued first and the one holding the lower
+    /// sequence then replaces it. Nothing serialises that pair for every
+    /// caller today, so the store's accounting has to come out even under it:
+    /// no count left, no fence held, no WAL sequence left pending.
+    ///
+    /// The order is exact, not raced: the first writer is parked between its
+    /// sequence assignment and its queue insert, and the write delay keeps the
+    /// flush loop from draining anything in between.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_writers_of_one_key_interleaved_between_sequence_and_insert_leave_nothing_unaccounted(
+    ) {
+        let wal = InMemoryTestWal::new();
+        let spy = Arc::new(SpyDataStore::new());
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 600_000,
+                capacity: 0,
+                wal_watermark_stall_bound_ms: 600_000,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+        let partition = partition_for("m", "k");
+        let k = ("m".to_string(), "k".to_string());
+        let queued_sequence = || {
+            store
+                .queues
+                .get(&partition)
+                .and_then(|queue| queue.entries.get(&k).map(|entry| entry.sequence))
+        };
+
+        // X takes the lower sequence and parks before it reaches the queue.
+        let mut park = store.test_park_before_queue_insert("m", "k");
+        let x = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .add("m", "k", &dummy_value_with(1), 0, now_millis())
+                    .await
+            })
+        };
+        park.wait_parked().await;
+
+        // Y runs to completion while X is parked: higher sequence, queued first.
+        store
+            .add("m", "k", &dummy_value_with(2), 0, now_millis())
+            .await
+            .expect("y is accepted into the buffer");
+        assert_eq!(
+            (queued_sequence(), store.assigned_write_sequence()),
+            (Some(1), 2),
+            "setup: y must be queued with the higher of the two sequences handed out"
+        );
+
+        park.release();
+        x.await
+            .expect("x did not panic")
+            .expect("x is accepted into the buffer");
+        let staged_sequence = store.staging.get(&k).map(|slot| slot.seq);
+        assert_eq!(
+            (queued_sequence(), staged_sequence),
+            (Some(0), Some(1)),
+            "setup: x must have replaced y in the queue while staging keeps y's higher sequence"
+        );
+
+        store
+            .hard_flush()
+            .await
+            .expect("the drain stores what is queued");
+
+        // Accounting only. Which value the inner store and staging end up with
+        // is deliberately not asserted: in this interleaving the two are known
+        // to differ, that is a defect of the callers that write one key
+        // concurrently, and a green run here must not be read as covering it.
+        assert_eq!(
+            (
+                store.pending_operation_count(),
+                (store.flushed_watermark(), store.assigned_write_sequence()),
+                store.test_pending_wal_sequences(partition),
+            ),
+            (0, (2, 2), vec![]),
+            "an entry replaced by a lower-sequence write of its key must leave nothing unaccounted"
         );
     }
 }
