@@ -138,11 +138,156 @@ struct FaultStore {
     /// the test and wedge the runtime's worker threads.
     released: std::sync::atomic::AtomicBool,
     wake: tokio::sync::Notify,
+    /// Off unless a test arms it, so every scenario that does not step the
+    /// store call by call sees the double exactly as before.
+    gate: StepGate,
+}
+
+/// What a test decides for one parked inner-store call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Record the value and return `Ok`.
+    Accept,
+    /// Return `Err` and record nothing.
+    Refuse,
+}
+
+/// Where the store stands once nothing further happens without the test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Settled {
+    /// One inner-store call for this key is waiting for its verdict.
+    Parked(String),
+    /// Nothing is queued and the flush loop holds no batch.
+    Idle,
+}
+
+/// Lets a test hand out the result of every inner-store call, one at a time.
+///
+/// A refusing store alone cannot place a write inside the flush window: the
+/// window is open only while the flush loop holds a drained entry, and without
+/// a park the test would have to race the loop for it. Parking each call makes
+/// the window as long as the test needs it to be.
+#[derive(Default)]
+struct StepGate {
+    state: std::sync::Mutex<GateState>,
+    wake: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct GateState {
+    armed: bool,
+    /// The key of the call that is waiting, if one is.
+    parked: Option<String>,
+    /// The verdict granted to the waiting call, until that call takes it.
+    verdict: Option<Verdict>,
+    /// How many calls have parked since the gate was armed.
+    calls: u64,
 }
 
 impl FaultStore {
     fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    fn gate_state(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.gate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// From now on every `add` and `remove` parks until it is granted a verdict.
+    fn arm_gate(&self) {
+        self.gate_state().armed = true;
+    }
+
+    fn parked(&self) -> Option<String> {
+        self.gate_state().parked.clone()
+    }
+
+    fn gate_calls(&self) -> u64 {
+        self.gate_state().calls
+    }
+
+    /// Releases the parked call with `verdict`.
+    ///
+    /// The parked mark is cleared here rather than by the released call, so a
+    /// `settle` issued right after cannot mistake that call for a new one.
+    fn grant(&self, verdict: Verdict) {
+        {
+            let mut state = self.gate_state();
+            assert!(
+                state.parked.take().is_some(),
+                "a verdict was granted with no call parked"
+            );
+            state.verdict = Some(verdict);
+        }
+        self.gate.wake.notify_waiters();
+    }
+
+    /// Disarms the gate: the parked call, if any, and every later call is
+    /// accepted.
+    fn open(&self) {
+        {
+            let mut state = self.gate_state();
+            state.armed = false;
+            if state.parked.take().is_some() {
+                state.verdict = Some(Verdict::Accept);
+            }
+        }
+        self.gate.wake.notify_waiters();
+    }
+
+    /// Parks the calling inner-store call until the test grants its verdict.
+    ///
+    /// The armed check and the parked mark are one critical section, so `open`
+    /// can never slip between them and leave a call parked behind a disarmed
+    /// gate.
+    async fn pass_gate(&self, key: &str) -> Verdict {
+        {
+            let mut state = self.gate_state();
+            if !state.armed {
+                return Verdict::Accept;
+            }
+            assert!(
+                state.parked.is_none(),
+                "two inner-store calls reached the gate at once"
+            );
+            state.parked = Some(key.to_string());
+            state.calls += 1;
+        }
+        loop {
+            // Created before the check: a grant that lands between the check
+            // and the wait still wakes it.
+            let granted = self.gate.wake.notified();
+            if let Some(verdict) = self.gate_state().verdict.take() {
+                return verdict;
+            }
+            granted.await;
+        }
+    }
+
+    /// Waits until either one call is parked or the store is idle, and says
+    /// which.
+    ///
+    /// Idle is the store's own witness, which cannot hold while the flush loop
+    /// has a batch in hand; "every queue is empty" is also true between the
+    /// drain and the first store call, with an entry in the loop's hands.
+    async fn settle(&self, store: &WriteBehindDataStore, after: &str) -> Settled {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(key) = self.parked() {
+                return Settled::Parked(key);
+            }
+            if store.test_is_idle() {
+                return Settled::Idle;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "neither a parked call nor an idle store within 5 s after {after}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
     }
 
     fn reject_key(&self, key: &str) {
@@ -227,6 +372,9 @@ impl MapDataStore for FaultStore {
         _exp: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
+        if self.pass_gate(key).await == Verdict::Refuse {
+            anyhow::bail!("gated inner-store refusal for key={key}");
+        }
         if self.rejects(key) {
             anyhow::bail!("injected inner-store rejection for key={key}");
         }
@@ -253,6 +401,9 @@ impl MapDataStore for FaultStore {
     }
 
     async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+        if self.pass_gate(key).await == Verdict::Refuse {
+            anyhow::bail!("gated inner-store refusal for key={key}");
+        }
         if self.rejects(key) {
             anyhow::bail!("injected inner-store rejection for key={key}");
         }
@@ -3104,5 +3255,598 @@ async fn an_aborted_in_flight_cell_entry_replays_like_a_value_entry() {
     assert_eq!(
         cell, value,
         "a cell entry must behave exactly as a value entry"
+    );
+}
+
+// ===========================================================================
+// Refusals interleaved with writes to one key: whatever leaves a queue or a
+// flush batch is accounted
+// ===========================================================================
+
+/// Drains at once and retries almost at once, so a stepped run spends its time
+/// in the steps rather than in waits.
+fn stepped_config(max_retries: u32) -> WriteBehindConfig {
+    WriteBehindConfig {
+        write_delay_ms: 0,
+        flush_interval_ms: 5,
+        backoff_base_ms: 1,
+        backoff_cap_ms: 2,
+        capacity: 0,
+        max_retries,
+        ..WriteBehindConfig::default()
+    }
+}
+
+/// A write-behind store on a real WAL over a gated inner store, with two keys
+/// of one partition.
+struct Stepped {
+    _dir: tempfile::TempDir,
+    wal: Arc<WalWriter>,
+    inner: Arc<FaultStore>,
+    store: Arc<WriteBehindDataStore>,
+    partition: u32,
+    keys: Vec<String>,
+}
+
+impl Stepped {
+    fn new(partition: u32, config: WriteBehindConfig) -> Self {
+        let (dir, wal) = real_wal();
+        let inner = FaultStore::new();
+        inner.arm_gate();
+        let store = build_store_with(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1, config);
+        Self {
+            _dir: dir,
+            wal,
+            inner,
+            store,
+            partition,
+            keys: keys_in_partition(partition, 2),
+        }
+    }
+
+    fn key(&self) -> &str {
+        &self.keys[0]
+    }
+
+    async fn settle(&self, after: &str) -> Settled {
+        self.inner.settle(&self.store, after).await
+    }
+
+    fn pending(&self) -> Vec<(u64, PendingOrigin)> {
+        self.store.test_pending_wal_sequences(self.partition)
+    }
+
+    fn abandoned(&self) -> Vec<u64> {
+        self.pending()
+            .into_iter()
+            .filter(|(_, origin)| *origin == PendingOrigin::Abandoned)
+            .map(|(sequence, _)| sequence)
+            .collect()
+    }
+
+    /// The WAL sequences owned by the queued entry of the first key, if one is
+    /// queued.
+    fn queued_wal_sequences(&self) -> Option<Vec<u64>> {
+        let slot = (TEST_MAP.to_string(), self.key().to_string());
+        self.store.queues.get(&self.partition).and_then(|queue| {
+            queue
+                .entries
+                .get(&slot)
+                .map(|entry| entry.wal_sequences.iter().copied().collect())
+        })
+    }
+
+    /// Accepts everything from here on and waits for the store to go idle.
+    async fn open_and_drain(&self) {
+        self.inner.open();
+        assert_eq!(
+            self.settle("the gate was opened").await,
+            Settled::Idle,
+            "an open gate parks nothing, so the store can only settle idle"
+        );
+    }
+
+    fn classifier_samples(&self) -> (Option<WalWatermarkAlarm>, Option<WalWatermarkAlarm>) {
+        // Two, because a leak is reported only for a sequence seen ownerless on
+        // two consecutive samples.
+        (
+            self.store.test_run_classifier_sample(self.partition),
+            self.store.test_run_classifier_sample(self.partition),
+        )
+    }
+}
+
+fn parked_on(key: &str) -> Settled {
+    Settled::Parked(key.to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Write,
+    Remove,
+    Refuse,
+    Accept,
+}
+
+/// The last thing the client asked for, which is what the inner store must
+/// hold once nothing was abandoned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastOp {
+    Value(u64),
+    Tombstone,
+}
+
+/// Runs steps against the first key, settling after each one.
+///
+/// At every settle point the store is either parked on one call or idle, and
+/// which of the two follows from the steps alone: the flush loop is the only
+/// other task, and it is either blocked in the gate or between passes.
+struct Script {
+    at: Settled,
+    /// Whether the key was written or removed since the parked call parked —
+    /// that is, while its entry was in the flush batch.
+    written_in_window: bool,
+    next_value: u64,
+    last: Option<LastOp>,
+}
+
+impl Script {
+    fn new() -> Self {
+        Self {
+            at: Settled::Idle,
+            written_in_window: false,
+            next_value: 0,
+            last: None,
+        }
+    }
+
+    async fn run(&mut self, stepped: &Stepped, step: Step) -> Result<(), String> {
+        let parked = matches!(self.at, Settled::Parked(_));
+        match step {
+            Step::Write => {
+                self.next_value += 1;
+                stepped
+                    .store
+                    .add(TEST_MAP, stepped.key(), &lww(self.next_value), 0, 0)
+                    .await
+                    .map_err(|err| format!("a write was not accepted: {err}"))?;
+                self.last = Some(LastOp::Value(self.next_value));
+                self.written_in_window |= parked;
+                self.at = stepped.settle("a write").await;
+            }
+            Step::Remove => {
+                stepped
+                    .store
+                    .remove(TEST_MAP, stepped.key(), 0)
+                    .await
+                    .map_err(|err| format!("a remove was not accepted: {err}"))?;
+                self.last = Some(LastOp::Tombstone);
+                self.written_in_window |= parked;
+                self.at = stepped.settle("a remove").await;
+            }
+            Step::Refuse | Step::Accept if !parked => {
+                // Nothing is waiting for a verdict, so there is nothing to grant.
+                self.at = stepped.settle("a verdict with no call parked").await;
+            }
+            Step::Refuse | Step::Accept => {
+                let refusal_in_window = step == Step::Refuse && self.written_in_window;
+                let abandoned_before = stepped.abandoned();
+                stepped.inner.grant(if step == Step::Refuse {
+                    Verdict::Refuse
+                } else {
+                    Verdict::Accept
+                });
+                self.written_in_window = false;
+                self.at = stepped.settle("a verdict").await;
+                // A newer write of the key is queued — it could not be drained
+                // while the loop was blocked in the gate — so the refused entry
+                // has a survivor to be retired into, whether or not it had
+                // retries left. Abandoning it would pin the partition's WAL
+                // for a key that does become durable.
+                let abandoned_after = stepped.abandoned();
+                if refusal_in_window && abandoned_after != abandoned_before {
+                    return Err(format!(
+                        "a refused entry with a queued newer write was abandoned: \
+                         abandoned sequences went from {abandoned_before:?} to {abandoned_after:?}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The quiescence predicate, on an idle store that accepts writes again.
+///
+/// One conjunct at a time and in a fixed order, so a failure names the first
+/// one that is false. The reads are not atomic and do not need to be: an idle
+/// store stays idle until the test writes again.
+async fn quiescent(stepped: &Stepped, last: Option<LastOp>) -> Result<(), String> {
+    let partition = stepped.partition;
+
+    let count = stepped.store.pending_operation_count();
+    if count != 0 {
+        return Err(format!("Q1 pending_operation_count() == 0: it is {count}"));
+    }
+
+    let flushed = stepped.store.flushed_watermark();
+    let assigned = stepped.store.assigned_write_sequence();
+    if flushed != assigned {
+        return Err(format!(
+            "Q2 flushed_watermark() == assigned_write_sequence(): {flushed} != {assigned}"
+        ));
+    }
+
+    let pending = stepped.pending();
+    if pending
+        .iter()
+        .any(|(_, origin)| matches!(origin, PendingOrigin::Live | PendingOrigin::Appending))
+    {
+        return Err(format!(
+            "Q3 no Live and no Appending WAL sequence: {pending:?}"
+        ));
+    }
+
+    let in_flight = stepped.store.test_in_flight_wal_sequences(partition);
+    if !in_flight.is_empty() {
+        return Err(format!("Q4 no WAL sequence in flight: {in_flight:?}"));
+    }
+
+    let samples = stepped.classifier_samples();
+    if samples.0 == Some(WalWatermarkAlarm::TrackerLeak)
+        || samples.1 == Some(WalWatermarkAlarm::TrackerLeak)
+    {
+        return Err(format!("Q5 no tracker leak: {samples:?}"));
+    }
+
+    // With no client op there is no last value, and the partition was never
+    // tracked, so the remaining conjunct has no subject.
+    let Some(last) = last else {
+        return Ok(());
+    };
+    // A discard with no newer write queued abandons by design; the frame then
+    // stays pending and the store need not hold the last op.
+    if !stepped.abandoned().is_empty() {
+        return Ok(());
+    }
+    if !pending.is_empty() {
+        return Err(format!("Q6 nothing pending: {pending:?}"));
+    }
+    let watermark = stepped.store.test_wal_watermark(partition);
+    let max_assigned = stepped.store.test_max_assigned_wal_sequence(partition);
+    if watermark != Some(Ok(max_assigned)) {
+        return Err(format!(
+            "Q6 the watermark is at the highest assigned sequence: {watermark:?}, \
+             highest assigned {max_assigned}"
+        ));
+    }
+    let held = stepped
+        .inner
+        .load(TEST_MAP, stepped.key())
+        .await
+        .map_err(|err| format!("the inner store could not be read: {err}"))?;
+    let holds_last = match last {
+        LastOp::Value(millis) => held == Some(lww(millis)),
+        LastOp::Tombstone => stepped.inner.is_tombstone(stepped.key()).await,
+    };
+    if !holds_last {
+        return Err(format!(
+            "Q6 the inner store holds the last client op {last:?}: it holds {held:?}"
+        ));
+    }
+    Ok(())
+}
+
+async fn interleaving_case(
+    steps: Vec<Step>,
+    max_retries: u32,
+    non_subsuming: bool,
+) -> Result<(), String> {
+    let stepped = Stepped::new(265, stepped_config(max_retries));
+    stepped
+        .store
+        .test_force_non_subsuming_survivor(non_subsuming);
+
+    let mut script = Script::new();
+    for step in steps {
+        script.run(&stepped, step).await?;
+    }
+    stepped.open_and_drain().await;
+    quiescent(&stepped, script.last).await?;
+
+    // The property runs on a process-wide runtime, so without this the flush
+    // loop and the watchdog of every case would keep running beside the later
+    // cases and compete with their settle bound.
+    stepped
+        .store
+        .hard_flush()
+        .await
+        .map_err(|err| format!("shutting down an idle store failed: {err}"))
+}
+
+fn any_step() -> impl Strategy<Value = Step> {
+    prop_oneof![
+        Just(Step::Write),
+        Just(Step::Remove),
+        Just(Step::Refuse),
+        Just(Step::Accept),
+    ]
+}
+
+proptest! {
+    // No regression file: the predicate is only ever read at a settle point,
+    // and a settle bound that expires on a slow machine must not be persisted
+    // as a counterexample. The fixed counterexamples are the pinned tests below.
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// However refusals, acceptances, writes and removes of one key interleave,
+    /// a store that accepts writes again and has gone idle counts nothing that
+    /// is not queued, fences nothing, and owns every WAL sequence it tracks.
+    #[test]
+    fn interleaved_refusals_and_writes_to_one_key_leave_nothing_unaccounted(
+        steps in proptest::collection::vec(any_step(), 1..24),
+        max_retries in 1u32..=3,
+        non_subsuming in any::<bool>(),
+    ) {
+        let outcome = block_on_async(interleaving_case(steps, max_retries, non_subsuming));
+        prop_assert_eq!(outcome, Ok(()));
+    }
+}
+
+#[tokio::test]
+async fn a_write_in_the_flush_window_then_a_refusal_leaves_nothing_unaccounted() {
+    let stepped = Stepped::new(266, stepped_config(3));
+    let mut script = Script::new();
+    for step in [Step::Write, Step::Write, Step::Refuse] {
+        script.run(&stepped, step).await.expect("step");
+    }
+    // Recorded now, while the store still refuses, and asserted only after the
+    // accounting below: the leak is the finding, this is the proof that the
+    // first write did meet the second one in the window.
+    let survivor_wal = stepped
+        .store
+        .test_in_flight_wal_sequences(stepped.partition);
+
+    script.run(&stepped, Step::Accept).await.expect("step");
+    stepped.open_and_drain().await;
+    if let Err(violated) = quiescent(&stepped, script.last).await {
+        panic!("{violated}");
+    }
+
+    assert_eq!(
+        survivor_wal,
+        vec![1, 2],
+        "the newer write owns the refused entry's WAL sequence until it is durable"
+    );
+}
+
+#[tokio::test]
+async fn a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable() {
+    let config = WriteBehindConfig {
+        or_delta_wal: true,
+        ..stepped_config(2)
+    };
+    let stepped = Stepped::new(267, config);
+    let partition = stepped.partition;
+    let (key, other_key) = (stepped.keys[0].as_str(), stepped.keys[1].as_str());
+    let add_tag = |tag: &str| OrDelta::Add {
+        entry: or_entry(tag),
+    };
+
+    // Real delta frames: each carries one mutation, so neither makes the other
+    // redundant and a lost frame is a lost mutation.
+    stepped
+        .store
+        .add_with_witness(
+            TEST_MAP,
+            key,
+            WriteSource::Value(&or_value(&["a"], &[])),
+            0,
+            0,
+            Some(&add_tag("a")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stepped.settle("the first add").await, parked_on(key));
+    stepped
+        .store
+        .add_with_witness(
+            TEST_MAP,
+            key,
+            WriteSource::Value(&or_value(&["a", "b"], &[])),
+            0,
+            0,
+            Some(&add_tag("b")),
+        )
+        .await
+        .unwrap();
+
+    // The first entry meets the second in the queue and is retired into it.
+    stepped.inner.grant(Verdict::Refuse);
+    assert_eq!(stepped.settle("the first refusal").await, parked_on(key));
+    let pending_after_supersede = stepped.pending();
+
+    // A second key of the same partition: its flush is what can move the
+    // partition's watermark past a sequence that was resolved too early.
+    stepped
+        .store
+        .add(TEST_MAP, other_key, &lww(1), 0, 0)
+        .await
+        .unwrap();
+    stepped.inner.grant(Verdict::Refuse);
+    assert_eq!(
+        stepped.settle("the survivor's first refusal").await,
+        parked_on(key),
+        "the requeued survivor is first in the batch it shares with the other key"
+    );
+    // Its last attempt, with no newer write queued: abandoned.
+    stepped.inner.grant(Verdict::Refuse);
+    assert_eq!(
+        stepped.settle("the survivor's last refusal").await,
+        parked_on(other_key)
+    );
+    stepped.inner.grant(Verdict::Accept);
+    assert_eq!(stepped.settle("the other key's flush").await, Settled::Idle);
+
+    let applied = stepped.wal.test_read_applied_sequence(partition);
+
+    // Crash: only the WAL survives.
+    let wal = Arc::clone(&stepped.wal);
+    let key = key.to_string();
+    let Stepped {
+        _dir: wal_dir,
+        store,
+        ..
+    } = stepped;
+    drop(store);
+    let recovered_store = FaultStore::new();
+    WalRecovery::new(wal, Vec::new())
+        .run(Arc::clone(&recovered_store) as Arc<dyn MapDataStore>)
+        .await
+        .expect("recovery");
+    let recovered = inner_view(&recovered_store, &key).await;
+    drop(wal_dir);
+
+    assert_eq!(
+        (pending_after_supersede, applied, recovered),
+        (
+            vec![(1, PendingOrigin::Live), (2, PendingOrigin::Live)],
+            0,
+            view(&["a", "b"], &[]),
+        ),
+        "the retired frame must stay pending, un-applied and replayable until the \
+         entry that took it over is durable; resolving it at the supersede lets the \
+         other key's flush move the watermark past it, and the acked `a` is then \
+         filtered out of replay"
+    );
+}
+
+#[tokio::test]
+async fn a_subsuming_write_over_a_survivor_resolves_the_carried_sequences() {
+    // The first backoff is min(base * 2, cap). It has to be long: the third
+    // write below must land inside it, and with a short one that would be a
+    // race against the flush loop instead of a two-second window.
+    let config = WriteBehindConfig {
+        backoff_base_ms: 1000,
+        backoff_cap_ms: 5000,
+        ..stepped_config(3)
+    };
+    let stepped = Stepped::new(268, config);
+    let key = stepped.key().to_string();
+
+    stepped
+        .store
+        .add(TEST_MAP, &key, &lww(1), 0, 0)
+        .await
+        .unwrap();
+    assert_eq!(stepped.settle("the first write").await, parked_on(&key));
+    stepped
+        .store
+        .add(TEST_MAP, &key, &lww(2), 0, 0)
+        .await
+        .unwrap();
+
+    let calls_at_refusal = stepped.inner.gate_calls();
+    stepped.inner.grant(Verdict::Refuse);
+    // Not settled on purpose: the loop now sleeps its backoff with the pass
+    // still open, and the point is what a write does during that sleep.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while stepped.queued_wal_sequences() != Some(vec![1, 2]) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the queued newer write did not take over the refused entry's WAL \
+             sequence within 1 s: it owns {:?}",
+            stepped.queued_wal_sequences()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+
+    stepped
+        .store
+        .add(TEST_MAP, &key, &lww(3), 0, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        stepped.pending(),
+        vec![(3, PendingOrigin::Live)],
+        "a full-value write over the survivor makes every frame it carried \
+         redundant, so the carried set cannot grow without bound"
+    );
+    assert_eq!(
+        stepped.inner.gate_calls(),
+        calls_at_refusal,
+        "the third write must have coalesced inside the backoff, before the \
+         survivor was drained"
+    );
+
+    stepped.open_and_drain().await;
+    if let Err(violated) = quiescent(&stepped, Some(LastOp::Value(3))).await {
+        panic!("{violated}");
+    }
+}
+
+#[tokio::test]
+async fn a_discarded_entry_with_a_queued_newer_write_is_retired_into_it() {
+    // One attempt only, so the first refusal is the discard.
+    let stepped = Stepped::new(269, stepped_config(1));
+    let partition = stepped.partition;
+    let key = stepped.key().to_string();
+
+    stepped
+        .store
+        .add(TEST_MAP, &key, &lww(1), 0, 0)
+        .await
+        .unwrap();
+    assert_eq!(stepped.settle("the first write").await, parked_on(&key));
+    stepped
+        .store
+        .add(TEST_MAP, &key, &lww(2), 0, 0)
+        .await
+        .unwrap();
+
+    stepped.inner.grant(Verdict::Refuse);
+    assert_eq!(
+        stepped.settle("the discard").await,
+        parked_on(&key),
+        "the newer write is drained next"
+    );
+    let after_discard = stepped.pending();
+
+    stepped.inner.grant(Verdict::Accept);
+    assert_eq!(
+        stepped.settle("the newer write's flush").await,
+        Settled::Idle
+    );
+
+    assert_eq!(
+        (
+            after_discard,
+            stepped.pending(),
+            stepped.store.test_wal_watermark(partition),
+            stepped.store.pending_operation_count(),
+            (
+                stepped.store.flushed_watermark(),
+                stepped.store.assigned_write_sequence(),
+            ),
+            stepped.classifier_samples(),
+        ),
+        (
+            vec![(1, PendingOrigin::Live), (2, PendingOrigin::Live)],
+            Vec::new(),
+            Some(Ok(2)),
+            0,
+            (2, 2),
+            (None, None),
+        ),
+        "the key became durable through the newer write, so the discarded \
+         entry's frame must not stay pinned as abandoned"
+    );
+    assert_eq!(
+        stepped.inner.load(TEST_MAP, &key).await.unwrap(),
+        Some(lww(2))
     );
 }
