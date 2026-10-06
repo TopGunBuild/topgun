@@ -11852,6 +11852,370 @@ mod tests {
                  batch must be rejected; got first {first:?}, second {second:?}"
             );
         }
+
+        // ---- Two writers of one key, each on its own route ----------------
+        //
+        // The tests below start two LWW writes of one key from two tasks, park
+        // the first inside its write, and let the second run. No sleep orders
+        // anything: every wait is either a park's own signal or the choice
+        // "the second writer returned, or it is counted as waiting for the
+        // key's writer", and the bound on it only detects a broken setup.
+
+        const VX: &str = "x";
+        const VY: &str = "y";
+
+        fn lww_put(text: &str) -> topgun_core::messages::base::ClientOp {
+            topgun_core::messages::base::ClientOp {
+                id: Some(format!("put-{text}")),
+                map_name: MAP.to_string(),
+                key: KEY.to_string(),
+                op_type: None,
+                record: Some(Some(topgun_core::LWWRecord {
+                    value: Some(rmpv::Value::String(text.into())),
+                    timestamp: make_timestamp(),
+                    ttl_ms: None,
+                })),
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            }
+        }
+
+        /// Route X: a single op addressed to the key's partition, as the
+        /// partition worker receives it. Anonymous with no connection, so the
+        /// service mints the stamp.
+        fn route_x(text: &str) -> Operation {
+            Operation::ClientOp {
+                ctx: make_anon_http_ctx_for_key(KEY),
+                payload: topgun_core::messages::ClientOpMessage {
+                    payload: lww_put(text),
+                },
+            }
+        }
+
+        /// Route Y: a batch with no partition, which is what classification
+        /// produces for an enveloped batch and what the global worker runs.
+        fn route_y(text: &str) -> Operation {
+            let mut ctx = make_anon_http_ctx_for_key(KEY);
+            ctx.partition_id = None;
+            Operation::OpBatch {
+                ctx,
+                payload: topgun_core::messages::sync::OpBatchMessage {
+                    payload: topgun_core::messages::sync::OpBatchPayload {
+                        ops: vec![lww_put(text)],
+                        write_concern: None,
+                        timeout: None,
+                    },
+                },
+            }
+        }
+
+        fn lww_text(value: Option<RecordValue>) -> Option<String> {
+            match value {
+                Some(RecordValue::Lww { value, .. }) => {
+                    value_to_rmpv(&value).as_str().map(str::to_string)
+                }
+                _ => None,
+            }
+        }
+
+        /// Whether the second writer had to wait for the key's writer while the
+        /// first one was parked: `false` when it returned instead. Exactly one
+        /// of the two happens, so the loop needs no timing margin; the bound
+        /// only reports a setup in which neither did.
+        async fn second_writer_waited<T>(
+            svc: &CrdtService,
+            second: &tokio::task::JoinHandle<T>,
+        ) -> bool {
+            tokio::time::timeout(PARK_BOUND, async {
+                loop {
+                    if second.is_finished() {
+                        return false;
+                    }
+                    if svc.key_writer.test_waiting() == 1 {
+                        return true;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the second writer neither returned nor waited for the key's writer")
+        }
+
+        /// The stamps the journal holds for the key, in the order the writes
+        /// were recorded.
+        fn journal_stamps(journal: &JournalStore) -> Vec<Timestamp> {
+            journal
+                .read(0, 100, Some(MAP))
+                .0
+                .into_iter()
+                .filter(|event| event.key == KEY)
+                .map(|event| event.timestamp)
+                .collect()
+        }
+
+        // A write that is parked between its in-memory put and its store write
+        // must not let a later write of the same key pass it: the engine would
+        // keep the later value while the store, and so every reload, keeps the
+        // earlier one.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn two_routes_writing_one_key_leave_engine_and_store_on_the_later_stamp() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, parking) = parking_stack(&dir);
+
+            let mut park = parking.park_before_add();
+            let x = tokio::spawn(svc.clone().oneshot(route_x(VX)));
+            // X has put its value into the engine and is parked on entry to
+            // its store write.
+            park.wait_parked().await;
+
+            let y = tokio::spawn(svc.clone().oneshot(route_y(VY)));
+            let y_waited = second_writer_waited(&svc, &y).await;
+            park.release();
+            x.await.expect("X task").expect("X must succeed");
+            y.await.expect("Y task").expect("Y must succeed");
+
+            let partition = hash_to_partition(KEY);
+            let engine = lww_text(
+                factory
+                    .get_or_create(MAP, partition)
+                    .get(KEY, false)
+                    .await
+                    .expect("engine read")
+                    .map(|record| record.value),
+            );
+            let store = lww_text(redb.load(MAP, KEY).await.expect("store read"));
+            let fresh = Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::clone(&redb),
+                Vec::new(),
+            ));
+            let reloaded = lww_text(
+                fresh
+                    .get_or_create(MAP, partition)
+                    .get(KEY, false)
+                    .await
+                    .expect("reload")
+                    .map(|record| record.value),
+            );
+
+            println!(
+                "two_routes/store: y_waited={y_waited} engine={engine:?} store={store:?} \
+                 reloaded={reloaded:?}"
+            );
+            assert_eq!(
+                (engine.as_deref(), store.as_deref(), reloaded.as_deref()),
+                (Some(VY), Some(VY), Some(VY)),
+                "(engine, store, reloaded by a fresh factory): the write that started later \
+                 holds the later stamp, and all three must hold its value"
+            );
+        }
+
+        /// What [`parking_stack_with_subscription`] builds.
+        struct SubscribedStack {
+            svc: Arc<CrdtService>,
+            factory: Arc<RecordStoreFactory>,
+            parking: Arc<ParkingStore>,
+            journal: Arc<JournalStore>,
+            /// Keeps the subscribed connection's channel open.
+            _listener: tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>,
+        }
+
+        /// [`parking_stack`] with a journal attached and one query subscription
+        /// on the map, so a write reads the key's previous value before it
+        /// applies.
+        fn parking_stack_with_subscription(dir: &tempfile::TempDir) -> SubscribedStack {
+            let redb: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(dir.path().join("nonres.redb")).expect("redb open"));
+            let parking = Arc::new(ParkingStore::new(redb));
+            let factory = Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                parking.clone() as Arc<dyn MapDataStore>,
+                Vec::new(),
+            ));
+            let conn_registry = Arc::new(ConnectionRegistry::new());
+            let query_registry = Arc::new(QueryRegistry::new());
+            let listener = subscribe_listener(&conn_registry, &query_registry, MAP);
+            let journal = Arc::new(JournalStore::new(100));
+            let svc = Arc::new(
+                CrdtService::new(
+                    Arc::clone(&factory),
+                    conn_registry,
+                    make_validator(),
+                    query_registry,
+                    Arc::new(SchemaService::new()),
+                )
+                .with_journal(Arc::clone(&journal)),
+            );
+            SubscribedStack {
+                svc,
+                factory,
+                parking,
+                journal,
+                _listener: listener,
+            }
+        }
+
+        // A write must not land after a write of the same key that carries a
+        // higher stamp. The only point between minting a stamp and applying it
+        // where a write can be overtaken is the read of the previous value,
+        // taken when the map has a query subscription and the key is not
+        // resident; the first writer is parked there.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_lower_stamped_put_never_lands_after_a_higher_stamped_one() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let SubscribedStack {
+                svc,
+                factory,
+                parking,
+                journal,
+                _listener,
+            } = parking_stack_with_subscription(&dir);
+            assert_not_resident(&factory);
+
+            let mut park = parking.park_after_load();
+            let x = tokio::spawn(svc.clone().oneshot(route_x(VX)));
+            // X is parked in the load of the previous value.
+            park.wait_parked().await;
+
+            let y = tokio::spawn(svc.clone().oneshot(route_y(VY)));
+            let y_waited = second_writer_waited(&svc, &y).await;
+            park.release();
+            x.await.expect("X task").expect("X must succeed");
+            y.await.expect("Y task").expect("Y must succeed");
+
+            let journal_order = journal_stamps(&journal);
+            assert_eq!(
+                journal_order.len(),
+                2,
+                "the journal must hold both writes of the key"
+            );
+            let a = journal_order.iter().min().expect("two stamps").clone();
+            let b = journal_order.iter().max().expect("two stamps").clone();
+            assert!(a < b, "the two writes must carry distinct stamps");
+            let engine_stamp = read_lww_timestamp(&factory, MAP, KEY).await;
+
+            println!(
+                "lower_stamped_put: y_waited={y_waited} a={a:?} b={b:?} engine={engine_stamp:?} \
+                 journal={journal_order:?}"
+            );
+            assert_eq!(
+                (engine_stamp, journal_order),
+                (Some(b.clone()), vec![a, b]),
+                "(engine stamp, journal order): the engine must hold the higher stamp and the \
+                 journal must record the two writes in stamp order"
+            );
+        }
+
+        // The same pair of routes over the buffered store, with the first
+        // writer parked between taking its entry sequence and entering the
+        // queue. What a read through the buffered store answers before the
+        // flush, what the flush writes and what is recovered after a restart
+        // must all be the value of the write that started later.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn two_routes_writing_one_key_leave_store_staging_and_restart_on_the_later_stamp() {
+            use crate::storage::datastores::WalBootstrap;
+            use crate::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let wal_dir = tempfile::tempdir().expect("wal tempdir");
+            let redb_path = dir.path().join("two_routes.redb");
+            let journal = Arc::new(JournalStore::new(100));
+
+            let (inner, staged_read, y_waited) = {
+                let redb: Arc<dyn MapDataStore> =
+                    Arc::new(RedbDataStore::new(&redb_path).expect("redb open"));
+                // Every frame is fsynced before its write returns, and the
+                // delays keep the flush loop from draining by itself.
+                let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
+                    .expect("wal open");
+                let write_behind = WriteBehindDataStore::new_with_wal(
+                    Arc::clone(&redb),
+                    WriteBehindConfig {
+                        write_delay_ms: 600_000,
+                        flush_interval_ms: 600_000,
+                        ..WriteBehindConfig::default()
+                    },
+                    Some(WalBootstrap {
+                        wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                        sequence_start: 1,
+                    }),
+                );
+                let factory = Arc::new(RecordStoreFactory::new(
+                    StorageConfig::default(),
+                    Arc::clone(&write_behind) as Arc<dyn MapDataStore>,
+                    Vec::new(),
+                ));
+                let svc = Arc::new(
+                    CrdtService::new(
+                        factory,
+                        Arc::new(ConnectionRegistry::new()),
+                        make_validator(),
+                        Arc::new(QueryRegistry::new()),
+                        Arc::new(SchemaService::new()),
+                    )
+                    .with_journal(Arc::clone(&journal)),
+                );
+
+                let mut park = write_behind.test_park_before_queue_insert(MAP, KEY);
+                let x = tokio::spawn(svc.clone().oneshot(route_x(VX)));
+                // X holds the lower entry sequence and is in no queue yet.
+                park.wait_parked().await;
+
+                let y = tokio::spawn(svc.clone().oneshot(route_y(VY)));
+                let y_waited = second_writer_waited(&svc, &y).await;
+                park.release();
+                x.await.expect("X task").expect("X must succeed");
+                y.await.expect("Y task").expect("Y must succeed");
+
+                // Taken before the flush: the flush empties the staging slot,
+                // and a read after it only repeats the inner store's answer.
+                let staged_read = lww_text(write_behind.load(MAP, KEY).await.expect("staged read"));
+                write_behind.hard_flush().await.expect("hard_flush");
+                let inner = lww_text(redb.load(MAP, KEY).await.expect("inner read"));
+                (inner, staged_read, y_waited)
+            };
+
+            // Restart: everything above is dropped; the same redb file and WAL
+            // directory are reopened and recovery runs over them.
+            let after_restart = {
+                let redb: Arc<dyn MapDataStore> =
+                    Arc::new(RedbDataStore::new(&redb_path).expect("redb reopen"));
+                let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
+                    .expect("wal reopen");
+                WalRecovery::new(Arc::clone(&wal), Vec::new())
+                    .run(Arc::clone(&redb))
+                    .await
+                    .expect("recovery");
+                lww_text(redb.load(MAP, KEY).await.expect("read after restart"))
+            };
+
+            let stamps = journal_stamps(&journal);
+            println!(
+                "two_routes/write_behind: y_waited={y_waited} inner={inner:?} \
+                 staged_read={staged_read:?} after_restart={after_restart:?} journal={stamps:?}"
+            );
+            assert_eq!(
+                (
+                    inner.as_deref(),
+                    staged_read.as_deref(),
+                    after_restart.as_deref()
+                ),
+                (Some(VY), Some(VY), Some(VY)),
+                "(inner store, read through the buffered store before the flush, inner store \
+                 after a restart): the write that started later holds the later stamp, and all \
+                 three must hold its value"
+            );
+            assert!(
+                stamps.len() == 2 && stamps[0] < stamps[1],
+                "the journal must record the two writes of the key in stamp order; got {stamps:?}"
+            );
+            assert!(
+                y_waited,
+                "the second writer must have waited for the key's writer while the first was parked"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
