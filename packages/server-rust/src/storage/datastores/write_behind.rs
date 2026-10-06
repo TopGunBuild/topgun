@@ -780,6 +780,9 @@ struct TestParks {
     load_slot_hits: AtomicU64,
     /// Parks the next `remove` of the key once its delete is staged.
     after_remove: Mutex<Option<(String, String, ParkGate)>>,
+    /// Parks the next write of the key once it holds its entry sequence and
+    /// before it takes the queue.
+    before_queue_insert: Mutex<Option<(String, String, ParkGate)>>,
     /// Parks `hard_flush` once the shutdown flag is set, before the flush
     /// loop is joined.
     after_shutdown_flag: Mutex<Option<ParkGate>>,
@@ -1494,6 +1497,22 @@ impl WriteBehindDataStore {
         *self
             .test_parks
             .after_remove
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((map.to_string(), key.to_string(), gate));
+        handle
+    }
+
+    /// Parks the next write of `(map, key)` between its sequence assignment
+    /// and its queue insert, so a second writer of the same key can be queued
+    /// first with a higher sequence. One-shot and held by this store instance:
+    /// the first writer of the key to reach the point parks, later ones pass.
+    #[cfg(test)]
+    pub(crate) fn test_park_before_queue_insert(&self, map: &str, key: &str) -> TestParkHandle {
+        let (gate, handle) = TestParkHandle::arm();
+        *self
+            .test_parks
+            .before_queue_insert
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some((map.to_string(), key.to_string(), gate));
@@ -2967,6 +2986,10 @@ impl MapDataStore for WriteBehindDataStore {
         // Assign and track the durability sequence atomically (see
         // `assign_tracked_sequence`) BEFORE the entry enters the queue.
         let entry_seq = self.assign_tracked_sequence();
+        #[cfg(test)]
+        if let Some(gate) = TestParks::take_keyed(&self.test_parks.before_queue_insert, map, key) {
+            gate.pass().await;
+        }
         let (operation, staged) = queued_and_staged(src, expiration_time);
         let entry = DelayedEntry {
             map: map.to_string(),
@@ -7588,6 +7611,96 @@ mod tests {
             spy.persisted("m", "b"),
             Some(newer),
             "the inner store must hold the newer write's value"
+        );
+    }
+
+    /// Two writers of one key, interleaved so that the write holding the
+    /// HIGHER entry sequence is queued first and the one holding the lower
+    /// sequence then replaces it. Nothing serialises that pair for every
+    /// caller today, so the store's accounting has to come out even under it:
+    /// no count left, no fence held, no WAL sequence left pending.
+    ///
+    /// The order is exact, not raced: the first writer is parked between its
+    /// sequence assignment and its queue insert, and the write delay keeps the
+    /// flush loop from draining anything in between.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_writers_of_one_key_interleaved_between_sequence_and_insert_leave_nothing_unaccounted(
+    ) {
+        let wal = InMemoryTestWal::new();
+        let spy = Arc::new(SpyDataStore::new());
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 600_000,
+                capacity: 0,
+                wal_watermark_stall_bound_ms: 600_000,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+        let partition = partition_for("m", "k");
+        let k = ("m".to_string(), "k".to_string());
+        let queued_sequence = || {
+            store
+                .queues
+                .get(&partition)
+                .and_then(|queue| queue.entries.get(&k).map(|entry| entry.sequence))
+        };
+
+        // X takes the lower sequence and parks before it reaches the queue.
+        let mut park = store.test_park_before_queue_insert("m", "k");
+        let x = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .add("m", "k", &dummy_value_with(1), 0, now_millis())
+                    .await
+            })
+        };
+        park.wait_parked().await;
+
+        // Y runs to completion while X is parked: higher sequence, queued first.
+        store
+            .add("m", "k", &dummy_value_with(2), 0, now_millis())
+            .await
+            .expect("y is accepted into the buffer");
+        assert_eq!(
+            (queued_sequence(), store.assigned_write_sequence()),
+            (Some(1), 2),
+            "setup: y must be queued with the higher of the two sequences handed out"
+        );
+
+        park.release();
+        x.await
+            .expect("x did not panic")
+            .expect("x is accepted into the buffer");
+        let staged_sequence = store.staging.get(&k).map(|slot| slot.seq);
+        assert_eq!(
+            (queued_sequence(), staged_sequence),
+            (Some(0), Some(1)),
+            "setup: x must have replaced y in the queue while staging keeps y's higher sequence"
+        );
+
+        store
+            .hard_flush()
+            .await
+            .expect("the drain stores what is queued");
+
+        // Accounting only. Which value the inner store and staging end up with
+        // is deliberately not asserted: in this interleaving the two are known
+        // to differ, that is a defect of the callers that write one key
+        // concurrently, and a green run here must not be read as covering it.
+        assert_eq!(
+            (
+                store.pending_operation_count(),
+                (store.flushed_watermark(), store.assigned_write_sequence()),
+                store.test_pending_wal_sequences(partition),
+            ),
+            (0, (2, 2), vec![]),
+            "an entry replaced by a lower-sequence write of its key must leave nothing unaccounted"
         );
     }
 }
