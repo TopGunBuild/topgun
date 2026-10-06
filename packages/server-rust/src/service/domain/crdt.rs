@@ -12799,6 +12799,62 @@ mod tests {
                 "the journal must record the two writes of the key in stamp order"
             );
         }
+
+        // An OR push arrives through the sync service and an LWW put through
+        // the CRDT service. Parked inside its store write, the push must hold
+        // the key's writer the two services share, so the put of the same key
+        // waits for it and the engine and the store end on the same value.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn an_lww_put_waits_for_a_parked_or_push_of_the_same_key() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (svc, factory, redb, parking) = parking_stack(&dir);
+            let sync = sync_sharing_writer(&svc, &factory);
+
+            let mut park = parking.park_before_add();
+            let pusher = tokio::spawn(
+                sync.clone()
+                    .oneshot(push_op(vec![push_entry(KEY, &PUSHED)])),
+            );
+            // The push has merged its entries into the engine and is parked on
+            // entry to its store write.
+            park.wait_parked().await;
+
+            let put = tokio::spawn(svc.clone().oneshot(route_x(VY)));
+            let put_waited = second_writer_waited(&svc, &put).await;
+            park.release();
+            pusher.await.expect("push task").expect("push must succeed");
+            put.await.expect("put task").expect("put must succeed");
+
+            let engine = factory
+                .get_or_create(MAP, hash_to_partition(KEY))
+                .get(KEY, false)
+                .await
+                .expect("engine read")
+                .map(|record| record.value);
+            let store = redb.load(MAP, KEY).await.expect("store read");
+            // Compared in serialised form: `RecordValue` has no `PartialEq`.
+            let engine_equals_store = rmp_serde::to_vec_named(&engine).expect("encode engine")
+                == rmp_serde::to_vec_named(&store).expect("encode store");
+            let kind = |value: &Option<RecordValue>| match value {
+                Some(RecordValue::Lww { .. }) => "lww",
+                Some(RecordValue::OrMap { .. }) => "or-map",
+                Some(RecordValue::OrTombstones { .. }) => "or-tombstones",
+                None => "absent",
+            };
+
+            println!(
+                "pair_d: put_waited={put_waited} engine_equals_store={engine_equals_store} \
+                 engine_kind={} store_kind={}",
+                kind(&engine),
+                kind(&store)
+            );
+            assert_eq!(
+                (put_waited, engine_equals_store),
+                (true, true),
+                "(the put waited for the key's writer, engine == store): the push holds the \
+                 writer the two services share across its store write"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
