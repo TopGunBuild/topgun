@@ -109,6 +109,9 @@ pub struct CrdtService {
     /// the low-water-mark it reads are one authority (a second frontier would
     /// stamp epochs no client ever ACKs).
     frontier: Option<Arc<TombstoneFrontier>>,
+    #[cfg(test)]
+    /// The one park a test may arm in front of this service's writer acquire.
+    before_acquire_park: BeforeAcquirePark,
 }
 
 impl CrdtService {
@@ -130,6 +133,8 @@ impl CrdtService {
             journal: None,
             key_writer: Arc::new(KeyWriterRegistry::new()),
             frontier: None,
+            #[cfg(test)]
+            before_acquire_park: BeforeAcquirePark::default(),
         }
     }
 
@@ -918,6 +923,8 @@ impl CrdtService {
             .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
             .await;
 
+        #[cfg(test)]
+        self.before_acquire_park.pass(&op.map_name, &op.key).await;
         let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
 
         let sanitized_ts = match stamp {
@@ -2370,6 +2377,97 @@ pub fn spawn_prune_task(
             }
         }
     }))
+}
+
+#[cfg(test)]
+/// The parked op's ends of the two signals of a park: it sends "parked" and
+/// awaits "release".
+type BeforeAcquireGate = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(test)]
+/// At most one armed park, for one `(map, key)`, in front of the writer
+/// acquire of `apply_op_under_writer`. It belongs to one service, so tests
+/// running side by side in one process cannot consume each other's park.
+#[derive(Default)]
+struct BeforeAcquirePark(std::sync::Mutex<Option<(String, String, BeforeAcquireGate)>>);
+
+#[cfg(test)]
+impl BeforeAcquirePark {
+    /// Parks the caller iff the park is armed for this key: reports "parked",
+    /// then waits until the test releases it or drops its end. The gate is
+    /// taken out of the slot, which is what makes the park fire once.
+    async fn pass(&self, map: &str, key: &str) {
+        let gate = {
+            let mut slot = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot
+                .as_ref()
+                .is_some_and(|(m, k, _)| m.as_str() == map && k.as_str() == key)
+            {
+                slot.take().map(|(_, _, gate)| gate)
+            } else {
+                None
+            }
+        };
+        if let Some((parked, release)) = gate {
+            let _ = parked.send(());
+            let _ = release.await;
+        }
+    }
+}
+
+#[cfg(test)]
+/// The test's side of the park in front of the writer acquire. Dropping it
+/// releases the parked op, so a failing test never leaves a task parked.
+struct BeforeAcquireParkHandle {
+    parked: Option<tokio::sync::oneshot::Receiver<()>>,
+    release: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+#[cfg(test)]
+impl BeforeAcquireParkHandle {
+    /// Waits until the op parks; panics after two seconds, which means the
+    /// setup never reached the park point.
+    async fn wait_parked(&mut self) {
+        let parked = self.parked.take().expect("wait_parked called once");
+        tokio::time::timeout(std::time::Duration::from_secs(2), parked)
+            .await
+            .expect("the op never parked: the setup did not reach the park point")
+            .expect("park dropped before parking");
+    }
+
+    fn release(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+#[cfg(test)]
+impl CrdtService {
+    /// Arms the park for the next client op of `(map, key)` on this service:
+    /// that op stops after its read of the previous value and immediately
+    /// before it asks for the key's writer, holding neither the writer nor a
+    /// stamp.
+    fn test_park_before_acquire(&self, map: &str, key: &str) -> BeforeAcquireParkHandle {
+        let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self
+            .before_acquire_park
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((map.to_string(), key.to_string(), (parked_tx, release_rx)));
+        BeforeAcquireParkHandle {
+            parked: Some(parked_rx),
+            release: Some(release_tx),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
