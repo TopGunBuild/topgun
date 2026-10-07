@@ -3819,6 +3819,46 @@ mod tests {
         );
     }
 
+    /// Whether two puts of one key both had to wait for the key's writer while
+    /// the caller held it: `false` when both returned instead.
+    ///
+    /// A put passing through `acquire` on a free lock is counted as waiting for
+    /// an instant, so one sighting does not tell blocked puts from puts in
+    /// transit. The wait counts only when it is stable: both seen waiting
+    /// again, and both still unfinished, at each of `STABLE_WAIT_YIELDS`
+    /// consecutive yields after the first sighting. Blocked puts stay blocked
+    /// for as long as the caller holds the writer, so no outcome depends on how
+    /// long the yields take; `bound` only reports a setup in which the puts
+    /// neither returned nor waited.
+    async fn both_puts_waited<T>(
+        key_writer: &KeyWriterRegistry,
+        first: &tokio::task::JoinHandle<T>,
+        second: &tokio::task::JoinHandle<T>,
+        bound: Duration,
+    ) -> bool {
+        const STABLE_WAIT_YIELDS: usize = 200;
+        tokio::time::timeout(bound, async {
+            let mut sightings_after_first = 0;
+            loop {
+                let finished = (first.is_finished(), second.is_finished());
+                if finished == (true, true) {
+                    return false;
+                }
+                if finished == (false, false) && key_writer.test_waiting() == 2 {
+                    if sightings_after_first == STABLE_WAIT_YIELDS {
+                        return true;
+                    }
+                    sightings_after_first += 1;
+                } else {
+                    sightings_after_first = 0;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the two puts neither returned nor waited for the key's writer")
+    }
+
     // Two LWW puts of one key from two tasks on one node must wait on the
     // node's shared per-key writer and be applied in stamp order. Around a
     // partition the harness's sync call moves nothing across the cut, and after
@@ -3894,23 +3934,10 @@ mod tests {
         let first = spawn_put("node0-first");
         let second = spawn_put("node0-second");
 
-        // 3. Either both puts return (they take no writer), or both are counted
-        // as waiting for the writer the test holds. Exactly one of the two
-        // happens, so the loop needs no timing margin.
-        let both_waited = tokio::time::timeout(WAIT_BOUND, async {
-            loop {
-                let finished = (first.is_finished(), second.is_finished());
-                if finished == (true, true) {
-                    return false;
-                }
-                if finished == (false, false) && cluster.nodes[0].key_writer.test_waiting() == 2 {
-                    return true;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the two puts neither returned nor waited for the key's writer");
+        // 3. Either both puts return (they take no writer), or both stay
+        // counted as waiting for the writer the test holds.
+        let both_waited =
+            both_puts_waited(&cluster.nodes[0].key_writer, &first, &second, WAIT_BOUND).await;
 
         // 4. Cut node 0 off and write the key on node 1, which has its own
         // registry and so does not see the writer held on node 0.
@@ -4021,6 +4048,214 @@ mod tests {
             (true, true, true, true),
             "(both puts waited for the held writer, node 0 applied them in stamp order, the two \
              sides differ while partitioned, every node holds the highest stamp after the heal)"
+        );
+    }
+
+    // The same two puts with the highest of the three stamps on the OTHER side
+    // of the cut: node 1 writes the key only after node 0 has applied both
+    // puts and the wall clock has passed their millisecond, so node 1's stamp
+    // is the highest and the heal must bring node 0 to node 1's value.
+    //
+    // A node's clock cannot be set from a test (each node builds its own over
+    // the system clock), so the order is made by waiting for the system clock
+    // to pass a known stamp. That is a condition which stays true once
+    // reached, not a margin.
+    #[tokio::test]
+    async fn same_key_puts_on_one_node_converge_to_a_higher_stamp_from_across_the_partition() {
+        const MAP: &str = "events";
+        const KEY: &str = "k";
+        /// How long the test waits for a point both the unfixed and the fixed
+        /// code reach before it declares the setup broken.
+        const WAIT_BOUND: Duration = Duration::from_secs(5);
+
+        /// An LWW put of [`KEY`] from an anonymous caller without a
+        /// connection, so the node that receives it mints the stamp.
+        fn anonymous_put(payload: &str) -> Operation {
+            let forged = Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: "client".to_string(),
+            };
+            let mut ctx = OperationContext::new(0, service_names::CRDT, forged.clone(), 5000);
+            ctx.partition_id = Some(topgun_core::hash_to_partition(KEY));
+            ctx.caller_origin = CallerOrigin::Anonymous;
+            Operation::ClientOp {
+                ctx,
+                payload: ClientOpMessage {
+                    payload: ClientOp {
+                        id: Some(format!("{MAP}/{KEY}/{payload}")),
+                        map_name: MAP.to_string(),
+                        key: KEY.to_string(),
+                        op_type: None,
+                        record: Some(Some(LWWRecord {
+                            value: Some(rmpv::Value::String(payload.into())),
+                            timestamp: forged,
+                            ttl_ms: None,
+                        })),
+                        or_record: None,
+                        or_tag: None,
+                        write_concern: None,
+                        timeout: None,
+                    },
+                },
+            }
+        }
+
+        fn stamp_of(value: Option<&RecordValue>) -> Option<Timestamp> {
+            match value {
+                Some(RecordValue::Lww { timestamp, .. }) => Some(timestamp.clone()),
+                _ => None,
+            }
+        }
+
+        // Compared in serialised form: `RecordValue` has no `PartialEq`.
+        fn encoded(value: Option<&RecordValue>) -> Vec<u8> {
+            rmp_serde::to_vec_named(&value).expect("encode record value")
+        }
+
+        fn system_millis() -> u128 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is before Unix epoch")
+                .as_millis()
+        }
+
+        let mut cluster = SimCluster::new(3, 384);
+        cluster.start().expect("cluster start");
+
+        // 1. The test holds the key's writer on node 0, and two puts of the key
+        // on node 0, each from its own task, either return or wait for it.
+        let held = cluster.nodes[0].key_writer.acquire(MAP, KEY).await;
+        let spawn_put = |payload: &'static str| {
+            let mut svc = Arc::clone(&cluster.nodes[0].crdt_service);
+            tokio::spawn(async move { Service::call(&mut svc, anonymous_put(payload)).await })
+        };
+        let first = spawn_put("node0-first");
+        let second = spawn_put("node0-second");
+        let both_waited =
+            both_puts_waited(&cluster.nodes[0].key_writer, &first, &second, WAIT_BOUND).await;
+
+        // 2. Cut node 0 off, release the writer and let both puts finish.
+        cluster.inject_partition(&[0], &[1, 2]);
+        drop(held);
+        first
+            .await
+            .expect("first put task")
+            .expect("the first put must succeed");
+        second
+            .await
+            .expect("second put task")
+            .expect("the second put must succeed");
+        let node0_stamps: Vec<Timestamp> = cluster.nodes[0]
+            .journal_store
+            .read(0, 100, Some(MAP))
+            .0
+            .into_iter()
+            .filter(|event| event.key == KEY)
+            .map(|event| event.timestamp)
+            .collect();
+        let node0_stamp = stamp_of(
+            cluster
+                .read(0, MAP, KEY)
+                .await
+                .expect("read node 0")
+                .as_ref(),
+        );
+        let journal_ascending = node0_stamps.len() == 2
+            && node0_stamps[0] < node0_stamps[1]
+            && node0_stamp.as_ref() == Some(&node0_stamps[1]);
+        let node0_highest = node0_stamps
+            .iter()
+            .max()
+            .cloned()
+            .expect("node 0 journalled its puts");
+
+        // 3. Once the system clock is past node 0's highest stamp, write the
+        // key on node 1: its clock then mints above every stamp of node 0.
+        tokio::time::timeout(WAIT_BOUND, async {
+            while system_millis() <= u128::from(node0_highest.millis) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the system clock never passed node 0's highest stamp");
+        let mut svc1 = Arc::clone(&cluster.nodes[1].crdt_service);
+        Service::call(&mut svc1, anonymous_put("node1-isolated"))
+            .await
+            .expect("the put on node 1 must succeed");
+        let node1_stamp = stamp_of(
+            cluster
+                .read(1, MAP, KEY)
+                .await
+                .expect("read node 1")
+                .as_ref(),
+        )
+        .expect("node 1 holds its own write");
+        assert!(
+            node1_stamp > node0_highest,
+            "precondition: node 1's stamp {node1_stamp:?} must be above node 0's highest \
+             {node0_highest:?}"
+        );
+
+        // 4. With the partition still up, attempt a sync across it in both
+        // directions.
+        cluster
+            .merkle_sync_pair(1, 0, MAP)
+            .await
+            .expect("sync 1 -> 0 across the partition");
+        cluster
+            .merkle_sync_pair(0, 1, MAP)
+            .await
+            .expect("sync 0 -> 1 across the partition");
+        let cut_node0 = cluster.read(0, MAP, KEY).await.expect("read node 0");
+        let cut_node1 = cluster.read(1, MAP, KEY).await.expect("read node 1");
+        let differ_under_partition = cut_node0.is_some()
+            && cut_node1.is_some()
+            && encoded(cut_node0.as_ref()) != encoded(cut_node1.as_ref());
+
+        // 5. Heal and run the same sync call over every pair.
+        cluster.heal_partition();
+        for src in 0..3 {
+            for dst in 0..3 {
+                if src != dst {
+                    cluster
+                        .merkle_sync_pair(src, dst, MAP)
+                        .await
+                        .expect("sync after the heal");
+                }
+            }
+        }
+        let mut healed = Vec::new();
+        for node in 0..3 {
+            healed.push(
+                cluster
+                    .read(node, MAP, KEY)
+                    .await
+                    .expect("read after the heal"),
+            );
+        }
+        let converged = healed.iter().all(|value| {
+            stamp_of(value.as_ref()).as_ref() == Some(&node1_stamp)
+                && encoded(value.as_ref()) == encoded(healed[0].as_ref())
+        });
+
+        println!(
+            "sim/same_key_puts_mirrored: both_waited={both_waited} \
+             journal_ascending={journal_ascending} \
+             differ_under_partition={differ_under_partition} converged={converged} \
+             node0_journal={node0_stamps:?} node0_store={node0_stamp:?} node1={node1_stamp:?} \
+             highest={node1_stamp:?}"
+        );
+        assert_eq!(
+            (
+                both_waited,
+                journal_ascending,
+                differ_under_partition,
+                converged
+            ),
+            (true, true, true, true),
+            "(both puts waited for the held writer, node 0 applied them in stamp order, the two \
+             sides differ while partitioned, every node holds node 1's stamp after the heal)"
         );
     }
 }

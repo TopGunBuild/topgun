@@ -11951,20 +11951,34 @@ mod tests {
         }
 
         /// Whether the second writer had to wait for the key's writer while the
-        /// first one was parked: `false` when it returned instead. Exactly one
-        /// of the two happens, so the loop needs no timing margin; the bound
-        /// only reports a setup in which neither did.
+        /// first one was parked: `false` when it returned instead.
+        ///
+        /// A writer passing through `acquire` on a free lock is counted as
+        /// waiting for an instant, so one sighting does not tell a blocked
+        /// writer from one in transit. The wait counts only when it is stable:
+        /// seen again, with the writer still unfinished, at each of
+        /// `STABLE_WAIT_YIELDS` consecutive yields after the first sighting. A
+        /// blocked writer stays blocked for as long as the first one is parked,
+        /// so no outcome depends on how long the yields take; the bound only
+        /// reports a setup in which the writer neither returned nor waited.
         async fn second_writer_waited<T>(
             svc: &CrdtService,
             second: &tokio::task::JoinHandle<T>,
         ) -> bool {
+            const STABLE_WAIT_YIELDS: usize = 200;
             tokio::time::timeout(PARK_BOUND, async {
+                let mut sightings_after_first = 0;
                 loop {
                     if second.is_finished() {
                         return false;
                     }
                     if svc.key_writer.test_waiting() == 1 {
-                        return true;
+                        if sightings_after_first == STABLE_WAIT_YIELDS {
+                            return true;
+                        }
+                        sightings_after_first += 1;
+                    } else {
+                        sightings_after_first = 0;
                     }
                     tokio::task::yield_now().await;
                 }

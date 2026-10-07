@@ -1956,17 +1956,31 @@ mod tests {
         }
 
         /// Whether the client write had to wait for the key's writer while the
-        /// write-back was held: `false` when it returned instead. Exactly one
-        /// of the two happens, so the loop needs no timing margin; the bound
-        /// only reports a setup in which neither did.
+        /// write-back was held: `false` when it returned instead.
+        ///
+        /// A write passing through `acquire` on a free lock is counted as
+        /// waiting for an instant, so one sighting does not tell a blocked
+        /// write from one in transit. The wait counts only when it is stable:
+        /// seen again, with the write still unfinished, at each of
+        /// `STABLE_WAIT_YIELDS` consecutive yields after the first sighting. A
+        /// blocked write stays blocked for as long as the write-back is held,
+        /// so no outcome depends on how long the yields take; the bound only
+        /// reports a setup in which the write neither returned nor waited.
         async fn client_write_waited<T>(rig: &Rig, write: &tokio::task::JoinHandle<T>) -> bool {
+            const STABLE_WAIT_YIELDS: usize = 200;
             tokio::time::timeout(WAIT_BOUND, async {
+                let mut sightings_after_first = 0;
                 loop {
                     if write.is_finished() {
                         return false;
                     }
                     if rig.key_writer.test_waiting() == 1 {
-                        return true;
+                        if sightings_after_first == STABLE_WAIT_YIELDS {
+                            return true;
+                        }
+                        sightings_after_first += 1;
+                    } else {
+                        sightings_after_first = 0;
                     }
                     tokio::task::yield_now().await;
                 }
