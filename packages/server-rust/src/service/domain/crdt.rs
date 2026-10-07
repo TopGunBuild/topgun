@@ -12257,6 +12257,93 @@ mod tests {
             );
         }
 
+        // The stamp of a write is minted under the key's writer. X is parked
+        // in front of its acquire: it has read the previous value and holds
+        // neither the writer nor a stamp. Y then runs to completion. X enters
+        // the critical section last and its value is what the engine and the
+        // store keep, so it must also carry the higher stamp. A stamp minted
+        // in front of the acquire would give X the lower one.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_put_that_takes_the_writer_last_carries_the_higher_stamp() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let redb: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(dir.path().join("mint.redb")).expect("redb open"));
+            let factory = Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::clone(&redb),
+                Vec::new(),
+            ));
+            let journal = Arc::new(JournalStore::new(100));
+            let svc = Arc::new(
+                CrdtService::new(
+                    Arc::clone(&factory),
+                    Arc::new(ConnectionRegistry::new()),
+                    make_validator(),
+                    Arc::new(QueryRegistry::new()),
+                    Arc::new(SchemaService::new()),
+                )
+                .with_journal(Arc::clone(&journal)),
+            );
+
+            let mut park = svc.test_park_before_acquire(MAP, KEY);
+            let x = tokio::spawn(svc.clone().oneshot(route_x(VX)));
+            park.wait_parked().await;
+
+            // X holds no writer, so Y is not kept waiting.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                svc.clone().oneshot(route_y(VY)),
+            )
+            .await
+            .expect("Y must complete while X is parked in front of its acquire")
+            .expect("Y must succeed");
+            assert_eq!(
+                journal_stamps(&journal).len(),
+                1,
+                "precondition: Y alone has been applied while X is parked"
+            );
+
+            park.release();
+            x.await.expect("X task").expect("X must succeed");
+
+            let journal_order = journal_stamps(&journal);
+            assert_eq!(
+                journal_order.len(),
+                2,
+                "the journal must hold both writes of the key"
+            );
+            let a = journal_order.iter().min().expect("two stamps").clone();
+            let b = journal_order.iter().max().expect("two stamps").clone();
+            assert!(a < b, "the two writes must carry distinct stamps");
+            let engine_stamp = read_lww_timestamp(&factory, MAP, KEY).await;
+            let engine = lww_text(
+                factory
+                    .get_or_create(MAP, hash_to_partition(KEY))
+                    .get(KEY, false)
+                    .await
+                    .expect("engine read")
+                    .map(|record| record.value),
+            );
+            let store = lww_text(redb.load(MAP, KEY).await.expect("store read"));
+
+            println!(
+                "mint_under_writer: a={a:?} b={b:?} engine_stamp={engine_stamp:?} \
+                 journal={journal_order:?} engine={engine:?} store={store:?}"
+            );
+            assert_eq!(
+                (
+                    engine_stamp,
+                    journal_order,
+                    engine.as_deref(),
+                    store.as_deref()
+                ),
+                (Some(b.clone()), vec![a, b], Some(VX), Some(VX)),
+                "(engine stamp, journal order, engine value, store value): X took the writer \
+                 last, so it must hold the higher stamp, be recorded second, and its value \
+                 must be the one the engine and the store keep"
+            );
+        }
+
         // The same pair of routes over the buffered store, with the first
         // writer parked between taking its entry sequence and entering the
         // queue. What a read through the buffered store answers before the
