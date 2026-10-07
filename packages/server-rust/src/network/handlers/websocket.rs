@@ -764,19 +764,28 @@ async fn dispatch_message(
         return;
     }
 
+    dispatch_one_message(tg_msg, conn_id, principal, &classify_svc, &dispatcher, &tx).await;
+}
+
+/// Routes one message that is not a transport envelope and answers it.
+///
+/// An operation batch is split by partition; anything else is classified and
+/// dispatched as a single operation. Everything a message can be answered with
+/// is decided here, so that a caller holding a message has one place to hand it
+/// to and the answer cannot depend on which caller that was.
+async fn dispatch_one_message(
+    tg_msg: TopGunMessage,
+    conn_id: ConnectionId,
+    principal: Option<Principal>,
+    classify_svc: &OperationService,
+    dispatcher: &Arc<PartitionDispatcher>,
+    tx: &mpsc::Sender<OutboundMessage>,
+) {
     // Intercept OpBatch messages before generic classify/dispatch.
     // Split by partition so each sub-batch runs on a dedicated partition worker
     // rather than serializing all ops on the single global worker.
     if let TopGunMessage::OpBatch(ref batch_msg) = tg_msg {
-        dispatch_op_batch(
-            batch_msg,
-            conn_id,
-            principal,
-            &classify_svc,
-            &dispatcher,
-            &tx,
-        )
-        .await;
+        dispatch_op_batch(batch_msg, conn_id, principal, classify_svc, dispatcher, tx).await;
         return;
     }
 
@@ -794,7 +803,7 @@ async fn dispatch_message(
             // Route through the partition dispatcher (MPSC channel per worker)
             match dispatcher.dispatch(op).await {
                 Ok(resp) => {
-                    send_operation_response(resp, &tx).await;
+                    send_operation_response(resp, tx).await;
                 }
                 Err(OperationError::Overloaded) => {
                     // Worker inbox is full; tell the client to back off and retry.
@@ -832,6 +841,15 @@ async fn dispatch_message(
             // Client should not send server-to-client messages
             debug!(
                 "ignoring server-to-client message '{}' from {:?}",
+                variant, conn_id
+            );
+        }
+        Err(ClassifyError::RequiresPartitionSplit { variant }) => {
+            // An operation batch is split above and never classified whole, so
+            // this is a routing bug on the server, not a client mistake: say so
+            // loudly and send nothing rather than run the batch off its workers.
+            warn!(
+                "message '{}' from {:?} reached classification without a partition split",
                 variant, conn_id
             );
         }
