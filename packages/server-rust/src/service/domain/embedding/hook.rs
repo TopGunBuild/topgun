@@ -5,6 +5,8 @@
 //! embedding generation events. A background `tokio::spawn` task batches events,
 //! calls `EmbeddingProvider::batch_embed`, and writes the resulting vector back
 //! to the record's `_embedding` field via a read-modify-write on `RecordStoreFactory`.
+//! That read-modify-write runs under the record's per-key writer and is dropped
+//! when the record has been written since the text was read (TG-KEY-001).
 //!
 //! Follows the same unbounded-channel + background-batch-processor pattern as
 //! `SearchMutationObserver` in `search.rs`, swapping tantivy indexing for
@@ -204,6 +206,9 @@ struct EmbeddingEvent {
     partition_id: u32,
     /// Concatenated text from all configured fields for this record.
     text: String,
+    /// The stamp of the record version `text` was extracted from. The
+    /// write-back attaches the vector only while the record still carries it.
+    source_timestamp: Timestamp,
     #[cfg(test)]
     /// The park a test armed for this record, carried to the write-back of
     /// exactly this event.
@@ -318,7 +323,7 @@ impl EmbeddingMutationObserver {
 
     /// Extracts text from configured fields in the rmpv value and enqueues
     /// an embedding event if the result is non-empty and not in-flight.
-    fn enqueue_if_applicable(&self, key: &str, rmpv_val: &rmpv::Value) {
+    fn enqueue_if_applicable(&self, key: &str, rmpv_val: &rmpv::Value, timestamp: &Timestamp) {
         // Re-entrancy guard: skip if the batch processor is currently writing back
         // an embedding for this record to avoid infinite observer loops.
         if self
@@ -338,6 +343,7 @@ impl EmbeddingMutationObserver {
             key: key.to_owned(),
             partition_id: self.partition_id,
             text,
+            source_timestamp: timestamp.clone(),
             #[cfg(test)]
             write_back_park: self
                 .write_back_park
@@ -355,11 +361,10 @@ impl MutationObserver for EmbeddingMutationObserver {
         _old_value: Option<&RecordValue>,
         _is_backup: bool,
     ) {
-        let rmpv_val = match &record.value {
-            RecordValue::Lww { value, .. } => value_to_rmpv(value),
-            _ => return,
+        let RecordValue::Lww { value, timestamp } = &record.value else {
+            return;
         };
-        self.enqueue_if_applicable(key, &rmpv_val);
+        self.enqueue_if_applicable(key, &value_to_rmpv(value), timestamp);
     }
 
     fn on_update(
@@ -370,11 +375,10 @@ impl MutationObserver for EmbeddingMutationObserver {
         new_value: &RecordValue,
         _is_backup: bool,
     ) {
-        let rmpv_val = match new_value {
-            RecordValue::Lww { value, .. } => value_to_rmpv(value),
-            _ => return,
+        let RecordValue::Lww { value, timestamp } = new_value else {
+            return;
         };
-        self.enqueue_if_applicable(key, &rmpv_val);
+        self.enqueue_if_applicable(key, &value_to_rmpv(value), timestamp);
     }
 
     fn on_remove(&self, _key: &str, _record: &Record, _is_backup: bool) {}
@@ -440,6 +444,7 @@ async fn run_embedding_batch_processor(
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     provider: Arc<dyn EmbeddingProvider>,
     record_store_factory: Arc<RecordStoreFactory>,
+    key_writer: Arc<KeyWriterRegistry>,
     batch_interval: Duration,
     batch_flush_threshold: usize,
     in_flight: Arc<DashSet<(String, String)>>,
@@ -460,7 +465,7 @@ async fn run_embedding_batch_processor(
                             batch.push(evt);
                         }
                         if !batch.is_empty() {
-                            flush_batch(batch, &provider, &record_store_factory, &in_flight, &health).await;
+                            flush_batch(batch, &provider, &record_store_factory, &key_writer, &in_flight, &health).await;
                         }
                         return;
                     }
@@ -497,7 +502,7 @@ async fn run_embedding_batch_processor(
                                 batch.push(evt);
                             }
                             if !batch.is_empty() {
-                                flush_batch(batch, &provider, &record_store_factory, &in_flight, &health).await;
+                                flush_batch(batch, &provider, &record_store_factory, &key_writer, &in_flight, &health).await;
                             }
                             return;
                         }
@@ -517,6 +522,7 @@ async fn run_embedding_batch_processor(
                 current_batch,
                 &provider,
                 &record_store_factory,
+                &key_writer,
                 &in_flight,
                 &health,
             )
@@ -527,14 +533,15 @@ async fn run_embedding_batch_processor(
 
 /// Processes one batch: calls `batch_embed` and writes results back to `RecordStore`.
 ///
-/// Uses read-modify-write to merge `_embedding` into existing record fields without
-/// clobbering user data. Inserts `(map_name, key)` into `in_flight` before each
-/// write-back and removes it after, so the observer's re-entrancy guard fires
-/// when the batch processor's own write arrives at the observer.
+/// The provider call is made with no key writer held — it can take as long as
+/// the provider likes, and a writer held across it would stall every client
+/// write of the batch's keys. Each write-back then takes its own record's
+/// writer, one at a time.
 async fn flush_batch(
     batch: Vec<EmbeddingEvent>,
     provider: &Arc<dyn EmbeddingProvider>,
     record_store_factory: &Arc<RecordStoreFactory>,
+    key_writer: &KeyWriterRegistry,
     in_flight: &Arc<DashSet<(String, String)>>,
     health: &EmbeddingHealth,
 ) {
@@ -573,7 +580,9 @@ async fn flush_batch(
     let mut records_embedded: u64 = 0;
     let mut writeback_failed: u64 = 0;
     for (evt, embedding) in batch.into_iter().zip(embeddings.into_iter()) {
-        match write_back_one_embedding(&evt, embedding, record_store_factory, in_flight).await {
+        match write_back_one_embedding(&evt, embedding, record_store_factory, key_writer, in_flight)
+            .await
+        {
             WriteBackOutcome::Embedded => records_embedded += 1,
             WriteBackOutcome::Failed => writeback_failed += 1,
             WriteBackOutcome::Skipped => {}
@@ -608,7 +617,8 @@ async fn flush_batch(
 enum WriteBackOutcome {
     /// `_embedding` was written.
     Embedded,
-    /// Nothing to do — the record was gone or not an LWW value at write-back time.
+    /// Nothing to do — at write-back time the record was gone, was not an LWW
+    /// value, or had been written again since its text was read.
     Skipped,
     /// Write-back failed on a real error (read / serialize / put) — the record is
     /// left without an `_embedding` despite a healthy provider.
@@ -616,15 +626,48 @@ enum WriteBackOutcome {
 }
 
 /// Writes one record's `_embedding` back via read-modify-write, preserving all
-/// existing user fields. Inserts `(map_name, key)` into `in_flight` around the
-/// write so the observer's re-entrancy guard fires for the hook's own write.
+/// existing user fields.
+///
+/// The whole read-modify-write runs under the record's per-key writer, the one
+/// every client write of the key holds (TG-KEY-001), so no client write can
+/// land between the read and the put and be overwritten by it. The vector is
+/// attached only if the record still carries the stamp its text was read
+/// under; a record written again in the meantime is left alone — that write
+/// enqueued its own event, and its text is the one to embed.
+///
+/// `(map_name, key)` is in `in_flight` only while the writer is held, so the
+/// one observer call that can see it is the one this function's own `put`
+/// makes: the re-entrancy guard can no longer swallow a client write's event.
 async fn write_back_one_embedding(
     evt: &EmbeddingEvent,
     embedding: Vec<f32>,
     record_store_factory: &Arc<RecordStoreFactory>,
+    key_writer: &KeyWriterRegistry,
     in_flight: &Arc<DashSet<(String, String)>>,
 ) -> WriteBackOutcome {
     let store = record_store_factory.get_or_create(&evt.map_name, evt.partition_id);
+
+    // Serialize the embedding in the canonical `Vector` wire form
+    // (`{"type":"f32","data":<LE bytes>}`) so the vector index's
+    // `decode_vector_from_record` can read it back. A bare `Vec<f32>` would
+    // serialize as a plain MsgPack array and silently fail to decode as a
+    // `Vector`, leaving the HNSW index empty.
+    let embedding_vector = topgun_core::vector::Vector::F32(embedding);
+    let embedding_bytes = match rmp_serde::to_vec_named(&embedding_vector) {
+        Ok(b) => b,
+        Err(err) => {
+            tracing::warn!(
+                "embedding write-back failed for {}/{}: serialize error: {err}",
+                evt.map_name,
+                evt.key
+            );
+            return WriteBackOutcome::Failed;
+        }
+    };
+
+    // Taken only now, with the provider's result in hand and serialized: the
+    // critical section holds a read, a check and a put, and nothing slower.
+    let key_guard = key_writer.acquire(&evt.map_name, &evt.key).await;
 
     // Read existing record to perform a complete read-modify-write.
     // Write-back must preserve all existing user fields.
@@ -651,28 +694,7 @@ async fn write_back_one_embedding(
     #[cfg(test)]
     WriteBackPark::pass(evt.write_back_park.as_ref()).await;
 
-    // Serialize the embedding in the canonical `Vector` wire form
-    // (`{"type":"f32","data":<LE bytes>}`) so the vector index's
-    // `decode_vector_from_record` can read it back. A bare `Vec<f32>` would
-    // serialize as a plain MsgPack array and silently fail to decode as a
-    // `Vector`, leaving the HNSW index empty.
-    let embedding_vector = topgun_core::vector::Vector::F32(embedding);
-    let embedding_bytes = match rmp_serde::to_vec_named(&embedding_vector) {
-        Ok(b) => b,
-        Err(err) => {
-            tracing::warn!(
-                "embedding write-back failed for {}/{}: serialize error: {err}",
-                evt.map_name,
-                evt.key
-            );
-            return WriteBackOutcome::Failed;
-        }
-    };
-
-    // Merge `_embedding` into the existing Value::Map.
-    let merged_value = if let RecordValue::Lww { value, .. } = existing.value {
-        merge_embedding_into_value(value, embedding_bytes)
-    } else {
+    let RecordValue::Lww { value, timestamp } = existing.value else {
         tracing::warn!(
             "embedding write-back skipped for {}/{}: non-LWW record",
             evt.map_name,
@@ -680,6 +702,20 @@ async fn write_back_one_embedding(
         );
         return WriteBackOutcome::Skipped;
     };
+
+    // The record was written again after this event's text was read: the
+    // vector describes a value that is no longer there.
+    if timestamp != evt.source_timestamp {
+        tracing::debug!(
+            "embedding write-back skipped for {}/{}: record superseded since its text was read",
+            evt.map_name,
+            evt.key
+        );
+        return WriteBackOutcome::Skipped;
+    }
+
+    // Merge `_embedding` into the existing Value::Map.
+    let merged_value = merge_embedding_into_value(value, embedding_bytes);
 
     // Construct a synthetic timestamp for the write-back.
     // Truncation from u128 to u64 is acceptable: ms since epoch fits in u64 until year 584,542,046.
@@ -723,6 +759,7 @@ async fn write_back_one_embedding(
 
     // Always remove from in-flight even on error to prevent permanent block.
     in_flight.remove(&(evt.map_name.clone(), evt.key.clone()));
+    drop(key_guard);
     outcome
 }
 
@@ -831,8 +868,8 @@ impl EmbeddingObserverFactory {
     ///
     /// `key_writer` is the node's one per-key writer registry, the same
     /// instance every other writer of the record stores is built with. It is
-    /// mandatory so the binary cannot wire this task without it; the
-    /// write-back does not take the writer yet.
+    /// mandatory so the binary cannot wire this task without it: each
+    /// write-back takes its record's writer from it.
     ///
     /// # Panics
     ///
@@ -840,7 +877,7 @@ impl EmbeddingObserverFactory {
     pub fn init(
         &self,
         record_store_factory: Arc<RecordStoreFactory>,
-        _key_writer: Arc<KeyWriterRegistry>,
+        key_writer: Arc<KeyWriterRegistry>,
     ) {
         self.record_store_factory
             .set(record_store_factory.clone())
@@ -859,6 +896,7 @@ impl EmbeddingObserverFactory {
             shutdown_rx,
             Arc::clone(&self.provider),
             record_store_factory,
+            key_writer,
             Duration::from_millis(self.config.batch_interval_ms),
             self.config.batch_flush_threshold,
             Arc::clone(&self.in_flight),

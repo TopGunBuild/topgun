@@ -233,6 +233,17 @@ impl Service<Operation> for Arc<CrdtService> {
 // Handler implementations
 // ---------------------------------------------------------------------------
 
+/// Where the stamp of a client write comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StampPolicy {
+    /// The server mints the stamp, inside the op's critical section. Every
+    /// client origin: a client-supplied stamp is never trusted.
+    Mint,
+    /// The caller's stamp is kept as it arrived. Trusted origins only, so
+    /// cross-node convergence is not perturbed.
+    Verbatim,
+}
+
 impl CrdtService {
     /// Handles a single `ClientOp` message: validates, applies CRDT merge, and broadcasts event.
     async fn handle_client_op(
@@ -245,7 +256,7 @@ impl CrdtService {
 
         // Acquire metadata snapshot if a connection_id is present.
         // None means internal/system call — skip validation.
-        let sanitized_ts = if let Some(conn_id) = ctx.connection_id {
+        let stamp = if let Some(conn_id) = ctx.connection_id {
             let metadata_snapshot = self.snapshot_metadata(conn_id).await?;
             let value_size = estimate_value_size(op);
             self.write_validator
@@ -254,7 +265,7 @@ impl CrdtService {
             self.validate_schema_for_op(op)?;
             // Last, so an unauthorised op is refused before its slot is read.
             self.admit_or_op(op, Some(partition_id), true).await?;
-            Some(self.write_validator.sanitize_hlc())
+            StampPolicy::Mint
         } else if ctx.caller_origin == CallerOrigin::HttpClient {
             // HTTP /sync carries no per-connection handle, but the JWT-validated
             // identity is on ctx.principal (set eagerly by the HTTP handler before
@@ -272,7 +283,7 @@ impl CrdtService {
                 .admit_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
             self.validate_schema_for_op(op)?;
             self.admit_or_op(op, Some(partition_id), true).await?;
-            Some(self.write_validator.sanitize_hlc())
+            StampPolicy::Mint
         } else if ctx.caller_origin == CallerOrigin::Anonymous {
             // Anonymous HTTP /sync write (no connection_id, no JWT identity).
             // Auth admission for this path is enforced at the HTTP handler
@@ -285,7 +296,7 @@ impl CrdtService {
             // not on auth state.
             self.validate_schema_for_op(op)?;
             self.admit_or_op(op, Some(partition_id), true).await?;
-            Some(self.write_validator.sanitize_hlc())
+            StampPolicy::Mint
         } else {
             // Genuine internal/system/forwarded call (trusted origin) — preserve
             // the caller's HLC so cross-node convergence is not perturbed.
@@ -300,7 +311,7 @@ impl CrdtService {
             // not re-validate tags already stored on its source — it either does
             // not route through this admission or carries an explicit exemption.
             self.admit_or_op(op, Some(partition_id), false).await?;
-            None
+            StampPolicy::Verbatim
         };
 
         // Deliberately NO forgotten-client gate on the op path. Client-originated
@@ -314,18 +325,8 @@ impl CrdtService {
         // permanently lost on both sides. The verbatim-tag path (ORMapPushDiff)
         // keeps its load-bearing gate.
 
-        // Read old value before mutation for query broadcast filtering.
-        let old_rmpv_value = self
-            .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
-            .await;
-
-        let event_payload = self
-            .apply_single_op(op, partition_id, sanitized_ts.as_ref())
+        self.apply_op_under_writer(op, partition_id, stamp, ctx.connection_id)
             .await?;
-
-        self.broadcast_event(&event_payload, ctx.connection_id)?;
-        self.broadcast_query_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
-        self.record_journal(&event_payload, sanitized_ts.as_ref());
 
         let last_id = op.id.clone().unwrap_or_else(|| "unknown".to_string());
         Ok(OperationResponse::Message(Box::new(Message::OpAck(
@@ -343,7 +344,8 @@ impl CrdtService {
     /// Handles an `OpBatch` message: validates all ops atomically, then applies each sequentially.
     ///
     /// Atomic rejection: if any op fails validation, no ops are applied.
-    /// Each op gets its own sanitized HLC timestamp (monotonically increasing via successive calls).
+    /// Each op gets its own sanitized HLC timestamp, minted inside that op's own
+    /// critical section immediately before the op is applied.
     #[allow(clippy::too_many_lines)]
     async fn handle_op_batch(
         &self,
@@ -382,8 +384,7 @@ impl CrdtService {
             // Each op gets its own partition based on its key (OpBatch ctx has
             // partition_id=None because the batch contains keys for many partitions).
             for op in ops {
-                let sanitized_ts = self.write_validator.sanitize_hlc();
-                self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
+                self.apply_batch_op(op, StampPolicy::Mint, ctx.connection_id)
                     .await?;
                 if let Some(id) = &op.id {
                     last_id = id.clone();
@@ -416,8 +417,7 @@ impl CrdtService {
             }
             // All ops validated — apply them sequentially with sanitized timestamps.
             for op in ops {
-                let sanitized_ts = self.write_validator.sanitize_hlc();
-                self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
+                self.apply_batch_op(op, StampPolicy::Mint, ctx.connection_id)
                     .await?;
                 if let Some(id) = &op.id {
                     last_id = id.clone();
@@ -435,8 +435,7 @@ impl CrdtService {
                 self.admit_or_op(op, None, true).await?;
             }
             for op in ops {
-                let sanitized_ts = self.write_validator.sanitize_hlc();
-                self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
+                self.apply_batch_op(op, StampPolicy::Mint, ctx.connection_id)
                     .await?;
                 if let Some(id) = &op.id {
                     last_id = id.clone();
@@ -459,7 +458,8 @@ impl CrdtService {
                 self.admit_or_op(op, None, false).await?;
             }
             for op in ops {
-                self.apply_batch_op(op, None, ctx.connection_id).await?;
+                self.apply_batch_op(op, StampPolicy::Verbatim, ctx.connection_id)
+                    .await?;
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -506,10 +506,17 @@ impl CrdtService {
     /// The verbatim-tag `ORMapPushDiff` sync path keeps the load-bearing gate
     /// instead.
     /// Applies a single `ClientOp` to the `RecordStore` and returns the `ServerEventPayload`
-    /// to broadcast. Called by both `handle_client_op` and `handle_op_batch`.
+    /// to broadcast.
     ///
     /// `sanitized_ts` — when `Some`, replaces client-provided timestamps in stored records.
-    /// When `None` (internal/test calls with no `connection_id`), the client timestamp is used as-is.
+    /// When `None` (a trusted origin), the client timestamp is used as-is.
+    ///
+    /// # Caller obligation
+    ///
+    /// The caller holds the per-key writer of `(op.map_name, op.key)` across
+    /// this call (TG-KEY-001). Nothing in here takes it: every branch below is
+    /// a read-modify-write or a staged write of that one key and relies on the
+    /// caller for its exclusion.
     #[allow(clippy::too_many_lines)]
     async fn apply_single_op(
         &self,
@@ -531,16 +538,14 @@ impl CrdtService {
 
         if is_remove {
             // REMOVE/OR_REMOVE: no timestamp sanitization needed (removes are idempotent).
-            // Held under the key's writer, the one every in-place write of the key
+            // Runs under the key's writer, the one every in-place write of the key
             // holds: the remove stages its durable delete before it empties the
             // engine, and an in-place write in between would mutate the still-
             // resident slot and re-stage it over that delete (TG-OR-007).
-            let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
             store
                 .remove(&op.key, CallerProvenance::CrdtMerge)
                 .await
                 .map_err(OperationError::Internal)?;
-            drop(key_guard);
 
             Ok(ServerEventPayload {
                 map_name: op.map_name.clone(),
@@ -579,14 +584,12 @@ impl CrdtService {
                 (entry, or_rec.clone())
             };
 
-            // Serialize the compound read-modify-write per key: without this, two
-            // concurrent OR_ADDs on the SAME key could each read the pre-mutation
-            // state below and race to `store.put`, with the second `put` silently
-            // clobbering the first's merge and losing an update. Held
-            // across `store.get` through the single `store.put` merge-commit only —
-            // does NOT cover the OR_REMOVE RMW below (342b's responsibility).
-            let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
-
+            // The compound read-modify-write below relies on the key's writer the
+            // caller holds: without it, two concurrent OR_ADDs on the SAME key
+            // could each read the pre-mutation state and race to the store, with
+            // the second silently clobbering the first's merge and losing an
+            // update.
+            //
             // Merge the new entry into the resident OR-Map slot IN PLACE rather
             // than reading a full clone, rebuilding, and re-putting the whole
             // ~130 KB snapshot every op. The add-wins / remove-wins algebra
@@ -597,7 +600,7 @@ impl CrdtService {
             // conflict it keeps the stored record where `apply_or_delta` replaces it.
             //
             // `Option::take` moves the entry into the delta without a clone; the
-            // closure runs exactly once (per key, under the writer lock above),
+            // closure runs exactly once (per key, under the caller's writer),
             // so the take can never come up empty (TG-OR-001).
             let mut new_entry_opt = Some(new_entry);
             // Read the witness demand ONCE per op, before the closure exists: when
@@ -676,13 +679,6 @@ impl CrdtService {
                 .await
                 .map_err(OperationError::Internal)?;
 
-            // Release the per-key writer lock the instant the merge-commit `put`
-            // returns: the critical region is exactly `store.get` -> `store.put`.
-            // The payload construction below only clones already-owned locals and
-            // touches no shared store state, so holding the lock across it would
-            // needlessly serialize unrelated writers to this key.
-            drop(key_guard);
-
             Ok(ServerEventPayload {
                 map_name: op.map_name.clone(),
                 event_type: ServerEventType::OR_ADD,
@@ -700,11 +696,11 @@ impl CrdtService {
                 .expect("or_tag is Some(Some(_))");
 
             // OR_REMOVE is tag-based; no timestamp sanitization needed.
-            // Serialize the OR_REMOVE RMW per key (the same primitive as OR_ADD) so
-            // the tombstone append and any concurrent prune sweep on this key preserve
-            // tombstone-set monotonicity (no pruned tag flickering back in mid-window).
-            let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
-
+            // The RMW below runs under the key's writer the caller holds (the same
+            // primitive as OR_ADD), so the tombstone append and any concurrent
+            // prune sweep on this key preserve tombstone-set monotonicity (no
+            // pruned tag flickering back in mid-window).
+            //
             // Read-modify-write over the unified OrMap shape IN PLACE: drop only the
             // matched tag from records (preserving every concurrent survivor) and
             // append the removed tag to the tombstone set, mutating the resident
@@ -776,11 +772,6 @@ impl CrdtService {
                     frontier.stamp_tombstone(&op.map_name, &op.key, tag);
                 }
             }
-
-            // End of the critical section: the tombstone append and its epoch
-            // stamp are both committed, and the payload built below only clones
-            // locals, so nothing past this point needs the key held.
-            drop(key_guard);
 
             // Ask for a prune pass; do NOT run one here. A pass walks every
             // eligible ref and re-acquires the per-key writer per dropped tag, so
@@ -880,32 +871,71 @@ impl CrdtService {
         Ok(())
     }
 
-    /// Applies one op from an `OpBatch` and runs the standard write fanout:
-    /// server-event broadcast, live-query updates, and journal recording.
+    /// Applies one op from an `OpBatch` in its own critical section.
     ///
     /// Partition is derived from the key because a batch spans many partitions.
-    /// Centralizes what were four byte-identical loop bodies (one per caller
-    /// origin); the per-origin validation that precedes the apply loop stays at
-    /// the call site.
+    /// The per-origin validation that precedes the apply loop stays at the call
+    /// site.
     async fn apply_batch_op(
         &self,
         op: &ClientOp,
-        sanitized_ts: Option<&Timestamp>,
+        stamp: StampPolicy,
         exclude_connection_id: Option<ConnectionId>,
     ) -> Result<(), OperationError> {
         let partition_id = hash_to_partition(&op.key);
-        // Read old value before mutation for query broadcast filtering.
+        self.apply_op_under_writer(op, partition_id, stamp, exclude_connection_id)
+            .await
+    }
+
+    /// The critical section of one client write: stamps the op, applies it and
+    /// runs the standard write fanout — server-event broadcast, live-query
+    /// updates, journal recording — all under the key's per-key writer
+    /// (TG-KEY-001).
+    ///
+    /// Every client op of every class passes through here, whichever worker it
+    /// arrived on, so two writers of one key are applied one after the other.
+    /// The stamp is minted under the writer because the store keeps whichever
+    /// write arrived last without comparing stamps: minted outside, a writer
+    /// could take the lower stamp and still reach the store second, leaving an
+    /// acknowledged newer write replaced by an older one. Held across the
+    /// fanout as well, so subscribers and the journal see one key's writes in
+    /// stamp order; none of the three fanout calls awaits.
+    ///
+    /// A `Verbatim` op keeps its caller's stamp, so for it the writer orders
+    /// the engine and the durable store by arrival only.
+    ///
+    /// The caller must hold no key writer: a task takes one at a time.
+    async fn apply_op_under_writer(
+        &self,
+        op: &ClientOp,
+        partition_id: u32,
+        stamp: StampPolicy,
+        exclude_connection_id: Option<ConnectionId>,
+    ) -> Result<(), OperationError> {
+        // Issued before the writer is taken: this can be a disk load, and its
+        // result orders nothing, so it must not extend the critical section.
         let old_rmpv_value = self
             .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
             .await;
-        let event_payload = self.apply_single_op(op, partition_id, sanitized_ts).await?;
+
+        let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
+
+        let sanitized_ts = match stamp {
+            StampPolicy::Mint => Some(self.write_validator.sanitize_hlc()),
+            StampPolicy::Verbatim => None,
+        };
+        let event_payload = self
+            .apply_single_op(op, partition_id, sanitized_ts.as_ref())
+            .await?;
         self.broadcast_event(&event_payload, exclude_connection_id)?;
         self.broadcast_query_updates(
             &event_payload,
             old_rmpv_value.as_ref(),
             exclude_connection_id,
         );
-        self.record_journal(&event_payload, sanitized_ts);
+        self.record_journal(&event_payload, sanitized_ts.as_ref());
+
+        drop(key_guard);
         Ok(())
     }
 
@@ -14192,10 +14222,12 @@ mod tests {
                     // The regenerating branches hand the apply a server stamp.
                     let stamp = (!matches!(via, Via::Trusted)).then(make_timestamp);
                     let applied = if as_batch {
-                        apply_only
-                            .svc
-                            .apply_batch_op(&op, stamp.as_ref(), None)
-                            .await
+                        let policy = if stamp.is_some() {
+                            StampPolicy::Mint
+                        } else {
+                            StampPolicy::Verbatim
+                        };
+                        apply_only.svc.apply_batch_op(&op, policy, None).await
                     } else {
                         apply_only
                             .svc
