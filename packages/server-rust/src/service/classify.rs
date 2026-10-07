@@ -66,11 +66,12 @@ impl OperationService {
 
     /// Create an `OpBatch` operation for a specific partition.
     ///
-    /// Unlike `classify()` which assigns `partition_id=None` for `OpBatch`
-    /// (because the batch may span multiple partitions), this method creates
-    /// an `OpBatch` routed to the specified partition worker. The caller is
-    /// responsible for grouping ops by `hash_to_partition(key)` before calling
-    /// this method.
+    /// This is the only way to obtain an `OpBatch` operation from a message:
+    /// `classify()` refuses one, because a batch may span partitions and a
+    /// batch labelled with no partition would run whole on the worker that
+    /// serves unpartitioned work. This method creates an `OpBatch` routed to
+    /// the specified partition worker. The caller is responsible for grouping
+    /// ops by `hash_to_partition(key)` before calling this method.
     ///
     /// The `write_concern` and `timeout` from the original batch are passed
     /// through unchanged to the sub-batch `OpBatchPayload`.
@@ -120,6 +121,8 @@ impl OperationService {
     /// - `ClassifyError::ServerToClient` for response messages and cluster-internal messages
     /// - `ClassifyError::TransportEnvelope` for `Batch` messages
     /// - `ClassifyError::AuthMessage` for `Auth` and `AuthRequired` messages
+    /// - `ClassifyError::RequiresPartitionSplit` for `OpBatch` messages, which the caller
+    ///   splits with `classify_op_batch_for_partition`
     #[allow(clippy::too_many_lines)]
     pub fn classify(
         &self,
@@ -135,9 +138,11 @@ impl OperationService {
                     self.make_ctx(service_names::CRDT, client_id, caller_origin, partition_key);
                 Ok(Operation::ClientOp { ctx, payload })
             }
-            Message::OpBatch(payload) => {
-                let ctx = self.make_ctx(service_names::CRDT, client_id, caller_origin, None);
-                Ok(Operation::OpBatch { ctx, payload })
+            // A batch has no single partition, and one labelled with none would
+            // run whole on the worker that serves unpartitioned work, off the
+            // workers its keys belong to. The caller splits it instead.
+            Message::OpBatch(_) => {
+                Err(ClassifyError::RequiresPartitionSplit { variant: "OpBatch" })
             }
 
             // ----- Sync domain (service_name = "sync") -----
@@ -604,6 +609,30 @@ mod tests {
         assert_eq!(op.ctx().service_name, service_names::CRDT);
         assert!(op.ctx().partition_id.is_some());
         assert_eq!(op.ctx().client_id.as_deref(), Some("client-1"));
+    }
+
+    /// A whole batch is never classified: it has to be split per partition
+    /// first, so the refusal names the message that needs the split.
+    #[test]
+    fn classify_refuses_an_op_batch() {
+        let svc = make_service();
+        let msg = Message::OpBatch(OpBatchMessage {
+            payload: OpBatchPayload {
+                ops: Vec::new(),
+                write_concern: None,
+                timeout: None,
+            },
+        });
+        let err = svc
+            .classify(msg, None, CallerOrigin::Client)
+            .expect_err("an OP_BATCH must not be classified whole");
+        assert!(
+            matches!(
+                err,
+                ClassifyError::RequiresPartitionSplit { variant: "OpBatch" }
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]

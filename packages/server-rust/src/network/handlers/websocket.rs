@@ -1570,32 +1570,18 @@ async fn unpack_and_dispatch_batch(
             }
         };
 
-        // Classify and route each inner message individually.
-        // Inner messages target different services and partitions, so each
-        // must be dispatched separately for correct partition routing.
-        match classify_svc.classify(inner_msg, None, CallerOrigin::Client) {
-            Ok(mut op) => {
-                op.set_connection_id(conn_id);
-                if let Some(p) = principal.clone() {
-                    op.set_principal(p);
-                }
-
-                match dispatcher.dispatch(op).await {
-                    Ok(resp) => {
-                        send_operation_response(resp, tx).await;
-                    }
-                    Err(e) => {
-                        debug!("dispatch error for batch item from {:?}: {}", conn_id, e);
-                    }
-                }
-            }
-            Err(e) => {
-                debug!(
-                    "failed to classify batch inner message from {:?}: {}",
-                    conn_id, e
-                );
-            }
-        }
+        // One inner message at a time, awaited: that is what keeps the answers
+        // in envelope order. Handing it to the entry a top-level message takes
+        // is what makes the answer the same on both paths (TG-DISP-001).
+        dispatch_one_message(
+            inner_msg,
+            conn_id,
+            principal.clone(),
+            classify_svc,
+            dispatcher,
+            tx,
+        )
+        .await;
     }
 }
 
@@ -3137,49 +3123,46 @@ mod tests {
     }
 
     /// An empty `OP_BATCH` carried inside a `BATCH` envelope is answered with
-    /// no frame either.
+    /// no frame either, and never reaches the domain service.
     ///
-    /// The envelope bypasses the top-level empty-batch branch: the inner message
-    /// is classified and dispatched to the domain service like any other, so its
-    /// response is mapped to a frame separately from the top-level path.
+    /// An inner message takes the entry a top-level one takes, so the empty
+    /// batch stops at the same branch: nothing is dispatched and nothing is
+    /// sent. Silence alone would also be what a dropped inner batch looks like,
+    /// so the same envelope carries a second, non-empty batch that has to be
+    /// dispatched and acknowledged.
     #[tokio::test]
     async fn nested_empty_op_batch_emits_no_frame() {
         let fx = build_fold_fixture(Vec::new(), None).await;
-        let inner = TopGunMessage::OpBatch(OpBatchMessage {
-            payload: OpBatchPayload {
-                ops: Vec::new(),
-                write_concern: None,
-                timeout: None,
-            },
-        });
-        let inner_bytes = rmp_serde::to_vec_named(&inner).expect("inner OP_BATCH serializes");
-        let batch = BatchMessage {
-            count: 1,
-            data: frame_inner_item(&inner_bytes),
-        };
-        let (tx, rx) = mpsc::channel(64);
+        let control_key = "nested-control-key";
+        let control_id = "1601";
+        let empty = op_batch_message(Vec::new());
+        let control = op_batch_message(vec![put_op(
+            control_id,
+            FOLD_MAP,
+            control_key,
+            allowed_fields("control"),
+        )]);
 
-        unpack_and_dispatch_batch(
-            &batch,
-            fx.conn_id,
-            Some(fold_principal()),
-            &fx.classify_svc,
-            &fx.dispatcher,
-            &tx,
-        )
-        .await;
-        let msgs = queued_messages(tx, rx).await;
+        let msgs = decode_frames(&enveloped_frames(&fx, &[empty, control]).await);
 
-        // Without this the test would also pass for an inner message that was
-        // dropped before dispatch, which says nothing about the response mapping.
+        let received = fx.received.lock().clone();
+        let calls_for_the_empty_batch = received.iter().filter(|(_, ops)| *ops == 0).count();
+        let control_acks = ack_payloads(&msgs)
+            .iter()
+            .filter(|ack| ack.last_id == control_id)
+            .count();
+        let control_dispatched = received.contains(&(Some(hash_to_partition(control_key)), 1));
         assert_eq!(
-            fx.service_calls.load(Ordering::Relaxed),
-            1,
-            "precondition: the inner empty batch reached the domain service"
-        );
-        assert!(
-            msgs.is_empty(),
-            "an empty op batch has no operation to give a verdict on, got {msgs:?}"
+            (
+                calls_for_the_empty_batch,
+                msgs.len() - control_acks,
+                control_dispatched,
+                control_acks == 1,
+            ),
+            (0, 0, true, true),
+            "(service calls for the empty batch, frames other than the control's \
+             acknowledgement, control batch dispatched, control batch acknowledged); \
+             received: {received:?}, frames: {msgs:?}"
         );
     }
 
