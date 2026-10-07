@@ -260,6 +260,14 @@ impl RecordStore for DefaultRecordStore {
         self.engine.contains_key(key)
     }
 
+    /// Caller obligation: every caller holds the key's per-key writer across the
+    /// whole call (TG-KEY-001), the same writer every in-place write (see
+    /// [`update_in_place`](RecordStore::update_in_place)) and every whole-key
+    /// [`remove`](RecordStore::remove) of the key holds. The write to the
+    /// engine and the staging of the write-through are separate steps with no
+    /// lock of this store across both, so two puts of one key that are not
+    /// serialised by the writer can leave memory on one value and the durable
+    /// store on the other.
     async fn put(
         &self,
         key: &str,
@@ -278,16 +286,18 @@ impl RecordStore for DefaultRecordStore {
 
         // Step 3: Create record. Capture the token from this record's metadata
         // before it is moved — this is the exact token that identifies this write.
-        // Never re-allocate or re-read the token off the resident after put(),
-        // since a concurrent writer may have already replaced the slot.
+        // Never re-allocate or re-read the token off the resident after put():
+        // the slot's occupant can change without the key's writer. Eviction
+        // and expiry remove a record, and a read of a key that is no longer
+        // resident loads one back.
         let write_token = metadata.write_token;
         let record = Record { value, metadata };
 
         // Sanity check: a live write must carry a minted token (>= 1). Token 0 is
         // reserved for Default-constructed/hydrated metadata, which must never
         // enter the engine dirty on this path. We assert our OWN captured token,
-        // not the resident's: a concurrent same-key write can replace the slot
-        // between our put() and any read, and tokens are minted at new() time
+        // not the resident's: the resident can be a different record by the
+        // time it is read (see step 3), and tokens are minted at new() time
         // rather than put() time, so the resident's token has no ordering
         // relationship to ours — comparing against it would panic spuriously.
         debug_assert_ne!(
@@ -322,16 +332,17 @@ impl RecordStore for DefaultRecordStore {
             // + fsync inside add() completes before returning Ok on real backends,
             // so the value is durable when we reach here. The per-write token
             // ensures that only the exact write just persisted is marked clean:
-            // a concurrent same-key write in the same millisecond carries a
-            // different token and stays dirty until its own persist completes.
+            // any other record in the slot — one loaded back after an eviction,
+            // or the write of a caller that did not hold the key's writer —
+            // carries a different token and is left as it is.
             // Mark in place under the engine's per-key lock (mark_stored) — the
-            // in-place mark never re-puts the value, so concurrent writes are
-            // never clobbered or lost.
+            // in-place mark never re-puts the value, so it cannot overwrite
+            // whatever occupies the slot.
             if !self.data_store.is_null() && !self.engine.mark_stored(key, now, write_token) {
-                // Record was evicted between the engine put and this mark, or a
-                // concurrent write landed and owns the slot. Harmless: the value
-                // is durable via add(), and the newer write will mark itself clean
-                // when its own persist completes.
+                // Record was evicted between the engine put and this mark, or
+                // another record now occupies the slot. Harmless: the value is
+                // durable via add(), and a write that owns the slot marks itself
+                // clean when its own persist completes.
                 tracing::trace!(
                     key,
                     "mark_stored found no eligible record after persist (evicted or superseded)"

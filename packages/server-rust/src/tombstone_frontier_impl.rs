@@ -1983,6 +1983,13 @@ impl TombstoneFrontier {
     /// linger, re-tracking the client at a real cursor it genuinely reached (no
     /// premature prune), and 342f's orphan TTL is the backstop for a genuinely
     /// abandoned row.
+    ///
+    /// Caller obligation, not enforced here (TODO-777): when the worker ran and its
+    /// delete failed, the fallback delete runs on the caller's task while the cursor
+    /// worker may be writing the same client's row, and nothing serialises the two.
+    /// This function has no production caller today. The first one must route that
+    /// retry through the worker's queue, or prove the two cannot overlap, before it
+    /// is wired.
     pub async fn forget_client(&self, client: &ClientId) {
         // Do the in-memory forget AND enqueue the durable delete under the SAME state
         // lock (see `confirm_apply_ack`): FIFO then orders the delete strictly after
