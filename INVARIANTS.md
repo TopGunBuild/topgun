@@ -7,7 +7,7 @@ that every cited enforcing test still exists and that no new entry lands without
 an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", not "zero NAKED".
 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
-EVI eviction, SYNC, NAME map names). Cite the ID verbatim in code comments and test names. Statuses:
+EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch). Cite the ID verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -511,24 +511,27 @@ measured; do not read it as reported.
 - **Scope:** `WriteBehindDataStore` — the pending counter (`pending_count`), the entry-sequence
   set (`pending_seqs`) and the per-partition WAL-sequence tracker, on a node that is not shutting
   down and whose flush task is alive.
-- **Precondition — known NOT to hold for every caller (tracker TODO-776):** the predicate below
-  is proven for one writer per `(map, key)` at a time. That is not guaranteed today. The LWW PUT
-  path writes a key without taking the per-key writer, and two production paths can write one
-  key concurrently. What is known about accounting when they do: by reading it converges, and
-  one deterministic test runs one such interleaving (listed below). That is evidence for that
-  one interleaving, not a proof for concurrent writers in general.
-- **Not claimed:** which VALUE the store keeps. Under two concurrent writers of one key the
-  durable store can hold the older value while memory serves the newer one, and the older value
-  wins after a restart. This row does not address that and nothing that enforces it tests it
-  (TODO-776). The carry below does not leave that class as it found it; it widens it in one
-  case. Carrying a retired entry's WAL sequences onto the queued entry is safe only if the
-  queued entry covers the retired one, which means it is the newer write of the key — the
-  one-writer precondition. When two writers break it and the queued entry holds the OLDER
-  value, storing that entry resolves the newer write's frame although the newer value was
-  never stored, and a restart recovers the older value. Before the carry existed that frame
-  was leaked `Live` and a restart replayed the newer value. Nothing in the write-behind store
+- **Precondition — upheld by `TG-KEY-001`:** the predicate below is proven for one writer per
+  `(map, key)` at a time. For record keys that is what `TG-KEY-001` states: every write of a
+  record, the LWW PUT path included, holds the record's per-key writer, so two paths can no
+  longer write one key concurrently. A caller that writes this store directly, not through the
+  record store, is outside `TG-KEY-001` and has to exclude a second writer of its key itself;
+  the one known exception, the cursor-forget fallback, has no production caller (TODO-777). One
+  deterministic test still runs an interleaving of two writers BELOW the per-key writer (listed
+  below). That is evidence for accounting under that one interleaving, not a proof for
+  concurrent writers in general.
+- **Not claimed:** which VALUE the store keeps. That is the subject of `TG-KEY-001`, with its
+  own exclusions, and this row adds nothing to it — in particular nothing for maps with
+  automatic embeddings. What the carry below needs is stated here because it is why the
+  precondition matters. Carrying a retired entry's WAL sequences onto the queued entry is safe
+  only if the queued entry covers the retired one, which means it is the newer write of the key
+  — the one-writer precondition. If two writers broke it and the queued entry held the OLDER
+  value, storing that entry would resolve the newer write's frame although the newer value was
+  never stored, and a restart would recover the older value. Nothing in the write-behind store
   can tell the two cases apart: an entry does not carry the value's own timestamp, and a later
-  arrival with an older value has the higher entry sequence.
+  arrival with an older value has the higher entry sequence. The precondition is upheld by
+  `TG-KEY-001`, so a record writer can no longer produce the case in which the queued entry
+  holds the older value.
 - **Statement:** an entry leaves a partition queue or a flush batch only through a site that
   disposes of all three: its count, its entry sequence, and its WAL sequences — resolved,
   carried onto a queued entry of the same key, or, only when no such entry exists, abandoned
@@ -556,8 +559,8 @@ measured; do not read it as reported.
   the pinned frame is replayed at boot.
 - **Discovered by:** the SPEC-382 implementation review (TODO-773); fixed and catalogued by
   SPEC-383.
-- **Status:** decided, **enforced** — under the one-writer precondition above, which is not yet
-  guaranteed by every caller.
+- **Status:** decided, **enforced** — under the one-writer precondition above, which
+  `TG-KEY-001` upholds for record keys.
 
 | Enforcer | What it covers | Where it runs |
 |----------|----------------|---------------|
@@ -585,10 +588,12 @@ case outside the precondition.
   code (TODO-775, with TODO-628).
 - **`reset`** on a WAL-backed store with queued entries (TODO-775).
 - **A write cancelled inside the WAL append** (`TG-WB-003` (b), TODO-672).
-- **Two concurrent writers of one key.** Outside the proven precondition, and a
-  value-correctness defect in its own right (TODO-776). One interleaving is tested, for
-  accounting only. The case in which the carry makes the outcome after a restart worse (see
-  "Not claimed") has no committed test.
+- **Two concurrent writers of one key.** The writers of a record key are serialised above this
+  store (`TG-KEY-001`), so it no longer meets them. One interleaving below the writer is still
+  tested here, for accounting only. The case in which the carry would make the outcome after a
+  restart worse (see "Not claimed") is now covered by two tests driven through the service:
+  `two_routes_and_a_refused_flush_recover_the_later_stamp_after_a_crash` and
+  `an_older_value_arriving_behind_a_refused_newer_one_does_not_win_after_a_crash`.
 
 ### TG-EVI-001: Never-evict-dirty — an unflushed write is never evicted from the resident cache
 
@@ -1443,3 +1448,82 @@ case outside the precondition.
   ack; SPEC-381a.
 - **Status:** decided, **enforced**. Stated limit, not a gap in the invariant: on the
   single-message paths the refusal sends no frame (tracker TODO-744).
+
+### TG-KEY-001: Every write of a record holds that record's per-key writer
+
+- **Scope:** every production call of `RecordStore::put`, `update_in_place` and `remove`: the
+  client write paths (LWW PUT and REMOVE, `OR_ADD`, `OR_REMOVE`), the tombstone prune pass,
+  `ORMapPushDiff` and the embedding write-back.
+- **Statement:** every such call runs while its task holds the per-key writer of exactly that
+  `(map, key)`, taken from the one `KeyWriterRegistry` of the process. The writer of a key is the
+  mutex of the key's stripe in a table of fixed size (`KEY_WRITER_STRIPES`); one key always maps
+  to one stripe, two keys may share one, and a task holds at most one writer at a time. For a
+  client operation the writer is taken before the server stamp is minted and released after the
+  write-through has returned and the operation's journal entry and broadcasts are issued. For
+  stamps minted under the writer, stamp order = engine order = durable-queue order for one key.
+  That equality does not hold across an embedding write-back, and nothing here says what a
+  restart recovers on a map with automatic embeddings — see "Not claimed".
+- **How it is enforced:** by tests and by sweep predicates, not by a type. Until `TG-KEY-002`
+  exists, "every production call" rests on a sweep of the call sites: the number of acquire
+  sites and their position relative to the stamp, the store call and the fan-out, re-run when a
+  writer is added. "One registry" is a wiring predicate on the server binary — the registry is
+  constructed once and handed to every writer — not a property of a type: a service constructed
+  without the shared registry gets a private one.
+- **Not claimed:**
+  - **A timestamp comparison.** An operation whose stamp is not minted under the writer (a
+    stamp the caller supplies and the server applies as given) is ordered by arrival: a lower
+    stamp that arrives later still replaces a higher one.
+  - **That stamp equality identifies a version for stamps the server did not mint.** The
+    embedding write-back attaches a vector only if the record still carries the stamp its text
+    was read under. Equal stamps mean "the same version" only for server-minted stamps; two
+    writes that carry the same caller-supplied stamp are not told apart.
+  - **The embedding write-back's stamp.** It is wall-clock time under a synthetic node id, not
+    from the server clock. For a key of an embedding-enabled map "stamp order = engine order"
+    therefore does not hold across a write-back.
+  - **The restart property on embedding-enabled maps.** After an unclean stop, replay can drop
+    an acknowledged client write that followed an embedding write-back, because its stamp can be
+    lower than the write-back's. Known by reading, not shown by a test. Tracker TODO-778.
+  - **The writers that call `MapDataStore` directly** (frontier cursors, device credentials,
+    policies). They do not go through the record store and this row says nothing about them.
+  - **How long a writer waits.** `acquire` has no bound of its own; what a holder that never
+    returns costs is stated in the module doc of `key_writer.rs`.
+- **Maintaining code:** `service/domain/key_writer.rs` (`KeyWriterRegistry`, `acquire`);
+  `service/domain/crdt.rs` — `apply_op_under_writer`, the one caller of `apply_single_op`, and the
+  prune pass; `service/domain/sync.rs` — `handle_ormap_push_diff`;
+  `service/domain/embedding/hook.rs` — `write_back_one_embedding`; `bin/topgun_server.rs`
+  constructs the one registry and passes it to each of them.
+- **Enforcing test:** `crdt.rs::two_routes_writing_one_key_leave_engine_and_store_on_the_later_stamp`
+  — two writes of one key arriving by two routes, the first parked inside the store: the second
+  waits for the writer, and memory and the durable store both end on the later stamp. Runs in CI
+  (`cargo test`). The table below lists the others and what each one covers.
+- **Violation consequence:** two writers of one record that are not serialised can each pass
+  the store's own checks and interleave. Memory then serves one value while the durable store
+  holds the other, and after a restart the server returns the OLDER of the two although it
+  acknowledged and served the newer one; with a refused flush in between, write-behind accounting
+  resolves the newer write's log frame although its value was never stored (`TG-WB-005`). An
+  embedding write-back that is not serialised with client writes overwrites a client write that
+  landed between its read and its put, or attaches a vector computed from the old text to the
+  new value. Holding the writer removes these interleavings; it does not make a restart recover
+  the last acknowledged write on a map with automatic embeddings (see "Not claimed").
+- **Discovered by:** the SPEC-383 implementation review (two concurrent writers of one key under
+  a refused flush) and the SPEC-384 call-site sweep (the LWW PUT path and the embedding
+  write-back took no writer); fixed and catalogued by SPEC-384a1.
+- **Status:** decided, **enforced** — by the tests below and by sweep predicates; not by a type.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `two_routes_writing_one_key_leave_engine_and_store_on_the_later_stamp` | two routes, the first parked inside the record store: memory and the durable store agree on the later stamp | CI (`cargo test`) |
+| `two_routes_writing_one_key_leave_store_staging_and_restart_on_the_later_stamp` | the same with the first writer parked inside the write-behind store: the store, staging and a restart all give the later stamp | CI (`cargo test`) |
+| `a_lower_stamped_put_never_lands_after_a_higher_stamped_one` | the stamp is minted under the writer: the journal order of two puts of one key is their stamp order | CI (`cargo test`) |
+| `two_routes_and_a_refused_flush_recover_the_later_stamp_after_a_crash` | two routes plus a refused flush: after a crash and recovery the recovered value is the later-stamped one and equals what the live server served | CI (`cargo test`) |
+| `an_older_value_arriving_behind_a_refused_newer_one_does_not_win_after_a_crash` | a write arriving while the newer one sits in a refused flush: the same assertion after a crash and recovery | CI (`cargo test`) |
+| `an_lww_put_waits_for_a_parked_or_push_of_the_same_key` | one registry for LWW and OR writers: an LWW put waits for an `ORMapPushDiff` of the same key | CI (`cargo test`) |
+| `a_client_write_during_an_embedding_write_back_is_not_overwritten` | the write-back's read-modify-write holds the writer: a client write during it is not overwritten | CI (`cargo test`) |
+| `a_client_write_during_a_write_back_is_still_embedded_and_reaches_the_store` | a client write that waited behind a write-back still enqueues its own embedding event and reaches the store | CI (`cargo test`) |
+| `a_stale_embedding_is_never_attached_to_a_newer_value` | the stamp check under the writer: a vector computed from an older text is not attached to a newer value | CI (`cargo test`) |
+| `concurrent_same_key_puts_wait_on_the_shared_writer_and_converge_across_a_partition`, `same_key_puts_on_one_node_converge_to_a_higher_stamp_from_across_the_partition` | on a simulated node: two puts of one key wait on the shared writer; the nodes differ while partitioned and converge after it heals, whichever node holds the highest stamp | `pnpm test:sim` (feature `simulation`) |
+| `two_different_keys_on_one_stripe_both_complete` | two keys on one stripe exclude each other, the waiter is served on release, and alternating writers all complete | CI (`cargo test`) |
+| `registry_holds_no_per_key_state_after_100_000_distinct_keys` | nothing is kept per key written: no stripe is still referenced or locked after 100 000 distinct keys | CI (`cargo test`) |
+| `stripe_table_footprint_is_within_the_stated_constant` | the table's size, from the sizes of its parts, is within `KEY_WRITER_FOOTPRINT_BOUND_BYTES` | CI (`cargo test`) |
+| `a_second_acquire_by_the_holding_task_on_the_same_stripe_stays_pending` | WHY a task holds at most one writer: a second acquire on the holder's own stripe never returns | CI (`cargo test`) |
+| `count_alloc_acquire_is_bounded_on_first_use_and_zero_on_repeat` | a stripe's first use allocates at most once and within the bound; a second pass over the same keys allocates nothing. Measured on macOS arm64 only | local only (`--features count-alloc`, `--ignored`); CI never enables the feature |

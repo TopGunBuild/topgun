@@ -638,6 +638,18 @@ enum WriteBackOutcome {
 /// `(map_name, key)` is in `in_flight` only while the writer is held, so the
 /// one observer call that can see it is the one this function's own `put`
 /// makes: the re-entrancy guard can no longer swallow a client write's event.
+///
+/// # Not guaranteed: the write-back's stamp is outside the server clock
+///
+/// The record is written back with wall-clock milliseconds, counter 0 and a
+/// synthetic node id. That stamp is not minted by the server clock and is
+/// never fed to it, so a client write that follows a write-back can carry a
+/// LOWER stamp than the record it replaces. WAL replay drops an LWW frame
+/// whose stamp is below the stored one. On a map with embeddings an
+/// acknowledged client write that followed a write-back can therefore be lost
+/// on restart after an unclean stop. This is known from reading the two code
+/// paths, not from a test, and the per-key writer does not change it
+/// (TODO-778).
 async fn write_back_one_embedding(
     evt: &EmbeddingEvent,
     embedding: Vec<f32>,

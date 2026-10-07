@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server):** two writes to the same record that reached the server at the same
+  moment could leave it holding the older value after a restart, although it had
+  acknowledged and served the newer one. A write that arrived while the server was
+  attaching an embedding to the same record could be overwritten by that embedding update.
+  Every write of a record is now serialised per record, so the case in which a restart
+  kept the older of two values can no longer arise. One gap remains on maps with
+  automatic embeddings: after an unclean stop, a write that followed an embedding update
+  can still be lost on restart. This change does not fix that.
 - **Fixed (server):** after a storage outage with clients still writing, the server could
   keep counting writes that had already been replaced by newer ones. Over time that shrank
   its write buffer, stopped the cleanup of deleted records and kept part of its
@@ -22,13 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   six keys refused while they were still being written: before the fix, three partitions
   stayed behind their log for the whole 15 s that were measured, in 3 of 3 runs; after
   it, every partition caught up within about 2 s, in 5 of 5 runs. What remains:
-  - **This is a bookkeeping fix only.** It is proven for one writer of a key at a time.
-    Two writes to the same key that reach the server at the same moment by different
-    paths are a separate, open defect: the server could already end up storing the
-    older of the two values. This fix does not repair that, and it makes one such case
-    worse. If the store refuses the newer value while the older one is waiting in the
-    write buffer behind it, a restart used to bring the newer value back. It no longer
-    does: the older value stays.
   - **A write the server gives up on is folded into a newer write only if that newer
     write is already waiting in the write buffer at that moment.** If the newer write
     has been logged but has not reached the buffer yet, if it arrives later, or if

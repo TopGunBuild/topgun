@@ -940,20 +940,20 @@ impl PartitionQueue {
     /// whose mutation a non-subsuming survivor does not re-carry, and a crash
     /// would then lose it.
     ///
-    /// # Assumption: the queued entry covers the retired one (NOT upheld by every caller)
+    /// # Assumption: the queued entry covers the retired one
     ///
     /// "Durable only through the queued entry" is true only when storing the
     /// queued entry also stores the retired mutation — that is, when the
     /// queued entry is the NEWER write of the key. One writer per key at a
     /// time guarantees it: the entry queued while this one was out of the
     /// queue was then written after it. Without that precondition the queued
-    /// entry can hold the OLDER value. Its flush then resolves the carried
-    /// sequences although the newer value was never stored, and a restart
-    /// recovers the older one. Nothing here can tell the two cases apart:
-    /// the entries do not carry the value's own timestamp, and a later
-    /// arrival with an older value has the higher entry sequence. The
-    /// precondition is not met by every caller today (`TG-WB-005`, tracked as
-    /// TODO-776; see `add_with_witness`).
+    /// entry could hold the OLDER value. Its flush would then resolve the
+    /// carried sequences although the newer value was never stored, and a
+    /// restart would recover the older one. Nothing here can tell the two
+    /// cases apart: the entries do not carry the value's own timestamp, and a
+    /// later arrival with an older value has the higher entry sequence. For
+    /// record keys the precondition is upheld by `TG-KEY-001`: every write of
+    /// a record holds that record's per-key writer (see `add_with_witness`).
     ///
     /// The queued entry also takes the earlier `store_time`, as a coalesce
     /// does, so a key rewritten during a store outage keeps its original flush
@@ -2868,23 +2868,28 @@ impl MapDataStore for WriteBehindDataStore {
         self.config.or_delta_wal
     }
 
-    /// # Precondition: one writer per key at a time (NOT upheld by every caller)
+    /// # Precondition: one writer per key at a time
     ///
     /// The entry sequence is assigned and the entry is queued in two separate
     /// steps, with no lock held across both. Two concurrent writers of one
-    /// `(map, key)` can therefore interleave so that the write with the higher
-    /// sequence is queued first and the one with the lower sequence then
-    /// replaces it: the queue is left holding the lower-sequence write while
-    /// staging keeps the higher one.
+    /// `(map, key)` could therefore interleave so that the write with the
+    /// higher sequence is queued first and the one with the lower sequence
+    /// then replaces it: the queue would be left holding the lower-sequence
+    /// write while staging keeps the higher one.
     ///
     /// This store's accounting (`TG-WB-005`) is proven for one writer per key
-    /// at a time. The component that serialises writers of a key is
-    /// `service::domain::key_writer::KeyWriterRegistry`, and it is a caller's
-    /// obligation to take it. That obligation is not met by every caller
-    /// today: a write that reaches `RecordStore::put` arrives here without the
-    /// per-key writer, so the interleaving above is possible in production
-    /// (tracked as TODO-776). `remove` and `remove_all` rest on the same
-    /// precondition.
+    /// at a time, and it is the callers that provide it. For record keys they
+    /// do: every write that reaches `RecordStore::put`, `update_in_place` or
+    /// `remove` holds the key's writer from
+    /// `service::domain::key_writer::KeyWriterRegistry` (`TG-KEY-001`). A
+    /// caller that writes this store directly, not through the record store,
+    /// is outside that invariant and has to exclude a second writer of its
+    /// key itself. `remove` and `remove_all` rest on the same precondition.
+    ///
+    /// One known exception: the fallback delete in
+    /// `TombstoneFrontier::forget_client` runs on its caller's task while the
+    /// cursor worker may be writing the same client's row. It has no
+    /// production caller today (TODO-777).
     async fn add_with_witness(
         &self,
         map: &str,

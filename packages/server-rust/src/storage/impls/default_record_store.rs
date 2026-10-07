@@ -260,6 +260,14 @@ impl RecordStore for DefaultRecordStore {
         self.engine.contains_key(key)
     }
 
+    /// Caller obligation: every caller holds the key's per-key writer across the
+    /// whole call (TG-KEY-001), the same writer every in-place write (see
+    /// [`update_in_place`](RecordStore::update_in_place)) and every whole-key
+    /// [`remove`](RecordStore::remove) of the key holds. The write to the
+    /// engine and the staging of the write-through are separate steps with no
+    /// lock of this store across both, so two puts of one key that are not
+    /// serialised by the writer can leave memory on one value and the durable
+    /// store on the other.
     async fn put(
         &self,
         key: &str,
