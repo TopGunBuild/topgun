@@ -6334,6 +6334,13 @@ mod tests {
         const K_HELD: &str = "kheld";
         const K_OP: &str = "kop";
         const BUDGET_MS: u64 = 500;
+        // The op of K_OP must complete while K_HELD's writer is held, which it
+        // can only do from another stripe.
+        assert_ne!(
+            crate::service::domain::key_writer::stripe_of("m", K_HELD),
+            crate::service::domain::key_writer::stripe_of("m", K_OP),
+            "precondition: K_HELD and K_OP must not share a key-writer stripe"
+        );
 
         let (svc, factory, frontier) = make_service_with_frontier();
 

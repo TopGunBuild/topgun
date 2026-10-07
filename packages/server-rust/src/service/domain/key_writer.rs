@@ -1,11 +1,12 @@
 //! Per-KEY single-writer registry for the CRDT apply path.
 //!
-//! Provides `KeyWriterRegistry`, a `DashMap`-backed store of per-key
-//! `tokio::sync::Mutex<()>` guards. Callers acquire the guard for a
-//! `(map_name, key)` pair and hold it across the compound, `.await`-spanning
-//! read-modify-write merge (`store.get` -> mutate -> `store.put`),
-//! serializing concurrent writers on the SAME key without contending on
-//! unrelated keys.
+//! Provides `KeyWriterRegistry`, a fixed table of `tokio::sync::Mutex<()>`
+//! stripes. Callers acquire the guard for a `(map_name, key)` pair and hold it
+//! across the compound, `.await`-spanning read-modify-write merge
+//! (`store.get` -> mutate -> `store.put`), serializing concurrent writers on
+//! the SAME key. A key's stripe is a hash of the pair, so two unrelated keys
+//! usually do not contend, and when they land on one stripe they serialize
+//! too.
 //!
 //! # Why per-KEY, not per-partition
 //!
@@ -13,8 +14,9 @@
 //! block concurrent writers to *different* keys that merely happen to hash
 //! to the same partition — a throughput cliff with zero correctness
 //! benefit, since the CRDT merge critical section is inherently scoped to
-//! one key's record. Per-key locking gives exactly the exclusion the RMW
-//! needs and nothing more.
+//! one key's record. A stripe is the exclusion the RMW needs for its key plus
+//! the few unrelated keys that hash to the same one of `KEY_WRITER_STRIPES`
+//! entries: far finer than a partition, and never narrower than the key.
 //!
 //! # Why `tokio::sync::Mutex`, not `std::sync::Mutex`
 //!
@@ -43,96 +45,145 @@
 //!   while both having read the same pre-mutation state, producing the
 //!   exact lost update this primitive exists to close.
 //!
-//! # Lock-map lifecycle (no eviction, by design)
+//! # The stripe table (fixed size, nothing per key)
 //!
-//! This registry never removes entries — the map only grows via
-//! `or_insert_with`. Naive eviction here would be a mutual-exclusion
-//! *correctness* bug, not merely a missed memory optimization: if task A
-//! drops its guard and `remove`s the map entry while task B still holds a
-//! clone of that same `Arc<Mutex>` (waiting on it), a later task C's
-//! `or_insert_with` mints a *fresh* `Mutex` for the same key — B and C now
-//! both believe they hold the key's lock, and mutual exclusion is broken. A
-//! correct eviction would require `DashMap::remove_if(&key, |arc|
-//! Arc::strong_count(arc) == 1)` executed atomically under the shard lock
-//! against concurrent `or_insert_with` acquirers, and any background reaper
-//! would need the identical guard (a two-step "iterate, check, then remove"
-//! reaper is unsound). This child implements neither — unbounded growth,
-//! bounded by the number of distinct keys ever written, is accepted as a
-//! documented operational memory concern. Guarded eviction (option b) is
-//! only adopted by a follow-up spec if key churn demonstrates it is needed.
+//! The table has exactly `KEY_WRITER_STRIPES` mutexes, all created at
+//! construction. None is ever added, removed or replaced, and the registry
+//! keeps nothing per key written, so its memory is bounded by
+//! `KEY_WRITER_FOOTPRINT_BOUND_BYTES` however many distinct keys pass through
+//! it. Because no entry is ever removed, a waiter can never be left holding a
+//! mutex that a later caller no longer finds: every caller of a key reaches
+//! the same mutex for the registry's whole life.
+//!
+//! A stripe's first use may allocate one small block for the platform's
+//! mutex, once, and never again; every later acquire-and-release allocates
+//! nothing. Measured: 64 B per stripe on macOS arm64. Linux: not measured.
+//!
+//! - **Same key, same stripe.** The stripe is a deterministic function of the
+//!   two strings, so every writer of one `(map_name, key)` on one registry —
+//!   whatever kind of write it is — excludes every other.
+//! - **Different keys may share a stripe.** They then serialize as if they
+//!   were one key. That is wider exclusion than correctness needs and is safe;
+//!   it costs the waiter the rest of the holder's critical section.
+//! - **A task holds at most one guard.** The mutex is not re-entrant, so a
+//!   task that holds one key's guard and acquires another key blocks on itself
+//!   whenever the two keys share a stripe. See `acquire`.
+//!
+//! # What a holder that never returns costs
+//!
+//! `acquire` has no bound of its own. A holder that never returns — a store
+//! call that hangs under the guard — keeps its whole stripe, not only its key:
+//!
+//! - A client operation drawn to that stripe waits until the operation's own
+//!   timeout drops it. A dispatch worker runs one operation at a time, so for
+//!   that long the waiting operation occupies its worker and everything queued
+//!   for that worker's partitions waits behind it. This repeats for each such
+//!   operation that arrives.
+//! - A caller that runs outside the timeout layer waits without bound. Two do
+//!   so today: the tombstone prune task and the embedding write-back. While
+//!   either waits, its whole pass stops, for every key.
+//!
+//! A new background caller must decide for itself how long it is willing to
+//! wait.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-/// Identifies a single CRDT record for per-key single-writer serialization.
+/// Number of stripes in a registry's table. A power of two, so a stripe index
+/// is a mask of the key's hash.
 ///
-/// Composed of `(map_name, key)` rather than the bare storage key alone:
-/// keys are only unique *within* a map, and scoping the lock to the map
-/// avoids false contention between unrelated maps whose keys happen to
-/// share the same string value.
-pub type WriterKey = (String, String);
+/// Sized so that, with every dispatch worker and background writer permanently
+/// inside a critical section, one operation finds its stripe held by an
+/// unrelated writer less than 1 % of the time up to 64 workers.
+pub const KEY_WRITER_STRIPES: usize = 16_384;
+
+const _: () = assert!(KEY_WRITER_STRIPES.is_power_of_two());
+
+/// Upper bound on the memory of one registry, before allocator overhead. It
+/// covers the stripe table plus the one block per stripe that the platform's
+/// mutex may allocate at the stripe's first use. The table never grows and
+/// that block is allocated at most once per stripe, so this holds for the
+/// registry's whole life.
+pub const KEY_WRITER_FOOTPRINT_BOUND_BYTES: usize = 4 * 1024 * 1024;
+
+/// The stripe of `(map, key)`.
+///
+/// The hashed bytes are the map name, one `0xFF` byte and the key. `0xFF`
+/// never occurs in UTF-8, so the encoding of the pair is injective: `("ab",
+/// "c")` and `("a", "bc")` are different inputs.
+///
+/// The hasher starts from fixed keys, so a pair has the same stripe in every
+/// registry of a process. Which keys share a stripe may change with the
+/// toolchain; nothing may depend on it.
+fn stripe_index(map: &str, key: &str) -> usize {
+    let mut hasher = DefaultHasher::new();
+    hasher.write(map.as_bytes());
+    hasher.write_u8(0xFF);
+    hasher.write(key.as_bytes());
+    // Only the low bits survive the mask, so truncating the hash loses nothing.
+    #[allow(clippy::cast_possible_truncation)]
+    let hash = hasher.finish() as usize;
+    hash & (KEY_WRITER_STRIPES - 1)
+}
+
+#[cfg(test)]
+/// The stripe of `(map, key)`, for tests that need two keys on one stripe or
+/// on two different ones.
+pub(crate) fn stripe_of(map: &str, key: &str) -> usize {
+    stripe_index(map, key)
+}
 
 /// Per-KEY single-writer registry.
 ///
 /// Serializes the compound, `.await`-spanning read-modify-write merge
 /// (`store.get` -> mutate -> `store.put`) used by CRDT apply, so concurrent
 /// writers to the SAME key cannot interleave and lose an update. See the
-/// module docs for the per-key-vs-per-partition rationale and the
-/// no-eviction lifecycle contract.
+/// module docs for the per-key-vs-per-partition rationale and the stripe
+/// table.
 pub struct KeyWriterRegistry {
-    locks: DashMap<WriterKey, Arc<Mutex<()>>>,
+    stripes: Box<[Arc<Mutex<()>>]>,
     #[cfg(test)]
     /// How many tasks are inside `acquire` and do not hold their guard yet.
     waiting: std::sync::atomic::AtomicUsize,
 }
 
 impl KeyWriterRegistry {
-    /// Creates a new, empty registry.
+    /// Creates a registry with all `KEY_WRITER_STRIPES` stripes.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            locks: DashMap::new(),
+            stripes: (0..KEY_WRITER_STRIPES)
+                .map(|_| Arc::new(Mutex::new(())))
+                .collect(),
             #[cfg(test)]
             waiting: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    /// Returns the per-key `Arc<Mutex<()>>` for `(map_name, key)`, inserting
-    /// a fresh one if this is the first acquisition for the key. The
-    /// registry NEVER removes entries — see module docs "Lock-map
-    /// lifecycle".
-    fn entry_lock(&self, map_name: &str, key: &str) -> Arc<Mutex<()>> {
-        self.locks
-            .entry((map_name.to_string(), key.to_string()))
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
-    /// Acquires the per-key writer lock for `(map_name, key)`, returning an
-    /// owned RAII guard that can be held across `.await` points — including
-    /// across a longer async scope than the acquisition call itself (per
-    /// the module's `tokio::sync::Mutex` rationale). Callers span this
-    /// guard over their entire critical region — for the `OR_ADD` joint-fix,
-    /// from `store.get` through the single `store.put` merge-commit.
+    /// Acquires the writer lock for `(map_name, key)`, returning an owned RAII
+    /// guard that can be held across `.await` points — including across a
+    /// longer async scope than the acquisition call itself (per the module's
+    /// `tokio::sync::Mutex` rationale). Callers span this guard over their
+    /// entire critical region — for the `OR_ADD` joint-fix, from `store.get`
+    /// through the single `store.put` merge-commit.
+    ///
+    /// # Precondition
+    ///
+    /// A task must not call `acquire` while it holds a guard of this registry.
+    /// Two different keys can share a stripe and the lock is not re-entrant,
+    /// so the second call would wait for the guard its own task holds, and
+    /// never return.
     pub async fn acquire(&self, map_name: &str, key: &str) -> KeyWriterGuard {
-        let lock = self.entry_lock(map_name, key);
+        let lock = Arc::clone(&self.stripes[stripe_index(map_name, key)]);
         #[cfg(test)]
         let waiting = WaitingProbe::enter(&self.waiting);
         let guard = lock.lock_owned().await;
         #[cfg(test)]
         drop(waiting);
         KeyWriterGuard { _guard: guard }
-    }
-
-    /// Number of distinct `(map_name, key)` pairs currently tracked. The
-    /// registry only grows (no eviction — see module docs), so this value
-    /// is monotonically non-decreasing over the registry's lifetime.
-    /// Exposed for tests/inspection.
-    #[must_use]
-    pub fn tracked_key_count(&self) -> usize {
-        self.locks.len()
     }
 }
 
@@ -179,7 +230,7 @@ impl Default for KeyWriterRegistry {
 
 /// RAII guard for a held per-key writer lock. Dropping it releases the
 /// lock. Deliberately opaque (no exposed methods) — its only job is to keep
-/// the per-key mutex held for the caller's critical-section lifetime; the
+/// the key's stripe held for the caller's critical-section lifetime; the
 /// `OwnedMutexGuard` it wraps keeps the underlying `Arc<Mutex<()>>` alive
 /// for as long as the guard is held, independent of the registry's own
 /// lifetime.
@@ -193,13 +244,49 @@ pub struct KeyWriterGuard {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::collections::HashSet;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::task::Poll;
+    use std::time::Duration;
 
     use super::*;
 
-    // -- AC6 (primitive half): the registry serializes concurrent
-    //    acquisitions on the same key, closing a classic read-then-write
-    //    lost-update race. --
+    const MAP: &str = "map";
+    /// How long a test waits for a point it must reach before it declares
+    /// itself broken. A failure detector: no outcome depends on it.
+    const WAIT_BOUND: Duration = Duration::from_secs(5);
+
+    /// The first `k{i}` whose stripe relates to `reference`'s as asked: the
+    /// same stripe, or a different one. `reference` itself is never returned.
+    fn key_by_stripe(reference: &str, same_stripe: bool) -> String {
+        let wanted = stripe_of(MAP, reference);
+        (0..64 * KEY_WRITER_STRIPES)
+            .map(|i| format!("k{i}"))
+            .find(|candidate| {
+                candidate != reference && (stripe_of(MAP, candidate) == wanted) == same_stripe
+            })
+            .expect("no candidate key with the wanted stripe")
+    }
+
+    /// The stripe table's memory, from the sizes of its parts: per stripe, the
+    /// pointer in the table and the heap block of two reference counts and the
+    /// mutex. Allocator overhead per block is not counted.
+    fn stripe_table_bytes() -> usize {
+        let pointer = std::mem::size_of::<Arc<Mutex<()>>>();
+        let reference_counts = 2 * std::mem::size_of::<usize>();
+        let mutex = std::mem::size_of::<Mutex<()>>();
+        KEY_WRITER_STRIPES * (pointer + reference_counts + mutex)
+    }
+
+    /// Polls `future` exactly once and says whether that poll was `Pending`.
+    async fn pending_on_first_poll<F: Future>(future: std::pin::Pin<&mut F>) -> bool {
+        let mut future = future;
+        std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx).is_pending())).await
+    }
+
+    // -- The registry serializes concurrent acquisitions on the same key,
+    //    closing a classic read-then-write lost-update race. --
 
     /// Simulates the exact RMW shape `crdt.rs`'s `OR_ADD` apply uses
     /// (read state -> yield across an await -> write state) on shared
@@ -244,70 +331,325 @@ mod tests {
         }
     }
 
-    /// Control: acquisitions on DIFFERENT keys must not serialize against
-    /// each other — this registry is per-KEY, not a single global lock.
+    /// Control: acquisitions of keys on different stripes must not serialize
+    /// against each other — this registry is not a single global lock.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_acquisitions_on_different_keys_do_not_block_each_other() {
         let registry = Arc::new(KeyWriterRegistry::new());
+        let other = key_by_stripe("a", false);
 
         // Hold key "a"'s lock for the duration of this scope.
-        let _guard_a = registry.acquire("map", "a").await;
+        let _guard_a = registry.acquire(MAP, "a").await;
 
-        // Acquiring an unrelated key "b" must complete promptly even while
-        // "a" is held — proven by a bounded timeout rather than a hang.
+        // Acquiring a key on a different stripe must complete promptly even
+        // while "a" is held — proven by a bounded timeout rather than a hang.
         let registry_b = Arc::clone(&registry);
         let acquired_b = tokio::time::timeout(
             std::time::Duration::from_millis(500),
             tokio::spawn(async move {
-                let _guard_b = registry_b.acquire("map", "b").await;
+                let _guard_b = registry_b.acquire(MAP, &other).await;
             }),
         )
         .await;
 
         assert!(
             acquired_b.is_ok(),
-            "acquiring a different key must not block on another key's held guard"
+            "acquiring a key on a different stripe must not block on another key's held guard"
         );
     }
 
-    // -- AC14: lock-map lifecycle — no eviction path exists; the registry
-    //    only grows via `or_insert_with`, never shrinks. This is an accepted
-    //    operational memory-growth concern (see module docs), not a bug. --
+    /// Two different keys that share a stripe exclude each other, and neither
+    /// is left behind: the waiter gets the stripe when the holder releases it,
+    /// and writers alternating between the two keys all complete.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_different_keys_on_one_stripe_both_complete() {
+        const A: &str = "a";
+        const STABLE_WAIT_YIELDS: usize = 200;
+        let b = key_by_stripe(A, true);
+        let registry = Arc::new(KeyWriterRegistry::new());
 
-    #[tokio::test]
-    async fn registry_never_evicts_entries_grows_monotonically() {
+        let held_a = registry.acquire(MAP, A).await;
+        let b_done = Arc::new(AtomicBool::new(false));
+        let task = {
+            let (registry, b, b_done) = (Arc::clone(&registry), b.clone(), Arc::clone(&b_done));
+            tokio::spawn(async move {
+                let _guard = registry.acquire(MAP, &b).await;
+                b_done.store(true, Ordering::SeqCst);
+            })
+        };
+        // B waits behind A only if the two share a mutex. One sighting of the
+        // count is also true for a task passing through a free lock, so the
+        // wait must still be there at each of the following yields.
+        let b_waited_while_a_was_held = tokio::time::timeout(WAIT_BOUND, async {
+            let mut sightings_after_first = 0;
+            loop {
+                if task.is_finished() {
+                    return false;
+                }
+                if registry.test_waiting() == 1 {
+                    if sightings_after_first == STABLE_WAIT_YIELDS {
+                        return true;
+                    }
+                    sightings_after_first += 1;
+                } else {
+                    sightings_after_first = 0;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the acquire of B neither returned nor waited");
+
+        drop(held_a);
+        tokio::time::timeout(WAIT_BOUND, task)
+            .await
+            .expect("B never got the stripe after A released it")
+            .expect("B task");
+        let b_completed = b_done.load(Ordering::SeqCst);
+
+        // One after the other: holding both at once is what a task must not do.
+        let a_and_b_reacquired = tokio::time::timeout(WAIT_BOUND, async {
+            drop(registry.acquire(MAP, A).await);
+            drop(registry.acquire(MAP, &b).await);
+        })
+        .await
+        .is_ok();
+
+        assert_eq!(
+            (b_waited_while_a_was_held, b_completed, a_and_b_reacquired),
+            (true, true, true),
+            "(B waited while A was held, B completed after the release, A and B can be \
+             acquired again)"
+        );
+
+        // No starvation: writers alternating between the two keys share one
+        // unprotected counter, and every one of them gets its turn.
+        let shared = Arc::new(AtomicU64::new(0));
+        let n = 50u64;
+        let handles: Vec<_> = (0..n)
+            .map(|i| {
+                let (registry, shared) = (Arc::clone(&registry), Arc::clone(&shared));
+                let key = if i % 2 == 0 { A.to_string() } else { b.clone() };
+                tokio::spawn(async move {
+                    let _guard = registry.acquire(MAP, &key).await;
+                    let current = shared.load(Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    shared.store(current + 1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        tokio::time::timeout(WAIT_BOUND, futures_util::future::join_all(handles))
+            .await
+            .expect("a writer on the shared stripe never got its turn")
+            .into_iter()
+            .for_each(|r| r.expect("task panicked"));
+        assert_eq!(
+            shared.load(Ordering::SeqCst),
+            n,
+            "two keys on one stripe must serialize all {n} read-modify-writes with no lost update"
+        );
+    }
+
+    /// Writing many distinct keys leaves nothing behind in the registry: the
+    /// table has its fixed size, no stripe is still referenced by an acquire
+    /// that has returned its guard, and no stripe is still locked. The keys
+    /// must really have spread over the table for that to say anything.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn registry_holds_no_per_key_state_after_100_000_distinct_keys() {
+        const KEYS: usize = 100_000;
+        const TASKS: usize = 8;
+        const MAPS: usize = 4;
+        let registry = Arc::new(KeyWriterRegistry::new());
+
+        let handles: Vec<_> = (0..TASKS)
+            .map(|task| {
+                let registry = Arc::clone(&registry);
+                tokio::spawn(async move {
+                    for i in (task..KEYS).step_by(TASKS) {
+                        let _guard = registry
+                            .acquire(&format!("m{}", i % MAPS), &format!("k{i}"))
+                            .await;
+                    }
+                })
+            })
+            .collect();
+        futures_util::future::join_all(handles)
+            .await
+            .into_iter()
+            .for_each(|r| r.expect("task panicked"));
+        assert_eq!(
+            registry.test_waiting(),
+            0,
+            "quiescence: every task has joined, so none is inside acquire"
+        );
+
+        let stripes_with_a_live_clone = registry
+            .stripes
+            .iter()
+            .filter(|stripe| Arc::strong_count(stripe) > 1)
+            .count();
+        let stripes_that_cannot_be_locked = registry
+            .stripes
+            .iter()
+            .filter(|stripe| stripe.try_lock().is_err())
+            .count();
+        let distinct_stripes_touched = (0..KEYS)
+            .map(|i| stripe_of(&format!("m{}", i % MAPS), &format!("k{i}")))
+            .collect::<HashSet<_>>()
+            .len();
+        println!(
+            "key_writer/no_per_key_state: keys={KEYS} stripe_count={} \
+             stripes_with_a_live_clone={stripes_with_a_live_clone} \
+             stripes_that_cannot_be_locked={stripes_that_cannot_be_locked} \
+             distinct_stripes_touched={distinct_stripes_touched}",
+            registry.stripes.len()
+        );
+        assert_eq!(
+            (
+                registry.stripes.len(),
+                stripes_with_a_live_clone,
+                stripes_that_cannot_be_locked,
+                distinct_stripes_touched >= KEY_WRITER_STRIPES / 2
+            ),
+            (KEY_WRITER_STRIPES, 0, 0, true),
+            "(stripe count, stripes still referenced outside the table, stripes still locked, \
+             the keys spread over at least half the table)"
+        );
+    }
+
+    /// The table's memory, computed from the sizes of its parts, is within the
+    /// stated constant, and the registry has no room for anything but the
+    /// table and the test counter. Allocator overhead per block is not counted.
+    #[test]
+    fn stripe_table_footprint_is_within_the_stated_constant() {
+        let mutex = std::mem::size_of::<Mutex<()>>();
+        let table = stripe_table_bytes();
+        println!(
+            "key_writer/footprint: size_of::<Mutex<()>>()={mutex} per_stripe={} table_bytes={table} \
+             bound_bytes={KEY_WRITER_FOOTPRINT_BOUND_BYTES} size_of::<KeyWriterRegistry>()={}",
+            table / KEY_WRITER_STRIPES,
+            std::mem::size_of::<KeyWriterRegistry>()
+        );
+        assert!(
+            table <= KEY_WRITER_FOOTPRINT_BOUND_BYTES,
+            "the stripe table ({table} B) must fit the stated bound"
+        );
+        assert_eq!(
+            std::mem::size_of::<KeyWriterRegistry>(),
+            std::mem::size_of::<Box<[Arc<Mutex<()>>]>>() + std::mem::size_of::<AtomicUsize>(),
+            "the registry holds the boxed stripe table and the test counter, nothing else"
+        );
+    }
+
+    /// The registry allocates nothing per key and nothing per acquire. A cold
+    /// pass over many distinct keys may allocate one block per stripe it
+    /// touches (the platform's mutex, at the stripe's first use), and that
+    /// plus the table stays within the stated bound; a second pass over the
+    /// same keys allocates nothing.
+    ///
+    /// A local allocation proof, not a CI guard: CI never enables `count-alloc`,
+    /// and the counters are process-global, so it is meaningful only when run
+    /// alone and single-threaded:
+    /// `cargo test --release -p topgun-server --lib --features count-alloc -- --ignored --test-threads=1 count_alloc_acquire`
+    #[cfg(feature = "count-alloc")]
+    #[test]
+    #[ignore = "local allocation proof: run single-threaded under count-alloc"]
+    fn count_alloc_acquire_is_bounded_on_first_use_and_zero_on_repeat() {
+        const KEYS: usize = 100_000;
+        let allocated = || stats_alloc::INSTRUMENTED_SYSTEM.stats().bytes_allocated;
+
         let registry = KeyWriterRegistry::new();
-        assert_eq!(registry.tracked_key_count(), 0);
+        let keys: Vec<String> = (0..KEYS).map(|i| format!("k{i}")).collect();
+        let stripes_touched = keys
+            .iter()
+            .map(|key| stripe_of(MAP, key))
+            .collect::<HashSet<_>>()
+            .len();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime");
 
-        // Acquire and fully release a key's guard.
-        {
-            let _guard = registry.acquire("map", "k1").await;
-        }
+        // The counter is live: one formatted string moves it.
+        let before = allocated();
+        let formatted = std::hint::black_box(format!("k{KEYS}"));
+        let one_format = allocated() - before;
+        drop(formatted);
+
+        // Both passes run inside one `block_on`. The runtime allocates one
+        // block of its own per `block_on` while the loop runs (seen as 64 B
+        // beyond the stripes' blocks in the cold figure); in a second
+        // `block_on` that block would be charged to the repeat pass.
+        let (cold, repeat) = runtime.block_on(async {
+            let before = allocated();
+            for key in &keys {
+                drop(registry.acquire(MAP, key).await);
+            }
+            let after_cold = allocated();
+            for key in &keys {
+                drop(registry.acquire(MAP, key).await);
+            }
+            (after_cold - before, allocated() - after_cold)
+        });
+
+        let table = stripe_table_bytes();
+        println!(
+            "count_alloc_acquire acquires_per_pass={KEYS} stripes_touched={stripes_touched} \
+             cold_pass_bytes_allocated={cold} cold_bytes_per_touched_stripe={} \
+             cold_bytes_remainder={} repeat_pass_bytes_allocated={repeat} table_bytes={table} \
+             bound_bytes={KEY_WRITER_FOOTPRINT_BOUND_BYTES} one_format_bytes_allocated={one_format}",
+            cold / stripes_touched,
+            cold % stripes_touched
+        );
+        assert!(one_format > 0, "the allocation counter must be live");
+        assert!(
+            cold + table <= KEY_WRITER_FOOTPRINT_BOUND_BYTES,
+            "the first use of {stripes_touched} stripes ({cold} B) plus the table ({table} B) \
+             must fit the stated bound"
+        );
         assert_eq!(
-            registry.tracked_key_count(),
-            1,
-            "the entry for k1 must remain tracked after its guard is dropped — no eviction"
+            repeat, 0,
+            "{KEYS} acquire-and-release calls on stripes already used must allocate nothing"
+        );
+    }
+
+    /// What the one-guard-per-task precondition prevents: a task that holds a
+    /// key and acquires another key on the same stripe waits for itself. The
+    /// second acquire is polled once and dropped, which also shows that a
+    /// dropped acquire leaves the waiting count.
+    #[tokio::test]
+    async fn a_second_acquire_by_the_holding_task_on_the_same_stripe_stays_pending() {
+        const A: &str = "a";
+        let same_stripe = key_by_stripe(A, true);
+        let other_stripe = key_by_stripe(A, false);
+        let registry = KeyWriterRegistry::new();
+        let _held_a = registry.acquire(MAP, A).await;
+
+        // Non-vacuity: a single poll does complete an acquire that is free.
+        let other_is_pending = {
+            let acquire = std::pin::pin!(registry.acquire(MAP, &other_stripe));
+            pending_on_first_poll(acquire).await
+        };
+        assert!(
+            !other_is_pending,
+            "precondition: with A held, a key on a different stripe is acquired at the first poll"
         );
 
-        // Re-acquiring the SAME key must reuse the existing entry, not add a
-        // second one.
-        {
-            let _guard = registry.acquire("map", "k1").await;
-        }
-        assert_eq!(
-            registry.tracked_key_count(),
-            1,
-            "re-acquiring the same key must not grow the tracked-key count"
-        );
+        let (is_pending, waiting_while_polled) = {
+            let acquire = std::pin::pin!(registry.acquire(MAP, &same_stripe));
+            let is_pending = pending_on_first_poll(acquire).await;
+            (is_pending, registry.test_waiting())
+        };
+        let waiting_after_the_future_was_dropped = registry.test_waiting();
 
-        // A distinct key gets its own tracked entry; the count only grows.
-        {
-            let _guard = registry.acquire("map", "k2").await;
-        }
         assert_eq!(
-            registry.tracked_key_count(),
-            2,
-            "a distinct key must be tracked as an additional entry (monotonic growth)"
+            (
+                is_pending,
+                waiting_while_polled,
+                waiting_after_the_future_was_dropped
+            ),
+            (true, 1, 0),
+            "(the second acquire is pending, it is counted as waiting while it lives, the count \
+             is back to zero once it is dropped)"
         );
     }
 }
