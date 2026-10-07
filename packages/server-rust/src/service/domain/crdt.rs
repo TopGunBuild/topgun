@@ -12207,10 +12207,14 @@ mod tests {
         }
 
         // A write must not land after a write of the same key that carries a
-        // higher stamp. The only point between minting a stamp and applying it
-        // where a write can be overtaken is the read of the previous value,
-        // taken when the map has a query subscription and the key is not
-        // resident; the first writer is parked there.
+        // higher stamp. The first writer is parked in the read of the previous
+        // value, taken when the map has a query subscription and the key is
+        // not resident. That read is in front of both the writer acquire and
+        // the mint, so the parked writer mints last and applies last, and the
+        // second writer is never kept waiting. What this guards is that the
+        // mint does not move back in front of that read; it passes with no
+        // writer at all. The mint's place under the writer is guarded by
+        // `a_put_that_takes_the_writer_last_carries_the_higher_stamp`.
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn a_lower_stamped_put_never_lands_after_a_higher_stamped_one() {
             let dir = tempfile::tempdir().expect("tempdir");

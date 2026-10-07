@@ -167,8 +167,8 @@ impl KeyWriterRegistry {
     /// guard that can be held across `.await` points — including across a
     /// longer async scope than the acquisition call itself (per the module's
     /// `tokio::sync::Mutex` rationale). Callers span this guard over their
-    /// entire critical region — for the `OR_ADD` joint-fix, from `store.get`
-    /// through the single `store.put` merge-commit.
+    /// entire critical region: from the first read of the key's record that
+    /// the write depends on through the last store call of that write.
     ///
     /// # Precondition
     ///

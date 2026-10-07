@@ -591,9 +591,11 @@ case outside the precondition.
 - **Two concurrent writers of one key.** The writers of a record key are serialised above this
   store (`TG-KEY-001`), so it no longer meets them. One interleaving below the writer is still
   tested here, for accounting only. The case in which the carry would make the outcome after a
-  restart worse (see "Not claimed") is now covered by two tests driven through the service:
-  `two_routes_and_a_refused_flush_recover_the_later_stamp_after_a_crash` and
-  `an_older_value_arriving_behind_a_refused_newer_one_does_not_win_after_a_crash`.
+  restart worse (see "Not claimed") is covered by one test driven through the service that needs
+  the writer: `two_routes_and_a_refused_flush_recover_the_later_stamp_after_a_crash`. A second
+  one, `an_older_value_arriving_behind_a_refused_newer_one_does_not_win_after_a_crash`, shows
+  that a write which arrives later behind a refused flush also carries the higher stamp, because
+  its stamp is minted after its read of the previous value; that test passes without the writer.
 
 ### TG-EVI-001: Never-evict-dirty — an unflushed write is never evicted from the resident cache
 
@@ -1493,9 +1495,8 @@ case outside the precondition.
   `service/domain/embedding/hook.rs` — `write_back_one_embedding`; `bin/topgun_server.rs`
   constructs the one registry and passes it to each of them.
 - **Enforcing test:** `crdt.rs::two_routes_writing_one_key_leave_engine_and_store_on_the_later_stamp`
-  — two writes of one key arriving by two routes, the first parked inside the store: the second
-  waits for the writer, and memory and the durable store both end on the later stamp. Runs in CI
-  (`cargo test`). The table below lists the others and what each one covers.
+  — two writes of one key arriving by two routes, the first parked inside the store: memory and
+  the durable store both end on the later stamp. Runs in CI (`cargo test`). The table below lists the others and what each one covers.
 - **Violation consequence:** two writers of one record that are not serialised can each pass
   the store's own checks and interleave. Memory then serves one value while the durable store
   holds the other, and after a restart the server returns the OLDER of the two although it
@@ -1514,9 +1515,10 @@ case outside the precondition.
 |----------|----------------|---------------|
 | `two_routes_writing_one_key_leave_engine_and_store_on_the_later_stamp` | two routes, the first parked inside the record store: memory and the durable store agree on the later stamp | CI (`cargo test`) |
 | `two_routes_writing_one_key_leave_store_staging_and_restart_on_the_later_stamp` | the same with the first writer parked inside the write-behind store: the store, staging and a restart all give the later stamp | CI (`cargo test`) |
-| `a_lower_stamped_put_never_lands_after_a_higher_stamped_one` | the stamp is minted under the writer: the journal order of two puts of one key is their stamp order | CI (`cargo test`) |
+| `a_put_that_takes_the_writer_last_carries_the_higher_stamp` | the stamp is minted under the writer: a put parked in front of its acquire while another put of the key completes takes the higher stamp, is recorded second, and its value is the one memory and the durable store keep | CI (`cargo test`) |
+| `a_lower_stamped_put_never_lands_after_a_higher_stamped_one` | the mint is not in front of the read of the previous value; the journal order of two puts of one key is their stamp order. It does not need the writer: it passes without one | CI (`cargo test`) |
 | `two_routes_and_a_refused_flush_recover_the_later_stamp_after_a_crash` | two routes plus a refused flush: after a crash and recovery the recovered value is the later-stamped one and equals what the live server served | CI (`cargo test`) |
-| `an_older_value_arriving_behind_a_refused_newer_one_does_not_win_after_a_crash` | a write arriving while the newer one sits in a refused flush: the same assertion after a crash and recovery | CI (`cargo test`) |
+| `an_older_value_arriving_behind_a_refused_newer_one_does_not_win_after_a_crash` | a write parked in the read of the previous value while another sits in a refused flush: it mints after that read, so the later arrival is also the higher stamp, and the value recovered after a crash is the one the live server served. It does not need the writer: it passes without one | CI (`cargo test`) |
 | `an_lww_put_waits_for_a_parked_or_push_of_the_same_key` | one registry for LWW and OR writers: an LWW put waits for an `ORMapPushDiff` of the same key | CI (`cargo test`) |
 | `a_client_write_during_an_embedding_write_back_is_not_overwritten` | the write-back's read-modify-write holds the writer: a client write during it is not overwritten | CI (`cargo test`) |
 | `a_client_write_during_a_write_back_is_still_embedded_and_reaches_the_store` | a client write that waited behind a write-back still enqueues its own embedding event and reaches the store | CI (`cargo test`) |
