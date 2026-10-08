@@ -180,7 +180,13 @@ impl KeyWriterRegistry {
         let lock = Arc::clone(&self.stripes[stripe_index(map_name, key)]);
         #[cfg(test)]
         let waiting = WaitingProbe::enter(&self.waiting);
-        let guard = lock.lock_owned().await;
+        // Polled outside the task's cooperative budget. The runtime charges
+        // every mutex acquire to that budget and sends the task back to the
+        // run queue when it is spent, so a write path that takes a free key
+        // per operation would give up its worker for a lock nobody holds. A
+        // lock that IS held still returns `Pending` here and is woken by the
+        // release: exclusion and the order of the waiters do not change.
+        let guard = tokio::task::coop::unconstrained(lock.lock_owned()).await;
         #[cfg(test)]
         drop(waiting);
         KeyWriterGuard { _guard: guard }
