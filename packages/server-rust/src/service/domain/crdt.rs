@@ -386,8 +386,9 @@ impl CrdtService {
                 self.admit_or_op(op, None, true).await?;
             }
             // All ops validated — apply them sequentially with sanitized timestamps.
-            // Each op gets its own partition based on its key (OpBatch ctx has
-            // partition_id=None because the batch contains keys for many partitions).
+            // Each op's partition is derived from its own key. A batch a transport
+            // dispatches is already split and carries its partition; a batch built
+            // by hand may still carry none, so the batch's own label is not relied on.
             for op in ops {
                 self.apply_batch_op(op, StampPolicy::Mint, ctx.connection_id)
                     .await?;
@@ -12029,8 +12030,10 @@ mod tests {
             }
         }
 
-        /// Route Y: a batch with no partition, which is what classification
-        /// produces for an enveloped batch and what the global worker runs.
+        /// Route Y: a batch with no partition. No production route produces one
+        /// any more: every transport splits a batch by partition before it is
+        /// dispatched. A batch built by hand can still carry none, so the route
+        /// is kept as a defence: the per-key writer must hold whatever the route.
         fn route_y(text: &str) -> Operation {
             let mut ctx = make_anon_http_ctx_for_key(KEY);
             ctx.partition_id = None;
