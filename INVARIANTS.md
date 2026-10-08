@@ -1575,10 +1575,22 @@ case outside the precondition.
   `dispatch_message` and `unpack_and_dispatch_batch`, and `dispatch_op_batch`;
   `service/classify.rs` — the `OpBatch` arm of `classify`; `service/operation.rs` —
   `ClassifyError::RequiresPartitionSplit`. Citations are line-number-free, per `TG-OR-004`.
-- **Enforcing test:** `an_overloaded_inner_message_is_answered_with_a_back_off_frame` — clause (a),
-  the same code on both paths; `an_enveloped_op_batch_is_split_onto_its_keys_partition_workers` —
-  clause (b), the split. Both in `websocket.rs`'s test module, both run in CI (`cargo test`).
-  The table below says what each was shown red on, and lists the others.
+- **Enforcing test:** one per property, each shown red on a tree with that property removed.
+  Clause (a) is not one property but four, and no single test holds "the same code on both paths":
+  - *the back-off answer* — `an_overloaded_inner_message_is_answered_with_a_back_off_frame`;
+  - *the principal an inner message is authorized as* —
+    `an_enveloped_message_is_authorized_as_the_connections_principal`;
+  - *the connection an inner message is handled for* —
+    `an_enveloped_single_write_is_handled_as_its_connections_write`;
+  - *envelope order* — `tests/integration-rust/enveloped-op-batch.test.ts`, and only it: no Rust
+    test sees the order. A tree that dispatches the inner items last-to-first, or all at once, is
+    green on every in-process test and red on this one.
+  Clause (b), *the split* — `an_enveloped_op_batch_is_split_onto_its_keys_partition_workers`.
+  The four Rust tests are in `websocket.rs`'s test module and run in CI (`cargo test`); the
+  integration test runs in CI (`pnpm test:integration-rust`). The table below says what each was
+  shown red on, and lists the others. What the tests do not hold: any other argument or branch the
+  two paths could come to differ in. That there is one entry at all is held by structure — one
+  `.classify(` call site in `websocket.rs` — and not by a test.
 - **Violation consequence:** an enveloped `OP_BATCH` that is classified whole runs on the global
   worker with no partition: every op of it is serialised behind one worker, one refused op fails
   the whole batch at validation, and the client is sent nothing — no per-op refusal, no
@@ -1591,9 +1603,11 @@ case outside the precondition.
 
 | Enforcer | What it covers | Where it runs |
 |----------|----------------|---------------|
-| `an_overloaded_inner_message_is_answered_with_a_back_off_frame` | clause (a): an overloaded `CLIENT_OP` is answered with one 429 frame top-level and inside an envelope, and so is an overloaded enveloped `OP_BATCH`. Shown red on the tree where the envelope splits an `OP_BATCH` but keeps its own block for every other message: the enveloped `CLIENT_OP` got no frame | CI (`cargo test`) |
+| `an_overloaded_inner_message_is_answered_with_a_back_off_frame` | clause (a), the back-off answer: an overloaded `CLIENT_OP` is answered with one 429 frame top-level and inside an envelope, and so is an overloaded enveloped `OP_BATCH`. Shown red on the tree where the envelope splits an `OP_BATCH` but keeps its own block, without the 429 arm, for every other message: the enveloped `CLIENT_OP` got no frame. It does not see the principal or the connection id: the overload is staged before either is read | CI (`cargo test`) |
+| `an_enveloped_message_is_authorized_as_the_connections_principal` | clause (a), the principal: under a policy that admits a write only for the principal its record names, one `OP_BATCH` is answered differently for two principals, and for each of them the enveloped frames are byte-equal to the top-level ones and the same records are stored. Shown red, 20 of 20, on the tree where the envelope hands its inner messages on with no principal: every op was refused | CI (`cargo test`) |
+| `an_enveloped_single_write_is_handled_as_its_connections_write` | clause (a), the connection id: a `CLIENT_OP` that names no connection is taken by the CRDT service for a trusted internal call — the caller's stamp is kept and the schema check is skipped. Top-level and enveloped alike, a valid write is stored under a stamp the server minted, and a write the map's schema rejects gets no frame and is not stored. Shown red, 20 of 20, on the tree where the envelope keeps its own block — with the 429 arm — that does not set the connection id: the client's stamp was stored and the schema-invalid write was acknowledged and stored | CI (`cargo test`) |
 | `an_enveloped_op_batch_is_split_onto_its_keys_partition_workers` | clause (b): the ops of one enveloped `OP_BATCH` whose keys fall in two partitions reach the service labelled with those two partitions. Shown red on the tree before the fix: one batch with no partition. What it reads is the label the dispatcher routes by; that a label reaches its worker is the dispatcher's own test | CI (`cargo test`) |
 | `an_enveloped_op_batch_refusal_is_answered_like_a_top_level_one` | the frames answering a batch with one refused op are byte-equal on both paths; the accepted op is stored and the refused one is not | CI (`cargo test`) |
 | `nested_empty_op_batch_emits_no_frame` | an empty enveloped `OP_BATCH` is not dispatched and gets no frame, while a non-empty one after it in the same envelope is dispatched and acknowledged. Shown red on the tree where the envelope skips an inner `OP_BATCH` | CI (`cargo test`) |
 | `classify_refuses_an_op_batch` | classification returns `RequiresPartitionSplit` for an `OP_BATCH` | CI (`cargo test`) |
-| `tests/integration-rust/enveloped-op-batch.test.ts` | against a real server binary: an enveloped `OP_BATCH` with one refused op is answered with the refusal and the acknowledgement of the accepted ops, ahead of the acknowledgement of a write placed after it in the same envelope | CI (`pnpm test:integration-rust`) |
+| `tests/integration-rust/enveloped-op-batch.test.ts` | clause (a), envelope order — the only enforcer of it — against a real server binary: an enveloped `OP_BATCH` with one refused op is answered with the refusal and the acknowledgement of the accepted ops, ahead of the acknowledgement of a write placed after it in the same envelope. Shown red on the tree that dispatches the inner items last-to-first and on the tree that dispatches them all at once: nothing arrived ahead of the later write's acknowledgement | CI (`pnpm test:integration-rust`) |

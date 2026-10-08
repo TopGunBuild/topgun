@@ -1,12 +1,14 @@
 /**
  * Integration: an operation batch carried inside a `BATCH` envelope is answered
- * the way the same batch is answered when it is sent on its own, against the
- * real Rust server.
+ * per operation — a rejection for the refused write, an acknowledgement naming
+ * the accepted ones — against the real Rust server.
  *
  * The batch holds three writes that all carry ids; the middle one names a map
- * the server cannot store. Sent on its own, such a batch gets one rejection for
- * the refused write and one acknowledgement naming the two accepted ones. The
- * same batch inside an envelope must get the same two frames.
+ * the server cannot store. The two frames expected for it are written out
+ * below: one rejection for the refused write and one acknowledgement naming the
+ * two accepted ones. This test sends the batch only inside an envelope. It does
+ * not send it on its own and compare; that comparison of the two paths is made
+ * in process, by the Rust tests of the WebSocket handler.
  *
  * HOW THE ANSWER IS DELIMITED. The envelope holds a second item behind the
  * batch: a single write, the barrier. The server handles the items of one

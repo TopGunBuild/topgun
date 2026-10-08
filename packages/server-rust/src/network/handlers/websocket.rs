@@ -654,16 +654,6 @@ fn release_session_state(state: &AppState, conn_id: ConnectionId) {
     }
 }
 
-/// Dispatches a single deserialized message through the operation pipeline.
-///
-/// Takes owned Arc and Sender so this function can be moved into a
-/// `tokio::spawn` closure (satisfying the `'static` bound). Helpers called
-/// from within this function borrow from its owned locals.
-///
-/// Handles BATCH messages by unpacking and routing each inner message
-/// individually. Non-BATCH messages are classified, have `connection_id`
-/// and `principal` set, and are routed through the pipeline. Each
-/// `OperationResponse` variant is mapped to the appropriate outbound message(s).
 /// Hard upper bound on the number of inner items a single transport `Batch`
 /// frame may carry through `unpack_and_dispatch_batch`.
 ///
@@ -734,6 +724,15 @@ fn inbound_op_cost(msg: &TopGunMessage) -> u32 {
     u32::try_from(count.max(1)).unwrap_or(u32::MAX)
 }
 
+/// Dispatches one deserialized frame through the operation pipeline.
+///
+/// Takes owned Arc and Sender so this function can be moved into a
+/// `tokio::spawn` closure (satisfying the `'static` bound). Helpers called
+/// from within this function borrow from its owned locals.
+///
+/// A `BATCH` envelope is unpacked and its inner messages are handed on one
+/// after another; any other message is handed on as it is. Both go to
+/// `dispatch_one_message`, which routes a message and answers it.
 async fn dispatch_message(
     tg_msg: TopGunMessage,
     conn_id: ConnectionId,
@@ -824,7 +823,9 @@ async fn dispatch_one_message(
             }
         }
         Err(ClassifyError::TransportEnvelope { variant }) => {
-            // BATCH messages should be caught above; log if another envelope type appears
+            // A top-level BATCH is unpacked by the caller and never gets here.
+            // One nested inside an envelope does, and this is where it is
+            // refused: an envelope is one level deep.
             debug!(
                 "unexpected transport envelope '{}' from {:?}",
                 variant, conn_id
@@ -1496,8 +1497,9 @@ async fn unpack_and_dispatch_batch(
     // Authoritative dispatch-side bound: drop the WHOLE frame if it packs more
     // inner items than the cap. This holds even if the cost function is later
     // changed or this path is reached another way, and matches the existing
-    // whole-frame token-exhaustion behavior — the batch path has no per-item ack,
-    // so partial dispatch would be silent unacked loss. The client is told via an
+    // whole-frame token-exhaustion behavior: nothing of an over-long envelope is
+    // dispatched, so the client gets one answer for the frame instead of answers
+    // for a part of it that it cannot identify. The client is told via an
     // explicit error rather than a silent drop.
     let item_count = count_batch_items(data);
     if item_count > MAX_BATCH_INNER_ITEMS {
