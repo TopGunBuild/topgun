@@ -1914,6 +1914,7 @@ mod tests {
     use crate::service::domain::schema::SchemaService;
     use crate::service::middleware::pipeline::build_operation_pipeline;
     use crate::service::operation::service_names;
+    use crate::service::policy::expr_parser::parse_permission_expr;
     use crate::service::policy::{
         InMemoryPolicyStore, PermissionAction, PermissionPolicy, PolicyEffect, PolicyEvaluator,
         PolicyStore,
@@ -1923,6 +1924,7 @@ mod tests {
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
+    use crate::storage::record::RecordValue;
     use crate::traits::SchemaProvider;
     use metrics_exporter_prometheus::PrometheusBuilder;
     use topgun_core::messages::base::{PredicateNode, PredicateOp};
@@ -2004,6 +2006,20 @@ mod tests {
                 .await
                 .expect("store read")
                 .is_some()
+        }
+
+        /// The stamp the durable store holds for an LWW `key`, if it holds one.
+        async fn stored_stamp(&self, map_name: &str, key: &str) -> Option<Timestamp> {
+            let record = self
+                .factory
+                .get_or_create(map_name, hash_to_partition(key))
+                .get(key, false)
+                .await
+                .expect("store read")?;
+            match record.value {
+                RecordValue::Lww { timestamp, .. } => Some(timestamp),
+                _ => None,
+            }
         }
 
         /// Keys of every journalled event, in apply order.
@@ -3231,11 +3247,20 @@ mod tests {
     /// Hands `msg` to the entry a frame that is not an envelope takes, and
     /// returns the frames it queued.
     async fn top_level_frames(fx: &FoldFixture, msg: TopGunMessage) -> Vec<Vec<u8>> {
+        top_level_frames_as(fx, fold_principal(), msg).await
+    }
+
+    /// [`top_level_frames`] for a connection authenticated as `principal`.
+    async fn top_level_frames_as(
+        fx: &FoldFixture,
+        principal: Principal,
+        msg: TopGunMessage,
+    ) -> Vec<Vec<u8>> {
         let (tx, rx) = mpsc::channel(64);
         dispatch_one_message(
             msg,
             fx.conn_id,
-            Some(fold_principal()),
+            Some(principal),
             &fx.classify_svc,
             &fx.dispatcher,
             &tx,
@@ -3247,6 +3272,15 @@ mod tests {
     /// Packs `inner` into one `BATCH` envelope, hands it to the envelope's entry
     /// and returns the frames it queued.
     async fn enveloped_frames(fx: &FoldFixture, inner: &[TopGunMessage]) -> Vec<Vec<u8>> {
+        enveloped_frames_as(fx, fold_principal(), inner).await
+    }
+
+    /// [`enveloped_frames`] for a connection authenticated as `principal`.
+    async fn enveloped_frames_as(
+        fx: &FoldFixture,
+        principal: Principal,
+        inner: &[TopGunMessage],
+    ) -> Vec<Vec<u8>> {
         let mut data = Vec::new();
         for msg in inner {
             let bytes = rmp_serde::to_vec_named(msg).expect("inner message serializes");
@@ -3260,7 +3294,7 @@ mod tests {
         unpack_and_dispatch_batch(
             &batch,
             fx.conn_id,
-            Some(fold_principal()),
+            Some(principal),
             &fx.classify_svc,
             &fx.dispatcher,
             &tx,
@@ -3411,6 +3445,207 @@ mod tests {
             (back_off(), back_off(), back_off()),
             "(top-level CLIENT_OP, enveloped CLIENT_OP, enveloped OP_BATCH): each must be \
              answered with exactly one ERROR frame carrying code 429"
+        );
+    }
+
+    /// Allow a write to `FOLD_MAP` only when the record names the writer as its
+    /// owner, so the same batch is answered differently for two principals.
+    fn allow_own_records() -> Vec<PermissionPolicy> {
+        vec![PermissionPolicy {
+            id: "allow-own-notes".to_string(),
+            map_pattern: FOLD_MAP.to_string(),
+            action: PermissionAction::Write,
+            effect: PolicyEffect::Allow,
+            condition: Some(
+                parse_permission_expr("auth.id == data.ownerId").expect("owner condition parses"),
+            ),
+        }]
+    }
+
+    /// A record whose owner is `owner_id`.
+    fn owned_fields(owner_id: &str) -> Vec<(&'static str, rmpv::Value)> {
+        vec![("ownerId", rmpv::Value::String(owner_id.into()))]
+    }
+
+    /// A message inside an envelope is authorized as the connection's own
+    /// principal, exactly as the same message is on its own (TG-DISP-001).
+    ///
+    /// The policy admits a write only for the principal its record names, so the
+    /// answer to one batch differs between two principals. An envelope that
+    /// handed its inner messages on under any other identity — or under none —
+    /// would answer at least one of them differently from the top-level path.
+    #[tokio::test]
+    async fn an_enveloped_message_is_authorized_as_the_connections_principal() {
+        let first = fold_principal();
+        let second = Principal {
+            id: "writer-2".to_string(),
+            roles: vec!["user".to_string()],
+        };
+        // One partition, so the frames do not depend on the order two
+        // sub-batches happened to finish in.
+        let keys = keys_in_one_partition(3);
+        let ops = || {
+            vec![
+                put_op("1701", FOLD_MAP, &keys[0], owned_fields(&first.id)),
+                put_op("1702", FOLD_MAP, &keys[1], owned_fields(&second.id)),
+                put_op("1703", FOLD_MAP, &keys[2], owned_fields(&first.id)),
+            ]
+        };
+
+        let top_level_fx_first = build_fold_fixture(allow_own_records(), None).await;
+        let top_level_first =
+            top_level_frames_as(&top_level_fx_first, first.clone(), op_batch_message(ops())).await;
+        let top_level_fx_second = build_fold_fixture(allow_own_records(), None).await;
+        let top_level_second = top_level_frames_as(
+            &top_level_fx_second,
+            second.clone(),
+            op_batch_message(ops()),
+        )
+        .await;
+        // If the two principals were answered alike, an envelope that dropped
+        // or swapped the principal would be answered alike too.
+        let (first_msgs, second_msgs) = (
+            decode_frames(&top_level_first),
+            decode_frames(&top_level_second),
+        );
+        assert_eq!(
+            (
+                rejections(&first_msgs).len(),
+                rejections(&second_msgs).len(),
+                ack_payloads(&first_msgs).len(),
+                ack_payloads(&second_msgs).len(),
+                top_level_first == top_level_second,
+            ),
+            (1, 2, 1, 1, false),
+            "precondition: (refusals for the first principal, for the second, acknowledgements \
+             for the first, for the second, both answered with the same bytes); \
+             first: {first_msgs:?}, second: {second_msgs:?}"
+        );
+
+        let enveloped_fx_first = build_fold_fixture(allow_own_records(), None).await;
+        let enveloped_first = enveloped_frames_as(
+            &enveloped_fx_first,
+            first.clone(),
+            &[op_batch_message(ops())],
+        )
+        .await;
+        let enveloped_fx_second = build_fold_fixture(allow_own_records(), None).await;
+        let enveloped_second = enveloped_frames_as(
+            &enveloped_fx_second,
+            second.clone(),
+            &[op_batch_message(ops())],
+        )
+        .await;
+
+        assert_eq!(
+            (
+                enveloped_first == top_level_first,
+                enveloped_second == top_level_second,
+                enveloped_fx_first.holds(FOLD_MAP, &keys[0]).await,
+                enveloped_fx_first.holds(FOLD_MAP, &keys[1]).await,
+                enveloped_fx_second.holds(FOLD_MAP, &keys[0]).await,
+                enveloped_fx_second.holds(FOLD_MAP, &keys[1]).await,
+            ),
+            (true, true, true, false, false, true),
+            "(first principal's enveloped frames equal its top-level ones, the second's equal \
+             its own, first principal: own record stored, the other's record stored, second \
+             principal: the other's record stored, own record stored); \
+             enveloped as the first: {:?}, enveloped as the second: {:?}",
+            decode_frames(&enveloped_first),
+            decode_frames(&enveloped_second)
+        );
+    }
+
+    /// What one path did with two single writes: the frames each was answered
+    /// with, whether the first kept the stamp its client sent, and whether the
+    /// second was stored.
+    type SingleWriteOutcome = (Vec<Vec<u8>>, bool, Vec<Vec<u8>>, bool);
+
+    /// A single write inside an envelope is handled as a write from the
+    /// connection it arrived on, exactly as the same write is on its own
+    /// (TG-DISP-001).
+    ///
+    /// The domain service takes a write that names no connection for a trusted
+    /// internal call: it keeps the caller's stamp and skips the schema check.
+    /// So two effects tell whether the connection was named — a valid write is
+    /// stored under a stamp the server minted, and a write the map's schema
+    /// rejects is neither acknowledged nor stored.
+    #[tokio::test]
+    async fn an_enveloped_single_write_is_handled_as_its_connections_write() {
+        let valid_key = "envelope-conn-valid";
+        let invalid_key = "envelope-conn-invalid";
+        let valid = || {
+            client_op_message(put_op(
+                "1801",
+                TYPED_MAP,
+                valid_key,
+                allowed_fields("named"),
+            ))
+        };
+        // No `name`, which the schema requires.
+        let invalid = || {
+            client_op_message(put_op(
+                "1802",
+                TYPED_MAP,
+                invalid_key,
+                vec![("title", rmpv::Value::String("unnamed".into()))],
+            ))
+        };
+        let client_stamp = match valid() {
+            TopGunMessage::ClientOp(msg) => {
+                msg.payload
+                    .record
+                    .flatten()
+                    .expect("the write carries a record")
+                    .timestamp
+            }
+            other => panic!("expected a CLIENT_OP, got {other:?}"),
+        };
+        let schema = || Some((TYPED_MAP, required_name_schema()));
+
+        let top_level_fx = build_fold_fixture(Vec::new(), schema()).await;
+        let top_level: SingleWriteOutcome = (
+            top_level_frames(&top_level_fx, valid()).await,
+            top_level_fx.stored_stamp(TYPED_MAP, valid_key).await == Some(client_stamp.clone()),
+            top_level_frames(&top_level_fx, invalid()).await,
+            top_level_fx.holds(TYPED_MAP, invalid_key).await,
+        );
+        // Each element is one the envelope could match by doing nothing, or by
+        // doing the trusted thing, unless the top-level path is shown to do the
+        // opposite.
+        assert_eq!(
+            (
+                ack_payloads(&decode_frames(&top_level.0)).len(),
+                top_level_fx
+                    .stored_stamp(TYPED_MAP, valid_key)
+                    .await
+                    .is_some(),
+                top_level.1,
+                top_level.2.len(),
+                top_level.3,
+            ),
+            (1, true, false, 0, false),
+            "precondition, top-level: (acknowledgements of the valid write, valid write stored, \
+             stored under the client's stamp, frames for the schema-invalid write, \
+             schema-invalid write stored)"
+        );
+
+        let enveloped_fx = build_fold_fixture(Vec::new(), schema()).await;
+        let enveloped: SingleWriteOutcome = (
+            enveloped_frames(&enveloped_fx, &[valid()]).await,
+            enveloped_fx.stored_stamp(TYPED_MAP, valid_key).await == Some(client_stamp),
+            enveloped_frames(&enveloped_fx, &[invalid()]).await,
+            enveloped_fx.holds(TYPED_MAP, invalid_key).await,
+        );
+
+        assert_eq!(
+            enveloped,
+            top_level,
+            "(frames for the valid write, valid write stored under the client's stamp, frames \
+             for the schema-invalid write, schema-invalid write stored) — enveloped on the left, \
+             top-level on the right; enveloped frames decoded: {:?} and {:?}",
+            decode_frames(&enveloped.0),
+            decode_frames(&enveloped.2)
         );
     }
 }
