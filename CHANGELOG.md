@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server):** writes sent inside a batch envelope are now handled exactly like
+  writes sent directly, including refusals and back-off. Before, a batch of writes packed
+  into an envelope was processed as one unit: if the server refused a single write in it,
+  none of the batch was stored and the client was told nothing; when the server was
+  overloaded the client got no signal to slow down. Now each write of a batch in the
+  envelope is accepted or refused on its own and the client is told which, and an
+  overloaded server answers with the same back-off message it sends for a direct write.
+  What a direct write is not told, a write in an envelope is not told either: a single
+  write sent outside a batch gets no message when it is refused for a reason other than
+  overload, and a batch the server was too loaded to finish gets the back-off message
+  and no acknowledgement. One difference remains: the request rate limit counts an
+  envelope by the messages packed in it, not by the writes inside them.
 - **Fixed (server):** two writes to the same record that reached the server at the same
   moment could leave it holding the older value after a restart, although it had
   acknowledged and served the newer one. A write that arrived while the server was

@@ -821,6 +821,9 @@ pub enum ClassifyError {
     /// Authentication messages are handled at the transport layer.
     #[error("authentication message handled at transport layer: {variant}")]
     AuthMessage { variant: &'static str },
+    /// Messages whose keys span partitions must be split per partition by the caller.
+    #[error("message must be split per partition before classification: {variant}")]
+    RequiresPartitionSplit { variant: &'static str },
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,6 +1066,9 @@ mod tests {
 
         let err = ClassifyError::AuthMessage { variant: "Auth" };
         assert!(format!("{err}").contains("Auth"));
+
+        let err = ClassifyError::RequiresPartitionSplit { variant: "OpBatch" };
+        assert!(format!("{err}").contains("OpBatch"));
     }
 
     #[test]

@@ -654,16 +654,6 @@ fn release_session_state(state: &AppState, conn_id: ConnectionId) {
     }
 }
 
-/// Dispatches a single deserialized message through the operation pipeline.
-///
-/// Takes owned Arc and Sender so this function can be moved into a
-/// `tokio::spawn` closure (satisfying the `'static` bound). Helpers called
-/// from within this function borrow from its owned locals.
-///
-/// Handles BATCH messages by unpacking and routing each inner message
-/// individually. Non-BATCH messages are classified, have `connection_id`
-/// and `principal` set, and are routed through the pipeline. Each
-/// `OperationResponse` variant is mapped to the appropriate outbound message(s).
 /// Hard upper bound on the number of inner items a single transport `Batch`
 /// frame may carry through `unpack_and_dispatch_batch`.
 ///
@@ -734,6 +724,15 @@ fn inbound_op_cost(msg: &TopGunMessage) -> u32 {
     u32::try_from(count.max(1)).unwrap_or(u32::MAX)
 }
 
+/// Dispatches one deserialized frame through the operation pipeline.
+///
+/// Takes owned Arc and Sender so this function can be moved into a
+/// `tokio::spawn` closure (satisfying the `'static` bound). Helpers called
+/// from within this function borrow from its owned locals.
+///
+/// A `BATCH` envelope is unpacked and its inner messages are handed on one
+/// after another; any other message is handed on as it is. Both go to
+/// `dispatch_one_message`, which routes a message and answers it.
 async fn dispatch_message(
     tg_msg: TopGunMessage,
     conn_id: ConnectionId,
@@ -764,19 +763,28 @@ async fn dispatch_message(
         return;
     }
 
+    dispatch_one_message(tg_msg, conn_id, principal, &classify_svc, &dispatcher, &tx).await;
+}
+
+/// Routes one message that is not a transport envelope and answers it.
+///
+/// An operation batch is split by partition; anything else is classified and
+/// dispatched as a single operation. Everything a message can be answered with
+/// is decided here, so that a caller holding a message has one place to hand it
+/// to and the answer cannot depend on which caller that was.
+async fn dispatch_one_message(
+    tg_msg: TopGunMessage,
+    conn_id: ConnectionId,
+    principal: Option<Principal>,
+    classify_svc: &OperationService,
+    dispatcher: &Arc<PartitionDispatcher>,
+    tx: &mpsc::Sender<OutboundMessage>,
+) {
     // Intercept OpBatch messages before generic classify/dispatch.
     // Split by partition so each sub-batch runs on a dedicated partition worker
     // rather than serializing all ops on the single global worker.
     if let TopGunMessage::OpBatch(ref batch_msg) = tg_msg {
-        dispatch_op_batch(
-            batch_msg,
-            conn_id,
-            principal,
-            &classify_svc,
-            &dispatcher,
-            &tx,
-        )
-        .await;
+        dispatch_op_batch(batch_msg, conn_id, principal, classify_svc, dispatcher, tx).await;
         return;
     }
 
@@ -794,7 +802,7 @@ async fn dispatch_message(
             // Route through the partition dispatcher (MPSC channel per worker)
             match dispatcher.dispatch(op).await {
                 Ok(resp) => {
-                    send_operation_response(resp, &tx).await;
+                    send_operation_response(resp, tx).await;
                 }
                 Err(OperationError::Overloaded) => {
                     // Worker inbox is full; tell the client to back off and retry.
@@ -815,7 +823,9 @@ async fn dispatch_message(
             }
         }
         Err(ClassifyError::TransportEnvelope { variant }) => {
-            // BATCH messages should be caught above; log if another envelope type appears
+            // A top-level BATCH is unpacked by the caller and never gets here.
+            // One nested inside an envelope does, and this is where it is
+            // refused: an envelope is one level deep.
             debug!(
                 "unexpected transport envelope '{}' from {:?}",
                 variant, conn_id
@@ -832,6 +842,15 @@ async fn dispatch_message(
             // Client should not send server-to-client messages
             debug!(
                 "ignoring server-to-client message '{}' from {:?}",
+                variant, conn_id
+            );
+        }
+        Err(ClassifyError::RequiresPartitionSplit { variant }) => {
+            // An operation batch is split above and never classified whole, so
+            // this is a routing bug on the server, not a client mistake: say so
+            // loudly and send nothing rather than run the batch off its workers.
+            warn!(
+                "message '{}' from {:?} reached classification without a partition split",
                 variant, conn_id
             );
         }
@@ -1478,8 +1497,9 @@ async fn unpack_and_dispatch_batch(
     // Authoritative dispatch-side bound: drop the WHOLE frame if it packs more
     // inner items than the cap. This holds even if the cost function is later
     // changed or this path is reached another way, and matches the existing
-    // whole-frame token-exhaustion behavior — the batch path has no per-item ack,
-    // so partial dispatch would be silent unacked loss. The client is told via an
+    // whole-frame token-exhaustion behavior: nothing of an over-long envelope is
+    // dispatched, so the client gets one answer for the frame instead of answers
+    // for a part of it that it cannot identify. The client is told via an
     // explicit error rather than a silent drop.
     let item_count = count_batch_items(data);
     if item_count > MAX_BATCH_INNER_ITEMS {
@@ -1552,32 +1572,18 @@ async fn unpack_and_dispatch_batch(
             }
         };
 
-        // Classify and route each inner message individually.
-        // Inner messages target different services and partitions, so each
-        // must be dispatched separately for correct partition routing.
-        match classify_svc.classify(inner_msg, None, CallerOrigin::Client) {
-            Ok(mut op) => {
-                op.set_connection_id(conn_id);
-                if let Some(p) = principal.clone() {
-                    op.set_principal(p);
-                }
-
-                match dispatcher.dispatch(op).await {
-                    Ok(resp) => {
-                        send_operation_response(resp, tx).await;
-                    }
-                    Err(e) => {
-                        debug!("dispatch error for batch item from {:?}: {}", conn_id, e);
-                    }
-                }
-            }
-            Err(e) => {
-                debug!(
-                    "failed to classify batch inner message from {:?}: {}",
-                    conn_id, e
-                );
-            }
-        }
+        // One inner message at a time, awaited: that is what keeps the answers
+        // in envelope order. Handing it to the entry a top-level message takes
+        // is what makes the answer the same on both paths (TG-DISP-001).
+        dispatch_one_message(
+            inner_msg,
+            conn_id,
+            principal.clone(),
+            classify_svc,
+            dispatcher,
+            tx,
+        )
+        .await;
     }
 }
 
@@ -1910,6 +1916,7 @@ mod tests {
     use crate::service::domain::schema::SchemaService;
     use crate::service::middleware::pipeline::build_operation_pipeline;
     use crate::service::operation::service_names;
+    use crate::service::policy::expr_parser::parse_permission_expr;
     use crate::service::policy::{
         InMemoryPolicyStore, PermissionAction, PermissionPolicy, PolicyEffect, PolicyEvaluator,
         PolicyStore,
@@ -1919,6 +1926,7 @@ mod tests {
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
+    use crate::storage::record::RecordValue;
     use crate::traits::SchemaProvider;
     use metrics_exporter_prometheus::PrometheusBuilder;
     use topgun_core::messages::base::{PredicateNode, PredicateOp};
@@ -1954,9 +1962,28 @@ mod tests {
         /// the optimistic pass, plus one per singleton the fallback re-dispatched
         /// — which is what makes "the fallback was never entered" checkable.
         service_calls: Arc<std::sync::atomic::AtomicUsize>,
+        /// What the domain service was handed, in arrival order.
+        received: ReceivedOps,
     }
 
     impl FoldFixture {
+        /// The distinct partition labels the domain service was handed, sorted.
+        ///
+        /// The label is what the dispatcher picks a worker by, so this is the
+        /// routing decision as the service saw it. That a label reaches its
+        /// worker is the dispatcher's own test, not this fixture's.
+        fn received_partitions(&self) -> Vec<Option<u32>> {
+            let mut partitions: Vec<Option<u32>> = self
+                .received
+                .lock()
+                .iter()
+                .map(|(partition_id, _)| *partition_id)
+                .collect();
+            partitions.sort_unstable();
+            partitions.dedup();
+            partitions
+        }
+
         /// The dispatch context the transports will build, with a write concern
         /// and a timeout set so the singleton pass is exercised carrying them.
         fn cx(&self) -> OpBatchDispatchContext<'_> {
@@ -1981,6 +2008,20 @@ mod tests {
                 .await
                 .expect("store read")
                 .is_some()
+        }
+
+        /// The stamp the durable store holds for an LWW `key`, if it holds one.
+        async fn stored_stamp(&self, map_name: &str, key: &str) -> Option<Timestamp> {
+            let record = self
+                .factory
+                .get_or_create(map_name, hash_to_partition(key))
+                .get(key, false)
+                .await
+                .expect("store read")?;
+            match record.value {
+                RecordValue::Lww { timestamp, .. } => Some(timestamp),
+                _ => None,
+            }
         }
 
         /// Keys of every journalled event, in apply order.
@@ -2021,8 +2062,13 @@ mod tests {
         }
     }
 
-    /// A CRDT service that answers its staged failure for any batch touching
-    /// `shed_key`, and delegates everything else to the real one.
+    /// One entry per operation the domain service was handed: the partition it
+    /// was labelled with and how many client operations it carried.
+    type ReceivedOps = Arc<parking_lot::Mutex<Vec<(Option<u32>, usize)>>>;
+
+    /// A CRDT service that answers its staged failure for any batch or single
+    /// write touching `shed_key`, and delegates everything else to the real one.
+    /// It also records what it was handed, before deciding either way.
     ///
     /// The production `LoadShedLayer` sheds by semaphore occupancy, which cannot
     /// be aimed at one operation of a sequentially re-dispatched fallback, and
@@ -2037,6 +2083,7 @@ mod tests {
         shed_key: Option<String>,
         staged: StagedFailure,
         calls: Arc<std::sync::atomic::AtomicUsize>,
+        received: ReceivedOps,
     }
 
     impl tower::Service<Operation> for SheddingCrdt {
@@ -2055,12 +2102,21 @@ mod tests {
 
         fn call(&mut self, op: Operation) -> Self::Future {
             self.calls.fetch_add(1, Ordering::Relaxed);
+            let op_count = match &op {
+                Operation::OpBatch { payload, .. } => payload.payload.ops.len(),
+                _ => 1,
+            };
+            self.received.lock().push((op.ctx().partition_id, op_count));
             let sheds = self.shed_key.as_ref().is_some_and(|shed_key| match &op {
                 Operation::OpBatch { payload, .. } => payload
                     .payload
                     .ops
                     .iter()
                     .any(|client_op| &client_op.key == shed_key),
+                // A single write is shed too, so the failure can be aimed at a
+                // message that takes the generic classify-and-dispatch route
+                // rather than the batch one.
+                Operation::ClientOp { payload, .. } => &payload.payload.key == shed_key,
                 _ => false,
             });
             if sheds {
@@ -2152,6 +2208,7 @@ mod tests {
             channel_buffer_size: 64,
         };
         let service_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received: ReceivedOps = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let dispatcher = Arc::new(PartitionDispatcher::new(&dispatch_config, || {
             let mut router = OperationRouter::new();
             router.register(
@@ -2161,6 +2218,7 @@ mod tests {
                     shed_key: shed_key.clone(),
                     staged,
                     calls: Arc::clone(&service_calls),
+                    received: Arc::clone(&received),
                 },
             );
             build_operation_pipeline(router, &server_config, Some(Arc::clone(&evaluator)))
@@ -2179,6 +2237,7 @@ mod tests {
             _connection: connection,
             _outbound: outbound,
             service_calls,
+            received,
         }
     }
 
@@ -3082,49 +3141,46 @@ mod tests {
     }
 
     /// An empty `OP_BATCH` carried inside a `BATCH` envelope is answered with
-    /// no frame either.
+    /// no frame either, and never reaches the domain service.
     ///
-    /// The envelope bypasses the top-level empty-batch branch: the inner message
-    /// is classified and dispatched to the domain service like any other, so its
-    /// response is mapped to a frame separately from the top-level path.
+    /// An inner message takes the entry a top-level one takes, so the empty
+    /// batch stops at the same branch: nothing is dispatched and nothing is
+    /// sent. Silence alone would also be what a dropped inner batch looks like,
+    /// so the same envelope carries a second, non-empty batch that has to be
+    /// dispatched and acknowledged.
     #[tokio::test]
     async fn nested_empty_op_batch_emits_no_frame() {
         let fx = build_fold_fixture(Vec::new(), None).await;
-        let inner = TopGunMessage::OpBatch(OpBatchMessage {
-            payload: OpBatchPayload {
-                ops: Vec::new(),
-                write_concern: None,
-                timeout: None,
-            },
-        });
-        let inner_bytes = rmp_serde::to_vec_named(&inner).expect("inner OP_BATCH serializes");
-        let batch = BatchMessage {
-            count: 1,
-            data: frame_inner_item(&inner_bytes),
-        };
-        let (tx, rx) = mpsc::channel(64);
+        let control_key = "nested-control-key";
+        let control_id = "1601";
+        let empty = op_batch_message(Vec::new());
+        let control = op_batch_message(vec![put_op(
+            control_id,
+            FOLD_MAP,
+            control_key,
+            allowed_fields("control"),
+        )]);
 
-        unpack_and_dispatch_batch(
-            &batch,
-            fx.conn_id,
-            Some(fold_principal()),
-            &fx.classify_svc,
-            &fx.dispatcher,
-            &tx,
-        )
-        .await;
-        let msgs = queued_messages(tx, rx).await;
+        let msgs = decode_frames(&enveloped_frames(&fx, &[empty, control]).await);
 
-        // Without this the test would also pass for an inner message that was
-        // dropped before dispatch, which says nothing about the response mapping.
+        let received = fx.received.lock().clone();
+        let calls_for_the_empty_batch = received.iter().filter(|(_, ops)| *ops == 0).count();
+        let control_acks = ack_payloads(&msgs)
+            .iter()
+            .filter(|ack| ack.last_id == control_id)
+            .count();
+        let control_dispatched = received.contains(&(Some(hash_to_partition(control_key)), 1));
         assert_eq!(
-            fx.service_calls.load(Ordering::Relaxed),
-            1,
-            "precondition: the inner empty batch reached the domain service"
-        );
-        assert!(
-            msgs.is_empty(),
-            "an empty op batch has no operation to give a verdict on, got {msgs:?}"
+            (
+                calls_for_the_empty_batch,
+                msgs.len() - control_acks,
+                control_dispatched,
+                control_acks == 1,
+            ),
+            (0, 0, true, true),
+            "(service calls for the empty batch, frames other than the control's \
+             acknowledgement, control batch dispatched, control batch acknowledged); \
+             received: {received:?}, frames: {msgs:?}"
         );
     }
 
@@ -3144,6 +3200,454 @@ mod tests {
         assert!(
             msgs.is_empty(),
             "a call id is not a client operation id and must not reach the wire, got {msgs:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // A message inside a `BATCH` envelope is handled like the same message sent
+    // on its own
+    // -----------------------------------------------------------------------
+
+    /// Wraps `ops` as the `OP_BATCH` message a client sends, with the write
+    /// concern and timeout the other transport tests use.
+    fn op_batch_message(ops: Vec<ClientOp>) -> TopGunMessage {
+        TopGunMessage::OpBatch(OpBatchMessage {
+            payload: OpBatchPayload {
+                ops,
+                write_concern: Some(WriteConcern::APPLIED),
+                timeout: Some(5_000),
+            },
+        })
+    }
+
+    /// Wraps one write as the `CLIENT_OP` message a client sends.
+    fn client_op_message(op: ClientOp) -> TopGunMessage {
+        TopGunMessage::ClientOp(topgun_core::messages::sync::ClientOpMessage { payload: op })
+    }
+
+    /// Drains a channel whose handler has returned, as raw frames in wire order.
+    ///
+    /// Every caller awaits its handler to completion first, so an empty result
+    /// is read from a closed channel and never from a wait that ran out.
+    async fn queued_frames(
+        tx: mpsc::Sender<OutboundMessage>,
+        mut rx: mpsc::Receiver<OutboundMessage>,
+    ) -> Vec<Vec<u8>> {
+        drop(tx);
+        let mut frames = Vec::new();
+        while let Some(outbound) = rx.recv().await {
+            match outbound {
+                OutboundMessage::Binary(bytes) => frames.push(bytes),
+                OutboundMessage::Close(reason) => {
+                    panic!("the exchange must not close the connection: {reason:?}")
+                }
+            }
+        }
+        frames
+    }
+
+    /// Hands `msg` to the entry a frame that is not an envelope takes, and
+    /// returns the frames it queued.
+    async fn top_level_frames(fx: &FoldFixture, msg: TopGunMessage) -> Vec<Vec<u8>> {
+        top_level_frames_as(fx, fold_principal(), msg).await
+    }
+
+    /// [`top_level_frames`] for a connection authenticated as `principal`.
+    async fn top_level_frames_as(
+        fx: &FoldFixture,
+        principal: Principal,
+        msg: TopGunMessage,
+    ) -> Vec<Vec<u8>> {
+        let (tx, rx) = mpsc::channel(64);
+        dispatch_one_message(
+            msg,
+            fx.conn_id,
+            Some(principal),
+            &fx.classify_svc,
+            &fx.dispatcher,
+            &tx,
+        )
+        .await;
+        queued_frames(tx, rx).await
+    }
+
+    /// Packs `inner` into one `BATCH` envelope, hands it to the envelope's entry
+    /// and returns the frames it queued.
+    async fn enveloped_frames(fx: &FoldFixture, inner: &[TopGunMessage]) -> Vec<Vec<u8>> {
+        enveloped_frames_as(fx, fold_principal(), inner).await
+    }
+
+    /// [`enveloped_frames`] for a connection authenticated as `principal`.
+    async fn enveloped_frames_as(
+        fx: &FoldFixture,
+        principal: Principal,
+        inner: &[TopGunMessage],
+    ) -> Vec<Vec<u8>> {
+        let mut data = Vec::new();
+        for msg in inner {
+            let bytes = rmp_serde::to_vec_named(msg).expect("inner message serializes");
+            data.extend_from_slice(&frame_inner_item(&bytes));
+        }
+        let batch = BatchMessage {
+            count: u32::try_from(inner.len()).expect("inner item count fits in u32"),
+            data,
+        };
+        let (tx, rx) = mpsc::channel(64);
+        unpack_and_dispatch_batch(
+            &batch,
+            fx.conn_id,
+            Some(principal),
+            &fx.classify_svc,
+            &fx.dispatcher,
+            &tx,
+        )
+        .await;
+        queued_frames(tx, rx).await
+    }
+
+    /// Two keys that hash to two different partitions.
+    fn keys_in_two_partitions() -> (String, String) {
+        let first = "envelope-key-0".to_string();
+        let first_partition = hash_to_partition(&first);
+        for i in 1..100_000_u32 {
+            let key = format!("envelope-key-{i}");
+            if hash_to_partition(&key) != first_partition {
+                return (first, key);
+            }
+        }
+        panic!("every candidate key hashed to partition {first_partition}");
+    }
+
+    /// One label per frame: the code of an `ERROR` frame, and the whole message
+    /// for anything else — so a frame list that should be a single back-off
+    /// error reads as `["429"]` and an unexpected frame shows what it was.
+    fn error_codes(frames: &[Vec<u8>]) -> Vec<String> {
+        decode_frames(frames)
+            .iter()
+            .map(|msg| match msg {
+                TopGunMessage::Error { payload } => payload.code.to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// An `OP_BATCH` inside an envelope reaches the domain service labelled
+    /// with its keys' partitions, one sub-batch per partition (TG-DISP-001).
+    ///
+    /// A batch labelled with no partition runs whole on the worker that serves
+    /// unpartitioned work, off the workers its keys belong to — which is what
+    /// the split exists to prevent.
+    #[tokio::test]
+    async fn an_enveloped_op_batch_is_split_onto_its_keys_partition_workers() {
+        let (key_a, key_b) = keys_in_two_partitions();
+        let (partition_a, partition_b) = (hash_to_partition(&key_a), hash_to_partition(&key_b));
+        // Without two partitions a batch that was not split would look the same
+        // as one that was.
+        assert_ne!(
+            partition_a, partition_b,
+            "precondition: the two keys are in different partitions"
+        );
+        let fx = build_fold_fixture(Vec::new(), None).await;
+        let ops = vec![
+            put_op("1301", FOLD_MAP, &key_a, allowed_fields("first")),
+            put_op("1302", FOLD_MAP, &key_b, allowed_fields("second")),
+        ];
+
+        enveloped_frames(&fx, &[op_batch_message(ops)]).await;
+
+        let mut expected = vec![Some(partition_a), Some(partition_b)];
+        expected.sort_unstable();
+        assert_eq!(
+            fx.received_partitions(),
+            expected,
+            "the service must be handed one sub-batch per partition of the batch's keys; \
+             (partition, operation count) as received: {:?}",
+            fx.received.lock()
+        );
+    }
+
+    /// A batch with one refused operation is answered with the same bytes inside
+    /// an envelope as on its own, and applies the same operations.
+    ///
+    /// The refusal comes from the real Authorization middleware. It evaluates
+    /// whatever it is handed as a unit, so a batch that reaches it whole is
+    /// refused whole: nothing is stored and no operation is named.
+    #[tokio::test]
+    async fn an_enveloped_op_batch_refusal_is_answered_like_a_top_level_one() {
+        // One partition, so the frames do not depend on the order two
+        // sub-batches happened to finish in.
+        let keys = keys_in_one_partition(3);
+        let ops = || {
+            vec![
+                put_op("1401", FOLD_MAP, &keys[0], allowed_fields("first")),
+                put_op("1402", FOLD_MAP, &keys[1], blocked_fields()),
+                put_op("1403", FOLD_MAP, &keys[2], allowed_fields("third")),
+            ]
+        };
+
+        let top_level_fx = build_fold_fixture(deny_blocked_records(), None).await;
+        let top_level = top_level_frames(&top_level_fx, op_batch_message(ops())).await;
+        // An empty top-level answer would make "the frames are equal" true for
+        // an envelope that answers nothing.
+        let top_level_msgs = decode_frames(&top_level);
+        assert_eq!(
+            rejections(&top_level_msgs).len(),
+            1,
+            "precondition: the top-level batch names its refused operation, got {top_level_msgs:?}"
+        );
+        assert!(
+            ack_payloads(&top_level_msgs)
+                .iter()
+                .any(|ack| ack.results.is_some()),
+            "precondition: the top-level batch acknowledges its accepted operations by id, \
+             got {top_level_msgs:?}"
+        );
+
+        let enveloped_fx = build_fold_fixture(deny_blocked_records(), None).await;
+        let enveloped = enveloped_frames(&enveloped_fx, &[op_batch_message(ops())]).await;
+
+        assert_eq!(
+            (
+                enveloped == top_level,
+                enveloped_fx.holds(FOLD_MAP, &keys[0]).await,
+                enveloped_fx.holds(FOLD_MAP, &keys[1]).await,
+            ),
+            (true, true, false),
+            "(frames equal to the top-level ones, accepted operation stored, refused operation \
+             stored); enveloped frames: {:?}",
+            decode_frames(&enveloped)
+        );
+    }
+
+    /// A message the server is too loaded to take is answered with the back-off
+    /// error whether it arrived on its own or inside an envelope (TG-DISP-001).
+    ///
+    /// The overload is staged at the service because the answer is decided by
+    /// the error value, not by who raised it. The single write is the case that
+    /// takes the generic classify-and-dispatch route; the batch is answered by
+    /// the batch path itself and is here so that neither route goes silent.
+    #[tokio::test]
+    async fn an_overloaded_inner_message_is_answered_with_a_back_off_frame() {
+        let shed_key = "envelope-shed-key".to_string();
+        let fx = build_fold_fixture_shedding(Vec::new(), None, Some(shed_key.clone())).await;
+        let write = |op_id: &str| put_op(op_id, FOLD_MAP, &shed_key, allowed_fields("shed"));
+
+        let top_level_client_op = top_level_frames(&fx, client_op_message(write("1501"))).await;
+        let enveloped_client_op = enveloped_frames(&fx, &[client_op_message(write("1502"))]).await;
+        let enveloped_op_batch =
+            enveloped_frames(&fx, &[op_batch_message(vec![write("1503")])]).await;
+
+        let back_off = || vec!["429".to_string()];
+        assert_eq!(
+            (
+                error_codes(&top_level_client_op),
+                error_codes(&enveloped_client_op),
+                error_codes(&enveloped_op_batch),
+            ),
+            (back_off(), back_off(), back_off()),
+            "(top-level CLIENT_OP, enveloped CLIENT_OP, enveloped OP_BATCH): each must be \
+             answered with exactly one ERROR frame carrying code 429"
+        );
+    }
+
+    /// Allow a write to `FOLD_MAP` only when the record names the writer as its
+    /// owner, so the same batch is answered differently for two principals.
+    fn allow_own_records() -> Vec<PermissionPolicy> {
+        vec![PermissionPolicy {
+            id: "allow-own-notes".to_string(),
+            map_pattern: FOLD_MAP.to_string(),
+            action: PermissionAction::Write,
+            effect: PolicyEffect::Allow,
+            condition: Some(
+                parse_permission_expr("auth.id == data.ownerId").expect("owner condition parses"),
+            ),
+        }]
+    }
+
+    /// A record whose owner is `owner_id`.
+    fn owned_fields(owner_id: &str) -> Vec<(&'static str, rmpv::Value)> {
+        vec![("ownerId", rmpv::Value::String(owner_id.into()))]
+    }
+
+    /// A message inside an envelope is authorized as the connection's own
+    /// principal, exactly as the same message is on its own (TG-DISP-001).
+    ///
+    /// The policy admits a write only for the principal its record names, so the
+    /// answer to one batch differs between two principals. An envelope that
+    /// handed its inner messages on under any other identity — or under none —
+    /// would answer at least one of them differently from the top-level path.
+    #[tokio::test]
+    async fn an_enveloped_message_is_authorized_as_the_connections_principal() {
+        let first = fold_principal();
+        let second = Principal {
+            id: "writer-2".to_string(),
+            roles: vec!["user".to_string()],
+        };
+        // One partition, so the frames do not depend on the order two
+        // sub-batches happened to finish in.
+        let keys = keys_in_one_partition(3);
+        let ops = || {
+            vec![
+                put_op("1701", FOLD_MAP, &keys[0], owned_fields(&first.id)),
+                put_op("1702", FOLD_MAP, &keys[1], owned_fields(&second.id)),
+                put_op("1703", FOLD_MAP, &keys[2], owned_fields(&first.id)),
+            ]
+        };
+
+        let top_level_fx_first = build_fold_fixture(allow_own_records(), None).await;
+        let top_level_first =
+            top_level_frames_as(&top_level_fx_first, first.clone(), op_batch_message(ops())).await;
+        let top_level_fx_second = build_fold_fixture(allow_own_records(), None).await;
+        let top_level_second = top_level_frames_as(
+            &top_level_fx_second,
+            second.clone(),
+            op_batch_message(ops()),
+        )
+        .await;
+        // If the two principals were answered alike, an envelope that dropped
+        // or swapped the principal would be answered alike too.
+        let (first_msgs, second_msgs) = (
+            decode_frames(&top_level_first),
+            decode_frames(&top_level_second),
+        );
+        assert_eq!(
+            (
+                rejections(&first_msgs).len(),
+                rejections(&second_msgs).len(),
+                ack_payloads(&first_msgs).len(),
+                ack_payloads(&second_msgs).len(),
+                top_level_first == top_level_second,
+            ),
+            (1, 2, 1, 1, false),
+            "precondition: (refusals for the first principal, for the second, acknowledgements \
+             for the first, for the second, both answered with the same bytes); \
+             first: {first_msgs:?}, second: {second_msgs:?}"
+        );
+
+        let enveloped_fx_first = build_fold_fixture(allow_own_records(), None).await;
+        let enveloped_first = enveloped_frames_as(
+            &enveloped_fx_first,
+            first.clone(),
+            &[op_batch_message(ops())],
+        )
+        .await;
+        let enveloped_fx_second = build_fold_fixture(allow_own_records(), None).await;
+        let enveloped_second = enveloped_frames_as(
+            &enveloped_fx_second,
+            second.clone(),
+            &[op_batch_message(ops())],
+        )
+        .await;
+
+        assert_eq!(
+            (
+                enveloped_first == top_level_first,
+                enveloped_second == top_level_second,
+                enveloped_fx_first.holds(FOLD_MAP, &keys[0]).await,
+                enveloped_fx_first.holds(FOLD_MAP, &keys[1]).await,
+                enveloped_fx_second.holds(FOLD_MAP, &keys[0]).await,
+                enveloped_fx_second.holds(FOLD_MAP, &keys[1]).await,
+            ),
+            (true, true, true, false, false, true),
+            "(first principal's enveloped frames equal its top-level ones, the second's equal \
+             its own, first principal: own record stored, the other's record stored, second \
+             principal: the other's record stored, own record stored); \
+             enveloped as the first: {:?}, enveloped as the second: {:?}",
+            decode_frames(&enveloped_first),
+            decode_frames(&enveloped_second)
+        );
+    }
+
+    /// What one path did with two single writes: the frames each was answered
+    /// with, whether the first kept the stamp its client sent, and whether the
+    /// second was stored.
+    type SingleWriteOutcome = (Vec<Vec<u8>>, bool, Vec<Vec<u8>>, bool);
+
+    /// A single write inside an envelope is handled as a write from the
+    /// connection it arrived on, exactly as the same write is on its own
+    /// (TG-DISP-001).
+    ///
+    /// The domain service takes a write that names no connection for a trusted
+    /// internal call: it keeps the caller's stamp and skips the schema check.
+    /// So two effects tell whether the connection was named — a valid write is
+    /// stored under a stamp the server minted, and a write the map's schema
+    /// rejects is neither acknowledged nor stored.
+    #[tokio::test]
+    async fn an_enveloped_single_write_is_handled_as_its_connections_write() {
+        let valid_key = "envelope-conn-valid";
+        let invalid_key = "envelope-conn-invalid";
+        let valid = || {
+            client_op_message(put_op(
+                "1801",
+                TYPED_MAP,
+                valid_key,
+                allowed_fields("named"),
+            ))
+        };
+        // No `name`, which the schema requires.
+        let invalid = || {
+            client_op_message(put_op(
+                "1802",
+                TYPED_MAP,
+                invalid_key,
+                vec![("title", rmpv::Value::String("unnamed".into()))],
+            ))
+        };
+        let client_stamp = match valid() {
+            TopGunMessage::ClientOp(msg) => {
+                msg.payload
+                    .record
+                    .flatten()
+                    .expect("the write carries a record")
+                    .timestamp
+            }
+            other => panic!("expected a CLIENT_OP, got {other:?}"),
+        };
+        let schema = || Some((TYPED_MAP, required_name_schema()));
+
+        let top_level_fx = build_fold_fixture(Vec::new(), schema()).await;
+        let top_level: SingleWriteOutcome = (
+            top_level_frames(&top_level_fx, valid()).await,
+            top_level_fx.stored_stamp(TYPED_MAP, valid_key).await == Some(client_stamp.clone()),
+            top_level_frames(&top_level_fx, invalid()).await,
+            top_level_fx.holds(TYPED_MAP, invalid_key).await,
+        );
+        // Each element is one the envelope could match by doing nothing, or by
+        // doing the trusted thing, unless the top-level path is shown to do the
+        // opposite.
+        assert_eq!(
+            (
+                ack_payloads(&decode_frames(&top_level.0)).len(),
+                top_level_fx
+                    .stored_stamp(TYPED_MAP, valid_key)
+                    .await
+                    .is_some(),
+                top_level.1,
+                top_level.2.len(),
+                top_level.3,
+            ),
+            (1, true, false, 0, false),
+            "precondition, top-level: (acknowledgements of the valid write, valid write stored, \
+             stored under the client's stamp, frames for the schema-invalid write, \
+             schema-invalid write stored)"
+        );
+
+        let enveloped_fx = build_fold_fixture(Vec::new(), schema()).await;
+        let enveloped: SingleWriteOutcome = (
+            enveloped_frames(&enveloped_fx, &[valid()]).await,
+            enveloped_fx.stored_stamp(TYPED_MAP, valid_key).await == Some(client_stamp),
+            enveloped_frames(&enveloped_fx, &[invalid()]).await,
+            enveloped_fx.holds(TYPED_MAP, invalid_key).await,
+        );
+
+        assert_eq!(
+            enveloped,
+            top_level,
+            "(frames for the valid write, valid write stored under the client's stamp, frames \
+             for the schema-invalid write, schema-invalid write stored) — enveloped on the left, \
+             top-level on the right; enveloped frames decoded: {:?} and {:?}",
+            decode_frames(&enveloped.0),
+            decode_frames(&enveloped.2)
         );
     }
 }

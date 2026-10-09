@@ -1530,3 +1530,84 @@ case outside the precondition.
 | `a_second_acquire_by_the_holding_task_on_the_same_stripe_stays_pending` | WHY a task holds at most one writer: a second acquire on the holder's own stripe never returns | CI (`cargo test`) |
 | `acquires_of_free_keys_complete_in_one_poll_of_their_task` | taking a free key does not make the task yield: a task that awaits nothing but 1 024 acquires of keys nobody holds is polled once. It guards the write path against paying a trip through the run queue for a lock nobody contends, which is what filled the partition workers' inboxes under CPU pressure. Red when the acquire is charged to the task's cooperative budget: 8 polls instead of 1. Not covered: an acquire of a HELD key, which still waits for the release | CI (`cargo test`) |
 | `count_alloc_acquire_is_bounded_on_first_use_and_zero_on_repeat` | a stripe's first use allocates at most once and within the bound; a second pass over the same keys allocates nothing. Measured on macOS arm64 only | local only (`--features count-alloc`, `--ignored`); CI never enables the feature |
+
+### TG-DISP-001: A message is handled by the same code top-level and inside a `BATCH` envelope
+
+- **Scope:** every client message the WebSocket handler dispatches to a domain service
+  (`network/handlers/websocket.rs`), whether it arrives as its own frame or as an inner item of a
+  `BATCH` envelope, and the classification of a message into an operation (`service/classify.rs`).
+- **Statement:**
+  (a) *One entry.* A message that is not itself an envelope is routed and answered by one
+  function, `dispatch_one_message`, on both paths. The envelope only unpacks: it walks its inner
+  items in order and hands each to that function, awaiting one before the next. So whatever a
+  message is answered with top-level — an acknowledgement, a per-op refusal, a 429 back-off
+  frame — it is answered with inside an envelope, and the answers of one envelope leave in
+  envelope order.
+  (b) *The split.* An `OP_BATCH` is always split by its keys' partitions and each sub-batch runs
+  on that partition's worker, top-level or enveloped. Classification refuses a whole `OP_BATCH`
+  (`ClassifyError::RequiresPartitionSplit`), so no transport can hand one to the global worker by
+  classifying it.
+  **Exceptions — four, and each is a difference between the two paths:**
+  1. `DeviceHello` is handled in the connection's read loop. Inside an envelope it is not accepted.
+  2. `ClientApplyAck` is handled in the read loop as well. Inside an envelope it is not accepted.
+  3. A nested `BATCH` is not unpacked: an envelope is one level deep.
+  4. The rate-limit charge is taken in the read loop, per frame, before any unpacking.
+- **Not claimed:**
+  - **An answer to what the envelope does not accept.** A `DeviceHello`, a `ClientApplyAck` or a
+    nested `BATCH` inside an envelope is dropped with a log line and the client gets no frame.
+    The same holds for an inner item that does not decode and for a truncated tail: the rest of
+    a truncated envelope is not dispatched and nothing says so. Tracker TODO-785.
+  - **A rate limit by operations for an envelope.** The limiter charges a frame once, in the read
+    loop: an envelope costs one token per inner item, so an inner `OP_BATCH` of N ops costs one
+    token where the same batch sent top-level costs N. Because of clause (b) that one-token batch
+    now fans out across the partition workers instead of running serially on one. Tracker
+    TODO-781.
+  - **That nothing can build a batch without a partition.** An operation can still be constructed
+    by hand with no partition and passed to a service directly; simulation and unit tests do. The
+    dispatcher does not refuse it. What keeps such a batch correct is the per-key writer
+    (`TG-KEY-001`), not its route.
+  - **That a full worker inbox is what the back-off test produces.** The first enforcing test
+    stages the overload error at the service; that a full inbox raises that error is the
+    dispatcher's own test.
+  - **Any transport other than the WebSocket envelope.** HTTP sync builds its sub-batches per
+    partition itself and has no envelope.
+- **Maintaining code:** `network/handlers/websocket.rs` — `dispatch_one_message`, its two callers
+  `dispatch_message` and `unpack_and_dispatch_batch`, and `dispatch_op_batch`;
+  `service/classify.rs` — the `OpBatch` arm of `classify`; `service/operation.rs` —
+  `ClassifyError::RequiresPartitionSplit`. Citations are line-number-free, per `TG-OR-004`.
+- **Enforcing test:** one per property, each shown red on a tree with that property removed.
+  Clause (a) is not one property but four, and no single test holds "the same code on both paths":
+  - *the back-off answer* — `an_overloaded_inner_message_is_answered_with_a_back_off_frame`;
+  - *the principal an inner message is authorized as* —
+    `an_enveloped_message_is_authorized_as_the_connections_principal`;
+  - *the connection an inner message is handled for* —
+    `an_enveloped_single_write_is_handled_as_its_connections_write`;
+  - *envelope order* — `tests/integration-rust/enveloped-op-batch.test.ts`, and only it: no Rust
+    test sees the order. A tree that dispatches the inner items last-to-first, or all at once, is
+    green on every in-process test and red on this one.
+  Clause (b), *the split* — `an_enveloped_op_batch_is_split_onto_its_keys_partition_workers`.
+  The four Rust tests are in `websocket.rs`'s test module and run in CI (`cargo test`); the
+  integration test runs in CI (`pnpm test:integration-rust`). The table below says what each was
+  shown red on, and lists the others. What the tests do not hold: any other argument or branch the
+  two paths could come to differ in. That there is one entry at all is held by structure — one
+  `.classify(` call site in `websocket.rs` — and not by a test.
+- **Violation consequence:** an enveloped `OP_BATCH` that is classified whole runs on the global
+  worker with no partition: every op of it is serialised behind one worker, one refused op fails
+  the whole batch at validation, and the client is sent nothing — no per-op refusal, no
+  acknowledgement of the accepted ops, no back-off frame when the server is overloaded. A client
+  waiting for a verdict on those ops receives none.
+- **Discovered by:** the SPEC-384 call-site sweep (the envelope kept its own classify-and-dispatch
+  block, the one production caller that classified an `OP_BATCH` whole); fixed and catalogued by
+  SPEC-384a2.
+- **Status:** decided, **enforced** — by the tests below; not by a type.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `an_overloaded_inner_message_is_answered_with_a_back_off_frame` | clause (a), the back-off answer: an overloaded `CLIENT_OP` is answered with one 429 frame top-level and inside an envelope, and so is an overloaded enveloped `OP_BATCH`. Shown red on the tree where the envelope splits an `OP_BATCH` but keeps its own block, without the 429 arm, for every other message: the enveloped `CLIENT_OP` got no frame. It does not see the principal or the connection id: the overload is staged before either is read | CI (`cargo test`) |
+| `an_enveloped_message_is_authorized_as_the_connections_principal` | clause (a), the principal: under a policy that admits a write only for the principal its record names, one `OP_BATCH` is answered differently for two principals, and for each of them the enveloped frames are byte-equal to the top-level ones and the same records are stored. Shown red, 20 of 20, on the tree where the envelope hands its inner messages on with no principal: every op was refused | CI (`cargo test`) |
+| `an_enveloped_single_write_is_handled_as_its_connections_write` | clause (a), the connection id: a `CLIENT_OP` that names no connection is taken by the CRDT service for a trusted internal call — the caller's stamp is kept and the schema check is skipped. Top-level and enveloped alike, a valid write is stored under a stamp the server minted, and a write the map's schema rejects gets no frame and is not stored. Shown red, 20 of 20, on the tree where the envelope keeps its own block — with the 429 arm — that does not set the connection id: the client's stamp was stored and the schema-invalid write was acknowledged and stored | CI (`cargo test`) |
+| `an_enveloped_op_batch_is_split_onto_its_keys_partition_workers` | clause (b): the ops of one enveloped `OP_BATCH` whose keys fall in two partitions reach the service labelled with those two partitions. Shown red on the tree before the fix: one batch with no partition. What it reads is the label the dispatcher routes by; that a label reaches its worker is the dispatcher's own test | CI (`cargo test`) |
+| `an_enveloped_op_batch_refusal_is_answered_like_a_top_level_one` | the frames answering a batch with one refused op are byte-equal on both paths; the accepted op is stored and the refused one is not | CI (`cargo test`) |
+| `nested_empty_op_batch_emits_no_frame` | an empty enveloped `OP_BATCH` is not dispatched and gets no frame, while a non-empty one after it in the same envelope is dispatched and acknowledged. Shown red on the tree where the envelope skips an inner `OP_BATCH` | CI (`cargo test`) |
+| `classify_refuses_an_op_batch` | classification returns `RequiresPartitionSplit` for an `OP_BATCH` | CI (`cargo test`) |
+| `tests/integration-rust/enveloped-op-batch.test.ts` | clause (a), envelope order — the only enforcer of it — against a real server binary: an enveloped `OP_BATCH` with one refused op is answered with the refusal and the acknowledgement of the accepted ops, ahead of the acknowledgement of a write placed after it in the same envelope. Shown red on the tree that dispatches the inner items last-to-first and on the tree that dispatches them all at once: nothing arrived ahead of the later write's acknowledgement | CI (`pnpm test:integration-rust`) |
