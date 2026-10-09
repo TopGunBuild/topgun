@@ -176,7 +176,7 @@ impl KeyWriterRegistry {
     /// Two different keys can share a stripe and the lock is not re-entrant,
     /// so the second call would wait for the guard its own task holds, and
     /// never return.
-    pub async fn acquire(&self, map_name: &str, key: &str) -> KeyWriterGuard {
+    pub async fn acquire<'k>(&self, map_name: &'k str, key: &'k str) -> KeyWriteToken<'k> {
         let lock = Arc::clone(&self.stripes[stripe_index(map_name, key)]);
         #[cfg(test)]
         let waiting = WaitingProbe::enter(&self.waiting);
@@ -189,7 +189,11 @@ impl KeyWriterRegistry {
         let guard = tokio::task::coop::unconstrained(lock.lock_owned()).await;
         #[cfg(test)]
         drop(waiting);
-        KeyWriterGuard { _guard: guard }
+        KeyWriteToken {
+            _guard: guard,
+            map: map_name,
+            key,
+        }
     }
 }
 
@@ -234,15 +238,132 @@ impl Default for KeyWriterRegistry {
     }
 }
 
-/// RAII guard for a held per-key writer lock. Dropping it releases the
-/// lock. Deliberately opaque (no exposed methods) — its only job is to keep
-/// the key's stripe held for the caller's critical-section lifetime; the
-/// `OwnedMutexGuard` it wraps keeps the underlying `Arc<Mutex<()>>` alive
-/// for as long as the guard is held, independent of the registry's own
-/// lifetime.
-pub struct KeyWriterGuard {
+/// The held per-key writer of one `(map, key)`: the lock guard of the key's
+/// stripe together with the pair it was acquired for.
+///
+/// The token IS the guard. The stripe stays locked exactly as long as the
+/// token is alive and dropping the token is the only way to release it, so
+/// the token cannot be cloned or copied and has no method that gives the
+/// guard up. The `OwnedMutexGuard` it wraps keeps the underlying
+/// `Arc<Mutex<()>>` alive for as long as the token is held, independent of
+/// the registry's own lifetime.
+///
+/// The pair is borrowed from the arguments of `acquire`, so the token
+/// allocates nothing. It carries the strings because a stripe does not
+/// identify a key: two keys can share one, and the registry keeps no key at
+/// all.
+///
+/// The token has no `Drop` impl of its own and must not get one; releasing
+/// the lock is the guard field's drop. A destructor that could read the
+/// borrowed strings would stretch their borrow to the end of the token's
+/// scope, and a caller that moves the value it acquired from while the token
+/// is still in scope — the tombstone prune pass does — would stop compiling.
+pub struct KeyWriteToken<'k> {
     _guard: OwnedMutexGuard<()>,
+    map: &'k str,
+    key: &'k str,
 }
+
+impl KeyWriteToken<'_> {
+    /// Whether the token was acquired for exactly `(map, key)`.
+    ///
+    /// Both strings are compared, never the stripe: a token of another key on
+    /// the same stripe does hold the same lock, but accepting it would let a
+    /// caller that locked the wrong key pass by a coincidence of the hash.
+    #[must_use]
+    pub fn covers(&self, map: &str, key: &str) -> bool {
+        self.map == map && self.key == key
+    }
+
+    /// `Ok` when the token [`covers`](Self::covers) `(map, key)`. The token
+    /// is only borrowed: checking does not give up the lock.
+    ///
+    /// # Errors
+    ///
+    /// [`KeyWriterMismatch`], naming the pair the token was acquired for and
+    /// the pair it was asked about, when they differ.
+    pub fn check(&self, map: &str, key: &str) -> Result<(), KeyWriterMismatch> {
+        if self.covers(map, key) {
+            return Ok(());
+        }
+        Err(KeyWriterMismatch {
+            token_map: self.map.to_owned(),
+            token_key: self.key.to_owned(),
+            requested_map: map.to_owned(),
+            requested_key: key.to_owned(),
+        })
+    }
+}
+
+#[cfg(test)]
+impl<'k> KeyWriteToken<'k> {
+    /// A token for `(map, key)` around the guard of a fresh mutex that
+    /// nothing else can reach, for a test that needs a token and no registry.
+    /// It is a real guard of a real lock, but it excludes nobody.
+    pub(crate) fn for_test(map: &'k str, key: &'k str) -> Self {
+        let guard = Arc::new(Mutex::new(()))
+            .try_lock_owned()
+            .expect("a mutex nobody else can reach is free");
+        Self {
+            _guard: guard,
+            map,
+            key,
+        }
+    }
+}
+
+/// A [`KeyWriteToken`] was asked about a `(map, key)` it was not acquired
+/// for.
+///
+/// Only [`KeyWriteToken::check`] builds one, so a value of this type always
+/// reports a mismatch that was observed. The strings are owned, which lets
+/// the error travel through `anyhow` and be found again by `downcast_ref`;
+/// they are allocated only when a mismatch is reported.
+#[derive(Debug)]
+pub struct KeyWriterMismatch {
+    token_map: String,
+    token_key: String,
+    requested_map: String,
+    requested_key: String,
+}
+
+impl KeyWriterMismatch {
+    /// The map the token was acquired for.
+    #[must_use]
+    pub fn token_map(&self) -> &str {
+        &self.token_map
+    }
+
+    /// The key the token was acquired for.
+    #[must_use]
+    pub fn token_key(&self) -> &str {
+        &self.token_key
+    }
+
+    /// The map the token was asked about.
+    #[must_use]
+    pub fn requested_map(&self) -> &str {
+        &self.requested_map
+    }
+
+    /// The key the token was asked about.
+    #[must_use]
+    pub fn requested_key(&self) -> &str {
+        &self.requested_key
+    }
+}
+
+impl std::fmt::Display for KeyWriterMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the key writer token of ({:?}, {:?}) was presented for ({:?}, {:?})",
+            self.token_map, self.token_key, self.requested_map, self.requested_key
+        )
+    }
+}
+
+impl std::error::Error for KeyWriterMismatch {}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -711,6 +832,113 @@ mod tests {
             (true, 1, 0),
             "(the second acquire is pending, it is counted as waiting while it lives, the count \
              is back to zero once it is dropped)"
+        );
+    }
+
+    // -- The token: it knows its key, and it is the lock guard. --
+
+    // The token is the only handle on its lock, so a copy of it would be a
+    // second handle that outlives the first. The guard field already rules
+    // out a derived `Clone`; this fails the test build if a later change of
+    // the field's type, or a hand-written impl, makes the token clonable.
+    static_assertions::assert_not_impl_any!(KeyWriteToken<'static>: Clone, Copy);
+
+    /// A token answers for the pair it was acquired for and for no other —
+    /// not even a key that shares its stripe, whose lock it does hold — and
+    /// while it is alive the key's writer is taken.
+    #[tokio::test]
+    async fn a_token_covers_exactly_the_key_it_was_acquired_for() {
+        const A: &str = "a";
+        const OTHER_MAP: &str = "other-map";
+        let same_stripe = key_by_stripe(A, true);
+        let other_stripe = key_by_stripe(A, false);
+        let registry = KeyWriterRegistry::new();
+        let token = registry.acquire(MAP, A).await;
+
+        // Non-vacuity of the fourth element: the refused key is on the
+        // token's own stripe.
+        assert_eq!(
+            stripe_of(MAP, &same_stripe),
+            stripe_of(MAP, A),
+            "precondition: the same-stripe key shares the token's stripe"
+        );
+        assert_eq!(
+            (
+                token.covers(MAP, A),
+                token.covers(MAP, &other_stripe),
+                token.covers(OTHER_MAP, A),
+                token.covers(MAP, &same_stripe),
+            ),
+            (true, false, false, false),
+            "(its own map and key, another key, another map, another key on its own stripe)"
+        );
+
+        // One sighting of the waiting count is also true for a task passing
+        // through a free lock, so the wait is taken from the first poll of
+        // the second acquire; the count is read while that future lives.
+        let mut second = std::pin::pin!(registry.acquire(MAP, A));
+        let pending_while_the_token_lives = pending_on_first_poll(second.as_mut()).await;
+        let waiting_while_the_token_lives = registry.test_waiting();
+        assert_eq!(
+            (pending_while_the_token_lives, waiting_while_the_token_lives),
+            (true, 1),
+            "(a second acquire of the same key is pending at its first poll, it is counted as \
+             waiting)"
+        );
+
+        drop(token);
+        let second_token = tokio::time::timeout(WAIT_BOUND, second)
+            .await
+            .expect("the second acquire never completed after the token was dropped");
+        assert!(second_token.covers(MAP, A));
+    }
+
+    /// `check` is `Ok` for the token's own pair and otherwise names both
+    /// pairs, and the error is still found after a trip through `anyhow`.
+    #[test]
+    fn check_names_both_identities_on_a_mismatch_and_is_ok_on_a_match() {
+        fn identities(mismatch: &KeyWriterMismatch) -> (&str, &str, &str, &str) {
+            (
+                mismatch.token_map(),
+                mismatch.token_key(),
+                mismatch.requested_map(),
+                mismatch.requested_key(),
+            )
+        }
+        let token = KeyWriteToken::for_test("m", "k");
+
+        let matching = token.check("m", "k").is_ok();
+        let wrong_key = token
+            .check("m", "other-key")
+            .expect_err("a wrong key is a mismatch");
+        let wrong_map = token
+            .check("other-map", "k")
+            .expect_err("a wrong map is a mismatch");
+        let through_anyhow = anyhow::Error::from(
+            token
+                .check("m", "other-key")
+                .expect_err("a wrong key is a mismatch"),
+        );
+        let found_again = through_anyhow
+            .downcast_ref::<KeyWriterMismatch>()
+            .map(identities);
+
+        assert_eq!(
+            (
+                matching,
+                identities(&wrong_key),
+                identities(&wrong_map),
+                found_again,
+            ),
+            (
+                true,
+                ("m", "k", "m", "other-key"),
+                ("m", "k", "other-map", "k"),
+                Some(("m", "k", "m", "other-key")),
+            ),
+            "(the token's own pair is Ok, a wrong key, a wrong map, the wrong-key error found \
+             again behind anyhow) — each mismatch as (token map, token key, requested map, \
+             requested key)"
         );
     }
 }
