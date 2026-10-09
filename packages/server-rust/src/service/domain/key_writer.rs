@@ -180,7 +180,13 @@ impl KeyWriterRegistry {
         let lock = Arc::clone(&self.stripes[stripe_index(map_name, key)]);
         #[cfg(test)]
         let waiting = WaitingProbe::enter(&self.waiting);
-        let guard = lock.lock_owned().await;
+        // Polled outside the task's cooperative budget. The runtime charges
+        // every mutex acquire to that budget and sends the task back to the
+        // run queue when it is spent, so a write path that takes a free key
+        // per operation would give up its worker for a lock nobody holds. A
+        // lock that IS held still returns `Pending` here and is woken by the
+        // release: exclusion and the order of the waiters do not change.
+        let guard = tokio::task::coop::unconstrained(lock.lock_owned()).await;
         #[cfg(test)]
         drop(waiting);
         KeyWriterGuard { _guard: guard }
@@ -609,6 +615,61 @@ mod tests {
         assert_eq!(
             repeat, 0,
             "{KEYS} acquire-and-release calls on stripes already used must allocate nothing"
+        );
+    }
+
+    /// Counts the polls of the future it wraps.
+    struct CountPolls<F> {
+        future: std::pin::Pin<Box<F>>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl<F: Future> Future for CountPolls<F> {
+        type Output = F::Output;
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> Poll<F::Output> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            self.future.as_mut().poll(cx)
+        }
+    }
+
+    /// An acquire of a free key does not make its task yield. The task below
+    /// awaits nothing but acquires of keys nobody holds, more of them than
+    /// the runtime lets one poll of a task complete when each is charged to
+    /// the task's cooperative budget; charged, the task is sent back to the
+    /// run queue part-way and polled again, and the count below is above one.
+    /// A write path that acquires a free key per operation would hand its
+    /// worker back to the scheduler that often for a lock nobody contends.
+    #[tokio::test]
+    async fn acquires_of_free_keys_complete_in_one_poll_of_their_task() {
+        const ACQUIRES: usize = 1_024;
+        let registry = KeyWriterRegistry::new();
+        let keys: Vec<String> = (0..ACQUIRES).map(|i| format!("k{i}")).collect();
+        let polls = Arc::new(AtomicUsize::new(0));
+
+        let task = tokio::spawn(CountPolls {
+            future: Box::pin(async move {
+                let mut acquired = 0;
+                for key in &keys {
+                    drop(registry.acquire(MAP, key).await);
+                    acquired += 1;
+                }
+                acquired
+            }),
+            polls: Arc::clone(&polls),
+        });
+        let acquired = tokio::time::timeout(WAIT_BOUND, task)
+            .await
+            .expect("the acquiring task never finished")
+            .expect("acquiring task");
+
+        assert_eq!(
+            (acquired, polls.load(Ordering::SeqCst)),
+            (ACQUIRES, 1),
+            "(acquires of free keys made, polls of the task that made them)"
         );
     }
 
