@@ -20,6 +20,7 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::key_writer::KeyWriteToken;
     use std::sync::Arc;
 
     use tower::ServiceExt;
@@ -170,6 +171,7 @@ mod tests {
         let store = factory.get_or_create(map, hash_to_partition(key));
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), key),
                 key,
                 RecordValue::OrMap {
                     records: records
@@ -2402,6 +2404,7 @@ mod tests {
             let written = factory
                 .get_or_create(MAP, hash_to_partition(key))
                 .update_in_place(
+                    &KeyWriteToken::for_test(MAP, key),
                     key,
                     None,
                     ExpiryPolicy::NONE,

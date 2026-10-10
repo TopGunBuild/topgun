@@ -790,6 +790,7 @@ mod tests {
     use crate::network::handlers::auth::{decode_jwt_key, JwtClaims};
     use crate::network::NetworkConfig;
     use crate::query::cursor::{decode_cursor, encode_cursor, CursorData, SortValue};
+    use crate::storage::key_writer::KeyWriteToken;
     use arc_swap::ArcSwap;
     use jsonwebtoken::{EncodingKey, Header};
     use serde::Serialize;
@@ -1152,6 +1153,7 @@ mod tests {
         for (key, val) in records {
             store
                 .put(
+                    &KeyWriteToken::for_test(store.name(), key),
                     key,
                     StoreRecordValue::Lww {
                         value: TgValue::Map(

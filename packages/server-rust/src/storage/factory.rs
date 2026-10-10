@@ -203,6 +203,7 @@ impl RecordStoreFactory {
 #[cfg(test)]
 #[allow(clippy::doc_markdown)]
 mod tests {
+    use crate::storage::key_writer::KeyWriteToken;
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;
 
@@ -238,6 +239,7 @@ mod tests {
         // Put and get round-trip through Arc<dyn RecordStore>
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "alice"),
                 "alice",
                 make_value("data"),
                 ExpiryPolicy::NONE,
@@ -285,6 +287,7 @@ mod tests {
 
         store_a
             .put(
+                &KeyWriteToken::for_test(store_a.name(), "key1"),
                 "key1",
                 make_value("a"),
                 ExpiryPolicy::NONE,

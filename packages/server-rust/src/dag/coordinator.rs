@@ -787,6 +787,7 @@ pub(crate) fn make_supplier_from_descriptor(
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::key_writer::KeyWriteToken;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -1431,7 +1432,13 @@ mod tests {
                 },
             };
             store
-                .put(key, value, ExpiryPolicy::NONE, CallerProvenance::Client)
+                .put(
+                    &KeyWriteToken::for_test(store.name(), key),
+                    key,
+                    value,
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
                 .await
                 .expect("put should succeed");
         }
@@ -1653,6 +1660,7 @@ mod tests {
         let store = factory.get_or_create(map_name, partition_id);
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "k1"),
                 "k1",
                 RecordValue::Lww {
                     value: Value::Int(42),
@@ -1727,6 +1735,7 @@ mod tests {
         let store = factory.get_or_create(map_name, partition_id);
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "k1"),
                 "k1",
                 RecordValue::Lww {
                     value: Value::Int(42),

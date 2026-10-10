@@ -11,6 +11,7 @@
 
 #[cfg(test)]
 mod eviction_cost_tests {
+    use crate::storage::key_writer::KeyWriteToken;
     use std::sync::Arc;
 
     use tempfile::tempdir;
@@ -75,6 +76,7 @@ mod eviction_cost_tests {
             let key = format!("{prefix}{i:03}");
             store
                 .put(
+                    &KeyWriteToken::for_test(store.name(), &key),
                     &key,
                     lww_value("payload-for-eviction-test"),
                     ExpiryPolicy::NONE,
@@ -277,6 +279,7 @@ mod eviction_cost_tests {
         let store = make_store_with_datastore("cost_nonleak", null_store as Arc<dyn MapDataStore>);
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "k"),
                 "k",
                 lww_value("v"),
                 ExpiryPolicy::NONE,
@@ -332,6 +335,7 @@ mod eviction_cost_tests {
 
             store
                 .put(
+                    &KeyWriteToken::for_test(store.name(), "key-real"),
                     "key-real",
                     lww_value("value-real"),
                     ExpiryPolicy::NONE,
@@ -371,6 +375,7 @@ mod eviction_cost_tests {
 
             store
                 .put(
+                    &KeyWriteToken::for_test(store.name(), "key-null"),
                     "key-null",
                     lww_value("value-null"),
                     ExpiryPolicy::NONE,

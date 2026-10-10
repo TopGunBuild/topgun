@@ -1173,6 +1173,7 @@ impl SimCluster {
     clippy::items_after_statements
 )]
 mod tests {
+    use crate::storage::key_writer::KeyWriteToken;
     use std::time::Duration;
 
     use tokio::sync::{mpsc, oneshot};
@@ -1308,6 +1309,7 @@ mod tests {
             .get_or_create(map_name, partition_id);
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), key),
                 key,
                 RecordValue::Lww {
                     value: topgun_core::Value::Int(42),
@@ -1822,6 +1824,7 @@ mod tests {
                 .get_or_create(map_name, partition_id);
             store
                 .put(
+                    &KeyWriteToken::for_test(store.name(), key),
                     key,
                     RecordValue::Lww {
                         value: topgun_core::Value::Map(std::collections::BTreeMap::from([(
@@ -2020,6 +2023,7 @@ mod tests {
                 .get_or_create(map_name, partition_id);
             store
                 .put(
+                    &KeyWriteToken::for_test(store.name(), key),
                     key,
                     RecordValue::Lww {
                         value: topgun_core::Value::Map(std::collections::BTreeMap::from([(
@@ -3241,6 +3245,7 @@ mod tests {
             .record_store_factory
             .get_or_create(MAP, topgun_core::hash_to_partition(KEY))
             .put(
+                &KeyWriteToken::for_test(MAP, KEY),
                 KEY,
                 RecordValue::OrMap {
                     records: vec![OrMapEntry {

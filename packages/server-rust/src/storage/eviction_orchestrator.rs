@@ -207,6 +207,7 @@ mod tests {
     use crate::storage::eviction_config::EvictionConfig;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
+    use crate::storage::key_writer::KeyWriteToken;
     use crate::storage::map_data_store::MapDataStore;
     use crate::storage::record::Record;
     use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, ExpiryReason, RecordStore};
@@ -296,6 +297,7 @@ mod tests {
 
         async fn put(
             &self,
+            _writer: &KeyWriteToken<'_>,
             _key: &str,
             _value: crate::storage::record::RecordValue,
             _expiry: ExpiryPolicy,
@@ -306,6 +308,7 @@ mod tests {
 
         async fn remove(
             &self,
+            _writer: &KeyWriteToken<'_>,
             _key: &str,
             _provenance: CallerProvenance,
         ) -> anyhow::Result<Option<crate::storage::record::RecordValue>> {
@@ -314,6 +317,7 @@ mod tests {
 
         async fn put_backup(
             &self,
+            _writer: &KeyWriteToken<'_>,
             _key: &str,
             _record: Record,
             _provenance: CallerProvenance,
@@ -323,6 +327,7 @@ mod tests {
 
         async fn remove_backup(
             &self,
+            _writer: &KeyWriteToken<'_>,
             _key: &str,
             _provenance: CallerProvenance,
         ) -> anyhow::Result<()> {
@@ -849,7 +854,13 @@ mod tests {
                 },
             };
             store
-                .put(&key, value, ExpiryPolicy::NONE, CallerProvenance::Client)
+                .put(
+                    &KeyWriteToken::for_test(store.name(), &key),
+                    &key,
+                    value,
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
                 .await
                 .expect("put must succeed");
         }
@@ -906,6 +917,116 @@ mod tests {
             "owned_entry_cost must drop after eviction; before={cost_before}, \
              after={}",
             store.owned_entry_cost()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TG-KEY-002 on the trait's default `update_in_place`, which `MockStore`
+    // inherits.
+    // -----------------------------------------------------------------------
+
+    /// Counts the ERROR-level events of the calling thread.
+    #[derive(Clone, Default)]
+    struct ErrorCount(Arc<AtomicU32>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorCount {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The default body refuses a token acquired for another key before it
+    /// reads and before the caller's closure runs, whatever the implementor's
+    /// `put` does with the token — `MockStore`'s ignores it. `MockStore::get`
+    /// finds nothing, so the call passes an initial value: without the refusal
+    /// the closure would run. The default path has no production store behind
+    /// it and does not log.
+    #[tokio::test]
+    async fn the_default_update_in_place_refuses_a_foreign_token_before_the_closure_runs() {
+        use crate::storage::key_writer::KeyWriterMismatch;
+        use crate::storage::record::RecordValue;
+        use crate::storage::record_store::MutateOutcome;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Written out and not taken from the store's constant: this is the
+        // text a caller is shown, and the test is what pins it.
+        const SENTENCE: &str =
+            "record write refused: the key writer token was acquired for another key";
+        const MAP: &str = "default-path";
+
+        let store = MockStore::new(MAP, 0);
+        let empty = || RecordValue::OrMap {
+            records: Vec::new(),
+            tombstones: Vec::new(),
+        };
+        let update = |writer: KeyWriteToken<'static>| {
+            let store = Arc::clone(&store);
+            async move {
+                let runs = AtomicU32::new(0);
+                let mut mutate = |_: &mut RecordValue| {
+                    runs.fetch_add(1, Ordering::Relaxed);
+                    MutateOutcome {
+                        changed: true,
+                        witness: None,
+                    }
+                };
+                let errors = ErrorCount::default();
+                let guard = tracing::subscriber::set_default(
+                    tracing_subscriber::registry().with(errors.clone()),
+                );
+                let result = store
+                    .update_in_place(
+                        &writer,
+                        "k-requested",
+                        Some(empty()),
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::Client,
+                        &mut mutate,
+                    )
+                    .await;
+                drop(guard);
+                (
+                    result,
+                    runs.load(Ordering::Relaxed),
+                    errors.0.load(Ordering::Relaxed),
+                )
+            }
+        };
+
+        let (result, runs, errors) = update(KeyWriteToken::for_test(MAP, "k-foreign")).await;
+        let (typed, shown) = match &result {
+            Ok(_) => (false, String::new()),
+            Err(err) => (
+                err.downcast_ref::<KeyWriterMismatch>().is_some_and(|m| {
+                    (
+                        m.token_map(),
+                        m.token_key(),
+                        m.requested_map(),
+                        m.requested_key(),
+                    ) == (MAP, "k-foreign", MAP, "k-requested")
+                }),
+                format!("{err}"),
+            ),
+        };
+        assert_eq!(
+            (typed, runs, shown == SENTENCE, errors),
+            (true, 0, true, 0),
+            "(the typed mismatch naming both pairs, closure runs, the fixed sentence, \
+             ERROR events)"
+        );
+
+        // Positive control: with the key's own token the closure runs once.
+        let (result, runs, errors) = update(KeyWriteToken::for_test(MAP, "k-requested")).await;
+        assert_eq!(
+            (result.ok(), runs, errors),
+            (Some(true), 1, 0),
+            "(the call's result, closure runs, ERROR events)"
         );
     }
 }

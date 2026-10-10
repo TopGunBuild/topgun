@@ -751,6 +751,7 @@ async fn write_back_one_embedding(
 
     let outcome = match store
         .put(
+            &key_guard,
             &evt.key,
             record_value,
             ExpiryPolicy::NONE,
@@ -974,6 +975,7 @@ impl ObserverFactory for EmbeddingObserverFactory {
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::key_writer::KeyWriteToken;
     use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
     use std::time::Duration;
@@ -1206,6 +1208,7 @@ mod tests {
         };
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "doc1"),
                 "doc1",
                 record_value,
                 ExpiryPolicy::NONE,
@@ -1303,6 +1306,7 @@ mod tests {
         };
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "doc2"),
                 "doc2",
                 record_value,
                 ExpiryPolicy::NONE,
@@ -1395,6 +1399,7 @@ mod tests {
         };
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "doc1"),
                 "doc1",
                 record_value,
                 ExpiryPolicy::NONE,
@@ -1500,6 +1505,7 @@ mod tests {
         };
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "doc1"),
                 "doc1",
                 record_value,
                 ExpiryPolicy::NONE,
