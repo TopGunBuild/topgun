@@ -439,7 +439,6 @@ fn lww(i: u64) -> RecordValue {
 
 /// (LWW update of a resident key, LWW insert of a new key).
 async fn lww_readings() -> (Reading, Reading) {
-    let fx = fixture();
     // The token borrows the key it was acquired for, so the measured future
     // borrows both and owns neither.
     async fn put(
@@ -459,6 +458,7 @@ async fn lww_readings() -> (Reading, Reading) {
             .await
             .expect("put")
     }
+    let fx = fixture();
     for i in 0..8 {
         let writer = fx.key_writer.acquire(MAP, "lww-resident").await;
         put(&writer, &fx.store, "lww-resident", i).await;

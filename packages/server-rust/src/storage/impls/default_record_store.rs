@@ -3741,6 +3741,10 @@ mod tests {
         /// lock that token does hold — before it writes, notifies or runs the
         /// caller's closure; it logs the refusal once and tells its caller
         /// only the fixed sentence.
+        // One test on purpose: the five rows are compared in a single
+        // assertion, so a failure shows which mutator's row moved and that the
+        // other four did not.
+        #[allow(clippy::too_many_lines)]
         #[tokio::test]
         async fn a_token_for_another_key_is_refused_and_nothing_is_written() {
             let rig = Rig::new();
