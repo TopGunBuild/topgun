@@ -295,6 +295,7 @@ impl ExecutionPlan for TopGunExec {
 #[allow(clippy::redundant_closure_for_method_calls)]
 mod tests {
     use super::*;
+    use crate::storage::key_writer::KeyWriteToken;
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use topgun_core::hlc::Timestamp;
@@ -336,6 +337,7 @@ mod tests {
             };
             store
                 .put(
+                    &KeyWriteToken::for_test(store.name(), key),
                     key,
                     record_value,
                     ExpiryPolicy::NONE,

@@ -11,6 +11,7 @@
 use async_trait::async_trait;
 
 use super::engine::{FetchResult, IterationCursor, StorageEngine};
+use super::key_writer::KeyWriteToken;
 use super::map_data_store::MapDataStore;
 use super::record::{Record, RecordValue};
 use super::wal::OrDelta;
@@ -134,6 +135,7 @@ pub trait RecordStore: Send + Sync {
     /// Handles write-through to `MapDataStore` based on provenance.
     async fn put(
         &self,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         value: RecordValue,
         expiry: ExpiryPolicy,
@@ -169,6 +171,7 @@ pub trait RecordStore: Send + Sync {
     /// with the true in-place seam.
     async fn update_in_place(
         &self,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         init: Option<RecordValue>,
         expiry: ExpiryPolicy,
@@ -202,7 +205,7 @@ pub trait RecordStore: Send + Sync {
         if !outcome.changed {
             return Ok(false);
         }
-        self.put(key, value, expiry, provenance).await?;
+        self.put(writer, key, value, expiry, provenance).await?;
         Ok(true)
     }
 
@@ -221,6 +224,7 @@ pub trait RecordStore: Send + Sync {
     /// Remove a record, returning the old value.
     async fn remove(
         &self,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         provenance: CallerProvenance,
     ) -> anyhow::Result<Option<RecordValue>>;
@@ -228,13 +232,19 @@ pub trait RecordStore: Send + Sync {
     /// Put a record received from backup replication.
     async fn put_backup(
         &self,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         record: Record,
         provenance: CallerProvenance,
     ) -> anyhow::Result<()>;
 
     /// Remove a record on backup.
-    async fn remove_backup(&self, key: &str, provenance: CallerProvenance) -> anyhow::Result<()>;
+    async fn remove_backup(
+        &self,
+        writer: &KeyWriteToken<'_>,
+        key: &str,
+        provenance: CallerProvenance,
+    ) -> anyhow::Result<()>;
 
     // --- Batch operations ---
 

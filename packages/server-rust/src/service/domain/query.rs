@@ -1564,6 +1564,7 @@ pub(crate) fn project_fields(fields: &[String], record: &rmpv::Value) -> rmpv::V
     clippy::uninlined_format_args
 )]
 mod tests {
+    use crate::storage::key_writer::KeyWriteToken;
     use std::collections::BTreeMap;
 
     use dashmap::DashSet;
@@ -2307,6 +2308,7 @@ mod tests {
             factory
                 .get_or_create(map_name, partition_id)
                 .put(
+                    &KeyWriteToken::for_test(map_name, key),
                     key,
                     RecordValue::Lww {
                         value,
@@ -2603,6 +2605,7 @@ mod tests {
             factory
                 .get_or_create(map_name, partition_id)
                 .put(
+                    &KeyWriteToken::for_test(map_name, key),
                     key,
                     RecordValue::Lww {
                         value,
@@ -3326,6 +3329,7 @@ mod tests {
         let store = svc.record_store_factory.get_or_create("maps", 0);
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "k1"),
                 "k1",
                 RecordValue::Lww {
                     value: make_value_map(vec![("name", Value::String("Alice".to_string()))]),
@@ -3479,6 +3483,7 @@ mod tests {
         let store = svc.record_store_factory.get_or_create("maps", 0);
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "k1"),
                 "k1",
                 RecordValue::Lww {
                     value: stored_value,

@@ -207,6 +207,7 @@ mod tests {
     use crate::storage::eviction_config::EvictionConfig;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
+    use crate::storage::key_writer::KeyWriteToken;
     use crate::storage::map_data_store::MapDataStore;
     use crate::storage::record::Record;
     use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, ExpiryReason, RecordStore};
@@ -296,6 +297,7 @@ mod tests {
 
         async fn put(
             &self,
+            _writer: &KeyWriteToken<'_>,
             _key: &str,
             _value: crate::storage::record::RecordValue,
             _expiry: ExpiryPolicy,
@@ -306,6 +308,7 @@ mod tests {
 
         async fn remove(
             &self,
+            _writer: &KeyWriteToken<'_>,
             _key: &str,
             _provenance: CallerProvenance,
         ) -> anyhow::Result<Option<crate::storage::record::RecordValue>> {
@@ -314,6 +317,7 @@ mod tests {
 
         async fn put_backup(
             &self,
+            _writer: &KeyWriteToken<'_>,
             _key: &str,
             _record: Record,
             _provenance: CallerProvenance,
@@ -323,6 +327,7 @@ mod tests {
 
         async fn remove_backup(
             &self,
+            _writer: &KeyWriteToken<'_>,
             _key: &str,
             _provenance: CallerProvenance,
         ) -> anyhow::Result<()> {
@@ -849,7 +854,13 @@ mod tests {
                 },
             };
             store
-                .put(&key, value, ExpiryPolicy::NONE, CallerProvenance::Client)
+                .put(
+                    &KeyWriteToken::for_test(store.name(), &key),
+                    &key,
+                    value,
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
                 .await
                 .expect("put must succeed");
         }

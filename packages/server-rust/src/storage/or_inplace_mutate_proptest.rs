@@ -46,6 +46,7 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::key_writer::KeyWriteToken;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -401,6 +402,7 @@ mod tests {
                 };
                 store
                     .update_in_place(
+                        &KeyWriteToken::for_test(store.name(), KEY),
                         KEY,
                         Some(empty_ormap()),
                         ExpiryPolicy::NONE,
@@ -431,6 +433,7 @@ mod tests {
                 };
                 store
                     .update_in_place(
+                        &KeyWriteToken::for_test(store.name(), KEY),
                         KEY,
                         Some(empty_ormap()),
                         ExpiryPolicy::NONE,
@@ -458,6 +461,7 @@ mod tests {
                     };
                     store
                         .update_in_place(
+                            &KeyWriteToken::for_test(store.name(), KEY),
                             KEY,
                             None,
                             ExpiryPolicy::NONE,
@@ -500,7 +504,13 @@ mod tests {
                     }
                 };
                 store
-                    .put(KEY, rv, ExpiryPolicy::NONE, CallerProvenance::CrdtMerge)
+                    .put(
+                        &KeyWriteToken::for_test(store.name(), KEY),
+                        KEY,
+                        rv,
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::CrdtMerge,
+                    )
                     .await
                     .unwrap();
             }
@@ -515,6 +525,7 @@ mod tests {
                 }
                 store
                     .put(
+                        &KeyWriteToken::for_test(store.name(), KEY),
                         KEY,
                         RecordValue::OrMap {
                             records,
@@ -534,6 +545,7 @@ mod tests {
                 if tombstones.len() != before {
                     store
                         .put(
+                            &KeyWriteToken::for_test(store.name(), KEY),
                             KEY,
                             RecordValue::OrMap {
                                 records,
@@ -762,6 +774,7 @@ mod tests {
             for h in [&inplace, &legacy] {
                 h.store
                     .put(
+                        &KeyWriteToken::for_test(h.store.name(), KEY),
                         KEY,
                         RecordValue::OrTombstones {
                             tags: vec!["t0".into(), "t1".into()],
@@ -925,6 +938,7 @@ mod tests {
                 // in-closure, then the durable write fails.
                 let r1 = store
                     .update_in_place(
+                        &KeyWriteToken::for_test(store.name(), KEY),
                         KEY,
                         Some(empty_ormap()),
                         ExpiryPolicy::NONE,
@@ -937,6 +951,7 @@ mod tests {
                 // the durable write now succeeds.
                 let r2 = store
                     .update_in_place(
+                        &KeyWriteToken::for_test(store.name(), KEY),
                         KEY,
                         Some(empty_ormap()),
                         ExpiryPolicy::NONE,
@@ -989,6 +1004,7 @@ mod tests {
             // Insert (no resident slot yet).
             store
                 .update_in_place(
+                    &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     Some(empty_ormap()),
                     ExpiryPolicy::NONE,
@@ -1006,6 +1022,7 @@ mod tests {
             // Occupied (mutate the resident slot).
             store
                 .update_in_place(
+                    &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     Some(empty_ormap()),
                     ExpiryPolicy::NONE,
@@ -1027,6 +1044,7 @@ mod tests {
             assert!(
                 store
                     .update_in_place(
+                        &KeyWriteToken::for_test(store.name(), KEY),
                         KEY,
                         Some(empty_ormap()),
                         ExpiryPolicy::NONE,
@@ -1079,6 +1097,7 @@ mod tests {
 
             store
                 .update_in_place(
+                    &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     Some(empty_ormap()),
                     ExpiryPolicy::NONE,
@@ -1128,6 +1147,7 @@ mod tests {
             };
             store
                 .put(
+                    &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     lww.clone(),
                     ExpiryPolicy::NONE,
@@ -1163,6 +1183,7 @@ mod tests {
             };
             store
                 .update_in_place(
+                    &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     Some(empty_ormap()),
                     ExpiryPolicy::NONE,
@@ -1389,6 +1410,7 @@ mod tests {
             };
             let written = store
                 .update_in_place(
+                    &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     Some(empty_ormap()),
                     ExpiryPolicy::NONE,
@@ -1436,6 +1458,7 @@ mod tests {
             };
             let written = store
                 .update_in_place(
+                    &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     None,
                     ExpiryPolicy::NONE,
@@ -1470,6 +1493,7 @@ mod tests {
             };
             let written = store
                 .update_in_place(
+                    &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     None,
                     ExpiryPolicy::NONE,

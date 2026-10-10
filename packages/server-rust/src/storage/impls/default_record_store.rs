@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use crate::storage::engine::{
     FetchResult, IterationCursor, PutIfAbsentOutcome, SlotInit, StorageEngine,
 };
+use crate::storage::key_writer::KeyWriteToken;
 use crate::storage::map_data_store::{Loaded, MapDataStore, WriteSource};
 use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
@@ -270,6 +271,7 @@ impl RecordStore for DefaultRecordStore {
     /// store on the other.
     async fn put(
         &self,
+        _writer: &KeyWriteToken<'_>,
         key: &str,
         value: RecordValue,
         expiry: ExpiryPolicy,
@@ -369,6 +371,7 @@ impl RecordStore for DefaultRecordStore {
     /// a transient failure (the client re-sends the op).
     async fn update_in_place(
         &self,
+        _writer: &KeyWriteToken<'_>,
         key: &str,
         init: Option<RecordValue>,
         expiry: ExpiryPolicy,
@@ -555,6 +558,7 @@ impl RecordStore for DefaultRecordStore {
     /// can mutate the still-resident slot and re-stage it over the delete.
     async fn remove(
         &self,
+        _writer: &KeyWriteToken<'_>,
         key: &str,
         provenance: CallerProvenance,
     ) -> anyhow::Result<Option<RecordValue>> {
@@ -580,6 +584,7 @@ impl RecordStore for DefaultRecordStore {
 
     async fn put_backup(
         &self,
+        _writer: &KeyWriteToken<'_>,
         key: &str,
         record: Record,
         provenance: CallerProvenance,
@@ -605,7 +610,12 @@ impl RecordStore for DefaultRecordStore {
         Ok(())
     }
 
-    async fn remove_backup(&self, key: &str, provenance: CallerProvenance) -> anyhow::Result<()> {
+    async fn remove_backup(
+        &self,
+        _writer: &KeyWriteToken<'_>,
+        key: &str,
+        provenance: CallerProvenance,
+    ) -> anyhow::Result<()> {
         // Step 1: Remove from engine
         let old = self.engine.remove(key);
 
@@ -1044,6 +1054,7 @@ mod tests {
         };
         let _ = store
             .update_in_place(
+                &KeyWriteToken::for_test(store.name(), "k"),
                 "k",
                 Some(make_value("init")),
                 ExpiryPolicy::NONE,
@@ -1068,6 +1079,7 @@ mod tests {
         };
         assert!(store
             .update_in_place(
+                &KeyWriteToken::for_test(store.name(), "k"),
                 "k",
                 Some(make_value("init")),
                 ExpiryPolicy::NONE,
@@ -1088,6 +1100,7 @@ mod tests {
 
         let old = store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 value.clone(),
                 ExpiryPolicy::NONE,
@@ -1117,6 +1130,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1139,6 +1153,7 @@ mod tests {
         // First put
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1150,6 +1165,7 @@ mod tests {
         // Second put on same key = update
         let old = store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v2"),
                 ExpiryPolicy::NONE,
@@ -1172,6 +1188,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1181,7 +1198,11 @@ mod tests {
             .unwrap();
 
         let old = store
-            .remove("key1", CallerProvenance::Client)
+            .remove(
+                &KeyWriteToken::for_test(store.name(), "key1"),
+                "key1",
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
         assert!(old.is_some());
@@ -1201,6 +1222,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1228,6 +1250,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1255,6 +1278,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1280,6 +1304,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1289,6 +1314,7 @@ mod tests {
             .unwrap();
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key2"),
                 "key2",
                 make_value("v2"),
                 ExpiryPolicy::NONE,
@@ -1314,6 +1340,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1323,6 +1350,7 @@ mod tests {
             .unwrap();
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key2"),
                 "key2",
                 make_value("v2"),
                 ExpiryPolicy::NONE,
@@ -1345,6 +1373,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1383,6 +1412,7 @@ mod tests {
         assert!(!store.exists_in_memory("key1"));
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1393,7 +1423,11 @@ mod tests {
         assert!(store.exists_in_memory("key1"));
 
         store
-            .remove("key1", CallerProvenance::Client)
+            .remove(
+                &KeyWriteToken::for_test(store.name(), "key1"),
+                "key1",
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
         assert!(!store.exists_in_memory("key1"));
@@ -1447,6 +1481,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1468,6 +1503,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "a"),
                 "a",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1477,6 +1513,7 @@ mod tests {
             .unwrap();
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "b"),
                 "b",
                 make_value("v2"),
                 ExpiryPolicy::NONE,
@@ -1486,6 +1523,7 @@ mod tests {
             .unwrap();
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "c"),
                 "c",
                 make_value("v3"),
                 ExpiryPolicy::NONE,
@@ -1507,6 +1545,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1527,6 +1566,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1552,6 +1592,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "a"),
                 "a",
                 make_value("va"),
                 ExpiryPolicy::NONE,
@@ -1561,6 +1602,7 @@ mod tests {
             .unwrap();
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "b"),
                 "b",
                 make_value("vb"),
                 ExpiryPolicy::NONE,
@@ -1595,6 +1637,7 @@ mod tests {
 
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
                 ExpiryPolicy::NONE,
@@ -1918,6 +1961,7 @@ mod tests {
             };
             store
                 .update_in_place(
+                    &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     Some(or_value(&[], &[])),
                     ExpiryPolicy::NONE,
@@ -2539,7 +2583,11 @@ mod tests {
             reader_park.wait_parked().await;
 
             store
-                .remove(KEY, CallerProvenance::CrdtMerge)
+                .remove(
+                    &KeyWriteToken::for_test(store.name(), KEY),
+                    KEY,
+                    CallerProvenance::CrdtMerge,
+                )
                 .await
                 .expect("remove");
 
@@ -2577,7 +2625,15 @@ mod tests {
             let mut remove_park = parking.park_before_remove();
             let remover = {
                 let store = Arc::clone(&store);
-                tokio::spawn(async move { store.remove(KEY, CallerProvenance::CrdtMerge).await })
+                tokio::spawn(async move {
+                    store
+                        .remove(
+                            &KeyWriteToken::for_test(store.name(), KEY),
+                            KEY,
+                            CallerProvenance::CrdtMerge,
+                        )
+                        .await
+                })
             };
             remove_park.wait_parked().await;
 
@@ -2747,7 +2803,11 @@ mod tests {
             assert!(!store.exists_in_memory(KEY), "precondition: never resident");
 
             store
-                .remove(KEY, CallerProvenance::CrdtMerge)
+                .remove(
+                    &KeyWriteToken::for_test(store.name(), KEY),
+                    KEY,
+                    CallerProvenance::CrdtMerge,
+                )
                 .await
                 .expect("remove");
 
@@ -3100,7 +3160,11 @@ mod tests {
             reader_park.wait_parked().await;
 
             store
-                .remove(KEY, CallerProvenance::CrdtMerge)
+                .remove(
+                    &KeyWriteToken::for_test(store.name(), KEY),
+                    KEY,
+                    CallerProvenance::CrdtMerge,
+                )
                 .await
                 .expect("remove");
 
@@ -3145,7 +3209,15 @@ mod tests {
             let mut remove_park = write_behind.test_park_after_remove(MAP, KEY);
             let remover = {
                 let store = Arc::clone(&store);
-                tokio::spawn(async move { store.remove(KEY, CallerProvenance::CrdtMerge).await })
+                tokio::spawn(async move {
+                    store
+                        .remove(
+                            &KeyWriteToken::for_test(store.name(), KEY),
+                            KEY,
+                            CallerProvenance::CrdtMerge,
+                        )
+                        .await
+                })
             };
             remove_park.wait_parked().await;
 
