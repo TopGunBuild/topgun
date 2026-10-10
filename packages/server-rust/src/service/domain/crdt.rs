@@ -517,12 +517,19 @@ impl CrdtService {
     /// `sanitized_ts` — when `Some`, replaces client-provided timestamps in stored records.
     /// When `None` (a trusted origin), the client timestamp is used as-is.
     ///
-    /// # Caller obligation
+    /// # The writer token
     ///
-    /// The caller holds the per-key writer of `(op.map_name, op.key)` across
-    /// this call (TG-KEY-001). Nothing in here takes it: every branch below is
-    /// a read-modify-write or a staged write of that one key and relies on the
-    /// caller for its exclusion.
+    /// `writer` is the token of the per-key writer of `(op.map_name, op.key)`
+    /// (TG-KEY-001). Nothing in here takes the writer: every branch below is a
+    /// read-modify-write or a staged write of that one key and relies on the
+    /// caller for its exclusion. The branches hand the token on to the store,
+    /// which does not compile without one and refuses a token acquired for
+    /// another key (TG-KEY-002).
+    ///
+    /// Still the caller's alone: to have acquired the token before the stamp
+    /// is minted and before the first read the op depends on, and to hold it
+    /// until the fan-out that fixes the op's order is done. The borrow covers
+    /// this call, not that region.
     #[allow(clippy::too_many_lines)]
     async fn apply_single_op(
         &self,

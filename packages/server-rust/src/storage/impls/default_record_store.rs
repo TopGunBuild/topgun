@@ -19,6 +19,7 @@ use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObser
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
 use crate::storage::record_store::{
     CallerProvenance, ExpiryPolicy, ExpiryReason, MutateOutcome, RecordStore,
+    KEY_WRITER_MISMATCH_CONTEXT,
 };
 use crate::storage::wal::OrDelta;
 
@@ -90,6 +91,39 @@ impl DefaultRecordStore {
             observer,
             config,
         }
+    }
+
+    /// Refuses a writer token that was acquired for another `(map, key)` than
+    /// the one `mutator` was called for (TG-KEY-002). Every mutator calls this
+    /// before it reads, writes or notifies anything.
+    ///
+    /// A mismatch is a defect of the caller, never load and never client
+    /// input, and this store is the one place every write route passes, so it
+    /// is logged here, once, with both pairs. The error handed back carries
+    /// the pairs as its typed source and prints only the fixed sentence: that
+    /// text can reach a client frame, and a server-side identity has no place
+    /// in one.
+    ///
+    /// Always on. A debug-only check would leave release builds accepting the
+    /// wrong key's writer, which is the one build where it matters.
+    fn refuse_foreign_token(
+        &self,
+        mutator: &'static str,
+        writer: &KeyWriteToken<'_>,
+        key: &str,
+    ) -> anyhow::Result<()> {
+        let Err(mismatch) = writer.check(&self.name, key) else {
+            return Ok(());
+        };
+        tracing::error!(
+            mutator,
+            token_map = mismatch.token_map(),
+            token_key = mismatch.token_key(),
+            requested_map = mismatch.requested_map(),
+            requested_key = mismatch.requested_key(),
+            "record write refused: the caller presented the key writer token of another key"
+        );
+        Err(anyhow::Error::new(mismatch).context(KEY_WRITER_MISMATCH_CONTEXT))
     }
 
     /// Fires the observers for an in-place write, matching `put()`: `on_put`
@@ -261,22 +295,29 @@ impl RecordStore for DefaultRecordStore {
         self.engine.contains_key(key)
     }
 
-    /// Caller obligation: every caller holds the key's per-key writer across the
-    /// whole call (TG-KEY-001), the same writer every in-place write (see
+    /// The caller passes the writer token of exactly this `(map, key)`: a call
+    /// without one does not compile, and a token acquired for another key is
+    /// refused before anything is written (TG-KEY-002). It is the same writer
+    /// every in-place write (see
     /// [`update_in_place`](RecordStore::update_in_place)) and every whole-key
-    /// [`remove`](RecordStore::remove) of the key holds. The write to the
-    /// engine and the staging of the write-through are separate steps with no
-    /// lock of this store across both, so two puts of one key that are not
-    /// serialised by the writer can leave memory on one value and the durable
-    /// store on the other.
+    /// [`remove`](RecordStore::remove) of the key holds (TG-KEY-001).
+    ///
+    /// Still the caller's alone: to have taken the token before the first read
+    /// this write depends on, and to hold it until the write's last store
+    /// call. The borrow covers this call, not the caller's critical region.
+    /// The write to the engine and the staging of the write-through are
+    /// separate steps with no lock of this store across both, so two puts of
+    /// one key that are not serialised by the writer can leave memory on one
+    /// value and the durable store on the other.
     async fn put(
         &self,
-        _writer: &KeyWriteToken<'_>,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         value: RecordValue,
         expiry: ExpiryPolicy,
         provenance: CallerProvenance,
     ) -> anyhow::Result<Option<RecordValue>> {
+        self.refuse_foreign_token("put", writer, key)?;
         let now = now_millis();
 
         // Step 1: Check if key already exists
@@ -359,11 +400,17 @@ impl RecordStore for DefaultRecordStore {
     /// Mutates the key's record in place, materializing it from the data store
     /// first when it is durable but not resident (TG-OR-007).
     ///
-    /// Caller obligation: every caller holds the key's per-key writer across the
-    /// whole call — the load, the mutate and the staging of the write-through —
-    /// and every whole-key [`remove`](RecordStore::remove) of the key holds the
-    /// same writer. The vacancy generation guards against readers and eviction;
-    /// only the writer excludes a remove that stages its delete while this write
+    /// The caller passes the writer token of exactly this `(map, key)`: a call
+    /// without one does not compile, and a token acquired for another key is
+    /// refused before the load and before `mutate` runs (TG-KEY-002). The
+    /// borrow keeps the writer held across the whole call — the load, the
+    /// mutate and the staging of the write-through — and every whole-key
+    /// [`remove`](RecordStore::remove) of the key takes the same writer.
+    ///
+    /// Still the caller's alone: to have taken the token before the first read
+    /// this write depends on, and to hold it until the write's last store
+    /// call. The vacancy generation guards against readers and eviction; only
+    /// the writer excludes a remove that stages its delete while this write
     /// mutates a still-resident slot and re-stages it over that delete.
     ///
     /// Retries at most `MATERIALIZE_MAX_ATTEMPTS` times when a removal moves the
@@ -371,7 +418,7 @@ impl RecordStore for DefaultRecordStore {
     /// a transient failure (the client re-sends the op).
     async fn update_in_place(
         &self,
-        _writer: &KeyWriteToken<'_>,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         init: Option<RecordValue>,
         expiry: ExpiryPolicy,
@@ -380,6 +427,7 @@ impl RecordStore for DefaultRecordStore {
     ) -> anyhow::Result<bool> {
         use crate::storage::engine::UpdateInPlaceOutcome;
 
+        self.refuse_foreign_token("update_in_place", writer, key)?;
         let now = now_millis();
         // Cost estimate mirrors put(): value bytes + the key string's heap
         // contribution. For the OrMap arm this is now a cheap structural
@@ -552,16 +600,21 @@ impl RecordStore for DefaultRecordStore {
     /// copy, or is refused by the generation. If the durable delete fails, the
     /// engine is left untouched.
     ///
-    /// Caller obligation: the caller holds the key's per-key writer across the
-    /// call, the same writer every in-place write of the key holds (see
+    /// The caller passes the writer token of exactly this `(map, key)`: a call
+    /// without one does not compile, and a token acquired for another key is
+    /// refused before the durable delete is staged (TG-KEY-002). It is the
+    /// same writer every in-place write of the key holds (see
     /// [`update_in_place`](RecordStore::update_in_place)), so no in-place write
     /// can mutate the still-resident slot and re-stage it over the delete.
+    /// Still the caller's alone: to have taken the token before the first read
+    /// the removal depends on, and to hold it until its last store call.
     async fn remove(
         &self,
-        _writer: &KeyWriteToken<'_>,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         provenance: CallerProvenance,
     ) -> anyhow::Result<Option<RecordValue>> {
+        self.refuse_foreign_token("remove", writer, key)?;
         // Step 1: Stage the durable delete.
         let now = now_millis();
         let _ = provenance; // provenance available for future use
@@ -584,11 +637,12 @@ impl RecordStore for DefaultRecordStore {
 
     async fn put_backup(
         &self,
-        _writer: &KeyWriteToken<'_>,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         record: Record,
         provenance: CallerProvenance,
     ) -> anyhow::Result<()> {
+        self.refuse_foreign_token("put_backup", writer, key)?;
         // Step 1: Put into engine
         let old = self.engine.put(key, record.clone());
 
@@ -612,10 +666,11 @@ impl RecordStore for DefaultRecordStore {
 
     async fn remove_backup(
         &self,
-        _writer: &KeyWriteToken<'_>,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         provenance: CallerProvenance,
     ) -> anyhow::Result<()> {
+        self.refuse_foreign_token("remove_backup", writer, key)?;
         // Step 1: Remove from engine
         let old = self.engine.remove(key);
 
@@ -3321,6 +3376,515 @@ mod tests {
                 durable_tags(&ds).await,
                 Some(strings(&["a", "a2", "b", "c", "op"])),
                 "the flush must persist every op on the cell"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // TG-KEY-002: a writer token acquired for another key is refused by every
+    // mutator, and nothing is written.
+    // -----------------------------------------------------------------------
+
+    mod foreign_token {
+        use std::sync::Mutex;
+
+        use super::*;
+        use crate::service::operation::OperationError;
+        use crate::storage::key_writer::{
+            stripe_of, KeyWriterMismatch, KeyWriterRegistry, KEY_WRITER_STRIPES,
+        };
+        use crate::storage::map_data_store::{LeafSink, ScanBatch, ScanCursor};
+
+        const MAP: &str = "test-map";
+        const OTHER_MAP: &str = "another-map";
+        const REQ: &str = "k-requested";
+        const OTHER: &str = "k-foreign";
+        const MUTATORS: [&str; 5] = [
+            "put",
+            "update_in_place",
+            "remove",
+            "put_backup",
+            "remove_backup",
+        ];
+
+        /// The one sentence a refused call may show its caller, written out
+        /// and not taken from the store's constant: this is the text a client
+        /// frame carries, and the test is what pins it.
+        const SENTENCE: &str =
+            "record write refused: the key writer token was acquired for another key";
+
+        /// A data store that keeps nothing and counts every call made to it.
+        #[derive(Default)]
+        struct RecordingStore {
+            calls: AtomicUsize,
+        }
+
+        impl RecordingStore {
+            fn called(&self) {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        #[async_trait]
+        impl MapDataStore for RecordingStore {
+            async fn add(
+                &self,
+                _: &str,
+                _: &str,
+                _: &RecordValue,
+                _: i64,
+                _: i64,
+            ) -> anyhow::Result<()> {
+                self.called();
+                Ok(())
+            }
+
+            async fn add_backup(
+                &self,
+                _: &str,
+                _: &str,
+                _: &RecordValue,
+                _: i64,
+                _: i64,
+            ) -> anyhow::Result<()> {
+                self.called();
+                Ok(())
+            }
+
+            async fn remove(&self, _: &str, _: &str, _: i64) -> anyhow::Result<()> {
+                self.called();
+                Ok(())
+            }
+
+            async fn remove_backup(&self, _: &str, _: &str, _: i64) -> anyhow::Result<()> {
+                self.called();
+                Ok(())
+            }
+
+            async fn load(&self, _: &str, _: &str) -> anyhow::Result<Option<RecordValue>> {
+                self.called();
+                Ok(None)
+            }
+
+            async fn load_all(
+                &self,
+                _: &str,
+                _: &[String],
+            ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+                self.called();
+                Ok(Vec::new())
+            }
+
+            async fn enumerate_leaves(
+                &self,
+                _: &str,
+                _: bool,
+                _: &mut dyn LeafSink,
+            ) -> anyhow::Result<()> {
+                self.called();
+                Ok(())
+            }
+
+            async fn scan_values(&self, _: &str, _: bool, _: u64) -> anyhow::Result<ScanBatch> {
+                self.called();
+                anyhow::bail!("the recording store is never scanned")
+            }
+
+            async fn scan_values_batched(
+                &self,
+                _: &str,
+                _: bool,
+                _: ScanCursor,
+                _: u64,
+            ) -> anyhow::Result<ScanBatch> {
+                self.called();
+                anyhow::bail!("the recording store is never scanned")
+            }
+
+            async fn remove_all(&self, _: &str, _: &[String]) -> anyhow::Result<()> {
+                self.called();
+                Ok(())
+            }
+
+            fn is_loadable(&self, _: &str) -> bool {
+                self.called();
+                true
+            }
+
+            fn pending_operation_count(&self) -> u64 {
+                self.called();
+                0
+            }
+
+            async fn soft_flush(&self) -> anyhow::Result<u64> {
+                self.called();
+                Ok(0)
+            }
+
+            async fn hard_flush(&self) -> anyhow::Result<()> {
+                self.called();
+                Ok(())
+            }
+
+            async fn flush_key(
+                &self,
+                _: &str,
+                _: &str,
+                _: &RecordValue,
+                _: bool,
+            ) -> anyhow::Result<()> {
+                self.called();
+                Ok(())
+            }
+
+            fn reset(&self) {
+                self.called();
+            }
+        }
+
+        /// Renders an event's fields as ` name=value ` pairs.
+        struct FieldLine(String);
+
+        impl tracing::field::Visit for FieldLine {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                use std::fmt::Write as _;
+                let _ = write!(self.0, "{}={value} ", field.name());
+            }
+
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write as _;
+                let _ = write!(self.0, "{}={value:?} ", field.name());
+            }
+        }
+
+        /// Keeps one rendered line per ERROR-level event and drops every other
+        /// level.
+        #[derive(Clone, Default)]
+        struct ErrorEvents(Arc<Mutex<Vec<String>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorEvents {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() != tracing::Level::ERROR {
+                    return;
+                }
+                let mut line = FieldLine(" ".to_string());
+                event.record(&mut line);
+                self.0.lock().unwrap().push(line.0);
+            }
+        }
+
+        /// Captures the ERROR events of the calling thread until the guard
+        /// drops. The capture is thread-local, so the call under observation
+        /// must run on the test's own thread: a current-thread runtime.
+        fn capture_errors() -> (tracing::subscriber::DefaultGuard, ErrorEvents) {
+            use tracing_subscriber::layer::SubscriberExt;
+            let events = ErrorEvents::default();
+            let subscriber = tracing_subscriber::registry().with(events.clone());
+            (tracing::subscriber::set_default(subscriber), events)
+        }
+
+        struct Rig {
+            store: DefaultRecordStore,
+            data: Arc<RecordingStore>,
+            observer: Arc<CountingObserver>,
+        }
+
+        impl Rig {
+            fn new() -> Self {
+                let data = Arc::new(RecordingStore::default());
+                let observer = Arc::new(CountingObserver::new());
+                let store = DefaultRecordStore::new(
+                    MAP.to_string(),
+                    0,
+                    Box::new(HashMapStorage::new()),
+                    Arc::clone(&data) as Arc<dyn MapDataStore>,
+                    Arc::new(CompositeMutationObserver::new(vec![
+                        Arc::clone(&observer) as Arc<dyn MutationObserver>
+                    ])),
+                    StorageConfig::default(),
+                );
+                Self {
+                    store,
+                    data,
+                    observer,
+                }
+            }
+
+            /// Puts `key` back to a known value with its own token.
+            async fn seed(&self, key: &str) {
+                self.store
+                    .put(
+                        &KeyWriteToken::for_test(MAP, key),
+                        key,
+                        make_value("seeded"),
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::Client,
+                    )
+                    .await
+                    .expect("seed");
+            }
+
+            fn engine_value(&self, key: &str) -> Option<RecordValue> {
+                self.store.storage().get(key).map(|record| record.value)
+            }
+
+            fn data_calls(&self) -> usize {
+                self.data.calls.load(Ordering::Relaxed)
+            }
+
+            fn notifications(&self) -> usize {
+                let o = &self.observer;
+                [
+                    &o.put_count,
+                    &o.update_count,
+                    &o.remove_count,
+                    &o.evict_count,
+                    &o.load_count,
+                    &o.clear_count,
+                    &o.reset_count,
+                    &o.destroy_count,
+                ]
+                .iter()
+                .map(|count| count.load(Ordering::Relaxed))
+                .sum()
+            }
+        }
+
+        /// One call of `mutator` on `key`, with a value that differs from the
+        /// seeded one. `closure_runs` counts the in-place closure.
+        async fn call(
+            mutator: &str,
+            store: &DefaultRecordStore,
+            writer: &KeyWriteToken<'_>,
+            key: &str,
+            closure_runs: &AtomicUsize,
+        ) -> anyhow::Result<()> {
+            match mutator {
+                "put" => store
+                    .put(
+                        writer,
+                        key,
+                        make_value("written"),
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::Client,
+                    )
+                    .await
+                    .map(|_| ()),
+                "update_in_place" => {
+                    let mut mutate = |value: &mut RecordValue| {
+                        closure_runs.fetch_add(1, Ordering::Relaxed);
+                        *value = make_value("written");
+                        MutateOutcome {
+                            changed: true,
+                            witness: None,
+                        }
+                    };
+                    store
+                        .update_in_place(
+                            writer,
+                            key,
+                            None,
+                            ExpiryPolicy::NONE,
+                            CallerProvenance::Client,
+                            &mut mutate,
+                        )
+                        .await
+                        .map(|_| ())
+                }
+                "remove" => store
+                    .remove(writer, key, CallerProvenance::Client)
+                    .await
+                    .map(|_| ()),
+                "put_backup" => {
+                    let record = Record {
+                        value: make_value("written"),
+                        metadata: RecordMetadata::new(now_millis(), 1),
+                    };
+                    store
+                        .put_backup(writer, key, record, CallerProvenance::Client)
+                        .await
+                }
+                "remove_backup" => {
+                    store
+                        .remove_backup(writer, key, CallerProvenance::Client)
+                        .await
+                }
+                other => unreachable!("no mutator named {other}"),
+            }
+        }
+
+        /// A key other than `reference` on `reference`'s stripe of `map`. The
+        /// search is bounded and panics on exhaustion; it depends on no
+        /// particular hash output.
+        fn key_on_the_stripe_of(map: &str, reference: &str) -> String {
+            let stripe = stripe_of(map, reference);
+            (0..64 * KEY_WRITER_STRIPES)
+                .map(|i| format!("k{i}"))
+                .find(|candidate| candidate != reference && stripe_of(map, candidate) == stripe)
+                .expect("some key shares the stripe")
+        }
+
+        /// (every result is the typed mismatch naming the case's two pairs;
+        /// the requested key's engine value is unchanged; the token key's
+        /// engine value is unchanged; data-store calls; observer
+        /// notifications; closure runs; refused calls that produced exactly
+        /// one ERROR event, carrying the five fields; the text a caller sees
+        /// is the fixed sentence and names neither key)
+        type Row = (bool, bool, bool, usize, usize, usize, usize, bool);
+
+        /// Every mutator refuses a token acquired for another key, for another
+        /// map and for another key on the requested key's own stripe — whose
+        /// lock that token does hold — before it writes, notifies or runs the
+        /// caller's closure; it logs the refusal once and tells its caller
+        /// only the fixed sentence.
+        #[tokio::test]
+        async fn a_token_for_another_key_is_refused_and_nothing_is_written() {
+            let rig = Rig::new();
+            let registry = KeyWriterRegistry::new();
+            let same = key_on_the_stripe_of(MAP, REQ);
+            assert_eq!(
+                stripe_of(MAP, &same),
+                stripe_of(MAP, REQ),
+                "precondition: the third foreign token is of the requested key's stripe"
+            );
+
+            let mut rows: Vec<(&str, Row)> = Vec::new();
+            for mutator in MUTATORS {
+                for key in [REQ, OTHER, same.as_str()] {
+                    rig.seed(key).await;
+                }
+                let closure_runs = AtomicUsize::new(0);
+                let (mut typed, mut requested_kept, mut token_key_kept, mut text) =
+                    (true, true, true, true);
+                let (mut data_calls, mut notifications, mut logged_once) = (0, 0, 0);
+                for case in 0..3 {
+                    // At most one token of the registry is alive at a time.
+                    let (token_map, token_key, token) = match case {
+                        0 => (MAP, OTHER, KeyWriteToken::for_test(MAP, OTHER)),
+                        1 => (OTHER_MAP, REQ, KeyWriteToken::for_test(OTHER_MAP, REQ)),
+                        _ => (MAP, same.as_str(), registry.acquire(MAP, &same).await),
+                    };
+                    let before = (
+                        rig.engine_value(REQ),
+                        rig.engine_value(token_key),
+                        rig.data_calls(),
+                        rig.notifications(),
+                    );
+                    let (guard, events) = capture_errors();
+                    let result = call(mutator, &rig.store, &token, REQ, &closure_runs).await;
+                    drop(guard);
+
+                    requested_kept &= rig.engine_value(REQ) == before.0;
+                    token_key_kept &= rig.engine_value(token_key) == before.1;
+                    data_calls += rig.data_calls() - before.2;
+                    notifications += rig.notifications() - before.3;
+                    let events = events.0.lock().unwrap().clone();
+                    let carries_the_five = |line: &String| {
+                        [
+                            format!(" mutator={mutator} "),
+                            format!(" token_map={token_map} "),
+                            format!(" token_key={token_key} "),
+                            format!(" requested_map={MAP} "),
+                            format!(" requested_key={REQ} "),
+                        ]
+                        .iter()
+                        .all(|field| line.contains(field))
+                    };
+                    if events.len() == 1 && carries_the_five(&events[0]) {
+                        logged_once += 1;
+                    }
+                    match result {
+                        Ok(()) => {
+                            typed = false;
+                            text = false;
+                        }
+                        Err(err) => {
+                            typed &= err.downcast_ref::<KeyWriterMismatch>().is_some_and(|m| {
+                                (
+                                    m.token_map(),
+                                    m.token_key(),
+                                    m.requested_map(),
+                                    m.requested_key(),
+                                ) == (token_map, token_key, MAP, REQ)
+                            });
+                            let shown = format!("{err}");
+                            text &= shown == SENTENCE
+                                && !shown.contains(token_key)
+                                && !shown.contains(REQ)
+                                && OperationError::Internal(err).to_string()
+                                    == format!("internal error: {SENTENCE}");
+                        }
+                    }
+                }
+                rows.push((
+                    mutator,
+                    (
+                        typed,
+                        requested_kept,
+                        token_key_kept,
+                        data_calls,
+                        notifications,
+                        closure_runs.load(Ordering::Relaxed),
+                        logged_once,
+                        text,
+                    ),
+                ));
+            }
+            let refused: Row = (true, true, true, 0, 0, 0, 3, true);
+            assert_eq!(
+                rows,
+                MUTATORS.map(|mutator| (mutator, refused)).to_vec(),
+                "each mutator, over a token of another key, of another map and of another \
+                 key on the same stripe: (typed mismatch, requested key kept, token key kept, \
+                 data-store calls, observer notifications, closure runs, logged exactly once \
+                 with the five fields, fixed sentence naming no key)"
+            );
+
+            // Positive control: the same call with the token of exactly this
+            // key is accepted and does write, so the zeroes above are not the
+            // zeroes of a call that could never have written.
+            let mut controls = Vec::new();
+            for mutator in MUTATORS {
+                rig.seed(REQ).await;
+                let closure_runs = AtomicUsize::new(0);
+                let before = (
+                    rig.engine_value(REQ),
+                    rig.data_calls() + rig.notifications(),
+                );
+                let (guard, events) = capture_errors();
+                let result = call(
+                    mutator,
+                    &rig.store,
+                    &KeyWriteToken::for_test(MAP, REQ),
+                    REQ,
+                    &closure_runs,
+                )
+                .await;
+                drop(guard);
+                controls.push((
+                    mutator,
+                    result.is_ok(),
+                    rig.engine_value(REQ) != before.0,
+                    rig.data_calls() + rig.notifications() > before.1,
+                    closure_runs.load(Ordering::Relaxed),
+                    events.0.lock().unwrap().len(),
+                ));
+            }
+            assert_eq!(
+                controls,
+                vec![
+                    ("put", true, true, true, 0, 0),
+                    ("update_in_place", true, true, true, 1, 0),
+                    ("remove", true, true, true, 0, 0),
+                    ("put_backup", true, true, true, 0, 0),
+                    ("remove_backup", true, true, true, 0, 0),
+                ],
+                "with its own key's token each mutator: (is accepted, changes the engine \
+                 value, reaches the data store or an observer, closure runs, ERROR events)"
             );
         }
     }

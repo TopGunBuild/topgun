@@ -96,6 +96,17 @@ pub struct MutateOutcome {
     pub witness: Option<OrDelta>,
 }
 
+/// What a refused mutator call says to its caller when the writer token it
+/// was handed was acquired for another `(map, key)` (TG-KEY-002).
+///
+/// This is the outermost context of the returned error, and so the only part
+/// of it that an operation error prints into a client frame. It names no map
+/// and no key on purpose: the two pairs are a server-side identity. They stay
+/// on the typed error beneath this context, where the store's caller can
+/// still find them.
+pub(crate) const KEY_WRITER_MISMATCH_CONTEXT: &str =
+    "record write refused: the key writer token was acquired for another key";
+
 /// Per-map-per-partition record store.
 ///
 /// Primary interface that operation handlers interact with.
@@ -178,6 +189,13 @@ pub trait RecordStore: Send + Sync {
         provenance: CallerProvenance,
         mutate: &mut (dyn for<'a> FnMut(&'a mut RecordValue) -> MutateOutcome + Send),
     ) -> anyhow::Result<bool> {
+        // Refused before the read, and so before `mutate` can run on a copy
+        // and leave its side effects on whatever the caller's closure
+        // captured. Checked here and not left to `put`, so the refusal does
+        // not depend on what an implementor's `put` does with the token.
+        writer.check(self.name(), key).map_err(|mismatch| {
+            anyhow::Error::new(mismatch).context(KEY_WRITER_MISMATCH_CONTEXT)
+        })?;
         let existing = self.get(key, false).await?;
         let mut value = match existing {
             Some(record) => record.value,
