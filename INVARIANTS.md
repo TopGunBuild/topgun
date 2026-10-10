@@ -1489,7 +1489,7 @@ case outside the precondition.
     policies). They do not go through the record store and this row says nothing about them.
   - **How long a writer waits.** `acquire` has no bound of its own; what a holder that never
     returns costs is stated in the module doc of `key_writer.rs`.
-- **Maintaining code:** `service/domain/key_writer.rs` (`KeyWriterRegistry`, `acquire`);
+- **Maintaining code:** `storage/key_writer.rs` (`KeyWriterRegistry`, `acquire`), re-exported at the old path;
   `service/domain/crdt.rs` — `apply_op_under_writer`, the one caller of `apply_single_op`, and the
   prune pass; `service/domain/sync.rs` — `handle_ormap_push_diff`;
   `service/domain/embedding/hook.rs` — `write_back_one_embedding`; `bin/topgun_server.rs`

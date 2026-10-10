@@ -32,6 +32,7 @@ pub mod eviction_config;
 pub mod eviction_orchestrator;
 pub mod factory;
 pub mod impls;
+pub mod key_writer;
 pub mod map_data_store;
 pub mod merkle_sync;
 pub mod mutation_observer;
