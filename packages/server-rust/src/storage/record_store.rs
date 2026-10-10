@@ -144,6 +144,49 @@ pub trait RecordStore: Send + Sync {
     /// Put a value, returning the old value if it existed.
     ///
     /// Handles write-through to `MapDataStore` based on provenance.
+    ///
+    /// `writer` is the token of the per-key writer of this store's map and
+    /// `key`. Like every method here that writes a record value, `put` cannot
+    /// be called without one (TG-KEY-002):
+    ///
+    /// ```no_run
+    /// use topgun_server::storage::key_writer::KeyWriterRegistry;
+    /// use topgun_server::storage::record::RecordValue;
+    /// use topgun_server::storage::record_store::{CallerProvenance, ExpiryPolicy, RecordStore};
+    ///
+    /// async fn write(
+    ///     store: &dyn RecordStore,
+    ///     registry: &KeyWriterRegistry,
+    ///     value: RecordValue,
+    /// ) -> anyhow::Result<()> {
+    ///     let writer = registry.acquire(store.name(), "k").await;
+    ///     store
+    ///         .put(&writer, "k", value, ExpiryPolicy::NONE, CallerProvenance::Client)
+    ///         .await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// The same call without the token is rejected by the compiler. The block
+    /// below differs from the one above in that argument and nothing else:
+    ///
+    /// ```compile_fail
+    /// use topgun_server::storage::key_writer::KeyWriterRegistry;
+    /// use topgun_server::storage::record::RecordValue;
+    /// use topgun_server::storage::record_store::{CallerProvenance, ExpiryPolicy, RecordStore};
+    ///
+    /// async fn write(
+    ///     store: &dyn RecordStore,
+    ///     registry: &KeyWriterRegistry,
+    ///     value: RecordValue,
+    /// ) -> anyhow::Result<()> {
+    ///     let writer = registry.acquire(store.name(), "k").await;
+    ///     store
+    ///         .put("k", value, ExpiryPolicy::NONE, CallerProvenance::Client)
+    ///         .await?;
+    ///     Ok(())
+    /// }
+    /// ```
     async fn put(
         &self,
         writer: &KeyWriteToken<'_>,
