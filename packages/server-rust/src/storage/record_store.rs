@@ -369,3 +369,132 @@ pub trait RecordStore: Send + Sync {
     /// Access the underlying `MapDataStore` (Layer 3).
     fn map_data_store(&self) -> &dyn MapDataStore;
 }
+
+#[cfg(test)]
+mod tests {
+    /// Every method of [`RecordStore`](super::RecordStore), `fn` and
+    /// `async fn`, is on exactly one of the four lists below, and exactly the
+    /// methods of the first list take the writer token. A method added to the
+    /// trait fails this test until someone decides which list it belongs to —
+    /// which is the moment to ask whether it writes a record value and so
+    /// needs the token (TG-KEY-002).
+    ///
+    /// What this does NOT check: it checks classification, not behaviour. A
+    /// method put on the wrong list passes. And it reads this file's source
+    /// text, so it follows the trait's formatting: a method is a line of the
+    /// trait body indented by four spaces that starts with `fn` or
+    /// `async fn`.
+    #[test]
+    fn every_method_of_the_record_store_trait_is_classified() {
+        const SOURCE: &str = include_str!("record_store.rs");
+
+        // Writes a record value: takes the token.
+        const TAKES_THE_TOKEN: [&str; 5] = [
+            "put",
+            "update_in_place",
+            "remove",
+            "put_backup",
+            "remove_backup",
+        ];
+        // Reads only: changes no resident, engine or durable state.
+        const READS_ONLY: [&str; 14] = [
+            "name",
+            "partition_id",
+            "exists_in_memory",
+            "or_witness_wanted",
+            "fetch_keys",
+            "fetch_entries",
+            "for_each_boxed",
+            "size",
+            "is_empty",
+            "owned_entry_cost",
+            "has_expired",
+            "is_expirable",
+            "should_evict",
+            "dirty_count",
+        ];
+        // Changes resident or engine state, or flushes, without writing a new
+        // record value: `get` load-inserts a resident copy and stamps the
+        // access, `get_all` is a loop over `get`, `soft_flush` flushes pending
+        // writes, the rest evict, clear or tear down.
+        const CHANGES_STATE_WITHOUT_A_NEW_VALUE: [&str; 11] = [
+            "evict",
+            "evict_all",
+            "evict_expired",
+            "evict_lru",
+            "clear",
+            "reset",
+            "destroy",
+            "init",
+            "get",
+            "get_all",
+            "soft_flush",
+        ];
+        // Hands out the raw engine or data store, which take no token.
+        const HANDS_OUT_THE_RAW_LAYERS: [&str; 2] = ["storage", "map_data_store"];
+
+        let from = SOURCE
+            .find("pub trait RecordStore")
+            .expect("the trait is in this file");
+        let body = &SOURCE[from..];
+        let body = &body[..body.find("\n}\n").expect("the trait's closing brace")];
+
+        // (name, signature text up to the `;` or the `{` that ends it)
+        let mut methods: Vec<(&str, String)> = Vec::new();
+        let mut lines = body.lines();
+        while let Some(line) = lines.next() {
+            let Some(rest) = line
+                .strip_prefix("    async fn ")
+                .or_else(|| line.strip_prefix("    fn "))
+            else {
+                continue;
+            };
+            let name = &rest[..rest
+                .find(['(', '<'])
+                .expect("a method name ends at its parameter list")];
+            let mut signature = line.to_string();
+            while !(signature.ends_with(';') || signature.ends_with('{')) {
+                signature.push_str(lines.next().expect("a signature ends inside the trait"));
+            }
+            methods.push((name, signature));
+        }
+
+        let lists = [
+            &TAKES_THE_TOKEN[..],
+            &READS_ONLY[..],
+            &CHANGES_STATE_WITHOUT_A_NEW_VALUE[..],
+            &HANDS_OUT_THE_RAW_LAYERS[..],
+        ];
+        let listed = |name: &str| lists.iter().filter(|list| list.contains(&name)).count();
+        let not_on_exactly_one_list: Vec<&str> = methods
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| listed(name) != 1)
+            .collect();
+        let listed_but_not_in_the_trait: Vec<&str> = lists
+            .iter()
+            .flat_map(|list| list.iter().copied())
+            .filter(|name| !methods.iter().any(|(method, _)| method == name))
+            .collect();
+        let token_disagrees_with_the_list: Vec<&str> = methods
+            .iter()
+            .filter(|(name, signature)| {
+                signature.contains("KeyWriteToken") != TAKES_THE_TOKEN.contains(name)
+            })
+            .map(|(name, _)| *name)
+            .collect();
+
+        assert_eq!(
+            (
+                methods.len(),
+                not_on_exactly_one_list,
+                listed_but_not_in_the_trait,
+                token_disagrees_with_the_list,
+            ),
+            (32, Vec::new(), Vec::new(), Vec::new()),
+            "(methods declared by the trait, methods not on exactly one list, listed names \
+             the trait does not declare, methods whose signature names the token against \
+             their list)"
+        );
+    }
+}
