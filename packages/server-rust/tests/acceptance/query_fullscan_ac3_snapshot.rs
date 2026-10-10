@@ -29,6 +29,7 @@ use topgun_server::service::operation::{
 };
 use topgun_server::storage::datastores::RedbDataStore;
 use topgun_server::storage::impls::StorageConfig;
+use topgun_server::storage::key_writer::KeyWriterRegistry;
 use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::record::RecordValue;
 use topgun_server::storage::RecordStoreFactory;
@@ -217,13 +218,21 @@ async fn snapshot_merges_resident_over_datastore_by_hlc_direction() {
         ("datastore-wins", "resident-low", make_ts(1)), // older → loses
         ("tie", "resident-tie", make_ts(5)),            // equal → wins
     ];
+    let key_writer = KeyWriterRegistry::new();
     for (key, val, ts) in resident {
         let value = RecordValue::Lww {
             value: Value::String(val.to_string()),
             timestamp: ts,
         };
+        let writer = key_writer.acquire(map_name, key).await;
         store
-            .put(key, value, ExpiryPolicy::NONE, CallerProvenance::Load)
+            .put(
+                &writer,
+                key,
+                value,
+                ExpiryPolicy::NONE,
+                CallerProvenance::Load,
+            )
             .await
             .expect("resident write");
     }

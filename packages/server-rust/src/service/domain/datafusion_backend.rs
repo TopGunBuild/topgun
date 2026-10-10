@@ -139,6 +139,7 @@ impl SqlQueryBackend for DataFusionBackend {
 #[allow(clippy::redundant_closure_for_method_calls)]
 mod tests {
     use super::*;
+    use crate::storage::key_writer::KeyWriteToken;
     use arrow::array::{Array, Int64Array, StringArray};
     use std::collections::BTreeMap;
     use topgun_core::hlc::Timestamp;
@@ -249,6 +250,7 @@ mod tests {
             let store = factory.get_or_create("users", 0);
             store
                 .put(
+                    &KeyWriteToken::for_test(store.name(), key),
                     key,
                     RecordValue::Lww {
                         value: make_user(name, age),
@@ -467,6 +469,7 @@ mod tests {
         let store = factory.get_or_create("users", 0);
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), "u2"),
                 "u2",
                 RecordValue::Lww {
                     value: make_user("Bob", 25),

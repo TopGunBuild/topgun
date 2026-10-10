@@ -2522,6 +2522,7 @@ async fn an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_rea
 use crate::service::domain::crdt::apply_or_delta;
 use crate::storage::engines::HashMapStorage;
 use crate::storage::impls::{DefaultRecordStore, StorageConfig};
+use crate::storage::key_writer::KeyWriteToken;
 use crate::storage::mutation_observer::CompositeMutationObserver;
 use crate::storage::record::{OrMapEntry, Record, RecordMetadata};
 use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, MutateOutcome, RecordStore};
@@ -2649,6 +2650,7 @@ async fn apply_or(store: &DefaultRecordStore, key: &str, op: OrOp) -> anyhow::Re
     };
     store
         .update_in_place(
+            &KeyWriteToken::for_test(store.name(), key),
             key,
             Some(or_value(&[], &[])),
             ExpiryPolicy::NONE,

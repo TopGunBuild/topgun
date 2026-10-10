@@ -58,6 +58,7 @@ use topgun_server::storage::datastores::{
 };
 use topgun_server::storage::engines::HashMapStorage;
 use topgun_server::storage::impls::{DefaultRecordStore, StorageConfig};
+use topgun_server::storage::key_writer::{KeyWriteToken, KeyWriterRegistry};
 use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::merkle_sync::{MerkleMutationObserver, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
@@ -169,8 +170,13 @@ fn or_slot(n: usize) -> RecordValue {
 
 /// Everything one reading needs: the record store over write-behind over redb,
 /// with the WAL armed. The directories live as long as the fixture.
+///
+/// The key writer registry is built here, outside every measured window, and
+/// each token is acquired before the window of the op it is for: a stripe's
+/// first acquire can allocate, and that is not the write's cost.
 struct Fixture {
     store: DefaultRecordStore,
+    key_writer: KeyWriterRegistry,
     inner: Arc<RedbDataStore>,
     _write_behind: Arc<WriteBehindDataStore>,
     _dir: tempfile::TempDir,
@@ -213,6 +219,7 @@ fn fixture() -> Fixture {
     );
     Fixture {
         store,
+        key_writer: KeyWriterRegistry::new(),
         inner,
         _write_behind: write_behind,
         _dir: dir,
@@ -234,7 +241,12 @@ async fn seed_resident(fx: &Fixture, key: &str, n: usize) {
 /// path shapes it: the add fold (drop an equal tag, then append unless the tag
 /// is tombstoned) and, when the store demands one, the applied entry as the
 /// witness.
-async fn or_add(store: &DefaultRecordStore, key: &str, tag: &str) -> bool {
+async fn or_add(
+    writer: &KeyWriteToken<'_>,
+    store: &DefaultRecordStore,
+    key: &str,
+    tag: &str,
+) -> bool {
     let witness_wanted = store.or_witness_wanted();
     let mut new_entry = Some(entry(tag.to_string()));
     let mut merge_add = move |value: &mut RecordValue| {
@@ -262,6 +274,7 @@ async fn or_add(store: &DefaultRecordStore, key: &str, tag: &str) -> bool {
     };
     store
         .update_in_place(
+            writer,
             key,
             Some(RecordValue::OrMap {
                 records: Vec::new(),
@@ -312,7 +325,15 @@ async fn resident_readings() -> Vec<(usize, Reading, Reading)> {
     // here and in no measured op.
     seed_resident(&fx, "kwarm", SIZES[0]).await;
     for i in 0..3 {
-        assert!(or_add(&fx.store, "kwarm", &format!("warm-{i}")).await);
+        assert!(
+            or_add(
+                &fx.key_writer.acquire(MAP, "kwarm").await,
+                &fx.store,
+                "kwarm",
+                &format!("warm-{i}")
+            )
+            .await
+        );
     }
     let mut out = Vec::new();
     for n in SIZES {
@@ -320,12 +341,22 @@ async fn resident_readings() -> Vec<(usize, Reading, Reading)> {
         seed_resident(&fx, &key, n).await;
         // Growth of the slot's own vector and the key's first queue / staging
         // entry happen here, not in a measured op.
-        assert!(or_add(&fx.store, &key, "warm").await);
+        assert!(
+            or_add(
+                &fx.key_writer.acquire(MAP, &key).await,
+                &fx.store,
+                &key,
+                "warm"
+            )
+            .await
+        );
         let c = median((0..REPS).map(|_| engine_clone(&fx.store, &key)).collect());
         let mut ops = Vec::new();
         for i in 0..REPS {
             settle().await;
-            let (changed, r) = measure(or_add(&fx.store, &key, &format!("op-{i}"))).await;
+            let writer = fx.key_writer.acquire(MAP, &key).await;
+            let (changed, r) = measure(or_add(&writer, &fx.store, &key, &format!("op-{i}"))).await;
+            drop(writer);
             assert!(changed, "the add is applied");
             ops.push(r);
         }
@@ -340,15 +371,39 @@ async fn materialize_readings() -> Vec<(usize, Reading, Reading)> {
     let fx = fixture();
     seed_resident(&fx, "kwarm", SIZES[0]).await;
     for i in 0..3 {
-        assert!(or_add(&fx.store, "kwarm", &format!("warm-{i}")).await);
+        assert!(
+            or_add(
+                &fx.key_writer.acquire(MAP, "kwarm").await,
+                &fx.store,
+                "kwarm",
+                &format!("warm-{i}")
+            )
+            .await
+        );
         assert!(fx.store.evict_lru(u32::MAX, false) > 0);
-        assert!(or_add(&fx.store, "kwarm", &format!("warm-m{i}")).await);
+        assert!(
+            or_add(
+                &fx.key_writer.acquire(MAP, "kwarm").await,
+                &fx.store,
+                "kwarm",
+                &format!("warm-m{i}")
+            )
+            .await
+        );
     }
     let mut out = Vec::new();
     for n in SIZES {
         let key = format!("k{n}");
         seed_resident(&fx, &key, n).await;
-        assert!(or_add(&fx.store, &key, "warm").await);
+        assert!(
+            or_add(
+                &fx.key_writer.acquire(MAP, &key).await,
+                &fx.store,
+                &key,
+                "warm"
+            )
+            .await
+        );
         let c = median((0..REPS).map(|_| engine_clone(&fx.store, &key)).collect());
         let mut ops = Vec::new();
         for i in 0..REPS {
@@ -360,7 +415,9 @@ async fn materialize_readings() -> Vec<(usize, Reading, Reading)> {
             );
             assert!(!fx.store.exists_in_memory(&key), "the key is not resident");
             settle().await;
-            let (changed, r) = measure(or_add(&fx.store, &key, &format!("op-{i}"))).await;
+            let writer = fx.key_writer.acquire(MAP, &key).await;
+            let (changed, r) = measure(or_add(&writer, &fx.store, &key, &format!("op-{i}"))).await;
+            drop(writer);
             assert!(changed, "the add is applied");
             assert!(
                 fx.store.exists_in_memory(&key),
@@ -382,18 +439,29 @@ fn lww(i: u64) -> RecordValue {
 
 /// (LWW update of a resident key, LWW insert of a new key).
 async fn lww_readings() -> (Reading, Reading) {
+    // The token borrows the key it was acquired for, so the measured future
+    // borrows both and owns neither.
+    async fn put(
+        writer: &KeyWriteToken<'_>,
+        store: &DefaultRecordStore,
+        key: &str,
+        i: u64,
+    ) -> Option<RecordValue> {
+        store
+            .put(
+                writer,
+                key,
+                lww(i),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
+            .await
+            .expect("put")
+    }
     let fx = fixture();
-    let put = |key: String, i: u64| {
-        let store = &fx.store;
-        async move {
-            store
-                .put(&key, lww(i), ExpiryPolicy::NONE, CallerProvenance::Client)
-                .await
-                .expect("put")
-        }
-    };
     for i in 0..8 {
-        put("lww-resident".to_string(), i).await;
+        let writer = fx.key_writer.acquire(MAP, "lww-resident").await;
+        put(&writer, &fx.store, "lww-resident", i).await;
     }
     // The write-behind store seeds each WAL partition on its first write, and
     // that seed reads the partition's un-applied frames; a new key almost always
@@ -401,12 +469,16 @@ async fn lww_readings() -> (Reading, Reading) {
     // reading would carry a seed whose cost grows with the WAL. Enough warm keys
     // to touch every partition keep the seed out of the measured inserts.
     for i in 0..WARM_KEYS {
-        put(format!("lww-warm-{i}"), i).await;
+        let key = format!("lww-warm-{i}");
+        let writer = fx.key_writer.acquire(MAP, &key).await;
+        put(&writer, &fx.store, &key, i).await;
     }
     let mut updates = Vec::new();
     for i in 0..LWW_REPS as u64 {
         settle().await;
-        let (_, r) = measure(put("lww-resident".to_string(), 100 + i)).await;
+        let writer = fx.key_writer.acquire(MAP, "lww-resident").await;
+        let (_, r) = measure(put(&writer, &fx.store, "lww-resident", 100 + i)).await;
+        drop(writer);
         updates.push(r);
     }
     let mut inserts = Vec::new();
@@ -414,7 +486,9 @@ async fn lww_readings() -> (Reading, Reading) {
         // The key is built outside the window: its `String` is the caller's.
         let key = format!("lww-new-{i:04}");
         settle().await;
-        let (_, r) = measure(put(key, 100 + i)).await;
+        let writer = fx.key_writer.acquire(MAP, &key).await;
+        let (_, r) = measure(put(&writer, &fx.store, &key, 100 + i)).await;
+        drop(writer);
         inserts.push(r);
     }
     if std::env::var("OR_WRITE_ALLOC_DUMP").is_ok() {

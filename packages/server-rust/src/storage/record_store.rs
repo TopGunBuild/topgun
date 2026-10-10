@@ -11,6 +11,7 @@
 use async_trait::async_trait;
 
 use super::engine::{FetchResult, IterationCursor, StorageEngine};
+use super::key_writer::KeyWriteToken;
 use super::map_data_store::MapDataStore;
 use super::record::{Record, RecordValue};
 use super::wal::OrDelta;
@@ -95,6 +96,17 @@ pub struct MutateOutcome {
     pub witness: Option<OrDelta>,
 }
 
+/// What a refused mutator call says to its caller when the writer token it
+/// was handed was acquired for another `(map, key)` (TG-KEY-002).
+///
+/// This is the outermost context of the returned error, and so the only part
+/// of it that an operation error prints into a client frame. It names no map
+/// and no key on purpose: the two pairs are a server-side identity. They stay
+/// on the typed error beneath this context, where the store's caller can
+/// still find them.
+pub(crate) const KEY_WRITER_MISMATCH_CONTEXT: &str =
+    "record write refused: the key writer token was acquired for another key";
+
 /// Per-map-per-partition record store.
 ///
 /// Primary interface that operation handlers interact with.
@@ -132,8 +144,52 @@ pub trait RecordStore: Send + Sync {
     /// Put a value, returning the old value if it existed.
     ///
     /// Handles write-through to `MapDataStore` based on provenance.
+    ///
+    /// `writer` is the token of the per-key writer of this store's map and
+    /// `key`. Like every method here that writes a record value, `put` cannot
+    /// be called without one (TG-KEY-002):
+    ///
+    /// ```no_run
+    /// use topgun_server::storage::key_writer::KeyWriterRegistry;
+    /// use topgun_server::storage::record::RecordValue;
+    /// use topgun_server::storage::record_store::{CallerProvenance, ExpiryPolicy, RecordStore};
+    ///
+    /// async fn write(
+    ///     store: &dyn RecordStore,
+    ///     registry: &KeyWriterRegistry,
+    ///     value: RecordValue,
+    /// ) -> anyhow::Result<()> {
+    ///     let writer = registry.acquire(store.name(), "k").await;
+    ///     store
+    ///         .put(&writer, "k", value, ExpiryPolicy::NONE, CallerProvenance::Client)
+    ///         .await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// The same call without the token is rejected by the compiler. The block
+    /// below differs from the one above in that argument and nothing else:
+    ///
+    /// ```compile_fail
+    /// use topgun_server::storage::key_writer::KeyWriterRegistry;
+    /// use topgun_server::storage::record::RecordValue;
+    /// use topgun_server::storage::record_store::{CallerProvenance, ExpiryPolicy, RecordStore};
+    ///
+    /// async fn write(
+    ///     store: &dyn RecordStore,
+    ///     registry: &KeyWriterRegistry,
+    ///     value: RecordValue,
+    /// ) -> anyhow::Result<()> {
+    ///     let writer = registry.acquire(store.name(), "k").await;
+    ///     store
+    ///         .put("k", value, ExpiryPolicy::NONE, CallerProvenance::Client)
+    ///         .await?;
+    ///     Ok(())
+    /// }
+    /// ```
     async fn put(
         &self,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         value: RecordValue,
         expiry: ExpiryPolicy,
@@ -169,12 +225,20 @@ pub trait RecordStore: Send + Sync {
     /// with the true in-place seam.
     async fn update_in_place(
         &self,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         init: Option<RecordValue>,
         expiry: ExpiryPolicy,
         provenance: CallerProvenance,
         mutate: &mut (dyn for<'a> FnMut(&'a mut RecordValue) -> MutateOutcome + Send),
     ) -> anyhow::Result<bool> {
+        // Refused before the read, and so before `mutate` can run on a copy
+        // and leave its side effects on whatever the caller's closure
+        // captured. Checked here and not left to `put`, so the refusal does
+        // not depend on what an implementor's `put` does with the token.
+        writer.check(self.name(), key).map_err(|mismatch| {
+            anyhow::Error::new(mismatch).context(KEY_WRITER_MISMATCH_CONTEXT)
+        })?;
         let existing = self.get(key, false).await?;
         let mut value = match existing {
             Some(record) => record.value,
@@ -202,7 +266,7 @@ pub trait RecordStore: Send + Sync {
         if !outcome.changed {
             return Ok(false);
         }
-        self.put(key, value, expiry, provenance).await?;
+        self.put(writer, key, value, expiry, provenance).await?;
         Ok(true)
     }
 
@@ -221,6 +285,7 @@ pub trait RecordStore: Send + Sync {
     /// Remove a record, returning the old value.
     async fn remove(
         &self,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         provenance: CallerProvenance,
     ) -> anyhow::Result<Option<RecordValue>>;
@@ -228,13 +293,19 @@ pub trait RecordStore: Send + Sync {
     /// Put a record received from backup replication.
     async fn put_backup(
         &self,
+        writer: &KeyWriteToken<'_>,
         key: &str,
         record: Record,
         provenance: CallerProvenance,
     ) -> anyhow::Result<()>;
 
     /// Remove a record on backup.
-    async fn remove_backup(&self, key: &str, provenance: CallerProvenance) -> anyhow::Result<()>;
+    async fn remove_backup(
+        &self,
+        writer: &KeyWriteToken<'_>,
+        key: &str,
+        provenance: CallerProvenance,
+    ) -> anyhow::Result<()>;
 
     // --- Batch operations ---
 
@@ -340,4 +411,133 @@ pub trait RecordStore: Send + Sync {
 
     /// Access the underlying `MapDataStore` (Layer 3).
     fn map_data_store(&self) -> &dyn MapDataStore;
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every method of [`RecordStore`](super::RecordStore), `fn` and
+    /// `async fn`, is on exactly one of the four lists below, and exactly the
+    /// methods of the first list take the writer token. A method added to the
+    /// trait fails this test until someone decides which list it belongs to —
+    /// which is the moment to ask whether it writes a record value and so
+    /// needs the token (TG-KEY-002).
+    ///
+    /// What this does NOT check: it checks classification, not behaviour. A
+    /// method put on the wrong list passes. And it reads this file's source
+    /// text, so it follows the trait's formatting: a method is a line of the
+    /// trait body indented by four spaces that starts with `fn` or
+    /// `async fn`.
+    #[test]
+    fn every_method_of_the_record_store_trait_is_classified() {
+        const SOURCE: &str = include_str!("record_store.rs");
+
+        // Writes a record value: takes the token.
+        const TAKES_THE_TOKEN: [&str; 5] = [
+            "put",
+            "update_in_place",
+            "remove",
+            "put_backup",
+            "remove_backup",
+        ];
+        // Reads only: changes no resident, engine or durable state.
+        const READS_ONLY: [&str; 14] = [
+            "name",
+            "partition_id",
+            "exists_in_memory",
+            "or_witness_wanted",
+            "fetch_keys",
+            "fetch_entries",
+            "for_each_boxed",
+            "size",
+            "is_empty",
+            "owned_entry_cost",
+            "has_expired",
+            "is_expirable",
+            "should_evict",
+            "dirty_count",
+        ];
+        // Changes resident or engine state, or flushes, without writing a new
+        // record value: `get` load-inserts a resident copy and stamps the
+        // access, `get_all` is a loop over `get`, `soft_flush` flushes pending
+        // writes, the rest evict, clear or tear down.
+        const CHANGES_STATE_WITHOUT_A_NEW_VALUE: [&str; 11] = [
+            "evict",
+            "evict_all",
+            "evict_expired",
+            "evict_lru",
+            "clear",
+            "reset",
+            "destroy",
+            "init",
+            "get",
+            "get_all",
+            "soft_flush",
+        ];
+        // Hands out the raw engine or data store, which take no token.
+        const HANDS_OUT_THE_RAW_LAYERS: [&str; 2] = ["storage", "map_data_store"];
+
+        let from = SOURCE
+            .find("pub trait RecordStore")
+            .expect("the trait is in this file");
+        let body = &SOURCE[from..];
+        let body = &body[..body.find("\n}\n").expect("the trait's closing brace")];
+
+        // (name, signature text up to the `;` or the `{` that ends it)
+        let mut methods: Vec<(&str, String)> = Vec::new();
+        let mut lines = body.lines();
+        while let Some(line) = lines.next() {
+            let Some(rest) = line
+                .strip_prefix("    async fn ")
+                .or_else(|| line.strip_prefix("    fn "))
+            else {
+                continue;
+            };
+            let name = &rest[..rest
+                .find(['(', '<'])
+                .expect("a method name ends at its parameter list")];
+            let mut signature = line.to_string();
+            while !(signature.ends_with(';') || signature.ends_with('{')) {
+                signature.push_str(lines.next().expect("a signature ends inside the trait"));
+            }
+            methods.push((name, signature));
+        }
+
+        let lists = [
+            &TAKES_THE_TOKEN[..],
+            &READS_ONLY[..],
+            &CHANGES_STATE_WITHOUT_A_NEW_VALUE[..],
+            &HANDS_OUT_THE_RAW_LAYERS[..],
+        ];
+        let listed = |name: &str| lists.iter().filter(|list| list.contains(&name)).count();
+        let not_on_exactly_one_list: Vec<&str> = methods
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| listed(name) != 1)
+            .collect();
+        let listed_but_not_in_the_trait: Vec<&str> = lists
+            .iter()
+            .flat_map(|list| list.iter().copied())
+            .filter(|name| !methods.iter().any(|(method, _)| method == name))
+            .collect();
+        let token_disagrees_with_the_list: Vec<&str> = methods
+            .iter()
+            .filter(|(name, signature)| {
+                signature.contains("KeyWriteToken") != TAKES_THE_TOKEN.contains(name)
+            })
+            .map(|(name, _)| *name)
+            .collect();
+
+        assert_eq!(
+            (
+                methods.len(),
+                not_on_exactly_one_list,
+                listed_but_not_in_the_trait,
+                token_disagrees_with_the_list,
+            ),
+            (32, Vec::new(), Vec::new(), Vec::new()),
+            "(methods declared by the trait, methods not on exactly one list, listed names \
+             the trait does not declare, methods whose signature names the token against \
+             their list)"
+        );
+    }
 }

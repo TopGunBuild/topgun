@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Internal (server):** no visible change. The server's code that writes a record must now
+  present proof that it holds that record's write lock, and the build fails where it does
+  not; a write that presents the lock of a different record is refused and logged as a
+  server error. Before, this rule was kept by review and by counting call sites.
 - **Fixed (server):** writes sent inside a batch envelope are now handled exactly like
   writes sent directly, including refusals and back-off. Before, a batch of writes packed
   into an envelope was processed as one unit: if the server refused a single write in it,

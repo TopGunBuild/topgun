@@ -1647,7 +1647,7 @@ impl SyncService {
             // broadcast out of this scope: subscribers would then be able to observe
             // this key's events out of order with a concurrent writer's. Only one
             // key's writer is held at a time, so no multi-key lock ordering exists.
-            let _key_guard = self.key_writer.acquire(&map_name, &entry.key).await;
+            let key_guard = self.key_writer.acquire(&map_name, &entry.key).await;
 
             if let Some(frontier) = self.frontier.as_ref() {
                 if !gate_seen_active {
@@ -1758,6 +1758,7 @@ impl SyncService {
             };
             store
                 .update_in_place(
+                    &key_guard,
                     &entry.key,
                     Some(RecordValue::OrMap {
                         records: Vec::new(),
@@ -1773,7 +1774,7 @@ impl SyncService {
             // Broadcast OR_ADD only for inbound records that actually survived the
             // merge. A record whose tag is tombstoned (remove-wins) was suppressed
             // from stored state, so emitting an OR_ADD for it would tell subscribers
-            // to resurrect a removed entry. This runs while `_key_guard` is still
+            // to resurrect a removed entry. This runs while `key_guard` is still
             // held (see above).
             for record in &entry.records {
                 if tombstoned_inbound.contains(&record.tag) {
@@ -1966,6 +1967,7 @@ static REFUSED_PUSH_LOG: RefusedPushLog = RefusedPushLog::new();
     clippy::default_trait_access
 )]
 mod tests {
+    use crate::storage::key_writer::KeyWriteToken;
     use std::sync::Arc;
 
     use topgun_core::hlc::Timestamp;
@@ -2050,6 +2052,7 @@ mod tests {
         let store = factory.get_or_create(map, hash_to_partition(key));
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), key),
                 key,
                 RecordValue::OrMap {
                     records: vec![StoreOrMapEntry {
@@ -4861,6 +4864,7 @@ mod tests {
         let store = factory.get_or_create(map, hash_to_partition(key));
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), key),
                 key,
                 RecordValue::OrMap {
                     records: vec![StoreOrMapEntry {
@@ -5478,6 +5482,7 @@ mod tests {
         factory
             .get_or_create(MAP, hash_to_partition("D-legacy"))
             .put(
+                &KeyWriteToken::for_test(MAP, "D-legacy"),
                 "D-legacy",
                 RecordValue::OrMap {
                     records: vec![StoreOrMapEntry {
@@ -5701,7 +5706,11 @@ mod tests {
                 // Each path meets a FRESH key: a slot that already holds the tag
                 // would be allowed to keep it, which is not what is compared.
                 store
-                    .remove(&key, CallerProvenance::CrdtMerge)
+                    .remove(
+                        &KeyWriteToken::for_test(store.name(), &key),
+                        &key,
+                        CallerProvenance::CrdtMerge,
+                    )
                     .await
                     .expect("clear the key between paths");
                 let fresh = slot_image(&factory, MAP, &key).await;
@@ -6194,12 +6203,17 @@ mod tests {
                     // Every path meets the slot as seeded: an accepted path
                     // changes it, and the next one must not inherit that.
                     store
-                        .remove(&key, CallerProvenance::CrdtMerge)
+                        .remove(
+                            &KeyWriteToken::for_test(store.name(), &key),
+                            &key,
+                            CallerProvenance::CrdtMerge,
+                        )
                         .await
                         .expect("clear the key between paths");
                     if let Some(value) = seed {
                         store
                             .put(
+                                &KeyWriteToken::for_test(store.name(), &key),
                                 &key,
                                 value.clone(),
                                 ExpiryPolicy::NONE,
@@ -6624,6 +6638,7 @@ mod tests {
                     .factory
                     .get_or_create(MAP, hash_to_partition(key))
                     .update_in_place(
+                        &KeyWriteToken::for_test(MAP, key),
                         key,
                         Some(RecordValue::OrMap {
                             records: Vec::new(),
@@ -6796,6 +6811,7 @@ mod tests {
         rig.factory
             .get_or_create(map, hash_to_partition(key))
             .put(
+                &KeyWriteToken::for_test(map, key),
                 key,
                 RecordValue::OrMap {
                     records: tags
@@ -6839,6 +6855,7 @@ mod tests {
             .factory
             .get_or_create(map, hash_to_partition(key))
             .update_in_place(
+                &KeyWriteToken::for_test(map, key),
                 key,
                 None,
                 ExpiryPolicy::NONE,
@@ -7501,6 +7518,7 @@ mod tests {
             factory
                 .get_or_create(MAP, hash_to_partition(A))
                 .put(
+                    &KeyWriteToken::for_test(MAP, A),
                     A,
                     or_value("a-tag"),
                     ExpiryPolicy::NONE,

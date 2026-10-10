@@ -1465,12 +1465,16 @@ case outside the precondition.
   stamps minted under the writer, stamp order = engine order = durable-queue order for one key.
   That equality does not hold across an embedding write-back, and nothing here says what a
   restart recovers on a map with automatic embeddings — see "Not claimed".
-- **How it is enforced:** by tests and by sweep predicates, not by a type. Until `TG-KEY-002`
-  exists, "every production call" rests on a sweep of the call sites: the number of acquire
-  sites and their position relative to the stamp, the store call and the fan-out, re-run when a
-  writer is added. "One registry" is a wiring predicate on the server binary — the registry is
-  constructed once and handed to every writer — not a property of a type: a service constructed
-  without the shared registry gets a private one.
+- **How it is enforced:** in two parts. That every production call PASSES a writer token of
+  its key is enforced by the type and by the store (`TG-KEY-002`): a call of a `RecordStore`
+  mutator without a token does not compile, and a token acquired for another key is refused.
+  That the token is taken EARLY ENOUGH — before the server stamp is minted and before the first
+  read the write depends on — and held until the fan-out is done still rests on the tests below
+  and on the position predicates: the number of acquire sites and their position relative to
+  the stamp, the store call and the fan-out, re-run when a writer is added. "One registry" is a
+  wiring predicate on the server binary — the registry is constructed once and handed to every
+  writer — not a property of a type: a service constructed without the shared registry gets a
+  private one.
 - **Not claimed:**
   - **A timestamp comparison.** An operation whose stamp is not minted under the writer (a
     stamp the caller supplies and the server applies as given) is ordered by arrival: a lower
@@ -1509,7 +1513,9 @@ case outside the precondition.
 - **Discovered by:** the SPEC-383 implementation review (two concurrent writers of one key under
   a refused flush) and the SPEC-384 call-site sweep (the LWW PUT path and the embedding
   write-back took no writer); fixed and catalogued by SPEC-384a1.
-- **Status:** decided, **enforced** — by the tests below and by sweep predicates; not by a type.
+- **Status:** decided, **enforced** — that a call passes its key's token, by the type and the
+  store (`TG-KEY-002`); that the token is taken early enough and held long enough, by the tests
+  below and by position predicates.
 
 | Enforcer | What it covers | Where it runs |
 |----------|----------------|---------------|
@@ -1530,6 +1536,79 @@ case outside the precondition.
 | `a_second_acquire_by_the_holding_task_on_the_same_stripe_stays_pending` | WHY a task holds at most one writer: a second acquire on the holder's own stripe never returns | CI (`cargo test`) |
 | `acquires_of_free_keys_complete_in_one_poll_of_their_task` | taking a free key does not make the task yield: a task that awaits nothing but 1 024 acquires of keys nobody holds is polled once. It guards the write path against paying a trip through the run queue for a lock nobody contends, which is what filled the partition workers' inboxes under CPU pressure. Red when the acquire is charged to the task's cooperative budget: 8 polls instead of 1. Not covered: an acquire of a HELD key, which still waits for the release | CI (`cargo test`) |
 | `count_alloc_acquire_is_bounded_on_first_use_and_zero_on_repeat` | a stripe's first use allocates at most once and within the bound; a second pass over the same keys allocates nothing. Measured on macOS arm64 only | local only (`--features count-alloc`, `--ignored`); CI never enables the feature |
+
+### TG-KEY-002: A `RecordStore` mutator cannot be called without a writer token, and refuses a token of another key
+
+- **Scope:** the five methods of the `RecordStore` trait that write a record value — `put`,
+  `update_in_place`, `remove`, `put_backup`, `remove_backup` — on every implementor, and every
+  call of them in the crate, production and test.
+- **Statement:** each of the five takes `&KeyWriteToken`, so a call without a token does not
+  compile. The token is the lock guard of its key's writer: it is the only handle on that lock,
+  it cannot be copied, and it exists exactly as long as the writer is held (`TG-KEY-001`), so
+  presenting one means holding the writer — not having held it once. `DefaultRecordStore`
+  checks the token against the `(map, key)` of the call as the first statement of each of the
+  five, and the trait's default `update_in_place` does the same before it reads or runs the
+  caller's closure. A token acquired for another key, for another map, or for another key that
+  shares the requested key's stripe — whose lock it does hold — is refused before anything is
+  written, notified or mutated. The check is always on; it is not a debug assertion and is
+  behind no feature.
+- **What a refused call looks like:** the store logs it once, at error level, with the pair the
+  token was acquired for, the pair it was presented for and the mutator's name: a mismatch is a
+  defect of the server's own caller, never load and never client input. The error keeps the
+  typed mismatch as its source at the store boundary and prints one fixed sentence that names no
+  map and no key; that sentence is all a client can be sent. The client sees an internal,
+  retryable error: the refused write is valid and succeeds once the server is fixed. Until then
+  that client re-sends and is refused every time, and the store's error line is the signal.
+- **Not claimed:**
+  - **"No write without a token."** The claim is "no `RecordStore` mutator without a token".
+    `MapDataStore` takes no token, and the writers that call it directly are listed under
+    `TG-KEY-001`.
+  - **The methods that change resident or engine state, or flush, without writing a new record
+    value** (`evict`, `evict_all`, `evict_expired`, `evict_lru`, `clear`, `reset`, `destroy`,
+    `init`, `get`, `get_all`, `soft_flush`) take no token.
+  - **The methods that hand out the raw engine or data store** (`storage`, `map_data_store`)
+    stay on the trait and take none. They have no production caller; nothing but a grep keeps it
+    so.
+  - **That a method is on the right list.** The classification test below fails on a method
+    nobody classified; a method put on the wrong list passes it.
+  - **That the token was taken early enough or is held long enough.** The borrow covers the
+    store call, not the caller's critical region; that part is `TG-KEY-001`'s.
+  - **A way for a client to retire a write the server refuses on every attempt.** Its queue
+    head stays blocked until a fixed server is deployed.
+- **Maintaining code:** `storage/record_store.rs` — the trait's five signatures, the default
+  `update_in_place`, `KEY_WRITER_MISMATCH_CONTEXT`; `storage/impls/default_record_store.rs` —
+  `refuse_foreign_token` and its five calls; `storage/key_writer.rs` — `KeyWriteToken`, `check`,
+  `KeyWriterMismatch`.
+- **Enforcing test:** `default_record_store.rs::a_token_for_another_key_is_refused_and_nothing_is_written`
+  — for each of the five mutators, over a token of another key, of another map and of another
+  key on the same stripe: a typed mismatch, both keys' values unchanged, no data-store call, no
+  observer notification, no closure run, one error line, and a text that names no key. Runs in
+  CI (`cargo test`). The table below lists the others and where each one runs.
+- **Violation consequence:** a caller that locked the wrong key, or no key, writes a record
+  outside its writer. That is the interleaving `TG-KEY-001` exists to remove: memory serves one
+  value while the durable store holds the other, and a restart returns the older one. Without
+  the signatures a new caller that forgets the writer compiles and passes every test that does
+  not race it.
+- **Discovered by:** the SPEC-384 call-site sweep, which found the rule held only by counting
+  acquire sites; SPEC-384b1 introduced the token type and SPEC-384b2 the signatures and the
+  refusal.
+- **Status:** decided, **enforced** — for the five existing mutators by their signatures, which
+  CI compiles at every call site, and by the store's check; a method added to the trait is
+  caught by the classification test, which checks that it was classified and not that it was
+  classified correctly.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| the five signatures | every call site of the five mutators is compiled with a token | CI: every build and `cargo test --all-targets` |
+| `a_token_for_another_key_is_refused_and_nothing_is_written` | each of the five mutators of `DefaultRecordStore` refuses a token of another key, of another map and of another key on the same stripe; nothing is written; one error line; the text a client would get names no key | CI (`cargo test`) |
+| `the_default_update_in_place_refuses_a_foreign_token_before_the_closure_runs` | the trait's default `update_in_place` refuses before the caller's closure runs, and does not log | CI (`cargo test`) |
+| six one-statement mutants, one per mutator and one for the default body | removing one refusal turns exactly that mutator's observation red | one shot, at landing; not a guard |
+| `every_method_of_the_record_store_trait_is_classified` | every method of the trait, `fn` and `async fn` (32), is on exactly one of four lists — takes the token; reads only; changes resident or engine state, or flushes, without writing a new record value; hands out the raw engine or data store — so a new method fails the test until it is classified. **It checks classification, not behaviour — a wrong label passes; it reads source text** | CI (`cargo test`) |
+| a production call with its token argument deleted | does not compile | one shot, at landing; not a guard |
+| the doctest pair on `RecordStore::put` | the same, as a `compile_fail` block with a `no_run` twin that differs only in the token | LOCAL only (`cargo test --doc`); no CI job runs doc tests; not a guard |
+| `a_token_covers_exactly_the_key_it_was_acquired_for` | a token answers for its own pair only, not for another key of its own stripe; while it lives the key's writer is taken | CI (`cargo test`) |
+| `check_names_both_identities_on_a_mismatch_and_is_ok_on_a_match` | `check` names both pairs and the error survives `anyhow` | CI (`cargo test`) |
+| `assert_not_impl_any!(KeyWriteToken<'static>: Clone, Copy)` | the token cannot be copied | CI: the test build fails to compile |
 
 ### TG-DISP-001: A message is handled by the same code top-level and inside a `BATCH` envelope
 

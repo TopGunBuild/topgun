@@ -23,7 +23,7 @@ use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
 use crate::service::domain::journal::JournalStore;
-use crate::service::domain::key_writer::KeyWriterRegistry;
+use crate::service::domain::key_writer::{KeyWriteToken, KeyWriterRegistry};
 use crate::service::domain::predicate::{
     evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext,
 };
@@ -517,15 +517,23 @@ impl CrdtService {
     /// `sanitized_ts` — when `Some`, replaces client-provided timestamps in stored records.
     /// When `None` (a trusted origin), the client timestamp is used as-is.
     ///
-    /// # Caller obligation
+    /// # The writer token
     ///
-    /// The caller holds the per-key writer of `(op.map_name, op.key)` across
-    /// this call (TG-KEY-001). Nothing in here takes it: every branch below is
-    /// a read-modify-write or a staged write of that one key and relies on the
-    /// caller for its exclusion.
+    /// `writer` is the token of the per-key writer of `(op.map_name, op.key)`
+    /// (TG-KEY-001). Nothing in here takes the writer: every branch below is a
+    /// read-modify-write or a staged write of that one key and relies on the
+    /// caller for its exclusion. The branches hand the token on to the store,
+    /// which does not compile without one and refuses a token acquired for
+    /// another key (TG-KEY-002).
+    ///
+    /// Still the caller's alone: to have acquired the token before the stamp
+    /// is minted and before the first read the op depends on, and to hold it
+    /// until the fan-out that fixes the op's order is done. The borrow covers
+    /// this call, not that region.
     #[allow(clippy::too_many_lines)]
     async fn apply_single_op(
         &self,
+        writer: &KeyWriteToken<'_>,
         op: &ClientOp,
         partition_id: u32,
         sanitized_ts: Option<&Timestamp>,
@@ -549,7 +557,7 @@ impl CrdtService {
             // engine, and an in-place write in between would mutate the still-
             // resident slot and re-stage it over that delete (TG-OR-007).
             store
-                .remove(&op.key, CallerProvenance::CrdtMerge)
+                .remove(writer, &op.key, CallerProvenance::CrdtMerge)
                 .await
                 .map_err(OperationError::Internal)?;
 
@@ -673,6 +681,7 @@ impl CrdtService {
             };
             store
                 .update_in_place(
+                    writer,
                     &op.key,
                     Some(RecordValue::OrMap {
                         records: Vec::new(),
@@ -756,6 +765,7 @@ impl CrdtService {
                 };
                 store
                     .update_in_place(
+                        writer,
                         &op.key,
                         Some(RecordValue::OrMap {
                             records: Vec::new(),
@@ -817,6 +827,7 @@ impl CrdtService {
                 };
                 store
                     .put(
+                        writer,
                         &op.key,
                         record_value,
                         ExpiryPolicy::NONE,
@@ -933,7 +944,7 @@ impl CrdtService {
             StampPolicy::Verbatim => None,
         };
         let event_payload = self
-            .apply_single_op(op, partition_id, sanitized_ts.as_ref())
+            .apply_single_op(&key_guard, op, partition_id, sanitized_ts.as_ref())
             .await?;
         self.broadcast_event(&event_payload, exclude_connection_id)?;
         self.broadcast_query_updates(
@@ -2067,7 +2078,7 @@ pub(crate) async fn prune_epoch_tombstones(
     while let Some((epoch, r)) = guard.begin_next_ref() {
         let store = factory.get_or_create(&r.map, hash_to_partition(&r.key));
         // Serialize the drop against concurrent OR writes on this key.
-        let _key_guard = key_writer.acquire(&r.map, &r.key).await;
+        let key_guard = key_writer.acquire(&r.map, &r.key).await;
         // Residency check before the in-place drop. A resident key needs no read:
         // the in-place write below mutates it, and materializes it itself should it
         // be evicted in between (TG-OR-007), so a read would only clone the whole
@@ -2153,6 +2164,7 @@ pub(crate) async fn prune_epoch_tombstones(
             };
             store
                 .update_in_place(
+                    &key_guard,
                     &r.key,
                     None,
                     ExpiryPolicy::NONE,
@@ -10522,6 +10534,7 @@ mod tests {
         let store = factory.get_or_create("m", hash_to_partition(key));
         store
             .put(
+                &KeyWriteToken::for_test(store.name(), key),
                 key,
                 RecordValue::OrMap {
                     records,
@@ -13204,7 +13217,13 @@ mod tests {
     ) {
         factory
             .get_or_create(map, hash_to_partition(key))
-            .put(key, value, ExpiryPolicy::NONE, CallerProvenance::CrdtMerge)
+            .put(
+                &KeyWriteToken::for_test(map, key),
+                key,
+                value,
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+            )
             .await
             .expect("seed the slot through the store");
     }
@@ -14442,9 +14461,15 @@ mod tests {
                         };
                         apply_only.svc.apply_batch_op(&op, policy, None).await
                     } else {
+                        let writer = KeyWriteToken::for_test(&op.map_name, &op.key);
                         apply_only
                             .svc
-                            .apply_single_op(&op, hash_to_partition(&op.key), stamp.as_ref())
+                            .apply_single_op(
+                                &writer,
+                                &op,
+                                hash_to_partition(&op.key),
+                                stamp.as_ref(),
+                            )
                             .await
                             .map(|_| ())
                     };
