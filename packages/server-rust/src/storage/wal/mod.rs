@@ -4832,4 +4832,39 @@ mod tests {
             "The accessor must observe the durable sidecar value, not an in-memory mirror"
         );
     }
+
+    /// Under `Batched` an appended frame is in the file but not fsynced until
+    /// the group-commit timer runs, and that timer ends with the process. A
+    /// shutdown therefore has to be able to fsync on demand.
+    ///
+    /// The clock is paused so the timer cannot be what empties the counts: the
+    /// precondition below fails if it ever does.
+    #[tokio::test(start_paused = true)]
+    async fn wal_writer_sync_leaves_no_unfsynced_frame() {
+        async fn unfsynced(wal: &WalWriter, partition: u32) -> u32 {
+            let handle = wal.handle(partition).await.unwrap();
+            let active = handle.active.lock().await;
+            active.unfsynced_count()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::Batched).unwrap();
+
+        wal.append(0, &make_wal_entry(1)).await.unwrap();
+        wal.append(1, &make_wal_entry(2)).await.unwrap();
+        wal.append(1, &make_wal_entry(3)).await.unwrap();
+        assert_eq!(
+            (unfsynced(&wal, 0).await, unfsynced(&wal, 1).await),
+            (1, 2),
+            "the appended frames must be un-fsynced before `sync`, or the test shows nothing"
+        );
+
+        wal.sync().await.unwrap();
+
+        assert_eq!(
+            (unfsynced(&wal, 0).await, unfsynced(&wal, 1).await),
+            (0, 0),
+            "`sync` must fsync the active segment of every partition that held a frame"
+        );
+    }
 }

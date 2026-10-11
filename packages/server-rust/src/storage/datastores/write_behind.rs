@@ -8553,30 +8553,54 @@ mod background_task_panic_tests {
         }
     }
 
-    /// Forwards to a store that keeps nothing, except that the `panic_on`-th
-    /// `add` announces itself on a channel and then panics instead of
-    /// returning. Counting calls rather than matching a key lets a test place
-    /// the panic in the flush task's pass and leave the shutdown drain's later
-    /// calls alone.
+    /// Forwards to `inner`, except that the `panic_on`-th `add` announces itself
+    /// on a channel and then panics instead of returning. Counting calls rather
+    /// than matching a key lets a test place the panic in the flush task's pass
+    /// and leave the shutdown drain's later calls alone. `panic_on` 0 never
+    /// panics.
+    ///
+    /// An armed park holds the next `add` on entry, before the count is taken:
+    /// the flush task then sits inside a pass, holding its batch, for as long
+    /// as the test needs to act around it.
     struct PanickingAddStore {
-        inner: NullDataStore,
+        inner: Arc<dyn MapDataStore>,
         panic_on: u64,
         adds: AtomicU64,
         about_to_panic: tokio::sync::mpsc::UnboundedSender<()>,
+        park: Mutex<Option<ParkGate>>,
     }
 
     impl PanickingAddStore {
-        /// Returns the store and the receiver that yields one message
-        /// immediately before the panic.
+        /// Over a store that keeps nothing. Returns the store and the receiver
+        /// that yields one message immediately before the panic.
         fn new(panic_on: u64) -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<()>) {
+            Self::over(Arc::new(NullDataStore), panic_on)
+        }
+
+        /// Over `inner`, which receives every `add` that does not panic.
+        fn over(
+            inner: Arc<dyn MapDataStore>,
+            panic_on: u64,
+        ) -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<()>) {
             let (about_to_panic, announced) = tokio::sync::mpsc::unbounded_channel();
             let store = Arc::new(Self {
-                inner: NullDataStore,
+                inner,
                 panic_on,
                 adds: AtomicU64::new(0),
                 about_to_panic,
+                park: Mutex::new(None),
             });
             (store, announced)
+        }
+
+        /// Parks the next `add` on entry. Dropping the handle releases it.
+        fn arm_park(&self) -> TestParkHandle {
+            let (gate, handle) = TestParkHandle::arm();
+            *self
+                .park
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
+            handle
         }
     }
 
@@ -8590,6 +8614,14 @@ mod background_task_panic_tests {
             expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
+            let gate = self
+                .park
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(gate) = gate {
+                gate.pass().await;
+            }
             if self.adds.fetch_add(1, Ordering::SeqCst) + 1 == self.panic_on {
                 let _ = self.about_to_panic.send(());
                 panic!("injected inner-store panic");
@@ -8714,6 +8746,367 @@ mod background_task_panic_tests {
         }
     }
 
+    /// What a [`RecordingWal`] was asked to do, in call order.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WalCall {
+        Append,
+        MarkApplied,
+        Sync,
+    }
+
+    /// A WAL that holds no frame and records which of its mutating calls were
+    /// made, in order. `unapplied` is a read and is not recorded.
+    #[derive(Default)]
+    struct RecordingWal {
+        calls: Mutex<Vec<WalCall>>,
+    }
+
+    impl RecordingWal {
+        fn record(&self, call: WalCall) {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(call);
+        }
+
+        fn calls(&self) -> Vec<WalCall> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn appends(&self) -> usize {
+            self.calls()
+                .iter()
+                .filter(|call| **call == WalCall::Append)
+                .count()
+        }
+    }
+
+    #[async_trait]
+    impl Wal for RecordingWal {
+        async fn append(&self, _partition: u32, _entry: &WalEntry) -> anyhow::Result<()> {
+            self.record(WalCall::Append);
+            Ok(())
+        }
+
+        async fn mark_applied(&self, _partition: u32, _sequence: u64) -> anyhow::Result<()> {
+            self.record(WalCall::MarkApplied);
+            Ok(())
+        }
+
+        async fn unapplied(&self, _partition: u32) -> anyhow::Result<Vec<WalEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn sync(&self) -> anyhow::Result<()> {
+            self.record(WalCall::Sync);
+            Ok(())
+        }
+    }
+
+    /// An inner store that keeps what it is given, so a test can read back
+    /// what the flush task, the shutdown drain or a WAL replay put there. With
+    /// `refuse_adds` set every `add` fails, which is how a shutdown drain is
+    /// made to give up on an entry without any clock being involved.
+    #[derive(Default)]
+    struct MemoryStore {
+        values: Mutex<HashMap<(String, String), RecordValue>>,
+        refuse_adds: AtomicBool,
+    }
+
+    impl MemoryStore {
+        fn values(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), RecordValue>> {
+            self.values
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        fn get(&self, map: &str, key: &str) -> Option<RecordValue> {
+            self.values()
+                .get(&(map.to_string(), key.to_string()))
+                .cloned()
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for MemoryStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            if self.refuse_adds.load(Ordering::SeqCst) {
+                anyhow::bail!("injected inner-store refusal");
+            }
+            self.values()
+                .insert((map.to_string(), key.to_string()), value.clone());
+            Ok(())
+        }
+
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            NullDataStore
+                .add_backup(map, key, value, expiration_time, now)
+                .await
+        }
+
+        async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+            self.values().remove(&(map.to_string(), key.to_string()));
+            Ok(())
+        }
+
+        async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            NullDataStore.remove_backup(map, key, now).await
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            Ok(self.get(map, key))
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            Ok(keys
+                .iter()
+                .filter_map(|key| self.get(map, key).map(|value| (key.clone(), value)))
+                .collect())
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            NullDataStore.enumerate_leaves(map, is_backup, sink).await
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            NullDataStore
+                .scan_values(map, is_backup, max_batch_cost)
+                .await
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: ScanCursor,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            NullDataStore
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            let mut values = self.values();
+            for key in keys {
+                values.remove(&(map.to_string(), key.clone()));
+            }
+            Ok(())
+        }
+
+        fn is_loadable(&self, _key: &str) -> bool {
+            true
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            0
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn flush_key(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            _is_backup: bool,
+        ) -> anyhow::Result<()> {
+            self.add(map, key, value, 0, 0).await
+        }
+
+        fn reset(&self) {
+            self.values().clear();
+        }
+    }
+
+    /// One `tracing` event as a test reads it: its level and its fields by
+    /// name, the text under `message`.
+    #[derive(Debug, Clone)]
+    struct CapturedEvent {
+        level: tracing::Level,
+        fields: BTreeMap<String, String>,
+    }
+
+    impl CapturedEvent {
+        fn field(&self, name: &str) -> Option<&str> {
+            self.fields.get(name).map(String::as_str)
+        }
+    }
+
+    /// Collects every event of the thread it is the default subscriber on.
+    struct EventCapture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    struct FieldCollector<'a>(&'a mut BTreeMap<String, String>);
+
+    impl tracing::field::Visit for FieldCollector<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = BTreeMap::new();
+            event.record(&mut FieldCollector(&mut fields));
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(CapturedEvent {
+                    level: *event.metadata().level(),
+                    fields,
+                });
+        }
+    }
+
+    /// Runs `body` on a current-thread runtime and returns what it returned
+    /// together with every event logged on that thread meanwhile.
+    ///
+    /// The subscriber is scoped to the thread, never installed globally: the
+    /// test binary is shared and runs in parallel. One thread is also what
+    /// makes the capture complete — the store's background tasks run on it.
+    fn run_captured<T>(body: impl std::future::Future<Output = T>) -> (T, Vec<CapturedEvent>) {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&events)));
+        let output = tracing::subscriber::with_default(subscriber, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(body)
+        });
+        let events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        (output, events)
+    }
+
+    /// The events whose text is exactly `message`.
+    fn events_saying<'a>(events: &'a [CapturedEvent], message: &str) -> Vec<&'a CapturedEvent> {
+        events
+            .iter()
+            .filter(|event| event.field("message") == Some(message))
+            .collect()
+    }
+
+    const PANIC_LINE: &str =
+        "write-behind background task panicked; the store refuses writes from now on";
+    const FAILED_SHUTDOWN_LINE: &str = "write-behind shutdown on a failed store: entries not \
+         persisted here stay un-resolved and replay from the WAL at the next start when the \
+         store has one";
+    const FLUSH_LOOP_ABORTED_LINE_START: &str = "write-behind flush loop did not finish";
+
+    /// An LWW value that can be told from another by its text, with `millis`
+    /// as its timestamp.
+    fn lww_text(text: &str, millis: u64) -> RecordValue {
+        RecordValue::Lww {
+            value: topgun_core::types::Value::String(text.to_string()),
+            timestamp: topgun_core::hlc::Timestamp {
+                millis,
+                counter: 0,
+                node_id: "node-a".to_string(),
+            },
+        }
+    }
+
+    /// A flush task that runs a pass only when a test asks for one
+    /// (`soft_flush`), and then takes everything queued. With a timer-driven
+    /// loop the test could not say which entries a pass holds.
+    fn manual_flush_config() -> WriteBehindConfig {
+        WriteBehindConfig {
+            write_delay_ms: 0,
+            flush_interval_ms: 60_000,
+            capacity: 0,
+            shutdown_timeout_ms: 5_000,
+            ..WriteBehindConfig::default()
+        }
+    }
+
+    fn bootstrap(wal: Arc<dyn Wal>) -> WalBootstrap {
+        WalBootstrap {
+            wal,
+            sequence_start: 1,
+        }
+    }
+
+    const DEAD_BATCH_KEY: &str = "in-the-dead-batch";
+
+    /// A store whose flush task has just panicked holding a batch of one
+    /// entry, [`DEAD_BATCH_KEY`]. Returns when the poll of that task has
+    /// returned; nothing was awaited after the receipt of its announcement.
+    async fn store_with_a_dead_flush_task(
+        wal: Option<Arc<dyn Wal>>,
+    ) -> (Arc<WriteBehindDataStore>, Arc<MemoryStore>) {
+        let memory = Arc::new(MemoryStore::default());
+        let (inner, mut about_to_panic) =
+            PanickingAddStore::over(Arc::clone(&memory) as Arc<dyn MapDataStore>, 1);
+        let store =
+            WriteBehindDataStore::new_with_wal(inner, manual_flush_config(), wal.map(bootstrap));
+        store
+            .add(MAP, DEAD_BATCH_KEY, &lww_value(), 0, now_millis())
+            .await
+            .expect("a healthy store accepts the write");
+        store.soft_flush().await.expect("soft_flush");
+        tokio::time::timeout(HANG_LIMIT, about_to_panic.recv())
+            .await
+            .expect("the flush task never reached the inner store")
+            .expect("the inner store was dropped before it panicked");
+        (store, memory)
+    }
+
+    /// The lifecycle value, read the way a write entry reads it.
+    fn lifecycle(store: &WriteBehindDataStore) -> Lifecycle {
+        store.lifecycle.load(Ordering::Acquire)
+    }
+
     #[tokio::test]
     async fn a_flush_task_panic_fails_the_store() {
         let (inner, mut about_to_panic) = PanickingAddStore::new(1);
@@ -8803,6 +9196,1160 @@ mod background_task_panic_tests {
             after_panic.is_err(),
             "`add` returned Ok after the stall watchdog panicked: the store runs on without \
              its only stall detector"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flush_task_panic_is_observed_without_any_call() {
+        let (store, _memory) = store_with_a_dead_flush_task(None).await;
+
+        // Read at once: no `hard_flush`, no write and no suspension point lies
+        // between the panic and this read, so nothing but the dying task can
+        // have put the record there.
+        let failure = store.background_failure().borrow().clone();
+
+        assert_eq!(
+            failure,
+            Some(BackgroundFailure {
+                task: BackgroundTask::Flush,
+                message: "injected inner-store panic".to_string(),
+            }),
+            "the store must learn of its flush task's panic from the task itself"
+        );
+    }
+
+    #[test]
+    fn a_flush_task_panic_is_logged_once_at_error() {
+        let ((), events) = run_captured(async {
+            let _store = store_with_a_dead_flush_task(None).await;
+        });
+
+        let lines = events_saying(&events, PANIC_LINE);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one panic must give exactly one line; captured events: {events:?}"
+        );
+        assert_eq!(lines[0].level, tracing::Level::ERROR);
+        assert_eq!(lines[0].field("task"), Some("flush"));
+        assert_eq!(lines[0].field("panic"), Some("injected inner-store panic"));
+    }
+
+    #[test]
+    fn a_background_task_panic_is_counted_by_task() {
+        fn series(task: &str, value: u64) -> String {
+            format!("{BACKGROUND_TASK_PANICS_COUNTER}{{task=\"{task}\"}} {value}")
+        }
+        fn renders(rendered: &str, line: &str) -> bool {
+            rendered.lines().any(|rendered_line| rendered_line == line)
+        }
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        // The recorder is bound around the runtime, not inside a task of it: it
+        // belongs to the calling thread, and on a current-thread runtime that
+        // is also the thread the dying flush task increments the counter on.
+        let (at_construction, after_the_panic) = metrics::with_local_recorder(&recorder, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(async {
+                    let (inner, mut about_to_panic) = PanickingAddStore::new(1);
+                    let store = WriteBehindDataStore::new(inner, manual_flush_config());
+                    let at_construction = handle.render();
+
+                    store
+                        .add(MAP, DEAD_BATCH_KEY, &lww_value(), 0, now_millis())
+                        .await
+                        .expect("a healthy store accepts the write");
+                    store.soft_flush().await.expect("soft_flush");
+                    tokio::time::timeout(HANG_LIMIT, about_to_panic.recv())
+                        .await
+                        .expect("the flush task never reached the inner store")
+                        .expect("the inner store was dropped before it panicked");
+                    (at_construction, handle.render())
+                })
+        });
+
+        // Line by line: the order of the two series in a render is not stable.
+        for task in ["flush", "stall_watchdog"] {
+            assert!(
+                renders(&at_construction, &series(task, 0)),
+                "the `{task}` series must render at 0 from construction; render was:\n\
+                 {at_construction}"
+            );
+        }
+        assert!(
+            renders(&after_the_panic, &series("flush", 1)),
+            "the flush task's panic must be counted once; render was:\n{after_the_panic}"
+        );
+        assert!(
+            renders(&after_the_panic, &series("stall_watchdog", 0)),
+            "the watchdog did not panic and must still read 0; render was:\n{after_the_panic}"
+        );
+    }
+
+    /// A failed store over a WAL that records its calls, with how many frames
+    /// were appended and how many entries were pending when the task died.
+    async fn failed_store_over_a_recording_wal(
+    ) -> (Arc<WriteBehindDataStore>, Arc<RecordingWal>, usize, u64) {
+        let wal = Arc::new(RecordingWal::default());
+        let (store, _memory) =
+            store_with_a_dead_flush_task(Some(Arc::clone(&wal) as Arc<dyn Wal>)).await;
+        let appends = wal.appends();
+        let pending = store.pending_operation_count();
+        assert_eq!(appends, 1, "the dead batch's one frame was appended");
+        assert_eq!(pending, 1, "the dead batch's one entry is still counted");
+        (store, wal, appends, pending)
+    }
+
+    #[tokio::test]
+    async fn a_failed_store_refuses_add() {
+        let (store, wal, appends, pending) = failed_store_over_a_recording_wal().await;
+
+        let refused = store
+            .add(MAP, "after-the-panic", &lww_value(), 0, now_millis())
+            .await
+            .expect_err("a failed store must refuse `add`");
+
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "write-behind store has failed (background task panicked); write rejected for \
+                 map={MAP} key=after-the-panic"
+            )
+        );
+        assert_eq!(
+            wal.appends(),
+            appends,
+            "a refused write must not reach the WAL: its frame would replay a write the client \
+             was told had failed"
+        );
+        assert_eq!(store.pending_operation_count(), pending);
+    }
+
+    #[tokio::test]
+    async fn a_failed_store_refuses_remove() {
+        let (store, wal, appends, pending) = failed_store_over_a_recording_wal().await;
+
+        let refused = store
+            .remove(MAP, "after-the-panic", now_millis())
+            .await
+            .expect_err("a failed store must refuse `remove`");
+
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "write-behind store has failed (background task panicked); write rejected for \
+                 map={MAP} key=after-the-panic"
+            )
+        );
+        assert_eq!(
+            wal.appends(),
+            appends,
+            "a refused remove must not reach the WAL"
+        );
+        assert_eq!(store.pending_operation_count(), pending);
+    }
+
+    #[tokio::test]
+    async fn a_failed_store_refuses_remove_all() {
+        let (store, wal, appends, pending) = failed_store_over_a_recording_wal().await;
+
+        let refused = store
+            .remove_all(MAP, &["first".to_string(), "second".to_string()])
+            .await
+            .expect_err("a failed store must refuse `remove_all`");
+
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "write-behind store has failed (background task panicked); write rejected for \
+                 map={MAP}"
+            )
+        );
+        assert_eq!(
+            wal.appends(),
+            appends,
+            "a refused remove_all must not reach the WAL for any of its keys"
+        );
+        assert_eq!(store.pending_operation_count(), pending);
+    }
+
+    #[tokio::test]
+    async fn a_write_past_the_check_when_the_task_dies_is_drained_at_shutdown() {
+        const PARKED_KEY: &str = "past-the-check";
+
+        let memory = Arc::new(MemoryStore::default());
+        let (inner, mut about_to_panic) =
+            PanickingAddStore::over(Arc::clone(&memory) as Arc<dyn MapDataStore>, 1);
+        let store = WriteBehindDataStore::new(inner, manual_flush_config());
+        let parked_value = lww_text("past-the-check", 1);
+
+        // This write loads the state while the store is healthy and stops
+        // before it takes the queue.
+        let mut park = store.test_park_before_queue_insert(MAP, PARKED_KEY);
+        let parked_write = {
+            let store = Arc::clone(&store);
+            let value = parked_value.clone();
+            tokio::spawn(async move { store.add(MAP, PARKED_KEY, &value, 0, now_millis()).await })
+        };
+        park.wait_parked().await;
+
+        store
+            .add(MAP, DEAD_BATCH_KEY, &lww_value(), 0, now_millis())
+            .await
+            .expect("a healthy store accepts the write");
+        store.soft_flush().await.expect("soft_flush");
+        tokio::time::timeout(HANG_LIMIT, about_to_panic.recv())
+            .await
+            .expect("the flush task never reached the inner store")
+            .expect("the inner store was dropped before it panicked");
+        assert!(
+            store.background_failure().borrow().is_some(),
+            "the failure must be on record before the parked write is let go"
+        );
+
+        park.release();
+        let parked_result = tokio::time::timeout(HANG_LIMIT, parked_write)
+            .await
+            .expect("the parked write never returned")
+            .expect("the parked write's task");
+        assert!(
+            parked_result.is_ok(),
+            "a write that passed the state check before the failure was recorded must be \
+             accepted, not refused half-way with its entry sequence already assigned: \
+             {parked_result:?}"
+        );
+
+        // What the shutdown returns is not this test's subject.
+        let _ = store.hard_flush().await;
+
+        assert_eq!(
+            memory.get(MAP, PARKED_KEY),
+            Some(parked_value),
+            "the shutdown drain of a failed store must still persist what is queued"
+        );
+    }
+
+    /// `count` keys of [`MAP`] that share one partition.
+    fn keys_in_one_partition(count: usize) -> Vec<String> {
+        let mut by_partition: HashMap<u32, Vec<String>> = HashMap::new();
+        for index in 0u32.. {
+            let key = format!("key-{index}");
+            let bucket = by_partition.entry(partition_for(MAP, &key)).or_default();
+            bucket.push(key);
+            if bucket.len() == count {
+                return bucket.clone();
+            }
+        }
+        unreachable!("the key space is unbounded")
+    }
+
+    /// The keys of the stranded-batch scenario. They share one partition
+    /// because the applied watermark is per partition: a defect that moves it
+    /// past the dead batch's frames can only be seen from a key whose frames
+    /// lie in the partition the shutdown drain advances.
+    struct StrandedKeys {
+        /// Written once; its entry is in the dead batch.
+        batch_only: String,
+        /// Written twice: the older value is in the dead batch, the newer one
+        /// is persisted by the shutdown drain.
+        in_both: String,
+        /// Written once; persisted by the shutdown drain.
+        drained_only: String,
+        /// An OR-Map key written with delta frames: one tag in the dead batch,
+        /// a second one persisted by the shutdown drain.
+        or_map: String,
+    }
+
+    impl StrandedKeys {
+        fn chosen() -> Self {
+            let mut keys = keys_in_one_partition(4).into_iter();
+            let mut next = || keys.next().expect("four keys");
+            Self {
+                batch_only: next(),
+                in_both: next(),
+                drained_only: next(),
+                or_map: next(),
+            }
+        }
+
+        /// Asserts the keys share one partition and returns it.
+        fn assert_one_partition(&self) -> u32 {
+            let partition = partition_for(MAP, &self.batch_only);
+            for key in [&self.in_both, &self.drained_only, &self.or_map] {
+                assert_eq!(
+                    partition_for(MAP, key),
+                    partition,
+                    "`{key}` must share the partition of `{}`",
+                    self.batch_only
+                );
+            }
+            partition
+        }
+    }
+
+    fn batch_only_value() -> RecordValue {
+        lww_text("batch-only", 1)
+    }
+
+    fn older_value() -> RecordValue {
+        lww_text("older", 2)
+    }
+
+    fn newer_value() -> RecordValue {
+        lww_text("newer", 3)
+    }
+
+    fn drained_only_value() -> RecordValue {
+        lww_text("drained-only", 4)
+    }
+
+    fn or_entry(tag: &str) -> crate::storage::record::OrMapEntry {
+        crate::storage::record::OrMapEntry {
+            value: topgun_core::types::Value::String(format!("value-of-{tag}")),
+            tag: tag.to_string(),
+            timestamp: topgun_core::hlc::Timestamp {
+                millis: 1,
+                counter: 0,
+                node_id: "node-a".to_string(),
+            },
+        }
+    }
+
+    fn or_snapshot(tags: &[&str]) -> RecordValue {
+        RecordValue::OrMap {
+            records: tags.iter().map(|tag| or_entry(tag)).collect(),
+            tombstones: Vec::new(),
+        }
+    }
+
+    /// The `(key, value)` of every full-record store frame, in frame order.
+    fn stored_frames(frames: &[WalEntry]) -> Vec<(String, RecordValue)> {
+        frames
+            .iter()
+            .filter_map(|frame| match &frame.op {
+                WalOp::Store {
+                    value: WalStorePayload::Record(value),
+                    ..
+                } => Some((frame.key.clone(), value.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What the stranded-batch scenario leaves behind.
+    struct Stranded {
+        wal_dir: tempfile::TempDir,
+        wal: Arc<crate::storage::wal::WalWriter>,
+        memory: Arc<MemoryStore>,
+        store: Arc<WriteBehindDataStore>,
+    }
+
+    /// A flush task dies holding a batch while newer writes are queued, and
+    /// the store is then shut down, over a real WAL in a temporary directory.
+    ///
+    /// The pass is parked inside the inner store, holding `batch_only` and the
+    /// older value of `in_both`. While it is parked the store is healthy, so
+    /// the newer value of `in_both` and `drained_only` are accepted and queued
+    /// — nothing takes them, the only flush task is inside its pass. Then the
+    /// pass is released and panics. With `with_or_map`, the OR-Map key gets
+    /// one tag on each side of the park, each as a delta frame.
+    async fn stranded_shutdown(keys: &StrandedKeys, with_or_map: bool) -> Stranded {
+        let wal_dir = tempfile::tempdir().expect("tempdir");
+        let wal = crate::storage::wal::WalWriter::new(
+            wal_dir.path().to_path_buf(),
+            WalFsyncPolicy::PerOp,
+        )
+        .expect("WAL writer");
+        let memory = Arc::new(MemoryStore::default());
+        let (inner, mut about_to_panic) =
+            PanickingAddStore::over(Arc::clone(&memory) as Arc<dyn MapDataStore>, 1);
+        let mut pass_parked = inner.arm_park();
+        let store = WriteBehindDataStore::new_with_wal(
+            inner,
+            WriteBehindConfig {
+                or_delta_wal: true,
+                ..manual_flush_config()
+            },
+            Some(bootstrap(Arc::clone(&wal) as Arc<dyn Wal>)),
+        );
+        let now = now_millis();
+
+        store
+            .add(MAP, &keys.batch_only, &batch_only_value(), 0, now)
+            .await
+            .expect("batch-only write");
+        store
+            .add(MAP, &keys.in_both, &older_value(), 0, now)
+            .await
+            .expect("older write of the key in both");
+        if with_or_map {
+            store
+                .add_with_witness(
+                    MAP,
+                    &keys.or_map,
+                    WriteSource::Value(&or_snapshot(&["tag-a"])),
+                    0,
+                    now,
+                    Some(&OrDelta::Add {
+                        entry: or_entry("tag-a"),
+                    }),
+                )
+                .await
+                .expect("first OR write");
+        }
+        store.soft_flush().await.expect("soft_flush");
+        pass_parked.wait_parked().await;
+
+        store
+            .add(MAP, &keys.in_both, &newer_value(), 0, now)
+            .await
+            .expect("newer write of the key in both");
+        store
+            .add(MAP, &keys.drained_only, &drained_only_value(), 0, now)
+            .await
+            .expect("drained-only write");
+        if with_or_map {
+            store
+                .add_with_witness(
+                    MAP,
+                    &keys.or_map,
+                    WriteSource::Value(&or_snapshot(&["tag-a", "tag-b"])),
+                    0,
+                    now,
+                    Some(&OrDelta::Add {
+                        entry: or_entry("tag-b"),
+                    }),
+                )
+                .await
+                .expect("second OR write");
+        }
+
+        pass_parked.release();
+        tokio::time::timeout(HANG_LIMIT, about_to_panic.recv())
+            .await
+            .expect("the released flush pass never panicked")
+            .expect("the inner store was dropped before it panicked");
+
+        // A limiter, not a wait: the dead batch keeps the pending count above
+        // zero for good, so a shutdown that waited for zero would never return.
+        // What it returns is asserted where the failed store is the subject.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), store.hard_flush())
+            .await
+            .expect(
+                "`hard_flush` did not complete on a store whose pending count stays above zero",
+            );
+
+        Stranded {
+            wal_dir,
+            wal,
+            memory,
+            store,
+        }
+    }
+
+    #[test]
+    fn the_dead_tasks_batch_stays_unresolved_through_shutdown() {
+        let keys = StrandedKeys::chosen();
+        let partition = keys.assert_one_partition();
+
+        let ((pending, unapplied, memory), events) = run_captured(async {
+            let stranded = stranded_shutdown(&keys, false).await;
+            let unapplied = stranded
+                .wal
+                .unapplied(partition)
+                .await
+                .expect("unapplied frames");
+            (
+                stranded.store.pending_operation_count(),
+                unapplied,
+                stranded.memory,
+            )
+        });
+
+        let lines = events_saying(&events, FAILED_SHUTDOWN_LINE);
+        assert_eq!(lines.len(), 1, "captured events: {events:?}");
+        assert_eq!(lines[0].level, tracing::Level::ERROR);
+        assert_eq!(lines[0].field("task"), Some("flush"));
+        assert_eq!(
+            lines[0].field("unpersisted_entries"),
+            Some("2"),
+            "the drain failed on nothing here, so what is left un-persisted is the dead batch"
+        );
+        assert_eq!(lines[0].field("drained_entries"), Some("2"));
+        assert!(
+            pending > 0,
+            "the shutdown completed although the dead batch's entries stay counted for good"
+        );
+
+        assert_eq!(
+            memory.get(MAP, &keys.in_both),
+            Some(newer_value()),
+            "the drain persisted the newer value"
+        );
+        assert_eq!(
+            memory.get(MAP, &keys.drained_only),
+            Some(drained_only_value())
+        );
+        assert_eq!(
+            memory.get(MAP, &keys.batch_only),
+            None,
+            "the dead batch never reached the inner store"
+        );
+
+        let frames = stored_frames(&unapplied);
+        for (key, value, what) in [
+            (&keys.batch_only, batch_only_value(), "the batch-only frame"),
+            (
+                &keys.in_both,
+                older_value(),
+                "the dead batch's frame of the key in both",
+            ),
+            (
+                &keys.in_both,
+                newer_value(),
+                "the later frame of the key in both, whose value the drain persisted",
+            ),
+            (
+                &keys.drained_only,
+                drained_only_value(),
+                "the drained-only frame, later than the dead batch's in the same partition",
+            ),
+        ] {
+            assert!(
+                frames.contains(&(key.clone(), value)),
+                "{what} must still be un-applied in partition {partition}: the dead batch \
+                 holds the watermark below every later frame; un-applied frames: {frames:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn after_a_flush_task_panic_a_restart_holds_every_acked_write() {
+        use crate::storage::wal::{WalRecovery, WalWriter};
+
+        let keys = StrandedKeys::chosen();
+        let partition = keys.assert_one_partition();
+
+        let Stranded {
+            wal_dir,
+            wal,
+            memory,
+            store,
+        } = stranded_shutdown(&keys, true).await;
+
+        // The precondition the outcome rests on, asserted and not assumed: the
+        // drained value's frame is still in the replay window, after the dead
+        // batch's older frame of the same key.
+        let unapplied = wal.unapplied(partition).await.expect("unapplied frames");
+        let frames = stored_frames(&unapplied);
+        let older_at = frames
+            .iter()
+            .position(|frame| *frame == (keys.in_both.clone(), older_value()));
+        let newer_at = frames
+            .iter()
+            .position(|frame| *frame == (keys.in_both.clone(), newer_value()));
+        assert!(
+            matches!((older_at, newer_at), (Some(older), Some(newer)) if older < newer),
+            "both frames of the key in both must be un-applied, the older first: {frames:?}"
+        );
+        assert_eq!(
+            memory.get(MAP, &keys.batch_only),
+            None,
+            "before the start the batch-only write exists in the WAL and nowhere else"
+        );
+
+        // The simulated start: the old process is gone, a new writer opens
+        // the same directory and recovery replays into the same inner store.
+        drop(store);
+        drop(wal);
+        let reopened = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
+            .expect("reopened WAL writer");
+        WalRecovery::new(Arc::clone(&reopened), Vec::new())
+            .run(Arc::clone(&memory) as Arc<dyn MapDataStore>)
+            .await
+            .expect("recovery");
+
+        assert_eq!(memory.get(MAP, &keys.batch_only), Some(batch_only_value()));
+        assert_eq!(
+            memory.get(MAP, &keys.drained_only),
+            Some(drained_only_value())
+        );
+        assert_eq!(
+            memory.get(MAP, &keys.in_both),
+            Some(newer_value()),
+            "replaying the dead batch's older frame must not bring the older value back"
+        );
+        match memory.get(MAP, &keys.or_map) {
+            Some(RecordValue::OrMap {
+                records,
+                tombstones,
+            }) => {
+                let mut tags: Vec<&str> = records.iter().map(|entry| entry.tag.as_str()).collect();
+                tags.sort_unstable();
+                assert_eq!(
+                    tags,
+                    vec!["tag-a", "tag-b"],
+                    "each acked tag must be held exactly once after the replay"
+                );
+                assert!(tombstones.is_empty(), "nothing was removed: {tombstones:?}");
+            }
+            other => panic!("expected the OR-Map record after the replay, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hard_flush_syncs_the_wal_before_every_return() {
+        fn assert_sync_is_the_last_call(calls: &[WalCall], case: &str) {
+            assert_eq!(
+                calls.last(),
+                Some(&WalCall::Sync),
+                "{case}: `sync` must be the last WAL call; calls were {calls:?}"
+            );
+            assert_eq!(
+                calls.iter().filter(|call| **call == WalCall::Sync).count(),
+                1,
+                "{case}: one shutdown, one `sync`; calls were {calls:?}"
+            );
+        }
+        // Nothing is flushed before the shutdown asks for it.
+        fn buffered_config() -> WriteBehindConfig {
+            WriteBehindConfig {
+                write_delay_ms: 60_000,
+                ..manual_flush_config()
+            }
+        }
+
+        // The return taken when the queues are empty, reached with nothing
+        // ever queued.
+        {
+            let wal = Arc::new(RecordingWal::default());
+            let store = WriteBehindDataStore::new_with_wal(
+                Arc::new(MemoryStore::default()),
+                buffered_config(),
+                Some(bootstrap(Arc::clone(&wal) as Arc<dyn Wal>)),
+            );
+            store.hard_flush().await.expect("a healthy shutdown");
+            assert_eq!(wal.calls(), vec![WalCall::Sync], "nothing queued");
+        }
+
+        // The same return, reached after the drain persisted an entry.
+        {
+            let wal = Arc::new(RecordingWal::default());
+            let store = WriteBehindDataStore::new_with_wal(
+                Arc::new(MemoryStore::default()),
+                buffered_config(),
+                Some(bootstrap(Arc::clone(&wal) as Arc<dyn Wal>)),
+            );
+            store
+                .add(MAP, "drained", &lww_value(), 0, now_millis())
+                .await
+                .expect("write");
+            store.hard_flush().await.expect("a healthy shutdown");
+            let calls = wal.calls();
+            assert!(
+                calls.contains(&WalCall::Append) && calls.contains(&WalCall::MarkApplied),
+                "the case must append a frame and mark it applied; calls were {calls:?}"
+            );
+            assert_sync_is_the_last_call(&calls, "queues drained");
+        }
+
+        // The return taken when the drain gave up on an entry. The inner store
+        // refuses it, which takes the same exit as an entry that ran out of
+        // time, with no clock involved.
+        {
+            let wal = Arc::new(RecordingWal::default());
+            let memory = Arc::new(MemoryStore::default());
+            let store = WriteBehindDataStore::new_with_wal(
+                Arc::clone(&memory) as Arc<dyn MapDataStore>,
+                buffered_config(),
+                Some(bootstrap(Arc::clone(&wal) as Arc<dyn Wal>)),
+            );
+            store
+                .add(MAP, "given-up-on", &lww_value(), 0, now_millis())
+                .await
+                .expect("write");
+            memory.refuse_adds.store(true, Ordering::SeqCst);
+            // The limiter is for a shutdown that would wait for the entry it
+            // gave up on: that entry stays counted as pending for good.
+            tokio::time::timeout(HANG_LIMIT, store.hard_flush())
+                .await
+                .expect("`hard_flush` did not return after its drain gave up on an entry")
+                .expect("a healthy store's shutdown returns Ok when its drain gives up");
+            let calls = wal.calls();
+            assert!(
+                calls.contains(&WalCall::Append) && !calls.contains(&WalCall::MarkApplied),
+                "the entry must be appended and never applied; calls were {calls:?}"
+            );
+            assert_sync_is_the_last_call(&calls, "drain gave up");
+        }
+
+        // The return of a failed store.
+        {
+            let wal = Arc::new(RecordingWal::default());
+            let (store, _memory) =
+                store_with_a_dead_flush_task(Some(Arc::clone(&wal) as Arc<dyn Wal>)).await;
+            // What it returns is asserted where the failed store is the
+            // subject; here only the order of the WAL calls is.
+            let _ = store.hard_flush().await;
+            let calls = wal.calls();
+            assert!(calls.contains(&WalCall::Append), "calls were {calls:?}");
+            assert_sync_is_the_last_call(&calls, "failed store");
+        }
+    }
+
+    #[test]
+    fn a_stall_watchdog_panic_is_recorded_and_shutdown_still_drains() {
+        const QUEUED: [&str; 3] = ["tracked-1", "tracked-2", "tracked-3"];
+
+        let ((failure, flush_task_alive, shutdown, persisted), events) = run_captured(async {
+            let memory = Arc::new(MemoryStore::default());
+            let wal: Arc<dyn Wal> = Arc::new(AcceptingWal);
+            let store = WriteBehindDataStore::new_with_wal(
+                Arc::clone(&memory) as Arc<dyn MapDataStore>,
+                // The flush task stays out of the way for the whole test, and
+                // the watchdog ticks at its floor.
+                WriteBehindConfig {
+                    write_delay_ms: 60_000,
+                    flush_interval_ms: 60_000,
+                    capacity: 0,
+                    shutdown_timeout_ms: 5_000,
+                    wal_watermark_stall_bound_ms: 1_000,
+                    ..WriteBehindConfig::default()
+                },
+                Some(bootstrap(wal)),
+            );
+            let (about_to_panic, mut announced) = tokio::sync::mpsc::unbounded_channel();
+            store.test_set_classifier_hook(Arc::new(move |_partition| {
+                let _ = about_to_panic.send(());
+                panic!("injected stall watchdog panic");
+            }));
+
+            for key in QUEUED {
+                store
+                    .add(MAP, key, &lww_text(key, 1), 0, now_millis())
+                    .await
+                    .expect("a healthy store accepts the write");
+            }
+            tokio::time::timeout(HANG_LIMIT, announced.recv())
+                .await
+                .expect("the stall watchdog never sampled a written partition")
+                .expect("the classifier hook was dropped before it ran");
+
+            let failure = store.background_failure().borrow().clone();
+            let flush_task_alive = store
+                .flush_loop
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .map(|task| !task.is_finished());
+            // Twice the store's own shutdown timeout, so a flush task that
+            // ignored the signal shows as the abort line asserted on below and
+            // not as this limiter.
+            let shutdown = tokio::time::timeout(HANG_LIMIT * 2, store.hard_flush())
+                .await
+                .expect("`hard_flush` did not complete after a watchdog panic");
+            let persisted = QUEUED.map(|key| memory.get(MAP, key));
+            (failure, flush_task_alive, shutdown, persisted)
+        });
+
+        assert_eq!(
+            failure,
+            Some(BackgroundFailure {
+                task: BackgroundTask::StallWatchdog,
+                message: "injected stall watchdog panic".to_string(),
+            })
+        );
+        assert_eq!(
+            flush_task_alive,
+            Some(true),
+            "the watchdog's panic must not take the flush task with it"
+        );
+        assert!(
+            !events.iter().any(|event| event
+                .field("message")
+                .is_some_and(|message| message.starts_with(FLUSH_LOOP_ABORTED_LINE_START))),
+            "the flush task must leave on the shutdown signal, not be aborted at the shutdown \
+             timeout; captured events: {events:?}"
+        );
+
+        let error = shutdown.expect_err("a store whose watchdog panicked has failed");
+        assert_eq!(
+            error
+                .downcast_ref::<BackgroundFailure>()
+                .map(|failure| failure.task),
+            Some(BackgroundTask::StallWatchdog)
+        );
+        assert_eq!(
+            persisted,
+            QUEUED.map(|key| Some(lww_text(key, 1))),
+            "the shutdown of a failed store must drain everything that is queued"
+        );
+
+        let lines = events_saying(&events, FAILED_SHUTDOWN_LINE);
+        assert_eq!(lines.len(), 1, "captured events: {events:?}");
+        assert_eq!(lines[0].field("task"), Some("stall_watchdog"));
+        assert_eq!(
+            lines[0].field("unpersisted_entries"),
+            Some("0"),
+            "the watchdog held no batch and the drain failed on nothing"
+        );
+        assert_eq!(lines[0].field("drained_entries"), Some("3"));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn a_flush_task_panic_after_shutdown_began_is_still_a_failure() {
+        const PARKED_KEY: &str = "in-the-parked-batch";
+
+        struct Observed {
+            state_while_waiting: Lifecycle,
+            flush_task_taken: bool,
+            shutdown_pending: bool,
+            failure_while_waiting: Option<BackgroundFailure>,
+            shutdown: anyhow::Result<()>,
+            failure: Option<BackgroundFailure>,
+            unapplied: Vec<WalEntry>,
+            write_after: anyhow::Result<()>,
+        }
+
+        let parked_value = lww_text("in-the-parked-batch", 1);
+        let (observed, events) = run_captured(async {
+            let wal_dir = tempfile::tempdir().expect("tempdir");
+            let wal = crate::storage::wal::WalWriter::new(
+                wal_dir.path().to_path_buf(),
+                WalFsyncPolicy::PerOp,
+            )
+            .expect("WAL writer");
+            let (inner, mut about_to_panic) = PanickingAddStore::new(1);
+            let mut pass_parked = inner.arm_park();
+            let store = WriteBehindDataStore::new_with_wal(
+                inner,
+                manual_flush_config(),
+                Some(bootstrap(Arc::clone(&wal) as Arc<dyn Wal>)),
+            );
+
+            store
+                .add(MAP, PARKED_KEY, &parked_value, 0, now_millis())
+                .await
+                .expect("a healthy store accepts the write");
+            store.soft_flush().await.expect("soft_flush");
+            pass_parked.wait_parked().await;
+
+            // The store's own shutdown signal is what tells this test that
+            // `hard_flush` is waiting for the flush task. `hard_flush` sends it
+            // after it stored the shutting-down state and suspends next at the
+            // join of the flush task, with no suspension point in between; on
+            // one thread this task is not run again until that poll returned.
+            let mut shutdown_signal = store.shutdown.subscribe();
+            let shutdown_task = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move { store.hard_flush().await })
+            };
+            tokio::time::timeout(HANG_LIMIT, shutdown_signal.wait_for(|signalled| *signalled))
+                .await
+                .expect("`hard_flush` never signalled the shutdown")
+                .expect("the shutdown signal's sender was dropped");
+
+            let state_while_waiting = lifecycle(&store);
+            // The join takes the handle out of its slot before it awaits it.
+            let flush_task_taken = store
+                .flush_loop
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none();
+            let shutdown_pending = !shutdown_task.is_finished();
+            let failure_while_waiting = store.background_failure().borrow().clone();
+
+            pass_parked.release();
+            tokio::time::timeout(HANG_LIMIT, about_to_panic.recv())
+                .await
+                .expect("the released flush pass never panicked")
+                .expect("the inner store was dropped before it panicked");
+
+            let shutdown = tokio::time::timeout(HANG_LIMIT, shutdown_task)
+                .await
+                .expect("`hard_flush` never returned after the flush task died")
+                .expect("the `hard_flush` task");
+            let failure = store.background_failure().borrow().clone();
+            let unapplied = wal
+                .unapplied(partition_for(MAP, PARKED_KEY))
+                .await
+                .expect("unapplied frames");
+            let write_after = store
+                .add(MAP, "after-the-shutdown", &lww_value(), 0, now_millis())
+                .await;
+
+            Observed {
+                state_while_waiting,
+                flush_task_taken,
+                shutdown_pending,
+                failure_while_waiting,
+                shutdown,
+                failure,
+                unapplied,
+                write_after,
+            }
+        });
+
+        // The setup: the panic landed while `hard_flush` waited for the task.
+        assert_eq!(observed.state_while_waiting, Lifecycle::ShuttingDown);
+        assert!(
+            observed.flush_task_taken,
+            "`hard_flush` must have begun to wait for the flush task"
+        );
+        assert!(observed.shutdown_pending);
+        assert_eq!(observed.failure_while_waiting, None);
+
+        let flush_failure = BackgroundFailure {
+            task: BackgroundTask::Flush,
+            message: "injected inner-store panic".to_string(),
+        };
+        let error = observed.shutdown.expect_err(
+            "a flush task that panics during the shutdown leaves a failed store, and its \
+             shutdown must say so",
+        );
+        assert_eq!(
+            error.downcast_ref::<BackgroundFailure>(),
+            Some(&flush_failure),
+            "the failed store must be recognisable by type, not by the text of the error"
+        );
+        assert!(
+            format!("{error:#}").contains("background task panicked"),
+            "error was: {error:#}"
+        );
+        assert_eq!(observed.failure, Some(flush_failure));
+
+        let lines = events_saying(&events, FAILED_SHUTDOWN_LINE);
+        assert_eq!(lines.len(), 1, "captured events: {events:?}");
+        assert_eq!(lines[0].field("task"), Some("flush"));
+        assert_eq!(lines[0].field("unpersisted_entries"), Some("1"));
+        assert_eq!(lines[0].field("drained_entries"), Some("0"));
+
+        assert_eq!(
+            stored_frames(&observed.unapplied),
+            vec![(PARKED_KEY.to_string(), parked_value)],
+            "the parked batch's frame must stay un-applied so the next start replays it"
+        );
+        assert_eq!(
+            observed
+                .write_after
+                .expect_err("a failed store refuses writes")
+                .to_string(),
+            format!(
+                "write-behind store has failed (background task panicked); write rejected for \
+                 map={MAP} key=after-the-shutdown"
+            ),
+            "the store is failed, not merely shutting down, and must say which"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_clean_stop_is_not_a_failure() {
+        // `hard_flush` on a healthy WAL-backed store with a write queued.
+        {
+            let memory = Arc::new(MemoryStore::default());
+            let store = WriteBehindDataStore::new_with_wal(
+                Arc::clone(&memory) as Arc<dyn MapDataStore>,
+                manual_flush_config(),
+                Some(bootstrap(Arc::new(AcceptingWal))),
+            );
+            store
+                .add(MAP, "queued", &lww_value(), 0, now_millis())
+                .await
+                .expect("write");
+            store.hard_flush().await.expect("a healthy shutdown");
+            assert_eq!(*store.background_failure().borrow(), None);
+            assert_eq!(lifecycle(&store), Lifecycle::ShuttingDown);
+            assert_eq!(memory.get(MAP, "queued"), Some(lww_value()));
+        }
+
+        // A store with no WAL: its watchdog returned at once, which is a
+        // return and not a panic.
+        {
+            let store =
+                WriteBehindDataStore::new(Arc::new(MemoryStore::default()), manual_flush_config());
+            store
+                .add(MAP, "queued", &lww_value(), 0, now_millis())
+                .await
+                .expect("write");
+            store.hard_flush().await.expect("a healthy shutdown");
+            assert_eq!(*store.background_failure().borrow(), None);
+            assert_eq!(lifecycle(&store), Lifecycle::ShuttingDown);
+        }
+
+        // The flush task aborted at the shutdown timeout, parked inside a
+        // pass. An abort drops the task; nothing unwinds.
+        {
+            let (inner, _about_to_panic) = PanickingAddStore::new(0);
+            let mut pass_parked = inner.arm_park();
+            let store = WriteBehindDataStore::new(
+                inner,
+                WriteBehindConfig {
+                    shutdown_timeout_ms: 1_000,
+                    ..manual_flush_config()
+                },
+            );
+            store
+                .add(MAP, "in-the-aborted-batch", &lww_value(), 0, now_millis())
+                .await
+                .expect("write");
+            store.soft_flush().await.expect("soft_flush");
+            pass_parked.wait_parked().await;
+
+            // The clock is paused so the shutdown timeout elapses by the
+            // runtime advancing it when every task is waiting, not by waiting
+            // it out. The limiter is later than that timeout on the same
+            // clock; it is for a shutdown that would wait for the aborted
+            // batch, whose entry stays counted as pending for good.
+            tokio::time::pause();
+            tokio::time::timeout(HANG_LIMIT, store.hard_flush())
+                .await
+                .expect("`hard_flush` did not return after it aborted the flush task")
+                .expect("a shutdown that aborted the flush task returns Ok, as it always did");
+            tokio::time::resume();
+
+            // The abort drops the task when the runtime next gets to it, which
+            // is after `hard_flush` returned: the shutdown does not wait for a
+            // task it aborted. The parked pass going away is what shows the
+            // abort took place, and it closes the park's release channel.
+            let release = pass_parked.release.as_mut().expect("not released");
+            tokio::time::timeout(HANG_LIMIT, release.closed())
+                .await
+                .expect("the parked pass was never dropped: the flush task was not aborted");
+            assert_eq!(
+                *store.background_failure().borrow(),
+                None,
+                "an aborted flush task is a cancellation, not a failure"
+            );
+            assert_eq!(lifecycle(&store), Lifecycle::ShuttingDown);
+        }
+    }
+
+    /// Poisons a lock of `store` the way a panic under it would: a thread takes
+    /// the lock through `lock` and panics while it holds it.
+    fn poison(
+        store: &Arc<WriteBehindDataStore>,
+        lock: impl FnOnce(&WriteBehindDataStore) + Send + 'static,
+    ) {
+        let store = Arc::clone(store);
+        let poisoner = std::thread::spawn(move || lock(&store));
+        assert!(
+            poisoner.join().is_err(),
+            "the poisoning thread must have panicked"
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_flush_completes_with_a_poisoned_pending_seqs_lock() {
+        let memory = Arc::new(MemoryStore::default());
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&memory) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 60_000,
+                ..manual_flush_config()
+            },
+        );
+        store
+            .add(MAP, "queued", &lww_value(), 0, now_millis())
+            .await
+            .expect("write");
+
+        poison(&store, |store| {
+            let _guard = store.pending_seqs.lock().expect("not yet poisoned");
+            panic!("injected panic under the pending_seqs lock");
+        });
+        assert!(store.pending_seqs.is_poisoned());
+
+        // The drain resolves the entry's sequence under this lock.
+        store
+            .hard_flush()
+            .await
+            .expect("`hard_flush` over a poisoned pending_seqs lock");
+        assert_eq!(memory.get(MAP, "queued"), Some(lww_value()));
+    }
+
+    #[tokio::test]
+    async fn hard_flush_completes_with_a_poisoned_flush_loop_handle_lock() {
+        let memory = Arc::new(MemoryStore::default());
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&memory) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 60_000,
+                ..manual_flush_config()
+            },
+        );
+        store
+            .add(MAP, "queued", &lww_value(), 0, now_millis())
+            .await
+            .expect("write");
+
+        poison(&store, |store| {
+            let _guard = store.flush_loop.lock().expect("not yet poisoned");
+            panic!("injected panic under the flush_loop handle lock");
+        });
+        assert!(store.flush_loop.is_poisoned());
+
+        // The shutdown takes the flush task's handle out from under this lock.
+        store
+            .hard_flush()
+            .await
+            .expect("`hard_flush` over a poisoned flush_loop handle lock");
+        assert!(
+            store
+                .flush_loop
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none(),
+            "the shutdown must still have taken and joined the flush task"
+        );
+        assert_eq!(memory.get(MAP, "queued"), Some(lww_value()));
+    }
+
+    #[tokio::test]
+    async fn hard_flush_completes_with_a_poisoned_wal_tracking_cell_lock() {
+        let memory = Arc::new(MemoryStore::default());
+        let wal = Arc::new(RecordingWal::default());
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&memory) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 60_000,
+                ..manual_flush_config()
+            },
+            Some(bootstrap(Arc::clone(&wal) as Arc<dyn Wal>)),
+        );
+        store
+            .add(MAP, "queued", &lww_value(), 0, now_millis())
+            .await
+            .expect("write");
+
+        let cell = store
+            .wal
+            .as_ref()
+            .expect("a WAL-backed store")
+            .cell(partition_for(MAP, "queued"));
+        poison(&store, {
+            let cell = Arc::clone(&cell);
+            move |_store| {
+                let _guard = cell.lock().expect("not yet poisoned");
+                panic!("injected panic under a partition's WAL tracking lock");
+            }
+        });
+        assert!(cell.is_poisoned());
+
+        // The drain registers, resolves and advances the entry's WAL sequence
+        // under this lock.
+        store
+            .hard_flush()
+            .await
+            .expect("`hard_flush` over a poisoned WAL tracking lock");
+        assert_eq!(memory.get(MAP, "queued"), Some(lww_value()));
+        assert!(
+            wal.calls().contains(&WalCall::MarkApplied),
+            "the drained entry's frame must still have been marked applied"
         );
     }
 }
