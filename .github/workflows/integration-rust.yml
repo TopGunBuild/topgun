@@ -132,10 +132,11 @@ jobs:
         #   property, not a regression surface, so both files are run locally
         #   (`pnpm test:integration-rust:two-binary`) and their output is carried
         #   in the pull request.
-        # - store-refusal-liveness needs a server built with the `fault-injection`
-        #   cargo feature, and this job builds one binary without it. It is run
-        #   locally (`pnpm test:integration-rust:liveness`). What guards the
-        #   defect in CI is the in-process test in `cargo test` and the clippy gate.
+        # - store-refusal-liveness and flush-task-panic each need a server built
+        #   with the `fault-injection` cargo feature, and this job builds one
+        #   binary without it. Both are run locally
+        #   (`pnpm test:integration-rust:liveness`). What guards the two defects
+        #   in CI is the in-process tests in `cargo test` and the clippy gate.
         # - cluster-routing is left out by the variable below and gated separately
         #   (non-blocking) in the next job.
         # Each of these files fails, never skips, when its binary is not given.
