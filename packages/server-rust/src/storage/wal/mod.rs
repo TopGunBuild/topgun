@@ -437,6 +437,20 @@ pub trait Wal: Send + Sync {
     /// contiguous suffix of the log rather than an arbitrary subset. An empty vec
     /// means the partition is clean.
     async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>>;
+
+    /// Makes every frame appended so far durable, whatever the fsync policy
+    /// has deferred.
+    ///
+    /// For the one caller that cannot leave durability to the policy: a store
+    /// that is shutting down. Under a deferred policy the frames of its last
+    /// moments are in the file but not yet fsynced, and the task that would
+    /// fsync them ends with the process.
+    ///
+    /// The default does nothing, which is right for an implementation that
+    /// defers no fsync or keeps no file.
+    async fn sync(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 // ===========================================================================

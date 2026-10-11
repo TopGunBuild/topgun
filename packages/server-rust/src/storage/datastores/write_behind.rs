@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -1172,6 +1172,118 @@ impl WalTracking {
     }
 }
 
+/// A background task the write-behind store runs for its whole life.
+///
+/// These are the tasks whose death the store cannot work around: without the
+/// flush task nothing queued ever reaches the inner store, and without the
+/// stall watchdog nothing reports a WAL watermark that has stopped moving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundTask {
+    /// The task that moves queued entries to the inner store.
+    Flush,
+    /// The task that samples each partition's applied watermark for a stall.
+    StallWatchdog,
+}
+
+impl BackgroundTask {
+    /// The task's name as it appears in log fields and metric labels.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flush => "flush",
+            Self::StallWatchdog => "stall_watchdog",
+        }
+    }
+}
+
+impl std::fmt::Display for BackgroundTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The record of a background task that ended by a panic (`TG-WB-006`).
+///
+/// It is an error type so that a shutdown on a failed store can carry it as
+/// the source of what it returns: a caller then recognises the failed store by
+/// downcasting, not by matching on the text of a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundFailure {
+    /// The task that panicked.
+    pub task: BackgroundTask,
+    /// The panic payload when it was a string, a fixed placeholder otherwise.
+    pub message: String,
+}
+
+impl std::fmt::Display for BackgroundFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "write-behind {} background task panicked: {}",
+            self.task, self.message
+        )
+    }
+}
+
+impl std::error::Error for BackgroundFailure {}
+
+/// Where the store is in its life.
+///
+/// `Failed` is absorbing: a store whose background task panicked stays failed
+/// through its shutdown, so nothing that reads the state afterwards can take
+/// it for a store that merely stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Lifecycle {
+    /// Accepting writes; both background tasks are expected to be alive.
+    Running = 0,
+    /// A background task panicked. Writes are refused.
+    Failed = 1,
+    /// `hard_flush` was entered on a healthy store. Writes are refused.
+    ShuttingDown = 2,
+}
+
+/// The store's [`Lifecycle`] in one atomic, so that a write entry learns
+/// "running, failed or shutting down" from the single load it always made.
+struct LifecycleState(AtomicU8);
+
+#[expect(
+    dead_code,
+    reason = "the state replaces the shutdown flag in the change that follows"
+)]
+impl LifecycleState {
+    fn new() -> Self {
+        Self(AtomicU8::new(Lifecycle::Running as u8))
+    }
+
+    fn load(&self, order: Ordering) -> Lifecycle {
+        match self.0.load(order) {
+            state if state == Lifecycle::Running as u8 => Lifecycle::Running,
+            state if state == Lifecycle::ShuttingDown as u8 => Lifecycle::ShuttingDown,
+            // Only the three values above are ever stored; reading anything
+            // else as failed keeps an impossible value on the refusing side.
+            _ => Lifecycle::Failed,
+        }
+    }
+
+    /// A background task panicked. Unconditional, because the store is failed
+    /// from then on whatever it was doing, a shutdown included.
+    fn fail(&self) {
+        self.0.store(Lifecycle::Failed as u8, Ordering::Release);
+    }
+
+    /// `hard_flush` was entered. A transition from `Running` only: a failed
+    /// store stays failed, and a second call changes nothing.
+    fn begin_shutdown(&self) {
+        let _ = self.0.compare_exchange(
+            Lifecycle::Running as u8,
+            Lifecycle::ShuttingDown as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
 /// Write-behind buffering layer that wraps any [`MapDataStore`].
 ///
 /// Buffers `add`/`remove` calls in per-partition coalesced queues and flushes
@@ -1203,6 +1315,10 @@ pub struct WriteBehindDataStore {
     /// Set to true once graceful drain begins so any straggler writes are
     /// rejected loudly rather than silently lost.
     is_shutdown: AtomicBool,
+    /// The first background-task panic, `None` until there is one. A `watch`
+    /// channel so that whoever owns the process can wait for the failure
+    /// instead of polling the store for it.
+    background_failure: watch::Sender<Option<BackgroundFailure>>,
     /// Optional WAL for append-before-ack durability, bundled with its
     /// per-partition sequence tracking. When `Some`, every write is persisted to
     /// the WAL per the configured fsync policy before the store method returns,
@@ -1354,6 +1470,7 @@ impl WriteBehindDataStore {
             flush_notify: flush_notify.clone(),
             shutdown: shutdown_tx,
             is_shutdown: AtomicBool::new(false),
+            background_failure: watch::channel(None).0,
             wal,
             wal_sequence: AtomicU64::new(wal_sequence_start),
             pending_seqs: Mutex::new(BTreeSet::new()),
@@ -1392,6 +1509,18 @@ impl WriteBehindDataStore {
         tokio::spawn(watchdog_loop(watchdog_store, watchdog_shutdown));
 
         store
+    }
+
+    /// The failure of a background task, `None` while both are alive.
+    ///
+    /// The value is set once, by the task that panicked, and never replaced or
+    /// cleared: a second failure leaves the first in place, and a shutdown
+    /// does not erase it. A receiver taken after the failure sees it as its
+    /// current value, so a caller that waits must look at the value before it
+    /// waits for a change (`wait_for` does).
+    #[must_use]
+    pub fn background_failure(&self) -> watch::Receiver<Option<BackgroundFailure>> {
+        self.background_failure.subscribe()
     }
 
     /// Assign the next ordering sequence AND record it pending byte-durability in

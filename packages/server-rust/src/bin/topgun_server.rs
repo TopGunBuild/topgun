@@ -2229,6 +2229,83 @@ async fn shutdown_signal() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// How a shutdown ends
+// ---------------------------------------------------------------------------
+
+/// What made the node start shutting down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    dead_code,
+    reason = "the shutdown path that reads the store's failure follows"
+)]
+enum ShutdownCause {
+    /// SIGTERM or SIGINT.
+    Signal,
+    /// A background task of the write-behind store panicked (`TG-WB-006`).
+    StoreFailure,
+}
+
+/// How the shutdown itself went, whatever started it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    dead_code,
+    reason = "the shutdown path that reads the store's failure follows"
+)]
+enum ShutdownOutcome {
+    /// The write-behind drain returned, with or without an error.
+    Completed,
+    /// The drain panicked, or did not return before the failure deadline.
+    PanickedOrOverran,
+}
+
+/// The process exit code for a shutdown.
+///
+/// It takes the fact of a store failure, not what started the stop: a node
+/// whose flush task died holding a batch must not report a clean stop because
+/// a signal happened to arrive first. No cell is 0 for a shutdown that
+/// panicked or overran, the one no caller reaches included.
+#[expect(
+    dead_code,
+    reason = "the shutdown path that reads the store's failure follows"
+)]
+fn exit_code_for(store_failed: bool, shutdown: ShutdownOutcome) -> i32 {
+    match (store_failed, shutdown) {
+        (_, ShutdownOutcome::PanickedOrOverran) => 71,
+        (true, ShutdownOutcome::Completed) => 70,
+        (false, ShutdownOutcome::Completed) => 0,
+    }
+}
+
+/// Whether the store has failed, read once the write-behind drain returned.
+///
+/// The cause alone is not enough: a task can panic after a signal started the
+/// stop, and then the failure is only in the store's record or in what the
+/// drain returned. `recorded` is `None` for a backend with no write-behind
+/// store.
+///
+/// Generic over the failure type because the store's own type is not exported
+/// under a name this binary can write; the receiver the store hands out fixes
+/// it at the call.
+#[expect(
+    dead_code,
+    reason = "the shutdown path that reads the store's failure follows"
+)]
+fn store_failed<F>(
+    cause: ShutdownCause,
+    recorded: Option<&watch::Receiver<Option<F>>>,
+    flushed: &anyhow::Result<()>,
+) -> bool
+where
+    F: std::error::Error + Send + Sync + 'static,
+{
+    cause == ShutdownCause::StoreFailure
+        || recorded.is_some_and(|failure| failure.borrow().is_some())
+        || flushed
+            .as_ref()
+            .is_err_and(|err| err.downcast_ref::<F>().is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{admin_bind_posture, log_boot_summary, BindPosture};
