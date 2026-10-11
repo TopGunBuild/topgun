@@ -3393,9 +3393,18 @@ impl MapDataStore for WriteBehindDataStore {
         // Check capacity before insertion to avoid partial state on rejection
         if self.config.capacity != 0 {
             let current = self.pending_count.load(Ordering::Relaxed);
-            // Only reject if this would be a NEW key (not a coalesce).
-            // We check the staging area as a fast pre-check; the definitive
-            // check happens via PartitionQueue::insert return value.
+            // A soft bound, not a reservation. The check reads staging, and a
+            // key whose entry is held by a flush pass counts as known: its
+            // staging slot is cleared only once the entry is persisted. The
+            // check and the insert below are separate steps with nothing held
+            // across them, and what `PartitionQueue::insert` returns is not
+            // consulted.
+            //
+            // The bound that holds: `pending_count` can exceed `capacity` by
+            // at most the number of entries a flush pass holds plus the number
+            // of writers that are between this check and their insert. Every
+            // write of a key that is in neither staging nor a flush pass is
+            // rejected while `pending_count >= capacity`.
             let is_new_key = !self
                 .staging
                 .contains_key(&(map.to_string(), key.to_string()));
@@ -10396,5 +10405,102 @@ mod background_task_panic_tests {
             wal.calls().contains(&WalCall::MarkApplied),
             "the drained entry's frame must still have been marked applied"
         );
+    }
+
+    #[tokio::test]
+    async fn the_capacity_pre_check_bound_is_the_stated_one() {
+        const CAPACITY: u64 = 3;
+        /// The keys whose entries the parked flush pass holds.
+        const HELD: [&str; 2] = ["held-1", "held-2"];
+        /// Queued but too young for the pass, so it stays in its queue.
+        const QUEUED: &str = "queued";
+
+        async fn assert_a_new_key_is_rejected(store: &WriteBehindDataStore, when: &str) {
+            let pending = store.pending_operation_count();
+            let rejected = store
+                .add(MAP, "in-neither", &lww_value(), 0, now_millis())
+                .await
+                .expect_err("a key in neither staging nor a flush pass must be rejected");
+            assert_eq!(
+                rejected.to_string(),
+                "Write-behind capacity exceeded",
+                "{when}"
+            );
+            assert_eq!(
+                store.pending_operation_count(),
+                pending,
+                "{when}: a rejected write must not be counted"
+            );
+        }
+
+        let (inner, _about_to_panic) = PanickingAddStore::new(0);
+        let mut pass_parked = inner.arm_park();
+        let store = WriteBehindDataStore::new(
+            inner,
+            WriteBehindConfig {
+                capacity: CAPACITY,
+                ..manual_flush_config()
+            },
+        );
+        let now = now_millis();
+        let held = u64::try_from(HELD.len()).expect("a small count");
+
+        for key in HELD {
+            store
+                .add(MAP, key, &lww_value(), 0, now)
+                .await
+                .expect("below capacity");
+        }
+        // Stored an hour from now, so no pass finds it old enough to take.
+        store
+            .add(MAP, QUEUED, &lww_value(), 0, now + 3_600_000)
+            .await
+            .expect("below capacity");
+        assert_eq!(store.pending_operation_count(), CAPACITY);
+        assert_a_new_key_is_rejected(&store, "at capacity, before any pass").await;
+
+        store.soft_flush().await.expect("soft_flush");
+        pass_parked.wait_parked().await;
+        assert_eq!(
+            store.pending_operation_count(),
+            CAPACITY,
+            "the entries a pass holds stay counted until they are persisted"
+        );
+        assert_a_new_key_is_rejected(&store, "a pass holds entries").await;
+
+        // The held keys are still staged, so the pre-check takes each re-write
+        // for a coalesce; their queue entries are gone, so each is counted anew.
+        let mut rewritten = 0;
+        for key in HELD {
+            store
+                .add(MAP, key, &lww_value(), 0, now)
+                .await
+                .expect("a re-write of a key the flush pass holds is accepted over capacity");
+            rewritten += 1;
+            assert_eq!(store.pending_operation_count(), CAPACITY + rewritten);
+            assert_a_new_key_is_rejected(&store, "over capacity, while the pass is parked").await;
+        }
+        assert_eq!(store.pending_operation_count(), CAPACITY + held);
+
+        // A second round finds every key queued and coalesces: the excess does
+        // not grow past the number of entries the pass holds.
+        for key in HELD.into_iter().chain([QUEUED]) {
+            store
+                .add(MAP, key, &lww_value(), 0, now)
+                .await
+                .expect("a re-write of a queued key coalesces");
+        }
+        assert_eq!(
+            store.pending_operation_count(),
+            CAPACITY + held,
+            "the count must not exceed capacity by more than the pass holds"
+        );
+        assert_a_new_key_is_rejected(&store, "after the second round").await;
+
+        pass_parked.release();
+        tokio::time::timeout(HANG_LIMIT, store.hard_flush())
+            .await
+            .expect("`hard_flush` did not return")
+            .expect("a healthy shutdown");
     }
 }
