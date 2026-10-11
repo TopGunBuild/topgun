@@ -1630,17 +1630,13 @@ case outside the precondition.
   1. `DeviceHello` is handled in the connection's read loop. Inside an envelope it is not accepted.
   2. `ClientApplyAck` is handled in the read loop as well. Inside an envelope it is not accepted.
   3. A nested `BATCH` is not unpacked: an envelope is one level deep.
-  4. The rate-limit charge is taken in the read loop, per frame, before any unpacking.
+  4. The rate-limit charge is taken in the read loop, per frame, after the envelope is unpacked
+     there: what an envelope costs is `TG-RATE-001`.
 - **Not claimed:**
   - **An answer to what the envelope does not accept.** A `DeviceHello`, a `ClientApplyAck` or a
     nested `BATCH` inside an envelope is dropped with a log line and the client gets no frame.
     The same holds for an inner item that does not decode and for a truncated tail: the rest of
     a truncated envelope is not dispatched and nothing says so. Tracker TODO-785.
-  - **A rate limit by operations for an envelope.** The limiter charges a frame once, in the read
-    loop: an envelope costs one token per inner item, so an inner `OP_BATCH` of N ops costs one
-    token where the same batch sent top-level costs N. Because of clause (b) that one-token batch
-    now fans out across the partition workers instead of running serially on one. Tracker
-    TODO-781.
   - **That nothing can build a batch without a partition.** An operation can still be constructed
     by hand with no partition and passed to a service directly; simulation and unit tests do. The
     dispatcher does not refuse it. What keeps such a batch correct is the per-key writer
@@ -1651,7 +1647,8 @@ case outside the precondition.
   - **Any transport other than the WebSocket envelope.** HTTP sync builds its sub-batches per
     partition itself and has no envelope.
 - **Maintaining code:** `network/handlers/websocket.rs` — `dispatch_one_message`, its two callers
-  `dispatch_message` and `unpack_and_dispatch_batch`, and `dispatch_op_batch`;
+  `dispatch_message` and `dispatch_envelope`, `UnpackedEnvelope::unpack`, which decodes an
+  envelope's inner items in the read loop, and `dispatch_op_batch`;
   `service/classify.rs` — the `OpBatch` arm of `classify`; `service/operation.rs` —
   `ClassifyError::RequiresPartitionSplit`. Citations are line-number-free, per `TG-OR-004`.
 - **Enforcing test:** one per property, each shown red on a tree with that property removed.
@@ -1690,3 +1687,80 @@ case outside the precondition.
 | `nested_empty_op_batch_emits_no_frame` | an empty enveloped `OP_BATCH` is not dispatched and gets no frame, while a non-empty one after it in the same envelope is dispatched and acknowledged. Shown red on the tree where the envelope skips an inner `OP_BATCH` | CI (`cargo test`) |
 | `classify_refuses_an_op_batch` | classification returns `RequiresPartitionSplit` for an `OP_BATCH` | CI (`cargo test`) |
 | `tests/integration-rust/enveloped-op-batch.test.ts` | clause (a), envelope order — the only enforcer of it — against a real server binary: an enveloped `OP_BATCH` with one refused op is answered with the refusal and the acknowledgement of the accepted ops, ahead of the acknowledgement of a write placed after it in the same envelope. Shown red on the tree that dispatches the inner items last-to-first and on the tree that dispatches them all at once: nothing arrived ahead of the later write's acknowledgement | CI (`pnpm test:integration-rust`) |
+
+### TG-RATE-001: The cost a frame presents to its connection's limiter is not less than the number of client operations it hands to dispatch
+
+- **Scope:** every inbound WebSocket frame that reaches the per-connection rate limiter in the
+  read loop (`network/handlers/websocket.rs`): a message sent on its own, and a `BATCH` envelope
+  with whatever it packs.
+- **Statement:** for every inbound frame, the cost presented to the connection's limiter is not
+  less than the number of client operations the frame hands to dispatch. A **client operation**
+  is one `ClientOp` of an `OP_BATCH`, or one message that is not an `OP_BATCH`; it is counted
+  once however many times dispatch is called with it. A frame the limiter refuses hands no
+  operation to dispatch.
+  How it is kept:
+  (a) *Cost of one message.* An `OP_BATCH` costs the number of operations it carries, at least
+  one; every other message costs one — an envelope found inside an envelope included.
+  (b) *One decode, one value.* The read loop unpacks an envelope once, before the charge, and
+  moves the unpacked value into the dispatch task. The cost is computed from the messages that
+  value holds and is stored nowhere, and dispatch consumes those messages and reads no envelope
+  bytes of its own. The unpacker is handed the envelope's `data` bytes and nothing else, so the
+  count the envelope declares has no way into the cost.
+  (c) *What an envelope costs.* The sum of what its decodable inner messages cost, plus one per
+  framed item that does not decode, at least one. An envelope framing more than 8 192 items is
+  not decoded at all, costs its framed item count, and is answered whole with one 413.
+  (d) *A nested envelope* costs one token and is neither unpacked nor dispatched: an envelope is
+  one level deep (`TG-DISP-001`, exception 3).
+  (e) *Refusal.* A frame the bucket does not cover is answered with one 429 and dropped whole in
+  the read loop; nothing of it reaches the dispatch task.
+- **Not claimed:**
+  - **What the bucket takes for the cost presented, and any bound on operations per frame.** The
+    bucket charges `min(cost, capacity)` (`network/rate_limit.rs`, `try_consume_at`): a frame
+    whose cost is above the burst passes on a full bucket and is charged the burst, top-level and
+    enveloped alike. This entry is a statement per frame about the cost presented; what the
+    bucket then does with it, and the rate that results over time, are outside it. Tracker
+    TODO-797, which also holds the considered hard cap on operations per frame.
+  - **A limiter configured with refill 0.** It answers yes and charges nothing
+    (`network/rate_limit.rs`, `try_consume_at`). By configuration.
+  - **`ORMAP_PUSH_DIFF`.** A message with N entries is one client operation by the definition
+    above and costs one.
+  - **The number of dispatch calls.** The per-op fallback dispatches an operation of a
+    permanently refused sub-batch a second time, as a singleton, for the one token it was charged.
+  - **HTTP `/sync`,** which this bucket does not charge. Tracker TODO-799.
+  - **An undecodable top-level frame,** which is dropped before the charge, **and decode before
+    refusal:** an envelope the bucket then refuses has already been decoded. Tracker TODO-798.
+  - **Any limit across connections,** per principal or per address; cost by bytes or CPU.
+  - **An answer to a nested envelope or to an inner item that does not decode.** Still
+    `TG-DISP-001`'s; tracker TODO-785.
+- **Maintaining code:** `network/handlers/websocket.rs` — `message_cost`,
+  `UnpackedEnvelope::unpack` and `UnpackedEnvelope::cost`, `InboundFrame::cost`, the charge and
+  its `continue` in the read loop of `handle_socket`, `dispatch_envelope`. Citations are
+  line-number-free, per `TG-OR-004`.
+- **Enforcing test:** `an_enveloped_op_batch_costs_its_operation_count` and the four other unit
+  tests of the table below, in `websocket.rs`'s test module, for clauses (a)–(d); and
+  `tests/rate_limit_envelope_integration.rs`, **the only enforcer of the read-loop wiring** — of
+  the cost the read loop presents and of clause (e). The unit tests never enter the read loop:
+  a read loop that presented some other figure than the unpacked value's cost, or that sent the
+  429 and dispatched the frame anyway, is green on all of them. All run in CI (`cargo test`).
+  Held by the signature and not by a test: that the declared count is not read, and that the
+  cost is of the list dispatched.
+- **Violation consequence:** a peer packs operations so that they cost less than they are. Before
+  this entry a frame `BATCH[ OP_BATCH(N) ]` presented a cost of one and dispatched N operations
+  across the partition workers, N limited only by the 2 MB frame.
+- **Discovered by:** the SPEC-384 planning read of the read loop (the charge counted an
+  envelope's framed items without decoding them); left open by SPEC-384a2, fixed and catalogued
+  by SPEC-385.
+- **Status:** decided, **enforced** — by the tests below and, for the two properties named above,
+  by the unpacker's signature.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `an_enveloped_op_batch_costs_its_operation_count` | an envelope holding one `OP_BATCH` of 7 costs 7; one holding `OP_BATCH(3)`, `CLIENT_OP`, `OP_BATCH(0)`, `PING` costs 6. Shown red on the mutant where an inner `OP_BATCH` costs one inside the envelope's sum, and on the mutant where an empty `OP_BATCH` costs nothing | CI (`cargo test`) |
+| `an_envelope_costs_what_its_messages_cost_on_their_own` | property, 256 generated envelopes under a fixed generator: 1 to 12 items — batches of 0 to 39 operations, single writes, pings, nested envelopes, items that do not decode — an arbitrary declared count, an optional truncated tail. The cost is the sum of what the items cost on their own, the held messages are the decodable items in order, and the operations held never exceed the cost. Shown red on the two mutants above and on those where an undecodable item is free, where the walk ends at the first undecodable item, and where a nested envelope's items are unpacked | CI (`cargo test`) |
+| `an_envelope_never_presents_a_cost_below_what_it_dispatches` | through the real dispatch path: one envelope with two real batches, an empty batch, an undecodable item and a nested envelope presents a cost of 12 and hands 9 operations to the domain service. Shown red on the same five mutants | CI (`cargo test`) |
+| `a_nested_envelope_costs_one_token_and_is_not_unpacked` | clause (d): cost 1, nothing dispatched, no frame, with both headers declaring a count that is not true. Shown red on the mutant that unpacks a nested envelope's items | CI (`cargo test`) |
+| `an_oversized_envelope_is_not_decoded_and_is_refused_whole` | clause (c), the cap: 8 193 framed items, the first a real batch — nothing held, cost 8 193, one 413, nothing dispatched. Shown red on the mutant with the cap check removed | CI (`cargo test`) |
+| `inbound_op_cost_counts_batch_ops` | the costs of single messages, and of envelopes whose items do not decode (50 items cost 50, none costs 1, a header declaring 99 over 3 items costs 3). Shown red on the mutants where an empty `OP_BATCH` costs nothing, where an undecodable item is free, where the walk ends at the first undecodable item, and — alone — on the mutant with no floor of one on an envelope's cost | CI (`cargo test`) |
+| `tests/rate_limit_envelope_integration.rs` :: `an_enveloped_op_batch_drains_the_bucket_like_a_top_level_one` | **the cost the read loop presents**, through a real socket: an envelope holding one `OP_BATCH` of 100 drains a 100-token bucket, so both batches of 60 that follow are answered 429. Shown red, 20 of 20, on the tree before the fix (one 429), on the mutant where an inner `OP_BATCH` costs one, and — alone among all the tests — on the mutant where the read loop presents the framed item count instead of the unpacked value's cost. Control: `a_top_level_op_batch_drains_the_bucket` | CI (`cargo test`) |
+| `tests/rate_limit_envelope_integration.rs` :: `a_refused_envelope_hands_nothing_to_dispatch` | **clause (e)**, through a real socket with a recording service behind a one-worker dispatcher: an envelope of 70 writes the bucket does not cover gets one 429 and not one of its writes is recorded by the time a write sent after it is. Shown red, 20 of 20, on the mutant where the read loop sends the 429 and moves the frame to dispatch anyway — the only test that is. Control: `an_admitted_envelope_hands_every_operation_to_dispatch` records all 70 with no 429. The zero is read when the later write arrives; that this orders a dispatched write ahead of it rests on one worker and on the single-threaded test runtime polling tasks in spawn order | CI (`cargo test`) |
+| nine one-change mutants, ten tests each | each mutant turned red exactly the tests named for it above and no other | one shot, at landing; not a guard |
