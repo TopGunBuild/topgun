@@ -4206,7 +4206,7 @@ impl MapDataStore for WriteBehindDataStore {
         // pair coherent.
         //
         // What is NOT cleared, and why the precondition also needs empty queues on a
-        // WAL-backed store (TG-WB-005 does not cover `reset`; tracked as TODO-775):
+        // WAL-backed store (TG-WB-005 does not cover `reset`; tracked as TODO-803):
         // the WAL-sequence tracker is left as it is, because the frames are still on
         // disk and forgetting them would let the watermark pass writes that were
         // never applied. Entries queued at this moment therefore leave their WAL
