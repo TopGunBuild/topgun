@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -1247,10 +1249,6 @@ enum Lifecycle {
 /// "running, failed or shutting down" from the single load it always made.
 struct LifecycleState(AtomicU8);
 
-#[expect(
-    dead_code,
-    reason = "the state replaces the shutdown flag in the change that follows"
-)]
 impl LifecycleState {
     fn new() -> Self {
         Self(AtomicU8::new(Lifecycle::Running as u8))
@@ -1284,6 +1282,79 @@ impl LifecycleState {
     }
 }
 
+/// Counts background tasks that ended by a panic, by `task` label.
+const BACKGROUND_TASK_PANICS_COUNTER: &str = "topgun_write_behind_background_task_panics_total";
+
+/// Registers the panic counter with both of its series at zero.
+///
+/// A series that first appears when it is incremented cannot be told from a
+/// series that was never exported, so an alert on it would have nothing to
+/// compare against until the failure it is there to report.
+fn register_background_task_panic_metrics() {
+    metrics::describe_counter!(
+        BACKGROUND_TASK_PANICS_COUNTER,
+        "Write-behind background tasks that ended by a panic, labeled by the task"
+    );
+    for task in [BackgroundTask::Flush, BackgroundTask::StallWatchdog] {
+        metrics::counter!(BACKGROUND_TASK_PANICS_COUNTER, "task" => task.as_str()).increment(0);
+    }
+}
+
+/// The text of a panic payload: the message when the panic carried a string,
+/// which is what `panic!` produces, and a fixed placeholder otherwise.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+/// The body of a background task, run so that a panic in it is seen by the
+/// store (`TG-WB-006`).
+///
+/// The unwind is caught inside `poll`, on the dying task and before that poll
+/// returns to the runtime, and the failure is recorded right there. Awaiting
+/// the task's `JoinHandle` from another task would learn of the panic only
+/// when the runtime next ran that other task, and every write accepted in
+/// between would be queued behind a flush task that no longer exists.
+///
+/// A task that is aborted is dropped, not unwound, so an abort records
+/// nothing; neither does a body that returns.
+struct ObservedTask<F> {
+    store: Arc<WriteBehindDataStore>,
+    task: BackgroundTask,
+    /// Boxed so the wrapper is `Unpin` and needs no pin projection.
+    body: std::pin::Pin<Box<F>>,
+}
+
+impl<F> std::future::Future for ObservedTask<F>
+where
+    F: std::future::Future<Output = ()>,
+{
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let this = &mut *self;
+        let body = this.body.as_mut();
+        // The body is never polled again after it unwound: the task ends here,
+        // so no state the panic left half-updated inside it is observed.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.poll(cx))) {
+            Ok(poll) => poll,
+            Err(payload) => {
+                this.store
+                    .record_background_failure(this.task, panic_message(payload.as_ref()));
+                std::task::Poll::Ready(())
+            }
+        }
+    }
+}
+
 /// Write-behind buffering layer that wraps any [`MapDataStore`].
 ///
 /// Buffers `add`/`remove` calls in per-partition coalesced queues and flushes
@@ -1312,9 +1383,11 @@ pub struct WriteBehindDataStore {
     flush_notify: Arc<Notify>,
     /// Shutdown signal sender — wakes the background flush task and tells it to exit.
     shutdown: watch::Sender<bool>,
-    /// Set to true once graceful drain begins so any straggler writes are
-    /// rejected loudly rather than silently lost.
-    is_shutdown: AtomicBool,
+    /// Running, failed or shutting down. A write entry loads it once and
+    /// refuses in the last two, so a straggler write is rejected loudly rather
+    /// than silently lost: after a shutdown began nothing would drain it, and
+    /// after a background task panicked nothing would flush it.
+    lifecycle: LifecycleState,
     /// The first background-task panic, `None` until there is one. A `watch`
     /// channel so that whoever owns the process can wait for the failure
     /// instead of polling the store for it.
@@ -1448,6 +1521,8 @@ impl WriteBehindDataStore {
             );
         }
 
+        register_background_task_panic_metrics();
+
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let flush_notify = Arc::new(Notify::new());
 
@@ -1469,7 +1544,7 @@ impl WriteBehindDataStore {
             pending_count: AtomicU64::new(0),
             flush_notify: flush_notify.clone(),
             shutdown: shutdown_tx,
-            is_shutdown: AtomicBool::new(false),
+            lifecycle: LifecycleState::new(),
             background_failure: watch::channel(None).0,
             wal,
             wal_sequence: AtomicU64::new(wal_sequence_start),
@@ -1494,7 +1569,11 @@ impl WriteBehindDataStore {
 
         // Spawn background flush loop with a clone of the Arc
         let store_clone = Arc::clone(&store);
-        let flush_task = tokio::spawn(flush_loop(store_clone, shutdown_rx));
+        let flush_task = Self::spawn_background_task(
+            &store,
+            BackgroundTask::Flush,
+            flush_loop(store_clone, shutdown_rx),
+        );
         *store
             .flush_loop
             .lock()
@@ -1506,9 +1585,64 @@ impl WriteBehindDataStore {
         // precisely when it is needed.
         let watchdog_shutdown = store.shutdown.subscribe();
         let watchdog_store = Arc::clone(&store);
-        tokio::spawn(watchdog_loop(watchdog_store, watchdog_shutdown));
+        // Under the same policy as the flush task: the watchdog reads the state
+        // the flush path changes, so its panic is a sign of a defect in that
+        // state, and a store that ran on without it would have lost its only
+        // stall detector without saying so.
+        Self::spawn_background_task(
+            &store,
+            BackgroundTask::StallWatchdog,
+            watchdog_loop(watchdog_store, watchdog_shutdown),
+        );
 
         store
+    }
+
+    /// Starts a background task. Every one of them starts here, so none can
+    /// run without its panic being recorded.
+    fn spawn_background_task<F>(
+        store: &Arc<Self>,
+        task: BackgroundTask,
+        body: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        tokio::spawn(ObservedTask {
+            store: Arc::clone(store),
+            task,
+            body: Box::pin(body),
+        })
+    }
+
+    /// Fails the store because `task` panicked. Runs on the dying task.
+    ///
+    /// Synchronous on purpose, and the state is stored first: once the poll of
+    /// the panicked task has returned, the next write already finds a failed
+    /// store. Were the state stored after a suspension point, or after the
+    /// signal that makes the owner of the process react, a write could be
+    /// accepted by a store already known to be dead.
+    ///
+    /// The record keeps the first failure. A second task that panics is still
+    /// logged and counted, because it is a second defect.
+    fn record_background_failure(&self, task: BackgroundTask, message: String) {
+        self.lifecycle.fail();
+        error!(
+            task = task.as_str(),
+            panic = %message,
+            "write-behind background task panicked; the store refuses writes from now on"
+        );
+        metrics::counter!(BACKGROUND_TASK_PANICS_COUNTER, "task" => task.as_str()).increment(1);
+        // `send_if_modified` and not `send`: `send` stores nothing when no
+        // receiver exists at that moment, and the record has to be there for a
+        // receiver taken later.
+        self.background_failure.send_if_modified(|recorded| {
+            if recorded.is_some() {
+                return false;
+            }
+            *recorded = Some(BackgroundFailure { task, message });
+            true
+        });
     }
 
     /// The failure of a background task, `None` while both are alive.
@@ -1521,6 +1655,173 @@ impl WriteBehindDataStore {
     #[must_use]
     pub fn background_failure(&self) -> watch::Receiver<Option<BackgroundFailure>> {
         self.background_failure.subscribe()
+    }
+
+    /// The shutdown drain: persists every queued entry to the inner store, or
+    /// gives up on what is left when `deadline` passes.
+    ///
+    /// Returns how many entries it took from the queues, persisted or not. It
+    /// ends when the queues are empty and never looks at `pending_count`: on a
+    /// store whose flush task died holding a batch that count stays above zero
+    /// for good, and a drain that waited for it would never return.
+    ///
+    /// Only what is queued is touched. The entries a dead flush task held are
+    /// in no queue; their WAL sequences stay un-resolved, which holds the
+    /// applied watermark below their frames so the next start replays them
+    /// (`TG-WB-006`).
+    async fn drain_for_shutdown(&self, deadline: tokio::time::Instant) -> usize {
+        // Flush all partition queues directly to the inner store. Using i64::MAX
+        // as the drain deadline ensures every buffered entry is eligible regardless
+        // of its write_delay_ms schedule — on shutdown we want everything, not just
+        // entries past their delay window.
+        let mut drained_entries = 0usize;
+        loop {
+            // Collect all entries still in the queues.
+            let mut all_entries: Vec<DelayedEntry> = Vec::new();
+            for mut queue_ref in self.queues.iter_mut() {
+                let drained = queue_ref.value_mut().drain_ready(i64::MAX);
+                all_entries.extend(drained);
+            }
+            drained_entries += all_entries.len();
+
+            if all_entries.is_empty() {
+                return drained_entries;
+            }
+
+            // Same window as the flush loop's drain: from here the entries exist
+            // only as local bindings, so record ownership before the first
+            // inner-store call and after every queue guard has dropped.
+            for entry in &all_entries {
+                self.register_in_flight(
+                    partition_for(&entry.map, &entry.key),
+                    &entry.wal_sequences,
+                );
+            }
+
+            // Persist each entry, wrapping each inner-store call with the
+            // remaining deadline budget. This ensures that even a single slow
+            // inner-store write cannot hold up the process past the configured
+            // timeout.
+            let mut timed_out_entries: Vec<DelayedEntry> = Vec::new();
+
+            for entry in all_entries {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    // Budget exhausted — collect this entry as timed-out.
+                    timed_out_entries.push(entry);
+                    continue;
+                }
+
+                let flush_future = persist_entry(self.inner.as_ref(), &entry);
+
+                let partition_id_for_wal = partition_for(&entry.map, &entry.key);
+                match tokio::time::timeout(remaining, flush_future).await {
+                    Ok(Ok(())) => {
+                        self.staging.remove(&(entry.map.clone(), entry.key.clone()));
+                        self.pending_count.fetch_sub(1, Ordering::Relaxed);
+                        self.resolve_pending(entry.sequence);
+                        // Resolve and advance so a restart after clean shutdown is
+                        // a no-op rather than re-replaying already-durable writes.
+                        self.resolve_and_advance(partition_id_for_wal, &entry.wal_sequences)
+                            .await;
+                    }
+                    Ok(Err(err)) => {
+                        // Inner store returned an error; log and treat as timed-out
+                        // rather than looping forever on a failing backend.
+                        warn!(
+                            map = %entry.map,
+                            key = %entry.key,
+                            error = %err,
+                            "Inner store error during shutdown drain; entry not persisted"
+                        );
+                        timed_out_entries.push(entry);
+                    }
+                    Err(_elapsed) => {
+                        // Deadline expired mid-write.
+                        timed_out_entries.push(entry);
+                    }
+                }
+            }
+
+            if !timed_out_entries.is_empty() {
+                // Also sweep any entries reinserted by concurrent retry paths.
+                // These are drained and abandoned in one go — deliberately never
+                // registered, since they never enter a flush and an ownership
+                // that is taken and released with no call in between is a state
+                // no observer can see.
+                for mut queue_ref in self.queues.iter_mut() {
+                    let drained = queue_ref.value_mut().drain_ready(i64::MAX);
+                    drained_entries += drained.len();
+                    timed_out_entries.extend(drained);
+                }
+
+                // The process is exiting with these writes in neither the inner
+                // store nor applied in the WAL. Abandoning rather than resolving
+                // holds the watermark below their frames, so recovery replays
+                // them on the next boot.
+                for entry in &timed_out_entries {
+                    self.abandon_wal_sequences(
+                        partition_for(&entry.map, &entry.key),
+                        &entry.wal_sequences,
+                    );
+                }
+
+                // Log every op that could not be persisted within the timeout.
+                for entry in &timed_out_entries {
+                    warn!(
+                        map = %entry.map,
+                        key = %entry.key,
+                        timeout_ms = self.config.shutdown_timeout_ms,
+                        "Shutdown drain timed out; write-behind entry could not be persisted"
+                    );
+                }
+                return drained_entries;
+            }
+
+            // Yield briefly between iterations to avoid starving the tokio runtime.
+            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// The one way out of `hard_flush`: makes the WAL durable, then says
+    /// whether the store that was shut down had failed.
+    ///
+    /// The sync comes first and on every shutdown, not only a failed one. Under
+    /// a deferred fsync policy the frames of the last moments are in the file
+    /// but not fsynced, and the task that would fsync them ends with the
+    /// process. Its error does not replace the result: the caller has to learn
+    /// about the store either way.
+    ///
+    /// The failure is read here, after everything else, because a task can
+    /// panic at any moment of the shutdown — while the flush task was being
+    /// waited for, or during the drain. Read at the entry, such a failure
+    /// would end in `Ok(())` and a node reporting a clean stop.
+    async fn finish_shutdown(&self, drained_entries: usize) -> anyhow::Result<()> {
+        if let Some(tracking) = &self.wal {
+            if let Err(err) = tracking.wal.sync().await {
+                error!(
+                    error = %err,
+                    "WAL sync at write-behind shutdown failed; frames appended since the last \
+                     fsync may not be durable"
+                );
+            }
+        }
+
+        let failure = self.background_failure.borrow().clone();
+        let Some(failure) = failure else {
+            return Ok(());
+        };
+        // `pending_count` here is the dead flush task's batch plus whatever
+        // this drain timed out or failed on; it is not the size of the batch.
+        error!(
+            task = failure.task.as_str(),
+            unpersisted_entries = self.pending_count.load(Ordering::Relaxed),
+            drained_entries,
+            "write-behind shutdown on a failed store: entries not persisted here stay \
+             un-resolved and replay from the WAL at the next start when the store has one"
+        );
+        Err(anyhow::Error::new(failure)
+            .context("write-behind shutdown ran on a failed store: a background task panicked"))
     }
 
     /// Assign the next ordering sequence AND record it pending byte-durability in
@@ -3031,11 +3332,17 @@ impl MapDataStore for WriteBehindDataStore {
         // Reject new writes once graceful drain is in progress so any out-of-order
         // arrival is visible as an error rather than silently lost. In the normal
         // shutdown sequence the HTTP server is already draining before the shutdown
-        // flag is set, making this path effectively unreachable under orderly shutdown.
-        if self.is_shutdown.load(Ordering::Acquire) {
-            anyhow::bail!(
+        // state is set, making that arm effectively unreachable under orderly
+        // shutdown. A failed store refuses for the opposite reason: the write
+        // would be acked and then queued behind a flush task that is gone.
+        match self.lifecycle.load(Ordering::Acquire) {
+            Lifecycle::Running => {}
+            Lifecycle::Failed => anyhow::bail!(
+                "write-behind store has failed (background task panicked); write rejected for map={map} key={key}"
+            ),
+            Lifecycle::ShuttingDown => anyhow::bail!(
                 "write-behind store is shutting down; write rejected for map={map} key={key}"
-            );
+            ),
         }
 
         // Check capacity before insertion to avoid partial state on rejection
@@ -3217,11 +3524,16 @@ impl MapDataStore for WriteBehindDataStore {
     }
 
     async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
-        // Reject once graceful drain begins — same reasoning as `add`.
-        if self.is_shutdown.load(Ordering::Acquire) {
-            anyhow::bail!(
+        // Reject once graceful drain begins or the store has failed — same
+        // reasoning as `add`.
+        match self.lifecycle.load(Ordering::Acquire) {
+            Lifecycle::Running => {}
+            Lifecycle::Failed => anyhow::bail!(
+                "write-behind store has failed (background task panicked); write rejected for map={map} key={key}"
+            ),
+            Lifecycle::ShuttingDown => anyhow::bail!(
                 "write-behind store is shutting down; remove rejected for map={map} key={key}"
-            );
+            ),
         }
 
         // Check capacity before insertion
@@ -3407,9 +3719,16 @@ impl MapDataStore for WriteBehindDataStore {
         // Reject new writes once graceful drain is in progress so any out-of-order
         // arrival is visible as an error rather than silently lost, matching the
         // add/remove guards. Effectively unreachable under orderly shutdown (the
-        // HTTP server drains before the shutdown flag is set).
-        if self.is_shutdown.load(Ordering::Acquire) {
-            anyhow::bail!("write-behind store is shutting down; remove_all rejected for map={map}");
+        // HTTP server drains before the shutdown state is set). A failed store
+        // refuses for the reason `add` gives.
+        match self.lifecycle.load(Ordering::Acquire) {
+            Lifecycle::Running => {}
+            Lifecycle::Failed => anyhow::bail!(
+                "write-behind store has failed (background task panicked); write rejected for map={map}"
+            ),
+            Lifecycle::ShuttingDown => anyhow::bail!(
+                "write-behind store is shutting down; remove_all rejected for map={map}"
+            ),
         }
 
         let now = now_millis();
@@ -3681,8 +4000,9 @@ impl MapDataStore for WriteBehindDataStore {
 
     async fn hard_flush(&self) -> anyhow::Result<()> {
         // Mark the store as shutting down so any straggler writes are rejected
-        // rather than queued behind the drain.
-        self.is_shutdown.store(true, Ordering::Release);
+        // rather than queued behind the drain. From `Running` only: a store that
+        // has already failed stays failed, so its writers keep being told why.
+        self.lifecycle.begin_shutdown();
 
         #[cfg(test)]
         {
@@ -3705,114 +4025,8 @@ impl MapDataStore for WriteBehindDataStore {
 
         self.join_flush_loop(deadline).await;
 
-        // Flush all partition queues directly to the inner store. Using i64::MAX
-        // as the drain deadline ensures every buffered entry is eligible regardless
-        // of its write_delay_ms schedule — on shutdown we want everything, not just
-        // entries past their delay window.
-        loop {
-            // Collect all entries still in the queues.
-            let mut all_entries: Vec<DelayedEntry> = Vec::new();
-            for mut queue_ref in self.queues.iter_mut() {
-                let drained = queue_ref.value_mut().drain_ready(i64::MAX);
-                all_entries.extend(drained);
-            }
-
-            if all_entries.is_empty() {
-                return Ok(());
-            }
-
-            // Same window as the flush loop's drain: from here the entries exist
-            // only as local bindings, so record ownership before the first
-            // inner-store call and after every queue guard has dropped.
-            for entry in &all_entries {
-                self.register_in_flight(
-                    partition_for(&entry.map, &entry.key),
-                    &entry.wal_sequences,
-                );
-            }
-
-            // Persist each entry, wrapping each inner-store call with the
-            // remaining deadline budget. This ensures that even a single slow
-            // inner-store write cannot hold up the process past the configured
-            // timeout.
-            let mut timed_out_entries: Vec<DelayedEntry> = Vec::new();
-
-            for entry in all_entries {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    // Budget exhausted — collect this entry as timed-out.
-                    timed_out_entries.push(entry);
-                    continue;
-                }
-
-                let flush_future = persist_entry(self.inner.as_ref(), &entry);
-
-                let partition_id_for_wal = partition_for(&entry.map, &entry.key);
-                match tokio::time::timeout(remaining, flush_future).await {
-                    Ok(Ok(())) => {
-                        self.staging.remove(&(entry.map.clone(), entry.key.clone()));
-                        self.pending_count.fetch_sub(1, Ordering::Relaxed);
-                        self.resolve_pending(entry.sequence);
-                        // Resolve and advance so a restart after clean shutdown is
-                        // a no-op rather than re-replaying already-durable writes.
-                        self.resolve_and_advance(partition_id_for_wal, &entry.wal_sequences)
-                            .await;
-                    }
-                    Ok(Err(err)) => {
-                        // Inner store returned an error; log and treat as timed-out
-                        // rather than looping forever on a failing backend.
-                        warn!(
-                            map = %entry.map,
-                            key = %entry.key,
-                            error = %err,
-                            "Inner store error during shutdown drain; entry not persisted"
-                        );
-                        timed_out_entries.push(entry);
-                    }
-                    Err(_elapsed) => {
-                        // Deadline expired mid-write.
-                        timed_out_entries.push(entry);
-                    }
-                }
-            }
-
-            if !timed_out_entries.is_empty() {
-                // Also sweep any entries reinserted by concurrent retry paths.
-                // These are drained and abandoned in one go — deliberately never
-                // registered, since they never enter a flush and an ownership
-                // that is taken and released with no call in between is a state
-                // no observer can see.
-                for mut queue_ref in self.queues.iter_mut() {
-                    let drained = queue_ref.value_mut().drain_ready(i64::MAX);
-                    timed_out_entries.extend(drained);
-                }
-
-                // The process is exiting with these writes in neither the inner
-                // store nor applied in the WAL. Abandoning rather than resolving
-                // holds the watermark below their frames, so recovery replays
-                // them on the next boot.
-                for entry in &timed_out_entries {
-                    self.abandon_wal_sequences(
-                        partition_for(&entry.map, &entry.key),
-                        &entry.wal_sequences,
-                    );
-                }
-
-                // Log every op that could not be persisted within the timeout.
-                for entry in &timed_out_entries {
-                    warn!(
-                        map = %entry.map,
-                        key = %entry.key,
-                        timeout_ms = self.config.shutdown_timeout_ms,
-                        "Shutdown drain timed out; write-behind entry could not be persisted"
-                    );
-                }
-                return Ok(());
-            }
-
-            // Yield briefly between iterations to avoid starving the tokio runtime.
-            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
-        }
+        let drained_entries = self.drain_for_shutdown(deadline).await;
+        self.finish_shutdown(drained_entries).await
     }
 
     /// Persists `value` for `(map, key)` directly, superseding whatever this
