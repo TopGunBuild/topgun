@@ -8180,3 +8180,286 @@ mod hard_flush_order_tests {
         );
     }
 }
+
+/// A write-behind background task that ends by a panic must not leave a store
+/// that keeps acknowledging writes nothing will ever flush.
+///
+/// Waiting here is by a message sent from the injection point immediately
+/// before it panics, on a current-thread runtime: with one thread the test
+/// task cannot run again until the poll of the panicking task has returned, so
+/// the first statement after the receipt already sees whatever that task left
+/// behind. A timeout around a receipt only bounds a hung test.
+#[cfg(test)]
+mod background_task_panic_tests {
+    use super::*;
+
+    use crate::storage::datastores::NullDataStore;
+
+    const MAP: &str = "background_task_panic_map";
+    /// Upper bound on any single wait; reaching it is a failed test, not a wait.
+    const HANG_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    fn lww_value() -> RecordValue {
+        RecordValue::Lww {
+            value: topgun_core::types::Value::Null,
+            timestamp: topgun_core::hlc::Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: String::new(),
+            },
+        }
+    }
+
+    /// Forwards to a store that keeps nothing, except that the `panic_on`-th
+    /// `add` announces itself on a channel and then panics instead of
+    /// returning. Counting calls rather than matching a key lets a test place
+    /// the panic in the flush task's pass and leave the shutdown drain's later
+    /// calls alone.
+    struct PanickingAddStore {
+        inner: NullDataStore,
+        panic_on: u64,
+        adds: AtomicU64,
+        about_to_panic: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    impl PanickingAddStore {
+        /// Returns the store and the receiver that yields one message
+        /// immediately before the panic.
+        fn new(panic_on: u64) -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<()>) {
+            let (about_to_panic, announced) = tokio::sync::mpsc::unbounded_channel();
+            let store = Arc::new(Self {
+                inner: NullDataStore,
+                panic_on,
+                adds: AtomicU64::new(0),
+                about_to_panic,
+            });
+            (store, announced)
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for PanickingAddStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            if self.adds.fetch_add(1, Ordering::SeqCst) + 1 == self.panic_on {
+                let _ = self.about_to_panic.send(());
+                panic!("injected inner-store panic");
+            }
+            self.inner.add(map, key, value, expiration_time, now).await
+        }
+
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .add_backup(map, key, value, expiration_time, now)
+                .await
+        }
+
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove(map, key, now).await
+        }
+
+        async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove_backup(map, key, now).await
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.inner.load(map, key).await
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.inner.load_all(map, keys).await
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            self.inner.enumerate_leaves(map, is_backup, sink).await
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.inner.scan_values(map, is_backup, max_batch_cost).await
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: ScanCursor,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.inner
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.inner.remove_all(map, keys).await
+        }
+
+        fn is_loadable(&self, key: &str) -> bool {
+            self.inner.is_loadable(key)
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            self.inner.pending_operation_count()
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            self.inner.soft_flush().await
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            self.inner.hard_flush().await
+        }
+
+        async fn flush_key(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            is_backup: bool,
+        ) -> anyhow::Result<()> {
+            self.inner.flush_key(map, key, value, is_backup).await
+        }
+
+        fn reset(&self) {
+            self.inner.reset();
+        }
+    }
+
+    /// A WAL that accepts every frame and holds none. It is here because the
+    /// stall watchdog returns at once on a store that has no WAL.
+    struct AcceptingWal;
+
+    #[async_trait]
+    impl Wal for AcceptingWal {
+        async fn append(&self, _partition: u32, _entry: &WalEntry) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn mark_applied(&self, _partition: u32, _sequence: u64) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn unapplied(&self, _partition: u32) -> anyhow::Result<Vec<WalEntry>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_flush_task_panic_fails_the_store() {
+        let (inner, mut about_to_panic) = PanickingAddStore::new(1);
+        let store = WriteBehindDataStore::new(
+            inner,
+            // No write delay, so the first flush tick already takes the entry.
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 10,
+                capacity: 0,
+                shutdown_timeout_ms: 5_000,
+                ..WriteBehindConfig::default()
+            },
+        );
+        let value = lww_value();
+
+        store
+            .add(MAP, "in-the-dead-batch", &value, 0, now_millis())
+            .await
+            .expect("a healthy store accepts the write");
+        tokio::time::timeout(HANG_LIMIT, about_to_panic.recv())
+            .await
+            .expect("the flush task never reached the inner store")
+            .expect("the inner store was dropped before it panicked");
+
+        // Nothing is awaited between the receipt and this call: it is the first
+        // write after the poll of the panicked flush task returned.
+        let after_panic = store
+            .add(MAP, "after-the-panic", &value, 0, now_millis())
+            .await;
+        let shutdown = store.hard_flush().await;
+
+        assert!(
+            after_panic.is_err(),
+            "`add` returned Ok after the flush task panicked: the write was acknowledged by \
+             a store that no task flushes any more (`hard_flush` then returned {shutdown:?})"
+        );
+        assert!(
+            shutdown.is_err(),
+            "`hard_flush` returned Ok(()) on a store whose flush task panicked holding a batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stall_watchdog_panic_fails_the_store() {
+        let wal: Arc<dyn Wal> = Arc::new(AcceptingWal);
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::new(NullDataStore),
+            // The flush task stays out of the way for the whole test, and the
+            // watchdog ticks at its floor instead of once every six seconds.
+            WriteBehindConfig {
+                write_delay_ms: 60_000,
+                flush_interval_ms: 60_000,
+                capacity: 0,
+                shutdown_timeout_ms: 5_000,
+                wal_watermark_stall_bound_ms: 1_000,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal,
+                sequence_start: 1,
+            }),
+        );
+        let (about_to_panic, mut announced) = tokio::sync::mpsc::unbounded_channel();
+        store.test_set_classifier_hook(Arc::new(move |_partition| {
+            let _ = about_to_panic.send(());
+            panic!("injected stall watchdog panic");
+        }));
+        let value = lww_value();
+
+        // The watchdog samples only partitions that have tracking state, and a
+        // partition gets its state with its first write.
+        store
+            .add(MAP, "tracked", &value, 0, now_millis())
+            .await
+            .expect("a healthy store accepts the write");
+        tokio::time::timeout(HANG_LIMIT, announced.recv())
+            .await
+            .expect("the stall watchdog never sampled the written partition")
+            .expect("the classifier hook was dropped before it ran");
+
+        let after_panic = store
+            .add(MAP, "after-the-panic", &value, 0, now_millis())
+            .await;
+
+        assert!(
+            after_panic.is_err(),
+            "`add` returned Ok after the stall watchdog panicked: the store runs on without \
+             its only stall detector"
+        );
+    }
+}
