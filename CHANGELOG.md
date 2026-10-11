@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server):** writes packed into a batch envelope now count against the connection's
+  rate limit like the same writes sent directly. Before, a batch of writes placed inside an
+  envelope counted as one request however many writes it held. A client that packs batches
+  into envelopes can now be told to slow down (error 429) where it was not before; the
+  message and the handling are the ones a direct batch gets. The stock TopGun client sends no
+  envelope, so applications built on it see no change. This closes the difference the entry
+  below left open. What changed is how much one request counts for; the limit itself, its
+  defaults and how it treats a single request larger than its burst are as they were.
 - **Internal (server):** no visible change. The server's code that writes a record must now
   present proof that it holds that record's write lock, and the build fails where it does
   not; a write that presents the lock of a different record is refused and logged as a

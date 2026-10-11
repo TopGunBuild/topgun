@@ -399,7 +399,18 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 // flood is throttled fairly. On exceed we send a 429 back-off and
                 // drop the frame — the connection stays up and recovers as tokens
                 // refill (отбой, не падение).
-                let op_cost = inbound_op_cost(&tg_msg);
+                //
+                // A transport envelope is unpacked here, before the charge, and
+                // the unpacked value is what the dispatch task is handed: the
+                // cost is computed from the very messages that will be
+                // dispatched, so the two cannot come to disagree (TG-RATE-001).
+                let frame = match tg_msg {
+                    TopGunMessage::Batch(batch) => {
+                        InboundFrame::Envelope(UnpackedEnvelope::unpack(&batch.data))
+                    }
+                    other => InboundFrame::Message(other),
+                };
+                let op_cost = frame.cost();
                 if !rate_limiter.try_consume(op_cost) {
                     debug!(
                         "rate limit exceeded for {:?} (op_cost={}); backing off",
@@ -430,7 +441,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 // both in `state`/`handle`) rather than in the spawned data-plane
                 // dispatch task. The read loop is sequential, so cursor monotonicity is
                 // naturally preserved across a connection's ACK stream.
-                if let TopGunMessage::ClientApplyAck(ref ack) = tg_msg {
+                if let InboundFrame::Message(TopGunMessage::ClientApplyAck(ref ack)) = frame {
                     handle_client_apply_ack(
                         &state,
                         &handle,
@@ -454,7 +465,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 let principal_clone = principal.clone();
 
                 tokio::spawn(async move {
-                    dispatch_message(tg_msg, conn_id, principal_clone, op_service, dispatcher, tx)
+                    dispatch_message(frame, conn_id, principal_clone, op_service, dispatcher, tx)
                         .await;
                     drop(permit); // Release after dispatch completes
                 });
@@ -655,27 +666,24 @@ fn release_session_state(state: &AppState, conn_id: ConnectionId) {
 }
 
 /// Hard upper bound on the number of inner items a single transport `Batch`
-/// frame may carry through `unpack_and_dispatch_batch`.
+/// frame may carry.
 ///
-/// Bounds worst-case per-frame dispatch work: the 2 MB inbound frame cap lets a
+/// Bounds worst-case per-frame work: the 2 MB inbound frame cap lets a
 /// `Batch.data` blob pack roughly 524K minimal 4-byte length-prefixed entries,
 /// each of which would otherwise drive a decode + classify + dispatch. Capping
-/// at `8_192` keeps per-frame dispatch cost bounded while sitting far above any
+/// at `8_192` keeps per-frame cost bounded while sitting far above any
 /// legitimate batch size (tens to low thousands), so honest clients never hit it.
+/// The cap is checked on the framing alone, before any inner item is decoded.
 const MAX_BATCH_INNER_ITEMS: usize = 8_192;
 
 /// Counts the well-formed length-prefixed inner items packed into a transport
 /// `Batch.data` blob, without decoding any inner payload.
 ///
-/// This is the single source of truth for BOTH the rate-limiter charge and the
-/// hard inner-item cap, so the charged count and the dispatched count agree by
-/// construction. It mirrors `unpack_and_dispatch_batch`'s framing walk exactly:
-/// read a 4-byte big-endian length prefix, skip that many bytes, repeat. A
-/// truncated trailing prefix or payload ends the walk (the unpacker `break`s on
-/// the same condition), so the count is exactly the number of complete framed
-/// items the unpacker iterates over — i.e. the charge is never *smaller* than
-/// what the unpacker would actually attempt to decode and dispatch, which is the
-/// property the rate limiter relies on.
+/// The framing rule is the one [`UnpackedEnvelope::unpack`] walks by: read a
+/// 4-byte big-endian length prefix, skip that many bytes, repeat. A truncated
+/// trailing prefix or payload ends the walk. Its one caller is that
+/// constructor, which uses the count to decide whether the envelope may be
+/// decoded at all.
 ///
 /// Comparisons are written against the remaining byte count (`data.len() -
 /// offset`) rather than `offset + len` so an adversarial length prefix near
@@ -706,22 +714,163 @@ fn count_batch_items(data: &[u8]) -> usize {
     count
 }
 
-/// Cost, in op-rate-limiter tokens, of an inbound frame.
+/// Cost, in op-rate-limiter tokens, of one message.
 ///
-/// A frame's cost is the number of individual ops it carries so a single peer
-/// cannot evade the per-connection rate limit by packing many ops into one
-/// `OpBatch`/`Batch` frame. For a transport `Batch` the declared `count` field
-/// is attacker-controlled and is NOT trusted: the cost is the actual number of
-/// length-prefixed inner items the unpacker would dispatch. Non-batch messages
-/// cost one token. Always at least 1 so an empty batch still consumes a token
-/// (and cannot be used to spin).
-fn inbound_op_cost(msg: &TopGunMessage) -> u32 {
+/// An `OpBatch` costs the number of operations it carries, so a peer cannot
+/// lower its cost by packing many operations into one message. Every other
+/// message costs one token — a transport `Batch` included: one found inside an
+/// envelope is refused at classification and dispatches nothing, and a
+/// top-level one is costed by [`UnpackedEnvelope::cost`], not here. Always at
+/// least 1, so an empty batch still consumes a token and cannot be used to spin.
+fn message_cost(msg: &TopGunMessage) -> u32 {
     let count = match msg {
         TopGunMessage::OpBatch(b) => b.payload.ops.len(),
-        TopGunMessage::Batch(b) => count_batch_items(&b.data),
         _ => 1,
     };
     u32::try_from(count.max(1)).unwrap_or(u32::MAX)
+}
+
+/// A transport `BATCH` envelope, unpacked once.
+///
+/// The read loop builds this value before it charges the connection's rate
+/// limiter and then moves it into the dispatch task. The cost presented to the
+/// limiter and the messages dispatched therefore come from one decode of one
+/// value: there is no second walk over the envelope's bytes that could count a
+/// different list than the one dispatched (TG-RATE-001).
+enum UnpackedEnvelope {
+    /// The envelope frames more than [`MAX_BATCH_INNER_ITEMS`] items. None of
+    /// them was decoded; the whole frame is answered with one 413.
+    OverCap {
+        /// Complete framed items in the envelope.
+        framed_items: usize,
+    },
+    /// The envelope's inner items, decoded.
+    Unpacked {
+        /// Every inner item that decoded, in envelope order.
+        messages: Vec<TopGunMessage>,
+        /// Framed items that did not decode. They are skipped by dispatch and
+        /// still paid for, so garbage is never cheaper than a message.
+        undecodable: usize,
+    },
+}
+
+impl UnpackedEnvelope {
+    /// Unpacks an envelope's `data`: length-prefixed inner messages, each
+    /// preceded by a 4-byte big-endian length.
+    ///
+    /// This is the only place an envelope's framing is walked with a decode and
+    /// the only place an inner item is decoded. It is handed the bytes and
+    /// nothing else — in particular not the count the envelope declares, which
+    /// the peer controls and which therefore cannot enter the cost.
+    ///
+    /// A truncated trailing prefix or payload ends the walk. An item that does
+    /// not decode is skipped and counted.
+    fn unpack(data: &[u8]) -> Self {
+        // The cap comes first and reads the framing only, so an over-long
+        // envelope costs the server no inner decode at all.
+        let framed_items = count_batch_items(data);
+        if framed_items > MAX_BATCH_INNER_ITEMS {
+            return Self::OverCap { framed_items };
+        }
+
+        let mut messages = Vec::with_capacity(framed_items);
+        let mut undecodable = 0;
+        let mut offset = 0;
+
+        // Comparisons use the remaining byte count (`data.len() - offset`)
+        // rather than `offset + len` so an adversarial near-`u32::MAX` length
+        // cannot overflow `usize` on a 32-bit target; `offset <= data.len()`
+        // holds throughout, so the subtraction never underflows.
+        while data.len() - offset >= 4 {
+            let len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if len > data.len() - offset {
+                debug!(
+                    "truncated batch message (need {} bytes, {} available)",
+                    len,
+                    data.len() - offset
+                );
+                break;
+            }
+
+            let msg_bytes = &data[offset..offset + len];
+            offset += len;
+
+            // Inner messages live inside the batch's opaque `bin` body, which
+            // the outer frame's depth pre-scan skips without descending — so
+            // each inner message gets its own depth-checked decode, consistent
+            // with the top-level Phase 1/2 sites. This is the
+            // version-independent guard against an unbounded recursive decode
+            // of a deeply-nested inner frame; the pinned rmp_serde also caps
+            // recursion at 1024, but that is an unstable codec internal we do
+            // not rely on.
+            match decode::decode_depth_checked::<TopGunMessage>(msg_bytes) {
+                Ok(msg) => messages.push(msg),
+                Err(e) => {
+                    debug!("failed to deserialize batch inner message: {}", e);
+                    undecodable += 1;
+                }
+            }
+        }
+
+        Self::Unpacked {
+            messages,
+            undecodable,
+        }
+    }
+
+    /// Cost, in op-rate-limiter tokens, of the envelope.
+    ///
+    /// Computed from what the value holds; there is no stored figure a caller
+    /// could set. An unpacked envelope costs what its messages would cost sent
+    /// on their own, plus one token per item that did not decode, and at least
+    /// one token. An over-cap envelope, of which nothing is dispatched, costs
+    /// its framed item count.
+    fn cost(&self) -> u32 {
+        match self {
+            Self::OverCap { framed_items } => u32::try_from(*framed_items).unwrap_or(u32::MAX),
+            Self::Unpacked {
+                messages,
+                undecodable,
+            } => messages
+                .iter()
+                .map(message_cost)
+                .fold(u32::try_from(*undecodable).unwrap_or(u32::MAX), |sum, c| {
+                    sum.saturating_add(c)
+                })
+                .max(1),
+        }
+    }
+}
+
+/// One inbound frame as the read loop hands it to dispatch: a transport
+/// envelope already unpacked, or any other message as decoded.
+///
+/// The message variant is the large one and by far the common one. It is held
+/// inline on purpose: the value is built once per frame and moved straight into
+/// the dispatch task, and boxing it would cost every frame a heap allocation to
+/// make the rare envelope smaller.
+#[allow(clippy::large_enum_variant)]
+enum InboundFrame {
+    Envelope(UnpackedEnvelope),
+    Message(TopGunMessage),
+}
+
+impl InboundFrame {
+    /// Cost of the frame, in op-rate-limiter tokens: the number of client
+    /// operations it carries, whichever way it packs them.
+    fn cost(&self) -> u32 {
+        match self {
+            Self::Envelope(envelope) => envelope.cost(),
+            Self::Message(msg) => message_cost(msg),
+        }
+    }
 }
 
 /// Dispatches one deserialized frame through the operation pipeline.
@@ -730,11 +879,11 @@ fn inbound_op_cost(msg: &TopGunMessage) -> u32 {
 /// `tokio::spawn` closure (satisfying the `'static` bound). Helpers called
 /// from within this function borrow from its owned locals.
 ///
-/// A `BATCH` envelope is unpacked and its inner messages are handed on one
-/// after another; any other message is handed on as it is. Both go to
-/// `dispatch_one_message`, which routes a message and answers it.
+/// The inner messages of a `BATCH` envelope are handed on one after another;
+/// any other message is handed on as it is. Both go to `dispatch_one_message`,
+/// which routes a message and answers it.
 async fn dispatch_message(
-    tg_msg: TopGunMessage,
+    frame: InboundFrame,
     conn_id: ConnectionId,
     principal: Option<Principal>,
     operation_service: Option<Arc<OperationService>>,
@@ -749,21 +898,22 @@ async fn dispatch_message(
         return;
     };
 
-    // Handle BATCH messages: unpack each inner message and route individually
-    if let TopGunMessage::Batch(ref batch_msg) = tg_msg {
-        unpack_and_dispatch_batch(
-            batch_msg,
-            conn_id,
-            principal,
-            &classify_svc,
-            &dispatcher,
-            &tx,
-        )
-        .await;
-        return;
+    match frame {
+        InboundFrame::Envelope(envelope) => {
+            dispatch_envelope(
+                envelope,
+                conn_id,
+                principal,
+                &classify_svc,
+                &dispatcher,
+                &tx,
+            )
+            .await;
+        }
+        InboundFrame::Message(tg_msg) => {
+            dispatch_one_message(tg_msg, conn_id, principal, &classify_svc, &dispatcher, &tx).await;
+        }
     }
-
-    dispatch_one_message(tg_msg, conn_id, principal, &classify_svc, &dispatcher, &tx).await;
 }
 
 /// Routes one message that is not a transport envelope and answers it.
@@ -1480,98 +1630,46 @@ async fn dispatch_op_batch(
     send_frame(&ack, tx).await;
 }
 
-/// Unpacks a BATCH message and dispatches each inner message individually.
+/// Dispatches the inner messages of an unpacked `BATCH` envelope, one at a time.
 ///
-/// The BATCH `data` field contains length-prefixed binary messages: each
-/// inner message is preceded by a 4-byte big-endian u32 length header.
-async fn unpack_and_dispatch_batch(
-    batch_msg: &topgun_core::messages::BatchMessage,
+/// Takes the value the read loop built and charged for and reads no envelope
+/// bytes of its own: nothing here walks a framing or decodes an item.
+async fn dispatch_envelope(
+    envelope: UnpackedEnvelope,
     conn_id: ConnectionId,
     principal: Option<Principal>,
     classify_svc: &OperationService,
     dispatcher: &Arc<PartitionDispatcher>,
     tx: &mpsc::Sender<OutboundMessage>,
 ) {
-    let data = &batch_msg.data;
-
-    // Authoritative dispatch-side bound: drop the WHOLE frame if it packs more
-    // inner items than the cap. This holds even if the cost function is later
-    // changed or this path is reached another way, and matches the existing
-    // whole-frame token-exhaustion behavior: nothing of an over-long envelope is
-    // dispatched, so the client gets one answer for the frame instead of answers
-    // for a part of it that it cannot identify. The client is told via an
-    // explicit error rather than a silent drop.
-    let item_count = count_batch_items(data);
-    if item_count > MAX_BATCH_INNER_ITEMS {
-        debug!(
-            "batch from {:?} exceeds max inner items ({} > {}); dropping whole frame",
-            conn_id, item_count, MAX_BATCH_INNER_ITEMS
-        );
-        let err = TopGunMessage::Error {
-            payload: ErrorPayload {
-                code: 413,
-                message: "batch exceeds maximum inner item count".to_string(),
-                details: None,
-            },
-        };
-        if let Ok(bytes) = rmp_serde::to_vec_named(&err) {
-            let _ = tx.send(OutboundMessage::Binary(bytes)).await;
-        }
-        return;
-    }
-
-    let mut offset = 0;
-
-    while offset < data.len() {
-        // Read 4-byte big-endian length prefix. Comparisons use the remaining
-        // byte count (`data.len() - offset`) rather than `offset + len` so an
-        // adversarial near-`u32::MAX` length cannot overflow `usize` on a 32-bit
-        // target; `offset < data.len()` here and `offset <= data.len()` after the
-        // prefix read keep the subtraction from underflowing. This mirrors
-        // `count_batch_items` exactly so the charged and dispatched counts agree.
-        if data.len() - offset < 4 {
-            debug!("truncated batch length prefix from {:?}", conn_id);
-            break;
-        }
-        let len = u32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]) as usize;
-        offset += 4;
-
-        if len > data.len() - offset {
+    let messages = match envelope {
+        // Drop the WHOLE frame if it packs more inner items than the cap. This
+        // matches the whole-frame token-exhaustion behavior: nothing of an
+        // over-long envelope is dispatched, so the client gets one answer for
+        // the frame instead of answers for a part of it that it cannot
+        // identify. The client is told via an explicit error rather than a
+        // silent drop.
+        UnpackedEnvelope::OverCap { framed_items } => {
             debug!(
-                "truncated batch message (need {} bytes, {} available) from {:?}",
-                len,
-                data.len() - offset,
-                conn_id
+                "batch from {:?} exceeds max inner items ({} > {}); dropping whole frame",
+                conn_id, framed_items, MAX_BATCH_INNER_ITEMS
             );
-            break;
-        }
-
-        let msg_bytes = &data[offset..offset + len];
-        offset += len;
-
-        // Deserialize the inner message. Inner messages live inside the batch's
-        // opaque `bin` body, which the outer frame's depth pre-scan skips without
-        // descending — so each inner message gets its own depth-checked decode,
-        // consistent with the top-level Phase 1/2 sites. This is the
-        // version-independent guard against an unbounded recursive decode of a
-        // deeply-nested inner frame; the pinned rmp_serde also caps recursion at
-        // 1024, but that is an unstable codec internal we do not rely on.
-        let inner_msg = match decode::decode_depth_checked::<TopGunMessage>(msg_bytes) {
-            Ok(msg) => msg,
-            Err(e) => {
-                debug!(
-                    "failed to deserialize batch inner message from {:?}: {}",
-                    conn_id, e
-                );
-                continue;
+            let err = TopGunMessage::Error {
+                payload: ErrorPayload {
+                    code: 413,
+                    message: "batch exceeds maximum inner item count".to_string(),
+                    details: None,
+                },
+            };
+            if let Ok(bytes) = rmp_serde::to_vec_named(&err) {
+                let _ = tx.send(OutboundMessage::Binary(bytes)).await;
             }
-        };
+            return;
+        }
+        UnpackedEnvelope::Unpacked { messages, .. } => messages,
+    };
 
+    for inner_msg in messages {
         // One inner message at a time, awaited: that is what keeps the answers
         // in envelope order. Handing it to the entry a top-level message takes
         // is what makes the answer the same on both paths (TG-DISP-001).
@@ -1750,15 +1848,15 @@ mod tests {
         data
     }
 
-    /// The op-rate limiter charges a frame by the number of ops it carries, so a
-    /// peer cannot evade the per-connection cap by packing ops into one batch.
-    /// For a transport `Batch` the declared `count` is attacker-controlled and
-    /// must NOT be the cost basis — the cost is the actual packed inner-item count.
+    /// The cost of a frame is the number of ops it carries, however they are
+    /// packed. For a transport `Batch` the declared `count` is
+    /// attacker-controlled and is not the cost basis — it never reaches the
+    /// unpacker, which is handed the envelope's bytes alone.
     #[test]
     fn inbound_op_cost_counts_batch_ops() {
         // A non-batch message costs one token.
         let ping = TopGunMessage::Ping(topgun_core::messages::PingData { timestamp: 0 });
-        assert_eq!(inbound_op_cost(&ping), 1);
+        assert_eq!(message_cost(&ping), 1);
 
         // An OpBatch costs its op count.
         let three_ops = TopGunMessage::OpBatch(OpBatchMessage {
@@ -1772,36 +1870,36 @@ mod tests {
                 timeout: None,
             },
         });
-        assert_eq!(inbound_op_cost(&three_ops), 3);
+        assert_eq!(message_cost(&three_ops), 3);
 
         // An empty OpBatch still costs one token (cannot be used to spin for free).
         let empty = TopGunMessage::OpBatch(OpBatchMessage {
             payload: OpBatchPayload::default(),
         });
-        assert_eq!(inbound_op_cost(&empty), 1);
+        assert_eq!(message_cost(&empty), 1);
 
         // A transport Batch declaring count=1 but packing 50 framed inner items
-        // is charged ~50, NOT 1 — the declared count is not trusted.
-        let amplified = TopGunMessage::Batch(BatchMessage {
+        // is charged 50, NOT 1 — the declared count is not trusted.
+        let amplified = BatchMessage {
             count: 1,
             data: pack_n_minimal_items(50),
-        });
-        assert_eq!(inbound_op_cost(&amplified), 50);
+        };
+        assert_eq!(UnpackedEnvelope::unpack(&amplified.data).cost(), 50);
 
         // An empty transport Batch (no framed items) still costs one token.
-        let empty_batch = TopGunMessage::Batch(BatchMessage {
+        let empty_batch = BatchMessage {
             count: 0,
             data: vec![],
-        });
-        assert_eq!(inbound_op_cost(&empty_batch), 1);
+        };
+        assert_eq!(UnpackedEnvelope::unpack(&empty_batch.data).cost(), 1);
 
         // A transport Batch declaring count=99 but packing only 3 framed items
         // is charged 3 — the cost follows the actual packed count, not the lie.
-        let over_declared = TopGunMessage::Batch(BatchMessage {
+        let over_declared = BatchMessage {
             count: 99,
             data: pack_n_minimal_items(3),
-        });
-        assert_eq!(inbound_op_cost(&over_declared), 3);
+        };
+        assert_eq!(UnpackedEnvelope::unpack(&over_declared.data).cost(), 3);
     }
 
     /// Disconnect cleanup must drain a connection's standing subscriptions from
@@ -3293,8 +3391,8 @@ mod tests {
             data,
         };
         let (tx, rx) = mpsc::channel(64);
-        unpack_and_dispatch_batch(
-            &batch,
+        dispatch_envelope(
+            UnpackedEnvelope::unpack(&batch.data),
             fx.conn_id,
             Some(principal),
             &fx.classify_svc,
@@ -3648,6 +3746,354 @@ mod tests {
              top-level on the right; enveloped frames decoded: {:?} and {:?}",
             decode_frames(&enveloped.0),
             decode_frames(&enveloped.2)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // What an envelope costs, and that the cost is of the messages dispatched
+    // (TG-RATE-001)
+    // -----------------------------------------------------------------------
+
+    /// An `OP_BATCH` of `n` default operations, for the tests that only cost a
+    /// message and never dispatch it.
+    fn costed_op_batch(n: usize) -> TopGunMessage {
+        TopGunMessage::OpBatch(OpBatchMessage {
+            payload: OpBatchPayload {
+                ops: vec![ClientOp::default(); n],
+                write_concern: None,
+                timeout: None,
+            },
+        })
+    }
+
+    fn costed_ping() -> TopGunMessage {
+        TopGunMessage::Ping(topgun_core::messages::PingData { timestamp: 0 })
+    }
+
+    /// The bytes of one inner message, before framing.
+    fn inner_body(msg: &TopGunMessage) -> Vec<u8> {
+        rmp_serde::to_vec_named(msg).expect("inner message serializes")
+    }
+
+    /// An envelope whose items are `bodies`, each framed, declaring `count`.
+    ///
+    /// The declared count is a parameter so a test can make it lie: the
+    /// unpacker is handed `data` alone and has no way to read it.
+    fn envelope_declaring(count: u32, bodies: &[Vec<u8>]) -> BatchMessage {
+        let mut data = Vec::new();
+        for body in bodies {
+            data.extend_from_slice(&frame_inner_item(body));
+        }
+        BatchMessage { count, data }
+    }
+
+    /// The messages an unpacked envelope holds; none for an over-cap one.
+    fn held_messages(envelope: &UnpackedEnvelope) -> &[TopGunMessage] {
+        match envelope {
+            UnpackedEnvelope::OverCap { .. } => &[],
+            UnpackedEnvelope::Unpacked { messages, .. } => messages,
+        }
+    }
+
+    /// Hands an unpacked envelope to dispatch and returns the frames it queued.
+    async fn dispatched_envelope_frames(
+        fx: &FoldFixture,
+        envelope: UnpackedEnvelope,
+    ) -> Vec<Vec<u8>> {
+        let (tx, rx) = mpsc::channel(64);
+        dispatch_envelope(
+            envelope,
+            fx.conn_id,
+            Some(fold_principal()),
+            &fx.classify_svc,
+            &fx.dispatcher,
+            &tx,
+        )
+        .await;
+        queued_frames(tx, rx).await
+    }
+
+    /// `n` storable writes on `FOLD_MAP` with keys `{prefix}-0 .. {prefix}-{n-1}`.
+    fn storable_ops(prefix: &str, n: usize) -> Vec<ClientOp> {
+        (0..n)
+            .map(|i| {
+                put_op(
+                    &format!("{prefix}-op-{i}"),
+                    FOLD_MAP,
+                    &format!("{prefix}-{i}"),
+                    allowed_fields("costed"),
+                )
+            })
+            .collect()
+    }
+
+    /// An `OP_BATCH` inside an envelope costs its operations, and an envelope
+    /// costs the sum of what its messages cost.
+    #[test]
+    fn an_enveloped_op_batch_costs_its_operation_count() {
+        let one_batch = envelope_declaring(1, &[inner_body(&costed_op_batch(7))]);
+        assert_eq!(
+            UnpackedEnvelope::unpack(&one_batch.data).cost(),
+            7,
+            "an envelope holding one OP_BATCH of 7 operations"
+        );
+
+        // 3 + 1 + 1 (an empty batch still costs a token) + 1.
+        let mixed = envelope_declaring(
+            4,
+            &[
+                inner_body(&costed_op_batch(3)),
+                inner_body(&client_op_message(ClientOp::default())),
+                inner_body(&costed_op_batch(0)),
+                inner_body(&costed_ping()),
+            ],
+        );
+        assert_eq!(
+            UnpackedEnvelope::unpack(&mixed.data).cost(),
+            6,
+            "an envelope holding OP_BATCH(3), CLIENT_OP, OP_BATCH(0), PING"
+        );
+    }
+
+    /// One generated item of an envelope.
+    #[derive(Debug, Clone)]
+    enum GeneratedItem {
+        OpBatch(usize),
+        ClientOp,
+        Ping,
+        /// A nested envelope holding one `OP_BATCH` of three operations.
+        NestedEnvelope,
+        /// A framed item with no body: it does not decode.
+        EmptyBody,
+        /// The single byte `0xc1`, which `MsgPack` reserves: it does not decode.
+        ReservedByte,
+    }
+
+    impl GeneratedItem {
+        /// The message this item decodes to, if it decodes.
+        fn message(&self) -> Option<TopGunMessage> {
+            match self {
+                Self::OpBatch(n) => Some(costed_op_batch(*n)),
+                Self::ClientOp => Some(client_op_message(ClientOp::default())),
+                Self::Ping => Some(costed_ping()),
+                Self::NestedEnvelope => Some(TopGunMessage::Batch(envelope_declaring(
+                    1,
+                    &[inner_body(&costed_op_batch(3))],
+                ))),
+                Self::EmptyBody | Self::ReservedByte => None,
+            }
+        }
+
+        fn body(&self) -> Vec<u8> {
+            match self {
+                Self::EmptyBody => Vec::new(),
+                Self::ReservedByte => vec![0xc1],
+                decodable => inner_body(&decodable.message().expect("the item decodes")),
+            }
+        }
+
+        /// What the item costs sent on its own; an item that does not decode
+        /// costs one token.
+        fn expected_cost(&self) -> u32 {
+            match self {
+                Self::OpBatch(n) => u32::try_from((*n).max(1)).expect("a small count"),
+                _ => 1,
+            }
+        }
+    }
+
+    /// Client operations a held message hands to dispatch: a nested envelope
+    /// is refused and hands none.
+    fn dispatched_units(msg: &TopGunMessage) -> u32 {
+        match msg {
+            TopGunMessage::OpBatch(batch) => {
+                u32::try_from(batch.payload.ops.len()).expect("a small count")
+            }
+            TopGunMessage::Batch(_) => 0,
+            _ => 1,
+        }
+    }
+
+    /// An envelope costs what its items would cost on their own, holds exactly
+    /// the items that decode, in order, and never costs less than the
+    /// operations it holds — whatever the header declares and whether or not a
+    /// truncated tail follows the last item.
+    ///
+    /// Run under a fixed generator so a verdict is reproducible.
+    #[test]
+    fn an_envelope_costs_what_its_messages_cost_on_their_own() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+
+        let item = prop_oneof![
+            prop_oneof![Just(0_usize), 1_usize..40].prop_map(GeneratedItem::OpBatch),
+            Just(GeneratedItem::ClientOp),
+            Just(GeneratedItem::Ping),
+            Just(GeneratedItem::NestedEnvelope),
+            Just(GeneratedItem::EmptyBody),
+            Just(GeneratedItem::ReservedByte),
+        ];
+        // The tail, when present, is a length prefix cut short or a payload
+        // shorter than its prefix says.
+        let truncated_tail = proptest::option::of(prop_oneof![
+            Just(vec![0_u8, 0]),
+            Just(vec![0_u8, 0, 0, 9, 1, 2]),
+        ]);
+        let case = (
+            proptest::collection::vec(item, 1..=12),
+            truncated_tail,
+            any::<u32>(),
+        );
+
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 256,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::deterministic_rng(RngAlgorithm::ChaCha),
+        );
+        runner
+            .run(&case, |(items, tail, declared_count)| {
+                let bodies: Vec<Vec<u8>> = items.iter().map(GeneratedItem::body).collect();
+                let mut batch = envelope_declaring(declared_count, &bodies);
+                if let Some(tail) = tail {
+                    batch.data.extend_from_slice(&tail);
+                }
+
+                let envelope = UnpackedEnvelope::unpack(&batch.data);
+
+                let expected_cost: u32 = items.iter().map(GeneratedItem::expected_cost).sum();
+                prop_assert_eq!(envelope.cost(), expected_cost.max(1), "cost of {:?}", items);
+                let expected_held: Vec<TopGunMessage> =
+                    items.iter().filter_map(GeneratedItem::message).collect();
+                prop_assert_eq!(
+                    held_messages(&envelope),
+                    expected_held.as_slice(),
+                    "held messages of {:?}",
+                    items
+                );
+                let units: u32 = held_messages(&envelope).iter().map(dispatched_units).sum();
+                prop_assert!(
+                    units <= envelope.cost(),
+                    "{} operations held for a cost of {}: {:?}",
+                    units,
+                    envelope.cost(),
+                    items
+                );
+                Ok(())
+            })
+            .expect("every generated envelope costs what its items cost");
+    }
+
+    /// The cost an envelope presents is not below the operations dispatch is
+    /// handed from it, with every kind of item that could pull the two apart
+    /// in one envelope: an empty batch, an item that does not decode, and a
+    /// nested envelope.
+    ///
+    /// The nested `OP_BATCH` holds 7 operations, a size no other figure of the
+    /// test has, so a failing tuple says which list was counted.
+    #[tokio::test]
+    async fn an_envelope_never_presents_a_cost_below_what_it_dispatches() {
+        let first = storable_ops("cost-first", 5);
+        let last = storable_ops("cost-last", 4);
+        let partitions: BTreeSet<u32> = first
+            .iter()
+            .chain(&last)
+            .map(|op| hash_to_partition(&op.key))
+            .collect();
+        assert!(
+            partitions.len() >= 2,
+            "precondition: the nine dispatched keys span at least two partitions, got {partitions:?}"
+        );
+        let nested = TopGunMessage::Batch(envelope_declaring(
+            1,
+            &[inner_body(&op_batch_message(storable_ops(
+                "cost-nested",
+                7,
+            )))],
+        ));
+        let bodies = [
+            inner_body(&op_batch_message(first)),
+            inner_body(&op_batch_message(Vec::new())),
+            vec![0xc1],
+            inner_body(&nested),
+            inner_body(&op_batch_message(last)),
+        ];
+        // Charged by framed items, this envelope would cost 5; it dispatches 9.
+        // Without that gap the test would not tell the two charges apart.
+        assert!(
+            9 > bodies.len(),
+            "precondition: the operations dispatched exceed the framed item count"
+        );
+        let batch = envelope_declaring(5, &bodies);
+        let fx = build_fold_fixture(Vec::new(), None).await;
+
+        let envelope = UnpackedEnvelope::unpack(&batch.data);
+        let cost = envelope.cost();
+        dispatched_envelope_frames(&fx, envelope).await;
+
+        let dispatched: usize = fx.received.lock().iter().map(|(_, ops)| *ops).sum();
+        assert_eq!(
+            (cost, dispatched),
+            (12, 9),
+            "(cost presented, operations handed to the domain service); (partition, operation count) as received: {:?}",
+            fx.received.lock()
+        );
+    }
+
+    /// An envelope inside an envelope costs one token; its contents are neither
+    /// costed nor dispatched, and nothing answers it.
+    ///
+    /// Both headers declare 7, a count equal to nothing the test expects.
+    #[tokio::test]
+    async fn a_nested_envelope_costs_one_token_and_is_not_unpacked() {
+        let nested = TopGunMessage::Batch(envelope_declaring(
+            7,
+            &[inner_body(&op_batch_message(storable_ops(
+                "nested-only",
+                9,
+            )))],
+        ));
+        let outer = envelope_declaring(7, &[inner_body(&nested)]);
+        let fx = build_fold_fixture(Vec::new(), None).await;
+
+        let envelope = UnpackedEnvelope::unpack(&outer.data);
+        let cost = envelope.cost();
+        let frames = dispatched_envelope_frames(&fx, envelope).await;
+
+        // Read once and released: a guard still held by the compared tuple
+        // would deadlock the failure message's own read of the list.
+        let received = fx.received.lock().clone();
+        assert_eq!(
+            (cost, received.len(), frames.len()),
+            (1, 0, 0),
+            "(cost, operations handed to the domain service, frames queued); received: {received:?}, frames: {:?}",
+            decode_frames(&frames)
+        );
+    }
+
+    /// An envelope framing more items than the cap is not decoded at all, costs
+    /// its framed item count, and is answered whole with one 413.
+    ///
+    /// The first item is a storable batch: decoded, it would be held, would
+    /// change the cost and would reach the domain service.
+    #[tokio::test]
+    async fn an_oversized_envelope_is_not_decoded_and_is_refused_whole() {
+        let mut bodies = vec![inner_body(&op_batch_message(storable_ops("over-cap", 2)))];
+        bodies.resize(MAX_BATCH_INNER_ITEMS + 1, Vec::new());
+        let batch = envelope_declaring(1, &bodies);
+        let fx = build_fold_fixture(Vec::new(), None).await;
+
+        let envelope = UnpackedEnvelope::unpack(&batch.data);
+        let (held, cost) = (held_messages(&envelope).len(), envelope.cost());
+        let frames = dispatched_envelope_frames(&fx, envelope).await;
+
+        let received = fx.received.lock().len();
+        assert_eq!(
+            (held, cost, error_codes(&frames), received),
+            (0, 8193, vec!["413".to_string()], 0),
+            "(messages held, cost, one label per frame queued, operations handed to the domain service)"
         );
     }
 }
