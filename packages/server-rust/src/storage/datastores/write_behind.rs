@@ -1520,6 +1520,21 @@ impl WriteBehindDataStore {
                 "fault-injection build: no sentinel file is configured, store writes are never refused"
             );
         }
+        // The second seam is announced on a line of its own, after the first,
+        // for the same reason and likewise whether or not it is configured.
+        #[cfg(feature = "fault-injection")]
+        if let Some(path) = fault_store_panic_path() {
+            warn!(
+                env = FAULT_STORE_PANIC_FILE_ENV,
+                panic_file = %path.display(),
+                "fault-injection build: persisting an entry panics while the panic sentinel file exists"
+            );
+        } else {
+            warn!(
+                env = FAULT_STORE_PANIC_FILE_ENV,
+                "fault-injection build: no panic sentinel file is configured, persisting an entry never panics"
+            );
+        }
 
         register_background_task_panic_metrics();
 
@@ -2937,6 +2952,27 @@ fn fault_store_refusal_armed() -> bool {
     fault_store_refuse_path().is_some_and(std::path::Path::exists)
 }
 
+/// Environment variable naming the sentinel file of the store-panic seam.
+#[cfg(feature = "fault-injection")]
+const FAULT_STORE_PANIC_FILE_ENV: &str = "TOPGUN_FAULT_STORE_PANIC_FILE";
+
+/// The sentinel path of the store-panic seam, read from the environment once
+/// per process, for the reasons the refusal seam's path is.
+#[cfg(feature = "fault-injection")]
+fn fault_store_panic_path() -> Option<&'static std::path::Path> {
+    static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var_os(FAULT_STORE_PANIC_FILE_ENV).map(PathBuf::from))
+        .as_deref()
+}
+
+/// Whether the store-panic seam is armed right now: a sentinel path is
+/// configured AND a file exists there. Checked on every call, so a test can
+/// let entries through and then make the next one panic inside one process.
+#[cfg(feature = "fault-injection")]
+fn fault_store_panic_armed() -> bool {
+    fault_store_panic_path().is_some_and(std::path::Path::exists)
+}
+
 /// Persists one dequeued entry to the inner store — the single body the
 /// background flush and the shutdown drain share.
 ///
@@ -2947,6 +2983,15 @@ fn fault_store_refusal_armed() -> bool {
 /// guard lives only inside its block: it is `!Send`, and must not be held
 /// across the inner store's await (or into any call that takes the same lock).
 async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow::Result<()> {
+    // Panic here, before the inner store is reached, so the background flush
+    // and the shutdown drain both unwind from the point where a panic of the
+    // inner store itself would reach them.
+    #[cfg(feature = "fault-injection")]
+    assert!(
+        !fault_store_panic_armed(),
+        "fault injection: the inner store panicked"
+    );
+
     // Refuse here, before the inner store is reached, so the background flush
     // and the shutdown drain both see the refusal exactly as they would see an
     // inner-store error.
