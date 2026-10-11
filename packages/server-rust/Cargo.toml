@@ -111,6 +111,9 @@ proptest = "1"
 serial_test = "3"
 tempfile = "3"
 static_assertions = "1"
+# Counting allocator for the test binaries that assert on live bytes; unlike the
+# optional dependency above, these run in the default test build.
+stats_alloc = "0.1"
 
 [[bench]]
 name = "load_harness"

@@ -68,9 +68,8 @@
 //! to `3.x`, either ship a migration step or document a "rebuild from
 //! Postgres" path. See follow-up TODO-335 for the migration plan.
 
-use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use crate::storage::map_data_store::{
     check_map_name, merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
@@ -147,29 +146,14 @@ fn table_name_for(map: &str, is_backup: bool) -> anyhow::Result<String> {
     })
 }
 
-/// Module-level intern cache: maps a table name string to a leaked `&'static str`.
+/// The redb table definition for a table name.
 ///
-/// redb 2.x requires `&'static str` for `TableDefinition::new`. We satisfy this by
-/// leaking one `Box<str>` per *distinct* table name encountered at runtime and caching
-/// the resulting `&'static str`. Repeat calls for the same name return the cached
-/// pointer without a new allocation, bounding leak growth to the number of distinct
-/// `(map, is_backup)` combinations ever seen — a small, schema-fixed set in practice.
-static LEAKED_TABLE_NAMES: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
-
-/// Return a `TableDefinition` whose name pointer is stable for the process lifetime.
-///
-/// On the first call for a given `name`, a single `Box<str>` is leaked and the
-/// resulting `&'static str` is cached in `LEAKED_TABLE_NAMES`. Subsequent calls for
-/// the same `name` return the cached pointer — no allocation, no additional leak.
-/// Total leaked memory is bounded by the number of distinct table names (one per
-/// `(map, is_backup)` combination), which is small and fixed by the application schema.
+/// The definition borrows `name` for as long as the caller holds it, which is
+/// one `open_table` call: redb copies what it needs when it opens the table.
+/// Nothing is cached and nothing is leaked, so the store holds no memory per
+/// distinct map name.
 fn table_def(name: &str) -> TableDefinition<'_, &'static str, &'static [u8]> {
-    let cache = LEAKED_TABLE_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = cache.lock().expect("LEAKED_TABLE_NAMES mutex poisoned");
-    let static_name = guard
-        .entry(name.to_string())
-        .or_insert_with(|| Box::leak(name.to_string().into_boxed_str()));
-    TableDefinition::new(static_name)
+    TableDefinition::new(name)
 }
 
 /// Embedded `redb`-backed `MapDataStore`.
@@ -663,6 +647,7 @@ impl MapDataStore for RedbDataStore {
 mod tests {
     use super::*;
     use crate::storage::record::OrMapEntry;
+    use std::sync::Mutex;
     use tempfile::tempdir;
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;
@@ -1200,23 +1185,13 @@ mod tests {
     }
 
     #[test]
-    fn table_def_cache_returns_pointer_identical_static_str() {
-        // Two calls for the same name must return the exact same &'static str pointer,
-        // confirming the intern cache hits on the second call and does not leak a second
-        // allocation for the same distinct name.
-        let def1 = table_def("map__cache_test");
-        let def2 = table_def("map__cache_test");
-        // TableDefinition::name() returns the &'static str used at construction.
-        assert!(
-            std::ptr::eq(def1.name(), def2.name()),
-            "second call must reuse cached pointer, not allocate a new &'static str"
-        );
-        // A different name must produce a different pointer (distinct intern entries).
-        let def3 = table_def("map__cache_test__backup");
-        assert!(
-            !std::ptr::eq(def1.name(), def3.name()),
-            "distinct names must have distinct pointers"
-        );
+    fn table_def_carries_the_name_it_was_given() {
+        // The definition borrows the caller's string rather than a copy of it:
+        // same bytes at the same address, so there is nothing to retain.
+        let name = String::from("mapr__orders/2026");
+        let def = table_def(&name);
+        assert_eq!(def.name(), name);
+        assert!(std::ptr::eq(def.name(), name.as_str()));
     }
 
     /// Test sink that collects every leaf the enumeration produces.

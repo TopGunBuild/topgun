@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server):** with the embedded store, the server's memory no longer grows with the
+  number of different map names it has seen. Before, every new map name the server read or
+  wrote stayed in memory until the process stopped, so an application that keeps creating
+  maps under fresh names (one per document, session or user) made the server grow for as
+  long as it ran. Stored data and its format on disk are unchanged.
 - **Fixed (server):** writes packed into a batch envelope now count against the connection's
   rate limit like the same writes sent directly. Before, a batch of writes placed inside an
   envelope counted as one request however many writes it held. A client that packs batches
