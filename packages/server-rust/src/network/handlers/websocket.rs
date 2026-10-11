@@ -4004,7 +4004,7 @@ mod tests {
             .collect();
         assert!(
             partitions.len() >= 2,
-            "precondition: the nine dispatched keys span at least two partitions, got              {partitions:?}"
+            "precondition: the nine dispatched keys span at least two partitions, got {partitions:?}"
         );
         let nested = TopGunMessage::Batch(envelope_declaring(
             1,
@@ -4037,7 +4037,7 @@ mod tests {
         assert_eq!(
             (cost, dispatched),
             (12, 9),
-            "(cost presented, operations handed to the domain service);              (partition, operation count) as received: {:?}",
+            "(cost presented, operations handed to the domain service); (partition, operation count) as received: {:?}",
             fx.received.lock()
         );
     }
@@ -4062,11 +4062,13 @@ mod tests {
         let cost = envelope.cost();
         let frames = dispatched_envelope_frames(&fx, envelope).await;
 
+        // Read once and released: a guard still held by the compared tuple
+        // would deadlock the failure message's own read of the list.
+        let received = fx.received.lock().clone();
         assert_eq!(
-            (cost, fx.received.lock().len(), frames.len()),
+            (cost, received.len(), frames.len()),
             (1, 0, 0),
-            "(cost, operations handed to the domain service, frames queued); received: {:?},              frames: {:?}",
-            fx.received.lock(),
+            "(cost, operations handed to the domain service, frames queued); received: {received:?}, frames: {:?}",
             decode_frames(&frames)
         );
     }
@@ -4087,10 +4089,11 @@ mod tests {
         let (held, cost) = (held_messages(&envelope).len(), envelope.cost());
         let frames = dispatched_envelope_frames(&fx, envelope).await;
 
+        let received = fx.received.lock().len();
         assert_eq!(
-            (held, cost, error_codes(&frames), fx.received.lock().len()),
+            (held, cost, error_codes(&frames), received),
             (0, 8193, vec!["413".to_string()], 0),
-            "(messages held, cost, one label per frame queued, operations handed to the domain              service)"
+            "(messages held, cost, one label per frame queued, operations handed to the domain service)"
         );
     }
 }
