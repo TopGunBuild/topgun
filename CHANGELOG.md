@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server):** a server whose background flush stops working no longer keeps
+  accepting writes it will never store. Before, if the background task that carries
+  acknowledged writes to the store crashed, the server went on acknowledging writes, reported
+  itself healthy and, when stopped later, exited with code 0 as after a clean stop. Now the
+  server stops itself: writes that arrive at that moment are refused as a temporary error, so
+  the client keeps them and sends them again once the server is back; `/health/ready` answers
+  503; the server stores what is still queued and exits with code 70, or 71 if that final
+  step fails or takes too long. Run the server under a supervisor that restarts it on a
+  non-zero exit code, and let it tolerate up to 70 s (with default settings) for this stop.
+  After the restart, the writes the crashed task was holding are replayed from the write-ahead
+  log. The same applies when the task that watches for stalled flushes crashes. One change
+  reaches a healthy server too: an ordinary stop now synchronises the write-ahead log to disk
+  before the process exits. The mechanism: a panic of the write-behind flush task or of the
+  stall watchdog is caught on the dying task and puts the store in a failed state that it
+  never leaves; the exit code is non-zero whether the panic came before or after a stop
+  signal. For embedders, `hard_flush` returns an error on a failed store. Two new metric
+  series, `topgun_write_behind_background_task_panics_total` with `task="flush"` and
+  `task="stall_watchdog"`, count these failures and read 0 on a healthy server.
 - **Fixed (server):** with the embedded store, the server's memory no longer grows with the
   number of different map names it has seen. Before, every new map name the server read or
   wrote stayed in memory until the process stopped, so an application that keeps creating
