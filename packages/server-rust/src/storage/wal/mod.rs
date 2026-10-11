@@ -1384,6 +1384,30 @@ impl Wal for WalWriter {
         all.retain(|e| e.sequence > applied_seq);
         Ok(all)
     }
+
+    /// Fsyncs the active segment of every open partition that holds
+    /// un-fsynced frames.
+    ///
+    /// Only an active segment can hold one: a sealed segment was fsynced
+    /// before it was frozen. Each segment is synced under its own lock, taken
+    /// after the map lock is released, so an append to another partition is
+    /// never held up. A failure does not end the pass — the other partitions
+    /// are still worth making durable — and the first one is what is returned.
+    async fn sync(&self) -> anyhow::Result<()> {
+        let handles: Vec<Arc<PartitionHandle>> =
+            { self.partitions.lock().await.values().cloned().collect() };
+        let mut first_error = None;
+        for handle in handles {
+            let mut active = handle.active.lock().await;
+            if active.unfsynced_count() == 0 {
+                continue;
+            }
+            if let Err(e) = active.sync_data().await {
+                first_error.get_or_insert(e);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
 }
 
 impl WalWriter {
