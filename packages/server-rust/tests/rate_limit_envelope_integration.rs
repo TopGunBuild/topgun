@@ -382,7 +382,7 @@ async fn a_top_level_op_batch_drains_the_bucket() {
 // ---------------------------------------------------------------------------
 
 /// Drives the two-envelope scenario and returns
-/// `(429 count, x- keys recorded, d- keys recorded)`.
+/// `(429 count, x- keys at the first read, x- keys by the end, d- keys recorded)`.
 ///
 /// The first envelope (60 writes, keys `d-*`) is admitted under either bucket.
 /// The second (70 writes, keys `x-*`) is the one under test, followed by a
@@ -397,7 +397,20 @@ async fn a_top_level_op_batch_drains_the_bucket() {
 /// runtime these tests run on, the envelope's task is polled before the
 /// barrier's, so if anything of the envelope were dispatched its first write
 /// would be recorded ahead of `barrier`.
-async fn two_envelopes_then_a_barrier(burst: u32, wait_for_every_x: bool) -> (usize, usize, usize) {
+///
+/// That ordering is observed, not guaranteed, so the refused case reads the
+/// count a second time in a way that does not depend on it: after `barrier` it
+/// keeps receiving until the recorder has been silent for [`QUIET`], every key
+/// restarting the timer, and counts `x-` over everything seen. Both counts must
+/// be zero. A late `x-` key can only turn the test red, never green. The limit:
+/// a write dispatched later than the quiet period is still not seen.
+///
+/// The admitted case awaits all 70 `x-` keys instead, and both counts are read
+/// once they have arrived.
+async fn two_envelopes_then_a_barrier(
+    burst: u32,
+    wait_for_every_x: bool,
+) -> (usize, usize, usize, usize) {
     let mut booted = boot(1, burst, true).await;
     let mut recorded = booted.recorded.take().expect("recorder is wired");
     let mut ws = connect(booted.port).await;
@@ -419,34 +432,44 @@ async fn two_envelopes_then_a_barrier(burst: u32, wait_for_every_x: bool) -> (us
     .await;
     let x_at_barrier = count_prefixed(&seen, "x-");
 
-    if wait_for_every_x {
+    let x_first_read = if wait_for_every_x {
         receive_until(&mut recorded, &mut seen, "70 x- keys", |s| {
             count_prefixed(s, "x-") == 70
         })
         .await;
-    }
+        count_prefixed(&seen, "x-")
+    } else {
+        // The timer running out is the expected way out, not an observation:
+        // what is concluded comes from the keys received before it did.
+        while let Ok(key) = tokio::time::timeout(QUIET, recorded.recv()).await {
+            seen.push(key.expect("the recording service is alive"));
+        }
+        x_at_barrier
+    };
 
     let refused = close_and_collect_429(ws).await;
     let _ = booted.shutdown_tx.send(());
 
-    let x_keys = if wait_for_every_x {
-        count_prefixed(&seen, "x-")
-    } else {
-        x_at_barrier
-    };
-    (refused.len(), x_keys, count_prefixed(&seen, "d-"))
+    (
+        refused.len(),
+        x_first_read,
+        count_prefixed(&seen, "x-"),
+        count_prefixed(&seen, "d-"),
+    )
 }
 
 /// 100 tokens: the first envelope takes 60, the second needs 70 against the 40
 /// that remain and is refused. One 429, and not one of its 70 writes reaches
-/// the service behind the dispatcher.
+/// the service behind the dispatcher: none by the time the barrier is recorded,
+/// and none by the end of the quiet period that follows.
 #[tokio::test]
 async fn a_refused_envelope_hands_nothing_to_dispatch() {
     assert_eq!(
         two_envelopes_then_a_barrier(100, false).await,
-        (1, 0, 60),
-        "(429 count, x- keys recorded when the barrier arrived, d- keys recorded): a frame the \
-         limiter refuses must hand nothing to dispatch"
+        (1, 0, 0, 60),
+        "(429 count, x- keys recorded when the barrier arrived, x- keys recorded by the end of \
+         the quiet period after it, d- keys recorded): a frame the limiter refuses must hand \
+         nothing to dispatch"
     );
 }
 
@@ -456,8 +479,8 @@ async fn a_refused_envelope_hands_nothing_to_dispatch() {
 async fn an_admitted_envelope_hands_every_operation_to_dispatch() {
     assert_eq!(
         two_envelopes_then_a_barrier(200, true).await,
-        (0, 70, 60),
-        "(429 count, x- keys recorded, d- keys recorded): an envelope the bucket covers is \
-         dispatched whole"
+        (0, 70, 70, 60),
+        "(429 count, x- keys recorded once all were awaited, x- keys recorded by the end, d- \
+         keys recorded): an envelope the bucket covers is dispatched whole"
     );
 }
