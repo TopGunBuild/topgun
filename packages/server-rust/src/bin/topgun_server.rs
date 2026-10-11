@@ -803,6 +803,12 @@ async fn main() -> anyhow::Result<()> {
     // Wrap durable backends in WriteBehindDataStore so client OP_ACK round-trips
     // do not block on disk fsync. The Null backend is intentionally skipped:
     // buffering writes to a no-op store wastes overhead with no durability win.
+    //
+    // The store's failure receiver is taken here, while the store still has its
+    // own type: a write-behind background task that panics is reported through
+    // it and through nothing on `MapDataStore` (`TG-WB-006`). The null backend
+    // has no such task and so no receiver.
+    let store_failure: Option<watch::Receiver<Option<_>>>;
     let datastore: Arc<dyn MapDataStore> = match backend {
         StorageBackend::Redb | StorageBackend::Postgres => {
             tracing::debug!(
@@ -813,20 +819,26 @@ async fn main() -> anyhow::Result<()> {
             // WriteBehindDataStore::new_with_wal returns Arc<Self> directly (it
             // spawns its own background flush task). Wrapping with Arc::new here
             // would produce Arc<Arc<...>>, which cannot coerce to Arc<dyn MapDataStore>.
-            WriteBehindDataStore::new_with_wal(
+            let store = WriteBehindDataStore::new_with_wal(
                 inner_data_store,
                 write_behind_config.clone(),
                 wal_opt,
-            )
+            );
+            store_failure = Some(store.background_failure());
+            store
         }
         StorageBackend::Null => {
             tracing::debug!(
                 target: "topgun_server::bootstrap",
                 "write-behind and WAL skipped for null backend"
             );
+            store_failure = None;
             inner_data_store
         }
     };
+    // How long a shutdown started by a store failure may take before the node
+    // is ended from outside the runtime.
+    let failure_deadline = failure_deadline_for(write_behind_config.shutdown_timeout_ms);
 
     let (cluster_state_for_services, cluster_state_for_app) = if cluster_mode {
         // --- Cluster mode ---
@@ -1332,7 +1344,16 @@ async fn main() -> anyhow::Result<()> {
     // outer scope keeps the original Arc for wait_for_drain below.
     let shutdown_for_drain = Arc::clone(&shutdown);
 
-    // Serve until SIGTERM or SIGINT.
+    // The shutdown future reports what ended its wait, and the deadline it
+    // started if that was a store failure, to the statements after the serve
+    // loop. The receiver it waits on is a second handle: the first is read
+    // again once the write-behind drain has returned.
+    let failure_for_stop = store_failure.clone();
+    let (stop_started_tx, mut stop_started_rx) =
+        oneshot::channel::<(ShutdownCause, Option<FailureDeadline>)>();
+
+    // Serve until SIGTERM or SIGINT, or until a write-behind background task
+    // panics.
     // into_make_service_with_connect_info threads the peer SocketAddr into each
     // request so the governor's PeerIpKeyExtractor can identify the client IP.
     // Without it, every rate-limited admin route 500s with "Unable To Extract Key".
@@ -1341,18 +1362,42 @@ async fn main() -> anyhow::Result<()> {
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown_signal().await;
+        let (cause, deadline) = match store_failure_or_signal(failure_for_stop).await {
+            Some(failure) => {
+                log_store_failure(
+                    failure.task.as_str(),
+                    exit_code_for(true, ShutdownOutcome::Completed),
+                );
+                // Started before anything else the stop does, so the bound
+                // covers the HTTP drain as well. The exit action is the real
+                // one; the thread that calls it has logged why by then.
+                let deadline =
+                    start_failure_deadline(failure_deadline, |code| std::process::exit(code));
+                (ShutdownCause::StoreFailure, Some(deadline))
+            }
+            None => (ShutdownCause::Signal, None),
+        };
         // Flip /health to 503 before the HTTP server starts closing so
         // any load balancer in front of us drains traffic away first.
         // Without this, /health stays "ready" until the process dies
         // and the LB happily forwards new requests into a dying server.
-        shutdown_for_drain.trigger_shutdown();
+        apply_shutdown_cause(cause, &shutdown_for_drain);
         // Signal cluster services (HeartbeatService, EvictionOrchestrator, etc.)
         // to exit their loops. The write-behind flush loop is stopped separately
         // by hard_flush() below (via the store's own internal shutdown channel).
         let _ = shutdown_tx.send(true);
+        // The receiver lives until `main` reads it below. A deadline that could
+        // not be handed over stays armed: dropping its handle does not cancel it.
+        let _ = stop_started_tx.send((cause, deadline));
     })
     .await?;
+
+    // The serve loop returns only after the shutdown future completed, so the
+    // cause is there to read. Were it ever not, no store failure was seen and no
+    // deadline was started, which is what a signal means below.
+    let (cause, deadline) = stop_started_rx
+        .try_recv()
+        .unwrap_or((ShutdownCause::Signal, None));
 
     // The HTTP server has stopped accepting; stop the reaper before draining.
     reaper_handle.abort();
@@ -1361,9 +1406,7 @@ async fn main() -> anyhow::Result<()> {
     // request handlers (tracked via ShutdownController::in_flight_guard) to
     // finish, with a bounded deadline so a stuck handler can't block exit
     // indefinitely. 30s matches typical k8s terminationGracePeriodSeconds.
-    let drained = shutdown
-        .wait_for_drain(std::time::Duration::from_secs(30))
-        .await;
+    let drained = shutdown.wait_for_drain(IN_FLIGHT_DRAIN_TIMEOUT).await;
     if drained {
         tracing::info!("graceful shutdown complete");
     } else {
@@ -1378,8 +1421,49 @@ async fn main() -> anyhow::Result<()> {
     // above, so no new client writes can arrive at this point. The drain is
     // bounded by shutdown_timeout_ms (default 30s); on timeout, still-pending
     // ops are logged via warn! and the process proceeds to exit.
-    if let Err(err) = datastore.hard_flush().await {
+    let flushed: anyhow::Result<()> = match cause {
+        ShutdownCause::Signal => datastore.hard_flush().await,
+        ShutdownCause::StoreFailure => {
+            // In a task of its own, so that a drain that panics on the store
+            // that already failed is an exit code and not an unwinding `main`.
+            let store = Arc::clone(&datastore);
+            match tokio::spawn(async move { store.hard_flush().await }).await {
+                Ok(flushed) => flushed,
+                Err(join_error) => {
+                    let exit_code = exit_code_for(true, ShutdownOutcome::PanickedOrOverran);
+                    tracing::error!(
+                        error = %join_error,
+                        exit_code,
+                        "write-behind drain did not complete on a failed store; \
+                         writes it did not persist replay from the WAL at the next start"
+                    );
+                    std::process::exit(exit_code);
+                }
+            }
+        }
+    };
+    if let Err(err) = &flushed {
         tracing::warn!(error = %err, "Write-behind drain encountered an error during shutdown");
+    }
+
+    // Read only now: a task that panicked after a signal began the stop is in
+    // the store's record or in what the drain returned, and in nothing earlier.
+    let failed = store_failed(cause, store_failure.as_ref(), &flushed);
+    let exit_code = exit_code_for(failed, ShutdownOutcome::Completed);
+    if failed {
+        match deadline {
+            Some(deadline) => deadline.cancel(),
+            // The stop was begun by a signal, so the failure has not been
+            // reported by this binary yet and no deadline is running.
+            None => log_store_failure(
+                recorded_failure(store_failure.as_ref(), &flushed)
+                    .map_or("unknown", |failure| failure.task.as_str()),
+                exit_code,
+            ),
+        }
+        // Not a return: dropping the runtime can wait on blocking tasks with
+        // nothing left to bound it. The WAL was synced by the drain above.
+        std::process::exit(exit_code);
     }
 
     Ok(())
@@ -2235,10 +2319,6 @@ async fn shutdown_signal() {
 
 /// What made the node start shutting down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    dead_code,
-    reason = "the shutdown path that reads the store's failure follows"
-)]
 enum ShutdownCause {
     /// SIGTERM or SIGINT.
     Signal,
@@ -2248,10 +2328,6 @@ enum ShutdownCause {
 
 /// How the shutdown itself went, whatever started it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    dead_code,
-    reason = "the shutdown path that reads the store's failure follows"
-)]
 enum ShutdownOutcome {
     /// The write-behind drain returned, with or without an error.
     Completed,
@@ -2265,10 +2341,6 @@ enum ShutdownOutcome {
 /// whose flush task died holding a batch must not report a clean stop because
 /// a signal happened to arrive first. No cell is 0 for a shutdown that
 /// panicked or overran, the one no caller reaches included.
-#[expect(
-    dead_code,
-    reason = "the shutdown path that reads the store's failure follows"
-)]
 fn exit_code_for(store_failed: bool, shutdown: ShutdownOutcome) -> i32 {
     match (store_failed, shutdown) {
         (_, ShutdownOutcome::PanickedOrOverran) => 71,
@@ -2277,33 +2349,167 @@ fn exit_code_for(store_failed: bool, shutdown: ShutdownOutcome) -> i32 {
     }
 }
 
+/// The store's failure as it stands when this is called: the store's own
+/// record first, then the failure a drain on a failed store returns as the
+/// source of its error.
+///
+/// Generic over the failure type because the store's own type is not exported
+/// under a name this binary can write; the receiver the store hands out fixes
+/// it at the call.
+fn recorded_failure<F>(
+    recorded: Option<&watch::Receiver<Option<F>>>,
+    flushed: &anyhow::Result<()>,
+) -> Option<F>
+where
+    F: std::error::Error + Clone + Send + Sync + 'static,
+{
+    recorded
+        .and_then(|failure| failure.borrow().clone())
+        .or_else(|| {
+            flushed
+                .as_ref()
+                .err()
+                .and_then(|err| err.downcast_ref::<F>().cloned())
+        })
+}
+
 /// Whether the store has failed, read once the write-behind drain returned.
 ///
 /// The cause alone is not enough: a task can panic after a signal started the
 /// stop, and then the failure is only in the store's record or in what the
 /// drain returned. `recorded` is `None` for a backend with no write-behind
 /// store.
-///
-/// Generic over the failure type because the store's own type is not exported
-/// under a name this binary can write; the receiver the store hands out fixes
-/// it at the call.
-#[expect(
-    dead_code,
-    reason = "the shutdown path that reads the store's failure follows"
-)]
 fn store_failed<F>(
     cause: ShutdownCause,
     recorded: Option<&watch::Receiver<Option<F>>>,
     flushed: &anyhow::Result<()>,
 ) -> bool
 where
-    F: std::error::Error + Send + Sync + 'static,
+    F: std::error::Error + Clone + Send + Sync + 'static,
 {
-    cause == ShutdownCause::StoreFailure
-        || recorded.is_some_and(|failure| failure.borrow().is_some())
-        || flushed
-            .as_ref()
-            .is_err_and(|err| err.downcast_ref::<F>().is_some())
+    cause == ShutdownCause::StoreFailure || recorded_failure(recorded, flushed).is_some()
+}
+
+/// Puts the controller in the state the cause asks for.
+///
+/// Both causes drain: readiness answers 503 and the listeners are told to
+/// stop. A node whose store failed is as unfit for new requests as one that was
+/// asked to stop, and the match is exhaustive so that a cause added later has
+/// to say what it does to health.
+fn apply_shutdown_cause(cause: ShutdownCause, controller: &ShutdownController) {
+    match cause {
+        ShutdownCause::Signal | ShutdownCause::StoreFailure => controller.trigger_shutdown(),
+    }
+}
+
+/// Completes with the store's failure once one is recorded, and never for a
+/// backend that has no write-behind store.
+async fn store_failure_recorded<F: Clone>(recorded: Option<watch::Receiver<Option<F>>>) -> F {
+    if let Some(mut recorded) = recorded {
+        // `wait_for` looks at the current value before it waits, so a failure
+        // recorded before this future was first polled is seen. The borrow it
+        // returns ends with this statement, before the await below.
+        let failure = recorded
+            .wait_for(Option::is_some)
+            .await
+            .ok()
+            .and_then(|failure| failure.clone());
+        if let Some(failure) = failure {
+            return failure;
+        }
+    }
+    // No store to fail, or a store that was dropped without failing.
+    std::future::pending().await
+}
+
+/// Waits for whatever stops the node first: `Some` with the store's failure,
+/// `None` for SIGTERM or SIGINT.
+async fn store_failure_or_signal<F: Clone>(
+    recorded: Option<watch::Receiver<Option<F>>>,
+) -> Option<F> {
+    tokio::select! {
+        // A failure that is ready together with a signal is taken as the
+        // failure, so that the stop it starts runs under the deadline.
+        biased;
+        failure = store_failure_recorded(recorded) => Some(failure),
+        () = shutdown_signal() => None,
+    }
+}
+
+/// The one line this binary writes when it learns that the store has failed.
+fn log_store_failure(task: &str, exit_code: i32) {
+    tracing::error!(
+        task,
+        exit_code,
+        "write-behind background task failed; shutting the node down"
+    );
+}
+
+/// The bound on waiting for in-flight request handlers once the HTTP server
+/// has stopped accepting. Matches a typical k8s `terminationGracePeriodSeconds`.
+const IN_FLIGHT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What the failure deadline allows on top of the two bounded waits it covers.
+const FAILURE_DEADLINE_MARGIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long a shutdown started by a store failure may take: the in-flight
+/// drain, the write-behind drain's own timeout, and a margin.
+fn failure_deadline_for(shutdown_timeout_ms: u64) -> std::time::Duration {
+    IN_FLIGHT_DRAIN_TIMEOUT
+        + std::time::Duration::from_millis(shutdown_timeout_ms)
+        + FAILURE_DEADLINE_MARGIN
+}
+
+/// The means to say that the shutdown a deadline was guarding has completed.
+///
+/// Dropping it does not cancel: a handle lost on some path leaves the deadline
+/// armed, which ends the process, rather than disarmed, which could leave a
+/// failed node running.
+struct FailureDeadline {
+    cancel: std::sync::mpsc::Sender<()>,
+}
+
+impl FailureDeadline {
+    /// The shutdown completed; the exit action will not be called.
+    fn cancel(self) {
+        // An error means the thread is past its wait and the action already ran.
+        let _ = self.cancel.send(());
+    }
+}
+
+/// Starts the deadline of a shutdown on a failed store: unless cancelled within
+/// `after`, `exit` is called with the exit code of a shutdown that overran.
+///
+/// It waits on an OS thread because what it guards against includes a runtime
+/// that no longer runs its timers. `exit` is a parameter so that the deadline
+/// can be driven without ending a process.
+fn start_failure_deadline<A>(after: std::time::Duration, exit: A) -> FailureDeadline
+where
+    A: FnOnce(i32) + Send + 'static,
+{
+    let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+    let expires = Instant::now() + after;
+    std::thread::Builder::new()
+        .name("failure-deadline".to_string())
+        .spawn(move || {
+            match cancelled.recv_timeout(after) {
+                Ok(()) => return,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                // The handle was dropped without a cancel: the deadline stands.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    std::thread::sleep(expires.saturating_duration_since(Instant::now()));
+                }
+            }
+            let exit_code = exit_code_for(true, ShutdownOutcome::PanickedOrOverran);
+            tracing::error!(
+                deadline_ms = u64::try_from(after.as_millis()).unwrap_or(u64::MAX),
+                exit_code,
+                "shutdown on a failed store passed its deadline; ending the process"
+            );
+            exit(exit_code);
+        })
+        .expect("failed to start the failure-deadline thread");
+    FailureDeadline { cancel }
 }
 
 #[cfg(test)]
