@@ -820,8 +820,8 @@ struct TestParks {
     load_slot_hits: AtomicU64,
     /// Parks the next `remove` of the key once its delete is staged.
     after_remove: Mutex<Option<(String, String, ParkGate)>>,
-    /// Parks the next write of the key once it holds its entry sequence and
-    /// before it takes the queue.
+    /// Parks the next write of the key once it holds its entry sequence,
+    /// before it stages the key and before it takes the queue.
     before_queue_insert: Mutex<Option<(String, String, ParkGate)>>,
     /// Parks the next write of the key between the staging of its key and its
     /// queue insert.
@@ -2013,9 +2013,10 @@ impl WriteBehindDataStore {
         handle
     }
 
-    /// Parks the next write of `(map, key)` between its sequence assignment
-    /// and its queue insert, so a second writer of the same key can be queued
-    /// first with a higher sequence. One-shot and held by this store instance:
+    /// Parks the next write of `(map, key)` after its sequence assignment,
+    /// before it stages the key and before it takes the queue, so a second
+    /// writer of the same key can be staged and queued first with a higher
+    /// sequence. One-shot and held by this store instance:
     /// the first writer of the key to reach the point parks, later ones pass.
     #[cfg(test)]
     pub(crate) fn test_park_before_queue_insert(&self, map: &str, key: &str) -> TestParkHandle {
@@ -2434,6 +2435,12 @@ impl WriteBehindDataStore {
     /// newer staged value (a plain `insert` is last-writer-wins by wall-clock,
     /// not by `seq`). The monotonic guard makes the slot's `seq` truthful, which
     /// is the identity [`clear_staging_if_current`] relies on.
+    ///
+    /// Caller contract (`TG-WB-007`): a write calls this directly before its
+    /// queue insert, with no await and no lock held from this call to the end
+    /// of the insert. Staged first, the slot is there for whichever terminal
+    /// persists the entry; with nothing able to suspend the writer in
+    /// between, a slot is never left behind without an entry.
     fn stage(&self, map: &str, key: &str, seq: u64, value: Option<StagedValue>) {
         use dashmap::mapref::entry::Entry;
         match self.staging.entry((map.to_string(), key.to_string())) {
@@ -3586,8 +3593,16 @@ impl MapDataStore for WriteBehindDataStore {
             wal_sequences: BTreeSet::from([wal_seq]),
         };
 
-        // Insert into partition queue, preserving original store_time on coalesce
         let staging_key = (map.to_string(), key.to_string());
+        // Staged before the entry is queued: a flush pass can take the entry the
+        // moment it is in the queue, and the terminal that persists it clears
+        // the slot only if it finds it. From here to the queue insert there is
+        // no await and no lock held, and it must stay that way (`TG-WB-007`).
+        let (smap, skey) = staging_key;
+        self.stage(&smap, &skey, entry_seq, Some(staged));
+        #[cfg(test)]
+        TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
+        // Insert into partition queue, preserving original store_time on coalesce
         let (retired_seq, subsumed_wal_seqs) = {
             let mut queue = self.queues.entry(partition_id).or_default();
             // If coalescing, preserve the original store_time
@@ -3610,8 +3625,6 @@ impl MapDataStore for WriteBehindDataStore {
                 (None, None)
             }
         };
-        #[cfg(test)]
-        TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
 
         // The frame is on disk and the entry is queued, so an entry now owns this
         // WAL sequence. Done after releasing the partition-queue lock so neither
@@ -3631,10 +3644,6 @@ impl MapDataStore for WriteBehindDataStore {
         if let Some(subsumed) = subsumed_wal_seqs {
             self.resolve_wal_sequences(partition_id, &subsumed);
         }
-
-        // Update staging area for read-your-writes
-        let (smap, skey) = staging_key;
-        self.stage(&smap, &skey, entry_seq, Some(staged));
 
         Ok(())
     }
@@ -3718,6 +3727,15 @@ impl MapDataStore for WriteBehindDataStore {
         };
 
         let staging_key = (map.to_string(), key.to_string());
+        // The pending delete is staged before the entry is queued: a flush pass
+        // can take the entry the moment it is in the queue, and the terminal
+        // that persists it clears the slot only if it finds it. From here to the
+        // queue insert there is no await and no lock held, and it must stay that
+        // way (`TG-WB-007`).
+        let (smap, skey) = staging_key;
+        self.stage(&smap, &skey, entry_seq, None);
+        #[cfg(test)]
+        TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
         let (retired_seq, subsumed_wal_seqs) = {
             let mut queue = self.queues.entry(partition_id).or_default();
             if let Some(existing) = queue.value_mut().remove(map, key) {
@@ -3738,8 +3756,6 @@ impl MapDataStore for WriteBehindDataStore {
                 (None, None)
             }
         };
-        #[cfg(test)]
-        TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
 
         // An entry now owns this WAL sequence; sited after the queue guard drops.
         self.promote_wal_sequence(partition_id, wal_seq);
@@ -3753,10 +3769,6 @@ impl MapDataStore for WriteBehindDataStore {
         if let Some(subsumed) = subsumed_wal_seqs {
             self.resolve_wal_sequences(partition_id, &subsumed);
         }
-
-        // Pending delete marker in staging
-        let (smap, skey) = staging_key;
-        self.stage(&smap, &skey, entry_seq, None);
 
         #[cfg(test)]
         if let Some(gate) = TestParks::take_keyed(&self.test_parks.after_remove, map, key) {
@@ -3919,6 +3931,15 @@ impl MapDataStore for WriteBehindDataStore {
             };
 
             let staging_key = (map.to_string(), key.clone());
+            // The pending delete is staged before the entry is queued: a flush pass
+            // can take the entry the moment it is in the queue, and the terminal
+            // that persists it clears the slot only if it finds it. From here to the
+            // queue insert there is no await and no lock held, and it must stay that
+            // way (`TG-WB-007`).
+            let (smap, skey) = staging_key;
+            self.stage(&smap, &skey, entry_seq, None);
+            #[cfg(test)]
+            TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
             let (retired_seq, subsumed_wal_seqs) = {
                 let mut queue = self.queues.entry(partition_id).or_default();
                 if let Some(existing) = queue.value_mut().remove(map, key) {
@@ -3938,8 +3959,6 @@ impl MapDataStore for WriteBehindDataStore {
                     (None, None)
                 }
             };
-            #[cfg(test)]
-            TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
 
             // An entry now owns this WAL sequence; sited after the queue guard drops.
             self.promote_wal_sequence(partition_id, wal_seq);
@@ -3957,9 +3976,6 @@ impl MapDataStore for WriteBehindDataStore {
             if let Some(subsumed) = subsumed_wal_seqs {
                 self.resolve_wal_sequences(partition_id, &subsumed);
             }
-
-            let (smap, skey) = staging_key;
-            self.stage(&smap, &skey, entry_seq, None);
         }
 
         Ok(())
