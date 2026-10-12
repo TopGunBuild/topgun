@@ -93,10 +93,15 @@ pub struct WriteBehindConfig {
     ///
     /// In the worst case the count stays below `2 * (C + W)`.
     ///
-    /// Precondition, which is not enforced: the formula is derived for keys
-    /// whose staging slot exists only while an entry of the key is queued or
-    /// held by a flush pass, with one writer per key (`TG-KEY-001`). See
-    /// `TG-WB-006`, "Not claimed", for the interleaving that breaks it.
+    /// Precondition, which the callers uphold and this store does not
+    /// enforce: one writer per key at a time (`TG-KEY-001`).
+    ///
+    /// What the formula rests on inside the store (`TG-WB-007`): a key's
+    /// staging slot exists only while an entry of the key is queued or held
+    /// by a flush pass, or while the key's writer is between its `stage` call
+    /// and its queue insert — a stretch with no await and no lock held, so it
+    /// ends by itself. Not covered: a panic inside that stretch leaves a slot
+    /// with nothing buffered.
     pub capacity: u64,
     /// Maximum milliseconds to wait for the write-behind buffer to drain on
     /// graceful shutdown. On timeout, still-pending ops are logged and the
@@ -820,9 +825,12 @@ struct TestParks {
     load_slot_hits: AtomicU64,
     /// Parks the next `remove` of the key once its delete is staged.
     after_remove: Mutex<Option<(String, String, ParkGate)>>,
-    /// Parks the next write of the key once it holds its entry sequence and
-    /// before it takes the queue.
+    /// Parks the next write of the key once it holds its entry sequence,
+    /// before it stages the key and before it takes the queue.
     before_queue_insert: Mutex<Option<(String, String, ParkGate)>>,
+    /// Parks the next write of the key between the staging of its key and its
+    /// queue insert.
+    between_stage_and_queue_insert: Mutex<Option<(String, String, ParkGate)>>,
     /// Parks `hard_flush` once the shutdown flag is set, before the flush
     /// loop is joined.
     after_shutdown_flag: Mutex<Option<ParkGate>>,
@@ -845,6 +853,15 @@ impl TestParks {
             slot.take().map(|(_, _, gate)| gate)
         } else {
             None
+        }
+    }
+
+    /// Parks the caller on `slot` when it is armed for `(map, key)`. One call
+    /// instead of an `if let` at the consult site keeps that site to a single
+    /// statement.
+    async fn pass_keyed(slot: &Mutex<Option<(String, String, ParkGate)>>, map: &str, key: &str) {
+        if let Some(gate) = Self::take_keyed(slot, map, key) {
+            gate.pass().await;
         }
     }
 }
@@ -1770,7 +1787,15 @@ impl WriteBehindDataStore {
                 let partition_id_for_wal = partition_for(&entry.map, &entry.key);
                 match tokio::time::timeout(remaining, flush_future).await {
                     Ok(Ok(())) => {
-                        self.staging.remove(&(entry.map.clone(), entry.key.clone()));
+                        // A writer that passed the lifecycle check before the
+                        // shutdown may have staged a newer write of this key —
+                        // its entry already queued (it completed while this
+                        // drain was inside the store call above) or not queued
+                        // yet. Removing the slot without comparing sequences
+                        // would leave that write buffered with no slot, and
+                        // reads would fall back to the older durable value
+                        // (`TG-WB-007`).
+                        self.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
                         self.pending_count.fetch_sub(1, Ordering::Relaxed);
                         self.resolve_pending(entry.sequence);
                         // Resolve and advance so a restart after clean shutdown is
@@ -2001,9 +2026,10 @@ impl WriteBehindDataStore {
         handle
     }
 
-    /// Parks the next write of `(map, key)` between its sequence assignment
-    /// and its queue insert, so a second writer of the same key can be queued
-    /// first with a higher sequence. One-shot and held by this store instance:
+    /// Parks the next write of `(map, key)` after its sequence assignment,
+    /// before it stages the key and before it takes the queue, so a second
+    /// writer of the same key can be staged and queued first with a higher
+    /// sequence. One-shot and held by this store instance:
     /// the first writer of the key to reach the point parks, later ones pass.
     #[cfg(test)]
     pub(crate) fn test_park_before_queue_insert(&self, map: &str, key: &str) -> TestParkHandle {
@@ -2011,6 +2037,27 @@ impl WriteBehindDataStore {
         *self
             .test_parks
             .before_queue_insert
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((map.to_string(), key.to_string(), gate));
+        handle
+    }
+
+    /// Parks the next write of `(map, key)` between the staging of its key and
+    /// its queue insert, so a flush pass or a shutdown drain can run while the
+    /// write has done one of the two and not the other. One-shot and held by
+    /// this store instance: the first write of the key to reach the point
+    /// parks, later ones pass.
+    #[cfg(test)]
+    pub(crate) fn test_park_between_stage_and_queue_insert(
+        &self,
+        map: &str,
+        key: &str,
+    ) -> TestParkHandle {
+        let (gate, handle) = TestParkHandle::arm();
+        *self
+            .test_parks
+            .between_stage_and_queue_insert
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some((map.to_string(), key.to_string(), gate));
@@ -2401,6 +2448,12 @@ impl WriteBehindDataStore {
     /// newer staged value (a plain `insert` is last-writer-wins by wall-clock,
     /// not by `seq`). The monotonic guard makes the slot's `seq` truthful, which
     /// is the identity [`clear_staging_if_current`] relies on.
+    ///
+    /// Caller contract (`TG-WB-007`): a write calls this directly before its
+    /// queue insert, with no await and no lock held from this call to the end
+    /// of the insert. Staged first, the slot is there for whichever terminal
+    /// persists the entry; with nothing able to suspend the writer in
+    /// between, a slot is never left behind without an entry.
     fn stage(&self, map: &str, key: &str, seq: u64, value: Option<StagedValue>) {
         use dashmap::mapref::entry::Entry;
         match self.staging.entry((map.to_string(), key.to_string())) {
@@ -3553,8 +3606,16 @@ impl MapDataStore for WriteBehindDataStore {
             wal_sequences: BTreeSet::from([wal_seq]),
         };
 
-        // Insert into partition queue, preserving original store_time on coalesce
         let staging_key = (map.to_string(), key.to_string());
+        // Staged before the entry is queued: a flush pass can take the entry the
+        // moment it is in the queue, and the terminal that persists it clears
+        // the slot only if it finds it. From here to the queue insert there is
+        // no await and no lock held, and it must stay that way (`TG-WB-007`).
+        let (smap, skey) = staging_key;
+        self.stage(&smap, &skey, entry_seq, Some(staged));
+        #[cfg(test)]
+        TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
+        // Insert into partition queue, preserving original store_time on coalesce
         let (retired_seq, subsumed_wal_seqs) = {
             let mut queue = self.queues.entry(partition_id).or_default();
             // If coalescing, preserve the original store_time
@@ -3596,10 +3657,6 @@ impl MapDataStore for WriteBehindDataStore {
         if let Some(subsumed) = subsumed_wal_seqs {
             self.resolve_wal_sequences(partition_id, &subsumed);
         }
-
-        // Update staging area for read-your-writes
-        let (smap, skey) = staging_key;
-        self.stage(&smap, &skey, entry_seq, Some(staged));
 
         Ok(())
     }
@@ -3683,6 +3740,15 @@ impl MapDataStore for WriteBehindDataStore {
         };
 
         let staging_key = (map.to_string(), key.to_string());
+        // The pending delete is staged before the entry is queued: a flush pass
+        // can take the entry the moment it is in the queue, and the terminal
+        // that persists it clears the slot only if it finds it. From here to the
+        // queue insert there is no await and no lock held, and it must stay that
+        // way (`TG-WB-007`).
+        let (smap, skey) = staging_key;
+        self.stage(&smap, &skey, entry_seq, None);
+        #[cfg(test)]
+        TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
         let (retired_seq, subsumed_wal_seqs) = {
             let mut queue = self.queues.entry(partition_id).or_default();
             if let Some(existing) = queue.value_mut().remove(map, key) {
@@ -3716,10 +3782,6 @@ impl MapDataStore for WriteBehindDataStore {
         if let Some(subsumed) = subsumed_wal_seqs {
             self.resolve_wal_sequences(partition_id, &subsumed);
         }
-
-        // Pending delete marker in staging
-        let (smap, skey) = staging_key;
-        self.stage(&smap, &skey, entry_seq, None);
 
         #[cfg(test)]
         if let Some(gate) = TestParks::take_keyed(&self.test_parks.after_remove, map, key) {
@@ -3882,6 +3944,15 @@ impl MapDataStore for WriteBehindDataStore {
             };
 
             let staging_key = (map.to_string(), key.clone());
+            // The pending delete is staged before the entry is queued: a flush pass
+            // can take the entry the moment it is in the queue, and the terminal
+            // that persists it clears the slot only if it finds it. From here to the
+            // queue insert there is no await and no lock held, and it must stay that
+            // way (`TG-WB-007`).
+            let (smap, skey) = staging_key;
+            self.stage(&smap, &skey, entry_seq, None);
+            #[cfg(test)]
+            TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
             let (retired_seq, subsumed_wal_seqs) = {
                 let mut queue = self.queues.entry(partition_id).or_default();
                 if let Some(existing) = queue.value_mut().remove(map, key) {
@@ -3918,9 +3989,6 @@ impl MapDataStore for WriteBehindDataStore {
             if let Some(subsumed) = subsumed_wal_seqs {
                 self.resolve_wal_sequences(partition_id, &subsumed);
             }
-
-            let (smap, skey) = staging_key;
-            self.stage(&smap, &skey, entry_seq, None);
         }
 
         Ok(())
@@ -10263,6 +10331,448 @@ mod background_task_panic_tests {
             store.pending_operation_count(),
             CAPACITY,
             "a remove_all of a buffered key coalesces and is not counted again"
+        );
+    }
+
+    /// The key whose write is raced against a flush pass or a shutdown drain.
+    const RACED_KEY: &str = "raced";
+    /// Far enough ahead that no requested pass finds the entry old enough.
+    const NOT_DUE_FOR_MS: i64 = 3_600_000;
+
+    /// Asks for one flush pass and returns once it has closed. The epoch moves
+    /// by two through a pass whether or not the pass found anything, so the
+    /// wait does not depend on what was queued.
+    async fn run_one_whole_pass(store: &WriteBehindDataStore) {
+        let opened_at = store.flush_pass_epoch.load(Ordering::SeqCst);
+        assert_eq!(opened_at % 2, 0, "a pass was already open");
+        store.soft_flush().await.expect("soft_flush");
+        tokio::time::timeout(HANG_LIMIT, async {
+            while store.flush_pass_epoch.load(Ordering::SeqCst) < opened_at + 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the requested flush pass never closed");
+    }
+
+    /// Returns once nothing is queued and no pass is open.
+    async fn wait_until_idle(store: &WriteBehindDataStore) {
+        tokio::time::timeout(HANG_LIMIT, async {
+            while !store.test_is_idle() {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the store never came to rest");
+    }
+
+    /// The sequence of the entry queued for `key`, if one is.
+    fn queued_sequence(store: &WriteBehindDataStore, key: &str) -> Option<u64> {
+        let slot_key = (MAP.to_string(), key.to_string());
+        store
+            .queues
+            .get(&partition_for(MAP, key))
+            .and_then(|queue| queue.entries.get(&slot_key).map(|entry| entry.sequence))
+    }
+
+    /// The sequence of the staging slot of `key`, if it has one.
+    fn staged_sequence(store: &WriteBehindDataStore, key: &str) -> Option<u64> {
+        store
+            .staging
+            .get(&(MAP.to_string(), key.to_string()))
+            .map(|slot| slot.seq)
+    }
+
+    /// What a write was answered: its error text, or `accepted`.
+    fn answer_of(result: anyhow::Result<()>) -> String {
+        result.map_or_else(|refused| refused.to_string(), |()| "accepted".to_string())
+    }
+
+    /// Waits for a spawned write and requires that it was accepted.
+    async fn accepted(write: tokio::task::JoinHandle<anyhow::Result<()>>) {
+        tokio::time::timeout(HANG_LIMIT, write)
+            .await
+            .expect("the released write never returned")
+            .expect("the write's task")
+            .expect("the write is accepted");
+    }
+
+    /// Shuts `store` down from a running state and requires a clean return.
+    async fn shut_down(store: &WriteBehindDataStore) {
+        tokio::time::timeout(HANG_LIMIT, store.hard_flush())
+            .await
+            .expect("hard_flush never returned")
+            .expect("hard_flush");
+    }
+
+    fn seed(memory: &MemoryStore, key: &str) {
+        memory
+            .values()
+            .insert((MAP.to_string(), key.to_string()), lww_text("seeded", 1));
+    }
+
+    #[tokio::test]
+    async fn a_pass_between_the_two_steps_of_a_new_key_write_leaves_no_slot_without_an_entry() {
+        let memory = Arc::new(MemoryStore::default());
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&memory) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                capacity: 1,
+                ..manual_flush_config()
+            },
+        );
+        let now = now_millis();
+        let written = lww_text("written", 1);
+
+        let mut park = store.test_park_between_stage_and_queue_insert(MAP, RACED_KEY);
+        let write = {
+            let store = Arc::clone(&store);
+            let value = written.clone();
+            tokio::spawn(async move { store.add(MAP, RACED_KEY, &value, 0, now).await })
+        };
+        park.wait_parked().await;
+
+        run_one_whole_pass(&store).await;
+        park.release();
+        accepted(write).await;
+        run_one_whole_pass(&store).await;
+        wait_until_idle(&store).await;
+
+        // Read before the filler below, which stages a key of its own.
+        let queued = queued_sequence(&store, RACED_KEY);
+        let staged = staged_sequence(&store, RACED_KEY);
+        let slots_at_rest = store.staging.len();
+        let persisted = memory.get(MAP, RACED_KEY);
+
+        store
+            .add(MAP, "filler", &lww_value(), 0, now + NOT_DUE_FOR_MS)
+            .await
+            .expect("the filler is accepted below capacity");
+        let answer = answer_of(
+            store
+                .add(MAP, RACED_KEY, &written, 0, now + NOT_DUE_FOR_MS)
+                .await,
+        );
+        let pending = store.pending_operation_count();
+
+        assert_eq!(
+            (queued, staged, slots_at_rest, persisted, answer, pending),
+            (
+                None,
+                None,
+                0,
+                Some(written),
+                "Write-behind capacity exceeded".to_string(),
+                1
+            ),
+            "(queued, staged, slots at rest, persisted, answer at capacity, pending)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pass_between_the_two_steps_of_a_coalescing_write_leaves_no_slot_without_an_entry() {
+        let memory = Arc::new(MemoryStore::default());
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&memory) as Arc<dyn MapDataStore>,
+            manual_flush_config(),
+        );
+        let now = now_millis();
+        let first = lww_text("first", 1);
+        let second = lww_text("second", 2);
+
+        store
+            .add(MAP, RACED_KEY, &first, 0, now)
+            .await
+            .expect("the first write is accepted");
+
+        // Its own time is an hour ahead: if its entry is due at once, that is
+        // only because it took over the first entry's time.
+        let mut park = store.test_park_between_stage_and_queue_insert(MAP, RACED_KEY);
+        let write = {
+            let store = Arc::clone(&store);
+            let value = second.clone();
+            tokio::spawn(async move {
+                store
+                    .add(MAP, RACED_KEY, &value, 0, now + NOT_DUE_FOR_MS)
+                    .await
+            })
+        };
+        park.wait_parked().await;
+
+        run_one_whole_pass(&store).await;
+        park.release();
+        accepted(write).await;
+
+        let after_the_write = (
+            queued_sequence(&store, RACED_KEY),
+            staged_sequence(&store, RACED_KEY),
+            store.pending_operation_count(),
+            store.load(MAP, RACED_KEY).await.expect("load"),
+        );
+
+        shut_down(&store).await;
+        let after_shutdown = (
+            queued_sequence(&store, RACED_KEY),
+            staged_sequence(&store, RACED_KEY),
+            store.staging.len(),
+            store.pending_operation_count(),
+            memory.get(MAP, RACED_KEY),
+        );
+
+        assert_eq!(
+            (after_the_write, after_shutdown),
+            (
+                (Some(1), Some(1), 1, Some(second.clone())),
+                (None, None, 0, 0, Some(second))
+            ),
+            "((queued, staged, pending, load), (queued, staged, slots at rest, pending, persisted))"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pass_between_the_two_steps_of_a_remove_leaves_no_slot_without_an_entry() {
+        let memory = Arc::new(MemoryStore::default());
+        seed(&memory, RACED_KEY);
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&memory) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                capacity: 1,
+                ..manual_flush_config()
+            },
+        );
+        let now = now_millis();
+
+        let mut park = store.test_park_between_stage_and_queue_insert(MAP, RACED_KEY);
+        let write = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move { store.remove(MAP, RACED_KEY, now).await })
+        };
+        park.wait_parked().await;
+
+        run_one_whole_pass(&store).await;
+        park.release();
+        accepted(write).await;
+        run_one_whole_pass(&store).await;
+        wait_until_idle(&store).await;
+
+        let queued = queued_sequence(&store, RACED_KEY);
+        let staged = staged_sequence(&store, RACED_KEY);
+        let slots_at_rest = store.staging.len();
+        let persisted = memory.get(MAP, RACED_KEY);
+
+        store
+            .add(MAP, "filler", &lww_value(), 0, now + NOT_DUE_FOR_MS)
+            .await
+            .expect("the filler is accepted below capacity");
+        let answer = answer_of(store.remove(MAP, RACED_KEY, now + NOT_DUE_FOR_MS).await);
+        let pending = store.pending_operation_count();
+
+        assert_eq!(
+            (queued, staged, slots_at_rest, persisted, answer, pending),
+            (
+                None,
+                None,
+                0,
+                None,
+                "Write-behind capacity exceeded".to_string(),
+                1
+            ),
+            "(queued, staged, slots at rest, persisted, answer at capacity, pending)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pass_between_the_two_steps_of_a_remove_all_leaves_no_slot_without_an_entry() {
+        /// Goes through the loop ahead of the raced key, without parking.
+        const UNPARKED_KEY: &str = "ahead-of-the-raced-key";
+
+        let memory = Arc::new(MemoryStore::default());
+        seed(&memory, UNPARKED_KEY);
+        seed(&memory, RACED_KEY);
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&memory) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                capacity: 2,
+                ..manual_flush_config()
+            },
+        );
+        let now = now_millis();
+
+        let mut park = store.test_park_between_stage_and_queue_insert(MAP, RACED_KEY);
+        let write = {
+            let store = Arc::clone(&store);
+            let keys = [UNPARKED_KEY.to_string(), RACED_KEY.to_string()];
+            tokio::spawn(async move { store.remove_all(MAP, &keys).await })
+        };
+        park.wait_parked().await;
+
+        run_one_whole_pass(&store).await;
+        park.release();
+        accepted(write).await;
+        run_one_whole_pass(&store).await;
+        wait_until_idle(&store).await;
+
+        let queued = queued_sequence(&store, RACED_KEY);
+        let staged = staged_sequence(&store, RACED_KEY);
+        let staged_unparked = staged_sequence(&store, UNPARKED_KEY);
+        let slots_at_rest = store.staging.len();
+        let persisted = (memory.get(MAP, UNPARKED_KEY), memory.get(MAP, RACED_KEY));
+
+        for filler in ["filler-1", "filler-2"] {
+            store
+                .add(MAP, filler, &lww_value(), 0, now + NOT_DUE_FOR_MS)
+                .await
+                .expect("the filler is accepted below capacity");
+        }
+        let answer = answer_of(store.remove_all(MAP, &[RACED_KEY.to_string()]).await);
+        let pending = store.pending_operation_count();
+
+        assert_eq!(
+            (
+                queued,
+                staged,
+                staged_unparked,
+                slots_at_rest,
+                persisted,
+                answer,
+                pending
+            ),
+            (
+                None,
+                None,
+                None,
+                0,
+                (None, None),
+                "Write-behind capacity exceeded".to_string(),
+                2
+            ),
+            "(queued, staged, staged of the unparked key, slots at rest, persisted, answer at \
+             capacity, pending)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_drain_between_the_two_steps_of_a_write_keeps_slot_and_entry_together() {
+        let memory = Arc::new(MemoryStore::default());
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&memory) as Arc<dyn MapDataStore>,
+            manual_flush_config(),
+        );
+        let later = now_millis() + NOT_DUE_FOR_MS;
+        let first = lww_text("first", 1);
+        let second = lww_text("second", 2);
+
+        store
+            .add(MAP, RACED_KEY, &first, 0, later)
+            .await
+            .expect("the first write is accepted");
+
+        // Parked past the lifecycle check, so the shutdown below does not
+        // refuse it.
+        let mut park = store.test_park_between_stage_and_queue_insert(MAP, RACED_KEY);
+        let write = {
+            let store = Arc::clone(&store);
+            let value = second.clone();
+            tokio::spawn(async move { store.add(MAP, RACED_KEY, &value, 0, later).await })
+        };
+        park.wait_parked().await;
+
+        shut_down(&store).await;
+        park.release();
+        accepted(write).await;
+
+        assert_eq!(
+            (
+                queued_sequence(&store, RACED_KEY),
+                staged_sequence(&store, RACED_KEY),
+                store.load(MAP, RACED_KEY).await.expect("load"),
+            ),
+            (Some(1), Some(1), Some(second)),
+            "(queued, staged, load)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_completed_while_the_drain_persists_an_older_entry_of_its_key_keeps_its_slot() {
+        let memory = Arc::new(MemoryStore::default());
+        let (inner, _about_to_panic) =
+            PanickingAddStore::over(Arc::clone(&memory) as Arc<dyn MapDataStore>, 0);
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&inner) as Arc<dyn MapDataStore>,
+            manual_flush_config(),
+        );
+        let later = now_millis() + NOT_DUE_FOR_MS;
+        let first = lww_text("first", 1);
+        let second = lww_text("second", 2);
+
+        store
+            .add(MAP, RACED_KEY, &first, 0, later)
+            .await
+            .expect("the first write is accepted");
+
+        // Past the lifecycle check, with neither of its two steps done.
+        let mut write_park = store.test_park_before_queue_insert(MAP, RACED_KEY);
+        let write = {
+            let store = Arc::clone(&store);
+            let value = second.clone();
+            tokio::spawn(async move { store.add(MAP, RACED_KEY, &value, 0, later).await })
+        };
+        write_park.wait_parked().await;
+
+        // The drain takes the first entry and stops inside its store call.
+        let mut store_call_for_first = inner.arm_park();
+        let shutdown = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move { store.hard_flush().await })
+        };
+        store_call_for_first.wait_parked().await;
+
+        let mut store_call_for_second = inner.arm_park();
+        write_park.release();
+        accepted(write).await;
+        let drain_inside_first_call = (
+            queued_sequence(&store, RACED_KEY),
+            staged_sequence(&store, RACED_KEY),
+            store.load(MAP, RACED_KEY).await.expect("load"),
+        );
+
+        // The drain persists the first entry, clears for it, takes the second
+        // entry in its next round and stops inside the store call for it.
+        store_call_for_first.release();
+        store_call_for_second.wait_parked().await;
+        let drain_inside_second_call = (
+            queued_sequence(&store, RACED_KEY),
+            staged_sequence(&store, RACED_KEY),
+            store.pending_operation_count(),
+            store.load(MAP, RACED_KEY).await.expect("load"),
+        );
+
+        store_call_for_second.release();
+        tokio::time::timeout(HANG_LIMIT, shutdown)
+            .await
+            .expect("hard_flush never returned")
+            .expect("the shutdown's task")
+            .expect("hard_flush");
+        let after_shutdown = (
+            queued_sequence(&store, RACED_KEY),
+            staged_sequence(&store, RACED_KEY),
+            store.staging.len(),
+            memory.get(MAP, RACED_KEY),
+        );
+
+        assert_eq!(
+            (
+                drain_inside_first_call,
+                drain_inside_second_call,
+                after_shutdown
+            ),
+            (
+                (Some(1), Some(1), Some(second.clone())),
+                (None, Some(1), 1, Some(second.clone())),
+                (None, None, 0, Some(second))
+            ),
+            "((queued, staged, load), (queued, staged, pending, load), (queued, staged, slots at \
+             rest, persisted))"
         );
     }
 }

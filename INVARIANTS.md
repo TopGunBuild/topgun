@@ -726,12 +726,12 @@ weaker than a test.
   and their queue insert; `W >= 1` while any write is in progress, because the inserting writer
   is itself past its check. `H` is the number of entries the running flush pass holds whose key
   was re-written while the pass holds them; a pass holds every entry that was due when it began,
-  and `batch_size` does not limit it. **Precondition:** the formula is derived for keys whose
-  staging slot exists only while an entry of the key is queued or held by a flush pass, with one
-  writer per key (`TG-KEY-001`). The enforcers are the five capacity rows of the table above.
-  Not claimed: the interleaving that breaks the precondition — a writer between its queue insert
-  and its staging insert while a pass persists the entry — leaves a key staged with nothing
-  buffered, whose next write passes the check at any count; it is not repaired here (TODO-814).
+  and `batch_size` does not limit it. **Precondition:** one writer per key (`TG-KEY-001`). The
+  formula also rests on `TG-WB-007`: a key's staging slot exists only while an entry of the key
+  is buffered, or while the key's writer is between staging the key and queueing its entry. The
+  enforcers are the five capacity rows of the table above. Not covered: a panic between a
+  write's staging and its queue insert leaves a key staged with nothing buffered, whose next
+  write passes the check at any count (`TG-WB-007`, "Not claimed"; TODO-817).
 - **Which statements of the flush loop or of an inner store can panic.** Not enumerated; the
   tests inject one.
 - **A stop started by a signal has no deadline of its own**, before this entry or after it. When
@@ -770,6 +770,77 @@ weaker than a test.
 - **What a client receives for a refused write.** The store's error maps to `internal`, 500,
   transient by reading; no test asserts it. The process-level test asserts only that the answer
   is not an acknowledgement and records what it was.
+
+### TG-WB-007: A write-behind staging slot exists only while an entry of its key is buffered, or while the key's writer is between staging the key and queueing its entry
+
+- **Scope:** `staging`, `queues` and the flush pass of `WriteBehindDataStore`; its three write
+  entries (`add`, `remove`, `remove_all`); the three sites that clear a slot. The relation is
+  stated for a node that is not shutting down and whose flush task is alive. For the shutdown
+  drain only the clearing rule is stated.
+- **Precondition:** one writer per `(map, key)` at a time (`TG-KEY-001`).
+- **Statement:**
+  1. A write stages its key directly before its queue insert. In a non-test build no statement
+     lies between the `stage` call and the queue insert, the stretch from that call to the end
+     of the insert has no await, and no lock taken earlier is held across it.
+  2. Every site that removes a slot after an entry was persisted or discarded removes it only
+     when the slot's sequence equals that entry's sequence: the success terminal and the discard
+     terminal of `flush_loop`, and the shutdown drain. Without the comparison the drain would
+     strip the slot of a newer write of the key, whether that write's entry is already queued or
+     not.
+  3. Therefore a slot for a key exists only while an entry of the key is queued or held by the
+     running flush pass, or while the key's writer is between `stage` and its queue insert.
+- **Mechanical predicate:** on an idle store — no entry queued and the flush loop between
+  passes, in the sense of `TG-WB-005` — `staging` holds no slot.
+- **Maintaining code:** `write_behind.rs` — `add_with_witness`, `remove`, `remove_all` (the
+  order of the two steps), `stage`, `clear_staging_if_current`, `flush_loop` (both terminals),
+  `drain_for_shutdown`.
+- **Enforcing test:** `write_behind.rs::a_pass_between_the_two_steps_of_a_new_key_write_leaves_no_slot_without_an_entry`,
+  `write_behind.rs::a_pass_between_the_two_steps_of_a_coalescing_write_leaves_no_slot_without_an_entry`,
+  `write_behind.rs::a_pass_between_the_two_steps_of_a_remove_leaves_no_slot_without_an_entry`,
+  `write_behind.rs::a_pass_between_the_two_steps_of_a_remove_all_leaves_no_slot_without_an_entry`,
+  `write_behind.rs::a_shutdown_drain_between_the_two_steps_of_a_write_keeps_slot_and_entry_together`,
+  `write_behind.rs::a_write_completed_while_the_drain_persists_an_older_entry_of_its_key_keeps_its_slot`
+  and `write_behind.rs::ac8_flush_does_not_clear_newer_coalesced_staging`. All run in CI
+  (`cargo test`). The table below says which form each one covers.
+- **Violation consequence:** a key staged with nothing buffered passes the capacity check at any
+  count, and each occurrence leaves one such key until it is written again, so the excess over
+  `capacity` has no bound. The slot's memory is not returned by eviction. The slot stays in
+  every scan and Merkle overlay, and a read of the key is answered from it instead of from the
+  store.
+- **Discovered by:** the audit of the previous write-behind work (the capacity bound of
+  `TG-WB-006`), which reached `pending_count` 4 against a capacity of 1 through this
+  interleaving; fixed and catalogued here.
+- **Status:** decided, **enforced** — within the limits listed under "Not claimed" below.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `a_pass_between_the_two_steps_of_a_new_key_write_leaves_no_slot_without_an_entry` | a new key: a flush pass between the two steps of an `add`; at rest `staging` is empty, and the key's next write is refused at capacity | CI (`cargo test`) |
+| `a_pass_between_the_two_steps_of_a_coalescing_write_leaves_no_slot_without_an_entry` | a coalescing write: the pass persists the older entry of the key while the newer write is between its two steps; the newer write keeps slot and entry, and after shutdown `staging` is empty | CI (`cargo test`) |
+| `a_pass_between_the_two_steps_of_a_remove_leaves_no_slot_without_an_entry` | the same for `remove` | CI (`cargo test`) |
+| `a_pass_between_the_two_steps_of_a_remove_all_leaves_no_slot_without_an_entry` | the same for one key of a `remove_all` | CI (`cargo test`) |
+| `a_shutdown_drain_between_the_two_steps_of_a_write_keeps_slot_and_entry_together` | the shutdown drain between the two steps of a write of a queued key: slot and entry carry the same sequence afterwards and a read answers the newer value | CI (`cargo test`) |
+| `a_write_completed_while_the_drain_persists_an_older_entry_of_its_key_keeps_its_slot` | the shutdown drain around its own store call: a write that completes while the drain persists the older entry of its key keeps its slot and stays readable | CI (`cargo test`) |
+| `ac8_flush_does_not_clear_newer_coalesced_staging` | the sequence comparison itself: `clear_staging_if_current` leaves a slot of another sequence | CI (`cargo test`) |
+
+**Not claimed.**
+
+- **A panic of the writer between `stage` and the queue insert.** It leaves a slot with nothing
+  buffered, until the key is written again or the node restarts. And on every base, before this
+  entry and after it, a panic of the writer after its entry sequence is assigned leaves that
+  sequence pending, which holds the flushed watermark until a restart. Which statements there
+  can panic was not enumerated. Both are tracked in TODO-817.
+- **Two concurrent writers of one key.** Outside the precondition. The queue may hold the lower
+  sequence while staging holds the higher, and no terminal then clears the slot.
+- **Entries a shutdown gives up on.** The entries a shutdown drain gives up on at its timeout,
+  and the batch a dead flush task held (`TG-WB-006`), keep their slots on a store that is
+  exiting.
+- **A write that reaches its queue insert after the shutdown drain's last look at the queues.**
+  It stays queued and is not persisted by that process. On a WAL-backed store its frame replays
+  at the next start; on a store without a WAL the write is gone.
+- **That a test or a CI lint holds "no await in the stretch".** It is held by a predicate over
+  the source run when the change was accepted, and by the comment-contract in the code. A later
+  edit that adds an `.await` or a held lock between `stage` and the queue insert is caught by
+  nothing automatic.
 
 ### TG-EVI-001: Never-evict-dirty — an unflushed write is never evicted from the resident cache
 
