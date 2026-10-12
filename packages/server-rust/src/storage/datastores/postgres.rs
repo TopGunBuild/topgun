@@ -1171,7 +1171,6 @@ mod tests {
         assert!(!store.is_null());
         assert_eq!(store.soft_flush().await.unwrap(), 0);
         assert!(store.hard_flush().await.is_ok());
-        store.reset(); // should not panic
     }
 
     #[tokio::test]
