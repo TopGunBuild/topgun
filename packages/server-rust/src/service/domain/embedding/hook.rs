@@ -1813,16 +1813,6 @@ mod tests {
                 Ok(())
             }
 
-            async fn flush_key(
-                &self,
-                _map: &str,
-                _key: &str,
-                _value: &RecordValue,
-                _is_backup: bool,
-            ) -> anyhow::Result<()> {
-                Ok(())
-            }
-
             fn reset(&self) {}
         }
 

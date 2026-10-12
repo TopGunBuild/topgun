@@ -481,15 +481,6 @@ mod tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn flush_key(
-            &self,
-            _m: &str,
-            _k: &str,
-            _v: &RecordValue,
-            _b: bool,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
         fn reset(&self) {}
     }
 

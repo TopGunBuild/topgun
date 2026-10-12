@@ -261,17 +261,6 @@ fn is_valid_table_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Get current wall-clock time as milliseconds since Unix epoch.
-fn now_millis() -> i64 {
-    // i64 can hold millis until year 292_278_994 -- truncation is not a concern
-    #[allow(clippy::cast_possible_truncation)]
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    ms
-}
-
 #[async_trait]
 impl MapDataStore for PostgresDataStore {
     async fn add(
@@ -539,39 +528,6 @@ impl MapDataStore for PostgresDataStore {
         Ok(())
     }
 
-    async fn flush_key(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        is_backup: bool,
-    ) -> anyhow::Result<()> {
-        let bytes = rmp_serde::to_vec_named(value)?;
-        let now = now_millis();
-
-        let query = format!(
-            r"
-            INSERT INTO {} (map_name, key, value, expiration_time, is_backup, created_at, updated_at)
-            VALUES ($1, $2, $3, 0, $4, $5, $5)
-            ON CONFLICT (map_name, key, is_backup) DO UPDATE
-            SET value = EXCLUDED.value,
-                updated_at = EXCLUDED.updated_at
-            ",
-            self.table_name
-        );
-
-        sqlx::query(&query)
-            .bind(map)
-            .bind(key)
-            .bind(&bytes)
-            .bind(is_backup)
-            .bind(now)
-            .execute(&self.pool)
-            .await?;
-
-        Ok(())
-    }
-
     fn reset(&self) {
         // No-op for write-through: all data is already persisted
     }
@@ -795,21 +751,6 @@ mod tests {
         // validation logic via is_valid_table_name which new() delegates to.
         assert!(is_valid_table_name("topgun_maps"));
         assert!(!is_valid_table_name("bad;name"));
-    }
-
-    #[test]
-    fn write_through_invariants() {
-        // These are compile-time verifiable properties of the write-through design:
-        // is_loadable always true, pending_operation_count always 0, is_null always false.
-        // We verify the const-like behavior without needing a database connection.
-
-        // Verify now_millis returns a reasonable value (after Unix epoch, before year 3000)
-        let ms = now_millis();
-        assert!(ms > 0, "now_millis should return a positive value");
-        assert!(
-            ms < 32_503_680_000_000,
-            "now_millis should be before year 3000"
-        );
     }
 
     #[test]
@@ -1129,35 +1070,6 @@ mod tests {
             .await
             .unwrap();
         assert!(store.load("map", "k").await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn flush_key_performs_upsert() {
-        let pool = require_db!();
-        let store = PostgresDataStore::new(pool, None).unwrap();
-        store.initialize().await.unwrap();
-
-        let value = test_lww_value("flushed");
-        store.flush_key("map", "k", &value, false).await.unwrap();
-
-        let loaded = store.load("map", "k").await.unwrap();
-        assert!(loaded.is_some(), "flush_key should persist the record");
-    }
-
-    #[tokio::test]
-    async fn flush_key_backup() {
-        let pool = require_db!();
-        let store = PostgresDataStore::new(pool, None).unwrap();
-        store.initialize().await.unwrap();
-
-        let value = test_lww_value("backup-flush");
-        store.flush_key("map", "k", &value, true).await.unwrap();
-
-        // Backup flush should not be visible via normal load (non-backup)
-        assert!(
-            store.load("map", "k").await.unwrap().is_none(),
-            "backup flush should not appear in non-backup load"
-        );
     }
 
     #[tokio::test]

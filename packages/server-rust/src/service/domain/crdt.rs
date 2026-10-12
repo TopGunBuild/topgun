@@ -5517,16 +5517,6 @@ mod tests {
             Ok(())
         }
 
-        async fn flush_key(
-            &self,
-            _: &str,
-            _: &str,
-            _: &RecordValue,
-            _: bool,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
         fn reset(&self) {}
 
         /// A real (non-null) backend, so the full write-through path runs and a
@@ -5750,19 +5740,6 @@ mod tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             match &self.inner {
                 Some(inner) => inner.hard_flush().await,
-                None => Ok(()),
-            }
-        }
-
-        async fn flush_key(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            deleted: bool,
-        ) -> anyhow::Result<()> {
-            match &self.inner {
-                Some(inner) => inner.flush_key(map, key, value, deleted).await,
                 None => Ok(()),
             }
         }
@@ -6837,16 +6814,6 @@ mod tests {
 
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
-        }
-
-        async fn flush_key(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            backup: bool,
-        ) -> anyhow::Result<()> {
-            self.inner.flush_key(map, key, value, backup).await
         }
 
         fn reset(&self) {
@@ -11268,16 +11235,6 @@ mod tests {
                 self.inner.hard_flush().await
             }
 
-            async fn flush_key(
-                &self,
-                map: &str,
-                key: &str,
-                value: &RecordValue,
-                is_backup: bool,
-            ) -> anyhow::Result<()> {
-                self.inner.flush_key(map, key, value, is_backup).await
-            }
-
             fn reset(&self) {
                 self.inner.reset();
             }
@@ -12788,16 +12745,6 @@ mod tests {
                 Ok(())
             }
 
-            async fn flush_key(
-                &self,
-                map: &str,
-                key: &str,
-                value: &RecordValue,
-                _is_backup: bool,
-            ) -> anyhow::Result<()> {
-                self.add(map, key, value, 0, 0).await
-            }
-
             fn reset(&self) {}
         }
 
@@ -13669,16 +13616,6 @@ mod tests {
                 self.inner.hard_flush().await
             }
 
-            async fn flush_key(
-                &self,
-                map: &str,
-                key: &str,
-                value: &RecordValue,
-                is_backup: bool,
-            ) -> anyhow::Result<()> {
-                self.inner.flush_key(map, key, value, is_backup).await
-            }
-
             fn reset(&self) {
                 self.inner.reset();
             }
@@ -14057,16 +13994,6 @@ mod tests {
 
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
-        }
-
-        async fn flush_key(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            is_backup: bool,
-        ) -> anyhow::Result<()> {
-            self.inner.flush_key(map, key, value, is_backup).await
         }
 
         fn reset(&self) {

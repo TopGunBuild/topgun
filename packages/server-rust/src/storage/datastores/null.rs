@@ -112,16 +112,6 @@ impl MapDataStore for NullDataStore {
         Ok(())
     }
 
-    async fn flush_key(
-        &self,
-        _map: &str,
-        _key: &str,
-        _value: &RecordValue,
-        _is_backup: bool,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     fn reset(&self) {
         // Nothing to reset — NullDataStore holds no state.
     }
@@ -212,13 +202,6 @@ mod tests {
     async fn hard_flush_returns_ok() {
         let store = NullDataStore;
         assert!(store.hard_flush().await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn flush_key_returns_ok() {
-        let store = NullDataStore;
-        let val = dummy_value();
-        assert!(store.flush_key("map", "key", &val, false).await.is_ok());
     }
 
     /// Constructs a minimal `RecordValue` for test method signatures.

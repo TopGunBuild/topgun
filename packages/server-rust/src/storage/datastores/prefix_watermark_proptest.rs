@@ -523,16 +523,6 @@ impl MapDataStore for FaultStore {
         Ok(())
     }
 
-    async fn flush_key(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        _is_backup: bool,
-    ) -> anyhow::Result<()> {
-        self.add(map, key, value, 0, 0).await
-    }
-
     fn reset(&self) {}
 }
 

@@ -569,15 +569,6 @@ pub trait MapDataStore: Send + Sync {
     /// Called during node shutdown for data safety.
     async fn hard_flush(&self) -> anyhow::Result<()>;
 
-    /// Flush a single key immediately (used during eviction).
-    async fn flush_key(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        is_backup: bool,
-    ) -> anyhow::Result<()>;
-
     /// Reset the data store to initial state (clear queues, etc.).
     fn reset(&self);
 

@@ -1649,9 +1649,10 @@ pub struct WalRecovery {
     replay_merge_gate: bool,
     /// Whether `run` re-replays each partition's oldest un-applied frame once more
     /// after the in-order pass — a harness seam that manufactures the "older frame
-    /// re-applied over a newer durable value" condition the live `flush_key` path
-    /// produces but generated ops cannot. `#[cfg(test)]`-only: it does not exist in
-    /// a production build.
+    /// re-applied over a newer durable value" condition, which generated ops
+    /// cannot: in-order replay always ends on the newest frame. The seam exists to
+    /// exercise the merge gate. `#[cfg(test)]`-only: it does not exist in a
+    /// production build.
     #[cfg(test)]
     re_replay_oldest_frame: bool,
     /// How many frames the `re_replay_oldest_frame` seam actually put back through
@@ -2111,10 +2112,9 @@ impl WalRecovery {
 
             // Harness-only seam: re-replay the oldest un-applied frame once more,
             // AFTER the in-order pass has left the newest value durable. This
-            // reproduces the stale re-replay the live `flush_key` path can cause
-            // (an older frame lingering in the replay window over a frameless newer
-            // durable write) — a condition generated ops cannot manufacture because
-            // in-order replay always ends on the newest frame. With the merge gate
+            // manufactures a stale re-replay — an older frame applied over a
+            // newer durable value — a condition generated ops cannot manufacture
+            // because in-order replay always ends on the newest frame. With the merge gate
             // on (production) the re-replayed older frame is discarded; with it off
             // it clobbers, which the `value_equality` oracle catches.
             #[cfg(test)]
@@ -2972,16 +2972,6 @@ mod tests {
             Ok(())
         }
 
-        async fn flush_key(
-            &self,
-            _map: &str,
-            _key: &str,
-            _value: &crate::storage::record::RecordValue,
-            _backup: bool,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
         fn reset(&self) {}
 
         fn is_null(&self) -> bool {
@@ -3125,15 +3115,6 @@ mod tests {
             Ok(0)
         }
         async fn hard_flush(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn flush_key(
-            &self,
-            _map: &str,
-            _key: &str,
-            _value: &crate::storage::record::RecordValue,
-            _backup: bool,
-        ) -> anyhow::Result<()> {
             Ok(())
         }
         fn reset(&self) {}

@@ -2738,10 +2738,10 @@ impl WriteBehindDataStore {
         // failure at the entry point leaves a partition with no knowable
         // watermark. The mutating entry points retry only when another write for
         // the same partition arrives; a partition that goes quiet after that
-        // failure would otherwise reach its terminals via `flush_key` and the
-        // flush loop alone, stay unseeded forever, and grow its WAL where neither
-        // alarm can see it. Retrying here makes every advance site seeded by
-        // construction.
+        // failure reaches its terminals through the flush loop and the shutdown
+        // drain alone, and would otherwise stay unseeded forever and grow its
+        // WAL where neither alarm can see it. Retrying here makes every advance
+        // site seeded by construction.
         //
         // Cheap after the first success — a bool read under the partition lock.
         self.ensure_wal_seeded(partition).await;
@@ -4083,110 +4083,6 @@ impl MapDataStore for WriteBehindDataStore {
         self.finish_shutdown(drained_entries).await
     }
 
-    /// Persists `value` for `(map, key)` directly, superseding whatever this
-    /// store has buffered for that key.
-    ///
-    /// # Caller obligation (load-bearing, not advisory)
-    ///
-    /// `value` MUST subsume every buffered op this store holds for `(map, key)`
-    /// — it has to be the state the key would have had if those ops had been
-    /// applied in order. This site writes **no WAL frame of its own**: it makes
-    /// the caller's value durable in the inner store and then resolves the
-    /// superseded entry's WAL sequences, retiring their frames without ever
-    /// having applied them. A caller that passes a value which does not carry a
-    /// superseded `Remove`'s effect therefore loses that acked delete outright,
-    /// with no crash involved: the delete's frame is resolved away while the
-    /// value that replaced it never expressed the deletion.
-    ///
-    /// The obligation is currently **vacuous** — every caller is under
-    /// `#[cfg(test)]` and passes the key's full current value — and it is
-    /// written here because it stops being vacuous the moment a production
-    /// caller (an eviction path, say) is wired to this method.
-    ///
-    /// That vacuity is a property of the current call graph, NOT a guarantee,
-    /// so the gap is tracked rather than merely described: **TODO-628**, which
-    /// must close before any production caller is wired. Anyone adding such a
-    /// caller is the person this pointer exists for — without it the
-    /// acked-delete-loss class would lapse silently at exactly the commit that
-    /// makes it live. `TG-WAL-009`'s windowing-residual bullet carries the same
-    /// pointer from the catalog side.
-    ///
-    /// The crash-window counterpart is different and is a no-op: a crash inside
-    /// the inner-store write leaves the superseded frames un-resolved and
-    /// therefore still enumerable, and `TG-WAL-009`'s ascending replay puts the
-    /// newer frame after the older `Remove`. See
-    /// `tests::flush_key_frameless_window_leaves_no_enumerable_past_older_remove`.
-    async fn flush_key(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        is_backup: bool,
-    ) -> anyhow::Result<()> {
-        if is_backup {
-            // Backup flush passes through directly
-            return self.inner.flush_key(map, key, value, is_backup).await;
-        }
-
-        // Remove the key from the partition queue if present
-        let partition_id = partition_for(map, key);
-        let removed = if let Some(mut queue) = self.queues.get_mut(&partition_id) {
-            queue.remove(map, key)
-        } else {
-            None
-        };
-
-        // This caller — not the flush loop — now owns the superseded entry's WAL
-        // sequences: a third in-flight producer, and the easiest of the three to
-        // miss. Recorded after the partition-queue guard has dropped.
-        if let Some(removed) = &removed {
-            self.register_in_flight(partition_id, &removed.wal_sequences);
-        }
-
-        // Remove from staging
-        self.staging.remove(&(map.to_string(), key.to_string()));
-
-        // Decrement pending count if the key was actually in the queue — this
-        // direct flush supersedes the buffered entry, which leaves the queue now.
-        if removed.is_some() {
-            self.pending_count.fetch_sub(1, Ordering::Relaxed);
-        }
-
-        // Persist the caller-provided value directly to the inner store.
-        let now = now_millis();
-        let result = self.inner.add(map, key, value, 0, now).await;
-
-        // Resolve the superseded entry's durability sequence ONLY AFTER inner.add
-        // returns — matching the flush-loop ordering. The prefix-complete flushed
-        // watermark must never advance past a sequence whose bytes are not yet
-        // durable in the inner store; resolving before the add would expose it as
-        // flushed while the write is still in flight. On Err the WAL frame still
-        // backstops durability (a discarded write is a re-sync event), so the
-        // sequence MUST still be resolved here — leaving it pending would stall the
-        // watermark forever and freeze the tombstone durability fence.
-        if let Some(removed) = &removed {
-            self.resolve_pending(removed.sequence);
-        }
-
-        // The WAL sequences split by outcome, unlike the entry sequence above.
-        // On success the value is durable in the inner store, so they resolve and
-        // the partition watermark advances — this site writes no WAL frame of its
-        // own, but skipping the advance would leave a flush_key-only partition
-        // moving its pending set while the sidecar never moves, growing the WAL
-        // where neither alarm can see it. On failure the write is durable
-        // nowhere, so they are abandoned and their frames stay replayable.
-        if let Some(removed) = &removed {
-            if result.is_ok() {
-                self.resolve_and_advance(partition_id, &removed.wal_sequences)
-                    .await;
-            } else {
-                self.abandon_wal_sequences(partition_id, &removed.wal_sequences);
-            }
-        }
-
-        result
-    }
-
     fn reset(&self) {
         // Hold the pending-sequence lock across ALL watermark-state clears — the
         // queues, staging, pending_count, the sequence counter, AND the pending set
@@ -4603,16 +4499,6 @@ mod tests {
             Ok(())
         }
 
-        async fn flush_key(
-            &self,
-            _map: &str,
-            _key: &str,
-            _value: &RecordValue,
-            _is_backup: bool,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
         fn reset(&self) {}
 
         fn is_null(&self) -> bool {
@@ -4819,56 +4705,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 8: flush_key_persists_immediately
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn flush_key_persists_immediately() {
-        let spy = Arc::new(SpyDataStore::new());
-        let calls = spy.calls();
-        let inner: Arc<dyn MapDataStore> = spy;
-
-        let config = WriteBehindConfig {
-            write_delay_ms: 60_000,
-            flush_interval_ms: 60_000,
-            ..WriteBehindConfig::default()
-        };
-        let store = WriteBehindDataStore::new(inner, config);
-
-        let val = dummy_value();
-        store.add("map1", "key1", &val, 0, 1000).await.unwrap();
-        assert_eq!(store.pending_operation_count(), 1);
-
-        // flush_key with is_backup=false should persist immediately
-        let flush_val = dummy_value_with(42);
-        store
-            .flush_key("map1", "key1", &flush_val, false)
-            .await
-            .unwrap();
-
-        // Staging should be cleared
-        assert!(
-            store
-                .staging
-                .get(&("map1".to_string(), "key1".to_string()))
-                .is_none(),
-            "Staging should be cleared after flush_key"
-        );
-
-        // Pending count should be decremented
-        assert_eq!(store.pending_operation_count(), 0);
-
-        // Inner store should have received an add call
-        let recorded = calls.lock().unwrap();
-        assert!(
-            recorded
-                .iter()
-                .any(|c| matches!(c, SpyCall::Add { map, key } if map == "map1" && key == "key1")),
-            "Inner store should have received the flush_key add call"
-        );
-    }
-
-    // -----------------------------------------------------------------------
     // AC3c: the flushed watermark is PREFIX-COMPLETE — it never exposes a value
     // above a still-pending (un-flushed) sequence, even when a HIGHER sequence
     // is resolved out of order below it. A max-with-holes watermark would admit
@@ -5024,197 +4860,6 @@ mod tests {
             assigned,
             "after inner.add returns the resolved sequence lets the watermark advance"
         );
-    }
-
-    // -----------------------------------------------------------------------
-    // The `flush_key` frameless window, driven LIVE through the real trait
-    // method, in `wal_seq` space.
-    //
-    // Additive to `flush_key_resolves_watermark_after_inner_add_not_before`
-    // above, not a restatement of it: that test reads only the entry-space
-    // `flushed_watermark()`, which `TG-WB-001` declares INDEPENDENT of the
-    // `wal_seq`-space tracker `TG-WAL-005` owns. This one asserts nothing about
-    // it — it reads the on-disk `.applied` sidecar, the enumerable-past window
-    // `WalWriter::unapplied` returns, and a real `WalRecovery` outcome.
-    //
-    // What is being confirmed. `flush_key` writes NO WAL frame of its own: it
-    // makes the caller's value durable in the inner store and only then resolves
-    // the superseded entry's WAL sequences. A crash inside `inner.add` therefore
-    // leaves an older, still-un-resolved `Remove` in the enumerable past while
-    // the value that supersedes it is durable nowhere. That window is real and
-    // this test holds it open on purpose (assertion A) — writing that the
-    // prefix-complete watermark EXCLUDES it would be backwards, since
-    // `applied_seq < min(pending)` is exactly what that discipline guarantees.
-    //
-    // What does NOT follow from the window is a lost re-creation, and the reason
-    // is the ENUMERABILITY CLOSURE: `unapplied` selects solely on
-    // `sequence > applied_seq`, so an un-resolved frame at `N` makes every frame
-    // above `N` enumerable too, and `TG-WAL-011` replays the window in strictly
-    // ascending order. Through this store's own mutating API a queued `Remove`
-    // is by construction the NEWEST op for its key (one queue entry per
-    // `(map, key)`), so any strictly-newer value carries its own frame at
-    // `M > N` inside the very same window and is replayed AFTER the `Remove`
-    // (assertion B). `TG-WAL-009`'s residual is therefore a no-op for every
-    // caller that reaches this path through the store's public mutating surface.
-    //
-    // The one premise left is caller-side and is stated as an obligation in
-    // `flush_key`'s own doc-contract: the caller's `value` must subsume the
-    // buffered ops it supersedes.
-    //
-    // Mutation dispositions, recorded from APPLICATION rather than from
-    // expectation — a test whose discriminating power is asserted instead of
-    // measured is the hollow-out this file's other proofs already refuse:
-    //   M1 — DISCRIMINATED (applied, observed RED, reverted). Hoist the
-    //      post-`inner.add` `resolve_and_advance` above the `inner.add` call.
-    //      The window closes over a write that is durable nowhere: `unapplied`
-    //      goes EMPTY (assertion C/A RED) and, with those suppressed, recovery
-    //      restores nothing (assertion B RED, `got None`) — acked-write loss.
-    //      This is the whole of the test's discriminating power.
-    //   M2 — NOT discriminated, and the reason bounds this test rather than
-    //      excusing it: `test_set_watermark_mode(WatermarkMode::ScalarMax)` was
-    //      applied and the test stayed GREEN, because NO watermark advance runs
-    //      before the crash point at all, so the rule that computes the advance
-    //      is never consulted in this window. The sidecar read below therefore
-    //      witnesses "nothing advanced it", not "the prefix-complete rule chose
-    //      correctly"; the latter is `TG-WB-001`/`TG-WAL-005` territory and is
-    //      proven elsewhere.
-    //   M3 — an ordering PIN, not a discriminator here. Deleting
-    //      `all.sort_by_key(|e| e.sequence)` in `WalWriter::unapplied` cannot
-    //      reorder this fixture's frames, which are appended ascending into one
-    //      segment. The assertion is still written out so `TG-WAL-011`'s
-    //      ascending-replay premise is READ at this seam rather than assumed by
-    //      the argument above.
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn flush_key_frameless_window_leaves_no_enumerable_past_older_remove() {
-        use crate::storage::datastores::RedbDataStore;
-        use crate::storage::wal::{WalRecovery, WalWriter};
-
-        let wal_dir = tempfile::tempdir().unwrap();
-        let recovered_dir = tempfile::tempdir().unwrap();
-
-        // The inner store is gated so the flush can be parked mid-`inner.add` —
-        // the crash point. 60s delays keep the background flush loop out of the
-        // way, so every state transition below is one this test caused.
-        let spy = Arc::new(SpyDataStore::new());
-        let (entered, _proceed) = spy.install_add_gate();
-        let inner: Arc<dyn MapDataStore> = spy;
-        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
-        let config = WriteBehindConfig {
-            write_delay_ms: 60_000,
-            flush_interval_ms: 60_000,
-            ..WriteBehindConfig::default()
-        };
-        let store = WriteBehindDataStore::new_with_wal(
-            Arc::clone(&inner),
-            config,
-            Some(WalBootstrap {
-                wal: Arc::clone(&wal) as Arc<dyn Wal>,
-                sequence_start: 1,
-            }),
-        );
-        let partition = partition_for("m", "k");
-
-        // An acked delete: a `WalOp::Remove` frame at N, buffered and un-resolved.
-        store.remove("m", "k", 1).await.unwrap();
-
-        // An acked re-creation at M > N. Forcing the survivor non-subsuming is
-        // what CARRIES N forward onto the survivor instead of early-resolving
-        // it, and carrying it forward is the only way to build the configuration
-        // under test: an un-resolved OLDER Remove still owned at the crash point.
-        // With the default subsuming disposition N resolves at the coalesce and
-        // the hazard is never constructed.
-        store.test_force_non_subsuming_survivor(true);
-        let v_new = RecordValue::Lww {
-            value: Value::String("re-created".to_string()),
-            timestamp: Timestamp {
-                millis: 42,
-                counter: 0,
-                node_id: "n1".to_string(),
-            },
-        };
-        store.add("m", "k", &v_new, 0, 2).await.unwrap();
-
-        // Drive the LIVE `flush_key` trait method and park it inside `inner.add`.
-        let flush_store = Arc::clone(&store);
-        let flush_value = v_new.clone();
-        let flush = tokio::spawn(async move {
-            flush_store
-                .flush_key("m", "k", &flush_value, false)
-                .await
-                .unwrap();
-        });
-        entered.notified().await;
-
-        let window = wal.unapplied(partition).await.unwrap();
-
-        // C — positive control. Without both frames in the window the test would
-        // be asserting over a configuration that never built the hazard, and a
-        // coalesce disposition change could hollow it out silently.
-        assert_eq!(
-            window.len(),
-            2,
-            "the crash point must hold BOTH the superseded Remove and its \
-             re-creation in the enumerable past; got {window:?}"
-        );
-
-        // A — the window IS open, and the re-creation is inside it.
-        assert!(
-            matches!(window[0].op, WalOp::Remove),
-            "the OLDER frame in the window is the superseded Remove; got {:?}",
-            window[0].op
-        );
-        assert_eq!(
-            (window[0].map.as_str(), window[0].key.as_str()),
-            ("m", "k"),
-            "the Remove in the window is the one for the key under flush"
-        );
-        assert!(
-            matches!(window[1].op, WalOp::Store { .. }),
-            "the NEWER frame is the re-creation, so the Remove is not the final \
-             effect for the key; got {:?}",
-            window[1].op
-        );
-        assert!(
-            window[0].sequence < window[1].sequence,
-            "the window is ascending: the re-creation carries M > N ({} vs {})",
-            window[1].sequence,
-            window[0].sequence
-        );
-        let n = window[0].sequence;
-        assert!(
-            wal.test_read_applied_sequence(partition) < n,
-            "the durable sidecar must still sit BELOW the superseded Remove \
-             while the frameless write is in flight — advancing it here is the \
-             loss M1 manufactures"
-        );
-
-        // B — the recovery outcome. The gate is NOT released: the crash lands
-        // mid-`inner.add`, so the frameless write never became durable anywhere,
-        // and a fresh durable store is the honest post-crash starting state.
-        let recovered: Arc<dyn MapDataStore> =
-            Arc::new(RedbDataStore::new(recovered_dir.path().join("d.redb")).unwrap());
-        WalRecovery::new(Arc::clone(&wal), Vec::new())
-            .run(Arc::clone(&recovered))
-            .await
-            .unwrap();
-        match recovered.load("m", "k").await.unwrap() {
-            Some(RecordValue::Lww { value, .. }) => assert_eq!(
-                value,
-                Value::String("re-created".to_string()),
-                "ascending replay puts the re-creation after the superseded \
-                 Remove, so the acked value survives the frameless window"
-            ),
-            other => panic!(
-                "the re-created key must be present after recovery — an absent \
-                 key is the acked-write loss TG-WAL-009's residual asks about; \
-                 got {other:?}"
-            ),
-        }
-
-        // The parked flush belongs to a process that died; nothing awaits it.
-        flush.abort();
     }
 
     /// Pins what the code does today, and is not an endorsement of it: an
@@ -5565,16 +5210,6 @@ mod tests {
         }
 
         async fn hard_flush(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn flush_key(
-            &self,
-            _map: &str,
-            _key: &str,
-            _value: &RecordValue,
-            _is_backup: bool,
-        ) -> anyhow::Result<()> {
             Ok(())
         }
 
@@ -6103,8 +5738,8 @@ mod tests {
     use crate::storage::RedbDataStore;
 
     /// `WriteBehind` over a real redb inner with a flush delay long enough that
-    /// `add`/`remove` stay buffered for the duration of a test (no background
-    /// flush fires unless we force it via `flush_key`).
+    /// `add`/`remove` stay buffered for the duration of a test (no flush pass
+    /// runs unless a test requests one with `soft_flush`).
     fn redb_backed_store() -> (Arc<WriteBehindDataStore>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("wb.redb");
@@ -7679,16 +7314,6 @@ mod tests {
             Ok(())
         }
 
-        async fn flush_key(
-            &self,
-            _map: &str,
-            _key: &str,
-            _value: &RecordValue,
-            _is_backup: bool,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
         fn reset(&self) {}
 
         fn is_null(&self) -> bool {
@@ -8545,16 +8170,6 @@ mod hard_flush_order_tests {
             self.inner.hard_flush().await
         }
 
-        async fn flush_key(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            is_backup: bool,
-        ) -> anyhow::Result<()> {
-            self.inner.flush_key(map, key, value, is_backup).await
-        }
-
         fn reset(&self) {
             self.inner.reset();
         }
@@ -8811,16 +8426,6 @@ mod background_task_panic_tests {
             self.inner.hard_flush().await
         }
 
-        async fn flush_key(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            is_backup: bool,
-        ) -> anyhow::Result<()> {
-            self.inner.flush_key(map, key, value, is_backup).await
-        }
-
         fn reset(&self) {
             self.inner.reset();
         }
@@ -9038,16 +8643,6 @@ mod background_task_panic_tests {
 
         async fn hard_flush(&self) -> anyhow::Result<()> {
             Ok(())
-        }
-
-        async fn flush_key(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            _is_backup: bool,
-        ) -> anyhow::Result<()> {
-            self.add(map, key, value, 0, 0).await
         }
 
         fn reset(&self) {
