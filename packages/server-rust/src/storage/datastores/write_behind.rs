@@ -93,10 +93,15 @@ pub struct WriteBehindConfig {
     ///
     /// In the worst case the count stays below `2 * (C + W)`.
     ///
-    /// Precondition, which is not enforced: the formula is derived for keys
-    /// whose staging slot exists only while an entry of the key is queued or
-    /// held by a flush pass, with one writer per key (`TG-KEY-001`). See
-    /// `TG-WB-006`, "Not claimed", for the interleaving that breaks it.
+    /// Precondition, which the callers uphold and this store does not
+    /// enforce: one writer per key at a time (`TG-KEY-001`).
+    ///
+    /// What the formula rests on inside the store (`TG-WB-007`): a key's
+    /// staging slot exists only while an entry of the key is queued or held
+    /// by a flush pass, or while the key's writer is between its `stage` call
+    /// and its queue insert — a stretch with no await and no lock held, so it
+    /// ends by itself. Not covered: a panic inside that stretch leaves a slot
+    /// with nothing buffered.
     pub capacity: u64,
     /// Maximum milliseconds to wait for the write-behind buffer to drain on
     /// graceful shutdown. On timeout, still-pending ops are logged and the
