@@ -70,6 +70,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import {
+  SEAM_BOOT_TEXT,
+  LagScrape,
+  allZero,
+  lwwPut,
+  requireFaultBinary,
+  scrapeLag,
+} from './helpers/fault-binary';
 import { TestClient } from './helpers/test-client';
 import {
   spawnBinary,
@@ -97,8 +105,6 @@ const ALL_ARMS: Arm[] = [
   'REFUSAL-LIFTED-UNDER-LOAD',
 ];
 
-const BUILD_COMMAND =
-  'cargo build --release -p topgun-server --features fault-injection --target-dir target/fault-injection';
 const SAMPLE_TOOL = '/usr/bin/sample';
 
 const CONTROL_MAP = 'liveness_control';
@@ -113,11 +119,9 @@ const DEVICE_CREDENTIALS_MAP = '_topgun_device_credentials';
 const LOAD_MAP = 'liveness_load';
 const LOAD_KEYS = ['load-0', 'load-1', 'load-2', 'load-3', 'load-4', 'load-5'];
 
-const SEAM_BOOT_TEXT = 'fault-injection build';
 const DISCARD_TEXT = 'Write-behind entry discarded after max retries';
 /** Logged at debug level when a refused write waiting for its next attempt is overtaken by a newer write of its key. */
 const SUPERSEDED_TEXT = 'Write-behind retry entry superseded by a newer write';
-const LAG_GAUGE = 'topgun_wal_applied_watermark_lag';
 
 const ACK_WAIT_MS = 5_000;
 const PROBE_WAIT_MS = 5_000;
@@ -172,19 +176,7 @@ interface FaultEnv {
 
 /** Reads the run's configuration, and throws — never skips — when the seam binary is not given. */
 function requireFaultEnv(): FaultEnv {
-  const hint = `Build the server with the store-refusal seam (\`${BUILD_COMMAND}\`) and export FAULT_SERVER_BINARY (its path) and FAULT_SERVER_COMMIT (the commit it was built from).`;
-  const binary = process.env.FAULT_SERVER_BINARY;
-  if (!binary) throw new Error(`FAULT_SERVER_BINARY is not set. ${hint}`);
-  const commit = process.env.FAULT_SERVER_COMMIT;
-  if (!commit) throw new Error(`FAULT_SERVER_COMMIT is not set. ${hint}`);
-  try {
-    if (!fs.statSync(binary).isFile()) throw new Error('not a regular file');
-    fs.accessSync(binary, fs.constants.X_OK);
-  } catch (err) {
-    throw new Error(
-      `FAULT_SERVER_BINARY does not name an executable file (${binary}: ${(err as Error).message}). ${hint}`,
-    );
-  }
+  const { binary, commit } = requireFaultBinary();
 
   const outDir = process.env.LIVENESS_OUT_DIR || null;
   const sample = process.env.LIVENESS_SAMPLE === '1';
@@ -210,16 +202,6 @@ function requireFaultEnv(): FaultEnv {
       .replace(/[^0-9]/g, '')
       .slice(0, 14);
   return { binary, commit, outDir, sample, run };
-}
-
-function lwwPut(id: string, mapName: string, key: string, value: unknown): Record<string, unknown> {
-  return {
-    id,
-    mapName,
-    opType: 'PUT',
-    key,
-    record: { value, timestamp: { millis: Date.now(), counter: 0, nodeId: 'liveness' } },
-  };
 }
 
 /** Sends one write on an open connection and returns the type of the frame that answered it, or `null`. */
@@ -253,28 +235,6 @@ function takeSample(pid: number, file: string): Promise<string> {
       (err) => resolve(err ? `failed: ${err.message}` : 'taken'),
     );
   });
-}
-
-/** One scrape of the lag gauge: partition id to lag. */
-type LagScrape = Record<string, number>;
-
-async function scrapeLag(port: number): Promise<LagScrape> {
-  const resp = await fetch(`http://localhost:${port}/metrics`);
-  const body = await resp.text();
-  const lags: LagScrape = {};
-  for (const line of body.split('\n')) {
-    if (!line.startsWith(`${LAG_GAUGE}{`)) continue;
-    const partition = /partition="(\d+)"/.exec(line);
-    const value = Number(line.trim().split(/\s+/).pop());
-    if (partition && Number.isFinite(value)) lags[partition[1]] = value;
-  }
-  return lags;
-}
-
-/** True for a scrape that has at least one sample and every sample at zero; an empty scrape says nothing. */
-function allZero(scrape: LagScrape): boolean {
-  const values = Object.values(scrape);
-  return values.length > 0 && values.every((lag) => lag === 0);
 }
 
 /** What the arm that lifts the refusal under load saw, beyond the probes every arm has. */

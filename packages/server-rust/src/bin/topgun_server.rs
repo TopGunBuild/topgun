@@ -803,6 +803,12 @@ async fn main() -> anyhow::Result<()> {
     // Wrap durable backends in WriteBehindDataStore so client OP_ACK round-trips
     // do not block on disk fsync. The Null backend is intentionally skipped:
     // buffering writes to a no-op store wastes overhead with no durability win.
+    //
+    // The store's failure receiver is taken here, while the store still has its
+    // own type: a write-behind background task that panics is reported through
+    // it and through nothing on `MapDataStore` (`TG-WB-006`). The null backend
+    // has no such task and so no receiver.
+    let store_failure: Option<watch::Receiver<Option<_>>>;
     let datastore: Arc<dyn MapDataStore> = match backend {
         StorageBackend::Redb | StorageBackend::Postgres => {
             tracing::debug!(
@@ -813,20 +819,26 @@ async fn main() -> anyhow::Result<()> {
             // WriteBehindDataStore::new_with_wal returns Arc<Self> directly (it
             // spawns its own background flush task). Wrapping with Arc::new here
             // would produce Arc<Arc<...>>, which cannot coerce to Arc<dyn MapDataStore>.
-            WriteBehindDataStore::new_with_wal(
+            let store = WriteBehindDataStore::new_with_wal(
                 inner_data_store,
                 write_behind_config.clone(),
                 wal_opt,
-            )
+            );
+            store_failure = Some(store.background_failure());
+            store
         }
         StorageBackend::Null => {
             tracing::debug!(
                 target: "topgun_server::bootstrap",
                 "write-behind and WAL skipped for null backend"
             );
+            store_failure = None;
             inner_data_store
         }
     };
+    // How long a shutdown started by a store failure may take before the node
+    // is ended from outside the runtime.
+    let failure_deadline = failure_deadline_for(write_behind_config.shutdown_timeout_ms);
 
     let (cluster_state_for_services, cluster_state_for_app) = if cluster_mode {
         // --- Cluster mode ---
@@ -1332,7 +1344,16 @@ async fn main() -> anyhow::Result<()> {
     // outer scope keeps the original Arc for wait_for_drain below.
     let shutdown_for_drain = Arc::clone(&shutdown);
 
-    // Serve until SIGTERM or SIGINT.
+    // The shutdown future reports what ended its wait, and the deadline it
+    // started if that was a store failure, to the statements after the serve
+    // loop. The receiver it waits on is a second handle: the first is read
+    // again once the write-behind drain has returned.
+    let failure_for_stop = store_failure.clone();
+    let (stop_started_tx, mut stop_started_rx) =
+        oneshot::channel::<(ShutdownCause, Option<FailureDeadline>)>();
+
+    // Serve until SIGTERM or SIGINT, or until a write-behind background task
+    // panics.
     // into_make_service_with_connect_info threads the peer SocketAddr into each
     // request so the governor's PeerIpKeyExtractor can identify the client IP.
     // Without it, every rate-limited admin route 500s with "Unable To Extract Key".
@@ -1341,18 +1362,42 @@ async fn main() -> anyhow::Result<()> {
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown_signal().await;
+        let (cause, deadline) = match store_failure_or_signal(failure_for_stop).await {
+            Some(failure) => {
+                log_store_failure(
+                    failure.task.as_str(),
+                    exit_code_for(true, ShutdownOutcome::Completed),
+                );
+                // Started before anything else the stop does, so the bound
+                // covers the HTTP drain as well. The exit action is the real
+                // one; the thread that calls it has logged why by then.
+                let deadline =
+                    start_failure_deadline(failure_deadline, |code| std::process::exit(code));
+                (ShutdownCause::StoreFailure, Some(deadline))
+            }
+            None => (ShutdownCause::Signal, None),
+        };
         // Flip /health to 503 before the HTTP server starts closing so
         // any load balancer in front of us drains traffic away first.
         // Without this, /health stays "ready" until the process dies
         // and the LB happily forwards new requests into a dying server.
-        shutdown_for_drain.trigger_shutdown();
+        apply_shutdown_cause(cause, &shutdown_for_drain);
         // Signal cluster services (HeartbeatService, EvictionOrchestrator, etc.)
         // to exit their loops. The write-behind flush loop is stopped separately
         // by hard_flush() below (via the store's own internal shutdown channel).
         let _ = shutdown_tx.send(true);
+        // The receiver lives until `main` reads it below. A deadline that could
+        // not be handed over stays armed: dropping its handle does not cancel it.
+        let _ = stop_started_tx.send((cause, deadline));
     })
     .await?;
+
+    // The serve loop returns only after the shutdown future completed, so the
+    // cause is there to read. Were it ever not, no store failure was seen and no
+    // deadline was started, which is what a signal means below.
+    let (cause, deadline) = stop_started_rx
+        .try_recv()
+        .unwrap_or((ShutdownCause::Signal, None));
 
     // The HTTP server has stopped accepting; stop the reaper before draining.
     reaper_handle.abort();
@@ -1361,9 +1406,7 @@ async fn main() -> anyhow::Result<()> {
     // request handlers (tracked via ShutdownController::in_flight_guard) to
     // finish, with a bounded deadline so a stuck handler can't block exit
     // indefinitely. 30s matches typical k8s terminationGracePeriodSeconds.
-    let drained = shutdown
-        .wait_for_drain(std::time::Duration::from_secs(30))
-        .await;
+    let drained = shutdown.wait_for_drain(IN_FLIGHT_DRAIN_TIMEOUT).await;
     if drained {
         tracing::info!("graceful shutdown complete");
     } else {
@@ -1378,8 +1421,49 @@ async fn main() -> anyhow::Result<()> {
     // above, so no new client writes can arrive at this point. The drain is
     // bounded by shutdown_timeout_ms (default 30s); on timeout, still-pending
     // ops are logged via warn! and the process proceeds to exit.
-    if let Err(err) = datastore.hard_flush().await {
+    let flushed: anyhow::Result<()> = match cause {
+        ShutdownCause::Signal => datastore.hard_flush().await,
+        ShutdownCause::StoreFailure => {
+            // In a task of its own, so that a drain that panics on the store
+            // that already failed is an exit code and not an unwinding `main`.
+            let store = Arc::clone(&datastore);
+            match tokio::spawn(async move { store.hard_flush().await }).await {
+                Ok(flushed) => flushed,
+                Err(join_error) => {
+                    let exit_code = exit_code_for(true, ShutdownOutcome::PanickedOrOverran);
+                    tracing::error!(
+                        error = %join_error,
+                        exit_code,
+                        "write-behind drain did not complete on a failed store; \
+                         writes it did not persist replay from the WAL at the next start"
+                    );
+                    std::process::exit(exit_code);
+                }
+            }
+        }
+    };
+    if let Err(err) = &flushed {
         tracing::warn!(error = %err, "Write-behind drain encountered an error during shutdown");
+    }
+
+    // Read only now: a task that panicked after a signal began the stop is in
+    // the store's record or in what the drain returned, and in nothing earlier.
+    let failed = store_failed(cause, store_failure.as_ref(), &flushed);
+    let exit_code = exit_code_for(failed, ShutdownOutcome::Completed);
+    if failed {
+        match deadline {
+            Some(deadline) => deadline.cancel(),
+            // The stop was begun by a signal, so the failure has not been
+            // reported by this binary yet and no deadline is running.
+            None => log_store_failure(
+                recorded_failure(store_failure.as_ref(), &flushed)
+                    .map_or("unknown", |failure| failure.task.as_str()),
+                exit_code,
+            ),
+        }
+        // Not a return: dropping the runtime can wait on blocking tasks with
+        // nothing left to bound it. The WAL was synced by the drain above.
+        std::process::exit(exit_code);
     }
 
     Ok(())
@@ -2229,6 +2313,205 @@ async fn shutdown_signal() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// How a shutdown ends
+// ---------------------------------------------------------------------------
+
+/// What made the node start shutting down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownCause {
+    /// SIGTERM or SIGINT.
+    Signal,
+    /// A background task of the write-behind store panicked (`TG-WB-006`).
+    StoreFailure,
+}
+
+/// How the shutdown itself went, whatever started it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownOutcome {
+    /// The write-behind drain returned, with or without an error.
+    Completed,
+    /// The drain panicked, or did not return before the failure deadline.
+    PanickedOrOverran,
+}
+
+/// The process exit code for a shutdown.
+///
+/// It takes the fact of a store failure, not what started the stop: a node
+/// whose flush task died holding a batch must not report a clean stop because
+/// a signal happened to arrive first. No cell is 0 for a shutdown that
+/// panicked or overran, the one no caller reaches included.
+fn exit_code_for(store_failed: bool, shutdown: ShutdownOutcome) -> i32 {
+    match (store_failed, shutdown) {
+        (_, ShutdownOutcome::PanickedOrOverran) => 71,
+        (true, ShutdownOutcome::Completed) => 70,
+        (false, ShutdownOutcome::Completed) => 0,
+    }
+}
+
+/// The store's failure as it stands when this is called: the store's own
+/// record first, then the failure a drain on a failed store returns as the
+/// source of its error.
+///
+/// Generic over the failure type because the store's own type is not exported
+/// under a name this binary can write; the receiver the store hands out fixes
+/// it at the call.
+fn recorded_failure<F>(
+    recorded: Option<&watch::Receiver<Option<F>>>,
+    flushed: &anyhow::Result<()>,
+) -> Option<F>
+where
+    F: std::error::Error + Clone + Send + Sync + 'static,
+{
+    recorded
+        .and_then(|failure| failure.borrow().clone())
+        .or_else(|| {
+            flushed
+                .as_ref()
+                .err()
+                .and_then(|err| err.downcast_ref::<F>().cloned())
+        })
+}
+
+/// Whether the store has failed, read once the write-behind drain returned.
+///
+/// The cause alone is not enough: a task can panic after a signal started the
+/// stop, and then the failure is only in the store's record or in what the
+/// drain returned. `recorded` is `None` for a backend with no write-behind
+/// store.
+fn store_failed<F>(
+    cause: ShutdownCause,
+    recorded: Option<&watch::Receiver<Option<F>>>,
+    flushed: &anyhow::Result<()>,
+) -> bool
+where
+    F: std::error::Error + Clone + Send + Sync + 'static,
+{
+    cause == ShutdownCause::StoreFailure || recorded_failure(recorded, flushed).is_some()
+}
+
+/// Puts the controller in the state the cause asks for.
+///
+/// Both causes drain: readiness answers 503 and the listeners are told to
+/// stop. A node whose store failed is as unfit for new requests as one that was
+/// asked to stop, and the match is exhaustive so that a cause added later has
+/// to say what it does to health.
+fn apply_shutdown_cause(cause: ShutdownCause, controller: &ShutdownController) {
+    match cause {
+        ShutdownCause::Signal | ShutdownCause::StoreFailure => controller.trigger_shutdown(),
+    }
+}
+
+/// Completes with the store's failure once one is recorded, and never for a
+/// backend that has no write-behind store.
+async fn store_failure_recorded<F: Clone>(recorded: Option<watch::Receiver<Option<F>>>) -> F {
+    if let Some(mut recorded) = recorded {
+        // `wait_for` looks at the current value before it waits, so a failure
+        // recorded before this future was first polled is seen. The borrow it
+        // returns ends with this statement, before the await below.
+        let failure = recorded
+            .wait_for(Option::is_some)
+            .await
+            .ok()
+            .and_then(|failure| failure.clone());
+        if let Some(failure) = failure {
+            return failure;
+        }
+    }
+    // No store to fail, or a store that was dropped without failing.
+    std::future::pending().await
+}
+
+/// Waits for whatever stops the node first: `Some` with the store's failure,
+/// `None` for SIGTERM or SIGINT.
+async fn store_failure_or_signal<F: Clone>(
+    recorded: Option<watch::Receiver<Option<F>>>,
+) -> Option<F> {
+    tokio::select! {
+        // A failure that is ready together with a signal is taken as the
+        // failure, so that the stop it starts runs under the deadline.
+        biased;
+        failure = store_failure_recorded(recorded) => Some(failure),
+        () = shutdown_signal() => None,
+    }
+}
+
+/// The one line this binary writes when it learns that the store has failed.
+fn log_store_failure(task: &str, exit_code: i32) {
+    tracing::error!(
+        task,
+        exit_code,
+        "write-behind background task failed; shutting the node down"
+    );
+}
+
+/// The bound on waiting for in-flight request handlers once the HTTP server
+/// has stopped accepting. Matches a typical k8s `terminationGracePeriodSeconds`.
+const IN_FLIGHT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What the failure deadline allows on top of the two bounded waits it covers.
+const FAILURE_DEADLINE_MARGIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long a shutdown started by a store failure may take: the in-flight
+/// drain, the write-behind drain's own timeout, and a margin.
+fn failure_deadline_for(shutdown_timeout_ms: u64) -> std::time::Duration {
+    IN_FLIGHT_DRAIN_TIMEOUT
+        + std::time::Duration::from_millis(shutdown_timeout_ms)
+        + FAILURE_DEADLINE_MARGIN
+}
+
+/// The means to say that the shutdown a deadline was guarding has completed.
+///
+/// Dropping it does not cancel: a handle lost on some path leaves the deadline
+/// armed, which ends the process, rather than disarmed, which could leave a
+/// failed node running.
+struct FailureDeadline {
+    cancel: std::sync::mpsc::Sender<()>,
+}
+
+impl FailureDeadline {
+    /// The shutdown completed; the exit action will not be called.
+    fn cancel(self) {
+        // An error means the thread is past its wait and the action already ran.
+        let _ = self.cancel.send(());
+    }
+}
+
+/// Starts the deadline of a shutdown on a failed store: unless cancelled within
+/// `after`, `exit` is called with the exit code of a shutdown that overran.
+///
+/// It waits on an OS thread because what it guards against includes a runtime
+/// that no longer runs its timers. `exit` is a parameter so that the deadline
+/// can be driven without ending a process.
+fn start_failure_deadline<A>(after: std::time::Duration, exit: A) -> FailureDeadline
+where
+    A: FnOnce(i32) + Send + 'static,
+{
+    let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+    let expires = Instant::now() + after;
+    std::thread::Builder::new()
+        .name("failure-deadline".to_string())
+        .spawn(move || {
+            match cancelled.recv_timeout(after) {
+                Ok(()) => return,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                // The handle was dropped without a cancel: the deadline stands.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    std::thread::sleep(expires.saturating_duration_since(Instant::now()));
+                }
+            }
+            let exit_code = exit_code_for(true, ShutdownOutcome::PanickedOrOverran);
+            tracing::error!(
+                deadline_ms = u64::try_from(after.as_millis()).unwrap_or(u64::MAX),
+                exit_code,
+                "shutdown on a failed store passed its deadline; ending the process"
+            );
+            exit(exit_code);
+        })
+        .expect("failed to start the failure-deadline thread");
+    FailureDeadline { cancel }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{admin_bind_posture, log_boot_summary, BindPosture};
@@ -2440,5 +2723,416 @@ mod tests {
         assert!(BindPosture::Allowed.mount_admin());
         assert!(BindPosture::WarnOverride.mount_admin());
         assert!(!BindPosture::AdminDisabled.mount_admin());
+    }
+
+    // -----------------------------------------------------------------------
+    // How a shutdown ends when the write-behind store has failed (TG-WB-006)
+    // -----------------------------------------------------------------------
+
+    use super::{
+        apply_shutdown_cause, exit_code_for, start_failure_deadline, store_failed,
+        store_failure_recorded, MapDataStore, NullDataStore, ShutdownCause, ShutdownController,
+        ShutdownOutcome, WriteBehindDataStore,
+    };
+    use std::time::{Duration, Instant};
+    use tokio::sync::watch;
+    use topgun_server::network::shutdown::HealthState;
+    use topgun_server::storage::map_data_store::{LeafSink, ScanBatch, ScanCursor};
+    use topgun_server::storage::record::RecordValue;
+
+    /// Bounds a wait that a broken build would otherwise hang on. It is not
+    /// what the tests wait for: each waits on the store's own receiver.
+    const HANG_LIMIT: Duration = Duration::from_secs(5);
+
+    /// An inner store whose `add` panics, which is how a write-behind flush
+    /// task is made to end by a panic from outside the store's own module.
+    /// Everything else is the null store.
+    struct PanickingInner(NullDataStore);
+
+    #[async_trait::async_trait]
+    impl MapDataStore for PanickingInner {
+        async fn add(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            panic!("injected inner-store panic");
+        }
+
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.0
+                .add_backup(map, key, value, expiration_time, now)
+                .await
+        }
+
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.0.remove(map, key, now).await
+        }
+
+        async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.0.remove_backup(map, key, now).await
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.0.load(map, key).await
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.0.load_all(map, keys).await
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            self.0.enumerate_leaves(map, is_backup, sink).await
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.0.scan_values(map, is_backup, max_batch_cost).await
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: ScanCursor,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.0
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.0.remove_all(map, keys).await
+        }
+
+        fn is_loadable(&self, key: &str) -> bool {
+            self.0.is_loadable(key)
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            self.0.pending_operation_count()
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            self.0.soft_flush().await
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            self.0.hard_flush().await
+        }
+
+        async fn flush_key(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            is_backup: bool,
+        ) -> anyhow::Result<()> {
+            self.0.flush_key(map, key, value, is_backup).await
+        }
+
+        fn reset(&self) {
+            self.0.reset();
+        }
+    }
+
+    /// A real write-behind store over `inner` whose first flush tick already
+    /// takes what was written.
+    fn write_behind_over(inner: Arc<dyn MapDataStore>) -> Arc<WriteBehindDataStore> {
+        WriteBehindDataStore::new(
+            inner,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 10,
+                capacity: 0,
+                shutdown_timeout_ms: 5_000,
+                ..WriteBehindConfig::default()
+            },
+        )
+    }
+
+    /// A store no task of which will panic.
+    fn healthy_store() -> Arc<WriteBehindDataStore> {
+        write_behind_over(Arc::new(NullDataStore))
+    }
+
+    /// Writes one key to `store` and returns once its flush task has ended by
+    /// a panic, which the store's own record says and nothing else is asked.
+    async fn fail_the_flush_task(store: &WriteBehindDataStore) {
+        let value = RecordValue::Lww {
+            value: topgun_core::types::Value::Null,
+            timestamp: topgun_core::hlc::Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: String::new(),
+            },
+        };
+        store
+            .add("bin-cause", "in-the-dead-batch", &value, 0, 0)
+            .await
+            .expect("a healthy store accepts the write");
+        let mut recorded = store.background_failure();
+        tokio::time::timeout(HANG_LIMIT, recorded.wait_for(Option::is_some))
+            .await
+            .expect("the flush task never panicked")
+            .expect("the store dropped its failure record");
+    }
+
+    /// The health reaction to a store failure is the one a stop signal has:
+    /// readiness answers 503 from the `Draining` state. A signal is the
+    /// positive control on a controller of its own.
+    #[test]
+    fn bin_cause_a_store_failure_puts_the_controller_in_draining() {
+        for cause in [ShutdownCause::StoreFailure, ShutdownCause::Signal] {
+            let controller = ShutdownController::new();
+            controller.set_ready();
+            let stopping = controller.shutdown_receiver();
+            assert_eq!(controller.health_state(), HealthState::Ready);
+
+            apply_shutdown_cause(cause, &controller);
+
+            assert_eq!(
+                controller.health_state(),
+                HealthState::Draining,
+                "cause {cause:?}: the controller must be draining, so that readiness answers 503"
+            );
+            assert!(
+                *stopping.borrow(),
+                "cause {cause:?}: the controller's listeners must be told to stop"
+            );
+        }
+    }
+
+    /// Row 1: a signal, the store's record empty and the drain `Ok` once the
+    /// shutdown is over. Exit code 0, as before the store could fail.
+    #[tokio::test]
+    async fn bin_cause_row_1_signal_and_a_healthy_store_exit_0() {
+        let store = healthy_store();
+        let recorded = store.background_failure();
+        let flushed = store.hard_flush().await;
+        assert!(flushed.is_ok(), "a healthy store drains: {flushed:?}");
+        assert!(recorded.borrow().is_none());
+
+        let failed = store_failed(ShutdownCause::Signal, Some(&recorded), &flushed);
+        assert_eq!(
+            exit_code_for(failed, ShutdownOutcome::Completed),
+            0,
+            "row 1: signal, record empty, drain Ok"
+        );
+
+        // A drain that returned an error which is not the failed-store one,
+        // a timeout for instance, is still a clean stop.
+        let timed_out: anyhow::Result<()> = Err(anyhow::anyhow!("drain timed out"));
+        let failed = store_failed(ShutdownCause::Signal, Some(&recorded), &timed_out);
+        assert_eq!(
+            exit_code_for(failed, ShutdownOutcome::Completed),
+            0,
+            "row 1, control: signal, record empty, drain Err that carries no store failure"
+        );
+
+        // The null backend has no store to ask.
+        let no_store: Option<&watch::Receiver<Option<std::fmt::Error>>> = None;
+        let failed = store_failed(ShutdownCause::Signal, no_store, &Ok(()));
+        assert_eq!(
+            exit_code_for(failed, ShutdownOutcome::Completed),
+            0,
+            "row 1, control: signal, no write-behind store"
+        );
+    }
+
+    /// Row 2, first form: a signal began the stop while the store's record was
+    /// empty, and the record holds a failure when it is read after the drain.
+    /// The drain's result is given as `Ok` so that the record alone decides.
+    #[tokio::test]
+    async fn bin_cause_row_2a_signal_then_a_failure_in_the_record_exits_70() {
+        let store = write_behind_over(Arc::new(PanickingInner(NullDataStore)));
+        let recorded = store.background_failure();
+        assert!(
+            recorded.borrow().is_none(),
+            "the record is empty when the shutdown begins"
+        );
+
+        fail_the_flush_task(&store).await;
+        assert!(
+            recorded.borrow().is_some(),
+            "the receiver taken before the failure reads it afterwards"
+        );
+
+        let failed = store_failed(ShutdownCause::Signal, Some(&recorded), &Ok(()));
+        assert_eq!(
+            exit_code_for(failed, ShutdownOutcome::Completed),
+            70,
+            "row 2a: signal, the record holds a failure after the drain"
+        );
+    }
+
+    /// Row 2, second form: a signal began the stop, the record that is read is
+    /// still empty, and the drain returned the failed-store error. The error is
+    /// the one a real failed store returns, recognised by its type.
+    #[tokio::test]
+    async fn bin_cause_row_2b_signal_then_a_failure_in_the_drain_result_exits_70() {
+        let failed_store = write_behind_over(Arc::new(PanickingInner(NullDataStore)));
+        fail_the_flush_task(&failed_store).await;
+        let flushed = failed_store.hard_flush().await;
+        assert!(
+            flushed.is_err(),
+            "a drain on a failed store returns an error"
+        );
+
+        // A record of the same type that holds nothing: another store's.
+        let other = healthy_store();
+        let empty_record = other.background_failure();
+        assert!(empty_record.borrow().is_none());
+
+        let failed = store_failed(ShutdownCause::Signal, Some(&empty_record), &flushed);
+        assert_eq!(
+            exit_code_for(failed, ShutdownOutcome::Completed),
+            70,
+            "row 2b: signal, record empty, the drain returned the failed-store error \
+             ({flushed:?})"
+        );
+    }
+
+    /// Row 3: the stop was begun by the failure and the shutdown completed.
+    #[tokio::test]
+    async fn bin_cause_row_3_failure_cause_and_a_completed_shutdown_exit_70() {
+        let store = write_behind_over(Arc::new(PanickingInner(NullDataStore)));
+        fail_the_flush_task(&store).await;
+        let recorded = store.background_failure();
+        let flushed = store.hard_flush().await;
+
+        let failed = store_failed(ShutdownCause::StoreFailure, Some(&recorded), &flushed);
+        assert_eq!(
+            exit_code_for(failed, ShutdownOutcome::Completed),
+            70,
+            "row 3: failure cause, shutdown completed"
+        );
+
+        // The cause is enough by itself.
+        let other = healthy_store();
+        let empty_record = other.background_failure();
+        let failed = store_failed(ShutdownCause::StoreFailure, Some(&empty_record), &Ok(()));
+        assert_eq!(
+            exit_code_for(failed, ShutdownOutcome::Completed),
+            70,
+            "row 3: failure cause alone, record empty and drain Ok"
+        );
+    }
+
+    /// Row 4: the stop was begun by the failure and the shutdown panicked or
+    /// passed its deadline.
+    #[tokio::test]
+    async fn bin_cause_row_4_failure_cause_and_a_shutdown_that_did_not_complete_exit_71() {
+        let store = write_behind_over(Arc::new(PanickingInner(NullDataStore)));
+        fail_the_flush_task(&store).await;
+        let recorded = store.background_failure();
+
+        // No drain result exists for a shutdown that did not complete.
+        let failed = store_failed(ShutdownCause::StoreFailure, Some(&recorded), &Ok(()));
+        assert_eq!(
+            exit_code_for(failed, ShutdownOutcome::PanickedOrOverran),
+            71,
+            "row 4: failure cause, shutdown panicked or overran"
+        );
+    }
+
+    /// Row 5: the cell no production call reaches. A shutdown that panicked or
+    /// overran is never a clean stop, recorded failure or not.
+    #[test]
+    fn bin_cause_row_5_no_failure_and_a_shutdown_that_did_not_complete_exit_71() {
+        assert_eq!(
+            exit_code_for(false, ShutdownOutcome::PanickedOrOverran),
+            71,
+            "row 5: no failure, shutdown panicked or overran"
+        );
+    }
+
+    /// The wait the shutdown future makes ends on a failure that was recorded
+    /// before the wait was first polled, on a receiver taken before or after it.
+    #[tokio::test]
+    async fn a_store_failure_recorded_before_the_wait_began_ends_it() {
+        let store = write_behind_over(Arc::new(PanickingInner(NullDataStore)));
+        let taken_before = store.background_failure();
+        fail_the_flush_task(&store).await;
+        let taken_after = store.background_failure();
+
+        for (which, recorded) in [("before", taken_before), ("after", taken_after)] {
+            let failure = tokio::time::timeout(HANG_LIMIT, store_failure_recorded(Some(recorded)))
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("a receiver taken {which} the failure never ended the wait")
+                });
+            assert_eq!(failure.task.as_str(), "flush");
+        }
+    }
+
+    #[test]
+    fn the_failure_deadline_calls_its_exit_action_unless_cancelled() {
+        const DEADLINE: Duration = Duration::from_millis(50);
+
+        // Left alone. The stand-in records the code it was called with; the
+        // deadline thread drops it when it ends, which closes the channel.
+        let (called, calls) = std::sync::mpsc::channel::<i32>();
+        let started = Instant::now();
+        let _deadline = start_failure_deadline(DEADLINE, move |code| {
+            let _ = called.send(code);
+        });
+        assert_eq!(
+            calls.recv_timeout(HANG_LIMIT),
+            Ok(71),
+            "left alone: the exit action must be called with the code of an overrun shutdown"
+        );
+        assert!(
+            started.elapsed() >= DEADLINE,
+            "left alone: the exit action was called before the deadline"
+        );
+        assert_eq!(
+            calls.recv_timeout(HANG_LIMIT),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "left alone: the exit action must be called once"
+        );
+
+        // Cancelled before the deadline. The thread then ends without calling
+        // the stand-in, and the channel closes with nothing sent on it.
+        let (called, calls) = std::sync::mpsc::channel::<i32>();
+        let started = Instant::now();
+        let deadline = start_failure_deadline(DEADLINE, move |code| {
+            let _ = called.send(code);
+        });
+        deadline.cancel();
+        assert!(
+            started.elapsed() < DEADLINE,
+            "the scenario did not hold: the cancel came after the deadline, so this run says \
+             nothing about a cancelled deadline"
+        );
+        assert_eq!(
+            calls.recv_timeout(HANG_LIMIT),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "cancelled: the exit action must not be called"
+        );
     }
 }

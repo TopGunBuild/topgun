@@ -582,11 +582,12 @@ case outside the precondition.
   replays it (TODO-757).
 - **Shutdown.** The flush task aborted at the shutdown timeout, the error, timeout and
   final-sweep exits of `hard_flush`, and a `hard_flush` future dropped mid-drain (TODO-768).
-- **The flush task ending by a panic** on a node that keeps running (TODO-775).
+- **The flush task ending by a panic.** The node does not keep running: the store fails and the
+  server binary exits non-zero (`TG-WB-006`).
 - **`flush_key`** cancelled at either of its two awaits (the store call, the watermark advance),
   and `flush_key` against a key whose entry is in a flush batch. Latent: every caller is test
-  code (TODO-775, with TODO-628).
-- **`reset`** on a WAL-backed store with queued entries (TODO-775).
+  code (TODO-803, with TODO-628).
+- **`reset`** on a WAL-backed store with queued entries (TODO-803).
 - **A write cancelled inside the WAL append** (`TG-WB-003` (b), TODO-672).
 - **Two concurrent writers of one key.** The writers of a record key are serialised above this
   store (`TG-KEY-001`), so it no longer meets them. One interleaving below the writer is still
@@ -596,6 +597,165 @@ case outside the precondition.
   one, `an_older_value_arriving_behind_a_refused_newer_one_does_not_win_after_a_crash`, shows
   that a write which arrives later behind a refused flush also carries the higher stamp, because
   its stamp is minted after its read of the previous value; that test passes without the writer.
+
+### TG-WB-006: A write-behind flush task or stall watchdog that ends by a panic puts the store in a failed state: new writes are refused, on a WAL-backed store the dead batch stays replayable, and the server binary exits non-zero
+
+- **Scope:** `WriteBehindDataStore` — its two background tasks (the flush task and the stall
+  watchdog), its lifecycle state, `hard_flush` — and the shutdown path of the server binary
+  (`bin/topgun_server.rs`). The store half holds for any embedder; the exit code is a property
+  of the server binary only.
+- **Statement:** when the flush task or the stall watchdog ends by a panic, the dying task
+  itself, before its poll returns to the runtime, puts the store in a failed state and records
+  which task failed and with what message. That happens in every lifecycle state, a shutdown
+  already under way included, and the failed state is never left. From then on:
+  - `add`, `remove` and `remove_all` return an error before a WAL sequence is assigned and
+    before anything is appended to the WAL, so no write is acknowledged by a store that can no
+    longer flush;
+  - nothing resolves, abandons or re-queues the WAL sequences of the batch the dead flush task
+    held. On a WAL-backed store those frames, and every later frame of the same partitions,
+    stay in the unapplied window and are replayed at the next start, in ascending order
+    (`TG-WAL-005`, `TG-WAL-010`, `TG-WAL-011`), so the replay ends on the newest value of a key;
+  - `hard_flush` still drains and persists what is queued, syncs the WAL before each of its
+    returns, reports how many entries it did not persist, and returns an error whose source is
+    the recorded failure — whether the failure was recorded before it was called or while it
+    ran;
+  - the server binary reports not ready, runs its ordinary shutdown and ends with exit code 70
+    when that shutdown completed, or 71 when the shutdown itself panicked or passed its
+    deadline (30 s + the write-behind shutdown timeout + 10 s). The code is non-zero whichever
+    came first, the panic or a stop signal: the binary reads the failure again after
+    `hard_flush` has returned. A stop with no recorded failure still exits 0.
+- **Mechanical predicate:** once the poll of a panicked background task has returned, (a)
+  `background_failure()` holds `Some` with that task and the panic message, and a second failure
+  does not replace it; (b) the next `add`, `remove` or `remove_all` returns the failed-store
+  error and the WAL saw no append for it; (c) after `hard_flush`, which returns `Err` with a
+  `BackgroundFailure` as its source, `wal.unapplied(p)` still returns the dead batch's frames
+  and every later frame of each partition `p` the batch touched; (d)
+  `exit_code_for(true, Completed) == 70` and `exit_code_for(_, PanickedOrOverran) == 71`, and
+  the decision that feeds it is true whenever the stop was caused by a failure, or the record
+  holds one, or the drain's result carries one.
+- **Maintaining code:** `write_behind.rs` — `ObservedTask` (the wrapper both tasks are spawned
+  through by `spawn_background_task`; it catches the unwind inside `poll`),
+  `record_background_failure` (state, error line, counter and signal in one stretch with no
+  await), the `Lifecycle` state read by the three write entries, `hard_flush`.
+  `wal/mod.rs` — `Wal::sync`, `WalWriter::sync`. `bin/topgun_server.rs` —
+  `store_failure_or_signal`, `apply_shutdown_cause`, `store_failed`, `exit_code_for`,
+  `start_failure_deadline`, and the two `std::process::exit` calls after the drain.
+- **Enforcing test:** `write_behind.rs::a_flush_task_panic_fails_the_store` and
+  `write_behind.rs::a_stall_watchdog_panic_fails_the_store` — after the panicked task's poll has
+  returned, the very next write is refused and `hard_flush` returns an error. Both run in CI
+  (`cargo test`). The table below lists the others and what each one covers.
+- **Violation consequence:** a node whose flush task has died keeps acknowledging writes that
+  nothing will ever flush while the process lives, reports itself healthy, and on a later stop
+  tells its supervisor "clean stop" with exit code 0. Operators see no line and no metric. The
+  write buffer fills until the capacity check rejects writes for an unrelated-looking reason.
+- **Visible to an operator:** one error line per failure
+  (`write-behind background task panicked; the store refuses writes from now on`, fields `task`
+  and `panic`), the counter `topgun_write_behind_background_task_panics_total{task}` (both
+  `task` values render at 0 from the first scrape), `/health/ready` and `/healthz` at 503 while
+  the stop runs (`/health/live` stays 200), and the exit code.
+- **Discovered by:** a review of the exits `TG-WB-005` leaves uncovered; fixed and catalogued by
+  SPEC-386.
+- **Status:** decided, **enforced** — within the limits listed under "Not claimed" below.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `a_flush_task_panic_fails_the_store` | a flush-task panic: the first write after the panicked poll returned is refused; `hard_flush` returns an error | CI (`cargo test`) |
+| `a_stall_watchdog_panic_fails_the_store` | the same for a panic of the stall watchdog, on a WAL-backed store | CI (`cargo test`) |
+| `a_flush_task_panic_is_observed_without_any_call` | the failure record holds the task and the panic text with no write and no `hard_flush` in between | CI (`cargo test`) |
+| `a_flush_task_panic_is_logged_once_at_error` | exactly one error line, with both fields | CI (`cargo test`) |
+| `a_background_task_panic_is_counted_by_task` | both counter series at 0 after construction; the `flush` series at 1 after the panic, the other still 0 | CI (`cargo test`) |
+| `a_failed_store_refuses_add`, `a_failed_store_refuses_remove`, `a_failed_store_refuses_remove_all` | each write entry returns the failed-store error, the WAL saw no append, the pending count is unchanged | CI (`cargo test`) |
+| `a_write_past_the_check_when_the_task_dies_is_drained_at_shutdown` | a write that passed the state check before the failure returns `Ok` and its value is persisted by the shutdown drain | CI (`cargo test`) |
+| `the_dead_tasks_batch_stays_unresolved_through_shutdown` | on a real WAL: `hard_flush` completes with a non-zero pending count, the report carries the batch size, and the later frame of a key that is in both the batch and the drain is still unapplied | CI (`cargo test`) |
+| `after_a_flush_task_panic_a_restart_holds_every_acked_write` | recovery over the same directory: every key holds its last acknowledged value — one key only in the dead batch, one only drained, one in both; an OR-Map key written with delta framing holds each tag once | CI (`cargo test`) |
+| `hard_flush_syncs_the_wal_before_every_return` | `sync` is the last WAL call on the empty-queue return, the timeout-sweep return and the failed-store return | CI (`cargo test`) |
+| `wal_writer_sync_leaves_no_unfsynced_frame` (`wal/mod.rs`) | under `batched`, after appends to two partitions and `sync`, neither active segment has an un-fsynced frame | CI (`cargo test`) |
+| `a_stall_watchdog_panic_is_recorded_and_shutdown_still_drains` | a watchdog failure: the record names the watchdog, the flush task still stops on the shutdown signal, `hard_flush` drains everything, returns an error and reports nothing un-persisted | CI (`cargo test`) |
+| `a_flush_task_panic_after_shutdown_began_is_still_a_failure` | the order "stop first, panic second" in the store: the failure is recorded, `hard_flush` returns the failed-store error, the parked batch stays unapplied | CI (`cargo test`) |
+| `a_clean_stop_is_not_a_failure` | what is NOT a failure: `hard_flush` on a healthy store, a store with no WAL, the flush task aborted at the shutdown timeout | CI (`cargo test`) |
+| `hard_flush_completes_with_a_poisoned_pending_seqs_lock`, `hard_flush_completes_with_a_poisoned_flush_loop_handle_lock`, `hard_flush_completes_with_a_poisoned_wal_tracking_cell_lock` | a lock poisoned by a panicking thread does not stop the shutdown path | CI (`cargo test`) |
+| `the_capacity_pre_check_bound_is_the_stated_one` | the bound the capacity pre-check keeps while a flush pass holds a batch: re-writes of the held keys are accepted, a new key is rejected | CI (`cargo test`) |
+| the seven `bin_cause_*` tests (`bin/topgun_server.rs`) | the binary's decisions without a process: a failure puts the health controller in `Draining`; signal and a healthy store → 0; signal, then a failure in the record or in the drain's result → 70; failure and a completed shutdown → 70; a shutdown that did not complete → 71, with or without a recorded failure | CI (`cargo test`) |
+| `the_failure_deadline_calls_its_exit_action_unless_cancelled` (`bin/topgun_server.rs`) | the deadline function: left alone it calls its exit action once with 71; cancelled, it never calls it | CI (`cargo test`) |
+| `tests/integration-rust/flush-task-panic.test.ts` | the CONSEQUENCE at process level on a `fault-injection` build, the client connection open throughout: with one write after the panic sentinel the process exits 70 by itself; with a stream of writes the shutdown drain panics too and it exits 71; after each, a restart on the same data directory reads every acknowledged key | local only (`pnpm test:integration-rust:liveness`) — opt-in, not run in CI, for the reason given under `TG-WB-004` (TODO-770) |
+
+**Not claimed.** Each of these is outside the statement, or is in it and rests on something
+weaker than a test.
+
+- **A deterministic panic.** Established by reading: boot replay calls the inner store directly
+  and does not run the flush loop. A panic that originates inside the inner store's `add` or
+  `remove` for a given record is met again at replay, on `main`, before the listener is bound:
+  the node fails at every start. A panic that originates in write-behind's own code is not on
+  the replay path. No quarantine policy exists (TODO-805).
+- **A deterministic panic of the stall watchdog.** The watchdog is under the same policy as the
+  flush task, so a watchdog panic that repeats at every start gives a crash loop caused by a
+  diagnostic task, on a node whose flushing may work. It is not restarted in the process and not
+  exempted (TODO-805).
+- **Other background tasks.** The batched WAL fsync timer, the partition workers, the tombstone
+  cursor worker and the rest are not supervised (TODO-804, which lists them).
+- **A flush task or watchdog that returns without a panic** while the store is not shutting
+  down (TODO-804).
+- **Embedders other than the server binary.** The library serve path (`network/module.rs`) does
+  not read the failure signal; a store embedded there refuses writes and returns `Err` from
+  `hard_flush`, and nothing shuts the process down (TODO-804).
+- **The inner store after a panic inside it.** Whether redb or Postgres stays usable for the
+  shutdown drain after one of their calls panicked was not established. If the drain panics, the
+  process exits with 71.
+- **Durability of the un-fsynced tail** when the shutdown panics or overruns under `batched`:
+  the frames were written to the file; they are not fsynced.
+- **The window between the state check and the failure is not empty.** A write that loaded the
+  lifecycle state before the dying task stored it is acknowledged: its frame is in the WAL, and
+  its entry is persisted by the shutdown drain or replayed at the next start.
+- **The 503 at process level.** The health reaction is enforced by the `bin_cause_*` unit tests;
+  an answer of 503 from a running process between the failure and its exit was not observed.
+- **The deadline at process level.** The deadline is tested through its function, not on a
+  process; the behaviour with a runtime that has stopped completely was not observed.
+- **The order "state before the log line and the signal"** inside `record_background_failure`
+  is pinned by reading the code, not by a test or a mutant.
+- **`hard_flush` exits already tracked elsewhere** — the abort at the shutdown timeout, the
+  error and timeout exits, a dropped `hard_flush` future (TODO-768).
+- **`flush_key`** against a flush batch or cancelled, and **`reset`** on a WAL-backed store
+  (TODO-803).
+- **`capacity` as a hard limit** (TODO-803). The pre-check keeps a soft bound, which its comment
+  states and one test above pins.
+- **Which statements of the flush loop or of an inner store can panic.** Not enumerated; the
+  tests inject one.
+- **A stop started by a signal has no deadline of its own**, before this entry or after it. When
+  a task panics during such a stop, the binary learns of it after `hard_flush` returned and
+  exits 70 at once; nothing bounds that stop beyond what bounded it before (the shutdown timeout
+  inside `hard_flush`, the 30 s wait for in-flight requests).
+- **A panic of `hard_flush` itself on the signal path.** There `hard_flush` is awaited on
+  `main`; its panic is a panic on `main` and the process exits 101, whether or not a failure was
+  recorded. The code is non-zero; it is not 71. `exit_code_for` returns 71 for "no failure,
+  shutdown panicked or overran", and no production call reaches that cell.
+- **The order "signal, then panic" at process level.** It is enforced in the store by
+  `a_flush_task_panic_after_shutdown_began_is_still_a_failure` and in the binary by the two
+  `bin_cause_row_2*` tests; no process was run through it.
+- **A failure recorded after the binary's last read.** A watchdog that panics after the binary
+  read the record following `hard_flush` is not seen; the process exits 0. The same holds for a
+  flush task whose panic coincides with its abort at the shutdown timeout: the shutdown does not
+  wait for an aborted task. In every other case the flush task has ended before `hard_flush`
+  drains.
+- **The watchdog's path to the exit code at process level.** The watchdog reaches the exit only
+  through the shared failure record; the store half is tested, and the process-level test
+  injects its panic where an entry is persisted, which the watchdog never does. No process was
+  run with a watchdog panic.
+- **The two call sites in `main`** — the call of the deadline function and the read of the
+  failure after `hard_flush` — are pinned by reading, not by a test or a mutant. The unit tests
+  drive the functions, not their call sites; the only check of the wiring is the process-level
+  test, which is local.
+- **The dead batch on a store without a WAL.** `WriteBehindDataStore::new` builds a store with
+  no WAL; there the dead batch's writes are lost at the exit. "Stays replayable" is claimed for
+  a WAL-backed store only, which is what the two tests of the batch use.
+- **`unpersisted_entries` is not the size of the dead batch.** It is the pending count, which
+  also holds the entries the shutdown drain timed out or failed on.
+- **The inner store after an exit that skipped its destructors.** Exit codes 70 and 71 are
+  produced by `std::process::exit`, which does not close redb or the Postgres pool. What an
+  unclosed redb file costs at the next start was not verified; the restarts of the process-level
+  test observe it for two scenarios and no more.
+- **What a client receives for a refused write.** The store's error maps to `internal`, 500,
+  transient by reading; no test asserts it. The process-level test asserts only that the answer
+  is not an acknowledgement and records what it was.
 
 ### TG-EVI-001: Never-evict-dirty — an unflushed write is never evicted from the resident cache
 

@@ -12,9 +12,9 @@ const optInSuites = [
     script: 'pnpm test:integration-rust:two-binary',
   },
   {
-    files: ['store-refusal-liveness'],
+    files: ['store-refusal-liveness', 'flush-task-panic'],
     reason:
-      'it needs a server built with the fault-injection cargo feature (FAULT_SERVER_BINARY, FAULT_SERVER_COMMIT)',
+      'each needs a server built with the fault-injection cargo feature (FAULT_SERVER_BINARY, FAULT_SERVER_COMMIT)',
     script: 'pnpm test:integration-rust:liveness',
   },
 ];

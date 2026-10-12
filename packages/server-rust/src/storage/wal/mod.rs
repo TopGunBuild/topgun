@@ -437,6 +437,20 @@ pub trait Wal: Send + Sync {
     /// contiguous suffix of the log rather than an arbitrary subset. An empty vec
     /// means the partition is clean.
     async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>>;
+
+    /// Makes every frame appended so far durable, whatever the fsync policy
+    /// has deferred.
+    ///
+    /// For the one caller that cannot leave durability to the policy: a store
+    /// that is shutting down. Under a deferred policy the frames of its last
+    /// moments are in the file but not yet fsynced, and the task that would
+    /// fsync them ends with the process.
+    ///
+    /// The default does nothing, which is right for an implementation that
+    /// defers no fsync or keeps no file.
+    async fn sync(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 // ===========================================================================
@@ -1369,6 +1383,30 @@ impl Wal for WalWriter {
         all.sort_by_key(|e| e.sequence);
         all.retain(|e| e.sequence > applied_seq);
         Ok(all)
+    }
+
+    /// Fsyncs the active segment of every open partition that holds
+    /// un-fsynced frames.
+    ///
+    /// Only an active segment can hold one: a sealed segment was fsynced
+    /// before it was frozen. Each segment is synced under its own lock, taken
+    /// after the map lock is released, so an append to another partition is
+    /// never held up. A failure does not end the pass — the other partitions
+    /// are still worth making durable — and the first one is what is returned.
+    async fn sync(&self) -> anyhow::Result<()> {
+        let handles: Vec<Arc<PartitionHandle>> =
+            { self.partitions.lock().await.values().cloned().collect() };
+        let mut first_error = None;
+        for handle in handles {
+            let mut active = handle.active.lock().await;
+            if active.unfsynced_count() == 0 {
+                continue;
+            }
+            if let Err(e) = active.sync_data().await {
+                first_error.get_or_insert(e);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -4792,6 +4830,41 @@ mod tests {
             wal.test_read_applied_sequence(0),
             1,
             "The accessor must observe the durable sidecar value, not an in-memory mirror"
+        );
+    }
+
+    /// Under `Batched` an appended frame is in the file but not fsynced until
+    /// the group-commit timer runs, and that timer ends with the process. A
+    /// shutdown therefore has to be able to fsync on demand.
+    ///
+    /// The clock is paused so the timer cannot be what empties the counts: the
+    /// precondition below fails if it ever does.
+    #[tokio::test(start_paused = true)]
+    async fn wal_writer_sync_leaves_no_unfsynced_frame() {
+        async fn unfsynced(wal: &WalWriter, partition: u32) -> u32 {
+            let handle = wal.handle(partition).await.unwrap();
+            let active = handle.active.lock().await;
+            active.unfsynced_count()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::Batched).unwrap();
+
+        wal.append(0, &make_wal_entry(1)).await.unwrap();
+        wal.append(1, &make_wal_entry(2)).await.unwrap();
+        wal.append(1, &make_wal_entry(3)).await.unwrap();
+        assert_eq!(
+            (unfsynced(&wal, 0).await, unfsynced(&wal, 1).await),
+            (1, 2),
+            "the appended frames must be un-fsynced before `sync`, or the test shows nothing"
+        );
+
+        wal.sync().await.unwrap();
+
+        assert_eq!(
+            (unfsynced(&wal, 0).await, unfsynced(&wal, 1).await),
+            (0, 0),
+            "`sync` must fsync the active segment of every partition that held a frame"
         );
     }
 }
