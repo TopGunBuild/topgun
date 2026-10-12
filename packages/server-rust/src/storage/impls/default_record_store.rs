@@ -2287,10 +2287,6 @@ mod tests {
             async fn hard_flush(&self) -> anyhow::Result<()> {
                 self.inner.hard_flush().await
             }
-
-            fn reset(&self) {
-                self.inner.reset();
-            }
         }
 
         /// The parked side of a one-shot blocking gate, for the synchronous
@@ -3514,10 +3510,6 @@ mod tests {
             async fn hard_flush(&self) -> anyhow::Result<()> {
                 self.called();
                 Ok(())
-            }
-
-            fn reset(&self) {
-                self.called();
             }
         }
 

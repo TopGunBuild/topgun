@@ -265,8 +265,6 @@ mod tests {
             Ok(())
         }
 
-        fn reset(&self) {}
-
         // A real (non-null) backend so the full write-through + mark_stored path
         // exercises exactly what production does.
         fn is_null(&self) -> bool {
@@ -1319,10 +1317,6 @@ mod tests {
 
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
-        }
-
-        fn reset(&self) {
-            self.inner.reset();
         }
     }
 

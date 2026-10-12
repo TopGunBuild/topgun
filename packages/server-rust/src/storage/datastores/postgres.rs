@@ -527,10 +527,6 @@ impl MapDataStore for PostgresDataStore {
     async fn hard_flush(&self) -> anyhow::Result<()> {
         Ok(())
     }
-
-    fn reset(&self) {
-        // No-op for write-through: all data is already persisted
-    }
 }
 
 // ── PostgresRefreshGrantStore ─────────────────────────────────────────────────

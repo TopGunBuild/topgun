@@ -1354,9 +1354,6 @@ mod rebuild_tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
         }
-        fn reset(&self) {
-            self.inner.reset();
-        }
     }
 
     /// Drive the live write-path observer for one record on a manager, routing

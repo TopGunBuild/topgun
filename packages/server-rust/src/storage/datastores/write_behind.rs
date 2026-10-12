@@ -4083,43 +4083,6 @@ impl MapDataStore for WriteBehindDataStore {
         self.finish_shutdown(drained_entries).await
     }
 
-    fn reset(&self) {
-        // Hold the pending-sequence lock across ALL watermark-state clears — the
-        // queues, staging, pending_count, the sequence counter, AND the pending set
-        // — so a `reset` presents a single consistent wipe. `assign_tracked_sequence`
-        // locks `pending_seqs` FIRST and only then touches `sequence`, so holding the
-        // lock here serializes reset against the counter/pending half of an assign;
-        // clearing queues/staging/pending_count inside the same critical section
-        // keeps them from drifting out of step with the counter (e.g. a stranded
-        // staging entry under a reset counter, which would freeze the watermark).
-        //
-        // Precondition: `reset` is a teardown / full-clear operation (test harnesses
-        // and quiesced admin clears) — it is NOT called concurrently with live
-        // tracked writers. An assign's second phase (its staging insert) runs OUTSIDE
-        // this lock, so the lock cannot make reset fully atomic against an in-flight
-        // writer; the invariant that no writer races reset is what guarantees
-        // consistency, and the lock is defense-in-depth that keeps the counter/pending
-        // pair coherent.
-        //
-        // What is NOT cleared, and why the precondition also needs empty queues on a
-        // WAL-backed store (TG-WB-005 does not cover `reset`; tracked as TODO-803):
-        // the WAL-sequence tracker is left as it is, because the frames are still on
-        // disk and forgetting them would let the watermark pass writes that were
-        // never applied. Entries queued at this moment therefore leave their WAL
-        // sequences `Live` with no owner, which pins the partition's log until
-        // restart. And an entry the flush loop holds in a drained batch at this
-        // moment is not in any queue cleared here: its terminal later decrements a
-        // pending count that was already set to zero.
-        let mut pending = self.pending_seqs();
-        self.queues.clear();
-        self.staging.clear();
-        self.pending_count.store(0, Ordering::Relaxed);
-        self.sequence.store(0, Ordering::Relaxed);
-        pending.clear();
-        drop(pending);
-        self.inner.reset();
-    }
-
     fn is_null(&self) -> bool {
         false
     }
@@ -4498,8 +4461,6 @@ mod tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             Ok(())
         }
-
-        fn reset(&self) {}
 
         fn is_null(&self) -> bool {
             false
@@ -4920,46 +4881,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AC4: `reset` clears the counter and the pending set under a single
-    // `pending_seqs` critical section, so a concurrent `assign_tracked_sequence`
-    // (which locks pending_seqs before touching the counter) cannot interleave and
-    // strand counter=1 with an empty set while a sequence is still buffered. This
-    // checks the resulting consistent postcondition: watermark and counter agree.
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn reset_clears_watermark_state_consistently() {
-        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
-        let config = WriteBehindConfig {
-            write_delay_ms: 60_000,
-            flush_interval_ms: 60_000,
-            ..WriteBehindConfig::default()
-        };
-        let store = WriteBehindDataStore::new(inner, config);
-
-        // Advance the counter and leave writes buffered (pending non-empty).
-        store.add("m", "k1", &dummy_value(), 0, 1).await.unwrap();
-        store.add("m", "k2", &dummy_value(), 0, 1).await.unwrap();
-        assert!(store.assigned_write_sequence() > 0);
-        assert!(store.flushed_watermark() < store.assigned_write_sequence());
-
-        store.reset();
-
-        // After reset the counter is 0 and the pending set is empty, so the
-        // watermark is 0 — no stranded sequence pinning it above the counter.
-        assert_eq!(
-            store.assigned_write_sequence(),
-            0,
-            "reset zeroes the counter"
-        );
-        assert_eq!(
-            store.flushed_watermark(),
-            0,
-            "reset leaves no pending sequence, so the watermark is 0 (counter and set agree)"
-        );
-    }
-
-    // -----------------------------------------------------------------------
     // A batch `remove_all` that coalesces a still-buffered write MUST resolve the
     // retired sequence — otherwise it leaks in the pending set forever and pins
     // the flushed watermark below it, permanently stalling the tombstone prune.
@@ -5212,8 +5133,6 @@ mod tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             Ok(())
         }
-
-        fn reset(&self) {}
 
         fn is_null(&self) -> bool {
             false
@@ -7314,8 +7233,6 @@ mod tests {
             Ok(())
         }
 
-        fn reset(&self) {}
-
         fn is_null(&self) -> bool {
             false
         }
@@ -8169,10 +8086,6 @@ mod hard_flush_order_tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
         }
-
-        fn reset(&self) {
-            self.inner.reset();
-        }
     }
 
     // AC-15: a Remove staged after the flush loop dequeued the key's Store must
@@ -8425,10 +8338,6 @@ mod background_task_panic_tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
         }
-
-        fn reset(&self) {
-            self.inner.reset();
-        }
     }
 
     /// A WAL that accepts every frame and holds none. It is here because the
@@ -8643,10 +8552,6 @@ mod background_task_panic_tests {
 
         async fn hard_flush(&self) -> anyhow::Result<()> {
             Ok(())
-        }
-
-        fn reset(&self) {
-            self.values().clear();
         }
     }
 

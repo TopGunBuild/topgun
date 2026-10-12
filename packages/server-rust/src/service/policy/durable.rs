@@ -481,7 +481,6 @@ mod tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             Ok(())
         }
-        fn reset(&self) {}
     }
 
     #[tokio::test]

@@ -2844,10 +2844,6 @@ mod tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.0.hard_flush().await
         }
-
-        fn reset(&self) {
-            self.0.reset();
-        }
     }
 
     /// A real write-behind store over `inner` whose first flush tick already

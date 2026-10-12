@@ -112,10 +112,6 @@ impl MapDataStore for NullDataStore {
         Ok(())
     }
 
-    fn reset(&self) {
-        // Nothing to reset — NullDataStore holds no state.
-    }
-
     fn is_null(&self) -> bool {
         true
     }

@@ -298,8 +298,6 @@ impl MapDataStore for HarnessInnerStore {
     async fn hard_flush(&self) -> anyhow::Result<()> {
         Ok(())
     }
-
-    fn reset(&self) {}
 }
 
 // ---------------------------------------------------------------------------

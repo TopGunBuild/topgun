@@ -522,8 +522,6 @@ impl MapDataStore for FaultStore {
     async fn hard_flush(&self) -> anyhow::Result<()> {
         Ok(())
     }
-
-    fn reset(&self) {}
 }
 
 // ---------------------------------------------------------------------------

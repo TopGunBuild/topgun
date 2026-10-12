@@ -5986,10 +5986,6 @@ mod tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
         }
-
-        fn reset(&self) {
-            self.inner.reset();
-        }
     }
 
     /// Logs each `(map, partition)` store the factory builds. The factory asks

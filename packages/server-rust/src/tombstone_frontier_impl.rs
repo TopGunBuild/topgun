@@ -3776,9 +3776,6 @@ mod tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
         }
-        fn reset(&self) {
-            self.inner.reset();
-        }
     }
 
     /// The one captured event whose `tracing` target is the conjunct snapshot line.
@@ -8707,9 +8704,6 @@ mod persistence_tests {
         }
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
-        }
-        fn reset(&self) {
-            self.inner.reset();
         }
     }
 }

@@ -5517,8 +5517,6 @@ mod tests {
             Ok(())
         }
 
-        fn reset(&self) {}
-
         /// A real (non-null) backend, so the full write-through path runs and a
         /// non-resident key is rehydrated from durable state on read.
         fn is_null(&self) -> bool {
@@ -5743,8 +5741,6 @@ mod tests {
                 None => Ok(()),
             }
         }
-
-        fn reset(&self) {}
 
         /// A real (non-null) backend, so the full write-through path runs.
         fn is_null(&self) -> bool {
@@ -6814,10 +6810,6 @@ mod tests {
 
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
-        }
-
-        fn reset(&self) {
-            self.inner.reset();
         }
 
         fn is_null(&self) -> bool {
@@ -11234,10 +11226,6 @@ mod tests {
             async fn hard_flush(&self) -> anyhow::Result<()> {
                 self.inner.hard_flush().await
             }
-
-            fn reset(&self) {
-                self.inner.reset();
-            }
         }
 
         fn remove_op(map: &str, key: &str) -> Operation {
@@ -12744,8 +12732,6 @@ mod tests {
             async fn hard_flush(&self) -> anyhow::Result<()> {
                 Ok(())
             }
-
-            fn reset(&self) {}
         }
 
         /// What [`refusing_stack`] builds.
@@ -13615,10 +13601,6 @@ mod tests {
             async fn hard_flush(&self) -> anyhow::Result<()> {
                 self.inner.hard_flush().await
             }
-
-            fn reset(&self) {
-                self.inner.reset();
-            }
         }
 
         /// A service over `data_store` with one authenticated client connection.
@@ -13994,10 +13976,6 @@ mod tests {
 
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
-        }
-
-        fn reset(&self) {
-            self.inner.reset();
         }
     }
 

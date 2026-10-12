@@ -1812,8 +1812,6 @@ mod tests {
             async fn hard_flush(&self) -> anyhow::Result<()> {
                 Ok(())
             }
-
-            fn reset(&self) {}
         }
 
         /// The two-phase embedding factory over `data_store`, and a CRDT

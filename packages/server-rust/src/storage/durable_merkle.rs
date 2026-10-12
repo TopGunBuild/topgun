@@ -398,9 +398,6 @@ mod tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
         }
-        fn reset(&self) {
-            self.inner.reset();
-        }
     }
 
     // -----------------------------------------------------------------------

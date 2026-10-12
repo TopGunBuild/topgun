@@ -2972,8 +2972,6 @@ mod tests {
             Ok(())
         }
 
-        fn reset(&self) {}
-
         fn is_null(&self) -> bool {
             false
         }
@@ -3117,7 +3115,6 @@ mod tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             Ok(())
         }
-        fn reset(&self) {}
         fn is_null(&self) -> bool {
             false
         }

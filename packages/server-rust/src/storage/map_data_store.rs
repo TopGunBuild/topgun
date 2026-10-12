@@ -569,9 +569,6 @@ pub trait MapDataStore: Send + Sync {
     /// Called during node shutdown for data safety.
     async fn hard_flush(&self) -> anyhow::Result<()>;
 
-    /// Reset the data store to initial state (clear queues, etc.).
-    fn reset(&self);
-
     /// Whether this is a null (no-op) implementation.
     ///
     /// Returns `false` by default. Null implementations override to return `true`.

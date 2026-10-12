@@ -624,11 +624,6 @@ impl MapDataStore for RedbDataStore {
         // Nothing to flush -- writes are already durable on commit.
         Ok(())
     }
-
-    fn reset(&self) {
-        // Nothing to reset -- redb's data lives on disk and has no
-        // in-memory queue. (Matches PostgresDataStore::reset.)
-    }
 }
 
 #[cfg(test)]
@@ -834,12 +829,6 @@ mod tests {
     async fn hard_flush_returns_ok() {
         let (store, _dir) = fresh_store();
         store.hard_flush().await.unwrap();
-    }
-
-    #[test]
-    fn reset_is_noop() {
-        let (store, _dir) = fresh_store();
-        store.reset();
     }
 
     #[test]

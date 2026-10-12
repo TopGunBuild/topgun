@@ -199,8 +199,6 @@ impl MapDataStore for RetainingStore {
     async fn hard_flush(&self) -> anyhow::Result<()> {
         Ok(())
     }
-
-    fn reset(&self) {}
 }
 
 // ---------------------------------------------------------------------------
