@@ -23,9 +23,47 @@ const RESERVED_BACKUP_SUFFIX = '__backup';
 
 export type MapNameViolation = 'empty' | 'reserved_backup_suffix' | 'contains_nul' | 'too_long';
 
-/** The length the server measures: UTF-8 bytes, not UTF-16 code units. */
+/**
+ * The length the server measures: UTF-8 bytes, not UTF-16 code units.
+ *
+ * Counted by walking the string rather than by encoding it. This runs on every
+ * `getMap` and `query`, and an encoder is not a global in every runtime an app
+ * ships to — a missing one must not turn "open a map" into a ReferenceError.
+ */
 function utf8ByteLength(name: string): number {
-  return new TextEncoder().encode(name).length;
+  let bytes = 0;
+  for (let i = 0; i < name.length; i++) {
+    const unit = name.charCodeAt(i);
+    if (unit < 0x80) {
+      bytes += 1;
+    } else if (unit < 0x800) {
+      bytes += 2;
+    } else if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = i + 1 < name.length ? name.charCodeAt(i + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        // A surrogate pair is one code point above U+FFFF: four bytes for the
+        // two units together.
+        bytes += 4;
+        i++;
+      } else {
+        // An unpaired surrogate is encoded as U+FFFD, three bytes.
+        bytes += 3;
+      }
+    } else {
+      // The rest of the basic plane, an unpaired low surrogate included.
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+/** Whether `name` is longer than the server's bound. */
+function exceedsMaxMapNameBytes(name: string): boolean {
+  // One UTF-16 code unit never encodes to more than three bytes, so a name this
+  // short cannot be over the bound and need not be walked. Nearly every real
+  // name takes this path.
+  if (name.length * 3 <= MAX_MAP_NAME_BYTES) return false;
+  return utf8ByteLength(name) > MAX_MAP_NAME_BYTES;
 }
 
 /**
@@ -37,7 +75,7 @@ export function mapNameViolation(name: string): MapNameViolation | null {
   if (typeof name !== 'string' || name.length === 0) return 'empty';
   if (name.endsWith(RESERVED_BACKUP_SUFFIX)) return 'reserved_backup_suffix';
   if (name.includes('\0')) return 'contains_nul';
-  if (utf8ByteLength(name) > MAX_MAP_NAME_BYTES) return 'too_long';
+  if (exceedsMaxMapNameBytes(name)) return 'too_long';
   return null;
 }
 
