@@ -5,6 +5,7 @@
 //! An optional WAL ensures every acked write is durable before the ack is returned.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Bound;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
@@ -2407,6 +2408,9 @@ impl WriteBehindDataStore {
     /// snapshot is O(buffer), not O(map). Taking it upfront keeps the scan and
     /// leaf overlays single-pass and free of the staging lock during the inner
     /// enumeration.
+    ///
+    /// A value scan calls this once per batch, not once per scan: every call
+    /// walks every slot of every map and clones each buffered value of `map`.
     fn collect_staging_for_map(&self, map: &str) -> BTreeMap<String, Option<RecordValue>> {
         let mut pending = BTreeMap::new();
         for entry in &self.staging {
@@ -4089,14 +4093,30 @@ impl MapDataStore for WriteBehindDataStore {
             return self.inner.scan_values(map, is_backup, max_batch_cost).await;
         }
 
+        // The snapshot is taken BEFORE the inner read. A flush makes the row
+        // durable and only then clears the slot, so in this order a key is in
+        // the snapshot or in the batch; the other order loses a key flushed
+        // between the two reads (TG-WB-008).
         let pending = self.collect_staging_for_map(map);
+        let ranged = !pending.is_empty() && self.inner.scans_in_key_order();
         let batch = self
             .inner
             .scan_values(map, is_backup, max_batch_cost)
             .await?;
-        // The first batch is the only place staging-only keys are emitted, so
-        // they are surfaced exactly once across the whole resumable scan.
-        Ok(overlay_scan_batch(batch, &pending, true))
+        if !ranged {
+            // Over a store that does not declare key order the first batch
+            // takes every buffered key that has no row in it. A buffered key
+            // whose row is in a later batch is then emitted twice (TODO-819).
+            return Ok(overlay_scan_batch(batch, &pending, &StagingOnly::Every));
+        }
+        // Key-ordered store: the first batch covers the keys up to its cursor,
+        // or every key when it is the only batch (TG-WB-008).
+        let upper = batch.next_cursor.as_ref().map(cursor_key).transpose()?;
+        let range = StagingOnly::InRange {
+            lower: None,
+            upper: upper.as_deref(),
+        };
+        Ok(overlay_scan_batch(batch, &pending, &range))
     }
 
     async fn scan_values_batched(
@@ -4114,15 +4134,42 @@ impl MapDataStore for WriteBehindDataStore {
                 .await;
         }
 
+        // Snapshot before the inner read, for the reason given in
+        // `scan_values`: the other order loses a key flushed between the two.
         let pending = self.collect_staging_for_map(map);
+        let ranged = !pending.is_empty() && self.inner.scans_in_key_order();
+        // The lower bound is read from the very bytes the previous batch
+        // returned as its upper bound, so consecutive ranges share an edge.
+        let lower = if ranged {
+            Some(cursor_key(&cursor)?)
+        } else {
+            None
+        };
         let batch = self
             .inner
             .scan_values_batched(map, is_backup, cursor, max_batch_cost)
             .await?;
-        // Resumed batches only overlay (replace/suppress) durable rows; the
-        // staging-only keys were already emitted by the first scan_values call,
-        // so emitting them again here would double-count.
-        Ok(overlay_scan_batch(batch, &pending, false))
+        let Some(lower) = lower else {
+            // Over a store that does not declare key order a resumed batch only
+            // replaces and drops rows: the first batch took the buffered keys
+            // without a row there, including those whose row is in this batch,
+            // which are therefore emitted twice (TODO-819).
+            return Ok(overlay_scan_batch(batch, &pending, &StagingOnly::Nothing));
+        };
+        // Key-ordered store: this batch covers the keys above the cursor it was
+        // resumed from, up to the cursor it returns (TG-WB-008).
+        let upper = batch.next_cursor.as_ref().map(cursor_key).transpose()?;
+        // A key-ordered store never returns a cursor below the one it was
+        // resumed from. One that does has broken its declaration, and the range
+        // would have no meaning: fail the call, as for a cursor that is no key.
+        if upper.as_deref().is_some_and(|upper| upper < lower.as_str()) {
+            anyhow::bail!("scan cursor is below the cursor it was resumed from");
+        }
+        let range = StagingOnly::InRange {
+            lower: Some(&lower),
+            upper: upper.as_deref(),
+        };
+        Ok(overlay_scan_batch(batch, &pending, &range))
     }
 
     fn is_loadable(&self, _key: &str) -> bool {
@@ -4202,19 +4249,47 @@ impl MapDataStore for WriteBehindDataStore {
 // Staging overlay helpers for the buffer-aware read surface
 // ---------------------------------------------------------------------------
 
+/// Which buffered keys that have no durable row in a batch are appended to it.
+enum StagingOnly<'a> {
+    /// None: a resumed batch over a store that does not declare key order.
+    Nothing,
+    /// All of them: the first batch over such a store.
+    Every,
+    /// Those in the batch's key range `lower < key <= upper`; an absent bound is
+    /// open. Used over a store that declares key order.
+    InRange {
+        lower: Option<&'a str>,
+        upper: Option<&'a str>,
+    },
+}
+
+/// The key a key-ordered store put into a scan cursor.
+fn cursor_key(cursor: &ScanCursor) -> anyhow::Result<String> {
+    String::from_utf8(cursor.0.clone())
+        .map_err(|e| anyhow::anyhow!("scan cursor is not valid UTF-8: {e}"))
+}
+
 /// Overlay a map's pending staging set onto one durable [`ScanBatch`].
 ///
 /// For each durable row: a buffered `Some(v)` replaces the row with the newer
 /// buffered value; a buffered `None` (pending delete) suppresses the row so an
 /// evicted-but-deleted key cannot resurrect; an absent staging entry keeps the
-/// durable row unchanged. When `emit_staging_only` is true (the first batch of a
-/// resumable scan), staging-only `Some` keys the durable store never returned
-/// are appended once. Resumed batches pass `false` so those keys are never
-/// double-counted.
+/// durable row unchanged. Buffered values with no row in the batch are then
+/// appended, in ascending key order, as `staging_only` says; a pending delete
+/// is appended nowhere.
+///
+/// Over a store that declares key order (`TG-WB-008`) the ranges of the batches
+/// of one scan tile the key space — each starts at the cursor the previous one
+/// ended at — so a buffered key is appended by exactly one batch, and never by
+/// a batch that also replaced its row.
+///
+/// Over any other store the first batch appends every buffered key without a
+/// row in it and later batches append none. That rule is known to emit twice a
+/// buffered key whose durable row is in a later batch (TODO-819).
 fn overlay_scan_batch(
     batch: ScanBatch,
     pending: &BTreeMap<String, Option<RecordValue>>,
-    emit_staging_only: bool,
+    staging_only: &StagingOnly<'_>,
 ) -> ScanBatch {
     if pending.is_empty() {
         return batch;
@@ -4243,12 +4318,27 @@ fn overlay_scan_batch(
         }
     }
 
-    if emit_staging_only {
-        for (key, value) in pending {
-            if let Some(value) = value {
-                if !seen.contains(key) {
-                    out.push((key.clone(), value.clone()));
-                }
+    let mut append = |key: &String, value: &Option<RecordValue>| {
+        if let Some(value) = value {
+            if !seen.contains(key) {
+                out.push((key.clone(), value.clone()));
+            }
+        }
+    };
+    match *staging_only {
+        StagingOnly::Nothing => {}
+        StagingOnly::Every => {
+            for (key, value) in pending {
+                append(key, value);
+            }
+        }
+        StagingOnly::InRange { lower, upper } => {
+            let bounds = (
+                lower.map_or(Bound::Unbounded, Bound::Excluded),
+                upper.map_or(Bound::Unbounded, Bound::Included),
+            );
+            for (key, value) in pending.range::<str, _>(bounds) {
+                append(key, value);
             }
         }
     }
