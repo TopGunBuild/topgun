@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Changed (client):** the client now applies the server's map-name rule before anything
+  is stored, so a bad name fails at the call that used it instead of coming back later as a
+  refused write. Names with `-`, `/` and `.` are accepted — `user-profiles`,
+  `users/profiles`, `todo/<uuid>`. `getMap` and `getORMap` throw for a name that is empty,
+  contains `:`, ends in `__backup` or is longer than 512 bytes (UTF-8 bytes, not
+  characters); each case has its own message. A write the server refuses for its name — one
+  queued by an older client, for example — is reported as a write rejection with the new
+  cause `invalid_map_name` instead of `unknown`. After a restart, pending writes the client
+  holds back for their name (empty, or containing `:`) are listed by name in the warning it
+  logs.
+- **Breaking (client):** queries refuse a name the server cannot serve. `client.query('')`
+  throws, and `queryOnce('')` / `queryOncePaged('')` reject their promise; the same holds
+  for a name that ends in `__backup` or is longer than 512 bytes. `useQuery('')` does not
+  throw: it returns an `error`, `loading: false` and empty data, and does not subscribe.
+  Before, `useQuery('')` returned no error and empty data, with `loading` turning `false`
+  once the local read finished, so some apps passed `''` to mean "do not subscribe". There
+  is no option to skip a query yet: such an app now gets an `error` from the hook and has to
+  stop rendering the hook or pass a real name. The rule covers exactly these methods:
+  `getMap` and `getORMap` (the full client rule, `:` included) and `query`, `queryOnce`,
+  `queryOncePaged` and `useQuery` (the same rule without the `:` restriction, so a map that
+  already has `:` in its name can still be read). `search`, `vectorSearch`,
+  `searchSubscribe` and `hybridQuery` are not covered.
 - **Fixed (server):** a server whose background flush stops working no longer keeps
   accepting writes it will never store. Before, if the background task that carries
   acknowledged writes to the store crashed, the server went on acknowledging writes, reported
