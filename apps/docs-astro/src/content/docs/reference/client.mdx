@@ -149,7 +149,7 @@ getMap<K = string, V = any>(name: string): LWWMap<K, V>;
 
 Returns an `LWWMap` (last-write-wins CRDT) for the given name. Creates the map on first call and restores its state from storage asynchronously.
 
-Map names may not contain `:` — that character is reserved for the storage layer's internal key namespacing. Keys inside a map (e.g. `'post:123'`) may still contain `:` freely. Calling `getMap` with an empty name or a name containing `:` throws an `Error` immediately, before any storage access.
+Name maps however your app reads best — `user-profiles`, `users/profiles` and `todo/<uuid>` are all accepted, as are names with `.` or `$`. There are four exceptions: a map name may not contain `:`, may not end in `__backup` (that suffix is reserved by the server), may not be empty, and may be at most 512 bytes long (bytes of UTF-8, not characters). Keys inside a map (e.g. `'post:123'`) may still contain `:` freely. Calling `getMap` or `getORMap` with a name that breaks one of these throws an `Error` immediately, before any storage access. `query`, `queryOnce`, `queryOncePaged` and `useQuery` apply the same exceptions except the one about `:`.
 
 ```typescript
 const users = client.getMap<string, User>('users');

@@ -8,14 +8,16 @@ export type WriteRejectionListener = (rejection: WriteRejection) => void;
  * The server's wire codes for the refusals it attributes to a single operation,
  * mapped onto the client's closed cause vocabulary.
  *
- * These three are the whole attributable set: only a permanent refusal that the
+ * These four are the whole attributable set: only a permanent refusal that the
  * server can name an operation for is sent as a per-op refusal, and that is
- * exactly `Forbidden` (403), `ValueTooLarge` (413) and `SchemaInvalid` (422).
+ * exactly `InvalidMapName` (400), `Forbidden` (403), `ValueTooLarge` (413) and
+ * `SchemaInvalid` (422).
  * Everything else the server can fail with is either transient — in which case
  * the operation stays pending and is retried, never reaching this map — or a
  * batch-level error that names no operation.
  */
 const CAUSE_BY_WIRE_CODE: Readonly<Record<number, WriteRejectionCause>> = {
+  400: 'invalid_map_name',
   403: 'forbidden',
   413: 'value_too_large',
   422: 'schema_invalid',

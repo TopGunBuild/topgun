@@ -8,8 +8,10 @@ import type { Timestamp } from './HLC';
  * cause, and a consumer switching on it is told by the compiler when a new
  * cause appears.
  *
- * - `'forbidden'`, `'schema_invalid'`, `'value_too_large'` — the server's
- *   permanent refusals, decided on admission, before anything is applied.
+ * - `'forbidden'`, `'schema_invalid'`, `'value_too_large'`, `'invalid_map_name'`
+ *   — the server's permanent refusals, decided on admission, before anything is
+ *   applied. `'invalid_map_name'` is a write to a map the server cannot hold
+ *   under that name (empty, reserved suffix, a NUL character, or too long).
  * - `'write_lost'` — the write was acknowledged and then lost. See
  *   {@link WriteRejection.previouslyAcked}: **no emitter produces this cause
  *   today**; it is emitted by the TODO-653 fix.
@@ -26,6 +28,7 @@ export type WriteRejectionCause =
   | 'forbidden'
   | 'schema_invalid'
   | 'value_too_large'
+  | 'invalid_map_name'
   | 'write_lost'
   | 'stale'
   | 'unknown';

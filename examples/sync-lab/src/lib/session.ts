@@ -38,10 +38,10 @@ export function getSessionId(): string {
 
 /**
  * Prefix a map name with the session namespace.
- * Example: prefixMap('sync-lab-todos') => 'sl-a1b2c3d4:sync-lab-todos'
+ * Example: prefixMap('sync-lab-todos') => 'sl-a1b2c3d4/sync-lab-todos'
  */
 export function prefixMap(mapName: string): string {
-  return `sl-${getSessionId()}:${mapName}`;
+  return `sl-${getSessionId()}/${mapName}`;
 }
 
 /**

@@ -15,7 +15,7 @@ interface TodoItemProps {
 export function TodoItem({ todoId, onRemove }: TodoItemProps) {
   // One LWWMap per todo; keyed on todo ID so each item's fields resolve
   // independently when two tabs edit different todos simultaneously.
-  const map = useMap<string, unknown>(`todo:${todoId}`);
+  const map = useMap<string, unknown>(`todo/${todoId}`);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
 

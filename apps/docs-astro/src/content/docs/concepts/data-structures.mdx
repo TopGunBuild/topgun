@@ -31,7 +31,7 @@ function ProfileList() {
 export const orMapCode = `import { useORMap } from '@topgunbuild/react';
 
 function ActiveGames() {
-  const orMap = useORMap<string, Game>('games:active');
+  const orMap = useORMap<string, Game>('games/active');
   // useORMap returns the raw ORMap<K, V> instance — call imperative methods directly
   const addGame = (id: string, game: Game) => orMap.add(id, game);
   const removeGame = (id: string, game: Game) => orMap.remove(id, game);
