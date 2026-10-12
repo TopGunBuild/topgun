@@ -184,24 +184,30 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   Premises (c) and (d) carry the load-bearing `M > N` and replayed-after steps; (a) and (b) bound the
   window and the sequence space. (b) alone is necessary-but-insufficient for the ordering — it is
   (c)+(d) that order the space.
-- **Windowing residual (tracked, NOT closed by a gate):** the frameless-`flush_key` window is a
-  WATERMARK/FRAMING concern rather than a Remove-idempotency one, so it is handled there and not
-  papered over with an unsound Remove-replay timestamp gate. Two distinct hazards live in that
-  window, and only one of them is still open:
-  - **Crash-window direction (TODO-612) — CLOSED, determined a NO-OP.** A frameless `flush_key`
-    durable write racing an un-resolved older Remove leaves no enumerable past-older Remove for
-    recovery to mis-order. Mutation-proven by
-    `flush_key_frameless_window_leaves_no_enumerable_past_older_remove`
-    (`datastores/write_behind.rs`, inline `#[cfg(test)] mod`), which drives the live `flush_key`
-    trait method rather than a re-implementation. This bullet previously asserted the hazard as the
-    "only genuine" one and routed it to TODO-612 as open; both halves of that were superseded by
-    the determination.
-  - **Caller-side direction (TODO-628) — OPEN, but vacuous at HEAD.** `flush_key` makes the
-    CALLER's value durable while resolving the superseded entry's sequences, so a caller passing a
-    value that does not subsume a staged `WalOp::Remove` loses an acked delete **with no crash at
-    all**. It is vacuous today only because `flush_key` has zero production callers (every call
-    site is under `#[cfg(test)]`), which is a property of the current call graph, not a guarantee.
-    Must close before any production caller is wired.
+- **Windowing residual — structurally absent.** The frameless window existed only because the
+  single-key flush method of the data store, removed, made a value durable in the inner store with
+  no frame of its own. With the method gone, no path makes a value durable without a frame of its
+  own, so the window is **structurally absent** — not "confirmed a no-op by a test". It was a
+  WATERMARK/FRAMING concern rather than a Remove-idempotency one, which is why it was never papered
+  over with an unsound Remove-replay timestamp gate. Its two directions:
+  - **Crash-window direction (TODO-612) — CLOSED.** It was determined a no-op while the method
+    existed, by a test that drove the method; the test went with the method, and the window it
+    held open has no producer left.
+  - **Caller-side direction (TODO-628) — CLOSED by the removal.** The method made the CALLER's
+    value durable while resolving the superseded entry's sequences, so a caller passing a value
+    that did not subsume a staged `WalOp::Remove` would have lost an acked delete with no crash at
+    all. No caller can do that now. Normative for any successor: a single-key flush, if one is
+    ever needed,
+    takes no value from its caller — it flushes the buffered entry itself — and is designed
+    together with its caller.
+  - **The discard path opens no similar window (established by reading the flush loop).** A
+    discarded entry's WAL sequences are either carried onto the queued newer entry of the same key
+    (`PartitionQueue::retire_into_queued`) or abandoned; the discard never resolves them. Carried
+    sequences are resolved when the survivor is durable, or earlier, when a subsuming write
+    coalesces over the survivor (`coalesce_wal_sequences`; holder
+    `a_subsuming_write_over_a_survivor_resolves_the_carried_sequences`). The early resolve is
+    sound: the subsuming write's own frame is still pending at a higher sequence, so the watermark
+    does not pass it. No value becomes durable without a frame of its own.
 - **Maintaining code:** `wal/mod.rs::replay_entry` (`WalOp::Remove` arm, unconditional) + `run` /
   `WalEntry` doc-contracts; `datastores/write_behind.rs` `remove`/`remove_all` append Remove frames
   with `timestamp: None`.
@@ -584,10 +590,6 @@ case outside the precondition.
   final-sweep exits of `hard_flush`, and a `hard_flush` future dropped mid-drain (TODO-768).
 - **The flush task ending by a panic.** The node does not keep running: the store fails and the
   server binary exits non-zero (`TG-WB-006`).
-- **`flush_key`** cancelled at either of its two awaits (the store call, the watermark advance),
-  and `flush_key` against a key whose entry is in a flush batch. Latent: every caller is test
-  code (TODO-803, with TODO-628).
-- **`reset`** on a WAL-backed store with queued entries (TODO-803).
 - **A write cancelled inside the WAL append** (`TG-WB-003` (b), TODO-672).
 - **Two concurrent writers of one key.** The writers of a record key are serialised above this
   store (`TG-KEY-001`), so it no longer meets them. One interleaving below the writer is still
@@ -675,6 +677,9 @@ case outside the precondition.
 | `a_clean_stop_is_not_a_failure` | what is NOT a failure: `hard_flush` on a healthy store, a store with no WAL, the flush task aborted at the shutdown timeout | CI (`cargo test`) |
 | `hard_flush_completes_with_a_poisoned_pending_seqs_lock`, `hard_flush_completes_with_a_poisoned_flush_loop_handle_lock`, `hard_flush_completes_with_a_poisoned_wal_tracking_cell_lock` | a lock poisoned by a panicking thread does not stop the shutdown path | CI (`cargo test`) |
 | `the_capacity_pre_check_bound_is_the_stated_one` | the bound the capacity pre-check keeps while a flush pass holds a batch: re-writes of the held keys are accepted, a new key is rejected | CI (`cargo test`) |
+| `distinct_new_key_writers_past_the_check_exceed_capacity_by_at_most_their_number` (`prefix_watermark_proptest.rs`) | the other term of the bound: writers of distinct new keys parked between the check and their insert are all accepted and the count ends at `capacity - 1` plus their number; and the boundary itself — a new key is accepted when the check reads `capacity - 1` and refused when it reads exactly `capacity` | CI (`cargo test`) |
+| `a_flush_pass_holds_every_due_entry_whatever_the_batch_size` | a pass takes every due entry out of every queue, with `batch_size` 1 and due keys in two partitions, two of them in one | CI (`cargo test`) |
+| `a_remove_of_a_key_that_is_not_buffered_is_refused_at_capacity`, `a_remove_all_of_a_key_that_is_not_buffered_is_refused_at_capacity` | the same check in `remove` and in `remove_all` (one key per call): accepted at `capacity - 1`, refused at exactly `capacity`, a buffered key accepted at `capacity` without being counted again | CI (`cargo test`) |
 | the seven `bin_cause_*` tests (`bin/topgun_server.rs`) | the binary's decisions without a process: a failure puts the health controller in `Draining`; signal and a healthy store → 0; signal, then a failure in the record or in the drain's result → 70; failure and a completed shutdown → 70; a shutdown that did not complete → 71, with or without a recorded failure | CI (`cargo test`) |
 | `the_failure_deadline_calls_its_exit_action_unless_cancelled` (`bin/topgun_server.rs`) | the deadline function: left alone it calls its exit action once with 71; cancelled, it never calls it | CI (`cargo test`) |
 | `tests/integration-rust/flush-task-panic.test.ts` | the CONSEQUENCE at process level on a `fault-injection` build, the client connection open throughout: with one write after the panic sentinel the process exits 70 by itself; with a stream of writes the shutdown drain panics too and it exits 71; after each, a restart on the same data directory reads every acknowledged key | local only (`pnpm test:integration-rust:liveness`) — opt-in, not run in CI, for the reason given under `TG-WB-004` (TODO-770) |
@@ -714,10 +719,19 @@ weaker than a test.
   is pinned by reading the code, not by a test or a mutant.
 - **`hard_flush` exits already tracked elsewhere** — the abort at the shutdown timeout, the
   error and timeout exits, a dropped `hard_flush` future (TODO-768).
-- **`flush_key`** against a flush batch or cancelled, and **`reset`** on a WAL-backed store
-  (TODO-803).
-- **`capacity` as a hard limit** (TODO-803). The pre-check keeps a soft bound, which its comment
-  states and one test above pins.
+- **`capacity` as a hard limit.** Decided: there is no hard limit and none is planned. The
+  pre-check keeps a soft bound. With `C = capacity > 0`: `pending_count <= C - 1 + W + H` and
+  `H <= C - 1 + W`, so the count stays below `2 * (C + W)`. `W` is the number of writes of
+  distinct keys that are not buffered and that are, at one instant, between the capacity check
+  and their queue insert; `W >= 1` while any write is in progress, because the inserting writer
+  is itself past its check. `H` is the number of entries the running flush pass holds whose key
+  was re-written while the pass holds them; a pass holds every entry that was due when it began,
+  and `batch_size` does not limit it. **Precondition:** the formula is derived for keys whose
+  staging slot exists only while an entry of the key is queued or held by a flush pass, with one
+  writer per key (`TG-KEY-001`). The enforcers are the five capacity rows of the table above.
+  Not claimed: the interleaving that breaks the precondition — a writer between its queue insert
+  and its staging insert while a pass persists the entry — leaves a key staged with nothing
+  buffered, whose next write passes the check at any count; it is not repaired here (TODO-814).
 - **Which statements of the flush loop or of an inner store can panic.** Not enumerated; the
   tests inject one.
 - **A stop started by a signal has no deadline of its own**, before this entry or after it. When

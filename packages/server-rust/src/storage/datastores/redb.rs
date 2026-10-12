@@ -624,23 +624,6 @@ impl MapDataStore for RedbDataStore {
         // Nothing to flush -- writes are already durable on commit.
         Ok(())
     }
-
-    async fn flush_key(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        is_backup: bool,
-    ) -> anyhow::Result<()> {
-        // For write-through, "flush this key" is equivalent to "write it
-        // through right now". Mirrors the Postgres flush_key semantics.
-        write_one(&self.db, map, key, value, is_backup)
-    }
-
-    fn reset(&self) {
-        // Nothing to reset -- redb's data lives on disk and has no
-        // in-memory queue. (Matches PostgresDataStore::reset.)
-    }
 }
 
 #[cfg(test)]
@@ -846,23 +829,6 @@ mod tests {
     async fn hard_flush_returns_ok() {
         let (store, _dir) = fresh_store();
         store.hard_flush().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn flush_key_writes_through() {
-        let (store, _dir) = fresh_store();
-        store
-            .flush_key("m", "k", &dummy_value("v"), false)
-            .await
-            .unwrap();
-        let got = store.load("m", "k").await.unwrap().expect("present");
-        assert!(matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "v"));
-    }
-
-    #[test]
-    fn reset_is_noop() {
-        let (store, _dir) = fresh_store();
-        store.reset();
     }
 
     #[test]

@@ -694,8 +694,9 @@ fn ac4_c3_scalar_max_watermark_regression() {
 /// and holds the partition watermark back; the SECOND write flushes durably (ts=20)
 /// but its frame therefore ALSO stays un-applied. At recovery both frames replay
 /// in order (leaving ts=20 durable), then the seam re-replays the oldest (ts=10)
-/// frame over it — the older-frame-in-window condition the live `flush_key` path
-/// can produce but generated ops cannot manufacture (flush persists the watermark).
+/// frame over it — an older frame re-applied over a newer durable value, which
+/// generated ops cannot manufacture (in-order replay always ends on the newest
+/// frame); the seam exists to exercise the merge gate against it.
 /// Monotonic timestamps keep the last-arrival model and the LWW gate in agreement,
 /// so the oracle is sound.
 #[test]

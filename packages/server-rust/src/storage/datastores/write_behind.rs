@@ -50,7 +50,11 @@ pub struct WriteBehindConfig {
     pub write_delay_ms: u64,
     /// How often the background flush task runs, in milliseconds.
     pub flush_interval_ms: u64,
-    /// Maximum number of entries to process per flush batch.
+    /// Size of the groups a flush pass iterates in.
+    ///
+    /// It does not limit how many entries a pass takes or persists: a pass
+    /// takes every entry that is due when it begins and works through all of
+    /// them, `batch_size` at a time, with nothing between the groups.
     pub batch_size: u32,
     /// Number of retry attempts for failed flush operations.
     pub max_retries: u32,
@@ -58,7 +62,41 @@ pub struct WriteBehindConfig {
     pub backoff_base_ms: u64,
     /// Maximum retry backoff cap in milliseconds.
     pub backoff_cap_ms: u64,
-    /// Node-wide maximum pending entries. 0 means unlimited.
+    /// Soft bound on the number of buffered keys. `0` disables the check.
+    ///
+    /// What is counted: buffered keys — queued entries plus the entries a
+    /// flush pass holds, which stay counted until each is persisted or
+    /// discarded.
+    ///
+    /// The rule: a write (`add`, `remove`, each key of `remove_all`) of a key
+    /// that is not buffered is refused while the count is at or above
+    /// `capacity`, with the error `Write-behind capacity exceeded`. A write of
+    /// a buffered key is always accepted.
+    ///
+    /// It is not a hard limit. The check and the queue insert are separate
+    /// steps with nothing reserved between them. With `C = capacity > 0`:
+    ///
+    /// ```text
+    /// pending_count  <=  C - 1 + W + H
+    /// H              <=  C - 1 + W
+    /// ```
+    ///
+    /// - `W` is the number of writes of distinct keys that are not buffered
+    ///   and that are, at one instant, between the check and their queue
+    ///   insert (the WAL append lies in between). `W >= 1` while any write is
+    ///   in progress: the writer that is inserting is itself past its check,
+    ///   so with one writer and no flush pass the count reaches `C`.
+    /// - `H` is the number of entries the running flush pass holds whose key
+    ///   was re-written while the pass holds them; each such key is counted a
+    ///   second time, once. A pass holds every entry that was due when it
+    ///   began — `batch_size` does not bound it — hence the second line.
+    ///
+    /// In the worst case the count stays below `2 * (C + W)`.
+    ///
+    /// Precondition, which is not enforced: the formula is derived for keys
+    /// whose staging slot exists only while an entry of the key is queued or
+    /// held by a flush pass, with one writer per key (`TG-KEY-001`). See
+    /// `TG-WB-006`, "Not claimed", for the interleaving that breaks it.
     pub capacity: u64,
     /// Maximum milliseconds to wait for the write-behind buffer to drain on
     /// graceful shutdown. On timeout, still-pending ops are logged and the
@@ -2738,10 +2776,10 @@ impl WriteBehindDataStore {
         // failure at the entry point leaves a partition with no knowable
         // watermark. The mutating entry points retry only when another write for
         // the same partition arrives; a partition that goes quiet after that
-        // failure would otherwise reach its terminals via `flush_key` and the
-        // flush loop alone, stay unseeded forever, and grow its WAL where neither
-        // alarm can see it. Retrying here makes every advance site seeded by
-        // construction.
+        // failure reaches its terminals through the flush loop and the shutdown
+        // drain alone, and would otherwise stay unseeded forever and grow its
+        // WAL where neither alarm can see it. Retrying here makes every advance
+        // site seeded by construction.
         //
         // Cheap after the first success — a bool read under the partition lock.
         self.ensure_wal_seeded(partition).await;
@@ -3404,7 +3442,11 @@ impl MapDataStore for WriteBehindDataStore {
             // at most the number of entries a flush pass holds plus the number
             // of writers that are between this check and their insert. Every
             // write of a key that is in neither staging nor a flush pass is
-            // rejected while `pending_count >= capacity`.
+            // rejected while `pending_count >= capacity`. A pass holds every
+            // entry that was due when it began, whatever `batch_size`, so the
+            // first of those two terms is itself bounded only by what was
+            // queued at that moment. The formula and its precondition are on
+            // `WriteBehindConfig::capacity`.
             let is_new_key = !self
                 .staging
                 .contains_key(&(map.to_string(), key.to_string()));
@@ -3590,7 +3632,7 @@ impl MapDataStore for WriteBehindDataStore {
             ),
         }
 
-        // Check capacity before insertion
+        // The same soft bound as in `add_with_witness`, where it is described.
         if self.config.capacity != 0 {
             let current = self.pending_count.load(Ordering::Relaxed);
             let is_new_key = !self
@@ -3788,7 +3830,7 @@ impl MapDataStore for WriteBehindDataStore {
         let now = now_millis();
 
         for key in keys {
-            // Check capacity before each insertion
+            // The same soft bound as in `add_with_witness`, checked per key.
             if self.config.capacity != 0 {
                 let current = self.pending_count.load(Ordering::Relaxed);
                 let is_new_key = !self.staging.contains_key(&(map.to_string(), key.clone()));
@@ -4081,147 +4123,6 @@ impl MapDataStore for WriteBehindDataStore {
 
         let drained_entries = self.drain_for_shutdown(deadline).await;
         self.finish_shutdown(drained_entries).await
-    }
-
-    /// Persists `value` for `(map, key)` directly, superseding whatever this
-    /// store has buffered for that key.
-    ///
-    /// # Caller obligation (load-bearing, not advisory)
-    ///
-    /// `value` MUST subsume every buffered op this store holds for `(map, key)`
-    /// — it has to be the state the key would have had if those ops had been
-    /// applied in order. This site writes **no WAL frame of its own**: it makes
-    /// the caller's value durable in the inner store and then resolves the
-    /// superseded entry's WAL sequences, retiring their frames without ever
-    /// having applied them. A caller that passes a value which does not carry a
-    /// superseded `Remove`'s effect therefore loses that acked delete outright,
-    /// with no crash involved: the delete's frame is resolved away while the
-    /// value that replaced it never expressed the deletion.
-    ///
-    /// The obligation is currently **vacuous** — every caller is under
-    /// `#[cfg(test)]` and passes the key's full current value — and it is
-    /// written here because it stops being vacuous the moment a production
-    /// caller (an eviction path, say) is wired to this method.
-    ///
-    /// That vacuity is a property of the current call graph, NOT a guarantee,
-    /// so the gap is tracked rather than merely described: **TODO-628**, which
-    /// must close before any production caller is wired. Anyone adding such a
-    /// caller is the person this pointer exists for — without it the
-    /// acked-delete-loss class would lapse silently at exactly the commit that
-    /// makes it live. `TG-WAL-009`'s windowing-residual bullet carries the same
-    /// pointer from the catalog side.
-    ///
-    /// The crash-window counterpart is different and is a no-op: a crash inside
-    /// the inner-store write leaves the superseded frames un-resolved and
-    /// therefore still enumerable, and `TG-WAL-009`'s ascending replay puts the
-    /// newer frame after the older `Remove`. See
-    /// `tests::flush_key_frameless_window_leaves_no_enumerable_past_older_remove`.
-    async fn flush_key(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        is_backup: bool,
-    ) -> anyhow::Result<()> {
-        if is_backup {
-            // Backup flush passes through directly
-            return self.inner.flush_key(map, key, value, is_backup).await;
-        }
-
-        // Remove the key from the partition queue if present
-        let partition_id = partition_for(map, key);
-        let removed = if let Some(mut queue) = self.queues.get_mut(&partition_id) {
-            queue.remove(map, key)
-        } else {
-            None
-        };
-
-        // This caller — not the flush loop — now owns the superseded entry's WAL
-        // sequences: a third in-flight producer, and the easiest of the three to
-        // miss. Recorded after the partition-queue guard has dropped.
-        if let Some(removed) = &removed {
-            self.register_in_flight(partition_id, &removed.wal_sequences);
-        }
-
-        // Remove from staging
-        self.staging.remove(&(map.to_string(), key.to_string()));
-
-        // Decrement pending count if the key was actually in the queue — this
-        // direct flush supersedes the buffered entry, which leaves the queue now.
-        if removed.is_some() {
-            self.pending_count.fetch_sub(1, Ordering::Relaxed);
-        }
-
-        // Persist the caller-provided value directly to the inner store.
-        let now = now_millis();
-        let result = self.inner.add(map, key, value, 0, now).await;
-
-        // Resolve the superseded entry's durability sequence ONLY AFTER inner.add
-        // returns — matching the flush-loop ordering. The prefix-complete flushed
-        // watermark must never advance past a sequence whose bytes are not yet
-        // durable in the inner store; resolving before the add would expose it as
-        // flushed while the write is still in flight. On Err the WAL frame still
-        // backstops durability (a discarded write is a re-sync event), so the
-        // sequence MUST still be resolved here — leaving it pending would stall the
-        // watermark forever and freeze the tombstone durability fence.
-        if let Some(removed) = &removed {
-            self.resolve_pending(removed.sequence);
-        }
-
-        // The WAL sequences split by outcome, unlike the entry sequence above.
-        // On success the value is durable in the inner store, so they resolve and
-        // the partition watermark advances — this site writes no WAL frame of its
-        // own, but skipping the advance would leave a flush_key-only partition
-        // moving its pending set while the sidecar never moves, growing the WAL
-        // where neither alarm can see it. On failure the write is durable
-        // nowhere, so they are abandoned and their frames stay replayable.
-        if let Some(removed) = &removed {
-            if result.is_ok() {
-                self.resolve_and_advance(partition_id, &removed.wal_sequences)
-                    .await;
-            } else {
-                self.abandon_wal_sequences(partition_id, &removed.wal_sequences);
-            }
-        }
-
-        result
-    }
-
-    fn reset(&self) {
-        // Hold the pending-sequence lock across ALL watermark-state clears — the
-        // queues, staging, pending_count, the sequence counter, AND the pending set
-        // — so a `reset` presents a single consistent wipe. `assign_tracked_sequence`
-        // locks `pending_seqs` FIRST and only then touches `sequence`, so holding the
-        // lock here serializes reset against the counter/pending half of an assign;
-        // clearing queues/staging/pending_count inside the same critical section
-        // keeps them from drifting out of step with the counter (e.g. a stranded
-        // staging entry under a reset counter, which would freeze the watermark).
-        //
-        // Precondition: `reset` is a teardown / full-clear operation (test harnesses
-        // and quiesced admin clears) — it is NOT called concurrently with live
-        // tracked writers. An assign's second phase (its staging insert) runs OUTSIDE
-        // this lock, so the lock cannot make reset fully atomic against an in-flight
-        // writer; the invariant that no writer races reset is what guarantees
-        // consistency, and the lock is defense-in-depth that keeps the counter/pending
-        // pair coherent.
-        //
-        // What is NOT cleared, and why the precondition also needs empty queues on a
-        // WAL-backed store (TG-WB-005 does not cover `reset`; tracked as TODO-803):
-        // the WAL-sequence tracker is left as it is, because the frames are still on
-        // disk and forgetting them would let the watermark pass writes that were
-        // never applied. Entries queued at this moment therefore leave their WAL
-        // sequences `Live` with no owner, which pins the partition's log until
-        // restart. And an entry the flush loop holds in a drained batch at this
-        // moment is not in any queue cleared here: its terminal later decrements a
-        // pending count that was already set to zero.
-        let mut pending = self.pending_seqs();
-        self.queues.clear();
-        self.staging.clear();
-        self.pending_count.store(0, Ordering::Relaxed);
-        self.sequence.store(0, Ordering::Relaxed);
-        pending.clear();
-        drop(pending);
-        self.inner.reset();
     }
 
     fn is_null(&self) -> bool {
@@ -4603,18 +4504,6 @@ mod tests {
             Ok(())
         }
 
-        async fn flush_key(
-            &self,
-            _map: &str,
-            _key: &str,
-            _value: &RecordValue,
-            _is_backup: bool,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn reset(&self) {}
-
         fn is_null(&self) -> bool {
             false
         }
@@ -4819,56 +4708,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 8: flush_key_persists_immediately
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn flush_key_persists_immediately() {
-        let spy = Arc::new(SpyDataStore::new());
-        let calls = spy.calls();
-        let inner: Arc<dyn MapDataStore> = spy;
-
-        let config = WriteBehindConfig {
-            write_delay_ms: 60_000,
-            flush_interval_ms: 60_000,
-            ..WriteBehindConfig::default()
-        };
-        let store = WriteBehindDataStore::new(inner, config);
-
-        let val = dummy_value();
-        store.add("map1", "key1", &val, 0, 1000).await.unwrap();
-        assert_eq!(store.pending_operation_count(), 1);
-
-        // flush_key with is_backup=false should persist immediately
-        let flush_val = dummy_value_with(42);
-        store
-            .flush_key("map1", "key1", &flush_val, false)
-            .await
-            .unwrap();
-
-        // Staging should be cleared
-        assert!(
-            store
-                .staging
-                .get(&("map1".to_string(), "key1".to_string()))
-                .is_none(),
-            "Staging should be cleared after flush_key"
-        );
-
-        // Pending count should be decremented
-        assert_eq!(store.pending_operation_count(), 0);
-
-        // Inner store should have received an add call
-        let recorded = calls.lock().unwrap();
-        assert!(
-            recorded
-                .iter()
-                .any(|c| matches!(c, SpyCall::Add { map, key } if map == "map1" && key == "key1")),
-            "Inner store should have received the flush_key add call"
-        );
-    }
-
-    // -----------------------------------------------------------------------
     // AC3c: the flushed watermark is PREFIX-COMPLETE — it never exposes a value
     // above a still-pending (un-flushed) sequence, even when a HIGHER sequence
     // is resolved out of order below it. A max-with-holes watermark would admit
@@ -4965,27 +4804,30 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // RED-without-fix: `flush_key` must resolve the superseded sequence AFTER
-    // `inner.add` returns, not before. Gate the inner add so we can observe the
-    // watermark while the flush is parked mid-add — it must still sit at the
-    // buffered sequence. Resolving before the add (the pre-fix bug) advances the
-    // watermark past a write whose bytes are not yet durable, licensing a prune
-    // of a tombstone the inner store has not persisted.
+    // A flush pass must resolve an entry's sequence AFTER `inner.add` returns,
+    // not before. Gate the inner add so the watermark can be read while the pass
+    // is parked mid-add — it must still sit at the buffered sequence. Resolving
+    // before the add advances the watermark past a write whose bytes are not yet
+    // durable, licensing a prune of a tombstone the inner store has not
+    // persisted.
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn flush_key_resolves_watermark_after_inner_add_not_before() {
+    async fn a_flush_pass_resolves_the_watermark_after_inner_add_not_before() {
+        use std::time::{Duration, Instant};
+
         let spy = Arc::new(SpyDataStore::new());
         let (entered, proceed) = spy.install_add_gate();
         let inner: Arc<dyn MapDataStore> = spy;
+        // Due at once, but the timer never fires within the test: the requested
+        // pass is the only pass.
         let config = WriteBehindConfig {
-            write_delay_ms: 60_000,
+            write_delay_ms: 0,
             flush_interval_ms: 60_000,
             ..WriteBehindConfig::default()
         };
         let store = WriteBehindDataStore::new(inner, config);
 
-        // Buffer a write so flush_key has a queued (tracked) sequence to supersede.
         store.add("m", "k", &dummy_value(), 0, 1).await.unwrap();
         let buffered_seq = store.flushed_watermark();
         let assigned = store.assigned_write_sequence();
@@ -4994,16 +4836,11 @@ mod tests {
             "precondition: the buffered write is not yet byte-durable"
         );
 
-        // Run flush_key concurrently; it parks inside the gated inner add.
-        let flush_store = Arc::clone(&store);
-        let flush = tokio::spawn(async move {
-            flush_store
-                .flush_key("m", "k", &dummy_value_with(42), false)
-                .await
-        });
-
-        // Block until the flush is inside inner.add — bytes are NOT durable yet.
-        entered.notified().await;
+        // The pass takes the entry and parks inside the gated inner add.
+        store.soft_flush().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the requested pass never reached the inner add");
         assert_eq!(
             store.flushed_watermark(),
             buffered_seq,
@@ -5013,7 +4850,14 @@ mod tests {
 
         // Let the add complete; the sequence is now durable and resolvable.
         proceed.notify_one();
-        flush.await.unwrap().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !store.test_is_idle() {
+            assert!(
+                Instant::now() < deadline,
+                "the pass never closed after the inner add returned"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         assert_eq!(
             store.flushed_watermark(),
             assigned,
@@ -5021,212 +4865,26 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // The `flush_key` frameless window, driven LIVE through the real trait
-    // method, in `wal_seq` space.
-    //
-    // Additive to `flush_key_resolves_watermark_after_inner_add_not_before`
-    // above, not a restatement of it: that test reads only the entry-space
-    // `flushed_watermark()`, which `TG-WB-001` declares INDEPENDENT of the
-    // `wal_seq`-space tracker `TG-WAL-005` owns. This one asserts nothing about
-    // it — it reads the on-disk `.applied` sidecar, the enumerable-past window
-    // `WalWriter::unapplied` returns, and a real `WalRecovery` outcome.
-    //
-    // What is being confirmed. `flush_key` writes NO WAL frame of its own: it
-    // makes the caller's value durable in the inner store and only then resolves
-    // the superseded entry's WAL sequences. A crash inside `inner.add` therefore
-    // leaves an older, still-un-resolved `Remove` in the enumerable past while
-    // the value that supersedes it is durable nowhere. That window is real and
-    // this test holds it open on purpose (assertion A) — writing that the
-    // prefix-complete watermark EXCLUDES it would be backwards, since
-    // `applied_seq < min(pending)` is exactly what that discipline guarantees.
-    //
-    // What does NOT follow from the window is a lost re-creation, and the reason
-    // is the ENUMERABILITY CLOSURE: `unapplied` selects solely on
-    // `sequence > applied_seq`, so an un-resolved frame at `N` makes every frame
-    // above `N` enumerable too, and `TG-WAL-011` replays the window in strictly
-    // ascending order. Through this store's own mutating API a queued `Remove`
-    // is by construction the NEWEST op for its key (one queue entry per
-    // `(map, key)`), so any strictly-newer value carries its own frame at
-    // `M > N` inside the very same window and is replayed AFTER the `Remove`
-    // (assertion B). `TG-WAL-009`'s residual is therefore a no-op for every
-    // caller that reaches this path through the store's public mutating surface.
-    //
-    // The one premise left is caller-side and is stated as an obligation in
-    // `flush_key`'s own doc-contract: the caller's `value` must subsume the
-    // buffered ops it supersedes.
-    //
-    // Mutation dispositions, recorded from APPLICATION rather than from
-    // expectation — a test whose discriminating power is asserted instead of
-    // measured is the hollow-out this file's other proofs already refuse:
-    //   M1 — DISCRIMINATED (applied, observed RED, reverted). Hoist the
-    //      post-`inner.add` `resolve_and_advance` above the `inner.add` call.
-    //      The window closes over a write that is durable nowhere: `unapplied`
-    //      goes EMPTY (assertion C/A RED) and, with those suppressed, recovery
-    //      restores nothing (assertion B RED, `got None`) — acked-write loss.
-    //      This is the whole of the test's discriminating power.
-    //   M2 — NOT discriminated, and the reason bounds this test rather than
-    //      excusing it: `test_set_watermark_mode(WatermarkMode::ScalarMax)` was
-    //      applied and the test stayed GREEN, because NO watermark advance runs
-    //      before the crash point at all, so the rule that computes the advance
-    //      is never consulted in this window. The sidecar read below therefore
-    //      witnesses "nothing advanced it", not "the prefix-complete rule chose
-    //      correctly"; the latter is `TG-WB-001`/`TG-WAL-005` territory and is
-    //      proven elsewhere.
-    //   M3 — an ordering PIN, not a discriminator here. Deleting
-    //      `all.sort_by_key(|e| e.sequence)` in `WalWriter::unapplied` cannot
-    //      reorder this fixture's frames, which are appended ascending into one
-    //      segment. The assertion is still written out so `TG-WAL-011`'s
-    //      ascending-replay premise is READ at this seam rather than assumed by
-    //      the argument above.
-    // -----------------------------------------------------------------------
-
+    /// Pins what the code does today, and is not an endorsement of it: an
+    /// entry the flush loop discards after its last retry still has its ENTRY
+    /// sequence resolved, so the flushed watermark reaches the assigned counter
+    /// although the inner store never took the write. Whether that advance
+    /// should happen for a write that is durable only in the WAL is an open
+    /// question this test does not answer.
     #[tokio::test]
-    async fn flush_key_frameless_window_leaves_no_enumerable_past_older_remove() {
-        use crate::storage::datastores::RedbDataStore;
-        use crate::storage::wal::{WalRecovery, WalWriter};
+    async fn a_terminal_discard_still_resolves_the_entry_sequence() {
+        use std::time::{Duration, Instant};
 
-        let wal_dir = tempfile::tempdir().unwrap();
-        let recovered_dir = tempfile::tempdir().unwrap();
-
-        // The inner store is gated so the flush can be parked mid-`inner.add` —
-        // the crash point. 60s delays keep the background flush loop out of the
-        // way, so every state transition below is one this test caused.
-        let spy = Arc::new(SpyDataStore::new());
-        let (entered, _proceed) = spy.install_add_gate();
-        let inner: Arc<dyn MapDataStore> = spy;
-        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
-        let config = WriteBehindConfig {
-            write_delay_ms: 60_000,
-            flush_interval_ms: 60_000,
-            ..WriteBehindConfig::default()
-        };
-        let store = WriteBehindDataStore::new_with_wal(
-            Arc::clone(&inner),
-            config,
-            Some(WalBootstrap {
-                wal: Arc::clone(&wal) as Arc<dyn Wal>,
-                sequence_start: 1,
-            }),
-        );
-        let partition = partition_for("m", "k");
-
-        // An acked delete: a `WalOp::Remove` frame at N, buffered and un-resolved.
-        store.remove("m", "k", 1).await.unwrap();
-
-        // An acked re-creation at M > N. Forcing the survivor non-subsuming is
-        // what CARRIES N forward onto the survivor instead of early-resolving
-        // it, and carrying it forward is the only way to build the configuration
-        // under test: an un-resolved OLDER Remove still owned at the crash point.
-        // With the default subsuming disposition N resolves at the coalesce and
-        // the hazard is never constructed.
-        store.test_force_non_subsuming_survivor(true);
-        let v_new = RecordValue::Lww {
-            value: Value::String("re-created".to_string()),
-            timestamp: Timestamp {
-                millis: 42,
-                counter: 0,
-                node_id: "n1".to_string(),
-            },
-        };
-        store.add("m", "k", &v_new, 0, 2).await.unwrap();
-
-        // Drive the LIVE `flush_key` trait method and park it inside `inner.add`.
-        let flush_store = Arc::clone(&store);
-        let flush_value = v_new.clone();
-        let flush = tokio::spawn(async move {
-            flush_store
-                .flush_key("m", "k", &flush_value, false)
-                .await
-                .unwrap();
-        });
-        entered.notified().await;
-
-        let window = wal.unapplied(partition).await.unwrap();
-
-        // C — positive control. Without both frames in the window the test would
-        // be asserting over a configuration that never built the hazard, and a
-        // coalesce disposition change could hollow it out silently.
-        assert_eq!(
-            window.len(),
-            2,
-            "the crash point must hold BOTH the superseded Remove and its \
-             re-creation in the enumerable past; got {window:?}"
-        );
-
-        // A — the window IS open, and the re-creation is inside it.
-        assert!(
-            matches!(window[0].op, WalOp::Remove),
-            "the OLDER frame in the window is the superseded Remove; got {:?}",
-            window[0].op
-        );
-        assert_eq!(
-            (window[0].map.as_str(), window[0].key.as_str()),
-            ("m", "k"),
-            "the Remove in the window is the one for the key under flush"
-        );
-        assert!(
-            matches!(window[1].op, WalOp::Store { .. }),
-            "the NEWER frame is the re-creation, so the Remove is not the final \
-             effect for the key; got {:?}",
-            window[1].op
-        );
-        assert!(
-            window[0].sequence < window[1].sequence,
-            "the window is ascending: the re-creation carries M > N ({} vs {})",
-            window[1].sequence,
-            window[0].sequence
-        );
-        let n = window[0].sequence;
-        assert!(
-            wal.test_read_applied_sequence(partition) < n,
-            "the durable sidecar must still sit BELOW the superseded Remove \
-             while the frameless write is in flight — advancing it here is the \
-             loss M1 manufactures"
-        );
-
-        // B — the recovery outcome. The gate is NOT released: the crash lands
-        // mid-`inner.add`, so the frameless write never became durable anywhere,
-        // and a fresh durable store is the honest post-crash starting state.
-        let recovered: Arc<dyn MapDataStore> =
-            Arc::new(RedbDataStore::new(recovered_dir.path().join("d.redb")).unwrap());
-        WalRecovery::new(Arc::clone(&wal), Vec::new())
-            .run(Arc::clone(&recovered))
-            .await
-            .unwrap();
-        match recovered.load("m", "k").await.unwrap() {
-            Some(RecordValue::Lww { value, .. }) => assert_eq!(
-                value,
-                Value::String("re-created".to_string()),
-                "ascending replay puts the re-creation after the superseded \
-                 Remove, so the acked value survives the frameless window"
-            ),
-            other => panic!(
-                "the re-created key must be present after recovery — an absent \
-                 key is the acked-write loss TG-WAL-009's residual asks about; \
-                 got {other:?}"
-            ),
-        }
-
-        // The parked flush belongs to a process that died; nothing awaits it.
-        flush.abort();
-    }
-
-    // -----------------------------------------------------------------------
-    // A failed `inner.add` during `flush_key` must STILL resolve the superseded
-    // sequence. The WAL frame backstops durability on `Err` (a discarded write is
-    // a re-sync event), so leaving the sequence pending would pin the flushed
-    // watermark below it forever and freeze the tombstone durability fence.
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn flush_key_error_path_still_resolves_no_watermark_stall() {
         let spy = Arc::new(SpyDataStore::new());
         spy.set_fail_add(true);
+        let calls = spy.calls();
         let inner: Arc<dyn MapDataStore> = spy;
+        // One attempt, so the first refusal is the terminal discard; due at
+        // once, and only a requested pass runs.
         let config = WriteBehindConfig {
-            write_delay_ms: 60_000,
+            write_delay_ms: 0,
             flush_interval_ms: 60_000,
+            max_retries: 1,
             ..WriteBehindConfig::default()
         };
         let store = WriteBehindDataStore::new(inner, config);
@@ -5238,59 +4896,29 @@ mod tests {
             "precondition: buffered, not durable"
         );
 
-        // flush_key hits the failing inner.add and surfaces the error ...
-        let result = store.flush_key("m", "k", &dummy_value_with(7), false).await;
-        assert!(
-            result.is_err(),
-            "flush_key must surface the inner-store durability failure"
-        );
+        store.soft_flush().await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !store.test_is_idle() {
+            assert!(
+                Instant::now() < deadline,
+                "the pass that discards the entry never closed"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
 
-        // ... yet the superseded sequence is resolved anyway, so the watermark is
-        // not stalled below the assigned counter.
+        // The inner store was asked exactly once and refused: the terminal is
+        // the discard, not a success and not a retry still to come.
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "one attempt, refused, is the whole of the entry's life"
+        );
+        assert_eq!(store.pending_operation_count(), 0);
         assert_eq!(
             store.flushed_watermark(),
             assigned,
-            "error path must resolve the pulled sequence so the watermark still advances"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // AC4: `reset` clears the counter and the pending set under a single
-    // `pending_seqs` critical section, so a concurrent `assign_tracked_sequence`
-    // (which locks pending_seqs before touching the counter) cannot interleave and
-    // strand counter=1 with an empty set while a sequence is still buffered. This
-    // checks the resulting consistent postcondition: watermark and counter agree.
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn reset_clears_watermark_state_consistently() {
-        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
-        let config = WriteBehindConfig {
-            write_delay_ms: 60_000,
-            flush_interval_ms: 60_000,
-            ..WriteBehindConfig::default()
-        };
-        let store = WriteBehindDataStore::new(inner, config);
-
-        // Advance the counter and leave writes buffered (pending non-empty).
-        store.add("m", "k1", &dummy_value(), 0, 1).await.unwrap();
-        store.add("m", "k2", &dummy_value(), 0, 1).await.unwrap();
-        assert!(store.assigned_write_sequence() > 0);
-        assert!(store.flushed_watermark() < store.assigned_write_sequence());
-
-        store.reset();
-
-        // After reset the counter is 0 and the pending set is empty, so the
-        // watermark is 0 — no stranded sequence pinning it above the counter.
-        assert_eq!(
-            store.assigned_write_sequence(),
-            0,
-            "reset zeroes the counter"
-        );
-        assert_eq!(
-            store.flushed_watermark(),
-            0,
-            "reset leaves no pending sequence, so the watermark is 0 (counter and set agree)"
+            "the discard resolves the entry sequence, so the watermark is not \
+             stalled below the assigned counter"
         );
     }
 
@@ -5547,18 +5175,6 @@ mod tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             Ok(())
         }
-
-        async fn flush_key(
-            &self,
-            _map: &str,
-            _key: &str,
-            _value: &RecordValue,
-            _is_backup: bool,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn reset(&self) {}
 
         fn is_null(&self) -> bool {
             false
@@ -6083,14 +5699,16 @@ mod tests {
     use crate::storage::RedbDataStore;
 
     /// `WriteBehind` over a real redb inner with a flush delay long enough that
-    /// `add`/`remove` stay buffered for the duration of a test (no background
-    /// flush fires unless we force it via `flush_key`).
+    /// `add`/`remove` stay buffered for the duration of a test (no flush pass
+    /// runs unless a test requests one with `soft_flush`).
     fn redb_backed_store() -> (Arc<WriteBehindDataStore>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("wb.redb");
         let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&path).expect("redb open"));
+        // Entries are due at once, but the timer never fires within a test:
+        // only a pass a test requests with `soft_flush` takes them.
         let config = WriteBehindConfig {
-            write_delay_ms: 600_000,
+            write_delay_ms: 0,
             flush_interval_ms: 600_000,
             capacity: 0,
             ..WriteBehindConfig::default()
@@ -6179,10 +5797,15 @@ mod tests {
         assert_lww(&rows[0].1, "v1", 1);
 
         // Flush to redb; scan must still return it exactly once (no double-count).
-        store
-            .flush_key("m", "k", &lww("v1", 1), false)
-            .await
-            .unwrap();
+        store.soft_flush().await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !store.test_is_idle() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the requested pass never flushed the key"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
         let rows = drain_scan(&store, "m").await;
         assert_eq!(rows.len(), 1, "flushed key must appear exactly once");
         assert_lww(&rows[0].1, "v1", 1);
@@ -6201,10 +5824,15 @@ mod tests {
         let (store, _dir) = redb_backed_store();
 
         store.add("m", "k", &lww("v1", 1), 0, 1000).await.unwrap();
-        store
-            .flush_key("m", "k", &lww("v1", 1), false)
-            .await
-            .unwrap();
+        store.soft_flush().await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !store.test_is_idle() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the requested pass never flushed the key"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
         // Now buffer a delete (staging None) over the flushed value.
         store.remove("m", "k", 2000).await.unwrap();
 
@@ -6232,10 +5860,15 @@ mod tests {
         assert_eq!(buffered_leaves.len(), 1, "buffered-only leaf must surface");
 
         // Flush and re-enumerate: same leaf hash (Merkle root unchanged).
-        store
-            .flush_key("m", "k", &lww("v1", 7), false)
-            .await
-            .unwrap();
+        store.soft_flush().await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !store.test_is_idle() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the requested pass never flushed the key"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
         let flushed_leaves = collect_leaves(&store, "m").await;
         assert_eq!(
             buffered_leaves, flushed_leaves,
@@ -6340,7 +5973,15 @@ mod tests {
             let k = format!("flushed_{i:02}");
             let v = lww(&format!("v{i}"), 1);
             store.add("m", &k, &v, 0, 1000).await.unwrap();
-            store.flush_key("m", &k, &v, false).await.unwrap();
+        }
+        store.soft_flush().await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !store.test_is_idle() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the requested pass never flushed the keys"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
         // Add staging-only keys (buffered, never flushed) interleaved by name.
         for i in 0..4u32 {
@@ -7634,18 +7275,6 @@ mod tests {
             Ok(())
         }
 
-        async fn flush_key(
-            &self,
-            _map: &str,
-            _key: &str,
-            _value: &RecordValue,
-            _is_backup: bool,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn reset(&self) {}
-
         fn is_null(&self) -> bool {
             false
         }
@@ -8499,20 +8128,6 @@ mod hard_flush_order_tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
         }
-
-        async fn flush_key(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            is_backup: bool,
-        ) -> anyhow::Result<()> {
-            self.inner.flush_key(map, key, value, is_backup).await
-        }
-
-        fn reset(&self) {
-            self.inner.reset();
-        }
     }
 
     // AC-15: a Remove staged after the flush loop dequeued the key's Store must
@@ -8765,20 +8380,6 @@ mod background_task_panic_tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
         }
-
-        async fn flush_key(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            is_backup: bool,
-        ) -> anyhow::Result<()> {
-            self.inner.flush_key(map, key, value, is_backup).await
-        }
-
-        fn reset(&self) {
-            self.inner.reset();
-        }
     }
 
     /// A WAL that accepts every frame and holds none. It is here because the
@@ -8993,20 +8594,6 @@ mod background_task_panic_tests {
 
         async fn hard_flush(&self) -> anyhow::Result<()> {
             Ok(())
-        }
-
-        async fn flush_key(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            _is_backup: bool,
-        ) -> anyhow::Result<()> {
-            self.add(map, key, value, 0, 0).await
-        }
-
-        fn reset(&self) {
-            self.values().clear();
         }
     }
 
@@ -10502,5 +10089,180 @@ mod background_task_panic_tests {
             .await
             .expect("`hard_flush` did not return")
             .expect("a healthy shutdown");
+    }
+
+    /// A flush pass takes every entry that is due when it begins, in every
+    /// partition; `batch_size` only groups the iteration and limits nothing.
+    #[tokio::test]
+    async fn a_flush_pass_holds_every_due_entry_whatever_the_batch_size() {
+        // Two keys in one partition and a third in another: a pass cut short
+        // per queue would leave one of the pair behind, and a pass cut short
+        // as a whole would leave two of the three.
+        let first = "due-0".to_string();
+        let shared = partition_for(MAP, &first);
+        let mut same_partition = None;
+        let mut other_partition = None;
+        for i in 1..100_000 {
+            let key = format!("due-{i}");
+            if partition_for(MAP, &key) == shared {
+                same_partition.get_or_insert(key);
+            } else {
+                other_partition.get_or_insert(key);
+            }
+            if same_partition.is_some() && other_partition.is_some() {
+                break;
+            }
+        }
+        let keys = [
+            first,
+            same_partition.expect("a second key in the first key's partition"),
+            other_partition.expect("a key in another partition"),
+        ];
+        let partitions: Vec<u32> = keys.iter().map(|key| partition_for(MAP, key)).collect();
+        assert_eq!(
+            partitions[0], partitions[1],
+            "two due keys share a partition"
+        );
+        assert_ne!(
+            partitions[0], partitions[2],
+            "the due keys span two partitions"
+        );
+        let due = u64::try_from(keys.len()).expect("a small count");
+
+        let (inner, _about_to_panic) = PanickingAddStore::new(0);
+        let mut pass_parked = inner.arm_park();
+        let store = WriteBehindDataStore::new(
+            inner,
+            WriteBehindConfig {
+                batch_size: 1,
+                ..manual_flush_config()
+            },
+        );
+        let now = now_millis();
+        for key in &keys {
+            store
+                .add(MAP, key, &lww_value(), 0, now)
+                .await
+                .expect("write");
+        }
+        assert_eq!(store.pending_operation_count(), due);
+
+        store.soft_flush().await.expect("soft_flush");
+        pass_parked.wait_parked().await;
+        assert!(
+            store.queues.iter().all(|queue| queue.entries.is_empty()),
+            "the pass must have taken every due entry out of every queue, not one batch"
+        );
+        assert_eq!(
+            store.pending_operation_count(),
+            due,
+            "the pass holds all of them, and held entries stay counted"
+        );
+
+        pass_parked.release();
+        let deadline = std::time::Instant::now() + HANG_LIMIT;
+        while !store.test_is_idle() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pass never closed after its park was released"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert_eq!(store.pending_operation_count(), 0);
+    }
+
+    /// Never due and never requested: nothing leaves the buffer during a test.
+    fn never_due_config(capacity: u64) -> WriteBehindConfig {
+        WriteBehindConfig {
+            write_delay_ms: 600_000,
+            flush_interval_ms: 600_000,
+            capacity,
+            shutdown_timeout_ms: 5_000,
+            ..WriteBehindConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remove_of_a_key_that_is_not_buffered_is_refused_at_capacity() {
+        const CAPACITY: u64 = 3;
+        let store = WriteBehindDataStore::new(Arc::new(NullDataStore), never_due_config(CAPACITY));
+        let now = now_millis();
+
+        for i in 0..CAPACITY - 1 {
+            store
+                .add(MAP, &format!("filled-{i}"), &lww_value(), 0, now)
+                .await
+                .expect("below capacity");
+        }
+        assert_eq!(store.pending_operation_count(), CAPACITY - 1);
+
+        store
+            .remove(MAP, "not-buffered-1", now)
+            .await
+            .expect("a remove checked one below capacity is accepted");
+        assert_eq!(store.pending_operation_count(), CAPACITY);
+
+        let refused = store
+            .remove(MAP, "not-buffered-2", now)
+            .await
+            .expect_err("a remove of a key that is not buffered is refused at capacity");
+        assert_eq!(refused.to_string(), "Write-behind capacity exceeded");
+        assert_eq!(
+            store.pending_operation_count(),
+            CAPACITY,
+            "a refused remove must not be counted"
+        );
+
+        store
+            .remove(MAP, "filled-0", now)
+            .await
+            .expect("a remove of a buffered key is accepted at capacity");
+        assert_eq!(
+            store.pending_operation_count(),
+            CAPACITY,
+            "a remove of a buffered key coalesces and is not counted again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remove_all_of_a_key_that_is_not_buffered_is_refused_at_capacity() {
+        const CAPACITY: u64 = 3;
+        let store = WriteBehindDataStore::new(Arc::new(NullDataStore), never_due_config(CAPACITY));
+        let now = now_millis();
+
+        for i in 0..CAPACITY - 1 {
+            store
+                .add(MAP, &format!("filled-{i}"), &lww_value(), 0, now)
+                .await
+                .expect("below capacity");
+        }
+        assert_eq!(store.pending_operation_count(), CAPACITY - 1);
+
+        store
+            .remove_all(MAP, &["not-buffered-1".to_string()])
+            .await
+            .expect("a remove_all checked one below capacity is accepted");
+        assert_eq!(store.pending_operation_count(), CAPACITY);
+
+        let refused = store
+            .remove_all(MAP, &["not-buffered-2".to_string()])
+            .await
+            .expect_err("a remove_all of a key that is not buffered is refused at capacity");
+        assert_eq!(refused.to_string(), "Write-behind capacity exceeded");
+        assert_eq!(
+            store.pending_operation_count(),
+            CAPACITY,
+            "a refused remove_all must not be counted"
+        );
+
+        store
+            .remove_all(MAP, &["filled-0".to_string()])
+            .await
+            .expect("a remove_all of a buffered key is accepted at capacity");
+        assert_eq!(
+            store.pending_operation_count(),
+            CAPACITY,
+            "a remove_all of a buffered key coalesces and is not counted again"
+        );
     }
 }

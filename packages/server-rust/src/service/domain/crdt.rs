@@ -5517,18 +5517,6 @@ mod tests {
             Ok(())
         }
 
-        async fn flush_key(
-            &self,
-            _: &str,
-            _: &str,
-            _: &RecordValue,
-            _: bool,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn reset(&self) {}
-
         /// A real (non-null) backend, so the full write-through path runs and a
         /// non-resident key is rehydrated from durable state on read.
         fn is_null(&self) -> bool {
@@ -5753,21 +5741,6 @@ mod tests {
                 None => Ok(()),
             }
         }
-
-        async fn flush_key(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            deleted: bool,
-        ) -> anyhow::Result<()> {
-            match &self.inner {
-                Some(inner) => inner.flush_key(map, key, value, deleted).await,
-                None => Ok(()),
-            }
-        }
-
-        fn reset(&self) {}
 
         /// A real (non-null) backend, so the full write-through path runs.
         fn is_null(&self) -> bool {
@@ -6837,20 +6810,6 @@ mod tests {
 
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
-        }
-
-        async fn flush_key(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            backup: bool,
-        ) -> anyhow::Result<()> {
-            self.inner.flush_key(map, key, value, backup).await
-        }
-
-        fn reset(&self) {
-            self.inner.reset();
         }
 
         fn is_null(&self) -> bool {
@@ -11267,20 +11226,6 @@ mod tests {
             async fn hard_flush(&self) -> anyhow::Result<()> {
                 self.inner.hard_flush().await
             }
-
-            async fn flush_key(
-                &self,
-                map: &str,
-                key: &str,
-                value: &RecordValue,
-                is_backup: bool,
-            ) -> anyhow::Result<()> {
-                self.inner.flush_key(map, key, value, is_backup).await
-            }
-
-            fn reset(&self) {
-                self.inner.reset();
-            }
         }
 
         fn remove_op(map: &str, key: &str) -> Operation {
@@ -12787,18 +12732,6 @@ mod tests {
             async fn hard_flush(&self) -> anyhow::Result<()> {
                 Ok(())
             }
-
-            async fn flush_key(
-                &self,
-                map: &str,
-                key: &str,
-                value: &RecordValue,
-                _is_backup: bool,
-            ) -> anyhow::Result<()> {
-                self.add(map, key, value, 0, 0).await
-            }
-
-            fn reset(&self) {}
         }
 
         /// What [`refusing_stack`] builds.
@@ -13668,20 +13601,6 @@ mod tests {
             async fn hard_flush(&self) -> anyhow::Result<()> {
                 self.inner.hard_flush().await
             }
-
-            async fn flush_key(
-                &self,
-                map: &str,
-                key: &str,
-                value: &RecordValue,
-                is_backup: bool,
-            ) -> anyhow::Result<()> {
-                self.inner.flush_key(map, key, value, is_backup).await
-            }
-
-            fn reset(&self) {
-                self.inner.reset();
-            }
         }
 
         /// A service over `data_store` with one authenticated client connection.
@@ -14057,20 +13976,6 @@ mod tests {
 
         async fn hard_flush(&self) -> anyhow::Result<()> {
             self.inner.hard_flush().await
-        }
-
-        async fn flush_key(
-            &self,
-            map: &str,
-            key: &str,
-            value: &RecordValue,
-            is_backup: bool,
-        ) -> anyhow::Result<()> {
-            self.inner.flush_key(map, key, value, is_backup).await
-        }
-
-        fn reset(&self) {
-            self.inner.reset();
         }
     }
 

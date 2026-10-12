@@ -86,6 +86,38 @@ fn never_flush_config() -> WriteBehindConfig {
     }
 }
 
+/// Entries are due at once, but the timer never fires within a test: a flush
+/// pass runs only when a test requests one, and then takes everything that is
+/// due.
+fn requested_flush_config() -> WriteBehindConfig {
+    WriteBehindConfig {
+        write_delay_ms: 0,
+        ..never_flush_config()
+    }
+}
+
+/// A `store_time` no pass of a test finds old enough to take.
+fn not_yet_due() -> i64 {
+    now_millis() + 3_600_000
+}
+
+/// Requests one flush pass and waits until it has closed.
+///
+/// The pass counter is odd while the flush loop holds a drained batch, so an
+/// even value two above the one read before the request says the requested
+/// pass ran and reached every terminal — whether or not entries that were not
+/// due are still queued, which `test_is_idle` could not tell apart.
+async fn run_requested_pass(store: &WriteBehindDataStore, label: &str) {
+    let before = store.flush_pass_epoch.load(Ordering::SeqCst);
+    assert_eq!(before % 2, 0, "no pass may be open before {label}");
+    store.soft_flush().await.expect("soft_flush");
+    wait_until(label, || {
+        let epoch = store.flush_pass_epoch.load(Ordering::SeqCst);
+        epoch.is_multiple_of(2) && epoch >= before + 2
+    })
+    .await;
+}
+
 /// `count` distinct keys that all hash to `partition`.
 ///
 /// The whole invariant is PER PARTITION, so a test whose keys scatter across the
@@ -490,18 +522,6 @@ impl MapDataStore for FaultStore {
     async fn hard_flush(&self) -> anyhow::Result<()> {
         Ok(())
     }
-
-    async fn flush_key(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        _is_backup: bool,
-    ) -> anyhow::Result<()> {
-        self.add(map, key, value, 0, 0).await
-    }
-
-    fn reset(&self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -542,6 +562,9 @@ struct FaultWal {
     pass_on_release: std::sync::atomic::AtomicBool,
     released: std::sync::atomic::AtomicBool,
     wake: tokio::sync::Notify,
+    /// How many appends have entered the park. `appends` cannot say: it is
+    /// advanced only by an append that was never parked.
+    parked: FaultAtomicU64,
     /// Every frame the inner WAL accepted, in append order.
     appended: std::sync::Mutex<Vec<WalEntry>>,
 }
@@ -556,8 +579,14 @@ impl FaultWal {
             pass_on_release: std::sync::atomic::AtomicBool::new(false),
             released: std::sync::atomic::AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
+            parked: FaultAtomicU64::new(0),
             appended: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// How many appends have reached the park since the WAL was built.
+    fn parked_appends(&self) -> u64 {
+        self.parked.load(Ordering::SeqCst)
     }
 
     /// Parks every subsequent append until [`release`](Self::release).
@@ -616,6 +645,7 @@ impl FaultWal {
 impl Wal for FaultWal {
     async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
         if self.hang.load(std::sync::atomic::Ordering::Relaxed) {
+            self.parked.fetch_add(1, Ordering::SeqCst);
             // Registered before the flag is read, so a release that lands in
             // between still wakes this append.
             loop {
@@ -697,15 +727,20 @@ fn build_store(
 /// of OTHER keys stay buffered. Flushing that one entry is therefore the exact
 /// state in which a scalar `max` watermark marks still-buffered frames applied.
 ///
-/// The coalesced entry is flushed via `flush_key` rather than by waiting for its
-/// inherited `store_time` to become eligible: both reach the same resolve, but a
-/// timing race would make the proof flaky, and a flaky negative control is not a
-/// control.
+/// The coalesced entry is flushed by a requested pass that finds only it due:
+/// the low keys carry a `store_time` no pass of the test reaches, so which
+/// entries the pass takes is decided by the test and not by a timing race — a
+/// flaky negative control is not a control.
 async fn stranded_entry_scenario(mode: WatermarkMode, low_key_count: usize) -> Vec<String> {
     let dir = tempfile::tempdir().expect("tempdir");
     let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).expect("wal");
     let pre_crash_inner = FaultStore::new();
-    let store = build_store(&pre_crash_inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+    let store = build_store_with(
+        &pre_crash_inner,
+        Arc::clone(&wal) as Arc<dyn Wal>,
+        1,
+        requested_flush_config(),
+    );
     store.test_set_watermark_mode(mode);
 
     let partition = test_partition();
@@ -717,7 +752,7 @@ async fn stranded_entry_scenario(mode: WatermarkMode, low_key_count: usize) -> V
     for (i, key) in lows.iter().enumerate() {
         let millis = 2 + i as u64;
         store
-            .add(TEST_MAP, key, &lww(millis), 0, 1000)
+            .add(TEST_MAP, key, &lww(millis), 0, not_yet_due())
             .await
             .unwrap();
     }
@@ -729,10 +764,17 @@ async fn stranded_entry_scenario(mode: WatermarkMode, low_key_count: usize) -> V
         .await
         .unwrap();
 
-    store
-        .flush_key(TEST_MAP, high, &high_value, false)
-        .await
-        .unwrap();
+    run_requested_pass(&store, "the pass that flushes the coalesced entry").await;
+    assert!(
+        pre_crash_inner.contains(high).await,
+        "the coalesced entry must have been flushed before the crash"
+    );
+    for key in lows {
+        assert!(
+            !pre_crash_inner.contains(key).await,
+            "the low keys must still be buffered at the crash, or nothing is stranded"
+        );
+    }
 
     // Crash: every write-behind-side structure dies with the store; the WAL files
     // on disk survive and the handle that reads them may cross.
@@ -865,21 +907,22 @@ async fn a_frame_written_after_the_partition_drains_is_still_replayed() {
     let dir = tempfile::tempdir().unwrap();
     let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
     let inner = FaultStore::new();
-    let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+    let store = build_store_with(
+        &inner,
+        Arc::clone(&wal) as Arc<dyn Wal>,
+        1,
+        requested_flush_config(),
+    );
     let partition = test_partition();
     let keys = keys_in_partition(partition, 2);
 
     // Drain the partition completely, so the empty-and-seeded branch is the one
     // that computes the watermark.
-    let first_value = lww(1);
     store
-        .add(TEST_MAP, &keys[0], &first_value, 0, 1000)
+        .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
         .await
         .unwrap();
-    store
-        .flush_key(TEST_MAP, &keys[0], &first_value, false)
-        .await
-        .unwrap();
+    run_requested_pass(&store, "the pass that drains the partition").await;
     assert!(
         store.test_pending_wal_sequences(partition).is_empty(),
         "the partition must actually be drained for this to test the empty branch"
@@ -998,13 +1041,21 @@ async fn an_abandoned_terminal_holds_the_watermark_and_its_frame_is_replayed() {
     let dir = tempfile::tempdir().unwrap();
     let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
     let inner = FaultStore::new();
-    let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+    // One attempt, so the first refusal is the terminal discard.
+    let store = build_store_with(
+        &inner,
+        Arc::clone(&wal) as Arc<dyn Wal>,
+        1,
+        WriteBehindConfig {
+            max_retries: 1,
+            ..requested_flush_config()
+        },
+    );
     let partition = test_partition();
     let keys = keys_in_partition(partition, 2);
 
-    let doomed_value = lww(1);
     store
-        .add(TEST_MAP, &keys[0], &doomed_value, 0, 1000)
+        .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
         .await
         .unwrap();
     let doomed_seq = store
@@ -1016,10 +1067,16 @@ async fn an_abandoned_terminal_holds_the_watermark_and_its_frame_is_replayed() {
     // The inner store now permanently rejects the key, so the flush terminal is
     // ABANDONED: the write is durable nowhere but the WAL.
     inner.reject_key(&keys[0]);
-    assert!(store
-        .flush_key(TEST_MAP, &keys[0], &doomed_value, false)
-        .await
-        .is_err());
+    run_requested_pass(&store, "the pass that discards the refused entry").await;
+    assert!(
+        !inner.contains(&keys[0]).await,
+        "the inner store refused the write, so it holds nothing for the key"
+    );
+    assert_eq!(
+        store.pending_operation_count(),
+        0,
+        "the entry reached its terminal: it is neither queued nor awaiting a retry"
+    );
 
     assert_eq!(
         store.test_pending_wal_sequences(partition),
@@ -1293,18 +1350,20 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
     // --- Incarnation 1: one applied frame at 100, then 101/102 left buffered ---
     {
         let inner = FaultStore::new();
-        let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 100);
-        let first_value = lww(1);
+        let store = build_store_with(
+            &inner,
+            Arc::clone(&wal) as Arc<dyn Wal>,
+            100,
+            requested_flush_config(),
+        );
         store
-            .add(TEST_MAP, &keys[0], &first_value, 0, 1000)
+            .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
             .await
             .unwrap();
-        // Drained key-by-key rather than with `hard_flush`, which marks the store
-        // shut down and would reject the two writes this incarnation must still ack.
-        store
-            .flush_key(TEST_MAP, &keys[0], &first_value, false)
-            .await
-            .unwrap();
+        // Drained by a requested pass rather than with `hard_flush`, which marks
+        // the store shut down and would reject the two writes this incarnation
+        // must still ack.
+        run_requested_pass(&store, "the pass that applies the first frame").await;
         assert_eq!(
             wal.test_read_applied_sequence(partition),
             100,
@@ -1336,7 +1395,12 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
          cannot license the release of the 101 that failed below it"
     );
 
-    let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 103);
+    let store = build_store_with(
+        &inner,
+        Arc::clone(&wal) as Arc<dyn Wal>,
+        103,
+        requested_flush_config(),
+    );
     store.test_set_watermark_mode(mode);
 
     // (a)'s precondition, asserted rather than assumed: this tracker provably
@@ -1354,16 +1418,13 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
     );
 
     // A live write to p seeds the partition and then flushes Ok.
-    let live_value = lww(4);
     store
-        .add(TEST_MAP, &keys[3], &live_value, 0, 1000)
+        .add(TEST_MAP, &keys[3], &lww(4), 0, 1000)
         .await
         .unwrap();
     let seeded = store.test_pending_wal_sequences(partition);
-    store
-        .flush_key(TEST_MAP, &keys[3], &live_value, false)
-        .await
-        .unwrap();
+    run_requested_pass(&store, "the pass that flushes the live write").await;
+    assert!(inner.contains(&keys[3]).await, "the live write flushed");
 
     let sidecar_after_live_flush = wal.test_read_applied_sequence(partition);
     let alarm = store.test_run_classifier_sample(partition);
@@ -2435,21 +2496,25 @@ async fn an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_rea
 
     let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let inner = FaultStore::new();
-    let store = build_store(
+    let store = build_store_with(
         &inner,
         Arc::new(FlakyUnseedableWal {
             inner: Arc::clone(&wal),
             failing: Arc::clone(&failing),
         }) as Arc<dyn Wal>,
         3,
+        requested_flush_config(),
     );
 
     // ---- Phase A: seeding fails at the entry point, so the advance is refused.
     // Two writes, so the pending map is NON-EMPTY at the advance — the case a
-    // seeded-only-on-empty guard lets straight through.
-    for key in &keys {
-        store.add(TEST_MAP, key, &lww(2), 0, 0).await.unwrap();
-    }
+    // seeded-only-on-empty guard lets straight through. Only the first is due
+    // for the pass of phase B; the second stays buffered.
+    store.add(TEST_MAP, &keys[0], &lww(2), 0, 0).await.unwrap();
+    store
+        .add(TEST_MAP, &keys[1], &lww(2), 0, not_yet_due())
+        .await
+        .unwrap();
     assert!(
         !store.test_wal_partition_seeded(partition),
         "the injected read failure must leave the partition unseeded"
@@ -2467,13 +2532,14 @@ async fn an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_rea
     );
 
     // ---- Phase B: the WAL read recovers. No further add/remove arrives for this
-    // partition, so `resolve_and_advance` — reached through `flush_key` — is the
-    // ONLY remaining site that can retry the seed.
+    // partition, so `resolve_and_advance` — reached through the `Ok` terminal
+    // of a flush pass — is the ONLY remaining site that can retry the seed.
     failing.store(false, Ordering::Relaxed);
-    store
-        .flush_key(TEST_MAP, &keys[0], &lww(2), false)
-        .await
-        .unwrap();
+    run_requested_pass(&store, "the pass that flushes the first key").await;
+    assert!(
+        inner.contains(&keys[0]).await,
+        "the pass must have reached its Ok terminal for the first key"
+    );
 
     assert!(
         store.test_wal_partition_seeded(partition),
@@ -4014,4 +4080,169 @@ fn a_retired_entry_hands_its_earlier_due_time_to_the_queued_write() {
         vec![(2, 1_000)],
         "the queued write keeps its own earlier due time"
     );
+}
+
+// ===========================================================================
+// The capacity check is a soft bound: its two readings at the boundary, and
+// what writers already past it add
+// ===========================================================================
+
+fn capacity_store(wal: Arc<dyn Wal>, capacity: u64) -> Arc<WriteBehindDataStore> {
+    build_store_with(
+        &FaultStore::new(),
+        wal,
+        1,
+        WriteBehindConfig {
+            capacity,
+            ..never_flush_config()
+        },
+    )
+}
+
+/// Writers of distinct keys that are not buffered, all past the capacity check
+/// at once, are all accepted: the count ends at `capacity - 1` plus their
+/// number. That value is a consequence of there being no reservation between
+/// the check and the queue insert.
+#[tokio::test]
+async fn distinct_new_key_writers_past_the_check_exceed_capacity_by_at_most_their_number() {
+    const CAPACITY: u64 = 4;
+    const WRITERS: u64 = 3;
+
+    // ---- Writers parked between the check and their insert.
+    let dir = tempfile::tempdir().unwrap();
+    let fault =
+        FaultWal::new(WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap());
+    let store = capacity_store(Arc::clone(&fault) as Arc<dyn Wal>, CAPACITY);
+    for i in 0..CAPACITY - 1 {
+        store
+            .add(TEST_MAP, &format!("filled-{i}"), &lww(1), 0, 1000)
+            .await
+            .expect("below capacity");
+    }
+    assert_eq!(store.pending_operation_count(), CAPACITY - 1);
+
+    fault.slow_appends();
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|i| {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .add(TEST_MAP, &format!("new-{i}"), &lww(2), 0, 1000)
+                    .await
+            })
+        })
+        .collect();
+    // An append is reached only after the check, so every parked writer has
+    // passed it.
+    wait_until("every writer to park inside its append", || {
+        fault.parked_appends() == WRITERS
+    })
+    .await;
+    assert_eq!(
+        store.pending_operation_count(),
+        CAPACITY - 1,
+        "a writer between its check and its insert is not counted yet"
+    );
+
+    fault.release();
+    for writer in writers {
+        tokio::time::timeout(std::time::Duration::from_secs(5), writer)
+            .await
+            .expect("a released writer did not return")
+            .expect("writer task")
+            .expect("a writer that passed the check is accepted");
+    }
+    assert_eq!(
+        store.pending_operation_count(),
+        CAPACITY - 1 + WRITERS,
+        "every writer that was past the check is counted, and nothing else"
+    );
+    let refused = store
+        .add(TEST_MAP, "one-more", &lww(3), 0, 1000)
+        .await
+        .expect_err("a new key is refused over capacity");
+    assert_eq!(refused.to_string(), "Write-behind capacity exceeded");
+    assert_eq!(store.pending_operation_count(), CAPACITY - 1 + WRITERS);
+
+    // ---- The boundary itself: one writer, nobody in the window, no pass.
+    let boundary_dir = tempfile::tempdir().unwrap();
+    let boundary_wal =
+        WalWriter::new(boundary_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+    let boundary = capacity_store(boundary_wal as Arc<dyn Wal>, CAPACITY);
+    for i in 0..CAPACITY - 1 {
+        boundary
+            .add(TEST_MAP, &format!("filled-{i}"), &lww(1), 0, 1000)
+            .await
+            .expect("below capacity");
+    }
+    boundary
+        .add(TEST_MAP, "at-one-below", &lww(2), 0, 1000)
+        .await
+        .expect("a new key checked one below capacity is accepted");
+    assert_eq!(boundary.pending_operation_count(), CAPACITY);
+    let refused = boundary
+        .add(TEST_MAP, "at-capacity", &lww(3), 0, 1000)
+        .await
+        .expect_err("a new key checked at exactly capacity is refused");
+    assert_eq!(refused.to_string(), "Write-behind capacity exceeded");
+    assert_eq!(
+        boundary.pending_operation_count(),
+        CAPACITY,
+        "a refused write must not be counted"
+    );
+}
+
+/// The shutdown drain owns the entries it takes out of the queues, and says so
+/// before its first inner-store call: while that call is parked the entry's
+/// WAL sequence is registered in flight.
+#[tokio::test]
+async fn the_shutdown_drain_registers_its_batch_in_flight() {
+    let (_dir, wal) = real_wal();
+    let inner = FaultStore::new();
+    // Never due, so only the shutdown drain can take the entry; and a drain
+    // deadline the test cannot reach, so the entry is not abandoned between the
+    // wait and the assertion.
+    let store = build_store_with(
+        &inner,
+        Arc::clone(&wal) as Arc<dyn Wal>,
+        1,
+        WriteBehindConfig {
+            shutdown_timeout_ms: 60_000,
+            ..never_flush_config()
+        },
+    );
+    let partition = test_partition();
+    let key = keys_in_partition(partition, 1).remove(0);
+
+    inner.arm_gate();
+    store.add(TEST_MAP, &key, &lww(1), 0, 1000).await.unwrap();
+    let wal_seq = store.test_max_assigned_wal_sequence(partition);
+    assert!(
+        store.test_in_flight_wal_sequences(partition).is_empty(),
+        "nothing has taken the entry yet"
+    );
+
+    let drain = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { store.hard_flush().await })
+    };
+    // The double's own signal, not the in-flight set: without the registration
+    // the wait still ends and the assertion below is what fails.
+    wait_until("the drain's inner-store call to park", || {
+        inner.parked().as_deref() == Some(key.as_str())
+    })
+    .await;
+    assert_eq!(
+        store.test_in_flight_wal_sequences(partition),
+        vec![wal_seq],
+        "the drain must have registered the entry it holds before calling the inner store"
+    );
+
+    inner.open();
+    tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+        .await
+        .expect("`hard_flush` did not return")
+        .expect("drain task")
+        .expect("a healthy drain");
+    assert!(inner.contains(&key).await);
 }

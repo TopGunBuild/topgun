@@ -1649,9 +1649,10 @@ pub struct WalRecovery {
     replay_merge_gate: bool,
     /// Whether `run` re-replays each partition's oldest un-applied frame once more
     /// after the in-order pass — a harness seam that manufactures the "older frame
-    /// re-applied over a newer durable value" condition the live `flush_key` path
-    /// produces but generated ops cannot. `#[cfg(test)]`-only: it does not exist in
-    /// a production build.
+    /// re-applied over a newer durable value" condition, which generated ops
+    /// cannot: in-order replay always ends on the newest frame. The seam exists to
+    /// exercise the merge gate. `#[cfg(test)]`-only: it does not exist in a
+    /// production build.
     #[cfg(test)]
     re_replay_oldest_frame: bool,
     /// How many frames the `re_replay_oldest_frame` seam actually put back through
@@ -2111,10 +2112,9 @@ impl WalRecovery {
 
             // Harness-only seam: re-replay the oldest un-applied frame once more,
             // AFTER the in-order pass has left the newest value durable. This
-            // reproduces the stale re-replay the live `flush_key` path can cause
-            // (an older frame lingering in the replay window over a frameless newer
-            // durable write) — a condition generated ops cannot manufacture because
-            // in-order replay always ends on the newest frame. With the merge gate
+            // manufactures a stale re-replay — an older frame applied over a
+            // newer durable value — a condition generated ops cannot manufacture
+            // because in-order replay always ends on the newest frame. With the merge gate
             // on (production) the re-replayed older frame is discarded; with it off
             // it clobbers, which the `value_equality` oracle catches.
             #[cfg(test)]
@@ -2972,18 +2972,6 @@ mod tests {
             Ok(())
         }
 
-        async fn flush_key(
-            &self,
-            _map: &str,
-            _key: &str,
-            _value: &crate::storage::record::RecordValue,
-            _backup: bool,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn reset(&self) {}
-
         fn is_null(&self) -> bool {
             false
         }
@@ -3127,16 +3115,6 @@ mod tests {
         async fn hard_flush(&self) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn flush_key(
-            &self,
-            _map: &str,
-            _key: &str,
-            _value: &crate::storage::record::RecordValue,
-            _backup: bool,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn reset(&self) {}
         fn is_null(&self) -> bool {
             false
         }
@@ -4671,7 +4649,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_flush_key_only_terminal_advances_the_durable_sidecar() {
+    async fn a_flush_pass_ok_terminal_advances_the_durable_sidecar() {
         use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
 
         // `partition_for` is private to the write-behind module, so the partition
@@ -4687,10 +4665,10 @@ mod tests {
         let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
         let inner: Arc<dyn MapDataStore> = Arc::new(ReplayStore::default());
 
-        // Nothing may drain on its own: `flush_key` must be the ONLY possible
-        // source of the advance, or the flush loop could satisfy the assertion.
+        // Due at once, but the timer never fires within the test: the pass
+        // requested below is the only pass.
         let config = WriteBehindConfig {
-            write_delay_ms: 600_000,
+            write_delay_ms: 0,
             flush_interval_ms: 600_000,
             shutdown_timeout_ms: 1_000,
             ..WriteBehindConfig::default()
@@ -4721,7 +4699,15 @@ mod tests {
             "a buffered write must not have advanced anything yet"
         );
 
-        store.flush_key("m", "k", &value, false).await.unwrap();
+        store.soft_flush().await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !store.test_is_idle() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the requested pass never closed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
 
         // Read off the `.applied` FILE: an implementation that resolves the
         // carried sequences but never calls `mark_applied` moves the pending set
@@ -4729,7 +4715,7 @@ mod tests {
         assert_eq!(
             advanced_partitions(&wal).len(),
             1,
-            "a flush_key Ok terminal must resolve AND advance the durable sidecar"
+            "an Ok terminal of a flush pass must resolve AND advance the durable sidecar"
         );
     }
 

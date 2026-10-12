@@ -298,18 +298,6 @@ impl MapDataStore for HarnessInnerStore {
     async fn hard_flush(&self) -> anyhow::Result<()> {
         Ok(())
     }
-
-    async fn flush_key(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        _is_backup: bool,
-    ) -> anyhow::Result<()> {
-        self.add(map, key, value, 0, 0).await
-    }
-
-    fn reset(&self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -634,7 +622,7 @@ impl LogModel {
     /// A due key's buffered sequences transition to `DurablyApplied` (a healthy
     /// flush drained them and advanced the watermark) — removed from
     /// `unresolved`, buffer entry cleared.
-    fn flush_key_durable(&mut self, key: Key) {
+    fn flush_due_key_durable(&mut self, key: Key) {
         if let Some(entry) = self.buffer.remove(&key) {
             let unresolved = self.unresolved_set(entry.partition);
             for s in entry.wal_seqs {
@@ -647,7 +635,7 @@ impl LogModel {
     /// (it stays in the implementation's pending map, but the entry has left the
     /// queue and will never re-flush this incarnation), so attribution is
     /// ambiguous — the model marks the sequences `Indeterminate`.
-    fn flush_key_indeterminate(&mut self, key: Key) {
+    fn flush_due_key_indeterminate(&mut self, key: Key) {
         if let Some(entry) = self.buffer.remove(&key) {
             let p = entry.partition;
             for s in entry.wal_seqs {
@@ -1418,9 +1406,9 @@ impl Driver {
         // Model side: transition each due key by the health the flush ran under.
         for key in due_keys {
             if self.store_healthy {
-                self.model.flush_key_durable(key);
+                self.model.flush_due_key_durable(key);
             } else {
-                self.model.flush_key_indeterminate(key);
+                self.model.flush_due_key_indeterminate(key);
             }
         }
     }
@@ -1619,9 +1607,9 @@ impl Driver {
         let remaining: Vec<Key> = self.model.buffer.keys().copied().collect();
         for key in remaining {
             if self.store_healthy {
-                self.model.flush_key_durable(key);
+                self.model.flush_due_key_durable(key);
             } else {
-                self.model.flush_key_indeterminate(key);
+                self.model.flush_due_key_indeterminate(key);
             }
         }
         drop(store);

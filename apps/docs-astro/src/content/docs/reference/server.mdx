@@ -128,9 +128,9 @@ mode and never the default. Use `ollama` or `openai` for real semantic search.
 
 | Variable | Type | Default | Consumer | Notes |
 |---|---|---|---|---|
-| `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | u64 | `1000` | `storage/datastores/write_behind.rs:79` | How often the write-behind buffer flushes to the durable backend. |
-| `TOPGUN_WRITEBEHIND_BATCH_SIZE` | usize | `100` | `storage/datastores/write_behind.rs:99` | Maximum records flushed per write-behind tick. |
-| `TOPGUN_WRITEBEHIND_CAPACITY` | usize | `10000` | `storage/datastores/write_behind.rs:119` | Bounded buffer size. Producers apply backpressure when full. |
+| `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | u64 | `1000` | `WriteBehindConfig::flush_interval_ms` | How often the write-behind buffer flushes to the durable backend. |
+| `TOPGUN_WRITEBEHIND_BATCH_SIZE` | u32 | `100` | `WriteBehindConfig::batch_size` | Size of the groups a flush pass iterates in. Today it does not limit how many entries a flush pass takes: a pass takes every entry that is due when it begins. |
+| `TOPGUN_WRITEBEHIND_CAPACITY` | u64 | `10000` | `WriteBehindConfig::capacity` | Soft bound on buffered keys, so the write buffer cannot grow without limit: a write of a key that is not already buffered is refused once this many keys are buffered (`0` means unlimited). It is not a hard limit — the count can exceed it by the writes of new keys that passed the check at the same moment (`W`), plus one re-write of each key the running flush pass holds (`H`): `buffered <= C - 1 + W + H`, with `H <= C - 1 + W`, because a pass holds every entry that was due when it began. In the worst case the count reaches up to about twice the capacity. A refused write is not acknowledged: the server answers with the transient `internal` error (code 500), and the client keeps the operation and sends it again. |
 
 At startup the server emits a single `tracing::info!` line containing the effective `max_ram_mb`, water marks, eviction interval, and `write_behind_enabled` so operators can confirm the active configuration without reading source.
 
