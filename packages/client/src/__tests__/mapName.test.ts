@@ -89,6 +89,70 @@ describe('mapName predicates', () => {
     );
   });
 
+  describe('the 512-byte bound is measured in UTF-8 bytes, for every kind of character', () => {
+    // What the server counts. Available in the test runtime; the rule itself
+    // must not depend on it (see the next block).
+    const utf8Bytes = (name: string): number => new TextEncoder().encode(name).length;
+
+    const units: Array<[string, string]> = [
+      ['ASCII (1 byte)', 'a'],
+      ['a two-byte character', 'é'],
+      ['a three-byte character', '€'],
+      ['an emoji — a surrogate pair, 4 bytes', '😀'],
+      // An unpaired surrogate is encoded as U+FFFD, 3 bytes.
+      ['a lone high surrogate', '\uD83D'],
+      ['a lone low surrogate', '\uDE00'],
+      ['a low surrogate followed by a high one — two lone surrogates, not a pair', '\uDE00\uD83D'],
+      ['a mix of all of them', 'aé€😀\uD83Dz\uDE00'],
+    ];
+    // Repeat counts on both sides of the bound for every unit width above.
+    const repeats = [1, 28, 29, 56, 57, 85, 86, 100, 128, 129, 170, 171, 256, 257, 512, 513];
+
+    it.each(units)('agrees with the encoded length for %s', (_label, unit) => {
+      for (const n of repeats) {
+        const name = unit.repeat(n);
+        const expected = utf8Bytes(name) > 512 ? 'too_long' : null;
+        expect([n, mapNameViolation(name)]).toEqual([n, expected]);
+      }
+    });
+
+    it.each(units)('reports the encoded length in the message for %s', (_label, unit) => {
+      const name = unit.repeat(513);
+      expect(() => assertStorableMapName(name)).toThrow(`${utf8Bytes(name)} bytes`);
+    });
+  });
+
+  describe('the rule needs no TextEncoder global', () => {
+    // Not every JavaScript runtime an app ships to has one. A missing global
+    // must never turn "open a map" into a ReferenceError.
+    const original = globalThis.TextEncoder;
+
+    beforeEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- removing a global for the duration of the test
+      delete (globalThis as any).TextEncoder;
+    });
+
+    afterEach(() => {
+      globalThis.TextEncoder = original;
+    });
+
+    it('accepts an ordinary name', () => {
+      expect(typeof globalThis.TextEncoder).toBe('undefined');
+      expect(mapNameViolation('users')).toBeNull();
+      expect(() => assertValidMapName('users')).not.toThrow();
+    });
+
+    it('accepts a 512-byte name and refuses a 513-byte one', () => {
+      expect(mapNameViolation(ASCII_512)).toBeNull();
+      expect(mapNameViolation(ASCII_513)).toBe('too_long');
+    });
+
+    it('refuses 300 two-byte characters (600 bytes) and says so', () => {
+      expect(mapNameViolation(TWO_BYTE_300)).toBe('too_long');
+      expect(() => assertValidMapName(TWO_BYTE_300)).toThrow(/600 bytes/);
+    });
+  });
+
   describe('isRestorableOpMapName — the oplog-restore filter, a different set', () => {
     it.each([['x__backup'], ['a\0b'], [ASCII_513], ['users']])(
       'passes %j: a name only the server refuses is restored and sent',
