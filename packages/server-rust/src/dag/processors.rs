@@ -2350,4 +2350,102 @@ mod tests {
         let cloned_procs = cloned.get(1);
         assert_eq!(cloned_procs.len(), 1);
     }
+
+    // --- ScanProcessor over a write-behind store ---
+
+    /// Five durable 3 MiB rows `d0..d4` in redb, a write-behind store over it,
+    /// and `d3` staged through it with a newer value. Nothing is resident. At
+    /// the default batch cost redb pages the map as `[d0,d1]`, `[d2,d3]`, `[d4]`.
+    async fn big_map_with_a_staged_key() -> (Arc<RecordStoreFactory>, tempfile::TempDir) {
+        use crate::storage::datastores::{RedbDataStore, WriteBehindConfig, WriteBehindDataStore};
+        use crate::storage::map_data_store::MapDataStore;
+        use crate::storage::StorageConfig;
+        use topgun_core::types::Value;
+
+        let lww = |value: String, millis: u64| RecordValue::Lww {
+            value: Value::String(value),
+            timestamp: Timestamp {
+                millis,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let redb = Arc::new(RedbDataStore::new(dir.path().join("big.redb")).expect("redb open"));
+        for key in ["d0", "d1", "d2", "d3", "d4"] {
+            redb.add("m", key, &lww("x".repeat(3 * 1024 * 1024), 1), 0, 1000)
+                .await
+                .expect("durable row");
+        }
+        let store = WriteBehindDataStore::new(
+            redb,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 600_000,
+                capacity: 0,
+                ..WriteBehindConfig::default()
+            },
+        );
+        store
+            .add("m", "d3", &lww("NW".to_string(), 9), 0, 2000)
+            .await
+            .expect("staged write");
+        let factory = RecordStoreFactory::new(StorageConfig::default(), store, Vec::new());
+        (Arc::new(factory), dir)
+    }
+
+    fn keys_of(rows: &[rmpv::Value]) -> Vec<String> {
+        rows.iter()
+            .map(|row| {
+                get_field(row, "_key")
+                    .and_then(|key| key.as_str().map(str::to_string))
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bounded_scan_returns_a_staged_non_resident_key_once() {
+        let (factory, _dir) = big_map_with_a_staged_key().await;
+
+        let mut at_five = ScanProcessor::new("m".to_string(), factory.clone(), Vec::new(), Some(5));
+        at_five.init(&make_context()).expect("init");
+        let mut at_four = ScanProcessor::new("m".to_string(), factory, Vec::new(), Some(4));
+        at_four.init(&make_context()).expect("init");
+
+        assert_eq!(
+            (keys_of(&at_five.buffer), keys_of(&at_four.buffer)),
+            (
+                ["d0", "d1", "d2", "d3", "d4"].map(str::to_string).to_vec(),
+                ["d0", "d1", "d2", "d3", "d4"].map(str::to_string).to_vec(),
+            ),
+            "a staged key takes one row of the page, so the boundary row is not displaced"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bounded_scan_returns_a_key_written_after_the_resident_snapshot_once() {
+        let (factory, _dir) = big_map_with_a_staged_key().await;
+        let processor = ScanProcessor::new("m".to_string(), factory, Vec::new(), Some(5));
+        let mut resident: BTreeMap<String, (rmpv::Value, Timestamp)> = BTreeMap::new();
+        resident.insert(
+            "d3".to_string(),
+            (
+                inject_key("d3", rmpv::Value::String("old".into())),
+                Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+            ),
+        );
+
+        let rows = processor.scan_bounded(resident, 5);
+
+        assert_eq!(
+            keys_of(&rows),
+            vec!["d0", "d1", "d2", "d3", "d4"],
+            "a key written after the resident snapshot reaches the page once"
+        );
+    }
 }

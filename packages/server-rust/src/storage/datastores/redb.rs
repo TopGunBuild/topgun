@@ -1256,6 +1256,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scan_values_returns_rows_in_str_order_and_each_cursor_is_the_last_key_of_its_batch() {
+        let (store, _dir) = fresh_store();
+        let mut keys: Vec<String> = [
+            "A",
+            "B",
+            "Z",
+            "a",
+            "b",
+            "z",
+            "a-b",
+            "a_b",
+            "a b",
+            "a.b",
+            "a/b",
+            "aB",
+            "ab",
+            "10",
+            "9",
+            "_",
+            "~",
+            "\u{e9}",
+            "\u{4e2d}",
+            "\u{1f600}",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        keys.sort();
+        for key in keys.iter().rev() {
+            store
+                .add("m", key, &dummy_value("v"), 0, 1000)
+                .await
+                .unwrap();
+        }
+
+        let mut returned: Vec<String> = Vec::new();
+        let mut cursors_are_last_keys = true;
+        let mut no_rowless_batch_with_a_cursor = true;
+        let mut batches = 0u32;
+        let mut batch = store.scan_values("m", false, 1).await.unwrap();
+        loop {
+            batches += 1;
+            let last = batch.records.last().map(|(k, _)| k.clone().into_bytes());
+            if let Some(cursor) = &batch.next_cursor {
+                cursors_are_last_keys &= last.as_ref() == Some(&cursor.0);
+                no_rowless_batch_with_a_cursor &= !batch.records.is_empty();
+            }
+            returned.extend(batch.records.iter().map(|(k, _)| k.clone()));
+            match batch.next_cursor.take() {
+                Some(cursor) => {
+                    batch = store
+                        .scan_values_batched("m", false, cursor, 1)
+                        .await
+                        .unwrap();
+                }
+                None => break,
+            }
+        }
+
+        assert_eq!(
+            (
+                returned == keys,
+                cursors_are_last_keys,
+                no_rowless_batch_with_a_cursor,
+                batches
+            ),
+            (true, true, true, 20),
+            "redb scans in str order and resumes from the last key of each batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_redb_store_declares_key_ordered_scans() {
+        let (store, _dir) = fresh_store();
+
+        assert_eq!(
+            (store.scans_in_key_order(), store.is_null()),
+            (true, false),
+            "the write-behind overlay places buffered keys by the order redb declares"
+        );
+    }
+
+    #[tokio::test]
     async fn scan_values_empty_map_is_exhausted() {
         let (store, _dir) = fresh_store();
         let batch = store.scan_values("never", false, 0).await.unwrap();
