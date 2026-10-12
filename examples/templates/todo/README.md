@@ -46,7 +46,7 @@ The client stores writes in IndexedDB (`topgun-template-todo`) while offline and
 
 ### Field-level conflict resolution: `useMap` + server-side resolver
 
-Each todo stores its fields (`title`, `completed`) in a per-todo `useMap('todo:<id>')`. The app registers a server-side `ConflictResolverDef` at startup (in `src/lib/conflictResolver.ts`, called once from `src/main.tsx` before React mounts to avoid React 18 strict-mode double-registration):
+Each todo stores its fields (`title`, `completed`) in a per-todo `useMap('todo/<id>')`. Keep this in mind before copying the pattern into a large app: one map per todo means the server keeps one table per todo on the embedded backend, so the number of tables grows with every todo ever created. For more than a demo's worth of items, store the fields as entries of one shared map instead. The app registers a server-side `ConflictResolverDef` at startup (in `src/lib/conflictResolver.ts`, called once from `src/main.tsx` before React mounts to avoid React 18 strict-mode double-registration):
 
 ```ts
 client.getConflictResolvers().register('todos', {

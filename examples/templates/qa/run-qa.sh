@@ -6,7 +6,7 @@
 #   The todosConflictResolver targets mapName='todos' (ORMap). ORMap.add(id, tag)
 #   with unique tags never produces a merge rejection — each tag is distinct so
 #   concurrent adds both survive. For a genuine LWW conflict the resolver would
-#   need to target per-todo LWWMaps (dynamic keys: todo:{id}), which the current
+#   need to target per-todo LWWMaps (dynamic keys: todo/{id}), which the current
 #   register(mapName, def) API cannot address with a static name. Decision:
 #   DOWNGRADE — AC #7 is an INFO verdict. No template code was changed.
 #   Follow-up tracked as TODO for a dedicated LWW-conflict smoke-test.
@@ -365,7 +365,7 @@ scenario_ac7() {
 
   yellow "  ⚠ AC #7 INFO — ConflictLog panel exists in UI but resolver does not"
   yellow "    fire for ORMap operations. Follow-up TODO tracks a dedicated"
-  yellow "    LWW-conflict smoke-test (two tabs editing same todo:id LWWMap)."
+  yellow "    LWW-conflict smoke-test (two tabs editing same todo/id LWWMap)."
   return 0
 }
 

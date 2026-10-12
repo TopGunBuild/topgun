@@ -26,7 +26,7 @@ export function TodoList() {
     // map via the client (bypassing hooks) because we are inside an event handler,
     // not at the top level of a component. This is safe: the LWWMap is cached by
     // the client and TodoItem will see the same instance via useMap.
-    const todoMap = client.getMap<string, string | boolean>(`todo:${id}`);
+    const todoMap = client.getMap<string, string | boolean>(`todo/${id}`);
     todoMap.set('title', title);
     todoMap.set('completed', false);
     setNewTitle('');

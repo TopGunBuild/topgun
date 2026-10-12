@@ -81,3 +81,25 @@ pnpm start:server
 The server defaults to embedded redb storage on disk — no Postgres needed. The notes app expects the server on `ws://localhost:8080`; set `VITE_TOPGUN_SERVER_URL` if you bind elsewhere.
 
 > **Tip:** for quick, auth-free experimentation (no Clerk integration), run `TOPGUN_NO_AUTH=1 pnpm start:server` and skip Clerk wiring entirely.
+
+## Upgrading: map names changed from `notes:<id>` to `notes/<id>`
+
+Each signed-in user's notes and folders now live in the maps `notes/<userId>` and `folders/<userId>`. Earlier versions of this example used `notes:<userId>` and `folders:<userId>`, which the current client refuses: `:` is not allowed in a map name.
+
+If you run this example on the embedded (default) storage and only for yourself, nothing needs doing — sign in and start with empty maps.
+
+If you have a Postgres database with rows saved under the old names, rename them once, with the server stopped. This assumes the server's default table name, `topgun_maps`:
+
+```sql
+UPDATE topgun_maps
+SET map_name = 'notes/' || substr(map_name, length('notes:') + 1)
+WHERE map_name LIKE 'notes:%';
+
+UPDATE topgun_maps
+SET map_name = 'folders/' || substr(map_name, length('folders:') + 1)
+WHERE map_name LIKE 'folders:%';
+```
+
+Browsers that used the old version still hold the old names in local storage; those copies are not read under the new names.
+
+No deployment configuration for this example was found in the repository beyond its Dockerfile (`deploy/Dockerfile.notes-app`), and the server it may be running on was not inspected. If you operate a deployment of it, check its database for the old names before upgrading.

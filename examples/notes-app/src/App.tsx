@@ -95,8 +95,8 @@ function AppContent() {
   const [isDraggingRight, setIsDraggingRight] = useState(false);
 
   const { user } = useUser();
-  const notesMap = user ? `notes:${user.id}` : 'notes-public';
-  const foldersMap = user ? `folders:${user.id}` : 'folders-public';
+  const notesMap = user ? `notes/${user.id}` : 'notes-public';
+  const foldersMap = user ? `folders/${user.id}` : 'folders-public';
 
   // Data fetching
   const { data: folders } = useQuery<Folder>(foldersMap);
