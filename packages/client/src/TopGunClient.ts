@@ -47,7 +47,11 @@ import type { HybridSearchSubscribeOptions } from './HybridSearchHandle';
 import { HybridQueryHandle } from './HybridQueryHandle';
 import type { HybridQueryFilter } from './HybridQueryHandle';
 import { logger } from './utils/logger';
-import { assertValidMapName, keyBelongsToLongerHeldName } from './utils/mapName';
+import {
+  assertStorableMapName,
+  assertValidMapName,
+  keyBelongsToLongerHeldName,
+} from './utils/mapName';
 import { loadOrMapKeyTombstones } from './utils/orMapKeyTombstones';
 import { SyncState } from './SyncState';
 import type { StateChangeEvent } from './SyncStateMachine';
@@ -360,6 +364,10 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   public query<T = any>(mapName: string, filter: QueryFilter): QueryHandle<T>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature uses any to satisfy both overloads; return type is narrowed by the overload the caller selects
   public query(mapName: string, filter: QueryFilter): QueryHandle<any> {
+    // The server answers a query for a name it cannot hold with no frame at all,
+    // so the refusal has to happen here or the caller waits on silence. ":" is
+    // deliberately allowed: a query creates no local key prefix under its name.
+    assertStorableMapName(mapName);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- QueryHandle constructed for untyped internal storage; actual type flows from the selected overload
     return new QueryHandle<any>(this.syncEngine, mapName, filter);
   }
@@ -397,6 +405,9 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     opts?: QueryOnceOptions,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature uses any to satisfy both overloads; return type is narrowed by the overload the caller selects
   ): Promise<QueryResultItem<any>[]> {
+    // Before the handle exists and before the first await: a refused name rejects
+    // the promise whatever the connection state, and nothing is subscribed for it.
+    assertStorableMapName(mapName);
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_QUERY_ONCE_TIMEOUT_MS;
     const allowLocal = opts?.allowLocal ?? false;
 
@@ -472,6 +483,9 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     opts?: QueryOnceOptions,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature uses any to satisfy both overloads; return type is narrowed by the overload the caller selects
   ): Promise<QueryOncePagedResult<any>> {
+    // Before the handle exists and before the first await: a refused name rejects
+    // the promise whatever the connection state, and nothing is subscribed for it.
+    assertStorableMapName(mapName);
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_QUERY_ONCE_TIMEOUT_MS;
     const allowLocal = opts?.allowLocal ?? false;
 

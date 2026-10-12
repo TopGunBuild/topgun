@@ -1,4 +1,17 @@
-import { isValidMapName, assertValidMapName, keyBelongsToLongerHeldName } from '../utils/mapName';
+import {
+  assertStorableMapName,
+  assertValidMapName,
+  isRestorableOpMapName,
+  isStorableMapName,
+  isValidMapName,
+  keyBelongsToLongerHeldName,
+  mapNameViolation,
+} from '../utils/mapName';
+
+const ASCII_512 = 'a'.repeat(512);
+const ASCII_513 = 'a'.repeat(513);
+// 300 characters of two UTF-8 bytes each: 300 by `length`, 600 by the server's count.
+const TWO_BYTE_300 = 'é'.repeat(300);
 
 describe('mapName predicates', () => {
   describe('isValidMapName', () => {
@@ -23,6 +36,85 @@ describe('mapName predicates', () => {
     });
   });
 
+  describe('isValidMapName — the write-time rule (server rule plus no ":")', () => {
+    it.each([
+      ['empty', ''],
+      ['a ":"', 'a:b'],
+      ['the reserved suffix', 'x__backup'],
+      ['a NUL character', 'a\0b'],
+      ['513 bytes of ASCII', ASCII_513],
+      ['300 two-byte characters (600 bytes)', TWO_BYTE_300],
+    ])('is false for %s', (_label, name) => {
+      expect(isValidMapName(name)).toBe(false);
+    });
+
+    it.each([[undefined], [null], [42], [{}]])('is false for the non-string %p', (name) => {
+      expect(isValidMapName(name as unknown as string)).toBe(false);
+    });
+
+    it.each([
+      ['a-b'],
+      ['a/b'],
+      ['a.b'],
+      ['$sys/x'],
+      // The suffix is reserved only at the end of a name.
+      ['__backup_data'],
+      [ASCII_512],
+    ])('is true for %j', (name) => {
+      expect(isValidMapName(name)).toBe(true);
+    });
+  });
+
+  describe('mapNameViolation — the server rule, in the server order', () => {
+    it.each([
+      ['', 'empty'],
+      ['x__backup', 'reserved_backup_suffix'],
+      ['a\0b', 'contains_nul'],
+      [ASCII_513, 'too_long'],
+      [TWO_BYTE_300, 'too_long'],
+      // Earlier clauses win over later ones.
+      ['a\0b__backup', 'reserved_backup_suffix'],
+      [`\0${ASCII_513}`, 'contains_nul'],
+    ])('mapNameViolation(%j) === %j', (name, expected) => {
+      expect(mapNameViolation(name)).toBe(expected);
+      expect(isStorableMapName(name)).toBe(false);
+    });
+
+    it.each([['a:b'], ['a-b'], ['users/profiles'], [ASCII_512]])(
+      'accepts %j — the server has no rule about ":"',
+      (name) => {
+        expect(mapNameViolation(name)).toBeNull();
+        expect(isStorableMapName(name)).toBe(true);
+      },
+    );
+  });
+
+  describe('isRestorableOpMapName — the oplog-restore filter, a different set', () => {
+    it.each([['x__backup'], ['a\0b'], [ASCII_513], ['users']])(
+      'passes %j: a name only the server refuses is restored and sent',
+      (name) => {
+        expect(isRestorableOpMapName(name)).toBe(true);
+      },
+    );
+
+    it.each([[''], ['a:b'], [undefined], [7]])('holds back %p', (name) => {
+      expect(isRestorableOpMapName(name)).toBe(false);
+    });
+  });
+
+  describe('assertStorableMapName', () => {
+    it('does not throw for a name with ":"', () => {
+      expect(() => assertStorableMapName('a:b')).not.toThrow();
+    });
+
+    it('never mentions ":" — that restriction is not the server\'s', () => {
+      for (const name of ['', 'x__backup', 'a\0b', ASCII_513]) {
+        expect(() => assertStorableMapName(name)).toThrow(Error);
+        expect(() => assertStorableMapName(name)).not.toThrow(/":"/);
+      }
+    });
+  });
+
   describe('assertValidMapName', () => {
     it('does not throw for a colon-free name', () => {
       expect(() => assertValidMapName('a-b')).not.toThrow();
@@ -42,6 +134,27 @@ describe('mapName predicates', () => {
       expect(() => assertValidMapName('')).toThrow(/must not be empty/);
       // The empty-name path must NOT reuse the colon message.
       expect(() => assertValidMapName('')).not.toThrow(/":" character is not allowed/);
+    });
+
+    it('says the "__backup" suffix is reserved, and does not blame ":"', () => {
+      expect(() => assertValidMapName('x__backup')).toThrow(/__backup/);
+      expect(() => assertValidMapName('x__backup')).toThrow(/reserved by the server/);
+      expect(() => assertValidMapName('x__backup')).not.toThrow(/":"/);
+    });
+
+    it('states the 512-byte bound and the actual byte length', () => {
+      expect(() => assertValidMapName(ASCII_513)).toThrow(/512 bytes/);
+      expect(() => assertValidMapName(ASCII_513)).toThrow(/513 bytes/);
+      // Bytes, not characters: 300 characters, 600 bytes.
+      expect(() => assertValidMapName(TWO_BYTE_300)).toThrow(/600 bytes/);
+    });
+
+    it('has a message of its own for a NUL character', () => {
+      expect(() => assertValidMapName('a\0b')).toThrow(/NUL/);
+    });
+
+    it('still suggests "-", "/" or "_" in place of ":"', () => {
+      expect(() => assertValidMapName('a:b')).toThrow(/Use "-", "\/", or "_" instead/);
     });
   });
 

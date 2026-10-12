@@ -24,7 +24,7 @@ import type { HybridQueryHandle, HybridQueryFilter } from './HybridQueryHandle';
 import { TopicHandle } from './TopicHandle';
 import { logger } from './utils/logger';
 import { unrefTimer } from './utils/unrefTimer';
-import { isValidMapName, keyBelongsToLongerHeldName } from './utils/mapName';
+import { isRestorableOpMapName, keyBelongsToLongerHeldName } from './utils/mapName';
 import {
   loadOrMapKeyTombstones,
   orMapKeyTombstonesBucketKey,
@@ -946,19 +946,33 @@ export class SyncEngine {
     // Clear and push to existing array (preserves BackpressureController reference)
     this.opLog.length = 0;
     // The OP_BATCH flush is held-set-independent, so a persisted op under a
-    // forbidden (non-injective) map name is the one path that could reach the
-    // server despite map-creation being forbidden for such names. Shed those
-    // entries at load — non-throwing (never invoke the throwing guard in the
-    // restore loop); an invalid entry is dropped, not fatal.
+    // non-injective map name (empty, or holding ":") is the one path that could
+    // reach the server despite map-creation being forbidden for such names. Shed
+    // those entries at load — non-throwing (never invoke the throwing guard in
+    // the restore loop); such an entry is not sent, not fatal, and not deleted
+    // from storage here.
+    //
+    // This is deliberately NOT the write-time rule. A name only the server
+    // refuses (reserved suffix, too long, a NUL character) stays in the op log
+    // and is sent: the server's permanent refusal is what retires it, and that
+    // refusal is what tells the application. Filtering it here would make the
+    // write vanish without a word.
+    const MAX_REPORTED_SHED_NAMES = 10;
     let droppedInvalidName = 0;
+    const shedMapNames: string[] = [];
     for (const op of pendingOps) {
       const restored = {
         ...op,
         id: String(op.id),
         synced: false,
       } as unknown as OpLogEntry;
-      if (!isValidMapName(restored.mapName)) {
+      if (!isRestorableOpMapName(restored.mapName)) {
         droppedInvalidName++;
+        // A stored op can hold anything; the log line promises strings.
+        const shedName = String(restored.mapName);
+        if (shedMapNames.length < MAX_REPORTED_SHED_NAMES && !shedMapNames.includes(shedName)) {
+          shedMapNames.push(shedName);
+        }
         continue;
       }
       this.opLog.push(restored);
@@ -969,8 +983,8 @@ export class SyncEngine {
 
     if (droppedInvalidName > 0) {
       logger.warn(
-        { count: droppedInvalidName },
-        'Dropped restored pending operations with an invalid (non-injective) map name; they will not be flushed to the server',
+        { count: droppedInvalidName, mapNames: shedMapNames },
+        'Held back restored pending operations with an invalid (non-injective) map name; these operations will not be sent to the server',
       );
     }
 
