@@ -172,6 +172,10 @@ describe('writeRejectionCauseFromCode', () => {
     expect(writeRejectionCauseFromCode(422)).toBe('schema_invalid');
   });
 
+  test('maps the invalid-map-name refusal (400) onto its own cause', () => {
+    expect(writeRejectionCauseFromCode(400)).toBe('invalid_map_name');
+  });
+
   test('reports an unmapped or absent code as unknown, and logs the unmapped one', () => {
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
 
