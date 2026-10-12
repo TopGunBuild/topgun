@@ -113,7 +113,7 @@ async fn run_requested_pass(store: &WriteBehindDataStore, label: &str) {
     store.soft_flush().await.expect("soft_flush");
     wait_until(label, || {
         let epoch = store.flush_pass_epoch.load(Ordering::SeqCst);
-        epoch % 2 == 0 && epoch >= before + 2
+        epoch.is_multiple_of(2) && epoch >= before + 2
     })
     .await;
 }
@@ -1424,10 +1424,7 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
         .unwrap();
     let seeded = store.test_pending_wal_sequences(partition);
     run_requested_pass(&store, "the pass that flushes the live write").await;
-    assert!(
-        inner.contains(&keys[3]).await,
-        "the live write must have flushed Ok"
-    );
+    assert!(inner.contains(&keys[3]).await, "the live write flushed");
 
     let sidecar_after_live_flush = wal.test_read_applied_sequence(partition);
     let alarm = store.test_run_classifier_sample(partition);
