@@ -1782,7 +1782,15 @@ impl WriteBehindDataStore {
                 let partition_id_for_wal = partition_for(&entry.map, &entry.key);
                 match tokio::time::timeout(remaining, flush_future).await {
                     Ok(Ok(())) => {
-                        self.staging.remove(&(entry.map.clone(), entry.key.clone()));
+                        // A writer that passed the lifecycle check before the
+                        // shutdown may have staged a newer write of this key —
+                        // its entry already queued (it completed while this
+                        // drain was inside the store call above) or not queued
+                        // yet. Removing the slot without comparing sequences
+                        // would leave that write buffered with no slot, and
+                        // reads would fall back to the older durable value
+                        // (`TG-WB-007`).
+                        self.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
                         self.pending_count.fetch_sub(1, Ordering::Relaxed);
                         self.resolve_pending(entry.sequence);
                         // Resolve and advance so a restart after clean shutdown is
