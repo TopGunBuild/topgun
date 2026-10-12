@@ -50,7 +50,11 @@ pub struct WriteBehindConfig {
     pub write_delay_ms: u64,
     /// How often the background flush task runs, in milliseconds.
     pub flush_interval_ms: u64,
-    /// Maximum number of entries to process per flush batch.
+    /// Size of the groups a flush pass iterates in.
+    ///
+    /// It does not limit how many entries a pass takes or persists: a pass
+    /// takes every entry that is due when it begins and works through all of
+    /// them, `batch_size` at a time, with nothing between the groups.
     pub batch_size: u32,
     /// Number of retry attempts for failed flush operations.
     pub max_retries: u32,
@@ -58,7 +62,41 @@ pub struct WriteBehindConfig {
     pub backoff_base_ms: u64,
     /// Maximum retry backoff cap in milliseconds.
     pub backoff_cap_ms: u64,
-    /// Node-wide maximum pending entries. 0 means unlimited.
+    /// Soft bound on the number of buffered keys. `0` disables the check.
+    ///
+    /// What is counted: buffered keys — queued entries plus the entries a
+    /// flush pass holds, which stay counted until each is persisted or
+    /// discarded.
+    ///
+    /// The rule: a write (`add`, `remove`, each key of `remove_all`) of a key
+    /// that is not buffered is refused while the count is at or above
+    /// `capacity`, with the error `Write-behind capacity exceeded`. A write of
+    /// a buffered key is always accepted.
+    ///
+    /// It is not a hard limit. The check and the queue insert are separate
+    /// steps with nothing reserved between them. With `C = capacity > 0`:
+    ///
+    /// ```text
+    /// pending_count  <=  C - 1 + W + H
+    /// H              <=  C - 1 + W
+    /// ```
+    ///
+    /// - `W` is the number of writes of distinct keys that are not buffered
+    ///   and that are, at one instant, between the check and their queue
+    ///   insert (the WAL append lies in between). `W >= 1` while any write is
+    ///   in progress: the writer that is inserting is itself past its check,
+    ///   so with one writer and no flush pass the count reaches `C`.
+    /// - `H` is the number of entries the running flush pass holds whose key
+    ///   was re-written while the pass holds them; each such key is counted a
+    ///   second time, once. A pass holds every entry that was due when it
+    ///   began — `batch_size` does not bound it — hence the second line.
+    ///
+    /// In the worst case the count stays below `2 * (C + W)`.
+    ///
+    /// Precondition, which is not enforced: the formula is derived for keys
+    /// whose staging slot exists only while an entry of the key is queued or
+    /// held by a flush pass, with one writer per key (`TG-KEY-001`). See
+    /// `TG-WB-006`, "Not claimed", for the interleaving that breaks it.
     pub capacity: u64,
     /// Maximum milliseconds to wait for the write-behind buffer to drain on
     /// graceful shutdown. On timeout, still-pending ops are logged and the
@@ -3404,7 +3442,11 @@ impl MapDataStore for WriteBehindDataStore {
             // at most the number of entries a flush pass holds plus the number
             // of writers that are between this check and their insert. Every
             // write of a key that is in neither staging nor a flush pass is
-            // rejected while `pending_count >= capacity`.
+            // rejected while `pending_count >= capacity`. A pass holds every
+            // entry that was due when it began, whatever `batch_size`, so the
+            // first of those two terms is itself bounded only by what was
+            // queued at that moment. The formula and its precondition are on
+            // `WriteBehindConfig::capacity`.
             let is_new_key = !self
                 .staging
                 .contains_key(&(map.to_string(), key.to_string()));
@@ -3590,7 +3632,7 @@ impl MapDataStore for WriteBehindDataStore {
             ),
         }
 
-        // Check capacity before insertion
+        // The same soft bound as in `add_with_witness`, where it is described.
         if self.config.capacity != 0 {
             let current = self.pending_count.load(Ordering::Relaxed);
             let is_new_key = !self
@@ -3788,7 +3830,7 @@ impl MapDataStore for WriteBehindDataStore {
         let now = now_millis();
 
         for key in keys {
-            // Check capacity before each insertion
+            // The same soft bound as in `add_with_witness`, checked per key.
             if self.config.capacity != 0 {
                 let current = self.pending_count.load(Ordering::Relaxed);
                 let is_new_key = !self.staging.contains_key(&(map.to_string(), key.clone()));
