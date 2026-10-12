@@ -1,6 +1,7 @@
 /**
  * Integration: on the Postgres backend, a write the server acknowledged is
- * still there after a restart for map names that use "-", "/" and ":".
+ * still there after a restart for map names that use "-", "/", ":" and ".",
+ * and for a name that starts with "$" ("$sys/x").
  *
  * Postgres keeps the map name as a column value, so none of these characters
  * needs any mapping there. This file pins that against a real database: it is
@@ -9,8 +10,10 @@
  *
  * It needs two things the default run does not have: `DATABASE_URL` naming a
  * reachable Postgres database, and a server binary built with the `postgres`
- * feature (`RUST_SERVER_BINARY`). Without `DATABASE_URL` the whole file is
- * skipped and says so on stderr; nothing here passes without having run.
+ * feature (`RUST_SERVER_BINARY`). The default run therefore leaves this file
+ * out and says so; `pnpm test:integration-rust:postgres` runs it. With either
+ * variable missing the file fails; it never skips, so nothing here passes
+ * without having run.
  *
  * The database outlives the run, so the key and the value are unique per run:
  * a value read after the restart can only be the one this run wrote.
@@ -32,12 +35,12 @@ import {
   TestClient,
 } from './helpers';
 
-const DATABASE_URL = process.env.DATABASE_URL;
-
 const DASH_MAP = 'user-profiles';
 const SLASH_MAP = 'users/profiles';
 const COLON_MAP = 'notes:abc';
-const MAPS = [DASH_MAP, SLASH_MAP, COLON_MAP];
+const DOT_MAP = 'users.profiles';
+const DOLLAR_MAP = '$sys/x';
+const MAPS = [DASH_MAP, SLASH_MAP, COLON_MAP, DOT_MAP, DOLLAR_MAP];
 
 const RUN_ID = crypto.randomUUID();
 const KEY = `alice-${RUN_ID}`;
@@ -54,184 +57,185 @@ interface Observed {
   merkleAfterRestart: unknown;
 }
 
-if (!DATABASE_URL) {
-  // Straight to stderr: the suite silences console.log, and a skipped file
-  // that does not say why reads as a file that passed.
-  process.stderr.write(
-    'SKIPPED map-name-postgres: DATABASE_URL is not set. To run it, point DATABASE_URL at a ' +
-      'Postgres database and RUST_SERVER_BINARY at a server built with `--features postgres`.\n',
-  );
+/** Reads the two variables this file needs, and throws — never skips — when either is missing. */
+function requirePostgresRun(): string {
+  const hint =
+    'Point DATABASE_URL at a Postgres database and RUST_SERVER_BINARY at a server built with ' +
+    '`cargo build --release --bin topgun-server --features postgres`.';
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error(`DATABASE_URL is not set. ${hint}`);
+  // Without a prebuilt binary the harness falls back to `cargo run`, which
+  // builds a server that has no Postgres backend at all.
+  if (!process.env.RUST_SERVER_BINARY) throw new Error(`RUST_SERVER_BINARY is not set. ${hint}`);
+  return url;
 }
 
-const describeWithPostgres = DATABASE_URL ? describe : describe.skip;
+const DATABASE_URL = requirePostgresRun();
 
-describeWithPostgres(
-  'Integration: an acknowledged write survives a restart on Postgres for map names with "-", "/" and ":"',
-  () => {
-    let server: SpawnedServer | null = null;
-    let walDir: string | null = null;
-    const observed = new Map<string, Observed>();
-    /** WARN/ERROR lines the server logged, per incarnation, kept as evidence of what it did. */
-    const serverLog: string[] = [];
+describe('Integration: an acknowledged write survives a restart on Postgres for map names with "-", "/", ":", "." and a leading "$"', () => {
+  let server: SpawnedServer | null = null;
+  let walDir: string | null = null;
+  const observed = new Map<string, Observed>();
+  /** WARN/ERROR lines the server logged, per incarnation, kept as evidence of what it did. */
+  const serverLog: string[] = [];
 
-    function captureLog(spawned: SpawnedServer, incarnation: string): SpawnedServer {
-      spawned.process.stdout?.on('data', (chunk: Buffer) => {
-        for (const line of chunk.toString('utf8').split('\n')) {
-          if (/WARN|ERROR/.test(line)) serverLog.push(`[${incarnation}] ${line}`);
-        }
-      });
-      return spawned;
-    }
-
-    /** A read that fails is itself an observation, so it is recorded instead of aborting the run. */
-    async function attempt(read: () => Promise<unknown>): Promise<unknown> {
-      try {
-        return await read();
-      } catch (err) {
-        return `READ FAILED: ${(err as Error).message}`;
+  function captureLog(spawned: SpawnedServer, incarnation: string): SpawnedServer {
+    spawned.process.stdout?.on('data', (chunk: Buffer) => {
+      for (const line of chunk.toString('utf8').split('\n')) {
+        if (/WARN|ERROR/.test(line)) serverLog.push(`[${incarnation}] ${line}`);
       }
-    }
+    });
+    return spawned;
+  }
 
-    function startServer(dir: string): Promise<SpawnedServer> {
-      return spawnRustServer({
-        env: {
-          STORAGE_BACKEND: 'postgres',
-          DATABASE_URL: DATABASE_URL!,
-          TOPGUN_WAL_DIR: dir,
-          TOPGUN_WAL_FSYNC_POLICY: 'per_op',
+  /** A read that fails is itself an observation, so it is recorded instead of aborting the run. */
+  async function attempt(read: () => Promise<unknown>): Promise<unknown> {
+    try {
+      return await read();
+    } catch (err) {
+      return `READ FAILED: ${(err as Error).message}`;
+    }
+  }
+
+  function startServer(dir: string): Promise<SpawnedServer> {
+    return spawnRustServer({
+      env: {
+        STORAGE_BACKEND: 'postgres',
+        DATABASE_URL,
+        TOPGUN_WAL_DIR: dir,
+        TOPGUN_WAL_FSYNC_POLICY: 'per_op',
+      },
+    });
+  }
+
+  async function stopServer(): Promise<void> {
+    if (!server) return;
+    const stopping = server;
+    server = null;
+    await stopping.cleanup();
+    await waitUntil(
+      () => stopping.process.exitCode !== null || stopping.process.signalCode !== null,
+      SIGNAL_TIMEOUT_MS,
+    );
+  }
+
+  async function connect(port: number, nodeId: string): Promise<TestClient> {
+    const client = await createRustTestClient(port, {
+      nodeId,
+      userId: 'map-name-user',
+      roles: ['ADMIN'],
+    });
+    await client.waitForMessage('AUTH_ACK', SIGNAL_TIMEOUT_MS);
+    return client;
+  }
+
+  /** Reads one key of a map through a snapshot query, over a connection of its own. */
+  async function queryValue(port: number, mapName: string, nodeId: string): Promise<unknown> {
+    const client = await connect(port, nodeId);
+    try {
+      client.send({
+        type: 'QUERY_SUB',
+        payload: { queryId: `q-${nodeId}`, mapName, query: {} },
+      });
+      const response = await client.waitForMessage('QUERY_RESP', SIGNAL_TIMEOUT_MS);
+      const row = (response.payload.results as any[]).find((r) => r.key === KEY);
+      return row ? (row.record?.value ?? row.value) : undefined;
+    } finally {
+      client.close();
+    }
+  }
+
+  /** Reads one key of a map through a full Merkle walk from an empty tree. */
+  async function merkleValue(port: number, mapName: string, nodeId: string): Promise<unknown> {
+    const client = await connect(port, nodeId);
+    try {
+      const records = await completeMerkleSync(client, mapName, SIGNAL_TIMEOUT_MS);
+      return records.get(KEY)?.value;
+    } finally {
+      client.close();
+    }
+  }
+
+  beforeAll(async () => {
+    walDir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-map-name-pg-'));
+    server = captureLog(await startServer(walDir), 'first run');
+
+    const writer = await connect(server.port, 'map-name-pg-writer');
+    for (const [i, mapName] of MAPS.entries()) {
+      writer.messages.length = 0;
+      writer.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: `op-map-name-pg-${i}`,
+          mapName,
+          opType: 'PUT',
+          key: KEY,
+          record: createLWWRecord(VALUE),
         },
       });
-    }
-
-    async function stopServer(): Promise<void> {
-      if (!server) return;
-      const stopping = server;
-      server = null;
-      await stopping.cleanup();
-      await waitUntil(
-        () => stopping.process.exitCode !== null || stopping.process.signalCode !== null,
-        SIGNAL_TIMEOUT_MS,
-      );
-    }
-
-    async function connect(port: number, nodeId: string): Promise<TestClient> {
-      const client = await createRustTestClient(port, {
-        nodeId,
-        userId: 'map-name-user',
-        roles: ['ADMIN'],
+      let acked = true;
+      try {
+        await writer.waitForMessage('OP_ACK', SIGNAL_TIMEOUT_MS);
+      } catch {
+        acked = false;
+      }
+      observed.set(mapName, {
+        acked,
+        queryBeforeRestart: undefined,
+        queryAfterRestart: undefined,
+        merkleAfterRestart: undefined,
       });
-      await client.waitForMessage('AUTH_ACK', SIGNAL_TIMEOUT_MS);
-      return client;
     }
+    writer.close();
 
-    /** Reads one key of a map through a snapshot query, over a connection of its own. */
-    async function queryValue(port: number, mapName: string, nodeId: string): Promise<unknown> {
-      const client = await connect(port, nodeId);
-      try {
-        client.send({
-          type: 'QUERY_SUB',
-          payload: { queryId: `q-${nodeId}`, mapName, query: {} },
-        });
-        const response = await client.waitForMessage('QUERY_RESP', SIGNAL_TIMEOUT_MS);
-        const row = (response.payload.results as any[]).find((r) => r.key === KEY);
-        return row ? (row.record?.value ?? row.value) : undefined;
-      } finally {
-        client.close();
-      }
-    }
-
-    /** Reads one key of a map through a full Merkle walk from an empty tree. */
-    async function merkleValue(port: number, mapName: string, nodeId: string): Promise<unknown> {
-      const client = await connect(port, nodeId);
-      try {
-        const records = await completeMerkleSync(client, mapName, SIGNAL_TIMEOUT_MS);
-        return records.get(KEY)?.value;
-      } finally {
-        client.close();
-      }
-    }
-
-    beforeAll(async () => {
-      walDir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-map-name-pg-'));
-      server = captureLog(await startServer(walDir), 'first run');
-
-      const writer = await connect(server.port, 'map-name-pg-writer');
-      for (const [i, mapName] of MAPS.entries()) {
-        writer.messages.length = 0;
-        writer.send({
-          type: 'CLIENT_OP',
-          payload: {
-            id: `op-map-name-pg-${i}`,
-            mapName,
-            opType: 'PUT',
-            key: KEY,
-            record: createLWWRecord(VALUE),
-          },
-        });
-        let acked = true;
-        try {
-          await writer.waitForMessage('OP_ACK', SIGNAL_TIMEOUT_MS);
-        } catch {
-          acked = false;
-        }
-        observed.set(mapName, {
-          acked,
-          queryBeforeRestart: undefined,
-          queryAfterRestart: undefined,
-          merkleAfterRestart: undefined,
-        });
-      }
-      writer.close();
-
-      for (const [i, mapName] of MAPS.entries()) {
-        const port = server.port;
-        observed.get(mapName)!.queryBeforeRestart = await attempt(() =>
-          queryValue(port, mapName, `map-name-pg-before-${i}`),
-        );
-      }
-
-      await waitForSync(FLUSH_SETTLE_MS);
-      await stopServer();
-      server = captureLog(await startServer(walDir), 'after restart');
+    for (const [i, mapName] of MAPS.entries()) {
       const port = server.port;
-
-      for (const [i, mapName] of MAPS.entries()) {
-        const seen = observed.get(mapName)!;
-        seen.queryAfterRestart = await attempt(() =>
-          queryValue(port, mapName, `map-name-pg-after-q-${i}`),
-        );
-        seen.merkleAfterRestart = await attempt(() =>
-          merkleValue(port, mapName, `map-name-pg-after-m-${i}`),
-        );
-      }
-
-      // Written straight to stderr (the suite silences console.log) so a run
-      // records exactly what the server did.
-      process.stderr.write(
-        `map-name postgres observed:\n${JSON.stringify([...observed.entries()], null, 2)}\n` +
-          `server WARN/ERROR lines:\n${serverLog.join('\n')}\n`,
+      observed.get(mapName)!.queryBeforeRestart = await attempt(() =>
+        queryValue(port, mapName, `map-name-pg-before-${i}`),
       );
-    }, 240_000);
+    }
 
-    afterAll(async () => {
-      await stopServer();
-      if (walDir) fs.rmSync(walDir, { recursive: true, force: true });
+    await waitForSync(FLUSH_SETTLE_MS);
+    await stopServer();
+    server = captureLog(await startServer(walDir), 'after restart');
+    const port = server.port;
+
+    for (const [i, mapName] of MAPS.entries()) {
+      const seen = observed.get(mapName)!;
+      seen.queryAfterRestart = await attempt(() =>
+        queryValue(port, mapName, `map-name-pg-after-q-${i}`),
+      );
+      seen.merkleAfterRestart = await attempt(() =>
+        merkleValue(port, mapName, `map-name-pg-after-m-${i}`),
+      );
+    }
+
+    // Written straight to stderr (the suite silences console.log) so a run
+    // records exactly what the server did.
+    process.stderr.write(
+      `map-name postgres observed:\n${JSON.stringify([...observed.entries()], null, 2)}\n` +
+        `server WARN/ERROR lines:\n${serverLog.join('\n')}\n`,
+    );
+  }, 240_000);
+
+  afterAll(async () => {
+    await stopServer();
+    if (walDir) fs.rmSync(walDir, { recursive: true, force: true });
+  });
+
+  describe.each(MAPS)('map %p', (mapName) => {
+    test('the write is acknowledged and readable before the restart', () => {
+      const seen = observed.get(mapName)!;
+      expect(seen.acked).toBe(true);
+      expect(seen.queryBeforeRestart).toEqual(VALUE);
     });
 
-    describe.each(MAPS)('map %p', (mapName) => {
-      test('the write is acknowledged and readable before the restart', () => {
-        const seen = observed.get(mapName)!;
-        expect(seen.acked).toBe(true);
-        expect(seen.queryBeforeRestart).toEqual(VALUE);
-      });
-
-      test('a query after the restart returns the acknowledged write', () => {
-        expect(observed.get(mapName)!.queryAfterRestart).toEqual(VALUE);
-      });
-
-      test('a Merkle sync after the restart returns the acknowledged write', () => {
-        expect(observed.get(mapName)!.merkleAfterRestart).toEqual(VALUE);
-      });
+    test('a query after the restart returns the acknowledged write', () => {
+      expect(observed.get(mapName)!.queryAfterRestart).toEqual(VALUE);
     });
-  },
-);
+
+    test('a Merkle sync after the restart returns the acknowledged write', () => {
+      expect(observed.get(mapName)!.merkleAfterRestart).toEqual(VALUE);
+    });
+  });
+});
