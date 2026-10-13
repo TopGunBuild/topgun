@@ -7,9 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
 use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -57,17 +55,20 @@ pub struct WriteBehindConfig {
     /// takes every entry that is due when it begins and works through all of
     /// them, `batch_size` at a time, with nothing between the groups.
     pub batch_size: u32,
-    /// Number of retry attempts for failed flush operations.
-    pub max_retries: u32,
-    /// Initial retry backoff in milliseconds (doubles on each retry).
+    /// The wait after the first refusal of an entry is twice this, and the
+    /// first length of a store-wide hold is this, in milliseconds; each
+    /// doubles with every further refusal, up to `backoff_cap_ms`.
     pub backoff_base_ms: u64,
-    /// Maximum retry backoff cap in milliseconds.
+    /// The longest wait between two attempts of one entry, and the longest
+    /// store-wide hold, in milliseconds.
     pub backoff_cap_ms: u64,
     /// Soft bound on the number of buffered keys. `0` disables the check.
     ///
     /// What is counted: buffered keys — queued entries plus the entries a
     /// flush pass holds, which stay counted until each is persisted or
-    /// discarded.
+    /// retired into a newer write of its key. An entry the store refuses is
+    /// neither: it goes back to its queue and stays counted until the store
+    /// takes it.
     ///
     /// The rule: a write (`add`, `remove`, each key of `remove_all`) of a key
     /// that is not buffered is refused while the count is at or above
@@ -80,6 +81,7 @@ pub struct WriteBehindConfig {
     /// ```text
     /// pending_count  <=  C - 1 + W + H
     /// H              <=  C - 1 + W
+    /// H              <=  1                      while a store-wide hold is in force
     /// ```
     ///
     /// - `W` is the number of writes of distinct keys that are not buffered
@@ -93,6 +95,14 @@ pub struct WriteBehindConfig {
     ///   began — `batch_size` does not bound it — hence the second line.
     ///
     /// In the worst case the count stays below `2 * (C + W)`.
+    ///
+    /// How long the bound is met: while the store refuses, nothing leaves the
+    /// buffer, so the count stays at the bound until the store accepts again,
+    /// and for that long every write of a key that is not buffered is refused.
+    /// An entry waiting for its next attempt is in its queue, not in a pass,
+    /// and adds nothing to `H`; a hold puts back every entry the pass did not
+    /// attempt, and a pass during a hold holds at most the one entry it probes
+    /// the store with.
     ///
     /// Precondition, which the callers uphold and this store does not
     /// enforce: one writer per key at a time (`TG-KEY-001`).
@@ -128,9 +138,12 @@ pub struct WriteBehindConfig {
     /// It must sit an order of magnitude above the longest LEGITIMATE
     /// non-advance, or the alarm fires on correct behaviour. The default is
     /// derived from the OTHER defaults in this struct (write delay + flush
-    /// interval + the full retry ladder, and clear of the shutdown timeout), so
-    /// raising `flush_interval_ms` or `shutdown_timeout_ms` requires raising
-    /// this alongside them.
+    /// interval + the longest wait between two attempts of a refused entry,
+    /// and clear of the shutdown timeout), so raising `flush_interval_ms` or
+    /// `shutdown_timeout_ms` requires raising this alongside them. A store that
+    /// refuses for longer than the bound is not a legitimate non-advance: the
+    /// refused entry is retried until it is stored, its sequence stays
+    /// un-resolved for as long, and the alarm fires for the whole of it.
     pub wal_watermark_stall_bound_ms: u64,
     /// Whether an OR mutation may be framed as a per-op delta in the WAL
     /// instead of a full record snapshot.
@@ -182,7 +195,6 @@ impl Default for WriteBehindConfig {
             write_delay_ms: 1000,
             flush_interval_ms: 1000,
             batch_size: 100,
-            max_retries: 3,
             backoff_base_ms: 500,
             backoff_cap_ms: 5000,
             capacity: 10_000,
@@ -214,8 +226,8 @@ impl WriteBehindConfig {
     /// | `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS` | `wal_watermark_stall_bound_ms` | 60 000 ms — raise it alongside `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` / `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`, whose defaults this default is derived from |
     /// | `TOPGUN_OR_DELTA_WAL` | `or_delta_wal` | `true` — the delta-framing kill-switch; `false` restores full-snapshot framing for every OR write |
     ///
-    /// Fields not covered by env vars (`write_delay_ms`, `max_retries`,
-    /// `backoff_base_ms`, `backoff_cap_ms`) retain their [`Self::default`] values.
+    /// Fields not covered by env vars (`write_delay_ms`, `backoff_base_ms`,
+    /// `backoff_cap_ms`) retain their [`Self::default`] values.
     #[must_use]
     pub fn from_env() -> Self {
         Self::from_source(|key| std::env::var(key).ok())
@@ -889,24 +901,10 @@ pub(crate) struct DelayedEntry {
     /// When the store may next be asked to take this entry; `None` until the
     /// store has refused it once. Monotonic, so a test can drive it with a
     /// paused clock and a wall-clock step cannot move it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the retry schedule, which lands with the fix"
-        )
-    )]
     pub next_attempt: Option<tokio::time::Instant>,
     /// When the store first refused this key's buffered entry; `None` until
     /// then. Written by the refusal only and never moved by a later one, so
     /// it says for how long the store has been refusing the key.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the retry schedule, which lands with the fix"
-        )
-    )]
     pub first_refused: Option<tokio::time::Instant>,
     /// WAL sequences whose frames this entry carries; resolved together at the
     /// entry's terminal outcome.
@@ -948,9 +946,82 @@ impl DelayedEntry {
     }
 
     /// What a write that replaces a queued entry takes from it: its place in
-    /// the flush schedule, which belongs to the key and not to one write of it.
+    /// the flush schedule and its retry state, which belong to the key and not
+    /// to one write of it. Without the retry state a key that is rewritten
+    /// while the store refuses it would be attempted in every pass.
     fn inherit_from(&mut self, replaced: &DelayedEntry) {
         self.store_time = replaced.store_time;
+        self.retry_count = replaced.retry_count;
+        self.next_attempt = replaced.next_attempt;
+        self.first_refused = replaced.first_refused;
+    }
+
+    /// Where a pass attempts this entry: the never-refused ones first, in the
+    /// order they were written, then the refused ones, the one whose time came
+    /// longest ago first. A refused entry therefore never stands between a key
+    /// the store has not spoken about and the store.
+    fn pass_order(&self) -> (bool, i64, Option<tokio::time::Instant>, u64) {
+        if self.retry_count == 0 {
+            (false, self.store_time, None, self.sequence)
+        } else {
+            (true, 0, self.next_attempt, self.sequence)
+        }
+    }
+
+    /// Whether a flush pass that began at `now` may take this entry.
+    fn is_due(&self, deadline: i64, now: tokio::time::Instant) -> bool {
+        self.store_time <= deadline && self.next_attempt.is_none_or(|at| at <= now)
+    }
+}
+
+/// The earlier of two first-refusal instants; an absent one is "no value", not
+/// the earliest.
+fn earlier_refusal(
+    a: Option<tokio::time::Instant>,
+    b: Option<tokio::time::Instant>,
+) -> Option<tokio::time::Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// What a probe compares of a due entry, and the entry's sequence, which only
+/// breaks ties.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProbeRank {
+    never_refused: bool,
+    store_time: i64,
+    next_attempt: Option<tokio::time::Instant>,
+    sequence: u64,
+}
+
+impl ProbeRank {
+    fn of(entry: &DelayedEntry) -> Self {
+        Self {
+            never_refused: entry.retry_count == 0,
+            store_time: entry.store_time,
+            next_attempt: entry.next_attempt,
+            sequence: entry.sequence,
+        }
+    }
+
+    /// Whether `self` is a better probe than `other`. A never-refused entry
+    /// goes before a refused one, and of the never-refused the newest: a key
+    /// written during a hold is then the next probe, however many refused keys
+    /// are buffered. Of the refused the one whose time came longest ago, so
+    /// successive probes walk them in turn. `store_time` decides before
+    /// `sequence` because a rewritten queued entry keeps its `store_time` and
+    /// takes a new, larger sequence.
+    fn before(&self, other: &Self) -> bool {
+        match (self.never_refused, other.never_refused) {
+            (true, false) => true,
+            (false, true) => false,
+            (true, true) => (self.store_time, self.sequence) > (other.store_time, other.sequence),
+            (false, false) => {
+                (self.next_attempt, self.sequence) < (other.next_attempt, other.sequence)
+            }
+        }
     }
 }
 
@@ -999,10 +1070,12 @@ impl PartitionQueue {
         self.entries.remove(&(map.to_string(), key.to_string()))
     }
 
-    /// Collects all entries whose `store_time` is at or before the deadline.
+    /// Collects all entries whose `store_time` is at or before the deadline,
+    /// whatever their next attempt time: the shutdown drain gives every
+    /// buffered entry one last attempt.
     ///
-    /// Eligible entries are removed from the queue and returned sorted by
-    /// `store_time` then `sequence` for fairness.
+    /// Eligible entries are removed from the queue and returned in no
+    /// particular order.
     pub fn drain_ready(&mut self, deadline: i64) -> Vec<DelayedEntry> {
         let ready_keys: Vec<(String, String)> = self
             .entries
@@ -1018,6 +1091,69 @@ impl PartitionQueue {
             }
         }
         ready
+    }
+
+    /// Like [`drain_ready`](Self::drain_ready), for a flush pass: leaves behind
+    /// the entries whose next attempt is still ahead of `now`.
+    pub fn drain_due(&mut self, deadline: i64, now: tokio::time::Instant) -> Vec<DelayedEntry> {
+        let due_keys: Vec<(String, String)> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.is_due(deadline, now))
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        let mut due = Vec::with_capacity(due_keys.len());
+        for k in due_keys {
+            if let Some(entry) = self.entries.remove(&k) {
+                due.push(entry);
+            }
+        }
+        due
+    }
+
+    /// The rank of the entry a probe would take from this queue, with that
+    /// entry's `(map, key)`; `None` when nothing in the queue is due.
+    pub fn best_due(
+        &self,
+        deadline: i64,
+        now: tokio::time::Instant,
+    ) -> Option<(ProbeRank, (String, String))> {
+        self.entries
+            .iter()
+            .filter(|(_, entry)| entry.is_due(deadline, now))
+            .map(|(key, entry)| (ProbeRank::of(entry), key))
+            .reduce(|best, candidate| {
+                if candidate.0.before(&best.0) {
+                    candidate
+                } else {
+                    best
+                }
+            })
+            .map(|(rank, key)| (rank, key.clone()))
+    }
+
+    /// Removes and returns the queued entry of the key, whatever entry
+    /// sequence it carries now; `None` when the key has no queued entry.
+    ///
+    /// By key and not by sequence: a writer that replaced the entry after it
+    /// was chosen as the probe left the key's buffered entry in its place,
+    /// with the same schedule and the newer value, and that is what the probe
+    /// has to carry.
+    pub fn take(&mut self, map: &str, key: &str) -> Option<DelayedEntry> {
+        self.remove(map, key)
+    }
+
+    /// How many queued entries the store has refused at least once, and the
+    /// earliest first refusal among them.
+    pub fn retrying(&self) -> (u64, Option<tokio::time::Instant>) {
+        let mut count = 0;
+        let mut earliest = None;
+        for entry in self.entries.values().filter(|entry| entry.retry_count > 0) {
+            count += 1;
+            earliest = earlier_refusal(earliest, entry.first_refused);
+        }
+        (count, earliest)
     }
 
     /// Re-inserts an entry that failed flush and needs retry, and reports
@@ -1071,7 +1207,8 @@ impl PartitionQueue {
     ///
     /// The queued entry also takes the earlier `store_time`, as a coalesce
     /// does, so a key rewritten during a store outage keeps its original flush
-    /// schedule.
+    /// schedule — and, for the same reason, the larger refusal count, the later
+    /// next attempt and the earlier first refusal of the two.
     ///
     /// Runs under the caller's shard guard, which is what stops the queued
     /// entry being drained between the lookup and the merge.
@@ -1086,6 +1223,13 @@ impl PartitionQueue {
             .wal_sequences
             .extend(retired.wal_sequences.iter().copied());
         survivor.store_time = survivor.store_time.min(retired.store_time);
+        // The retry schedule belongs to the key, not to one entry of it: a key
+        // rewritten while the store refuses it must not be attempted more
+        // often than a key that is left alone, and must not look as if the
+        // store had begun to refuse it only now.
+        survivor.retry_count = survivor.retry_count.max(retired.retry_count);
+        survivor.next_attempt = survivor.next_attempt.max(retired.next_attempt);
+        survivor.first_refused = earlier_refusal(survivor.first_refused, retired.first_refused);
         true
     }
 
@@ -1578,6 +1722,14 @@ pub struct WriteBehindDataStore {
     /// batch is in no queue.
     #[cfg(test)]
     flush_pass_epoch: AtomicU64,
+    /// Whether a store-wide hold is in force. The flush task owns the hold;
+    /// this mirrors it for readers outside that task.
+    store_hold: AtomicBool,
+    /// Probes refused in a row in the current hold, mirrored like the hold.
+    failed_probes: AtomicU32,
+    /// Set by a refusal and cleared by the walk that finds no refused entry,
+    /// so a pass on a store that refuses nothing pays one load and no walk.
+    retrying: AtomicBool,
 }
 
 /// WAL plus the live sequence counter's starting value, threaded into
@@ -1692,6 +1844,9 @@ impl WriteBehindDataStore {
             test_parks: TestParks::default(),
             #[cfg(test)]
             flush_pass_epoch: AtomicU64::new(0),
+            store_hold: AtomicBool::new(false),
+            failed_probes: AtomicU32::new(0),
+            retrying: AtomicBool::new(false),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -2153,22 +2308,14 @@ impl WriteBehindDataStore {
     /// accepted, including the stretch after the hold time has passed and
     /// before a probe has been made.
     #[cfg(test)]
-    #[expect(
-        clippy::unused_self,
-        reason = "reads the hold, which lands with the fix"
-    )]
     pub(crate) fn test_store_hold_active(&self) -> bool {
-        false
+        self.store_hold.load(Ordering::SeqCst)
     }
 
     /// Probes refused in a row in the current hold.
     #[cfg(test)]
-    #[expect(
-        clippy::unused_self,
-        reason = "reads the hold, which lands with the fix"
-    )]
     pub(crate) fn test_failed_probes(&self) -> u32 {
-        0
+        self.failed_probes.load(Ordering::SeqCst)
     }
 
     /// `(retry_count, next_attempt)` of the entry queued for a key; `None`
@@ -3277,13 +3424,369 @@ async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow
     }
 }
 
+/// Refused entries in a row, inside one flush pass, that start a store-wide
+/// hold. One refused entry can never start one.
+const HOLD_TRIP_REFUSALS: u32 = 3;
+/// Refusals of one entry from which the retry warning is emitted.
+const RETRY_WARN_ATTEMPTS: u32 = 3;
+/// The retry warning is emitted at most once per this interval.
+const RETRY_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long the store is left alone after the `attempt`-th refusal:
+/// `min(base << attempt, cap)`, for every `attempt`.
+///
+/// Refusals are not limited, so `attempt` grows for as long as the store
+/// refuses; a shift that would lose bits is past any cap.
+fn retry_backoff(base_ms: u64, cap_ms: u64, attempt: u32) -> std::time::Duration {
+    let ms = base_ms
+        .checked_shl(attempt)
+        .filter(|shifted| shifted >> attempt == base_ms)
+        .map_or(cap_ms, |shifted| shifted.min(cap_ms));
+    std::time::Duration::from_millis(ms)
+}
+
+/// What the flush task remembers between passes about a store that refuses.
+///
+/// Owned by the flush task alone, so it needs no lock; the store carries
+/// atomics that mirror the hold for readers outside the task.
+#[derive(Default)]
+struct RetrySchedule {
+    /// Set from the pass that trips the hold until a probe is accepted. Until
+    /// this instant no pass takes anything from a queue; from it on, a pass
+    /// takes one entry only, the probe.
+    hold_until: Option<tokio::time::Instant>,
+    /// Probes refused in a row since the hold began.
+    failed_probes: u32,
+    /// An entry reached the warning threshold or a hold began, and the
+    /// backlog has not cleared since.
+    warning_armed: bool,
+    /// When the warning was last emitted; `None` when it has not been since
+    /// the backlog was last clear.
+    last_warning: Option<tokio::time::Instant>,
+    /// The most recently refused entry, as the warning's example.
+    example: Option<RefusedExample>,
+}
+
+/// One refused entry, named in the retry warning so an operator has a
+/// concrete write to look at.
+struct RefusedExample {
+    map: String,
+    key: String,
+    attempts: u32,
+    error: String,
+}
+
+impl WriteBehindDataStore {
+    /// The one terminal of an entry the store accepted, whether a pass
+    /// attempted it in its turn or as a probe.
+    async fn settle_stored(&self, entry: &DelayedEntry) {
+        // Remove this write's staging slot ONLY if it is still the one that
+        // was flushed: a newer coalesced write must survive.
+        self.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
+        self.pending_count.fetch_sub(1, Ordering::Relaxed);
+        // The bytes are in the inner store, so the entry sequence may let the
+        // prefix-complete flushed watermark past it. This is the ONLY signal
+        // that advances the tombstone durability fence.
+        self.resolve_pending(entry.sequence);
+        // Resolve the entry's WAL sequences and advance the partition
+        // watermark to the prefix-complete frontier, so a clean restart does
+        // not re-replay writes that are already in the inner store — and so
+        // no lower, still un-flushed frame of the partition is marked applied.
+        self.resolve_and_advance(partition_for(&entry.map, &entry.key), &entry.wal_sequences)
+            .await;
+    }
+
+    /// Puts an entry a pass holds back on its queue, as it is.
+    ///
+    /// Nothing here suspends. A task can be dropped only where it suspends, so
+    /// an entry that is out of every queue has its count and its entry
+    /// sequence settled before the flush task can go away.
+    fn put_back(&self, entry: DelayedEntry) {
+        let partition = partition_for(&entry.map, &entry.key);
+        // Back on the queue, so this worker no longer owns the sequences —
+        // but they are NOT terminal and stay pending. Skipping this would
+        // leave them both queued and in flight, and would leak a registry
+        // entry per retry.
+        self.deregister_in_flight(partition, &entry.wal_sequences);
+        // One statement, so the shard guard is a temporary: held any longer
+        // it would block every synchronous access to the shard — a client
+        // write, the stall watchdog (TG-WB-004).
+        let outcome = self
+            .queues
+            .entry(partition)
+            .or_default()
+            .reinsert_front(entry);
+        // A newer write of the key was queued while this entry was out of the
+        // queue, so the entry is gone for good and two increments stand for
+        // one queued entry (TG-WB-005). Settled after the shard guard, so the
+        // pending-set lock is never nested under it.
+        if let Reinsert::Superseded { retired_sequence } = outcome {
+            self.pending_count.fetch_sub(1, Ordering::Relaxed);
+            self.resolve_pending(retired_sequence);
+        }
+    }
+
+    /// The disposition of an entry the store refused: it stays buffered, with
+    /// its staging slot, its count, its entry sequence pending and its WAL
+    /// sequences live, and is not attempted again before its backoff has
+    /// passed.
+    ///
+    /// `returned` is when the refused call came back. The backoff is counted
+    /// from there and not from the start of the pass, so a store that is slow
+    /// to refuse is still left alone for the whole of it.
+    fn requeue_refused(
+        &self,
+        schedule: &mut RetrySchedule,
+        mut entry: DelayedEntry,
+        err: &anyhow::Error,
+        returned: tokio::time::Instant,
+    ) {
+        self.retrying.store(true, Ordering::Relaxed);
+        entry.retry_count = entry.retry_count.saturating_add(1);
+        entry.next_attempt = Some(
+            returned
+                + retry_backoff(
+                    self.config.backoff_base_ms,
+                    self.config.backoff_cap_ms,
+                    entry.retry_count,
+                ),
+        );
+        // Written once: it says since when the store has been refusing the
+        // key, which a later refusal must not move.
+        if entry.first_refused.is_none() {
+            entry.first_refused = Some(returned);
+        }
+        if entry.retry_count >= RETRY_WARN_ATTEMPTS {
+            schedule.warning_armed = true;
+        }
+        schedule.example = Some(RefusedExample {
+            map: entry.map.clone(),
+            key: entry.key.clone(),
+            attempts: entry.retry_count,
+            error: err.to_string(),
+        });
+        self.put_back(entry);
+    }
+
+    /// Chooses, over all queues, the entry a probe attempts, and says which
+    /// queue holds it and which key it belongs to. `None` when nothing is due.
+    fn choose_probe(
+        &self,
+        deadline: i64,
+        now: tokio::time::Instant,
+    ) -> Option<(u32, (String, String))> {
+        let mut best: Option<(ProbeRank, u32, (String, String))> = None;
+        for queue in &self.queues {
+            if let Some((rank, key)) = queue.value().best_due(deadline, now) {
+                if best.as_ref().is_none_or(|(held, _, _)| rank.before(held)) {
+                    best = Some((rank, *queue.key(), key));
+                }
+            }
+        }
+        best.map(|(_, partition, key)| (partition, key))
+    }
+
+    /// The test park between the choice of a probe and its removal.
+    #[cfg(test)]
+    async fn pass_probe_park(&self) {
+        let gate = self
+            .test_parks
+            .between_probe_choice_and_removal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(gate) = gate {
+            gate.pass().await;
+        }
+    }
+
+    /// Publishes the flush task's hold to the readers outside the task. A
+    /// hold is in force for as long as `hold_until` is set — also after that
+    /// instant has passed and before a probe has been accepted.
+    fn publish_hold(&self, schedule: &RetrySchedule) {
+        self.store_hold
+            .store(schedule.hold_until.is_some(), Ordering::SeqCst);
+        self.failed_probes
+            .store(schedule.failed_probes, Ordering::SeqCst);
+    }
+
+    /// One pass of the flush task.
+    ///
+    /// The pass never waits on behalf of an entry: when an entry may be
+    /// attempted again is written on the entry, and a later pass honours it.
+    async fn run_flush_pass(
+        &self,
+        schedule: &mut RetrySchedule,
+        deadline: i64,
+        now: tokio::time::Instant,
+    ) {
+        let base = self.config.backoff_base_ms;
+        let cap = self.config.backoff_cap_ms;
+
+        if let Some(until) = schedule.hold_until {
+            // The store is being left alone: nothing is taken and no call is
+            // made, whoever woke the pass.
+            if now < until {
+                return;
+            }
+            let Some((partition, (map, key))) = self.choose_probe(deadline, now) else {
+                return;
+            };
+            #[cfg(test)]
+            self.pass_probe_park().await;
+            // No shard guard is held between the choice and the removal
+            // (TG-WB-004), so a writer can replace the chosen entry in
+            // between. The replacement inherited the schedule of the entry it
+            // replaced, so it is due all the same and is the probe. The key's
+            // entry can be gone only through the drain of a shutdown; then
+            // there is nothing to ask the store with and nothing changes.
+            let taken = self
+                .queues
+                .get_mut(&partition)
+                .and_then(|mut queue| queue.take(&map, &key));
+            let Some(probe) = taken else {
+                return;
+            };
+            self.register_in_flight(partition, &probe.wal_sequences);
+            match persist_entry(self.inner.as_ref(), &probe).await {
+                Ok(()) => {
+                    self.settle_stored(&probe).await;
+                    // The store answers again: the hold ends and this same
+                    // pass goes on over everything that is due.
+                    schedule.hold_until = None;
+                    schedule.failed_probes = 0;
+                    self.publish_hold(schedule);
+                }
+                Err(err) => {
+                    let returned = tokio::time::Instant::now();
+                    self.requeue_refused(schedule, probe, &err, returned);
+                    schedule.failed_probes = schedule.failed_probes.saturating_add(1);
+                    schedule.hold_until =
+                        Some(returned + retry_backoff(base, cap, schedule.failed_probes));
+                    self.publish_hold(schedule);
+                    return;
+                }
+            }
+        }
+
+        let mut ready = Vec::new();
+        for mut queue_ref in self.queues.iter_mut() {
+            ready.extend(queue_ref.value_mut().drain_due(deadline, now));
+        }
+        if ready.is_empty() {
+            return;
+        }
+        // The drained entries now exist only as local bindings, so record this
+        // worker's ownership of their WAL sequences before the first
+        // inner-store call. Done after every partition-queue guard has
+        // dropped, so the tracking lock is never nested under one.
+        for entry in &ready {
+            self.register_in_flight(partition_for(&entry.map, &entry.key), &entry.wal_sequences);
+        }
+        ready.sort_by_key(DelayedEntry::pass_order);
+
+        let mut refused_in_a_row = 0u32;
+        let mut entries = ready.into_iter();
+        while let Some(entry) = entries.next() {
+            match persist_entry(self.inner.as_ref(), &entry).await {
+                Ok(()) => {
+                    self.settle_stored(&entry).await;
+                    refused_in_a_row = 0;
+                }
+                Err(err) => {
+                    let returned = tokio::time::Instant::now();
+                    self.requeue_refused(schedule, entry, &err, returned);
+                    refused_in_a_row += 1;
+                    if refused_in_a_row >= HOLD_TRIP_REFUSALS {
+                        // The store refuses whatever it is given: stop asking.
+                        // What was not attempted goes back as it was, so the
+                        // store's refusal of other entries is not held
+                        // against it.
+                        for unattempted in entries.by_ref() {
+                            self.put_back(unattempted);
+                        }
+                        schedule.failed_probes = 0;
+                        schedule.hold_until = Some(returned + retry_backoff(base, cap, 0));
+                        schedule.warning_armed = true;
+                        self.publish_hold(schedule);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reports refused entries at the end of a pass: one rate-limited warning
+    /// while any is buffered, and one line when none is left after a warning.
+    ///
+    /// The queues are walked only while a refusal has happened and the last
+    /// walk still found a refused entry; a pass on a store that refuses
+    /// nothing pays one atomic load.
+    fn report_retries(&self, schedule: &mut RetrySchedule) {
+        if !self.retrying.load(Ordering::Relaxed) {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let mut retrying = 0u64;
+        let mut earliest = None;
+        for queue in &self.queues {
+            let (count, queue_earliest) = queue.value().retrying();
+            retrying += count;
+            earliest = earlier_refusal(earliest, queue_earliest);
+        }
+
+        if retrying == 0 {
+            self.retrying.store(false, Ordering::Relaxed);
+            // Only after a warning: a refusal nobody was told about needs no
+            // all-clear either.
+            if schedule.last_warning.is_some() {
+                tracing::info!(
+                    "Write-behind retry backlog cleared: the store accepted every refused entry"
+                );
+            }
+            schedule.warning_armed = false;
+            schedule.last_warning = None;
+            schedule.example = None;
+            return;
+        }
+
+        let due = schedule
+            .last_warning
+            .is_none_or(|last| now.saturating_duration_since(last) >= RETRY_WARN_INTERVAL);
+        if !(schedule.warning_armed && due) {
+            return;
+        }
+        let Some(example) = &schedule.example else {
+            return;
+        };
+        // Monotonic time since the first refusal, never the entry's
+        // `store_time`: that is supplied by the caller and is not a time at
+        // all for some callers.
+        let oldest_refusal_age_s = earliest
+            .map_or(std::time::Duration::ZERO, |first| {
+                now.saturating_duration_since(first)
+            })
+            .as_secs();
+        warn!(
+            retrying,
+            oldest_refusal_age_s,
+            hold = schedule.hold_until.is_some(),
+            map = %example.map,
+            key = %example.key,
+            attempts = example.attempts,
+            error = %example.error,
+            "Write-behind entries are being retried: the store refuses them"
+        );
+        schedule.last_warning = Some(now);
+    }
+}
+
 /// Background task that periodically flushes eligible entries to the inner store.
 ///
 /// Runs until the shutdown signal is received. Wakes on either the configured
-/// interval or an explicit notify (from `soft_flush`/`hard_flush`).
-#[allow(clippy::too_many_lines)]
+/// interval or an explicit notify (from `soft_flush`).
 async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Receiver<bool>) {
     let interval = tokio::time::Duration::from_millis(store.config.flush_interval_ms);
+    let mut schedule = RetrySchedule::default();
 
     loop {
         // Wait for flush interval or early wake, checking shutdown
@@ -3303,190 +3806,15 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
             return;
         }
 
-        let now = now_millis();
         #[allow(clippy::cast_possible_wrap)]
-        let deadline = now.saturating_sub(store.config.write_delay_ms as i64);
+        let deadline = now_millis().saturating_sub(store.config.write_delay_ms as i64);
+        // Read once: every entry of the pass is judged against one instant.
+        let now = tokio::time::Instant::now();
 
-        // Collect eligible entries from all partition queues
-        let mut ready_entries = Vec::new();
         #[cfg(test)]
         store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
-        for mut queue_ref in store.queues.iter_mut() {
-            let drained = queue_ref.value_mut().drain_ready(deadline);
-            ready_entries.extend(drained);
-        }
-
-        if ready_entries.is_empty() {
-            #[cfg(test)]
-            store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
-            continue;
-        }
-
-        // The drained entries now exist only as local bindings, so record this
-        // worker's ownership of their WAL sequences before the first inner-store
-        // call. Done after every partition-queue guard has dropped, so the
-        // tracking lock is never nested under one.
-        for entry in &ready_entries {
-            store.register_in_flight(partition_for(&entry.map, &entry.key), &entry.wal_sequences);
-        }
-
-        // Sort by store_time then sequence for fairness
-        ready_entries.sort_by(|a, b| {
-            a.store_time
-                .cmp(&b.store_time)
-                .then(a.sequence.cmp(&b.sequence))
-        });
-
-        // Process in batches
-        for batch in ready_entries.chunks(store.config.batch_size as usize) {
-            for entry in batch {
-                let result = persist_entry(store.inner.as_ref(), entry).await;
-
-                let partition_id_for_wal = partition_for(&entry.map, &entry.key);
-                match result {
-                    Ok(()) => {
-                        // Remove this write's staging slot ONLY if it is still the
-                        // one we flushed (a newer coalesced write must survive).
-                        // pending_count is decremented per terminal flush either
-                        // way -- it counts enqueues, one decrement per drained entry.
-                        store.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
-                        store.pending_count.fetch_sub(1, Ordering::Relaxed);
-                        // Bytes are now durable in the inner store — resolve the
-                        // sequence so the prefix-complete flushed watermark can
-                        // advance past it. This is the ONLY signal that advances
-                        // the tombstone durability fence.
-                        store.resolve_pending(entry.sequence);
-                        // Resolve this entry's WAL sequences and advance the
-                        // partition watermark to the prefix-complete frontier, so a
-                        // clean restart does not re-replay writes that are already
-                        // durable in the inner store — and so no lower, still
-                        // un-flushed frame in the same partition is marked applied.
-                        store
-                            .resolve_and_advance(partition_id_for_wal, &entry.wal_sequences)
-                            .await;
-                    }
-                    Err(err) => {
-                        let new_retry = entry.retry_count + 1;
-                        if new_retry < store.config.max_retries {
-                            // Reinsert with incremented retry count
-                            let mut retry_entry = entry.clone();
-                            retry_entry.retry_count = new_retry;
-
-                            // Back on the queue, so this worker no longer owns the
-                            // sequences — but they are NOT terminal and stay
-                            // pending. Skipping this would leave them both queued
-                            // and in-flight, and would leak a registry entry per
-                            // retry.
-                            store.deregister_in_flight(partition_id_for_wal, &entry.wal_sequences);
-
-                            // One statement, so the shard guard is a temporary that
-                            // is gone before the backoff below. Held across that
-                            // await it would block every synchronous access to the
-                            // shard — a client write, the stall watchdog — for the
-                            // whole backoff, and a runtime worker blocked there can
-                            // stop the node (TG-WB-004).
-                            let partition_id = partition_for(&entry.map, &entry.key);
-                            let outcome = store
-                                .queues
-                                .entry(partition_id)
-                                .or_default()
-                                .reinsert_front(retry_entry);
-
-                            // A newer write of the key was queued while this
-                            // entry was out of the queue, so the entry is gone
-                            // for good and two increments stand for one queued
-                            // entry. Settle its count and entry sequence here:
-                            // after the shard guard, so the pending-set lock is
-                            // never nested under it, and before the backoff,
-                            // because a task can be dropped only where it
-                            // suspends and the count and the durability fence
-                            // would otherwise stay wrong for the whole backoff
-                            // — or for good, if the task is aborted in it.
-                            if let Reinsert::Superseded { retired_sequence } = outcome {
-                                store.pending_count.fetch_sub(1, Ordering::Relaxed);
-                                store.resolve_pending(retired_sequence);
-                                tracing::debug!(
-                                    map = %entry.map,
-                                    key = %entry.key,
-                                    "Write-behind retry entry superseded by a newer write"
-                                );
-                            }
-
-                            // Backoff before processing next retry-eligible entry
-                            let backoff = std::cmp::min(
-                                store.config.backoff_base_ms * 2u64.pow(new_retry),
-                                store.config.backoff_cap_ms,
-                            );
-                            tokio::time::sleep(tokio::time::Duration::from_millis(backoff)).await;
-                        } else {
-                            // Max retries exceeded -- discard and log
-                            warn!(
-                                map = %entry.map,
-                                key = %entry.key,
-                                retries = new_retry,
-                                error = %err,
-                                "Write-behind entry discarded after max retries"
-                            );
-                            // Same identity guard as the success path: a newer
-                            // coalesced write must not be cleared by an older
-                            // entry's terminal discard.
-                            store.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
-                            store.pending_count.fetch_sub(1, Ordering::Relaxed);
-                            // Terminal discard in ENTRY space: the sequence will
-                            // never flush, so resolve it or the prefix-complete
-                            // flushed watermark — and with it the tombstone
-                            // durability fence — stalls behind a write that can
-                            // never arrive.
-                            //
-                            // This resolve does NOT keep the frame available: it
-                            // never gates WAL GC. What actually makes this write's
-                            // bytes collectable is a LATER entry in the same
-                            // partition advancing the WAL watermark past its
-                            // sequence, which is exactly why the wal_seq
-                            // disposition below is the opposite one.
-                            store.resolve_pending(entry.sequence);
-                            // The WAL sequences take the OPPOSITE disposition: this
-                            // write is in neither the inner store nor, once the WAL
-                            // watermark passes it, the WAL. Resolving would license
-                            // the watermark past an acked, non-durable write.
-                            //
-                            // Which non-resolving disposition depends on whether a
-                            // newer write of the key was queued while this entry
-                            // was out of the queue. If one was, the key will still
-                            // become durable through it, so it takes the sequences
-                            // over and resolves them at its own terminal; pinning
-                            // the partition's log until restart for such a key
-                            // would be a stall with no lost write behind it. The
-                            // hand-over comes first and the release of this
-                            // worker's ownership second, so the sequences have an
-                            // owner at every instant. The shard guard is a
-                            // temporary of the one statement that finds the queued
-                            // entry, and a missing queue is not created.
-                            let carried = store
-                                .queues
-                                .get_mut(&partition_id_for_wal)
-                                .is_some_and(|mut queue| queue.retire_into_queued(entry));
-                            if carried {
-                                store.deregister_in_flight(
-                                    partition_id_for_wal,
-                                    &entry.wal_sequences,
-                                );
-                            } else {
-                                // Nothing queued will make this write durable.
-                                // Abandoning holds the watermark below the frame,
-                                // keeps it replayable on the next restart, and
-                                // raises the abandoned-write alarm so the stall is
-                                // never silent.
-                                store.abandon_wal_sequences(
-                                    partition_id_for_wal,
-                                    &entry.wal_sequences,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        store.run_flush_pass(&mut schedule, deadline, now).await;
+        store.report_retries(&mut schedule);
         #[cfg(test)]
         store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
     }

@@ -1467,9 +1467,9 @@ mod tests {
         );
     }
 
-    /// A write the store refuses on every attempt must not disappear quietly:
-    /// once the write-behind layer gives up, the operator has to be able to see
-    /// WHICH write was dropped, and within a time short enough to act on.
+    /// A write the store refuses on every attempt must not be retried quietly:
+    /// within a time short enough to act on, the operator has to see a warning
+    /// that names a refused write.
     ///
     /// The store underneath is the real embedded one and the retry settings are
     /// the defaults a server boots with, so the wait below is the wall-clock an

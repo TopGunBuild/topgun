@@ -821,7 +821,6 @@ fn harness_config() -> WriteBehindConfig {
         flush_interval_ms: 1_000,
         batch_size: 100,
         // Fast, bounded graceful drain for CleanShutdown.
-        max_retries: 1,
         backoff_base_ms: 1,
         backoff_cap_ms: 1,
         capacity: 0,
