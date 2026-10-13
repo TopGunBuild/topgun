@@ -115,11 +115,15 @@ pub(crate) const KEY_WRITER_MISMATCH_CONTEXT: &str =
 ///
 /// **never-evict-dirty invariant:** Any record whose
 /// [`RecordMetadata::is_dirty`](super::record::RecordMetadata::is_dirty) returns
-/// `true` MUST NOT be evicted by [`RecordStore::evict_lru`]. Evicting a dirty
-/// record discards an acknowledged write that has not yet been flushed to the
-/// backing [`MapDataStore`], violating the durability contract. All
-/// implementations that handle LRU eviction are required to enforce this
-/// invariant; the orchestrator surfaces violations via [`RecordStore::dirty_count`]
+/// `true` MUST NOT be evicted by [`RecordStore::evict_lru`]. A dirty record is
+/// one whose write has not come back from [`MapDataStore::add`]: the backing
+/// store has not been given it yet. That is all the flag says. Over a
+/// write-behind store `add` returns once the write is buffered, so a record
+/// is clean, and evictable, while its write is still on its way to the
+/// durable store; that such a write stays readable is `TG-EVI-001`, which the
+/// write-behind store upholds and this rule does not. All implementations
+/// that handle LRU eviction are required to enforce the rule; the
+/// orchestrator surfaces violations via [`RecordStore::dirty_count`]
 /// backpressure logging.
 ///
 /// Used as `Arc<dyn RecordStore>`.
@@ -362,9 +366,12 @@ pub trait RecordStore: Send + Sync {
 
     /// Evict up to `target_count` least-recently-used non-dirty records.
     ///
-    /// MUST skip records where `metadata.is_dirty()` is true — evicting a
-    /// dirty record discards an acked write that has not yet flushed to the
-    /// backend, violating durability. This is the never-evict-dirty invariant.
+    /// MUST skip records where `metadata.is_dirty()` is true. A dirty record
+    /// is one whose write has not come back from the data store's `add`, so
+    /// the store has not been given it; evicting it would drop that write.
+    /// This is the never-evict-dirty rule. It says nothing about a write the
+    /// data store has buffered and not yet persisted: that such a write stays
+    /// readable after an eviction is `TG-EVI-001`.
     ///
     /// Returns the number of records actually evicted (may be less than
     /// `target_count` if fewer non-dirty candidates exist).

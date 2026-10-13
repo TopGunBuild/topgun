@@ -200,9 +200,11 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     ever needed,
     takes no value from its caller — it flushes the buffered entry itself — and is designed
     together with its caller.
-  - **The discard path opens no similar window (established by reading the flush loop).** A
-    discarded entry's WAL sequences are either carried onto the queued newer entry of the same key
-    (`PartitionQueue::retire_into_queued`) or abandoned; the discard never resolves them. Carried
+  - **A refused flush opens no similar window (established by reading the flush pass).** An entry
+    the store refuses goes back to its queue with its WAL sequences un-resolved; when a newer
+    write of the same key is queued by then, the sequences are carried onto that entry
+    (`PartitionQueue::retire_into_queued`). The flush pass never resolves the sequences of an
+    entry the store refused, and no longer abandons them either (`TG-WB-009`). Carried
     sequences are resolved when the survivor is durable, or earlier, when a subsuming write
     coalesces over the survivor (`coalesce_wal_sequences`; holder
     `a_subsuming_write_over_a_survivor_resolves_the_carried_sequences`). The early resolve is
@@ -409,12 +411,16 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:** a `queues` shard guard never lives across an `.await`. A store refusal therefore
   never blocks a synchronous `queues` access — a client write, a remove, the stall watchdog — for
   longer than a synchronous critical section.
-- **Maintaining code:** `write_behind.rs` `flush_loop`, retry branch: the refused entry is put back
-  on its queue in one statement, so the guard is a temporary that is gone before the retry backoff
-  is awaited.
+- **Maintaining code:** `write_behind.rs` `put_back`, which a flush pass calls for an entry the
+  store refused and for every entry it did not attempt when a store-wide hold began: the entry is
+  put back on its queue in one statement, so the guard is a temporary. The refusal branch no
+  longer awaits anything — the time of the next attempt is written on the entry and a later pass
+  honours it (`TG-WB-009`) — so at this site the statement holds by construction.
 - **Enforcing test:** `write_behind.rs::the_queue_shard_is_free_during_a_retry_backoff` — a write to
-  the partition under retry backoff must complete within 1000 ms. Two more enforcers cover other
-  parts; the table below says which covers what.
+  the partition of a refused entry, while that entry waits for its next attempt, must complete
+  within 1000 ms. With no await left in the refusal branch the test no longer discriminates at
+  that site; it is kept as a guard. Two more enforcers cover other parts; the table below says
+  which covers what.
 - **Violation consequence:** the node stops. The flush task sleeps on a timer while it holds the
   shard lock; the stall watchdog (or any writer of that partition) blocks a runtime worker on the
   lock; if that worker was the one driving the runtime's timer and I/O driver, the timer never
@@ -423,8 +429,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   killed. Measured with the store refusing from the start and the default configuration: 5 of 5
   runs hung before the fix, 5 of 5 healthy after it.
 - **Measured scope:** a refusal injected into the embedded (redb) backend, one or two refused
-  keys. In that case the node keeps answering reads and new connections, logs exactly one discard
-  line per refused key and exits on SIGTERM (2 ms to 1.46 s). Postgres was not measured. This row
+  keys. In that case the node keeps answering reads and new connections and exits on SIGTERM
+  (2 ms to 1.46 s, measured before refused entries were retried until stored; the times were not
+  measured again). Postgres was not measured. This row
   states that the node does not hang on a store refusal; it does not state that the node is
   otherwise unaffected by one — see "After a store refusal" below.
 - **Discovered by:** SPEC-381a wave A0 (rollback testing); fixed and catalogued by SPEC-382.
@@ -433,9 +440,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 | Enforcer | What it covers | Where it runs |
 |----------|----------------|---------------|
-| `the_queue_shard_is_free_during_a_retry_backoff` | ONE site: the retry branch of `flush_loop`. No other `queues` guard, no other map | CI (`cargo test`) |
+| `the_queue_shard_is_free_during_a_retry_backoff` | ONE site: where a flush pass puts a refused entry back on its queue. It no longer discriminates at that site: the pass does not await in the refusal branch any more, so there is no await left there for a guard to be held across. Kept as a guard. No other `queues` guard, no other map | CI (`cargo test`) |
 | lint gate: `clippy::await_holding_invalid_type` over the type list in the root `clippy.toml`, and `clippy::await_holding_lock` | WIDER than the statement: every listed DashMap/DashSet guard type in every target of both workspace crates — within the shapes the table below shows it reports | CI (`cargo clippy`) |
-| `tests/integration-rust/store-refusal-liveness.test.ts` | the CONSEQUENCE at node level for a store refusal — reads and new connections answered, exactly one discard line per refused key, clean exit on SIGTERM within 15 s — with one or two refused keys in each of its first four arms. No site in particular. Its `STORE-DOWN-FROM-START` arm is the one that goes red under the default configuration. The file now has five arms; the fifth, `REFUSAL-LIFTED-UNDER-LOAD`, refuses six load keys while they are still being written and belongs to `TG-WB-005` | local only (`pnpm test:integration-rust:liveness`) — left out of the default `pnpm test:integration-rust` run, locally and in CI, because it needs a second server build with the `fault-injection` feature (TODO-770) |
+| `tests/integration-rust/store-refusal-liveness.test.ts` | the CONSEQUENCE at node level for a store refusal — reads and new connections answered, clean exit on SIGTERM within 15 s. No site in particular. Its `STORE-DOWN-FROM-START` arm is the one that goes red under the default configuration on a binary without the fix. The file has six arms. What the arms assert about the refused write itself — it stays readable, a retry warning is logged, it reaches the store once the store accepts again, and it is read back from a second process after a SIGTERM during the refusal — belongs to `TG-WB-009`; the last arm, `REFUSAL-LIFTED-UNDER-LOAD`, refuses six load keys while they are still being written and belongs to `TG-WB-005` | local only (`pnpm test:integration-rust:liveness`) — left out of the default `pnpm test:integration-rust` run, locally and in CI, because it needs a second server build with the `fault-injection` feature (TODO-770) |
 
 **After a store refusal — what this invariant does not cover.** Before the fix the node hung
 within seconds of a refusal, so none of the states below was reached in practice. They are
@@ -445,15 +452,18 @@ reachable now. None of them is a violation of the statement above.
   entry that meets a newer write of its key is retired into that write, with its count, its
   entry sequence and its WAL sequences all disposed of. The contract, its one-writer-per-key
   precondition and what it still leaves out are in `TG-WB-005`.
-- **A discarded write is re-applied only by a restart.** After max retries the entry sequence is
-  resolved, so the tombstone fence moves, and the WAL sequences are abandoned on purpose, so the
-  frame is replayed at the next boot. Until that restart the partition's WAL watermark stays
-  below the frame, its WAL is not collected and, under continued writes, the watchdog reports
-  `AbandonedWrite`. This holds when no newer write of the key is queued at the discard; when one
-  is, the discarded entry's WAL sequences go to that write instead (`TG-WB-005`).
-- **Shutdown can take the full `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`.** The flush loop looks
-  at the shutdown signal once per batch and sleeps a backoff per refused entry. Measured with 40
-  refused entries and the default ladder: 30.00 s, the whole timeout.
+- **A refused write is retried until the store takes it.** It is not given up on and does not
+  wait for a restart: the entry stays buffered, with its entry sequence pending and its WAL
+  sequences `Live`. For as long as the store refuses it, the tombstone fence and the partition's
+  WAL watermark stay below it, the partition's WAL is not collected and, under continued writes,
+  the watchdog reports `AbandonedWrite`. The schedule, its bounds and what it leaves out are in
+  `TG-WB-009`.
+- **Shutdown can take the full `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`.** Measured before
+  refused entries were retried until stored, with 40 refused entries and the retry ladder of
+  that time: 30.00 s, the whole timeout. Not measured again since. The cause named then — the
+  flush loop slept a backoff per refused entry — is gone: a pass no longer waits on behalf of an
+  entry. What a shutdown costs against a store that still refuses is one store call per buffered
+  entry (`TG-WB-009`, "Not claimed").
 
 **What the lint reports — measured examples, not an exhaustive list** (clippy 0.1.93; one fixture
 per shape, each holding a guard across an await). A shape that is not in this table was not
@@ -539,20 +549,27 @@ measured; do not read it as reported.
   `TG-KEY-001`, so a record writer can no longer produce the case in which the queued entry
   holds the older value.
 - **Statement:** an entry leaves a partition queue or a flush batch only through a site that
-  disposes of all three: its count, its entry sequence, and its WAL sequences — resolved,
-  carried onto a queued entry of the same key, or, only when no such entry exists, abandoned
-  with the `Abandoned` tag. In particular a refused entry that finds a newer write of its key on
-  the queue is retired into that write: the count goes down by one, the entry sequence is
-  resolved, and the WAL sequences move to the newer entry under the same shard lock, so they
-  resolve when it becomes durable and are replayed at boot if it never does. This happens before
-  the retry backoff is awaited, so a cancelled flush task cannot leave it half done.
+  disposes of all three: its count, its entry sequence, and its WAL sequences. The exits are
+  the success terminal (the store accepted the entry: all three resolved), the retirement into a
+  queued newer write of the same key, and the shutdown drain. "Abandoned with the `Abandoned`
+  tag" is true only of the shutdown drain, which is outside the scope above; on a running node
+  no WAL sequence is abandoned. An entry the store refuses goes back on its queue and has left
+  nothing: its count, its entry sequence and its WAL sequences stay as they were
+  (`TG-WB-009`). The retirement happens when an entry that is put back — after a refusal, or
+  un-attempted when a store-wide hold began — finds a newer write of its key on the queue: the
+  count goes down by one, the entry sequence is resolved, and the WAL sequences move to the
+  newer entry under the same shard lock, so they resolve when it becomes durable and are
+  replayed at boot if it never does. Nothing suspends between the store's answer and the end of
+  the put-back, so a cancelled flush task cannot leave it half done.
 - **Mechanical predicate:** once the store accepts writes again and the write-behind store is
   idle — no entry is queued AND the flush loop is between passes, holding no drained batch
   ("every queue empty" alone is not idle: the loop may hold a batch it has just drained) —
-  `pending_operation_count() == 0`, `flushed_watermark() == assigned_write_sequence()`, and no
-  WAL sequence is `Live`.
+  `pending_operation_count() == 0`, `flushed_watermark() == assigned_write_sequence()`, no
+  WAL sequence is `Live`, no WAL sequence is `Abandoned`, and the inner store holds the last
+  acknowledged operation of every key.
 - **Maintaining code:** `write_behind.rs` — `PartitionQueue::retire_into_queued`, called from
-  `reinsert_front` (retry branch of `flush_loop`) and from the discard branch.
+  `reinsert_front`, which `put_back` calls for an entry the store refused and for every entry a
+  pass did not attempt when a hold began; `settle_stored`, the one success terminal.
 - **Enforcing test:** `prefix_watermark_proptest.rs::interleaved_refusals_and_writes_to_one_key_leave_nothing_unaccounted`
   (property: refusals, accepts, writes and removes of one key in generated order, 64 cases) and
   `write_behind.rs::a_refused_entry_superseded_by_a_newer_write_is_retired_into_it`. Both run in CI
@@ -570,13 +587,13 @@ measured; do not read it as reported.
 
 | Enforcer | What it covers | Where it runs |
 |----------|----------------|---------------|
-| `interleaved_refusals_and_writes_to_one_key_leave_nothing_unaccounted` | the predicate, for one key and one writer, over generated orders of refusals and writes; both the retry path and the discard path | CI (`cargo test`) |
+| `interleaved_refusals_and_writes_to_one_key_leave_nothing_unaccounted` | the predicate, for one key and one writer, over generated orders of refusals and writes, after one fixed order with more refusals than the retired retry limit allowed; no sequence may be `Abandoned` and the inner store must hold the last operation | CI (`cargo test`) |
 | `a_refused_entry_superseded_by_a_newer_write_is_retired_into_it` | the retry path, one fixed order: counter, watermark, WAL sequences, watchdog class | CI (`cargo test`) |
 | `a_write_in_the_flush_window_then_a_refusal_leaves_nothing_unaccounted` | the retry path at its smallest: one write in the flush window, one refusal | CI (`cargo test`) |
 | `a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable` | WHY the WAL sequences are carried and not resolved at once: with a second key in the same partition, a crash before the newer entry is durable must still replay the retired frame | CI (`cargo test`) |
-| `a_subsuming_write_over_a_survivor_resolves_the_carried_sequences` | a later write that subsumes the newer entry resolves the sequences that entry carried. Also the ORDER on the retry path: inside the retry backoff the count and the flushed watermark already have their settled values, so accounting moved behind the backoff fails it | CI (`cargo test`) |
-| `a_discarded_entry_with_a_queued_newer_write_is_retired_into_it` | the discard path: an entry on its last attempt, with a newer write queued, is not tagged `Abandoned` | CI (`cargo test`) |
-| `a_discarded_delta_entry_stays_replayable_until_its_survivor_is_durable` | WHY the discard path carries too: with a second key in the same partition, a crash before the newer entry is durable must still replay the discarded frame | CI (`cargo test`) |
+| `a_subsuming_write_over_a_survivor_resolves_the_carried_sequences` | a later write that subsumes the newer entry resolves the sequences that entry carried. Also WHEN the retirement is accounted: while the refused entry's next attempt is still ahead, the count and the flushed watermark already have their settled values | CI (`cargo test`) |
+| `a_refused_entry_with_a_queued_newer_write_is_retired_into_it` | the retirement with the newer write already queued when the store refuses: the refused entry is not tagged `Abandoned`, and the key becomes durable through the newer write | CI (`cargo test`) |
+| `a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable` | WHY the sequences are carried for a delta frame too: the newer entry is refused ten times and stays queued with both sequences `Live`; with a second key in the same partition, a crash before the newer entry is durable must still replay the retired frame | CI (`cargo test`) |
 | `a_retired_entry_hands_its_earlier_due_time_to_the_queued_write` | the queued entry takes the earlier due time of the two, so a key rewritten during an outage keeps its flush schedule | CI (`cargo test`) |
 | `two_writers_of_one_key_interleaved_between_sequence_and_insert_leave_nothing_unaccounted` | NOT an enforcer of the precondition. Evidence for accounting only, under one interleaving of two writers that the precondition excludes. It asserts nothing about the stored value | CI (`cargo test`) |
 | `tests/integration-rust/store-refusal-liveness.test.ts`, arm `REFUSAL-LIFTED-UNDER-LOAD` | the predicate at node level: six keys refused while they are still written; after the refusal is lifted every partition's WAL lag returns to 0 | local only (`pnpm test:integration-rust:liveness`), for the reason given under `TG-WB-004` (TODO-770) |
@@ -584,8 +601,6 @@ measured; do not read it as reported.
 **Not covered.** Each of these is an exit the statement names but no test above reaches, or a
 case outside the precondition.
 
-- **A discard with no newer write queued.** The frame stays pinned by design until a restart
-  replays it (TODO-757).
 - **Shutdown.** The flush task aborted at the shutdown timeout, the error, timeout and
   final-sweep exits of `hard_flush`, and a `hard_flush` future dropped mid-drain (TODO-768).
 - **The flush task ending by a panic.** The node does not keep running: the store fails and the
@@ -726,7 +741,13 @@ weaker than a test.
   and their queue insert; `W >= 1` while any write is in progress, because the inserting writer
   is itself past its check. `H` is the number of entries the running flush pass holds whose key
   was re-written while the pass holds them; a pass holds every entry that was due when it began,
-  and `batch_size` does not limit it. **Precondition:** one writer per key (`TG-KEY-001`). The
+  and `batch_size` does not limit it. A third line holds while a store-wide hold is in force
+  (`TG-WB-009`): `H <= 1`, because a hold puts back every entry the pass did not attempt and a
+  pass during a hold holds at most the one entry it probes the store with; an entry waiting for
+  its next attempt is in its queue, not in a pass, and adds nothing to `H`. What changes with a
+  store that refuses is not the bound but how long it is met: nothing leaves the buffer, so the
+  count stays at the bound until the store accepts again, and for that long every write of a key
+  that is not buffered is refused. **Precondition:** one writer per key (`TG-KEY-001`). The
   formula also rests on `TG-WB-007`: a key's staging slot exists only while an entry of the key
   is buffered, or while the key's writer is between staging the key and queueing its entry. The
   enforcers are the five capacity rows of the table above. Not covered: a panic between a
@@ -774,7 +795,7 @@ weaker than a test.
 ### TG-WB-007: A write-behind staging slot exists only while an entry of its key is buffered, or while the key's writer is between staging the key and queueing its entry
 
 - **Scope:** `staging`, `queues` and the flush pass of `WriteBehindDataStore`; its three write
-  entries (`add`, `remove`, `remove_all`); the three sites that clear a slot. The relation is
+  entries (`add`, `remove`, `remove_all`); the two sites that clear a slot. The relation is
   stated for a node that is not shutting down and whose flush task is alive. For the shutdown
   drain only the clearing rule is stated.
 - **Precondition:** one writer per `(map, key)` at a time (`TG-KEY-001`).
@@ -782,18 +803,18 @@ weaker than a test.
   1. A write stages its key directly before its queue insert. In a non-test build no statement
      lies between the `stage` call and the queue insert, the stretch from that call to the end
      of the insert has no await, and no lock taken earlier is held across it.
-  2. Every site that removes a slot after an entry was persisted or discarded removes it only
-     when the slot's sequence equals that entry's sequence: the success terminal and the discard
-     terminal of `flush_loop`, and the shutdown drain. Without the comparison the drain would
-     strip the slot of a newer write of the key, whether that write's entry is already queued or
-     not.
+  2. Every site that removes a slot removes it after its entry was persisted, and only when the
+     slot's sequence equals that entry's sequence: the success terminal of `flush_loop`, and the
+     shutdown drain. An entry the store refuses keeps its slot (`TG-WB-009`). Without the
+     comparison the drain would strip the slot of a newer write of the key, whether that write's
+     entry is already queued or not.
   3. Therefore a slot for a key exists only while an entry of the key is queued or held by the
      running flush pass, or while the key's writer is between `stage` and its queue insert.
 - **Mechanical predicate:** on an idle store — no entry queued and the flush loop between
   passes, in the sense of `TG-WB-005` — `staging` holds no slot.
 - **Maintaining code:** `write_behind.rs` — `add_with_witness`, `remove`, `remove_all` (the
-  order of the two steps), `stage`, `clear_staging_if_current`, `flush_loop` (both terminals),
-  `drain_for_shutdown`.
+  order of the two steps), `stage`, `clear_staging_if_current`, `flush_loop` (its success terminal,
+  `settle_stored`), `drain_for_shutdown`.
 - **Enforcing test:** `write_behind.rs::a_pass_between_the_two_steps_of_a_new_key_write_leaves_no_slot_without_an_entry`,
   `write_behind.rs::a_pass_between_the_two_steps_of_a_coalescing_write_leaves_no_slot_without_an_entry`,
   `write_behind.rs::a_pass_between_the_two_steps_of_a_remove_leaves_no_slot_without_an_entry`,
@@ -885,30 +906,245 @@ weaker than a test.
   `topgun_server.rs::the_store_the_binary_selects_for_redb_emits_a_staged_key_once_under_write_behind`.
 - **Not claimed:** the scan is not a snapshot; "once" is about the key, not about the value at
   the start of the scan; a key written after its range was passed is not emitted by that scan; a
-  key deleted or discarded during the scan; an inner store that does not declare key order —
+  key deleted during the scan; an inner store that does not declare key order —
   Postgres: the duplicate emission is open there (TODO-819); a wrapper between the write-behind
   store and a key-ordered store that does not forward the declaration; order of rows inside a
   batch; backup scans; two interleaved scans; `enumerate_leaves`; the order of the shutdown drain
   being held by a test.
 
-### TG-EVI-001: Never-evict-dirty — an unflushed write is never evicted from the resident cache
+### TG-WB-009: A write-behind entry the store refuses is retried on a schedule and is never dropped
 
-- **Scope:** `evict_lru` in the record store.
-- **Statement:** a record whose latest write has not reached the durable backend is not evictable,
-  regardless of memory pressure.
-- **Maintaining code:** `storage/impls/default_record_store.rs` dirty-skip; `RecordMetadata::is_dirty`
-  is exact by write token (`stored_token != write_token`, set by `on_store`), not by millisecond, so a
-  write stamped in the same millisecond as the previous persist stays dirty; `evict_lru` removes each
-  snapshot candidate through `StorageEngine::remove_if`, re-checking under the key's lock that the
-  resident is still clean and still the write the snapshot saw (SPEC-374).
-- **Enforcing test:** `default_record_store.rs::evict_lru_skips_all_dirty_records` +
+- **Scope:** the flush task of `WriteBehindDataStore` on a node that is not shutting down and
+  whose flush task is alive: the flush pass, what it does with an entry the store refused, the
+  store-wide hold and its probe. Below, `B = backoff_base_ms`, `K = backoff_cap_ms`,
+  `I = flush_interval_ms`; the numbers are for the defaults (500, 5000 and 1000 ms) and for store
+  calls that return promptly, unless a clause says otherwise.
+- **Precondition:** one writer per `(map, key)` at a time (`TG-KEY-001`).
+- **Statement:**
+  1. **Nothing is dropped.** An entry the store refuses goes back to its queue with its staging
+     slot, its count, its entry sequence pending and its WAL sequences `Live`, and is attempted
+     again; the number of attempts is not limited. No branch of the flush task clears a staging
+     slot, lowers the count, resolves an entry sequence or abandons a WAL sequence for an entry
+     the store refused. The only other outcome of a put-back is the retirement into a queued
+     newer write of the same key (`TG-WB-005`), which takes over the retry state.
+  2. **The schedule.** After its n-th refusal an entry is not attempted again for
+     `min(B << n, K)`, counted from the return of the refused call: 1000, 2000, 4000, 5000,
+     5000 … ms. The arithmetic saturates: the wait stays at `K` for any number of refusals. The
+     wait belongs to the key, not to one write of it: a write that replaces the queued entry
+     inherits it. A pass takes the entries that are due, never waits on behalf of one, and
+     attempts first those never refused, in write order, then those refused, the one whose
+     time came longest ago first.
+  3. **The store-wide hold.** Three refusals in a row inside one pass, with no accepted entry
+     between them, start a hold: the pass stops, the entries it did not attempt go back
+     untouched, and until the hold's time has passed no pass takes anything from a queue or
+     calls the store, whoever woke it. Then a pass takes ONE due entry, the probe: the newest
+     entry never refused, or, when none is due, the refused entry whose time came longest ago.
+     Accepted: the hold ends and the same pass goes on over everything that is due. Refused:
+     the hold is renewed, longer. Hold lengths are `min(B << k, K)` after the k-th failed probe
+     in a row, counted from the return of the refused call: 500, 1000, 2000, 4000, 5000,
+     5000 … ms. A new hold always starts at the first length.
+  4. **Bounds that follow.**
+     - *One refused entry delays nobody.* While fewer than three buffered entries are refused,
+       each gets at most one store call per its own wait — at most `4 + ceil((D - 7 s) / 5 s)`
+       calls in a stretch `D >= 7 s` — and an entry of another key is attempted in the first
+       pass that begins after it is due.
+     - *A store that refuses everything is left alone.* The flush task makes at most
+       `3 + ceil(log2(K / B)) + 1 + D / K` store calls in any stretch `D` that begins with the
+       first refusal — `8 + D / 5 s`, 20 in 60 s — whatever the number of buffered entries.
+       When a refused call takes `L` to return, calls do not overlap and the last term is
+       `D / (K + L)`: a store that is slow to refuse is still left alone for a whole hold after
+       each refusal.
+     - *When the store returns.* If the store accepts every call from an instant `T` on, every
+       entry buffered at `T` is attempted in a pass that begins no later than `T + K + I` —
+       6000 ms.
+     - *Order.* Entries of one partition may be stored in any order; the WAL watermark and the
+       flushed watermark stay at or below the lowest unresolved sequence. When the store
+       accepts a key again, the last value it receives for the key is the key's newest buffered
+       value, and it receives no older value of the key after a newer one.
+     - *A new healthy key is not starved.* While three or more buffered keys are refused for
+       ever, a key the store accepts that is written after them is stored in a pass that begins
+       no later than `K + I` after it is due — 6000 ms — however many keys are refused, and
+       for every such key in turn, without end.
+     - *A healthy key that has been refused.* While `P >= 3` buffered keys are refused for
+       ever, a key the store accepts whose entry was refused before is attempted after at most
+       `P` refused store calls on other entries, counted from the first pass at which it is due
+       and no never-refused entry is due, provided none becomes due in between. In time: at
+       most `(P + 1) * (K + I)` — 186 s for `P = 30`. This bound is linear in `P`; it is not a
+       constant.
+  5. **What is not bounded — part of the statement, not a footnote.**
+     Without classifying store errors there is no time by which every buffered key reaches the store while some records are refused for ever.
+     A healthy key written before `N` refused keys that have not been tried yet, with no newer
+     healthy write, waits up to one hold for each of them; so does a refused healthy key for
+     every never-refused entry that is due.
+  6. **The hold has a false positive.** Three refusals in a row start a store-wide hold also on
+     a healthy store whose particular records are refused: the hold is a heuristic for "the
+     store is down", and such records look the same to it.
+  7. **Records the store never accepts fill the buffer.** Records the store never accepts stay
+     in the buffer, and once they fill it the node refuses writes of new keys until an operator
+     intervenes.
+- **The known cost.** A refused entry keeps its entry sequence pending, so the node-wide flushed
+  watermark stops behind it and no tombstone is pruned on any map of the node. For a store that
+  returns, this is the correct behaviour: the fence must not pass a tombstone the store did not
+  get. For a record the store never accepts it lasts until the key is rewritten or the node
+  restarts (TODO-828, TODO-824).
+- **Maintaining code:** `write_behind.rs` — `run_flush_pass`, `requeue_refused`, `put_back`,
+  `settle_stored`, `choose_probe`, `retry_backoff`; `PartitionQueue::drain_due`, `best_due`,
+  `take`; `DelayedEntry::pass_order`, `inherit_from`; `PartitionQueue::retire_into_queued` (the
+  retry state of the retired entry).
+- **Enforcing test:** `write_behind.rs::a_refused_entry_stays_buffered_and_holds_the_flushed_watermark`,
+  `write_behind.rs::an_entry_refused_for_longer_than_the_old_ladder_is_stored_when_the_store_returns`,
+  `write_behind.rs::a_pass_over_refused_entries_ends_without_a_timer_wait`,
+  `write_behind.rs::one_refused_entry_costs_one_store_call_per_backoff_and_delays_no_other_key`,
+  `write_behind.rs::a_rewritten_refused_key_keeps_its_backoff`,
+  `write_behind.rs::a_superseded_entry_hands_its_backoff_to_the_queued_write`,
+  `write_behind.rs::a_store_that_refuses_everything_gets_a_bounded_number_of_calls`,
+  `write_behind.rs::a_hold_makes_no_store_call_even_when_a_flush_is_requested`,
+  `write_behind.rs::after_a_refusal_longer_than_the_old_ladder_the_buffer_drains_within_one_backoff_cap_and_one_interval`,
+  `write_behind.rs::keys_of_one_partition_are_stored_out_of_write_order_and_the_watermarks_follow`,
+  `write_behind.rs::a_refused_cell_entry_persists_what_the_cell_holds_when_it_is_accepted`,
+  `write_behind.rs::healthy_keys_written_after_refused_ones_are_never_starved`,
+  `write_behind.rs::a_refused_healthy_key_is_reached_after_at_most_one_probe_per_rejected_key`,
+  `write_behind.rs::a_store_that_refuses_slowly_is_called_once_at_a_time_and_left_alone_for_a_hold`,
+  `write_behind.rs::never_refused_entries_are_stored_before_refused_ones_in_a_pass`,
+  `write_behind.rs::refused_entries_are_attempted_longest_waiting_first`,
+  `write_behind.rs::entries_put_back_by_a_hold_are_accounted_like_a_retry`,
+  `write_behind.rs::an_accepted_probe_ends_the_hold_and_the_next_trip_starts_at_the_first_length`,
+  `write_behind.rs::an_accepted_entry_between_refusals_resets_the_count_in_a_row`,
+  `write_behind.rs::a_probe_does_not_take_an_entry_whose_time_has_not_come`,
+  `write_behind.rs::a_probe_whose_key_was_rewritten_before_it_was_taken_stores_the_new_value_in_that_pass`,
+  `write_behind.rs::an_accepted_probe_is_followed_by_a_normal_pass_over_what_is_due`,
+  `write_behind.rs::the_probe_is_the_never_refused_entry_with_the_latest_store_time_whatever_its_sequence`,
+  `write_behind.rs::an_entry_refused_a_hundred_times_backs_off_at_the_cap_and_the_flush_task_lives`
+  and `write_behind.rs::a_refusal_count_at_its_maximum_stays_there`. All run in CI
+  (`cargo test`), over a test double as the inner store. At process level, over redb with an
+  injected refusal: `tests/integration-rust/store-refusal-liveness.test.ts` — the refused write
+  stays readable, a retry warning is logged, the write reaches the store once the store accepts
+  again, and it is read back from a second process after a SIGTERM during the refusal. That
+  file is local only (`pnpm test:integration-rust:liveness`), for the reason given under
+  `TG-WB-004`; a CI job that runs it is TODO-832.
+- **Violation consequence:** an acknowledged write is lost on a running node. When the flush
+  gave up on a refused entry, the entry's staging slot went with it, and a read of the key was
+  then answered from the inner store, which never got the write: after an eviction an LWW write
+  read as the previous value or as no record, a removed record came back at once, an OR add
+  lost its tag and an OR remove its tombstone — and the next write of the key was built on that
+  stale value and stored that way. Only a restart, replaying the WAL, brought the write back.
+- **Discovered by:** a review of what a read returns after the flush gave up on an entry; fixed
+  and catalogued by SPEC-390.
+- **Status:** decided, **enforced** — within the limits listed under "Not claimed" below.
+
+**Not claimed.**
+
+- **A time by which every key reaches the store.** Statement 5. The only sign that a record is
+  one the store rejects is a refused call, and a hold allows a fixed number of calls per
+  period, so `P` such records cost at least `P` periods under any order of attempts. Measured
+  for a never-refused healthy key written before `N` refused keys not tried yet, with no newer
+  healthy write: 7.5 s for `N = 3`, 142.5 s for `N = 30`, 442.5 s for `N = 90` — in the order
+  of 14 hours for a full default buffer of 10 000. A known cost; no test pins it. Classifying
+  store errors and parking such records is TODO-824.
+- **A store that never accepts a record.** The entry is retried for the life of the process and
+  holds one buffer place and its partition's WAL watermark. Nothing parks or classifies it
+  (TODO-824).
+- **Tombstone pruning while an entry is refused.** The known cost above. How long it has lasted
+  is read from `topgun_write_behind_oldest_refusal_age_seconds` as a lower bound: the fence has
+  stood for at least that long, and can have stopped earlier, at the write of the entry. How
+  many tombstones wait has no series (TODO-828).
+- **Three or more refused keys due in one pass.** They start a hold; a healthy key then waits
+  for the probe, up to `K + I`. "The first pass after it is due" is stated for fewer than
+  three.
+- **`TOPGUN_WRITEBEHIND_CAPACITY=0` with a store that refuses** is not supported. With no
+  capacity nothing stops the arrival of records the store always refuses, each is newer than a
+  waiting healthy key, and there is then no bound at all on when that key is stored; memory
+  grows without limit.
+- **A store call that does not return promptly.** Calls of the flush task do not overlap and
+  each hold is counted from the return of the refused call. No timeout is added around the
+  store call: a call that never returns stops the flush task for as long as it hangs.
+- **The shutdown drain against a store that is down.** It calls the store once per buffered
+  entry, each call bounded by the remaining deadline; the hold does not apply to it. What is
+  held by a test is only that it ends within the shutdown timeout (TODO-831). An entry the
+  drain could not store is abandoned there and its frame replays at the next start — on a
+  WAL-backed store.
+- **A frame the store refuses at boot.** WAL recovery logs the refusal and continues; the frame
+  is not handed to this schedule and is not retried until the next restart (TODO-823).
+- **How many times the store is called for one key.** A key written again while its entry is
+  held by a pass is stored twice when the held entry is accepted. The statement gives the
+  order, not the count.
+- **WAL growth during an outage.** No frame is collected in a partition whose watermark is
+  held; nothing measures or limits the growth (TODO-757).
+- **The stall alarm during an outage.** Once a partition's stall has outlasted
+  `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS`, the watchdog reports it at `ERROR` on every tick for
+  every partition with a refused entry and ongoing writes, for the rest of the outage. It is
+  not rate-limited (TODO-757).
+- **Two writers of one key.** Outside the precondition. A caller that writes the write-behind
+  store directly — `DeviceIdentityStore` — is outside `TG-KEY-001` and has to exclude a second
+  writer of its key itself.
+- **redb and Postgres.** Every in-process test uses a test double as the inner store; the
+  process-level test uses redb with an injected refusal. Postgres was not run.
+- **The crash harness.** Its model still describes a flush that gives up; its proofs of
+  recovery after a crash are proofs about that model and are not evidence for this schedule
+  (TODO-829).
+- **Simulation.** A simulation cluster node has no write-behind store and no store fault, so no
+  simulation test exercises this row (TODO-830).
+- **Performance.** Not measured.
+- **The client.** Nothing is sent to a client about a refused entry.
+
+### TG-EVI-001: An acknowledged write the store has not taken is readable on a running node
+
+- **Scope:** `RecordStore::get` and `MapDataStore::load` / `load_slot` over a write-behind store
+  whose flush task is alive; and, for the second statement, `evict_lru` in the record store.
+- **Statement:**
+  1. From the ack until the inner store has accepted the write, a read of the key returns that
+     write — from the resident record, or, when the record is not resident, from the key's
+     staging slot. Eviction does not change the answer.
+  2. The narrower rule this row used to be, kept: `evict_lru` never removes a record with
+     `is_dirty() == true`, where dirty means "`data_store.add` has not returned". Over a
+     write-behind store `add` returns once the write is buffered, so a record is clean, and
+     evictable, while its write is still on its way to the inner store; that is why statement
+     1 rests on the staging slot and not on this rule.
+- **Maintaining code:** for statement 1, `write_behind.rs` — `stage` before the queue insert
+  (`TG-WB-007`); `requeue_refused`, which keeps the slot of an entry the store refused
+  (`TG-WB-009`); `load` / `load_slot`, which answer from the slot before they ask the inner
+  store. For statement 2, `storage/impls/default_record_store.rs` dirty-skip;
+  `RecordMetadata::is_dirty` is exact by write token (`stored_token != write_token`, set by
+  `on_store`), not by millisecond, so a write stamped in the same millisecond as the previous
+  persist stays dirty; `evict_lru` removes each snapshot candidate through
+  `StorageEngine::remove_if`, re-checking under the key's lock that the resident is still clean
+  and still the write the snapshot saw (SPEC-374).
+- **Enforcing test:** statement 1 — `crdt.rs::an_lww_write_refused_ten_times_and_evicted_reads_the_acked_value`,
+  `::a_first_lww_write_refused_ten_times_and_evicted_reads_the_acked_value`,
+  `::an_lww_tombstone_refused_ten_times_and_evicted_stays_a_tombstone`,
+  `::a_remove_refused_ten_times_stays_removed`,
+  `::an_or_add_refused_ten_times_and_evicted_keeps_its_tag`,
+  `::an_or_remove_refused_ten_times_and_evicted_keeps_its_tombstone`,
+  `::a_write_of_a_key_under_retry_is_stored_with_the_refused_one`,
+  `::an_or_remove_under_retry_survives_the_next_write_of_its_key`,
+  `write_behind.rs::a_value_added_straight_to_the_store_is_loadable_while_refused` and
+  `write_behind.rs::a_device_identity_is_presented_back_and_stays_revoked_while_the_store_refuses`.
+  Statement 2 — `default_record_store.rs::evict_lru_skips_all_dirty_records` +
   `::evict_lru_skips_dirty_in_mixed_snapshot` + assertion in `eviction_cost_test.rs`;
   `::evict_lru_keeps_a_record_written_after_its_snapshot` (a write between the snapshot and the
   removal), `::a_write_in_the_mark_stored_millisecond_is_not_evicted` and
   `record.rs::a_write_in_the_stored_millisecond_is_dirty` (same-millisecond write).
-- **Violation consequence:** eviction under pressure silently drops acked writes.
-- **Discovered by:** eviction design (pre-catalog).
-- **Status:** decided, **enforced**.
+- **Violation consequence:** a read returns a value older than an acknowledged write, or no
+  record, on a node that is running; and for statement 2, eviction under pressure drops a
+  write the store was never given.
+- **Discovered by:** eviction design (pre-catalog) for statement 2; statement 1 by the review
+  named under `TG-WB-009`, restated by SPEC-390.
+- **Status:** decided, **enforced** — within the limits listed under "Not claimed" below.
+
+**Not claimed.**
+
+- **A frame the store refuses at boot.** The node serves the previous value until the next
+  restart (TODO-823).
+- **A value left in memory when `data_store.add` fails.** The record store writes memory before
+  the store call, so a write that was not acknowledged can be read (TODO-825).
+- **`evict_expired`.** It removes expired records without looking at the dirty flag; what a
+  read then returns for a buffered write was not examined (TODO-827).
+- **Other nodes.** Whether other nodes of a cluster see a different value for the length of
+  one node's store outage was not examined (TODO-827).
+- **A node whose flush task has died, or that is shutting down.** Outside the scope
+  (`TG-WB-006`).
+- **Memory.** A slot's memory is not returned by eviction, and the capacity counts keys, not
+  bytes (`TG-WB-007`; TODO-826).
 
 ### TG-OR-001: `update_in_place`'s mutate closure runs at most once per call
 
