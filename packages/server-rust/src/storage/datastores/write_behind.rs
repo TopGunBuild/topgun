@@ -835,6 +835,9 @@ struct TestParks {
     /// Parks `hard_flush` once the shutdown flag is set, before the flush
     /// loop is joined.
     after_shutdown_flag: Mutex<Option<ParkGate>>,
+    /// Parks the flush task between the choice of a probe and its removal
+    /// from its queue.
+    between_probe_choice_and_removal: Mutex<Option<ParkGate>>,
 }
 
 #[cfg(test)]
@@ -883,6 +886,28 @@ pub(crate) struct DelayedEntry {
     pub sequence: u64,
     /// Number of failed flush attempts so far.
     pub retry_count: u32,
+    /// When the store may next be asked to take this entry; `None` until the
+    /// store has refused it once. Monotonic, so a test can drive it with a
+    /// paused clock and a wall-clock step cannot move it.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by the retry schedule, which lands with the fix"
+        )
+    )]
+    pub next_attempt: Option<tokio::time::Instant>,
+    /// When the store first refused this key's buffered entry; `None` until
+    /// then. Written by the refusal only and never moved by a later one, so
+    /// it says for how long the store has been refusing the key.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by the retry schedule, which lands with the fix"
+        )
+    )]
+    pub first_refused: Option<tokio::time::Instant>,
     /// WAL sequences whose frames this entry carries; resolved together at the
     /// entry's terminal outcome.
     ///
@@ -896,6 +921,37 @@ pub(crate) struct DelayedEntry {
     /// not subsume its predecessor's must carry that predecessor's sequence
     /// forward and resolve both together.
     pub wal_sequences: BTreeSet<u64>,
+}
+
+impl DelayedEntry {
+    /// The entry of a first buffered write of a key: never refused, carrying
+    /// the one WAL sequence of its own frame.
+    fn fresh(
+        map: &str,
+        key: &str,
+        operation: DelayedOp,
+        store_time: i64,
+        sequence: u64,
+        wal_seq: u64,
+    ) -> Self {
+        Self {
+            map: map.to_string(),
+            key: key.to_string(),
+            operation,
+            store_time,
+            sequence,
+            retry_count: 0,
+            next_attempt: None,
+            first_refused: None,
+            wal_sequences: BTreeSet::from([wal_seq]),
+        }
+    }
+
+    /// What a write that replaces a queued entry takes from it: its place in
+    /// the flush schedule, which belongs to the key and not to one write of it.
+    fn inherit_from(&mut self, replaced: &DelayedEntry) {
+        self.store_time = replaced.store_time;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2077,6 +2133,77 @@ impl WriteBehindDataStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
         handle
+    }
+
+    /// Parks the flush task the next time it has chosen a probe, before it
+    /// removes the entry from its queue, so a writer can replace the entry in
+    /// between. One-shot and held by this store instance.
+    #[cfg(test)]
+    pub(crate) fn test_park_between_probe_choice_and_removal(&self) -> TestParkHandle {
+        let (gate, handle) = TestParkHandle::arm();
+        *self
+            .test_parks
+            .between_probe_choice_and_removal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
+        handle
+    }
+
+    /// Whether a store-wide hold is in force: from the trip until a probe is
+    /// accepted, including the stretch after the hold time has passed and
+    /// before a probe has been made.
+    #[cfg(test)]
+    #[expect(
+        clippy::unused_self,
+        reason = "reads the hold, which lands with the fix"
+    )]
+    pub(crate) fn test_store_hold_active(&self) -> bool {
+        false
+    }
+
+    /// Probes refused in a row in the current hold.
+    #[cfg(test)]
+    #[expect(
+        clippy::unused_self,
+        reason = "reads the hold, which lands with the fix"
+    )]
+    pub(crate) fn test_failed_probes(&self) -> u32 {
+        0
+    }
+
+    /// `(retry_count, next_attempt)` of the entry queued for a key; `None`
+    /// when the key has no queued entry.
+    #[cfg(test)]
+    pub(crate) fn test_retry_state(
+        &self,
+        map: &str,
+        key: &str,
+    ) -> Option<(u32, Option<tokio::time::Instant>)> {
+        let queue = self.queues.get(&partition_for(map, key))?;
+        let entry = queue.entries.get(&(map.to_string(), key.to_string()))?;
+        Some((entry.retry_count, entry.next_attempt))
+    }
+
+    /// When the store first refused the entry queued for a key; `None` when
+    /// the key has no queued entry or the entry was never refused.
+    #[cfg(test)]
+    pub(crate) fn test_first_refused(&self, map: &str, key: &str) -> Option<tokio::time::Instant> {
+        let queue = self.queues.get(&partition_for(map, key))?;
+        let entry = queue.entries.get(&(map.to_string(), key.to_string()))?;
+        entry.first_refused
+    }
+
+    /// How many flush passes have ended. The epoch is bumped once when a pass
+    /// opens and once when it closes, so half of it counts the closed ones.
+    #[cfg(test)]
+    pub(crate) fn test_passes_closed(&self) -> u64 {
+        self.flush_pass_epoch.load(Ordering::SeqCst) / 2
+    }
+
+    /// Whether a flush pass is running: the epoch is odd while one is open.
+    #[cfg(test)]
+    pub(crate) fn test_pass_open(&self) -> bool {
+        self.flush_pass_epoch.load(Ordering::SeqCst) % 2 == 1
     }
 
     /// Selects the watermark rule this store computes with.
@@ -3600,15 +3727,7 @@ impl MapDataStore for WriteBehindDataStore {
             gate.pass().await;
         }
         let (operation, staged) = queued_and_staged(src, expiration_time);
-        let entry = DelayedEntry {
-            map: map.to_string(),
-            key: key.to_string(),
-            operation,
-            store_time: now,
-            sequence: entry_seq,
-            retry_count: 0,
-            wal_sequences: BTreeSet::from([wal_seq]),
-        };
+        let entry = DelayedEntry::fresh(map, key, operation, now, entry_seq, wal_seq);
 
         let staging_key = (map.to_string(), key.to_string());
         // Staged before the entry is queued: a flush pass can take the entry the
@@ -3626,7 +3745,7 @@ impl MapDataStore for WriteBehindDataStore {
             if let Some(existing) = queue.value_mut().remove(map, key) {
                 let retired = existing.sequence;
                 let mut coalesced = entry;
-                coalesced.store_time = existing.store_time;
+                coalesced.inherit_from(&existing);
                 let subsumed = Self::coalesce_wal_sequences(
                     survivor_subsumes,
                     &mut coalesced,
@@ -3733,15 +3852,7 @@ impl MapDataStore for WriteBehindDataStore {
 
         // Assign and track the durability sequence atomically before queuing.
         let entry_seq = self.assign_tracked_sequence();
-        let entry = DelayedEntry {
-            map: map.to_string(),
-            key: key.to_string(),
-            operation: DelayedOp::Remove,
-            store_time: now,
-            sequence: entry_seq,
-            retry_count: 0,
-            wal_sequences: BTreeSet::from([wal_seq]),
-        };
+        let entry = DelayedEntry::fresh(map, key, DelayedOp::Remove, now, entry_seq, wal_seq);
 
         let staging_key = (map.to_string(), key.to_string());
         // The pending delete is staged before the entry is queued: a flush pass
@@ -3758,7 +3869,7 @@ impl MapDataStore for WriteBehindDataStore {
             if let Some(existing) = queue.value_mut().remove(map, key) {
                 let retired = existing.sequence;
                 let mut coalesced = entry;
-                coalesced.store_time = existing.store_time;
+                coalesced.inherit_from(&existing);
                 let subsumed = Self::coalesce_wal_sequences(
                     survivor_subsumes,
                     &mut coalesced,
@@ -3937,15 +4048,7 @@ impl MapDataStore for WriteBehindDataStore {
 
             // Assign and track the durability sequence atomically before queuing.
             let entry_seq = self.assign_tracked_sequence();
-            let entry = DelayedEntry {
-                map: map.to_string(),
-                key: key.clone(),
-                operation: DelayedOp::Remove,
-                store_time: now,
-                sequence: entry_seq,
-                retry_count: 0,
-                wal_sequences: BTreeSet::from([wal_seq]),
-            };
+            let entry = DelayedEntry::fresh(map, key, DelayedOp::Remove, now, entry_seq, wal_seq);
 
             let staging_key = (map.to_string(), key.clone());
             // The pending delete is staged before the entry is queued: a flush pass
@@ -3962,7 +4065,7 @@ impl MapDataStore for WriteBehindDataStore {
                 if let Some(existing) = queue.value_mut().remove(map, key) {
                     let retired = existing.sequence;
                     let mut coalesced = entry;
-                    coalesced.store_time = existing.store_time;
+                    coalesced.inherit_from(&existing);
                     let subsumed = Self::coalesce_wal_sequences(
                         survivor_subsumes,
                         &mut coalesced,
@@ -4457,7 +4560,6 @@ mod tests {
             write_delay_ms: 10,
             flush_interval_ms: 10,
             batch_size: 100,
-            max_retries: 3,
             backoff_base_ms: 10,
             backoff_cap_ms: 100,
             capacity: 0,
@@ -4478,6 +4580,16 @@ mod tests {
         Remove { map: String, key: String },
     }
 
+    /// One inner-store call of a flush as the store saw it: which key, when the
+    /// call began, when it answered and whether it was accepted.
+    #[derive(Debug, Clone)]
+    struct SpyTimedCall {
+        key: String,
+        began: tokio::time::Instant,
+        returned: Option<tokio::time::Instant>,
+        accepted: bool,
+    }
+
     /// Test-only data store that records calls and optionally returns pre-seeded values.
     struct SpyDataStore {
         calls: Arc<Mutex<Vec<SpyCall>>>,
@@ -4493,6 +4605,22 @@ mod tests {
         /// What `add()` was actually asked to persist, kept apart from `seeded`
         /// so no existing expectation about `load()` changes.
         persisted: DashMap<(String, String), RecordValue>,
+        /// When set, `remove` returns `Err`.
+        fail_remove: std::sync::atomic::AtomicBool,
+        /// Keys whose `add` and `remove` return `Err` while every other key is
+        /// served: a record the store rejects next to a store that works.
+        refused_keys: Mutex<std::collections::HashSet<String>>,
+        /// How long `add` and `remove` take to answer. Slept on the runtime's
+        /// clock, so a paused clock drives it.
+        answer_delay_ms: AtomicU64,
+        /// Every `add` and `remove`, in the order they began.
+        timeline: Mutex<Vec<SpyTimedCall>>,
+        in_flight: std::sync::atomic::AtomicUsize,
+        most_in_flight: std::sync::atomic::AtomicUsize,
+        /// When set, an accepted `add` is kept and an accepted `remove` deletes,
+        /// so `load()` answers with what the store was actually given. Off by
+        /// default, so no existing expectation about `load()` changes.
+        retain_accepted: bool,
     }
 
     impl SpyDataStore {
@@ -4503,7 +4631,124 @@ mod tests {
                 fail_add: std::sync::atomic::AtomicBool::new(false),
                 add_gate: Mutex::new(None),
                 persisted: DashMap::new(),
+                fail_remove: std::sync::atomic::AtomicBool::new(false),
+                refused_keys: Mutex::new(std::collections::HashSet::new()),
+                answer_delay_ms: AtomicU64::new(0),
+                timeline: Mutex::new(Vec::new()),
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                most_in_flight: std::sync::atomic::AtomicUsize::new(0),
+                retain_accepted: false,
             }
+        }
+
+        /// A store that keeps what it accepts: `load()` and `held()` answer
+        /// with the last accepted value of a key, as a real store would.
+        fn retaining() -> Self {
+            Self {
+                retain_accepted: true,
+                ..Self::new()
+            }
+        }
+
+        /// Refuse, or stop refusing, every `add` and every `remove`.
+        fn refuse_everything(&self, refuse: bool) {
+            self.set_fail_add(refuse);
+            self.fail_remove
+                .store(refuse, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Refuse every call for `key` from now on, whatever the map.
+        fn refuse_key(&self, key: &str) {
+            self.refused_keys.lock().unwrap().insert(key.to_string());
+        }
+
+        /// Lift every per-key refusal.
+        fn accept_every_key(&self) {
+            self.refused_keys.lock().unwrap().clear();
+        }
+
+        fn set_answer_delay_ms(&self, delay_ms: u64) {
+            self.answer_delay_ms
+                .store(delay_ms, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Every `add` and `remove` so far, in the order they began.
+        fn timeline(&self) -> Vec<SpyTimedCall> {
+            self.timeline.lock().unwrap().clone()
+        }
+
+        fn call_count(&self) -> usize {
+            self.timeline.lock().unwrap().len()
+        }
+
+        fn calls_for(&self, key: &str) -> usize {
+            self.timeline
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call.key == key)
+                .count()
+        }
+
+        fn accepted_for(&self, key: &str) -> usize {
+            self.timeline
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call.key == key && call.accepted)
+                .count()
+        }
+
+        /// What a retaining store holds for a key: the last accepted value.
+        fn held(&self, map: &str, key: &str) -> Option<RecordValue> {
+            self.seeded
+                .get(&(map.to_string(), key.to_string()))
+                .map(|v| v.value().clone())
+        }
+
+        /// The largest number of calls that were unanswered at one instant.
+        fn most_in_flight(&self) -> usize {
+            self.most_in_flight
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Records that a call began and returns its place in the timeline.
+        fn call_began(&self, key: &str) -> usize {
+            let now_in_flight = self
+                .in_flight
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.most_in_flight
+                .fetch_max(now_in_flight, std::sync::atomic::Ordering::SeqCst);
+            let mut timeline = self.timeline.lock().unwrap();
+            timeline.push(SpyTimedCall {
+                key: key.to_string(),
+                began: tokio::time::Instant::now(),
+                returned: None,
+                accepted: false,
+            });
+            timeline.len() - 1
+        }
+
+        fn call_returned(&self, index: usize, accepted: bool) {
+            self.in_flight
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let mut timeline = self.timeline.lock().unwrap();
+            timeline[index].returned = Some(tokio::time::Instant::now());
+            timeline[index].accepted = accepted;
+        }
+
+        async fn answer_delay(&self) {
+            let delay_ms = self
+                .answer_delay_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if delay_ms > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
+
+        fn refuses_key(&self, key: &str) -> bool {
+            self.refused_keys.lock().unwrap().contains(key)
         }
 
         /// The value the inner store was handed for a key, if any.
@@ -4556,6 +4801,7 @@ mod tests {
             });
             self.persisted
                 .insert((map.to_string(), key.to_string()), value.clone());
+            let index = self.call_began(key);
             // If a gate is installed, consume it: signal that the add is now in
             // flight, then park until the test lets it proceed.
             let gate = self.add_gate.lock().unwrap().take();
@@ -4563,8 +4809,18 @@ mod tests {
                 entered.notify_one();
                 proceed.notified().await;
             }
-            if self.fail_add.load(std::sync::atomic::Ordering::Relaxed) {
+            self.answer_delay().await;
+            // Read when the call answers, not when it began: a refusal lifted
+            // while a slow call is in flight is an accepted call.
+            let refused =
+                self.fail_add.load(std::sync::atomic::Ordering::Relaxed) || self.refuses_key(key);
+            self.call_returned(index, !refused);
+            if refused {
                 anyhow::bail!("SpyDataStore: simulated inner-store add failure");
+            }
+            if self.retain_accepted {
+                self.seeded
+                    .insert((map.to_string(), key.to_string()), value.clone());
             }
             Ok(())
         }
@@ -4585,6 +4841,17 @@ mod tests {
                 map: map.to_string(),
                 key: key.to_string(),
             });
+            let index = self.call_began(key);
+            self.answer_delay().await;
+            let refused = self.fail_remove.load(std::sync::atomic::Ordering::Relaxed)
+                || self.refuses_key(key);
+            self.call_returned(index, !refused);
+            if refused {
+                anyhow::bail!("SpyDataStore: simulated inner-store remove failure");
+            }
+            if self.retain_accepted {
+                self.seeded.remove(&(map.to_string(), key.to_string()));
+            }
             Ok(())
         }
 
@@ -5023,60 +5290,40 @@ mod tests {
         );
     }
 
-    /// Pins what the code does today, and is not an endorsement of it: an
-    /// entry the flush loop discards after its last retry still has its ENTRY
-    /// sequence resolved, so the flushed watermark reaches the assigned counter
-    /// although the inner store never took the write. Whether that advance
-    /// should happen for a write that is durable only in the WAL is an open
-    /// question this test does not answer.
-    #[tokio::test]
-    async fn a_terminal_discard_still_resolves_the_entry_sequence() {
-        use std::time::{Duration, Instant};
-
-        let spy = Arc::new(SpyDataStore::new());
-        spy.set_fail_add(true);
-        let calls = spy.calls();
-        let inner: Arc<dyn MapDataStore> = spy;
-        // One attempt, so the first refusal is the terminal discard; due at
-        // once, and only a requested pass runs.
-        let config = WriteBehindConfig {
-            write_delay_ms: 0,
-            flush_interval_ms: 60_000,
-            max_retries: 1,
-            ..WriteBehindConfig::default()
-        };
-        let store = WriteBehindDataStore::new(inner, config);
-
-        store.add("m", "k", &dummy_value(), 0, 1).await.unwrap();
-        let assigned = store.assigned_write_sequence();
-        assert!(
-            store.flushed_watermark() < assigned,
-            "precondition: buffered, not durable"
+    /// An entry the store refuses is never given up: it stays buffered and
+    /// readable, and its ENTRY sequence stays unresolved, so the flushed
+    /// watermark — the tombstone durability fence — waits below it for as
+    /// long as the inner store has not taken the write. Only the accepted
+    /// store call resolves it.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_entry_stays_buffered_and_holds_the_flushed_watermark() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store(&spy, schedule_config());
+        store
+            .add(SCHEDULE_MAP, "k", &lww("v", 1), 0, 1)
+            .await
+            .unwrap();
+        advance(60_000).await;
+        let while_refused = (
+            store.pending_operation_count(),
+            store.load(SCHEDULE_MAP, "k").await.unwrap(),
+            store.flushed_watermark() < store.assigned_write_sequence(),
         );
-
-        store.soft_flush().await.unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !store.test_is_idle() {
-            assert!(
-                Instant::now() < deadline,
-                "the pass that discards the entry never closed"
-            );
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-
-        // The inner store was asked exactly once and refused: the terminal is
-        // the discard, not a success and not a retry still to come.
-        assert_eq!(
-            calls.lock().unwrap().len(),
-            1,
-            "one attempt, refused, is the whole of the entry's life"
+        spy.refuse_everything(false);
+        let drained = poll_until(10_000, || store.test_is_idle()).await.is_some();
+        let after = (
+            store.pending_operation_count(),
+            store.flushed_watermark() == store.assigned_write_sequence(),
+            spy.held(SCHEDULE_MAP, "k"),
         );
-        assert_eq!(store.pending_operation_count(), 0);
         assert_eq!(
-            store.flushed_watermark(),
-            assigned,
-            "the discard resolves the entry sequence, so the watermark is not \
-             stalled below the assigned counter"
+            (while_refused, drained, after),
+            (
+                (1, Some(lww("v", 1)), true),
+                true,
+                (0, true, Some(lww("v", 1)))
+            )
         );
     }
 
@@ -7465,6 +7712,8 @@ mod tests {
             store_time: 0,
             sequence: 1,
             retry_count: 0,
+            next_attempt: None,
+            first_refused: None,
             wal_sequences: BTreeSet::new(),
         };
 
@@ -7666,7 +7915,7 @@ mod tests {
     /// queue is retired into it.
     ///
     /// While an entry is out of the queue — drained into the flush batch and
-    /// waiting behind another key's backoff — a write to the same key has
+    /// waiting behind another key's store call — a write to the same key has
     /// nothing to coalesce with, so it is queued and counted as a new entry.
     /// When the older entry's attempt then fails, its count, its entry sequence
     /// and its WAL sequences must pass to that queued write. Dropping the entry
@@ -7685,9 +7934,6 @@ mod tests {
         let spy = Arc::new(SpyDataStore::new());
         spy.set_fail_add(true);
         let calls = spy.calls();
-        // First backoff = min(500 * 2^1, 5000) = 1000 ms: the window in which
-        // the older `b` entry sits in the batch behind `a`.
-        //
         // The stall bound puts the watchdog's first tick 60 s out, past every
         // wait below. The watchdog shares its leak-candidate state with the two
         // classifier samples at the end, so a background sample taken first
@@ -7699,7 +7945,6 @@ mod tests {
                 flush_interval_ms: 200,
                 backoff_base_ms: 500,
                 backoff_cap_ms: 5000,
-                max_retries: 3,
                 capacity: 0,
                 wal_watermark_stall_bound_ms: 600_000,
                 ..WriteBehindConfig::default()
@@ -7723,7 +7968,10 @@ mod tests {
         let b = ("m".to_string(), "b".to_string());
 
         // `a` is the older of the two, so it is first in the batch and `b`
-        // waits behind its backoff.
+        // waits behind it. The store call of `a` is held open: that is the
+        // window in which the older `b` entry sits in the batch, and it lasts
+        // until the test closes it, whatever the schedule of a retry is.
+        let (entered, proceed) = spy.install_add_gate();
         let t = now_millis();
         store
             .add("m", "a", &dummy_value_with(1), 0, t - 10)
@@ -7734,11 +7982,9 @@ mod tests {
             .await
             .expect("b is accepted into the buffer");
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while attempts("a") < 1 {
-            assert!(Instant::now() < deadline, "a was never attempted");
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("a was never attempted");
         let b_queued = store
             .queues
             .get(&pb)
@@ -7754,6 +8000,7 @@ mod tests {
             .add("m", "b", &newer, 0, now_millis())
             .await
             .expect("the newer b is accepted into the buffer");
+        proceed.notify_one();
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while attempts("b") < 1 {
@@ -8907,6 +9154,1609 @@ mod tests {
             "with nothing staged for the map a cursor is passed on and never decoded"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // The retry schedule of an entry the store refuses
+    // -----------------------------------------------------------------------
+
+    /// The map the schedule tests write to.
+    const SCHEDULE_MAP: &str = "m";
+
+    /// Every write is due at once and a pass begins every 100 ms.
+    fn schedule_config() -> WriteBehindConfig {
+        WriteBehindConfig {
+            write_delay_ms: 0,
+            flush_interval_ms: 100,
+            capacity: 0,
+            ..WriteBehindConfig::default()
+        }
+    }
+
+    fn schedule_store(
+        spy: &Arc<SpyDataStore>,
+        config: WriteBehindConfig,
+    ) -> Arc<WriteBehindDataStore> {
+        WriteBehindDataStore::new(Arc::clone(spy) as Arc<dyn MapDataStore>, config)
+    }
+
+    fn schedule_store_with_wal(
+        spy: &Arc<SpyDataStore>,
+        config: WriteBehindConfig,
+    ) -> Arc<WriteBehindDataStore> {
+        WriteBehindDataStore::new_with_wal(
+            Arc::clone(spy) as Arc<dyn MapDataStore>,
+            config,
+            Some(WalBootstrap {
+                wal: InMemoryTestWal::new() as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        )
+    }
+
+    /// Lets `ms` milliseconds of the runtime's clock pass.
+    async fn advance(ms: u64) {
+        tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
+    }
+
+    /// Polls `cond` every 10 ms of the runtime's clock for at most `limit_ms`
+    /// and says after how many milliseconds it first held.
+    async fn poll_until(limit_ms: u64, mut cond: impl FnMut() -> bool) -> Option<u64> {
+        let start = tokio::time::Instant::now();
+        loop {
+            let waited = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            if cond() {
+                return Some(waited);
+            }
+            if waited >= limit_ms {
+                return None;
+            }
+            advance(10).await;
+        }
+    }
+
+    /// The first `count` keys of the schedule map that fall into `partition`.
+    fn keys_of_partition(partition: u32, count: usize) -> Vec<String> {
+        (0u32..)
+            .map(|i| format!("p{i}"))
+            .filter(|key| partition_for(SCHEDULE_MAP, key) == partition)
+            .take(count)
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_entry_refused_for_longer_than_the_old_ladder_is_stored_when_the_store_returns() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store_with_wal(&spy, schedule_config());
+        store
+            .add(SCHEDULE_MAP, "k", &lww("v", 1), 0, 1)
+            .await
+            .unwrap();
+        let partition = partition_for(SCHEDULE_MAP, "k");
+        advance(60_000).await;
+        spy.refuse_everything(false);
+        let healed = poll_until(5_110, || {
+            spy.held(SCHEDULE_MAP, "k").is_some() && store.test_is_idle()
+        })
+        .await
+        .is_some();
+        assert_eq!(
+            (
+                healed,
+                spy.held(SCHEDULE_MAP, "k"),
+                store.test_wal_watermark(partition)
+                    == Some(Ok(store.test_max_assigned_wal_sequence(partition))),
+                store.test_pending_wal_sequences(partition),
+                store.staging.len(),
+            ),
+            (true, Some(lww("v", 1)), true, Vec::new(), 0)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_value_added_straight_to_the_store_is_loadable_while_refused() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.seed(SCHEDULE_MAP, "seeded", lww("old", 1));
+        spy.refuse_everything(true);
+        let store = schedule_store(&spy, schedule_config());
+        store
+            .add(SCHEDULE_MAP, "k", &lww("v", 2), 0, 1)
+            .await
+            .unwrap();
+        store.remove(SCHEDULE_MAP, "seeded", 1).await.unwrap();
+        advance(60_000).await;
+        assert_eq!(
+            (
+                store.load(SCHEDULE_MAP, "k").await.unwrap(),
+                store.load(SCHEDULE_MAP, "seeded").await.unwrap(),
+            ),
+            (Some(lww("v", 2)), None)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_device_identity_is_presented_back_and_stays_revoked_while_the_store_refuses() {
+        use crate::network::device_identity::DeviceIdentityStore;
+
+        let spy = Arc::new(SpyDataStore::retaining());
+        let store = schedule_store(&spy, schedule_config());
+        let identities = DeviceIdentityStore::new(Arc::clone(&store) as Arc<dyn MapDataStore>);
+
+        // X reaches the inner store while it still accepts, so its later
+        // revocation is the removal of a record the inner store holds.
+        let x = identities.present_or_mint(None, None).await.unwrap();
+        let x_token = x
+            .minted_token
+            .clone()
+            .expect("a fresh identity has a token");
+        poll_until(10_000, || store.test_is_idle())
+            .await
+            .expect("the first identity is stored");
+
+        spy.refuse_everything(true);
+        let y = identities.present_or_mint(None, None).await.unwrap();
+        let y_token = y
+            .minted_token
+            .clone()
+            .expect("a fresh identity has a token");
+        advance(60_000).await;
+        let again = identities
+            .present_or_mint(None, Some(&y_token))
+            .await
+            .unwrap();
+        let presented_back = (again.device_id == y.device_id, again.minted_token.is_none());
+
+        identities.revoke(None, &x.device_id).await.unwrap();
+        advance(60_000).await;
+        let after_revoke = identities
+            .present_or_mint(None, Some(&x_token))
+            .await
+            .unwrap();
+        let revoked = (
+            after_revoke.device_id != x.device_id,
+            after_revoke.minted_token.is_some(),
+        );
+        assert_eq!((presented_back, revoked), ((true, true), (true, true)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pass_over_refused_entries_ends_without_a_timer_wait() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        let store = schedule_store(&spy, schedule_config());
+        for i in 0..50 {
+            let key = format!("r{i}");
+            spy.refuse_key(&key);
+            store
+                .add(SCHEDULE_MAP, &key, &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        store
+            .add(SCHEDULE_MAP, "healthy", &lww("h", 1), 0, 1)
+            .await
+            .unwrap();
+        let closed_before = store.test_passes_closed();
+        store.soft_flush().await.unwrap();
+        let started = poll_until(10, || spy.call_count() > 0).await;
+        let closed = poll_until(10, || {
+            !store.test_pass_open() && store.test_passes_closed() > closed_before
+        })
+        .await;
+        let healthy_after =
+            poll_until(10_000, || spy.held(SCHEDULE_MAP, "healthy").is_some()).await;
+        assert_eq!(
+            (
+                started.is_some(),
+                closed.is_some(),
+                healthy_after.map(|ms| ms <= 5_110)
+            ),
+            (true, true, Some(true)),
+            "healthy key stored after {healthy_after:?} ms"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_refused_entry_costs_one_store_call_per_backoff_and_delays_no_other_key() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_key("A");
+        let store = schedule_store(&spy, schedule_config());
+        store
+            .add(SCHEDULE_MAP, "A", &lww("a", 1), 0, 1)
+            .await
+            .unwrap();
+        let mut slowest = 0u64;
+        let mut all_stored = true;
+        let mut hold_seen = false;
+        for i in 0..60 {
+            let round = tokio::time::Instant::now();
+            let key = format!("h{i}");
+            store
+                .add(SCHEDULE_MAP, &key, &lww("h", 1), 0, 1)
+                .await
+                .unwrap();
+            match poll_until(1_000, || spy.held(SCHEDULE_MAP, &key).is_some()).await {
+                Some(waited) => slowest = slowest.max(waited),
+                None => all_stored = false,
+            }
+            hold_seen |= store.test_store_hold_active();
+            tokio::time::sleep_until(round + tokio::time::Duration::from_millis(1_000)).await;
+        }
+        let calls = spy.calls_for("A");
+        assert_eq!(
+            (
+                (5..=15).contains(&calls),
+                hold_seen,
+                all_stored,
+                slowest <= 210
+            ),
+            (true, false, true, true),
+            "calls(A) = {calls}, slowest healthy key = {slowest} ms"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rewritten_refused_key_keeps_its_backoff() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_key("A");
+        let store = schedule_store(&spy, schedule_config());
+        let mut last = lww("a0", 1);
+        store.add(SCHEDULE_MAP, "A", &last, 0, 1).await.unwrap();
+        for i in 1..=100u64 {
+            advance(100).await;
+            last = lww(&format!("a{i}"), i + 1);
+            store.add(SCHEDULE_MAP, "A", &last, 0, 1).await.unwrap();
+        }
+        let calls = spy.calls_for("A");
+        assert_eq!(
+            (calls <= 6, store.load(SCHEDULE_MAP, "A").await.unwrap()),
+            (true, Some(last)),
+            "calls(A) = {calls}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_superseded_entry_hands_its_backoff_to_the_queued_write() {
+        fn answered(spy: &SpyDataStore) -> usize {
+            spy.timeline()
+                .iter()
+                .filter(|call| call.returned.is_some())
+                .count()
+        }
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_key("A");
+        let store = schedule_store(&spy, schedule_config());
+        store
+            .add(SCHEDULE_MAP, "A", &lww("a1", 1), 0, 1)
+            .await
+            .unwrap();
+        let refused_once = poll_until(1_000, || answered(&spy) == 1).await.is_some();
+
+        // The next attempt on A stops inside the store, so the pass holds the
+        // entry out of its queue while A is written again.
+        let (entered, proceed) = spy.install_add_gate();
+        let held_by_a_pass =
+            tokio::time::timeout(tokio::time::Duration::from_secs(30), entered.notified())
+                .await
+                .is_ok();
+        store
+            .add(SCHEDULE_MAP, "A", &lww("a2", 2), 0, 1)
+            .await
+            .unwrap();
+        let queued_before = store.test_retry_state(SCHEDULE_MAP, "A");
+        proceed.notify_one();
+        let refused_twice = poll_until(1_000, || answered(&spy) == 2).await.is_some();
+        let queued_after = store.test_retry_state(SCHEDULE_MAP, "A");
+        assert_eq!(
+            (
+                (refused_once, held_by_a_pass, refused_twice),
+                queued_before,
+                queued_after.map(|(count, next)| (count, next.is_some())),
+                store.pending_operation_count(),
+            ),
+            ((true, true, true), Some((0, None)), Some((2, true)), 1)
+        );
+    }
+
+    /// How many store calls a store that refuses everything gets in 60 s
+    /// with `keys` entries buffered.
+    async fn calls_under_a_full_refusal(keys: usize) -> usize {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store(&spy, schedule_config());
+        for i in 0..keys {
+            store
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        advance(60_000).await;
+        spy.call_count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_store_that_refuses_everything_gets_a_bounded_number_of_calls() {
+        let ten = calls_under_a_full_refusal(10).await;
+        let thousand = calls_under_a_full_refusal(1_000).await;
+        assert_eq!(
+            ((8..=20).contains(&ten), (8..=20).contains(&thousand)),
+            (true, true),
+            "calls for 10 keys = {ten}, for 1000 keys = {thousand}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hold_makes_no_store_call_even_when_a_flush_is_requested() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store(&spy, schedule_config());
+        for i in 0..10 {
+            store
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        let tripped = poll_until(1_000, || store.test_store_hold_active())
+            .await
+            .is_some();
+        let before = spy.call_count();
+        // Yields only: the clock does not move, so every request lands inside
+        // the hold that has just begun.
+        for _ in 0..100 {
+            store.soft_flush().await.unwrap();
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!((tripped, before, spy.call_count()), (true, 3, 3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn after_a_refusal_longer_than_the_old_ladder_the_buffer_drains_within_one_backoff_cap_and_one_interval(
+    ) {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store(
+            &spy,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                capacity: 0,
+                ..WriteBehindConfig::default()
+            },
+        );
+        for i in 0..100 {
+            store
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        advance(600_000).await;
+        let buffered_at_t = store.pending_operation_count();
+        spy.refuse_everything(false);
+        let drained = poll_until(6_010, || store.test_is_idle()).await;
+        let stored = (0..100)
+            .filter(|i| spy.held(SCHEDULE_MAP, &format!("k{i}")).is_some())
+            .count();
+        assert_eq!(
+            (buffered_at_t, drained.is_some(), stored),
+            (100, true, 100),
+            "drained after {drained:?} ms"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keys_of_one_partition_are_stored_out_of_write_order_and_the_watermarks_follow() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        let store = schedule_store_with_wal(&spy, schedule_config());
+        let partition = 7;
+        let keys = keys_of_partition(partition, 2);
+        spy.refuse_key(&keys[0]);
+        store
+            .add(SCHEDULE_MAP, &keys[0], &lww("first", 1), 0, 1)
+            .await
+            .unwrap();
+        let first_wal_seq = store.test_pending_wal_sequences(partition)[0].0;
+        // The first entry is the only pending one, so the flushed watermark is
+        // its entry sequence.
+        let first_entry_seq = store.flushed_watermark();
+        store
+            .add(SCHEDULE_MAP, &keys[1], &lww("second", 1), 0, 1)
+            .await
+            .unwrap();
+        advance(60_000).await;
+        let while_refused = (
+            spy.held(SCHEDULE_MAP, &keys[1]).is_some(),
+            store.test_wal_watermark(partition) == Some(Ok(first_wal_seq - 1)),
+            store.flushed_watermark() == first_entry_seq,
+        );
+        spy.accept_every_key();
+        let drained = poll_until(10_000, || store.test_is_idle()).await.is_some();
+        let after = (
+            store.test_wal_watermark(partition)
+                == Some(Ok(store.test_max_assigned_wal_sequence(partition))),
+            store.flushed_watermark() == store.assigned_write_sequence(),
+        );
+        assert_eq!(
+            (while_refused, drained, after),
+            ((true, true, true), true, (true, true))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_cell_entry_persists_what_the_cell_holds_when_it_is_accepted() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store_with_wal(&spy, schedule_config());
+        let partition = partition_for(SCHEDULE_MAP, "set");
+        let cell = crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value: or_value(&["t-1", "t-2"]),
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        });
+        let add_t2 = OrDelta::Add {
+            entry: or_entry("t-2"),
+        };
+        store
+            .add_with_witness(
+                SCHEDULE_MAP,
+                "set",
+                WriteSource::Cell(&cell),
+                0,
+                1,
+                Some(&add_t2),
+            )
+            .await
+            .unwrap();
+        advance(60_000).await;
+        cell.lock().value = or_value(&["t-1", "t-2", "t-3"]);
+        let add_t3 = OrDelta::Add {
+            entry: or_entry("t-3"),
+        };
+        store
+            .add_with_witness(
+                SCHEDULE_MAP,
+                "set",
+                WriteSource::Cell(&cell),
+                0,
+                1,
+                Some(&add_t3),
+            )
+            .await
+            .unwrap();
+        let pending_while_refused: Vec<PendingOrigin> = store
+            .test_pending_wal_sequences(partition)
+            .into_iter()
+            .map(|(_, origin)| origin)
+            .collect();
+        spy.refuse_everything(false);
+        let drained = poll_until(10_000, || store.test_is_idle()).await.is_some();
+        assert_eq!(
+            (
+                pending_while_refused,
+                drained,
+                spy.held(SCHEDULE_MAP, "set"),
+                spy.accepted_for("set"),
+                store.test_pending_wal_sequences(partition),
+            ),
+            (
+                vec![PendingOrigin::Live, PendingOrigin::Live],
+                true,
+                Some(or_value(&["t-1", "t-2", "t-3"])),
+                1,
+                Vec::new()
+            )
+        );
+    }
+
+    /// `refused` keys are written first and are never accepted, then one key
+    /// the store accepts every two seconds for two minutes. Says: how many of
+    /// those were stored, the longest wait of one of them in milliseconds, the
+    /// buffered-key count at the end, and whether a hold was ever in force.
+    async fn healthy_keys_after_refused_ones(refused: usize) -> (usize, u64, u64, bool) {
+        let spy = Arc::new(SpyDataStore::retaining());
+        let store = schedule_store(&spy, schedule_config());
+        for i in 0..refused {
+            let key = format!("r{i}");
+            spy.refuse_key(&key);
+            store
+                .add(SCHEDULE_MAP, &key, &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        let mut stored = 0usize;
+        let mut slowest = 0u64;
+        let mut hold_seen = false;
+        for i in 0..60 {
+            let round = tokio::time::Instant::now();
+            let key = format!("h{i}");
+            store
+                .add(SCHEDULE_MAP, &key, &lww("h", 1), 0, 1)
+                .await
+                .unwrap();
+            let waited = poll_until(60_000, || {
+                hold_seen |= store.test_store_hold_active();
+                spy.held(SCHEDULE_MAP, &key).is_some()
+            })
+            .await;
+            if let Some(waited) = waited {
+                stored += 1;
+                slowest = slowest.max(waited);
+            }
+            let next = round + tokio::time::Duration::from_millis(2_000);
+            if tokio::time::Instant::now() < next {
+                tokio::time::sleep_until(next).await;
+            }
+        }
+        (stored, slowest, store.pending_operation_count(), hold_seen)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn healthy_keys_written_after_refused_ones_are_never_starved() {
+        let (stored, slowest, pending, hold_seen) = healthy_keys_after_refused_ones(10).await;
+        assert_eq!(
+            (stored, slowest <= 5_110, pending, hold_seen),
+            (60, true, 10, true),
+            "slowest healthy key = {slowest} ms"
+        );
+    }
+
+    /// A key the store accepts is refused during an outage of the whole
+    /// store; the store then returns for everything but `rejected` records
+    /// written at that instant, which it never accepts. Says: refusals of the
+    /// key during the outage, after how many milliseconds it was stored, and —
+    /// between the first call on the last rejected record to be tried and the
+    /// key's accepted call — the refused store calls and the milliseconds.
+    async fn a_refused_healthy_key_among_rejected_records(
+        rejected: usize,
+        limit_ms: u64,
+    ) -> (usize, Option<u64>, Option<usize>, Option<u64>) {
+        let spy = Arc::new(SpyDataStore::retaining());
+        let store = schedule_store(&spy, schedule_config());
+        spy.refuse_everything(true);
+        store
+            .add(SCHEDULE_MAP, "H", &lww("h", 1), 0, 1)
+            .await
+            .unwrap();
+        poll_until(60_000, || spy.calls_for("H") == 5).await;
+        let refusals_in_outage = spy.calls_for("H");
+        spy.refuse_everything(false);
+        for i in 0..rejected {
+            let key = format!("rejected{i}");
+            spy.refuse_key(&key);
+            store
+                .add(SCHEDULE_MAP, &key, &lww("v", 1), 0, 2)
+                .await
+                .unwrap();
+        }
+        let waited = poll_until(limit_ms, || spy.held(SCHEDULE_MAP, "H").is_some()).await;
+        let calls = spy.timeline();
+        let last_first_try = (0..rejected)
+            .map(|i| {
+                let key = format!("rejected{i}");
+                calls.iter().position(|call| call.key == key)
+            })
+            .collect::<Option<Vec<usize>>>()
+            .and_then(|firsts| firsts.into_iter().max());
+        let accepted_at = calls
+            .iter()
+            .position(|call| call.key == "H" && call.accepted);
+        let stretch = match (last_first_try, accepted_at) {
+            (Some(from), Some(to)) if from < to => Some((
+                calls[from + 1..to]
+                    .iter()
+                    .filter(|call| !call.accepted)
+                    .count(),
+                u64::try_from(
+                    calls[to]
+                        .began
+                        .duration_since(calls[from].began)
+                        .as_millis(),
+                )
+                .unwrap_or(u64::MAX),
+            )),
+            _ => None,
+        };
+        (
+            refusals_in_outage,
+            waited,
+            stretch.map(|(refused, _)| refused),
+            stretch.map(|(_, ms)| ms),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_healthy_key_is_reached_after_at_most_one_probe_per_rejected_key() {
+        let (refusals, waited, refused_between, stretch_ms) =
+            a_refused_healthy_key_among_rejected_records(30, 600_000).await;
+        assert_eq!(
+            (
+                refusals,
+                waited.is_some(),
+                refused_between.is_some_and(|refused| refused <= 30),
+                stretch_ms.is_some_and(|ms| ms <= 158_110),
+            ),
+            (5, true, true, true),
+            "waited {waited:?} ms, {refused_between:?} refused calls in {stretch_ms:?} ms"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_store_that_refuses_slowly_is_called_once_at_a_time_and_left_alone_for_a_hold() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        // Longer than the backoff cap: a hold counted from the start of a call
+        // would be over before the call answered.
+        spy.set_answer_delay_ms(8_000);
+        let store = schedule_store(&spy, schedule_config());
+        for i in 0..100 {
+            store
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        let mut hold_seen = false;
+        for _ in 0..1_200 {
+            advance(100).await;
+            hold_seen |= store.test_store_hold_active();
+        }
+        let calls = spy.timeline();
+        let begun = calls.len();
+        let begins_ms: Vec<u128> = calls
+            .iter()
+            .map(|call| call.began.duration_since(calls[0].began).as_millis())
+            .collect();
+        let left_alone = calls.windows(2).skip(2).all(|pair| {
+            pair[0].returned.is_some_and(|returned| {
+                pair[1].began >= returned + tokio::time::Duration::from_millis(500)
+            })
+        });
+        assert_eq!(
+            (
+                spy.most_in_flight(),
+                begun <= 12,
+                begun >= 9,
+                left_alone,
+                hold_seen
+            ),
+            (1, true, true, true, true),
+            "calls begun = {begun}, at ms {begins_ms:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn never_refused_entries_are_stored_before_refused_ones_in_a_pass() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        let store = schedule_store(&spy, schedule_config());
+        for i in 0..5 {
+            let key = format!("r{i}");
+            spy.refuse_key(&key);
+            store
+                .add(SCHEDULE_MAP, &key, &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        // Refused once and due again, written onto the queued entries: passes
+        // cannot bring five keys there without a hold beginning first.
+        let now = tokio::time::Instant::now();
+        for mut queue in store.queues.iter_mut() {
+            for entry in queue.value_mut().entries.values_mut() {
+                entry.retry_count = 1;
+                entry.next_attempt = Some(now);
+            }
+        }
+        for i in 0..5 {
+            store
+                .add(SCHEDULE_MAP, &format!("h{i}"), &lww("h", 1), 0, 2)
+                .await
+                .unwrap();
+        }
+        store.soft_flush().await.unwrap();
+        advance(10).await;
+        let healthy_stored = (0..5)
+            .filter(|i| spy.held(SCHEDULE_MAP, &format!("h{i}")).is_some())
+            .count();
+        assert_eq!((healthy_stored, store.test_store_hold_active()), (5, true));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refused_entries_are_attempted_longest_waiting_first() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        let store = schedule_store(&spy, schedule_config());
+        // So that an instant two seconds in the past exists on this clock.
+        advance(3_000).await;
+        store
+            .add(SCHEDULE_MAP, "X", &lww("x", 1), 0, 1)
+            .await
+            .unwrap();
+        store
+            .add(SCHEDULE_MAP, "Y", &lww("y", 1), 0, 1)
+            .await
+            .unwrap();
+        store
+            .add(SCHEDULE_MAP, "Z", &lww("z", 1), 0, 2)
+            .await
+            .unwrap();
+        let now = tokio::time::Instant::now();
+        for mut queue in store.queues.iter_mut() {
+            for entry in queue.value_mut().entries.values_mut() {
+                match entry.key.as_str() {
+                    "X" => {
+                        entry.retry_count = 5;
+                        entry.next_attempt = Some(now - tokio::time::Duration::from_secs(2));
+                    }
+                    "Y" => {
+                        entry.retry_count = 1;
+                        entry.next_attempt = Some(now - tokio::time::Duration::from_secs(1));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        store.soft_flush().await.unwrap();
+        advance(10).await;
+        let order: Vec<String> = spy.timeline().into_iter().map(|call| call.key).collect();
+        assert_eq!(order, ["Z", "X", "Y"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // The store-wide hold, its probe, and what an operator is told
+    // -----------------------------------------------------------------------
+
+    /// How many inner-store calls have answered so far.
+    fn calls_answered(spy: &SpyDataStore) -> usize {
+        spy.timeline()
+            .iter()
+            .filter(|call| call.returned.is_some())
+            .count()
+    }
+
+    /// The entry sequence of the entry queued for a key of the schedule map.
+    fn queued_sequence(store: &WriteBehindDataStore, key: &str) -> Option<u64> {
+        let queue = store.queues.get(&partition_for(SCHEDULE_MAP, key))?;
+        let entry = queue
+            .entries
+            .get(&(SCHEDULE_MAP.to_string(), key.to_string()))?;
+        Some(entry.sequence)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn entries_put_back_by_a_hold_are_accounted_like_a_retry() {
+        const KEYS: [&str; 5] = ["A", "B", "C", "D", "E"];
+
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store_with_wal(&spy, schedule_config());
+        // The first store call of the pass, on A, stops inside the store: the
+        // pass then holds all five entries out of their queues.
+        let (entered, proceed) = spy.install_add_gate();
+        for (store_time, key) in (1i64..).zip(KEYS) {
+            store
+                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, store_time)
+                .await
+                .unwrap();
+        }
+        let held_by_a_pass =
+            tokio::time::timeout(tokio::time::Duration::from_secs(30), entered.notified())
+                .await
+                .is_ok();
+        store
+            .add(SCHEDULE_MAP, "E", &lww("v2", 2), 0, 9)
+            .await
+            .unwrap();
+        let count_while_held = store.pending_operation_count();
+        proceed.notify_one();
+        let closed = poll_until(10_000, || !store.test_pass_open() && spy.call_count() >= 3)
+            .await
+            .is_some();
+
+        let e_wal_sequences = store
+            .queues
+            .get(&partition_for(SCHEDULE_MAP, "E"))
+            .and_then(|queue| {
+                queue
+                    .entries
+                    .get(&(SCHEDULE_MAP.to_string(), "E".to_string()))
+                    .map(|entry| entry.wal_sequences.len())
+            });
+        let in_flight: usize = KEYS
+            .iter()
+            .map(|key| {
+                store
+                    .test_in_flight_wal_sequences(partition_for(SCHEDULE_MAP, key))
+                    .len()
+            })
+            .sum();
+        let pending_sequences = store.pending_seqs().len();
+        let loaded = store.load(SCHEDULE_MAP, "E").await.unwrap();
+        assert_eq!(
+            (
+                (held_by_a_pass, closed),
+                (spy.call_count(), spy.calls_for("D") + spy.calls_for("E")),
+                (
+                    store.test_retry_state(SCHEDULE_MAP, "D"),
+                    store.test_retry_state(SCHEDULE_MAP, "E"),
+                ),
+                (
+                    count_while_held,
+                    store.pending_operation_count(),
+                    pending_sequences
+                ),
+                (e_wal_sequences, in_flight),
+                loaded,
+            ),
+            (
+                (true, true),
+                (3, 0),
+                (Some((0, None)), Some((0, None))),
+                (6, 5, 5),
+                (Some(2), 0),
+                Some(lww("v2", 2)),
+            ),
+            "((held by a pass, pass closed), (store calls, calls on D and E), (retry state \
+             of D, of E), (count while held, count, pending entry sequences), (WAL \
+             sequences E's queued entry owns, WAL sequences in flight), load of E)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_accepted_probe_ends_the_hold_and_the_next_trip_starts_at_the_first_length() {
+        // From the return of the call that tripped the pass to the first probe.
+        fn first_probe_gap(calls: &[SpyTimedCall]) -> Option<u128> {
+            let tripped = calls.get(2).and_then(|call| call.returned)?;
+            let probe = calls.get(3)?;
+            Some(probe.began.duration_since(tripped).as_millis())
+        }
+        fn is_the_first_length(gap: Option<u128>) -> bool {
+            gap.is_some_and(|ms| (500..=610).contains(&ms))
+        }
+
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store(&spy, schedule_config());
+        for i in 0..4 {
+            store
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        let mut hold_seen = false;
+        let mut most_failed_probes = 0;
+        for _ in 0..200 {
+            advance(100).await;
+            hold_seen |= store.test_store_hold_active();
+            most_failed_probes = most_failed_probes.max(store.test_failed_probes());
+        }
+        let first_trip = spy.timeline();
+        spy.refuse_everything(false);
+        let _ = poll_until(30_000, || store.test_is_idle()).await;
+        let after_the_accepted_probe = (store.test_store_hold_active(), store.test_failed_probes());
+
+        let before_second = spy.call_count();
+        spy.refuse_everything(true);
+        for i in 0..4 {
+            store
+                .add(SCHEDULE_MAP, &format!("n{i}"), &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        advance(5_000).await;
+        let second_trip = spy.timeline().split_off(before_second);
+        let first_gap = first_probe_gap(&first_trip);
+        let second_gap = first_probe_gap(&second_trip);
+        assert_eq!(
+            (
+                hold_seen,
+                most_failed_probes >= 2,
+                after_the_accepted_probe.0,
+                after_the_accepted_probe.1,
+                is_the_first_length(first_gap),
+                is_the_first_length(second_gap),
+            ),
+            (true, true, false, 0, true, true),
+            "most failed probes = {most_failed_probes}, gaps: {first_gap:?} ms, \
+             {second_gap:?} ms"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_accepted_entry_between_refusals_resets_the_count_in_a_row() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        for key in ["A", "B", "D", "E"] {
+            spy.refuse_key(key);
+        }
+        let store = schedule_store(&spy, schedule_config());
+        for key in ["A", "B", "C", "D", "E"] {
+            store
+                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        store.soft_flush().await.unwrap();
+        let _ = poll_until(1_000, || spy.call_count() > 0).await;
+        advance(10).await;
+        assert_eq!(
+            (
+                spy.call_count(),
+                store.test_store_hold_active(),
+                spy.held(SCHEDULE_MAP, "C").is_some()
+            ),
+            (5, false, true)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_does_not_take_an_entry_whose_time_has_not_come() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store(&spy, schedule_config());
+        for i in 0..3 {
+            store
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        poll_until(30_000, || calls_answered(&spy) >= 3)
+            .await
+            .expect("three refusals");
+        let third_returned = spy.timeline()[2].returned.expect("the third call returned");
+        // The hold is over by now and every entry is still inside its own
+        // backoff: nothing is due for a probe.
+        tokio::time::sleep_until(third_returned + tokio::time::Duration::from_millis(900)).await;
+        let later = (
+            spy.call_count(),
+            store.test_store_hold_active(),
+            store.test_failed_probes(),
+        );
+        let _ = poll_until(30_000, || spy.call_count() >= 4).await;
+        let fourth_gap = spy
+            .timeline()
+            .get(3)
+            .map(|call| call.began.duration_since(third_returned).as_millis());
+        assert_eq!(
+            (
+                later.0,
+                later.1,
+                later.2,
+                fourth_gap.is_some_and(|ms| ms >= 1_000)
+            ),
+            (3, true, 0, true),
+            "the fourth call began {fourth_gap:?} ms after the third returned"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_whose_key_was_rewritten_before_it_was_taken_stores_the_new_value_in_that_pass()
+    {
+        let spy = Arc::new(SpyDataStore::retaining());
+        for key in ["a", "b", "c"] {
+            spy.refuse_key(key);
+        }
+        let store = schedule_store(&spy, schedule_config());
+        for key in ["a", "b", "c"] {
+            store
+                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        let _ = poll_until(1_000, || store.test_store_hold_active()).await;
+        let mut park = store.test_park_between_probe_choice_and_removal();
+        // Never refused and the newest: the next probe.
+        store
+            .add(SCHEDULE_MAP, "D", &lww("d1", 1), 0, 1)
+            .await
+            .unwrap();
+        let parked = park.parked.take().expect("armed");
+        let park_reached = tokio::time::timeout(tokio::time::Duration::from_secs(2), parked)
+            .await
+            .is_ok_and(|parked| parked.is_ok());
+        // The chosen key gets a new entry, with a new entry sequence, while
+        // the flush task stands between its choice and the removal.
+        store
+            .add(SCHEDULE_MAP, "D", &lww("d2", 2), 0, 1)
+            .await
+            .unwrap();
+        let closed_before = store.test_passes_closed();
+        park.release();
+        let _ = poll_until(1_000, || {
+            !store.test_pass_open() && store.test_passes_closed() > closed_before
+        })
+        .await;
+        assert_eq!(
+            (
+                park_reached,
+                spy.call_count(),
+                spy.held(SCHEDULE_MAP, "D") == Some(lww("d2", 2)),
+                store.test_retry_state(SCHEDULE_MAP, "D").is_some(),
+                store.test_store_hold_active(),
+                store.test_failed_probes(),
+            ),
+            (true, 4, true, false, false, 0)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_accepted_probe_is_followed_by_a_normal_pass_over_what_is_due() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        for key in ["a", "b", "c"] {
+            spy.refuse_key(key);
+        }
+        let store = schedule_store(&spy, schedule_config());
+        for key in ["a", "b", "c"] {
+            store
+                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        let hold_at_the_writes = poll_until(1_000, || store.test_store_hold_active())
+            .await
+            .is_some();
+        // Both never refused and due, with one `store_time`: E, the newer, is
+        // the probe and D is what the rest of that pass has to store.
+        for key in ["D", "E"] {
+            store
+                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        let _ = poll_until(1_000, || calls_answered(&spy) >= 4).await;
+        let fourth = spy.timeline().get(3).cloned();
+        if let Some(returned) = fourth.as_ref().and_then(|call| call.returned) {
+            // One poll step after the probe answered and no more: a D left to
+            // the next pass arrives a whole interval later.
+            tokio::time::sleep_until(returned + tokio::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            (
+                hold_at_the_writes,
+                fourth.is_some_and(|call| call.key == "E"),
+                spy.held(SCHEDULE_MAP, "D").is_some(),
+                store.test_store_hold_active(),
+                store.test_failed_probes(),
+            ),
+            (true, true, true, false, 0)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_probe_is_the_never_refused_entry_with_the_latest_store_time_whatever_its_sequence()
+    {
+        let spy = Arc::new(SpyDataStore::retaining());
+        for key in ["r0", "r1", "r2"] {
+            spy.refuse_key(key);
+        }
+        let store = schedule_store(&spy, schedule_config());
+        for key in ["r0", "r1", "r2"] {
+            store
+                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        let hold_at_the_writes = poll_until(1_000, || store.test_store_hold_active())
+            .await
+            .is_some();
+        store
+            .add(SCHEDULE_MAP, "A", &lww("a1", 1), 0, 1)
+            .await
+            .unwrap();
+        store
+            .add(SCHEDULE_MAP, "B", &lww("b", 1), 0, 2)
+            .await
+            .unwrap();
+        // A rewrite of a queued entry takes a new entry sequence and keeps the
+        // `store_time` of the entry it replaces: A is now the newer by
+        // sequence and still the older by `store_time`.
+        store
+            .add(SCHEDULE_MAP, "A", &lww("a2", 2), 0, 3)
+            .await
+            .unwrap();
+        let a_is_newer_by_sequence = queued_sequence(&store, "A")
+            .zip(queued_sequence(&store, "B"))
+            .is_some_and(|(a, b)| a > b);
+        let _ = poll_until(1_000, || spy.call_count() >= 4).await;
+        let fourth_key = spy.timeline().get(3).map(|call| call.key.clone());
+        assert_eq!(
+            (hold_at_the_writes, a_is_newer_by_sequence, fourth_key),
+            (true, true, Some("B".to_string()))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_refusal_fills_the_buffer_and_new_keys_are_refused_while_buffered_keys_are_accepted(
+    ) {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store(
+            &spy,
+            WriteBehindConfig {
+                capacity: 5,
+                ..schedule_config()
+            },
+        );
+        for i in 0..5 {
+            store
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        advance(60_000).await;
+        let count_refused = store.pending_operation_count();
+        let sixth = store
+            .add(SCHEDULE_MAP, "k5", &lww("v", 1), 0, 1)
+            .await
+            .err()
+            .map(|err| err.to_string().contains("Write-behind capacity exceeded"));
+        let rewrite = store
+            .add(SCHEDULE_MAP, "k0", &lww("rewritten", 2), 0, 1)
+            .await
+            .is_ok();
+        let after_rewrite = (
+            store.pending_operation_count(),
+            store.load(SCHEDULE_MAP, "k0").await.unwrap(),
+        );
+        spy.refuse_everything(false);
+        let drained = poll_until(10_000, || store.test_is_idle()).await.is_some();
+        let stored = (0..5)
+            .filter(|i| spy.held(SCHEDULE_MAP, &format!("k{i}")).is_some())
+            .count();
+        let sixth_after = store
+            .add(SCHEDULE_MAP, "k5", &lww("v", 1), 0, 1)
+            .await
+            .is_ok();
+        assert_eq!(
+            (
+                count_refused,
+                sixth,
+                rewrite,
+                after_rewrite,
+                drained,
+                (stored, spy.held(SCHEDULE_MAP, "k0")),
+                sixth_after
+            ),
+            (
+                5,
+                Some(true),
+                true,
+                (5, Some(lww("rewritten", 2))),
+                true,
+                (5, Some(lww("rewritten", 2))),
+                true
+            ),
+            "(count while refused, the sixth key failed on capacity, a buffered key was \
+             rewritten, (count, load) after the rewrite, drained, (buffered keys stored, \
+             the store's value of the rewritten key), the sixth key accepted afterwards)"
+        );
+    }
+
+    // Real time and a real WAL: the shutdown drain is bounded by a wall-clock
+    // deadline, and what a restart finds is what was written to disk.
+    #[tokio::test]
+    async fn a_shutdown_while_the_store_refuses_ends_in_time_and_keeps_slots_and_frames() {
+        use crate::storage::wal::{WalRecovery, WalWriter};
+
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 5,
+                backoff_base_ms: 1,
+                backoff_cap_ms: 2,
+                shutdown_timeout_ms: 500,
+                capacity: 0,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+        let partition = 11;
+        let keys = keys_of_partition(partition, 3);
+        for key in &keys {
+            store
+                .add(SCHEDULE_MAP, key, &lww(key, 1), 0, 1)
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        let outcome = store.hard_flush().await.is_ok();
+        let took = started.elapsed();
+        let mut loaded = Vec::new();
+        for key in &keys {
+            loaded.push(store.load(SCHEDULE_MAP, key).await.unwrap() == Some(lww(key, 1)));
+        }
+        let tags: Vec<PendingOrigin> = store
+            .test_pending_wal_sequences(partition)
+            .into_iter()
+            .map(|(_, origin)| origin)
+            .collect();
+        let frames = wal.unapplied(partition).await.unwrap().len();
+        drop(store);
+        let recovered = Arc::new(SpyDataStore::retaining());
+        WalRecovery::new(Arc::clone(&wal), Vec::new())
+            .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+            .await
+            .unwrap();
+        let replayed: Vec<bool> = keys
+            .iter()
+            .map(|key| recovered.held(SCHEDULE_MAP, key) == Some(lww(key, 1)))
+            .collect();
+        assert_eq!(
+            (
+                outcome,
+                took < std::time::Duration::from_millis(750),
+                loaded,
+                tags,
+                frames,
+                replayed
+            ),
+            (
+                true,
+                true,
+                vec![true; 3],
+                vec![PendingOrigin::Abandoned; 3],
+                3,
+                vec![true; 3]
+            ),
+            "hard_flush took {took:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_entry_refused_a_hundred_times_backs_off_at_the_cap_and_the_flush_task_lives() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store(&spy, schedule_config());
+        store
+            .add(SCHEDULE_MAP, "k", &lww("v", 1), 0, 1)
+            .await
+            .unwrap();
+        // A hundred refusals take hours of backoff to reach through passes, so
+        // the count is written onto the queued entry.
+        for mut queue in store.queues.iter_mut() {
+            for entry in queue.value_mut().entries.values_mut() {
+                entry.retry_count = 100;
+            }
+        }
+        let now = tokio::time::Instant::now();
+        store.soft_flush().await.unwrap();
+        // Yields only: the clock does not move, so the refusal is answered at
+        // `now` and the next attempt is counted from it.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let flush_task_lives = store.background_failure().borrow().is_none();
+        assert_eq!(
+            (
+                spy.call_count(),
+                flush_task_lives,
+                store.test_retry_state(SCHEDULE_MAP, "k"),
+            ),
+            (
+                1,
+                true,
+                Some((101, Some(now + tokio::time::Duration::from_millis(5_000))))
+            )
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_count_at_its_maximum_stays_there() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store(&spy, schedule_config());
+        store
+            .add(SCHEDULE_MAP, "k", &lww("v", 1), 0, 1)
+            .await
+            .unwrap();
+        for mut queue in store.queues.iter_mut() {
+            for entry in queue.value_mut().entries.values_mut() {
+                entry.retry_count = u32::MAX;
+            }
+        }
+        let now = tokio::time::Instant::now();
+        store.soft_flush().await.unwrap();
+        // Yields only, so the clock stands at `now` when the refusal answers.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let flush_task_lives = store.background_failure().borrow().is_none();
+        assert_eq!(
+            (flush_task_lives, store.test_retry_state(SCHEDULE_MAP, "k")),
+            (
+                true,
+                Some((
+                    u32::MAX,
+                    Some(now + tokio::time::Duration::from_millis(5_000))
+                ))
+            )
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_first_refusal_time_survives_a_rewrite_and_a_retirement() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_key("A");
+        let store = schedule_store(&spy, schedule_config());
+        store
+            .add(SCHEDULE_MAP, "A", &lww("a1", 1), 0, 1)
+            .await
+            .unwrap();
+        poll_until(30_000, || calls_answered(&spy) >= 1)
+            .await
+            .expect("the first refusal");
+        let first_refusal = spy.timeline()[0].returned;
+        let kept = |store: &WriteBehindDataStore| {
+            first_refusal.is_some() && store.test_first_refused(SCHEDULE_MAP, "A") == first_refusal
+        };
+        let after_the_refusal = kept(&store);
+
+        // Rewritten while its entry is queued.
+        store
+            .add(SCHEDULE_MAP, "A", &lww("a2", 2), 0, 1)
+            .await
+            .unwrap();
+        let after_the_rewrite = kept(&store);
+
+        // Rewritten while its entry is held by a pass, which is then refused:
+        // the held entry is retired into the rewrite.
+        let (entered, proceed) = spy.install_add_gate();
+        tokio::time::timeout(tokio::time::Duration::from_secs(30), entered.notified())
+            .await
+            .expect("the second attempt never began");
+        store
+            .add(SCHEDULE_MAP, "A", &lww("a3", 3), 0, 1)
+            .await
+            .unwrap();
+        proceed.notify_one();
+        let _ = poll_until(30_000, || {
+            calls_answered(&spy) == 2 && !store.test_pass_open()
+        })
+        .await;
+        let after_the_retirement = kept(&store);
+        assert_eq!(
+            (after_the_refusal, after_the_rewrite, after_the_retirement),
+            (true, true, true)
+        );
+    }
+
+    /// A current-thread runtime on a paused clock, for a test that has to
+    /// bind something to its thread around the runtime: a metrics recorder or
+    /// a `tracing` subscriber belongs to the calling thread, and on such a
+    /// runtime that is also the thread the flush task runs on.
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("current-thread runtime")
+    }
+
+    #[test]
+    fn refusals_are_counted_and_the_retry_and_buffer_gauges_follow() {
+        const REFUSALS: &str = "topgun_write_behind_flush_refusals_total";
+        const RETRYING: &str = "topgun_write_behind_retrying_entries";
+        const BUFFERED: &str = "topgun_write_behind_buffered_entries";
+        const AGE: &str = "topgun_write_behind_oldest_refusal_age_seconds";
+        const HOLD: &str = "topgun_write_behind_store_hold";
+
+        fn value_of(rendered: &str, name: &str) -> Option<f64> {
+            rendered
+                .lines()
+                .find(|line| line.starts_with(&format!("{name} ")))
+                .and_then(|line| line[name.len() + 1..].parse().ok())
+        }
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let (at_8s, at_9s, healed) = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::retaining());
+                spy.refuse_everything(true);
+                let store = schedule_store(&spy, schedule_config());
+                // A `store_time` of 0 is what a caller with no clock of its own
+                // passes: the age of a refusal must not be read from it.
+                store
+                    .add(SCHEDULE_MAP, "A", &lww("a", 1), 0, 0)
+                    .await
+                    .unwrap();
+                advance(8_000).await;
+                let at_8s = handle.render();
+                store
+                    .add(SCHEDULE_MAP, "A", &lww("a2", 2), 0, 0)
+                    .await
+                    .unwrap();
+                for key in ["B", "C", "D"] {
+                    store
+                        .add(SCHEDULE_MAP, key, &lww("v", 1), 0, 1)
+                        .await
+                        .unwrap();
+                }
+                advance(1_000).await;
+                let at_9s = handle.render();
+                spy.refuse_everything(false);
+                let _ = poll_until(60_000, || store.test_is_idle()).await;
+                (at_8s, at_9s, handle.render())
+            })
+        });
+        let first = (
+            value_of(&at_8s, REFUSALS),
+            value_of(&at_8s, RETRYING),
+            value_of(&at_8s, BUFFERED),
+            value_of(&at_8s, AGE).map(|age| (7.0..=8.0).contains(&age)),
+            value_of(&at_8s, HOLD),
+        );
+        let second = (
+            value_of(&at_9s, RETRYING).map(|retrying| retrying >= 1.0),
+            value_of(&at_9s, BUFFERED),
+            value_of(&at_9s, AGE).map(|age| age >= 8.0),
+            value_of(&at_9s, HOLD),
+        );
+        let third = (
+            value_of(&healed, RETRYING),
+            value_of(&healed, BUFFERED),
+            value_of(&healed, AGE),
+            value_of(&healed, HOLD),
+        );
+        assert_eq!(
+            (first, second, third),
+            (
+                (Some(4.0), Some(1.0), Some(1.0), Some(true), Some(0.0)),
+                (Some(true), Some(4.0), Some(true), Some(1.0)),
+                (Some(0.0), Some(0.0), Some(0.0), Some(0.0)),
+            )
+        );
+    }
+
+    /// One `tracing` event as a schedule test reads it: its level, the module
+    /// that emitted it, and its fields by name, the text under `message`.
+    #[derive(Debug, Clone)]
+    struct ScheduleEvent {
+        level: tracing::Level,
+        target: String,
+        fields: BTreeMap<String, String>,
+    }
+
+    impl ScheduleEvent {
+        fn says(&self, text: &str) -> bool {
+            self.fields.get("message").map(String::as_str) == Some(text)
+        }
+    }
+
+    /// Collects every event of the thread it is the default subscriber on.
+    struct ScheduleEventCapture(Arc<Mutex<Vec<ScheduleEvent>>>);
+
+    struct ScheduleEventFields<'a>(&'a mut BTreeMap<String, String>);
+
+    impl tracing::field::Visit for ScheduleEventFields<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ScheduleEventCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = BTreeMap::new();
+            event.record(&mut ScheduleEventFields(&mut fields));
+            self.0.lock().unwrap().push(ScheduleEvent {
+                level: *event.metadata().level(),
+                target: event.metadata().target().to_string(),
+                fields,
+            });
+        }
+    }
+
+    const RETRY_WARNING: &str = "Write-behind entries are being retried: the store refuses them";
+    const BACKLOG_CLEARED: &str =
+        "Write-behind retry backlog cleared: the store accepted every refused entry";
+
+    /// Runs `scenario` on a paused clock and returns every event logged on
+    /// its thread meanwhile. The subscriber is scoped to the thread, never
+    /// installed globally: the test binary is shared and runs in parallel.
+    fn events_on_a_paused_clock(
+        scenario: impl std::future::Future<Output = ()>,
+    ) -> Vec<ScheduleEvent> {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber =
+            tracing_subscriber::registry().with(ScheduleEventCapture(Arc::clone(&events)));
+        tracing::subscriber::with_default(subscriber, || {
+            paused_runtime().block_on(scenario);
+        });
+        let events = events.lock().unwrap().clone();
+        events
+    }
+
+    #[test]
+    fn the_only_warnings_of_a_refused_key_are_the_rate_limited_retry_warning() {
+        let events = events_on_a_paused_clock(async {
+            let spy = Arc::new(SpyDataStore::retaining());
+            spy.refuse_everything(true);
+            let store = schedule_store(&spy, schedule_config());
+            store
+                .add(SCHEDULE_MAP, "k", &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+            advance(95_000).await;
+            spy.refuse_everything(false);
+            let _ = poll_until(60_000, || store.test_is_idle()).await;
+            advance(1_000).await;
+        });
+        let loud: Vec<&ScheduleEvent> = events
+            .iter()
+            .filter(|event| {
+                event.target.contains("write_behind")
+                    && (event.level == tracing::Level::WARN || event.level == tracing::Level::ERROR)
+            })
+            .collect();
+        let complete = loud
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::WARN
+                    && event.says(RETRY_WARNING)
+                    && [
+                        "retrying",
+                        "oldest_refusal_age_s",
+                        "hold",
+                        "map",
+                        "key",
+                        "attempts",
+                        "error",
+                    ]
+                    .iter()
+                    .all(|field| event.fields.contains_key(*field))
+            })
+            .count();
+        let cleared = events
+            .iter()
+            .filter(|event| event.level == tracing::Level::INFO && event.says(BACKLOG_CLEARED))
+            .count();
+        assert_eq!(
+            (loud.len(), complete, cleared),
+            (4, 4, 1),
+            "events at WARN or ERROR: {:?}",
+            loud.iter()
+                .map(|event| (event.level, &event.fields))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_backlog_that_never_warned_clears_without_a_recovery_line() {
+        let events = events_on_a_paused_clock(async {
+            let spy = Arc::new(SpyDataStore::retaining());
+            spy.refuse_key("k");
+            let store = schedule_store(&spy, schedule_config());
+            store
+                .add(SCHEDULE_MAP, "k", &lww("v", 1), 0, 1)
+                .await
+                .unwrap();
+            let _ = poll_until(30_000, || calls_answered(&spy) >= 1).await;
+            spy.accept_every_key();
+            let _ = poll_until(60_000, || store.test_is_idle()).await;
+            advance(1_000).await;
+        });
+        let warnings = events
+            .iter()
+            .filter(|event| event.says(RETRY_WARNING))
+            .count();
+        let cleared = events
+            .iter()
+            .filter(|event| event.says(BACKLOG_CLEARED))
+            .count();
+        assert_eq!((warnings, cleared), (0, 0));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -9306,7 +11156,6 @@ mod hard_flush_order_tests {
                 write_delay_ms: 10,
                 flush_interval_ms: 10,
                 batch_size: 100,
-                max_retries: 3,
                 backoff_base_ms: 10,
                 backoff_cap_ms: 100,
                 capacity: 0,
