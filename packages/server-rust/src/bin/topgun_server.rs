@@ -3121,4 +3121,109 @@ mod tests {
             "cancelled: the exit action must not be called"
         );
     }
+
+    /// The store the binary builds for the redb backend declares key order, and
+    /// a write-behind store over that very value places a buffered key in one
+    /// batch (`TG-WB-008`). A wrapper put into `select_datastore` that does not
+    /// forward the declaration turns the scan back to the order-free rule.
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn the_store_the_binary_selects_for_redb_emits_a_staged_key_once_under_write_behind() {
+        use topgun_core::hlc::Timestamp;
+        use topgun_core::types::Value;
+        use topgun_server::storage::datastores::WriteBehindDataStore;
+        use topgun_server::storage::map_data_store::MapDataStore;
+        use topgun_server::storage::record::RecordValue;
+
+        fn lww(value: &str, millis: u64) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::String(value.to_string()),
+                timestamp: Timestamp {
+                    millis,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+            }
+        }
+
+        // `select_datastore` reads its backend and its path from the process
+        // environment. The check therefore runs in a child process — this same
+        // test, re-run alone — with the two variables given on its command, so
+        // the environment of the test process is never changed.
+        const CHILD: &str = "TOPGUN_TEST_WIRING_CHILD";
+        const MARK: &str = "WIRING-OBSERVATION ";
+        const NAME: &str =
+            "tests::the_store_the_binary_selects_for_redb_emits_a_staged_key_once_under_write_behind";
+
+        if std::env::var_os(CHILD).is_none() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([NAME, "--exact", "--nocapture", "--test-threads", "1"])
+                .env("STORAGE_BACKEND", "redb")
+                .env("TOPGUN_REDB_PATH", dir.path().join("wiring.redb"))
+                .env(CHILD, "1")
+                .output()
+                .expect("the child run starts");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let printed = stdout
+                .lines()
+                .find_map(|line| line.split_once(MARK).map(|(_, rest)| rest.to_string()));
+            // A child that exits 0 without having printed its observation did
+            // not run the check: absence is red, not green.
+            assert_eq!(
+                (
+                    output.status.code(),
+                    printed.is_some(),
+                    printed.unwrap_or_default()
+                ),
+                (
+                    Some(0),
+                    true,
+                    r#"("Redb", true, [["k1"], ["k2"]])"#.to_string(),
+                ),
+                "the binary's redb store declares key order and the wrap honours it"
+            );
+            return;
+        }
+
+        let (inner, backend) = super::select_datastore().await.expect("select");
+        let declared = inner.scans_in_key_order();
+        for key in ["k1", "k2"] {
+            inner
+                .add("m", key, &lww("v", 1), 0, 1000)
+                .await
+                .expect("durable row");
+        }
+        let store = WriteBehindDataStore::new_with_wal(
+            inner,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 600_000,
+                capacity: 0,
+                ..WriteBehindConfig::default()
+            },
+            None,
+        );
+        store
+            .add("m", "k2", &lww("w", 9), 0, 2000)
+            .await
+            .expect("staged write");
+
+        let mut batches: Vec<Vec<String>> = Vec::new();
+        let mut batch = store.scan_values("m", false, 1).await.expect("scan");
+        loop {
+            batches.push(batch.records.iter().map(|(k, _)| k.clone()).collect());
+            match batch.next_cursor.take() {
+                Some(cursor) => {
+                    batch = store
+                        .scan_values_batched("m", false, cursor, 1)
+                        .await
+                        .expect("scan");
+                }
+                None => break,
+            }
+        }
+
+        println!("\n{MARK}{:?}", (format!("{backend:?}"), declared, batches));
+    }
 }

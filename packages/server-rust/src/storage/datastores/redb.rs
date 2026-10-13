@@ -231,6 +231,12 @@ impl RedbDataStore {
     /// `max_batch_cost` (or `DEFAULT_SCAN_BATCH_COST` when `0`), then stops so a
     /// single batch never exceeds the resident-memory budget. The returned
     /// `next_cursor` is `None` once the table is fully drained.
+    ///
+    /// Two properties here are a contract the write-behind overlay relies on
+    /// (`TG-WB-008`), so an edit of the iteration or of the cursor is read
+    /// against them: rows come in strictly ascending `str` order across the
+    /// batches of a scan, and a returned cursor is exactly the bytes of the key
+    /// of the last row of its batch.
     fn scan_from(
         &self,
         map: &str,
@@ -403,6 +409,12 @@ impl MapDataStore for RedbDataStore {
     }
 
     fn accepts_encoded(&self) -> bool {
+        true
+    }
+
+    fn scans_in_key_order(&self) -> bool {
+        // A table over `&str` keys iterates in the order of the keys' bytes,
+        // and `scan_from` resumes strictly after the last key it returned.
         true
     }
 
@@ -1253,6 +1265,89 @@ mod tests {
         );
         assert_eq!(seen.first().map(String::as_str), Some("k000"));
         assert_eq!(seen.last().map(String::as_str), Some("k049"));
+    }
+
+    #[tokio::test]
+    async fn scan_values_returns_rows_in_str_order_and_each_cursor_is_the_last_key_of_its_batch() {
+        let (store, _dir) = fresh_store();
+        let mut keys: Vec<String> = [
+            "A",
+            "B",
+            "Z",
+            "a",
+            "b",
+            "z",
+            "a-b",
+            "a_b",
+            "a b",
+            "a.b",
+            "a/b",
+            "aB",
+            "ab",
+            "10",
+            "9",
+            "_",
+            "~",
+            "\u{e9}",
+            "\u{4e2d}",
+            "\u{1f600}",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        keys.sort();
+        for key in keys.iter().rev() {
+            store
+                .add("m", key, &dummy_value("v"), 0, 1000)
+                .await
+                .unwrap();
+        }
+
+        let mut returned: Vec<String> = Vec::new();
+        let mut cursors_are_last_keys = true;
+        let mut no_rowless_batch_with_a_cursor = true;
+        let mut batches = 0u32;
+        let mut batch = store.scan_values("m", false, 1).await.unwrap();
+        loop {
+            batches += 1;
+            let last = batch.records.last().map(|(k, _)| k.clone().into_bytes());
+            if let Some(cursor) = &batch.next_cursor {
+                cursors_are_last_keys &= last.as_ref() == Some(&cursor.0);
+                no_rowless_batch_with_a_cursor &= !batch.records.is_empty();
+            }
+            returned.extend(batch.records.iter().map(|(k, _)| k.clone()));
+            match batch.next_cursor.take() {
+                Some(cursor) => {
+                    batch = store
+                        .scan_values_batched("m", false, cursor, 1)
+                        .await
+                        .unwrap();
+                }
+                None => break,
+            }
+        }
+
+        assert_eq!(
+            (
+                returned == keys,
+                cursors_are_last_keys,
+                no_rowless_batch_with_a_cursor,
+                batches
+            ),
+            (true, true, true, 20),
+            "redb scans in str order and resumes from the last key of each batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_redb_store_declares_key_ordered_scans() {
+        let (store, _dir) = fresh_store();
+
+        assert_eq!(
+            (store.scans_in_key_order(), store.is_null()),
+            (true, false),
+            "the write-behind overlay places buffered keys by the order redb declares"
+        );
     }
 
     #[tokio::test]

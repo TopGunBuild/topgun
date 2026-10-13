@@ -519,14 +519,14 @@ mod tests {
             seen.contains(&"k010".to_string()),
             "the stably-present key past the cursor is never skipped by a concurrent insert behind the cursor"
         );
-        // All originally-seeded keys must still appear exactly once.
-        let mut originals: Vec<String> = seen
+        // All originally-seeded keys must still appear exactly once, in key
+        // order: the list is compared as seen, so a repeated key fails it.
+        let originals: Vec<String> = seen
             .iter()
             .filter(|k| k.as_str() != "k000z")
             .cloned()
             .collect();
-        originals.sort();
-        originals.dedup();
-        assert_eq!(originals.len(), 20, "no original key missed or duplicated");
+        let expected: Vec<String> = (0..20).map(|i| format!("k{i:03}")).collect();
+        assert_eq!(originals, expected, "no original key missed or duplicated");
     }
 }
