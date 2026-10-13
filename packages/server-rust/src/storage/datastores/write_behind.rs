@@ -605,8 +605,8 @@ impl WalWatermarkAlarm {
                 origin: PendingOrigin::Live,
             } => {
                 "WAL watermark stalled on a write the store has not accepted: the backend is down \
-                 or its disk is full. The data is safe in the WAL and replays once the store \
-                 accepts it."
+                 or its disk is full. The write stays buffered and is retried until the store \
+                 accepts it; its frame is safe in the WAL."
             }
             Self::AbandonedWrite {
                 origin: PendingOrigin::BootUnreplayed,
@@ -617,8 +617,8 @@ impl WalWatermarkAlarm {
             Self::AbandonedWrite {
                 origin: PendingOrigin::Abandoned,
             } => {
-                "WAL watermark stalled on an acked write the store rejected to max retries. The \
-                 frame stays replayable; GC stays stalled until the store accepts it."
+                "WAL watermark stalled on an acked write a shutdown gave up on: the store had not \
+                 accepted it when the node stopped. Its frame replays at the next start."
             }
         }
     }
@@ -1556,6 +1556,64 @@ fn register_background_task_panic_metrics() {
     }
 }
 
+/// Counts store calls of the flush task that returned an error.
+const FLUSH_REFUSALS_COUNTER: &str = "topgun_write_behind_flush_refusals_total";
+/// Buffered entries the store has refused at least once, as of the last pass.
+const RETRYING_ENTRIES_GAUGE: &str = "topgun_write_behind_retrying_entries";
+/// The buffered-key count the capacity check uses.
+const BUFFERED_ENTRIES_GAUGE: &str = "topgun_write_behind_buffered_entries";
+/// Seconds since the store first refused the entry it has refused longest.
+const OLDEST_REFUSAL_AGE_GAUGE: &str = "topgun_write_behind_oldest_refusal_age_seconds";
+/// 1 while a store-wide hold is in force.
+const STORE_HOLD_GAUGE: &str = "topgun_write_behind_store_hold";
+
+/// Registers the retry series at zero.
+///
+/// They render from the first scrape for the same reason as the panic
+/// counter: a refusal counter or a hold gauge that first appears during an
+/// outage gives an alert nothing to compare against before it.
+fn register_retry_metrics() {
+    metrics::describe_counter!(
+        FLUSH_REFUSALS_COUNTER,
+        "Store calls made by the write-behind flush task that returned an error"
+    );
+    metrics::describe_gauge!(
+        RETRYING_ENTRIES_GAUGE,
+        "Buffered write-behind entries the store has refused at least once, as of the last \
+         pass. It is not the size of the buffer: while the store refuses everything a hold \
+         allows one call per period, so this number is about the number of store calls made \
+         so far"
+    );
+    metrics::describe_gauge!(
+        BUFFERED_ENTRIES_GAUGE,
+        "Buffered write-behind keys, the count the capacity check uses, as of the last pass; \
+         writes of new keys are refused once it reaches the capacity"
+    );
+    metrics::describe_gauge!(
+        OLDEST_REFUSAL_AGE_GAUGE,
+        "Seconds the store has been refusing the buffered entry it has refused longest, 0 when \
+         none is refused. The node-wide flushed watermark, and with it tombstone pruning on \
+         every map of the node, has stood for at least this long"
+    );
+    metrics::describe_gauge!(
+        STORE_HOLD_GAUGE,
+        "1 while a store-wide hold is in force, from the pass that started it until a probe is \
+         accepted, else 0"
+    );
+    metrics::counter!(FLUSH_REFUSALS_COUNTER).increment(0);
+    metrics::gauge!(RETRYING_ENTRIES_GAUGE).set(0.0);
+    metrics::gauge!(BUFFERED_ENTRIES_GAUGE).set(0.0);
+    metrics::gauge!(OLDEST_REFUSAL_AGE_GAUGE).set(0.0);
+    metrics::gauge!(STORE_HOLD_GAUGE).set(0.0);
+}
+
+/// A count as a gauge value. A count above `u32::MAX` reads as that: every
+/// `u32` is exact as an `f64`, and a gauge that large is not read digit by
+/// digit.
+fn count_as_gauge(count: u64) -> f64 {
+    f64::from(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
 /// The text of a panic payload: the message when the panic carried a string,
 /// which is what `panic!` produces, and a fixed placeholder otherwise.
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -1801,6 +1859,7 @@ impl WriteBehindDataStore {
         }
 
         register_background_task_panic_metrics();
+        register_retry_metrics();
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let flush_notify = Arc::new(Notify::new());
@@ -3541,6 +3600,7 @@ impl WriteBehindDataStore {
         err: &anyhow::Error,
         returned: tokio::time::Instant,
     ) {
+        metrics::counter!(FLUSH_REFUSALS_COUNTER).increment(1);
         self.retrying.store(true, Ordering::Relaxed);
         entry.retry_count = entry.retry_count.saturating_add(1);
         entry.next_attempt = Some(
@@ -3600,14 +3660,21 @@ impl WriteBehindDataStore {
         }
     }
 
-    /// Publishes the flush task's hold to the readers outside the task. A
-    /// hold is in force for as long as `hold_until` is set — also after that
-    /// instant has passed and before a probe has been accepted.
+    /// Publishes the flush task's hold to the readers outside the task and
+    /// to its gauge. A hold is in force for as long as `hold_until` is set —
+    /// also after that instant has passed and before a probe has been
+    /// accepted. Called where the hold changes, so a pass that changes
+    /// nothing sets no gauge for it.
     fn publish_hold(&self, schedule: &RetrySchedule) {
         self.store_hold
             .store(schedule.hold_until.is_some(), Ordering::SeqCst);
         self.failed_probes
             .store(schedule.failed_probes, Ordering::SeqCst);
+        metrics::gauge!(STORE_HOLD_GAUGE).set(if schedule.hold_until.is_some() {
+            1.0
+        } else {
+            0.0
+        });
     }
 
     /// One pass of the flush task.
@@ -3715,13 +3782,17 @@ impl WriteBehindDataStore {
         }
     }
 
-    /// Reports refused entries at the end of a pass: one rate-limited warning
-    /// while any is buffered, and one line when none is left after a warning.
+    /// Reports the buffer and its refused entries at the end of a pass: the
+    /// gauges, one rate-limited warning while any entry is refused, and one
+    /// line when none is left after a warning.
     ///
     /// The queues are walked only while a refusal has happened and the last
     /// walk still found a refused entry; a pass on a store that refuses
-    /// nothing pays one atomic load.
+    /// nothing pays one atomic load for that, and one more load and one gauge
+    /// set for the buffered count.
     fn report_retries(&self, schedule: &mut RetrySchedule) {
+        metrics::gauge!(BUFFERED_ENTRIES_GAUGE)
+            .set(count_as_gauge(self.pending_count.load(Ordering::Relaxed)));
         if !self.retrying.load(Ordering::Relaxed) {
             return;
         }
@@ -3733,6 +3804,17 @@ impl WriteBehindDataStore {
             retrying += count;
             earliest = earlier_refusal(earliest, queue_earliest);
         }
+        // Monotonic time since the first refusal, never the entry's
+        // `store_time`: that is supplied by the caller and is not a time at
+        // all for some callers.
+        let oldest_refusal_age = earliest.map_or(std::time::Duration::ZERO, |first| {
+            now.saturating_duration_since(first)
+        });
+        // Also on the walk that finds nothing refused any more: it is the
+        // last walk until the next refusal, and it is what brings both gauges
+        // back to zero.
+        metrics::gauge!(RETRYING_ENTRIES_GAUGE).set(count_as_gauge(retrying));
+        metrics::gauge!(OLDEST_REFUSAL_AGE_GAUGE).set(oldest_refusal_age.as_secs_f64());
 
         if retrying == 0 {
             self.retrying.store(false, Ordering::Relaxed);
@@ -3758,14 +3840,8 @@ impl WriteBehindDataStore {
         let Some(example) = &schedule.example else {
             return;
         };
-        // Monotonic time since the first refusal, never the entry's
-        // `store_time`: that is supplied by the caller and is not a time at
-        // all for some callers.
-        let oldest_refusal_age_s = earliest
-            .map_or(std::time::Duration::ZERO, |first| {
-                now.saturating_duration_since(first)
-            })
-            .as_secs();
+        // Whole seconds of the age gauge, so the line and the series agree.
+        let oldest_refusal_age_s = oldest_refusal_age.as_secs();
         warn!(
             retrying,
             oldest_refusal_age_s,
