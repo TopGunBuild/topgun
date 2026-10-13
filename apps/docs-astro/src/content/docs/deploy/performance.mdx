@@ -16,7 +16,7 @@ TOPGUN_EVICTION_INTERVAL_MS=1000   # default 1000 ms — orchestrator tick`;
 
 export const writeBehindEnvCode = `# Write-behind buffer (all real env vars)
 TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000   # default 1000 ms — flush cadence
-TOPGUN_WRITEBEHIND_BATCH_SIZE=100           # default 100 — group size inside a flush pass (does not limit the pass)
+TOPGUN_WRITEBEHIND_BATCH_SIZE=100           # default 100 — accepted, currently has no effect
 TOPGUN_WRITEBEHIND_CAPACITY=10000           # default 10000 — soft bound on buffered keys (0 = unlimited)`;
 
 export const serverConfigNote = `// packages/server-rust/src/service/config.rs
@@ -152,7 +152,7 @@ All three env vars below are real — sourced from `packages/server-rust/src/sto
 | Variable | Default | Source | Notes |
 |----------|---------|--------|-------|
 | `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `1000` | `WriteBehindConfig::flush_interval_ms` | How often the background flush task runs |
-| `TOPGUN_WRITEBEHIND_BATCH_SIZE` | `100` | `WriteBehindConfig::batch_size` | Size of the groups a flush pass iterates in. Today it does not limit how many entries a flush pass takes: a pass takes every entry that is due when it begins. |
+| `TOPGUN_WRITEBEHIND_BATCH_SIZE` | `100` | `WriteBehindConfig::batch_size` | Accepted and currently without effect: a flush pass takes every entry that is due when it begins and stores them one at a time, so the value neither groups nor limits the pass. |
 | `TOPGUN_WRITEBEHIND_CAPACITY` | `10000` | `WriteBehindConfig::capacity` | Soft bound on buffered keys, so the write buffer cannot grow without limit: a write of a key that is not already buffered is refused once this many keys are buffered (`0` means unlimited). It is not a hard limit — the count can exceed it by the writes of new keys that passed the check at the same moment (`W`), plus one re-write of each key the running flush pass holds (`H`): `buffered <= C - 1 + W + H`, with `H <= C - 1 + W`, because a pass holds every entry that was due when it began, and `H <= 1` while the server is leaving a refusing store alone. In the worst case the count reaches up to about twice the capacity. A key stays counted until its entry is persisted or retired into a newer write of the same key; an entry the store refuses is neither, and stays counted until the store takes it. So while the store refuses writes the buffer stays at its bound, and every write of a key that is not already buffered is refused until the store returns. A refused write is not acknowledged: the server answers with the transient `internal` error (code 500), and the client keeps the operation and sends it again. `TOPGUN_WRITEBEHIND_CAPACITY=0` together with a store that refuses writes is not supported: nothing then limits the buffer, and memory grows for as long as the store refuses. |
 | `TOPGUN_WAL_FSYNC_POLICY` | `batched` | `write_behind.rs` | WAL fsync aggressiveness: `batched` (default, throughput) \| `per_op` (acked == durable under `kill -9`) \| `none` (tests only) |
 

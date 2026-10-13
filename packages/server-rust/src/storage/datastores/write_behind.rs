@@ -49,11 +49,12 @@ pub struct WriteBehindConfig {
     pub write_delay_ms: u64,
     /// How often the background flush task runs, in milliseconds.
     pub flush_interval_ms: u64,
-    /// Size of the groups a flush pass iterates in.
+    /// Accepted and parsed, and currently without effect.
     ///
-    /// It does not limit how many entries a pass takes or persists: a pass
-    /// takes every entry that is due when it begins and works through all of
-    /// them, `batch_size` at a time, with nothing between the groups.
+    /// Nothing reads it: a flush pass takes every entry that is due when it
+    /// begins and stores them one at a time, so the value neither groups nor
+    /// limits the pass. It is kept so that a configuration which sets it
+    /// still loads.
     pub batch_size: u32,
     /// The wait after the first refusal of an entry is twice this, and the
     /// first length of a store-wide hold is this, in milliseconds; each
@@ -218,7 +219,7 @@ impl WriteBehindConfig {
     /// | Env var | Field | Default |
     /// |---|---|---|
     /// | `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `flush_interval_ms` | 1000 ms |
-    /// | `TOPGUN_WRITEBEHIND_BATCH_SIZE` | `batch_size` | 100 |
+    /// | `TOPGUN_WRITEBEHIND_BATCH_SIZE` | `batch_size` | 100 — accepted and currently without effect |
     /// | `TOPGUN_WRITEBEHIND_CAPACITY` | `capacity` | 10 000 |
     /// | `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS` | `shutdown_timeout_ms` | 30 000 ms |
     /// | `TOPGUN_WAL_DIR` | `wal_dir` | `./topgun-wal` |
@@ -282,7 +283,9 @@ impl WriteBehindConfig {
             }
         }
 
-        // Parse TOPGUN_WRITEBEHIND_BATCH_SIZE → batch_size (u32)
+        // Parse TOPGUN_WRITEBEHIND_BATCH_SIZE → batch_size (u32). The value is
+        // validated so a deployment that sets it keeps starting; no flush
+        // pass reads it.
         if let Some(raw) = get("TOPGUN_WRITEBEHIND_BATCH_SIZE") {
             match raw.trim().parse::<u32>() {
                 Ok(size) => {
@@ -4031,7 +4034,7 @@ impl MapDataStore for WriteBehindDataStore {
             // of writers that are between this check and their insert. Every
             // write of a key that is in neither staging nor a flush pass is
             // rejected while `pending_count >= capacity`. A pass holds every
-            // entry that was due when it began, whatever `batch_size`, so the
+            // entry that was due when it began (`batch_size` has no effect), so the
             // first of those two terms is itself bounded only by what was
             // queued at that moment. The formula and its precondition are on
             // `WriteBehindConfig::capacity`.
