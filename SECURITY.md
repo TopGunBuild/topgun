@@ -41,7 +41,7 @@ We will credit you in the advisory unless you ask to remain anonymous.
 
 In scope:
 
-- Server: `packages/server-rust/` (axum WS handler, clustering, redb/Postgres backends, eviction, write-behind, auth, ACL).
+- Server: `packages/server-rust/` (axum WS handler, clustering, embedded redb storage, eviction, write-behind, auth, ACL).
 - Clients: `packages/client/`, `packages/react/`, `packages/adapters/`.
 - Tooling: `packages/mcp-server/`, `packages/create-topgun-app/`, `packages/cli/`.
 - Deployment: `deploy/Dockerfile.*`, `deploy/k8s/`, root `docker-compose.yml`.

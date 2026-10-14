@@ -25,7 +25,7 @@ pnpm --filter admin-dashboard typecheck
 ## Deploy via Docker Compose
 
 ```bash
-# Boots admin-ui (port 3001) + server (8080) + postgres
+# Boots admin-ui (port 3001) + server (8080)
 docker compose --profile admin up
 ```
 
