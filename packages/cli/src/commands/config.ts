@@ -9,9 +9,6 @@ interface ConfigOptions {
 
 interface EnvConfig {
   STORAGE_BACKEND?: string;
-  DB_HOST?: string;
-  DB_PORT?: string;
-  DB_NAME?: string;
   PORT?: string;
   METRICS_PORT?: string;
   TOPGUN_LOG_FORMAT?: string;
@@ -23,7 +20,7 @@ interface EnvConfig {
 }
 
 // Valid storage values the Rust server recognises (STORAGE_BACKEND env var)
-const VALID_STORAGES = ['redb', 'postgres', 'null'];
+const VALID_STORAGES = ['redb', 'null'];
 
 async function config(options: ConfigOptions) {
   const envPath = path.join(process.cwd(), '.env');
@@ -41,11 +38,6 @@ async function config(options: ConfigOptions) {
 
     console.log(chalk.cyan('  Storage'));
     console.log(`    Backend: ${cfg.STORAGE_BACKEND || 'not set (server default: redb)'}`);
-    if (cfg.STORAGE_BACKEND === 'postgres') {
-      console.log(`    Host: ${cfg.DB_HOST || 'localhost'}`);
-      console.log(`    Port: ${cfg.DB_PORT || '5432'}`);
-      console.log(`    Database: ${cfg.DB_NAME || 'topgun'}`);
-    }
 
     console.log('');
     console.log(chalk.cyan('  Auth'));
@@ -80,12 +72,19 @@ async function config(options: ConfigOptions) {
     console.log(
       chalk.gray('    topgun config --storage redb      Set storage to embedded redb (default)'),
     );
-    console.log(chalk.gray('    topgun config --storage postgres  Set storage to PostgreSQL'));
     console.log(
       chalk.gray('    topgun config --storage null      Set storage to ephemeral (no persistence)'),
     );
     console.log('');
     return;
+  }
+
+  // Checked before the .env lookup so the answer is the same in a directory without .env
+  if (options.storage === 'postgres') {
+    console.error(
+      'The Postgres backend has been removed; the server keeps its data in its embedded store. There is no migration tool: data kept by the Postgres backend remains available with the server built from the tag postgres-backend-last. See CHANGELOG.md.',
+    );
+    process.exit(1);
   }
 
   // Update configuration

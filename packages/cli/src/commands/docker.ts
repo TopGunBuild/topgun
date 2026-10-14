@@ -4,7 +4,6 @@ import { execSync } from 'child_process';
 const PROFILES: Record<string, string> = {
   admin: 'Admin UI at :3001',
   monitoring: 'Prometheus (:9090) + Grafana (:3000)',
-  dbtools: 'DbGate database browser at :3002',
   k6: 'k6 load testing',
   cluster: '3-node cluster for testing',
   'auto-setup': 'Rust server with auto-setup',
@@ -50,7 +49,6 @@ export async function start(options: StartOptions) {
 
     console.log(chalk.white('  Base services:'));
     console.log(chalk.cyan('    - Server: http://localhost:8080'));
-    console.log(chalk.cyan('    - PostgreSQL: localhost:5432'));
 
     for (const profile of profiles) {
       if (profile === 'admin' || profile === 'all') {
@@ -61,10 +59,6 @@ export async function start(options: StartOptions) {
         console.log(chalk.white('\n  Monitoring:'));
         console.log(chalk.cyan('    - Prometheus: http://localhost:9090'));
         console.log(chalk.cyan('    - Grafana: http://localhost:3000 (admin/admin)'));
-      }
-      if (profile === 'dbtools' || profile === 'all') {
-        console.log(chalk.white('\n  Database Tools:'));
-        console.log(chalk.cyan('    - DbGate: http://localhost:3002'));
       }
       if (profile === 'cluster') {
         console.log(chalk.white('\n  Cluster:'));

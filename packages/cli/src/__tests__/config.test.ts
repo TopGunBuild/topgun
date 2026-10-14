@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
-import { execSync } from 'child_process';
+import os from 'os';
+import { execSync, spawnSync } from 'child_process';
 import { runCli, withTempEnv } from './test-utils';
 
 const CLI_PATH = path.join(__dirname, '../../dist/topgun.js');
@@ -34,7 +35,7 @@ describe('topgun config', () => {
     });
 
     it('should display STORAGE_BACKEND from .env file (AC8 regression guard)', () => {
-      // Uses the new STORAGE_BACKEND key, not the dead STORAGE_MODE
+      // Uses the STORAGE_BACKEND key
       const envContent = `
 TOPGUN_NO_AUTH=1
 STORAGE_BACKEND=redb
@@ -61,7 +62,7 @@ METRICS_PORT=9091
     it('should update .env with valid storage backend (redb)', () => {
       const envContent = `
 TOPGUN_NO_AUTH=1
-STORAGE_BACKEND=postgres
+STORAGE_BACKEND=null
 PORT=8080
 `;
 
@@ -76,9 +77,8 @@ PORT=8080
 
         const envPath = path.join(CLI_CWD, '.env');
         const updatedContent = fs.readFileSync(envPath, 'utf8');
-        // Must write STORAGE_BACKEND, not STORAGE_MODE
+        // Must write the STORAGE_BACKEND key
         expect(updatedContent).toContain('STORAGE_BACKEND=redb');
-        expect(updatedContent).not.toContain('STORAGE_MODE');
       });
     });
 
@@ -94,9 +94,25 @@ PORT=8080
         expect(allOutput).toContain('Invalid storage type: memory');
         expect(allOutput).toContain('Valid options:');
         expect(allOutput).toContain('redb');
-        expect(allOutput).toContain('postgres');
+        expect(allOutput).not.toContain('postgres');
         expect(allOutput).toContain('null');
       });
+    });
+
+    it('refuses postgres: the backend has been removed', () => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-config-test-'));
+      try {
+        const result = spawnSync('node', [CLI_PATH, 'config', '--storage', 'postgres'], {
+          encoding: 'utf8',
+          cwd: tempDir,
+        });
+        const allOutput = (result.stdout || '') + (result.stderr || '');
+        expect(result.status).toBe(1);
+        expect(allOutput).toContain('The Postgres backend has been removed');
+        expect(allOutput).toContain('There is no migration tool');
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
     });
 
     it('should show error for invalid storage type', () => {

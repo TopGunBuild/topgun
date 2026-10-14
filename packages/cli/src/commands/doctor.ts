@@ -88,7 +88,7 @@ const checks: Check[] = [
       } catch {
         return {
           pass: true,
-          message: 'Not installed (optional — required for PostgreSQL and cluster)',
+          message: 'Not installed (optional — required for cluster)',
           optional: true,
         };
       }
