@@ -12636,6 +12636,24 @@ mod background_task_panic_tests {
         assert_eq!(store.pending_operation_count(), pending);
     }
 
+    /// The shutdown of a store whose flush task panicked renders its context
+    /// byte for byte: a broken store has a context of its own, and the panic
+    /// one must not drift with it.
+    #[tokio::test]
+    async fn a_panicked_store_shutdown_keeps_its_context_text() {
+        let (store, _memory) = store_with_a_dead_flush_task(None).await;
+
+        let shutdown = tokio::time::timeout(HANG_LIMIT, store.hard_flush())
+            .await
+            .expect("hard_flush on a store whose flush task panicked did not return");
+        let error = shutdown.expect_err("a shutdown on a store whose flush task panicked fails");
+
+        assert_eq!(
+            error.to_string(),
+            "write-behind shutdown ran on a failed store: a background task panicked"
+        );
+    }
+
     #[tokio::test]
     async fn a_write_past_the_check_when_the_task_dies_is_drained_at_shutdown() {
         const PARKED_KEY: &str = "past-the-check";
@@ -14326,5 +14344,743 @@ mod background_task_panic_tests {
             "((queued, staged, load), (queued, staged, pending, load), (queued, staged, slots at \
              rest, persisted))"
         );
+    }
+}
+
+#[cfg(test)]
+mod store_broken_tests {
+    use super::*;
+
+    use crate::storage::datastores::NullDataStore;
+
+    const MAP: &str = "store_broken_map";
+    /// Upper bound on any single wait; reaching it is a failed test, not a wait.
+    const HANG_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+    const KEYS: [&str; 3] = ["k1", "k2", "k3"];
+    const BROKEN_LINE: &str = "write-behind store: the durable store is broken and stores nothing \
+         more in this process; writes are refused from now on and the node stops";
+    const DRAIN_LINE: &str = "write-behind shutdown drain stopped at a broken store: the entries \
+         it did not store stay un-resolved and replay from the WAL at the next start";
+
+    fn value(text: &str) -> RecordValue {
+        RecordValue::Lww {
+            value: topgun_core::types::Value::String(text.to_string()),
+            timestamp: topgun_core::hlc::Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: String::new(),
+            },
+        }
+    }
+
+    fn broken() -> StoreErrorClass {
+        StoreErrorClass::StoreBroken(StoreBrokenCause::PreviousIo)
+    }
+
+    /// An inner store that refuses every write and classifies its error as
+    /// `class`. It counts every call it gets, reads included, and remembers
+    /// the key of every refused write in call order.
+    struct RefusingStore {
+        class: StoreErrorClass,
+        calls: AtomicU64,
+        refused_keys: Mutex<Vec<String>>,
+        empty: NullDataStore,
+    }
+
+    impl RefusingStore {
+        fn new(class: StoreErrorClass) -> Arc<Self> {
+            Arc::new(Self {
+                class,
+                calls: AtomicU64::new(0),
+                refused_keys: Mutex::new(Vec::new()),
+                empty: NullDataStore,
+            })
+        }
+
+        fn calls(&self) -> u64 {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn refused_keys(&self) -> Vec<String> {
+            self.refused_keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn refuse(&self, key: &str) -> anyhow::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.refused_keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(key.to_string());
+            Err(anyhow::anyhow!("the test store refuses the write"))
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for RefusingStore {
+        async fn add(
+            &self,
+            _map: &str,
+            key: &str,
+            _value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            self.refuse(key)
+        }
+
+        async fn add_backup(
+            &self,
+            _map: &str,
+            key: &str,
+            _value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            self.refuse(key)
+        }
+
+        async fn remove(&self, _map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+            self.refuse(key)
+        }
+
+        async fn remove_backup(&self, _map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+            self.refuse(key)
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.empty.load(map, key).await
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.empty.load_all(map, keys).await
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            self.empty.enumerate_leaves(map, is_backup, sink).await
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_records: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.empty.scan_values(map, is_backup, max_records).await
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: ScanCursor,
+            max_records: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.empty
+                .scan_values_batched(map, is_backup, cursor, max_records)
+                .await
+        }
+
+        async fn remove_all(&self, _map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.refuse(&keys.join(","))
+        }
+
+        fn is_loadable(&self, _key: &str) -> bool {
+            true
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            0
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn classify_error(&self, _err: &anyhow::Error) -> StoreErrorClass {
+            self.class
+        }
+    }
+
+    /// A WAL that keeps every frame and the applied watermark of each
+    /// partition, so a test can tell an abandoned frame from a resolved one.
+    #[derive(Default)]
+    struct FrameWal {
+        frames: Mutex<Vec<(u32, WalEntry)>>,
+        applied: Mutex<Vec<(u32, u64)>>,
+    }
+
+    impl FrameWal {
+        fn appends(&self) -> usize {
+            self.frames
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+        }
+
+        fn mark_applied_calls(&self) -> usize {
+            self.applied
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+        }
+
+        async fn unapplied_frames(&self) -> usize {
+            let partitions: BTreeSet<u32> = self
+                .frames
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|(partition, _)| *partition)
+                .collect();
+            let mut total = 0;
+            for partition in partitions {
+                total += self
+                    .unapplied(partition)
+                    .await
+                    .expect("the test WAL never fails")
+                    .len();
+            }
+            total
+        }
+    }
+
+    #[async_trait]
+    impl Wal for FrameWal {
+        async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
+            self.frames
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((partition, entry.clone()));
+            Ok(())
+        }
+
+        async fn mark_applied(&self, partition: u32, sequence: u64) -> anyhow::Result<()> {
+            self.applied
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((partition, sequence));
+            Ok(())
+        }
+
+        async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>> {
+            let watermark = self
+                .applied
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter(|(applied_partition, _)| *applied_partition == partition)
+                .map(|(_, sequence)| *sequence)
+                .max()
+                .unwrap_or(0);
+            Ok(self
+                .frames
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter(|(frame_partition, entry)| {
+                    *frame_partition == partition && entry.sequence > watermark
+                })
+                .map(|(_, entry)| entry.clone())
+                .collect())
+        }
+    }
+
+    /// A flush task that runs a pass only when a test asks for one, and a
+    /// backoff long enough that no refused entry and no hold comes due again
+    /// inside a test.
+    fn manual_flush_config() -> WriteBehindConfig {
+        WriteBehindConfig {
+            write_delay_ms: 0,
+            flush_interval_ms: 3_600_000,
+            capacity: 0,
+            shutdown_timeout_ms: 5_000,
+            backoff_base_ms: 60_000,
+            backoff_cap_ms: 60_000,
+            ..WriteBehindConfig::default()
+        }
+    }
+
+    fn store_over(inner: &Arc<RefusingStore>) -> Arc<WriteBehindDataStore> {
+        WriteBehindDataStore::new(
+            Arc::clone(inner) as Arc<dyn MapDataStore>,
+            manual_flush_config(),
+        )
+    }
+
+    fn store_with_wal(
+        inner: &Arc<RefusingStore>,
+        wal: &Arc<FrameWal>,
+    ) -> Arc<WriteBehindDataStore> {
+        WriteBehindDataStore::new_with_wal(
+            Arc::clone(inner) as Arc<dyn MapDataStore>,
+            manual_flush_config(),
+            Some(WalBootstrap {
+                wal: Arc::clone(wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        )
+    }
+
+    async fn add_keys(store: &WriteBehindDataStore) {
+        for key in KEYS {
+            store
+                .add(MAP, key, &value(key), 0, now_millis())
+                .await
+                .expect("a healthy store accepts the write");
+        }
+    }
+
+    /// Asks the flush task for one pass and returns once that pass has closed.
+    async fn one_pass(store: &WriteBehindDataStore) {
+        let opened = store.flush_pass_epoch.load(Ordering::SeqCst);
+        store.soft_flush().await.expect("soft_flush");
+        tokio::time::timeout(HANG_LIMIT, async {
+            while store.flush_pass_epoch.load(Ordering::SeqCst) < opened + 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("no flush pass closed after soft_flush");
+    }
+
+    async fn bounded_hard_flush(store: &WriteBehindDataStore) -> anyhow::Result<()> {
+        tokio::time::timeout(HANG_LIMIT, store.hard_flush())
+            .await
+            .expect("hard_flush did not return")
+    }
+
+    fn failed_on_a_broken_store(store: &WriteBehindDataStore) -> bool {
+        store
+            .background_failure()
+            .borrow()
+            .as_ref()
+            .is_some_and(BackgroundFailure::store_broken)
+    }
+
+    /// Every queued entry, read in place: the queues are left as they are.
+    fn queued_entries(store: &WriteBehindDataStore) -> Vec<DelayedEntry> {
+        store
+            .queues
+            .iter()
+            .flat_map(|queue| queue.value().entries.values().cloned().collect::<Vec<_>>())
+            .collect()
+    }
+
+    // ---- what a test reads of the logs and the metrics ----------------------
+
+    #[derive(Debug, Clone)]
+    struct CapturedEvent {
+        fields: BTreeMap<String, String>,
+    }
+
+    impl CapturedEvent {
+        fn field(&self, name: &str) -> Option<&str> {
+            self.fields.get(name).map(String::as_str)
+        }
+    }
+
+    struct EventCapture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    struct FieldCollector<'a>(&'a mut BTreeMap<String, String>);
+
+    impl tracing::field::Visit for FieldCollector<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = BTreeMap::new();
+            event.record(&mut FieldCollector(&mut fields));
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(CapturedEvent { fields });
+        }
+    }
+
+    /// Runs `body` on a current-thread runtime under `recorder` and a
+    /// thread-scoped subscriber, and returns what it returned with every event
+    /// logged meanwhile. One thread is what makes both complete: the store's
+    /// background tasks run on it.
+    fn run_observed<T>(
+        recorder: &metrics_exporter_prometheus::PrometheusRecorder,
+        body: impl std::future::Future<Output = T>,
+    ) -> (T, Vec<CapturedEvent>) {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&events)));
+        let output = metrics::with_local_recorder(recorder, || {
+            tracing::subscriber::with_default(subscriber, || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("current-thread runtime")
+                    .block_on(body)
+            })
+        });
+        let events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        (output, events)
+    }
+
+    fn events_saying<'a>(events: &'a [CapturedEvent], message: &str) -> Vec<&'a CapturedEvent> {
+        events
+            .iter()
+            .filter(|event| event.field("message") == Some(message))
+            .collect()
+    }
+
+    /// Whether `rendered` holds `line` as one whole line: the order of series
+    /// in a render is not stable.
+    fn renders(rendered: &str, line: &str) -> bool {
+        rendered.lines().any(|rendered_line| rendered_line == line)
+    }
+
+    fn broken_series(cause: &str, count: u64) -> String {
+        format!("{STORE_BROKEN_COUNTER}{{cause=\"{cause}\"}} {count}")
+    }
+
+    fn panic_series(task: &str, count: u64) -> String {
+        format!("{BACKGROUND_TASK_PANICS_COUNTER}{{task=\"{task}\"}} {count}")
+    }
+
+    // ---- tests ----------------------------------------------------------------
+
+    #[test]
+    fn t_no_more_calls_after_a_broken_store() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        run_observed(&recorder, async {
+            let inner = RefusingStore::new(broken());
+            let store = store_over(&inner);
+            add_keys(&store).await;
+
+            one_pass(&store).await;
+
+            assert_eq!(inner.calls(), 1, "the failing pass makes exactly one call");
+            assert!(
+                failed_on_a_broken_store(&store),
+                "the refusal of a broken store must fail the store"
+            );
+            let rendered = handle.render();
+            assert!(
+                renders(&rendered, &format!("{FLUSH_REFUSALS_COUNTER} 1")),
+                "the failing call is counted as one refusal, like any refusal; render \
+                 was:\n{rendered}"
+            );
+            let refused_key = inner.refused_keys()[0].clone();
+            let entries = queued_entries(&store);
+            assert_eq!(
+                entries.len(),
+                KEYS.len(),
+                "every entry of the pass, the refused one included, is back on its queue"
+            );
+            let refused: Vec<&DelayedEntry> = entries
+                .iter()
+                .filter(|entry| entry.key == refused_key)
+                .collect();
+            assert_eq!(
+                refused.len(),
+                1,
+                "the refused entry {refused_key} is queued"
+            );
+            assert_eq!(refused[0].retry_count, 1, "the refused entry was counted");
+            assert!(
+                refused[0].next_attempt.is_some() && refused[0].first_refused.is_some(),
+                "the refused entry carries its backoff and its first refusal time"
+            );
+            for entry in entries.iter().filter(|entry| entry.key != refused_key) {
+                assert_eq!(
+                    (entry.retry_count, entry.next_attempt, entry.first_refused),
+                    (0, None, None),
+                    "the entry {} was not attempted and goes back untouched",
+                    entry.key
+                );
+            }
+
+            one_pass(&store).await;
+            one_pass(&store).await;
+            assert_eq!(
+                inner.calls(),
+                1,
+                "no pass calls a store that reported itself broken"
+            );
+        });
+    }
+
+    #[test]
+    fn t_drain_one_call_on_a_broken_store() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let ((), events) = run_observed(&recorder, async {
+            let inner = RefusingStore::new(broken());
+            let wal = Arc::new(FrameWal::default());
+            let store = store_with_wal(&inner, &wal);
+            add_keys(&store).await;
+
+            let error = bounded_hard_flush(&store)
+                .await
+                .expect_err("a shutdown drain on a broken store returns an error");
+
+            assert!(
+                error
+                    .downcast_ref::<BackgroundFailure>()
+                    .is_some_and(BackgroundFailure::store_broken),
+                "the error carries the broken-store failure: {error:?}"
+            );
+            assert_eq!(inner.calls(), 1, "the drain calls a broken store once");
+            assert_eq!(
+                wal.unapplied_frames().await,
+                KEYS.len(),
+                "every frame of an entry the drain did not store stays un-applied"
+            );
+            assert_eq!(
+                wal.mark_applied_calls(),
+                0,
+                "no frame of an entry the drain did not store is resolved"
+            );
+        });
+        let lines = events_saying(&events, DRAIN_LINE);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one drain line; captured events: {events:?}"
+        );
+        assert_eq!(lines[0].field("abandoned_entries"), Some("3"));
+        assert_eq!(lines[0].field("cause"), Some("previous_io"));
+        let broken_lines = events_saying(&events, BROKEN_LINE);
+        assert_eq!(broken_lines.len(), 1, "captured events: {events:?}");
+        assert_eq!(broken_lines[0].field("site"), Some("shutdown_drain"));
+    }
+
+    #[tokio::test]
+    async fn t_unknown_unchanged() {
+        let inner = RefusingStore::new(StoreErrorClass::Unknown);
+        let store = store_over(&inner);
+        add_keys(&store).await;
+
+        one_pass(&store).await;
+
+        assert_eq!(
+            inner.calls(),
+            3,
+            "every due entry is attempted until the hold trips"
+        );
+        assert!(
+            store.background_failure().borrow().is_none(),
+            "an unknown refusal records no failure"
+        );
+        let backoff = retry_backoff(store.config.backoff_base_ms, store.config.backoff_cap_ms, 1);
+        let entries = queued_entries(&store);
+        assert_eq!(entries.len(), KEYS.len(), "every refused entry is back");
+        for entry in &entries {
+            assert_eq!(entry.retry_count, 1, "{} was counted once", entry.key);
+            let first_refused = entry
+                .first_refused
+                .expect("a refused entry carries its first refusal time");
+            assert_eq!(
+                entry.next_attempt,
+                Some(first_refused + backoff),
+                "{} waits one backoff from its refusal",
+                entry.key
+            );
+        }
+        assert!(
+            store.store_hold.load(Ordering::SeqCst),
+            "three refusals in a row start the store-wide hold"
+        );
+        assert_eq!(store.failed_probes.load(Ordering::SeqCst), 0);
+
+        one_pass(&store).await;
+        assert_eq!(inner.calls(), 3, "no call while the hold is in force");
+
+        store
+            .add(MAP, "k4", &value("k4"), 0, now_millis())
+            .await
+            .expect("an unknown refusal leaves the store accepting writes");
+        bounded_hard_flush(&store)
+            .await
+            .expect("a drain over unknown refusals ends as on the base");
+        assert_eq!(
+            inner.calls(),
+            7,
+            "the drain gives each of the four entries its one last attempt"
+        );
+    }
+
+    #[test]
+    fn t_once_per_process() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let ((), events) = run_observed(&recorder, async {
+            let inner = RefusingStore::new(broken());
+            let store = store_over(&inner);
+            add_keys(&store).await;
+
+            one_pass(&store).await;
+            assert!(failed_on_a_broken_store(&store));
+            assert!(
+                bounded_hard_flush(&store).await.is_err(),
+                "the shutdown of a broken store fails"
+            );
+            // At least: how many calls the drain makes is the drain's own
+            // test; this one needs only that the drain met the broken store.
+            assert!(
+                inner.calls() >= 2,
+                "the drain met the broken store a second time"
+            );
+        });
+        let lines = events_saying(&events, BROKEN_LINE);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one broken store is one line; captured events: {events:?}"
+        );
+        assert_eq!(lines[0].field("site"), Some("flush"));
+        let rendered = handle.render();
+        assert!(
+            renders(&rendered, &broken_series("previous_io", 1)),
+            "one broken store is counted once; render was:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn t_metric_broken() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let (at_construction, _events) = run_observed(&recorder, async {
+            let inner = RefusingStore::new(broken());
+            let store = store_over(&inner);
+            let at_construction = handle.render();
+            add_keys(&store).await;
+
+            one_pass(&store).await;
+            assert!(failed_on_a_broken_store(&store));
+            at_construction
+        });
+        let after = handle.render();
+        for cause in ["io", "previous_io", "corrupted", "lock_poisoned"] {
+            assert!(
+                renders(&at_construction, &broken_series(cause, 0)),
+                "the `{cause}` series renders at 0 from construction; render \
+                 was:\n{at_construction}"
+            );
+            let expected = u64::from(cause == "previous_io");
+            assert!(
+                renders(&after, &broken_series(cause, expected)),
+                "the `{cause}` series reads {expected}; render was:\n{after}"
+            );
+        }
+        for task in ["flush", "stall_watchdog"] {
+            assert!(
+                renders(&after, &panic_series(task, 0)),
+                "a broken store is not a panic: the `{task}` panic series stays 0; render \
+                 was:\n{after}"
+            );
+        }
+    }
+
+    #[test]
+    fn t_refuse_broken() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        run_observed(&recorder, async {
+            let inner = RefusingStore::new(broken());
+            let wal = Arc::new(FrameWal::default());
+            let store = store_with_wal(&inner, &wal);
+            add_keys(&store).await;
+            one_pass(&store).await;
+            assert!(failed_on_a_broken_store(&store));
+            let appends = wal.appends();
+            let pending = store.pending_operation_count();
+
+            let add = store
+                .add(MAP, "after", &value("after"), 0, now_millis())
+                .await
+                .expect_err("a store failed on a broken store refuses `add`");
+            let remove = store
+                .remove(MAP, "after", now_millis())
+                .await
+                .expect_err("a store failed on a broken store refuses `remove`");
+            let remove_all = store
+                .remove_all(MAP, &["after".to_string()])
+                .await
+                .expect_err("a store failed on a broken store refuses `remove_all`");
+
+            let with_key = format!(
+                "write-behind store has failed (the durable store is broken); write rejected for \
+                 map={MAP} key=after"
+            );
+            assert_eq!(add.to_string(), with_key);
+            assert_eq!(remove.to_string(), with_key);
+            assert_eq!(
+                remove_all.to_string(),
+                format!(
+                    "write-behind store has failed (the durable store is broken); write rejected \
+                     for map={MAP}"
+                )
+            );
+            assert_eq!(wal.appends(), appends, "a refused write reaches no WAL");
+            assert_eq!(store.pending_operation_count(), pending);
+        });
+    }
+
+    #[test]
+    fn t_read_after_break() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        run_observed(&recorder, async {
+            let inner = RefusingStore::new(broken());
+            let store = store_over(&inner);
+            add_keys(&store).await;
+            one_pass(&store).await;
+            assert!(failed_on_a_broken_store(&store));
+            let calls = inner.calls();
+
+            let read = store
+                .load(MAP, "k1")
+                .await
+                .expect("a read of a buffered key answers");
+
+            assert_eq!(
+                read,
+                Some(value("k1")),
+                "the acked value is answered from the buffer"
+            );
+            assert_eq!(inner.calls(), calls, "the read makes no inner call");
+        });
     }
 }
