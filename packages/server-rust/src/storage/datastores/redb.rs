@@ -73,6 +73,7 @@ use std::sync::Arc;
 
 use crate::storage::map_data_store::{
     check_map_name, merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+    StoreBrokenCause, StoreErrorClass,
 };
 use crate::storage::record::RecordValue;
 use anyhow::bail;
@@ -401,7 +402,7 @@ fn delete_one(db: &redb::Database, map: &str, key: &str, is_backup: bool) -> any
     // the key cannot exist; skip the WriteTransaction round trip entirely.
     {
         let read_txn = db.begin_read()?;
-        if !table_exists(&read_txn, &table_name) {
+        if !table_exists(&read_txn, &table_name)? {
             return Ok(());
         }
     }
@@ -418,15 +419,64 @@ fn delete_one(db: &redb::Database, map: &str, key: &str, is_backup: bool) -> any
 /// Check whether a table with the given name has ever been created in the
 /// database. Used by the delete and remove-all paths to short-circuit when
 /// the table has never been written to.
-fn table_exists(read_txn: &redb::ReadTransaction, table_name: &str) -> bool {
-    match read_txn.list_tables() {
-        Ok(iter) => iter.into_iter().any(|h| h.name() == table_name),
-        Err(_) => false,
+///
+/// A catalog that cannot be read is an error, not "no such table": read as
+/// the latter, a remove the store never applied would be reported done, and
+/// the write-behind store would resolve its WAL frame as stored.
+fn table_exists(read_txn: &redb::ReadTransaction, table_name: &str) -> anyhow::Result<bool> {
+    Ok(read_txn
+        .list_tables()?
+        .into_iter()
+        .any(|h| h.name() == table_name))
+}
+
+/// The cause of a redb storage error this store treats as fatal for the
+/// process, `None` for any other. Decided by the variant alone: the error's
+/// text is never read.
+fn broken_cause(err: &redb::StorageError) -> Option<StoreBrokenCause> {
+    match err {
+        redb::StorageError::Io(io) => Some(StoreBrokenCause::Io(io.kind())),
+        redb::StorageError::PreviousIo => Some(StoreBrokenCause::PreviousIo),
+        redb::StorageError::Corrupted(_) => Some(StoreBrokenCause::Corrupted),
+        redb::StorageError::LockPoisoned(_) => Some(StoreBrokenCause::LockPoisoned),
+        // `ValueTooLarge` concerns one record, and the enum is
+        // `#[non_exhaustive]`: anything else is not a broken store.
+        _ => None,
     }
 }
 
 #[async_trait]
 impl MapDataStore for RedbDataStore {
+    fn classify_error(&self, err: &anyhow::Error) -> StoreErrorClass {
+        // By type only. redb's error types carry no `source()`, so a
+        // `StorageError` inside a wrapper is invisible to `anyhow`'s chain;
+        // each wrapper that can reach a caller of this store is matched
+        // itself. `downcast_ref` sees through `.context()` layers.
+        let storage = if let Some(e) = err.downcast_ref::<redb::StorageError>() {
+            Some(e)
+        } else if let Some(e) = err.downcast_ref::<redb::CommitError>() {
+            match e {
+                redb::CommitError::Storage(s) => Some(s),
+                _ => None,
+            }
+        } else if let Some(e) = err.downcast_ref::<redb::TransactionError>() {
+            match e {
+                redb::TransactionError::Storage(s) => Some(s),
+                _ => None,
+            }
+        } else if let Some(e) = err.downcast_ref::<redb::TableError>() {
+            match e {
+                redb::TableError::Storage(s) => Some(s),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        storage
+            .and_then(broken_cause)
+            .map_or(StoreErrorClass::Unknown, StoreErrorClass::StoreBroken)
+    }
+
     async fn add(
         &self,
         map: &str,
@@ -532,7 +582,7 @@ impl MapDataStore for RedbDataStore {
         // Skip the WriteTransaction if the table has never been created.
         {
             let read_txn = self.db.begin_read()?;
-            if !table_exists(&read_txn, &table_name) {
+            if !table_exists(&read_txn, &table_name)? {
                 return Ok(());
             }
         }
