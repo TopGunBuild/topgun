@@ -2602,6 +2602,202 @@ mod store_broken_tests {
         );
     }
 
+    // ---- after the fix ---------------------------------------------------
+
+    fn broken(cause: StoreBrokenCause) -> StoreErrorClass {
+        StoreErrorClass::StoreBroken(cause)
+    }
+
+    /// Every `StorageError` variant a test can build, with the class it must
+    /// get in any wrapper.
+    fn storage_variants() -> Vec<(fn() -> redb::StorageError, StoreErrorClass)> {
+        vec![
+            (
+                || redb::StorageError::Io(io::Error::from_raw_os_error(28)),
+                broken(StoreBrokenCause::Io(io::ErrorKind::StorageFull)),
+            ),
+            (
+                || redb::StorageError::PreviousIo,
+                broken(StoreBrokenCause::PreviousIo),
+            ),
+            (
+                || redb::StorageError::Corrupted("x".to_string()),
+                broken(StoreBrokenCause::Corrupted),
+            ),
+            (
+                || redb::StorageError::LockPoisoned(std::panic::Location::caller()),
+                broken(StoreBrokenCause::LockPoisoned),
+            ),
+            (
+                || redb::StorageError::ValueTooLarge(1),
+                StoreErrorClass::Unknown,
+            ),
+        ]
+    }
+
+    async fn wait_for_failure(
+        recorded: &mut tokio::sync::watch::Receiver<
+            Option<crate::storage::datastores::write_behind::BackgroundFailure>,
+        >,
+    ) -> crate::storage::datastores::write_behind::BackgroundFailure {
+        tokio::time::timeout(HANG_LIMIT, recorded.wait_for(Option::is_some))
+            .await
+            .expect("no failure was recorded within 5 s")
+            .expect("the failure record's sender was dropped")
+            .clone()
+            .expect("the record holds a failure")
+    }
+
+    #[tokio::test]
+    async fn t_classify_by_type() {
+        let store = MemBackend::new(None).store();
+        for (make, want) in storage_variants() {
+            let wrapped: Vec<anyhow::Error> = vec![
+                make().into(),
+                redb::CommitError::Storage(make()).into(),
+                redb::TransactionError::Storage(make()).into(),
+                redb::TableError::Storage(make()).into(),
+            ];
+            for err in wrapped {
+                let label = format!("{err:?}");
+                assert_eq!(store.classify_error(&err), want, "{label}");
+                let err = err.context("outer context");
+                assert_eq!(store.classify_error(&err), want, "{label} under context");
+            }
+        }
+
+        // The store's own map-name refusal is a string, not a redb type.
+        let name = store
+            .add("x__backup", "k", &value("v"), 0, 0)
+            .await
+            .unwrap_err();
+        assert_eq!(store.classify_error(&name), StoreErrorClass::Unknown);
+        // The write-behind refusal seam must never look like a broken store.
+        let seam = anyhow::anyhow!("fault injection: the inner store refused the write");
+        assert_eq!(store.classify_error(&seam), StoreErrorClass::Unknown);
+        // An I/O error redb did not raise says nothing about redb's handle.
+        let bare: anyhow::Error = io::Error::from_raw_os_error(28).into();
+        assert_eq!(store.classify_error(&bare), StoreErrorClass::Unknown);
+
+        // A real `TableTypeMismatch`: a table of the map's name with other
+        // key and value types.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.redb");
+        {
+            let db = redb::Database::create(&path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let def: redb::TableDefinition<u64, u64> = redb::TableDefinition::new("map__foo");
+                txn.open_table(def).unwrap().insert(1, 1).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        let typed = RedbDataStore::new(&path).unwrap();
+        let mismatch = typed.add("foo", "k", &value("x"), 0, 0).await.unwrap_err();
+        assert!(
+            matches!(
+                mismatch.downcast_ref::<redb::TableError>(),
+                Some(redb::TableError::TableTypeMismatch { .. })
+            ),
+            "{mismatch:?}"
+        );
+        assert_eq!(typed.classify_error(&mismatch), StoreErrorClass::Unknown);
+    }
+
+    #[tokio::test]
+    async fn t_previous_io_through_the_write_behind_flush() {
+        let backend = MemBackend::new(None);
+        let inner = backend.store();
+        // Latch the handle before the write-behind store sees it, then give
+        // the disk room again: only the latch is left.
+        backend.full.store(true, Ordering::SeqCst);
+        assert!(inner.add("m", "k0", &value("v"), 0, 0).await.is_err());
+        backend.full.store(false, Ordering::SeqCst);
+        let latched = inner.add("m", "k0", &value("v"), 0, 0).await.unwrap_err();
+        assert!(
+            matches!(
+                latched.downcast_ref::<redb::TransactionError>(),
+                Some(redb::TransactionError::Storage(redb::StorageError::PreviousIo))
+            ),
+            "a latched handle answers a write with PreviousIo through TransactionError: {latched:?}"
+        );
+
+        let store = write_behind(inner);
+        let mut recorded = store.background_failure();
+        store.add("m", "k1", &value("v1"), 0, 0).await.unwrap();
+        store.soft_flush().await.unwrap();
+        let failure = wait_for_failure(&mut recorded).await;
+        assert!(failure.store_broken(), "{failure}");
+        assert_eq!(failure.cause_label(), "previous_io");
+    }
+
+    #[tokio::test]
+    async fn t_restart_heals() {
+        use crate::storage::datastores::WalBootstrap;
+        use crate::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
+        let wal_dir = tempfile::tempdir().unwrap();
+        let backend = MemBackend::new(None);
+        let inner = Arc::new(backend.store());
+        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&inner) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 3_600_000,
+                capacity: 0,
+                shutdown_timeout_ms: 5_000,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+        store.add("m", "k0", &value("v0"), 0, 0).await.unwrap();
+        store.soft_flush().await.unwrap();
+        // k0 must be in redb before the disk fills, so the reopen proves it
+        // survived the latch rather than being replayed.
+        tokio::time::timeout(HANG_LIMIT, async {
+            while inner.load("m", "k0").await.unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("k0 was not stored within 5 s");
+
+        backend.full.store(true, Ordering::SeqCst);
+        let mut recorded = store.background_failure();
+        store.add("m", "k1", &value("v1"), 0, 0).await.unwrap();
+        store.add("m", "k2", &value("v2"), 0, 0).await.unwrap();
+        store.remove("m", "k2", 0).await.unwrap();
+        store.soft_flush().await.unwrap();
+        let failure = wait_for_failure(&mut recorded).await;
+        assert!(failure.store_broken(), "{failure}");
+        assert!(store.hard_flush().await.is_err());
+        let mut keys = Vec::new();
+        for p in 0..topgun_core::PARTITION_COUNT {
+            for e in wal.unapplied(p).await.unwrap() {
+                keys.push(e.key.clone());
+            }
+        }
+        assert!(keys.contains(&"k1".to_string()), "{keys:?}");
+        assert!(keys.contains(&"k2".to_string()), "{keys:?}");
+        // A process that exits skips the destructors: leave the latched
+        // handle open, as `std::process::exit` would.
+        std::mem::forget(store);
+        std::mem::forget(inner);
+
+        backend.full.store(false, Ordering::SeqCst);
+        let reopened: Arc<dyn MapDataStore> = Arc::new(backend.store());
+        WalRecovery::new(Arc::clone(&wal), Vec::new())
+            .run(Arc::clone(&reopened))
+            .await
+            .unwrap();
+        assert_eq!(reopened.load("m", "k0").await.unwrap(), Some(value("v0")));
+        assert_eq!(reopened.load("m", "k1").await.unwrap(), Some(value("v1")));
+        assert_eq!(reopened.load("m", "k2").await.unwrap(), None);
+    }
+
     #[test]
     fn the_sentinel_backend_refuses_writes_while_the_file_exists() {
         let dir = tempfile::tempdir().unwrap();
