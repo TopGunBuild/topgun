@@ -303,7 +303,7 @@ export interface QueryContext {
   isDistributed: boolean;
   /** Number of nodes in cluster */
   nodeCount: number;
-  /** Whether query uses PostgreSQL storage */
+  /** Whether query uses durable storage */
   usesStorage: boolean;
   /** Local node ID for partition ownership checks */
   localNodeId?: string;
@@ -322,7 +322,7 @@ export interface DistributedCost {
   cpu: number;
   /** Network cost (data transfer between nodes) */
   network: number;
-  /** I/O cost (disk reads for PostgreSQL) */
+  /** I/O cost (disk reads) */
   io: number;
 }
 
