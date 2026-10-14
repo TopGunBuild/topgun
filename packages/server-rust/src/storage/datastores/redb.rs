@@ -2227,3 +2227,237 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod store_broken_tests {
+    use super::*;
+    use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
+    use std::io;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    /// The ceiling on every wait in these tests: a store that never answers
+    /// must fail the test, not hang it.
+    const HANG_LIMIT: Duration = Duration::from_secs(5);
+
+    fn value(s: &str) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String(s.to_string()),
+            timestamp: Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: String::new(),
+            },
+        }
+    }
+
+    /// An in-memory redb backend whose bytes outlive the database handle, so a
+    /// second handle can be opened over what the first one wrote.
+    ///
+    /// Two faults can be injected below redb, where a real disk would raise
+    /// them:
+    /// - while `full` is set, every write, `set_len` and `sync_data` answers
+    ///   ENOSPC, and each refusal is announced on `refused` so a test can wait
+    ///   for it instead of sleeping;
+    /// - every read whose zero-based number is at or above `fail_reads_from`
+    ///   answers EIO, which lets a test fail one chosen read and no earlier one.
+    #[derive(Debug, Clone)]
+    struct MemBackend {
+        data: Arc<Mutex<Vec<u8>>>,
+        full: Arc<AtomicBool>,
+        refused: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+        reads: Arc<AtomicU64>,
+        fail_reads_from: Arc<AtomicU64>,
+    }
+
+    impl MemBackend {
+        fn new(refused: Option<tokio::sync::mpsc::UnboundedSender<()>>) -> Self {
+            Self {
+                data: Arc::new(Mutex::new(Vec::new())),
+                full: Arc::new(AtomicBool::new(false)),
+                refused,
+                reads: Arc::new(AtomicU64::new(0)),
+                fail_reads_from: Arc::new(AtomicU64::new(u64::MAX)),
+            }
+        }
+
+        fn room(&self) -> io::Result<()> {
+            if self.full.load(Ordering::SeqCst) {
+                if let Some(tx) = &self.refused {
+                    // The receiver may already be gone once the test has seen
+                    // the first refusal; later ones need no audience.
+                    let _ = tx.send(());
+                }
+                Err(io::Error::from_raw_os_error(28))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn store_with(&self, builder: &redb::Builder) -> RedbDataStore {
+            let db = builder
+                .create_with_backend(self.clone())
+                .expect("open over the in-memory backend");
+            RedbDataStore { db: Arc::new(db) }
+        }
+
+        fn store(&self) -> RedbDataStore {
+            self.store_with(&redb::Builder::new())
+        }
+    }
+
+    impl redb::StorageBackend for MemBackend {
+        fn len(&self) -> io::Result<u64> {
+            Ok(self.data.lock().unwrap().len() as u64)
+        }
+        fn read(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            let n = self.reads.fetch_add(1, Ordering::SeqCst);
+            if n >= self.fail_reads_from.load(Ordering::SeqCst) {
+                return Err(io::Error::from_raw_os_error(5));
+            }
+            let data = self.data.lock().unwrap();
+            let start = usize::try_from(offset).unwrap();
+            Ok(data[start..start + len].to_vec())
+        }
+        fn set_len(&self, len: u64) -> io::Result<()> {
+            self.room()?;
+            self.data
+                .lock()
+                .unwrap()
+                .resize(usize::try_from(len).unwrap(), 0);
+            Ok(())
+        }
+        fn sync_data(&self, _eventual: bool) -> io::Result<()> {
+            self.room()
+        }
+        fn write(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+            self.room()?;
+            let mut data = self.data.lock().unwrap();
+            let start = usize::try_from(offset).unwrap();
+            data[start..start + bytes.len()].copy_from_slice(bytes);
+            Ok(())
+        }
+    }
+
+    /// A write-behind store over `inner` whose flush task runs only when
+    /// woken, so each test decides when the store is called.
+    fn write_behind(inner: RedbDataStore) -> Arc<WriteBehindDataStore> {
+        WriteBehindDataStore::new(
+            Arc::new(inner),
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 3_600_000,
+                capacity: 0,
+                shutdown_timeout_ms: 5_000,
+                ..WriteBehindConfig::default()
+            },
+        )
+    }
+
+    /// A store holding `key` in `map`, reopened with no read cache, whose
+    /// backend fails the first read after the ones a read transaction makes by
+    /// itself to open. That read is the table catalog's, so the operation
+    /// cannot tell whether the map's table exists.
+    async fn a_store_that_cannot_read_its_catalog(map: &str, key: &str) -> RedbDataStore {
+        let backend = MemBackend::new(None);
+        backend
+            .store()
+            .add(map, key, &value("v"), 0, 0)
+            .await
+            .expect("seed");
+        let mut builder = redb::Builder::new();
+        builder.set_cache_size(0);
+        let store = backend.store_with(&builder);
+        // Count the reads opening a read transaction makes by itself, so that
+        // the read which fails is the first one after them.
+        let before = backend.reads.load(Ordering::SeqCst);
+        drop(store.db.begin_read().expect("read transaction"));
+        let by_begin_read = backend.reads.load(Ordering::SeqCst) - before;
+        backend.fail_reads_from.store(
+            backend.reads.load(Ordering::SeqCst) + by_begin_read,
+            Ordering::SeqCst,
+        );
+        store
+    }
+
+    #[tokio::test]
+    async fn a_latched_redb_store_fails_the_write_behind_store() {
+        let (tx, mut refused) = tokio::sync::mpsc::unbounded_channel();
+        let backend = MemBackend::new(Some(tx));
+        let store = write_behind(backend.store());
+
+        backend.full.store(true, Ordering::SeqCst);
+        store
+            .add("m", "k1", &value("v1"), 0, 0)
+            .await
+            .expect("the write is accepted into the buffer");
+        store.soft_flush().await.expect("soft flush");
+        tokio::time::timeout(HANG_LIMIT, refused.recv())
+            .await
+            .expect("the flush never reached the backend: no write was refused within 5 s")
+            .expect("the backend was dropped before it refused a write");
+        // The disk has room again; the handle stays latched.
+        backend.full.store(false, Ordering::SeqCst);
+
+        let second = store.add("m", "k2", &value("v2"), 0, 0).await;
+        assert!(
+            second.is_err(),
+            "add returned Ok after the redb handle latched"
+        );
+        assert!(
+            store.background_failure().borrow().is_some(),
+            "no failure is recorded after the redb handle latched"
+        );
+        assert!(
+            store.hard_flush().await.is_err(),
+            "hard_flush reported a clean stop on a latched redb handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_drain_on_a_latched_redb_store_reports_a_failure() {
+        let backend = MemBackend::new(None);
+        let store = write_behind(backend.store());
+
+        backend.full.store(true, Ordering::SeqCst);
+        store
+            .add("m", "k1", &value("v1"), 0, 0)
+            .await
+            .expect("the write is accepted into the buffer");
+
+        let flushed = store.hard_flush().await;
+        assert!(
+            flushed.is_err(),
+            "hard_flush reported a clean stop on a store it could not write to"
+        );
+        assert!(
+            store.background_failure().borrow().is_some(),
+            "no failure is recorded after the drain met a latched redb handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remove_on_a_store_that_cannot_read_its_catalog_is_not_reported_done() {
+        let store = a_store_that_cannot_read_its_catalog("m", "k").await;
+
+        let removed = store.remove("m", "k", 0).await;
+        assert!(
+            removed.is_err(),
+            "remove reported Ok although the store could not read its catalog"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remove_all_on_a_store_that_cannot_read_its_catalog_is_not_reported_done() {
+        let store = a_store_that_cannot_read_its_catalog("m", "k").await;
+
+        let removed = store.remove_all("m", &["k".to_string()]).await;
+        assert!(
+            removed.is_err(),
+            "remove_all reported Ok although the store could not read its catalog"
+        );
+    }
+}
