@@ -157,7 +157,7 @@ This guide covers common issues you may encounter when using TopGun, organized b
 - `STORAGE_BACKEND=postgres is no longer supported: the Postgres backend has been removed.`
 - `DATABASE_URL is set, but the Postgres backend has been removed and this server does not read it.`
 
-**Cause:** The server keeps its data in an embedded store and no longer has a Postgres backend. It refuses `STORAGE_BACKEND=postgres`, and it refuses to start while `DATABASE_URL` is set (an empty value counts as set), so a leftover variable cannot silently send your data to a different store than you expect.
+**Cause:** The server keeps its data in an embedded store, because the Postgres backend has been removed. It refuses STORAGE_BACKEND=postgres, and it refuses to start while DATABASE_URL is set (an empty value counts as set), so a leftover variable cannot silently send your data to a different store than you expect.
 
 **Solutions:**
 - Unset `DATABASE_URL` (an empty value counts as set), and remove `STORAGE_BACKEND=postgres` if you set it. The server then starts on the embedded store (`STORAGE_BACKEND=redb`, the default). Check your shell, `.env` files, compose files and container environment.
