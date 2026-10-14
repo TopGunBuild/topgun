@@ -312,6 +312,49 @@ pub enum Loaded {
     Cell(Arc<SlotCell>),
 }
 
+/// What a data store's error says about the store itself.
+///
+/// Decided by the store that produced the error, from the error's type
+/// ([`MapDataStore::classify_error`]); the write-behind store reacts to it on
+/// its flush path (`TG-WB-010`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreErrorClass {
+    /// Nothing is known about the store from this error: retry as before
+    /// (`TG-WB-009`).
+    Unknown,
+    /// An error the store treats as fatal for this process. It is a decision
+    /// of the store, not a proof that every later call would fail: a corrupted
+    /// page, for one, can leave other tables readable. A fresh process gets a
+    /// fresh handle, which is why the reaction is to stop the node.
+    StoreBroken(StoreBrokenCause),
+}
+
+/// Why a store reported itself broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreBrokenCause {
+    /// An I/O error, with its kind (a full disk is `StorageFull`).
+    Io(std::io::ErrorKind),
+    /// An I/O error earlier on the same handle.
+    PreviousIo,
+    /// The database file is corrupted.
+    Corrupted,
+    /// A lock inside the store was poisoned by a panic.
+    LockPoisoned,
+}
+
+impl StoreBrokenCause {
+    /// The cause as it appears in log fields and metric labels.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Io(_) => "io",
+            Self::PreviousIo => "previous_io",
+            Self::Corrupted => "corrupted",
+            Self::LockPoisoned => "lock_poisoned",
+        }
+    }
+}
+
 /// Used as `Arc<dyn MapDataStore>`.
 #[async_trait]
 pub trait MapDataStore: Send + Sync {
@@ -602,6 +645,19 @@ pub trait MapDataStore: Send + Sync {
     /// Returns `false` by default. Null implementations override to return `true`.
     fn is_null(&self) -> bool {
         false
+    }
+
+    /// What `err`, returned by a call on this store, says about the store.
+    ///
+    /// `StoreBroken` is returned only for an error the store treats as fatal
+    /// for this process. The answer is decided from the error's type, never
+    /// from its message. An error the store does not recognise is `Unknown`,
+    /// and `Unknown` means "retry as before" (`TG-WB-009`). The contract does
+    /// not say that no later call could succeed: a store may treat as fatal an
+    /// error after which some calls would still work, because a fresh process
+    /// is the only reliable way back to a working handle.
+    fn classify_error(&self, _err: &anyhow::Error) -> StoreErrorClass {
+        StoreErrorClass::Unknown
     }
 }
 

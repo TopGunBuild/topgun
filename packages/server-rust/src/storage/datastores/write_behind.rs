@@ -19,7 +19,7 @@ use tracing::{error, warn};
 use crate::storage::engine::SlotCell;
 use crate::storage::map_data_store::{
     merkle_leaf_hash, LeafSink, Loaded, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
-    WriteSource,
+    StoreBrokenCause, WriteSource,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{
@@ -1463,26 +1463,68 @@ impl std::fmt::Display for BackgroundTask {
     }
 }
 
-/// The record of a background task that ended by a panic (`TG-WB-006`).
+/// Why the store failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureCause {
+    /// A background task ended by a panic (`TG-WB-006`).
+    Panicked,
+    /// The inner store reported itself broken (`TG-WB-010`).
+    StoreBroken(StoreBrokenCause),
+}
+
+/// The record of a failed store: a background task that ended by a panic
+/// (`TG-WB-006`), or an inner store that reported itself broken (`TG-WB-010`).
 ///
 /// It is an error type so that a shutdown on a failed store can carry it as
 /// the source of what it returns: a caller then recognises the failed store by
 /// downcasting, not by matching on the text of a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundFailure {
-    /// The task that panicked.
+    /// The task that panicked. For a broken store it is `Flush`: the flush
+    /// path, which the flush task and the shutdown drain share, is where the
+    /// inner store's error was met.
     pub task: BackgroundTask,
-    /// The panic payload when it was a string, a fixed placeholder otherwise.
+    /// The panic payload when it was a string, a fixed placeholder otherwise;
+    /// for a broken store, the inner store's error.
     pub message: String,
+    /// Why the store failed.
+    pub cause: FailureCause,
+}
+
+impl BackgroundFailure {
+    /// Whether the store failed because its inner store is broken. A method
+    /// rather than a match on `cause`, because the server binary cannot name
+    /// this module's types and acts on the failure through its methods.
+    #[must_use]
+    pub fn store_broken(&self) -> bool {
+        matches!(self.cause, FailureCause::StoreBroken(_))
+    }
+
+    /// The cause as a log field: `panic`, or the broken store's cause.
+    #[must_use]
+    pub fn cause_label(&self) -> &'static str {
+        match self.cause {
+            FailureCause::Panicked => "panic",
+            FailureCause::StoreBroken(cause) => cause.as_str(),
+        }
+    }
 }
 
 impl std::fmt::Display for BackgroundFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "write-behind {} background task panicked: {}",
-            self.task, self.message
-        )
+        match self.cause {
+            FailureCause::Panicked => write!(
+                f,
+                "write-behind {} background task panicked: {}",
+                self.task, self.message
+            ),
+            FailureCause::StoreBroken(cause) => write!(
+                f,
+                "write-behind durable store is broken ({}): {}",
+                cause.as_str(),
+                self.message
+            ),
+        }
     }
 }
 
@@ -1984,7 +2026,11 @@ impl WriteBehindDataStore {
             if recorded.is_some() {
                 return false;
             }
-            *recorded = Some(BackgroundFailure { task, message });
+            *recorded = Some(BackgroundFailure {
+                task,
+                message,
+                cause: FailureCause::Panicked,
+            });
             true
         });
     }
@@ -12268,6 +12314,7 @@ mod background_task_panic_tests {
             Some(BackgroundFailure {
                 task: BackgroundTask::Flush,
                 message: "injected inner-store panic".to_string(),
+                cause: FailureCause::Panicked,
             }),
             "the store must learn of its flush task's panic from the task itself"
         );
@@ -13016,6 +13063,7 @@ mod background_task_panic_tests {
             Some(BackgroundFailure {
                 task: BackgroundTask::StallWatchdog,
                 message: "injected stall watchdog panic".to_string(),
+                cause: FailureCause::Panicked,
             })
         );
         assert_eq!(
@@ -13162,6 +13210,7 @@ mod background_task_panic_tests {
         let flush_failure = BackgroundFailure {
             task: BackgroundTask::Flush,
             message: "injected inner-store panic".to_string(),
+            cause: FailureCause::Panicked,
         };
         let error = observed.shutdown.expect_err(
             "a flush task that panics during the shutdown leaves a failed store, and its \
