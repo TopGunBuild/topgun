@@ -184,6 +184,36 @@ impl RedbDataStore {
     /// Returns an error if the file cannot be opened (permissions, corrupt
     /// header, or another process holds the `redb` lockfile).
     pub fn new<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+        // A build that can refuse redb I/O on demand must say so at open,
+        // whether or not the seam is configured: such a binary must never be
+        // mistaken for a production one.
+        #[cfg(feature = "fault-injection")]
+        if let Some(sentinel) = fault_io::sentinel_path() {
+            tracing::warn!(
+                env = fault_io::FAULT_REDB_IO_FILE_ENV,
+                sentinel = %sentinel.display(),
+                "fault-injection build: redb writes answer ENOSPC while the sentinel file exists"
+            );
+            // Opened as `redb::Builder::create` opens it, so the only
+            // difference from a plain build is the wrapper below redb.
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path.as_ref())?;
+            let backend = fault_io::SentinelBackend {
+                inner: redb::backends::FileBackend::new(file)?,
+                sentinel: sentinel.to_path_buf(),
+            };
+            let db = redb::Builder::new().create_with_backend(backend)?;
+            return Ok(Self { db: Arc::new(db) });
+        }
+        #[cfg(feature = "fault-injection")]
+        tracing::warn!(
+            env = fault_io::FAULT_REDB_IO_FILE_ENV,
+            "fault-injection build: no redb sentinel file is configured, redb I/O is never refused"
+        );
         let db = redb::Database::create(path.as_ref())?;
         Ok(Self { db: Arc::new(db) })
     }
@@ -635,6 +665,67 @@ impl MapDataStore for RedbDataStore {
     async fn hard_flush(&self) -> anyhow::Result<()> {
         // Nothing to flush -- writes are already durable on commit.
         Ok(())
+    }
+}
+
+/// A redb backend that refuses writes while a sentinel file exists, so a
+/// process test can give redb a full disk and take it away again.
+#[cfg(any(test, feature = "fault-injection"))]
+mod fault_io {
+    use std::io;
+    #[cfg(feature = "fault-injection")]
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    /// Environment variable naming the sentinel file.
+    #[cfg(feature = "fault-injection")]
+    pub(super) const FAULT_REDB_IO_FILE_ENV: &str = "TOPGUN_FAULT_REDB_IO_FILE";
+
+    /// The sentinel path, read from the environment once per process.
+    #[cfg(feature = "fault-injection")]
+    pub(super) fn sentinel_path() -> Option<&'static Path> {
+        static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        PATH.get_or_init(|| std::env::var_os(FAULT_REDB_IO_FILE_ENV).map(PathBuf::from))
+            .as_deref()
+    }
+
+    /// Passes reads through; `write`, `set_len` and `sync_data` answer ENOSPC
+    /// while a file exists at `sentinel`, as a full disk would.
+    #[derive(Debug)]
+    pub(super) struct SentinelBackend<B> {
+        pub(super) inner: B,
+        pub(super) sentinel: PathBuf,
+    }
+
+    impl<B> SentinelBackend<B> {
+        fn room(&self) -> io::Result<()> {
+            if self.sentinel.exists() {
+                Err(io::Error::from_raw_os_error(28))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl<B: redb::StorageBackend> redb::StorageBackend for SentinelBackend<B> {
+        fn len(&self) -> io::Result<u64> {
+            self.inner.len()
+        }
+        fn read(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            self.inner.read(offset, len)
+        }
+        fn set_len(&self, len: u64) -> io::Result<()> {
+            self.room()?;
+            self.inner.set_len(len)
+        }
+        fn sync_data(&self, eventual: bool) -> io::Result<()> {
+            self.room()?;
+            self.inner.sync_data(eventual)
+        }
+        fn write(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+            self.room()?;
+            self.inner.write(offset, data)
+        }
     }
 }
 
@@ -2458,6 +2549,42 @@ mod store_broken_tests {
         assert!(
             removed.is_err(),
             "remove_all reported Ok although the store could not read its catalog"
+        );
+    }
+
+    #[test]
+    fn the_sentinel_backend_refuses_writes_while_the_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("full");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.path().join("db.redb"))
+            .unwrap();
+        let db = redb::Builder::new()
+            .create_with_backend(super::fault_io::SentinelBackend {
+                inner: redb::backends::FileBackend::new(file).unwrap(),
+                sentinel: sentinel.clone(),
+            })
+            .unwrap();
+        let def: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("t");
+        let write = |db: &redb::Database| -> anyhow::Result<()> {
+            let txn = db.begin_write()?;
+            txn.open_table(def)?.insert("k", b"v".as_slice())?;
+            txn.commit()?;
+            Ok(())
+        };
+        write(&db).expect("no sentinel: the write passes");
+        std::fs::write(&sentinel, b"").unwrap();
+        let err = write(&db).expect_err("sentinel: the write is refused");
+        assert!(
+            matches!(
+                err.downcast_ref::<redb::CommitError>(),
+                Some(redb::CommitError::Storage(redb::StorageError::Io(e))) if e.raw_os_error() == Some(28)
+            ),
+            "{err:?}"
         );
     }
 }
