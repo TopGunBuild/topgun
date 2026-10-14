@@ -17,12 +17,6 @@ const optInSuites = [
       'each needs a server built with the fault-injection cargo feature (FAULT_SERVER_BINARY, FAULT_SERVER_COMMIT)',
     script: 'pnpm test:integration-rust:liveness',
   },
-  {
-    files: ['map-name-postgres'],
-    reason:
-      'it needs a reachable Postgres database and a server built with the postgres cargo feature (DATABASE_URL, RUST_SERVER_BINARY)',
-    script: 'pnpm test:integration-rust:postgres',
-  },
 ];
 
 // Left out only where the environment asks for it. The 3-node suite fails to
