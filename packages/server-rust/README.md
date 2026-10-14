@@ -1,6 +1,6 @@
 # topgun-server
 
-The TopGun Rust server. Single binary built on [axum](https://docs.rs/axum) and [tokio](https://tokio.rs); ships the CRDT merge engine, WebSocket sync protocol, BM25 + HNSW search, cluster routing, and and the embedded redb storage.
+The TopGun Rust server. Single binary built on [axum](https://docs.rs/axum) and [tokio](https://tokio.rs); ships the CRDT merge engine, WebSocket sync protocol, BM25 + HNSW search, cluster routing, and the embedded redb storage.
 
 Internal workspace crate — depends on [`topgun-core`](../core-rust/) for the CRDT primitives. Not published to crates.io; distribution is the Docker image at `ghcr.io/topgunbuild/topgun-server`.
 
