@@ -73,6 +73,7 @@ use std::sync::Arc;
 
 use crate::storage::map_data_store::{
     check_map_name, merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+    StoreBrokenCause, StoreErrorClass,
 };
 use crate::storage::record::RecordValue;
 use anyhow::bail;
@@ -184,6 +185,36 @@ impl RedbDataStore {
     /// Returns an error if the file cannot be opened (permissions, corrupt
     /// header, or another process holds the `redb` lockfile).
     pub fn new<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+        // A build that can refuse redb I/O on demand must say so at open,
+        // whether or not the seam is configured: such a binary must never be
+        // mistaken for a production one.
+        #[cfg(feature = "fault-injection")]
+        if let Some(sentinel) = fault_io::sentinel_path() {
+            tracing::warn!(
+                env = fault_io::FAULT_REDB_IO_FILE_ENV,
+                sentinel = %sentinel.display(),
+                "fault-injection build: redb writes answer ENOSPC while the sentinel file exists"
+            );
+            // Opened as `redb::Builder::create` opens it, so the only
+            // difference from a plain build is the wrapper below redb.
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path.as_ref())?;
+            let backend = fault_io::SentinelBackend {
+                inner: redb::backends::FileBackend::new(file)?,
+                sentinel: sentinel.to_path_buf(),
+            };
+            let db = redb::Builder::new().create_with_backend(backend)?;
+            return Ok(Self { db: Arc::new(db) });
+        }
+        #[cfg(feature = "fault-injection")]
+        tracing::warn!(
+            env = fault_io::FAULT_REDB_IO_FILE_ENV,
+            "fault-injection build: no redb sentinel file is configured, redb I/O is never refused"
+        );
         let db = redb::Database::create(path.as_ref())?;
         Ok(Self { db: Arc::new(db) })
     }
@@ -371,7 +402,7 @@ fn delete_one(db: &redb::Database, map: &str, key: &str, is_backup: bool) -> any
     // the key cannot exist; skip the WriteTransaction round trip entirely.
     {
         let read_txn = db.begin_read()?;
-        if !table_exists(&read_txn, &table_name) {
+        if !table_exists(&read_txn, &table_name)? {
             return Ok(());
         }
     }
@@ -388,15 +419,64 @@ fn delete_one(db: &redb::Database, map: &str, key: &str, is_backup: bool) -> any
 /// Check whether a table with the given name has ever been created in the
 /// database. Used by the delete and remove-all paths to short-circuit when
 /// the table has never been written to.
-fn table_exists(read_txn: &redb::ReadTransaction, table_name: &str) -> bool {
-    match read_txn.list_tables() {
-        Ok(iter) => iter.into_iter().any(|h| h.name() == table_name),
-        Err(_) => false,
+///
+/// A catalog that cannot be read is an error, not "no such table": read as
+/// the latter, a remove the store never applied would be reported done, and
+/// the write-behind store would resolve its WAL frame as stored.
+fn table_exists(read_txn: &redb::ReadTransaction, table_name: &str) -> anyhow::Result<bool> {
+    Ok(read_txn
+        .list_tables()?
+        .into_iter()
+        .any(|h| h.name() == table_name))
+}
+
+/// The cause of a redb storage error this store treats as fatal for the
+/// process, `None` for any other. Decided by the variant alone: the error's
+/// text is never read.
+fn broken_cause(err: &redb::StorageError) -> Option<StoreBrokenCause> {
+    match err {
+        redb::StorageError::Io(io) => Some(StoreBrokenCause::Io(io.kind())),
+        redb::StorageError::PreviousIo => Some(StoreBrokenCause::PreviousIo),
+        redb::StorageError::Corrupted(_) => Some(StoreBrokenCause::Corrupted),
+        redb::StorageError::LockPoisoned(_) => Some(StoreBrokenCause::LockPoisoned),
+        // `ValueTooLarge` concerns one record, and the enum is
+        // `#[non_exhaustive]`: anything else is not a broken store.
+        _ => None,
     }
 }
 
 #[async_trait]
 impl MapDataStore for RedbDataStore {
+    fn classify_error(&self, err: &anyhow::Error) -> StoreErrorClass {
+        // By type only. redb's error types carry no `source()`, so a
+        // `StorageError` inside a wrapper is invisible to `anyhow`'s chain;
+        // each wrapper that can reach a caller of this store is matched
+        // itself. `downcast_ref` sees through `.context()` layers.
+        let storage = if let Some(e) = err.downcast_ref::<redb::StorageError>() {
+            Some(e)
+        } else if let Some(e) = err.downcast_ref::<redb::CommitError>() {
+            match e {
+                redb::CommitError::Storage(s) => Some(s),
+                _ => None,
+            }
+        } else if let Some(e) = err.downcast_ref::<redb::TransactionError>() {
+            match e {
+                redb::TransactionError::Storage(s) => Some(s),
+                _ => None,
+            }
+        } else if let Some(e) = err.downcast_ref::<redb::TableError>() {
+            match e {
+                redb::TableError::Storage(s) => Some(s),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        storage
+            .and_then(broken_cause)
+            .map_or(StoreErrorClass::Unknown, StoreErrorClass::StoreBroken)
+    }
+
     async fn add(
         &self,
         map: &str,
@@ -502,7 +582,7 @@ impl MapDataStore for RedbDataStore {
         // Skip the WriteTransaction if the table has never been created.
         {
             let read_txn = self.db.begin_read()?;
-            if !table_exists(&read_txn, &table_name) {
+            if !table_exists(&read_txn, &table_name)? {
                 return Ok(());
             }
         }
@@ -635,6 +715,67 @@ impl MapDataStore for RedbDataStore {
     async fn hard_flush(&self) -> anyhow::Result<()> {
         // Nothing to flush -- writes are already durable on commit.
         Ok(())
+    }
+}
+
+/// A redb backend that refuses writes while a sentinel file exists, so a
+/// process test can give redb a full disk and take it away again.
+#[cfg(any(test, feature = "fault-injection"))]
+mod fault_io {
+    use std::io;
+    #[cfg(feature = "fault-injection")]
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    /// Environment variable naming the sentinel file.
+    #[cfg(feature = "fault-injection")]
+    pub(super) const FAULT_REDB_IO_FILE_ENV: &str = "TOPGUN_FAULT_REDB_IO_FILE";
+
+    /// The sentinel path, read from the environment once per process.
+    #[cfg(feature = "fault-injection")]
+    pub(super) fn sentinel_path() -> Option<&'static Path> {
+        static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        PATH.get_or_init(|| std::env::var_os(FAULT_REDB_IO_FILE_ENV).map(PathBuf::from))
+            .as_deref()
+    }
+
+    /// Passes reads through; `write`, `set_len` and `sync_data` answer ENOSPC
+    /// while a file exists at `sentinel`, as a full disk would.
+    #[derive(Debug)]
+    pub(super) struct SentinelBackend<B> {
+        pub(super) inner: B,
+        pub(super) sentinel: PathBuf,
+    }
+
+    impl<B> SentinelBackend<B> {
+        fn room(&self) -> io::Result<()> {
+            if self.sentinel.exists() {
+                Err(io::Error::from_raw_os_error(28))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl<B: redb::StorageBackend> redb::StorageBackend for SentinelBackend<B> {
+        fn len(&self) -> io::Result<u64> {
+            self.inner.len()
+        }
+        fn read(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            self.inner.read(offset, len)
+        }
+        fn set_len(&self, len: u64) -> io::Result<()> {
+            self.room()?;
+            self.inner.set_len(len)
+        }
+        fn sync_data(&self, eventual: bool) -> io::Result<()> {
+            self.room()?;
+            self.inner.sync_data(eventual)
+        }
+        fn write(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+            self.room()?;
+            self.inner.write(offset, data)
+        }
     }
 }
 
@@ -2225,5 +2366,471 @@ mod tests {
                 name.len()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod store_broken_tests {
+    use super::*;
+    use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
+    use std::io;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    /// The ceiling on every wait in these tests: a store that never answers
+    /// must fail the test, not hang it.
+    const HANG_LIMIT: Duration = Duration::from_secs(5);
+
+    fn value(s: &str) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String(s.to_string()),
+            timestamp: Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: String::new(),
+            },
+        }
+    }
+
+    /// An in-memory redb backend whose bytes outlive the database handle, so a
+    /// second handle can be opened over what the first one wrote.
+    ///
+    /// Two faults can be injected below redb, where a real disk would raise
+    /// them:
+    /// - while `full` is set, every write, `set_len` and `sync_data` answers
+    ///   ENOSPC, and each refusal is announced on `refused` so a test can wait
+    ///   for it instead of sleeping;
+    /// - every read whose zero-based number is at or above `fail_reads_from`
+    ///   answers EIO, which lets a test fail one chosen read and no earlier one.
+    #[derive(Debug, Clone)]
+    struct MemBackend {
+        data: Arc<Mutex<Vec<u8>>>,
+        full: Arc<AtomicBool>,
+        refused: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+        reads: Arc<AtomicU64>,
+        fail_reads_from: Arc<AtomicU64>,
+    }
+
+    impl MemBackend {
+        fn new(refused: Option<tokio::sync::mpsc::UnboundedSender<()>>) -> Self {
+            Self {
+                data: Arc::new(Mutex::new(Vec::new())),
+                full: Arc::new(AtomicBool::new(false)),
+                refused,
+                reads: Arc::new(AtomicU64::new(0)),
+                fail_reads_from: Arc::new(AtomicU64::new(u64::MAX)),
+            }
+        }
+
+        fn room(&self) -> io::Result<()> {
+            if self.full.load(Ordering::SeqCst) {
+                if let Some(tx) = &self.refused {
+                    // The receiver may already be gone once the test has seen
+                    // the first refusal; later ones need no audience.
+                    let _ = tx.send(());
+                }
+                Err(io::Error::from_raw_os_error(28))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn store_with(&self, builder: &redb::Builder) -> RedbDataStore {
+            let db = builder
+                .create_with_backend(self.clone())
+                .expect("open over the in-memory backend");
+            RedbDataStore { db: Arc::new(db) }
+        }
+
+        fn store(&self) -> RedbDataStore {
+            self.store_with(&redb::Builder::new())
+        }
+    }
+
+    impl redb::StorageBackend for MemBackend {
+        fn len(&self) -> io::Result<u64> {
+            Ok(self.data.lock().unwrap().len() as u64)
+        }
+        fn read(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            let n = self.reads.fetch_add(1, Ordering::SeqCst);
+            if n >= self.fail_reads_from.load(Ordering::SeqCst) {
+                return Err(io::Error::from_raw_os_error(5));
+            }
+            let data = self.data.lock().unwrap();
+            let start = usize::try_from(offset).unwrap();
+            Ok(data[start..start + len].to_vec())
+        }
+        fn set_len(&self, len: u64) -> io::Result<()> {
+            self.room()?;
+            self.data
+                .lock()
+                .unwrap()
+                .resize(usize::try_from(len).unwrap(), 0);
+            Ok(())
+        }
+        fn sync_data(&self, _eventual: bool) -> io::Result<()> {
+            self.room()
+        }
+        fn write(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+            self.room()?;
+            let mut data = self.data.lock().unwrap();
+            let start = usize::try_from(offset).unwrap();
+            data[start..start + bytes.len()].copy_from_slice(bytes);
+            Ok(())
+        }
+    }
+
+    /// A write-behind store over `inner` whose flush task runs only when
+    /// woken, so each test decides when the store is called.
+    fn write_behind(inner: RedbDataStore) -> Arc<WriteBehindDataStore> {
+        WriteBehindDataStore::new(
+            Arc::new(inner),
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 3_600_000,
+                capacity: 0,
+                shutdown_timeout_ms: 5_000,
+                ..WriteBehindConfig::default()
+            },
+        )
+    }
+
+    /// A store holding `key` in `map`, reopened with no read cache, whose
+    /// backend fails the first read after the ones a read transaction makes by
+    /// itself to open. That read is the table catalog's, so the operation
+    /// cannot tell whether the map's table exists.
+    async fn a_store_that_cannot_read_its_catalog(map: &str, key: &str) -> RedbDataStore {
+        let backend = MemBackend::new(None);
+        backend
+            .store()
+            .add(map, key, &value("v"), 0, 0)
+            .await
+            .expect("seed");
+        let mut builder = redb::Builder::new();
+        builder.set_cache_size(0);
+        let store = backend.store_with(&builder);
+        // Count the reads opening a read transaction makes by itself, so that
+        // the read which fails is the first one after them.
+        let before = backend.reads.load(Ordering::SeqCst);
+        drop(store.db.begin_read().expect("read transaction"));
+        let by_begin_read = backend.reads.load(Ordering::SeqCst) - before;
+        backend.fail_reads_from.store(
+            backend.reads.load(Ordering::SeqCst) + by_begin_read,
+            Ordering::SeqCst,
+        );
+        store
+    }
+
+    #[tokio::test]
+    async fn a_latched_redb_store_fails_the_write_behind_store() {
+        let (tx, mut refused) = tokio::sync::mpsc::unbounded_channel();
+        let backend = MemBackend::new(Some(tx));
+        let store = write_behind(backend.store());
+
+        backend.full.store(true, Ordering::SeqCst);
+        store
+            .add("m", "k1", &value("v1"), 0, 0)
+            .await
+            .expect("the write is accepted into the buffer");
+        store.soft_flush().await.expect("soft flush");
+        tokio::time::timeout(HANG_LIMIT, refused.recv())
+            .await
+            .expect("the flush never reached the backend: no write was refused within 5 s")
+            .expect("the backend was dropped before it refused a write");
+        // The disk has room again; the handle stays latched.
+        backend.full.store(false, Ordering::SeqCst);
+
+        let second = store.add("m", "k2", &value("v2"), 0, 0).await;
+        assert!(
+            second.is_err(),
+            "add returned Ok after the redb handle latched"
+        );
+        assert!(
+            store.background_failure().borrow().is_some(),
+            "no failure is recorded after the redb handle latched"
+        );
+        assert!(
+            store.hard_flush().await.is_err(),
+            "hard_flush reported a clean stop on a latched redb handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_drain_on_a_latched_redb_store_reports_a_failure() {
+        let backend = MemBackend::new(None);
+        let store = write_behind(backend.store());
+
+        backend.full.store(true, Ordering::SeqCst);
+        store
+            .add("m", "k1", &value("v1"), 0, 0)
+            .await
+            .expect("the write is accepted into the buffer");
+
+        let flushed = store.hard_flush().await;
+        assert!(
+            flushed.is_err(),
+            "hard_flush reported a clean stop on a store it could not write to"
+        );
+        assert!(
+            store.background_failure().borrow().is_some(),
+            "no failure is recorded after the drain met a latched redb handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remove_on_a_store_that_cannot_read_its_catalog_is_not_reported_done() {
+        let store = a_store_that_cannot_read_its_catalog("m", "k").await;
+
+        let removed = store.remove("m", "k", 0).await;
+        assert!(
+            removed.is_err(),
+            "remove reported Ok although the store could not read its catalog"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remove_all_on_a_store_that_cannot_read_its_catalog_is_not_reported_done() {
+        let store = a_store_that_cannot_read_its_catalog("m", "k").await;
+
+        let removed = store.remove_all("m", &["k".to_string()]).await;
+        assert!(
+            removed.is_err(),
+            "remove_all reported Ok although the store could not read its catalog"
+        );
+    }
+
+    // ---- after the fix ---------------------------------------------------
+
+    fn broken(cause: StoreBrokenCause) -> StoreErrorClass {
+        StoreErrorClass::StoreBroken(cause)
+    }
+
+    /// Every `StorageError` variant a test can build, with the class it must
+    /// get in any wrapper.
+    fn storage_variants() -> Vec<(fn() -> redb::StorageError, StoreErrorClass)> {
+        vec![
+            (
+                || redb::StorageError::Io(io::Error::from_raw_os_error(28)),
+                broken(StoreBrokenCause::Io(io::ErrorKind::StorageFull)),
+            ),
+            (
+                || redb::StorageError::PreviousIo,
+                broken(StoreBrokenCause::PreviousIo),
+            ),
+            (
+                || redb::StorageError::Corrupted("x".to_string()),
+                broken(StoreBrokenCause::Corrupted),
+            ),
+            (
+                || redb::StorageError::LockPoisoned(std::panic::Location::caller()),
+                broken(StoreBrokenCause::LockPoisoned),
+            ),
+            (
+                || redb::StorageError::ValueTooLarge(1),
+                StoreErrorClass::Unknown,
+            ),
+        ]
+    }
+
+    async fn wait_for_failure(
+        recorded: &mut tokio::sync::watch::Receiver<
+            Option<crate::storage::datastores::write_behind::BackgroundFailure>,
+        >,
+    ) -> crate::storage::datastores::write_behind::BackgroundFailure {
+        tokio::time::timeout(HANG_LIMIT, recorded.wait_for(Option::is_some))
+            .await
+            .expect("no failure was recorded within 5 s")
+            .expect("the failure record's sender was dropped")
+            .clone()
+            .expect("the record holds a failure")
+    }
+
+    #[tokio::test]
+    async fn t_classify_by_type() {
+        let store = MemBackend::new(None).store();
+        for (make, want) in storage_variants() {
+            let wrapped: Vec<anyhow::Error> = vec![
+                make().into(),
+                redb::CommitError::Storage(make()).into(),
+                redb::TransactionError::Storage(make()).into(),
+                redb::TableError::Storage(make()).into(),
+            ];
+            for err in wrapped {
+                let label = format!("{err:?}");
+                assert_eq!(store.classify_error(&err), want, "{label}");
+                let err = err.context("outer context");
+                assert_eq!(store.classify_error(&err), want, "{label} under context");
+            }
+        }
+
+        // The store's own map-name refusal is a string, not a redb type.
+        let name = store
+            .add("x__backup", "k", &value("v"), 0, 0)
+            .await
+            .unwrap_err();
+        assert_eq!(store.classify_error(&name), StoreErrorClass::Unknown);
+        // The write-behind refusal seam must never look like a broken store.
+        let seam = anyhow::anyhow!("fault injection: the inner store refused the write");
+        assert_eq!(store.classify_error(&seam), StoreErrorClass::Unknown);
+        // An I/O error redb did not raise says nothing about redb's handle.
+        let bare: anyhow::Error = io::Error::from_raw_os_error(28).into();
+        assert_eq!(store.classify_error(&bare), StoreErrorClass::Unknown);
+
+        // A real `TableTypeMismatch`: a table of the map's name with other
+        // key and value types.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.redb");
+        {
+            let db = redb::Database::create(&path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let def: redb::TableDefinition<u64, u64> = redb::TableDefinition::new("map__foo");
+                txn.open_table(def).unwrap().insert(1, 1).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        let typed = RedbDataStore::new(&path).unwrap();
+        let mismatch = typed.add("foo", "k", &value("x"), 0, 0).await.unwrap_err();
+        assert!(
+            matches!(
+                mismatch.downcast_ref::<redb::TableError>(),
+                Some(redb::TableError::TableTypeMismatch { .. })
+            ),
+            "{mismatch:?}"
+        );
+        assert_eq!(typed.classify_error(&mismatch), StoreErrorClass::Unknown);
+    }
+
+    #[tokio::test]
+    async fn t_previous_io_through_the_write_behind_flush() {
+        let backend = MemBackend::new(None);
+        let inner = backend.store();
+        // Latch the handle before the write-behind store sees it, then give
+        // the disk room again: only the latch is left.
+        backend.full.store(true, Ordering::SeqCst);
+        assert!(inner.add("m", "k0", &value("v"), 0, 0).await.is_err());
+        backend.full.store(false, Ordering::SeqCst);
+        let latched = inner.add("m", "k0", &value("v"), 0, 0).await.unwrap_err();
+        assert!(
+            matches!(
+                latched.downcast_ref::<redb::TransactionError>(),
+                Some(redb::TransactionError::Storage(redb::StorageError::PreviousIo))
+            ),
+            "a latched handle answers a write with PreviousIo through TransactionError: {latched:?}"
+        );
+
+        let store = write_behind(inner);
+        let mut recorded = store.background_failure();
+        store.add("m", "k1", &value("v1"), 0, 0).await.unwrap();
+        store.soft_flush().await.unwrap();
+        let failure = wait_for_failure(&mut recorded).await;
+        assert!(failure.store_broken(), "{failure}");
+        assert_eq!(failure.cause_label(), "previous_io");
+    }
+
+    #[tokio::test]
+    async fn t_restart_heals() {
+        use crate::storage::datastores::WalBootstrap;
+        use crate::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
+        let wal_dir = tempfile::tempdir().unwrap();
+        let backend = MemBackend::new(None);
+        let inner = Arc::new(backend.store());
+        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&inner) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 3_600_000,
+                capacity: 0,
+                shutdown_timeout_ms: 5_000,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+        store.add("m", "k0", &value("v0"), 0, 0).await.unwrap();
+        store.soft_flush().await.unwrap();
+        // k0 must be in redb before the disk fills, so the reopen proves it
+        // survived the latch rather than being replayed.
+        tokio::time::timeout(HANG_LIMIT, async {
+            while inner.load("m", "k0").await.unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("k0 was not stored within 5 s");
+
+        backend.full.store(true, Ordering::SeqCst);
+        let mut recorded = store.background_failure();
+        store.add("m", "k1", &value("v1"), 0, 0).await.unwrap();
+        store.add("m", "k2", &value("v2"), 0, 0).await.unwrap();
+        store.remove("m", "k2", 0).await.unwrap();
+        store.soft_flush().await.unwrap();
+        let failure = wait_for_failure(&mut recorded).await;
+        assert!(failure.store_broken(), "{failure}");
+        assert!(store.hard_flush().await.is_err());
+        let mut keys = Vec::new();
+        for p in 0..topgun_core::PARTITION_COUNT {
+            for e in wal.unapplied(p).await.unwrap() {
+                keys.push(e.key.clone());
+            }
+        }
+        assert!(keys.contains(&"k1".to_string()), "{keys:?}");
+        assert!(keys.contains(&"k2".to_string()), "{keys:?}");
+        // A process that exits skips the destructors: leave the latched
+        // handle open, as `std::process::exit` would.
+        std::mem::forget(store);
+        std::mem::forget(inner);
+
+        backend.full.store(false, Ordering::SeqCst);
+        let reopened: Arc<dyn MapDataStore> = Arc::new(backend.store());
+        WalRecovery::new(Arc::clone(&wal), Vec::new())
+            .run(Arc::clone(&reopened))
+            .await
+            .unwrap();
+        assert_eq!(reopened.load("m", "k0").await.unwrap(), Some(value("v0")));
+        assert_eq!(reopened.load("m", "k1").await.unwrap(), Some(value("v1")));
+        assert_eq!(reopened.load("m", "k2").await.unwrap(), None);
+    }
+
+    #[test]
+    fn the_sentinel_backend_refuses_writes_while_the_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("full");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.path().join("db.redb"))
+            .unwrap();
+        let db = redb::Builder::new()
+            .create_with_backend(super::fault_io::SentinelBackend {
+                inner: redb::backends::FileBackend::new(file).unwrap(),
+                sentinel: sentinel.clone(),
+            })
+            .unwrap();
+        let def: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("t");
+        let write = |db: &redb::Database| -> anyhow::Result<()> {
+            let txn = db.begin_write()?;
+            txn.open_table(def)?.insert("k", b"v".as_slice())?;
+            txn.commit()?;
+            Ok(())
+        };
+        write(&db).expect("no sentinel: the write passes");
+        std::fs::write(&sentinel, b"").unwrap();
+        let err = write(&db).expect_err("sentinel: the write is refused");
+        assert!(
+            matches!(
+                err.downcast_ref::<redb::CommitError>(),
+                Some(redb::CommitError::Storage(redb::StorageError::Io(e))) if e.raw_os_error() == Some(28)
+            ),
+            "{err:?}"
+        );
     }
 }

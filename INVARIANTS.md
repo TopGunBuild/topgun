@@ -641,13 +641,15 @@ case outside the precondition.
     deadline (30 s + the write-behind shutdown timeout + 10 s). The code is non-zero whichever
     came first, the panic or a stop signal: the binary reads the failure again after
     `hard_flush` has returned. A stop with no recorded failure still exits 0.
+  The failed state has a second cause, an inner store that reports itself broken
+  (`TG-WB-010`); for it exit code 72 replaces 70, and everything else above holds as stated.
 - **Mechanical predicate:** once the poll of a panicked background task has returned, (a)
   `background_failure()` holds `Some` with that task and the panic message, and a second failure
   does not replace it; (b) the next `add`, `remove` or `remove_all` returns the failed-store
   error and the WAL saw no append for it; (c) after `hard_flush`, which returns `Err` with a
   `BackgroundFailure` as its source, `wal.unapplied(p)` still returns the dead batch's frames
   and every later frame of each partition `p` the batch touched; (d)
-  `exit_code_for(true, Completed) == 70` and `exit_code_for(_, PanickedOrOverran) == 71`, and
+  `exit_code_for(Panicked, Completed) == 70` and `exit_code_for(_, PanickedOrOverran) == 71`, and
   the decision that feeds it is true whenever the stop was caused by a failure, or the record
   holds one, or the drain's result carries one.
 - **Maintaining code:** `write_behind.rs` — `ObservedTask` (the wrapper both tasks are spawned
@@ -914,8 +916,9 @@ weaker than a test.
 
 ### TG-WB-009: A write-behind entry the store refuses is retried on a schedule and is never dropped
 
-- **Scope:** the flush task of `WriteBehindDataStore` on a node that is not shutting down and
-  whose flush task is alive: the flush pass, what it does with an entry the store refused, the
+- **Scope:** the flush task of `WriteBehindDataStore` on a node that is not shutting down,
+  whose flush task is alive and whose inner store has not reported itself broken
+  (`TG-WB-010`): the flush pass, what it does with an entry the store refused, the
   store-wide hold and its probe. Below, `B = backoff_base_ms`, `K = backoff_cap_ms`,
   `I = flush_interval_ms`; the numbers are for the defaults (500, 5000 and 1000 ms) and for store
   calls that return promptly, unless a clause says otherwise.
@@ -1043,7 +1046,9 @@ weaker than a test.
   store errors and parking such records is TODO-824.
 - **A store that never accepts a record.** The entry is retried for the life of the process and
   holds one buffer place and its partition's WAL watermark. Nothing parks or classifies it
-  (TODO-824).
+  (TODO-824). A redb store whose error is an I/O error, a previous I/O error, corruption or a
+  poisoned lock is not retried this way: it reports itself broken and the node stops
+  (`TG-WB-010`).
 - **Tombstone pruning while an entry is refused.** The known cost above. How long it has lasted
   is read from `topgun_write_behind_oldest_refusal_age_seconds` as a lower bound: the fence has
   stood for at least that long, and can have stopped earlier, at the write of the entry. How
@@ -1062,7 +1067,8 @@ weaker than a test.
   entry, each call bounded by the remaining deadline; the hold does not apply to it. What is
   held by a test is only that it ends within the shutdown timeout (TODO-831). An entry the
   drain could not store is abandoned there and its frame replays at the next start — on a
-  WAL-backed store.
+  WAL-backed store. On a redb store that reports itself broken the drain stops at its first
+  such refusal and abandons the rest without calling the store (`TG-WB-010`).
 - **A frame the store refuses at boot.** WAL recovery logs the refusal and continues; the frame
   is not handed to this schedule and is not retried until the next restart (TODO-823).
 - **How many times the store is called for one key.** A key written again while its entry is
@@ -1086,6 +1092,159 @@ weaker than a test.
   simulation test exercises this row (TODO-830).
 - **Performance.** Not measured.
 - **The client.** Nothing is sent to a client about a refused entry.
+
+### TG-WB-010: A write-behind store whose inner store reports itself broken fails like a store whose background task panicked: new writes are refused, nothing it holds is resolved, and the server binary exits 72
+
+- **Scope:** `WriteBehindDataStore` — the refusal branch of its flush task (a pass entry and a
+  probe) and of its shutdown drain, its failure record and lifecycle state, `hard_flush`;
+  `MapDataStore::classify_error` and its one override, `RedbDataStore::classify_error`; and the
+  shutdown path of the server binary (`bin/topgun_server.rs`). The store half holds for any
+  embedder; the exit code is a property of the server binary only.
+- **Statement:**
+  1. **Classification is by type.** An inner-store error is classified by
+     `MapDataStore::classify_error`, whose default answer is `Unknown`. Only the redb store
+     overrides it: it returns `StoreBroken(cause)` for a `redb::StorageError` — bare, or inside
+     `CommitError::Storage`, `TransactionError::Storage` or `TableError::Storage` — that is one
+     of four causes: `Io` (with the `io::ErrorKind`, so a full disk shows as `StorageFull`),
+     `PreviousIo` (the handle has latched after an earlier I/O error), `Corrupted` and
+     `LockPoisoned`. The answer is decided from the error's type, never from its message. Every
+     other error — `ValueTooLarge`, `TableTypeMismatch`, the map-name refusal, any non-redb error
+     — is `Unknown`. `StoreBroken` means an error the store treats as fatal for this process; it
+     is not a proof that no later call could succeed (see "Not claimed").
+  2. **The reaction is the failed state of `TG-WB-006`.** When an inner-store call of the flush
+     task or of the shutdown drain returns an error classified `StoreBroken`, the store, in one
+     synchronous stretch with no await, records the failure (cause `StoreBroken`, task `Flush`),
+     enters the failed state, logs one error line and counts it. From then on `add`, `remove`
+     and `remove_all` return an error before a WAL sequence is assigned and before anything is
+     appended to the WAL, and `hard_flush` returns an error whose source is the recorded
+     failure, whatever started the stop.
+  3. **Nothing it holds is resolved.** The entry the flush task was refused on goes back to its
+     queue exactly as any refused entry (`TG-WB-009`.1), and the entries of the pass it did not
+     attempt go back untouched. The drain abandons that entry and every entry it has not
+     attempted yet; their WAL sequences are abandoned, never resolved. On a WAL-backed store
+     every acknowledged write the store did not take stays in the unapplied window and is
+     replayed at the next start.
+  4. **The flush task stops calling the store.** After the failure no later pass makes an inner
+     call; the flush task still exits on the shutdown signal. The shutdown drain calls the store
+     at most once more: it stops at its first `StoreBroken` refusal.
+  5. **Once per process.** A second `StoreBroken` classification — the drain after the flush
+     task — adds no line and no count. **The first recorded failure wins:** the record is set
+     only if empty, so a broken store followed by a watchdog panic exits 72 (with the panic line
+     also in the log), and a panic followed by a broken store exits 70 (with the store-broken
+     line and count also there).
+  6. **The server binary exits 72.** It reports not ready, runs the shutdown of `TG-WB-006`, and
+     ends with exit code 72 when that shutdown completed, 71 when it panicked or passed its
+     deadline. The kind is read from the recorded failure after `hard_flush` returned, so a stop
+     begun by a signal on a broken store also exits 72.
+  7. **`Unknown` is `TG-WB-009` unchanged.** An error classified `Unknown` is retried on the
+     `TG-WB-009` schedule, in the flush task, and handled by the drain as before. Postgres
+     classifies nothing: its errors are all `Unknown`.
+- **Mechanical predicate:** on a write-behind store over a `RedbDataStore` whose backend has
+  returned an I/O error: (a) once the flush task's call that returned the error has returned,
+  the next `add`, `remove`, `remove_all` returns the store-broken sentence and the WAL saw no
+  append for it; (b) `background_failure()` holds `Some` with `store_broken() == true`; (c) the
+  flush task makes no further inner call; (d) `hard_flush` calls the store at most once and
+  returns `Err`; (e) every WAL frame of every entry it did not store is still in
+  `wal.unapplied(p)`; (f) `exit_code_for(StoreBroken, Completed) == 72`; (g) a store reopened
+  over the same bytes with the backend healed, after `WalRecovery`, holds every acknowledged
+  value.
+- **Maintaining code:** `map_data_store.rs` — `StoreErrorClass`, `StoreBrokenCause`,
+  `MapDataStore::classify_error`. `redb.rs` — `classify_error`, `broken_cause`, `table_exists`
+  (a catalog that cannot be read is an error, never "no such table", so a remove is not
+  reported done on a broken store), the `fault_io` backend (`fault-injection` builds and tests
+  only). `write_behind.rs` — `requeue_refused`, `run_flush_pass` and the `store_broken` flag of
+  `RetrySchedule`, `record_store_broken` (record, state, line, counter in that order),
+  `failed_reason`, the refusal arm of `drain_for_shutdown`, `finish_shutdown`,
+  `BackgroundFailure::{store_broken, cause_label}`. `bin/topgun_server.rs` — `exit_code_for`,
+  `FailureKind`, `failure_kind_after_drain`, `log_store_failure`.
+- **Enforcing test:** `redb.rs::a_latched_redb_store_fails_the_write_behind_store` — over a
+  redb store whose backend returned ENOSPC once, the next write is refused, the failure is
+  recorded and `hard_flush` returns an error. It runs in CI (`cargo test`). The table below
+  lists the others and what each one covers.
+- **Violation consequence:** a node whose redb handle has latched acknowledges writes (their
+  frames are in the WAL) and stores none of them, retries each for the life of the process,
+  holds the node-wide tombstone fence and fills its buffer until writes of new keys are refused
+  — until something restarts the process, which nothing does. On a stop it reports a clean exit
+  0. An acknowledged remove could be reported stored when the catalog could not be read, so its
+  frame was resolved without the delete being stored.
+- **Visible to an operator:** one error line per process,
+  `write-behind store: the durable store is broken and stores nothing more in this process; writes are refused from now on and the node stops`,
+  with fields `cause`, `io_kind` (for `io` only), `error`, `map`, `key` and `site`
+  (`flush` | `shutdown_drain`); when the drain stops, one line
+  `write-behind shutdown drain stopped at a broken store: the entries it did not store stay un-resolved and replay from the WAL at the next start`
+  with `abandoned_entries` and `cause`; the binary's line
+  `the durable store is broken; shutting the node down` with `cause` and `exit_code`; the
+  counter `topgun_write_behind_store_broken_total{cause}` (`io`, `previous_io`, `corrupted`,
+  `lock_poisoned`, each rendered at 0 from the first scrape); a refused write's sentence
+  `write-behind store has failed (the durable store is broken); write rejected for …`;
+  `/health/ready` and `/healthz` at 503 while the stop runs; exit code 72.
+- **Discovered by:** a review of what the retry-until-stored schedule of `TG-WB-009` does on a
+  redb handle that refuses every call after its first I/O error; fixed and catalogued by
+  SPEC-391.
+- **Status:** decided, **enforced** — within the limits listed under "Not claimed" below.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `a_latched_redb_store_fails_the_write_behind_store` (`redb.rs`) | predicate (a), (b) and (d)'s `Err`, over redb with ENOSPC injected below it: after the refused flush the next write is refused, the record holds a failure, `hard_flush` returns `Err` | CI (`cargo test`) |
+| `a_shutdown_drain_on_a_latched_redb_store_reports_a_failure` (`redb.rs`) | the drain alone meets the broken store: `hard_flush` returns `Err` and the failure is recorded, so a stop begun by a signal is a failure | CI (`cargo test`) |
+| `a_remove_on_a_store_that_cannot_read_its_catalog_is_not_reported_done`, `a_remove_all_on_a_store_that_cannot_read_its_catalog_is_not_reported_done` (`redb.rs`) | a catalog read that fails is an error on both remove paths, not "no such table, nothing to delete" | CI (`cargo test`) |
+| `t_classify_by_type` (`redb.rs`) | each of the four causes in each wrapper, also under `.context(..)`, is `StoreBroken` with its cause; `ValueTooLarge`, the map-name refusal, a real `TableTypeMismatch`, the fault-injection refusal string and a bare `std::io::Error` are `Unknown` | CI (`cargo test`) |
+| `t_previous_io_through_the_write_behind_flush` (`redb.rs`) | a handle that latched before the write-behind store saw it: the first flush meets `PreviousIo` through `TransactionError` and the store fails with cause `previous_io` | CI (`cargo test`) |
+| `t_restart_heals` (`redb.rs`) | predicate (e) and (g): on a real WAL the un-stored frames stay unapplied; reopened over the same bytes with the backend healed and recovered from the WAL, every acknowledged value is there and a removed key is absent | CI (`cargo test`) |
+| `the_sentinel_backend_refuses_writes_while_the_file_exists` (`redb.rs`) | the fault backend the process-level test uses: a commit passes without the sentinel file and fails with ENOSPC (`os error 28`) while it exists | CI (`cargo test`) |
+| `t_no_more_calls_after_a_broken_store` (`write_behind.rs`) | predicate (c): one pass makes one inner call; the refused entry is back with the retry state of any refusal, the others untouched, none lost; two more passes make no call | CI (`cargo test`) |
+| `t_drain_one_call_on_a_broken_store` (`write_behind.rs`) | predicate (d) and (e) for the drain: one inner call, `Err` with a store-broken source, every entry's frames abandoned and none resolved, the drain line with `abandoned_entries` | CI (`cargo test`) |
+| `t_unknown_unchanged` (`write_behind.rs`) | an `Unknown` refusal: retry counter, backoff, hold and drain as under `TG-WB-009`, no record, `hard_flush` `Ok` | CI (`cargo test`) |
+| `t_once_per_process` (`write_behind.rs`) | broken in a pass, then again in the drain: one line, count 1 | CI (`cargo test`) |
+| `t_metric_broken` (`write_behind.rs`) | the four series at 0 after construction; the failure's cause at 1; the panic counter unchanged | CI (`cargo test`) |
+| `t_refuse_broken` (`write_behind.rs`) | each write entry returns the store-broken sentence, the WAL saw no append, the pending count is unchanged | CI (`cargo test`) |
+| `t_read_after_break` (`write_behind.rs`) | after the failure a read of an acknowledged key answers its value from the slot, with no inner call | CI (`cargo test`) |
+| `a_panicked_store_shutdown_keeps_its_context_text` (`write_behind.rs`) | the panic texts of `TG-WB-006` are not changed by the new cause: `hard_flush`'s context after a panic stays byte for byte | CI (`cargo test`) |
+| `bin_broken_exit_code_for_is_total`, `bin_broken_signal_then_a_broken_store_in_the_record_exits_72` (`bin/topgun_server.rs`) | predicate (f): `exit_code_for` over every kind and shutdown outcome; on the signal path a store-broken record read after `hard_flush` gives 72, a panicked one 70 | CI (`cargo test`) |
+| `tests/integration-rust/store-broken.test.ts` | the CONSEQUENCE at process level on a `fault-injection` build, ENOSPC injected below redb by a sentinel file, a client connection open throughout: the process exits 72 by itself with the three lines; after a restart with the disk healed every acknowledged key reads back; a restart while the disk is still full exits 1 at the store open, and a third start with room reads every key back | local only (`pnpm test:integration-rust:liveness`) — opt-in, not run in CI, for the reason given under `TG-WB-004` (TODO-770) |
+
+**Not claimed.** Each of these is outside the statement, or is in it and rests on something
+weaker than a test.
+
+- **The read path.** `load`, `load_slot`, `load_all`, scans and `list_maps` of an uncached page
+  on a latched handle return the error to their caller, per request; they do not fail the node.
+  A latched node that receives no write is not stopped until a write reaches the flush
+  (TODO-838).
+- **The backup pass-throughs** `add_backup` / `remove_backup` return the error to their caller
+  and are not classified.
+- **Boot recovery.** A store-broken refusal during WAL replay is logged and the boot continues;
+  the node starts on a latched handle and stops at its first flush (TODO-823).
+- **Postgres** classifies nothing; its behaviour is `TG-WB-009` unchanged.
+- **A crash loop** on a corrupted file or a still-full disk is not detected or delayed by the
+  process; the supervisor paces it. On a still-full disk it is a loop of exit 1 at the store
+  open.
+- **One corrupted page stops the node**, although redb raises `Corrupted` per page and the other
+  tables still read. Likewise a `LockPoisoned` that came from a per-transaction lock after a
+  caught panic stops it. The class is "fatal for this process" by decision, not a proof that no
+  later call could succeed.
+- **A full disk is injected, not real.** ENOSPC comes from a wrapper below redb; no run used a
+  real full filesystem. In particular exit 134 — the WAL append aborting the process on a really
+  full disk shared by the WAL (`TG-WAL-007`) — is not shown: the injection never reaches the
+  WAL.
+- **`io_kind`** is visible on the first error only; a `PreviousIo` record has none.
+- **The metric** may not be scraped before the process exits.
+- **The per-entry drain `warn!` lines** for abandoned entries are still one per entry, so a
+  large buffer logs one line per entry; on a broken store each names the broken store and its
+  `cause` instead of a timeout.
+- **`ValueTooLarge`, `TableTypeMismatch`, the map-name refusal** are `Unknown` here (TODO-824).
+- **A panic inside redb** (its own `.lock().unwrap()`) is the `TG-WB-006` path, not this one.
+- **The window.** A write that loaded the lifecycle state before the record was made is
+  acknowledged: its frame is in the WAL; the drain abandons it; it replays.
+- **A store without a WAL** (`WriteBehindDataStore::new`): abandoned entries are lost at the
+  exit, as under `TG-WB-006`.
+- **A latched handle with nothing queued at SIGTERM exits 0.** The drain makes no store call, so
+  it never meets the latch; the node stops clean and the next start opens a fresh handle.
+  Consistent with the read path being out (TODO-838).
+- **The order "record before state"** inside `record_store_broken` is pinned by reading the
+  code, not by a test or a mutant: no test can place a write between two synchronous
+  statements of one thread.
+- **The order of two failures in one process** (the first record wins) is pinned by reading;
+  no test drives a broken store and a panic in the same process.
 
 ### TG-EVI-001: An acknowledged write the store has not taken is readable on a running node
 

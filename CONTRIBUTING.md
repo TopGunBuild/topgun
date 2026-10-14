@@ -230,11 +230,11 @@ pnpm --filter @topgunbuild/core test:coverage
 pnpm test:integration-rust
 ```
 
-The default run leaves out five files that need a server binary or a database a clean checkout does not have, and prints which ones and why. Each has its own script, and fails rather than skips when what it needs is not given:
+The default run leaves out six files that need a server binary or a database a clean checkout does not have, and prints which ones and why. Each has its own script, and fails rather than skips when what it needs is not given:
 
 ```bash
 pnpm test:integration-rust:two-binary   # map-name-upgrade, map-name-rollback: OLD_SERVER_BINARY, OLD_SERVER_COMMIT, NEW_SERVER_COMMIT
-pnpm test:integration-rust:liveness     # store-refusal-liveness, flush-task-panic: FAULT_SERVER_BINARY, FAULT_SERVER_COMMIT
+pnpm test:integration-rust:liveness     # store-refusal-liveness, flush-task-panic, store-broken: FAULT_SERVER_BINARY, FAULT_SERVER_COMMIT
 pnpm test:integration-rust:postgres     # map-name-postgres: DATABASE_URL, RUST_SERVER_BINARY built with --features postgres
 ```
 

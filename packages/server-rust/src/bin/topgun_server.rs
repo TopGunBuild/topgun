@@ -1364,9 +1364,16 @@ async fn main() -> anyhow::Result<()> {
     .with_graceful_shutdown(async move {
         let (cause, deadline) = match store_failure_or_signal(failure_for_stop).await {
             Some(failure) => {
+                let kind = if failure.store_broken() {
+                    FailureKind::StoreBroken
+                } else {
+                    FailureKind::Panicked
+                };
                 log_store_failure(
                     failure.task.as_str(),
-                    exit_code_for(true, ShutdownOutcome::Completed),
+                    failure.cause_label(),
+                    kind,
+                    exit_code_for(kind, ShutdownOutcome::Completed),
                 );
                 // Started before anything else the stop does, so the bound
                 // covers the HTTP drain as well. The exit action is the real
@@ -1430,7 +1437,8 @@ async fn main() -> anyhow::Result<()> {
             match tokio::spawn(async move { store.hard_flush().await }).await {
                 Ok(flushed) => flushed,
                 Err(join_error) => {
-                    let exit_code = exit_code_for(true, ShutdownOutcome::PanickedOrOverran);
+                    let exit_code =
+                        exit_code_for(FailureKind::Panicked, ShutdownOutcome::PanickedOrOverran);
                     tracing::error!(
                         error = %join_error,
                         exit_code,
@@ -1448,18 +1456,27 @@ async fn main() -> anyhow::Result<()> {
 
     // Read only now: a task that panicked after a signal began the stop is in
     // the store's record or in what the drain returned, and in nothing earlier.
-    let failed = store_failed(cause, store_failure.as_ref(), &flushed);
+    let failed = failure_kind_after_drain(cause, store_failure.as_ref(), &flushed, |failure| {
+        failure.store_broken()
+    });
     let exit_code = exit_code_for(failed, ShutdownOutcome::Completed);
-    if failed {
-        match deadline {
-            Some(deadline) => deadline.cancel(),
+    if failed != FailureKind::None {
+        if let Some(deadline) = deadline {
+            deadline.cancel();
+        } else {
             // The stop was begun by a signal, so the failure has not been
             // reported by this binary yet and no deadline is running.
-            None => log_store_failure(
-                recorded_failure(store_failure.as_ref(), &flushed)
+            let recorded = recorded_failure(store_failure.as_ref(), &flushed);
+            log_store_failure(
+                recorded
+                    .as_ref()
                     .map_or("unknown", |failure| failure.task.as_str()),
+                recorded
+                    .as_ref()
+                    .map_or("unknown", |failure| failure.cause_label()),
+                failed,
                 exit_code,
-            ),
+            );
         }
         // Not a return: dropping the runtime can wait on blocking tasks with
         // nothing left to bound it. The WAL was synced by the drain above.
@@ -2322,7 +2339,8 @@ async fn shutdown_signal() {
 enum ShutdownCause {
     /// SIGTERM or SIGINT.
     Signal,
-    /// A background task of the write-behind store panicked (`TG-WB-006`).
+    /// The write-behind store failed: a background task panicked
+    /// (`TG-WB-006`) or the durable store reported itself broken (`TG-WB-010`).
     StoreFailure,
 }
 
@@ -2339,13 +2357,51 @@ enum ShutdownOutcome {
 ///
 /// It takes the fact of a store failure, not what started the stop: a node
 /// whose flush task died holding a batch must not report a clean stop because
-/// a signal happened to arrive first. No cell is 0 for a shutdown that
-/// panicked or overran, the one no caller reaches included.
-fn exit_code_for(store_failed: bool, shutdown: ShutdownOutcome) -> i32 {
-    match (store_failed, shutdown) {
+/// a signal happened to arrive first. A broken store gets 72 rather than 70
+/// so that a supervisor tells an environment fault (disk, file) from a defect
+/// without the logs. No cell is 0 for a shutdown that panicked or overran, the
+/// one no caller reaches included.
+fn exit_code_for(failure: FailureKind, shutdown: ShutdownOutcome) -> i32 {
+    match (failure, shutdown) {
         (_, ShutdownOutcome::PanickedOrOverran) => 71,
-        (true, ShutdownOutcome::Completed) => 70,
-        (false, ShutdownOutcome::Completed) => 0,
+        (FailureKind::Panicked, ShutdownOutcome::Completed) => 70,
+        (FailureKind::StoreBroken, ShutdownOutcome::Completed) => 72,
+        (FailureKind::None, ShutdownOutcome::Completed) => 0,
+    }
+}
+
+/// What the store's failure was, read once the write-behind drain returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureKind {
+    /// No failure: a clean stop.
+    None,
+    /// A background task panicked (`TG-WB-006`).
+    Panicked,
+    /// The durable store reported itself broken (`TG-WB-010`).
+    StoreBroken,
+}
+
+/// The kind of the store's failure once the write-behind drain returned.
+///
+/// Read from the recorded failure, never from what started the stop or from
+/// text: a signal may begin the stop of a store that is broken. `is_broken`
+/// asks the concrete failure, whose type this binary cannot name.
+fn failure_kind_after_drain<F>(
+    cause: ShutdownCause,
+    recorded: Option<&watch::Receiver<Option<F>>>,
+    flushed: &anyhow::Result<()>,
+    is_broken: impl Fn(&F) -> bool,
+) -> FailureKind
+where
+    F: std::error::Error + Clone + Send + Sync + 'static,
+{
+    if !store_failed(cause, recorded, flushed) {
+        return FailureKind::None;
+    }
+    if recorded_failure(recorded, flushed).is_some_and(|failure| is_broken(&failure)) {
+        FailureKind::StoreBroken
+    } else {
+        FailureKind::Panicked
     }
 }
 
@@ -2437,12 +2493,20 @@ async fn store_failure_or_signal<F: Clone>(
 }
 
 /// The one line this binary writes when it learns that the store has failed.
-fn log_store_failure(task: &str, exit_code: i32) {
-    tracing::error!(
-        task,
-        exit_code,
-        "write-behind background task failed; shutting the node down"
-    );
+fn log_store_failure(task: &str, cause: &str, kind: FailureKind, exit_code: i32) {
+    if kind == FailureKind::StoreBroken {
+        tracing::error!(
+            cause,
+            exit_code,
+            "the durable store is broken; shutting the node down"
+        );
+    } else {
+        tracing::error!(
+            task,
+            exit_code,
+            "write-behind background task failed; shutting the node down"
+        );
+    }
 }
 
 /// The bound on waiting for in-flight request handlers once the HTTP server
@@ -2500,7 +2564,8 @@ where
                     std::thread::sleep(expires.saturating_duration_since(Instant::now()));
                 }
             }
-            let exit_code = exit_code_for(true, ShutdownOutcome::PanickedOrOverran);
+            let exit_code =
+                exit_code_for(FailureKind::Panicked, ShutdownOutcome::PanickedOrOverran);
             tracing::error!(
                 deadline_ms = u64::try_from(after.as_millis()).unwrap_or(u64::MAX),
                 exit_code,
@@ -2730,15 +2795,26 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use super::{
-        apply_shutdown_cause, exit_code_for, start_failure_deadline, store_failed,
-        store_failure_recorded, MapDataStore, NullDataStore, ShutdownCause, ShutdownController,
-        ShutdownOutcome, WriteBehindDataStore,
+        apply_shutdown_cause, exit_code_for, failure_kind_after_drain, start_failure_deadline,
+        store_failed, store_failure_recorded, FailureKind, MapDataStore, NullDataStore,
+        ShutdownCause, ShutdownController, ShutdownOutcome, WriteBehindDataStore,
     };
     use std::time::{Duration, Instant};
     use tokio::sync::watch;
     use topgun_server::network::shutdown::HealthState;
     use topgun_server::storage::map_data_store::{LeafSink, ScanBatch, ScanCursor};
+    use topgun_server::storage::map_data_store::{StoreBrokenCause, StoreErrorClass};
     use topgun_server::storage::record::RecordValue;
+
+    /// The tests written before a broken store had its own exit code pass the
+    /// `bool` of `store_failed`; a failure then could only be a panic.
+    fn panicked_if(failed: bool) -> FailureKind {
+        if failed {
+            FailureKind::Panicked
+        } else {
+            FailureKind::None
+        }
+    }
 
     /// Bounds a wait that a broken build would otherwise hang on. It is not
     /// what the tests wait for: each waits on the store's own receiver.
@@ -2925,7 +3001,7 @@ mod tests {
 
         let failed = store_failed(ShutdownCause::Signal, Some(&recorded), &flushed);
         assert_eq!(
-            exit_code_for(failed, ShutdownOutcome::Completed),
+            exit_code_for(panicked_if(failed), ShutdownOutcome::Completed),
             0,
             "row 1: signal, record empty, drain Ok"
         );
@@ -2935,7 +3011,7 @@ mod tests {
         let timed_out: anyhow::Result<()> = Err(anyhow::anyhow!("drain timed out"));
         let failed = store_failed(ShutdownCause::Signal, Some(&recorded), &timed_out);
         assert_eq!(
-            exit_code_for(failed, ShutdownOutcome::Completed),
+            exit_code_for(panicked_if(failed), ShutdownOutcome::Completed),
             0,
             "row 1, control: signal, record empty, drain Err that carries no store failure"
         );
@@ -2944,7 +3020,7 @@ mod tests {
         let no_store: Option<&watch::Receiver<Option<std::fmt::Error>>> = None;
         let failed = store_failed(ShutdownCause::Signal, no_store, &Ok(()));
         assert_eq!(
-            exit_code_for(failed, ShutdownOutcome::Completed),
+            exit_code_for(panicked_if(failed), ShutdownOutcome::Completed),
             0,
             "row 1, control: signal, no write-behind store"
         );
@@ -2970,7 +3046,7 @@ mod tests {
 
         let failed = store_failed(ShutdownCause::Signal, Some(&recorded), &Ok(()));
         assert_eq!(
-            exit_code_for(failed, ShutdownOutcome::Completed),
+            exit_code_for(panicked_if(failed), ShutdownOutcome::Completed),
             70,
             "row 2a: signal, the record holds a failure after the drain"
         );
@@ -2996,7 +3072,7 @@ mod tests {
 
         let failed = store_failed(ShutdownCause::Signal, Some(&empty_record), &flushed);
         assert_eq!(
-            exit_code_for(failed, ShutdownOutcome::Completed),
+            exit_code_for(panicked_if(failed), ShutdownOutcome::Completed),
             70,
             "row 2b: signal, record empty, the drain returned the failed-store error \
              ({flushed:?})"
@@ -3013,7 +3089,7 @@ mod tests {
 
         let failed = store_failed(ShutdownCause::StoreFailure, Some(&recorded), &flushed);
         assert_eq!(
-            exit_code_for(failed, ShutdownOutcome::Completed),
+            exit_code_for(panicked_if(failed), ShutdownOutcome::Completed),
             70,
             "row 3: failure cause, shutdown completed"
         );
@@ -3023,7 +3099,7 @@ mod tests {
         let empty_record = other.background_failure();
         let failed = store_failed(ShutdownCause::StoreFailure, Some(&empty_record), &Ok(()));
         assert_eq!(
-            exit_code_for(failed, ShutdownOutcome::Completed),
+            exit_code_for(panicked_if(failed), ShutdownOutcome::Completed),
             70,
             "row 3: failure cause alone, record empty and drain Ok"
         );
@@ -3040,7 +3116,7 @@ mod tests {
         // No drain result exists for a shutdown that did not complete.
         let failed = store_failed(ShutdownCause::StoreFailure, Some(&recorded), &Ok(()));
         assert_eq!(
-            exit_code_for(failed, ShutdownOutcome::PanickedOrOverran),
+            exit_code_for(panicked_if(failed), ShutdownOutcome::PanickedOrOverran),
             71,
             "row 4: failure cause, shutdown panicked or overran"
         );
@@ -3051,7 +3127,7 @@ mod tests {
     #[test]
     fn bin_cause_row_5_no_failure_and_a_shutdown_that_did_not_complete_exit_71() {
         assert_eq!(
-            exit_code_for(false, ShutdownOutcome::PanickedOrOverran),
+            exit_code_for(FailureKind::None, ShutdownOutcome::PanickedOrOverran),
             71,
             "row 5: no failure, shutdown panicked or overran"
         );
@@ -3074,6 +3150,156 @@ mod tests {
                 });
             assert_eq!(failure.task.as_str(), "flush");
         }
+    }
+
+    /// An inner store whose `add` fails with an error it classifies as a
+    /// broken store; everything else is the null store.
+    struct BrokenInner(NullDataStore);
+
+    #[async_trait::async_trait]
+    impl MapDataStore for BrokenInner {
+        async fn add(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("injected broken store"))
+        }
+
+        fn classify_error(&self, _err: &anyhow::Error) -> StoreErrorClass {
+            StoreErrorClass::StoreBroken(StoreBrokenCause::PreviousIo)
+        }
+
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.0
+                .add_backup(map, key, value, expiration_time, now)
+                .await
+        }
+
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.0.remove(map, key, now).await
+        }
+
+        async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.0.remove_backup(map, key, now).await
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.0.load(map, key).await
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.0.load_all(map, keys).await
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            self.0.enumerate_leaves(map, is_backup, sink).await
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.0.scan_values(map, is_backup, max_batch_cost).await
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: ScanCursor,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.0
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.0.remove_all(map, keys).await
+        }
+
+        fn is_loadable(&self, key: &str) -> bool {
+            self.0.is_loadable(key)
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            self.0.pending_operation_count()
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            self.0.soft_flush().await
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            self.0.hard_flush().await
+        }
+    }
+
+    #[test]
+    fn bin_broken_exit_code_for_is_total() {
+        use ShutdownOutcome::{Completed, PanickedOrOverran};
+        assert_eq!(exit_code_for(FailureKind::None, Completed), 0);
+        assert_eq!(exit_code_for(FailureKind::None, PanickedOrOverran), 71);
+        assert_eq!(exit_code_for(FailureKind::Panicked, Completed), 70);
+        assert_eq!(exit_code_for(FailureKind::Panicked, PanickedOrOverran), 71);
+        assert_eq!(exit_code_for(FailureKind::StoreBroken, Completed), 72);
+        assert_eq!(
+            exit_code_for(FailureKind::StoreBroken, PanickedOrOverran),
+            71
+        );
+    }
+
+    /// A signal began the stop; the store's record, read after the drain,
+    /// holds a broken store. The kind comes from the record: 72.
+    #[tokio::test]
+    async fn bin_broken_signal_then_a_broken_store_in_the_record_exits_72() {
+        let store = write_behind_over(Arc::new(BrokenInner(NullDataStore)));
+        let recorded = store.background_failure();
+        fail_the_flush_task(&store).await;
+        let flushed = store.hard_flush().await;
+        assert!(
+            flushed.is_err(),
+            "a drain on a broken store returns an error"
+        );
+        let kind =
+            failure_kind_after_drain(ShutdownCause::Signal, Some(&recorded), &flushed, |f| {
+                f.store_broken()
+            });
+        assert_eq!(kind, FailureKind::StoreBroken);
+        assert_eq!(exit_code_for(kind, ShutdownOutcome::Completed), 72);
+
+        // The panic control: a panicked store on the same path is 70.
+        let panicked = write_behind_over(Arc::new(PanickingInner(NullDataStore)));
+        let recorded = panicked.background_failure();
+        fail_the_flush_task(&panicked).await;
+        let flushed = panicked.hard_flush().await;
+        let kind =
+            failure_kind_after_drain(ShutdownCause::Signal, Some(&recorded), &flushed, |f| {
+                f.store_broken()
+            });
+        assert_eq!(exit_code_for(kind, ShutdownOutcome::Completed), 70);
     }
 
     #[test]
