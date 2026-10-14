@@ -2589,6 +2589,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "redb")]
     #[test]
     fn t_choose_default() {
         assert_eq!(
