@@ -46,7 +46,7 @@ import { ArrowLeft } from 'lucide-react';
         <li><strong>Zero-Latency UI:</strong> Reads and writes happen locally against an in-memory CRDT.</li>
         <li><strong>Offline Capability:</strong> Data is persisted to IndexedDB (Browser) or SQLite (Mobile/Desktop).</li>
         <li><strong>Real-Time Sync:</strong> Automatic background synchronization using efficient Merkle Trees and WebSockets.</li>
-        <li><strong>Scalable Backend:</strong> A server-authoritative cluster that partitions data and persists to standard databases like PostgreSQL.</li>
+        <li><strong>Scalable Backend:</strong> A server-authoritative cluster that partitions data and persists to an embedded store inside the server.</li>
       </ul>
 
       <h2 class="flex items-center gap-3">
@@ -215,7 +215,7 @@ import { ArrowLeft } from 'lucide-react';
           <strong>vs ElectricSQL:</strong> TopGun operates entirely in-memory for zero-latency reads/writes, whereas ElectricSQL relies on SQLite access (5-10ms).
         </li>
         <li>
-          <strong>vs Firebase:</strong> TopGun gives you ownership of your data. Run it on your own cloud, use your own Postgres DB.
+          <strong>vs Firebase:</strong> TopGun gives you ownership of your data. Run it on your own cloud, keep the data on your own volume.
         </li>
         <li>
           <strong>vs RxDB:</strong> TopGun includes a powerful, sharded server cluster for handling massive datasets and complex server-side logic, rather than just replication.

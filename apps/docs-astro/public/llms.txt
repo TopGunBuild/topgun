@@ -1,6 +1,6 @@
 # TopGun
 
-TopGun is a hybrid offline-first in-memory data grid — zero-latency reads/writes via local CRDTs, real-time sync via WebSockets, durable storage on PostgreSQL or redb.
+TopGun is a hybrid offline-first in-memory data grid — zero-latency reads/writes via local CRDTs, real-time sync via WebSockets, durable storage in an embedded store (redb) inside the server.
 
 ## Docs
 

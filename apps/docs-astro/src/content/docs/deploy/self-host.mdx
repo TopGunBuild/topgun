@@ -10,23 +10,14 @@ import { ChevronRight, Layers, Server, Lock, Cloud } from 'lucide-react';
 export const dockerBuildCode = `# From the root of the repository
 docker build -t topgun-server -f deploy/Dockerfile.server .`;
 
-export const dockerRunRedbCode = `# Run with embedded redb backend (default — no Postgres required)
+export const dockerRunRedbCode = `# Run with the embedded store (default — no database to run)
 docker run -d \\
   --name topgun-server \\
   -p 8080:8080 \\
   -e RUST_LOG=topgun_server=info \\
   -v topgun-data:/data \\
   -e TOPGUN_REDB_PATH=/data/topgun.redb \\
-  topgun-server`;
-
-export const dockerRunPostgresCode = `# Run with PostgreSQL backend (opt-in)
-docker run -d \\
-  --name topgun-server \\
-  -p 8080:8080 \\
-  -e RUST_LOG=topgun_server=info \\
-  -e STORAGE_BACKEND=postgres \\
-  -e DATABASE_URL=postgres://user:pass@db-host:5432/myapp \\
-  -e JWT_SECRET=your-production-secret \\
+  -e TOPGUN_WAL_DIR=/data/topgun-wal \\
   topgun-server`;
 
 export const dockerComposeRedbCode = `version: '3.8'
@@ -43,6 +34,8 @@ services:
       RUST_LOG: topgun_server=info
       # redb is the default; TOPGUN_REDB_PATH sets the file location
       TOPGUN_REDB_PATH: /data/topgun.redb
+      # The write-ahead log must sit on the same volume as the redb file
+      TOPGUN_WAL_DIR: /data/topgun-wal
       # Optional: enable auth
       JWT_SECRET: your-dev-secret
     volumes:
@@ -51,47 +44,6 @@ services:
 
 volumes:
   topgun-data:`;
-
-export const dockerComposePostgresCode = `version: '3.8'
-
-services:
-  postgres:
-    image: postgres:15-alpine
-    container_name: topgun-postgres
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres_password
-      POSTGRES_DB: topgun
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  server:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.server
-    container_name: topgun-server
-    depends_on:
-      postgres:
-        condition: service_healthy
-    ports:
-      - "8080:8080"
-    environment:
-      RUST_LOG: topgun_server=info
-      STORAGE_BACKEND: postgres
-      DATABASE_URL: postgres://postgres:postgres_password@postgres:5432/topgun
-      JWT_SECRET: your-production-secret
-      TOPGUN_BIND_ADDR: "0.0.0.0"
-    restart: unless-stopped
-
-volumes:
-  postgres_data:`;
 
 export const k8sStatefulSetCode = `apiVersion: apps/v1
 kind: StatefulSet
@@ -120,13 +72,10 @@ spec:
               value: "topgun_server=info"
             - name: TOPGUN_BIND_ADDR
               value: "0.0.0.0"
-            - name: STORAGE_BACKEND
-              value: "postgres"
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: topgun-secrets
-                  key: database-url
+            - name: TOPGUN_REDB_PATH
+              value: "/data/topgun.redb"
+            - name: TOPGUN_WAL_DIR
+              value: "/data/topgun-wal"
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:
@@ -151,12 +100,28 @@ spec:
             limits:
               memory: "2Gi"
               cpu: "2"
+          volumeMounts:
+            - name: data
+              mountPath: /data
           livenessProbe:
             httpGet:
-              path: /health
+              path: /health/live
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
 ---
 apiVersion: v1
 kind: Service
@@ -179,7 +144,6 @@ metadata:
   namespace: topgun
 type: Opaque
 stringData:
-  database-url: "postgres://user:pass@postgres-host:5432/topgun"
   jwt-secret: "your-production-secret-min-32-chars"
   admin-username: "admin"
   admin-password: "your-admin-password"`;
@@ -213,7 +177,7 @@ const engine = new SyncEngine({
 
 # Self-host the server
 
-Run the TopGun server on your own infrastructure using Docker, Docker Compose, or Kubernetes. By default the server uses an embedded [redb](https://github.com/cberner/redb) database — no Postgres or external dependency required. Switch to PostgreSQL when you need a shared production backend.
+Run the TopGun server on your own infrastructure using Docker, Docker Compose, or Kubernetes. The server keeps its data in an embedded store ([redb](https://github.com/cberner/redb)) inside the process — there is no database to run and no external dependency. Give it a persistent volume and your data survives restarts.
 
 ## Building the image
 
@@ -225,21 +189,15 @@ The Dockerfile uses a multi-stage Rust build (`rust:1.85-bookworm`) and produces
 
 ## Docker
 
-### Run with redb (default — no Postgres required)
+### Run with the embedded store (default)
 
 <div className="not-prose">
   <CodeBlock title="terminal" language="bash" code={dockerRunRedbCode} />
 </div>
 
-### Run with PostgreSQL (opt-in)
-
-<div className="not-prose">
-  <CodeBlock title="terminal" language="bash" code={dockerRunPostgresCode} />
-</div>
-
 ## Docker Compose
 
-### redb default (recommended for single-node)
+### Single node
 
 <div className="not-prose">
   <CodeBlock title="docker-compose.yml" language="yaml" code={dockerComposeRedbCode} />
@@ -249,15 +207,17 @@ The Dockerfile uses a multi-stage Rust build (`rust:1.85-bookworm`) and produces
   <CodeBlock title="terminal" language="bash" code="docker-compose up -d" />
 </div>
 
-### With PostgreSQL (opt-in)
+## Backup and restore
 
-<div className="not-prose">
-  <CodeBlock title="docker-compose.postgres.yml" language="yaml" code={dockerComposePostgresCode} />
-</div>
+The data is two things on the volume: the redb file (`TOPGUN_REDB_PATH`, `/data/topgun.redb` in the image) and the write-ahead log directory (`TOPGUN_WAL_DIR`, `/data/topgun-wal` in the image). Acknowledged writes that are not yet in the redb file live in the WAL directory, so a backup needs both.
+
+- **Back up:** stop the server (`SIGTERM`; it drains its write buffer and syncs the log, then exits 0), then copy the redb file and the WAL directory.
+- **Restore:** with the server stopped, put both back, then start it.
+- **Not supported:** a copy of a running server's files.
 
 ## Kubernetes
 
-For production Kubernetes deployments, use a `StatefulSet` so pods get stable network identities. Store `DATABASE_URL`, `JWT_SECRET`, and admin credentials in a Kubernetes `Secret`.
+For production Kubernetes deployments, use a `StatefulSet` so pods get stable network identities. Keep `/data` on a persistent volume (`volumeClaimTemplates` below), and store `JWT_SECRET` and admin credentials in a Kubernetes `Secret`.
 
 ### Secrets
 

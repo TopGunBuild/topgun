@@ -38,7 +38,7 @@ PowerSync and ElectricSQL are sync layers that sit between your existing databas
 - **Integrated server.** TopGun includes its own Rust server with storage, clustering, search, and pub/sub -- not just a sync proxy
 - **CRDT conflict resolution.** PowerSync and ElectricSQL use SQL-based conflict resolution (last-write-wins at the row level, or custom SQL rules). TopGun uses purpose-built CRDTs (LWWMap, ORMap) with field-level conflict resolution via Hybrid Logical Clocks
 - **Pub/Sub and search built-in.** TopGun includes real-time topics and full-text search (via Tantivy) as core features, not add-ons
-- **No existing database required.** TopGun runs with an embedded redb backend by default (zero-config per SPEC-241), PostgreSQL opt-in for production, or a null backend for testing. You do not need an existing Postgres database to start. See [storage backends](/docs/deploy/storage-backends)
+- **No existing database required.** TopGun keeps its data in an embedded store inside the server (redb, zero-config), or in memory only with the null backend for testing. There is no database to set up or run. See [storage backends](/docs/deploy/storage-backends)
 
 PowerSync and ElectricSQL are better if you already have a PostgreSQL database and want to add sync. TopGun is better for greenfield projects that want an integrated offline-first data platform.
 

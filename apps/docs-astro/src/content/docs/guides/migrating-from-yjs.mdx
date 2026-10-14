@@ -19,7 +19,7 @@ import { ChevronRight } from 'lucide-react';
 
 # Migrating from Y.js
 
-This guide is for Y.js users who want a server-backed, offline-first data layer with durable Postgres storage and server-side queries. The mapping is one-to-one for whole-document and whole-map use cases (Y.Map / Y.Doc), but Y.js features built on character-level operational transform (Y.Text, RelativePosition) and presence (Y.Awareness, UndoManager) do not have direct TopGun equivalents — cross-check the Concept Mapping table and the [roadmap](/docs/roadmap) before porting.
+This guide is for Y.js users who want a server-backed, offline-first data layer with durable server-side storage and server-side queries. The mapping is one-to-one for whole-document and whole-map use cases (Y.Map / Y.Doc), but Y.js features built on character-level operational transform (Y.Text, RelativePosition) and presence (Y.Awareness, UndoManager) do not have direct TopGun equivalents — cross-check the Concept Mapping table and the [roadmap](/docs/roadmap) before porting.
 
 ## Concept Mapping
 
@@ -281,7 +281,7 @@ For a first migration, start on single-node. The partition-routed cluster mode w
 - **Local-first reads/writes:** Operations never wait for network; the UI updates immediately (parity with Y.js).
 - **Server-side filtering and indexing:** Y.js requires you to download the full document client-side and filter locally. TopGun supports `client.query(filter)` so the server returns only matching rows.
 - **Server-side queries:** SQL-style queries and full-text search (tantivy) on the server. Y.js has no server-side query layer.
-- **Plain Postgres durable store:** Migrate data off TopGun via `pg_dump`. Y.js typically pairs with a custom server (y-websocket, y-redis, y-leveldb) — TopGun ships with the durable store.
+- **Durable store included:** the server keeps its data in an embedded store on a volume you control. Y.js typically pairs with a custom server (y-websocket, y-redis, y-leveldb) — TopGun ships with the durable store.
 - **Offline persistence via `IDBAdapter`:** Always-on parity with `IndexeddbPersistence`.
 - **CRDT conflict resolution by HLC:** Deterministic across clients (parity with Y.js's CRDT semantics, but at whole-document granularity, not character-level).
 - **Performance:** 483K ops/sec fire-and-forget, ~37K ops/sec fire-and-wait at 1.5ms p50 on M1 Max (200 connections). See [benchmarks](/docs/benchmarks) for methodology.
@@ -293,7 +293,7 @@ For a first migration, start on single-node. The partition-routed cluster mode w
 3. Flag any feature that maps to a "Not supported" or "Roadmap" cell — those need an explicit decision (drop, work around, or wait for the roadmap item).
 4. Port the provider layer: replace `Y.Doc + WebsocketProvider + IndexeddbPersistence` with `new TopGunClient({ serverUrl, storage: new IDBAdapter() })` and `client.setAuthToken(jwt)`.
 5. Port reads/writes/observes one map at a time: replace `yMap.set` / `yMap.get` / `yMap.observe` with `client.getMap().set` / `.get` / `.subscribe` (and `client.query().subscribe` for filter-aware server-pushed deltas).
-6. Backfill data: write a one-time migration script that reads from your Y.js persistence (e.g. y-leveldb / y-redis / y-mongodb) and writes to TopGun via the client SDK or directly to Postgres.
+6. Backfill data: write a one-time migration script that reads from your Y.js persistence (e.g. y-leveldb / y-redis / y-mongodb) and writes to TopGun via the client SDK.
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
   <a href="/docs/guides/migrating-from-firebase" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">

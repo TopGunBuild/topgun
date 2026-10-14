@@ -150,28 +150,20 @@ This guide covers common issues you may encounter when using TopGun, organized b
   ```
 - If running in development, ensure previous server processes are terminated before restarting
 
-### Storage backend mismatch
+### Server refuses to start: removed storage setting
 
-**Symptom:** The server logs `using redb backend` but you expected Postgres, or the server fails to connect to PostgreSQL.
+**Symptom:** The server exits at startup with an error whose message begins with one of these sentences:
 
-**Cause:** As of SPEC-241, the default storage backend is an embedded redb database (zero-config). If you need PostgreSQL, you must explicitly set the `STORAGE_BACKEND` environment variable.
+- `STORAGE_BACKEND=postgres is no longer supported: the Postgres backend has been removed.`
+- `DATABASE_URL is set, but the Postgres backend has been removed and this server does not read it.`
+
+**Cause:** The server keeps its data in an embedded store and no longer has a Postgres backend. It refuses `STORAGE_BACKEND=postgres`, and it refuses to start while `DATABASE_URL` is set (an empty value counts as set), so a leftover variable cannot silently send your data to a different store than you expect.
 
 **Solutions:**
-- To use PostgreSQL, set `STORAGE_BACKEND=postgres` and provide `DATABASE_URL`:
-  ```bash
-  STORAGE_BACKEND=postgres DATABASE_URL=postgresql://user:password@host:5432/database cargo run --bin topgun-server --release
-  ```
-- See [Storage Backends](/docs/deploy/storage-backends) for all backend options and decision guidance
-- If using the default redb backend and you see connection failures, check that the redb file path is writable (defaults to `./topgun.redb`; override with `TOPGUN_REDB_PATH`)
-
-#### PostgreSQL-specific issues
-
-If you have switched to the Postgres backend:
-- Verify the connection string format: `postgresql://user:password@host:port/database`
-- Check that PostgreSQL is running and accepting connections on the configured host and port
-- If using SSL, ensure the `sslmode` parameter matches your PostgreSQL configuration (e.g., `sslmode=require` or `sslmode=prefer`)
-- Verify the database exists and the user has appropriate permissions
-- Check PostgreSQL's `pg_hba.conf` for client authentication rules
+- Unset `DATABASE_URL` (an empty value counts as set), and remove `STORAGE_BACKEND=postgres` if you set it. The server then starts on the embedded store (`STORAGE_BACKEND=redb`, the default). Check your shell, `.env` files, compose files and container environment.
+- Data kept by the old Postgres backend is not read by this server. There is no migration tool: it remains available with the server built from the tag `postgres-backend-last`.
+- See [Storage Backends](/docs/deploy/storage-backends) for the embedded store, its paths and backup
+- If the server starts on the default redb store and you see write failures, check that the redb file path is writable (defaults to `./topgun.redb`; override with `TOPGUN_REDB_PATH`)
 
 ### Cluster nodes not discovering each other
 

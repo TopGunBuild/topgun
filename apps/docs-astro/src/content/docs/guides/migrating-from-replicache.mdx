@@ -82,7 +82,7 @@ This guide is for Replicache users (including those on the deprecated upstream) 
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">SaaS server hosting</td>
         <td className="py-3 px-4 text-foreground">Self-hosted Rust server</td>
-        <td className="py-3 px-4 text-neutral-500">No SaaS invoice — run the Rust server alongside your own Postgres</td>
+        <td className="py-3 px-4 text-neutral-500">No SaaS invoice — run the Rust server on your own infrastructure</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Optimistic mutations</td>
@@ -302,7 +302,7 @@ For a first migration, start on single-node. The partition-routed cluster mode w
 - **Local-first reads/writes:** Synchronous local reads and writes — parity with Replicache optimistic mutations, without the mutator wrapper.
 - **CRDT-merge auto-resolves conflicts:** LWW-Map and OR-Map merge deterministically via HLC; no need to design custom mutators for conflict-free operations.
 - **OSS Apache-2.0:** No per-MAU pricing, no SaaS invoice — run the Rust server on your own infra.
-- **Self-hosted on your own Postgres:** Plain Postgres durable store; migrate data off TopGun with `pg_dump`.
+- **Self-hosted with embedded storage:** the server keeps its data on a volume you control, with no database to run.
 - **Performance:** 483K ops/sec fire-and-forget, ~37K ops/sec fire-and-wait at 1.5ms p50 on M1 Max (200 connections). See [benchmarks](/docs/benchmarks) for methodology.
 
 ## Migration checklist
@@ -312,7 +312,7 @@ For a first migration, start on single-node. The partition-routed cluster mode w
 3. Flag any feature mapping to "Not supported" / "Roadmap" cells — explicit decision needed (drop, work around, wait for roadmap).
 4. Rewrite mutator-based logic as CRDT writes (`getMap().set`), or move custom validation into per-map ACL hooks (planned: Entry Processor for fine-grained server-side hooks).
 5. Port reads/writes/subscribes one collection at a time: replace `tx.set` / `tx.scan` / `useSubscribe` with `getMap().set` / `client.query()` / `useQuery()`.
-6. Backfill data via a one-time migration script that reads from Replicache's IndexedDB (or your server-side Replicache cache store) and writes to TopGun via the client SDK or direct Postgres insert.
+6. Backfill data via a one-time migration script that reads from Replicache's IndexedDB (or your server-side Replicache cache store) and writes to TopGun via the client SDK.
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
   <a href="/docs/guides/migrating-from-yjs" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">

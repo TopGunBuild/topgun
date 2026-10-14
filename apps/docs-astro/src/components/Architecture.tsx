@@ -79,7 +79,7 @@ export const Architecture = () => {
               <div className="flex flex-col items-center gap-4">
                 <Node icon={Server} label="TopGun Gateway" sub="Partition Engine" />
                 <div className="h-8 w-[2px] bg-black/10 dark:bg-white/10"></div>
-                <Node icon={Database} label="Persistence" sub="Postgres / Mongo" />
+                <Node icon={Database} label="Persistence" sub="Embedded store" />
               </div>
             </div>
           </div>

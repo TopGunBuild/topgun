@@ -11,7 +11,7 @@ import { Server } from 'lucide-react';
   <h1 className="text-4xl font-bold text-foreground">Server & CLI</h1>
 </div>
 
-The TopGun server is a Rust binary built on [axum](https://docs.rs/axum) and [tokio](https://tokio.rs). It manages client WebSocket connections, CRDT synchronization, Merkle delta sync, full-text and vector search, clustering, and durable storage (embedded redb by default, optional PostgreSQL for production).
+The TopGun server is a Rust binary built on [axum](https://docs.rs/axum) and [tokio](https://tokio.rs). It manages client WebSocket connections, CRDT synchronization, Merkle delta sync, full-text and vector search, clustering, and durable storage (the embedded redb store).
 
 This page documents the user-facing surface: how to run it, what flags and environment variables it reads, the HTTP and WebSocket endpoints, and the Rust embed API for callers that want to host the server in-process. For operator-oriented setup with Docker Compose, Kubernetes, and tuning advice, see [Deploy](/docs/deploy).
 
@@ -33,7 +33,7 @@ PORT=8080 cargo run --bin topgun-server --release
 RUST_LOG=topgun_server=debug cargo run --bin topgun-server --release
 ```
 
-By default the server uses the embedded redb backend (no Postgres, no Docker required). It binds to `0.0.0.0:8080` and opens `./topgun.redb` in the working directory. Set `STORAGE_BACKEND=postgres` and `DATABASE_URL=...` to use Postgres instead.
+By default the server uses the embedded redb backend (no database to run, no Docker required). It binds to `0.0.0.0:8080` and opens `./topgun.redb` in the working directory, with its write-ahead log in `./topgun-wal`.
 
 ## CLI flags
 
@@ -57,9 +57,9 @@ All variables below correspond to direct `std::env::var(...)` reads or `tracing-
 
 | Variable | Type | Default | Consumer | Notes |
 |---|---|---|---|---|
-| `STORAGE_BACKEND` | string | `"redb"` | `bin/topgun_server.rs:109` | One of `redb`, `postgres`, `null`. `null` is in-memory ephemeral (test only). |
+| `STORAGE_BACKEND` | string | `"redb"` | `bin/topgun_server.rs:109` | One of `redb` or `null`; any other value is refused at startup. `null` is in-memory ephemeral (test only). |
 | `TOPGUN_REDB_PATH` | path | `./topgun.redb` | `bin/topgun_server.rs:115` | File path for the embedded redb database (used when `STORAGE_BACKEND=redb`). |
-| `DATABASE_URL` | string | none | `bin/topgun_server.rs:126`, `storage/datastores/postgres.rs:693` | Postgres connection string (required when `STORAGE_BACKEND=postgres`). |
+| `TOPGUN_WAL_DIR` | path | `./topgun-wal` | `storage/datastores/write_behind.rs` | Directory of the write-ahead log. Keep it on the same volume as the redb file. |
 
 ### Networking
 
@@ -216,19 +216,6 @@ let port = module.start().await?;
 println!("Server listening on port {port}");
 module.serve(shutdown_signal()).await?;
 ```
-
-### PostgresDataStore
-
-```rust
-use sqlx::PgPool;
-use topgun_server::storage::datastores::PostgresDataStore;
-
-let pool = PgPool::connect("postgres://user:pass@localhost/topgun").await?;
-let store = PostgresDataStore::new(pool, None)?;  // default table: "topgun_maps"
-store.initialize().await?;                         // CREATE TABLE IF NOT EXISTS
-```
-
-`PostgresDataStore::new(pool, table_name)` takes an optional custom table name; if supplied, it is validated against `^[a-zA-Z_][a-zA-Z0-9_]*$`. Call `initialize()` after construction to run the schema migration.
 
 ## POST /sync wire format
 
