@@ -234,7 +234,7 @@ pub struct ScanBatch {
 /// Opaque, backend-defined resume token for a value-streamed scan.
 ///
 /// The byte payload is interpreted only by the producing backend (e.g. a redb
-/// last-key marker or a Postgres keyset offset). Callers treat it as opaque and
+/// last-key marker). Callers treat it as opaque and
 /// pass it back unchanged to fetch the next [`ScanBatch`].
 ///
 /// One narrowing: a store that declares
@@ -578,7 +578,7 @@ pub trait MapDataStore: Send + Sync {
     /// Unlike [`enumerate_leaves`](MapDataStore::enumerate_leaves), this has a
     /// default body returning an empty list: a backend that holds no durable
     /// maps (the null / in-memory test stores) correctly contributes nothing to
-    /// seed, and the durable backends (redb / Postgres / write-behind) override
+    /// seed, and the durable backends (redb / write-behind) override
     /// it. An empty default here cannot couple correctness to residency the way
     /// an empty `enumerate_leaves` would — at worst the seed is a no-op and the
     /// map's trees stay empty (the pre-existing behavior), never wrong leaves.

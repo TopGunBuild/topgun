@@ -4834,7 +4834,7 @@ impl MapDataStore for WriteBehindDataStore {
         if !ranged {
             // Over a store that does not declare key order the first batch
             // takes every buffered key that has no row in it. A buffered key
-            // whose row is in a later batch is then emitted twice (TODO-819).
+            // whose row is in a later batch is then emitted twice.
             return Ok(overlay_scan_batch(batch, &pending, &StagingOnly::Every));
         }
         // Key-ordered store: the first batch covers the keys up to its cursor,
@@ -4881,7 +4881,7 @@ impl MapDataStore for WriteBehindDataStore {
             // Over a store that does not declare key order a resumed batch only
             // replaces and drops rows: the first batch took the buffered keys
             // without a row there, including those whose row is in this batch,
-            // which are therefore emitted twice (TODO-819).
+            // which are therefore emitted twice.
             return Ok(overlay_scan_batch(batch, &pending, &StagingOnly::Nothing));
         };
         // Key-ordered store: this batch covers the keys above the cursor it was
@@ -5013,7 +5013,7 @@ fn cursor_key(cursor: &ScanCursor) -> anyhow::Result<String> {
 ///
 /// Over any other store the first batch appends every buffered key without a
 /// row in it and later batches append none. That rule is known to emit twice a
-/// buffered key whose durable row is in a later batch (TODO-819).
+/// buffered key whose durable row is in a later batch.
 fn overlay_scan_batch(
     batch: ScanBatch,
     pending: &BTreeMap<String, Option<RecordValue>>,
@@ -9704,8 +9704,8 @@ mod tests {
     /// Pins the path this store does NOT fix. Over a store that does not declare
     /// key order the first batch still takes every buffered key without a row in
     /// it, so `d40` and `d50` — buffered, with their rows in later batches — are
-    /// emitted twice. That is the known defect `TG-WB-008` does not cover
-    /// (TODO-819), not wanted behaviour: when such a store is fixed, this
+    /// emitted twice. That is the defect `TG-WB-008` does not cover
+    /// (no shipped store lacks key order; only this test double does), not wanted behaviour: when such a store is fixed, this
     /// transcript changes with it.
     #[tokio::test]
     async fn over_a_store_that_does_not_declare_key_order_a_staged_key_with_a_later_row_is_still_emitted_twice(

@@ -6,7 +6,7 @@ use topgun_core::{
 };
 
 /// Pluggable persistence backend for the server.
-/// Implementations: `PostgreSQL`, `SQLite`, S3 (future), memory (tests).
+/// Implementations: embedded `redb`, S3 (future), memory (tests).
 #[async_trait]
 pub trait ServerStorage: Send + Sync {
     /// Load a single record by map name and key.

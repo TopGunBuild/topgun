@@ -206,7 +206,7 @@ pub async fn reconcile_tombstone_bytes(store: Arc<dyn MapDataStore>) -> u64 {
     // Folded into this existing boot-only walk (no second O(keyspace) scan): the
     // count of legacy tombstone-only blobs, which a clean-slate store never grows
     // but a rehydrated pre-epoch store still carries. Durable backends only — this
-    // reconcile runs solely under the redb/postgres startup arm.
+    // reconcile runs solely under the redb startup arm.
     let mut legacy_rows: u64 = 0;
 
     for map in &maps {

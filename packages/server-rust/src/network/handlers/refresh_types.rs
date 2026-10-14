@@ -27,7 +27,7 @@ pub struct RefreshGrant {
 
 /// Storage trait for refresh grants.
 ///
-/// Implementations wrap a backing store (e.g., `PostgreSQL`) and are injected
+/// Implementations wrap a backing store (e.g., an embedded `redb` table) and are injected
 /// into `AppState` as `Option<Arc<dyn RefreshGrantStore>>`. When `None`,
 /// the refresh endpoint returns 404 (refresh disabled).
 #[async_trait]

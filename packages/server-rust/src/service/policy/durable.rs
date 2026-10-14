@@ -14,7 +14,7 @@
 //! [`RecordValue`] is CRDT-shaped and has no opaque-blob variant, so each
 //! payload is msgpack-encoded (`rmp_serde::to_vec_named`) and wrapped in a
 //! [`RecordValue::Lww`] with a synthetic [`Timestamp`]. The same backend wire
-//! format the redb/Postgres stores already use is reused — no new record
+//! format the redb store already uses is reused — no new record
 //! variant, no second serialization path.
 //!
 //! Three reserved keys are used:

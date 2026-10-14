@@ -1,4 +1,4 @@
-//! `TopGun` Server — `WebSocket` server with clustering, partitioning, and `PostgreSQL` storage.
+//! `TopGun` Server — `WebSocket` server with clustering, partitioning, and embedded `redb` storage.
 
 // Relax `clippy::unimplemented` under `#[cfg(test)]` so that mock implementations
 // of production traits can stub out methods the orchestrator under test does
