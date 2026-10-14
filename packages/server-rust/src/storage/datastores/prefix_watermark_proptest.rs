@@ -173,6 +173,9 @@ struct FaultStore {
     /// Off unless a test arms it, so every scenario that does not step the
     /// store call by call sees the double exactly as before.
     gate: StepGate,
+    /// How many calls for each key the store has refused: "the key was
+    /// refused ten times" is a count, and a wait of a guessed length is not.
+    refusals: std::sync::Mutex<HashMap<String, u64>>,
 }
 
 /// What a test decides for one parked inner-store call.
@@ -336,6 +339,25 @@ impl FaultStore {
             .clear();
     }
 
+    fn count_refusal(&self, key: &str) {
+        *self
+            .refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(key.to_string())
+            .or_default() += 1;
+    }
+
+    /// How many calls for `key` the store has refused so far.
+    fn refusals(&self, key: &str) -> u64 {
+        self.refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Parks every subsequent `add` of `key` until [`release`](Self::release).
     fn hang_key(&self, key: &str) {
         self.hang
@@ -405,9 +427,11 @@ impl MapDataStore for FaultStore {
         _now: i64,
     ) -> anyhow::Result<()> {
         if self.pass_gate(key).await == Verdict::Refuse {
+            self.count_refusal(key);
             anyhow::bail!("gated inner-store refusal for key={key}");
         }
         if self.rejects(key) {
+            self.count_refusal(key);
             anyhow::bail!("injected inner-store rejection for key={key}");
         }
         if self.hangs(key) {
@@ -434,9 +458,11 @@ impl MapDataStore for FaultStore {
 
     async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
         if self.pass_gate(key).await == Verdict::Refuse {
+            self.count_refusal(key);
             anyhow::bail!("gated inner-store refusal for key={key}");
         }
         if self.rejects(key) {
+            self.count_refusal(key);
             anyhow::bail!("injected inner-store rejection for key={key}");
         }
         if self.hangs(key) {
@@ -1033,75 +1059,66 @@ async fn heavy_coalescing_across_add_remove_and_remove_all_advances_the_full_pre
 }
 
 // ===========================================================================
-// AC2(b) — abandoned terminals do NOT resolve
+// AC2(b) — a refused entry does NOT resolve, and neither does an abandoned one
 // ===========================================================================
 
 #[tokio::test]
-async fn an_abandoned_terminal_holds_the_watermark_and_its_frame_is_replayed() {
+async fn a_refused_entry_holds_the_watermark_and_its_frame_is_replayed() {
     let dir = tempfile::tempdir().unwrap();
     let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
     let inner = FaultStore::new();
-    // One attempt, so the first refusal is the terminal discard.
     let store = build_store_with(
         &inner,
         Arc::clone(&wal) as Arc<dyn Wal>,
         1,
-        WriteBehindConfig {
-            max_retries: 1,
-            ..requested_flush_config()
-        },
+        draining_config(),
     );
     let partition = test_partition();
     let keys = keys_in_partition(partition, 2);
 
+    // The inner store rejects the key for as long as the store runs, so the
+    // write is durable nowhere but the WAL.
+    inner.reject_key(&keys[0]);
     store
         .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
         .await
         .unwrap();
-    let doomed_seq = store
+    let refused_seq = store
         .test_pending_wal_sequences(partition)
         .first()
         .map(|(seq, _)| *seq)
         .expect("the acked write is pending");
 
-    // The inner store now permanently rejects the key, so the flush terminal is
-    // ABANDONED: the write is durable nowhere but the WAL.
-    inner.reject_key(&keys[0]);
-    run_requested_pass(&store, "the pass that discards the refused entry").await;
-    assert!(
-        !inner.contains(&keys[0]).await,
-        "the inner store refused the write, so it holds nothing for the key"
-    );
-    assert_eq!(
+    let refusals = refusals_up_to(&inner, &store, &keys[0], 10).await;
+    let while_refused = (
         store.pending_operation_count(),
-        0,
-        "the entry reached its terminal: it is neither queued nor awaiting a retry"
-    );
-
-    assert_eq!(
         store.test_pending_wal_sequences(partition),
-        vec![(doomed_seq, PendingOrigin::Abandoned)],
-        "an abandoned terminal must NOT resolve — resolving here is the data-loss \
-         bug, because the write exists only in the frame the resolve would release"
-    );
-    assert_eq!(
         store.test_wal_watermark(partition),
-        Some(Ok(doomed_seq - 1)),
-        "the watermark must not advance past an abandoned sequence"
+        inner.contains(&keys[0]).await,
     );
 
-    // A later, healthy write must not drag the watermark over it either.
+    // A later, healthy write of the same partition reaches the store, and must
+    // not drag the watermark over the refused one.
     store
         .add(TEST_MAP, &keys[1], &lww(2), 0, 1000)
         .await
         .unwrap();
-    store.hard_flush().await.unwrap();
-    assert_eq!(
+    wait_until("the later key's sequence to be resolved", || {
+        store
+            .test_pending_wal_sequences(partition)
+            .iter()
+            .all(|(seq, _)| *seq == refused_seq)
+    })
+    .await;
+    let after_the_later_key = (
+        inner.contains(&keys[1]).await,
         store.test_wal_watermark(partition),
-        Some(Ok(doomed_seq - 1)),
-        "a later success is not contiguous with the prefix and cannot license the \
-         abandoned frame's release"
     );
+
+    // A shutdown gives up on the write for this incarnation: one more attempt,
+    // then the frame is left for the next start.
+    let shutdown_ok = store.hard_flush().await.is_ok();
+    let after_shutdown = store.test_pending_wal_sequences(partition);
 
     drop(store);
     let recovered = FaultStore::new();
@@ -1109,9 +1126,34 @@ async fn an_abandoned_terminal_holds_the_watermark_and_its_frame_is_replayed() {
         .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
         .await
         .unwrap();
-    assert!(
-        recovered.contains(&keys[0]).await,
-        "the abandoned write's frame must still be replayable on the next boot"
+    let replayed = recovered.contains(&keys[0]).await;
+
+    assert_eq!(
+        (
+            refusals,
+            while_refused,
+            after_the_later_key,
+            shutdown_ok,
+            after_shutdown,
+            replayed,
+        ),
+        (
+            10,
+            (
+                1,
+                vec![(refused_seq, PendingOrigin::Live)],
+                Some(Ok(refused_seq - 1)),
+                false,
+            ),
+            (true, Some(Ok(refused_seq - 1))),
+            true,
+            vec![(refused_seq, PendingOrigin::Abandoned)],
+            true,
+        ),
+        "a refused write stays buffered and counted, its sequence stays live and \
+         holds the watermark below its frame — a later success is not contiguous \
+         with the prefix and cannot release it — and only a shutdown abandons it, \
+         leaving the frame to be replayed on the next boot"
     );
 }
 
@@ -1598,7 +1640,6 @@ fn draining_config() -> WriteBehindConfig {
         write_delay_ms: 0,
         flush_interval_ms: 5,
         shutdown_timeout_ms: 200,
-        max_retries: 1,
         backoff_base_ms: 1,
         backoff_cap_ms: 2,
         ..WriteBehindConfig::default()
@@ -1639,6 +1680,62 @@ async fn wait_until(label: &str, mut cond: impl FnMut() -> bool) {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
     panic!("timed out waiting for {label}");
+}
+
+/// Waits until the inner store has refused `key` `limit` times and the pass
+/// that made the last of those calls has closed, and says how many refusals
+/// it saw, `limit` at most.
+///
+/// It also ends when the store goes idle: a store that gives up on a refused
+/// entry stops calling before the limit, and the caller gets the smaller
+/// number instead of a wait that runs into its bound.
+async fn refusals_up_to(
+    inner: &FaultStore,
+    store: &WriteBehindDataStore,
+    key: &str,
+    limit: u64,
+) -> u64 {
+    wait_until("the key to be refused or given up on", || {
+        store.test_is_idle() || (inner.refusals(key) >= limit && !store.test_pass_open())
+    })
+    .await;
+    inner.refusals(key).min(limit)
+}
+
+/// The WAL sequences owned by the entry queued for `key`, if one is queued.
+fn queued_wal_sequences_of(
+    store: &WriteBehindDataStore,
+    partition: u32,
+    key: &str,
+) -> Option<Vec<u64>> {
+    let slot = (TEST_MAP.to_string(), key.to_string());
+    store.queues.get(&partition).and_then(|queue| {
+        queue
+            .entries
+            .get(&slot)
+            .map(|entry| entry.wal_sequences.iter().copied().collect())
+    })
+}
+
+/// What a node that crashed at this moment would recover on its next start.
+///
+/// Recovery runs over a copy of the WAL files: run over the live store's own
+/// WAL it would mark frames applied under a store that is still retrying them.
+async fn crash_image(wal_dir: &std::path::Path) -> Arc<FaultStore> {
+    let image_dir = tempfile::tempdir().expect("tempdir");
+    for file in std::fs::read_dir(wal_dir).expect("read the WAL directory") {
+        let file = file.expect("a WAL directory entry");
+        std::fs::copy(file.path(), image_dir.path().join(file.file_name()))
+            .expect("copy a WAL file");
+    }
+    let wal = WalWriter::new(image_dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
+        .expect("open the copied WAL");
+    let recovered = FaultStore::new();
+    WalRecovery::new(wal, Vec::new())
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await
+        .expect("recovery over the copied WAL");
+    recovered
 }
 
 /// The `topgun_wal_applied_watermark_lag` sample for `partition`, read off the
@@ -1815,7 +1912,7 @@ async fn a_queued_then_dequeued_sequence_missing_from_the_registry_is_a_leak() {
 }
 
 #[tokio::test]
-async fn a_max_retries_discard_is_an_abandoned_write_not_a_leak() {
+async fn a_refused_entry_under_retry_is_an_abandoned_write_not_a_leak() {
     // Install the recorder BEFORE the first emission: a metric emitted against
     // the no-op recorder is invisible to every later scrape.
     init_observability();
@@ -1833,24 +1930,30 @@ async fn a_max_retries_discard_is_an_abandoned_write_not_a_leak() {
     inner.reject_key(&key);
     store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
 
-    wait_until("the entry to exhaust its retries", || {
-        store.test_pending_wal_sequences(partition) == vec![(1, PendingOrigin::Abandoned)]
-    })
-    .await;
-    assert!(
-        store.test_in_flight_wal_sequences(partition).is_empty(),
-        "the discard deregisters, so the tag is the ONLY thing carrying the class"
+    let refusals = refusals_up_to(&inner, &store, &key, 10).await;
+    // Read with no await in between, so the flush loop cannot move the entry
+    // from one owner to the other between two of the reads.
+    let tags = store.test_pending_wal_sequences(partition);
+    let owned = queued_wal_sequences_of(&store, partition, &key) == Some(vec![1])
+        || store.test_in_flight_wal_sequences(partition) == vec![1];
+    // Two, because a leak is reported only for a sequence seen ownerless on
+    // two consecutive samples.
+    let samples = (
+        store.test_run_classifier_sample(partition),
+        store.test_run_classifier_sample(partition),
     );
-
-    let alarm = store.test_run_classifier_sample(partition);
-    assert_eq!(
-        alarm,
-        Some(WalWatermarkAlarm::AbandonedWrite {
-            origin: PendingOrigin::Abandoned
-        }),
-    );
-    assert_ne!(alarm, Some(WalWatermarkAlarm::TrackerLeak));
     assert_lag_visible(partition, 1.0);
+
+    let stall = Some(WalWatermarkAlarm::AbandonedWrite {
+        origin: PendingOrigin::Live,
+    });
+    assert_eq!(
+        (refusals, tags, owned, samples),
+        (10, vec![(1, PendingOrigin::Live)], true, (stall, stall)),
+        "an entry the store keeps refusing is retried, so its sequence stays \
+         live and owned — queued between attempts, in flight during one — and \
+         the operator is sent to the backend, never told of a tracker leak"
+    );
 }
 
 #[tokio::test]
@@ -2309,66 +2412,71 @@ async fn a_subsuming_survivor_early_resolves_the_retired_sequence() {
 async fn a_non_subsuming_survivor_carries_the_retired_sequence_forward() {
     let partition = 263;
     let key = keys_in_partition(partition, 1).remove(0);
-    let (_wal_dir, wal) = real_wal();
+    let (wal_dir, wal) = real_wal();
+    let inner = FaultStore::new();
+    let store = build_store_with(
+        &inner,
+        Arc::clone(&wal) as Arc<dyn Wal>,
+        1,
+        draining_config(),
+    );
+    // The survivor's framing carries only partial state, so the retired
+    // frame's effect is NOT re-carried and must stay replayable.
+    store.test_force_non_subsuming_survivor(true);
+    inner.reject_key(&key);
 
-    {
-        let inner = FaultStore::new();
-        let store = build_store_with(
-            &inner,
-            Arc::clone(&wal) as Arc<dyn Wal>,
-            1,
-            draining_config(),
-        );
-        // The survivor's framing carries only partial state, so the retired
-        // frame's effect is NOT re-carried and must stay replayable.
-        store.test_force_non_subsuming_survivor(true);
-        inner.reject_key(&key);
-
-        store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
-        store.add(TEST_MAP, &key, &lww(2), 0, 0).await.unwrap();
-
-        assert_eq!(
-            store
-                .test_pending_wal_sequences(partition)
-                .iter()
-                .map(|(s, _)| *s)
-                .collect::<Vec<_>>(),
-            vec![1, 2],
-            "the survivor OWNS the retired sequence: it does not early-resolve"
-        );
-
-        // The survivor then hits an abandoned terminal, so neither sequence may
-        // resolve and the watermark must stay below BOTH.
-        wait_until("the survivor to exhaust its retries", || {
-            store
-                .test_pending_wal_sequences(partition)
-                .iter()
-                .all(|(_, origin)| *origin == PendingOrigin::Abandoned)
-        })
-        .await;
-        assert_eq!(
-            store.test_wal_watermark(partition),
-            Some(Ok(0)),
-            "the watermark stalls at the OLDEST carried sequence, not at the \
-             survivor's own"
-        );
-        drop(store);
-    }
+    store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
+    store.add(TEST_MAP, &key, &lww(2), 0, 0).await.unwrap();
 
     assert_eq!(
-        wal.test_read_applied_sequence(partition),
-        0,
-        "nothing was marked applied, so the retired frame stays GC-ineligible"
+        store
+            .test_pending_wal_sequences(partition)
+            .iter()
+            .map(|(s, _)| *s)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "the survivor OWNS the retired sequence: it does not early-resolve"
     );
-    let recovered = FaultStore::new();
-    WalRecovery::new(Arc::clone(&wal), Vec::new())
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
-        .await
-        .expect("recovery");
-    assert!(
-        recovered.contains(&key).await,
-        "the retired frame IS replayed when the survivor is abandoned — which is \
-         exactly what early-resolving it would have made impossible"
+
+    // The store keeps refusing the survivor. Whether the first write met the
+    // second in the queue or was already held by a pass decides how many
+    // refusals a store that gives up makes, so the count is read as reached
+    // or not.
+    let refused_ten_times = refusals_up_to(&inner, &store, &key, 10).await == 10;
+    let live = PendingOrigin::Live;
+    let while_refused = (
+        store.test_pending_wal_sequences(partition),
+        queued_wal_sequences_of(&store, partition, &key),
+        store.test_wal_watermark(partition),
+        wal.test_read_applied_sequence(partition),
+    );
+    let replayed = crash_image(wal_dir.path()).await.contains(&key).await;
+
+    inner.accept_all();
+    wait_until("the store to go idle once it accepts", || {
+        store.test_is_idle()
+    })
+    .await;
+    let once_accepted = (
+        store.test_pending_wal_sequences(partition),
+        store.test_wal_watermark(partition),
+        wal.test_read_applied_sequence(partition),
+        inner.contains(&key).await,
+    );
+
+    assert_eq!(
+        (refused_ten_times, while_refused, replayed, once_accepted),
+        (
+            true,
+            (vec![(1, live), (2, live)], Some(vec![1, 2]), Some(Ok(0)), 0),
+            true,
+            (Vec::new(), Some(Ok(2)), 2, true),
+        ),
+        "while the survivor is refused it stays queued and owns BOTH sequences, \
+         so the watermark stalls below the OLDEST carried one, nothing is marked \
+         applied and the retired frame is replayed by a crash — which is exactly \
+         what early-resolving it would have made impossible; both resolve only \
+         when the store has taken the survivor"
     );
 }
 
@@ -3333,14 +3441,13 @@ async fn an_aborted_in_flight_cell_entry_replays_like_a_value_entry() {
 
 /// Drains at once and retries almost at once, so a stepped run spends its time
 /// in the steps rather than in waits.
-fn stepped_config(max_retries: u32) -> WriteBehindConfig {
+fn stepped_config() -> WriteBehindConfig {
     WriteBehindConfig {
         write_delay_ms: 0,
         flush_interval_ms: 5,
         backoff_base_ms: 1,
         backoff_cap_ms: 2,
         capacity: 0,
-        max_retries,
         ..WriteBehindConfig::default()
     }
 }
@@ -3348,7 +3455,7 @@ fn stepped_config(max_retries: u32) -> WriteBehindConfig {
 /// A write-behind store on a real WAL over a gated inner store, with two keys
 /// of one partition.
 struct Stepped {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     wal: Arc<WalWriter>,
     inner: Arc<FaultStore>,
     store: Arc<WriteBehindDataStore>,
@@ -3363,7 +3470,7 @@ impl Stepped {
         inner.arm_gate();
         let store = build_store_with(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1, config);
         Self {
-            _dir: dir,
+            dir,
             wal,
             inner,
             store,
@@ -3395,13 +3502,65 @@ impl Stepped {
     /// The WAL sequences owned by the queued entry of the first key, if one is
     /// queued.
     fn queued_wal_sequences(&self) -> Option<Vec<u64>> {
-        let slot = (TEST_MAP.to_string(), self.key().to_string());
-        self.store.queues.get(&self.partition).and_then(|queue| {
-            queue
-                .entries
-                .get(&slot)
-                .map(|entry| entry.wal_sequences.iter().copied().collect())
-        })
+        queued_wal_sequences_of(&self.store, self.partition, self.key())
+    }
+
+    /// Refuses the calls of the first key, `limit` of them at most, and
+    /// accepts any call of the other key that parks on the way. Says how many
+    /// it refused and where the store stood then.
+    ///
+    /// A store that gives up on a refused entry goes idle before the limit; a
+    /// store that keeps retrying has its next call parked when the limit is
+    /// reached.
+    async fn refuse_first_key(&self, limit: u32) -> (u32, Settled) {
+        let mut refused = 0;
+        loop {
+            let at = self.settle("a verdict on the way to the limit").await;
+            match &at {
+                Settled::Parked(key) if key != self.key() => self.inner.grant(Verdict::Accept),
+                Settled::Parked(_) if refused < limit => {
+                    self.inner.grant(Verdict::Refuse);
+                    refused += 1;
+                }
+                _ => return (refused, at),
+            }
+        }
+    }
+
+    /// Refuses the parked call and returns when the pass that made it has
+    /// closed and the flush loop has not run again.
+    ///
+    /// The wait yields instead of sleeping: the loop then runs up to its next
+    /// suspension, which after a pass is the wait for the next one, and the
+    /// caller reads the store before any timer can start that pass.
+    async fn refuse_and_close_the_pass(&self) {
+        let closed = self.store.test_passes_closed();
+        self.inner.grant(Verdict::Refuse);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.store.test_passes_closed() == closed {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pass that made the refused call did not close within 5 s"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Keeps refusing the first key until a call of the other key parks, and
+    /// accepts that one. Does nothing more when the store goes idle first.
+    async fn flush_the_other_key(&self) {
+        loop {
+            match self.settle("a verdict on the way to the other key").await {
+                Settled::Parked(key) if key == self.key() => self.inner.grant(Verdict::Refuse),
+                Settled::Parked(_) => return self.inner.grant(Verdict::Accept),
+                Settled::Idle => return,
+            }
+        }
+    }
+
+    /// See [`crash_image`].
+    async fn crash_image(&self) -> Arc<FaultStore> {
+        crash_image(self.dir.path()).await
     }
 
     /// Accepts everything from here on and waits for the store to go idle.
@@ -3437,7 +3596,7 @@ enum Step {
 }
 
 /// The last thing the client asked for, which is what the inner store must
-/// hold once nothing was abandoned.
+/// hold once it accepts writes again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LastOp {
     Value(u64),
@@ -3520,6 +3679,15 @@ impl Script {
                 }
             }
         }
+        // A running store abandons nothing: a refused entry stays buffered and
+        // is retried, so a sequence tagged abandoned here names a write the
+        // store gave up on with nobody shutting it down.
+        let abandoned = stepped.abandoned();
+        if !abandoned.is_empty() {
+            return Err(format!(
+                "a WAL sequence is Abandoned at the settle point after {step:?}: {abandoned:?}"
+            ));
+        }
         Ok(())
     }
 }
@@ -3567,24 +3735,24 @@ async fn quiescent(stepped: &Stepped, last: Option<LastOp>) -> Result<(), String
         return Err(format!("Q5 no tracker leak: {samples:?}"));
     }
 
+    let abandoned = stepped.abandoned();
+    if !abandoned.is_empty() {
+        return Err(format!("Q6 no Abandoned WAL sequence: {abandoned:?}"));
+    }
+
     // With no client op there is no last value, and the partition was never
     // tracked, so the remaining conjunct has no subject.
     let Some(last) = last else {
         return Ok(());
     };
-    // A discard with no newer write queued abandons by design; the frame then
-    // stays pending and the store need not hold the last op.
-    if !stepped.abandoned().is_empty() {
-        return Ok(());
-    }
     if !pending.is_empty() {
-        return Err(format!("Q6 nothing pending: {pending:?}"));
+        return Err(format!("Q7 nothing pending: {pending:?}"));
     }
     let watermark = stepped.store.test_wal_watermark(partition);
     let max_assigned = stepped.store.test_max_assigned_wal_sequence(partition);
     if watermark != Some(Ok(max_assigned)) {
         return Err(format!(
-            "Q6 the watermark is at the highest assigned sequence: {watermark:?}, \
+            "Q7 the watermark is at the highest assigned sequence: {watermark:?}, \
              highest assigned {max_assigned}"
         ));
     }
@@ -3599,18 +3767,14 @@ async fn quiescent(stepped: &Stepped, last: Option<LastOp>) -> Result<(), String
     };
     if !holds_last {
         return Err(format!(
-            "Q6 the inner store holds the last client op {last:?}: it holds {held:?}"
+            "Q7 the inner store holds the last client op {last:?}: it holds {held:?}"
         ));
     }
     Ok(())
 }
 
-async fn interleaving_case(
-    steps: Vec<Step>,
-    max_retries: u32,
-    non_subsuming: bool,
-) -> Result<(), String> {
-    let stepped = Stepped::new(265, stepped_config(max_retries));
+async fn interleaving_case(steps: Vec<Step>, non_subsuming: bool) -> Result<(), String> {
+    let stepped = Stepped::new(265, stepped_config());
     stepped
         .store
         .test_force_non_subsuming_survivor(non_subsuming);
@@ -3641,33 +3805,53 @@ fn any_step() -> impl Strategy<Value = Step> {
     ]
 }
 
-proptest! {
+/// However refusals, acceptances, writes and removes of one key interleave,
+/// a store that accepts writes again and has gone idle counts nothing that
+/// is not queued, fences nothing, owns every WAL sequence it tracks, has
+/// abandoned none of them and holds the last thing the client asked for.
+#[test]
+fn interleaved_refusals_and_writes_to_one_key_leave_nothing_unaccounted() {
+    // One fixed case before the generated ones: four refusals in a row with
+    // no write between them, then an acceptance. A generated case holds such
+    // a run only now and then, and whether a store gives up on an entry that
+    // is refused again and again must not depend on the draw.
+    let fixed = vec![
+        Step::Write,
+        Step::Refuse,
+        Step::Refuse,
+        Step::Refuse,
+        Step::Refuse,
+        Step::Accept,
+    ];
+    assert_eq!(
+        block_on_async(interleaving_case(fixed, false)),
+        Ok(()),
+        "the fixed case: one write refused four times in a row, then accepted"
+    );
+
     // No regression file: the predicate is only ever read at a settle point,
     // and a settle bound that expires on a slow machine must not be persisted
-    // as a counterexample. The fixed counterexamples are the pinned tests below.
-    #![proptest_config(ProptestConfig {
+    // as a counterexample. The fixed counterexamples are the case above and
+    // the pinned tests below.
+    let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
         cases: 64,
         failure_persistence: None,
         ..ProptestConfig::default()
-    })]
-
-    /// However refusals, acceptances, writes and removes of one key interleave,
-    /// a store that accepts writes again and has gone idle counts nothing that
-    /// is not queued, fences nothing, and owns every WAL sequence it tracks.
-    #[test]
-    fn interleaved_refusals_and_writes_to_one_key_leave_nothing_unaccounted(
-        steps in proptest::collection::vec(any_step(), 1..24),
-        max_retries in 1u32..=3,
-        non_subsuming in any::<bool>(),
-    ) {
-        let outcome = block_on_async(interleaving_case(steps, max_retries, non_subsuming));
+    });
+    let cases = (proptest::collection::vec(any_step(), 1..24), any::<bool>());
+    let outcome = runner.run(&cases, |(steps, non_subsuming)| {
+        let outcome = block_on_async(interleaving_case(steps, non_subsuming));
         prop_assert_eq!(outcome, Ok(()));
+        Ok(())
+    });
+    if let Err(failure) = outcome {
+        panic!("{failure}\n{runner}");
     }
 }
 
 #[tokio::test]
 async fn a_write_in_the_flush_window_then_a_refusal_leaves_nothing_unaccounted() {
-    let stepped = Stepped::new(266, stepped_config(3));
+    let stepped = Stepped::new(266, stepped_config());
     let mut script = Script::new();
     for step in [Step::Write, Step::Write, Step::Refuse] {
         script.run(&stepped, step).await.expect("step");
@@ -3696,7 +3880,7 @@ async fn a_write_in_the_flush_window_then_a_refusal_leaves_nothing_unaccounted()
 async fn a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable() {
     let config = WriteBehindConfig {
         or_delta_wal: true,
-        ..stepped_config(2)
+        ..stepped_config()
     };
     let stepped = Stepped::new(267, config);
     let partition = stepped.partition;
@@ -3739,57 +3923,45 @@ async fn a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable
     let pending_after_supersede = stepped.pending();
 
     // A second key of the same partition: its flush is what can move the
-    // partition's watermark past a sequence that was resolved too early.
+    // partition's watermark past a sequence that was resolved too early. It
+    // is accepted whenever its call comes up between the survivor's refusals.
     stepped
         .store
         .add(TEST_MAP, other_key, &lww(1), 0, 0)
         .await
         .unwrap();
-    stepped.inner.grant(Verdict::Refuse);
-    assert_eq!(
-        stepped.settle("the survivor's first refusal").await,
-        parked_on(key),
-        "the requeued survivor is first in the batch it shares with the other key"
-    );
-    // Its last attempt, with no newer write queued: abandoned.
-    stepped.inner.grant(Verdict::Refuse);
-    assert_eq!(
-        stepped.settle("the survivor's last refusal").await,
-        parked_on(other_key)
-    );
-    stepped.inner.grant(Verdict::Accept);
-    assert_eq!(stepped.settle("the other key's flush").await, Settled::Idle);
-
+    let (refusals, _) = stepped.refuse_first_key(10).await;
+    let pending_after_refusals = stepped.pending();
+    let other_stored = stepped.inner.contains(other_key).await;
     let applied = stepped.wal.test_read_applied_sequence(partition);
 
     // Crash: only the WAL survives.
-    let wal = Arc::clone(&stepped.wal);
-    let key = key.to_string();
-    let Stepped {
-        _dir: wal_dir,
-        store,
-        ..
-    } = stepped;
-    drop(store);
-    let recovered_store = FaultStore::new();
-    WalRecovery::new(wal, Vec::new())
-        .run(Arc::clone(&recovered_store) as Arc<dyn MapDataStore>)
-        .await
-        .expect("recovery");
-    let recovered = inner_view(&recovered_store, &key).await;
-    drop(wal_dir);
+    let image = stepped.crash_image().await;
+    let recovered = inner_view(&image, key).await;
 
+    let live = PendingOrigin::Live;
     assert_eq!(
-        (pending_after_supersede, applied, recovered),
         (
-            vec![(1, PendingOrigin::Live), (2, PendingOrigin::Live)],
+            refusals,
+            pending_after_supersede,
+            pending_after_refusals,
+            other_stored,
+            applied,
+            recovered,
+        ),
+        (
+            10,
+            vec![(1, live), (2, live)],
+            vec![(1, live), (2, live)],
+            true,
             0,
             view(&["a", "b"], &[]),
         ),
         "the retired frame must stay pending, un-applied and replayable until the \
-         entry that took it over is durable; resolving it at the supersede lets the \
-         other key's flush move the watermark past it, and the acked `a` is then \
-         filtered out of replay"
+         entry that took it over is durable, and that entry is retried for as long \
+         as the store refuses it; resolving the retired frame at the supersede, or \
+         abandoning the survivor, lets the other key's flush or a restart lose the \
+         acked `a`"
     );
 }
 
@@ -3801,7 +3973,7 @@ async fn a_subsuming_write_over_a_survivor_resolves_the_carried_sequences() {
     let config = WriteBehindConfig {
         backoff_base_ms: 1000,
         backoff_cap_ms: 5000,
-        ..stepped_config(3)
+        ..stepped_config()
     };
     let stepped = Stepped::new(268, config);
     let key = stepped.key().to_string();
@@ -3873,9 +4045,8 @@ async fn a_subsuming_write_over_a_survivor_resolves_the_carried_sequences() {
 }
 
 #[tokio::test]
-async fn a_discarded_entry_with_a_queued_newer_write_is_retired_into_it() {
-    // One attempt only, so the first refusal is the discard.
-    let stepped = Stepped::new(269, stepped_config(1));
+async fn a_refused_entry_with_a_queued_newer_write_is_retired_into_it() {
+    let stepped = Stepped::new(269, stepped_config());
     let partition = stepped.partition;
     let key = stepped.key().to_string();
 
@@ -3893,11 +4064,11 @@ async fn a_discarded_entry_with_a_queued_newer_write_is_retired_into_it() {
 
     stepped.inner.grant(Verdict::Refuse);
     assert_eq!(
-        stepped.settle("the discard").await,
+        stepped.settle("the refusal").await,
         parked_on(&key),
         "the newer write is drained next"
     );
-    let after_discard = stepped.pending();
+    let after_refusal = stepped.pending();
 
     stepped.inner.grant(Verdict::Accept);
     assert_eq!(
@@ -3907,7 +4078,7 @@ async fn a_discarded_entry_with_a_queued_newer_write_is_retired_into_it() {
 
     assert_eq!(
         (
-            after_discard,
+            after_refusal,
             stepped.pending(),
             stepped.store.test_wal_watermark(partition),
             stepped.store.pending_operation_count(),
@@ -3925,7 +4096,7 @@ async fn a_discarded_entry_with_a_queued_newer_write_is_retired_into_it() {
             (2, 2),
             (None, None),
         ),
-        "the key became durable through the newer write, so the discarded \
+        "the key became durable through the newer write, so the refused \
          entry's frame must not stay pinned as abandoned"
     );
     assert_eq!(
@@ -3935,11 +4106,10 @@ async fn a_discarded_entry_with_a_queued_newer_write_is_retired_into_it() {
 }
 
 #[tokio::test]
-async fn a_discarded_delta_entry_stays_replayable_until_its_survivor_is_durable() {
-    // One attempt only, so every refusal is a discard.
+async fn a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable() {
     let config = WriteBehindConfig {
         or_delta_wal: true,
-        ..stepped_config(1)
+        ..stepped_config()
     };
     let stepped = Stepped::new(270, config);
     let partition = stepped.partition;
@@ -3948,8 +4118,9 @@ async fn a_discarded_delta_entry_stays_replayable_until_its_survivor_is_durable(
         entry: or_entry(tag),
     };
 
-    // Real delta frames, as in the retry-path test above: the second frame
-    // does not repeat the first one's mutation, so a lost frame is a lost tag.
+    // Real delta frames, as in the test of the superseded entry above: the
+    // second frame does not repeat the first one's mutation, so a lost frame
+    // is a lost tag.
     stepped
         .store
         .add_with_witness(
@@ -3976,11 +4147,22 @@ async fn a_discarded_delta_entry_stays_replayable_until_its_survivor_is_durable(
         .await
         .unwrap();
 
-    // The first entry is discarded with the second one queued, and is retired
+    // The first entry is refused with the second one queued, and is retired
     // into it.
     stepped.inner.grant(Verdict::Refuse);
-    assert_eq!(stepped.settle("the discard").await, parked_on(key));
-    let pending_after_discard = stepped.pending();
+    assert_eq!(stepped.settle("the retirement").await, parked_on(key));
+    let pending_after_retirement = stepped.pending();
+
+    // The survivor is refused ten times with nothing queued for its key. The
+    // last refusal is followed to the end of its pass, so the survivor is
+    // read where it rests between two attempts: in its queue.
+    let (mut refusals, at) = stepped.refuse_first_key(9).await;
+    if at == parked_on(key) {
+        stepped.refuse_and_close_the_pass().await;
+        refusals += 1;
+    }
+    let queued = stepped.queued_wal_sequences();
+    let pending_after_refusals = stepped.pending();
 
     // A second key of the same partition: its flush is what can move the
     // partition's watermark past a sequence that was resolved too early.
@@ -3989,47 +4171,40 @@ async fn a_discarded_delta_entry_stays_replayable_until_its_survivor_is_durable(
         .add(TEST_MAP, other_key, &lww(1), 0, 0)
         .await
         .unwrap();
-    // The survivor is discarded too, with nothing queued for its key.
-    stepped.inner.grant(Verdict::Refuse);
-    assert_eq!(
-        stepped.settle("the survivor's discard").await,
-        parked_on(other_key)
+    stepped.flush_the_other_key().await;
+    stepped.settle("the other key's flush").await;
+    let after_the_other_key = (
+        stepped.inner.contains(other_key).await,
+        stepped.pending(),
+        stepped.store.test_wal_watermark(partition),
+        stepped.wal.test_read_applied_sequence(partition),
     );
-    stepped.inner.grant(Verdict::Accept);
-    assert_eq!(stepped.settle("the other key's flush").await, Settled::Idle);
-
-    let pending_at_idle = stepped.pending();
-    let applied = stepped.wal.test_read_applied_sequence(partition);
 
     // Crash: only the WAL survives.
-    let wal = Arc::clone(&stepped.wal);
-    let key = key.to_string();
-    let Stepped {
-        _dir: wal_dir,
-        store,
-        ..
-    } = stepped;
-    drop(store);
-    let recovered_store = FaultStore::new();
-    WalRecovery::new(wal, Vec::new())
-        .run(Arc::clone(&recovered_store) as Arc<dyn MapDataStore>)
-        .await
-        .expect("recovery");
-    let recovered = inner_view(&recovered_store, &key).await;
-    drop(wal_dir);
+    let image = stepped.crash_image().await;
+    let recovered = inner_view(&image, key).await;
 
+    let live = PendingOrigin::Live;
     assert_eq!(
-        (pending_after_discard, pending_at_idle, applied, recovered),
         (
-            vec![(1, PendingOrigin::Live), (2, PendingOrigin::Live)],
-            vec![(1, PendingOrigin::Abandoned), (2, PendingOrigin::Abandoned)],
-            0,
+            refusals,
+            pending_after_retirement,
+            (queued, pending_after_refusals),
+            after_the_other_key,
+            recovered,
+        ),
+        (
+            10,
+            vec![(1, live), (2, live)],
+            (Some(vec![1, 2]), vec![(1, live), (2, live)]),
+            (true, vec![(1, live), (2, live)], Some(Ok(0)), 0),
             view(&["a", "b"], &[]),
         ),
-        "the discarded frame must stay pending, un-applied and replayable for as \
-         long as the entry that took it over is not durable; resolving it at the \
-         discard lets the other key's flush move the watermark past it, and the \
-         acked `a` is then filtered out of replay"
+        "the retired frame must stay pending, un-applied and replayable for as \
+         long as the entry that took it over is not durable, and that entry stays \
+         queued with both sequences while the store refuses it; resolving the \
+         retired frame early lets the other key's flush move the watermark past \
+         it, and the acked `a` is then filtered out of replay"
     );
 }
 
@@ -4045,6 +4220,8 @@ fn queued_entry(store_time: i64, sequence: u64) -> DelayedEntry {
         store_time,
         sequence,
         retry_count: 0,
+        next_attempt: None,
+        first_refused: None,
         wal_sequences: BTreeSet::from([sequence]),
     }
 }

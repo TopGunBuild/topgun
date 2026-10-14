@@ -12751,7 +12751,7 @@ mod tests {
         /// [`RefusingStore`] gating `(MAP, KEY)`, with a journal attached.
         /// Every frame is fsynced before its write returns, the flush loop
         /// drains by itself within milliseconds, and a refused entry is retried
-        /// rather than discarded. `subscribed` registers one query subscription
+        /// until it is accepted. `subscribed` registers one query subscription
         /// on the map, so a write reads the key's previous value before it
         /// applies.
         fn refusing_stack(wal_dir: &tempfile::TempDir, subscribed: bool) -> RefusingStack {
@@ -12766,7 +12766,6 @@ mod tests {
                 WriteBehindConfig {
                     write_delay_ms: 0,
                     flush_interval_ms: 5,
-                    max_retries: 3,
                     backoff_base_ms: 1,
                     backoff_cap_ms: 2,
                     ..WriteBehindConfig::default()
@@ -13042,6 +13041,373 @@ mod tests {
                 (true, true),
                 "(the put waited for the key's writer, engine == store): the push holds the \
                  writer the two services share across its store write"
+            );
+        }
+
+        // ====================================================================
+        // TG-EVI-001: what a read returns for an acknowledged write the store
+        // keeps refusing, before and after an eviction
+        // ====================================================================
+        //
+        // Every state is rendered as text and each test compares one tuple, so
+        // a failing run prints the whole observation rather than its first
+        // differing member.
+
+        fn evi_describe(value: Option<&RecordValue>) -> String {
+            match value {
+                None => "absent".to_string(),
+                Some(RecordValue::Lww {
+                    value: topgun_core::types::Value::Null,
+                    ..
+                }) => "tomb".to_string(),
+                Some(RecordValue::Lww { value, .. }) => format!("{:?}", value_to_rmpv(value)),
+                Some(RecordValue::OrMap {
+                    records,
+                    tombstones,
+                }) => {
+                    let mut tags: Vec<&str> = records.iter().map(|e| e.tag.as_str()).collect();
+                    tags.sort_unstable();
+                    let mut tombs: Vec<&str> = tombstones.iter().map(String::as_str).collect();
+                    tombs.sort_unstable();
+                    format!("{tags:?}+T{tombs:?}")
+                }
+                Some(RecordValue::OrTombstones { tags }) => format!("T{tags:?}"),
+            }
+        }
+
+        fn evi_lww_tombstone_op() -> Operation {
+            let mut op = lww_put("unused");
+            op.id = Some("put-tombstone".to_string());
+            op.record = Some(Some(topgun_core::LWWRecord {
+                value: None,
+                timestamp: make_timestamp(),
+                ttl_ms: None,
+            }));
+            Operation::ClientOp {
+                ctx: make_anon_http_ctx_for_key(KEY),
+                payload: topgun_core::messages::ClientOpMessage { payload: op },
+            }
+        }
+
+        /// Grants `verdict` to each parked store call, at most `limit` times,
+        /// and returns early when the store goes idle. Says how many it
+        /// granted: a store that gives up on a refused entry goes idle before
+        /// the limit, so the caller ends instead of waiting for a call that
+        /// never comes.
+        async fn grant_up_to(
+            inner: &RefusingStore,
+            write_behind: &WriteBehindDataStore,
+            limit: usize,
+            verdict: Verdict,
+        ) -> usize {
+            let mut granted = 0;
+            while granted < limit && inner.settle(write_behind).await {
+                inner.grant(verdict);
+                granted += 1;
+            }
+            granted
+        }
+
+        async fn evi_read(factory: &Arc<RecordStoreFactory>) -> String {
+            let store = factory.get_or_create(MAP, hash_to_partition(KEY));
+            let read = store.get(KEY, false).await.expect("get");
+            evi_describe(read.as_ref().map(|r| &r.value))
+        }
+
+        fn evi_inner(inner: &RefusingStore) -> String {
+            match inner
+                .data
+                .lock()
+                .unwrap()
+                .get(&(MAP.to_string(), KEY.to_string()))
+            {
+                None => "never written".to_string(),
+                Some(None) => "deleted".to_string(),
+                Some(Some(value)) => evi_describe(Some(value)),
+            }
+        }
+
+        /// What a restart at this moment would serve for the key: recovery
+        /// runs over the same WAL into a copy of the inner store.
+        async fn evi_restart_image(
+            inner: &RefusingStore,
+            wal: &Arc<crate::storage::wal::WalWriter>,
+        ) -> String {
+            use crate::storage::wal::WalRecovery;
+
+            let image = Arc::new(RefusingStore::image_of(inner));
+            WalRecovery::new(Arc::clone(wal), Vec::new())
+                .run(Arc::clone(&image) as Arc<dyn MapDataStore>)
+                .await
+                .expect("recovery");
+            evi_describe(image.load(MAP, KEY).await.expect("read the image").as_ref())
+        }
+
+        /// `(refusals granted, pending ops after them, read before eviction,
+        /// evicted, read after eviction, inner store after Accept, restart
+        /// image)`.
+        type EviTuple = (usize, u64, String, u32, String, String, String);
+
+        /// Seed (accepted, flushed) -> the acknowledged op -> up to ten
+        /// refusals -> read -> evict -> read -> (optional follow-up op) ->
+        /// accept until idle -> the inner store -> the restart image.
+        async fn evi_scenario(
+            seed: Vec<Operation>,
+            acked: Operation,
+            followup: Option<Operation>,
+        ) -> EviTuple {
+            let wal_dir = tempfile::tempdir().expect("wal tempdir");
+            let RefusingStack {
+                svc,
+                factory,
+                write_behind,
+                wal,
+                inner,
+                journal: _journal,
+                _listener,
+            } = refusing_stack(&wal_dir, false);
+            let store = factory.get_or_create(MAP, hash_to_partition(KEY));
+            for op in seed {
+                svc.clone().oneshot(op).await.expect("seed op must succeed");
+                grant_up_to(&inner, &write_behind, usize::MAX, Verdict::Accept).await;
+            }
+            svc.clone()
+                .oneshot(acked)
+                .await
+                .expect("the op under test must be acknowledged");
+            let refused = grant_up_to(&inner, &write_behind, 10, Verdict::Refuse).await;
+            let pending = write_behind.pending_operation_count();
+            let before = evi_read(&factory).await;
+            let evicted = store.evict_lru(u32::MAX, false);
+            let after = evi_read(&factory).await;
+            if let Some(op) = followup {
+                svc.clone().oneshot(op).await.expect("the follow-up op");
+            }
+            grant_up_to(&inner, &write_behind, usize::MAX, Verdict::Accept).await;
+            let stored = evi_inner(&inner);
+            let image = evi_restart_image(&inner, &wal).await;
+            (refused, pending, before, evicted, after, stored, image)
+        }
+
+        fn evi(
+            refused: usize,
+            pending: u64,
+            before: &str,
+            evicted: u32,
+            after: &str,
+            stored: &str,
+            image: &str,
+        ) -> EviTuple {
+            (
+                refused,
+                pending,
+                before.to_string(),
+                evicted,
+                after.to_string(),
+                stored.to_string(),
+                image.to_string(),
+            )
+        }
+
+        const EVI_NEW: &str = "String(Utf8String { s: Ok(\"NEW\") })";
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn an_lww_write_refused_ten_times_and_evicted_reads_the_acked_value() {
+            let seen = evi_scenario(vec![route_x("OLD")], route_x("NEW"), None).await;
+            assert_eq!(seen, evi(10, 1, EVI_NEW, 1, EVI_NEW, EVI_NEW, EVI_NEW));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_first_lww_write_refused_ten_times_and_evicted_reads_the_acked_value() {
+            let seen = evi_scenario(Vec::new(), route_x("NEW"), None).await;
+            assert_eq!(seen, evi(10, 1, EVI_NEW, 1, EVI_NEW, EVI_NEW, EVI_NEW));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn an_lww_tombstone_refused_ten_times_and_evicted_stays_a_tombstone() {
+            let seen = evi_scenario(vec![route_x("OLD")], evi_lww_tombstone_op(), None).await;
+            assert_eq!(seen, evi(10, 1, "tomb", 1, "tomb", "tomb", "tomb"));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_remove_refused_ten_times_stays_removed() {
+            let seen = evi_scenario(vec![route_x("OLD")], remove_op(MAP, KEY), None).await;
+            assert_eq!(seen, evi(10, 1, "absent", 0, "absent", "deleted", "absent"));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn an_or_add_refused_ten_times_and_evicted_keeps_its_tag() {
+            let seen = evi_scenario(
+                vec![or_add_op(MAP, KEY, "v1", "t-1")],
+                or_add_op(MAP, KEY, "v2", "t-2"),
+                None,
+            )
+            .await;
+            let both = "[\"t-1\", \"t-2\"]+T[]";
+            assert_eq!(seen, evi(10, 1, both, 1, both, both, both));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn an_or_remove_refused_ten_times_and_evicted_keeps_its_tombstone() {
+            let seen = evi_scenario(
+                vec![
+                    or_add_op(MAP, KEY, "v1", "t-1"),
+                    or_add_op(MAP, KEY, "v2", "t-2"),
+                ],
+                or_remove_op(MAP, KEY, "t-1"),
+                None,
+            )
+            .await;
+            let left = "[\"t-2\"]+T[\"t-1\"]";
+            assert_eq!(seen, evi(10, 1, left, 1, left, left, left));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_write_of_a_key_under_retry_is_stored_with_the_refused_one() {
+            let seen = evi_scenario(
+                vec![or_add_op(MAP, KEY, "v1", "t-1")],
+                or_add_op(MAP, KEY, "v2", "t-2"),
+                Some(or_add_op(MAP, KEY, "v3", "t-3")),
+            )
+            .await;
+            let both = "[\"t-1\", \"t-2\"]+T[]";
+            let all = "[\"t-1\", \"t-2\", \"t-3\"]+T[]";
+            assert_eq!(seen, evi(10, 1, both, 1, both, all, all));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn an_or_remove_under_retry_survives_the_next_write_of_its_key() {
+            let seen = evi_scenario(
+                vec![
+                    or_add_op(MAP, KEY, "v1", "t-1"),
+                    or_add_op(MAP, KEY, "v2", "t-2"),
+                ],
+                or_remove_op(MAP, KEY, "t-1"),
+                Some(or_add_op(MAP, KEY, "v3", "t-3")),
+            )
+            .await;
+            let left = "[\"t-2\"]+T[\"t-1\"]";
+            let all = "[\"t-2\", \"t-3\"]+T[\"t-1\"]";
+            assert_eq!(seen, evi(10, 1, left, 1, left, all, all));
+        }
+
+        /// The windows in which the entry is buffered and the store has not
+        /// taken it yet: evict while the first store call is parked -> read;
+        /// one refusal, evict -> read; accept, evict -> read.
+        async fn evi_window(seed: Vec<Operation>, acked: Operation) -> (String, String, String) {
+            let wal_dir = tempfile::tempdir().expect("wal tempdir");
+            let RefusingStack {
+                svc,
+                factory,
+                write_behind,
+                wal: _wal,
+                inner,
+                journal: _journal,
+                _listener,
+            } = refusing_stack(&wal_dir, false);
+            let store = factory.get_or_create(MAP, hash_to_partition(KEY));
+            for op in seed {
+                svc.clone().oneshot(op).await.expect("seed op must succeed");
+                grant_up_to(&inner, &write_behind, usize::MAX, Verdict::Accept).await;
+            }
+            svc.clone()
+                .oneshot(acked)
+                .await
+                .expect("the op under test must be acknowledged");
+            inner.wait_store_call_parked().await;
+            store.evict_lru(u32::MAX, false);
+            let parked = evi_read(&factory).await;
+            inner.grant(Verdict::Refuse);
+            inner.wait_store_call_parked().await;
+            store.evict_lru(u32::MAX, false);
+            let retried = evi_read(&factory).await;
+            grant_up_to(&inner, &write_behind, usize::MAX, Verdict::Accept).await;
+            store.evict_lru(u32::MAX, false);
+            let flushed = evi_read(&factory).await;
+            (parked, retried, flushed)
+        }
+
+        fn thrice(value: &str) -> (String, String, String) {
+            (value.to_string(), value.to_string(), value.to_string())
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_write_evicted_before_its_first_flush_reads_the_acked_value_lww_value() {
+            let seen = evi_window(vec![route_x("OLD")], route_x("NEW")).await;
+            assert_eq!(seen, thrice(EVI_NEW));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_write_evicted_before_its_first_flush_reads_the_acked_value_lww_tombstone() {
+            let seen = evi_window(vec![route_x("OLD")], evi_lww_tombstone_op()).await;
+            assert_eq!(seen, thrice("tomb"));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_write_evicted_before_its_first_flush_reads_the_acked_value_remove() {
+            let seen = evi_window(vec![route_x("OLD")], remove_op(MAP, KEY)).await;
+            assert_eq!(seen, thrice("absent"));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_write_evicted_before_its_first_flush_reads_the_acked_value_or_add() {
+            let seen = evi_window(
+                vec![or_add_op(MAP, KEY, "v1", "t-1")],
+                or_add_op(MAP, KEY, "v2", "t-2"),
+            )
+            .await;
+            assert_eq!(seen, thrice("[\"t-1\", \"t-2\"]+T[]"));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_write_evicted_before_its_first_flush_reads_the_acked_value_or_remove() {
+            let seen = evi_window(
+                vec![
+                    or_add_op(MAP, KEY, "v1", "t-1"),
+                    or_add_op(MAP, KEY, "v2", "t-2"),
+                ],
+                or_remove_op(MAP, KEY, "t-1"),
+            )
+            .await;
+            assert_eq!(seen, thrice("[\"t-2\"]+T[\"t-1\"]"));
+        }
+
+        /// `NEW` is refused twice; while its third store call is parked `NEWER`
+        /// is acknowledged; the parked call is refused; then the store accepts.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_newer_lww_write_replaces_the_refused_one_and_is_what_the_store_gets() {
+            let wal_dir = tempfile::tempdir().expect("wal tempdir");
+            let RefusingStack {
+                svc,
+                factory: _factory,
+                write_behind,
+                wal: _wal,
+                inner,
+                journal: _journal,
+                _listener,
+            } = refusing_stack(&wal_dir, false);
+            svc.clone().oneshot(route_x("OLD")).await.expect("seed");
+            grant_up_to(&inner, &write_behind, usize::MAX, Verdict::Accept).await;
+            svc.clone().oneshot(route_x("NEW")).await.expect("NEW");
+            let refused = grant_up_to(&inner, &write_behind, 2, Verdict::Refuse).await;
+            inner.wait_store_call_parked().await;
+            svc.clone().oneshot(route_x("NEWER")).await.expect("NEWER");
+            inner.grant(Verdict::Refuse);
+            // The store is read after each accepted call has returned: the
+            // flush task makes one store call at a time, so once the next call
+            // is parked or the store is idle, the accepted one has recorded
+            // its value.
+            let mut accepted = Vec::new();
+            let mut parked = inner.settle(&write_behind).await;
+            while parked {
+                inner.grant(Verdict::Accept);
+                parked = inner.settle(&write_behind).await;
+                accepted.push(evi_inner(&inner));
+            }
+            let newer = "String(Utf8String { s: Ok(\"NEWER\") })".to_string();
+            assert_eq!(
+                (refused, accepted, evi_inner(&inner)),
+                (2, vec![newer.clone()], newer)
             );
         }
     }

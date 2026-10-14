@@ -2048,6 +2048,8 @@ fn tg_or_003_ac7b_an_or_delta_survivor_carries_the_retired_sequences_forward() {
         store_time: 0,
         sequence: 1,
         retry_count: 0,
+        next_attempt: None,
+        first_refused: None,
         wal_sequences: BTreeSet::from([11]),
     };
     let retired = BTreeSet::from([7, 9]);

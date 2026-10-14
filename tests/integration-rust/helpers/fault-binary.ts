@@ -1,7 +1,7 @@
 /**
  * What the tests that drive a `fault-injection` server build have in common:
  * how the binary is required, how a write is shaped, and how the per-partition
- * WAL lag gauge is read.
+ * WAL lag gauge and the unlabelled series are read.
  *
  * No release build has the `fault-injection` cargo feature, so the binary is
  * given by path (FAULT_SERVER_BINARY) together with the commit it was built
@@ -72,6 +72,23 @@ export async function scrapeLag(port: number): Promise<LagScrape> {
     if (partition && Number.isFinite(value)) lags[partition[1]] = value;
   }
   return lags;
+}
+
+/**
+ * Reads one series that has no labels, or `null` when the server does not
+ * render it: a build without the series is told that way from one that
+ * reports zero.
+ */
+export async function scrapeGauge(port: number, name: string): Promise<number | null> {
+  const resp = await fetch(`http://localhost:${port}/metrics`);
+  const body = await resp.text();
+  for (const line of body.split('\n')) {
+    const [series, sample] = line.trim().split(/\s+/);
+    if (series !== name) continue;
+    const value = Number(sample);
+    return Number.isFinite(value) ? value : null;
+  }
+  return null;
 }
 
 /** True for a scrape that has at least one sample and every sample at zero; an empty scrape says nothing. */

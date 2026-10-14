@@ -10,6 +10,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server):** a write the server acknowledged is no longer lost when the storage
+  refuses it. Before, the server tried to store a write three times and then gave up on
+  it. The write stayed readable only while its record was in memory: after the record was
+  evicted, a read returned the previous value, or nothing for a new key; a delete the
+  storage had refused came back at once; and the next write to the same record was built
+  on that old value and stored that way. Only a restart brought the write back. Now a
+  write the storage refuses stays in the server's write buffer, stays readable, and is
+  retried until the storage takes it — a storage outage of any length loses no
+  acknowledged write on a running server. The retry limit is gone (it was never a
+  setting). The server spaces its retries, so a storage that is down is called at most
+  20 times in the first minute, and less often after that, however many writes are
+  waiting, and after the storage returns
+  every waiting write is attempted within about 6 s. What changes for whoever runs the
+  server, and what remains:
+  - **During an outage the write buffer fills, and then new writes are refused.** Nothing
+    leaves the buffer while the storage refuses, so once `TOPGUN_WRITEBEHIND_CAPACITY`
+    keys are buffered, a write of a key that is not buffered yet is refused as a
+    temporary error; the client keeps it and sends it again. Writes of keys that are
+    already buffered are still accepted. `TOPGUN_WRITEBEHIND_CAPACITY=0` together with a
+    storage that refuses writes is not supported: nothing then limits the buffer.
+  - **New log lines and metrics.** One warning, at most every 30 s, says that writes are
+    being retried and names one of them; one line says when the backlog has cleared.
+    After an outage has lasted `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS` (60 s by default)
+    the existing `WAL watermark stalled` error is also logged, every 6 s per affected
+    partition, until the storage returns; that is expected. Five new metrics,
+    `topgun_write_behind_flush_refusals_total`, `…_buffered_entries`,
+    `…_retrying_entries`, `…_oldest_refusal_age_seconds` and `…_store_hold`, show the
+    backlog; `topgun_write_behind_buffered_entries` is the one to watch against the
+    capacity.
+  - **A record the storage never accepts is retried for ever.** The server cannot tell a
+    storage that is down from a record the storage rejects. Such a record keeps one
+    place in the buffer, and enough of them fill it; there is then no time by which
+    every other waiting write is stored, although a new write the storage accepts is
+    stored within about 6 s of the moment it is due. Three refusals in a row also make
+    the server leave the storage alone for a while, even when the storage is up and
+    only those records are refused.
+  - **Cleanup of deleted records stops on the whole server while any write is
+    refused,** and that partition's write-ahead log is not collected. For an outage that
+    ends this is intended; for a record the storage never accepts it lasts until the
+    record is written again or the server restarts.
+  - **A write the storage refuses while the server starts** — during recovery from the
+    write-ahead log — is not retried this way: the server serves the previous value of
+    that record until its next restart.
+  - **Shutdown during an outage** tries each buffered write once and can take the full
+    `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`; what it could not store is applied from
+    the write-ahead log at the next start.
+  - **Postgres was not measured,** and no performance measurement was made.
 - **Changed (client):** the client now applies the server's map-name rule before anything
   is stored, so a bad name fails at the call that used it instead of coming back later as a
   refused write. Names with `-`, `/` and `.` are accepted — `user-profiles`,
