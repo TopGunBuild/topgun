@@ -27,7 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep their data on named volumes, and every server service sets
   `TOPGUN_WAL_DIR=/data/topgun-wal` (the image's existing default, so no WAL moves). The Helm
   chart gets a persistent volume, correct probe paths (`/health/ready`), `replicaCount: 1`
-  and the disruption budget off by default.
+  and the disruption budget off by default. Kubernetes does not allow `volumeClaimTemplates`
+  to change on an existing StatefulSet, so `helm upgrade` of a release installed from an
+  earlier chart is refused; install such a release anew (the earlier chart kept no data on a
+  volume).
 
 - **Fixed (server):** a server on the embedded redb store no longer runs on while storing
   nothing after the database reports a fault: it now stops by itself with exit code 72, and
