@@ -19,7 +19,7 @@ use tracing::{error, warn};
 use crate::storage::engine::SlotCell;
 use crate::storage::map_data_store::{
     merkle_leaf_hash, LeafSink, Loaded, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
-    StoreBrokenCause, WriteSource,
+    StoreBrokenCause, StoreErrorClass, WriteSource,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{
@@ -1565,8 +1565,9 @@ impl LifecycleState {
         }
     }
 
-    /// A background task panicked. Unconditional, because the store is failed
-    /// from then on whatever it was doing, a shutdown included.
+    /// A background task panicked or the inner store reported itself broken.
+    /// Unconditional, because the store is failed from then on whatever it was
+    /// doing, a shutdown included.
     fn fail(&self) {
         self.0.store(Lifecycle::Failed as u8, Ordering::Release);
     }
@@ -1598,6 +1599,27 @@ fn register_background_task_panic_metrics() {
     );
     for task in [BackgroundTask::Flush, BackgroundTask::StallWatchdog] {
         metrics::counter!(BACKGROUND_TASK_PANICS_COUNTER, "task" => task.as_str()).increment(0);
+    }
+}
+
+/// Counts stores whose inner store reported itself broken, by `cause` label.
+const STORE_BROKEN_COUNTER: &str = "topgun_write_behind_store_broken_total";
+
+/// Registers the broken-store counter with all four of its series at zero,
+/// for the reason the panic counter is registered at zero.
+fn register_store_broken_metrics() {
+    metrics::describe_counter!(
+        STORE_BROKEN_COUNTER,
+        "Write-behind stores whose inner store reported itself broken, labeled by the cause"
+    );
+    // The `io` label does not carry the kind, so any kind registers it.
+    for cause in [
+        StoreBrokenCause::Io(std::io::ErrorKind::Other),
+        StoreBrokenCause::PreviousIo,
+        StoreBrokenCause::Corrupted,
+        StoreBrokenCause::LockPoisoned,
+    ] {
+        metrics::counter!(STORE_BROKEN_COUNTER, "cause" => cause.as_str()).increment(0);
     }
 }
 
@@ -1747,10 +1769,14 @@ pub struct WriteBehindDataStore {
     /// than silently lost: after a shutdown began nothing would drain it, and
     /// after a background task panicked nothing would flush it.
     lifecycle: LifecycleState,
-    /// The first background-task panic, `None` until there is one. A `watch`
-    /// channel so that whoever owns the process can wait for the failure
-    /// instead of polling the store for it.
+    /// The first failure — a background-task panic or a broken inner store —
+    /// `None` until there is one. A `watch` channel so that whoever owns the
+    /// process can wait for the failure instead of polling the store for it.
     background_failure: watch::Sender<Option<BackgroundFailure>>,
+    /// Set by the first broken-store record, whatever the failure record
+    /// holds, so that the drain meeting the same broken store after the flush
+    /// task adds no second line and no second count.
+    store_broken_seen: AtomicBool,
     /// Optional WAL for append-before-ack durability, bundled with its
     /// per-partition sequence tracking. When `Some`, every write is persisted to
     /// the WAL per the configured fsync policy before the store method returns,
@@ -1904,6 +1930,7 @@ impl WriteBehindDataStore {
         }
 
         register_background_task_panic_metrics();
+        register_store_broken_metrics();
         register_retry_metrics();
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1929,6 +1956,7 @@ impl WriteBehindDataStore {
             shutdown: shutdown_tx,
             lifecycle: LifecycleState::new(),
             background_failure: watch::channel(None).0,
+            store_broken_seen: AtomicBool::new(false),
             wal,
             wal_sequence: AtomicU64::new(wal_sequence_start),
             pending_seqs: Mutex::new(BTreeSet::new()),
@@ -2047,6 +2075,64 @@ impl WriteBehindDataStore {
         self.background_failure.subscribe()
     }
 
+    /// Fails the store because its inner store reported itself broken
+    /// (`TG-WB-010`). Once per process: a later call does nothing.
+    ///
+    /// Synchronous, like the panic record. The record is set before the state,
+    /// so that a write refused for the failed state finds the record when it
+    /// chooses its sentence; both precede the line. The record is set only if
+    /// empty: a panic recorded earlier stays the first failure.
+    fn record_store_broken(
+        &self,
+        cause: StoreBrokenCause,
+        err: &anyhow::Error,
+        map: &str,
+        key: &str,
+        site: &'static str,
+    ) {
+        if self.store_broken_seen.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let message = err.to_string();
+        self.background_failure.send_if_modified(|recorded| {
+            if recorded.is_some() {
+                return false;
+            }
+            *recorded = Some(BackgroundFailure {
+                task: BackgroundTask::Flush,
+                message: message.clone(),
+                cause: FailureCause::StoreBroken(cause),
+            });
+            true
+        });
+        self.lifecycle.fail();
+        let io_kind = match cause {
+            StoreBrokenCause::Io(kind) => Some(format!("{kind:?}")),
+            _ => None,
+        };
+        error!(
+            cause = cause.as_str(),
+            io_kind = io_kind.as_deref(),
+            error = %message,
+            map,
+            key,
+            site,
+            "write-behind store: the durable store is broken and stores nothing more in this \
+             process; writes are refused from now on and the node stops"
+        );
+        metrics::counter!(STORE_BROKEN_COUNTER, "cause" => cause.as_str()).increment(1);
+    }
+
+    /// Why a failed store refuses a write, as the refusal sentence names it.
+    /// Read only when a write is refused for the failed state, so an accepted
+    /// write pays nothing for it.
+    fn failed_reason(&self) -> &'static str {
+        match self.background_failure.borrow().as_ref() {
+            Some(failure) if failure.store_broken() => "the durable store is broken",
+            _ => "background task panicked",
+        }
+    }
+
     /// The shutdown drain: persists every queued entry to the inner store, or
     /// gives up on what is left when `deadline` passes.
     ///
@@ -2093,8 +2179,10 @@ impl WriteBehindDataStore {
             // inner-store write cannot hold up the process past the configured
             // timeout.
             let mut timed_out_entries: Vec<DelayedEntry> = Vec::new();
+            let mut broken: Option<StoreBrokenCause> = None;
 
-            for entry in all_entries {
+            let mut entries = all_entries.into_iter();
+            while let Some(entry) = entries.next() {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     // Budget exhausted — collect this entry as timed-out.
@@ -2124,6 +2212,24 @@ impl WriteBehindDataStore {
                             .await;
                     }
                     Ok(Err(err)) => {
+                        if let StoreErrorClass::StoreBroken(cause) = self.inner.classify_error(&err)
+                        {
+                            // A broken store stores nothing more: no further
+                            // call. This entry and every one not attempted are
+                            // abandoned, never resolved, so their frames replay
+                            // at the next start.
+                            self.record_store_broken(
+                                cause,
+                                &err,
+                                &entry.map,
+                                &entry.key,
+                                "shutdown_drain",
+                            );
+                            broken = Some(cause);
+                            timed_out_entries.push(entry);
+                            timed_out_entries.extend(entries.by_ref());
+                            break;
+                        }
                         // Inner store returned an error; log and treat as timed-out
                         // rather than looping forever on a failing backend.
                         warn!(
@@ -2161,6 +2267,15 @@ impl WriteBehindDataStore {
                     self.abandon_wal_sequences(
                         partition_for(&entry.map, &entry.key),
                         &entry.wal_sequences,
+                    );
+                }
+
+                if let Some(cause) = broken {
+                    error!(
+                        abandoned_entries = timed_out_entries.len(),
+                        cause = cause.as_str(),
+                        "write-behind shutdown drain stopped at a broken store: the entries it \
+                         did not store stay un-resolved and replay from the WAL at the next start"
                     );
                 }
 
@@ -2218,8 +2333,12 @@ impl WriteBehindDataStore {
             "write-behind shutdown on a failed store: entries not persisted here stay \
              un-resolved and replay from the WAL at the next start when the store has one"
         );
-        Err(anyhow::Error::new(failure)
-            .context("write-behind shutdown ran on a failed store: a background task panicked"))
+        let context = if failure.store_broken() {
+            "write-behind shutdown ran on a failed store: the durable store is broken"
+        } else {
+            "write-behind shutdown ran on a failed store: a background task panicked"
+        };
+        Err(anyhow::Error::new(failure).context(context))
     }
 
     /// Assign the next ordering sequence AND record it pending byte-durability in
@@ -3573,6 +3692,9 @@ struct RetrySchedule {
     last_warning: Option<tokio::time::Instant>,
     /// The most recently refused entry, as the warning's example.
     example: Option<RefusedExample>,
+    /// The inner store reported itself broken: no pass calls it again
+    /// (`TG-WB-010`).
+    store_broken: bool,
 }
 
 /// One refused entry, named in the retry warning so an operator has a
@@ -3642,13 +3764,17 @@ impl WriteBehindDataStore {
     /// `returned` is when the refused call came back. The backoff is counted
     /// from there and not from the start of the pass, so a store that is slow
     /// to refuse is still left alone for the whole of it.
+    ///
+    /// Returns what the inner store says about the error. On `StoreBroken`
+    /// the store is failed here and the schedule stops every later pass; the
+    /// caller makes no further call in this pass.
     fn requeue_refused(
         &self,
         schedule: &mut RetrySchedule,
         mut entry: DelayedEntry,
         err: &anyhow::Error,
         returned: tokio::time::Instant,
-    ) {
+    ) -> StoreErrorClass {
         metrics::counter!(FLUSH_REFUSALS_COUNTER).increment(1);
         self.retrying.store(true, Ordering::Relaxed);
         entry.retry_count = entry.retry_count.saturating_add(1);
@@ -3674,7 +3800,18 @@ impl WriteBehindDataStore {
             attempts: entry.retry_count,
             error: err.to_string(),
         });
-        self.put_back(entry);
+        let class = self.inner.classify_error(err);
+        if let StoreErrorClass::StoreBroken(cause) = class {
+            // Put back first, exactly as any refused entry: the record only
+            // stops further calls, it never decides the entry's fate.
+            let (map, key) = (entry.map.clone(), entry.key.clone());
+            self.put_back(entry);
+            self.record_store_broken(cause, err, &map, &key, "flush");
+            schedule.store_broken = true;
+        } else {
+            self.put_back(entry);
+        }
+        class
     }
 
     /// Chooses, over all queues, the entry a probe attempts, and says which
@@ -3739,6 +3876,11 @@ impl WriteBehindDataStore {
         let base = self.config.backoff_base_ms;
         let cap = self.config.backoff_cap_ms;
 
+        // A broken store stores nothing more in this process (`TG-WB-010`).
+        if schedule.store_broken {
+            return;
+        }
+
         if let Some(until) = schedule.hold_until {
             // The store is being left alone: nothing is taken and no call is
             // made, whoever woke the pass.
@@ -3775,7 +3917,11 @@ impl WriteBehindDataStore {
                 }
                 Err(err) => {
                     let returned = tokio::time::Instant::now();
-                    self.requeue_refused(schedule, probe, &err, returned);
+                    if let StoreErrorClass::StoreBroken(_) =
+                        self.requeue_refused(schedule, probe, &err, returned)
+                    {
+                        return;
+                    }
                     schedule.failed_probes = schedule.failed_probes.saturating_add(1);
                     schedule.hold_until =
                         Some(returned + retry_backoff(base, cap, schedule.failed_probes));
@@ -3811,7 +3957,15 @@ impl WriteBehindDataStore {
                 }
                 Err(err) => {
                     let returned = tokio::time::Instant::now();
-                    self.requeue_refused(schedule, entry, &err, returned);
+                    if let StoreErrorClass::StoreBroken(_) =
+                        self.requeue_refused(schedule, entry, &err, returned)
+                    {
+                        // What was not attempted goes back as it was.
+                        for unattempted in entries.by_ref() {
+                            self.put_back(unattempted);
+                        }
+                        return;
+                    }
                     refused_in_a_row += 1;
                     if refused_in_a_row >= HOLD_TRIP_REFUSALS {
                         // The store refuses whatever it is given: stop asking.
@@ -4058,7 +4212,8 @@ impl MapDataStore for WriteBehindDataStore {
         match self.lifecycle.load(Ordering::Acquire) {
             Lifecycle::Running => {}
             Lifecycle::Failed => anyhow::bail!(
-                "write-behind store has failed (background task panicked); write rejected for map={map} key={key}"
+                "write-behind store has failed ({}); write rejected for map={map} key={key}",
+                self.failed_reason()
             ),
             Lifecycle::ShuttingDown => anyhow::bail!(
                 "write-behind store is shutting down; write rejected for map={map} key={key}"
@@ -4258,7 +4413,8 @@ impl MapDataStore for WriteBehindDataStore {
         match self.lifecycle.load(Ordering::Acquire) {
             Lifecycle::Running => {}
             Lifecycle::Failed => anyhow::bail!(
-                "write-behind store has failed (background task panicked); write rejected for map={map} key={key}"
+                "write-behind store has failed ({}); write rejected for map={map} key={key}",
+                self.failed_reason()
             ),
             Lifecycle::ShuttingDown => anyhow::bail!(
                 "write-behind store is shutting down; remove rejected for map={map} key={key}"
@@ -4450,7 +4606,8 @@ impl MapDataStore for WriteBehindDataStore {
         match self.lifecycle.load(Ordering::Acquire) {
             Lifecycle::Running => {}
             Lifecycle::Failed => anyhow::bail!(
-                "write-behind store has failed (background task panicked); write rejected for map={map}"
+                "write-behind store has failed ({}); write rejected for map={map}",
+                self.failed_reason()
             ),
             Lifecycle::ShuttingDown => anyhow::bail!(
                 "write-behind store is shutting down; remove_all rejected for map={map}"
