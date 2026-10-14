@@ -46,15 +46,11 @@
 
   "postCreateCommand": "bash .devcontainer/post-create.sh",
 
-  "forwardPorts": [8080, 5432, 3001, 9090, 3000, 9091],
+  "forwardPorts": [8080, 3001, 9090, 3000, 9091],
   "portsAttributes": {
     "8080": {
       "label": "TopGun Server",
       "onAutoForward": "notify"
-    },
-    "5432": {
-      "label": "PostgreSQL",
-      "onAutoForward": "silent"
     },
     "3001": {
       "label": "Admin UI",
@@ -85,15 +81,6 @@
     "ghcr.io/devcontainers/features/git:1": {
       "version": "latest"
     }
-  },
-
-  "containerEnv": {
-    "STORAGE_MODE": "postgres",
-    "DB_HOST": "postgres",
-    "DB_PORT": "5432",
-    "DB_USER": "topgun",
-    "DB_PASSWORD": "topgun_dev",
-    "DB_NAME": "topgun"
   },
 
   "remoteUser": "node"
