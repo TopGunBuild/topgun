@@ -132,10 +132,10 @@ jobs:
         #   property, not a regression surface, so both files are run locally
         #   (`pnpm test:integration-rust:two-binary`) and their output is carried
         #   in the pull request.
-        # - store-refusal-liveness and flush-task-panic each need a server built
-        #   with the `fault-injection` cargo feature, and this job builds one
-        #   binary without it. Both are run locally
-        #   (`pnpm test:integration-rust:liveness`). What guards the two defects
+        # - store-refusal-liveness, flush-task-panic and store-broken each need a
+        #   server built with the `fault-injection` cargo feature, and this job
+        #   builds one binary without it. All three are run locally
+        #   (`pnpm test:integration-rust:liveness`). What guards the three defects
         #   in CI is the in-process tests in `cargo test` and the clippy gate.
         # - map-name-postgres needs a reachable Postgres database and a server built
         #   with the `postgres` cargo feature; this workflow has neither. It is run

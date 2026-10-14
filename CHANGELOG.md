@@ -10,6 +10,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server):** a server on the embedded redb store no longer runs on while storing
+  nothing after the database reports a fault: it now stops by itself with exit code 72, and
+  a restart brings every acknowledged write back. Before, once redb reported an I/O error —
+  a full disk included — it refused every later write on the same handle, also after the
+  disk had room again, while the server kept acknowledging writes, retried each for as long
+  as the process ran, and on a stop reported a clean exit 0. Now, when redb reports an I/O
+  error, a previous I/O error, corruption or a poisoned lock, the server stops calling it,
+  refuses writes arriving meanwhile as a temporary error (the client keeps them and sends
+  them again), answers 503 on `/health/ready`, and shuts down with exit code 72. The
+  acknowledged writes redb did not take stay in the write-ahead log and are replayed at the
+  next start, which opens a fresh database handle. A remove is also no longer reported
+  stored when redb could not read its table list. What changes for whoever runs the server:
+  - **Run it under a supervisor that restarts on a non-zero exit code** (as for exit codes
+    70 and 71). While the disk is still full, each restart exits with code 1 when it opens
+    the database, until there is room; give the restart a delay of several seconds.
+  - **New log lines and a metric.** One error line names the cause (`io` with its
+    `io_kind`, `previous_io`, `corrupted` or `lock_poisoned`); the binary logs
+    `the durable store is broken; shutting the node down` with `exit_code=72`. The new
+    counter `topgun_write_behind_store_broken_total{cause}` renders all four causes at 0
+    from the first scrape.
+  - **Other store errors are unchanged:** they are retried until stored, as before. Postgres
+    classifies none of its errors.
+  - **For embedders:** `MapDataStore` gains `classify_error`, whose default answer is
+    `StoreErrorClass::Unknown` (retry as before), so existing implementations compile
+    unchanged; `WriteBehindDataStore::hard_flush` returns an error when the inner store
+    reported itself broken, and the failure that `background_failure()` reports gains the
+    methods `store_broken()` and `cause_label()`.
+
 - **Fixed (server):** a write the server acknowledged is no longer lost when the storage
   refuses it. Before, the server tried to store a write three times and then gave up on
   it. The write stayed readable only while its record was in memory: after the record was
