@@ -32,6 +32,22 @@ export interface RustTestContext {
 }
 
 /**
+ * Builds the environment a spawned server gets: the caller's own environment
+ * minus DATABASE_URL, then the harness defaults, then the test's overrides.
+ * The server refuses to start while DATABASE_URL is set (an empty value counts),
+ * so one exported in a developer's or CI shell must not reach a suite that has
+ * nothing to do with it. A test that wants the variable passes it in `overrides`.
+ */
+function serverEnv(
+  defaults: Record<string, string>,
+  overrides?: Record<string, string>,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.DATABASE_URL;
+  return { ...env, ...defaults, ...overrides };
+}
+
+/**
  * Spawns the Rust test server binary and waits for it to print `PORT=<number>`
  * to stdout.
  *
@@ -100,12 +116,7 @@ export async function spawnRustServer(
       cwd: REPO_ROOT,
       detached: true,
       stdio: ['ignore', 'pipe', 'inherit'],
-      env: {
-        ...process.env,
-        STORAGE_BACKEND: 'null',
-        JWT_SECRET: 'test-e2e-secret',
-        ...options.env,
-      },
+      env: serverEnv({ STORAGE_BACKEND: 'null', JWT_SECRET: 'test-e2e-secret' }, options.env),
     });
   } else {
     // Development: let cargo build and run the binary.
@@ -118,12 +129,7 @@ export async function spawnRustServer(
         cwd: REPO_ROOT,
         detached: true,
         stdio: ['ignore', 'pipe', 'inherit'],
-        env: {
-          ...process.env,
-          STORAGE_BACKEND: 'null',
-          JWT_SECRET: 'test-e2e-secret',
-          ...options.env,
-        },
+        env: serverEnv({ STORAGE_BACKEND: 'null', JWT_SECRET: 'test-e2e-secret' }, options.env),
       },
     );
   }

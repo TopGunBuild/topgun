@@ -140,6 +140,18 @@ export function sha256OfFile(filePath: string): string {
 }
 
 /**
+ * The child's environment: a copy of the caller's with DATABASE_URL dropped
+ * (the server refuses to start while it is set, an empty value included), then
+ * the harness defaults, then the test's own variables, so a test can still pass
+ * DATABASE_URL on purpose.
+ */
+function childEnv(overrides?: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.DATABASE_URL;
+  return { ...env, STORAGE_BACKEND: 'null', JWT_SECRET: 'test-e2e-secret', ...overrides };
+}
+
+/**
  * Starts the given server binary and resolves once it has printed `PORT=`, has
  * exited, or the port wait has timed out — whichever comes first. It never
  * rejects for a server that failed to start; inspect `port`, `exit()` and the
@@ -158,12 +170,7 @@ export async function spawnBinary(options: SpawnBinaryOptions): Promise<SpawnedB
   const proc = child_process.spawn(binaryPath, ['--port', String(options.port ?? 0)], {
     cwd: REPO_ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      STORAGE_BACKEND: 'null',
-      JWT_SECRET: 'test-e2e-secret',
-      ...options.env,
-    },
+    env: childEnv(options.env),
   });
 
   // Listeners are attached in the same tick as the spawn, before any I/O can be
