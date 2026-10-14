@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Removed (server):** the Postgres backend. TopGun keeps its data in the embedded store
+  inside the server, so there is no database to run. Gone are the `postgres` cargo feature,
+  `STORAGE_BACKEND=postgres`, reading `DATABASE_URL`, the Postgres service and the `dbtools`
+  profile of `docker-compose.yml`, the PostgreSQL choice of the `topgun` CLI setup and its
+  `dev --no-db` flag (the flag did nothing), the opt-in suite `map-name-postgres`, and
+  `examples/push-worker/n8n-workflow.json`.
+  - **If you ran on Postgres:** the server now refuses to start when `STORAGE_BACKEND=postgres`
+    is set or when `DATABASE_URL` is set (an empty value counts), and says why in its first
+    log line. Unset `DATABASE_URL` to start on the embedded store.
+    There is no migration tool: data kept by the Postgres backend remains available with the server built from the tag `postgres-backend-last`.
+  - **Backup:** stop the server (`SIGTERM`), copy the redb file (`TOPGUN_REDB_PATH`) and the
+    WAL directory (`TOPGUN_WAL_DIR`), start it again; restore by putting both back with the
+    server stopped. A copy of a running server's files is not a supported backup.
+- **Changed (deployment):** the `cluster` and `auto-setup` services of `docker-compose.yml`
+  keep their data on named volumes, and every server service sets
+  `TOPGUN_WAL_DIR=/data/topgun-wal` (the image's existing default, so no WAL moves). The Helm
+  chart gets a persistent volume, correct probe paths (`/health/ready`), `replicaCount: 1`
+  and the disruption budget off by default.
+
 - **Fixed (server):** a server on the embedded redb store no longer runs on while storing
   nothing after the database reports a fault: it now stops by itself with exit code 72, and
   a restart brings every acknowledged write back. Before, once redb reported an I/O error —
