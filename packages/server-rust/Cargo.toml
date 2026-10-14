@@ -10,7 +10,6 @@ workspace = true
 
 [features]
 default = ["redb"]
-postgres = ["dep:sqlx"]
 redb = ["dep:redb"]
 simulation = ["dep:madsim"]
 datafusion = ["dep:datafusion", "dep:arrow"]
@@ -78,7 +77,6 @@ rand = "0.9"
 ahash = "0.8"
 ordered-float = "4"
 regex = "1"
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"], optional = true }
 redb = { version = "2", optional = true }
 madsim = { workspace = true, optional = true }
 datafusion = { version = "45", optional = true }

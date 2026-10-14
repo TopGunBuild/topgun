@@ -4,7 +4,7 @@
 //! and prints `PORT=<number>` to stdout. The TS test harness passes `--port 0`
 //! to opt into an ephemeral port and reads it from stdout to connect.
 //!
-//! Uses `NullDataStore` (no `PostgreSQL` dependency). The JWT signing secret is
+//! Defaults to the embedded redb store. The JWT signing secret is
 //! read from the `JWT_SECRET` env var; the process fails fast if it is unset and
 //! `TOPGUN_NO_AUTH` is not `1` / `true`. Integration tests, benches, and the
 //! sync-lab demo expect `JWT_SECRET=test-e2e-secret` (matched against the
@@ -105,21 +105,47 @@ use topgun_server::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
 /// Identifies the active persistence backend so the bootstrap can decide
 /// whether to wrap the data store with `WriteBehindDataStore` (skipped for the
 /// `Null` backend because buffering writes to a no-op store wastes overhead).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StorageBackend {
     Null,
     Redb,
-    // Constructed only under `feature = "postgres"`; the variant is still listed
-    // here so the bootstrap match arms compile in every feature configuration.
-    #[allow(dead_code)]
-    Postgres,
+}
+
+const POSTGRES_REMOVED: &str = "STORAGE_BACKEND=postgres is no longer supported: the Postgres backend has been removed. The server keeps its data in its embedded store (STORAGE_BACKEND=redb, the default). There is no migration tool: data kept by the Postgres backend remains available with the server built from the tag postgres-backend-last. See CHANGELOG.md.";
+
+const DATABASE_URL_UNREAD: &str = "DATABASE_URL is set, but the Postgres backend has been removed and this server does not read it. Unset DATABASE_URL (an empty value counts as set) to start on the embedded store (STORAGE_BACKEND=redb, the default). There is no migration tool: data kept by the Postgres backend remains available with the server built from the tag postgres-backend-last. See CHANGELOG.md.";
+
+/// Pure backend decision, kept free of the environment so it is unit-testable.
+///
+/// Refusals come first and in a fixed order: a removed backend name wins over a
+/// stray `DATABASE_URL`, because it is the more specific operator mistake.
+fn choose_backend(
+    storage_backend: Option<&str>,
+    database_url_set: bool,
+) -> anyhow::Result<StorageBackend> {
+    if storage_backend == Some("postgres") {
+        anyhow::bail!(POSTGRES_REMOVED);
+    }
+    if database_url_set {
+        anyhow::bail!(DATABASE_URL_UNREAD);
+    }
+    match storage_backend.unwrap_or("redb") {
+        "null" => Ok(StorageBackend::Null),
+        #[cfg(feature = "redb")]
+        "redb" => Ok(StorageBackend::Redb),
+        #[cfg(not(feature = "redb"))]
+        "redb" => anyhow::bail!(
+            "STORAGE_BACKEND=redb requested but topgun-server was built without the `redb` feature"
+        ),
+        other => anyhow::bail!("Unknown STORAGE_BACKEND='{other}' (expected: redb, null)"),
+    }
 }
 
 /// Resolve the storage backend at startup.
 ///
 /// Reads `STORAGE_BACKEND` (default: `redb`) and constructs the matching
 /// `Arc<dyn MapDataStore>`. Each branch is responsible for any per-backend
-/// initialization (e.g. opening a redb file, connecting to Postgres).
+/// initialization (e.g. opening a redb file).
 ///
 /// Returns the constructed store paired with a `StorageBackend` discriminant
 /// so the bootstrap can branch on backend variant when deciding whether to
@@ -127,41 +153,25 @@ enum StorageBackend {
 ///
 /// The default is `redb` so a developer running `pnpm start:server` with no
 /// env vars gets durable embedded storage out of the box. Set
-/// `STORAGE_BACKEND=null` for ephemeral integration-test fixtures, or
-/// `STORAGE_BACKEND=postgres` (with the `postgres` feature compiled in) for
-/// production deployments.
+/// `STORAGE_BACKEND=null` for ephemeral integration-test fixtures. A removed
+/// backend name or a set `DATABASE_URL` is refused before any file is opened.
 async fn select_datastore() -> anyhow::Result<(Arc<dyn MapDataStore>, StorageBackend)> {
-    let backend = std::env::var("STORAGE_BACKEND").unwrap_or_else(|_| "redb".to_string());
-    match backend.as_str() {
-        "null" => Ok((Arc::new(NullDataStore), StorageBackend::Null)),
+    let storage_backend = std::env::var("STORAGE_BACKEND").ok();
+    let database_url_set = std::env::var_os("DATABASE_URL").is_some();
+    let backend = choose_backend(storage_backend.as_deref(), database_url_set)?;
+    match backend {
+        StorageBackend::Null => Ok((Arc::new(NullDataStore), StorageBackend::Null)),
         #[cfg(feature = "redb")]
-        "redb" => {
+        StorageBackend::Redb => {
             let path =
                 std::env::var("TOPGUN_REDB_PATH").unwrap_or_else(|_| "./topgun.redb".to_string());
             let store = RedbDataStore::new(&path)?;
             store.initialize().await?;
             Ok((Arc::new(store), StorageBackend::Redb))
         }
+        // choose_backend already bailed for Redb without the feature.
         #[cfg(not(feature = "redb"))]
-        "redb" => anyhow::bail!(
-            "STORAGE_BACKEND=redb requested but topgun-server was built without the `redb` feature"
-        ),
-        #[cfg(feature = "postgres")]
-        "postgres" => {
-            let url = std::env::var("DATABASE_URL")
-                .map_err(|_| anyhow::anyhow!("STORAGE_BACKEND=postgres requires DATABASE_URL"))?;
-            let pool = sqlx::PgPool::connect(&url).await?;
-            let store = topgun_server::storage::datastores::PostgresDataStore::new(pool, None)?;
-            store.initialize().await?;
-            Ok((Arc::new(store), StorageBackend::Postgres))
-        }
-        #[cfg(not(feature = "postgres"))]
-        "postgres" => anyhow::bail!(
-            "STORAGE_BACKEND=postgres requested but topgun-server was built without the `postgres` feature"
-        ),
-        other => anyhow::bail!(
-            "Unknown STORAGE_BACKEND='{other}' (expected: redb, postgres, null)"
-        ),
+        StorageBackend::Redb => unreachable!("choose_backend refuses redb without the feature"),
     }
 }
 
@@ -687,7 +697,7 @@ async fn main() -> anyhow::Result<()> {
     // middleware (PolicyEvaluator) hold Arc references to the SAME store, so
     // policies created via the admin API are immediately visible to the evaluator.
     let policy_store: Arc<dyn PolicyStore> = match backend {
-        StorageBackend::Redb | StorageBackend::Postgres => {
+        StorageBackend::Redb => {
             let durable = DurablePolicyStore::new(Arc::clone(&inner_data_store));
             if let Err(err) = durable.load_from_backend().await {
                 eprintln!("FATAL: policy recovery failed: {err}");
@@ -739,7 +749,7 @@ async fn main() -> anyhow::Result<()> {
     // any client can observe stale state. The Null backend is intentionally
     // skipped (mirrors the write-behind skip: buffering a no-op store is wasteful).
     let wal_opt: Option<WalBootstrap> = match backend {
-        StorageBackend::Redb | StorageBackend::Postgres => {
+        StorageBackend::Redb => {
             match WalWriter::new(
                 write_behind_config.wal_dir.clone(),
                 write_behind_config.wal_fsync_policy,
@@ -810,7 +820,7 @@ async fn main() -> anyhow::Result<()> {
     // has no such task and so no receiver.
     let store_failure: Option<watch::Receiver<Option<_>>>;
     let datastore: Arc<dyn MapDataStore> = match backend {
-        StorageBackend::Redb | StorageBackend::Postgres => {
+        StorageBackend::Redb => {
             tracing::debug!(
                 target: "topgun_server::bootstrap",
                 backend = ?backend,
@@ -1979,7 +1989,7 @@ fn build_services(
     // `merkle_manager` here is the exact Arc moved into SyncService below, which
     // is the instance the real binary's SYNC_INIT path aggregates its root from.
     // `datastore_for_merkle_seed` is the same durable backend (write-behind-
-    // wrapped redb/Postgres) every other write goes through. Only primary
+    // wrapped redb) every other write goes through. Only primary
     // partitions are seeded (rebuild_from_datastore uses is_backup=false), which
     // matches the SYNC_INIT root path (handle_sync_init aggregates the primary
     // LWW / OR-Map roots); backup partitions are intentionally not on this path.
@@ -2579,6 +2589,51 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn t_choose_default() {
+        assert_eq!(
+            super::choose_backend(None, false).unwrap(),
+            super::StorageBackend::Redb
+        );
+    }
+
+    #[test]
+    fn t_choose_null() {
+        assert_eq!(
+            super::choose_backend(Some("null"), false).unwrap(),
+            super::StorageBackend::Null
+        );
+    }
+
+    #[test]
+    fn t_pg() {
+        let err = super::choose_backend(Some("postgres"), false).unwrap_err();
+        assert_eq!(err.to_string(), super::POSTGRES_REMOVED);
+    }
+
+    #[test]
+    fn t_pg_url() {
+        let err = super::choose_backend(Some("postgres"), true).unwrap_err();
+        assert_eq!(err.to_string(), super::POSTGRES_REMOVED);
+    }
+
+    #[test]
+    fn t_url() {
+        let err = super::choose_backend(None, true).unwrap_err();
+        assert_eq!(err.to_string(), super::DATABASE_URL_UNREAD);
+        let err = super::choose_backend(Some("redb"), true).unwrap_err();
+        assert_eq!(err.to_string(), super::DATABASE_URL_UNREAD);
+    }
+
+    #[test]
+    fn t_unknown() {
+        let err = super::choose_backend(Some("mysql"), false).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Unknown STORAGE_BACKEND='mysql' (expected: redb, null)"
+        );
+    }
+
     use super::{admin_bind_posture, log_boot_summary, BindPosture};
     use super::{EvictionConfig, WriteBehindConfig};
     use std::io;
@@ -3384,6 +3439,7 @@ mod tests {
         if std::env::var_os(CHILD).is_none() {
             let dir = tempfile::tempdir().expect("tempdir");
             let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .env_remove("DATABASE_URL")
                 .args([NAME, "--exact", "--nocapture", "--test-threads", "1"])
                 .env("STORAGE_BACKEND", "redb")
                 .env("TOPGUN_REDB_PATH", dir.path().join("wiring.redb"))
