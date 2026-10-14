@@ -1228,8 +1228,9 @@ weaker than a test.
   WAL.
 - **`io_kind`** is visible on the first error only; a `PreviousIo` record has none.
 - **The metric** may not be scraped before the process exits.
-- **The per-entry drain `warn!` lines** for abandoned entries are unchanged; a large buffer
-  still logs one line per entry.
+- **The per-entry drain `warn!` lines** for abandoned entries are still one per entry, so a
+  large buffer logs one line per entry; on a broken store each names the broken store and its
+  `cause` instead of a timeout.
 - **`ValueTooLarge`, `TableTypeMismatch`, the map-name refusal** are `Unknown` here (TODO-824).
 - **A panic inside redb** (its own `.lock().unwrap()`) is the `TG-WB-006` path, not this one.
 - **The window.** A write that loaded the lifecycle state before the record was made is

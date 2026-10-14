@@ -2279,20 +2279,35 @@ impl WriteBehindDataStore {
                     );
                 }
 
-                // Log every op that could not be persisted within the timeout.
-                for entry in &timed_out_entries {
-                    warn!(
-                        map = %entry.map,
-                        key = %entry.key,
-                        timeout_ms = self.config.shutdown_timeout_ms,
-                        "Shutdown drain timed out; write-behind entry could not be persisted"
-                    );
-                }
+                self.log_unpersisted(&timed_out_entries, broken);
                 return drained_entries;
             }
 
             // Yield briefly between iterations to avoid starving the tokio runtime.
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Logs every entry the shutdown drain did not persist, naming why: a drain
+    /// that stopped at a broken store did not time out, and saying so would send
+    /// an operator after the shutdown timeout instead of the store.
+    fn log_unpersisted(&self, entries: &[DelayedEntry], broken: Option<StoreBrokenCause>) {
+        for entry in entries {
+            if let Some(cause) = broken {
+                warn!(
+                    map = %entry.map,
+                    key = %entry.key,
+                    cause = cause.as_str(),
+                    "Shutdown drain stopped at a broken store; write-behind entry was not persisted"
+                );
+            } else {
+                warn!(
+                    map = %entry.map,
+                    key = %entry.key,
+                    timeout_ms = self.config.shutdown_timeout_ms,
+                    "Shutdown drain timed out; write-behind entry could not be persisted"
+                );
+            }
         }
     }
 
