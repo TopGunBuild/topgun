@@ -145,11 +145,13 @@ echo "[4/5] Building admin SPA and bundling into the meta package..."
 ADMIN_SRC_DIST="${REPO_ROOT}/apps/admin-dashboard/dist"
 ADMIN_META_DIST="${REPO_ROOT}/packages/server-dist/admin-dist"
 
-pnpm --filter admin-dashboard build
+# The trailing "..." also builds the workspace packages the SPA imports
+# (@topgunbuild/client, react, adapters, core), so a fresh checkout works.
+pnpm --filter "admin-dashboard..." build
 
 if [ ! -f "${ADMIN_SRC_DIST}/index.html" ]; then
   echo "ERROR: admin SPA build did not produce ${ADMIN_SRC_DIST}/index.html"
-  echo "  Check: pnpm --filter admin-dashboard build"
+  echo "  Check: pnpm --filter \"admin-dashboard...\" build"
   exit 1
 fi
 
