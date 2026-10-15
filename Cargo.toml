@@ -43,7 +43,43 @@ codegen-units = 1
 strip = true
 # opt-level defaults to 3 for release — kept explicit-by-omission to protect
 # the load-harness perf gates (p99 < 500 ms, ops/sec baselines). Do NOT switch
-# to opt-level "z"/"s" or panic = "abort".
+# the profile as a whole to opt-level "z"/"s" or to panic = "abort".
+
+# Size-optimized code for crates that never run on the request path, so the
+# prebuilt binary stays under the size gate in scripts/build-server-binaries.sh
+# without touching the hot path: command-line parsing (clap), the OpenAPI document
+# (utoipa), the outbound HTTP client of the embedding providers and the JWKS fetch
+# (reqwest), certificate and PEM handling (rustls-webpki, rustls-pemfile), URL and
+# IDNA parsing with its Unicode tables (url, idna, icu_*, zerovec and friends), and
+# regex compilation (regex-syntax; matching lives in regex-automata, which stays at
+# opt-level 3). hyper-util, rustls and tower-http are deliberately absent: the
+# server's own connections run through them. An entry that no longer matches a
+# dependency only makes cargo warn, so prune the list when a crate leaves the tree.
+[profile.release.package]
+clap = { opt-level = "s" }
+clap_builder = { opt-level = "s" }
+clap_lex = { opt-level = "s" }
+utoipa = { opt-level = "s" }
+utoipa-axum = { opt-level = "s" }
+reqwest = { opt-level = "s" }
+url = { opt-level = "s" }
+idna = { opt-level = "s" }
+idna_adapter = { opt-level = "s" }
+icu_collections = { opt-level = "s" }
+icu_locale_core = { opt-level = "s" }
+icu_normalizer = { opt-level = "s" }
+icu_properties = { opt-level = "s" }
+icu_provider = { opt-level = "s" }
+iri-string = { opt-level = "s" }
+rustls-webpki = { opt-level = "s" }
+rustls-pemfile = { opt-level = "s" }
+regex-syntax = { opt-level = "s" }
+litemap = { opt-level = "s" }
+zerovec = { opt-level = "s" }
+yoke = { opt-level = "s" }
+tinystr = { opt-level = "s" }
+writeable = { opt-level = "s" }
+potential_utf = { opt-level = "s" }
 
 [profile.release-with-debug]
 inherits = "release"
