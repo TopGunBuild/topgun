@@ -319,6 +319,9 @@ impl ServerSupervisor {
             std::env::var("TOPGUN_JOURNAL_ENABLED").unwrap_or_else(|_| "true".to_string());
         eprintln!("soak: child TOPGUN_JOURNAL_ENABLED={journal_enabled}");
         let mut cmd = Command::new(&self.config.binary);
+        // The server refuses to start when DATABASE_URL is set, so a value exported in the
+        // operator's shell must not reach the child and abort every soak run.
+        cmd.env_remove("DATABASE_URL");
         cmd.arg("--port")
             .arg(self.config.port.to_string())
             .env("STORAGE_BACKEND", "redb")

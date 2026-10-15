@@ -7,7 +7,6 @@ RUN apt-get update && apt-get install -y \
     curl \
     vim \
     zsh \
-    postgresql-client \
     build-essential \
     python3 \
     && rm -rf /var/lib/apt/lists/*

@@ -431,7 +431,7 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Measured scope:** a refusal injected into the embedded (redb) backend, one or two refused
   keys. In that case the node keeps answering reads and new connections and exits on SIGTERM
   (2 ms to 1.46 s, measured before refused entries were retried until stored; the times were not
-  measured again). Postgres was not measured. This row
+  measured again). This row
   states that the node does not hang on a store refusal; it does not state that the node is
   otherwise unaffected by one — see "After a store refusal" below.
 - **Discovered by:** SPEC-381a wave A0 (rollback testing); fixed and catalogued by SPEC-382.
@@ -720,8 +720,8 @@ weaker than a test.
 - **Embedders other than the server binary.** The library serve path (`network/module.rs`) does
   not read the failure signal; a store embedded there refuses writes and returns `Err` from
   `hard_flush`, and nothing shuts the process down (TODO-804).
-- **The inner store after a panic inside it.** Whether redb or Postgres stays usable for the
-  shutdown drain after one of their calls panicked was not established. If the drain panics, the
+- **The inner store after a panic inside it.** Whether redb stays usable for the
+  shutdown drain after one of its calls panicked was not established. If the drain panics, the
   process exits with 71.
 - **Durability of the un-fsynced tail** when the shutdown panics or overruns under `batched`:
   the frames were written to the file; they are not fsynced.
@@ -787,7 +787,7 @@ weaker than a test.
 - **`unpersisted_entries` is not the size of the dead batch.** It is the pending count, which
   also holds the entries the shutdown drain timed out or failed on.
 - **The inner store after an exit that skipped its destructors.** Exit codes 70 and 71 are
-  produced by `std::process::exit`, which does not close redb or the Postgres pool. What an
+  produced by `std::process::exit`, which does not close redb. What an
   unclosed redb file costs at the next start was not verified; the restarts of the process-level
   test observe it for two scenarios and no more.
 - **What a client receives for a refused write.** The store's error maps to `internal`, 500,
@@ -909,7 +909,8 @@ weaker than a test.
 - **Not claimed:** the scan is not a snapshot; "once" is about the key, not about the value at
   the start of the scan; a key written after its range was passed is not emitted by that scan; a
   key deleted during the scan; an inner store that does not declare key order —
-  Postgres: the duplicate emission is open there (TODO-819); a wrapper between the write-behind
+  none of the shipped stores; the test double that does not is the one this row was measured
+  against; a wrapper between the write-behind
   store and a key-ordered store that does not forward the declaration; order of rows inside a
   batch; backup scans; two interleaved scans; `enumerate_leaves`; the order of the shutdown drain
   being held by a test.
@@ -1083,8 +1084,8 @@ weaker than a test.
 - **Two writers of one key.** Outside the precondition. A caller that writes the write-behind
   store directly — `DeviceIdentityStore` — is outside `TG-KEY-001` and has to exclude a second
   writer of its key itself.
-- **redb and Postgres.** Every in-process test uses a test double as the inner store; the
-  process-level test uses redb with an injected refusal. Postgres was not run.
+- **redb.** Every in-process test uses a test double as the inner store; the
+  process-level test uses redb with an injected refusal.
 - **The crash harness.** Its model still describes a flush that gives up; its proofs of
   recovery after a crash are proofs about that model and are not evidence for this schedule
   (TODO-829).
@@ -1137,8 +1138,7 @@ weaker than a test.
      deadline. The kind is read from the recorded failure after `hard_flush` returned, so a stop
      begun by a signal on a broken store also exits 72.
   7. **`Unknown` is `TG-WB-009` unchanged.** An error classified `Unknown` is retried on the
-     `TG-WB-009` schedule, in the flush task, and handled by the drain as before. Postgres
-     classifies nothing: its errors are all `Unknown`.
+     `TG-WB-009` schedule, in the flush task, and handled by the drain as before.
 - **Mechanical predicate:** on a write-behind store over a `RedbDataStore` whose backend has
   returned an I/O error: (a) once the flush task's call that returned the error has returned,
   the next `add`, `remove`, `remove_all` returns the store-broken sentence and the WAL saw no
@@ -1214,7 +1214,6 @@ weaker than a test.
   and are not classified.
 - **Boot recovery.** A store-broken refusal during WAL replay is logged and the boot continues;
   the node starts on a latched handle and stops at its first flush (TODO-823).
-- **Postgres** classifies nothing; its behaviour is `TG-WB-009` unchanged.
 - **A crash loop** on a corrupted file or a still-full disk is not detected or delayed by the
   process; the supervisor paces it. On a still-full disk it is a loop of exit 1 at the store
   open.
@@ -2022,7 +2021,6 @@ weaker than a test.
 
 - **Scope:** `RedbDataStore`: the mapping from a `(map name, is_backup)` pair to a redb table name
   (`table_name_for`) and its inverse on primaries (`list_maps`), for every name the store accepts.
-  Postgres is outside it — there the map name is a column value, not a table name.
 - **Definitions:** `S` (storable) = names that are non-empty, do not end in `__backup` and contain
   no U+0000. `V` (identifier class) = members of `S` matching `^[a-zA-Z_][a-zA-Z0-9_]*$` — exactly
   the set the store accepted before this invariant. `W` = `S \ V`. `table(n, backup)`: for

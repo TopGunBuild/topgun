@@ -10,6 +10,8 @@ image: "/images/blog-architecture-grid.png"
 avatar: "/images/ivan-avatar.jpeg"
 ---
 
+*Editor's note (2026-10-14): the Postgres backend has been removed; see the changelog.*
+
 When designing TopGun v2, the initial instinct was to stand on the shoulders of giants. Why build a database engine when **PostgreSQL** exists?
 
 Our first prototype was a "Realtime Layer" on top of Postgres. It relied on Logical Replication (WAL) to stream changes to clients, and standard SQL for queries. Ideally, it would have given us the best of both worlds: reliability of SQL + speed of Websockets.

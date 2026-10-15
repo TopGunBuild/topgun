@@ -2,7 +2,7 @@
 //!
 //! Provides zero-config durable persistence in a single file (`./topgun.redb`
 //! by default). Selected as the default backend for `pnpm start:server` so a
-//! developer can boot the server with no Postgres container, no Docker, and
+//! developer can boot the server with no database server, no Docker, and
 //! no environment variables -- writes survive process restart.
 //!
 //! # Storage layout
@@ -33,14 +33,13 @@
 //! store must keep reading every table that already exists.
 //!
 //! Values are msgpack-serialized [`RecordValue`] (via
-//! [`rmp_serde::to_vec_named`]), matching the on-disk format the Postgres
-//! backend uses for its `value BYTEA` column. This preserves byte-level
-//! cross-backend wire compatibility for future migration tooling.
+//! [`rmp_serde::to_vec_named`]), the same encoding the other record
+//! stores use, so a record has one byte-level format across backends.
 //!
 //! # Durability semantics
 //!
 //! `redb` commits its write-ahead log on every `WriteTransaction::commit()`
-//! by default -- writes are durable on commit, matching the Postgres
+//! by default -- writes are durable on commit, giving a
 //! write-through guarantee. Do not call `Database::set_durability(None)` on
 //! the inner handle; that would silently downgrade the embedded backend
 //! below the documented HN-demo "data survives restart" promise.
@@ -58,15 +57,14 @@
 //!
 //! `redb` is single-writer / multi-reader. Concurrent readers do not block
 //! each other, but writes serialize on the database-level write lock. This is
-//! acceptable for the embedded Drop-in tier (single-user dev, HN demo); for
-//! multi-client production workloads, prefer the Postgres backend.
+//! acceptable for the embedded Drop-in tier (single-user dev, HN demo) and for
+//! single-node deployments.
 //!
 //! # Version pin
 //!
 //! Pinned to `redb = "2"` (current stable major as of 2026-05-04). `redb` has
 //! had on-disk format breaking changes across major versions; before bumping
-//! to `3.x`, either ship a migration step or document a "rebuild from
-//! Postgres" path. See follow-up TODO-335 for the migration plan.
+//! to `3.x`, ship a migration step for the on-disk format.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -222,17 +220,16 @@ impl RedbDataStore {
     /// Initialize the data store.
     ///
     /// `redb` opens its tables lazily inside the first `WriteTransaction`,
-    /// so this is currently a no-op. The async signature mirrors
-    /// `PostgresDataStore::initialize` to keep the bootstrap call site
-    /// uniform across backends.
+    /// so this is currently a no-op. The async signature keeps the
+    /// bootstrap call site uniform with stores that do real work here.
     ///
     /// # Errors
     ///
     /// Reserved for future schema migrations; never errors today.
     // Async signature is intentional: `select_datastore()` in `topgun_server.rs` calls
-    // `store.initialize().await` uniformly across backends. `PostgresDataStore::initialize`
-    // is genuinely async (runs DDL migrations); keeping the same signature here lets the
-    // bootstrap code branch on the backend without conditional `.await`.
+    // `store.initialize().await` uniformly across backends. A store that does real work
+    // here is genuinely async; keeping the same signature lets the bootstrap code
+    // call it without a conditional `.await`.
     #[allow(clippy::unused_async)]
     pub async fn initialize(&self) -> anyhow::Result<()> {
         Ok(())
@@ -248,8 +245,8 @@ impl RedbDataStore {
     /// # Errors
     ///
     /// Reserved for future explicit-flush behavior; never errors today.
-    // Async signature is intentional: matches the `PostgresDataStore::close` signature for
-    // interface parity, so callers can call `.close().await` uniformly without branching.
+    // Async signature is intentional: keeps interface parity with stores whose close is genuinely
+    // async, so callers can call `.close().await` uniformly without branching.
     #[allow(clippy::unused_async)]
     pub async fn close(&self) -> anyhow::Result<()> {
         Ok(())

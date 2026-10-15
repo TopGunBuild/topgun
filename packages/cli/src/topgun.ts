@@ -36,7 +36,6 @@ program
 program
   .command('dev')
   .description('Start development server')
-  .option('--no-db', 'Skip database startup')
   .option('-p, --port <port>', 'Server port', '8080')
   .option('--debug', 'Enable debug logging (RUST_LOG=debug, TOPGUN_LOG_FORMAT=json)')
   .option('--admin', 'Also start the admin dashboard (monorepo only)')
@@ -51,7 +50,7 @@ program
 program
   .command('config')
   .description('Manage configuration')
-  .option('--storage <type>', 'Set storage: redb, postgres, null')
+  .option('--storage <type>', 'Set storage: redb, null')
   .option('--show', 'Show current configuration')
   .action(configCmd);
 
@@ -99,10 +98,7 @@ program
 program
   .command('docker:start')
   .description('Start Docker services')
-  .option(
-    '--with <profiles>',
-    'Profiles to start (admin,monitoring,dbtools,k6,cluster,auto-setup,all)',
-  )
+  .option('--with <profiles>', 'Profiles to start (admin,monitoring,k6,cluster,auto-setup,all)')
   .action(dockerCmds.start);
 
 program.command('docker:stop').description('Stop all Docker services').action(dockerCmds.stop);

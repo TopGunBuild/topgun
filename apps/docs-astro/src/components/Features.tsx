@@ -72,7 +72,7 @@ export const Features = () => {
           colSpan={2}
           icon={Database}
           title="Scalable Backend"
-          description="A server-authoritative cluster that coordinates HLC (Hybrid Logical Clocks) and persists to standard databases like PostgreSQL or Mongo. You own your data."
+          description="A server-authoritative cluster that coordinates HLC (Hybrid Logical Clocks) and persists to an embedded store inside the server, with no database to run. You own your data."
         />
         <FeatureCard
           icon={Lock}

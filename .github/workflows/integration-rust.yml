@@ -137,9 +137,6 @@ jobs:
         #   builds one binary without it. All three are run locally
         #   (`pnpm test:integration-rust:liveness`). What guards the three defects
         #   in CI is the in-process tests in `cargo test` and the clippy gate.
-        # - map-name-postgres needs a reachable Postgres database and a server built
-        #   with the `postgres` cargo feature; this workflow has neither. It is run
-        #   locally (`pnpm test:integration-rust:postgres`).
         # - cluster-routing is left out by the variable below and gated separately
         #   (non-blocking) in the next job.
         # Each of these files fails, never skips, when what it needs is not given.

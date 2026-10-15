@@ -4,7 +4,7 @@
  * Handles:
  * - Permission requests
  * - Push subscription management
- * - Storing subscriptions in TopGun (synced to PostgreSQL)
+ * - Storing subscriptions in TopGun (persisted by the server)
  */
 
 import { getClient } from './topgun';
@@ -120,7 +120,7 @@ export async function subscribeToPush(odGunKor: string): Promise<PushSubscriptio
     userAgent: navigator.userAgent,
   };
 
-  // Store in TopGun (will sync to PostgreSQL)
+  // Store in TopGun (the server persists it)
   await saveSubscription(subscriptionData);
 
   return subscriptionData;

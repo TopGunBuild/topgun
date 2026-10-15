@@ -37,7 +37,7 @@ describe('topgun setup', () => {
       // Auth-gap fix: must have TOPGUN_NO_AUTH=1
       expect(envContent).toContain('TOPGUN_NO_AUTH=1');
 
-      // Storage env-var fix: must use STORAGE_BACKEND, not STORAGE_MODE
+      // Storage env-var fix: the server reads STORAGE_BACKEND
       expect(envContent).toContain('STORAGE_BACKEND=redb');
       expect(envContent).not.toContain('STORAGE_MODE');
 
@@ -48,7 +48,7 @@ describe('topgun setup', () => {
     }
   });
 
-  it('should write TOPGUN_NO_AUTH=1 and STORAGE_BACKEND for all non-postgres choices', () => {
+  it('should write TOPGUN_NO_AUTH=1 and STORAGE_BACKEND for the default choice', () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-setup-test-'));
 
     const nodeModulesPath = path.join(tempDir, 'node_modules');
@@ -75,6 +75,7 @@ describe('topgun setup', () => {
 
       // Must NOT include the dead STORAGE_MODE key
       expect(envContent).not.toContain('STORAGE_MODE');
+      expect(envContent).not.toContain('DATABASE_URL');
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

@@ -108,7 +108,7 @@ struct HarnessInnerStore {
     /// When `false`, every `add`/`remove` is rejected. Reads always succeed.
     healthy: AtomicBool,
     /// Whether the store accepts encoded records (like redb), so a flushed cell
-    /// is encoded under its lock, or not (like Postgres), so it is cloned out.
+    /// is encoded under its lock, or not (a store that holds values only as clones), so it is cloned out.
     encoding: bool,
 }
 

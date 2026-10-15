@@ -6,33 +6,10 @@ services:
   # BASE SERVICES (always available)
   # ============================================================================
 
-  postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${DB_USER:-topgun}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-topgun_dev}
-      POSTGRES_DB: ${DB_NAME:-topgun}
-    ports:
-      - "${DB_PORT:-5432}:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./deploy/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-topgun}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - topgun
-
   server:
     # Default `docker compose up server` boots TopGun with the embedded redb
-    # backend on a named volume — no Postgres required, no auth required.
-    # For a Postgres-backed deployment, set STORAGE_BACKEND=postgres and
-    # DATABASE_URL via .env (the `postgres` service above is left running so
-    # the connection string resolves) OR use the `server-postgres` profile
-    # below for an explicit production-shaped wiring.
+    # store on the named volume `topgun-data`. The store file and the
+    # write-ahead log both live on that volume, under /data. No auth required.
     build:
       context: .
       dockerfile: deploy/Dockerfile.server
@@ -45,12 +22,11 @@ services:
       TOPGUN_CLUSTER_PORT: 9080
       STORAGE_BACKEND: ${STORAGE_BACKEND:-redb}
       TOPGUN_REDB_PATH: /data/topgun.redb
+      TOPGUN_WAL_DIR: /data/topgun-wal
       # Dev default: skip auth so `docker compose up server` works without
       # generating a key. Override with JWT_SECRET=... for any real deploy.
       TOPGUN_NO_AUTH: ${TOPGUN_NO_AUTH:-1}
       JWT_SECRET: ${JWT_SECRET:-}
-      # Only consumed when STORAGE_BACKEND=postgres — harmless otherwise.
-      DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
     volumes:
       - topgun-data:/data
     healthcheck:
@@ -142,33 +118,6 @@ services:
       - topgun
 
   # ============================================================================
-  # PROFILE: dbtools
-  # ============================================================================
-
-  dbgate:
-    image: dbgate/dbgate:latest
-    ports:
-      - "3002:3000"
-    environment:
-      CONNECTIONS: |
-        {
-          "topgun-postgres": {
-            "engine": "postgres@dbgate-plugin-postgres",
-            "server": "postgres",
-            "port": 5432,
-            "user": "${DB_USER:-topgun}",
-            "password": "${DB_PASSWORD:-topgun_dev}",
-            "database": "${DB_NAME:-topgun}"
-          }
-        }
-    profiles: ["dbtools", "all"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - topgun
-
-  # ============================================================================
   # PROFILE: k6 (load testing)
   # ============================================================================
 
@@ -204,11 +153,12 @@ services:
       RUST_LOG: topgun_server=info
       TOPGUN_PORT: 8080
       TOPGUN_METRICS_PORT: 9090
-      DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
+      TOPGUN_REDB_PATH: /data/topgun.redb
+      TOPGUN_WAL_DIR: /data/topgun-wal
     profiles: ["auto-setup"]
-    depends_on:
-      postgres:
-        condition: service_healthy
+    # Store file and WAL live on this named volume.
+    volumes:
+      - server-auto-data:/data
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 10s
@@ -234,11 +184,12 @@ services:
       TOPGUN_PORT: 8080
       TOPGUN_CLUSTER_PORT: 9080
       TOPGUN_PEERS: node-2:9080,node-3:9080
-      DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
+      TOPGUN_REDB_PATH: /data/topgun.redb
+      TOPGUN_WAL_DIR: /data/topgun-wal
     profiles: ["cluster"]
-    depends_on:
-      postgres:
-        condition: service_healthy
+    # Store file and WAL live on this named volume.
+    volumes:
+      - node-1-data:/data
     networks:
       - topgun
 
@@ -255,11 +206,12 @@ services:
       TOPGUN_PORT: 8080
       TOPGUN_CLUSTER_PORT: 9080
       TOPGUN_PEERS: node-1:9080,node-3:9080
-      DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
+      TOPGUN_REDB_PATH: /data/topgun.redb
+      TOPGUN_WAL_DIR: /data/topgun-wal
     profiles: ["cluster"]
-    depends_on:
-      postgres:
-        condition: service_healthy
+    # Store file and WAL live on this named volume.
+    volumes:
+      - node-2-data:/data
     networks:
       - topgun
 
@@ -276,19 +228,23 @@ services:
       TOPGUN_PORT: 8080
       TOPGUN_CLUSTER_PORT: 9080
       TOPGUN_PEERS: node-1:9080,node-2:9080
-      DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
+      TOPGUN_REDB_PATH: /data/topgun.redb
+      TOPGUN_WAL_DIR: /data/topgun-wal
     profiles: ["cluster"]
-    depends_on:
-      postgres:
-        condition: service_healthy
+    # Store file and WAL live on this named volume.
+    volumes:
+      - node-3-data:/data
     networks:
       - topgun
 
 volumes:
-  postgres-data:
   prometheus-data:
   grafana-data:
   topgun-data:
+  server-auto-data:
+  node-1-data:
+  node-2-data:
+  node-3-data:
 
 networks:
   topgun:

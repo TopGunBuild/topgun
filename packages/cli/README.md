@@ -31,7 +31,7 @@ topgun dev
 |---------|-------------|
 | `topgun doctor` | Check environment setup and dependencies |
 | `topgun setup [-y\|--yes]` | Interactive project setup (writes `.env`) |
-| `topgun dev [--no-db] [-p port] [--debug]` | Start development server |
+| `topgun dev [-p port] [--debug]` | Start development server |
 | `topgun test [scope] [--coverage]` | Run tests (core, client, server, e2e, k6:smoke) |
 | `topgun config [--storage type] [--show]` | Manage configuration |
 | `topgun codegen [--schema path] [--out-dir dir]` | Generate types from schema file |
@@ -50,7 +50,7 @@ topgun dev
 After running `topgun setup`, a `.env` file is written with:
 
 - `TOPGUN_NO_AUTH=1` — local dev runs without auth tokens; set `JWT_SECRET` for any networked/production deployment
-- `STORAGE_BACKEND=redb` — zero-config embedded storage (no Postgres, no Docker required)
+- `STORAGE_BACKEND=redb` — zero-config embedded storage (no external database, no Docker required)
 
 Then `topgun dev` starts the server using those settings.
 
@@ -59,7 +59,6 @@ Then `topgun dev` starts the server using those settings.
 | Value | Description |
 |-------|-------------|
 | `redb` | Embedded storage (default, zero dependencies) |
-| `postgres` | PostgreSQL (requires `DATABASE_URL`) |
 | `null` | Ephemeral in-memory only |
 
 ## Note on `topgun dev`

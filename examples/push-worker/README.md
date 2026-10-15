@@ -1,19 +1,19 @@
 # Push Worker
 
-Cloudflare Worker для отправки Web Push уведомлений. Используется вместе с n8n для отправки напоминаний из Notes App.
+Cloudflare Worker для отправки Web Push уведомлений. Используется вместе с планировщиком (cron-задачей, читающей данные TopGun) для отправки напоминаний из Notes App.
 
 ## Архитектура
 
 ```
 ┌──────────────┐     TopGun Sync      ┌──────────────┐
-│   PWA        │ ──────────────────→  │  PostgreSQL  │
+│   PWA        │ ──────────────────→  │ TopGun Server│
 │  (Client)    │                      │              │
 └──────────────┘                      └──────┬───────┘
        │                                     │
-       │ GET /api/vapid-public-key           │ SQL Query
+       │ GET /api/vapid-public-key           │ Read
        ▼                                     ▼
 ┌──────────────┐                      ┌──────────────┐
-│ Push Worker  │ ◄──────────────────  │     n8n      │
+│ Push Worker  │ ◄──────────────────  │  Scheduler   │
 │ (Cloudflare) │   POST /api/push/    │   (Cron)     │
 └──────┬───────┘                      └──────────────┘
        │
@@ -90,7 +90,7 @@ npm run deploy
 
 ### POST /api/push/send
 
-Отправляет одно push-уведомление. Вызывается из n8n.
+Отправляет одно push-уведомление. Вызывается из планировщика.
 
 **Request:**
 ```json
@@ -213,74 +213,7 @@ if (isPushSupported()) {
 }
 ```
 
-## Настройка n8n
-
-### Workflow: Scheduled Notes Reminder
-
-```
-[Cron: * * * * *] → [PostgreSQL] → [Loop] → [HTTP Request] → [PostgreSQL Update]
-```
-
-### 1. Cron Trigger
-
-- Тип: Cron
-- Expression: `* * * * *` (каждую минуту)
-
-### 2. PostgreSQL: Get Due Notes
-
-```sql
-SELECT
-  n.data->>'id' as note_id,
-  n.data->>'title' as title,
-  n.data->>'userId' as user_id,
-  n.data->>'date' as due_date,
-  n.data->>'time' as due_time,
-  p.data->>'endpoint' as endpoint,
-  p.data->>'p256dh' as p256dh,
-  p.data->>'auth' as auth
-FROM topgun_nodes n
-JOIN topgun_nodes p ON p.data->>'userId' = n.data->>'userId'
-WHERE
-  n.soul LIKE 'notes/%'
-  AND p.soul LIKE 'pushSubscriptions/%'
-  AND n.data->>'date' = CURRENT_DATE::text
-  AND n.data->>'time' = TO_CHAR(NOW(), 'HH24:MI')
-  AND COALESCE((n.data->>'notified')::boolean, false) = false;
-```
-
-### 3. HTTP Request: Send Push
-
-- Method: POST
-- URL: `https://push-worker.xxx.workers.dev/api/push/send`
-- Body:
-```json
-{
-  "subscription": {
-    "endpoint": "{{ $json.endpoint }}",
-    "keys": {
-      "p256dh": "{{ $json.p256dh }}",
-      "auth": "{{ $json.auth }}"
-    }
-  },
-  "payload": {
-    "title": "Напоминание",
-    "body": "{{ $json.title }}",
-    "data": {
-      "noteId": "{{ $json.note_id }}"
-    }
-  }
-}
-```
-
-### 4. PostgreSQL: Mark as Notified
-
-```sql
-UPDATE topgun_nodes
-SET data = jsonb_set(data, '{notified}', 'true')
-WHERE soul LIKE 'notes/%' AND data->>'id' = '{{ $json.note_id }}';
-```
-
-## Структура данных в TopGun/PostgreSQL
+## Структура данных в TopGun
 
 ### Push Subscriptions
 
@@ -316,7 +249,7 @@ Path: `notes/{userId}/{noteId}`
 
 ## Обработка ошибок
 
-| Status Code | Значение | Действие в n8n |
+| Status Code | Значение | Действие в планировщике |
 |-------------|----------|----------------|
 | 201 | Успешно отправлено | Пометить как notified |
 | 410 | Подписка истекла | Удалить подписку из БД |

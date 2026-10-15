@@ -13,7 +13,6 @@ if (fs.existsSync(envPath)) {
 interface DevOptions {
   port?: string;
   debug?: boolean;
-  db?: boolean;
   admin?: boolean;
 }
 

@@ -13,16 +13,6 @@ pnpm install
 echo "Building packages..."
 pnpm build
 
-# Wait for PostgreSQL
-echo "Waiting for PostgreSQL..."
-until pg_isready -h postgres -U topgun; do
-  sleep 1
-done
-
-# Run database migrations (if any)
-echo "Setting up database..."
-# pnpm db:migrate (if you have migrations)
-
 echo ""
 echo "Setup complete!"
 echo ""

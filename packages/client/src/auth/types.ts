@@ -40,7 +40,7 @@ export interface TokenExchangeConfig {
    * Enable the server-issued refresh token flow.
    * When true, the provider stores the refresh token returned by /api/auth/token
    * and uses it to renew the access JWT before falling back to fetchExternalToken().
-   * The server must have refresh grants configured (PostgresRefreshGrantStore).
+   * The server must have refresh grants configured (a refresh grant store).
    * Default: false.
    */
   enableRefresh?: boolean;

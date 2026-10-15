@@ -15,7 +15,7 @@ describe('topgun dev', () => {
       let exitCode = 0;
 
       try {
-        execSync(`node ${CLI_PATH} dev --no-db`, {
+        execSync(`node ${CLI_PATH} dev`, {
           encoding: 'utf8',
           cwd: tempDir,
           stdio: 'pipe',
@@ -99,7 +99,7 @@ describe('topgun dev', () => {
       let output = '';
 
       try {
-        execSync(`node ${CLI_PATH} dev --admin --no-db`, {
+        execSync(`node ${CLI_PATH} dev --admin`, {
           encoding: 'utf8',
           cwd: tempDir,
           stdio: 'pipe',

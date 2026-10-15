@@ -1,6 +1,6 @@
 ---
 title: Migrating from Supabase Realtime
-description: Map Supabase Realtime (channels, broadcast, presence, postgres_changes) concepts to TopGun. Offline-first, CRDT auto-merge, your-own-Postgres.
+description: Map Supabase Realtime (channels, broadcast, presence, postgres_changes) concepts to TopGun. Offline-first, CRDT auto-merge, self-hosted.
 order: 8
 ---
 
@@ -87,11 +87,6 @@ Supabase Realtime is a Postgres-native real-time library: clients open WebSocket
         <td className="py-3 px-4 font-medium text-foreground">Pricing tiers (Free / Pro / Team / Enterprise)</td>
         <td className="py-3 px-4 text-foreground">Self-hosted, OSS (Apache-2.0)</td>
         <td className="py-3 px-4 text-neutral-500">Cost = your infra; no usage-based pricing</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">Postgres-native (your-own-Postgres framing)</td>
-        <td className="py-3 px-4 text-foreground">TopGun also runs in front of YOUR Postgres</td>
-        <td className="py-3 px-4 text-neutral-500">Parity — durable store is plain Postgres; <code>pg_dump</code> works</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Offline writes</td>
@@ -216,7 +211,7 @@ const unsubQuery = query.subscribe((results) => {
 
 Supabase delivers WAL-derived row events; TopGun delivers CRDT-merge deltas. Functionally similar for "show me changes to this collection," but TopGun owns the write path — see Pattern C.
 
-### Pattern C — Write to Postgres + listen vs CRDT write via client
+### Pattern C — Write through the API + listen vs CRDT write via client
 
 <div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
   <div className="p-4 border border-card-border rounded-lg">
@@ -328,7 +323,7 @@ For a first migration, start on single-node. The partition-routed cluster mode w
 - **Local-first reads/writes:** Operations never wait for network; the UI updates immediately. Supabase Realtime is read-only on the client; writes still go through PostgREST + a network round-trip.
 - **Offline persistence:** First-class via `IDBAdapter`. Supabase Realtime has no offline mode.
 - **CRDT auto-merge:** LWW-Map and OR-Map merge deterministically via HLC. No "lost update" surprises when two clients write the same key offline.
-- **Your-own-Postgres:** Parity with Supabase's "you own your Postgres" framing. TopGun's durable store is plain Postgres; `pg_dump` works.
+- **Self-hosted:** the server keeps its data in an embedded store on a volume you control, with no database to run.
 - **Performance:** 483K ops/sec fire-and-forget, ~37K ops/sec fire-and-wait at 1.5ms p50 on M1 Max (200 connections). See [benchmarks](/docs/benchmarks) for methodology.
 
 ## Migration checklist

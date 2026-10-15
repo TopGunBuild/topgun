@@ -1,4 +1,18 @@
-replicaCount: 3
+# There is no cluster mode in this chart: every pod has its own store on its
+# own volume and does not share data with the others. Keep this at 1.
+replicaCount: 1
+
+# Persistent storage for the embedded store file and the write-ahead log.
+# Both live under mountPath (topgun.redb and topgun-wal). Without it the
+# data is lost when the pod is rescheduled.
+persistence:
+  enabled: true
+  size: 1Gi
+  # Empty uses the cluster's default storage class.
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  mountPath: /data
 
 image:
   # Override per environment if you're hosting the image elsewhere.
@@ -56,12 +70,12 @@ clustering:
 probes:
   liveness:
     enabled: true
-    path: /health
+    path: /health/live
     initialDelaySeconds: 10
     periodSeconds: 10
   readiness:
     enabled: true
-    path: /ready
+    path: /health/ready
     initialDelaySeconds: 5
     periodSeconds: 5
 
@@ -79,8 +93,11 @@ resources:
     memory: 256Mi
 
 # Pod Disruption Budget
+# Enable only with replicaCount of 2 or more, and keep minAvailable below
+# replicaCount: otherwise no voluntary eviction is allowed and a node drain
+# never finishes.
 podDisruptionBudget:
-  enabled: true
+  enabled: false
   minAvailable: 2
 
 # TLS Configuration
@@ -91,4 +108,4 @@ tls:
   # keyPath: /certs/tls.key
 
 env: {}
-  # DATABASE_URL: "postgres://user:pass@host:5432/db"
+  # RUST_LOG: "topgun_server=info"

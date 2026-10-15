@@ -5,7 +5,7 @@ import path from 'path';
 import { execSync } from 'child_process';
 
 interface SetupConfig {
-  storage: 'redb' | 'postgres' | 'null';
+  storage: 'redb' | 'null';
   installK6: boolean;
   devContainer: boolean;
 }
@@ -35,10 +35,6 @@ async function setup(options: SetupOptions) {
             name: 'redb (recommended — embedded, zero dependencies, boots instantly)',
             value: 'redb',
           },
-          {
-            name: 'PostgreSQL (production use, requires Docker or external DB)',
-            value: 'postgres',
-          },
           { name: 'null (ephemeral, data lost on restart — for testing)', value: 'null' },
         ],
         default: 'redb',
@@ -66,20 +62,11 @@ async function setup(options: SetupOptions) {
   console.log(chalk.green('  ✓ .env created'));
 
   // Inform the user which auth mode was written and how to switch.
-  // The postgres path is production-leaning, so make the no-auth notice a visible warning there.
-  if (config.storage === 'postgres') {
-    console.log(
-      chalk.yellow(
-        '  Auth: TOPGUN_NO_AUTH=1 written for local dev — set JWT_SECRET before any production/networked deployment',
-      ),
-    );
-  } else {
-    console.log(
-      chalk.gray(
-        '  Auth: TOPGUN_NO_AUTH=1 (local dev mode — set JWT_SECRET for any networked/production deployment)',
-      ),
-    );
-  }
+  console.log(
+    chalk.gray(
+      '  Auth: TOPGUN_NO_AUTH=1 (local dev mode — set JWT_SECRET for any networked/production deployment)',
+    ),
+  );
   console.log(chalk.gray(`  Storage: STORAGE_BACKEND=${config.storage}`));
 
   // Step 2: Install dependencies
@@ -114,30 +101,14 @@ async function setup(options: SetupOptions) {
     console.log(chalk.green('  ✓ Server binary already built'));
   }
 
-  // Step 4: Start PostgreSQL (if selected)
-  if (config.storage === 'postgres') {
-    console.log(chalk.cyan('\n[4/4] Starting PostgreSQL...'));
-    try {
-      execSync('docker compose up -d postgres', { stdio: 'inherit' });
-      console.log(chalk.green('  ✓ PostgreSQL started'));
-
-      console.log(chalk.gray('  Waiting for PostgreSQL to be ready...'));
-      await waitForPostgres();
-      console.log(chalk.green('  ✓ PostgreSQL is ready'));
-    } catch {
-      console.error(chalk.red('  ✗ Failed to start PostgreSQL'));
-      console.log(chalk.yellow('  Hint: Make sure Docker is running'));
-      process.exit(1);
-    }
-  } else {
-    const storageLabel = config.storage === 'null' ? 'ephemeral in-memory' : 'embedded redb';
-    console.log(chalk.cyan(`\n[4/4] Skipping database (${storageLabel} mode)`));
-    console.log(
-      chalk.green(
-        `  ✓ ${storageLabel.charAt(0).toUpperCase() + storageLabel.slice(1)} storage will be used`,
-      ),
-    );
-  }
+  // Step 4: Storage is embedded, nothing to start
+  const storageLabel = config.storage === 'null' ? 'ephemeral in-memory' : 'embedded redb';
+  console.log(chalk.cyan(`\n[4/4] Skipping database (${storageLabel} mode)`));
+  console.log(
+    chalk.green(
+      `  ✓ ${storageLabel.charAt(0).toUpperCase() + storageLabel.slice(1)} storage will be used`,
+    ),
+  );
 
   // Done!
   console.log(chalk.bold.green('\n Setup complete!\n'));
@@ -159,15 +130,6 @@ function generateEnvFile(config: SetupConfig): string {
     `STORAGE_BACKEND=${config.storage}`,
   ];
 
-  if (config.storage === 'postgres') {
-    lines.push('DB_HOST=localhost');
-    lines.push('DB_PORT=5432');
-    lines.push('DB_USER=topgun');
-    lines.push('DB_PASSWORD=topgun_dev');
-    lines.push('DB_NAME=topgun');
-    lines.push('DATABASE_URL=postgresql://topgun:topgun_dev@localhost:5432/topgun');
-  }
-
   lines.push('');
   lines.push('# Server');
   lines.push('PORT=8080');
@@ -183,20 +145,6 @@ function generateEnvFile(config: SetupConfig): string {
   lines.push('# TOPGUN_ADMIN_DIR=./admin/dist');
 
   return lines.join('\n') + '\n';
-}
-
-async function waitForPostgres(maxAttempts = 30) {
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      execSync('docker compose exec -T postgres pg_isready -U topgun', {
-        stdio: 'ignore',
-      });
-      return;
-    } catch {
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  }
-  throw new Error('PostgreSQL did not become ready');
 }
 
 export default setup;

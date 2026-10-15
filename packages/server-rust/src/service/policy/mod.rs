@@ -120,7 +120,7 @@ pub enum PolicyError {
 /// Abstraction over policy persistence backends.
 ///
 /// Implementations include `InMemoryPolicyStore` for v1 and future
-/// PostgreSQL-backed stores. Using a trait here allows the storage
+/// durable stores. Using a trait here allows the storage
 /// backend to be swapped without touching the evaluator or admin handlers.
 #[async_trait]
 pub trait PolicyStore: Send + Sync {
@@ -207,7 +207,7 @@ fn glob_match_segments(pat: &[&str], inp: &[&str]) -> bool {
 /// Concurrent in-memory policy store backed by `DashMap`.
 ///
 /// Suitable for single-node deployments and testing. Policies are lost on
-/// restart; a PostgreSQL-backed store can be swapped in via the `PolicyStore`
+/// restart; a durable store can be swapped in via the `PolicyStore`
 /// trait without changing callers.
 #[derive(Default)]
 pub struct InMemoryPolicyStore {

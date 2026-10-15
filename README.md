@@ -4,7 +4,7 @@
 
 > **v2 — single-node core, in active hardening.** The TypeScript client and Rust server APIs are stable for single-node development and self-hosted evaluation. Before we recommend unattended production use, we're completing a public stabilization program: a machine-checked [invariant catalog](INVARIANTS.md) (every durability claim mapped to an enforcing test — gaps marked honestly), a crash-recovery proof harness, and a 72-hour endurance gate. Durability trade-offs are documented, not hidden (e.g. the default `batched` fsync acks before fsync — see the server docs). Cluster-mode (Raft-backed locks, cross-node replication) is in progress.
 
-Build real-time apps that work offline. Local writes are instant and survive disconnects; reconnecting clients sync seamlessly with automatic conflict resolution. Self-host today with the embedded backend, or wire up Postgres when you need it. Apache-2.0, Rust server, TypeScript client. AI agents talk to your data natively through MCP.
+Build real-time apps that work offline. Local writes are instant and survive disconnects; reconnecting clients sync seamlessly with automatic conflict resolution. Self-host today: the server keeps your data in an embedded store, so there is no database to run. Apache-2.0, Rust server, TypeScript client. AI agents talk to your data natively through MCP.
 
 TopGun v2 is a complete rewrite. It's not a port — it's a new architecture built to earn production trust; the status note above says what we do and don't yet claim.
 
@@ -16,7 +16,7 @@ TopGun v2 is a complete rewrite. It's not a port — it's a new architecture bui
 - **Offline support**: Changes persist to IndexedDB and sync when reconnected.
 - **Conflict-free merges**: Automatic conflict resolution via LWW-Map and OR-Map, with causality tracked by logical clocks.
 - **Efficient delta sync**: Only changed data moves over the wire, via Merkle tree comparison.
-- **Pluggable storage**: Embedded redb by default; Postgres optional for production; bring your own adapter.
+- **Pluggable storage**: Data lives in an embedded store inside the server (redb) — no database to run; bring your own client-side adapter.
 - **Cluster-ready**: Server-side partitioning, pub/sub, and distributed locks (single-node stable; cluster-mode uses partition-routing — Raft-backed cluster locks in progress).
 - **Rust server, TypeScript client**: Type-safe SDK with a high-performance Rust backend.
 - **AI-native**: AI agents read and mutate your live data natively over MCP — the bundled `@topgunbuild/mcp-server` exposes your maps to Claude Desktop, Cursor, or any MCP client. Query, mutate, search, and subscribe without leaving your agent workflow.
@@ -39,7 +39,7 @@ This boots a Vite app with a working LWW-Map todo demo. For the backend, in a se
 npx @topgunbuild/server
 ```
 
-No Rust toolchain required — this downloads a prebuilt binary for your platform and starts the server instantly. The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart, no Postgres required. Stop with `Ctrl-C`, restart, and your data is still there. Backup is a single-file copy.
+No Rust toolchain required — this downloads a prebuilt binary for your platform and starts the server instantly. The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart, no separate database required. Stop with `Ctrl-C`, restart, and your data is still there. To back it up, see [Backup and restore](#production) below.
 
 **Contributor / monorepo path:**
 
@@ -49,7 +49,7 @@ pnpm start:server
 
 `pnpm start:server` uses a prebuilt binary when present and falls back to `cargo run --bin topgun-server --release` for contributors with the Rust toolchain.
 
-For users who prefer containers, `docker compose up server` works too — it spins up Postgres alongside the server in one command.
+For users who prefer containers, `docker compose up server` works too — it starts the server with its data on a named volume.
 
 ### Pull pre-built image (Docker)
 
@@ -64,17 +64,16 @@ The image is multi-arch (linux/amd64 + linux/arm64) and is rebuilt on every push
 
 ### Production
 
-Production deployments need Postgres for durability and explicit auth configuration. The TopGun v2 server is **single-node stable**; multi-node Raft consensus is on the roadmap (see [`/docs/roadmap`](https://topgun.build/docs/roadmap)).
+Production deployments need a persistent path for the embedded store and explicit auth configuration. The TopGun v2 server is **single-node stable**; multi-node Raft consensus is on the roadmap (see [`/docs/roadmap`](https://topgun.build/docs/roadmap)).
 
-**1. Postgres setup**
+**1. Storage**
 
-Provision a Postgres database and set the DSN:
+There is no database to provision. The server keeps its data in an embedded store: a redb file plus a write-ahead log directory. Point both at a persistent volume (the image defaults are `/data/topgun.redb` and `/data/topgun-wal`):
 
 ```bash
-export DATABASE_URL=postgres://user:pass@host:5432/topgun
+export TOPGUN_REDB_PATH=/data/topgun.redb     # embedded store file
+export TOPGUN_WAL_DIR=/data/topgun-wal        # write-ahead log; keep it on the same volume
 ```
-
-The server applies its schema on first boot. Retention policy (op-log truncation, snapshot cadence) is configured per-map.
 
 **2. Server-side env vars**
 
@@ -100,9 +99,9 @@ npx @topgunbuild/server
 
 Multi-node deployments today use partition-routing without Raft consensus. **Cluster-safe distributed locks and split-brain protection require Raft, which is on the roadmap.** See [`/docs/roadmap`](https://topgun.build/docs/roadmap) for status.
 
-**5. Backup and restore** *(coming with TODO-139)*
+**5. Backup and restore**
 
-Operational backup/restore tooling is planned. Today, take Postgres-level backups (`pg_dump`) and restore via standard Postgres workflows.
+Back up by stopping the server (`SIGTERM` drains the write buffer and syncs the log) and copying **both** the redb file (`TOPGUN_REDB_PATH`) and the WAL directory (`TOPGUN_WAL_DIR`). Restore by putting both back with the server stopped, then starting it. The redb file alone is not the whole state: acknowledged writes that are not yet in it live in the WAL directory. A copy of a running server's files is not a supported backup. Operational backup tooling beyond this is planned.
 
 **6. Monitoring hooks** *(coming)*
 
@@ -209,7 +208,7 @@ Full docs: [topgun.build/docs](https://topgun.build/docs)
 |---------|-------------|
 | `@topgunbuild/core` | CRDTs, Hybrid Logical Clock, Merkle trees, message schemas |
 | `@topgunbuild/client` | Browser/Node.js SDK with IndexedDB persistence |
-| `server-rust` | Rust WebSocket server (axum), clustering, PostgreSQL |
+| `server-rust` | Rust WebSocket server (axum), clustering, embedded redb storage |
 | `core-rust` | Rust port of CRDT primitives, depended on by `server-rust` (internal) |
 | `@topgunbuild/react` | React hooks: `useQuery`, `useMap`, `useMutation`, `useTopic` |
 | `@topgunbuild/adapters` | Storage adapters: IndexedDB |
@@ -224,7 +223,7 @@ Full docs: [topgun.build/docs](https://topgun.build/docs)
 # Start the server — no Rust toolchain required
 npx @topgunbuild/server
 
-# Or start with Docker (includes Postgres)
+# Or start with Docker (data kept on a named volume)
 docker compose up --build
 
 # Contributor / monorepo path (has cargo):

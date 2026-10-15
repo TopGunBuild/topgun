@@ -12,13 +12,14 @@ RUST_LOG=topgun_server=info
 # STORAGE_BACKEND defaults to redb — omit for zero-config local dev
 # TOPGUN_REDB_PATH defaults to ./topgun.redb — omit to use cwd`;
 
-export const productionEnvCode = `# Production .env — PostgreSQL, auth enabled, memory tuned for 4 GB instance
+export const productionEnvCode = `# Production .env — embedded store on a persistent volume, auth enabled, memory tuned for 4 GB instance
 RUST_LOG=topgun_server=info
 TOPGUN_LOG_FORMAT=json
 
 # Storage
-STORAGE_BACKEND=postgres
-DATABASE_URL=postgres://topgun_user:secret@db-host:5432/topgun
+STORAGE_BACKEND=redb
+TOPGUN_REDB_PATH=/data/topgun.redb
+TOPGUN_WAL_DIR=/data/topgun-wal
 
 # Auth (required in production — never disable)
 JWT_SECRET=your-production-secret-min-32-chars
@@ -95,7 +96,7 @@ Fixed in the binary as `PARTITION_COUNT = 271` (a prime) in `packages/topgun-cor
 Before going live, verify:
 
 - [ ] **Auth is enabled.** `JWT_SECRET` is set to a random string of at least 32 characters. `TOPGUN_NO_AUTH` is **not** set (or is `false`). `INSECURE_FORWARD_AUTH_ERRORS` is **not** set (or is `false`).
-- [ ] **Storage backend is set.** `STORAGE_BACKEND=postgres` with a valid `DATABASE_URL` for shared/durable deployments. Or `STORAGE_BACKEND=redb` with `TOPGUN_REDB_PATH` pointing to a persistent volume.
+- [ ] **Storage backend is set.** `STORAGE_BACKEND=redb` (the default) with `TOPGUN_REDB_PATH` and `TOPGUN_WAL_DIR` pointing to the same persistent volume (the image defaults are `/data/topgun.redb` and `/data/topgun-wal`).
 - [ ] **TLS is terminated externally.** The binary does not read `TOPGUN_TLS_*` env vars today. Use a reverse proxy (nginx, Caddy, AWS ALB) to terminate TLS in front of the server.
 - [ ] **Memory ceiling is set.** `TOPGUN_MAX_RAM_MB` is set to ~80% of your instance RAM. Default 1024 MB is tuned for demo; most production instances have more.
 - [ ] **Log format is set.** For log aggregators (Datadog, CloudWatch, Splunk), set `TOPGUN_LOG_FORMAT=json`. Default is human-readable text.
@@ -105,7 +106,7 @@ Before going live, verify:
 ## Cross-links
 
 - [Self-host guide](/docs/deploy/self-host) — Docker, Docker Compose, Kubernetes recipes
-- [Storage backends](/docs/deploy/storage-backends) — redb vs PostgreSQL vs null decision table
+- [Storage backends](/docs/deploy/storage-backends) — the embedded store, backup and restore
 - [Performance tuning](/docs/deploy/performance) — memory/eviction/write-behind env vars + programmatic config
 - [Server & CLI reference](/docs/reference/server) — canonical env-var table with source-file line numbers
 

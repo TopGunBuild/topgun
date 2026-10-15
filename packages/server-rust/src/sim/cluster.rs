@@ -117,7 +117,7 @@ impl ClusterService for SimClusterService {
 /// A single simulated `TopGun` server node with a full service stack.
 ///
 /// Uses in-memory storage (`NullDataStore` + `HashMapStorage` via
-/// `RecordStoreFactory`) instead of `PostgreSQL`. The node's services are
+/// `RecordStoreFactory`) instead of a durable store. The node's services are
 /// invoked directly through the Tower `Service<Operation>` trait rather
 /// than through `WebSocket` connections.
 pub struct SimNode {

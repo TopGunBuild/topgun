@@ -46,7 +46,7 @@ const QuickStartTabs = () => {
             <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">
               ./topgun.redb
             </code>
-            , no Docker, no Postgres. (Docker alternative:{' '}
+            , no Docker, no database to run. (Docker alternative:{' '}
             <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">
               {DROP_IN_DOCKER_ALT}
             </code>
@@ -55,7 +55,7 @@ const QuickStartTabs = () => {
         ) : (
           <>
             <p>
-              Postgres + JWT + single-node deployment. Multi-node clustering is on the{' '}
+              A persistent volume + JWT + single-node deployment. Multi-node clustering is on the{' '}
               <a href={PROD_LINK} className="underline underline-offset-2 hover:text-foreground">
                 roadmap (Raft consensus)
               </a>

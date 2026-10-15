@@ -40,6 +40,16 @@ const DEFAULT_CLUSTER_TIMEOUT_MS = 60_000;
 const NODE_COUNT = 3;
 
 /**
+ * The node's environment: a copy of the caller's with DATABASE_URL dropped,
+ * because the server refuses to start while it is set (an empty value counts).
+ */
+function nodeEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.DATABASE_URL;
+  return { ...env, STORAGE_BACKEND: 'null', TOPGUN_NO_AUTH: 'true' };
+}
+
+/**
  * Budget for the post-restart join verification poll inside `restartNode()`.
  * The poll exits as soon as the cluster reports all NODE_COUNT members, so on
  * a fast machine this typically resolves in 1–3s. The 20s ceiling covers the
@@ -115,7 +125,7 @@ export async function spawnCluster(options: { timeout?: number } = {}): Promise<
         cwd: REPO_ROOT,
         detached: true,
         stdio: ['ignore', 'pipe', 'inherit'],
-        env: { ...process.env, STORAGE_BACKEND: 'null', TOPGUN_NO_AUTH: 'true' },
+        env: nodeEnv(),
       });
     } else {
       proc = child_process.spawn(
@@ -125,7 +135,7 @@ export async function spawnCluster(options: { timeout?: number } = {}): Promise<
           cwd: REPO_ROOT,
           detached: true,
           stdio: ['ignore', 'pipe', 'inherit'],
-          env: { ...process.env, STORAGE_BACKEND: 'null', TOPGUN_NO_AUTH: 'true' },
+          env: nodeEnv(),
         },
       );
     }

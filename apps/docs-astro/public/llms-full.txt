@@ -216,7 +216,7 @@ pnpm start:server
 
 `pnpm start:server` uses a prebuilt binary when present and falls back to `cargo run --bin topgun-server --release` for contributors who have the Rust toolchain.
 
-The server boots in seconds with embedded storage (`./topgun.redb`) — no Postgres, no Docker required.
+The server boots in seconds with embedded storage (`./topgun.redb`) — no database to run, no Docker required.
 
 3. Open your app in two browser tabs and watch changes sync in real time.
 
@@ -298,7 +298,7 @@ This launches the Vite dev server alongside the Rust server for hot-reload while
 
   <h3 className="text-lg font-semibold text-foreground mb-2">Server Development</h3>
   <p className="text-neutral-600 dark:text-neutral-300 mb-4">
-    Boot the server from the repository root. The default backend is embedded redb (durable, on-disk, no Postgres required); the only prerequisite is a Rust toolchain to compile the binary.
+    Boot the server from the repository root. The default backend is embedded redb (durable, on-disk, no separate database to run); the only prerequisite is a Rust toolchain to compile the binary.
   </p>
   <CodeBlock
     title="terminal"
@@ -687,7 +687,7 @@ While clients are "Local-First", TopGun is backed by a Rust server (single-node 
     <h4 className="font-bold text-foreground">2. Partition Engine</h4>
     <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">In-memory sharding logic that distributes data across the cluster.</p>
     <h4 className="font-bold text-foreground">3. Persistence Layer</h4>
-    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Async write-behind to the configured backend (redb embedded default, PostgreSQL optional for production).</p>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Async write-behind to the configured backend (the embedded redb store).</p>
     <h4 className="font-bold text-foreground">4. Pub/Sub Bus</h4>
     <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Broadcasts updates to other connected clients in real-time.</p>
 

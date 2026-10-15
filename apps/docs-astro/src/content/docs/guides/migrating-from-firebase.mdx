@@ -101,8 +101,8 @@ This guide is for Firestore users, Firebase Realtime Database users, and anyone 
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Vendor lock-in</td>
-        <td className="py-3 px-4 text-foreground">None — open source, MsgPack wire protocol, plain Postgres durable store</td>
-        <td className="py-3 px-4 text-neutral-500">Migrate off TopGun via <code>pg_dump</code></td>
+        <td className="py-3 px-4 text-foreground">None — open source, MsgPack wire protocol, data kept in an embedded store on your own volume</td>
+        <td className="py-3 px-4 text-neutral-500">Apache-2.0 server you host yourself</td>
       </tr>
     </tbody>
   </table>
@@ -330,8 +330,8 @@ For a first migration, start on single-node. The partition-routed cluster mode w
 
 - **Local-first reads/writes:** Operations never wait for network; the UI updates immediately. Compare to Firestore's `getDoc`, which requires a network round-trip on a cache miss.
 - **CRDT conflict resolution:** LWW-Map and OR-Map merge deterministically via HLC. No "lost update" surprises when two clients write the same key offline.
-- **Self-hosted, OSS (Apache-2.0):** Run TopGun on your own cloud, your own Postgres. No proprietary platform, no vendor agreement required.
-- **Plain Postgres durable store:** Migrate data off TopGun with `pg_dump`. Your data is always in a table you can query directly.
+- **Self-hosted, OSS (Apache-2.0):** Run TopGun on your own cloud, with its data on your own volume. No proprietary platform, no vendor agreement required.
+- **Embedded store you host:** Data is kept by the server on a volume you control, with no database to run. Back it up by stopping the server and copying its files.
 - **Performance:** 483K ops/sec fire-and-forget, ~37K ops/sec fire-and-wait at 1.5ms p50 on M1 Max (200 connections). See [benchmarks](/docs/benchmarks) for methodology.
 
 ## Migration checklist
@@ -341,7 +341,7 @@ For a first migration, start on single-node. The partition-routed cluster mode w
 3. Flag any planned-only items (Cloud Functions trigger, map-pattern security rules, cluster mTLS) against [/docs/roadmap](/docs/roadmap) and decide whether to wait or work around.
 4. Port auth: replace Firebase Auth with a JWT issuer of your choice and configure `client.setAuthToken()`. See [Authentication](/docs/guides/authentication).
 5. Port reads/writes one collection at a time: replace `doc()` / `getDoc()` / `setDoc()` with `getMap().get()` / `getMap().set()`, and replace `onSnapshot` with `client.query().subscribe()` (vanilla JS) or `useQuery()` (React).
-6. Backfill existing data via a one-time import script that reads from Firestore and writes to TopGun via the client SDK or direct Postgres insert.
+6. Backfill existing data via a one-time import script that reads from Firestore and writes to TopGun via the client SDK.
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
   <a href="/docs/guides/authentication" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">

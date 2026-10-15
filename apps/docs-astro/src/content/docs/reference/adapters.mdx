@@ -142,11 +142,11 @@ Values are AES-GCM-encrypted before they hit the underlying adapter. Keys and me
 
 Use this for sensitive client-side caches (PII, draft messages, auth state) where IndexedDB on a shared device is a threat model.
 
-## PostgreSQL — server-side only
+## Server-side storage
 
-PostgreSQL is **not** a client adapter. The Rust server uses PostgreSQL as one of its durable backends; clients talk to that server over WebSocket. See the [Server reference](/docs/reference/server) for the `DATABASE_URL` configuration and the `PostgresDataStore` Rust embed API.
+The server's storage is **not** a client adapter. The Rust server keeps its data in an embedded store; clients talk to that server over WebSocket. See the [Server reference](/docs/reference/server) for the storage configuration.
 
-<AlertBox variant="info" title="No client-side PostgresAdapter" text="If you find references to a `PostgresAdapter` in older docs, code, or LLM-generated snippets, they are stale. PostgreSQL lives behind the server; the client only talks WebSocket." />
+<AlertBox variant="info" title="No client-side PostgresAdapter" text="If you find references to a `PostgresAdapter` in older docs, code, or LLM-generated snippets, they are stale. Storage lives behind the server; the client only talks WebSocket." />
 
 ## Writing a custom adapter
 
