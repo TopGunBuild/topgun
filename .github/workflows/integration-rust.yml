@@ -21,6 +21,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'pnpm-lock.yaml'
+      - 'scripts/check-server-binary-size.sh'
       - '.github/workflows/integration-rust.yml'
   pull_request:
     branches: [main, develop]
@@ -35,6 +36,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'pnpm-lock.yaml'
+      - 'scripts/check-server-binary-size.sh'
       - '.github/workflows/integration-rust.yml'
 
 permissions:
@@ -76,6 +78,12 @@ jobs:
 
       - name: Build topgun-server (release)
         run: cargo build --release --bin topgun-server
+
+      - name: Check server binary size
+        # Native linux-x64 build with the release profile, the same profile the
+        # published binary uses. The ceiling lives in the script, not here.
+        continue-on-error: true
+        run: bash scripts/check-server-binary-size.sh target/release/topgun-server linux-x64
 
       - name: Upload server binary
         uses: actions/upload-artifact@v4
