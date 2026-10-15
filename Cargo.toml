@@ -50,11 +50,12 @@ strip = true
 # without touching the hot path: command-line parsing (clap), the OpenAPI document
 # (utoipa), the outbound HTTP client of the embedding providers and the JWKS fetch
 # (reqwest), certificate and PEM handling (rustls-webpki, rustls-pemfile), URL and
-# IDNA parsing with its Unicode tables (url, idna, icu_*, zerovec and friends), and
-# regex compilation (regex-syntax; matching lives in regex-automata, which stays at
-# opt-level 3). hyper-util, rustls and tower-http are deliberately absent: the
-# server's own connections run through them. An entry that no longer matches a
-# dependency only makes cargo warn, so prune the list when a crate leaves the tree.
+# IDNA parsing with its Unicode tables (url, idna, icu_*, zerovec and friends).
+# hyper-util, rustls and tower-http are deliberately absent: the server's own
+# connections run through them. So is regex-syntax: LIKE and REGEX predicates
+# compile their pattern on every evaluation, i.e. per record while a query or
+# subscription runs. An entry that no longer matches a dependency only makes cargo
+# warn, so prune the list when a crate leaves the tree.
 [profile.release.package]
 clap = { opt-level = "s" }
 clap_builder = { opt-level = "s" }
@@ -73,7 +74,6 @@ icu_provider = { opt-level = "s" }
 iri-string = { opt-level = "s" }
 rustls-webpki = { opt-level = "s" }
 rustls-pemfile = { opt-level = "s" }
-regex-syntax = { opt-level = "s" }
 litemap = { opt-level = "s" }
 zerovec = { opt-level = "s" }
 yoke = { opt-level = "s" }
