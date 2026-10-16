@@ -3404,7 +3404,7 @@ mod tests {
         );
     }
 
-    /// The store the binary builds for the redb backend declares key order, and
+    /// The store the binary builds for the redb backend declares a scan order, and
     /// a write-behind store over that very value places a buffered key in one
     /// batch (`TG-WB-008`). A wrapper put into `select_datastore` that does not
     /// forward the declaration turns the scan back to the order-free rule.
@@ -3464,13 +3464,13 @@ mod tests {
                     true,
                     r#"("Redb", true, [["k1"], ["k2"]])"#.to_string(),
                 ),
-                "the binary's redb store declares key order and the wrap honours it"
+                "the binary's redb store declares a scan order and the wrap honours it"
             );
             return;
         }
 
         let (inner, backend) = super::select_datastore().await.expect("select");
-        let declared = inner.scans_in_key_order();
+        let declared = inner.scan_order().is_some();
         for key in ["k1", "k2"] {
             inner
                 .add("m", key, &lww("v", 1), 0, 1000)

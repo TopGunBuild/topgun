@@ -865,23 +865,26 @@ weaker than a test.
   edit that adds an `.await` or a held lock between `stage` and the queue insert is caught by
   nothing automatic.
 
-### TG-WB-008: A resumable value scan through the write-behind store over a key-ordered inner store emits a key in at most one batch
+### TG-WB-008: A resumable value scan through the write-behind store over an inner store that declares its scan order emits a key in at most one batch
 
 - **Scope:** `scan_values` / `scan_values_batched` of `WriteBehindDataStore` for a primary scan
-  over an inner store that declares key order (`MapDataStore::scans_in_key_order`) — redb today.
-- **Preconditions:** the inner store upholds the four clauses of the declaration's contract; the
+  over an inner store that declares a scan order (`MapDataStore::scan_order`) — redb today,
+  declaring `ScanOrder::KEY_BYTES`.
+- **Preconditions:** the inner store upholds the four clauses of the declaration's contract,
+  stated over the positions of its `ScanOrder`; the
   caller passes each returned cursor back unchanged, once, in order, with the same map; one
   writer per `(map, key)` (`TG-KEY-001`).
 - **Statement:**
-  1. The key ranges of the batches of one scan tile the key space: each batch covers the keys
-     above the cursor it was resumed from, up to and including the cursor it returns.
+  1. The position ranges of the batches of one scan tile the position space of the declared
+     order: each batch covers the keys whose position is above the position of the cursor it was
+     resumed from, up to and including the position of the cursor it returns.
   2. A key is emitted in at most one batch, at most once.
   3. A key that, from the start to the return of the call covering its range, always has a
      staging slot holding a value or a durable row, and no staged delete, is emitted once.
   4. A staged delete is emitted nowhere.
-- **Maintaining code:** `write_behind.rs` — `overlay_scan_batch`, the two scan bodies (snapshot
-  before the inner read), `flush_loop` and `drain_for_shutdown` (row before slot); `redb.rs` —
-  `scan_from`.
+- **Maintaining code:** `map_data_store.rs` — `ScanOrder`; `write_behind.rs` —
+  `overlay_scan_batch`, the two scan bodies (snapshot before the inner read), `flush_loop` and
+  `drain_for_shutdown` (row before slot); `redb.rs` — `scan_from` and `scan_order`.
 - **Enforcing test:** `write_behind.rs::a_staged_key_whose_durable_row_is_in_a_later_batch_is_emitted_once`,
   `write_behind.rs::a_staging_only_key_is_emitted_in_the_batch_whose_key_range_holds_it`,
   `write_behind.rs::a_key_flushed_between_two_batches_is_emitted_once`,
@@ -899,19 +902,22 @@ weaker than a test.
   `write_behind.rs::a_cursor_below_the_one_a_batch_was_resumed_from_fails_the_scan`,
   `write_behind.rs::a_cursor_that_is_not_a_key_passes_through_while_nothing_is_staged_for_the_map`,
   `write_behind.rs::over_a_store_that_does_not_declare_key_order_a_staged_key_with_a_later_row_is_still_emitted_twice`
-  (pins the order-free rule over a store that does not declare key order, double emission
+  (pins the order-free rule over a store that does not declare a scan order, double emission
   included — the open defect, not wanted behaviour),
   `redb.rs::scan_values_returns_rows_in_str_order_and_each_cursor_is_the_last_key_of_its_batch`,
-  `redb.rs::the_redb_store_declares_key_ordered_scans`,
+  `redb.rs::the_redb_store_declares_its_scan_order`,
+  `write_behind.rs::a_staged_key_at_a_batch_boundary_between_partitions_is_emitted_once`,
+  `map_data_store.rs::key_bytes_order_positions_are_the_key_bytes_and_reject_a_cursor_that_is_not_utf8`,
   `processors.rs::a_bounded_scan_returns_a_staged_non_resident_key_once`,
   `processors.rs::a_bounded_scan_returns_a_key_written_after_the_resident_snapshot_once`,
   `topgun_server.rs::the_store_the_binary_selects_for_redb_emits_a_staged_key_once_under_write_behind`.
 - **Not claimed:** the scan is not a snapshot; "once" is about the key, not about the value at
   the start of the scan; a key written after its range was passed is not emitted by that scan; a
-  key deleted during the scan; an inner store that does not declare key order —
+  key deleted during the scan; an inner store that does not declare a scan order —
   none of the shipped stores; the test double that does not is the one this row was measured
   against; a wrapper between the write-behind
-  store and a key-ordered store that does not forward the declaration; order of rows inside a
+  store and a store that declares a scan order and does not forward the declaration; order of
+  rows inside a
   batch; backup scans; two interleaved scans; `enumerate_leaves`; the order of the shutdown drain
   being held by a test.
 
