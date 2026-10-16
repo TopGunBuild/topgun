@@ -244,6 +244,42 @@ pub struct ScanBatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanCursor(pub Vec<u8>);
 
+/// The order in which a store's value scan walks one map and one `is_backup`,
+/// and how a key and a cursor are placed in it. Positions are compared as
+/// byte strings; rows of a scan ascend strictly by the positions of their keys.
+///
+/// A store declares it through [`scan_order()`](MapDataStore::scan_order). The
+/// functions are plain `fn` pointers so the order is `Copy` and a wrapper can
+/// hold it across an `await` without borrowing the store.
+#[derive(Clone, Copy, Debug)]
+pub struct ScanOrder {
+    /// Names the order in logs and tests; callers never branch on it.
+    pub name: &'static str,
+    /// The position of a key. Injective: distinct keys have distinct positions.
+    pub key_position: fn(key: &str) -> Vec<u8>,
+    /// The position a cursor this store returned stands for — the position of
+    /// the key of the last row of its batch. An error when the bytes cannot be
+    /// such a cursor.
+    pub cursor_position: fn(cursor: &ScanCursor) -> anyhow::Result<Vec<u8>>,
+}
+
+impl ScanOrder {
+    /// Rust `str` order: a key's position is its UTF-8 bytes, and so is a cursor's.
+    pub const KEY_BYTES: ScanOrder = ScanOrder {
+        name: "key-bytes",
+        key_position: key_bytes_position,
+        cursor_position: key_bytes_cursor_position,
+    };
+}
+
+fn key_bytes_position(_key: &str) -> Vec<u8> {
+    unimplemented!()
+}
+
+fn key_bytes_cursor_position(_cursor: &ScanCursor) -> anyhow::Result<Vec<u8>> {
+    unimplemented!()
+}
+
 /// Async sink invoked once per bounded batch of Merkle leaves during
 /// enumeration.
 ///
@@ -468,6 +504,32 @@ pub trait MapDataStore: Send + Sync {
     /// wrapper on its order-free rule.
     fn scans_in_key_order(&self) -> bool {
         false
+    }
+
+    /// The order in which a value scan of this store walks a map, or `None`.
+    ///
+    /// A store that answers `Some(order)` accepts this contract (`TG-WB-008`),
+    /// stated over the positions of `order`, which a buffering wrapper relies on
+    /// to place a buffered key in exactly one batch:
+    ///
+    /// - within one map and one `is_backup`, a scan returns rows in strictly
+    ///   ascending `key_position` across all of its batches;
+    /// - a returned `next_cursor` `c` satisfies
+    ///   `cursor_position(c) == Ok(key_position(k))` for the key `k` of the last
+    ///   row of that batch, so a batch with a cursor has a row;
+    /// - a batch resumed from `c` holds only rows whose position is greater than
+    ///   `cursor_position(c)`;
+    /// - a row that is durable for the whole call, whose position is above the
+    ///   start cursor's position and not above the returned cursor's (or above
+    ///   the start cursor's, when none is returned), is in the batch.
+    ///
+    /// And `cursor_position` accepts every cursor the store returns.
+    ///
+    /// Defaulted to `None`: a store that orders rows in any other way, or a
+    /// wrapper that does not forward the declaration of what it wraps, keeps
+    /// the wrapper on its order-free rule.
+    fn scan_order(&self) -> Option<ScanOrder> {
+        None
     }
 
     /// Persist a backup record.
