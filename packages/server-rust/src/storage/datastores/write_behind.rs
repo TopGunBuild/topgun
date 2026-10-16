@@ -9780,6 +9780,232 @@ mod tests {
         );
     }
 
+    /// A store that walks a map in `(partition, key)` order rather than key
+    /// order and declares it: a key's position is its partition as a big-endian
+    /// `u32` followed by its bytes, and a cursor is the position of the last row
+    /// of its batch. Every batch holds exactly one row, whatever the budget; the
+    /// batch of the last row returns no cursor. Filled at construction and only
+    /// read, so every write or flush reaching it is a test failure.
+    struct PartitionOrderedStore {
+        rows: std::collections::BTreeMap<(u32, String), RecordValue>,
+    }
+
+    impl PartitionOrderedStore {
+        const ORDER: crate::storage::map_data_store::ScanOrder =
+            crate::storage::map_data_store::ScanOrder {
+                name: "test-partition-then-key",
+                key_position: Self::key_position,
+                cursor_position: Self::cursor_position,
+            };
+
+        fn new(rows: &[(&str, RecordValue)]) -> Self {
+            Self {
+                rows: rows
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            (
+                                topgun_core::partition::hash_to_partition(key),
+                                (*key).to_string(),
+                            ),
+                            value.clone(),
+                        )
+                    })
+                    .collect(),
+            }
+        }
+
+        fn key_position(key: &str) -> Vec<u8> {
+            let mut position = topgun_core::partition::hash_to_partition(key)
+                .to_be_bytes()
+                .to_vec();
+            position.extend_from_slice(key.as_bytes());
+            position
+        }
+
+        fn cursor_position(cursor: &ScanCursor) -> anyhow::Result<Vec<u8>> {
+            if cursor.0.len() >= 4 && std::str::from_utf8(&cursor.0[4..]).is_ok() {
+                Ok(cursor.0.clone())
+            } else {
+                anyhow::bail!("not a partition-then-key cursor: {:?}", cursor.0)
+            }
+        }
+
+        /// The batch holding the first row whose position is above `after`.
+        fn batch_after(&self, map: &str, is_backup: bool, after: Option<&[u8]>) -> ScanBatch {
+            if map != "m" || is_backup {
+                return ScanBatch::default();
+            }
+            let mut above = self
+                .rows
+                .iter()
+                .map(|((_, key), value)| (Self::key_position(key), key, value))
+                .filter(|(position, _, _)| after.is_none_or(|after| position.as_slice() > after));
+            match above.next() {
+                None => ScanBatch::default(),
+                Some((position, key, value)) => ScanBatch {
+                    records: vec![(key.clone(), value.clone())],
+                    next_cursor: above.next().map(|_| ScanCursor(position)),
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for PartitionOrderedStore {
+        async fn add(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            unreachable!("the partition-ordered store is only read")
+        }
+
+        async fn add_backup(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            unreachable!("the partition-ordered store is only read")
+        }
+
+        async fn remove(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+            unreachable!("the partition-ordered store is only read")
+        }
+
+        async fn remove_backup(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+            unreachable!("the partition-ordered store is only read")
+        }
+
+        async fn load(&self, _map: &str, _key: &str) -> anyhow::Result<Option<RecordValue>> {
+            unreachable!("the test reads only through a scan")
+        }
+
+        async fn load_all(
+            &self,
+            _map: &str,
+            _keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            unreachable!("the test reads only through a scan")
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            unreachable!("the test reads only through a scan")
+        }
+
+        fn scan_order(&self) -> Option<crate::storage::map_data_store::ScanOrder> {
+            Some(Self::ORDER)
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            Ok(self.batch_after(map, is_backup, None))
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: ScanCursor,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            let after = Self::cursor_position(&cursor)?;
+            Ok(self.batch_after(map, is_backup, Some(&after)))
+        }
+
+        async fn remove_all(&self, _map: &str, _keys: &[String]) -> anyhow::Result<()> {
+            unreachable!("the partition-ordered store is only read")
+        }
+
+        fn is_loadable(&self, _key: &str) -> bool {
+            unreachable!("the test reads only through a scan")
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            unreachable!("the test reads only through a scan")
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            unreachable!("no flush pass runs in the test")
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            unreachable!("no flush pass runs in the test")
+        }
+    }
+
+    /// Over a store whose declared order is not key order, the batch boundary
+    /// falls between partitions: `k2` ends the first batch and `k1` is the last
+    /// row, while key order would put `k1` first. Each staging-only key must be
+    /// emitted once, in the batch whose position range holds it, and `k2` — the
+    /// key at the boundary — exactly once with its staged value (TG-WB-008).
+    /// Order inside a batch is not claimed, so batches are compared sorted.
+    #[tokio::test]
+    async fn a_staged_key_at_a_batch_boundary_between_partitions_is_emitted_once() {
+        use topgun_core::partition::hash_to_partition;
+
+        async fn sorted_transcript(delete_k1: bool) -> Vec<Vec<String>> {
+            let inner = Arc::new(PartitionOrderedStore::new(&[
+                ("k1", lww("d1", 1)),
+                ("k2", lww("d2", 1)),
+            ]));
+            let store = WriteBehindDataStore::new(inner, scan_config());
+            store.add("m", "k2", &lww("NW", 9), 0, 2000).await.unwrap();
+            for key in ["s0", "s6", "s8"] {
+                store.add("m", key, &lww("st", 2), 0, 2000).await.unwrap();
+            }
+            if delete_k1 {
+                store.remove("m", "k1", 2000).await.unwrap();
+            }
+            let mut observed = scan_transcript(store.as_ref(), 1).await;
+            for batch in &mut observed {
+                batch.sort();
+            }
+            observed
+        }
+
+        let partitions = ["s0", "k2", "s6", "k1", "s8"].map(hash_to_partition);
+        assert!(
+            partitions.windows(2).all(|pair| pair[0] < pair[1]),
+            "the test needs partition(s0) < partition(k2) < partition(s6) < partition(k1) \
+             < partition(s8); got s0={} k2={} s6={} k1={} s8={}",
+            partitions[0],
+            partitions[1],
+            partitions[2],
+            partitions[3],
+            partitions[4]
+        );
+
+        assert_eq!(
+            sorted_transcript(false).await,
+            batches(&[
+                &["k2=NW@9", "s0=st@2"][..],
+                &["k1=d1@1", "s6=st@2", "s8=st@2"],
+            ]),
+            "each key is emitted once, in the batch whose position range holds it"
+        );
+        assert_eq!(
+            sorted_transcript(true).await,
+            batches(&[&["k2=NW@9", "s0=st@2"][..], &["s6=st@2", "s8=st@2"]]),
+            "a staged delete of the last row is emitted in no batch"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // The retry schedule of an entry the store refuses
     // -----------------------------------------------------------------------

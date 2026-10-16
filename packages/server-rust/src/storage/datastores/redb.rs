@@ -1478,12 +1478,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_redb_store_declares_key_ordered_scans() {
+    async fn the_redb_store_declares_its_scan_order() {
         let (store, _dir) = fresh_store();
 
         assert_eq!(
-            (store.scans_in_key_order(), store.is_null()),
-            (true, false),
+            (store.scan_order().map(|order| order.name), store.is_null()),
+            (Some("key-bytes"), false),
             "the write-behind overlay places buffered keys by the order redb declares"
         );
     }

@@ -927,6 +927,39 @@ mod tests {
     };
     use crate::storage::record::{OrMapEntry, RecordValue};
 
+    /// Pins `ScanOrder::KEY_BYTES`: a key's position is its UTF-8 bytes, a
+    /// cursor's position is its bytes, and a cursor that is not UTF-8 cannot be
+    /// a key-bytes cursor, so it fails with the text the write-behind scan
+    /// reports (TG-WB-008).
+    #[test]
+    fn key_bytes_order_positions_are_the_key_bytes_and_reject_a_cursor_that_is_not_utf8() {
+        use super::{ScanCursor, ScanOrder};
+
+        let order = ScanOrder::KEY_BYTES;
+        let rejected = (order.cursor_position)(&ScanCursor(vec![b'k', 0xFF]))
+            .map_err(|error| error.to_string());
+
+        assert_eq!(
+            (
+                order.name,
+                (order.key_position)("k1\u{e9}"),
+                (order.cursor_position)(&ScanCursor("k1\u{e9}".as_bytes().to_vec())).ok(),
+            ),
+            (
+                "key-bytes",
+                "k1\u{e9}".as_bytes().to_vec(),
+                Some("k1\u{e9}".as_bytes().to_vec())
+            ),
+            "a key-bytes position is the key's UTF-8 bytes, and so is a cursor's"
+        );
+        assert!(
+            rejected
+                .as_ref()
+                .is_err_and(|text| text.starts_with("scan cursor is not valid UTF-8:")),
+            "a cursor that is not UTF-8 is refused with the scan's error text, got {rejected:?}"
+        );
+    }
+
     /// Pins the rule clause by clause, and the order between clauses
     /// (TG-NAME-001): a name violating a store-enforced clause AND the length
     /// bound must report the store-enforced one, because a store lets `TooLong`
