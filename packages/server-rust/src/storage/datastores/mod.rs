@@ -4,6 +4,8 @@
 //! Includes [`NullDataStore`] for testing and ephemeral data,
 //! and [`RedbDataStore`] for embedded zero-config persistence (default).
 
+#[cfg(test)]
+mod kv_conformance;
 pub mod kv_engine;
 mod null;
 #[cfg(feature = "redb")]
