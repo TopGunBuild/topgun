@@ -217,6 +217,9 @@ pub trait KvSnapshot: Send + Sync {
     ///
     /// [`KvError::InvalidArgument`] when `start > end`; otherwise as
     /// [`KvSnapshot::get`], also for each item.
+    // The contract names it `iter`; it returns the iterator inside a
+    // `KvResult` because opening it can fail.
+    #[allow(clippy::iter_not_returning_iterator)]
     fn iter(&self, range: KeyRange) -> KvResult<KvIter<'_>>;
 }
 
@@ -284,8 +287,9 @@ pub trait KvEngine: Send + Sync + 'static {
     ///
     /// As [`KvEngine::write`].
     fn delete(&self, key: &[u8], opts: WriteOptions) -> KvResult<()> {
-        let _ = (key, opts);
-        unimplemented!()
+        let mut batch = WriteBatch::new();
+        batch.delete(key);
+        self.write(batch, opts)
     }
 
     /// Removes every key `k` with `start <= k < end`, atomically, as a one-op
@@ -296,8 +300,9 @@ pub trait KvEngine: Send + Sync + 'static {
     ///
     /// As [`KvEngine::write`]; [`KvError::InvalidArgument`] when `start > end`.
     fn delete_range(&self, start: &[u8], end: &[u8], opts: WriteOptions) -> KvResult<()> {
-        let _ = (start, end, opts);
-        unimplemented!()
+        let mut batch = WriteBatch::new();
+        batch.delete_range(start, end);
+        self.write(batch, opts)
     }
 
     /// A consistent point-in-time view (see [`KvSnapshot`]). The snapshot may
@@ -345,8 +350,41 @@ pub trait KvEngine: Send + Sync + 'static {
         resume_after: Option<&[u8]>,
         limit: usize,
     ) -> KvResult<PrefixPage> {
-        let _ = (prefix, resume_after, limit);
-        unimplemented!()
+        // The snapshot comes first, so a shut-down engine answers `ShutDown`
+        // whatever the arguments.
+        let snapshot = self.snapshot()?;
+        if limit == 0 {
+            return Err(KvError::InvalidArgument("scan_prefix limit is 0"));
+        }
+        let lower = match resume_after {
+            Some(r) => {
+                let mut after = Vec::with_capacity(r.len() + 1);
+                after.extend_from_slice(r);
+                after.push(0x00);
+                after.max(prefix.to_vec())
+            }
+            None => prefix.to_vec(),
+        };
+        let upper = prefix_successor(prefix);
+        if upper.as_ref().is_some_and(|u| lower >= *u) {
+            return Ok(PrefixPage::default());
+        }
+        let entries = snapshot
+            .iter(KeyRange {
+                start: Some(lower),
+                end: upper,
+            })?
+            .take(limit)
+            .collect::<KvResult<Vec<_>>>()?;
+        let resume_after = if entries.len() == limit {
+            entries.last().map(|(key, _)| key.clone())
+        } else {
+            None
+        };
+        Ok(PrefixPage {
+            entries,
+            resume_after,
+        })
     }
 
     /// When [`KvCapabilities::ingest`] is `true`: atomically replaces the
@@ -400,8 +438,13 @@ pub trait KvEngine: Send + Sync + 'static {
 /// `0xFF` bytes only): every trailing `0xFF` is stripped and the last
 /// remaining byte incremented, so no carry ever overflows.
 fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
-    let _ = prefix;
-    unimplemented!()
+    let mut successor = prefix.to_vec();
+    while successor.last() == Some(&0xFF) {
+        successor.pop();
+    }
+    let last = successor.last_mut()?;
+    *last += 1;
+    Some(successor)
 }
 
 #[cfg(test)]
@@ -411,57 +454,190 @@ pub(crate) use mem::MemKvEngine;
 /// carries the crash hooks the crash suite drives.
 #[cfg(test)]
 mod mem {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use parking_lot::Mutex;
+
     use super::{
-        KeyRange, KvCapabilities, KvEngine, KvIter, KvResult, KvSnapshot, WriteBatch, WriteOptions,
+        BatchOp, KeyRange, KvCapabilities, KvEngine, KvError, KvIter, KvResult, KvSnapshot,
+        RangeDeleteCost, WriteBatch, WriteOptions,
     };
 
+    type Map = BTreeMap<Vec<u8>, Vec<u8>>;
+
     /// The in-memory reference engine.
+    ///
+    /// Besides the live map it keeps what a crash would leave: the `durable`
+    /// map and the batches that returned `Ok` unsynced since the last fold.
     pub(crate) struct MemKvEngine {
-        _private: (),
+        state: Mutex<State>,
+    }
+
+    struct State {
+        live: Map,
+        durable: Map,
+        unsynced: Vec<Vec<BatchOp>>,
+        /// Counted calls entered so far.
+        calls: u64,
+        /// The index of the counted call that kills the engine.
+        death_at: Option<u64>,
+        dead: bool,
+        shut_down: bool,
+    }
+
+    impl State {
+        fn fresh(map: Map) -> Self {
+            Self {
+                live: map.clone(),
+                durable: map,
+                unsynced: Vec::new(),
+                calls: 0,
+                death_at: None,
+                dead: false,
+                shut_down: false,
+            }
+        }
+
+        /// Entry of a counted call: counted first, whatever it returns, then
+        /// the death latch, then the shut-down check.
+        fn enter_counted(&mut self) -> KvResult<()> {
+            let index = self.calls;
+            self.calls += 1;
+            if !self.dead && self.death_at.is_some_and(|n| index >= n) {
+                self.dead = true;
+            }
+            self.enter()
+        }
+
+        /// Entry of any call that returns a `KvResult`.
+        fn enter(&self) -> KvResult<()> {
+            if self.dead {
+                return Err(KvError::Other(anyhow::anyhow!("mem engine is dead")));
+            }
+            if self.shut_down {
+                return Err(KvError::ShutDown);
+            }
+            Ok(())
+        }
+
+        /// Applies a validated batch live and records it for durability.
+        fn commit(&mut self, operations: Vec<BatchOp>, opts: WriteOptions) {
+            apply(&mut self.live, &operations);
+            self.unsynced.push(operations);
+            if opts.sync {
+                self.fold();
+            }
+        }
+
+        /// Makes every listed batch durable.
+        fn fold(&mut self) {
+            for ops in self.unsynced.drain(..) {
+                apply(&mut self.durable, &ops);
+            }
+        }
+    }
+
+    fn apply(map: &mut Map, ops: &[BatchOp]) {
+        for op in ops {
+            match op {
+                BatchOp::Put { key, value } => {
+                    map.insert(key.clone(), value.clone());
+                }
+                BatchOp::Delete { key } => {
+                    map.remove(key);
+                }
+                BatchOp::DeleteRange { start, end } => {
+                    if start < end {
+                        let doomed: Vec<Vec<u8>> = map
+                            .range::<Vec<u8>, _>(start..end)
+                            .map(|(key, _)| key.clone())
+                            .collect();
+                        for key in doomed {
+                            map.remove(&key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn validate(ops: &[BatchOp]) -> KvResult<()> {
+        for op in ops {
+            if let BatchOp::DeleteRange { start, end } = op {
+                if start > end {
+                    return Err(KvError::InvalidArgument("delete range start > end"));
+                }
+            }
+        }
+        Ok(())
     }
 
     impl MemKvEngine {
         /// A fresh, empty, live engine.
         pub(crate) fn new() -> Self {
-            unimplemented!()
+            Self {
+                state: Mutex::new(State::fresh(Map::new())),
+            }
         }
 
         /// Number of counted calls entered so far; 0 on a fresh engine or a fresh crash image.
         pub(crate) fn calls_so_far(&self) -> u64 {
-            unimplemented!()
+            self.state.lock().calls
         }
 
         /// The counted call with index `at_call` and every later `KvEngine` / `KvSnapshot` call that returns a
         /// `KvResult` fail.
         pub(crate) fn arm_death(&self, at_call: u64) {
-            let _ = at_call;
-            unimplemented!()
+            self.state.lock().death_at = Some(at_call);
         }
 
         /// A fresh engine holding `durable` plus the first `keep` unsynced batches, each whole.
         pub(crate) fn crash_image(&self, keep: usize) -> MemKvEngine {
-            let _ = keep;
-            unimplemented!()
+            let state = self.state.lock();
+            let mut image = state.durable.clone();
+            for ops in state.unsynced.iter().take(keep) {
+                apply(&mut image, ops);
+            }
+            MemKvEngine {
+                state: Mutex::new(State::fresh(image)),
+            }
         }
     }
 
     impl KvEngine for MemKvEngine {
         fn capabilities(&self) -> KvCapabilities {
-            unimplemented!()
+            KvCapabilities {
+                engine: "mem",
+                ingest: true,
+                range_delete_cost: RangeDeleteCost::LinearInKeys,
+            }
         }
 
         fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
-            let _ = key;
-            unimplemented!()
+            let state = self.state.lock();
+            state.enter()?;
+            Ok(state.live.get(key).cloned())
         }
 
         fn write(&self, batch: WriteBatch, opts: WriteOptions) -> KvResult<()> {
-            let _ = (batch, opts);
-            unimplemented!()
+            // One lock acquisition for the whole batch: no snapshot can be
+            // taken between two of its ops (`TG-ENG-001`).
+            let mut state = self.state.lock();
+            state.enter_counted()?;
+            let operations = batch.into_ops();
+            validate(&operations)?;
+            state.commit(operations, opts);
+            Ok(())
         }
 
         fn snapshot(&self) -> KvResult<Box<dyn KvSnapshot + '_>> {
-            unimplemented!()
+            let state = self.state.lock();
+            state.enter()?;
+            Ok(Box::new(MemSnapshot {
+                engine: self,
+                map: Arc::new(state.live.clone()),
+            }))
         }
 
         fn ingest(
@@ -470,31 +646,87 @@ mod mem {
             sorted: Vec<(Vec<u8>, Vec<u8>)>,
             opts: WriteOptions,
         ) -> KvResult<()> {
-            let _ = (range, sorted, opts);
-            unimplemented!()
+            let mut state = self.state.lock();
+            state.enter_counted()?;
+            let (Some(start), Some(end)) = (range.start, range.end) else {
+                return Err(KvError::InvalidArgument("ingest range must be bounded"));
+            };
+            if start > end {
+                return Err(KvError::InvalidArgument("ingest range start > end"));
+            }
+            if !sorted.windows(2).all(|w| w[0].0 < w[1].0) {
+                return Err(KvError::InvalidArgument(
+                    "ingest input is not strictly ascending",
+                ));
+            }
+            if !sorted.iter().all(|(key, _)| *key >= start && *key < end) {
+                return Err(KvError::InvalidArgument("ingest key outside its range"));
+            }
+            let mut replace = Vec::with_capacity(sorted.len() + 1);
+            replace.push(BatchOp::DeleteRange { start, end });
+            replace.extend(
+                sorted
+                    .into_iter()
+                    .map(|(key, value)| BatchOp::Put { key, value }),
+            );
+            state.commit(replace, opts);
+            Ok(())
         }
 
         fn sync(&self) -> KvResult<()> {
-            unimplemented!()
+            let mut state = self.state.lock();
+            state.enter_counted()?;
+            state.fold();
+            Ok(())
         }
 
         fn shutdown(&self) -> KvResult<()> {
-            unimplemented!()
+            let mut state = self.state.lock();
+            state.enter_counted()?;
+            state.fold();
+            state.shut_down = true;
+            Ok(())
         }
     }
 
-    /// A snapshot of [`MemKvEngine`].
-    struct MemSnapshot;
+    /// A snapshot of [`MemKvEngine`]: an immutable copy of the live map,
+    /// taken under the engine's lock.
+    struct MemSnapshot<'e> {
+        /// Read only for the death latch, which covers snapshot calls too.
+        engine: &'e MemKvEngine,
+        map: Arc<Map>,
+    }
 
-    impl KvSnapshot for MemSnapshot {
+    impl MemSnapshot<'_> {
+        fn enter(&self) -> KvResult<()> {
+            if self.engine.state.lock().dead {
+                return Err(KvError::Other(anyhow::anyhow!("mem engine is dead")));
+            }
+            Ok(())
+        }
+    }
+
+    impl KvSnapshot for MemSnapshot<'_> {
         fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
-            let _ = key;
-            unimplemented!()
+            self.enter()?;
+            Ok(self.map.get(key).cloned())
         }
 
         fn iter(&self, range: KeyRange) -> KvResult<KvIter<'_>> {
-            let _ = range;
-            unimplemented!()
+            use std::ops::Bound;
+            self.enter()?;
+            if let (Some(start), Some(end)) = (&range.start, &range.end) {
+                if start > end {
+                    return Err(KvError::InvalidArgument("iter range start > end"));
+                }
+            }
+            let lower = range.start.map_or(Bound::Unbounded, Bound::Included);
+            let upper = range.end.map_or(Bound::Unbounded, Bound::Excluded);
+            Ok(Box::new(
+                self.map
+                    .range::<Vec<u8>, _>((lower, upper))
+                    .map(|(key, value)| Ok((key.clone(), value.clone()))),
+            ))
         }
     }
 }
