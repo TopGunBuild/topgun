@@ -237,10 +237,11 @@ pub struct ScanBatch {
 /// last-key marker). Callers treat it as opaque and
 /// pass it back unchanged to fetch the next [`ScanBatch`].
 ///
-/// One narrowing: a store that declares
-/// [`scans_in_key_order()`](MapDataStore::scans_in_key_order) promises a
-/// wrapper that the payload is the UTF-8 bytes of a key. It stays opaque for
-/// every other caller.
+/// One narrowing: a store that declares a scan order
+/// ([`scan_order()`](MapDataStore::scan_order)) promises that every cursor it
+/// returns is accepted by that order's
+/// [`cursor_position`](ScanOrder::cursor_position). The payload stays opaque
+/// for every other caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanCursor(pub Vec<u8>);
 
@@ -272,12 +273,14 @@ impl ScanOrder {
     };
 }
 
-fn key_bytes_position(_key: &str) -> Vec<u8> {
-    unimplemented!()
+fn key_bytes_position(key: &str) -> Vec<u8> {
+    key.as_bytes().to_vec()
 }
 
-fn key_bytes_cursor_position(_cursor: &ScanCursor) -> anyhow::Result<Vec<u8>> {
-    unimplemented!()
+fn key_bytes_cursor_position(cursor: &ScanCursor) -> anyhow::Result<Vec<u8>> {
+    std::str::from_utf8(&cursor.0)
+        .map(|key| key.as_bytes().to_vec())
+        .map_err(|e| anyhow::anyhow!("scan cursor is not valid UTF-8: {e}"))
 }
 
 /// Async sink invoked once per bounded batch of Merkle leaves during
@@ -480,29 +483,6 @@ pub trait MapDataStore: Send + Sync {
     /// discarded copy. Defaulted to `false`: only a backend that actually
     /// records deltas overrides it.
     fn wants_or_witness(&self) -> bool {
-        false
-    }
-
-    /// Whether a value scan of this store walks a map in key order, where "key
-    /// order" is Rust `str` order — the order of the keys' UTF-8 bytes.
-    ///
-    /// A store that answers `true` accepts this contract (`TG-WB-008`), which a
-    /// buffering wrapper relies on to place a buffered key in exactly one batch:
-    ///
-    /// - within one map and one `is_backup`, a scan returns rows in strictly
-    ///   ascending key order across all of its batches;
-    /// - a returned `next_cursor` holds exactly the UTF-8 bytes of the key of
-    ///   the last row of that batch, so a batch with a cursor has a row;
-    /// - a resumed batch holds only rows whose key is greater than the cursor it
-    ///   was resumed from;
-    /// - a row that is durable for the whole call, above the start cursor and
-    ///   not above the returned cursor (or above the start cursor, when none is
-    ///   returned), is in the batch.
-    ///
-    /// Defaulted to `false`: a store that orders rows in any other way, or a
-    /// wrapper that does not forward the answer of what it wraps, keeps the
-    /// wrapper on its order-free rule.
-    fn scans_in_key_order(&self) -> bool {
         false
     }
 

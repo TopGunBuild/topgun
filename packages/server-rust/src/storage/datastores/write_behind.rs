@@ -5,7 +5,6 @@
 //! An optional WAL ensures every acked write is durable before the ack is returned.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,7 +17,7 @@ use tracing::{error, warn};
 
 use crate::storage::engine::SlotCell;
 use crate::storage::map_data_store::{
-    merkle_leaf_hash, LeafSink, Loaded, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+    merkle_leaf_hash, LeafSink, Loaded, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor, ScanOrder,
     StoreBrokenCause, StoreErrorClass, WriteSource,
 };
 use crate::storage::record::RecordValue;
@@ -4826,21 +4825,31 @@ impl MapDataStore for WriteBehindDataStore {
         // the snapshot or in the batch; the other order loses a key flushed
         // between the two reads (TG-WB-008).
         let pending = self.collect_staging_for_map(map);
-        let ranged = !pending.is_empty() && self.inner.scans_in_key_order();
+        let order = if pending.is_empty() {
+            None
+        } else {
+            self.inner.scan_order()
+        };
         let batch = self
             .inner
             .scan_values(map, is_backup, max_batch_cost)
             .await?;
-        if !ranged {
-            // Over a store that does not declare key order the first batch
+        let Some(order) = order else {
+            // Over a store that does not declare a scan order the first batch
             // takes every buffered key that has no row in it. A buffered key
             // whose row is in a later batch is then emitted twice.
             return Ok(overlay_scan_batch(batch, &pending, &StagingOnly::Every));
-        }
-        // Key-ordered store: the first batch covers the keys up to its cursor,
-        // or every key when it is the only batch (TG-WB-008).
-        let upper = batch.next_cursor.as_ref().map(cursor_key).transpose()?;
+        };
+        // A store that declares a scan order: the first batch covers the
+        // positions up to its cursor's, or every position when it is the only
+        // batch (TG-WB-008).
+        let upper = batch
+            .next_cursor
+            .as_ref()
+            .map(order.cursor_position)
+            .transpose()?;
         let range = StagingOnly::InRange {
+            order,
             lower: None,
             upper: upper.as_deref(),
         };
@@ -4865,35 +4874,48 @@ impl MapDataStore for WriteBehindDataStore {
         // Snapshot before the inner read, for the reason given in
         // `scan_values`: the other order loses a key flushed between the two.
         let pending = self.collect_staging_for_map(map);
-        let ranged = !pending.is_empty() && self.inner.scans_in_key_order();
+        let order = if pending.is_empty() {
+            None
+        } else {
+            self.inner.scan_order()
+        };
         // The lower bound is read from the very bytes the previous batch
         // returned as its upper bound, so consecutive ranges share an edge.
-        let lower = if ranged {
-            Some(cursor_key(&cursor)?)
-        } else {
-            None
+        let lower = match order {
+            Some(order) => Some((order.cursor_position)(&cursor)?),
+            None => None,
         };
         let batch = self
             .inner
             .scan_values_batched(map, is_backup, cursor, max_batch_cost)
             .await?;
-        let Some(lower) = lower else {
-            // Over a store that does not declare key order a resumed batch only
-            // replaces and drops rows: the first batch took the buffered keys
-            // without a row there, including those whose row is in this batch,
-            // which are therefore emitted twice.
+        let (Some(order), Some(lower)) = (order, lower) else {
+            // Over a store that does not declare a scan order a resumed batch
+            // only replaces and drops rows: the first batch took the buffered
+            // keys without a row there, including those whose row is in this
+            // batch, which are therefore emitted twice.
             return Ok(overlay_scan_batch(batch, &pending, &StagingOnly::Nothing));
         };
-        // Key-ordered store: this batch covers the keys above the cursor it was
-        // resumed from, up to the cursor it returns (TG-WB-008).
-        let upper = batch.next_cursor.as_ref().map(cursor_key).transpose()?;
-        // A key-ordered store never returns a cursor below the one it was
-        // resumed from. One that does has broken its declaration, and the range
-        // would have no meaning: fail the call, as for a cursor that is no key.
-        if upper.as_deref().is_some_and(|upper| upper < lower.as_str()) {
+        // A store that declares a scan order: this batch covers the positions
+        // above the cursor it was resumed from, up to the cursor it returns
+        // (TG-WB-008).
+        let upper = batch
+            .next_cursor
+            .as_ref()
+            .map(order.cursor_position)
+            .transpose()?;
+        // A store that declares a scan order never returns a cursor below the
+        // one it was resumed from. One that does has broken its declaration,
+        // and the range would have no meaning: fail the call, as for a cursor
+        // its order cannot place.
+        if upper
+            .as_deref()
+            .is_some_and(|upper| upper < lower.as_slice())
+        {
             anyhow::bail!("scan cursor is below the cursor it was resumed from");
         }
         let range = StagingOnly::InRange {
+            order,
             lower: Some(&lower),
             upper: upper.as_deref(),
         };
@@ -4979,22 +5001,18 @@ impl MapDataStore for WriteBehindDataStore {
 
 /// Which buffered keys that have no durable row in a batch are appended to it.
 enum StagingOnly<'a> {
-    /// None: a resumed batch over a store that does not declare key order.
+    /// None: a resumed batch over a store that does not declare a scan order.
     Nothing,
     /// All of them: the first batch over such a store.
     Every,
-    /// Those in the batch's key range `lower < key <= upper`; an absent bound is
-    /// open. Used over a store that declares key order.
+    /// Those whose position `q` in the declared order lies in the batch's
+    /// position range `lower < q <= upper`; an absent bound is open. Used over a
+    /// store that declares a scan order.
     InRange {
-        lower: Option<&'a str>,
-        upper: Option<&'a str>,
+        order: ScanOrder,
+        lower: Option<&'a [u8]>,
+        upper: Option<&'a [u8]>,
     },
-}
-
-/// The key a key-ordered store put into a scan cursor.
-fn cursor_key(cursor: &ScanCursor) -> anyhow::Result<String> {
-    String::from_utf8(cursor.0.clone())
-        .map_err(|e| anyhow::anyhow!("scan cursor is not valid UTF-8: {e}"))
 }
 
 /// Overlay a map's pending staging set onto one durable [`ScanBatch`].
@@ -5003,13 +5021,14 @@ fn cursor_key(cursor: &ScanCursor) -> anyhow::Result<String> {
 /// buffered value; a buffered `None` (pending delete) suppresses the row so an
 /// evicted-but-deleted key cannot resurrect; an absent staging entry keeps the
 /// durable row unchanged. Buffered values with no row in the batch are then
-/// appended, in ascending key order, as `staging_only` says; a pending delete
-/// is appended nowhere.
+/// appended, in the pending map's order (ascending key bytes), as
+/// `staging_only` says; a pending delete is appended nowhere.
 ///
-/// Over a store that declares key order (`TG-WB-008`) the ranges of the batches
-/// of one scan tile the key space — each starts at the cursor the previous one
-/// ended at — so a buffered key is appended by exactly one batch, and never by
-/// a batch that also replaced its row.
+/// Over a store that declares a scan order (`TG-WB-008`) the position ranges
+/// of the batches of one scan tile the position space of that order — each
+/// starts at the cursor the previous one ended at — so a buffered key is
+/// appended by exactly one batch, and never by a batch that also replaced its
+/// row.
 ///
 /// Over any other store the first batch appends every buffered key without a
 /// row in it and later batches append none. That rule is known to emit twice a
@@ -5060,13 +5079,18 @@ fn overlay_scan_batch(
                 append(key, value);
             }
         }
-        StagingOnly::InRange { lower, upper } => {
-            let bounds = (
-                lower.map_or(Bound::Unbounded, Bound::Excluded),
-                upper.map_or(Bound::Unbounded, Bound::Included),
-            );
-            for (key, value) in pending.range::<str, _>(bounds) {
-                append(key, value);
+        StagingOnly::InRange {
+            order,
+            lower,
+            upper,
+        } => {
+            for (key, value) in pending {
+                let position = (order.key_position)(key);
+                let above_lower = lower.is_none_or(|lower| lower < position.as_slice());
+                let up_to_upper = upper.is_none_or(|upper| position.as_slice() <= upper);
+                if above_lower && up_to_upper {
+                    append(key, value);
+                }
             }
         }
     }
@@ -8866,7 +8890,7 @@ mod tests {
     }
 
     /// Answers the n-th scan call with a prepared batch, records the cursors it
-    /// is given, and accepts writes. Declares key order.
+    /// is given, and accepts writes. Declares the key-bytes scan order.
     struct ScriptedScanStore {
         script: Mutex<std::collections::VecDeque<ScanBatch>>,
         cursors: Mutex<Vec<String>>,
@@ -8942,8 +8966,8 @@ mod tests {
             Ok(())
         }
 
-        fn scans_in_key_order(&self) -> bool {
-            true
+        fn scan_order(&self) -> Option<ScanOrder> {
+            Some(ScanOrder::KEY_BYTES)
         }
 
         async fn scan_values(
@@ -8995,7 +9019,7 @@ mod tests {
         tokio::sync::oneshot::Receiver<()>,
     );
 
-    /// Forwards everything to redb and declares key order. Can be armed to park
+    /// Forwards everything to redb and declares its scan order. Can be armed to park
     /// the next `add` on entry, or the next `scan_values` / `scan_values_batched`
     /// after it has read its batch and before it returns.
     struct ParkingScanStore {
@@ -9083,8 +9107,8 @@ mod tests {
             self.inner.enumerate_leaves(map, is_backup, sink).await
         }
 
-        fn scans_in_key_order(&self) -> bool {
-            true
+        fn scan_order(&self) -> Option<ScanOrder> {
+            Some(ScanOrder::KEY_BYTES)
         }
 
         async fn scan_values(
@@ -9137,7 +9161,7 @@ mod tests {
         }
     }
 
-    /// Forwards everything to redb and does NOT forward the key-order
+    /// Forwards everything to redb and does NOT forward the scan-order
     /// declaration: it answers the trait's default, so a write-behind store over
     /// it keeps the order-free rule whatever it wraps.
     struct UndeclaredScanStore(RedbDataStore);
@@ -9702,11 +9726,12 @@ mod tests {
     }
 
     /// Pins the path this store does NOT fix. Over a store that does not declare
-    /// key order the first batch still takes every buffered key without a row in
-    /// it, so `d40` and `d50` — buffered, with their rows in later batches — are
-    /// emitted twice. That is the defect `TG-WB-008` does not cover
-    /// (no shipped store lacks key order; only this test double does), not wanted behaviour: when such a store is fixed, this
-    /// transcript changes with it.
+    /// a scan order the first batch still takes every buffered key without a row
+    /// in it, so `d40` and `d50` — buffered, with their rows in later batches —
+    /// are emitted twice. That is the defect `TG-WB-008` does not cover (no
+    /// shipped store lacks a declared scan order; only this test double does),
+    /// not wanted behaviour: when such a store is fixed, this transcript changes
+    /// with it.
     #[tokio::test]
     async fn over_a_store_that_does_not_declare_key_order_a_staged_key_with_a_later_row_is_still_emitted_twice(
     ) {

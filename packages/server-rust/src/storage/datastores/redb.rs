@@ -71,7 +71,7 @@ use std::sync::Arc;
 
 use crate::storage::map_data_store::{
     check_map_name, merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
-    StoreBrokenCause, StoreErrorClass,
+    ScanOrder, StoreBrokenCause, StoreErrorClass,
 };
 use crate::storage::record::RecordValue;
 use anyhow::bail;
@@ -262,9 +262,9 @@ impl RedbDataStore {
     ///
     /// Two properties here are a contract the write-behind overlay relies on
     /// (`TG-WB-008`), so an edit of the iteration or of the cursor is read
-    /// against them: rows come in strictly ascending `str` order across the
-    /// batches of a scan, and a returned cursor is exactly the bytes of the key
-    /// of the last row of its batch.
+    /// against them: rows ascend strictly by `ScanOrder::KEY_BYTES` positions
+    /// across the batches of a scan, and a returned cursor is exactly the bytes
+    /// of the last row's key.
     fn scan_from(
         &self,
         map: &str,
@@ -489,10 +489,10 @@ impl MapDataStore for RedbDataStore {
         true
     }
 
-    fn scans_in_key_order(&self) -> bool {
+    fn scan_order(&self) -> Option<ScanOrder> {
         // A table over `&str` keys iterates in the order of the keys' bytes,
         // and `scan_from` resumes strictly after the last key it returned.
-        true
+        Some(ScanOrder::KEY_BYTES)
     }
 
     async fn add_encoded(
