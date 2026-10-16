@@ -430,7 +430,7 @@ fn table_exists(read_txn: &redb::ReadTransaction, table_name: &str) -> anyhow::R
 /// The cause of a redb storage error this store treats as fatal for the
 /// process, `None` for any other. Decided by the variant alone: the error's
 /// text is never read.
-fn broken_cause(err: &redb::StorageError) -> Option<StoreBrokenCause> {
+pub(super) fn broken_cause(err: &redb::StorageError) -> Option<StoreBrokenCause> {
     match err {
         redb::StorageError::Io(io) => Some(StoreBrokenCause::Io(io.kind())),
         redb::StorageError::PreviousIo => Some(StoreBrokenCause::PreviousIo),
