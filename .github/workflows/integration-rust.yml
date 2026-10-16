@@ -21,6 +21,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'pnpm-lock.yaml'
+      - 'scripts/check-server-binary-size.sh'
       - '.github/workflows/integration-rust.yml'
   pull_request:
     branches: [main, develop]
@@ -35,6 +36,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'pnpm-lock.yaml'
+      - 'scripts/check-server-binary-size.sh'
       - '.github/workflows/integration-rust.yml'
 
 permissions:
@@ -76,6 +78,17 @@ jobs:
 
       - name: Build topgun-server (release)
         run: cargo build --release --bin topgun-server
+
+      - name: Check server binary size
+        # Native linux-x64 build with the release profile, the same profile the
+        # published binary uses. The ceiling lives in the script, not here.
+        # Non-blocking for now: the runner's native link comes out about 230 KB
+        # larger than the cargo-zigbuild link of the published binary, which puts
+        # it over the 20 MiB ceiling while the published binary is under it. The
+        # ceiling is to be raised together with the RocksDB engine; make the step
+        # blocking then. Until then the printed size still shows growth per PR.
+        continue-on-error: true
+        run: bash scripts/check-server-binary-size.sh target/release/topgun-server linux-x64
 
       - name: Upload server binary
         uses: actions/upload-artifact@v4

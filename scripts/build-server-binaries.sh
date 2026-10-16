@@ -2,8 +2,9 @@
 # build-server-binaries.sh
 #
 # Cross-compile topgun-server for darwin-arm64 and linux-x64, strip each binary,
-# assert size < 20 MB, place into the per-platform npm package, build the admin
-# SPA and bundle it ONCE into the meta package, and run pnpm publish --dry-run
+# check each size against the ceiling in scripts/check-server-binary-size.sh,
+# place into the per-platform npm package, build the admin SPA and bundle it
+# ONCE into the meta package, and run pnpm publish --dry-run
 # for all three packages to verify publish-readiness.
 #
 # Build tool: cargo-zigbuild (preferred — clean cross-compile from macOS M1
@@ -38,7 +39,6 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CRATE="topgun-server"
 BIN="topgun-server"
-MAX_SIZE_BYTES=$((20 * 1024 * 1024))  # 20 MB
 
 echo ""
 echo "TopGun Server — Cross-Compile + Publish-Readiness Check"
@@ -104,33 +104,20 @@ chmod 0755 "${DARWIN_ARM64_OUT}"
 # uses the cross-toolchain, which correctly processes ELF regardless of macOS host).
 # Do NOT run host strip --strip-all here — it is a no-op on macOS BSD strip when
 # targeting ELF and would silently leave a 30 MB unstripped binary if cargo strip
-# were ever disabled. The check_size assertion below is the hard gate.
+# were ever disabled. The size check below is the hard gate.
 cp "${LINUX_X64_SRC}" "${LINUX_X64_OUT}"
 chmod 0755 "${LINUX_X64_OUT}"
 echo "  linux-x64: stripped by cargo [profile.release] strip = true (ELF, cross-toolchain)"
 
 # ── Size assertion ─────────────────────────────────────────────────────────────
 
-check_size() {
-  local path="$1"
-  local label="$2"
-  local size
-  size=$(wc -c < "${path}")
-  local mb
-  mb=$(echo "${size} / 1048576" | bc 2>/dev/null || echo "?")
-  echo "  ${label}: ${mb} MB (${size} bytes)"
-  if [ "${size}" -gt "${MAX_SIZE_BYTES}" ]; then
-    echo "ERROR: ${label} binary exceeds 20 MB ceiling (${size} bytes > ${MAX_SIZE_BYTES})."
-    echo "  Investigate with: nm -j ${path} | head -40  and  cargo bloat"
-    exit 1
-  fi
-}
-
+# The ceiling and the check live in scripts/check-server-binary-size.sh, which CI
+# runs on every pull request as well.
 echo ""
 echo "Binary sizes:"
-check_size "${DARWIN_ARM64_OUT}" "darwin-arm64"
-check_size "${LINUX_X64_OUT}"    "linux-x64"
-echo "  All binaries within 20 MB ceiling."
+bash "${REPO_ROOT}/scripts/check-server-binary-size.sh" "${DARWIN_ARM64_OUT}" "darwin-arm64"
+bash "${REPO_ROOT}/scripts/check-server-binary-size.sh" "${LINUX_X64_OUT}"    "linux-x64"
+echo "  All binaries within the size ceiling."
 
 # ── Build + bundle admin SPA into the meta package ──────────────────────────────
 #
@@ -145,11 +132,13 @@ echo "[4/5] Building admin SPA and bundling into the meta package..."
 ADMIN_SRC_DIST="${REPO_ROOT}/apps/admin-dashboard/dist"
 ADMIN_META_DIST="${REPO_ROOT}/packages/server-dist/admin-dist"
 
-pnpm --filter admin-dashboard build
+# The trailing "..." also builds the workspace packages the SPA imports
+# (@topgunbuild/client, react, adapters, core), so a fresh checkout works.
+pnpm --filter "admin-dashboard..." build
 
 if [ ! -f "${ADMIN_SRC_DIST}/index.html" ]; then
   echo "ERROR: admin SPA build did not produce ${ADMIN_SRC_DIST}/index.html"
-  echo "  Check: pnpm --filter admin-dashboard build"
+  echo "  Check: pnpm --filter \"admin-dashboard...\" build"
   exit 1
 fi
 
