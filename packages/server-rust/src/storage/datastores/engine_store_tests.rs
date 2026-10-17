@@ -346,10 +346,22 @@ async fn scan_batches(
         out.push(batch);
         match cursor {
             Some(c) => {
+                // Positions must rise strictly from cursor to cursor, so a store
+                // that re-emits rows fails here instead of looping for ever.
+                let at = (PARTITION_THEN_KEY.cursor_position)(&c).expect("cursor position");
                 batch = store
                     .scan_values_batched(map, backup, c, budget)
                     .await
                     .expect("resumed scan");
+                assert!(
+                    batch.records.iter().all(|(k, _)| position(k) > at),
+                    "resumed batch does not start after its cursor"
+                );
+                if let Some(next) = &batch.next_cursor {
+                    let next_at =
+                        (PARTITION_THEN_KEY.cursor_position)(next).expect("cursor position");
+                    assert!(next_at > at, "cursor did not advance");
+                }
             }
             None => return out,
         }
