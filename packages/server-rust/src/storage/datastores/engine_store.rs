@@ -35,16 +35,18 @@
 //! Every [`MapDataStore`] method writes with `sync = true`: the store is
 //! write-through, durable on return, as the redb store is.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use anyhow::{anyhow, bail};
 use async_trait::async_trait;
-use parking_lot::{Mutex, RwLock};
-use topgun_core::partition::hash_to_partition;
+use parking_lot::{Mutex, MutexGuard, RwLock};
+use topgun_core::partition::{hash_to_partition, PARTITION_COUNT};
 
-use super::kv_engine::{KvEngine, KvSnapshot, WriteOptions};
+use super::kv_engine::{KeyRange, KvEngine, KvError, KvSnapshot, WriteBatch, WriteOptions};
 use crate::storage::map_data_store::{
-    LeafSink, MapDataStore, ScanBatch, ScanCursor, ScanOrder, StoreErrorClass,
+    check_map_name, merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+    ScanOrder, StoreErrorClass,
 };
 use crate::storage::record::RecordValue;
 
@@ -77,11 +79,26 @@ pub const FLAG_PRIMARY: u8 = 0b01;
 /// Flag bit of a `0x01` row: a backup record of the map was ever stored.
 pub const FLAG_BACKUP: u8 = 0b10;
 
+/// The only ack mode this binary knows: an ack waits for the local engine.
+const ACK_MODE_LOCAL: u8 = 0;
+
+/// Prefix of every refusal of `open` / `open_for_migration`.
+const REFUSAL: &str = "store format: refusing to open:";
+
+/// Number of leaves accumulated before invoking the sink once, as the redb store does.
+const LEAF_BATCH_SIZE: usize = 1024;
+
+/// Per-batch byte budget of a value scan called with `max_batch_cost == 0`,
+/// as the redb store's.
+const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
+
 /// The engine key of the metadata row `name`: `KS_META ‖ name`.
 #[must_use]
 pub fn meta_key(name: &[u8]) -> Vec<u8> {
-    let _ = name;
-    unimplemented!()
+    let mut key = Vec::with_capacity(1 + name.len());
+    key.push(KS_META);
+    key.extend_from_slice(name);
+    key
 }
 
 /// One of the two record keyspaces.
@@ -97,8 +114,42 @@ impl RecordSpace {
     /// The keyspace byte.
     #[must_use]
     pub fn byte(self) -> u8 {
-        unimplemented!()
+        match self {
+            Self::Primary => KS_PRIMARY,
+            Self::Backup => KS_BACKUP,
+        }
     }
+
+    fn of(backup: bool) -> Self {
+        if backup {
+            Self::Backup
+        } else {
+            Self::Primary
+        }
+    }
+
+    /// The registry flag bit a record of this keyspace sets.
+    fn flag(self) -> u8 {
+        match self {
+            Self::Primary => FLAG_PRIMARY,
+            Self::Backup => FLAG_BACKUP,
+        }
+    }
+}
+
+/// `space ‖ partition ‖ map_id`, the 9-byte head of every record key.
+fn record_prefix(space: u8, partition: u32, map_id: u32) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(9);
+    prefix.push(space);
+    prefix.extend_from_slice(&partition.to_be_bytes());
+    prefix.extend_from_slice(&map_id.to_be_bytes());
+    prefix
+}
+
+fn be_u32(bytes: &[u8]) -> u32 {
+    let mut word = [0u8; 4];
+    word.copy_from_slice(&bytes[..4]);
+    u32::from_be_bytes(word)
 }
 
 /// A decoded record key.
@@ -118,8 +169,9 @@ impl RecordKey {
     /// `space ‖ hash_to_partition(key) ‖ map_id ‖ key`.
     #[must_use]
     pub fn encode(space: RecordSpace, map_id: u32, key: &str) -> Vec<u8> {
-        let _ = (space, map_id, key);
-        unimplemented!()
+        let mut bytes = record_prefix(space.byte(), hash_to_partition(key), map_id);
+        bytes.extend_from_slice(key.as_bytes());
+        bytes
     }
 
     /// The inverse of [`RecordKey::encode`].
@@ -130,8 +182,29 @@ impl RecordKey {
     /// keyspace, the user key is not UTF-8, or the partition is not
     /// `hash_to_partition` of the user key — no key this store writes.
     pub fn decode(bytes: &[u8]) -> anyhow::Result<RecordKey> {
-        let _ = bytes;
-        unimplemented!()
+        if bytes.len() < 9 {
+            bail!("record key is {} bytes, shorter than 9", bytes.len());
+        }
+        let space = match bytes[0] {
+            KS_PRIMARY => RecordSpace::Primary,
+            KS_BACKUP => RecordSpace::Backup,
+            other => bail!("record key starts with {other:#04x}, not a record keyspace"),
+        };
+        let partition = be_u32(&bytes[1..5]);
+        let map_id = be_u32(&bytes[5..9]);
+        let key = std::str::from_utf8(&bytes[9..])
+            .map_err(|e| anyhow!("record key is not valid UTF-8: {e}"))?;
+        // Every partition is derived from the key; a mismatch cannot come
+        // from this store's writes.
+        if partition != hash_to_partition(key) {
+            bail!("record key carries partition {partition}, not the partition of {key:?}");
+        }
+        Ok(RecordKey {
+            space,
+            partition,
+            map_id,
+            key: key.to_string(),
+        })
     }
 }
 
@@ -149,8 +222,18 @@ pub struct RegistryEntry {
 /// The engine key of the `0x01` row of `name`.
 #[must_use]
 pub fn map_by_name_key(name: &str) -> Vec<u8> {
-    let _ = name;
-    unimplemented!()
+    let mut key = Vec::with_capacity(1 + name.len());
+    key.push(KS_MAP_BY_NAME);
+    key.extend_from_slice(name.as_bytes());
+    key
+}
+
+/// The value of a `0x01` row.
+fn map_by_name_value(map_id: u32, flags: u8) -> Vec<u8> {
+    let mut value = Vec::with_capacity(5);
+    value.extend_from_slice(&map_id.to_be_bytes());
+    value.push(flags);
+    value
 }
 
 /// Decodes a `0x01` row.
@@ -160,15 +243,37 @@ pub fn map_by_name_key(name: &str) -> Vec<u8> {
 /// When the key is not `KS_MAP_BY_NAME ‖ UTF-8`, the value is not 5 bytes,
 /// or the id is 0.
 pub fn decode_map_by_name_row(key: &[u8], value: &[u8]) -> anyhow::Result<RegistryEntry> {
-    let _ = (key, value);
-    unimplemented!()
+    let Some((&KS_MAP_BY_NAME, name)) = key.split_first() else {
+        bail!("registry key is not in the map-by-name keyspace");
+    };
+    let name = std::str::from_utf8(name)
+        .map_err(|e| anyhow!("registry map name is not valid UTF-8: {e}"))?;
+    let (map_id, flags) = decode_map_by_name_value(value)?;
+    Ok(RegistryEntry {
+        name: name.to_string(),
+        map_id,
+        flags,
+    })
+}
+
+fn decode_map_by_name_value(value: &[u8]) -> anyhow::Result<(u32, u8)> {
+    if value.len() != 5 {
+        bail!("registry row is {} bytes, not 5", value.len());
+    }
+    let map_id = be_u32(&value[..4]);
+    if map_id == 0 {
+        bail!("registry row holds map id 0, which is never issued");
+    }
+    Ok((map_id, value[4]))
 }
 
 /// The engine key of the `0x02` row of `map_id`.
 #[must_use]
 pub fn map_by_id_key(map_id: u32) -> Vec<u8> {
-    let _ = map_id;
-    unimplemented!()
+    let mut key = Vec::with_capacity(5);
+    key.push(KS_MAP_BY_ID);
+    key.extend_from_slice(&map_id.to_be_bytes());
+    key
 }
 
 /// Decodes a `0x02` row into `(map_id, name)`.
@@ -178,8 +283,12 @@ pub fn map_by_id_key(map_id: u32) -> Vec<u8> {
 /// When the key is not 5 bytes starting `KS_MAP_BY_ID`, or the value is not
 /// UTF-8.
 pub fn decode_map_by_id_row(key: &[u8], value: &[u8]) -> anyhow::Result<(u32, String)> {
-    let _ = (key, value);
-    unimplemented!()
+    if key.len() != 5 || key[0] != KS_MAP_BY_ID {
+        bail!("registry key is not a 5-byte map-by-id key");
+    }
+    let name = std::str::from_utf8(value)
+        .map_err(|e| anyhow!("registry map name is not valid UTF-8: {e}"))?;
+    Ok((be_u32(&key[1..5]), name.to_string()))
 }
 
 /// The id the `0x01` row of `name` holds in `snapshot`, `None` only when the
@@ -190,8 +299,14 @@ pub fn decode_map_by_id_row(key: &[u8], value: &[u8]) -> anyhow::Result<(u32, St
 /// An engine error is returned, never read as "absent"; a malformed row is
 /// an error.
 pub fn map_id_in(snapshot: &dyn KvSnapshot, name: &str) -> anyhow::Result<Option<u32>> {
-    let _ = (snapshot, name);
-    unimplemented!()
+    Ok(registry_row_in(snapshot, name)?.map(|(map_id, _)| map_id))
+}
+
+fn registry_row_in(snapshot: &dyn KvSnapshot, name: &str) -> anyhow::Result<Option<(u32, u8)>> {
+    snapshot
+        .get(&map_by_name_key(name))?
+        .map(|value| decode_map_by_name_value(&value))
+        .transpose()
 }
 
 /// The scan order of [`EngineMapDataStore`]: a key's position is its
@@ -204,13 +319,121 @@ pub const PARTITION_THEN_KEY: ScanOrder = ScanOrder {
 };
 
 fn partition_then_key_position(key: &str) -> Vec<u8> {
-    let _ = (key, hash_to_partition);
-    unimplemented!()
+    let mut position = Vec::with_capacity(4 + key.len());
+    position.extend_from_slice(&hash_to_partition(key).to_be_bytes());
+    position.extend_from_slice(key.as_bytes());
+    position
 }
 
+/// A cursor is a record key; its position drops the keyspace and map id,
+/// which the scan it came from fixes.
 fn partition_then_key_cursor_position(cursor: &ScanCursor) -> anyhow::Result<Vec<u8>> {
-    let _ = cursor;
-    unimplemented!()
+    let bytes = &cursor.0;
+    if bytes.len() < 9 || (bytes[0] != KS_PRIMARY && bytes[0] != KS_BACKUP) {
+        bail!("scan cursor is not a record key: wrong length or keyspace");
+    }
+    let key = std::str::from_utf8(&bytes[9..])
+        .map_err(|e| anyhow!("scan cursor is not valid UTF-8: {e}"))?;
+    if be_u32(&bytes[1..5]) != hash_to_partition(key) {
+        bail!("scan cursor is not a record key: its partition is not its key's");
+    }
+    let mut position = bytes[1..5].to_vec();
+    position.extend_from_slice(key.as_bytes());
+    Ok(position)
+}
+
+/// Refuses exactly the names the shared rule makes a store refuse, with the
+/// redb store's text, before anything touches the engine.
+fn check_name(map: &str) -> anyhow::Result<()> {
+    if let Err(violation) = check_map_name(map) {
+        if violation.refused_by_store() {
+            bail!("Invalid map name {map:?}: {violation}");
+        }
+    }
+    Ok(())
+}
+
+/// The metadata rows of a store this binary formats.
+fn format_rows() -> [(Vec<u8>, Vec<u8>); 3] {
+    [
+        (meta_key(META_FORMAT), FORMAT_VERSION.to_be_bytes().to_vec()),
+        (meta_key(META_NEXT_MAP_ID), 1u32.to_be_bytes().to_vec()),
+        (meta_key(META_ACK_MODE), vec![ACK_MODE_LOCAL]),
+    ]
+}
+
+/// The first key of `range` in `snapshot`, if any.
+fn first_key_in(snapshot: &dyn KvSnapshot, range: KeyRange) -> anyhow::Result<Option<Vec<u8>>> {
+    match snapshot.iter(range)?.next() {
+        Some(entry) => Ok(Some(entry?.0)),
+        None => Ok(None),
+    }
+}
+
+/// What the metadata of a non-empty engine says, once every check passed.
+struct StoreMetadata {
+    migration: Option<Vec<u8>>,
+}
+
+/// `None` for an engine that holds no key; otherwise the checked metadata,
+/// or a refusal (`TG-ENG-006`). Reads only.
+fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<StoreMetadata>> {
+    if first_key_in(snapshot, KeyRange::default())?.is_none() {
+        return Ok(None);
+    }
+    let mut format = None;
+    let mut next_map_id = None;
+    let mut ack_mode = None;
+    let mut migration = None;
+    let meta = KeyRange {
+        start: Some(vec![KS_META]),
+        end: Some(vec![KS_MAP_BY_NAME]),
+    };
+    for entry in snapshot.iter(meta)? {
+        let (key, value) = entry?;
+        match &key[1..] {
+            META_FORMAT => format = Some(value),
+            META_NEXT_MAP_ID => next_map_id = Some(value),
+            META_ACK_MODE => ack_mode = Some(value),
+            META_MIGRATION => migration = Some(value),
+            other => bail!(
+                "{REFUSAL} unknown metadata {:?}",
+                String::from_utf8_lossy(other)
+            ),
+        }
+    }
+    match format.as_deref() {
+        None => bail!("{REFUSAL} no format metadata; not a store of this binary"),
+        Some(v) if v.len() == 4 && be_u32(v) == FORMAT_VERSION => {}
+        Some(v) if v.len() == 4 => bail!("{REFUSAL} format {} is not {FORMAT_VERSION}", be_u32(v)),
+        Some(v) => bail!("{REFUSAL} format metadata is {} bytes, not 4", v.len()),
+    }
+    match ack_mode.as_deref() {
+        None => bail!("{REFUSAL} no ack mode metadata"),
+        Some([ACK_MODE_LOCAL]) => {}
+        Some(v) => bail!("{REFUSAL} ack mode {v:?} is not local"),
+    }
+    match next_map_id.as_deref() {
+        None => bail!("{REFUSAL} no next map id metadata"),
+        Some(v) if v.len() == 4 && be_u32(v) >= 1 => {}
+        Some(v) => bail!("{REFUSAL} next map id {v:?} is not a u32 of at least 1"),
+    }
+    let reserved = [
+        KeyRange {
+            start: Some(vec![KS_MAP_BY_ID + 1]),
+            end: Some(vec![KS_PRIMARY]),
+        },
+        KeyRange {
+            start: Some(vec![KS_BACKUP + 1]),
+            end: None,
+        },
+    ];
+    for range in reserved {
+        if let Some(key) = first_key_in(snapshot, range)? {
+            bail!("{REFUSAL} a key in the reserved keyspace {:#04x}", key[0]);
+        }
+    }
+    Ok(Some(StoreMetadata { migration }))
 }
 
 /// One operation of [`EngineMapDataStore::write_records`].
@@ -247,6 +470,29 @@ pub enum RecordOp<'a> {
     SetMigrationMark(Option<&'a [u8]>),
 }
 
+impl RecordOp<'_> {
+    /// The map the op names and the flag bits it needs on that map's row:
+    /// a `Delete` needs none, so it never issues an id or sets a flag.
+    fn map_need(&self) -> Option<(&str, u8)> {
+        match *self {
+            Self::Put { map, backup, .. } | Self::Touch { map, backup } => {
+                Some((map, RecordSpace::of(backup).flag()))
+            }
+            Self::Delete { map, .. } => Some((map, 0)),
+            Self::SetMigrationMark(_) => None,
+        }
+    }
+}
+
+/// The registry side of one `write_records` call: every named map's row as
+/// it will stand after the batch, the registry rows to put into the batch,
+/// and the registry lock when an id is issued or a flag set.
+struct RegistryPlan<'s, 'n> {
+    rows: HashMap<&'n str, Option<(u32, u8)>>,
+    puts: Vec<(Vec<u8>, Vec<u8>)>,
+    _guard: Option<MutexGuard<'s, ()>>,
+}
+
 /// A [`MapDataStore`] over a [`KvEngine`], in the key format of this module.
 pub struct EngineMapDataStore<E: KvEngine> {
     engine: Arc<E>,
@@ -275,8 +521,29 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     /// holds metadata this binary does not know, a key in a reserved
     /// keyspace, or an unfinished migration (`TG-ENG-006`); an engine error.
     pub fn open(engine: Arc<E>) -> anyhow::Result<Self> {
-        let _ = engine;
-        unimplemented!()
+        let metadata = read_store_metadata(&*engine.snapshot()?)?;
+        match metadata {
+            None => {
+                let mut batch = WriteBatch::new();
+                for (key, value) in format_rows() {
+                    batch.put(key, value);
+                }
+                engine.write(batch, WriteOptions { sync: true })?;
+            }
+            Some(StoreMetadata {
+                migration: Some(_), ..
+            }) => {
+                bail!("{REFUSAL} a migration into this store is unfinished");
+            }
+            Some(_) => {}
+        }
+        Ok(Self {
+            engine,
+            registry_lock: Mutex::new(()),
+            cache: RwLock::new(HashMap::new()),
+            #[cfg(test)]
+            registry_park: Mutex::new(None),
+        })
     }
 
     /// Opens a store whose migration is unfinished, or formats an empty
@@ -290,8 +557,34 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         engine: Arc<E>,
         initial_mark: &[u8],
     ) -> anyhow::Result<(Self, Vec<u8>)> {
-        let _ = (engine, initial_mark);
-        unimplemented!()
+        let metadata = read_store_metadata(&*engine.snapshot()?)?;
+        let mark = match metadata {
+            None => {
+                // One batch, so no crash point leaves a formatted store
+                // without its mark.
+                let mut batch = WriteBatch::new();
+                for (key, value) in format_rows() {
+                    batch.put(key, value);
+                }
+                batch.put(meta_key(META_MIGRATION), initial_mark.to_vec());
+                engine.write(batch, WriteOptions { sync: true })?;
+                initial_mark.to_vec()
+            }
+            Some(StoreMetadata {
+                migration: Some(mark),
+            }) => mark,
+            Some(StoreMetadata { migration: None }) => bail!(
+                "store format: refusing to resume a migration: the store has no migration mark"
+            ),
+        };
+        let store = Self {
+            engine,
+            registry_lock: Mutex::new(()),
+            cache: RwLock::new(HashMap::new()),
+            #[cfg(test)]
+            registry_park: Mutex::new(None),
+        };
+        Ok((store, mark))
     }
 
     /// The migration mark of `engine`, read from one snapshot; writes nothing.
@@ -300,9 +593,134 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     ///
     /// An engine error, never read as "absent".
     pub fn read_migration_mark(engine: &E) -> anyhow::Result<Option<Vec<u8>>> {
-        let _ = engine;
-        unimplemented!()
+        Ok(engine.snapshot()?.get(&meta_key(META_MIGRATION))?)
     }
+
+    /// The registry row of `name`: from the cache, else from the engine,
+    /// caching only a row that exists.
+    fn cached_row(&self, name: &str) -> anyhow::Result<Option<(u32, u8)>> {
+        if let Some(row) = self.cache.read().get(name) {
+            return Ok(Some(*row));
+        }
+        let row = self
+            .engine
+            .get(&map_by_name_key(name))?
+            .map(|value| decode_map_by_name_value(&value))
+            .transpose()?;
+        if let Some(row) = row {
+            self.cache.write().insert(name.to_string(), row);
+        }
+        Ok(row)
+    }
+
+    /// The id of `name` for a read from `snapshot`: from the cache, else
+    /// from the snapshot, caching only a row that exists.
+    fn read_map_id(&self, snapshot: &dyn KvSnapshot, name: &str) -> anyhow::Result<Option<u32>> {
+        if let Some((map_id, _)) = self.cache.read().get(name) {
+            return Ok(Some(*map_id));
+        }
+        let row = registry_row_in(snapshot, name)?;
+        if let Some(row) = row {
+            self.cache.write().insert(name.to_string(), row);
+        }
+        Ok(row.map(|(map_id, _)| map_id))
+    }
+
+    /// Plans the registry rows a call needs (`TG-ENG-005`). A call whose
+    /// every needed flag is already known takes no lock; any other re-reads
+    /// every row under `registry_lock`, which the plan holds until the
+    /// caller's engine write has returned, so two first writes cannot read
+    /// the same `next_map_id`.
+    fn plan_registry<'n>(
+        &self,
+        needs: &BTreeMap<&'n str, u8>,
+    ) -> anyhow::Result<RegistryPlan<'_, 'n>> {
+        let mut rows = HashMap::with_capacity(needs.len());
+        let mut settled = true;
+        for (&name, &need) in needs {
+            let row = self.cached_row(name)?;
+            settled &= match row {
+                Some((_, flags)) => flags & need == need,
+                None => need == 0,
+            };
+            rows.insert(name, row);
+        }
+        if settled {
+            return Ok(RegistryPlan {
+                rows,
+                puts: Vec::new(),
+                _guard: None,
+            });
+        }
+
+        let guard = self.registry_lock.lock();
+        let mut puts = Vec::new();
+        let mut next_map_id: Option<u32> = None;
+        for (&name, &need) in needs {
+            let current = self
+                .engine
+                .get(&map_by_name_key(name))?
+                .map(|value| decode_map_by_name_value(&value))
+                .transpose()?;
+            let planned = match current {
+                Some((map_id, flags)) => {
+                    if flags | need != flags {
+                        puts.push((
+                            map_by_name_key(name),
+                            map_by_name_value(map_id, flags | need),
+                        ));
+                    }
+                    Some((map_id, flags | need))
+                }
+                None if need == 0 => None,
+                None => {
+                    let map_id = match next_map_id {
+                        Some(id) => id,
+                        None => self.stored_next_map_id()?,
+                    };
+                    // `u32::MAX` is never issued, so `map_id + 1` — the end
+                    // of a map's partition range — never overflows.
+                    if map_id == u32::MAX {
+                        bail!("map id space exhausted");
+                    }
+                    puts.push((map_by_name_key(name), map_by_name_value(map_id, need)));
+                    puts.push((map_by_id_key(map_id), name.as_bytes().to_vec()));
+                    next_map_id = Some(map_id + 1);
+                    Some((map_id, need))
+                }
+            };
+            rows.insert(name, planned);
+        }
+        if let Some(next) = next_map_id {
+            puts.push((meta_key(META_NEXT_MAP_ID), next.to_be_bytes().to_vec()));
+            self.registry_park_point();
+        }
+        Ok(RegistryPlan {
+            rows,
+            puts,
+            _guard: Some(guard),
+        })
+    }
+
+    fn stored_next_map_id(&self) -> anyhow::Result<u32> {
+        match self.engine.get(&meta_key(META_NEXT_MAP_ID))? {
+            Some(value) if value.len() == 4 => Ok(be_u32(&value)),
+            _ => bail!("next map id metadata is missing or malformed"),
+        }
+    }
+
+    #[cfg(test)]
+    fn registry_park_point(&self) {
+        let park = self.registry_park.lock().take();
+        if let Some(park) = park {
+            let _ = park.reached.send(());
+            let _ = park.release.recv();
+        }
+    }
+
+    #[cfg(not(test))]
+    #[allow(clippy::unused_self)]
+    fn registry_park_point(&self) {}
 
     /// Applies `ops`, and every registry row they need, as one engine batch.
     ///
@@ -349,15 +767,19 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     pub(crate) fn arm_registry_park(
         &self,
     ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
-        let _ = &self.registry_park;
-        unimplemented!()
+        let (reached, reached_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *self.registry_park.lock() = Some(RegistryPark {
+            reached,
+            release: release_rx,
+        });
+        (reached_rx, release)
     }
 
     /// The number of registry cache entries.
     #[cfg(test)]
     pub(crate) fn registry_cache_len(&self) -> usize {
-        let _ = (&self.cache, &self.registry_lock);
-        unimplemented!()
+        self.cache.read().len()
     }
 }
 
@@ -437,7 +859,8 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         is_backup: bool,
         sink: &mut dyn LeafSink,
     ) -> anyhow::Result<()> {
-        let _ = (map, is_backup, sink);
+        let _ = (map, is_backup, sink, merkle_leaf_hash, LEAF_BATCH_SIZE);
+        let _: Option<MerkleLeaf> = None;
         unimplemented!()
     }
 
@@ -447,7 +870,13 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         is_backup: bool,
         max_batch_cost: u64,
     ) -> anyhow::Result<ScanBatch> {
-        let _ = (map, is_backup, max_batch_cost);
+        let _ = (
+            map,
+            is_backup,
+            max_batch_cost,
+            DEFAULT_SCAN_BATCH_COST,
+            PARTITION_COUNT,
+        );
         unimplemented!()
     }
 
@@ -488,7 +917,7 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
     }
 
     fn classify_error(&self, err: &anyhow::Error) -> StoreErrorClass {
-        let _ = err;
+        let _ = (err, std::any::type_name::<KvError>());
         unimplemented!()
     }
 }
