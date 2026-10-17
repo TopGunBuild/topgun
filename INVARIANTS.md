@@ -7,7 +7,7 @@ that every cited enforcing test still exists and that no new entry lands without
 an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", not "zero NAKED".
 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
-EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch). Cite the ID verbatim in code comments and test names. Statuses:
+EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine). Cite the ID verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -2457,3 +2457,98 @@ weaker than a test.
 | `tests/rate_limit_envelope_integration.rs` :: `an_enveloped_op_batch_drains_the_bucket_like_a_top_level_one` | **the cost the read loop presents**, through a real socket: an envelope holding one `OP_BATCH` of 100 drains a 100-token bucket, so both batches of 60 that follow are answered 429. Shown red, 20 of 20, on the tree before the fix (one 429), on the mutant where an inner `OP_BATCH` costs one, and — alone among all the tests — on the mutant where the read loop presents the framed item count instead of the unpacked value's cost. Control: `a_top_level_op_batch_drains_the_bucket` | CI (`cargo test`) |
 | `tests/rate_limit_envelope_integration.rs` :: `a_refused_envelope_hands_nothing_to_dispatch` | **clause (e)**, through a real socket with a recording service behind a one-worker dispatcher: an envelope of 70 writes the bucket does not cover gets one 429 and not one of its writes is recorded — neither by the time a write sent after it is, nor by the time the recorder has then been silent for one second. Shown red, 20 of 20, on the mutant where the read loop sends the 429 and moves the frame to dispatch anyway, and on the one where it dispatches the refused frame 200 ms later from a task of its own — the only test that is, on either. Control: `an_admitted_envelope_hands_every_operation_to_dispatch` records all 70 with no 429. The zero is read twice. The first read, when the later write arrives, orders a dispatched write ahead of it only on one worker and on the single-threaded test runtime polling tasks in spawn order; the second, after the quiet period, does not depend on task order. A late write can only turn the test red, never green; a write dispatched later than the quiet period is still not seen | CI (`cargo test`) |
 | nine one-change mutants, ten tests each | each mutant turned red exactly the tests named for it above and no other | one shot, at landing; not a guard |
+
+### TG-ENG-001: A `KvEngine` write batch is atomic and ordered, also for a concurrent reader; `shutdown` keeps every returned batch
+
+- **Scope:** every implementation of the byte-level engine boundary `KvEngine`
+  (`storage/datastores/kv_engine.rs`): the reference engine `MemKvEngine` and `RedbKvEngine`. No
+  server code calls the boundary yet.
+- **Statement:** the ops of one `write` apply in batch order (a later op on a key wins; a range
+  delete removes keys put earlier in the batch). A batch holding a range delete with
+  `start > end` is refused with `InvalidArgument` and nothing of it is applied. When `write`
+  returns `Ok`, every later read of the process sees all of the batch, also when it was written
+  with `sync = false`, and no reader ever sees a strict subset of a batch: a snapshot contains each
+  batch whose `write` overlapped it wholly or not at all. After `shutdown` returned and the engine
+  was dropped, an engine opened on the same files holds every batch whose `write` returned before
+  `shutdown`.
+- **Not claimed:** what survives a crash (the trait's durability clause: a prefix of the written
+  batches, each whole, containing every batch made durable). It is stated on the trait and is not
+  enforced by this entry's tests.
+- **Maintaining code:** `kv_engine.rs` — `MemKvEngine::write` (one lock acquisition per batch) and
+  `MemKvEngine::shutdown`; `redb_engine.rs` — `RedbKvEngine::write` (validation, then one write
+  transaction), `sync`, `shutdown` (sync, then drop the database).
+- **Enforcing test:** `c04_batch_ops_apply_in_order`,
+  `c05_a_batch_with_an_invalid_range_changes_nothing`,
+  `c25_a_concurrent_reader_never_sees_part_of_a_batch`,
+  `m03_a_reader_never_sees_a_batch_parked_between_its_ops`,
+  `r01_a_reader_never_sees_part_of_a_batch_while_its_commit_syncs`,
+  `c24_the_engine_matches_the_model`, `c27_shutdown_then_reopen_keeps_every_returned_batch` — all
+  in `storage/datastores/kv_conformance.rs`. The `c` cases run for every engine; `m03` parks a mem
+  write between its first and second op and reads from another thread; `r01` parks redb's durable
+  commit inside `sync_data` and reads at every park.
+- **Violation consequence:** a record layer built on the engine would expose half of a multi-key
+  update to a reader, or lose acknowledged batches across a clean restart.
+- **Discovered by:** SPEC-394a (the boundary's contract).
+- **Status:** decided, **enforced** for both engines. Shown red on one-change mutants: a batch
+  applied op by op (mem), one commit per op (redb, `r01`, 10 of 10 runs, each ending `FAILED`), the
+  database forgotten instead of dropped (redb, `c27`). A14 (Mem lock per op) is killed
+  deterministically by `m03_a_reader_never_sees_a_batch_parked_between_its_ops`, 10 of 10;
+  `c25_a_concurrent_reader_never_sees_part_of_a_batch` is a probabilistic smoke test (A14 killed in
+  8 of 10 runs at its frozen iteration count) and is not counted as A14's killer.
+
+### TG-ENG-002: A snapshot is a consistent point-in-time view, iterated in byte order; a prefix walk follows the page and walk rules
+
+- **Scope:** `KvEngine::snapshot`, `KvSnapshot::get` / `iter`, `KvEngine::scan_prefix` of every
+  engine (both engines here use the trait's default `scan_prefix`).
+- **Statement:** every ordered view is strictly ascending by unsigned byte-lexicographic order. A
+  snapshot never sees a put, delete or range delete made after it, and none of its iterators is
+  affected by writes made while it runs; of two snapshots taken one after the other by one thread
+  the later contains every batch of the earlier. `iter` honours an inclusive start, an exclusive
+  end and open bounds. `scan_prefix` returns the keys under the prefix greater than its cursor, at
+  most `limit`, from one snapshot; its `resume_after` is `Some(last key)` iff the page is full. A
+  walk returns a key at most once and returns it iff it is present in the snapshot of the call
+  whose page interval contains it: a key present for the whole walk exactly once, a key put behind
+  the cursor never, and deleting the cursor key changes nothing for later pages.
+- **Maintaining code:** `kv_engine.rs` — the default `KvEngine::scan_prefix` and
+  `prefix_successor`, `MemKvEngine::snapshot` (an immutable copy) and its snapshot's `iter`;
+  `redb_engine.rs` — `RedbKvEngine::snapshot` (a held read transaction) and its snapshot's `iter`.
+- **Enforcing test:** `c09_iteration_is_in_ascending_byte_order`,
+  `c11_a_snapshot_does_not_see_writes_made_after_it`,
+  `c12_an_iterator_is_unaffected_by_writes_made_while_it_runs`,
+  `c14_scan_prefix_pages_cover_every_key_once`,
+  `c26_a_cursor_walk_with_writes_between_pages_follows_the_page_rule`,
+  `c24_the_engine_matches_the_model` — in `storage/datastores/kv_conformance.rs`, for every engine.
+- **Violation consequence:** a scan resumed by key would skip or repeat records after concurrent
+  writes, or a reader would mix two points in time.
+- **Discovered by:** SPEC-394a.
+- **Status:** decided, **enforced**. Shown red on one-change mutants of the cursor (inclusive
+  resume bound, restart on a deleted cursor key, one-key look-ahead, open upper bound, a successor
+  without the `0xFF` strip) and of the snapshot (live reads, a fresh read transaction per `iter`,
+  an inclusive end bound).
+
+### TG-ENG-003: An engine refuses what it does not offer, typed, without side effects; a broken engine says so by type
+
+- **Scope:** `KvEngine::capabilities` and every call of an operation an engine may not offer
+  (today only `ingest`); the error mapping of `RedbKvEngine`.
+- **Statement:** an operation an engine does not offer returns `KvError::Unsupported(capability)`
+  whatever its arguments, changes nothing and never panics, and `capabilities()` says so in
+  advance; an operation declared present is not refused. `KvError::Broken { cause }` is returned
+  only for what `TG-WB-010` treats as fatal for the process (an I/O error, a previous I/O error,
+  corruption, a poisoned lock), decided from a typed classification — the engine's error type, or
+  the error-kind enum its binding library exposes — and never from error text; everything else is
+  `KvError::Other`. For redb the cause is the one the production store's `broken_cause` gives,
+  because the engine calls that function.
+- **Maintaining code:** `redb_engine.rs` — `RedbKvEngine::capabilities`, `RedbKvEngine::ingest`,
+  `kv_from_storage`, `kv_from_commit`, `kv_from_transaction`, `kv_from_table`; `redb.rs` —
+  `broken_cause`.
+- **Enforcing test:** `c17_ingest_replaces_a_range_or_is_refused_as_unsupported`,
+  `c18_capabilities_are_truthful`, `r02_a_latched_engine_reports_broken_previous_io`,
+  `r03_storage_errors_map_to_their_broken_cause`,
+  `r04_redb_ingest_is_refused_as_unsupported_and_never_panics` — in
+  `storage/datastores/kv_conformance.rs`.
+- **Violation consequence:** a caller would depend on an operation that is not there, or a broken
+  store would be retried for ever instead of stopping the node (exit 72).
+- **Discovered by:** SPEC-394a.
+- **Status:** decided, **enforced**. Shown red on one-change mutants: a capability declared
+  present while refused, a panicking `ingest`, an argument check before the capability check,
+  `PreviousIo` mapped to `Other`.
