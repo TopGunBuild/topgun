@@ -163,7 +163,7 @@ At startup the server emits a single `tracing::info!` line containing the effect
 | `/api/admin/cluster/status` | GET | admin JWT | Cluster membership and partition status. |
 | `/api/admin/maps` | GET | admin JWT | List maps with record counts and partition info. |
 | `/api/admin/settings` | GET, PUT | admin JWT | Read or update server configuration at runtime. |
-| `/api/docs` | GET | none | Swagger UI for the admin API (OpenAPI spec at `/api/openapi.json`). |
+| `/api/openapi.json` | GET | none | OpenAPI spec of the admin API, as JSON. |
 | `/admin/*` | GET | none | SPA admin dashboard. Serves static files from `TOPGUN_ADMIN_DIR`. |
 
 ## Rust embed API

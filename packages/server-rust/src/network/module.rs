@@ -28,6 +28,15 @@ use super::handlers::{
     refresh_handler, token_exchange_handler, ws_upgrade_handler, AppState,
 };
 use super::middleware::build_http_layers;
+use super::openapi::openapi_json;
+use super::shutdown::ShutdownController;
+use crate::cluster::state::ClusterState;
+use crate::service::config::ServerConfig;
+use crate::service::domain::index::mutation_observer::IndexObserverFactory;
+use crate::service::domain::index::vector_index::{rebuild_from_store, VectorRebuildSpec};
+use crate::service::middleware::ObservabilityHandle;
+use crate::service::policy::PolicyStore;
+use crate::storage::factory::RecordStoreFactory;
 use arc_swap::ArcSwap;
 use axum::routing::{delete, get, post};
 use axum::Router;
@@ -37,23 +46,6 @@ use tower_governor::key_extractor::{KeyExtractor, PeerIpKeyExtractor};
 use tower_governor::GovernorLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
-// Only the non-swagger build mounts the standalone /api/openapi.json route; the
-// swagger build serves that path through SwaggerUi instead (gating avoids an
-// unused-import warning when the feature is on).
-#[cfg(not(feature = "swagger"))]
-use super::openapi::openapi_json;
-#[cfg(feature = "swagger")]
-use super::openapi::AdminApiDoc;
-use super::shutdown::ShutdownController;
-use crate::cluster::state::ClusterState;
-use crate::service::config::ServerConfig;
-use crate::service::domain::index::mutation_observer::IndexObserverFactory;
-use crate::service::domain::index::vector_index::{rebuild_from_store, VectorRebuildSpec};
-use crate::service::middleware::ObservabilityHandle;
-use crate::service::policy::PolicyStore;
-use crate::storage::factory::RecordStoreFactory;
-#[cfg(feature = "swagger")]
-use utoipa::OpenApi;
 
 /// Manages the full HTTP/WebSocket server lifecycle.
 ///
@@ -661,11 +653,6 @@ pub fn admin_routes(
     // governor refills 1 token every 10 ms. burst_size controls the initial
     // burst window. /ws and /sync are excluded because those have
     // operation-level load shedding instead of HTTP-layer rate limiting.
-    // Swagger UI served at /api/docs (only when the `swagger` feature is enabled)
-    #[cfg(feature = "swagger")]
-    let swagger_ui = utoipa_swagger_ui::SwaggerUi::new("/api/docs")
-        .url("/api/openapi.json", AdminApiDoc::openapi());
-
     let mut router = Router::new()
         // Health probes -- never rate-limited (Kubernetes liveness/readiness).
         // /healthz is the ops-standard alias for /health/ready: returns 503
@@ -785,20 +772,8 @@ pub fn admin_routes(
             .nest_service("/admin", serve_dir);
     }
 
-    // Serve the machine-readable OpenAPI JSON spec. In swagger-feature builds the
-    // SwaggerUi merge below already registers `/api/openapi.json` (via `.url(...)`),
-    // so mounting it here too would panic at router build with an overlapping-route
-    // error. Only mount the standalone route when the Swagger UI is NOT built in --
-    // this is what keeps the JSON available in the default (prebuilt) binary.
-    #[cfg(not(feature = "swagger"))]
-    let router = router.route("/api/openapi.json", get(|| async { openapi_json() }));
-
-    // Swagger UI at /api/docs (which also serves /api/openapi.json) -- only present
-    // in swagger-feature builds (e.g. cargo run --features swagger)
-    #[cfg(feature = "swagger")]
-    let router = router.merge(swagger_ui);
-
-    router
+    // The machine-readable OpenAPI JSON spec of the admin API.
+    router.route("/api/openapi.json", get(|| async { openapi_json() }))
 }
 
 /// Builds the complete application router with all routes and middleware.

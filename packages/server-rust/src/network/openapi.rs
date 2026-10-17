@@ -1,9 +1,8 @@
-//! `OpenAPI` specification generation and Swagger UI for the admin API.
+//! `OpenAPI` specification generation for the admin API.
 //!
 //! Uses `utoipa` to derive the `OpenAPI` 3.1 spec from Rust types and handler
-//! annotations. Provides two endpoints:
-//! - `GET /api/openapi.json` -- raw `OpenAPI` JSON spec
-//! - `GET /api/docs` -- Swagger UI rendering the spec
+//! annotations, served raw at `GET /api/openapi.json`; any `OpenAPI` viewer
+//! renders it.
 
 // The `utoipa::OpenApi` derive macro generates code that triggers this lint.
 #![allow(clippy::needless_for_each)]

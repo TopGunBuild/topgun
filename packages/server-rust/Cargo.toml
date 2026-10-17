@@ -13,7 +13,6 @@ default = ["redb"]
 redb = ["dep:redb"]
 simulation = ["dep:madsim"]
 datafusion = ["dep:datafusion", "dep:arrow"]
-swagger = ["dep:utoipa-swagger-ui"]
 # Heap-profiling instrument (off by default): installs a dhat global allocator and
 # writes a heap profile on clean exit. Used to attribute in-process memory holders
 # during soak investigation; never enabled in production builds.
@@ -87,7 +86,6 @@ jsonwebtoken = "9"
 subtle = "2"
 utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-axum = "0.2"
-utoipa-swagger-ui = { version = "9", features = ["axum"], optional = true }
 tower_governor = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
