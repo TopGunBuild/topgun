@@ -94,11 +94,20 @@ impl BackendState {
     /// Entry of a counted op: its index is the counter at entry; the death
     /// latch is checked against that index, before anything is applied.
     fn enter_counted(&mut self) -> io::Result<()> {
-        unimplemented!()
+        let index = self.ops;
+        self.ops += 1;
+        if self.die_at.is_some_and(|n| index >= n) {
+            self.dead = true;
+        }
+        self.enter()
     }
 
     fn enter(&self) -> io::Result<()> {
-        unimplemented!()
+        if self.dead {
+            Err(io::Error::from_raw_os_error(5))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -111,42 +120,62 @@ pub(crate) struct CrashableBackend {
 
 impl fmt::Debug for CrashableBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!()
+        // Never the bytes: a file image is megabytes.
+        let state = self.state.lock();
+        f.debug_struct("CrashableBackend")
+            .field("live_len", &state.live.len())
+            .field("durable_len", &state.durable.len())
+            .field("pending", &state.pending.len())
+            .field("ops", &state.ops)
+            .field("die_at", &state.die_at)
+            .field("dead", &state.dead)
+            .finish()
     }
 }
 
 fn offset_to_index(offset: u64) -> usize {
-    unimplemented!()
+    usize::try_from(offset).expect("a test file offset fits in usize")
 }
 
 fn apply_write(image: &mut Vec<u8>, offset: u64, bytes: &[u8]) {
-    unimplemented!()
+    let start = offset_to_index(offset);
+    let end = start + bytes.len();
+    if image.len() < end {
+        image.resize(end, 0);
+    }
+    image[start..end].copy_from_slice(bytes);
 }
 
 impl CrashableBackend {
     /// An empty, live backend that is never killed until `set_die_at`.
     pub(crate) fn new() -> Self {
-        unimplemented!()
+        Self::with_image(Vec::new())
     }
 
     fn with_image(image: Vec<u8>) -> Self {
-        unimplemented!()
+        Self {
+            state: Arc::new(Mutex::new(BackendState {
+                live: image.clone(),
+                durable: image,
+                ..BackendState::default()
+            })),
+        }
     }
 
     /// Kills the counted op with index `at` (or the next one, if the counter
     /// is already past it) and every later call; `None` disarms.
     pub(crate) fn set_die_at(&self, at: Option<u64>) {
-        unimplemented!()
+        self.state.lock().die_at = at;
     }
 
     /// Counted ops (`write`, `set_len`, `sync_data`) entered so far.
     pub(crate) fn ops_so_far(&self) -> u64 {
-        unimplemented!()
+        self.state.lock().ops
     }
 
     /// `sync_data(true)` calls seen so far.
     pub(crate) fn eventual_syncs(&self) -> u64 {
-        unimplemented!()
+        self.state.lock().eventual_syncs
     }
 
     /// The backend a crash leaves, then releases this handle's state.
@@ -156,34 +185,111 @@ impl CrashableBackend {
     /// answers EIO and no file image outlives the crash, whatever the dead
     /// engine still holds.
     pub(crate) fn crash_image(&self, mode: CrashMode, seed: u64) -> CrashableBackend {
-        unimplemented!()
+        let mut state = self.state.lock();
+        let mut image = state.durable.clone();
+        if mode != CrashMode::DropUnsynced {
+            let mut rng = StdRng::seed_from_u64(seed);
+            for op in &state.pending {
+                if matches!(op, PendingOp::Barrier) || !rng.random_bool(0.5) {
+                    continue;
+                }
+                match op {
+                    PendingOp::Write { offset, bytes } if mode == CrashMode::KeepRandomSectors => {
+                        let mut at = *offset;
+                        let mut rest = bytes.as_slice();
+                        while !rest.is_empty() {
+                            let room = offset_to_index(SECTOR - at % SECTOR);
+                            let (sector, tail) = rest.split_at(room.min(rest.len()));
+                            if rng.random_bool(0.5) {
+                                apply_write(&mut image, at, sector);
+                            }
+                            at += sector.len() as u64;
+                            rest = tail;
+                        }
+                    }
+                    PendingOp::Write { offset, bytes } => apply_write(&mut image, *offset, bytes),
+                    PendingOp::SetLen { len } => image.resize(offset_to_index(*len), 0),
+                    PendingOp::Barrier => {}
+                }
+            }
+        }
+        state.live = Vec::new();
+        state.durable = Vec::new();
+        state.pending = Vec::new();
+        state.dead = true;
+        drop(state);
+        Self::with_image(image)
     }
 
     /// Bytes this handle's state keeps alive: both images and every pending write.
     pub(crate) fn retained_bytes(&self) -> usize {
-        unimplemented!()
+        let state = self.state.lock();
+        let pending: usize = state
+            .pending
+            .iter()
+            .map(|op| match op {
+                PendingOp::Write { bytes, .. } => bytes.len(),
+                PendingOp::SetLen { .. } | PendingOp::Barrier => 0,
+            })
+            .sum();
+        state.live.capacity() + state.durable.capacity() + pending
     }
 }
 
 impl redb::StorageBackend for CrashableBackend {
     fn len(&self) -> io::Result<u64> {
-        unimplemented!()
+        let state = self.state.lock();
+        state.enter()?;
+        Ok(state.live.len() as u64)
     }
 
     fn read(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        unimplemented!()
+        let state = self.state.lock();
+        state.enter()?;
+        let start = offset_to_index(offset);
+        state
+            .live
+            .get(start..start + len)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))
     }
 
     fn set_len(&self, len: u64) -> io::Result<()> {
-        unimplemented!()
+        let mut state = self.state.lock();
+        state.enter_counted()?;
+        state.live.resize(offset_to_index(len), 0);
+        state.pending.push(PendingOp::SetLen { len });
+        Ok(())
     }
 
     fn sync_data(&self, eventual: bool) -> io::Result<()> {
-        unimplemented!()
+        let mut state = self.state.lock();
+        state.enter_counted()?;
+        if eventual {
+            state.eventual_syncs += 1;
+            state.pending.push(PendingOp::Barrier);
+        } else {
+            let BackendState {
+                live,
+                durable,
+                pending,
+                ..
+            } = &mut *state;
+            durable.clone_from(live);
+            pending.clear();
+        }
+        Ok(())
     }
 
     fn write(&self, offset: u64, data: &[u8]) -> io::Result<()> {
-        unimplemented!()
+        let mut state = self.state.lock();
+        state.enter_counted()?;
+        apply_write(&mut state.live, offset, data);
+        state.pending.push(PendingOp::Write {
+            offset,
+            bytes: data.to_vec(),
+        });
+        Ok(())
     }
 }
 
@@ -222,23 +328,53 @@ impl CrashTarget for RedbTarget {
     const KEEPS_WHOLE_BATCHES: bool = false;
 
     fn fresh() -> Self {
-        unimplemented!()
+        let backend = CrashableBackend::new();
+        let engine = RedbKvEngine::with_backend(backend.clone())
+            .unwrap_or_else(|e| panic!("redb over a fresh crashable backend: {e}"));
+        Self {
+            backend,
+            engine: Arc::new(engine),
+        }
     }
 
     fn engine(&self) -> Arc<RedbKvEngine> {
-        unimplemented!()
+        Arc::clone(&self.engine)
     }
 
     fn arm_death(&self, at_op: u64) {
-        unimplemented!()
+        self.backend.set_die_at(Some(at_op));
     }
 
     fn ops_so_far(&self) -> u64 {
-        unimplemented!()
+        self.backend.ops_so_far()
     }
 
     fn crash(self, mode: CrashMode, seed: u64) -> Self {
-        unimplemented!()
+        let Self { backend, engine } = self;
+        assert_eq!(
+            backend.eventual_syncs(),
+            0,
+            "STOP 3: the engine issued an Eventual sync barrier"
+        );
+        // The image first: the dead engine's destructor must not reach it.
+        let image = backend.crash_image(mode, seed);
+        assert_eq!(
+            backend.retained_bytes(),
+            0,
+            "the crashed backend still holds file bytes"
+        );
+        assert_eq!(
+            Arc::strong_count(&engine),
+            1,
+            "the dead engine is still shared, so dropping it here would not run its destructor"
+        );
+        drop(engine);
+        let reopened = RedbKvEngine::with_backend(image.clone())
+            .unwrap_or_else(|e| panic!("reopen after the crash failed: {e}"));
+        Self {
+            backend: image,
+            engine: Arc::new(reopened),
+        }
     }
 }
 
@@ -253,23 +389,35 @@ impl CrashTarget for MemTarget {
     const KEEPS_WHOLE_BATCHES: bool = true;
 
     fn fresh() -> Self {
-        unimplemented!()
+        Self {
+            engine: Arc::new(MemKvEngine::new()),
+        }
     }
 
     fn engine(&self) -> Arc<MemKvEngine> {
-        unimplemented!()
+        Arc::clone(&self.engine)
     }
 
     fn arm_death(&self, at_op: u64) {
-        unimplemented!()
+        self.engine.arm_death(at_op);
     }
 
     fn ops_so_far(&self) -> u64 {
-        unimplemented!()
+        self.engine.calls_so_far()
     }
 
     fn crash(self, _mode: CrashMode, seed: u64) -> Self {
-        unimplemented!()
+        let keep = usize::try_from(seed).unwrap_or(usize::MAX);
+        let image = self.engine.crash_image(keep);
+        assert_eq!(
+            Arc::strong_count(&self.engine),
+            1,
+            "the dead engine is still shared"
+        );
+        drop(self.engine);
+        Self {
+            engine: Arc::new(image),
+        }
     }
 }
 
