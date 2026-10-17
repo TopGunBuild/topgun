@@ -9624,6 +9624,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_declared_order_cursor_past_the_last_row_of_the_first_batch_fails_the_scan() {
+        let scripted = Arc::new(ScriptedScanStore::new(vec![ScanBatch {
+            records: vec![scripted_row("d10", "v1")],
+            next_cursor: Some(ScanCursor(b"d30".to_vec())),
+        }]));
+        let store = WriteBehindDataStore::new(scripted, scan_config());
+        store.add("m", "d05", &lww("st", 2), 0, 2000).await.unwrap();
+
+        let outcome = store.scan_values("m", false, 0).await;
+        let message = outcome
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+
+        assert_eq!(
+            (
+                outcome.is_err(),
+                message.contains("scan cursor does not stand for the last row of its batch")
+            ),
+            (true, true),
+            "a cursor above the last row of its batch would let a resume skip rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_order_cursor_past_the_last_row_of_a_resumed_batch_fails_the_scan() {
+        let scripted = Arc::new(ScriptedScanStore::new(vec![ScanBatch {
+            records: vec![scripted_row("d30", "v3")],
+            next_cursor: Some(ScanCursor(b"d50".to_vec())),
+        }]));
+        let store = WriteBehindDataStore::new(scripted, scan_config());
+        store.add("m", "d05", &lww("st", 2), 0, 2000).await.unwrap();
+
+        let outcome = store
+            .scan_values_batched("m", false, ScanCursor(b"d10".to_vec()), 0)
+            .await;
+        let message = outcome
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+
+        assert_eq!(
+            (
+                outcome.is_err(),
+                message.contains("scan cursor does not stand for the last row of its batch")
+            ),
+            (true, true),
+            "a cursor above the last row of a resumed batch would let a resume skip rows"
+        );
+    }
+
+    #[tokio::test]
     async fn a_resumed_scan_given_a_cursor_that_is_not_a_key_fails() {
         let scripted = Arc::new(ScriptedScanStore::new(vec![ScanBatch {
             records: vec![scripted_row("d50", "v5")],

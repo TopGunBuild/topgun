@@ -6,6 +6,8 @@
 
 pub mod engine_store;
 #[cfg(test)]
+mod engine_store_tests;
+#[cfg(test)]
 mod kv_conformance;
 pub mod kv_engine;
 mod null;
