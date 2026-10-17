@@ -490,7 +490,7 @@ impl RecordOp<'_> {
 struct RegistryPlan<'s, 'n> {
     rows: HashMap<&'n str, Option<(u32, u8)>>,
     puts: Vec<(Vec<u8>, Vec<u8>)>,
-    _guard: Option<MutexGuard<'s, ()>>,
+    guard: Option<MutexGuard<'s, ()>>,
 }
 
 /// A [`MapDataStore`] over a [`KvEngine`], in the key format of this module.
@@ -649,7 +649,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
             return Ok(RegistryPlan {
                 rows,
                 puts: Vec::new(),
-                _guard: None,
+                guard: None,
             });
         }
 
@@ -698,7 +698,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         Ok(RegistryPlan {
             rows,
             puts,
-            _guard: Some(guard),
+            guard: Some(guard),
         })
     }
 
@@ -709,28 +709,70 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         }
     }
 
-    #[cfg(test)]
-    fn registry_park_point(&self) {
-        let park = self.registry_park.lock().take();
-        if let Some(park) = park {
-            let _ = park.reached.send(());
-            let _ = park.release.recv();
-        }
-    }
-
-    #[cfg(not(test))]
-    #[allow(clippy::unused_self)]
-    fn registry_park_point(&self) {}
-
     /// Applies `ops`, and every registry row they need, as one engine batch.
     ///
     /// # Errors
     ///
     /// A refused map name (nothing is written); `map id space exhausted`;
     /// an engine error, with nothing of the batch applied.
-    pub fn write_records(&self, ops: &[RecordOp<'_>], opts: WriteOptions) -> anyhow::Result<()> {
-        let _ = (ops, opts);
-        unimplemented!()
+    pub fn write_records(&self, ops: &[RecordOp<'_>], options: WriteOptions) -> anyhow::Result<()> {
+        let mut needs: BTreeMap<&str, u8> = BTreeMap::new();
+        for op in ops {
+            if let Some((map, need)) = op.map_need() {
+                check_name(map)?;
+                *needs.entry(map).or_insert(0) |= need;
+            }
+        }
+        let plan = self.plan_registry(&needs)?;
+
+        let mut batch = WriteBatch::new();
+        for (key, value) in &plan.puts {
+            batch.put(key.clone(), value.clone());
+        }
+        for op in ops {
+            match *op {
+                RecordOp::Put {
+                    map,
+                    backup,
+                    key,
+                    bytes,
+                } => {
+                    let (map_id, _) =
+                        plan.rows.get(map).copied().flatten().ok_or_else(|| {
+                            anyhow!("map {map:?} has no registry row after its plan")
+                        })?;
+                    batch.put(
+                        RecordKey::encode(RecordSpace::of(backup), map_id, key),
+                        bytes.to_vec(),
+                    );
+                }
+                RecordOp::Delete { map, backup, key } => {
+                    // A map without a registry row holds no record to delete.
+                    if let Some((map_id, _)) = plan.rows.get(map).copied().flatten() {
+                        batch.delete(RecordKey::encode(RecordSpace::of(backup), map_id, key));
+                    }
+                }
+                RecordOp::Touch { .. } => {}
+                RecordOp::SetMigrationMark(Some(mark)) => {
+                    batch.put(meta_key(META_MIGRATION), mark.to_vec());
+                }
+                RecordOp::SetMigrationMark(None) => batch.delete(meta_key(META_MIGRATION)),
+            }
+        }
+        if !batch.is_empty() {
+            self.engine.write(batch, options)?;
+        }
+        // Only after the batch is applied: a failed write must leave no id
+        // in the cache that the engine does not hold.
+        if plan.guard.is_some() {
+            let mut cache = self.cache.write();
+            for (name, row) in &plan.rows {
+                if let Some(row) = row {
+                    cache.insert((*name).to_string(), *row);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Visits every record of `(map, backup)` in [`PARTITION_THEN_KEY`]
@@ -746,8 +788,19 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         backup: bool,
         visit: &mut dyn FnMut(&str, &[u8]) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        let _ = (map, backup, visit);
-        unimplemented!()
+        check_name(map)?;
+        let space = RecordSpace::of(backup);
+        let snapshot = self.engine.snapshot()?;
+        let Some(map_id) = self.read_map_id(&*snapshot, map)? else {
+            return Ok(());
+        };
+        for partition in 0..PARTITION_COUNT {
+            for entry in snapshot.iter(partition_range(space, partition, map_id, None))? {
+                let (key, value) = entry?;
+                visit(&RecordKey::decode(&key)?.key, &value)?;
+            }
+        }
+        Ok(())
     }
 
     /// Makes every returned write durable.
@@ -756,8 +809,88 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     ///
     /// The engine's error.
     pub fn sync(&self) -> anyhow::Result<()> {
-        unimplemented!()
+        self.engine.sync()?;
+        Ok(())
     }
+
+    /// One batch of a value scan of `(map, backup)`, from one snapshot,
+    /// resumed strictly after `cursor` when given. Partitions are walked in
+    /// sequence; the redb store's budget rules apply unchanged.
+    fn scan_from(
+        &self,
+        map: &str,
+        backup: bool,
+        cursor: Option<&ScanCursor>,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        check_name(map)?;
+        let budget = if max_batch_cost == 0 {
+            DEFAULT_SCAN_BATCH_COST
+        } else {
+            max_batch_cost
+        };
+        let space = RecordSpace::of(backup);
+        let snapshot = self.engine.snapshot()?;
+        let Some(map_id) = self.read_map_id(&*snapshot, map)? else {
+            return Ok(ScanBatch::default());
+        };
+        let (first_partition, mut resume_after) = match cursor {
+            Some(cursor) => (
+                resume_partition(cursor, space, map_id)?,
+                Some(cursor.0.as_slice()),
+            ),
+            None => (0, None),
+        };
+
+        let mut records: Vec<(String, RecordValue)> = Vec::new();
+        let mut last_engine_key: Option<Vec<u8>> = None;
+        let mut accumulated: u64 = 0;
+        let mut more_rows_pending = false;
+        'walk: for partition in first_partition..PARTITION_COUNT {
+            let range = partition_range(space, partition, map_id, resume_after.take());
+            for entry in snapshot.iter(range)? {
+                let (key, bytes) = entry?;
+                let row_cost = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                // Check before push: a batch never holds the row that would
+                // cross the budget, except its first row, admitted whole.
+                if !records.is_empty() && accumulated.saturating_add(row_cost) > budget {
+                    more_rows_pending = true;
+                    break 'walk;
+                }
+                accumulated += row_cost;
+                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
+                records.push((RecordKey::decode(&key)?.key, value));
+                last_engine_key = Some(key);
+            }
+        }
+        let next_cursor = if more_rows_pending {
+            last_engine_key.map(ScanCursor)
+        } else {
+            None
+        };
+        Ok(ScanBatch {
+            records,
+            next_cursor,
+        })
+    }
+
+    /// Writes one op for `(map, key)` and nothing else.
+    fn write_one(&self, op: RecordOp<'_>) -> anyhow::Result<()> {
+        self.write_records(&[op], WriteOptions { sync: true })
+    }
+
+    #[cfg(test)]
+    fn registry_park_point(&self) {
+        let park = self.registry_park.lock().take();
+        if let Some(park) = park {
+            let _ = park.reached.send(());
+            let _ = park.release.recv();
+        }
+    }
+
+    #[cfg(not(test))]
+    #[allow(clippy::unused_self)]
+    fn registry_park_point(&self) {}
 
     /// Arms a one-shot park in the next `write_records` call that issues a
     /// map id: between its in-lock registry re-read and its engine write it
@@ -783,8 +916,58 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     }
 }
 
+/// The engine range of one partition of a map: `[ks ‖ p ‖ id, ks ‖ p ‖ (id + 1))`,
+/// starting strictly after `after` when given.
+fn partition_range(
+    space: RecordSpace,
+    partition: u32,
+    map_id: u32,
+    after: Option<&[u8]>,
+) -> KeyRange {
+    let start = match after {
+        Some(after) => {
+            let mut start = Vec::with_capacity(after.len() + 1);
+            start.extend_from_slice(after);
+            start.push(0x00);
+            start
+        }
+        None => record_prefix(space.byte(), partition, map_id),
+    };
+    KeyRange {
+        start: Some(start),
+        end: Some(record_prefix(space.byte(), partition, map_id + 1)),
+    }
+}
+
+/// The partition a scan resumes in, after checking that `cursor` is a record
+/// key of this scan's keyspace and map.
+fn resume_partition(cursor: &ScanCursor, space: RecordSpace, map_id: u32) -> anyhow::Result<u32> {
+    let bytes = &cursor.0;
+    if bytes.len() < 9 || bytes[0] != space.byte() || be_u32(&bytes[5..9]) != map_id {
+        bail!("scan cursor is not a record key of this map");
+    }
+    let key = std::str::from_utf8(&bytes[9..])
+        .map_err(|e| anyhow!("scan cursor is not valid UTF-8: {e}"))?;
+    let partition = be_u32(&bytes[1..5]);
+    if partition != hash_to_partition(key) {
+        bail!("scan cursor is not a record key of this map");
+    }
+    Ok(partition)
+}
+
 #[async_trait]
 impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
+    fn classify_error(&self, err: &anyhow::Error) -> StoreErrorClass {
+        // By type only: the first engine error in the chain decides.
+        let engine_error = err
+            .downcast_ref::<KvError>()
+            .or_else(|| err.chain().find_map(|e| e.downcast_ref::<KvError>()));
+        match engine_error {
+            Some(KvError::Broken { cause, .. }) => StoreErrorClass::StoreBroken(*cause),
+            _ => StoreErrorClass::Unknown,
+        }
+    }
+
     async fn add(
         &self,
         map: &str,
@@ -793,12 +976,19 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         _expiration_time: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
-        let _ = (map, key, value);
-        unimplemented!()
+        // The one msgpack encoding of a stored record, so `add` and
+        // `add_encoded` store the same bytes.
+        let bytes = rmp_serde::to_vec_named(value)?;
+        self.write_one(RecordOp::Put {
+            map,
+            backup: false,
+            key,
+            bytes: &bytes,
+        })
     }
 
     fn accepts_encoded(&self) -> bool {
-        unimplemented!()
+        true
     }
 
     async fn add_encoded(
@@ -809,12 +999,18 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         _expiration_time: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
-        let _ = (map, key, bytes);
-        unimplemented!()
+        self.write_one(RecordOp::Put {
+            map,
+            backup: false,
+            key,
+            bytes,
+        })
     }
 
     fn scan_order(&self) -> Option<ScanOrder> {
-        unimplemented!()
+        // One snapshot per scan call, partitions walked in sequence and a
+        // resume strictly after the cursor's engine key (TG-ENG-004).
+        Some(PARTITION_THEN_KEY)
     }
 
     async fn add_backup(
@@ -825,23 +1021,41 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         _expiration_time: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
-        let _ = (map, key, value);
-        unimplemented!()
+        let bytes = rmp_serde::to_vec_named(value)?;
+        self.write_one(RecordOp::Put {
+            map,
+            backup: true,
+            key,
+            bytes: &bytes,
+        })
     }
 
     async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
-        let _ = (map, key);
-        unimplemented!()
+        self.write_one(RecordOp::Delete {
+            map,
+            backup: false,
+            key,
+        })
     }
 
     async fn remove_backup(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
-        let _ = (map, key);
-        unimplemented!()
+        self.write_one(RecordOp::Delete {
+            map,
+            backup: true,
+            key,
+        })
     }
 
     async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
-        let _ = (map, key);
-        unimplemented!()
+        check_name(map)?;
+        let snapshot = self.engine.snapshot()?;
+        let Some(map_id) = self.read_map_id(&*snapshot, map)? else {
+            return Ok(None);
+        };
+        match snapshot.get(&RecordKey::encode(RecordSpace::Primary, map_id, key))? {
+            Some(bytes) => Ok(Some(rmp_serde::from_slice(&bytes)?)),
+            None => Ok(None),
+        }
     }
 
     async fn load_all(
@@ -849,8 +1063,20 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         map: &str,
         keys: &[String],
     ) -> anyhow::Result<Vec<(String, RecordValue)>> {
-        let _ = (map, keys);
-        unimplemented!()
+        check_name(map)?;
+        let snapshot = self.engine.snapshot()?;
+        let Some(map_id) = self.read_map_id(&*snapshot, map)? else {
+            return Ok(Vec::new());
+        };
+        let mut found = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some(bytes) =
+                snapshot.get(&RecordKey::encode(RecordSpace::Primary, map_id, key))?
+            {
+                found.push((key.clone(), rmp_serde::from_slice(&bytes)?));
+            }
+        }
+        Ok(found)
     }
 
     async fn enumerate_leaves(
@@ -859,9 +1085,36 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         is_backup: bool,
         sink: &mut dyn LeafSink,
     ) -> anyhow::Result<()> {
-        let _ = (map, is_backup, sink, merkle_leaf_hash, LEAF_BATCH_SIZE);
-        let _: Option<MerkleLeaf> = None;
-        unimplemented!()
+        check_name(map)?;
+        let space = RecordSpace::of(is_backup);
+        let snapshot = self.engine.snapshot()?;
+        let Some(map_id) = self.read_map_id(&*snapshot, map)? else {
+            return Ok(());
+        };
+        // Fixed-size batches, so peak memory stays bounded whatever the map's size.
+        let mut batch: Vec<MerkleLeaf> = Vec::with_capacity(LEAF_BATCH_SIZE);
+        for partition in 0..PARTITION_COUNT {
+            for entry in snapshot.iter(partition_range(space, partition, map_id, None))? {
+                let (engine_key, bytes) = entry?;
+                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
+                let key = RecordKey::decode(&engine_key)?.key;
+                if let Some((kind, leaf_hash)) = merkle_leaf_hash(&key, &value) {
+                    batch.push(MerkleLeaf {
+                        key,
+                        kind,
+                        leaf_hash,
+                    });
+                }
+                if batch.len() >= LEAF_BATCH_SIZE {
+                    sink.consume(std::mem::take(&mut batch)).await?;
+                    batch = Vec::with_capacity(LEAF_BATCH_SIZE);
+                }
+            }
+        }
+        if !batch.is_empty() {
+            sink.consume(batch).await?;
+        }
+        Ok(())
     }
 
     async fn scan_values(
@@ -870,14 +1123,7 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         is_backup: bool,
         max_batch_cost: u64,
     ) -> anyhow::Result<ScanBatch> {
-        let _ = (
-            map,
-            is_backup,
-            max_batch_cost,
-            DEFAULT_SCAN_BATCH_COST,
-            PARTITION_COUNT,
-        );
-        unimplemented!()
+        self.scan_from(map, is_backup, None, max_batch_cost)
     }
 
     async fn scan_values_batched(
@@ -887,37 +1133,61 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         cursor: ScanCursor,
         max_batch_cost: u64,
     ) -> anyhow::Result<ScanBatch> {
-        let _ = (map, is_backup, cursor, max_batch_cost);
-        unimplemented!()
+        self.scan_from(map, is_backup, Some(&cursor), max_batch_cost)
     }
 
     async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
-        let _ = (map, keys);
-        unimplemented!()
+        // Before the empty-keys return: a refused name is refused whatever
+        // the key list holds.
+        check_name(map)?;
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let ops: Vec<RecordOp<'_>> = keys
+            .iter()
+            .map(|key| RecordOp::Delete {
+                map,
+                backup: false,
+                key,
+            })
+            .collect();
+        self.write_records(&ops, WriteOptions { sync: true })
     }
 
     async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
-        unimplemented!()
+        // A map is listed from its first primary write on and never
+        // dropped, as a redb primary table is (TG-ENG-005).
+        let snapshot = self.engine.snapshot()?;
+        let range = KeyRange {
+            start: Some(vec![KS_MAP_BY_NAME]),
+            end: Some(vec![KS_MAP_BY_ID]),
+        };
+        let mut names = Vec::new();
+        for entry in snapshot.iter(range)? {
+            let (key, value) = entry?;
+            let row = decode_map_by_name_row(&key, &value)?;
+            if row.flags & FLAG_PRIMARY != 0 {
+                names.push(row.name);
+            }
+        }
+        // Rows come in byte order of the UTF-8 names, which is `String` order.
+        Ok(names)
     }
 
     fn is_loadable(&self, _key: &str) -> bool {
-        unimplemented!()
+        // Write-through: every write is durable before it returns.
+        true
     }
 
     fn pending_operation_count(&self) -> u64 {
-        unimplemented!()
+        0
     }
 
     async fn soft_flush(&self) -> anyhow::Result<u64> {
-        unimplemented!()
+        Ok(0)
     }
 
     async fn hard_flush(&self) -> anyhow::Result<()> {
-        unimplemented!()
-    }
-
-    fn classify_error(&self, err: &anyhow::Error) -> StoreErrorClass {
-        let _ = (err, std::any::type_name::<KvError>());
-        unimplemented!()
+        Ok(())
     }
 }

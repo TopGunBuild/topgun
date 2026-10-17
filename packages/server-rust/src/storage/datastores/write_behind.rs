@@ -4848,6 +4848,13 @@ impl MapDataStore for WriteBehindDataStore {
             .as_ref()
             .map(order.cursor_position)
             .transpose()?;
+        // The cursor must stand for the batch's last row: a cursor above it
+        // would let the next resume skip durable rows in the gap (TG-WB-008).
+        if let (Some(upper), Some((last, _))) = (upper.as_deref(), batch.records.last()) {
+            if upper != (order.key_position)(last).as_slice() {
+                anyhow::bail!("scan cursor does not stand for the last row of its batch");
+            }
+        }
         let range = StagingOnly::InRange {
             order,
             lower: None,
@@ -4904,6 +4911,13 @@ impl MapDataStore for WriteBehindDataStore {
             .as_ref()
             .map(order.cursor_position)
             .transpose()?;
+        // The cursor must stand for the batch's last row: a cursor above it
+        // would let the next resume skip durable rows in the gap (TG-WB-008).
+        if let (Some(upper), Some((last, _))) = (upper.as_deref(), batch.records.last()) {
+            if upper != (order.key_position)(last).as_slice() {
+                anyhow::bail!("scan cursor does not stand for the last row of its batch");
+            }
+        }
         // A store that declares a scan order never returns a cursor below the
         // one it was resumed from. One that does has broken its declaration,
         // and the range would have no meaning: fail the call, as for a cursor
