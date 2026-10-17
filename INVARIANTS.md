@@ -882,6 +882,8 @@ weaker than a test.
   3. A key that, from the start to the return of the call covering its range, always has a
      staging slot holding a value or a durable row, and no staged delete, is emitted once.
   4. A staged delete is emitted nowhere.
+  5. Over a store that declares a scan order, a batch with rows whose cursor's position is not
+     the position of its last row fails the scan call.
 - **Maintaining code:** `map_data_store.rs` — `ScanOrder`; `write_behind.rs` —
   `overlay_scan_batch`, the two scan bodies (snapshot before the inner read), `flush_loop` and
   `drain_for_shutdown` (row before slot); `redb.rs` — `scan_from` and `scan_order`.
@@ -900,6 +902,8 @@ weaker than a test.
   `write_behind.rs::a_resumed_scan_given_a_cursor_that_is_not_a_key_fails`,
   `write_behind.rs::a_cursor_returned_by_a_resumed_batch_that_is_not_a_key_fails_the_scan`,
   `write_behind.rs::a_cursor_below_the_one_a_batch_was_resumed_from_fails_the_scan`,
+  `write_behind.rs::a_declared_order_cursor_past_the_last_row_of_the_first_batch_fails_the_scan`,
+  `write_behind.rs::a_declared_order_cursor_past_the_last_row_of_a_resumed_batch_fails_the_scan`,
   `write_behind.rs::a_cursor_that_is_not_a_key_passes_through_while_nothing_is_staged_for_the_map`,
   `write_behind.rs::over_a_store_that_does_not_declare_key_order_a_staged_key_with_a_later_row_is_still_emitted_twice`
   (pins the order-free rule over a store that does not declare a scan order, double emission
@@ -919,7 +923,8 @@ weaker than a test.
   store and a store that declares a scan order and does not forward the declaration; order of
   rows inside a
   batch; backup scans; two interleaved scans; `enumerate_leaves`; the order of the shutdown drain
-  being held by a test.
+  being held by a test; a batch without rows that returns a cursor is not checked against
+  clause 5 (TODO-856).
 
 ### TG-WB-009: A write-behind entry the store refuses is retried on a schedule and is never dropped
 
@@ -2552,3 +2557,98 @@ weaker than a test.
 - **Status:** decided, **enforced**. Shown red on one-change mutants: a capability declared
   present while refused, a panicking `ingest`, an argument check before the capability check,
   `PreviousIo` mapped to `Other`.
+
+### TG-ENG-004: A record's engine key is `keyspace ‖ hash_to_partition(key) ‖ map_id ‖ key`, and a map's scan walks it in `(partition, key)` order
+
+- **Scope:** `EngineMapDataStore` and the record-key codec of `engine_store.rs`.
+- **Statement:** a record of map `m`, key `k` lives at exactly one engine key,
+  `0x10 ‖ p(k) ‖ id(m) ‖ k` for the primary keyspace and `0x11 ‖ …` for the backup one, where
+  `p = topgun_core::partition::hash_to_partition` (u32 BE) and `id(m)` is the map's registry id
+  (u32 BE). The encoding is injective and decodes back; the keys under a `keyspace ‖ p ‖ id`
+  prefix are exactly that triple's keys. A map's scan walks the 271 partitions in sequence from
+  one snapshot, so its rows come in `(partition, key)` order — the byte order of their engine
+  keys; a returned cursor is the engine key of the last row of its batch, and a resume starts
+  strictly after it. `PARTITION_THEN_KEY` positions (`p ‖ key bytes`) agree with that order, so the
+  store declares it and the four clauses of the scan-order contract hold (`TG-WB-008`).
+- **Maintaining code:** `engine_store.rs` — `RecordKey::{encode, decode}`, `PARTITION_THEN_KEY`,
+  `partition_range`, `resume_partition`, `scan_from`, `enumerate_leaves`, `visit_records`.
+- **Enforcing test:** `s01_record_key_golden_vectors`,
+  `s02_record_key_encoding_is_injective_and_decodes_back`,
+  `s03_a_record_key_prefix_holds_exactly_its_triple`,
+  `s04_the_partition_is_hash_to_partition_of_the_user_key`,
+  `s11_a_scan_returns_keys_of_every_partition_in_partition_then_key_order`,
+  `s12_each_cursor_is_the_engine_key_of_the_last_row_and_a_resume_is_strictly_after_it`,
+  `s28_a_write_behind_scan_over_the_engine_store_emits_a_key_at_a_partition_boundary_once`,
+  `s31_a_cursor_of_another_map_or_keyspace_fails_the_scan`,
+  `s32_partition_then_key_positions_agree_with_engine_key_order` — in
+  `storage/datastores/engine_store_tests.rs`, each over the in-memory and the redb engine.
+- **Violation consequence:** a record would be read under the wrong partition or map, a scan
+  would skip or repeat rows, or the write-behind overlay would place a buffered key in the wrong
+  batch.
+- **Not claimed:** the WAL partition of a record — the WAL partitions by `"{map}:{key}"`, so a
+  record's engine partition and its WAL partition are in general different numbers (TODO-843).
+  The store is not wired into the server yet.
+- **Discovered by:** SPEC-394b2.
+- **Status:** decided, **enforced**.
+
+### TG-ENG-005: The map registry is a bijection name ↔ id, an id is issued in the batch of the map's first record, and `list_maps` lists the maps with a primary record ever stored
+
+- **Scope:** the registry of `EngineMapDataStore` (`0x01` map by name, `0x02` map by id,
+  `next_map_id`), its cache and `registry_lock`.
+- **Statement:** a map's id is issued, from 1 upward and never reused, in the same engine batch
+  as the map's first record or `Touch`, together with both registry rows and the new
+  `next_map_id`; a failed first write leaves no registry row and no record. Two first writes of
+  two new maps get distinct ids, because a write that issues an id or sets a flag re-reads the
+  registry under `registry_lock` and holds it until its batch has returned. `u32::MAX` is never
+  issued: when no id is left, a write that needs one fails with `map id space exhausted` and
+  changes nothing. No record key carries an id the registry does not hold. A `Delete` never
+  issues an id or sets a flag. The cache is filled only from rows that exist. `list_maps` returns
+  every registry name whose primary flag is set, ascending, once.
+- **Maintaining code:** `engine_store.rs` — `plan_registry`, `cached_row`, `read_map_id`,
+  `write_records`, `list_maps`, the `0x01` / `0x02` codecs and `map_id_in`.
+- **Enforcing test:** `s05_map_ids_are_issued_from_one_and_survive_a_reopen`,
+  `s06_a_failed_first_write_leaves_no_registry_entry_and_no_record`,
+  `s07_two_first_writes_of_two_new_maps_get_distinct_map_ids`,
+  `s08_a_map_with_only_backup_rows_is_not_listed_and_one_emptied_by_removes_stays_listed`,
+  `s09_reads_of_absent_maps_grow_no_registry_cache`,
+  `s26_touch_registers_a_map_without_a_record`,
+  `s33_an_exhausted_map_id_space_refuses_a_new_map_and_changes_nothing`,
+  `s34_the_public_codecs_read_what_the_store_wrote` — in
+  `storage/datastores/engine_store_tests.rs`, each over the in-memory and the redb engine.
+- **Violation consequence:** two maps would share an id and read each other's records, a record
+  would be stored under an id no name resolves to, or `list_maps` would differ from the redb
+  store's.
+- **Not claimed:** the bijection after a crash — the crash suite extends the enforcing tests
+  (SPEC-394c). No operation deletes a map.
+- **Discovered by:** SPEC-394b2.
+- **Status:** decided, **enforced**.
+
+### TG-ENG-006: A store opens only at a format, ack mode and keyspace set this binary knows and with no unfinished migration; a migration mark is written only in the batch of its records
+
+- **Scope:** `EngineMapDataStore::{open, open_for_migration, read_migration_mark}` and the
+  `SetMigrationMark` op of `write_records`.
+- **Statement:** `open` formats an empty engine with `format = 1`, `next_map_id = 1` and
+  `ack_mode = 0` (local) in one durable batch. A non-empty engine is opened only when `format` is
+  1, `ack_mode` is 0, `next_map_id` is at least 1, the metadata keyspace holds no other name, no
+  key lies in a reserved keyspace (`0x03..=0x0F`, `0x12..=0xFF`, `0x20` included) and no
+  `migration` row is present; anything else is refused with an error starting
+  `store format: refusing to open:` and nothing is written. Only `open_for_migration` admits a
+  store with a migration mark; on an empty engine it writes the format rows and the mark in one
+  batch. A mark is written only through `RecordOp::SetMigrationMark`, in the one batch of its
+  call's records.
+- **Maintaining code:** `engine_store.rs` — `read_store_metadata`, `format_rows`, `open`,
+  `open_for_migration`, `read_migration_mark`, `write_records`.
+- **Enforcing test:** `s18_a_fresh_engine_gets_format_one_and_local_ack_mode`,
+  `s19_a_store_of_an_unknown_format_or_with_unknown_metadata_is_refused`,
+  `s20_a_non_empty_engine_without_format_metadata_is_refused`,
+  `s21_a_key_in_a_reserved_keyspace_is_refused_at_open`,
+  `s29_a_store_with_a_migration_mark_is_refused_by_open_and_admitted_by_open_for_migration`,
+  `s30_a_migration_mark_is_written_in_the_batch_of_its_records` — in
+  `storage/datastores/engine_store_tests.rs`, each over the in-memory and the redb engine.
+- **Violation consequence:** a binary would serve a store of a newer format or another ack mode
+  as if it were its own, or a half-finished migration as complete.
+- **Not claimed:** that only the migration issues `SetMigrationMark` — a mark set on a store from
+  `open` makes the next `open` refuse (fail-closed, nothing is lost); keeping the op to the
+  migration path is the migration's obligation (SPEC-394d).
+- **Discovered by:** SPEC-394b2.
+- **Status:** decided, **enforced**.
