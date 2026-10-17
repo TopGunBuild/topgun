@@ -1518,6 +1518,78 @@ mod mem_specific {
         assert!(matches!(result, Err(KvError::Other(_))), "{result:?}");
         assert_eq!(all(&fresh.crash_image(usize::MAX)), Entries::new());
     }
+
+    #[test]
+    fn m03_a_reader_never_sees_a_batch_parked_between_its_ops() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        type View = (Option<Vec<u8>>, Option<Vec<u8>>);
+        let zero = 0u32.to_be_bytes().to_vec();
+        let one = 1u32.to_be_bytes().to_vec();
+        let engine = MemKvEngine::new();
+        let mut batch = WriteBatch::new();
+        batch.put(b"a", zero.clone());
+        batch.put(b"b", zero.clone());
+        engine.write(batch, SYNC).unwrap();
+        let whole = |views: &[View; 3]| {
+            for (name, (a, b)) in ["get", "snapshot", "scan_prefix"].iter().zip(views) {
+                assert!(
+                    a.is_some() && a == b && (*a == Some(zero.clone()) || *a == Some(one.clone())),
+                    "{name}: part of a batch is visible: a={a:?} b={b:?}"
+                );
+            }
+        };
+        std::thread::scope(|s| {
+            // Owned here: a failed assertion drops the release sender, which
+            // ends the park instead of leaving the writer blocked.
+            let (reached, release) = engine.park_between_ops();
+            let engine = &engine;
+            let writer = s.spawn(move || {
+                let mut batch = WriteBatch::new();
+                batch.put(b"a", 1u32.to_be_bytes());
+                batch.put(b"b", 1u32.to_be_bytes());
+                engine.write(batch, NOSYNC)
+            });
+            reached
+                .recv_timeout(Duration::from_secs(10))
+                .expect("writer never parked");
+            let (views_tx, views_rx) = channel::<[View; 3]>();
+            let reader = s.spawn(move || {
+                let by_get = (engine.get(b"a").unwrap(), engine.get(b"b").unwrap());
+                let snapshot = engine.snapshot().unwrap();
+                let by_snapshot = (snapshot.get(b"a").unwrap(), snapshot.get(b"b").unwrap());
+                drop(snapshot);
+                let page = engine.scan_prefix(b"", None, 16).unwrap();
+                let find = |key: &[u8]| {
+                    page.entries
+                        .iter()
+                        .find(|(k, _)| k == key)
+                        .map(|(_, v)| v.clone())
+                };
+                let by_scan = (find(b"a"), find(b"b"));
+                let _ = views_tx.send([by_get, by_snapshot, by_scan]);
+            });
+            if let Ok(views) = views_rx.recv_timeout(Duration::from_secs(1)) {
+                whole(&views);
+                release.send(()).unwrap();
+            } else {
+                // The reader is blocked behind the parked batch, as it should be.
+                release.send(()).unwrap();
+                let views = views_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("the reader never finished");
+                whole(&views);
+            }
+            reader.join().unwrap();
+            assert!(
+                matches!(writer.join().unwrap(), Ok(())),
+                "the writer failed"
+            );
+        });
+        assert_eq!(engine.get(b"a").unwrap(), Some(one.clone()));
+        assert_eq!(engine.get(b"b").unwrap(), Some(one));
+    }
 }
 
 // ---- redb ---------------------------------------------------------------------

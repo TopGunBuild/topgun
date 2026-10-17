@@ -455,6 +455,7 @@ pub(crate) use mem::MemKvEngine;
 #[cfg(test)]
 mod mem {
     use std::collections::BTreeMap;
+    use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::Arc;
 
     use parking_lot::Mutex;
@@ -484,6 +485,25 @@ mod mem {
         death_at: Option<u64>,
         dead: bool,
         shut_down: bool,
+        /// Armed by `park_between_ops`, taken by the next write of two or more ops.
+        park: Option<Park>,
+    }
+
+    /// A one-shot stop between the first and the second op of a write, so a
+    /// test can read while a batch is half applied — the correct `write`
+    /// holds the lock there, so no reader can.
+    struct Park {
+        reached: Sender<()>,
+        release: Receiver<()>,
+    }
+
+    impl Park {
+        /// Announces the stop, then waits for a release or for the release
+        /// sender to be dropped, so a failed test never leaves the writer blocked.
+        fn wait(&self) {
+            let _ = self.reached.send(());
+            let _ = self.release.recv();
+        }
     }
 
     impl State {
@@ -496,6 +516,7 @@ mod mem {
                 death_at: None,
                 dead: false,
                 shut_down: false,
+                park: None,
             }
         }
 
@@ -521,9 +542,17 @@ mod mem {
             Ok(())
         }
 
-        /// Applies a validated batch live and records it for durability.
-        fn commit(&mut self, operations: Vec<BatchOp>, opts: WriteOptions) {
-            apply(&mut self.live, &operations);
+        /// Applies a validated batch live and records it for durability;
+        /// `park` stops it between its first and second op.
+        fn commit(&mut self, operations: Vec<BatchOp>, opts: WriteOptions, park: Option<&Park>) {
+            for (index, op) in operations.iter().enumerate() {
+                if index == 1 {
+                    if let Some(park) = park {
+                        park.wait();
+                    }
+                }
+                apply(&mut self.live, std::slice::from_ref(op));
+            }
             self.unsynced.push(operations);
             if opts.sync {
                 self.fold();
@@ -603,6 +632,22 @@ mod mem {
                 state: Mutex::new(State::fresh(image)),
             }
         }
+
+        /// One-shot park between the first and the second op of the next `write` with at least two ops.
+        ///
+        /// That write sends `()` on the returned receiver's channel, then
+        /// waits until a message arrives on the returned sender or the sender
+        /// is dropped. It parks wherever the lock is at that point: the
+        /// correct `write` holds it for the whole batch.
+        pub(crate) fn park_between_ops(&self) -> (Receiver<()>, Sender<()>) {
+            let (reached, reached_rx) = channel();
+            let (release, release_rx) = channel();
+            self.state.lock().park = Some(Park {
+                reached,
+                release: release_rx,
+            });
+            (reached_rx, release)
+        }
     }
 
     impl KvEngine for MemKvEngine {
@@ -627,7 +672,12 @@ mod mem {
             state.enter_counted()?;
             let operations = batch.into_ops();
             validate(&operations)?;
-            state.commit(operations, opts);
+            let park = if operations.len() >= 2 {
+                state.park.take()
+            } else {
+                None
+            };
+            state.commit(operations, opts, park.as_ref());
             Ok(())
         }
 
@@ -669,7 +719,7 @@ mod mem {
                     .into_iter()
                     .map(|(key, value)| BatchOp::Put { key, value }),
             );
-            state.commit(replace, opts);
+            state.commit(replace, opts, None);
             Ok(())
         }
 
