@@ -438,19 +438,45 @@ pub(crate) struct RunRecord {
 
 impl RunRecord {
     fn push(&mut self, ok: bool, counted: bool, durable: bool) {
-        unimplemented!()
+        self.ok.push(ok);
+        self.counted.push(counted);
+        self.durable.push(durable);
     }
 
     /// `d`: the units called up to the last durable call that returned
     /// before the first failure.
     pub(crate) fn durable_units(&self) -> usize {
-        unimplemented!()
+        let mut units = 0;
+        let mut durable = 0;
+        for ((&ok, &counted), &makes_durable) in
+            self.ok.iter().zip(&self.counted).zip(&self.durable)
+        {
+            if counted {
+                units += 1;
+            }
+            if !ok {
+                break;
+            }
+            if makes_durable {
+                durable = units;
+            }
+        }
+        durable
     }
 
     /// The longest prefix a crash may leave: every unit before the first
     /// failed call, plus that call when it is a unit (it was in flight).
     pub(crate) fn upper_units(&self) -> usize {
-        unimplemented!()
+        let mut units = 0;
+        for (&ok, &counted) in self.ok.iter().zip(&self.counted) {
+            if counted {
+                units += 1;
+            }
+            if !ok {
+                return units;
+            }
+        }
+        units
     }
 }
 
@@ -492,12 +518,23 @@ pub(crate) struct Report {
 
 impl Report {
     fn add(&mut self, outcome: &CaseOutcome) {
-        unimplemented!()
+        self.cases += 1;
+        let longest = outcome.matches.iter().copied().max().unwrap_or(0);
+        if longest < outcome.units {
+            self.lossy += 1;
+        }
+        if longest > outcome.durable {
+            self.beyond_durable += 1;
+        }
     }
 }
 
 fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
-    unimplemented!()
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+        .unwrap_or_else(|| "non-text panic".to_string())
 }
 
 /// One case: fresh target, death armed at `die_at` (never, for `None`), run,
@@ -509,23 +546,73 @@ pub(crate) fn crash_case<T: CrashTarget, S: Scenario>(
     mode: CrashMode,
     seed: u64,
 ) -> CaseOutcome {
-    unimplemented!()
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let target = T::fresh();
+        if let Some(at) = die_at {
+            target.arm_death(at);
+        }
+        let run = scenario.run(&target.engine());
+        let target = target.crash(mode, seed);
+        let engine = target.engine();
+        let matches = scenario.check(&engine, &run)?;
+        Ok::<_, String>(CaseOutcome {
+            durable: run.durable_units(),
+            upper: run.upper_units(),
+            matches,
+            units: scenario.units(),
+        })
+    }));
+    let context = format!(
+        "{} crash case: die_at {die_at:?}, mode {mode:?}, seed {seed}",
+        T::NAME
+    );
+    match result {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(why)) => panic!("{context}: {why}"),
+        Err(payload) => panic!("{context}: panicked: {}", panic_text(&*payload)),
+    }
 }
 
 /// `T`: the counted ops after a full run of `scenario` on a fresh target.
 pub(crate) fn dry_run_ops<T: CrashTarget, S: Scenario>(scenario: &S) -> u64 {
-    unimplemented!()
+    let target = T::fresh();
+    let run = scenario.run(&target.engine());
+    assert!(
+        run.ok.iter().all(|&ok| ok),
+        "{}: a call failed in a run without a death",
+        T::NAME
+    );
+    target.ops_so_far()
 }
 
 /// The crash variants of one point: every mode (a byte-tearing target) or
 /// every number of unsynced batches to keep in `0..=B` (a whole-batch one).
 fn variants<T: CrashTarget>(units: usize, point: u64) -> Vec<(CrashMode, u64)> {
-    unimplemented!()
+    if T::KEEPS_WHOLE_BATCHES {
+        (0..=units as u64)
+            .map(|keep| (CrashMode::DropUnsynced, keep))
+            .collect()
+    } else {
+        (0u64..)
+            .zip(CRASH_MODES)
+            .map(|(index, mode)| (mode, point.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ index))
+            .collect()
+    }
 }
 
 /// Every crash point `n ∈ 0..=T` of `scenario`, each in every variant.
 pub(crate) fn every_crash_point<T: CrashTarget, S: Scenario>(scenario: &S) -> Report {
-    unimplemented!()
+    let ops = dry_run_ops::<T, S>(scenario);
+    let mut report = Report {
+        ops,
+        ..Report::default()
+    };
+    for point in 0..=ops {
+        for (mode, seed) in variants::<T>(scenario.units(), point) {
+            report.add(&crash_case::<T, S>(scenario, Some(point), mode, seed));
+        }
+    }
+    report
 }
 
 /// Seeded random crashes: per seed, a dry run counts `T_s` and the death
@@ -537,7 +624,39 @@ pub(crate) fn random_crashes<T: CrashTarget, S: Scenario>(
     every_mode: bool,
     make: impl Fn(u64) -> S,
 ) -> Report {
-    unimplemented!()
+    let mut report = Report::default();
+    for seed in seeds {
+        let scenario = make(seed);
+        let ops = dry_run_ops::<T, S>(&scenario);
+        report.ops = report.ops.max(ops);
+        let mut rng = StdRng::seed_from_u64(seed ^ 0xC0A5_7E57_0000_0000);
+        let choices: Vec<(CrashMode, u64)> = if T::KEEPS_WHOLE_BATCHES {
+            vec![(
+                CrashMode::DropUnsynced,
+                rng.random_range(0..=scenario.units() as u64),
+            )]
+        } else if every_mode {
+            CRASH_MODES
+                .iter()
+                .map(|&mode| (mode, rng.random()))
+                .collect()
+        } else {
+            vec![(
+                CRASH_MODES[rng.random_range(0..CRASH_MODES.len())],
+                rng.random(),
+            )]
+        };
+        for (mode, crash_seed) in choices {
+            let point = rng.random_range(0..=ops);
+            report.add(&crash_case::<T, S>(
+                &scenario,
+                Some(point),
+                mode,
+                crash_seed,
+            ));
+        }
+    }
+    report
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +680,19 @@ pub(crate) enum Step {
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
 fn apply_model(model: &mut Model, ops: &[BatchOp]) {
-    unimplemented!()
+    for op in ops {
+        match op {
+            BatchOp::Put { key, value } => {
+                model.insert(key.clone(), value.clone());
+            }
+            BatchOp::Delete { key } => {
+                model.remove(key);
+            }
+            BatchOp::DeleteRange { start, end } => {
+                model.retain(|key, _| key < start || key >= end);
+            }
+        }
+    }
 }
 
 /// An engine workload: batches and syncs against the bare engine.
@@ -572,23 +703,33 @@ pub(crate) struct KvWorkload {
 }
 
 fn value_of(len: usize, tag: u8) -> Vec<u8> {
-    unimplemented!()
+    (0..len)
+        .map(|i| tag.wrapping_add(u8::try_from(i % 251).unwrap_or(0)))
+        .collect()
 }
 
 fn put(key: &str, len: usize, tag: u8) -> BatchOp {
-    unimplemented!()
+    BatchOp::Put {
+        key: key.as_bytes().to_vec(),
+        value: value_of(len, tag),
+    }
 }
 
 fn delete(key: &str) -> BatchOp {
-    unimplemented!()
+    BatchOp::Delete {
+        key: key.as_bytes().to_vec(),
+    }
 }
 
 fn delete_range(start: &str, end: &str) -> BatchOp {
-    unimplemented!()
+    BatchOp::DeleteRange {
+        start: start.as_bytes().to_vec(),
+        end: end.as_bytes().to_vec(),
+    }
 }
 
 fn batch(ops: Vec<BatchOp>, sync: bool) -> Step {
-    unimplemented!()
+    Step::Batch { ops, sync }
 }
 
 impl KvWorkload {
@@ -596,43 +737,208 @@ impl KvWorkload {
     /// `sync()` after unsynced batches followed by more unsynced ones before
     /// the next durable write, and a trailing unsynced batch (`d = 11`).
     pub(crate) fn fixed() -> Self {
-        unimplemented!()
+        let steps = vec![
+            batch(
+                vec![put("a", 16, 1), put("b", 300, 2), put("c", 2048, 3)],
+                true,
+            ),
+            batch(vec![put("d", 700, 4), put("e", 64, 5), delete("a")], false),
+            batch(vec![delete_range("b", "d"), put("f", 1500, 6)], false),
+            Step::Sync,
+            batch(
+                vec![
+                    put("a", 900, 7),
+                    put("b", 33, 8),
+                    put("g", 2048, 9),
+                    put("h", 128, 10),
+                ],
+                false,
+            ),
+            batch(vec![put("c", 512, 11)], false),
+            batch(
+                vec![
+                    put("d", 1024, 12),
+                    put("e", 17, 13),
+                    delete("f"),
+                    delete("g"),
+                ],
+                true,
+            ),
+            batch(vec![delete_range("a", "c")], false),
+            batch(
+                vec![put("f", 256, 14), put("g", 2000, 15), put("a", 48, 16)],
+                false,
+            ),
+            Step::Sync,
+            batch(vec![put("b", 1800, 17)], false),
+            batch(
+                vec![
+                    put("c", 40, 18),
+                    put("d", 2048, 19),
+                    put("e", 600, 20),
+                    put("h", 1200, 21),
+                    put("b", 77, 22),
+                    delete("a"),
+                ],
+                false,
+            ),
+            batch(vec![put("g", 96, 23), put("a", 1000, 24)], true),
+            batch(vec![put("h", 444, 25)], false),
+        ];
+        Self { steps }
     }
 
     /// A seeded workload: 10–60 steps; a step is `sync()` (10 %) or a batch
     /// of 1–8 puts, deletes and range deletes over 64 keys of 1–6 bytes with
     /// values of 0–2 KiB, written with `sync = true` (30 %) or `false`.
     pub(crate) fn random(seed: u64) -> Self {
-        unimplemented!()
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut keys = BTreeSet::new();
+        while keys.len() < 64 {
+            let len = rng.random_range(1..=6);
+            keys.insert((0..len).map(|_| rng.random::<u8>()).collect::<Vec<u8>>());
+        }
+        let keys: Vec<Vec<u8>> = keys.into_iter().collect();
+        let steps = (0..rng.random_range(10..=60))
+            .map(|_| {
+                if rng.random_bool(0.1) {
+                    return Step::Sync;
+                }
+                let ops = (0..rng.random_range(1..=8))
+                    .map(|_| {
+                        let key = keys[rng.random_range(0..keys.len())].clone();
+                        match rng.random_range(0..20) {
+                            0..=11 => {
+                                let len = rng.random_range(0..=2048);
+                                let mut value = vec![0u8; len];
+                                rng.fill(value.as_mut_slice());
+                                BatchOp::Put { key, value }
+                            }
+                            12..=16 => BatchOp::Delete { key },
+                            _ => {
+                                let other = keys[rng.random_range(0..keys.len())].clone();
+                                let (start, end) = if key <= other {
+                                    (key, other)
+                                } else {
+                                    (other, key)
+                                };
+                                BatchOp::DeleteRange { start, end }
+                            }
+                        }
+                    })
+                    .collect();
+                batch(ops, rng.random_bool(0.3))
+            })
+            .collect();
+        Self { steps }
     }
 
     /// The model after each prefix of batches: entry `i` is the state after
     /// the first `i`.
     pub(crate) fn models(&self) -> Vec<BTreeMap<Vec<u8>, Vec<u8>>> {
-        unimplemented!()
+        let mut model = Model::new();
+        let mut models = vec![model.clone()];
+        for step in &self.steps {
+            if let Step::Batch { ops, .. } = step {
+                apply_model(&mut model, ops);
+                models.push(model.clone());
+            }
+        }
+        models
     }
 }
 
 /// Every key of `engine`, read from one snapshot.
 pub(crate) fn read_all<E: KvEngine>(engine: &E) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, String> {
-    unimplemented!()
+    let snapshot = engine
+        .snapshot()
+        .map_err(|e| format!("snapshot of the recovered engine: {e}"))?;
+    let mut state = BTreeMap::new();
+    for entry in snapshot
+        .iter(KeyRange::default())
+        .map_err(|e| format!("iter of the recovered engine: {e}"))?
+    {
+        let (key, value) = entry.map_err(|e| format!("read of the recovered engine: {e}"))?;
+        if state.insert(key.clone(), value).is_some() {
+            return Err(format!("the recovered engine returned {key:?} twice"));
+        }
+    }
+    Ok(state)
 }
 
 fn describe_diff(state: &Model, model: &Model) -> String {
-    unimplemented!()
+    let mut lines = Vec::new();
+    for (key, value) in state {
+        match model.get(key) {
+            None => lines.push(format!("extra {key:?} ({} bytes)", value.len())),
+            Some(expected) if expected != value => lines.push(format!(
+                "{key:?}: {} bytes, the model has {} bytes",
+                value.len(),
+                expected.len()
+            )),
+            Some(_) => {}
+        }
+    }
+    for key in model.keys().filter(|key| !state.contains_key(*key)) {
+        lines.push(format!("missing {key:?}"));
+    }
+    let shown = lines.len().min(6);
+    format!(
+        "{} (of {} differences)",
+        lines[..shown].join("; "),
+        lines.len()
+    )
 }
 
 impl Scenario for KvWorkload {
     fn run<E: KvEngine>(&self, engine: &Arc<E>) -> RunRecord {
-        unimplemented!()
+        let mut run = RunRecord::default();
+        for step in &self.steps {
+            match step {
+                Step::Batch { ops, sync } => {
+                    let mut batch = WriteBatch::new();
+                    for op in ops {
+                        match op {
+                            BatchOp::Put { key, value } => batch.put(key.clone(), value.clone()),
+                            BatchOp::Delete { key } => batch.delete(key.clone()),
+                            BatchOp::DeleteRange { start, end } => {
+                                batch.delete_range(start.clone(), end.clone());
+                            }
+                        }
+                    }
+                    let ok = engine.write(batch, WriteOptions { sync: *sync }).is_ok();
+                    run.push(ok, true, *sync);
+                }
+                Step::Sync => run.push(engine.sync().is_ok(), false, true),
+            }
+        }
+        run
     }
 
     fn check<E: KvEngine>(&self, engine: &Arc<E>, run: &RunRecord) -> Result<Vec<usize>, String> {
-        unimplemented!()
+        let state = read_all(&**engine)?;
+        let models = self.models();
+        let durable = run.durable_units();
+        let upper = run.upper_units();
+        let matches: Vec<usize> = (durable..=upper).filter(|&i| models[i] == state).collect();
+        if matches.is_empty() {
+            let diffs: Vec<String> = (durable..=upper)
+                .map(|i| format!("prefix {i}: {}", describe_diff(&state, &models[i])))
+                .collect();
+            return Err(format!(
+                "the recovered state is no prefix in {durable}..={upper} of {} batches: {}",
+                self.units(),
+                diffs.join(" | ")
+            ));
+        }
+        Ok(matches)
     }
 
     fn units(&self) -> usize {
-        unimplemented!()
+        self.steps
+            .iter()
+            .filter(|step| matches!(step, Step::Batch { .. }))
+            .count()
     }
 }
 
@@ -743,39 +1049,89 @@ struct RegistryModel {
 }
 
 fn lww_value(stamp: u64) -> RecordValue {
-    unimplemented!()
+    RecordValue::Lww {
+        value: Value::String(format!("v{stamp}")),
+        timestamp: Timestamp {
+            millis: stamp,
+            counter: 0,
+            node_id: "crash".to_string(),
+        },
+    }
 }
 
 /// The bytes `add` stores for `stamp`.
 fn lww_bytes(stamp: u64) -> Vec<u8> {
-    unimplemented!()
+    rmp_serde::to_vec_named(&lww_value(stamp)).expect("an LWW value encodes")
 }
 
 /// Drives a store future that never suspends: every store call is
 /// synchronous underneath.
 fn ready<F: Future>(future: F) -> F::Output {
-    unimplemented!()
+    let mut future = pin!(future);
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("a store call suspended; the crash suite polls it once"),
+    }
 }
 
 fn s(text: &str) -> String {
-    unimplemented!()
+    text.to_string()
 }
 
 fn rec_put(map: &str, backup: bool, key: &str, tag: u8) -> RecordChange {
-    unimplemented!()
+    RecordChange::Put {
+        map: s(map),
+        backup,
+        key: s(key),
+        bytes: value_of(24, tag),
+    }
 }
 
 impl RegistryModel {
     fn put(&mut self, map: &str, backup: bool, key: &str, bytes: Vec<u8>) {
-        unimplemented!()
+        self.records.insert((s(map), backup, s(key)), bytes);
+        self.put_names.insert(s(map));
+        if !backup {
+            self.primary_names.insert(s(map));
+        }
     }
 
     fn remove(&mut self, map: &str, backup: bool, key: &str) {
-        unimplemented!()
+        self.records.remove(&(s(map), backup, s(key)));
     }
 
     fn apply(&mut self, op: &StoreOp) {
-        unimplemented!()
+        match op {
+            StoreOp::Add { map, key, stamp } => self.put(map, false, key, lww_bytes(*stamp)),
+            StoreOp::AddBackup { map, key, stamp } => self.put(map, true, key, lww_bytes(*stamp)),
+            StoreOp::Remove { map, key } => self.remove(map, false, key),
+            StoreOp::RemoveAll { map, keys } => {
+                for key in keys {
+                    self.remove(map, false, key);
+                }
+            }
+            StoreOp::Records { changes, mark, .. } => {
+                for change in changes {
+                    match change {
+                        RecordChange::Put {
+                            map,
+                            backup,
+                            key,
+                            bytes,
+                        } => self.put(map, *backup, key, bytes.clone()),
+                        RecordChange::Delete { map, backup, key } => self.remove(map, *backup, key),
+                    }
+                }
+                match mark {
+                    MarkChange::Untouched => {}
+                    MarkChange::Set(bytes) => self.mark = Some(bytes.clone()),
+                    MarkChange::Clear => self.mark = None,
+                }
+            }
+        }
     }
 }
 
@@ -788,7 +1144,85 @@ struct RecoveredRegistry {
 }
 
 fn decode_registry(raw: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<RecoveredRegistry, String> {
-    unimplemented!()
+    let mut by_name: BTreeMap<String, u32> = BTreeMap::new();
+    let mut by_id: BTreeMap<u32, String> = BTreeMap::new();
+    let mut next_map_id = None;
+    let mut mark = None;
+    let mut record_keys = Vec::new();
+    for (key, value) in raw {
+        match key.first().copied() {
+            Some(KS_META) => {
+                if key[1..] == *META_NEXT_MAP_ID {
+                    let word: [u8; 4] = value
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "next_map_id is not 4 bytes".to_string())?;
+                    next_map_id = Some(u32::from_be_bytes(word));
+                } else if key[1..] == *META_MIGRATION {
+                    mark = Some(value.clone());
+                }
+            }
+            Some(KS_MAP_BY_NAME) => {
+                let row =
+                    decode_map_by_name_row(key, value).map_err(|e| format!("0x01 row: {e}"))?;
+                by_name.insert(row.name, row.map_id);
+            }
+            Some(KS_MAP_BY_ID) => {
+                let (id, name) =
+                    decode_map_by_id_row(key, value).map_err(|e| format!("0x02 row: {e}"))?;
+                by_id.insert(id, name);
+            }
+            Some(KS_PRIMARY | KS_BACKUP) => record_keys.push((key, value)),
+            other => return Err(format!("a key in keyspace {other:?} after a crash")),
+        }
+    }
+    // Assertion 2: the two registry keyspaces are inverse bijections, and
+    // `next_map_id` is above every issued id.
+    for (name, id) in &by_name {
+        if by_id.get(id) != Some(name) {
+            return Err(format!("0x01 {name:?} → {id} has no matching 0x02 row"));
+        }
+    }
+    for (id, name) in &by_id {
+        if by_name.get(name) != Some(id) {
+            return Err(format!("0x02 {id} → {name:?} has no matching 0x01 row"));
+        }
+    }
+    if let Some(max_id) = by_id.keys().max() {
+        match next_map_id {
+            Some(next) if next > *max_id => {}
+            other => {
+                return Err(format!(
+                    "next_map_id {other:?} does not exceed the issued id {max_id}"
+                ))
+            }
+        }
+    }
+    // Assertion 1: every record decodes, under an id the registry resolves.
+    let mut records = BTreeMap::new();
+    for (key, value) in record_keys {
+        let record = RecordKey::decode(key).map_err(|e| format!("record key {key:?}: {e}"))?;
+        let Some(name) = by_id.get(&record.map_id) else {
+            return Err(format!(
+                "orphan record {:?} under unregistered id {}",
+                record.key, record.map_id
+            ));
+        };
+        records.insert(
+            (
+                name.clone(),
+                record.space == RecordSpace::Backup,
+                record.key,
+            ),
+            value.clone(),
+        );
+    }
+    Ok(RecoveredRegistry {
+        empty: raw.is_empty(),
+        records,
+        names: by_name.into_keys().collect(),
+        mark,
+    })
 }
 
 impl RegistryWorkload {
@@ -796,14 +1230,85 @@ impl RegistryWorkload {
     /// `add_backup` to `m1`, a 3-op `write_records` (two puts to `m1`, one to
     /// new `m4`), `remove` on `m-2`, `remove_all` on `m/3`, `add` to `m4`.
     pub(crate) fn fixed() -> Self {
-        unimplemented!()
+        let add = |map: &str, key: &str, stamp| StoreOp::Add {
+            map: s(map),
+            key: s(key),
+            stamp,
+        };
+        let ops = vec![
+            add("m1", "k1", 1),
+            add("m-2", "k1", 2),
+            add("m/3", "k1", 3),
+            StoreOp::AddBackup {
+                map: s("m1"),
+                key: s("k1"),
+                stamp: 4,
+            },
+            StoreOp::Records {
+                changes: vec![
+                    rec_put("m1", false, "k2", 5),
+                    rec_put("m1", false, "k3", 6),
+                    rec_put("m4", false, "k1", 7),
+                ],
+                mark: MarkChange::Untouched,
+                sync: false,
+            },
+            StoreOp::Remove {
+                map: s("m-2"),
+                key: s("k1"),
+            },
+            StoreOp::RemoveAll {
+                map: s("m/3"),
+                keys: vec![s("k1"), s("k2")],
+            },
+            add("m4", "k2", 8),
+        ];
+        Self {
+            initial_mark: None,
+            ops,
+        }
     }
 
     /// Second fixed workload: `open_for_migration(m0)`, then 8
     /// `write_records` batches over `m1`…`m4`; batches 1, 2, 4, 6, 7 set a
     /// distinct mark, batch 8 clears it.
     pub(crate) fn fixed_migration() -> Self {
-        unimplemented!()
+        let maps = ["m1", "m2", "m3", "m4"];
+        let marked = [1, 2, 4, 6, 7];
+        let synced = [2, 5, 8];
+        let ops = (1u8..=8)
+            .map(|n| {
+                let map = maps[usize::from(n - 1) % maps.len()];
+                let other = maps[usize::from(n) % maps.len()];
+                let mut changes = vec![
+                    rec_put(map, false, &format!("k{n}"), n),
+                    rec_put(other, n % 3 == 0, "k0", n.wrapping_add(100)),
+                ];
+                if n > 4 {
+                    changes.push(RecordChange::Delete {
+                        map: s(maps[usize::from(n) % maps.len()]),
+                        backup: false,
+                        key: format!("k{}", n - 3),
+                    });
+                }
+                let mark = if n == 8 {
+                    MarkChange::Clear
+                } else if marked.contains(&n) {
+                    MarkChange::Set(format!("mark-{n}").into_bytes())
+                } else {
+                    MarkChange::Untouched
+                };
+                StoreOp::Records {
+                    changes,
+                    mark,
+                    sync: synced.contains(&n),
+                }
+            })
+            .collect();
+        Self {
+            initial_mark: Some(b"mark-0".to_vec()),
+            ops,
+        }
     }
 
     /// A seeded workload over 20 map names (one with `/`, one with `-`) of
@@ -813,17 +1318,156 @@ impl RegistryWorkload {
     /// distinct mark and the last operation is a `write_records` that clears
     /// it.
     pub(crate) fn random(seed: u64, migration: bool) -> Self {
-        unimplemented!()
+        let mut rng = StdRng::seed_from_u64(seed);
+        let names: Vec<String> = (0..20)
+            .map(|i| match i {
+                7 => s("map/7"),
+                13 => s("map-13"),
+                _ => format!("map{i}"),
+            })
+            .collect();
+        let pick_map = |rng: &mut StdRng| names[rng.random_range(0..names.len())].clone();
+        let pick_key = |rng: &mut StdRng| format!("k{}", rng.random_range(0..8));
+        let mut marks = 0u32;
+        let mut ops: Vec<StoreOp> = Vec::new();
+        let count: u64 = rng.random_range(10..=40);
+        for index in 0..count {
+            let stamp = index + 1;
+            let last = index + 1 == count;
+            let kind = if migration && last {
+                4
+            } else {
+                rng.random_range(0..20)
+            };
+            let op = match kind {
+                0..=5 => StoreOp::Add {
+                    map: pick_map(&mut rng),
+                    key: pick_key(&mut rng),
+                    stamp,
+                },
+                6..=8 => StoreOp::AddBackup {
+                    map: pick_map(&mut rng),
+                    key: pick_key(&mut rng),
+                    stamp,
+                },
+                9..=11 => StoreOp::Remove {
+                    map: pick_map(&mut rng),
+                    key: pick_key(&mut rng),
+                },
+                12..=13 => StoreOp::RemoveAll {
+                    map: pick_map(&mut rng),
+                    keys: (0..rng.random_range(1..=3))
+                        .map(|_| pick_key(&mut rng))
+                        .collect(),
+                },
+                _ => {
+                    let changes = (0..rng.random_range(2..=5))
+                        .map(|_| {
+                            let map = pick_map(&mut rng);
+                            let backup = rng.random_bool(0.3);
+                            let key = pick_key(&mut rng);
+                            if rng.random_bool(0.75) {
+                                let mut bytes = vec![0u8; rng.random_range(1..=64)];
+                                rng.fill(bytes.as_mut_slice());
+                                RecordChange::Put {
+                                    map,
+                                    backup,
+                                    key,
+                                    bytes,
+                                }
+                            } else {
+                                RecordChange::Delete { map, backup, key }
+                            }
+                        })
+                        .collect();
+                    let mark = if !migration {
+                        MarkChange::Untouched
+                    } else if last {
+                        MarkChange::Clear
+                    } else if rng.random_bool(0.6) {
+                        marks += 1;
+                        MarkChange::Set(format!("mark-{seed}-{marks}").into_bytes())
+                    } else {
+                        MarkChange::Untouched
+                    };
+                    StoreOp::Records {
+                        changes,
+                        mark,
+                        sync: rng.random_bool(0.5),
+                    }
+                }
+            };
+            ops.push(op);
+        }
+        Self {
+            initial_mark: migration.then(|| b"mark-0".to_vec()),
+            ops,
+        }
     }
 
     /// The model after each prefix of operations; entry 0 is the empty engine.
     fn models(&self) -> Vec<RegistryModel> {
-        unimplemented!()
+        let mut model = RegistryModel::default();
+        let mut models = vec![model.clone()];
+        model.formatted = true;
+        model.mark.clone_from(&self.initial_mark);
+        models.push(model.clone());
+        for op in &self.ops {
+            model.apply(op);
+            models.push(model.clone());
+        }
+        models
     }
 }
 
 fn call_store<E: KvEngine>(store: &EngineMapDataStore<E>, op: &StoreOp) -> bool {
-    unimplemented!()
+    match op {
+        StoreOp::Add { map, key, stamp } => {
+            ready(store.add(map, key, &lww_value(*stamp), 0, 0)).is_ok()
+        }
+        StoreOp::AddBackup { map, key, stamp } => {
+            ready(store.add_backup(map, key, &lww_value(*stamp), 0, 0)).is_ok()
+        }
+        StoreOp::Remove { map, key } => ready(store.remove(map, key, 0)).is_ok(),
+        StoreOp::RemoveAll { map, keys } => ready(store.remove_all(map, keys)).is_ok(),
+        StoreOp::Records {
+            changes,
+            mark,
+            sync,
+        } => {
+            let mut ops: Vec<RecordOp<'_>> = changes
+                .iter()
+                .map(|change| match change {
+                    RecordChange::Put {
+                        map,
+                        backup,
+                        key,
+                        bytes,
+                    } => RecordOp::Put {
+                        map,
+                        backup: *backup,
+                        key,
+                        bytes,
+                    },
+                    RecordChange::Delete { map, backup, key } => RecordOp::Delete {
+                        map,
+                        backup: *backup,
+                        key,
+                    },
+                })
+                .collect();
+            match mark {
+                MarkChange::Untouched => {}
+                MarkChange::Set(bytes) => {
+                    ops.push(RecordOp::SetMigrationMark(Some(bytes.as_slice())))
+                }
+                MarkChange::Clear => ops.push(RecordOp::SetMigrationMark(None)),
+            }
+            store
+                .write_records(&ops, WriteOptions { sync: *sync })
+                .is_ok()
+        }
+    }
 }
 
 /// Whether an `Ok` of `op` makes every earlier operation durable: it must
@@ -831,24 +1475,131 @@ fn call_store<E: KvEngine>(store: &EngineMapDataStore<E>, op: &StoreOp) -> bool 
 /// A call whose every change is a delete on a map with no registry row and
 /// that sets no mark writes no batch, so it makes nothing durable.
 fn op_is_durable(op: &StoreOp, registered: &BTreeSet<String>) -> bool {
-    unimplemented!()
+    match op {
+        StoreOp::Add { .. } | StoreOp::AddBackup { .. } => true,
+        StoreOp::Remove { map, .. } | StoreOp::RemoveAll { map, .. } => registered.contains(map),
+        StoreOp::Records {
+            changes,
+            mark,
+            sync,
+        } => {
+            *sync
+                && (*mark != MarkChange::Untouched
+                    || changes.iter().any(|change| match change {
+                        RecordChange::Put { .. } => true,
+                        RecordChange::Delete { map, .. } => registered.contains(map),
+                    }))
+        }
+    }
 }
 
 /// Adds the maps `op` registers (any put, primary or backup).
 fn register(op: &StoreOp, registered: &mut BTreeSet<String>) {
-    unimplemented!()
+    match op {
+        StoreOp::Add { map, .. } | StoreOp::AddBackup { map, .. } => {
+            registered.insert(map.clone());
+        }
+        StoreOp::Records { changes, .. } => {
+            for change in changes {
+                if let RecordChange::Put { map, .. } = change {
+                    registered.insert(map.clone());
+                }
+            }
+        }
+        StoreOp::Remove { .. } | StoreOp::RemoveAll { .. } => {}
+    }
 }
 
 impl Scenario for RegistryWorkload {
     fn run<E: KvEngine>(&self, engine: &Arc<E>) -> RunRecord {
-        unimplemented!()
+        let mut run = RunRecord::default();
+        let opened = match &self.initial_mark {
+            Some(mark) => {
+                EngineMapDataStore::open_for_migration(Arc::clone(engine), mark).map(|(s, _)| s)
+            }
+            None => EngineMapDataStore::open(Arc::clone(engine)),
+        };
+        let Ok(store) = opened else {
+            // A death in the format batch ends the run.
+            run.push(false, true, true);
+            return run;
+        };
+        run.push(true, true, true);
+        let mut registered = BTreeSet::new();
+        for op in &self.ops {
+            let durable = op_is_durable(op, &registered);
+            let ok = call_store(&store, op);
+            if ok {
+                register(op, &mut registered);
+            }
+            run.push(ok, true, durable);
+        }
+        run
     }
 
     fn check<E: KvEngine>(&self, engine: &Arc<E>, run: &RunRecord) -> Result<Vec<usize>, String> {
-        unimplemented!()
+        let raw = read_all(&**engine)?;
+        let recovered = decode_registry(&raw)?;
+        // Assertion 4 and the refusal half of assertion 5: `open` refuses
+        // exactly when a mark is present, and the matching open succeeds.
+        let plain = EngineMapDataStore::open(Arc::clone(engine));
+        let store = match (&recovered.mark, plain) {
+            (Some(_), Ok(_)) => return Err("open admitted a store with a migration mark".into()),
+            (Some(mark), Err(_)) => {
+                let (store, read) =
+                    EngineMapDataStore::open_for_migration(Arc::clone(engine), b"unused")
+                        .map_err(|e| format!("open_for_migration after the crash: {e}"))?;
+                if read != *mark {
+                    return Err("open_for_migration returned another mark".into());
+                }
+                store
+            }
+            (None, Ok(store)) => store,
+            (None, Err(e)) => return Err(format!("open after the crash: {e}")),
+        };
+        let listed: BTreeSet<String> = ready(store.list_maps())
+            .map_err(|e| format!("list_maps after the crash: {e}"))?
+            .into_iter()
+            .collect();
+        let models = self.models();
+        let durable = run.durable_units();
+        let upper = run.upper_units();
+        let mut why = Vec::new();
+        let mut matches = Vec::new();
+        for (i, model) in models.iter().enumerate().take(upper + 1).skip(durable) {
+            let mismatch = if model.formatted == recovered.empty {
+                Some("format rows")
+            } else if model.records != recovered.records {
+                Some("records")
+            } else if model.primary_names != listed {
+                Some("list_maps")
+            } else if model.put_names != recovered.names {
+                Some("registry names")
+            } else if model.mark != recovered.mark {
+                Some("migration mark")
+            } else {
+                None
+            };
+            match mismatch {
+                None => matches.push(i),
+                Some(what) => why.push(format!("prefix {i}: {what}")),
+            }
+        }
+        if matches.is_empty() {
+            return Err(format!(
+                "the recovered registry is no prefix in {durable}..={upper} of {} operations \
+                 (records {}, listed {listed:?}, names {:?}, mark {:?}): {}",
+                self.units(),
+                recovered.records.len(),
+                recovered.names,
+                recovered.mark.as_deref().map(String::from_utf8_lossy),
+                why.join("; ")
+            ));
+        }
+        Ok(matches)
     }
 
     fn units(&self) -> usize {
-        unimplemented!()
+        1 + self.ops.len()
     }
 }
