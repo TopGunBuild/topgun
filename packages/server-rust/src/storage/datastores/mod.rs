@@ -20,6 +20,11 @@ mod engine_store_tests;
 mod kv_conformance;
 #[cfg(all(test, feature = "redb"))]
 mod kv_crash;
+// The main tests are frozen once committed; the style lints they trip are
+// allowed here, by name, as for the engine store's.
+#[allow(clippy::cast_possible_truncation)]
+#[cfg(all(test, feature = "redb"))]
+mod kv_crash_tests;
 pub mod kv_engine;
 mod null;
 #[cfg(feature = "redb")]
