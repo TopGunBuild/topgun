@@ -1459,7 +1459,7 @@ fn call_store<E: KvEngine>(store: &EngineMapDataStore<E>, op: &StoreOp) -> bool 
             match mark {
                 MarkChange::Untouched => {}
                 MarkChange::Set(bytes) => {
-                    ops.push(RecordOp::SetMigrationMark(Some(bytes.as_slice())))
+                    ops.push(RecordOp::SetMigrationMark(Some(bytes.as_slice())));
                 }
                 MarkChange::Clear => ops.push(RecordOp::SetMigrationMark(None)),
             }
