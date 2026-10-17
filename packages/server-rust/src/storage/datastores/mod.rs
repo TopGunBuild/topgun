@@ -18,6 +18,8 @@ pub mod engine_store;
 mod engine_store_tests;
 #[cfg(test)]
 mod kv_conformance;
+#[cfg(all(test, feature = "redb"))]
+mod kv_crash;
 pub mod kv_engine;
 mod null;
 #[cfg(feature = "redb")]
