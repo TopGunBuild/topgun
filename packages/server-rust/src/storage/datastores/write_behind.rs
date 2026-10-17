@@ -4848,6 +4848,13 @@ impl MapDataStore for WriteBehindDataStore {
             .as_ref()
             .map(order.cursor_position)
             .transpose()?;
+        // The cursor must stand for the batch's last row: a cursor above it
+        // would let the next resume skip durable rows in the gap (TG-WB-008).
+        if let (Some(upper), Some((last, _))) = (upper.as_deref(), batch.records.last()) {
+            if upper != (order.key_position)(last).as_slice() {
+                anyhow::bail!("scan cursor does not stand for the last row of its batch");
+            }
+        }
         let range = StagingOnly::InRange {
             order,
             lower: None,
@@ -4904,6 +4911,13 @@ impl MapDataStore for WriteBehindDataStore {
             .as_ref()
             .map(order.cursor_position)
             .transpose()?;
+        // The cursor must stand for the batch's last row: a cursor above it
+        // would let the next resume skip durable rows in the gap (TG-WB-008).
+        if let (Some(upper), Some((last, _))) = (upper.as_deref(), batch.records.last()) {
+            if upper != (order.key_position)(last).as_slice() {
+                anyhow::bail!("scan cursor does not stand for the last row of its batch");
+            }
+        }
         // A store that declares a scan order never returns a cursor below the
         // one it was resumed from. One that does has broken its declaration,
         // and the range would have no meaning: fail the call, as for a cursor
@@ -9620,6 +9634,60 @@ mod tests {
                 vec!["d50=v5@1", "d60=v6@1"],
             ],
             "a key flushed after a resumed batch was read is still emitted from the buffer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_order_cursor_past_the_last_row_of_the_first_batch_fails_the_scan() {
+        let scripted = Arc::new(ScriptedScanStore::new(vec![ScanBatch {
+            records: vec![scripted_row("d10", "v1")],
+            next_cursor: Some(ScanCursor(b"d30".to_vec())),
+        }]));
+        let store = WriteBehindDataStore::new(scripted, scan_config());
+        store.add("m", "d05", &lww("st", 2), 0, 2000).await.unwrap();
+
+        let outcome = store.scan_values("m", false, 0).await;
+        let message = outcome
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+
+        assert_eq!(
+            (
+                outcome.is_err(),
+                message.contains("scan cursor does not stand for the last row of its batch")
+            ),
+            (true, true),
+            "a cursor above the last row of its batch would let a resume skip rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_order_cursor_past_the_last_row_of_a_resumed_batch_fails_the_scan() {
+        let scripted = Arc::new(ScriptedScanStore::new(vec![ScanBatch {
+            records: vec![scripted_row("d30", "v3")],
+            next_cursor: Some(ScanCursor(b"d50".to_vec())),
+        }]));
+        let store = WriteBehindDataStore::new(scripted, scan_config());
+        store.add("m", "d05", &lww("st", 2), 0, 2000).await.unwrap();
+
+        let outcome = store
+            .scan_values_batched("m", false, ScanCursor(b"d10".to_vec()), 0)
+            .await;
+        let message = outcome
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+
+        assert_eq!(
+            (
+                outcome.is_err(),
+                message.contains("scan cursor does not stand for the last row of its batch")
+            ),
+            (true, true),
+            "a cursor above the last row of a resumed batch would let a resume skip rows"
         );
     }
 
