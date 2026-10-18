@@ -216,7 +216,7 @@ pnpm start:server
 
 `pnpm start:server` uses a prebuilt binary when present and falls back to `cargo run --bin topgun-server --release` for contributors who have the Rust toolchain.
 
-The server boots in seconds with embedded storage (`./topgun.redb`) — no database to run, no Docker required.
+The server boots in seconds with embedded storage in the data directory `./topgun-data` — no database to run, no Docker required.
 
 3. Open your app in two browser tabs and watch changes sync in real time.
 
@@ -315,7 +315,7 @@ cargo run --bin topgun-server --release
 # Set an explicit port (default is 8080)
 PORT=9000 pnpm start:server`}
   />
-    <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-green-600 dark:text-green-400">No external database required.</span> The server writes to <code>./topgun.redb</code> by default; data survives restarts. Set <code>TOPGUN_NO_AUTH=1</code> for auth-free local exploration. See the <a href="/docs/reference/server" className="underline">Server &amp; CLI reference</a> for flags and env vars.</span>
+    <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-green-600 dark:text-green-400">No external database required.</span> The server keeps its store in the data directory <code>./topgun-data</code> by default; data survives restarts. Set <code>TOPGUN_NO_AUTH=1</code> for auth-free local exploration. See the <a href="/docs/reference/server" className="underline">Server &amp; CLI reference</a> for flags and env vars.</span>
 
   <a href="/docs/comparison" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-400 dark:text-neutral-400">Previous</span>
