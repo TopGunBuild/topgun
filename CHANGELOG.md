@@ -10,6 +10,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Changed (on-disk format):** the server keeps its store in a **data directory** and moves an
+  existing store there by itself, once, at the first start of this version. Nothing has to be
+  run by hand; the old store file is kept. An older server binary started on the node refuses
+  to start instead of serving an empty store.
+  - **Where the store lives:** `TOPGUN_DATA_DIR` names the store directory, which holds
+    `engine.redb`. Its default is `{directory of TOPGUN_REDB_PATH}/topgun-data` when
+    `TOPGUN_REDB_PATH` is set (so a store on a volume stays on it), else `./topgun-data`. The
+    container image sets `TOPGUN_DATA_DIR=/data/topgun-data` and the Helm chart
+    `{mountPath}/topgun-data`. A set-but-empty value is refused at startup. Every start logs
+    `store location: data directory {D}` with `data_dir`, `data_dir_source` and
+    `legacy_path`.
+  - **`TOPGUN_REDB_PATH`** (default `./topgun.redb`) now names only the legacy store file of
+    earlier versions — the source of the migration — and the place of the marker file below.
+  - **One-time, resumable migration:** a table-per-map store file at `TOPGUN_REDB_PATH` with no
+    store in the data directory is copied at start-up, before the WAL is opened and before the
+    server listens. Rows and the progress mark are written in one batch, so a migration killed
+    at any point resumes at the next start and ends with the same content; a supervisor that
+    restarts the node converges, provided each run lives longer than start-up plus 2 s plus two
+    batches (a batch is at most 10 000 rows or 8 MiB). The copy is verified byte for byte
+    before anything is renamed. Log lines (`INFO`): `store format: migrating {L} into {D} from
+    the table-per-map format`, `store migration progress` (at most every 10 s),
+    `store migration: resuming from table {T}`, `store format: migration complete`.
+  - **Free space:** the migration refuses to start, changing nothing, unless
+    `1.5 × the size of the old file + 64 MiB` is free on the file system of the data directory:
+    `store migration: refusing to start: … bytes are free on the file system of {D}, … are needed (1.5 × the size of {L}, plus 64 MiB); nothing was changed`.
+  - **The old file is kept** as `{TOPGUN_REDB_PATH}.pre-migration`, and every start logs
+    `store format: the pre-migration store file is kept at {K}; delete it once this store is confirmed`
+    until an operator deletes it.
+  - **A marker file at the old path:** while a store is open, `TOPGUN_REDB_PATH` holds a small
+    text file starting with `TOPGUN-STORE-MOVED 1` that points at this entry. Do not delete it
+    while an older binary may be started with that path: an older binary refuses the marker
+    file, but on an absent path it would create an empty store.
+  - **Older binaries refuse:** a binary built before this version, started with the same
+    environment or with `TOPGUN_REDB_PATH` pointing at the data directory, exits 1 at its
+    store open, before it opens the WAL or listens, and changes no file (tested for the build
+    of `b346e277`, read from the source for `07d009f0`).
+  - **Two stores refuse the start:** a table-per-map file at `TOPGUN_REDB_PATH` beside a data
+    directory that already holds a store is refused, naming both; move one of them aside. Every
+    refusal at the store open logs one `ERROR` line, exits 1 and creates, moves or deletes
+    nothing. The troubleshooting guide lists each refusal and what to do.
+  - **Rollback** is supported only as a return to the pre-migration file: stop the new binary
+    cleanly (exit 0), move the data directory away, delete the marker file, rename
+    `{TOPGUN_REDB_PATH}.pre-migration` back to `TOPGUN_REDB_PATH`, start the old binary. **Every
+    write the new binary acknowledged is then absent on the server**; no recovery path for those
+    writes is claimed. There is no tool that exports the new format back, and none is planned. A
+    rollback after a `kill -9` of the new binary is out of contract. Rolling forward again
+    migrates the old file anew, including what the old binary wrote meanwhile.
+  - **Not claimed:** an older binary pointed at the data directory's `engine.redb` itself
+    (`TOPGUN_REDB_PATH={D}/engine.redb`) is not protected — it opens that file as a store with
+    no maps and serves empty maps. Never point an older binary there.
+  - **Backup:** stop the server cleanly and copy the whole `TOPGUN_DATA_DIR` directory
+    recursively, together with the WAL directory (`TOPGUN_WAL_DIR`); a copy of a running
+    server's directory is not a consistent backup. Before upgrading, copy the
+    `TOPGUN_REDB_PATH` file elsewhere: the migration keeps it beside the store, but only a copy
+    on another disk survives the loss of this one.
+  - **Size and order:** every record key is 9 bytes longer on disk (a keyspace byte, the
+    partition and the map id precede the key). A scan of a map now returns its records in
+    partition order, and by key within a partition, rather than in key order.
 - **Removed (server):** the Postgres backend. TopGun keeps its data in the embedded store
   inside the server, so there is no database to run. Gone are the `postgres` cargo feature,
   `STORAGE_BACKEND=postgres`, reading `DATABASE_URL`, the Postgres service and the `dbtools`
@@ -20,9 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is set or when `DATABASE_URL` is set (an empty value counts), and says why in its first
     log line. Unset `DATABASE_URL` to start on the embedded store.
     There is no migration tool: data kept by the Postgres backend remains available with the server built from the tag `postgres-backend-last`.
-  - **Backup:** stop the server (`SIGTERM`), copy the redb file (`TOPGUN_REDB_PATH`) and the
-    WAL directory (`TOPGUN_WAL_DIR`), start it again; restore by putting both back with the
-    server stopped. A copy of a running server's files is not a supported backup.
+  - **Backup:** stop the server (`SIGTERM`), copy the data directory (`TOPGUN_DATA_DIR`, see
+    "Changed (on-disk format)" above) and the WAL directory (`TOPGUN_WAL_DIR`), start it again;
+    restore by putting both back with the server stopped. A copy of a running server's files is
+    not a supported backup.
 - **Changed (deployment):** the `cluster` and `auto-setup` services of `docker-compose.yml`
   keep their data on named volumes, and every server service sets
   `TOPGUN_WAL_DIR=/data/topgun-wal` (the image's existing default, so no WAL moves). The Helm
@@ -248,7 +307,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store are replayed from the WAL on first boot. An application that renamed its map
   since then will see the old map's data come back under the old name. The first boot
   after the upgrade replays every stranded write, so it can take longer than usual, and
-  it creates one table per stranded map name.
+  it registers every stranded map name in the store.
 - **Breaking (`@topgunbuild/client`, `@topgunbuild/core`, server):** a node id may no
   longer contain `|` or `#` (`:` was already refused). `new TopGunClient({ nodeId })`
   and `new HLC(nodeId)` throw for such an id, and a server started with such a

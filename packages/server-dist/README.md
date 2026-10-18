@@ -62,9 +62,11 @@ custom build directory to override; an explicit value is never overwritten.
 
 ## Storage
 
-The server uses embedded redb storage by default. Data is written to `./topgun.redb` in the current directory. No external database is required.
+The server uses embedded redb storage by default. Data is kept in the directory `./topgun-data` in the current directory. No external database is required.
 
-To keep the data elsewhere, set `TOPGUN_REDB_PATH` (store file) and `TOPGUN_WAL_DIR` (write-ahead log); keep both on the same volume. To back up, stop the server and copy both; a copy of a running server's files is not a supported backup.
+To keep the data elsewhere, set `TOPGUN_DATA_DIR` (store directory) and `TOPGUN_WAL_DIR` (write-ahead log); keep both on the same volume. To back up, stop the server and copy both directories; a copy of a running server's directory is not a supported backup.
+
+`TOPGUN_REDB_PATH` (default `./topgun.redb`) names only the store file of earlier versions. The first start of a version with the data directory migrates that file into the directory once, keeps it as `topgun.redb.pre-migration`, and leaves a small marker file at its path so that an older version refuses to start instead of serving an empty store. Copy the old file elsewhere before upgrading. Rolling back is only a return to the kept file, and loses every write acknowledged since the upgrade.
 
 ## Contributor / Monorepo Usage
 

@@ -89,6 +89,8 @@ spec:
               value: "{{ .Values.metrics.port }}"
             {{- end }}
             {{- if .Values.persistence.enabled }}
+            - name: TOPGUN_DATA_DIR
+              value: "{{ .Values.persistence.mountPath }}/topgun-data"
             - name: TOPGUN_REDB_PATH
               value: "{{ .Values.persistence.mountPath }}/topgun.redb"
             - name: TOPGUN_WAL_DIR

@@ -33,7 +33,7 @@ PORT=8080 cargo run --bin topgun-server --release
 RUST_LOG=topgun_server=debug cargo run --bin topgun-server --release
 ```
 
-By default the server uses the embedded redb backend (no database to run, no Docker required). It binds to `0.0.0.0:8080` and opens `./topgun.redb` in the working directory, with its write-ahead log in `./topgun-wal`.
+By default the server uses the embedded redb backend (no database to run, no Docker required). It binds to `0.0.0.0:8080` and keeps its store in the data directory `./topgun-data` in the working directory, with its write-ahead log in `./topgun-wal`.
 
 ## CLI flags
 
@@ -58,8 +58,9 @@ All variables below correspond to direct `std::env::var(...)` reads or `tracing-
 | Variable | Type | Default | Consumer | Notes |
 |---|---|---|---|---|
 | `STORAGE_BACKEND` | string | `"redb"` | `bin/topgun_server.rs:109` | One of `redb` or `null`; any other value is refused at startup. `null` is in-memory ephemeral (test only). |
-| `TOPGUN_REDB_PATH` | path | `./topgun.redb` | `bin/topgun_server.rs:115` | File path for the embedded redb database (used when `STORAGE_BACKEND=redb`). |
-| `TOPGUN_WAL_DIR` | path | `./topgun-wal` | `storage/datastores/write_behind.rs` | Directory of the write-ahead log. Keep it on the same volume as the redb file. |
+| `TOPGUN_DATA_DIR` | path | `topgun-data` beside `TOPGUN_REDB_PATH` when that is set, else `./topgun-data` | `storage/datastores/redb.rs` | The store directory (used when `STORAGE_BACKEND=redb`); it holds `engine.redb`. A set-but-empty value is refused at startup. |
+| `TOPGUN_REDB_PATH` | path | `./topgun.redb` | `storage/datastores/redb.rs` | The store file of earlier versions: migrated into the data directory once and kept as `{path}.pre-migration`; a small marker file then stays at this path so that an older binary refuses to start. Not the store. A set-but-empty value is refused at startup. See [Storage backends](/docs/deploy/storage-backends#upgrading-from-a-store-file). |
+| `TOPGUN_WAL_DIR` | path | `./topgun-wal` | `storage/datastores/write_behind.rs` | Directory of the write-ahead log. Keep it on the same volume as the data directory. |
 
 ### Networking
 

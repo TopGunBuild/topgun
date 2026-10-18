@@ -2,9 +2,12 @@
 # own volume and does not share data with the others. Keep this at 1.
 replicaCount: 1
 
-# Persistent storage for the embedded store file and the write-ahead log.
-# Both live under mountPath (topgun.redb and topgun-wal). Without it the
-# data is lost when the pod is rescheduled.
+# Persistent storage for the embedded store and the write-ahead log. Both
+# live under mountPath (the store directory topgun-data and topgun-wal);
+# topgun.redb there is the store file of earlier versions, which the server
+# migrates into topgun-data once and then replaces by a small marker file.
+# The migration needs 1.5 x the size of that file plus 64 MiB free on the
+# volume. Without persistence the data is lost when the pod is rescheduled.
 persistence:
   enabled: true
   size: 1Gi

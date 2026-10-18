@@ -7,9 +7,12 @@ services:
   # ============================================================================
 
   server:
-    # Default `docker compose up server` boots TopGun with the embedded redb
-    # store on the named volume `topgun-data`. The store file and the
-    # write-ahead log both live on that volume, under /data. No auth required.
+    # Default `docker compose up server` boots TopGun with the embedded store
+    # on the named volume `topgun-data`. The store directory
+    # (TOPGUN_DATA_DIR) and the write-ahead log both live on that volume, under
+    # /data. TOPGUN_REDB_PATH names only the store file of earlier versions,
+    # which the server migrates into the store directory once, and the small
+    # marker file it then leaves there. No auth required.
     build:
       context: .
       dockerfile: deploy/Dockerfile.server
@@ -21,6 +24,7 @@ services:
       TOPGUN_PORT: 8080
       TOPGUN_CLUSTER_PORT: 9080
       STORAGE_BACKEND: ${STORAGE_BACKEND:-redb}
+      TOPGUN_DATA_DIR: /data/topgun-data
       TOPGUN_REDB_PATH: /data/topgun.redb
       TOPGUN_WAL_DIR: /data/topgun-wal
       # Dev default: skip auth so `docker compose up server` works without
@@ -153,10 +157,11 @@ services:
       RUST_LOG: topgun_server=info
       TOPGUN_PORT: 8080
       TOPGUN_METRICS_PORT: 9090
+      TOPGUN_DATA_DIR: /data/topgun-data
       TOPGUN_REDB_PATH: /data/topgun.redb
       TOPGUN_WAL_DIR: /data/topgun-wal
     profiles: ["auto-setup"]
-    # Store file and WAL live on this named volume.
+    # Store directory and WAL live on this named volume.
     volumes:
       - server-auto-data:/data
     healthcheck:
@@ -184,10 +189,11 @@ services:
       TOPGUN_PORT: 8080
       TOPGUN_CLUSTER_PORT: 9080
       TOPGUN_PEERS: node-2:9080,node-3:9080
+      TOPGUN_DATA_DIR: /data/topgun-data
       TOPGUN_REDB_PATH: /data/topgun.redb
       TOPGUN_WAL_DIR: /data/topgun-wal
     profiles: ["cluster"]
-    # Store file and WAL live on this named volume.
+    # Store directory and WAL live on this named volume.
     volumes:
       - node-1-data:/data
     networks:
@@ -206,10 +212,11 @@ services:
       TOPGUN_PORT: 8080
       TOPGUN_CLUSTER_PORT: 9080
       TOPGUN_PEERS: node-1:9080,node-3:9080
+      TOPGUN_DATA_DIR: /data/topgun-data
       TOPGUN_REDB_PATH: /data/topgun.redb
       TOPGUN_WAL_DIR: /data/topgun-wal
     profiles: ["cluster"]
-    # Store file and WAL live on this named volume.
+    # Store directory and WAL live on this named volume.
     volumes:
       - node-2-data:/data
     networks:
@@ -228,10 +235,11 @@ services:
       TOPGUN_PORT: 8080
       TOPGUN_CLUSTER_PORT: 9080
       TOPGUN_PEERS: node-1:9080,node-2:9080
+      TOPGUN_DATA_DIR: /data/topgun-data
       TOPGUN_REDB_PATH: /data/topgun.redb
       TOPGUN_WAL_DIR: /data/topgun-wal
     profiles: ["cluster"]
-    # Store file and WAL live on this named volume.
+    # Store directory and WAL live on this named volume.
     volumes:
       - node-3-data:/data
     networks:
