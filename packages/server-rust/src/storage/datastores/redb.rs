@@ -488,6 +488,10 @@ impl MovedMarker {
         let tmp = with_suffix(legacy_path, STUB_TMP_SUFFIX);
         {
             let mut file = fs::File::create(&tmp)?;
+            #[cfg(test)]
+            if io.abort_at == Some(AbortAt::StubAfterCreate) {
+                std::process::abort();
+            }
             file.write_all(&stub_text(data_dir))?;
             file.sync_all()?;
         }
@@ -710,6 +714,9 @@ pub(crate) enum AbortAt {
     AfterBatch(u64),
     /// In step 10, between the temporary stub's sync and its rename.
     MarkerBeforeRename,
+    /// In step 10, right after the temporary stub is created and before
+    /// anything is written to it.
+    StubAfterCreate,
 }
 
 /// Default rows per copy batch.

@@ -833,6 +833,7 @@ fn m05_abort(spec: &str) -> Option<AbortAt> {
             other => panic!("no abort step {other}"),
         })),
         None if spec == "marker" => Some(AbortAt::MarkerBeforeRename),
+        None if spec == "stub-create" => Some(AbortAt::StubAfterCreate),
         None if spec == "none" => None,
         _ => panic!("unknown abort spec {spec:?}"),
     }
@@ -936,13 +937,14 @@ fn m05_a_killed_process_resumes_from_its_mark() {
         dump_engine_file(&r.engine_path())
     };
 
-    let sequences: [(&str, &[&str]); 6] = [
+    let sequences: [(&str, &[&str]); 7] = [
         ("batches", &["batch:1", "batch:3", "batch:7"]),
         ("step5", &["step:5"]),
         ("step7", &["step:7"]),
         ("step9", &["step:9"]),
         ("step10", &["step:10"]),
         ("marker", &["marker"]),
+        ("stub-create", &["stub-create"]),
     ];
     let logs = tempdir().expect("log dir");
     for (name, aborts) in sequences {
@@ -1073,7 +1075,7 @@ fn m06_a_migration_whose_copy_differs_is_refused_and_serves_nothing() {
 #[test]
 fn m07_a_legacy_table_that_is_not_a_store_table_refuses_the_migration() {
     type Build = fn(&redb::WriteTransaction);
-    let cases: [(&str, Build); 4] = [
+    let cases: [(&str, Build); 5] = [
         ("other_table", |txn| {
             let def: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("other_table");
             txn.open_table(def)
@@ -1098,6 +1100,13 @@ fn m07_a_legacy_table_that_is_not_a_store_table_refuses_the_migration() {
             txn.open_multimap_table(def)
                 .unwrap()
                 .insert("k", b"v".as_slice())
+                .unwrap();
+        }),
+        ("mapr__users", |txn| {
+            let def: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("mapr__users");
+            txn.open_table(def)
+                .unwrap()
+                .insert("k", lww_bytes("v").as_slice())
                 .unwrap();
         }),
     ];
