@@ -9755,7 +9755,7 @@ mod tests {
 
         assert_eq!(
             observed,
-            vec![vec!["k2=st@2", "k1=st@2"]],
+            vec![vec!["k1=st@2", "k2=st@2"]],
             "the only batch of an empty durable map holds every staged value once"
         );
     }
