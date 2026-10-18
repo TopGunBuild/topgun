@@ -135,6 +135,50 @@ export function requireTwoBinaryEnv(): TwoBinaryEnv {
   };
 }
 
+/** The commands that produce the on-disk-format rollback pair, repeated in every "variable is missing" failure. */
+const FORMAT_BUILD_HINT =
+  'Format rollback: build the server at b346e277 (the last binary that stores maps as one redb table each) ' +
+  'in its own worktree and target directory (`git worktree add <scratch>/topgun-format-old b346e277`, then ' +
+  '`cargo build --release -p topgun-server --manifest-path <scratch>/topgun-format-old/Cargo.toml ' +
+  '--target-dir <scratch>/topgun-format-old-target`), build the newer one in this checkout, and export ' +
+  'FORMAT_OLD_SERVER_BINARY, FORMAT_OLD_SERVER_COMMIT (the full commit the older binary was built from), ' +
+  'RUST_SERVER_BINARY and NEW_SERVER_COMMIT.';
+
+/**
+ * Reads the variables of the on-disk-format rollback test: the older binary is
+ * the build from before the data directory existed (FORMAT_OLD_SERVER_BINARY /
+ * FORMAT_OLD_SERVER_COMMIT), the newer one is the binary under test. Throws,
+ * naming every missing older-binary variable at once; like
+ * `requireTwoBinaryEnv`, it never falls back to running one binary in both
+ * roles, because a refusal "proved" by the newer binary says nothing about the
+ * older one.
+ */
+export function requireFormatRollbackEnv(): TwoBinaryEnv {
+  const missing = ['FORMAT_OLD_SERVER_BINARY', 'FORMAT_OLD_SERVER_COMMIT'].filter(
+    (name) => !process.env[name],
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `${missing.join(' and ')} ${missing.length > 1 ? 'are' : 'is'} not set. ${FORMAT_BUILD_HINT}`,
+    );
+  }
+  const oldBinary = process.env.FORMAT_OLD_SERVER_BINARY as string;
+  try {
+    if (!fs.statSync(oldBinary).isFile()) throw new Error('not a regular file');
+    fs.accessSync(oldBinary, fs.constants.X_OK);
+  } catch (err) {
+    throw new Error(
+      `FORMAT_OLD_SERVER_BINARY does not name an executable file (${oldBinary}: ${(err as Error).message}). ${FORMAT_BUILD_HINT}`,
+    );
+  }
+  return {
+    oldBinary,
+    newBinary: requireExecutable('RUST_SERVER_BINARY'),
+    oldCommit: process.env.FORMAT_OLD_SERVER_COMMIT as string,
+    newCommit: requireVariable('NEW_SERVER_COMMIT'),
+  };
+}
+
 export function sha256OfFile(filePath: string): string {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
@@ -527,4 +571,105 @@ export function countBytesUnder(dir: string, needle: string): number {
 /** Log lines of a capture with terminal colour codes removed. */
 export function plainLines(capture: string): string[] {
   return capture.replace(/\u001b\[[0-9;]*m/g, '').split('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Store directory, as files
+// ---------------------------------------------------------------------------
+
+/** The marker line that opens the file the server leaves at the old store path once the store has moved. */
+export const STORE_MOVED_MARKER = 'TOPGUN-STORE-MOVED 1\n';
+/** The largest file the server recognises as that marker file. */
+export const STORE_MOVED_MAX_BYTES = 16_384;
+
+export interface MovedMarkerState {
+  /** `file`, `directory`, `symlink`, `other`, or `absent`. */
+  kind: string;
+  size?: number;
+  /** The file's first line (without its newline), when it is a regular file. */
+  firstLine?: string;
+  /** Regular file, at most 16 384 bytes, opening with the whole marker line. */
+  isMarker: boolean;
+}
+
+/** What is at `filePath`, judged the way the server recognises the moved-store marker file (never follows a symlink). */
+export function movedMarkerState(filePath: string): MovedMarkerState {
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(filePath);
+  } catch {
+    return { kind: 'absent', isMarker: false };
+  }
+  if (!st.isFile()) {
+    const kind = st.isDirectory() ? 'directory' : st.isSymbolicLink() ? 'symlink' : 'other';
+    return { kind, isMarker: false };
+  }
+  const head = fs.readFileSync(filePath).subarray(0, 256).toString('latin1');
+  const newline = head.indexOf('\n');
+  return {
+    kind: 'file',
+    size: st.size,
+    firstLine: newline === -1 ? head : head.slice(0, newline),
+    isMarker: st.size <= STORE_MOVED_MAX_BYTES && head.startsWith(STORE_MOVED_MARKER),
+  };
+}
+
+export interface TreeSnapshot {
+  /** Every path under the root, relative to it, sorted; a directory ends in `/`. */
+  paths: string[];
+  /** sha256 of every regular file the filter admits (all of them without a filter), by relative path. */
+  sha256: Record<string, string>;
+}
+
+/**
+ * Every path under `root` and the hash of the files' contents. Symlinks are
+ * listed and not followed. Hashing reads the files only, so taking a snapshot
+ * changes nothing it would later be compared with.
+ */
+export function treeSnapshot(
+  root: string,
+  hashFile: (rel: string) => boolean = () => true,
+): TreeSnapshot {
+  const paths: string[] = [];
+  const sha256: Record<string, string> = {};
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      const rel = path.relative(root, full);
+      if (entry.isDirectory()) {
+        paths.push(`${rel}/`);
+        walk(full);
+      } else {
+        paths.push(rel);
+        if (entry.isFile() && hashFile(rel)) sha256[rel] = sha256OfFile(full);
+      }
+    }
+  };
+  walk(root);
+  paths.sort();
+  return { paths, sha256 };
+}
+
+/**
+ * The value of one structured field on a `tracing` text line, or `undefined`
+ * when the line has no such field. A field the server recorded as a string or
+ * with `?` is printed quoted and escaped (`name="a b"`), one recorded with `%`
+ * is printed bare (`name=a b`) and may contain spaces, so a bare value runs to
+ * the next ` key=` or the end of the line.
+ */
+export function logField(line: string, name: string): string | undefined {
+  const at = new RegExp(`(?:^|\\s)${name}=`).exec(line);
+  if (!at) return undefined;
+  const rest = line.slice(at.index + at[0].length);
+  if (rest.startsWith('"')) {
+    const quoted = /^"((?:[^"\\]|\\.)*)"/.exec(rest);
+    if (!quoted) return undefined;
+    try {
+      return JSON.parse(`"${quoted[1]}"`) as string;
+    } catch {
+      return quoted[1];
+    }
+  }
+  const next = /\s[A-Za-z_][A-Za-z0-9_.]*=/.exec(rest);
+  return (next ? rest.slice(0, next.index) : rest).trimEnd();
 }

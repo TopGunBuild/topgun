@@ -1,26 +1,33 @@
 /**
- * Integration: rolling the server binary back is safe after the newer binary
- * has stored maps the older one cannot name.
+ * Integration: what rolling the server binary back does once the newer binary
+ * has moved the store into the data directory.
  *
- * The newer binary keeps maps whose names are not identifier-shaped
- * (`user-profiles`, `users/profiles`) in tables the older binary does not
- * look at. This test starts the older binary on a directory the newer one
- * wrote, and checks what an operator rolling back would see: the older binary
- * starts, reports no fatal error, serves the identifier-shaped map and stays
- * up; and when the newer binary returns, the other maps are there again.
+ * The older binary (built at b346e277) keeps the store as one redb file at
+ * `TOPGUN_REDB_PATH`, one table per map. The newer binary keeps it in the data
+ * directory `topgun-data/` beside that path, migrates an old file into it once,
+ * keeps the old file as `topgun.redb.pre-migration`, and leaves a small marker
+ * file at the old path so that the older binary refuses to start instead of
+ * serving an empty store. The older binary cannot read the new store; the only
+ * supported rollback is a return to the kept pre-migration file. Five cases:
  *
- * Two cases, each on a directory of its own:
- *
- * - clean stop — the newer binary flushed everything to the store before it
- *   was stopped;
- * - `kill -9` — the newer binary was killed with every write still only in the
- *   WAL (its flush interval is set far beyond the test's duration), so the
- *   older binary boots over frames it cannot apply. It must report them, keep
- *   serving, and leave them for the newer binary to replay.
+ * - R-A clean stop and R-B `kill -9` — the newer binary writes on a fresh
+ *   store and stops; the older binary, started on the marker file and then on
+ *   the data directory itself, exits non-zero, never prints `PORT=` and
+ *   changes no file; the newer binary started again serves every value.
+ * - R-C documented rollback — the older binary writes `v0`, the newer one
+ *   migrates and writes `v1`, the operator's steps restore the pre-migration
+ *   file, and the older binary serves `v0` (the write acknowledged after the
+ *   migration is gone, as documented) and writes `v2`.
+ * - R-D roll forward again — after R-C the newer binary migrates once more and
+ *   serves `v2`; the older binary then meets the new marker file and refuses as
+ *   in R-A.
+ * - R-E two stores — a legacy file put back at the old path beside an existing
+ *   data directory is refused by the newer binary without touching either; with
+ *   the legacy file removed the newer binary serves what it served before.
  *
  * Two binaries are needed, each given by path together with the commit it was
- * built from (OLD_SERVER_BINARY / OLD_SERVER_COMMIT for the older one,
- * RUST_SERVER_BINARY / NEW_SERVER_COMMIT for the newer). With any of them
+ * built from (FORMAT_OLD_SERVER_BINARY / FORMAT_OLD_SERVER_COMMIT for the older
+ * one, RUST_SERVER_BINARY / NEW_SERVER_COMMIT for the newer). With any of them
  * missing the test fails; it never runs one binary in both roles on its own
  * initiative.
  */
@@ -31,7 +38,7 @@ import * as path from 'path';
 
 import { createORRecord } from './helpers';
 import {
-  requireTwoBinaryEnv,
+  requireFormatRollbackEnv,
   spawnBinary,
   connectWithin,
   firstFrame,
@@ -40,17 +47,20 @@ import {
   orMapValues,
   observe,
   sleep,
-  walPartitions,
-  grownPartitions,
   plainLines,
+  movedMarkerState,
+  treeSnapshot,
   SpawnedBinary,
   BinaryExit,
   TwoBinaryEnv,
+  MovedMarkerState,
+  TreeSnapshot,
 } from './helpers/two-binary';
 
-const OLD_CLASS_MAP = 'user_profiles';
+const CONTROL_MAP = 'user_profiles';
 const DASH_MAP = 'user-profiles';
 const SLASH_MAP = 'users/profiles';
+const OR_MAP = 'users/colours';
 const KEY = 'alice';
 
 const VALUE_CONTROL = { name: 'Alice', map: 'control' };
@@ -58,11 +68,20 @@ const VALUE_DASH = { name: 'Alice', map: 'dash' };
 const VALUE_SLASH = { name: 'Alice', map: 'slash' };
 const OR_VALUE = 'blue';
 
+const V0 = { version: 'v0' };
+const V1 = { version: 'v1' };
+const V2 = { version: 'v2' };
+
 const ACK_WAIT_MS = 5_000;
 const FLUSH_SETTLE_MS = 10_000;
 const STAY_UP_MS = 10_000;
+/** A binary that must refuse to start has this long, from its spawn, to exit. */
+const REFUSAL_DEADLINE_MS = 30_000;
 /** A graceful stop may spend up to 30 s draining buffered writes; past this the process is killed and the exit status says so. */
 const STOP_TIMEOUT_MS = 40_000;
+const CASE_TIMEOUT_MS = 600_000;
+
+const CLEAN_EXIT: BinaryExit = { code: 0, signal: null };
 
 function storeEnv(dir: string, extra: Record<string, string> = {}): Record<string, string> {
   return {
@@ -84,6 +103,10 @@ function unreplayedLines(server: SpawnedBinary): string[] {
   return plainLines(server.stdout())
     .filter((l) => l.includes('BootUnreplayed') || l.includes('replay failed for entry'))
     .map((l) => l.slice(0, 400));
+}
+
+function countLines(server: SpawnedBinary, needle: string): number {
+  return plainLines(server.stdout()).filter((l) => l.includes(needle)).length;
 }
 
 /** Both streams of a server, for the record: the stdout without the per-index startup lines. */
@@ -122,295 +145,573 @@ function lwwPut(id: string, mapName: string, value: unknown): Record<string, unk
   };
 }
 
-/** What the older binary did on the directory, common to both cases. */
-interface OldRun {
-  port: number | null;
-  fatal: string[];
-  unreplayed: string[];
-  controlValue?: unknown;
-  /** Exit status at the end of the stay-up window; `null` means still running. */
-  exitDuringWindow: BinaryExit | null;
-  /**
-   * The control map read again at the end of the window. A hung process has not
-   * exited either, so only an answered read shows the binary is still serving.
-   */
-  controlValueAtEndOfWindow?: unknown;
-  stop?: BinaryExit | null;
+function orAdd(id: string): Record<string, unknown> {
+  return {
+    id,
+    mapName: OR_MAP,
+    opType: 'OR_ADD',
+    key: KEY,
+    orRecord: createORRecord(OR_VALUE, 'rollback'),
+  };
 }
 
-async function runOld(
-  env: TwoBinaryEnv,
-  dir: string,
+/** Starts a binary that must serve, or throws with its stderr. */
+async function startServing(
+  running: SpawnedBinary[],
+  binaryPath: string,
+  commit: string,
   label: string,
-): Promise<[SpawnedBinary, OldRun]> {
-  const old = await spawnBinary({
-    binaryPath: env.oldBinary,
-    commit: env.oldCommit,
-    label,
-    env: storeEnv(dir),
-  });
-  const run: OldRun = { port: old.port, fatal: [], unreplayed: [], exitDuringWindow: old.exit() };
-  if (old.port !== null) {
-    const port = old.port;
-    run.controlValue = await observe(() => queryKey(port, OLD_CLASS_MAP, KEY, `${label}-control`));
-    await sleep(STAY_UP_MS);
-    run.exitDuringWindow = old.exit();
-    run.controlValueAtEndOfWindow = await observe(() =>
-      queryKey(port, OLD_CLASS_MAP, KEY, `${label}-control-end`),
-    );
+  env: Record<string, string>,
+): Promise<[SpawnedBinary, number]> {
+  const server = await spawnBinary({ binaryPath, commit, label, env });
+  running.push(server);
+  if (server.port === null) {
+    throw new Error(`${label} did not print PORT=; stderr:\n${server.stderr()}`);
   }
-  run.unreplayed = unreplayedLines(old);
-  run.stop = await old.stop('SIGTERM', STOP_TIMEOUT_MS);
-  run.fatal = fatalLines(old);
-  return [old, run];
+  return [server, server.port];
 }
 
-describe('Integration: rollback to the older server binary after a clean stop', () => {
+/** What a start that must be refused did. */
+interface RefusedStart {
+  /** Exit status within the deadline; `null` means it was still running and was killed. */
+  exit: BinaryExit | null;
+  printedPort: boolean;
+  output: string;
+}
+
+/**
+ * Starts a binary that must refuse to start and waits for it to end, at most
+ * REFUSAL_DEADLINE_MS from the spawn. A process still running then — or one
+ * that printed `PORT=` — is killed at once, so it cannot go on to write into
+ * the directory, and is recorded as not having exited.
+ */
+async function startExpectingRefusal(
+  running: SpawnedBinary[],
+  binaryPath: string,
+  commit: string,
+  label: string,
+  env: Record<string, string>,
+): Promise<RefusedStart> {
+  const spawnedAt = Date.now();
+  const server = await spawnBinary({
+    binaryPath,
+    commit,
+    label,
+    env,
+    portTimeoutMs: REFUSAL_DEADLINE_MS,
+  });
+  running.push(server);
+  let exit = server.exit();
+  if (exit === null && server.port === null) {
+    exit = await server.waitForExit(Math.max(0, spawnedAt + REFUSAL_DEADLINE_MS - Date.now()));
+  }
+  const printedPort = server.port !== null || /^PORT=/m.test(server.stdout());
+  if (exit === null || printedPort) {
+    exit = null;
+    await server.stop('SIGKILL', 5_000);
+  }
+  return { exit, printedPort, output: `${server.stdout()}\n${server.stderr()}` };
+}
+
+function exitedNonZero(start: RefusedStart | undefined): boolean {
+  return typeof start?.exit?.code === 'number' && start.exit.code !== 0;
+}
+
+function freshDir(tag: string): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `topgun-format-rollback-${tag}-`));
+}
+
+test('the older binary is the build from b346e277', () => {
+  const env = requireFormatRollbackEnv();
+  expect(env.oldCommit.startsWith('b346e277')).toBe(true);
+});
+
+/** What R-A and R-B observe. */
+interface RefusalCase {
+  writes: Record<string, string[] | string>;
+  newStop?: BinaryExit | null;
+  marker?: MovedMarkerState;
+  before?: TreeSnapshot;
+  onMarker?: RefusedStart;
+  afterOnMarker?: TreeSnapshot;
+  onDataDir?: RefusedStart;
+  afterOnDataDir?: TreeSnapshot;
+  againPort?: number | null;
+  values: Record<string, unknown>;
+  againUnreplayed?: string[];
+  againStop?: BinaryExit | null;
+}
+
+function refusalCase(title: string, tag: string, stop: 'SIGTERM' | 'SIGKILL'): void {
+  describe(title, () => {
+    const o: RefusalCase = { writes: {}, values: {} };
+    let dataDir: string | null = null;
+    const running: SpawnedBinary[] = [];
+
+    beforeAll(async () => {
+      const env: TwoBinaryEnv = requireFormatRollbackEnv();
+      dataDir = freshDir(tag);
+      const dir = dataDir;
+
+      // Under kill -9 the flush interval is set far beyond the test's duration,
+      // so every acknowledged write exists only as a WAL frame at the kill and
+      // the restarted newer binary must replay it.
+      const firstEnv =
+        stop === 'SIGKILL'
+          ? storeEnv(dir, { TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS: '600000' })
+          : storeEnv(dir);
+      const [first, port] = await startServing(
+        running,
+        env.newBinary,
+        env.newCommit,
+        `${tag}: NEW first run`,
+        firstEnv,
+      );
+      const writes: Array<[string, Record<string, unknown>]> = [
+        [CONTROL_MAP, lwwPut('1', CONTROL_MAP, VALUE_CONTROL)],
+        [DASH_MAP, lwwPut('2', DASH_MAP, VALUE_DASH)],
+        [SLASH_MAP, lwwPut('3', SLASH_MAP, VALUE_SLASH)],
+        [OR_MAP, orAdd('4')],
+      ];
+      for (const [i, [mapName, payload]] of writes.entries()) {
+        o.writes[mapName] = await observe(() =>
+          writeAndCollect(port, `${tag}-writer-${i}`, payload),
+        );
+      }
+      if (stop === 'SIGTERM') await sleep(FLUSH_SETTLE_MS);
+      o.newStop = await first.stop(stop, stop === 'SIGKILL' ? 5_000 : STOP_TIMEOUT_MS);
+
+      o.marker = movedMarkerState(path.join(dir, 'topgun.redb'));
+      o.before = treeSnapshot(dir);
+      o.onMarker = await startExpectingRefusal(
+        running,
+        env.oldBinary,
+        env.oldCommit,
+        `${tag}: OLD on the marker file`,
+        storeEnv(dir),
+      );
+      o.afterOnMarker = treeSnapshot(dir);
+      o.onDataDir = await startExpectingRefusal(
+        running,
+        env.oldBinary,
+        env.oldCommit,
+        `${tag}: OLD on the data directory`,
+        storeEnv(dir, { TOPGUN_REDB_PATH: path.join(dir, 'topgun-data') }),
+      );
+      o.afterOnDataDir = treeSnapshot(dir);
+
+      const again = await spawnBinary({
+        binaryPath: env.newBinary,
+        commit: env.newCommit,
+        label: `${tag}: NEW again`,
+        env: storeEnv(dir),
+      });
+      running.push(again);
+      o.againPort = again.port;
+      if (again.port !== null) {
+        const p = again.port;
+        o.values[`query ${CONTROL_MAP}`] = await observe(() =>
+          queryKey(p, CONTROL_MAP, KEY, `${tag}-q-0`),
+        );
+        for (const [i, mapName] of [DASH_MAP, SLASH_MAP].entries()) {
+          o.values[`query ${mapName}`] = await observe(() =>
+            queryKey(p, mapName, KEY, `${tag}-q-${i + 1}`),
+          );
+          o.values[`merkle ${mapName}`] = await observe(() =>
+            merkleKey(p, mapName, KEY, `${tag}-m-${i + 1}`),
+          );
+        }
+        o.values[`or ${OR_MAP}`] = await observe(() => orMapValues(p, OR_MAP, KEY, `${tag}-or`));
+      }
+      o.againUnreplayed = unreplayedLines(again);
+      o.againStop = await again.stop('SIGTERM', STOP_TIMEOUT_MS);
+
+      // Straight to stderr: the suite silences console.log.
+      process.stderr.write(
+        `[map-name-rollback] ${tag}, observed:\n${JSON.stringify(o, null, 2)}\n` +
+          running.map(streams).join(''),
+      );
+    }, CASE_TIMEOUT_MS);
+
+    afterAll(async () => {
+      for (const server of running) await server.stop('SIGKILL', 5_000);
+      if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    test('setup: the newer binary acknowledged the four writes and was stopped as the case says', () => {
+      expect(o.writes).toEqual({
+        [CONTROL_MAP]: ['OP_ACK'],
+        [DASH_MAP]: ['OP_ACK'],
+        [SLASH_MAP]: ['OP_ACK'],
+        [OR_MAP]: ['OP_ACK'],
+      });
+      expect(o.newStop).toEqual(
+        stop === 'SIGKILL' ? { code: null, signal: 'SIGKILL' } : CLEAN_EXIT,
+      );
+    });
+
+    test('the old store path holds the marker file', () => {
+      expect(o.marker?.kind).toBe('file');
+      expect(o.marker?.firstLine).toBe('TOPGUN-STORE-MOVED 1');
+      expect(o.marker?.size).toBeLessThanOrEqual(16_384);
+      expect(o.marker?.isMarker).toBe(true);
+    });
+
+    test('the older binary on the marker file exits non-zero within 30 s and never prints PORT=', () => {
+      expect(o.onMarker?.printedPort).toBe(false);
+      expect(o.onMarker?.exit).not.toBeNull();
+      expect(exitedNonZero(o.onMarker)).toBe(true);
+    });
+
+    test('the older binary on the data directory exits non-zero within 30 s and never prints PORT=', () => {
+      expect(o.onDataDir?.printedPort).toBe(false);
+      expect(o.onDataDir?.exit).not.toBeNull();
+      expect(exitedNonZero(o.onDataDir)).toBe(true);
+    });
+
+    test('neither refused start changed, created or removed any file under the directory', () => {
+      expect(o.before?.paths.length).toBeGreaterThan(0);
+      expect(o.afterOnMarker).toEqual(o.before);
+      expect(o.afterOnDataDir).toEqual(o.before);
+    });
+
+    test('the newer binary started again serves every value and reports nothing unreplayed', () => {
+      expect(typeof o.againPort).toBe('number');
+      expect(o.values).toEqual({
+        [`query ${CONTROL_MAP}`]: VALUE_CONTROL,
+        [`query ${DASH_MAP}`]: VALUE_DASH,
+        [`merkle ${DASH_MAP}`]: VALUE_DASH,
+        [`query ${SLASH_MAP}`]: VALUE_SLASH,
+        [`merkle ${SLASH_MAP}`]: VALUE_SLASH,
+        [`or ${OR_MAP}`]: [OR_VALUE],
+      });
+      expect(o.againUnreplayed).toEqual([]);
+      expect(o.againStop).toEqual(CLEAN_EXIT);
+    });
+  });
+}
+
+refusalCase(
+  'Integration: R-A, the older binary refuses the moved store after a clean stop',
+  'ra',
+  'SIGTERM',
+);
+refusalCase(
+  'Integration: R-B, the older binary refuses the moved store after kill -9',
+  'rb',
+  'SIGKILL',
+);
+
+describe('Integration: R-C, the documented rollback to the pre-migration file, and R-D, rolling forward again', () => {
   const o: {
-    writes: Record<string, string[] | string>;
-    newAnsweredAfterSettle?: unknown;
+    oldV0Write?: string[] | string;
+    oldV0Stop?: BinaryExit | null;
+    newMigrations?: number;
+    newV1Write?: string[] | string;
     newStop?: BinaryExit | null;
-    old?: OldRun;
-    newAgainPort?: number | null;
-    query: Record<string, unknown>;
-    merkle: Record<string, unknown>;
-  } = { writes: {}, query: {}, merkle: {} };
+    restoredFile?: boolean;
+    rollbackPort?: number | null;
+    rollbackValue?: unknown;
+    rollbackExitDuringWindow?: BinaryExit | null;
+    rollbackValueAtEndOfWindow?: unknown;
+    rollbackV2Write?: string[] | string;
+    rollbackStop?: BinaryExit | null;
+    rollbackFatal?: string[];
+    forwardPort?: number | null;
+    forwardMigrations?: number;
+    forwardValue?: unknown;
+    forwardStop?: BinaryExit | null;
+    forwardMarker?: MovedMarkerState;
+    before?: TreeSnapshot;
+    refused?: RefusedStart;
+    after?: TreeSnapshot;
+  } = {};
   let dataDir: string | null = null;
+  let movedAway: string | null = null;
   const running: SpawnedBinary[] = [];
 
   beforeAll(async () => {
-    const env = requireTwoBinaryEnv();
-    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-map-name-rollback-clean-'));
+    const env = requireFormatRollbackEnv();
+    dataDir = freshDir('rc');
+    movedAway = freshDir('rc-moved-away');
     const dir = dataDir;
+    const legacy = path.join(dir, 'topgun.redb');
 
-    const first = await spawnBinary({
-      binaryPath: env.newBinary,
-      commit: env.newCommit,
-      label: 'clean: NEW first run',
+    // --- The older binary writes v0 on a fresh file.
+    const [old, oldPort] = await startServing(
+      running,
+      env.oldBinary,
+      env.oldCommit,
+      'rc: OLD first run',
+      storeEnv(dir),
+    );
+    o.oldV0Write = await observe(() =>
+      writeAndCollect(oldPort, 'rc-writer-v0', lwwPut('1', CONTROL_MAP, V0)),
+    );
+    o.oldV0Stop = await old.stop('SIGTERM', STOP_TIMEOUT_MS);
+
+    // --- The newer binary migrates the file and acknowledges v1.
+    const [migrating, newPort] = await startServing(
+      running,
+      env.newBinary,
+      env.newCommit,
+      'rc: NEW (migrates)',
+      storeEnv(dir),
+    );
+    o.newV1Write = await observe(() =>
+      writeAndCollect(newPort, 'rc-writer-v1', lwwPut('2', CONTROL_MAP, V1)),
+    );
+    o.newStop = await migrating.stop('SIGTERM', STOP_TIMEOUT_MS);
+    o.newMigrations = countLines(migrating, 'migration complete');
+
+    // --- The operator's rollback: move the data directory away, delete the
+    // marker file, put the pre-migration file back at the old path.
+    fs.renameSync(path.join(dir, 'topgun-data'), path.join(movedAway, 'topgun-data'));
+    fs.unlinkSync(legacy);
+    fs.renameSync(path.join(dir, 'topgun.redb.pre-migration'), legacy);
+    o.restoredFile = fs.lstatSync(legacy).isFile();
+
+    // --- R-C: the older binary serves the state at migration time and writes v2.
+    const rollback = await spawnBinary({
+      binaryPath: env.oldBinary,
+      commit: env.oldCommit,
+      label: 'rc: OLD after the rollback',
       env: storeEnv(dir),
     });
-    running.push(first);
-    if (first.port === null) throw new Error(`NEW did not print PORT=; stderr:\n${first.stderr()}`);
-    const port = first.port;
-    const values: Array<[string, unknown]> = [
-      [OLD_CLASS_MAP, VALUE_CONTROL],
-      [DASH_MAP, VALUE_DASH],
-      [SLASH_MAP, VALUE_SLASH],
-    ];
-    for (const [i, [mapName, value]] of values.entries()) {
-      o.writes[mapName] = await observe(() =>
-        writeAndCollect(port, `clean-writer-${i}`, lwwPut(String(i + 1), mapName, value)),
+    running.push(rollback);
+    o.rollbackPort = rollback.port;
+    o.rollbackExitDuringWindow = rollback.exit();
+    if (rollback.port !== null) {
+      const p = rollback.port;
+      o.rollbackValue = await observe(() => queryKey(p, CONTROL_MAP, KEY, 'rc-old-read'));
+      await sleep(STAY_UP_MS);
+      o.rollbackExitDuringWindow = rollback.exit();
+      o.rollbackValueAtEndOfWindow = await observe(() =>
+        queryKey(p, CONTROL_MAP, KEY, 'rc-old-read-end'),
+      );
+      o.rollbackV2Write = await observe(() =>
+        writeAndCollect(p, 'rc-writer-v2', lwwPut('3', CONTROL_MAP, V2)),
       );
     }
-    await sleep(FLUSH_SETTLE_MS);
-    // Recorded, not asserted: whether the writing binary still answers after its flush attempts.
-    o.newAnsweredAfterSettle = await observe(() =>
-      queryKey(port, OLD_CLASS_MAP, KEY, 'clean-liveness'),
-    );
-    o.newStop = await first.stop('SIGTERM', STOP_TIMEOUT_MS);
+    o.rollbackStop = await rollback.stop('SIGTERM', STOP_TIMEOUT_MS);
+    o.rollbackFatal = fatalLines(rollback);
 
-    const [old, oldRun] = await runOld(env, dir, 'clean: OLD');
-    running.push(old);
-    o.old = oldRun;
-
-    const again = await spawnBinary({
+    // --- R-D: the newer binary migrates again and serves v2.
+    const forward = await spawnBinary({
       binaryPath: env.newBinary,
       commit: env.newCommit,
-      label: 'clean: NEW again',
+      label: 'rd: NEW (migrates again)',
       env: storeEnv(dir),
     });
-    running.push(again);
-    o.newAgainPort = again.port;
-    if (again.port !== null) {
-      const againPort = again.port;
-      for (const [i, mapName] of [DASH_MAP, SLASH_MAP].entries()) {
-        o.query[mapName] = await observe(() => queryKey(againPort, mapName, KEY, `clean-q-${i}`));
-        o.merkle[mapName] = await observe(() => merkleKey(againPort, mapName, KEY, `clean-m-${i}`));
-      }
+    running.push(forward);
+    o.forwardPort = forward.port;
+    if (forward.port !== null) {
+      const p = forward.port;
+      o.forwardValue = await observe(() => queryKey(p, CONTROL_MAP, KEY, 'rd-new-read'));
     }
-    await again.stop('SIGTERM', STOP_TIMEOUT_MS);
+    o.forwardStop = await forward.stop('SIGTERM', STOP_TIMEOUT_MS);
+    o.forwardMigrations = countLines(forward, 'migration complete');
 
-    // Straight to stderr: the suite silences console.log.
-    process.stderr.write(
-      `[map-name-rollback] clean stop, observed:\n${JSON.stringify(o, null, 2)}\n${streams(old)}`,
+    // --- R-D: the older binary meets the marker file that migration wrote.
+    o.forwardMarker = movedMarkerState(legacy);
+    o.before = treeSnapshot(dir);
+    o.refused = await startExpectingRefusal(
+      running,
+      env.oldBinary,
+      env.oldCommit,
+      'rd: OLD on the marker file',
+      storeEnv(dir),
     );
-  }, 420_000);
+    o.after = treeSnapshot(dir);
+
+    process.stderr.write(
+      `[map-name-rollback] rc/rd, observed:\n${JSON.stringify(o, null, 2)}\n` +
+        running.map(streams).join(''),
+    );
+  }, CASE_TIMEOUT_MS);
 
   afterAll(async () => {
     for (const server of running) await server.stop('SIGKILL', 5_000);
     if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
+    if (movedAway) fs.rmSync(movedAway, { recursive: true, force: true });
   });
 
-  test('setup: the newer binary acknowledged the three writes and stopped cleanly', () => {
-    expect(o.writes).toEqual({
-      [OLD_CLASS_MAP]: ['OP_ACK'],
-      [DASH_MAP]: ['OP_ACK'],
-      [SLASH_MAP]: ['OP_ACK'],
-    });
-    expect(o.newStop).toEqual({ code: 0, signal: null });
+  test('setup: the older binary acknowledged v0 and stopped cleanly; the newer one migrated, acknowledged v1 and stopped cleanly', () => {
+    expect(o.oldV0Write).toEqual(['OP_ACK']);
+    expect(o.oldV0Stop).toEqual(CLEAN_EXIT);
+    expect(o.newMigrations).toBe(1);
+    expect(o.newV1Write).toEqual(['OP_ACK']);
+    expect(o.newStop).toEqual(CLEAN_EXIT);
+    expect(o.restoredFile).toBe(true);
   });
 
-  test('R8-1: the older binary prints PORT=', () => {
-    expect(typeof o.old?.port).toBe('number');
+  test('R-C: after the rollback the older binary serves v0 (the write acknowledged after the migration is absent) and stays up for 10 s', () => {
+    expect(typeof o.rollbackPort).toBe('number');
+    expect(o.rollbackValue).toEqual(V0);
+    expect(o.rollbackExitDuringWindow).toBeNull();
+    expect(o.rollbackValueAtEndOfWindow).toEqual(V0);
   });
 
-  test('R8-2: neither stream of the older binary contains FATAL', () => {
-    expect(o.old?.fatal).toEqual([]);
+  test('R-C: the older binary acknowledges v2, stops cleanly and reports no fatal error', () => {
+    expect(o.rollbackV2Write).toEqual(['OP_ACK']);
+    expect(o.rollbackStop).toEqual(CLEAN_EXIT);
+    expect(o.rollbackFatal).toEqual([]);
   });
 
-  test('R8-3: the older binary returns the identifier-named map the newer one wrote', () => {
-    expect(o.old?.controlValue).toEqual(VALUE_CONTROL);
+  test('R-D: the newer binary migrates exactly once more, serves v2 and stops cleanly', () => {
+    expect(typeof o.forwardPort).toBe('number');
+    expect(o.forwardMigrations).toBe(1);
+    expect(o.forwardValue).toEqual(V2);
+    expect(o.forwardStop).toEqual(CLEAN_EXIT);
   });
 
-  test('R8-4: the older binary is still serving at the end of the 10 s of the check', () => {
-    expect(typeof o.old?.port).toBe('number');
-    expect(o.old?.exitDuringWindow).toBeNull();
-    expect(o.old?.controlValueAtEndOfWindow).toEqual(VALUE_CONTROL);
+  test('R-D: the migration left the marker file at the old path', () => {
+    expect(o.forwardMarker?.firstLine).toBe('TOPGUN-STORE-MOVED 1');
+    expect(o.forwardMarker?.isMarker).toBe(true);
   });
 
-  test.each([
-    [DASH_MAP, VALUE_DASH],
-    [SLASH_MAP, VALUE_SLASH],
-  ])('R8-5: back on the newer binary, a query for %p returns the value', (mapName, value) => {
-    expect(typeof o.newAgainPort).toBe('number');
-    expect(o.query[mapName]).toEqual(value);
-  });
-
-  test.each([
-    [DASH_MAP, VALUE_DASH],
-    [SLASH_MAP, VALUE_SLASH],
-  ])('R8-6: back on the newer binary, a Merkle sync for %p returns the value', (mapName, value) => {
-    expect(o.merkle[mapName]).toEqual(value);
+  test('R-D: the older binary on that marker file exits non-zero within 30 s, never prints PORT= and changes no file', () => {
+    expect(o.refused?.printedPort).toBe(false);
+    expect(o.refused?.exit).not.toBeNull();
+    expect(exitedNonZero(o.refused)).toBe(true);
+    expect(o.before?.paths.length).toBeGreaterThan(0);
+    expect(o.after).toEqual(o.before);
   });
 });
 
-describe('Integration: rollback to the older server binary after kill -9', () => {
+describe('Integration: R-E, a legacy file beside an existing data directory is refused', () => {
   const o: {
-    writes: { control?: string[] | string; lww?: string[] | string; orAdd?: string[] | string };
-    /** Partitions whose WAL segments grew between the newer binary's PORT= line and its kill. */
-    grown: number[];
-    grownWithSidecar: number[];
-    grownEmpty: number[];
-    kill?: BinaryExit | null;
-    old?: OldRun;
-    newAgainPort?: number | null;
-    lwwQuery?: unknown;
-    lwwMerkle?: unknown;
-    orValues?: unknown;
-    newAgainUnreplayed?: string[];
-  } = { writes: {}, grown: [], grownWithSidecar: [], grownEmpty: [] };
+    oldV0Write?: string[] | string;
+    oldV0Stop?: BinaryExit | null;
+    migratedValue?: unknown;
+    migrations?: number;
+    newStop?: BinaryExit | null;
+    before?: TreeSnapshot;
+    refused?: RefusedStart;
+    refusalNamesBoth?: { twoStoresFound: boolean; dataDir: boolean; legacyPath: boolean };
+    after?: TreeSnapshot;
+    againPort?: number | null;
+    againValue?: unknown;
+    againMarker?: MovedMarkerState;
+    againStop?: BinaryExit | null;
+  } = {};
   let dataDir: string | null = null;
+  let side: string | null = null;
   const running: SpawnedBinary[] = [];
 
   beforeAll(async () => {
-    const env = requireTwoBinaryEnv();
-    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-map-name-rollback-kill-'));
+    const env = requireFormatRollbackEnv();
+    dataDir = freshDir('re');
+    side = freshDir('re-side');
     const dir = dataDir;
-    const walDir = path.join(dir, 'wal');
+    const legacy = path.join(dir, 'topgun.redb');
+    const legacyCopy = path.join(side, 'topgun.redb');
+    const engineDir = path.join(dir, 'topgun-data');
 
-    // A flush interval far beyond the test's duration: nothing reaches the
-    // store, so every acknowledged write exists only as a WAL frame at the kill.
-    const first = await spawnBinary({
-      binaryPath: env.newBinary,
-      commit: env.newCommit,
-      label: 'kill: NEW first run',
-      env: storeEnv(dir, { TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS: '600000' }),
-    });
-    running.push(first);
-    if (first.port === null) throw new Error(`NEW did not print PORT=; stderr:\n${first.stderr()}`);
-    const port = first.port;
-    const atPort = walPartitions(walDir);
-
-    // Each wait for an acknowledgement is bounded and its result recorded, so
-    // an unacknowledged write fails its own clause and the run goes on.
-    o.writes.control = await observe(() =>
-      writeAndCollect(port, 'kill-writer-0', lwwPut('1', OLD_CLASS_MAP, VALUE_CONTROL)),
+    const [old, oldPort] = await startServing(
+      running,
+      env.oldBinary,
+      env.oldCommit,
+      're: OLD',
+      storeEnv(dir),
     );
-    o.writes.lww = await observe(() =>
-      writeAndCollect(port, 'kill-writer-1', lwwPut('2', DASH_MAP, VALUE_DASH)),
+    o.oldV0Write = await observe(() =>
+      writeAndCollect(oldPort, 're-writer-v0', lwwPut('1', CONTROL_MAP, V0)),
     );
-    o.writes.orAdd = await observe(() =>
-      writeAndCollect(port, 'kill-writer-2', {
-        id: '3',
-        mapName: SLASH_MAP,
-        opType: 'OR_ADD',
-        key: KEY,
-        orRecord: createORRecord(OR_VALUE, 'rollback'),
-      }),
+    o.oldV0Stop = await old.stop('SIGTERM', STOP_TIMEOUT_MS);
+    fs.copyFileSync(legacy, legacyCopy);
+
+    const [migrating, newPort] = await startServing(
+      running,
+      env.newBinary,
+      env.newCommit,
+      're: NEW (migrates)',
+      storeEnv(dir),
     );
+    o.migratedValue = await observe(() => queryKey(newPort, CONTROL_MAP, KEY, 're-new-read'));
+    o.newStop = await migrating.stop('SIGTERM', STOP_TIMEOUT_MS);
+    o.migrations = countLines(migrating, 'migration complete');
 
-    o.kill = await first.stop('SIGKILL', 5_000);
-    const atKill = walPartitions(walDir);
-    o.grown = grownPartitions(atPort, atKill);
-    o.grownWithSidecar = o.grown.filter((id) => atKill.get(id)?.hasSidecar);
-    o.grownEmpty = o.grown.filter((id) => (atKill.get(id)?.segmentBytes ?? 0) === 0);
+    // The legacy file goes back over the marker file; the data directory stays.
+    fs.copyFileSync(legacyCopy, legacy);
 
-    const [old, oldRun] = await runOld(env, dir, 'kill: OLD');
-    running.push(old);
-    o.old = oldRun;
+    // The engine file's bytes are not compared: the refused start opens the
+    // engine to read its migration mark, and that open commits. Its content is
+    // checked through the server below instead.
+    const outsideEngine = (rel: string) => rel.split(path.sep)[0] !== 'topgun-data';
+    o.before = treeSnapshot(dir, outsideEngine);
+    o.refused = await startExpectingRefusal(
+      running,
+      env.newBinary,
+      env.newCommit,
+      're: NEW with two stores',
+      storeEnv(dir),
+    );
+    o.after = treeSnapshot(dir, outsideEngine);
+    o.refusalNamesBoth = {
+      twoStoresFound: o.refused.output.includes('two stores found'),
+      dataDir: o.refused.output.includes(engineDir),
+      legacyPath: o.refused.output.includes(legacy),
+    };
 
+    fs.unlinkSync(legacy);
     const again = await spawnBinary({
       binaryPath: env.newBinary,
       commit: env.newCommit,
-      label: 'kill: NEW again',
+      label: 're: NEW without the legacy file',
       env: storeEnv(dir),
     });
     running.push(again);
-    o.newAgainPort = again.port;
+    o.againPort = again.port;
     if (again.port !== null) {
-      const againPort = again.port;
-      o.lwwQuery = await observe(() => queryKey(againPort, DASH_MAP, KEY, 'kill-q'));
-      o.lwwMerkle = await observe(() => merkleKey(againPort, DASH_MAP, KEY, 'kill-m'));
-      o.orValues = await observe(() => orMapValues(againPort, SLASH_MAP, KEY, 'kill-or'));
+      const p = again.port;
+      o.againValue = await observe(() => queryKey(p, CONTROL_MAP, KEY, 're-new-read-again'));
     }
-    o.newAgainUnreplayed = unreplayedLines(again);
-    await again.stop('SIGTERM', STOP_TIMEOUT_MS);
+    o.againStop = await again.stop('SIGTERM', STOP_TIMEOUT_MS);
+    o.againMarker = movedMarkerState(legacy);
 
     process.stderr.write(
-      `[map-name-rollback] kill -9, observed:\n${JSON.stringify(o, null, 2)}\n${streams(old)}`,
+      `[map-name-rollback] re, observed:\n${JSON.stringify(o, null, 2)}\n` +
+        running.map(streams).join(''),
     );
-  }, 420_000);
+  }, CASE_TIMEOUT_MS);
 
   afterAll(async () => {
     for (const server of running) await server.stop('SIGKILL', 5_000);
     if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
+    if (side) fs.rmSync(side, { recursive: true, force: true });
   });
 
-  test('R8b-1: both LWW writes were acknowledged before the kill, and no frame written since PORT= was applied', () => {
-    expect(o.writes.control).toEqual(['OP_ACK']);
-    expect(o.writes.lww).toEqual(['OP_ACK']);
-    expect(o.kill).toEqual({ code: null, signal: 'SIGKILL' });
-    // No upper bound on the count: besides the three writes, every client that
-    // authenticates gets a tombstone-cursor record of its own, which is a WAL
-    // frame in whatever partition its id hashes to.
-    expect(o.grown.length).toBeGreaterThanOrEqual(1);
-    expect(o.grownEmpty).toEqual([]);
-    expect(o.grownWithSidecar).toEqual([]);
+  test('setup: the older binary acknowledged v0 and stopped cleanly; the newer one migrated it and stopped cleanly', () => {
+    expect(o.oldV0Write).toEqual(['OP_ACK']);
+    expect(o.oldV0Stop).toEqual(CLEAN_EXIT);
+    expect(o.migrations).toBe(1);
+    expect(o.migratedValue).toEqual(V0);
+    expect(o.newStop).toEqual(CLEAN_EXIT);
   });
 
-  test('R8b-2: the older binary prints PORT= and neither of its streams contains FATAL', () => {
-    expect(typeof o.old?.port).toBe('number');
-    expect(o.old?.fatal).toEqual([]);
+  test('the newer binary with two stores exits non-zero within 30 s and never prints PORT=', () => {
+    expect(o.refused?.printedPort).toBe(false);
+    expect(o.refused?.exit).not.toBeNull();
+    expect(exitedNonZero(o.refused)).toBe(true);
   });
 
-  test('R8b-3: the older binary reports the frames it could not replay', () => {
-    expect(o.old?.unreplayed.length).toBeGreaterThanOrEqual(1);
+  test('its output says two stores were found and names both absolute paths', () => {
+    expect(o.refusalNamesBoth).toEqual({ twoStoresFound: true, dataDir: true, legacyPath: true });
   });
 
-  test('R8b-4: the older binary returns the identifier-named map and is still serving at the end of the 10 s of the check', () => {
-    expect(o.old?.controlValue).toEqual(VALUE_CONTROL);
-    expect(o.old?.exitDuringWindow).toBeNull();
-    expect(o.old?.controlValueAtEndOfWindow).toEqual(VALUE_CONTROL);
+  test('the refused start changed no file outside the data directory and created or removed no path', () => {
+    expect(Object.keys(o.before?.sha256 ?? {})).toEqual(
+      expect.arrayContaining(['topgun.redb', 'topgun.redb.pre-migration']),
+    );
+    expect(o.after).toEqual(o.before);
   });
 
-  test('R8b-5: back on the newer binary, a query and a Merkle sync return the LWW value', () => {
-    expect(typeof o.newAgainPort).toBe('number');
-    expect(o.lwwQuery).toEqual(VALUE_DASH);
-    expect(o.lwwMerkle).toEqual(VALUE_DASH);
-  });
-
-  test('R8b-6: the OR_ADD was acknowledged before the kill, and an OR-Map sync returns the entry after the replay', () => {
-    expect(o.writes.orAdd).toEqual(['OP_ACK']);
-    expect(o.orValues).toEqual([OR_VALUE]);
+  test('with the legacy file removed the newer binary starts, writes the marker file back and serves v0 as before', () => {
+    expect(typeof o.againPort).toBe('number');
+    expect(o.againValue).toEqual(o.migratedValue);
+    expect(o.againValue).toEqual(V0);
+    expect(o.againMarker?.isMarker).toBe(true);
+    expect(o.againStop).toEqual(CLEAN_EXIT);
   });
 });

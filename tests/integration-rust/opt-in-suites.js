@@ -8,7 +8,7 @@ const optInSuites = [
   {
     files: ['map-name-upgrade', 'map-name-rollback'],
     reason:
-      'each drives two server binaries and needs the older one by path (OLD_SERVER_BINARY, OLD_SERVER_COMMIT, NEW_SERVER_COMMIT)',
+      'each drives two server binaries and needs the older one by path: map-name-upgrade a 07d009f0 build (OLD_SERVER_BINARY, OLD_SERVER_COMMIT), map-name-rollback a b346e277 build (FORMAT_OLD_SERVER_BINARY, FORMAT_OLD_SERVER_COMMIT); both also NEW_SERVER_COMMIT for the newer binary',
     script: 'pnpm test:integration-rust:two-binary',
   },
   {

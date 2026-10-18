@@ -1,9 +1,11 @@
 /**
- * Integration: the supported backup — stop the server, copy the redb file and
- * the WAL directory, start a server on the copy — brings back every
- * acknowledged write. The control arm copies the redb file alone after an
- * unclean stop and must lose writes: it is what shows the WAL directory is
- * part of the backup.
+ * Integration: the supported backup — stop the server, copy the data directory
+ * (`topgun-data/`, recursively) and the WAL directory, start a server on the
+ * copy — brings back every acknowledged write. The file at the old store path
+ * is not copied: the server writes it again beside the data directory it
+ * opens. The control arm copies the data directory alone after an unclean stop
+ * and must lose writes: it is what shows the WAL directory is part of the
+ * backup.
  */
 
 import * as fs from 'fs';
@@ -122,7 +124,7 @@ async function arm(run: string, stop: 'SIGTERM' | 'SIGKILL', copyWal: boolean): 
     a = await start(dir1, `${run} A`);
     const acked = await writeAll(a.port!, run);
     const exit = await a.stop(stop, STOP_WAIT_MS);
-    fs.copyFileSync(path.join(dir1, 'topgun.redb'), path.join(dir2, 'topgun.redb'));
+    fs.cpSync(path.join(dir1, 'topgun-data'), path.join(dir2, 'topgun-data'), { recursive: true });
     if (copyWal) {
       fs.cpSync(path.join(dir1, 'topgun-wal'), path.join(dir2, 'topgun-wal'), { recursive: true });
     }
@@ -137,27 +139,27 @@ async function arm(run: string, stop: 'SIGTERM' | 'SIGKILL', copyWal: boolean): 
   }
 }
 
-describe('Integration: backup by stopping the server and copying the redb file and the WAL directory', () => {
-  test('SIGTERM, redb file + WAL copied: every acknowledged write is back', async () => {
+describe('Integration: backup by stopping the server and copying the data directory and the WAL directory', () => {
+  test('SIGTERM, data directory + WAL copied: every acknowledged write is back', async () => {
     const r = await arm('term', 'SIGTERM', true);
     process.stderr.write(`[backup] term: ${JSON.stringify(r)}\n`);
     expect(r).toEqual({ acked: LWW_COUNT + OR_COUNT, stopCode: 0, stopSignal: null, lost: [] });
   }, 240_000);
 
-  test('SIGKILL, redb file + WAL copied: every acknowledged write is back', async () => {
+  test('SIGKILL, data directory + WAL copied: every acknowledged write is back', async () => {
     const r = await arm('killwal', 'SIGKILL', true);
     process.stderr.write(`[backup] killwal: ${JSON.stringify(r)}\n`);
     expect(r.acked).toBe(LWW_COUNT + OR_COUNT);
     expect(r.lost).toEqual([]);
   }, 240_000);
 
-  test('control: SIGKILL, redb file alone: acknowledged writes are missing', async () => {
+  test('control: SIGKILL, data directory alone: acknowledged writes are missing', async () => {
     const r = await arm('killfile', 'SIGKILL', false);
     process.stderr.write(`[backup] killfile: ${JSON.stringify(r)}\n`);
     expect(r.acked).toBe(LWW_COUNT + OR_COUNT);
     if (r.lost.length === 0) {
       throw new Error(
-        'the redb-file-only arm lost nothing: it no longer shows that the WAL directory is part of the backup',
+        'the data-directory-only arm lost nothing: it no longer shows that the WAL directory is part of the backup',
       );
     }
   }, 240_000);
