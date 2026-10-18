@@ -66,8 +66,13 @@
 //! had on-disk format breaking changes across major versions; before bumping
 //! to `3.x`, ship a migration step for the on-disk format.
 
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
+
+use super::engine_store::EngineMapDataStore;
+use super::redb_engine::RedbKvEngine;
 
 use crate::storage::map_data_store::{
     check_map_name, merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
@@ -84,6 +89,7 @@ use redb::{ReadableTable, TableDefinition, TableHandle};
 /// `(key, u32)` pairs are held at a time, never the whole map. Values are
 /// never materialized — each row is decoded only far enough to derive its
 /// leaf hash, then dropped.
+#[allow(dead_code)]
 const LEAF_BATCH_SIZE: usize = 1024;
 
 /// Default per-batch resident byte budget for value-streamed scans when the
@@ -93,6 +99,7 @@ const LEAF_BATCH_SIZE: usize = 1024;
 /// so a single batch never dominates the record cache. A scan resumes via its
 /// `ScanCursor` until the map is exhausted, so this only caps one batch, not
 /// the total scanned volume.
+#[allow(dead_code)]
 const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
 
 /// Whether a map name is in the identifier class `^[a-zA-Z_][a-zA-Z0-9_]*$`.
@@ -102,6 +109,7 @@ const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
 /// `map__` tables they have always had, every other storable name goes under
 /// `mapr__` / `maprb__`. Which names the store refuses is decided by the
 /// shared rule, which [`table_name_for`] applies before it consults this.
+#[allow(dead_code)]
 fn is_identifier_class(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -131,6 +139,7 @@ fn is_identifier_class(name: &str) -> bool {
 /// `r`), byte 4 separates the raw-name primary from its backup (`_` vs `b`),
 /// and an identifier-class primary never ends in `__backup` because no
 /// storable name does.
+#[allow(dead_code)]
 fn table_name_for(map: &str, is_backup: bool) -> anyhow::Result<String> {
     if let Err(violation) = check_map_name(map) {
         if violation.refused_by_store() {
@@ -151,28 +160,23 @@ fn table_name_for(map: &str, is_backup: bool) -> anyhow::Result<String> {
 /// one `open_table` call: redb copies what it needs when it opens the table.
 /// Nothing is cached and nothing is leaked, so the store holds no memory per
 /// distinct map name.
+#[allow(dead_code)]
 fn table_def(name: &str) -> TableDefinition<'_, &'static str, &'static [u8]> {
     TableDefinition::new(name)
 }
 
-/// Embedded `redb`-backed `MapDataStore`.
+/// The table-per-map `redb` store this module served before the data
+/// directory: one table per `(map, is_backup)`.
 ///
-/// Wraps a single [`redb::Database`] handle behind an [`Arc`] so the same
-/// store can be cloned cheaply into the partition dispatcher and per-task
-/// futures.
-///
-/// # Construction
-///
-/// ```ignore
-/// let store = RedbDataStore::new("./topgun.redb")?;
-/// store.initialize().await?;
-/// // hand to RecordStoreFactory::new(...)
-/// ```
-pub struct RedbDataStore {
+/// Kept only until the store is served through [`RedbDataStore`]; the tests
+/// of this module still exercise it until they are rewritten.
+#[allow(dead_code)]
+struct TablePerMapStore {
     db: Arc<redb::Database>,
 }
 
-impl RedbDataStore {
+#[allow(dead_code)]
+impl TablePerMapStore {
     /// Open (or create) a `redb` database at the given path.
     ///
     /// The database file is created on first call; subsequent calls reuse
@@ -349,6 +353,7 @@ impl RedbDataStore {
 /// recovery path (TG-WAL-006). Keeping merge semantics out of the storage
 /// primitive avoids a layering inversion and a per-write read on the flush hot
 /// path.
+#[allow(dead_code)]
 fn write_one(
     db: &redb::Database,
     map: &str,
@@ -363,6 +368,7 @@ fn write_one(
 /// The one msgpack encoding of a stored record. Callers that hand
 /// [`RedbDataStore`] pre-encoded bytes (`add_encoded`) must produce exactly
 /// this encoding.
+#[allow(dead_code)]
 fn encode_record(value: &RecordValue) -> anyhow::Result<Vec<u8>> {
     Ok(rmp_serde::to_vec_named(value)?)
 }
@@ -371,6 +377,7 @@ fn encode_record(value: &RecordValue) -> anyhow::Result<Vec<u8>> {
 /// name the store cannot hold, opens (or creates) the per-(map, `is_backup`) table inside one
 /// `WriteTransaction`, inserts the bytes as given, and commits. The bytes are
 /// not decoded or checked here.
+#[allow(dead_code)]
 fn write_encoded(
     db: &redb::Database,
     map: &str,
@@ -391,6 +398,7 @@ fn write_encoded(
 
 /// Delete a single record under the given `(map, key, is_backup)` tuple.
 /// No-op if the table or key does not exist.
+#[allow(dead_code)]
 fn delete_one(db: &redb::Database, map: &str, key: &str, is_backup: bool) -> anyhow::Result<()> {
     let table_name = table_name_for(map, is_backup)?;
     let def = table_def(&table_name);
@@ -420,6 +428,7 @@ fn delete_one(db: &redb::Database, map: &str, key: &str, is_backup: bool) -> any
 /// A catalog that cannot be read is an error, not "no such table": read as
 /// the latter, a remove the store never applied would be reported done, and
 /// the write-behind store would resolve its WAL frame as stored.
+#[allow(dead_code)]
 fn table_exists(read_txn: &redb::ReadTransaction, table_name: &str) -> anyhow::Result<bool> {
     Ok(read_txn
         .list_tables()?
@@ -442,8 +451,527 @@ pub(super) fn broken_cause(err: &redb::StorageError) -> Option<StoreBrokenCause>
     }
 }
 
+// ---------------------------------------------------------------------------
+// The data-directory store: location, location rules, migration (TG-ENG-007)
+// ---------------------------------------------------------------------------
+
+/// The store: an [`EngineMapDataStore`] over the `redb` engine file
+/// `{data_dir}/engine.redb`.
+pub type RedbDataStore = EngineMapDataStore<RedbKvEngine>;
+
+/// The variable naming the store directory.
+const DATA_DIR_ENV: &str = "TOPGUN_DATA_DIR";
+/// The variable naming the legacy table-per-map file (and the marker's place).
+const REDB_PATH_ENV: &str = "TOPGUN_REDB_PATH";
+
+/// redb's 9-byte file magic: a regular file that begins with it is a legacy
+/// (table-per-map) store file; the marker at the old path never does.
+#[allow(dead_code)]
+pub(crate) const REDB_MAGIC: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
+
+/// Where the data directory's path came from; its `Display` is the exact
+/// `data_dir_source` field of the startup line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataDirSource {
+    /// `TOPGUN_DATA_DIR` was set.
+    TopgunDataDir,
+    /// `TOPGUN_DATA_DIR` was unset and `TOPGUN_REDB_PATH` was set: the
+    /// directory is `{parent of TOPGUN_REDB_PATH}/topgun-data`, so a node whose
+    /// data sits on a volume stays on it.
+    DerivedFromRedbPath,
+    /// Neither was set: `./topgun-data`.
+    Default,
+}
+
+impl std::fmt::Display for DataDirSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TopgunDataDir => DATA_DIR_ENV,
+            Self::DerivedFromRedbPath => "derived from TOPGUN_REDB_PATH",
+            Self::Default => "default",
+        })
+    }
+}
+
+/// Where the store lives: the data directory `D` and, for a server start, the
+/// legacy path `L` (the migration source and the place of the marker).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreLocation {
+    /// `D`: the directory holding `engine.redb`.
+    pub data_dir: PathBuf,
+    /// Where `data_dir` came from.
+    pub data_dir_source: DataDirSource,
+    /// `L`: `None` for a store opened by path alone (`RedbDataStore::new`),
+    /// which never migrates and writes no marker.
+    pub legacy_path: Option<PathBuf>,
+}
+
+impl StoreLocation {
+    /// The location this process's environment names.
+    ///
+    /// # Errors
+    ///
+    /// As [`StoreLocation::from_vars`].
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::from_vars(
+            std::env::var_os(DATA_DIR_ENV).as_deref(),
+            std::env::var_os(REDB_PATH_ENV).as_deref(),
+        )
+    }
+
+    /// The location a supplied environment names; reads nothing else (no
+    /// process environment, no working directory, no file system).
+    ///
+    /// `L` = `redb_path`, else `./topgun.redb`. `D` = `data_dir` (source
+    /// `TOPGUN_DATA_DIR`), else `{parent of L}/topgun-data` when `redb_path`
+    /// is set (source `derived from TOPGUN_REDB_PATH`; the parent of a bare
+    /// file name is `.`), else `./topgun-data` (source `default`). A relative
+    /// value whose first component is a plain name is returned with a leading
+    /// `./` (`a.redb` gives `L = ./a.redb`); every other value is returned as
+    /// given. `legacy_path` is always `Some`.
+    ///
+    /// # Errors
+    ///
+    /// `store location: {VAR} is set but empty` when either value is present
+    /// and empty (row L1).
+    #[allow(clippy::unimplemented)]
+    pub fn from_vars(data_dir: Option<&OsStr>, redb_path: Option<&OsStr>) -> anyhow::Result<Self> {
+        let _ = (data_dir, redb_path);
+        unimplemented!("store location from supplied variables")
+    }
+}
+
+/// The rows of the location table, evaluated in this order; the first match
+/// wins (TG-ENG-007).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocationRow {
+    /// A location variable is set but empty: refused.
+    L1,
+    /// `D` and `L` are the same place, or one lies inside the other: refused.
+    L2,
+    /// `D` is neither a store directory, an empty directory, nor absent: refused.
+    L3,
+    /// A store in `D` with no mark and a legacy file at `L`: refused (two stores).
+    L4a,
+    /// A store in `D` with no mark and a zero-length file at `L`: refused.
+    L4b,
+    /// A store in `D` with no mark: opened (the marker written when `L` is absent).
+    L4,
+    /// A mark in phase 0 or 1 for this `L`, still a legacy file, `K` absent: resumed.
+    L5,
+    /// A mark in phase 2 for this `L`: finished from step 9 or 10.
+    L6,
+    /// A mark this location cannot resume: refused.
+    L7,
+    /// No store, `L` a legacy file, `K` absent: migrated.
+    L8,
+    /// No store, `L` a legacy file, `K` present: refused.
+    L9,
+    /// No store, `L` the marker: refused (never a migration source).
+    L10,
+    /// No store, `L` absent, `K` present: refused.
+    L11,
+    /// No store, `L` and `K` absent: a fresh store.
+    L12,
+    /// No store, `L` neither a legacy file nor the marker: refused.
+    L13,
+}
+
+/// The file-system marker at the old path `L` that says the store moved to
+/// the data directory, so a binary older than the layout refuses to start
+/// there instead of serving an empty store.
+#[allow(dead_code)]
+pub(crate) struct MovedMarker;
+
+#[allow(dead_code)]
+impl MovedMarker {
+    /// Writes the marker at `legacy_path` naming `data_dir`, whole or not at
+    /// all (a temporary sibling, synced, renamed into place, then the parent
+    /// directory synced). Both paths are absolute. `io.abort_at` may stop the
+    /// process between the sync of the temporary and its rename.
+    ///
+    /// # Errors
+    ///
+    /// The file system's error.
+    #[allow(clippy::unimplemented)]
+    pub(crate) fn write(
+        legacy_path: &Path,
+        data_dir: &Path,
+        io: &MigrationIo,
+    ) -> std::io::Result<()> {
+        let _ = (legacy_path, data_dir, io);
+        unimplemented!("write the moved-store marker")
+    }
+
+    /// Whether `path` is the marker. Reads at most its first bytes; never
+    /// follows the text it holds. An absent path is `Ok(false)`.
+    ///
+    /// # Errors
+    ///
+    /// The file system's error other than "not found".
+    #[allow(clippy::unimplemented)]
+    pub(crate) fn recognise(path: &Path) -> std::io::Result<bool> {
+        let _ = path;
+        unimplemented!("recognise the moved-store marker")
+    }
+}
+
+/// Whether `path` is a legacy store file: a regular file whose first 9 bytes
+/// are [`REDB_MAGIC`]. An absent path is `Ok(false)`.
+///
+/// # Errors
+///
+/// The file system's error other than "not found".
+#[allow(dead_code, clippy::unimplemented)]
+pub(crate) fn is_legacy_file(path: &Path) -> std::io::Result<bool> {
+    let _ = path;
+    unimplemented!("legacy file check")
+}
+
+/// The phase a migration mark records.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum MigrationPhase {
+    /// Rows are being copied; the mark names how far.
+    Copying = 0,
+    /// Every row is copied; verification has not passed yet.
+    Copied = 1,
+    /// Verification passed; the legacy file is to be kept and the marker written.
+    Verified = 2,
+}
+
+/// The version byte that opens every encoded mark.
+#[allow(dead_code)]
+const MARK_VERSION: u8 = 0x01;
+
+/// The migration mark: the opaque value of the store's `migration` row.
+///
+/// Encoded as `0x01` ‖ phase u8 ‖ u32 BE `n` ‖ `n` bytes of the absolute
+/// source path (UTF-8) ‖ u32 BE `m` ‖ `m` bytes of the table name ‖ `has_key`
+/// u8 ‖ the key's bytes when `has_key == 1`. In phases 1 and 2 the table is
+/// empty and there is no key. Phase 0 with table `T` and key `k`: every table
+/// before `T` is copied, `T` is registered, and its rows up to and including
+/// `k` are; with no key, `T` is the next table and none of its rows is copied.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MigrationMark {
+    /// How far the migration is.
+    pub(crate) phase: MigrationPhase,
+    /// The absolute path of the legacy file, UTF-8.
+    pub(crate) source: String,
+    /// The legacy table name (empty in phases 1 and 2, and for a legacy file
+    /// with no table).
+    pub(crate) table: String,
+    /// The last copied key of `table`, if any row of it is copied.
+    pub(crate) key: Option<String>,
+}
+
+#[allow(dead_code)]
+impl MigrationMark {
+    /// The mark's bytes, as the store's `migration` row holds them.
+    #[allow(clippy::unimplemented)]
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        unimplemented!("encode the migration mark")
+    }
+
+    /// The mark `bytes` encode.
+    ///
+    /// # Errors
+    ///
+    /// An unknown version or phase, a truncated or overlong value, a source,
+    /// table or key that is not UTF-8, a `has_key` other than 0 or 1.
+    #[allow(clippy::unimplemented)]
+    pub(crate) fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        let _ = bytes;
+        unimplemented!("decode the migration mark")
+    }
+}
+
+/// The numbered steps of the migration; `number()` is the step number the
+/// `after_step` seam receives.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum MigrationStep {
+    /// 0: free-space check.
+    FreeSpace = 0,
+    /// 1: magic check and open of the legacy file.
+    OpenLegacy = 1,
+    /// 2: catalog decode.
+    ReadCatalog = 2,
+    /// 3: data directory, engine and first mark (or resume).
+    OpenEngine = 3,
+    /// 4: copy.
+    Copy = 4,
+    /// 5: phase-1 mark.
+    MarkCopied = 5,
+    /// 6: verification.
+    Verify = 6,
+    /// 7: phase-2 mark.
+    MarkVerified = 7,
+    /// 8: legacy handle dropped.
+    DropLegacy = 8,
+    /// 9: `rename(L, K)` and parent sync.
+    KeepLegacy = 9,
+    /// 10: the marker at `L`.
+    WriteMarker = 10,
+    /// 11: mark removed, completion line.
+    ClearMark = 11,
+}
+
+impl MigrationStep {
+    /// The step's number.
+    #[allow(dead_code)]
+    pub(crate) const fn number(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Where a test makes the migrating process call `std::process::abort()`.
+#[cfg(test)]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbortAt {
+    /// After the step returns (and after `after_step` for it).
+    AfterStep(MigrationStep),
+    /// After the `n`-th copy batch of this run (1-based) is written.
+    AfterBatch(u64),
+    /// In step 10, between the temporary marker's sync and its rename.
+    MarkerBeforeRename,
+}
+
+/// Default rows per copy batch.
+const DEFAULT_BATCH_ROWS: usize = 10_000;
+/// Value bytes per copy batch, whichever of the two limits comes first.
+#[allow(dead_code)]
+const MAX_BATCH_VALUE_BYTES: u64 = 8 * 1024 * 1024;
+/// Default longest time between two durable copy batches.
+const DEFAULT_DURABLE_EVERY: Duration = Duration::from_secs(2);
+/// Default longest time between two progress lines.
+const DEFAULT_PROGRESS_EVERY: Duration = Duration::from_secs(10);
+
+/// Free bytes on the file system holding a path.
+pub(crate) type AvailableSpace = dyn Fn(&Path) -> std::io::Result<u64>;
+
+/// The migration's I/O knobs; production uses [`MigrationIo::default`], tests
+/// set the seams.
+#[allow(dead_code)]
+pub(crate) struct MigrationIo {
+    /// Free bytes on the file system of a path.
+    pub(crate) available_space: Box<AvailableSpace>,
+    /// Rows per copy batch.
+    pub(crate) batch_rows: usize,
+    /// A batch is durable when this long has passed since the last durable
+    /// one began (`Duration::ZERO`: every batch).
+    pub(crate) durable_every: Duration,
+    /// A progress line after a batch when this long has passed since the last
+    /// one (`Duration::ZERO`: after every batch).
+    pub(crate) progress_every: Duration,
+    /// Flip one byte of one copied value, so verification must fail.
+    #[cfg(test)]
+    pub(crate) corrupt_one_copied_byte: bool,
+    /// Abort the process at this point.
+    #[cfg(test)]
+    pub(crate) abort_at: Option<AbortAt>,
+    /// Called with the step number after each numbered step returns.
+    #[cfg(test)]
+    pub(crate) after_step: Option<Box<dyn Fn(u8)>>,
+}
+
+impl Default for MigrationIo {
+    fn default() -> Self {
+        Self {
+            available_space: Box::new(default_available_space),
+            batch_rows: DEFAULT_BATCH_ROWS,
+            durable_every: DEFAULT_DURABLE_EVERY,
+            progress_every: DEFAULT_PROGRESS_EVERY,
+            #[cfg(test)]
+            corrupt_one_copied_byte: false,
+            #[cfg(test)]
+            abort_at: None,
+            #[cfg(test)]
+            after_step: None,
+        }
+    }
+}
+
+/// Free bytes on the file system holding `path`.
+#[allow(clippy::unimplemented)]
+fn default_available_space(path: &Path) -> std::io::Result<u64> {
+    let _ = path;
+    unimplemented!("free space of the data directory's file system")
+}
+
+/// One table of a legacy file, decoded.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LegacyTable {
+    /// The table name in the legacy file.
+    pub(crate) name: String,
+    /// The map name it decodes to.
+    pub(crate) map: String,
+    /// Whether it is the map's backup table.
+    pub(crate) backup: bool,
+}
+
+/// An open legacy file and its decoded catalog, ascending by table name.
+#[allow(dead_code)]
+pub(crate) struct LegacySource {
+    /// The legacy database handle; dropped by step 8.
+    pub(crate) db: redb::Database,
+    /// Every table of the file, decoded.
+    pub(crate) tables: Vec<LegacyTable>,
+}
+
+/// The `(map, backup)` a legacy table name decodes to, or `None` when the name
+/// matches no rule or does not round-trip through [`table_name_for`].
+#[allow(dead_code, clippy::unimplemented)]
+pub(crate) fn decode_table_name(name: &str) -> Option<(String, bool)> {
+    let _ = name;
+    unimplemented!("decode a legacy table name")
+}
+
+/// The decoded catalog of `db`, ascending by table name.
+///
+/// # Errors
+///
+/// A table whose name does not decode, a multimap table, or a table whose
+/// key/value types are not `&str`/`&[u8]` (at most 20 offending names in the
+/// message); a redb error.
+#[allow(dead_code, clippy::unimplemented)]
+pub(crate) fn read_legacy_catalog(db: &redb::Database) -> anyhow::Result<Vec<LegacyTable>> {
+    let _ = db;
+    unimplemented!("read the legacy catalog")
+}
+
+/// The absolute paths a migration works on.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MigrationPaths {
+    /// `D`.
+    pub(crate) data_dir: PathBuf,
+    /// `L`.
+    pub(crate) legacy_path: PathBuf,
+    /// `K` = `{L}.pre-migration`.
+    pub(crate) kept_path: PathBuf,
+}
+
+/// Runs the migration from `mark` to its end (steps 4–11 of the copy, verify,
+/// keep and marker sequence; a phase-1 mark starts at verification, a phase-2
+/// mark at step 9 or 10). The only production code that writes the migration
+/// mark (TG-ENG-007).
+///
+/// `engine` is the engine `store` was opened on, held by the caller for the
+/// whole run, so the verification's snapshots see one state. `legacy` is
+/// `None` only for a phase-2 mark whose legacy file was already renamed.
+/// Returns once the mark is removed; the caller then opens the store.
+///
+/// # Errors
+///
+/// An engine or file-system error; a verification difference.
+#[allow(dead_code, clippy::unimplemented, clippy::needless_pass_by_value)]
+pub(crate) fn run_migration(
+    engine: &RedbKvEngine,
+    store: &RedbDataStore,
+    legacy: Option<LegacySource>,
+    mark: &MigrationMark,
+    paths: &MigrationPaths,
+    io: &MigrationIo,
+) -> anyhow::Result<()> {
+    let _ = (engine, store, legacy, mark, paths, io);
+    unimplemented!("run the migration")
+}
+
+impl EngineMapDataStore<RedbKvEngine> {
+    /// The location the process environment names. The binary reaches
+    /// [`StoreLocation::from_env`] through here, as `StoreLocation` is not
+    /// re-exported.
+    ///
+    /// # Errors
+    ///
+    /// As [`StoreLocation::from_vars`].
+    pub fn location_from_env() -> anyhow::Result<StoreLocation> {
+        StoreLocation::from_env()
+    }
+
+    /// Opens the store at `location` by the location rules, migrating a
+    /// legacy file when they say so, and logs the startup line naming the
+    /// data directory (TG-ENG-007).
+    ///
+    /// # Errors
+    ///
+    /// A refusal of the location rules, a failed migration, an engine error.
+    pub fn open_location(location: &StoreLocation) -> anyhow::Result<Self> {
+        Self::open_location_with(location, &MigrationIo::default())
+    }
+
+    /// [`Self::open_location`] with the migration's I/O knobs.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_location`].
+    #[allow(clippy::unimplemented)]
+    pub(crate) fn open_location_with(
+        location: &StoreLocation,
+        io: &MigrationIo,
+    ) -> anyhow::Result<Self> {
+        let _ = (location, io);
+        unimplemented!("open the store by the location rules")
+    }
+
+    /// Opens (or creates) the store in the data directory `path`, creating
+    /// the directory when absent. No legacy path: never migrates, writes no
+    /// marker, logs no startup line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_location`].
+    #[allow(clippy::unimplemented)]
+    pub fn new<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+        let _ = path.as_ref();
+        unimplemented!("open the store in a data directory")
+    }
+
+    /// Opens the store over a custom `redb` storage backend, with no
+    /// directory.
+    ///
+    /// # Errors
+    ///
+    /// The engine's or the store's open error.
+    #[cfg(test)]
+    #[allow(dead_code, clippy::needless_pass_by_value)]
+    pub(crate) fn with_backend<B: redb::StorageBackend>(backend: B) -> anyhow::Result<Self> {
+        let _ = backend;
+        unimplemented!("open the store over a custom backend")
+    }
+
+    /// Initialize the data store: a no-op, kept so the bootstrap call site
+    /// stays uniform.
+    ///
+    /// # Errors
+    ///
+    /// Never errors today.
+    #[allow(clippy::unused_async)]
+    pub async fn initialize(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Close the data store: a no-op; the engine is released when the last
+    /// handle drops.
+    ///
+    /// # Errors
+    ///
+    /// Never errors today.
+    #[allow(clippy::unused_async)]
+    pub async fn close(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 #[async_trait]
-impl MapDataStore for RedbDataStore {
+impl MapDataStore for TablePerMapStore {
     fn classify_error(&self, err: &anyhow::Error) -> StoreErrorClass {
         // By type only. redb's error types carry no `source()`, so a
         // `StorageError` inside a wrapper is invisible to `anyhow`'s chain;
@@ -779,6 +1307,9 @@ mod fault_io {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // These tests still exercise the table-per-map store until they are
+    // rewritten against the data-directory store.
+    use super::TablePerMapStore as RedbDataStore;
     use crate::storage::record::OrMapEntry;
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -2369,6 +2900,9 @@ mod tests {
 #[cfg(test)]
 mod store_broken_tests {
     use super::*;
+    // These tests still exercise the table-per-map store until they are
+    // rewritten against the data-directory store.
+    use super::TablePerMapStore as RedbDataStore;
     use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
     use std::io;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
