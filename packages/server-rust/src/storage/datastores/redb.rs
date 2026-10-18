@@ -1307,9 +1307,11 @@ mod fault_io {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // These tests still exercise the table-per-map store until they are
-    // rewritten against the data-directory store.
-    use super::TablePerMapStore as RedbDataStore;
+    use crate::storage::datastores::engine_store::{
+        map_by_name_key, meta_key, KS_MAP_BY_ID, KS_MAP_BY_NAME, META_ACK_MODE, META_FORMAT,
+        META_NEXT_MAP_ID, PARTITION_THEN_KEY,
+    };
+    use crate::storage::datastores::kv_engine::{KeyRange, KvEngine};
     use crate::storage::record::OrMapEntry;
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -1322,6 +1324,16 @@ mod tests {
         let path = dir.path().join("test.redb");
         let store = RedbDataStore::new(&path).expect("redb open");
         (store, dir)
+    }
+
+    /// A store over an engine the test keeps a handle to, so it can read the
+    /// engine's keys while the store is open. The same pair `new` builds.
+    fn fresh_engine_store() -> (RedbDataStore, Arc<RedbKvEngine>, tempfile::TempDir) {
+        let dir = tempdir().expect("tempdir");
+        let engine =
+            Arc::new(RedbKvEngine::open(&dir.path().join("engine.redb")).expect("engine open"));
+        let store = EngineMapDataStore::open(Arc::clone(&engine)).expect("store open");
+        (store, engine, dir)
     }
 
     fn dummy_value(s: &str) -> RecordValue {
@@ -1545,12 +1557,12 @@ mod tests {
         );
     }
 
-    /// A name full of metacharacters is data, not syntax: redb table names are
-    /// opaque strings, so the name is stored verbatim under the raw-name prefix
-    /// and comes back from the catalog byte-identical.
+    /// A name full of metacharacters is data, not syntax: the registry keys a
+    /// map by its name's bytes, so the name is stored verbatim and comes back
+    /// from the registry byte-identical.
     #[tokio::test]
     async fn metacharacter_map_name_is_stored_verbatim() {
-        let (store, _dir) = fresh_store();
+        let (store, engine, _dir) = fresh_engine_store();
         let name = "foo; DROP TABLE x";
         store
             .add(name, "k", &dummy_value("v"), 0, 1000)
@@ -1562,7 +1574,7 @@ mod tests {
             "the value reads back under the same name"
         );
         assert_eq!(store.list_maps().await.unwrap(), vec![name.to_string()]);
-        assert_eq!(catalog(&store), vec![format!("mapr__{name}")]);
+        assert_eq!(registry_keys(&engine), vec![map_by_name_key(name)]);
     }
 
     #[tokio::test]
@@ -1572,31 +1584,51 @@ mod tests {
         assert!(err.is_err());
     }
 
-    /// Every table name in the store's catalog, sorted.
-    fn catalog(store: &RedbDataStore) -> Vec<String> {
-        let txn = store.db.begin_read().expect("read txn");
-        let mut tables: Vec<String> = txn
-            .list_tables()
-            .expect("list_tables")
-            .map(|handle| handle.name().to_string())
+    /// Every key of the engine, ascending.
+    fn engine_keys(engine: &RedbKvEngine) -> Vec<Vec<u8>> {
+        let snapshot = engine.snapshot().expect("snapshot");
+        let keys = snapshot
+            .iter(KeyRange::default())
+            .expect("iter")
+            .map(|entry| entry.expect("entry").0)
             .collect();
-        tables.sort();
-        tables
+        keys
     }
 
-    /// The raw bytes stored for `(map, key)` in the primary table.
+    /// The engine keys of the map registry (`0x01 ‖ name`), ascending.
+    fn registry_keys(engine: &RedbKvEngine) -> Vec<Vec<u8>> {
+        let snapshot = engine.snapshot().expect("snapshot");
+        let keys = snapshot
+            .iter(KeyRange {
+                start: Some(vec![KS_MAP_BY_NAME]),
+                end: Some(vec![KS_MAP_BY_ID]),
+            })
+            .expect("iter")
+            .map(|entry| entry.expect("entry").0)
+            .collect();
+        keys
+    }
+
+    /// Every map name in the registry, in the registry's (byte) order.
+    fn catalog(engine: &RedbKvEngine) -> Vec<String> {
+        registry_keys(engine)
+            .into_iter()
+            .map(|key| String::from_utf8(key[1..].to_vec()).expect("UTF-8 name"))
+            .collect()
+    }
+
+    /// The raw bytes stored for `(map, key)` in the primary keyspace.
     fn raw_row(store: &RedbDataStore, map: &str, key: &str) -> Option<Vec<u8>> {
-        let table_name = table_name_for(map, false).unwrap();
-        let txn = store.db.begin_read().expect("read txn");
-        let table = match txn.open_table(table_def(&table_name)) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return None,
-            Err(e) => panic!("open table: {e}"),
-        };
-        table
-            .get(key)
-            .expect("get row")
-            .map(|guard| guard.value().to_vec())
+        let mut found = None;
+        store
+            .visit_records(map, false, &mut |k, v| {
+                if k == key {
+                    found = Some(v.to_vec());
+                }
+                Ok(())
+            })
+            .expect("visit records");
+        found
     }
 
     fn or_value_with_tombstones() -> RecordValue {
@@ -1687,11 +1719,11 @@ mod tests {
     }
 
     /// `add_encoded` refuses a name the store cannot hold exactly as `add` does:
-    /// the same error, and no table created. And a name outside the identifier
-    /// class, which both paths take, lands in the same table through either.
+    /// the same error, and nothing written. And a name outside the identifier
+    /// class, which both paths take, lands in the same map through either.
     #[tokio::test]
     async fn add_encoded_refuses_a_store_refused_map_name_exactly_as_add() {
-        let (store, _dir) = fresh_store();
+        let (store, engine, _dir) = fresh_engine_store();
         let value = dummy_value("v");
         let bytes = rmp_serde::to_vec_named(&value).unwrap();
         for bad in ["", "users__backup", "has-dash__backup", "a\0b"] {
@@ -1706,9 +1738,16 @@ mod tests {
             assert_eq!(via_encoded.to_string(), via_add.to_string(), "map {bad:?}");
             assert!(via_encoded.to_string().contains("Invalid map name"));
         }
-        assert!(
-            catalog(&store).is_empty(),
-            "a refused write creates no table"
+        let mut metadata_only = vec![
+            meta_key(META_FORMAT),
+            meta_key(META_NEXT_MAP_ID),
+            meta_key(META_ACK_MODE),
+        ];
+        metadata_only.sort();
+        assert_eq!(
+            engine_keys(&engine),
+            metadata_only,
+            "a refused write leaves only the three metadata rows"
         );
 
         for name in ["foo; DROP TABLE x", "9starts_with_digit", "has-dash"] {
@@ -1937,7 +1976,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_values_returns_rows_in_str_order_and_each_cursor_is_the_last_key_of_its_batch() {
+    async fn scan_values_returns_rows_in_the_declared_order_and_each_cursor_stands_for_the_last_key_of_its_batch(
+    ) {
         let (store, _dir) = fresh_store();
         let mut keys: Vec<String> = [
             "A",
@@ -1972,6 +2012,9 @@ mod tests {
                 .unwrap();
         }
 
+        let mut expected = keys.clone();
+        expected.sort_by_key(|key| (PARTITION_THEN_KEY.key_position)(key));
+
         let mut returned: Vec<String> = Vec::new();
         let mut cursors_are_last_keys = true;
         let mut no_rowless_batch_with_a_cursor = true;
@@ -1979,9 +2022,14 @@ mod tests {
         let mut batch = store.scan_values("m", false, 1).await.unwrap();
         loop {
             batches += 1;
-            let last = batch.records.last().map(|(k, _)| k.clone().into_bytes());
+            let last = batch
+                .records
+                .last()
+                .map(|(k, _)| (PARTITION_THEN_KEY.key_position)(k));
             if let Some(cursor) = &batch.next_cursor {
-                cursors_are_last_keys &= last.as_ref() == Some(&cursor.0);
+                let position =
+                    (PARTITION_THEN_KEY.cursor_position)(cursor).expect("cursor position");
+                cursors_are_last_keys &= last.as_ref() == Some(&position);
                 no_rowless_batch_with_a_cursor &= !batch.records.is_empty();
             }
             returned.extend(batch.records.iter().map(|(k, _)| k.clone()));
@@ -1998,13 +2046,13 @@ mod tests {
 
         assert_eq!(
             (
-                returned == keys,
+                returned == expected,
                 cursors_are_last_keys,
                 no_rowless_batch_with_a_cursor,
                 batches
             ),
             (true, true, true, 20),
-            "redb scans in str order and resumes from the last key of each batch"
+            "redb scans in the declared order and resumes from the last key of each batch"
         );
     }
 
@@ -2014,7 +2062,7 @@ mod tests {
 
         assert_eq!(
             (store.scan_order().map(|order| order.name), store.is_null()),
-            (Some("key-bytes"), false),
+            (Some("partition-then-key"), false),
             "the write-behind overlay places buffered keys by the order redb declares"
         );
     }
@@ -2634,13 +2682,16 @@ mod tests {
     ];
 
     /// TG-NAME-001: an identifier-class name keeps the exact table names it has
-    /// always had, every other name goes under the raw-name prefixes, the four
-    /// ranges never meet, and the catalog decodes back to the primary names.
+    /// always had in a legacy file, every other name goes under the raw-name
+    /// prefixes, and the four ranges never meet; a legacy file holding both
+    /// tables of every name migrates into a registry of exactly those names,
+    /// with every value preserved.
     ///
-    /// All names share one store and both tables of each are written, so a
-    /// name that aliased another's table, or a backup read as a primary, shows
-    /// up as a wrong catalog or a wrong map set.
+    /// All names share one legacy file and both tables of each are written, so
+    /// a name that aliased another's table, or a backup read as a primary,
+    /// shows up as a wrong registry, a wrong map set or a wrong value.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn table_names_keep_the_old_class_and_prefix_the_new_class() {
         let raw_names = probe_names();
 
@@ -2695,16 +2746,27 @@ mod tests {
             .chain(raw_names.iter().cloned())
             .collect();
 
-        let (store, _dir) = fresh_store();
-        for (i, n) in all_names.iter().enumerate() {
-            store
-                .add(n, "k", &dummy_value(&format!("primary-{i}")), 0, 1000)
-                .await
-                .unwrap_or_else(|e| panic!("add {}: {e}", shown(n)));
-            store
-                .add_backup(n, "k", &dummy_value(&format!("backup-{i}")), 0, 1000)
-                .await
-                .unwrap_or_else(|e| panic!("add_backup {}: {e}", shown(n)));
+        // The store half: a legacy file holding both tables of every name,
+        // written under `table_name_for`, migrated into the data directory.
+        let dir = tempdir().expect("tempdir");
+        let legacy = dir.path().join("topgun.redb");
+        let primary_bytes =
+            |i: usize| rmp_serde::to_vec_named(&dummy_value(&format!("primary-{i}"))).unwrap();
+        let backup_bytes =
+            |i: usize| rmp_serde::to_vec_named(&dummy_value(&format!("backup-{i}"))).unwrap();
+        {
+            let db = redb::Database::create(&legacy).expect("legacy create");
+            let txn = db.begin_write().expect("begin_write");
+            for (i, n) in all_names.iter().enumerate() {
+                for (backup, bytes) in [(false, primary_bytes(i)), (true, backup_bytes(i))] {
+                    let table = table_name_for(n, backup).unwrap();
+                    txn.open_table(table_def(&table))
+                        .expect("open legacy table")
+                        .insert("k", bytes.as_slice())
+                        .expect("insert");
+                }
+            }
+            txn.commit().expect("commit");
         }
 
         let mut expected_tables: Vec<String> = all_names
@@ -2726,7 +2788,14 @@ mod tests {
             all_names.len() * 2,
             "the mapping is injective over (name, is_backup)"
         );
-        assert_eq!(catalog(&store), expected_tables);
+
+        let data_dir = dir.path().join("topgun-data");
+        let location = StoreLocation {
+            data_dir: data_dir.clone(),
+            data_dir_source: DataDirSource::DerivedFromRedbPath,
+            legacy_path: Some(legacy.clone()),
+        };
+        let store = RedbDataStore::open_location(&location).expect("the legacy file migrates");
 
         let mut expected_maps = all_names.clone();
         expected_maps.sort();
@@ -2736,7 +2805,7 @@ mod tests {
             "the durable map set is exactly the primary names, each once"
         );
 
-        // No table was shared: every primary still holds its own value.
+        // No map was shared: every primary and every backup still holds its own value.
         for (i, n) in all_names.iter().enumerate() {
             assert_eq!(
                 store.load(n, "k").await.expect("load"),
@@ -2744,17 +2813,50 @@ mod tests {
                 "{}",
                 shown(n)
             );
+            let mut backup_rows: Vec<(String, Vec<u8>)> = Vec::new();
+            store
+                .visit_records(n, true, &mut |k, v| {
+                    backup_rows.push((k.to_string(), v.to_vec()));
+                    Ok(())
+                })
+                .expect("visit backup");
+            assert_eq!(
+                backup_rows,
+                vec![("k".to_string(), backup_bytes(i))],
+                "backup of {}",
+                shown(n)
+            );
+            let mut primary_rows: Vec<(String, Vec<u8>)> = Vec::new();
+            store
+                .visit_records(n, false, &mut |k, v| {
+                    primary_rows.push((k.to_string(), v.to_vec()));
+                    Ok(())
+                })
+                .expect("visit primary");
+            assert_eq!(
+                primary_rows,
+                vec![("k".to_string(), primary_bytes(i))],
+                "primary of {}",
+                shown(n)
+            );
         }
+        drop(store);
+
+        let engine = RedbKvEngine::open(&data_dir.join("engine.redb")).expect("engine reopen");
+        assert_eq!(
+            catalog(&engine),
+            expected_maps,
+            "the registry holds exactly the names, each once, under their own bytes"
+        );
     }
 
-    /// TG-NAME-001, primary vs backup: a name the store refuses reaches no
-    /// table through any entry point, so nothing can be written where a backup
-    /// partition lives, and backup tables never show up as maps. The length
+    /// TG-NAME-001, primary vs backup: a name the store refuses writes nothing
+    /// through any entry point, and a backup never shows up as a map. The length
     /// bound is not one of the store's refusals — except that a long name which
     /// is ALSO refused must still be refused.
     #[tokio::test]
     async fn store_refused_names_reach_no_table_and_backups_stay_unlisted() {
-        let (store, _dir) = fresh_store();
+        let (store, engine, _dir) = fresh_engine_store();
         let value = dummy_value("v");
 
         store.add("foo", "k", &value, 0, 1000).await.unwrap();
@@ -2763,8 +2865,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.list_maps().await.unwrap(), vec!["foo".to_string()]);
-        let tables_before = catalog(&store);
-        assert_eq!(tables_before, vec!["map__foo", "map__foo__backup"]);
+        let keys_before = engine_keys(&engine);
+        assert_eq!(catalog(&engine), vec!["foo"]);
 
         for refused in ["foo__backup", "a-b__backup", "", "a\0b"] {
             assert!(
@@ -2799,9 +2901,9 @@ mod tests {
         }
 
         assert_eq!(
-            catalog(&store),
-            tables_before,
-            "a refused name creates no table"
+            engine_keys(&engine),
+            keys_before,
+            "a refused name writes nothing"
         );
         // The backup partition of `foo` was not read or overwritten as a map.
         assert_eq!(store.load("foo", "k").await.unwrap(), Some(value.clone()));
@@ -2835,15 +2937,13 @@ mod tests {
             .expect_err("a long name with the reserved suffix is refused");
         assert!(err.to_string().contains("__backup"), "{err}");
         assert!(store.load(&long_reserved, "k").await.is_err());
+        let mut expected_registry =
+            vec![long_identifier.clone(), "foo".to_string(), long_raw.clone()];
+        expected_registry.sort();
         assert_eq!(
-            catalog(&store),
-            vec![
-                table_name_for(&long_identifier, false).unwrap(),
-                "map__foo".to_string(),
-                "map__foo__backup".to_string(),
-                table_name_for(&long_raw, false).unwrap(),
-            ],
-            "only the two storable long names gained a table"
+            catalog(&engine),
+            expected_registry,
+            "only the two storable long names gained a registry row"
         );
     }
 
@@ -2898,11 +2998,17 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "redb_migration_tests.rs"]
+mod migration_tests;
+
+#[cfg(test)]
 mod store_broken_tests {
     use super::*;
-    // These tests still exercise the table-per-map store until they are
-    // rewritten against the data-directory store.
-    use super::TablePerMapStore as RedbDataStore;
+    use crate::storage::datastores::engine_store::RecordOp;
+    use crate::storage::datastores::kv_engine::{KvError, WriteOptions};
+    use crate::storage::datastores::redb_engine::{
+        kv_from_commit, kv_from_storage, kv_from_table, kv_from_transaction,
+    };
     use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
     use std::io;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -2969,15 +3075,8 @@ mod store_broken_tests {
             }
         }
 
-        fn store_with(&self, builder: &redb::Builder) -> RedbDataStore {
-            let db = builder
-                .create_with_backend(self.clone())
-                .expect("open over the in-memory backend");
-            RedbDataStore { db: Arc::new(db) }
-        }
-
         fn store(&self) -> RedbDataStore {
-            self.store_with(&redb::Builder::new())
+            RedbDataStore::with_backend(self.clone()).expect("open over the in-memory backend")
         }
     }
 
@@ -3029,30 +3128,56 @@ mod store_broken_tests {
         )
     }
 
-    /// A store holding `key` in `map`, reopened with no read cache, whose
-    /// backend fails the first read after the ones a read transaction makes by
-    /// itself to open. That read is the table catalog's, so the operation
-    /// cannot tell whether the map's table exists.
-    async fn a_store_that_cannot_read_its_catalog(map: &str, key: &str) -> RedbDataStore {
+    /// Maps seeded beside `map` so that its registry row lies on a page the
+    /// store's open never reads. With at most 10 of them every key shares the
+    /// pages the open caches; from 50 on, the row is on a page of its own
+    /// (measured over this backend; 2000 leaves a wide margin).
+    const MAPS_AROUND_THE_REGISTRY_ROW: usize = 2000;
+
+    /// A store holding `key` in `map`, reopened, whose backend fails every
+    /// read after the ones the open made. The registry row of `map` sits
+    /// between `MAPS_AROUND_THE_REGISTRY_ROW` long names that sort before and
+    /// after it, so the open has not read its page: the operation's registry
+    /// lookup is the first read that fails, and the operation cannot tell
+    /// whether the map holds the key. Each caller checks that the backend was
+    /// read past the failure point, so the error is that refused read.
+    async fn a_store_that_cannot_read_its_catalog(
+        map: &str,
+        key: &str,
+    ) -> (RedbDataStore, MemBackend) {
         let backend = MemBackend::new(None);
+        {
+            let seed = backend.store();
+            let around: Vec<String> = (0..MAPS_AROUND_THE_REGISTRY_ROW / 2)
+                .flat_map(|i| {
+                    [
+                        format!("a{i:05}{}", "p".repeat(150)),
+                        format!("z{i:05}{}", "p".repeat(150)),
+                    ]
+                })
+                .collect();
+            let touches: Vec<RecordOp<'_>> = around
+                .iter()
+                .map(|name| RecordOp::Touch {
+                    map: name,
+                    backup: false,
+                })
+                .collect();
+            seed.write_records(&touches, WriteOptions { sync: true })
+                .expect("seed the maps around");
+            seed.add(map, key, &value("v"), 0, 0).await.expect("seed");
+        }
+        let store = backend.store();
+        // Every read from here on fails: the open's reads are done.
         backend
-            .store()
-            .add(map, key, &value("v"), 0, 0)
-            .await
-            .expect("seed");
-        let mut builder = redb::Builder::new();
-        builder.set_cache_size(0);
-        let store = backend.store_with(&builder);
-        // Count the reads opening a read transaction makes by itself, so that
-        // the read which fails is the first one after them.
-        let before = backend.reads.load(Ordering::SeqCst);
-        drop(store.db.begin_read().expect("read transaction"));
-        let by_begin_read = backend.reads.load(Ordering::SeqCst) - before;
-        backend.fail_reads_from.store(
-            backend.reads.load(Ordering::SeqCst) + by_begin_read,
-            Ordering::SeqCst,
-        );
-        store
+            .fail_reads_from
+            .store(backend.reads.load(Ordering::SeqCst), Ordering::SeqCst);
+        (store, backend)
+    }
+
+    /// Whether the backend was asked for a read past its failure point.
+    fn a_read_was_refused(backend: &MemBackend) -> bool {
+        backend.reads.load(Ordering::SeqCst) > backend.fail_reads_from.load(Ordering::SeqCst)
     }
 
     #[tokio::test]
@@ -3113,9 +3238,13 @@ mod store_broken_tests {
 
     #[tokio::test]
     async fn a_remove_on_a_store_that_cannot_read_its_catalog_is_not_reported_done() {
-        let store = a_store_that_cannot_read_its_catalog("m", "k").await;
+        let (store, backend) = a_store_that_cannot_read_its_catalog("m", "k").await;
 
         let removed = store.remove("m", "k", 0).await;
+        assert!(
+            a_read_was_refused(&backend),
+            "precondition: the remove never reached a refused read, so it says nothing"
+        );
         assert!(
             removed.is_err(),
             "remove reported Ok although the store could not read its catalog"
@@ -3124,9 +3253,13 @@ mod store_broken_tests {
 
     #[tokio::test]
     async fn a_remove_all_on_a_store_that_cannot_read_its_catalog_is_not_reported_done() {
-        let store = a_store_that_cannot_read_its_catalog("m", "k").await;
+        let (store, backend) = a_store_that_cannot_read_its_catalog("m", "k").await;
 
         let removed = store.remove_all("m", &["k".to_string()]).await;
+        assert!(
+            a_read_was_refused(&backend),
+            "precondition: the remove_all never reached a refused read, so it says nothing"
+        );
         assert!(
             removed.is_err(),
             "remove_all reported Ok although the store could not read its catalog"
@@ -3183,11 +3316,12 @@ mod store_broken_tests {
     async fn t_classify_by_type() {
         let store = MemBackend::new(None).store();
         for (make, want) in storage_variants() {
+            // Every redb error reaches the store through the engine's mapping.
             let wrapped: Vec<anyhow::Error> = vec![
-                make().into(),
-                redb::CommitError::Storage(make()).into(),
-                redb::TransactionError::Storage(make()).into(),
-                redb::TableError::Storage(make()).into(),
+                kv_from_storage(make()).into(),
+                kv_from_commit(redb::CommitError::Storage(make())).into(),
+                kv_from_transaction(redb::TransactionError::Storage(make())).into(),
+                kv_from_table(redb::TableError::Storage(make())).into(),
             ];
             for err in wrapped {
                 let label = format!("{err:?}");
@@ -3197,7 +3331,7 @@ mod store_broken_tests {
             }
         }
 
-        // The store's own map-name refusal is a string, not a redb type.
+        // The store's own map-name refusal is a string, not an engine error.
         let name = store
             .add("x__backup", "k", &value("v"), 0, 0)
             .await
@@ -3210,29 +3344,28 @@ mod store_broken_tests {
         let bare: anyhow::Error = io::Error::from_raw_os_error(28).into();
         assert_eq!(store.classify_error(&bare), StoreErrorClass::Unknown);
 
-        // A real `TableTypeMismatch`: a table of the map's name with other
-        // key and value types.
+        // A real `TableTypeMismatch`: the engine's table, in a store
+        // directory's `engine.redb`, with other key and value types.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.redb");
+        let data_dir = dir.path().join("store");
+        std::fs::create_dir(&data_dir).unwrap();
         {
-            let db = redb::Database::create(&path).unwrap();
+            let db = redb::Database::create(data_dir.join("engine.redb")).unwrap();
             let txn = db.begin_write().unwrap();
             {
-                let def: redb::TableDefinition<u64, u64> = redb::TableDefinition::new("map__foo");
+                let def: redb::TableDefinition<u64, u64> = redb::TableDefinition::new("topgun_kv");
                 txn.open_table(def).unwrap().insert(1, 1).unwrap();
             }
             txn.commit().unwrap();
         }
-        let typed = RedbDataStore::new(&path).unwrap();
-        let mismatch = typed.add("foo", "k", &value("x"), 0, 0).await.unwrap_err();
-        assert!(
-            matches!(
-                mismatch.downcast_ref::<redb::TableError>(),
-                Some(redb::TableError::TableTypeMismatch { .. })
-            ),
+        let Err(mismatch) = RedbDataStore::new(&data_dir) else {
+            panic!("a store directory whose engine table has other types must not open");
+        };
+        assert_eq!(
+            store.classify_error(&mismatch),
+            StoreErrorClass::Unknown,
             "{mismatch:?}"
         );
-        assert_eq!(typed.classify_error(&mismatch), StoreErrorClass::Unknown);
     }
 
     #[tokio::test]
@@ -3247,10 +3380,17 @@ mod store_broken_tests {
         let latched = inner.add("m", "k0", &value("v"), 0, 0).await.unwrap_err();
         assert!(
             matches!(
-                latched.downcast_ref::<redb::TransactionError>(),
-                Some(redb::TransactionError::Storage(redb::StorageError::PreviousIo))
+                latched.downcast_ref::<KvError>(),
+                Some(KvError::Broken {
+                    cause: StoreBrokenCause::PreviousIo,
+                    ..
+                })
             ),
-            "a latched handle answers a write with PreviousIo through TransactionError: {latched:?}"
+            "a latched handle answers a write with PreviousIo through the engine's error: {latched:?}"
+        );
+        assert_eq!(
+            inner.classify_error(&latched),
+            StoreErrorClass::StoreBroken(StoreBrokenCause::PreviousIo)
         );
 
         let store = write_behind(inner);

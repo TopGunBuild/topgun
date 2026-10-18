@@ -3462,7 +3462,7 @@ mod tests {
                 (
                     Some(0),
                     true,
-                    r#"("Redb", true, [["k1"], ["k2"]])"#.to_string(),
+                    r#"("Redb", true, [["k2"], ["k1"]])"#.to_string(),
                 ),
                 "the binary's redb store declares a scan order and the wrap honours it"
             );

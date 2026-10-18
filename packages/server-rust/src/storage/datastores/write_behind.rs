@@ -6784,6 +6784,20 @@ mod tests {
         (WriteBehindDataStore::new(inner, config), dir)
     }
 
+    /// `WriteBehind` over a [`KeyOrderedStore`], configured as
+    /// [`redb_backed_store`]: for the scenarios whose batches are drawn by key
+    /// ranges, which need an inner store that really scans in key-byte order.
+    fn key_ordered_backed_store() -> Arc<WriteBehindDataStore> {
+        let inner: Arc<dyn MapDataStore> = Arc::new(KeyOrderedStore::default());
+        let config = WriteBehindConfig {
+            write_delay_ms: 0,
+            flush_interval_ms: 600_000,
+            capacity: 0,
+            ..WriteBehindConfig::default()
+        };
+        WriteBehindDataStore::new(inner, config)
+    }
+
     fn lww(value: &str, millis: u64) -> RecordValue {
         RecordValue::Lww {
             value: Value::String(value.to_string()),
@@ -9028,16 +9042,252 @@ mod tests {
         }
     }
 
+    /// `(map, backup)` → key → stored msgpack.
+    type KeyOrderedRows =
+        std::collections::BTreeMap<(String, bool), std::collections::BTreeMap<String, Vec<u8>>>;
+
+    /// An in-memory store that declares `ScanOrder::KEY_BYTES` and honours it:
+    /// a scan walks a map's keys in the order of their bytes, resumes strictly
+    /// after its cursor, and a cursor is the key of the last row of its batch.
+    /// Batches follow the redb budget rules (a row's cost is its stored
+    /// msgpack; a batch stops before the row that would cross the budget, and
+    /// always takes at least one row). The scenarios that place staged keys by
+    /// key ranges run over it, so the order they rely on is true by
+    /// construction whatever order the shipped store scans in.
+    #[derive(Default)]
+    struct KeyOrderedStore {
+        rows: Mutex<KeyOrderedRows>,
+    }
+
+    impl KeyOrderedStore {
+        fn put(
+            &self,
+            map: &str,
+            backup: bool,
+            key: &str,
+            value: &RecordValue,
+        ) -> anyhow::Result<()> {
+            let bytes = rmp_serde::to_vec_named(value)?;
+            self.rows
+                .lock()
+                .unwrap()
+                .entry((map.to_string(), backup))
+                .or_default()
+                .insert(key.to_string(), bytes);
+            Ok(())
+        }
+
+        fn delete(&self, map: &str, backup: bool, key: &str) {
+            if let Some(table) = self
+                .rows
+                .lock()
+                .unwrap()
+                .get_mut(&(map.to_string(), backup))
+            {
+                table.remove(key);
+            }
+        }
+
+        fn scan_from(
+            &self,
+            map: &str,
+            backup: bool,
+            after: Option<&str>,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            use std::ops::Bound;
+            let budget = if max_batch_cost == 0 {
+                8 * 1024 * 1024
+            } else {
+                max_batch_cost
+            };
+            let rows = self.rows.lock().unwrap();
+            let Some(table) = rows.get(&(map.to_string(), backup)) else {
+                return Ok(ScanBatch::default());
+            };
+            let lower = after.map_or(Bound::Unbounded, Bound::Excluded);
+            let mut records: Vec<(String, RecordValue)> = Vec::new();
+            let mut accumulated: u64 = 0;
+            let mut more_rows_pending = false;
+            for (key, bytes) in table.range::<str, _>((lower, Bound::Unbounded)) {
+                let row_cost = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                if !records.is_empty() && accumulated.saturating_add(row_cost) > budget {
+                    more_rows_pending = true;
+                    break;
+                }
+                accumulated += row_cost;
+                records.push((key.clone(), rmp_serde::from_slice(bytes)?));
+            }
+            let next_cursor = if more_rows_pending {
+                records
+                    .last()
+                    .map(|(k, _)| ScanCursor(k.clone().into_bytes()))
+            } else {
+                None
+            };
+            Ok(ScanBatch {
+                records,
+                next_cursor,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for KeyOrderedStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            self.put(map, false, key, value)
+        }
+
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            self.put(map, true, key, value)
+        }
+
+        async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+            self.delete(map, false, key);
+            Ok(())
+        }
+
+        async fn remove_backup(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+            self.delete(map, true, key);
+            Ok(())
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            let rows = self.rows.lock().unwrap();
+            rows.get(&(map.to_string(), false))
+                .and_then(|table| table.get(key))
+                .map(|bytes| rmp_serde::from_slice(bytes).map_err(anyhow::Error::from))
+                .transpose()
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            let mut out = Vec::new();
+            for key in keys {
+                if let Some(value) = self.load(map, key).await? {
+                    out.push((key.clone(), value));
+                }
+            }
+            Ok(out)
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            let mut leaves = Vec::new();
+            let rows: Vec<(String, Vec<u8>)> = self
+                .rows
+                .lock()
+                .unwrap()
+                .get(&(map.to_string(), is_backup))
+                .map(|table| table.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default();
+            for (key, bytes) in rows {
+                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
+                if let Some((kind, leaf_hash)) =
+                    crate::storage::map_data_store::merkle_leaf_hash(&key, &value)
+                {
+                    leaves.push(MerkleLeaf {
+                        key,
+                        kind,
+                        leaf_hash,
+                    });
+                }
+            }
+            if !leaves.is_empty() {
+                sink.consume(leaves).await?;
+            }
+            Ok(())
+        }
+
+        fn scan_order(&self) -> Option<ScanOrder> {
+            Some(ScanOrder::KEY_BYTES)
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.scan_from(map, is_backup, None, max_batch_cost)
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: ScanCursor,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            let after = String::from_utf8(cursor.0)
+                .map_err(|e| anyhow::anyhow!("scan cursor is not valid UTF-8: {e}"))?;
+            self.scan_from(map, is_backup, Some(&after), max_batch_cost)
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            for key in keys {
+                self.delete(map, false, key);
+            }
+            Ok(())
+        }
+
+        async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+            let rows = self.rows.lock().unwrap();
+            Ok(rows
+                .keys()
+                .filter(|(_, backup)| !backup)
+                .map(|(map, _)| map.clone())
+                .collect())
+        }
+
+        fn is_loadable(&self, _key: &str) -> bool {
+            true
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            0
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     type ScanGate = (
         tokio::sync::oneshot::Sender<()>,
         tokio::sync::oneshot::Receiver<()>,
     );
 
-    /// Forwards everything to redb and declares its scan order. Can be armed to park
-    /// the next `add` on entry, or the next `scan_values` / `scan_values_batched`
-    /// after it has read its batch and before it returns.
+    /// Forwards everything to a [`KeyOrderedStore`] and declares its scan order.
+    /// Can be armed to park the next `add` on entry, or the next `scan_values` /
+    /// `scan_values_batched` after it has read its batch and before it returns.
     struct ParkingScanStore {
-        inner: RedbDataStore,
+        inner: KeyOrderedStore,
         park_add: Mutex<Option<ScanGate>>,
         park_scan: Mutex<Option<ScanGate>>,
         park_resumed_scan: Mutex<Option<ScanGate>>,
@@ -9175,10 +9425,10 @@ mod tests {
         }
     }
 
-    /// Forwards everything to redb and does NOT forward the scan-order
-    /// declaration: it answers the trait's default, so a write-behind store over
-    /// it keeps the order-free rule whatever it wraps.
-    struct UndeclaredScanStore(RedbDataStore);
+    /// Forwards everything to a [`KeyOrderedStore`] and does NOT forward the
+    /// scan-order declaration: it answers the trait's default, so a write-behind
+    /// store over it keeps the order-free rule whatever it wraps.
+    struct UndeclaredScanStore(KeyOrderedStore);
 
     #[async_trait]
     impl MapDataStore for UndeclaredScanStore {
@@ -9277,20 +9527,15 @@ mod tests {
         }
     }
 
-    fn parking_backed_store() -> (
-        Arc<WriteBehindDataStore>,
-        Arc<ParkingScanStore>,
-        tempfile::TempDir,
-    ) {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn parking_backed_store() -> (Arc<WriteBehindDataStore>, Arc<ParkingScanStore>) {
         let parking = Arc::new(ParkingScanStore {
-            inner: RedbDataStore::new(dir.path().join("wb.redb")).expect("redb open"),
+            inner: KeyOrderedStore::default(),
             park_add: Mutex::new(None),
             park_scan: Mutex::new(None),
             park_resumed_scan: Mutex::new(None),
         });
         let store = WriteBehindDataStore::new(parking.clone(), scan_config());
-        (store, parking, dir)
+        (store, parking)
     }
 
     fn batches(expected: &[&[&str]]) -> Vec<Vec<String>> {
@@ -9306,7 +9551,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_staged_key_whose_durable_row_is_in_a_later_batch_is_emitted_once() {
-        let (store, _dir) = redb_backed_store();
+        let store = key_ordered_backed_store();
         for i in 0..6u32 {
             let key = format!("flushed_{i:02}");
             store
@@ -9338,7 +9583,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_staging_only_key_is_emitted_in_the_batch_whose_key_range_holds_it() {
-        let (store, _dir) = redb_backed_store();
+        let store = key_ordered_backed_store();
         write_six(&store).await;
         for key in ["a00", "d15", "d25", "d45", "z99"] {
             store.add("m", key, &lww("st", 2), 0, 2000).await.unwrap();
@@ -9362,7 +9607,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_key_flushed_between_two_batches_is_emitted_once() {
-        let (store, _dir) = redb_backed_store();
+        let store = key_ordered_backed_store();
         write_six(&store).await;
         store.add("m", "d45", &lww("st", 2), 0, 2000).await.unwrap();
         let budget = two_row_budget();
@@ -9386,7 +9631,7 @@ mod tests {
     #[tokio::test]
     async fn a_key_written_behind_the_scan_position_is_not_emitted_and_one_written_ahead_is_emitted_once(
     ) {
-        let (store, _dir) = redb_backed_store();
+        let store = key_ordered_backed_store();
         write_six(&store).await;
         let budget = two_row_budget();
 
@@ -9481,7 +9726,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_staged_key_whose_durable_row_is_in_the_first_batch_is_emitted_once() {
-        let (store, _dir) = redb_backed_store();
+        let store = key_ordered_backed_store();
         write_six(&store).await;
         store.add("m", "d10", &lww("NW", 9), 0, 2000).await.unwrap();
 
@@ -9510,14 +9755,14 @@ mod tests {
 
         assert_eq!(
             observed,
-            vec![vec!["k1=st@2", "k2=st@2"]],
+            vec![vec!["k2=st@2", "k1=st@2"]],
             "the only batch of an empty durable map holds every staged value once"
         );
     }
 
     #[tokio::test]
     async fn a_staged_delete_is_emitted_in_no_batch() {
-        let (store, _dir) = redb_backed_store();
+        let store = key_ordered_backed_store();
         write_six(&store).await;
         for key in ["d30", "d40", "q00"] {
             store.remove("m", key, 2000).await.unwrap();
@@ -9542,7 +9787,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_key_flushed_while_its_batch_is_being_read_is_still_emitted() {
-        let (store, parking, _dir) = parking_backed_store();
+        let (store, parking) = parking_backed_store();
         write_six(&store).await;
         store.add("m", "d45", &lww("st", 2), 0, 2000).await.unwrap();
 
@@ -9571,7 +9816,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_key_being_flushed_is_emitted_once_before_and_after_its_row_is_durable() {
-        let (store, parking, _dir) = parking_backed_store();
+        let (store, parking) = parking_backed_store();
         write_six(&store).await;
         store.add("m", "d45", &lww("st", 2), 0, 2000).await.unwrap();
 
@@ -9604,7 +9849,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_key_flushed_while_a_resumed_batch_is_being_read_is_still_emitted() {
-        let (store, parking, _dir) = parking_backed_store();
+        let (store, parking) = parking_backed_store();
         write_six(&store).await;
         store.add("m", "d35", &lww("st", 2), 0, 2000).await.unwrap();
         let budget = two_row_budget();
@@ -9803,10 +10048,7 @@ mod tests {
     #[tokio::test]
     async fn over_a_store_that_does_not_declare_key_order_a_staged_key_with_a_later_row_is_still_emitted_twice(
     ) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let undeclared = Arc::new(UndeclaredScanStore(
-            RedbDataStore::new(dir.path().join("wb.redb")).expect("redb open"),
-        ));
+        let undeclared = Arc::new(UndeclaredScanStore(KeyOrderedStore::default()));
         let store = WriteBehindDataStore::new(undeclared, scan_config());
         write_six(&store).await;
         for key in ["a00", "d15", "d25", "d45", "z99"] {
