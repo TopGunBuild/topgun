@@ -4603,6 +4603,7 @@ dependencies = [
  "dashmap",
  "datafusion",
  "dhat",
+ "fs4",
  "futures-util",
  "hdrhistogram",
  "hex",
