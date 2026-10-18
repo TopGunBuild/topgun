@@ -116,7 +116,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use parking_lot::Mutex;
-use redb::ReadableTable;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use client::SoakClient;
@@ -145,6 +144,7 @@ use report::{
     TombstoneCorpusReport, TombstoneReport, WalFrameStats,
 };
 use topgun_server::storage::record::RecordValue;
+use topgun_server::storage::RedbDataStore;
 
 /// Subject index used by the orchestrator's verifier connections. Far above the
 /// churn-client range so it never owns keys or collides with churn auth.
@@ -2227,7 +2227,7 @@ fn sample_live_census_via_copy(sampler: &CorpusSampler, sampler_start: Instant, 
     }
 }
 
-/// Byte-copy the server's store file into an ordinal-scoped scratch directory,
+/// Byte-copy the server's store directory into an ordinal-scoped scratch directory,
 /// scan the COPY, delete it, and return the census. `None` if the copy or the
 /// scan failed — the caller owns what a failure means for its own tally.
 ///
@@ -2251,10 +2251,10 @@ fn copy_and_scan_census(
     ordinal: usize,
 ) -> Option<DurableCensus> {
     let copy_dir = sampler.scratch_root.join(format!("{label}-{ordinal}"));
-    // The scan resolves `topgun.redb` under the directory it is given, so the
+    // The scan resolves `topgun-data` under the directory it is given, so the
     // ordinal is carried by the directory and the copy keeps the name the scan
     // looks for.
-    let copy_path = copy_dir.join("topgun.redb");
+    let copy_path = copy_dir.join(STORE_DIR);
     if let Err(e) = std::fs::create_dir_all(&copy_dir) {
         eprintln!(
             "{label} sample {ordinal}: cannot create scratch dir {}: {e}",
@@ -2264,8 +2264,8 @@ fn copy_and_scan_census(
     }
     // `std::fs::copy` truncates an existing destination, so even an aliasing
     // bug could not produce a partial-overwrite hybrid.
-    if let Err(e) = std::fs::copy(sampler.data_dir.join("topgun.redb"), &copy_path) {
-        eprintln!("{label} sample {ordinal}: cannot copy redb file: {e}");
+    if let Err(e) = copy_dir_recursive(&sampler.data_dir.join(STORE_DIR), &copy_path) {
+        eprintln!("{label} sample {ordinal}: cannot copy the store directory: {e}");
         return None;
     }
 
@@ -2285,6 +2285,28 @@ fn copy_and_scan_census(
     scanned
 }
 
+/// The store directory the server keeps under its data dir: the server is
+/// started with `TOPGUN_REDB_PATH={data_dir}/topgun.redb` and derives its store
+/// directory beside that path.
+const STORE_DIR: &str = "topgun-data";
+
+/// Copy the directory `from` to `to`, file by file, creating `to` and every
+/// subdirectory. Fails on the first entry it cannot copy, so a partial copy is
+/// never scanned as a whole one.
+fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
 /// Independent, gauge-free census of the OR-Map's on-disk state: the positive
 /// control's cross-check that `topgun_ormap_tombstone_bytes` is actually
 /// tracking the real durable byte total, not merely plateauing because it
@@ -2300,8 +2322,8 @@ fn copy_and_scan_census(
 /// makes `keys_scanned` equal the number of rows iterated. All the arithmetic
 /// lives in the fold functions, so this site only decodes and dispatches.
 ///
-/// Opens the server's own redb file directly (`{data_dir}/topgun.redb`, the
-/// same layout `RedbDataStore` writes: table `map__{map}`, msgpack-encoded
+/// Opens the server's own store directly (`{data_dir}/topgun-data`, through
+/// `RedbDataStore`, visiting the records of `map`, msgpack-encoded
 /// `RecordValue` values) and sums the UTF-8 byte length of every tombstoned
 /// tag across BOTH tombstone-carrying shapes: the live `RecordValue::OrMap`'s
 /// `tombstones` field, and the legacy `RecordValue::OrTombstones` blob a
@@ -2330,7 +2352,7 @@ fn copy_and_scan_census(
 /// and the server's crash recovery is precisely what the run's
 /// `recovery_failures` gate measures; an instrument may not mutate what
 /// another gate measures. So a checkpoint caller copies
-/// `{data_dir}/topgun.redb` to a scratch path outside the data dir and hands
+/// `{data_dir}/topgun-data` to a scratch path outside the data dir and hands
 /// this function the directory holding that copy — any repair redb performs
 /// happens on the copy, which is deleted immediately afterwards, and the
 /// server stays the FIRST opener of the original. The terminal call is the one
@@ -2345,32 +2367,25 @@ fn copy_and_scan_census(
 /// `pending_gates` rather than failing the run. An honest `Some(0)` from a
 /// never-written table stays distinguishable from it.
 fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Option<DurableCensus> {
-    let db_path = data_dir.join("topgun.redb");
-    if !db_path.exists() {
+    let store_dir = data_dir.join(STORE_DIR);
+    // Opening creates a missing store, so the engine file is checked first: a
+    // store that is not there is a failed scan, never an empty one.
+    if !store_dir.join("engine.redb").exists() {
         return None;
     }
-    let db = redb::Database::open(&db_path).ok()?;
-    let read_txn = db.begin_read().ok()?;
-    let table_name = format!("map__{map}");
-    let table_def: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new(&table_name);
-    let table = match read_txn.open_table(table_def) {
-        Ok(t) => t,
-        // Never-written table (e.g. no OR-Map write ever landed) contributes an
-        // EMPTY census — a real, honest answer, not a scan failure.
-        Err(redb::TableError::TableDoesNotExist(_)) => return Some(DurableCensus::default()),
-        Err(_) => return None,
-    };
+    let store = RedbDataStore::new(&store_dir).ok()?;
 
+    // A never-written map (e.g. no OR-Map write ever landed) is visited zero
+    // times and contributes an EMPTY census — a real, honest answer, not a
+    // scan failure.
     let mut census = DurableCensus::default();
-    let iter = table.iter().ok()?;
-    for entry in iter {
-        let (_key_guard, val_guard) = entry.ok()?;
-        let Ok(value) = rmp_serde::from_slice::<RecordValue>(val_guard.value()) else {
+    let mut visit = |_key: &str, bytes: &[u8]| -> anyhow::Result<()> {
+        let Ok(value) = rmp_serde::from_slice::<RecordValue>(bytes) else {
             // A corrupt/foreign row is COUNTED rather than silently skipped: a
             // row the instrument could not read must be visible in the census,
             // not invisible in it.
             fold_undecodable_key(&mut census);
-            continue;
+            return Ok(());
         };
         match value {
             RecordValue::OrMap {
@@ -2391,7 +2406,9 @@ fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Option<DurableCensu
             }
             RecordValue::Lww { .. } => fold_lww_key(&mut census),
         }
-    }
+        Ok(())
+    };
+    store.visit_records(map, false, &mut visit).ok()?;
     Some(census)
 }
 
@@ -4481,14 +4498,13 @@ mod tests {
         use topgun_server::storage::record::OrMapEntry;
 
         /// Write one OR-Map row — live entries plus tombstones — into a real
-        /// store file under `dir`, in the same table and encoding the scan
-        /// reads. A real file rather than a stub, so the path under test is the
-        /// whole path: copy, open, iterate, fold.
+        /// store directory under `dir`, through the store the server uses, in
+        /// the map and encoding the scan reads. A real store rather than a stub,
+        /// so the path under test is the whole path: copy, open, visit, fold.
         fn write_or_fixture(dir: &Path) {
-            let db = redb::Database::create(dir.join("topgun.redb")).expect("create store file");
-            let table_name = format!("map__{OR_MAP}");
-            let table_def: redb::TableDefinition<&str, &[u8]> =
-                redb::TableDefinition::new(&table_name);
+            use topgun_server::storage::MapDataStore;
+
+            let store = RedbDataStore::new(dir.join(STORE_DIR)).expect("create store");
             let value = RecordValue::OrMap {
                 records: vec![OrMapEntry {
                     value: Value::String("alive".to_string()),
@@ -4501,15 +4517,11 @@ mod tests {
                 }],
                 tombstones: vec!["dead-tag-a".to_string(), "dead-tag-b".to_string()],
             };
-            let encoded = rmp_serde::to_vec_named(&value).expect("encode record");
-            let write_txn = db.begin_write().expect("begin write");
-            {
-                let mut table = write_txn.open_table(table_def).expect("open table");
-                table
-                    .insert("ork-1", encoded.as_slice())
-                    .expect("insert row");
-            }
-            write_txn.commit().expect("commit");
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime")
+                .block_on(store.add(OR_MAP, "ork-1", &value, 0, 0))
+                .expect("write row");
         }
 
         let data = tempfile::tempdir().expect("data dir");
