@@ -2475,22 +2475,31 @@ weaker than a test.
   with `sync = false`, and no reader ever sees a strict subset of a batch: a snapshot contains each
   batch whose `write` overlapped it wholly or not at all. After `shutdown` returned and the engine
   was dropped, an engine opened on the same files holds every batch whose `write` returned before
-  `shutdown`.
-- **Not claimed:** what survives a crash (the trait's durability clause: a prefix of the written
-  batches, each whole, containing every batch made durable). It is stated on the trait and is not
-  enforced by this entry's tests.
+  `shutdown`. After a crash the durable state is the result of a prefix of the called batches, each
+  whole, containing every batch made durable by a returned `sync = true` write or `sync()`.
+- **Not claimed:** `Eventual` durability; engines without a crash target (none today); device
+  reordering across a completed `fsync` (redb's own assumption). The crash model is "everything
+  written after the last sync may be lost, whole, per write or per 512-byte sector"; redb runs with
+  its default one-phase commit.
 - **Maintaining code:** `kv_engine.rs` — `MemKvEngine::write` (one lock acquisition per batch) and
   `MemKvEngine::shutdown`; `redb_engine.rs` — `RedbKvEngine::write` (validation, then one write
   transaction), `sync`, `shutdown` (sync, then drop the database).
-- **Enforcing test:** `c04_batch_ops_apply_in_order`,
+- **Enforcing test:** `k03_redb_every_crash_point_recovers_a_prefix_that_holds_every_durable_batch`,
+  `k04_redb_random_crashes_recover_a_prefix_that_holds_every_durable_batch`,
+  `k05_mem_crashes_recover_a_prefix_that_holds_every_durable_batch` — in
+  `storage/datastores/kv_crash_tests.rs`; `c04_batch_ops_apply_in_order`,
   `c05_a_batch_with_an_invalid_range_changes_nothing`,
   `c25_a_concurrent_reader_never_sees_part_of_a_batch`,
   `m03_a_reader_never_sees_a_batch_parked_between_its_ops`,
   `r01_a_reader_never_sees_part_of_a_batch_while_its_commit_syncs`,
-  `c24_the_engine_matches_the_model`, `c27_shutdown_then_reopen_keeps_every_returned_batch` — all
-  in `storage/datastores/kv_conformance.rs`. The `c` cases run for every engine; `m03` parks a mem
+  `c24_the_engine_matches_the_model`, `c27_shutdown_then_reopen_keeps_every_returned_batch` — in
+  `storage/datastores/kv_conformance.rs`. The `c` cases run for every engine; `m03` parks a mem
   write between its first and second op and reads from another thread; `r01` parks redb's durable
-  commit inside `sync_data` and reads at every park.
+  commit inside `sync_data` and reads at every park. `k03` kills redb at every backend op of a
+  fixed 12-batch workload over an in-process backend that loses unsynced writes (dropped, kept per
+  write, or torn per sector) and also checks a never-armed run recovers exactly the durable
+  prefix; `k04` does the same at random ops of 200 seeded workloads (`k04b`, ignored, 10 000);
+  `k05` crashes the reference engine keeping every number of whole unsynced batches.
 - **Violation consequence:** a record layer built on the engine would expose half of a multi-key
   update to a reader, or lose acknowledged batches across a clean restart.
 - **Discovered by:** SPEC-394a (the boundary's contract).
@@ -2603,10 +2612,15 @@ weaker than a test.
   issued: when no id is left, a write that needs one fails with `map id space exhausted` and
   changes nothing. No record key carries an id the registry does not hold. A `Delete` never
   issues an id or sets a flag. The cache is filled only from rows that exist. `list_maps` returns
-  every registry name whose primary flag is set, ascending, once.
+  every registry name whose primary flag is set, ascending, once. After a crash: no orphan record,
+  inverse registry, `list_maps` = names with a primary put in the recovered prefix; every registered
+  name has a put in that prefix.
 - **Maintaining code:** `engine_store.rs` — `plan_registry`, `cached_row`, `read_map_id`,
   `write_records`, `list_maps`, the `0x01` / `0x02` codecs and `map_id_in`.
-- **Enforcing test:** `s05_map_ids_are_issued_from_one_and_survive_a_reopen`,
+- **Enforcing test:** `k06_redb_registry_after_any_crash_has_no_orphan_and_lists_exactly_the_recovered_maps`,
+  `k07_mem_registry_after_any_crash_has_no_orphan_and_lists_exactly_the_recovered_maps` — in
+  `storage/datastores/kv_crash_tests.rs`, every crash point of two fixed store workloads and 200
+  seeded ones; `s05_map_ids_are_issued_from_one_and_survive_a_reopen`,
   `s06_a_failed_first_write_leaves_no_registry_entry_and_no_record`,
   `s07_two_first_writes_of_two_new_maps_get_distinct_map_ids`,
   `s08_a_map_with_only_backup_rows_is_not_listed_and_one_emptied_by_removes_stays_listed`,
@@ -2618,8 +2632,7 @@ weaker than a test.
 - **Violation consequence:** two maps would share an id and read each other's records, a record
   would be stored under an id no name resolves to, or `list_maps` would differ from the redb
   store's.
-- **Not claimed:** the bijection after a crash — the crash suite extends the enforcing tests
-  (SPEC-394c). No operation deletes a map.
+- **Not claimed:** a crash model beyond `TG-ENG-001`'s. No operation deletes a map.
 - **Discovered by:** SPEC-394b2.
 - **Status:** decided, **enforced**.
 
@@ -2635,10 +2648,13 @@ weaker than a test.
   `store format: refusing to open:` and nothing is written. Only `open_for_migration` admits a
   store with a migration mark; on an empty engine it writes the format rows and the mark in one
   batch. A mark is written only through `RecordOp::SetMigrationMark`, in the one batch of its
-  call's records.
+  call's records. After a crash the migration mark is the one carried by the last recovered batch
+  that carried one.
 - **Maintaining code:** `engine_store.rs` — `read_store_metadata`, `format_rows`, `open`,
   `open_for_migration`, `read_migration_mark`, `write_records`.
-- **Enforcing test:** `s18_a_fresh_engine_gets_format_one_and_local_ack_mode`,
+- **Enforcing test:** `k06_redb_registry_after_any_crash_has_no_orphan_and_lists_exactly_the_recovered_maps`,
+  `k07_mem_registry_after_any_crash_has_no_orphan_and_lists_exactly_the_recovered_maps` — in
+  `storage/datastores/kv_crash_tests.rs`; `s18_a_fresh_engine_gets_format_one_and_local_ack_mode`,
   `s19_a_store_of_an_unknown_format_or_with_unknown_metadata_is_refused`,
   `s20_a_non_empty_engine_without_format_metadata_is_refused`,
   `s21_a_key_in_a_reserved_keyspace_is_refused_at_open`,
