@@ -68,12 +68,14 @@ Production deployments need a persistent path for the embedded store and explici
 
 **1. Storage**
 
-There is no database to provision. The server keeps its data in an embedded store: a redb file plus a write-ahead log directory. Point both at a persistent volume (the image defaults are `/data/topgun.redb` and `/data/topgun-wal`):
+There is no database to provision. The server keeps its data in an embedded store: a data directory plus a write-ahead log directory. Point both at a persistent volume (the image defaults are `/data/topgun-data` and `/data/topgun-wal`):
 
 ```bash
-export TOPGUN_REDB_PATH=/data/topgun.redb     # embedded store file
+export TOPGUN_DATA_DIR=/data/topgun-data      # embedded store directory
 export TOPGUN_WAL_DIR=/data/topgun-wal        # write-ahead log; keep it on the same volume
 ```
+
+Upgrading from an earlier version moves an existing `TOPGUN_REDB_PATH` store file into the data directory once, by itself, and keeps the old file as `{TOPGUN_REDB_PATH}.pre-migration`; copy that file off the machine before upgrading. See the `Changed (on-disk format)` entry of [CHANGELOG.md](CHANGELOG.md).
 
 **2. Server-side env vars**
 
@@ -101,7 +103,7 @@ Multi-node deployments today use partition-routing without Raft consensus. **Clu
 
 **5. Backup and restore**
 
-Back up by stopping the server (`SIGTERM` drains the write buffer and syncs the log) and copying **both** the redb file (`TOPGUN_REDB_PATH`) and the WAL directory (`TOPGUN_WAL_DIR`). Restore by putting both back with the server stopped, then starting it. The redb file alone is not the whole state: acknowledged writes that are not yet in it live in the WAL directory. A copy of a running server's files is not a supported backup. Operational backup tooling beyond this is planned.
+Back up by stopping the server (`SIGTERM` drains the write buffer and syncs the log) and copying **both** the whole data directory (`TOPGUN_DATA_DIR`) and the WAL directory (`TOPGUN_WAL_DIR`). Restore by putting both back with the server stopped, then starting it. The data directory alone is not the whole state: acknowledged writes that are not yet in it live in the WAL directory. A copy of a running server's directory is not a supported backup. Operational backup tooling beyond this is planned.
 
 **6. Monitoring hooks** *(coming)*
 

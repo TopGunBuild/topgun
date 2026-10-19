@@ -19,6 +19,12 @@
  * The watermark is checked through files, without decoding WAL frames: every
  * partition that had frames and no applied-watermark sidecar gets a sidecar,
  * and a second start of the newer binary finds nothing left to replay.
+ *
+ * The older binary keeps one redb table per map in `topgun.redb`; the newer one
+ * moves that store into the data directory `topgun-data/` at its first start.
+ * The test also checks what that move leaves on disk and in the log: the data
+ * directory, the marker file at the old path, the kept pre-migration file, one
+ * migration on the first start and none on the second.
  */
 
 import * as fs from 'fs';
@@ -36,6 +42,9 @@ import {
   sleep,
   walPartitions,
   plainLines,
+  movedMarkerState,
+  logField,
+  MovedMarkerState,
   SpawnedBinary,
   BinaryExit,
   TwoBinaryEnv,
@@ -80,6 +89,46 @@ interface Observed {
   controlSecondBoot?: unknown;
   secondBootUnreplayed?: string[];
   fatal: string[];
+  /** The store directory as files once the first run of the newer binary has stopped. */
+  afterFirstRun?: {
+    dataDirIsDirectory: boolean;
+    engineFileIsFile: boolean;
+    marker: MovedMarkerState;
+    preMigrationIsFile: boolean;
+  };
+  firstRunLog?: StoreLog;
+  secondRunLog?: StoreLog;
+}
+
+/** The store lines of one run of the newer binary. */
+interface StoreLog {
+  migrationComplete: number;
+  preMigrationKept: number;
+  /** `data_dir` and `data_dir_source` of every `store location: data directory` line. */
+  locationLines: Array<{ dataDir?: string; dataDirSource?: string }>;
+}
+
+function storeLog(server: SpawnedBinary): StoreLog {
+  const lines = plainLines(server.stdout());
+  return {
+    migrationComplete: lines.filter((l) => l.includes('migration complete')).length,
+    preMigrationKept: lines.filter((l) => l.includes('pre-migration store file is kept')).length,
+    locationLines: lines
+      .filter((l) => l.includes('store location: data directory'))
+      .map((l) => ({
+        dataDir: logField(l, 'data_dir'),
+        dataDirSource: logField(l, 'data_dir_source'),
+      })),
+  };
+}
+
+function isKind(p: string, kind: 'file' | 'directory'): boolean {
+  try {
+    const st = fs.lstatSync(p);
+    return kind === 'file' ? st.isFile() : st.isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /** A removed key shows up as no row or as a null value, depending on the read path. */
@@ -221,6 +270,13 @@ describe('Integration: the newer server binary replays the WAL frames the older 
     o.firstBootUnreplayed = unreplayedLines(first);
     o.newStop = await first.stop('SIGTERM', STOP_TIMEOUT_MS);
     noteFatal(first);
+    o.firstRunLog = storeLog(first);
+    o.afterFirstRun = {
+      dataDirIsDirectory: isKind(path.join(dataDir, 'topgun-data'), 'directory'),
+      engineFileIsFile: isKind(path.join(dataDir, 'topgun-data', 'engine.redb'), 'file'),
+      marker: movedMarkerState(path.join(dataDir, 'topgun.redb')),
+      preMigrationIsFile: isKind(path.join(dataDir, 'topgun.redb.pre-migration'), 'file'),
+    };
 
     // --- A second start of the newer binary finds nothing left to replay.
     const second = await start(env.newBinary, env.newCommit, 'NEW second run');
@@ -235,6 +291,7 @@ describe('Integration: the newer server binary replays the WAL frames the older 
     o.secondBootUnreplayed = unreplayedLines(second);
     await second.stop('SIGTERM', STOP_TIMEOUT_MS);
     noteFatal(second);
+    o.secondRunLog = storeLog(second);
 
     // Straight to stderr: the suite silences console.log.
     process.stderr.write(
@@ -305,5 +362,28 @@ describe('Integration: the newer server binary replays the WAL frames the older 
   test('the second boot of the newer binary has nothing left to replay', () => {
     expect(typeof o.secondPort).toBe('number');
     expect(o.secondBootUnreplayed).toEqual([]);
+  });
+
+  test('after the first run of the newer binary the store is a data directory, with the marker file and the pre-migration file beside it', () => {
+    expect(o.afterFirstRun?.dataDirIsDirectory).toBe(true);
+    expect(o.afterFirstRun?.engineFileIsFile).toBe(true);
+    expect(o.afterFirstRun?.marker.kind).toBe('file');
+    expect(o.afterFirstRun?.marker.firstLine).toBe('TOPGUN-STORE-MOVED 1');
+    expect(o.afterFirstRun?.preMigrationIsFile).toBe(true);
+  });
+
+  test('the first run of the newer binary migrates once and names the data directory it derived from TOPGUN_REDB_PATH', () => {
+    expect(o.firstRunLog?.migrationComplete).toBe(1);
+    expect(o.firstRunLog?.locationLines).toEqual([
+      {
+        dataDir: path.join(dataDir as string, 'topgun-data'),
+        dataDirSource: 'derived from TOPGUN_REDB_PATH',
+      },
+    ]);
+  });
+
+  test('the second run of the newer binary does not migrate again and says the pre-migration file is kept', () => {
+    expect(o.secondRunLog?.migrationComplete).toBe(0);
+    expect(o.secondRunLog?.preMigrationKept).toBe(1);
   });
 });

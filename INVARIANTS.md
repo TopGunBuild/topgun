@@ -869,7 +869,7 @@ weaker than a test.
 
 - **Scope:** `scan_values` / `scan_values_batched` of `WriteBehindDataStore` for a primary scan
   over an inner store that declares a scan order (`MapDataStore::scan_order`) — redb today,
-  declaring `ScanOrder::KEY_BYTES`.
+  declaring `PARTITION_THEN_KEY`.
 - **Preconditions:** the inner store upholds the four clauses of the declaration's contract,
   stated over the positions of its `ScanOrder`; the
   caller passes each returned cursor back unchanged, once, in order, with the same map; one
@@ -886,7 +886,8 @@ weaker than a test.
      the position of its last row fails the scan call.
 - **Maintaining code:** `map_data_store.rs` — `ScanOrder`; `write_behind.rs` —
   `overlay_scan_batch`, the two scan bodies (snapshot before the inner read), `flush_loop` and
-  `drain_for_shutdown` (row before slot); `redb.rs` — `scan_from` and `scan_order`.
+  `drain_for_shutdown` (row before slot); `engine_store.rs` — the partition scan (`scan_from`)
+  and `PARTITION_THEN_KEY`, which `scan_order` declares.
 - **Enforcing test:** `write_behind.rs::a_staged_key_whose_durable_row_is_in_a_later_batch_is_emitted_once`,
   `write_behind.rs::a_staging_only_key_is_emitted_in_the_batch_whose_key_range_holds_it`,
   `write_behind.rs::a_key_flushed_between_two_batches_is_emitted_once`,
@@ -908,8 +909,10 @@ weaker than a test.
   `write_behind.rs::over_a_store_that_does_not_declare_key_order_a_staged_key_with_a_later_row_is_still_emitted_twice`
   (pins the order-free rule over a store that does not declare a scan order, double emission
   included — the open defect, not wanted behaviour),
-  `redb.rs::scan_values_returns_rows_in_str_order_and_each_cursor_is_the_last_key_of_its_batch`,
-  `redb.rs::the_redb_store_declares_its_scan_order`,
+  `redb.rs::scan_values_returns_rows_in_the_declared_order_and_each_cursor_stands_for_the_last_key_of_its_batch`,
+  `redb.rs::the_redb_store_declares_its_scan_order` (re-asserted for the data-directory store:
+  it declares `PARTITION_THEN_KEY`),
+  `engine_store_tests.rs::s28_a_write_behind_scan_over_the_engine_store_emits_a_key_at_a_partition_boundary_once`,
   `write_behind.rs::a_staged_key_at_a_batch_boundary_between_partitions_is_emitted_once`,
   `map_data_store.rs::key_bytes_order_positions_are_the_key_bytes_and_reject_a_cursor_that_is_not_utf8`,
   `processors.rs::a_bounded_scan_returns_a_staged_non_resident_key_once`,
@@ -1109,13 +1112,16 @@ weaker than a test.
 
 - **Scope:** `WriteBehindDataStore` — the refusal branch of its flush task (a pass entry and a
   probe) and of its shutdown drain, its failure record and lifecycle state, `hard_flush`;
-  `MapDataStore::classify_error` and its one override, `RedbDataStore::classify_error`; and the
+  `MapDataStore::classify_error` and its one override, `EngineMapDataStore::classify_error`
+  (the redb store, `RedbDataStore`, is `EngineMapDataStore` over `RedbKvEngine`); and the
   shutdown path of the server binary (`bin/topgun_server.rs`). The store half holds for any
   embedder; the exit code is a property of the server binary only.
 - **Statement:**
   1. **Classification is by type.** An inner-store error is classified by
      `MapDataStore::classify_error`, whose default answer is `Unknown`. Only the redb store
-     overrides it: it returns `StoreBroken(cause)` for a `redb::StorageError` — bare, or inside
+     overrides it (its engine maps the redb error to `KvError::Broken { cause }`, and the
+     store's `classify_error` reads that variant): it returns `StoreBroken(cause)` for a
+     `redb::StorageError` — bare, or inside
      `CommitError::Storage`, `TransactionError::Storage` or `TableError::Storage` — that is one
      of four causes: `Io` (with the `io::ErrorKind`, so a full disk shows as `StorageFull`),
      `PreviousIo` (the handle has latched after an earlier I/O error), `Corrupted` and
@@ -1160,10 +1166,12 @@ weaker than a test.
   over the same bytes with the backend healed, after `WalRecovery`, holds every acknowledged
   value.
 - **Maintaining code:** `map_data_store.rs` — `StoreErrorClass`, `StoreBrokenCause`,
-  `MapDataStore::classify_error`. `redb.rs` — `classify_error`, `broken_cause`, `table_exists`
-  (a catalog that cannot be read is an error, never "no such table", so a remove is not
-  reported done on a broken store), the `fault_io` backend (`fault-injection` builds and tests
-  only). `write_behind.rs` — `requeue_refused`, `run_flush_pass` and the `store_broken` flag of
+  `MapDataStore::classify_error`. `redb.rs` — `broken_cause`, the `fault_io` backend
+  (`fault-injection` builds and tests only). `redb_engine.rs` — the error mapping
+  (`kv_from_storage`, `kv_from_commit`, `kv_from_transaction`, `kv_from_table`) that turns the
+  four causes into `KvError::Broken`. `engine_store.rs` — `classify_error`, and the
+  registry-read rule: a registry read that fails is an error, never "no such map", so a remove
+  is not reported done on a broken store. `write_behind.rs` — `requeue_refused`, `run_flush_pass` and the `store_broken` flag of
   `RetrySchedule`, `record_store_broken` (record, state, line, counter in that order),
   `failed_reason`, the refusal arm of `drain_for_shutdown`, `finish_shutdown`,
   `BackgroundFailure::{store_broken, cause_label}`. `bin/topgun_server.rs` — `exit_code_for`,
@@ -1198,7 +1206,7 @@ weaker than a test.
 |----------|----------------|---------------|
 | `a_latched_redb_store_fails_the_write_behind_store` (`redb.rs`) | predicate (a), (b) and (d)'s `Err`, over redb with ENOSPC injected below it: after the refused flush the next write is refused, the record holds a failure, `hard_flush` returns `Err` | CI (`cargo test`) |
 | `a_shutdown_drain_on_a_latched_redb_store_reports_a_failure` (`redb.rs`) | the drain alone meets the broken store: `hard_flush` returns `Err` and the failure is recorded, so a stop begun by a signal is a failure | CI (`cargo test`) |
-| `a_remove_on_a_store_that_cannot_read_its_catalog_is_not_reported_done`, `a_remove_all_on_a_store_that_cannot_read_its_catalog_is_not_reported_done` (`redb.rs`) | a catalog read that fails is an error on both remove paths, not "no such table, nothing to delete" | CI (`cargo test`) |
+| `a_remove_on_a_store_that_cannot_read_its_catalog_is_not_reported_done`, `a_remove_all_on_a_store_that_cannot_read_its_catalog_is_not_reported_done` (`redb.rs`) | a registry read that fails is an error on both remove paths, not "no such map, nothing to delete" (the test names keep the word "catalog" of the table-per-map store) | CI (`cargo test`) |
 | `t_classify_by_type` (`redb.rs`) | each of the four causes in each wrapper, also under `.context(..)`, is `StoreBroken` with its cause; `ValueTooLarge`, the map-name refusal, a real `TableTypeMismatch`, the fault-injection refusal string and a bare `std::io::Error` are `Unknown` | CI (`cargo test`) |
 | `t_previous_io_through_the_write_behind_flush` (`redb.rs`) | a handle that latched before the write-behind store saw it: the first flush meets `PreviousIo` through `TransactionError` and the store fails with cause `previous_io` | CI (`cargo test`) |
 | `t_restart_heals` (`redb.rs`) | predicate (e) and (g): on a real WAL the un-stored frames stay unapplied; reopened over the same bytes with the backend healed and recovered from the WAL, every acknowledged value is there and a removed key is absent | CI (`cargo test`) |
@@ -1229,7 +1237,7 @@ weaker than a test.
   process; the supervisor paces it. On a still-full disk it is a loop of exit 1 at the store
   open.
 - **One corrupted page stops the node**, although redb raises `Corrupted` per page and the other
-  tables still read. Likewise a `LockPoisoned` that came from a per-transaction lock after a
+  pages still read. Likewise a `LockPoisoned` that came from a per-transaction lock after a
   caught panic stops it. The class is "fatal for this process" by decision, not a proof that no
   later call could succeed.
 - **A full disk is injected, not real.** ENOSPC comes from a wrapper below redb; no run used a
@@ -2028,63 +2036,60 @@ weaker than a test.
   witnessed end-to-end by `tests/integration-rust/stray-op-ack.test.ts`.
 - **Status:** decided, **enforced** (clauses (b) and (c) client-side, as stated above).
 
-### TG-NAME-001: The redb table-name mapping is injective, class-disjoint and renames nothing
+### TG-NAME-001: Map names are stored as their bytes in the map registry; the table-per-map names exist only in a legacy file, which the one-time migration decodes totally and injectively and copies without renaming
 
-- **Scope:** `RedbDataStore`: the mapping from a `(map name, is_backup)` pair to a redb table name
-  (`table_name_for`) and its inverse on primaries (`list_maps`), for every name the store accepts.
+- **Scope:** `RedbDataStore` (`EngineMapDataStore` over `RedbKvEngine`) for every name the store
+  accepts; the legacy table-name mapping `table_name_for` and its inverse `decode_table_name`,
+  used only by the one-time migration of a table-per-map store file (`TG-ENG-007`).
 - **Definitions:** `S` (storable) = names that are non-empty, do not end in `__backup` and contain
   no U+0000. `V` (identifier class) = members of `S` matching `^[a-zA-Z_][a-zA-Z0-9_]*$` — exactly
-  the set the store accepted before this invariant. `W` = `S \ V`. `table(n, backup)`: for
-  `n ∈ V` → `"map__"+n` / `"map__"+n+"__backup"`; for `n ∈ W` → `"mapr__"+n` / `"maprb__"+n`.
-- **Statement:** for all `n ∈ S` and both values of `backup`:
-  1. *Four ranges.* `P_old = "map__"·V`, `B_old = "map__"·V·"__backup"`, `P_new = "mapr__"·W`,
-     `B_new = "maprb__"·W`.
-  2. *Old vs new, primary vs backup (new).* Every string of `P_old ∪ B_old` has `_` at byte index
-     3; every string of `P_new ∪ B_new` has `r` there. Every string of `P_new` has `_` at byte
-     index 4; every string of `B_new` has `b` there. So `(P_old ∪ B_old)`, `P_new` and `B_new`
-     are pairwise disjoint.
-  3. *Primary vs backup (old).* `"map__"+a == "map__"+b+"__backup"` ⇒ `a == b+"__backup"`, which
-     is not in `S`. So `P_old ∩ B_old = ∅`, and a table of `P_old` never ends in `__backup`.
-  4. *Within a range* the mapping is a constant prefix (plus, for `B_old`, a constant suffix)
-     around `n`, hence injective. With 2 and 3: `table` is injective on `S × {primary, backup}`.
-  5. *`list_maps` is the total, unambiguous inverse on primaries.* The three prefixes are mutually
-     exclusive (step 2: none is a prefix of another), so each catalog name takes at most one
-     branch, in any order: `mapr__` → strip 6 bytes → the raw name; `maprb__` → skipped; `map__` →
-     strip 5 bytes, skipped if the rest ends in `__backup`, else the name; anything else →
-     ignored. Sharp cases:
-     - `V`-name `r__x` → `map__r__x` (index 3 is `_`) — decodes to `r__x`, not to a `W`-name `x`;
-     - `V`-name `rb__x` → `map__rb__x` — decodes to `rb__x`, is not a `W` backup;
-     - `W`-names `map__a-b`, `mapr__a-b`, `maprb__a-b` → `mapr__map__a-b`, `mapr__mapr__a-b`,
-       `mapr__maprb__a-b` — each decodes to itself (only the first 6 bytes are stripped; index 4
-       is `_`, so none is read as a backup);
-     - `W`-name `a-b__backup_data` → `mapr__a-b__backup_data` — the `W` branch has no suffix logic;
-     - `V`-name `x__backup_data` → `map__x__backup_data` — does not end in `__backup`, listed;
-     - a name ending in `__backup` (either class) is not in `S` and reaches no table.
-  6. *Nothing is renamed.* For `n ∈ V` both table names are byte-identical to the ones the binary
-     built from `07d009f0` uses. The three fixed internal maps (`_topgun_tombstone_cursors_v2`,
-     `_topgun_device_credentials`, `__topgun_policies`) are in `V`. No table with byte `r` at
-     index 3 can exist in a store written only by earlier binaries, whose only table constructor
-     was `format!("map__…")`.
-- **Maintaining code:** `packages/server-rust/src/storage/datastores/redb.rs` — `table_name_for`
-  (refusal plus mapping in one call: it applies the shared rule `check_map_name` of
-  `storage/map_data_store.rs`, refuses a name outside `S` and returns the table name, so no path
-  to a table can skip the refusal) and `list_maps`. Citations are kept line-number-free on
-  purpose, per `TG-OR-004`.
-- **Enforcing test:** `table_names_keep_the_old_class_and_prefix_the_new_class` (steps 1-6 and the
-  sharp cases of step 5), `store_refused_names_reach_no_table_and_backups_stay_unlisted` (step 3)
-  and `map_names_outside_the_identifier_class_round_trip` (the round trip over the probe set) —
-  all in `redb.rs`'s test module. The old-binary consequence of step 2 is proven outside the Rust
-  tree, by the two-binary run `tests/integration-rust/map-name-rollback.test.ts`: the `07d009f0`
-  binary starts and serves every `V` map on a store that holds `mapr__` / `maprb__` tables, after
-  a clean stop and after `kill -9`. That run needs the older binary, so CI excludes it and it is
-  run locally; the rollback note in `CLAUDE.md` states what was measured.
-- **Violation consequence:** two maps, or a map and another map's backup partition, share one
-  table: one silently overwrites the other, or a primary is read as a backup and dropped from
-  `list_maps`, so the boot serves Merkle root 0 for durable data. Or an existing table is renamed
-  and its data is unreachable after an upgrade. Or an earlier binary lists a table it cannot scan
-  and refuses to start, which breaks rollback.
+  the set the store accepted before map names left the identifier class. `W` = `S \ V`.
+  `table(n, backup)`, the legacy mapping: for `n ∈ V` → `"map__"+n` / `"map__"+n+"__backup"`; for
+  `n ∈ W` → `"mapr__"+n` / `"maprb__"+n`.
+- **Statement:**
+  1. *New format.* A map name is stored as its UTF-8 bytes in the map registry of the data
+     directory's store (`TG-ENG-005`); no redb table carries it. The store still refuses every name
+     outside `S` (`check_map_name`, applied by `EngineMapDataStore` before anything touches the
+     engine). The reason this set is kept in the new format is **compatibility of the
+     input contract** (`TG-NAME-002`): every client and every older store refuse the same names, so a
+     name one of them accepts is accepted by all. It is **not** a table-name collision, which the
+     registry no longer has.
+  2. *Legacy decode.* A legacy table name decodes by exactly one of four rules: `mapr__X` →
+     `(X, primary)`; `maprb__X` → `(X, backup)`; `map__X__backup` with `X ∈ V` → `(X, backup)`;
+     `map__X` with `X ∈ V` not ending in `__backup` → `(X, primary)` — the four ranges
+     `P_new = "mapr__"·W`, `B_new = "maprb__"·W`, `B_old = "map__"·V·"__backup"`,
+     `P_old = "map__"·V` — and is accepted only if it round-trips: `table(X, backup) == name`. The
+     ranges are pairwise disjoint (byte 3 is `_` in `P_old ∪ B_old` and `r` in `P_new ∪ B_new`;
+     byte 4 separates `P_new` from `B_new`; `"map__"+a == "map__"+b+"__backup"` would need
+     `a ∉ S`), so the decode is total on the image of `table` and injective. Any other table name,
+     any multimap table and any table whose key/value types are not `&str`/`&[u8]` refuses the
+     migration, and the legacy file is left as it was.
+  3. *Nothing renamed.* After a migration `list_maps` equals the `list_maps` of the legacy file
+     byte for byte, and every row's key and value bytes are preserved (values are copied verbatim,
+     not decoded).
+- **Maintaining code:** `packages/server-rust/src/storage/datastores/redb.rs` — the legacy
+  decoder `decode_table_name`, `read_legacy_catalog`, `table_name_for` (refusal plus mapping in
+  one call, so no legacy table name is obtainable for a name outside `S`) and the copy and
+  verification of the migration; `engine_store.rs` — the map registry and `check_name`. Citations
+  are kept line-number-free on purpose, per `TG-OR-004`.
+- **Enforcing test:** `table_names_keep_the_old_class_and_prefix_the_new_class` (the four ranges,
+  their disjointness and the sharp cases of the legacy mapping),
+  `store_refused_names_reach_no_table_and_backups_stay_unlisted` and
+  `map_names_outside_the_identifier_class_round_trip` — in `redb.rs`'s test module;
+  `m02_a_legacy_file_is_migrated_byte_for_byte_and_kept_under_the_pre_migration_name`,
+  `m03_list_maps_after_a_migration_equals_the_legacy_list_maps` and
+  `m07_a_legacy_table_that_is_not_a_store_table_refuses_the_migration` — in
+  `redb_migration_tests.rs`. What an older binary does on a migrated store is stated by
+  `TG-ENG-007` and proven by the two-binary run `tests/integration-rust/map-name-rollback.test.ts`
+  (the rollback rule in `CLAUDE.md`); it needs the older binary, so CI excludes it and it is run
+  locally.
+- **Violation consequence:** two legacy tables would be copied into one map, or a primary read as
+  a backup and dropped from `list_maps`, so the migrated store serves Merkle root 0 for durable
+  data; or a map is renamed by the migration and its data is unreachable after the upgrade; or a
+  name one client accepts is refused by another store.
 - **Discovered by:** the map-name durability investigation of TODO-751 (acked writes to
-  `user-profiles` / `users/profiles` gone after a restart on redb); SPEC-381a.
+  `user-profiles` / `users/profiles` gone after a restart on redb); SPEC-381a; rewritten for the
+  data-directory store by SPEC-394d.
 - **Status:** decided, **enforced**.
 
 ### TG-NAME-002: A name outside the admissible set is refused before the WAL append and before the ack
@@ -2122,8 +2127,8 @@ weaker than a test.
   authorization bypass group (`JournalRead`, `UnregisterResolver`, `ListResolvers`) are in the
   same position. `TopicPublish` and `CounterSync` carry a topic / counter name, not a map name.
 - **Stated boundaries:** (a) Trusted origins (`Forwarded`, `Backup`, `Wan`, `System`) early-return
-  in `AuthorizationService::call`; for them the store's own check (TG-NAME-001, `table_name_for`)
-  is the last line. (b) HTTP `/sync` **queries** do not pass through the pipeline; they read
+  in `AuthorizationService::call`; for them the store's own check (TG-NAME-001, `check_map_name`
+  in `EngineMapDataStore`) is the last line. (b) HTTP `/sync` **queries** do not pass through the pipeline; they read
   resident records only and write nothing. HTTP `/sync` **operations** do pass through it, by the
   same per-op fold as an `OpBatch`, and are covered. (c) The invariant states what the server
   does, not what the client is told: on the single-message WebSocket path a refusal produces no
@@ -2665,6 +2670,93 @@ weaker than a test.
   as if it were its own, or a half-finished migration as complete.
 - **Not claimed:** that only the migration issues `SetMigrationMark` — a mark set on a store from
   `open` makes the next `open` refuse (fail-closed, nothing is lost); keeping the op to the
-  migration path is the migration's obligation (SPEC-394d).
+  migration path is the migration's obligation (`TG-ENG-007`, clause 6).
 - **Discovered by:** SPEC-394b2.
+- **Status:** decided, **enforced**.
+
+### TG-ENG-007: The store is a data directory in a format this binary knows; a table-per-map file is migrated once, resumably, and kept; every location that is not unambiguous is refused without side effects; while a store is open the old path holds the stub, which an older binary refuses; only the migration writes the mark
+
+- **Scope:** `RedbDataStore::open_location` (the location rules L1–L13, the migration and the
+  stub) and `RedbDataStore::new` (the same rules with no legacy path), as called by the server
+  binary's `select_datastore` before `WalWriter::new` and before the listener; `run_migration`.
+  `D` = `TOPGUN_DATA_DIR` (or the directory derived from `TOPGUN_REDB_PATH`, or
+  `./topgun-data`); `L` = `TOPGUN_REDB_PATH` (default `./topgun.redb`), the legacy path;
+  `K` = `{L}.pre-migration`; the stub = a regular file at `L` of at most 16 384 bytes whose first
+  21 bytes are `TOPGUN-STORE-MOVED 1\n`.
+- **Statement:**
+  1. *One store, a known format.* The store is the data directory `D`, holding `engine.redb`.
+     Every open of an existing store goes through `EngineMapDataStore::open` or
+     `open_for_migration`, so a store of an unknown format or with an unfinished migration is
+     never served (`TG-ENG-006`).
+  2. *Migrated once, resumably, and kept.* A table-per-map file at `L` with no store in `D` is
+     migrated once: its rows are copied with their value bytes verbatim, and the migration mark
+     that says how far the copy got is written in the one engine batch of the copied rows, so an
+     interrupted migration — at any point, any number of times — converges to the same content as
+     an uninterrupted one. The copy is verified (row counts, every value byte for byte, the
+     primary map set) before the legacy file is renamed to `K`, which is kept until an operator
+     deletes it.
+  3. *Refusal without side effects.* Every location that is not unambiguous is refused — an
+     empty variable, `D` and `L` naming the same place or one inside the other, a `D` that is
+     neither a store, an empty directory nor absent, **two stores** (a data-directory store and a
+     table-per-map file at the old path), an empty file at `L` beside a store, a mark that cannot
+     be resumed at this location, a kept `K` with no store, a stub with no store, a file at `L`
+     that is not a table-per-map store, a catalog with a table that does not decode, too little
+     free space. A refusal logs one error line, returns the error (the binary exits 1), and
+     creates, moves and deletes nothing: `L`, `K` and the stub stay byte-identical and the sorted
+     path list is unchanged. The engine directory's **key/value content** is unchanged; its
+     **bytes are not claimed**, because a refusal that must read the mark opens the engine, and
+     that open commits. The logical content is the `KvEngine` key space of `D/engine.redb` —
+     every key and value of `KvSnapshot::iter(KeyRange::default())`; access to `engine.redb`
+     other than through `RedbKvEngine` (for example a raw `redb::Database` handle adding a table)
+     is out of contract.
+  4. *The stub.* Whenever the server holds an open store in `D` and nothing is at `L`, it writes
+     the stub there, whole or not at all (a temporary file, `sync_all`, `rename`, `fsync` of the
+     parent), so `L` is never observed empty or partial. This binary never migrates the stub. A
+     binary built before the layout change (read for `07d009f0`, tested for `b346e277`) started
+     with the same environment meets the stub, and started with `TOPGUN_REDB_PATH={D}` meets a
+     directory: either way its redb refuses the open, before `WalWriter::new` and before it
+     listens, so it exits non-zero, serves nothing and changes no file — neither the store nor
+     the WAL.
+  5. *Exclusive verification.* The migration and its verification run inside the store open,
+     before the server opens its WAL or accepts any write, on the one engine handle this process
+     opened (redb's exclusive lock refuses a second open of `engine.redb`) and holds from the
+     location rules to the end of the migration, so the verification's snapshots see one state.
+  6. *Only the migration writes the mark.* In production code the only function that constructs
+     `RecordOp::SetMigrationMark` is `run_migration` in `redb.rs` (the first mark goes through
+     `open_for_migration`).
+- **Maintaining code:** `storage/datastores/redb.rs` — `StoreLocation::from_env`,
+  `RedbDataStore::{open_location, new}`, the row evaluation, `MovedMarker`, the migration mark
+  codec, `run_migration`, `verify`, `read_legacy_catalog`; `bin/topgun_server.rs` —
+  `select_datastore`. Citations are kept line-number-free on purpose, per `TG-OR-004`.
+- **Enforcing test:** `m01_a_fresh_start_creates_the_data_directory_and_the_stub`,
+  `m02_a_legacy_file_is_migrated_byte_for_byte_and_kept_under_the_pre_migration_name`,
+  `m04_k_interrupted_migrations_end_byte_for_byte_equal_to_an_uninterrupted_one`,
+  `m05_a_killed_process_resumes_from_its_mark`,
+  `m08_every_refusing_row_of_the_location_table_touches_nothing`, `m09_the_same_place_rules`,
+  `m11_a_store_with_a_legacy_file_beside_it_is_refused_and_touches_nothing`,
+  `m12_insufficient_free_space_refuses_and_touches_nothing`,
+  `m14_an_older_binary_cannot_open_the_stub_or_the_data_directory`,
+  `m19_the_stub_is_never_a_migration_source`,
+  `m21_a_store_with_an_empty_file_at_the_old_path_is_refused_and_touches_nothing`,
+  `m22_the_migration_holds_the_engine_exclusively_until_the_store_is_open` — in
+  `storage/datastores/redb_migration_tests.rs`. Clause 6 is checked mechanically: a program over
+  `redb.rs` lists the enclosing production function of every `SetMigrationMark(` and must print
+  exactly `run_migration`, and no other production file but `engine_store.rs` names the op.
+  Clause 4 for a real older binary is proven by the two-binary run
+  `tests/integration-rust/map-name-rollback.test.ts` (local, the `b346e277` binary,
+  `FORMAT_OLD_SERVER_BINARY`): the older binary on the stub and on the data directory, after a
+  clean stop and after `kill -9` of the newer one; the documented rollback and rolling forward
+  again; a table-per-map file beside a store refused. It needs the older binary, so CI excludes
+  it and it is run locally.
+- **Violation consequence:** an older binary started on the old path initialises an empty store
+  and serves empty maps; a server started with a store in `D` and a table-per-map file at `L`
+  silently serves one of them and leaves the other's writes out; a refused start moves or
+  deletes the operator's only copy of the data; an interrupted migration serves a partial copy;
+  a mark written outside the migration makes the next open refuse a healthy store.
+- **Not claimed:** an older binary pointed at the data directory's `engine.redb` itself
+  (`TOPGUN_REDB_PATH={D}/engine.redb`) is not protected: it opens that file as a table-per-map
+  store with no maps and serves empty maps. The bytes of `engine.redb` across a refusal. A
+  rollback after a `kill -9` of the new binary. Any binary older than `07d009f0`. A tool that
+  exports the new format back to tables — there is none.
+- **Discovered by:** SPEC-394d (the table-per-map store moved behind `KvEngine`).
 - **Status:** decided, **enforced**.

@@ -18,13 +18,19 @@ TopGun follows [Semantic Versioning](https://semver.org/) (semver):
 
 For the complete list of releases with detailed notes, visit the [GitHub Releases page](https://github.com/topgunbuild/topgun/releases).
 
+### Unreleased -- Changed (on-disk format): the store moves into a data directory
+
+The server keeps its store in a data directory, `TOPGUN_DATA_DIR` (default: `topgun-data` beside `TOPGUN_REDB_PATH` when that is set, else `./topgun-data`; the container image and the Helm chart use `/data/topgun-data`). The first start of this version moves an existing store into it by itself, once: nothing to run by hand, and the migration resumes where it stopped if the process is interrupted. `TOPGUN_REDB_PATH` now names only the store file of earlier versions. That file is kept as `{TOPGUN_REDB_PATH}.pre-migration`, and a small marker file at `TOPGUN_REDB_PATH` makes an older server binary refuse to start instead of serving an empty store. Copy the old file to another disk before upgrading, and keep 1.5 × its size plus 64 MiB free.
+
+**Rollback** is only a return to the kept file, and loses on the server every write acknowledged since the upgrade; there is no tool that exports the new format back. **Backup:** stop the server and copy the whole data directory together with the WAL directory. See [Storage backends](/docs/deploy/storage-backends#upgrading-from-a-store-file) and, if the server refuses to start, [Troubleshooting](/docs/guides/troubleshooting#server-refuses-to-start-with-a-store-location-or-store-migration-line).
+
 ### Unreleased -- Postgres backend removed
 
 The server keeps its data in an embedded store (redb) inside the process, so there is no database to run. The Postgres backend has been removed: the `postgres` cargo feature, `STORAGE_BACKEND=postgres`, reading `DATABASE_URL`, the Postgres service and `dbtools` profile of the compose file, and the PostgreSQL choice in the `topgun` CLI setup are gone.
 
 **If you ran on Postgres:** the server now refuses to start when `STORAGE_BACKEND=postgres` is set or when `DATABASE_URL` is set (an empty value counts). Unset `DATABASE_URL` to start on the embedded store. There is no migration tool: data kept by the Postgres backend remains available with the server built from the tag `postgres-backend-last`.
 
-**Backup:** stop the server, copy the redb file (`TOPGUN_REDB_PATH`) and the WAL directory (`TOPGUN_WAL_DIR`), start it again. A copy of a running server's files is not a supported backup. See [Storage backends](/docs/deploy/storage-backends).
+**Backup:** stop the server, copy the data directory (`TOPGUN_DATA_DIR`, see the entry above) and the WAL directory (`TOPGUN_WAL_DIR`), start it again. A copy of a running server's files is not a supported backup. See [Storage backends](/docs/deploy/storage-backends).
 
 **Deployment:** the `cluster` and `auto-setup` compose services keep data on named volumes, and the Helm chart gets a persistent volume, correct probe paths, `replicaCount: 1` and the disruption budget off by default.
 

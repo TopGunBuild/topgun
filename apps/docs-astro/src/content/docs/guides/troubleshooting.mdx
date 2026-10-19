@@ -163,7 +163,39 @@ This guide covers common issues you may encounter when using TopGun, organized b
 - Unset `DATABASE_URL` (an empty value counts as set), and remove `STORAGE_BACKEND=postgres` if you set it. The server then starts on the embedded store (`STORAGE_BACKEND=redb`, the default). Check your shell, `.env` files, compose files and container environment.
 - Data kept by the old Postgres backend is not read by this server. There is no migration tool: it remains available with the server built from the tag `postgres-backend-last`.
 - See [Storage Backends](/docs/deploy/storage-backends) for the embedded store, its paths and backup
-- If the server starts on the default redb store and you see write failures, check that the redb file path is writable (defaults to `./topgun.redb`; override with `TOPGUN_REDB_PATH`)
+- If the server starts on the default embedded store and you see write failures, check that the data directory is writable (defaults to `./topgun-data`; override with `TOPGUN_DATA_DIR`)
+
+### Server refuses to start with a store location or store migration line
+
+**Symptom:** The server exits with code 1 at startup, before it listens, with an error that begins with `store location:` or `store migration:` (a refusal is also logged as one `ERROR` line).
+
+**Cause:** The server keeps its store in a data directory (`TOPGUN_DATA_DIR`) and, once, migrates the store file of earlier versions (`TOPGUN_REDB_PATH`) into it. When the two paths do not say unambiguously which store to serve, it refuses rather than guess. A refusal creates, moves and deletes nothing: the old store file, the kept `.pre-migration` file and the marker file stay exactly as they were, and the data directory's records are unchanged. Fix the cause and start again. Below, `{D}` is the data directory, `{L}` the path `TOPGUN_REDB_PATH` names (default `./topgun.redb`), and `{K}` the kept file `{L}.pre-migration`. The `store location: data directory {D}` line logged just before the refusal shows the paths the server used (`data_dir`, `data_dir_source`, `legacy_path`).
+
+**Solutions, by the line the server logged:**
+
+- `store location: {VAR} is set but empty` — `TOPGUN_DATA_DIR` or `TOPGUN_REDB_PATH` is set to an empty value. Unset it to use the default, or set a path.
+- `store location: TOPGUN_DATA_DIR ({D}) and TOPGUN_REDB_PATH ({L}) name the same place or one lies inside the other` — give the data directory and the old store path different places, neither inside the other, for example `/data/topgun-data` and `/data/topgun.redb`.
+- `store location: {D} is not a store directory, an empty directory or absent` — the data directory holds files but no store (`engine.redb`), or is a file. Point `TOPGUN_DATA_DIR` at an empty or absent directory, or at the directory that holds your store.
+- `store location: two stores found: {D} holds a store in the data-directory format and {L} is a table-per-map store file; the server serves only one. Move one of them aside: rename {L} to keep the data-directory store, or move {D} away to migrate {L} again` — an old store file was put back beside an existing data directory (for example restored from a backup, or after a rollback that left the data directory in place). Decide which one holds the data you want. To keep the data directory, rename the file at `{L}`; the server then writes its marker file there. To serve the old file, move `{D}` away; the next start migrates `{L}` into a new data directory.
+- `store location: {L} is an empty file; an older binary would open it as an empty store. Delete it, and this server writes the marker file there` — delete the empty file; the next start writes the marker file in its place.
+- `store location: {L} says the store was moved to a data directory, but {D} holds no store` — `{L}` holds the marker file, but `TOPGUN_DATA_DIR` points at a directory without a store. Point `TOPGUN_DATA_DIR` at the directory the marker file names (its second line says which), or restore that directory from your backup. The marker file is never a store, so the server does not migrate it.
+- `store location: a pre-migration store file is kept at {K}, but {D} holds no store; restore the data directory, or rename {K} to {L} to migrate it again` — the data directory is missing after a migration. Restore it from your backup, or rename `{K}` to `{L}` so the next start migrates that file again (writes acknowledged after the first migration are not in it).
+- `store migration: a pre-migration file already exists at {K}; move it away before migrating {L}` — a previous migration's kept file is in the way. Move `{K}` somewhere else (keep it until the new store is confirmed), then start again.
+- `store migration: {L} is not a table-per-map store file` — the file at `{L}` is neither a store of an earlier version nor the marker file (an empty file counts). Point `TOPGUN_REDB_PATH` at your old store file, or move the file away to start with an empty store.
+- `store migration: refusing to migrate {L}: … table(s) are not table-per-map store tables: …` — the old file holds tables that no TopGun version created (at most 20 are named). The file is left as it was. Check that `TOPGUN_REDB_PATH` names the TopGun store file and not another redb database.
+- `store migration: refusing to migrate {L}: its path is not UTF-8` — move the file to a path whose name is valid UTF-8 and point `TOPGUN_REDB_PATH` there.
+- `store migration: refusing to start: {available} bytes are free on the file system of {D}, {required} are needed (1.5 × the size of {L}, plus 64 MiB); nothing was changed` — free disk space on the data directory's file system (or point `TOPGUN_DATA_DIR` at a larger one) and start again. While the kept file exists the node needs about twice the disk of the store.
+- `store migration: refusing to resume the migration from {source}: {reason}` — a migration was interrupted, and what is at the paths now no longer matches it. By reason:
+  - `the store is being migrated from that file, not from {L}` — `TOPGUN_REDB_PATH` changed during the migration. Set it back to `{source}`; the next start resumes.
+  - `{L} is not the table-per-map store file the copy reads` — the old file was moved or replaced during the migration. Put it back at `{L}`; the next start resumes.
+  - `a pre-migration file already exists at {K}` — a kept file appeared during the migration. Move `{K}` away; the next start resumes.
+  - `both {L} and {K} hold something; the copy is verified and only one of them may` — move aside whichever of the two is not the file the migration started from; the next start finishes the migration.
+  - `neither {L} nor {K} holds the legacy file the verified copy was taken from` — put the old store file back at `{L}` or `{K}`, or move `{D}` away and start from your backup.
+- `store migration: refusing to resume the migration from an unknown source: the mark cannot be read (…)` — the data directory holds an unfinished migration this server cannot read. Move `{D}` away and start again: the old file at `{L}` is migrated anew.
+- `store migration: verification failed for {table}: {difference}; {D} is left unfinished and is refused until it is removed` — the copy in the data directory does not match the old file. The old file is untouched. Move `{D}` away and start again to migrate anew; if the failure repeats, keep the logs and the old file and report it.
+- `store location: cannot write the stub at {L}` — the server could not write its marker file at `{L}`: check that the directory of `{L}` is writable by the server.
+
+**Not a refusal:** `store location: TOPGUN_REDB_PATH names {L}, which is not read: TOPGUN_DATA_DIR ({D}) already holds a store` is a warning; the server starts on the data directory and leaves the file at `{L}` alone. Remove it, or point `TOPGUN_REDB_PATH` elsewhere, to silence it. `store format: the pre-migration store file is kept at {K}; delete it once this store is confirmed` is logged at every start while the kept file exists; delete `{K}` once you no longer need a way back (see [Storage backends](/docs/deploy/storage-backends)).
 
 ### Cluster nodes not discovering each other
 

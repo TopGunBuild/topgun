@@ -87,7 +87,7 @@ PORT=9000 pnpm start:server`}
     <div className="mt-1">
       <div className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center text-white text-[10px] font-bold">i</div>
     </div>
-    <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-green-600 dark:text-green-400">No external database required.</span> The server writes to <code>./topgun.redb</code> by default; data survives restarts. Set <code>TOPGUN_NO_AUTH=1</code> for auth-free local exploration. See the <a href="/docs/reference/server" className="underline">Server &amp; CLI reference</a> for flags and env vars.</span>
+    <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-green-600 dark:text-green-400">No external database required.</span> The server keeps its store in the data directory <code>./topgun-data</code> by default; data survives restarts. Set <code>TOPGUN_NO_AUTH=1</code> for auth-free local exploration. See the <a href="/docs/reference/server" className="underline">Server &amp; CLI reference</a> for flags and env vars.</span>
   </div>
 </div>
 

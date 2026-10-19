@@ -16,6 +16,7 @@ docker run -d \\
   -p 8080:8080 \\
   -e RUST_LOG=topgun_server=info \\
   -v topgun-data:/data \\
+  -e TOPGUN_DATA_DIR=/data/topgun-data \\
   -e TOPGUN_REDB_PATH=/data/topgun.redb \\
   -e TOPGUN_WAL_DIR=/data/topgun-wal \\
   topgun-server`;
@@ -32,9 +33,12 @@ services:
       - "8080:8080"
     environment:
       RUST_LOG: topgun_server=info
-      # redb is the default; TOPGUN_REDB_PATH sets the file location
+      # The store directory, on the volume
+      TOPGUN_DATA_DIR: /data/topgun-data
+      # The store file of earlier versions: migrated into TOPGUN_DATA_DIR once,
+      # then replaced by a small marker file
       TOPGUN_REDB_PATH: /data/topgun.redb
-      # The write-ahead log must sit on the same volume as the redb file
+      # The write-ahead log must sit on the same volume as the store directory
       TOPGUN_WAL_DIR: /data/topgun-wal
       # Optional: enable auth
       JWT_SECRET: your-dev-secret
@@ -72,6 +76,8 @@ spec:
               value: "topgun_server=info"
             - name: TOPGUN_BIND_ADDR
               value: "0.0.0.0"
+            - name: TOPGUN_DATA_DIR
+              value: "/data/topgun-data"
             - name: TOPGUN_REDB_PATH
               value: "/data/topgun.redb"
             - name: TOPGUN_WAL_DIR
@@ -209,11 +215,15 @@ The Dockerfile uses a multi-stage Rust build (`rust:1.85-bookworm`) and produces
 
 ## Backup and restore
 
-The data is two things on the volume: the redb file (`TOPGUN_REDB_PATH`, `/data/topgun.redb` in the image) and the write-ahead log directory (`TOPGUN_WAL_DIR`, `/data/topgun-wal` in the image). Acknowledged writes that are not yet in the redb file live in the WAL directory, so a backup needs both.
+The data is two directories on the volume: the data directory (`TOPGUN_DATA_DIR`, `/data/topgun-data` in the image) and the write-ahead log directory (`TOPGUN_WAL_DIR`, `/data/topgun-wal` in the image). Acknowledged writes that are not yet in the data directory live in the WAL directory, so a backup needs both.
 
-- **Back up:** stop the server (`SIGTERM`; it drains its write buffer and syncs the log, then exits 0), then copy the redb file and the WAL directory.
+- **Back up:** stop the server (`SIGTERM`; it drains its write buffer and syncs the log, then exits 0), then copy the whole data directory recursively and the WAL directory.
 - **Restore:** with the server stopped, put both back, then start it.
-- **Not supported:** a copy of a running server's files.
+- **Not supported:** a copy of a running server's directory.
+
+### Upgrading a volume from an earlier version
+
+Earlier versions kept the store as one file, `/data/topgun.redb`. The first start of this version migrates it into `/data/topgun-data` by itself, keeps the old file as `/data/topgun.redb.pre-migration`, and leaves a small marker file at `/data/topgun.redb` so that an older image refuses to start on the volume instead of serving an empty store. Copy `/data/topgun.redb` off the volume before upgrading, and make sure the volume has 1.5 × that file's size plus 64 MiB free. Rolling back is only a return to the kept file and loses every write acknowledged since the upgrade; see [Storage backends](/docs/deploy/storage-backends#upgrading-from-a-store-file).
 
 ## Kubernetes
 

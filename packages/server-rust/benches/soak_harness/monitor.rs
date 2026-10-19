@@ -2738,11 +2738,14 @@ fn is_exposition_timestamp(token: &str) -> bool {
 
 /// The embedded store file's apparent size in bytes, from filesystem METADATA
 /// only — the file is never opened, so sampling cannot perturb the process
-/// being measured. `None` on any failure, mirroring [`sample_rss_mb`]'s
-/// `None`-on-failure contract.
+/// being measured. The store is the engine file inside the server's data
+/// directory (`{data_dir}/topgun-data/engine.redb`); the size of that
+/// directory's own entry would say nothing about how much the store holds.
+/// `None` on any failure, mirroring [`sample_rss_mb`]'s `None`-on-failure
+/// contract.
 #[must_use]
 pub fn sample_redb_bytes(data_dir: &Path) -> Option<u64> {
-    let meta = std::fs::metadata(data_dir.join("topgun.redb")).ok()?;
+    let meta = std::fs::metadata(data_dir.join("topgun-data").join("engine.redb")).ok()?;
     meta.is_file().then_some(meta.len())
 }
 
@@ -5610,8 +5613,23 @@ topgun_x{a=\"3\"} NaN
         assert!(sample_redb_bytes(&dir).is_none());
         assert!(sample_wal_retention(&dir).is_none());
 
-        std::fs::write(dir.join("topgun.redb"), vec![0u8; 4_096]).expect("store file");
-        assert_eq!(sample_redb_bytes(&dir), Some(4_096));
+        // The store directory alone is not a store: its own metadata size must
+        // never be reported as the store's.
+        let store_dir = dir.join("topgun-data");
+        std::fs::create_dir_all(&store_dir).expect("store dir");
+        assert!(sample_redb_bytes(&dir).is_none());
+
+        // A length no directory entry reports, so a sampler that read the
+        // directory's metadata instead of the engine file's cannot match it.
+        let engine_file = store_dir.join("engine.redb");
+        std::fs::write(&engine_file, vec![0u8; 12_345]).expect("engine file");
+        let engine_len = std::fs::metadata(&engine_file).expect("engine meta").len();
+        assert_eq!(engine_len, 12_345);
+        assert_ne!(
+            std::fs::metadata(&store_dir).expect("store dir meta").len(),
+            engine_len
+        );
+        assert_eq!(sample_redb_bytes(&dir), Some(engine_len));
 
         let wal = dir.join("wal");
         std::fs::create_dir_all(&wal).expect("wal dir");

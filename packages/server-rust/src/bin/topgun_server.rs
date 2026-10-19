@@ -163,9 +163,8 @@ async fn select_datastore() -> anyhow::Result<(Arc<dyn MapDataStore>, StorageBac
         StorageBackend::Null => Ok((Arc::new(NullDataStore), StorageBackend::Null)),
         #[cfg(feature = "redb")]
         StorageBackend::Redb => {
-            let path =
-                std::env::var("TOPGUN_REDB_PATH").unwrap_or_else(|_| "./topgun.redb".to_string());
-            let store = RedbDataStore::new(&path)?;
+            let location = RedbDataStore::location_from_env()?;
+            let store = RedbDataStore::open_location(&location)?;
             store.initialize().await?;
             Ok((Arc::new(store), StorageBackend::Redb))
         }
@@ -3462,7 +3461,7 @@ mod tests {
                 (
                     Some(0),
                     true,
-                    r#"("Redb", true, [["k1"], ["k2"]])"#.to_string(),
+                    r#"("Redb", true, [["k2"], ["k1"]])"#.to_string(),
                 ),
                 "the binary's redb store declares a scan order and the wrap honours it"
             );

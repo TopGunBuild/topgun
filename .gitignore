@@ -124,8 +124,13 @@ vector_indexes.json
 # Scalar index descriptor (generated at runtime; path configurable via TOPGUN_INDEX_PATH)
 scalar_indexes.json
 
-# Embedded redb backend file (generated at runtime by `pnpm start:server`)
+# Embedded store (generated at runtime by `pnpm start:server`): the data directory,
+# the marker file left at the old store path (`topgun.redb`), the pre-migration copy
+# of a migrated store file, and the marker file's temporary name
 topgun.redb
+topgun-data/
+topgun.redb.pre-migration
+topgun.redb.stub-tmp
 
 # Local scratch directories (not part of the release)
 my-test-review/

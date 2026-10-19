@@ -77,6 +77,7 @@ ahash = "0.8"
 ordered-float = "4"
 regex = "1"
 redb = { version = "2", optional = true }
+fs4 = { version = "0.8", default-features = false }
 madsim = { workspace = true, optional = true }
 datafusion = { version = "45", optional = true }
 arrow = { version = "54", optional = true }

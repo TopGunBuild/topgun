@@ -24,18 +24,24 @@ RUN apt-get update && \
 COPY --from=builder /app/target/release/topgun-server /usr/local/bin/topgun-server
 
 # Run as non-root user for security. Create a /data directory owned by the
-# topgun user so the embedded redb backend has a writable path; the
-# previous image left redb to create ./topgun.redb in WORKDIR, which is
-# owned by root and panics with "Permission denied" on first write.
+# topgun user so the embedded store has a writable path for its store
+# directory; an image that left the store in WORKDIR, which is owned by root,
+# panicked with "Permission denied" on first write.
 RUN useradd --create-home --shell /bin/bash topgun && \
     mkdir -p /data && \
     chown topgun:topgun /data
 USER topgun
 WORKDIR /data
 
-# Persist the embedded redb database across container restarts. Mount with
+# Persist the embedded store across container restarts. Mount with
 # `docker run -v topgun-data:/data ...` (or a host path) to retain writes.
+# The store lives in the directory TOPGUN_DATA_DIR. TOPGUN_REDB_PATH names
+# only the store file of earlier images: the server migrates it into the
+# store directory once, keeps it as /data/topgun.redb.pre-migration, and
+# leaves a small marker file at /data/topgun.redb so an older image refuses
+# to start on this volume instead of serving an empty store.
 VOLUME ["/data"]
+ENV TOPGUN_DATA_DIR=/data/topgun-data
 ENV TOPGUN_REDB_PATH=/data/topgun.redb
 
 # Containers publish ports (docker -p / compose ports), which requires binding

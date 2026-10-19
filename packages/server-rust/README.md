@@ -9,7 +9,7 @@ Internal workspace crate — depends on [`topgun-core`](../core-rust/) for the C
 From the repository root:
 
 ```bash
-# Compile and run with the embedded redb backend (writes to ./topgun.redb)
+# Compile and run with the embedded redb backend (store in ./topgun-data)
 pnpm start:server
 
 # Or directly with cargo

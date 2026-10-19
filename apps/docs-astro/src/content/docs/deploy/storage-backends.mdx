@@ -10,8 +10,8 @@ import { ChevronRight, HardDrive, AlertTriangle } from 'lucide-react';
 export const redbStartCode = `# Default — no configuration needed
 pnpm start:server
 
-# Or with explicit path
-TOPGUN_REDB_PATH=/var/lib/topgun/data.redb \\
+# Or with explicit paths
+TOPGUN_DATA_DIR=/var/lib/topgun/data \\
 TOPGUN_WAL_DIR=/var/lib/topgun/wal \\
 pnpm start:server`;
 
@@ -45,7 +45,7 @@ TopGun keeps your data in an embedded store inside the server: there is no datab
   <span className="text-neutral-600 dark:text-neutral-300">A fast embedded key-value store — no external process required.</span>
 </div>
 
-[redb](https://github.com/cberner/redb) is the default store. The server opens a single file (`./topgun.redb` by default) directly in-process, and keeps acknowledged writes that are not yet in that file in a write-ahead log directory (`./topgun-wal` by default). No separate database, no Docker, no connection pool.
+Your data stays on a path you choose and survives restarts, with no separate database, no Docker and no connection pool. The server keeps the store in a data directory (`./topgun-data` by default), served in-process by [redb](https://github.com/cberner/redb), and keeps acknowledged writes that are not yet in the store in a write-ahead log directory (`./topgun-wal` by default).
 
 ### Starting with redb
 
@@ -58,22 +58,35 @@ TopGun keeps your data in an embedded store inside the server: there is no datab
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STORAGE_BACKEND` | `"redb"` | Set to `redb` or omit entirely |
-| `TOPGUN_REDB_PATH` | `./topgun.redb` | File path for the redb database file |
-| `TOPGUN_WAL_DIR` | `./topgun-wal` | Directory of the write-ahead log; keep it on the same volume as the redb file |
+| `TOPGUN_DATA_DIR` | `topgun-data` beside `TOPGUN_REDB_PATH` when that is set, else `./topgun-data` | The store directory; it holds `engine.redb` |
+| `TOPGUN_REDB_PATH` | `./topgun.redb` | The store file of earlier versions: migrated into the data directory once, then replaced by a small marker file (see below) |
+| `TOPGUN_WAL_DIR` | `./topgun-wal` | Directory of the write-ahead log; keep it on the same volume as the data directory |
 
-The container image sets `TOPGUN_REDB_PATH=/data/topgun.redb` and its write-ahead log lives in `/data/topgun-wal`, so a volume mounted at `/data` holds both.
+The container image sets `TOPGUN_DATA_DIR=/data/topgun-data` and `TOPGUN_REDB_PATH=/data/topgun.redb`, and its write-ahead log lives in `/data/topgun-wal`, so a volume mounted at `/data` holds everything. Every start logs `store location: data directory …` with the directory it uses and where that came from (`data_dir_source`).
+
+### Upgrading from a store file
+
+Earlier versions kept the store as one file at `TOPGUN_REDB_PATH`. The first start of this version moves it into the data directory by itself: nothing to run by hand, and the old file is kept.
+
+- **Before upgrading,** copy the `TOPGUN_REDB_PATH` file to another disk. The migration keeps it, but only a copy elsewhere survives the loss of this disk.
+- The migration runs at start-up, before the server listens. It needs 1.5 × the size of the old file plus 64 MiB free on the data directory's file system, and otherwise refuses to start without changing anything. It logs `store format: migrating … into … from the table-per-map format`, a `store migration progress` line at least every 10 s, and `store format: migration complete`.
+- It is resumable: if the process is stopped or killed during the migration, the next start continues from where it got to. A health probe that restarts the server converges as long as each run lives a few seconds; for a large store, give the start-up probe enough time.
+- The copy is verified before anything is renamed. Then the old file is kept as `{TOPGUN_REDB_PATH}.pre-migration` — every start logs `store format: the pre-migration store file is kept at …; delete it once this store is confirmed` — and a small marker file is written at `TOPGUN_REDB_PATH`.
+- **Do not delete the marker file** while an older server binary may be started with that path. An older binary refuses to start on it (it exits with an error before it listens, and changes no file); without it, an older binary would create an empty store and serve empty maps.
+- **Rolling back** is only a return to the kept file, and it loses on the server every write the new version acknowledged: stop the new server cleanly, move the data directory away, delete the marker file, rename `{TOPGUN_REDB_PATH}.pre-migration` back to `TOPGUN_REDB_PATH`, start the old server. There is no tool that exports the new format back. Never point an older binary at the data directory's `engine.redb` itself: it would open it as a store with no maps and serve empty maps.
+- If the server refuses to start with a `store location:` or `store migration:` line, see [Troubleshooting](/docs/guides/troubleshooting#server-refuses-to-start-with-a-store-location-or-store-migration-line).
 
 ### Notes
 
-- Data persists across server restarts as long as the redb file and the WAL directory exist.
+- Data persists across server restarts as long as the data directory and the WAL directory exist.
 - Single-process: not shared between multiple server instances.
 - For Docker deployments, mount the path as a volume so data survives container recreation.
 
 ### Backup and restore
 
-- **Back up:** stop the server (`SIGTERM` — it drains its write buffer and syncs the log, then exits 0), then copy the redb file (`TOPGUN_REDB_PATH`) **and** the WAL directory (`TOPGUN_WAL_DIR`). In the container image these are `/data/topgun.redb` and `/data/topgun-wal`.
+- **Back up:** stop the server (`SIGTERM` — it drains its write buffer and syncs the log, then exits 0), then copy the whole data directory (`TOPGUN_DATA_DIR`) recursively **and** the WAL directory (`TOPGUN_WAL_DIR`). In the container image these are `/data/topgun-data` and `/data/topgun-wal`.
 - **Restore:** with the server stopped, put both back, then start the server.
-- **Not supported:** a copy of a running server's files. The redb file alone is not the server's state while it runs, because acknowledged writes that are not yet in it live in the WAL directory, and a file copied while the server writes to it can mix pages from different moments.
+- **Not supported:** a copy of a running server's directory. The data directory alone is not the server's state while it runs, because acknowledged writes that are not yet in it live in the WAL directory, and a file copied while the server writes to it can mix pages from different moments.
 
 ## Postgres (removed)
 
@@ -110,7 +123,7 @@ startup the server logs a one-line `WARN` reporting how many legacy tombstone ro
 it found.
 
 The supported way to reclaim a legacy corpus is to **recreate the datastore**: stop
-the server, start it against a fresh store (a new `TOPGUN_REDB_PATH` and `TOPGUN_WAL_DIR`), and let clients reconnect. Because every client holds its own
+the server, start it against a fresh store (a new, empty `TOPGUN_DATA_DIR` with a `TOPGUN_REDB_PATH` that names no file, and a new `TOPGUN_WAL_DIR`), and let clients reconnect. Because every client holds its own
 authoritative local state, CRDT delta-sync restores the live data on reconnect while
 the stale legacy tombstones are simply not recreated. There is intentionally no
 in-place "drop legacy tombstones" switch — dropping a tombstone while a client still
