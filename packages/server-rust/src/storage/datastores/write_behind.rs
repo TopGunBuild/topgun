@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::sync::{watch, Notify};
 use topgun_core::{fnv1a_hash, PARTITION_COUNT};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::storage::engine::SlotCell;
 use crate::storage::map_data_store::{
@@ -2301,7 +2301,8 @@ impl WriteBehindDataStore {
         }
     }
 
-    /// The one way out of `hard_flush`: makes the WAL durable, then says
+    /// The one way out of `hard_flush`: makes the WAL durable, ends its
+    /// collection — writing its rollback hints when nothing failed — then says
     /// whether the store that was shut down had failed.
     ///
     /// The sync comes first and on every shutdown, not only a failed one. Under
@@ -2326,6 +2327,31 @@ impl WriteBehindDataStore {
         }
 
         let failure = self.background_failure.borrow().clone();
+        // After the sync, so the hints follow every frame this process wrote.
+        // Written exactly when this stop returns `Ok` — also after a drain
+        // that timed out or was refused — because a hint is always the durable
+        // watermark, never a pending frame's sequence; a failed node writes
+        // none and only ends the WAL's collection.
+        if let Some(tracking) = &self.wal {
+            let write_hints = failure.is_none();
+            match tracking.wal.finish(write_hints).await {
+                Ok(partitions) if write_hints && tracking.wal.watermark_in_store() => {
+                    let pending = self.pending_operation_count();
+                    info!(
+                        drained = pending == 0,
+                        pending, partitions, "write-behind shutdown: rollback hints written"
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    error!(
+                        error = %err,
+                        "write-behind shutdown: the WAL's rollback hints could not be written; \
+                         a rollback to an older binary is not exact after this stop"
+                    );
+                }
+            }
+        }
         let Some(failure) = failure else {
             return Ok(());
         };
