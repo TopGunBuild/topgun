@@ -16,11 +16,12 @@
 pub mod format;
 pub mod segment;
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -508,6 +509,37 @@ struct PartitionHandle {
     /// Sealed, immutable segments in ascending `first_seq` order (oldest at the
     /// front). GC reclaims a watermark-covered prefix from the front.
     sealed: AsyncMutex<Vec<Segment>>,
+    /// Bytes appended to the active segment, so the collection tick can seal
+    /// it by size. Changed only under the `active` lock.
+    active_bytes: AtomicU64,
+    /// When the first frame of the active segment was appended, so the
+    /// collection tick can seal it by age. Changed only under the `active`
+    /// lock.
+    active_first_append: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl PartitionHandle {
+    /// Counts a frame of `len` bytes appended to the active segment. Called
+    /// under the `active` lock.
+    fn note_append(&self, len: usize) {
+        if self.active_bytes.fetch_add(len as u64, Ordering::Relaxed) == 0 {
+            *self
+                .active_first_append
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(std::time::Instant::now());
+        }
+    }
+
+    /// Forgets the counts of a segment that was just sealed. Called under the
+    /// `active` lock.
+    fn note_rotation(&self) {
+        self.active_bytes.store(0, Ordering::Relaxed);
+        *self
+            .active_first_append
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
 }
 
 /// Where a [`WalWriter`] keeps its applied watermark, fixed at construction.
@@ -519,15 +551,39 @@ enum WalMode {
     Store {
         /// The store that holds the watermark. Weak, so the WAL never keeps
         /// the store alive.
-        // Read by the collection tick.
-        #[allow(dead_code)]
         store: std::sync::Weak<dyn MapDataStore>,
         /// The durable watermark of every WAL partition, indexed by
         /// partition: the value of its row once a commit carrying it
         /// returned. In memory only — the store's row is the durable copy.
         durable: Box<[AtomicU64]>,
+        /// The collection tick's state.
+        collection: Collection,
     },
 }
+
+/// The collection tick of a store-mode WAL: the only code that seals or
+/// unlinks a segment in that mode.
+struct Collection {
+    /// The collected-up-to value of every partition, as `wal-collected`
+    /// holds it. Its lock is the collection lock: a tick runs under it, so
+    /// two ticks never interleave, and `finish` takes it to wait for a
+    /// running tick to end.
+    collected: AsyncMutex<Box<[u64]>>,
+    /// Set by `finish`: no tick seals, writes or unlinks anything afterwards,
+    /// and the task ends at its next wake.
+    closed: AtomicBool,
+    /// Wakes the tick task before its interval has passed.
+    wake: Arc<tokio::sync::Notify>,
+    /// The tick task, once spawned.
+    task: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
+}
+
+/// How often the collection tick runs.
+const COLLECTION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+/// Bytes appended to an active segment that make the tick seal it.
+const SEAL_BYTES: u64 = 8 * 1024 * 1024;
+/// Age of an active segment's first frame that makes the tick seal it.
+const SEAL_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// File name of the collected-up-to record of a store-mode WAL directory.
 pub(crate) const WAL_COLLECTED_FILE: &str = "wal-collected";
@@ -650,12 +706,10 @@ pub struct WalWriter {
     /// Added to the clock the collection tick reads a segment's age by, so a
     /// test can age a segment without waiting.
     #[cfg(test)]
-    #[allow(dead_code)]
     test_clock_offset: std::sync::Mutex<std::time::Duration>,
     /// Per-partition value the collection tick uses instead of the store's
     /// watermark when it is lower, so a test can force a retention.
     #[cfg(test)]
-    #[allow(dead_code)]
     test_tick_watermark_override: std::sync::Mutex<HashMap<u32, u64>>,
     /// Per-partition floor `unapplied` filters by instead of the durable
     /// watermark, so a test can hand recovery a frame at or below it.
@@ -770,6 +824,43 @@ pub(crate) const WAL_WATERMARK_LAG_GAUGE: &str = "topgun_wal_applied_watermark_l
 
 /// Sealed WAL segments retained rather than reclaimed, by reason.
 pub(crate) const WAL_GC_SKIPPED_COUNTER: &str = "topgun_wal_gc_skipped_total";
+
+/// Bytes of WAL segments a partition retains, by `partition`.
+pub(crate) const WAL_RETAINED_BYTES_GAUGE: &str = "topgun_wal_retained_bytes";
+
+/// Bytes of WAL segments all partitions retain.
+pub(crate) const WAL_RETAINED_BYTES_TOTAL_GAUGE: &str = "topgun_wal_retained_bytes_total";
+
+/// Why a collection tick collected nothing, as the `reason` label on the
+/// skipped-GC counter: the store's watermarks could not be read.
+const GC_SKIP_REASON_READ_FAILED: &str = "watermark_read_failed";
+
+/// Sets the retained-bytes gauge of every partition, 0 where `by_partition`
+/// has none, and their total.
+///
+/// Every partition is set, so each series renders from the first scrape on
+/// rather than appearing only once its partition holds a segment.
+fn set_retained_gauges(by_partition: &BTreeMap<u32, u64>) {
+    metrics::describe_gauge!(
+        WAL_RETAINED_BYTES_GAUGE,
+        "Bytes of WAL segments a partition retains: its sealed segments and its active one"
+    );
+    metrics::describe_gauge!(
+        WAL_RETAINED_BYTES_TOTAL_GAUGE,
+        "Bytes of WAL segments all partitions retain"
+    );
+    let mut total = 0u64;
+    for partition in 0..PARTITION_COUNT {
+        let bytes = by_partition.get(&partition).copied().unwrap_or(0);
+        total = total.saturating_add(bytes);
+        // Precision loss only past 2^53 bytes, far beyond any disk.
+        #[allow(clippy::cast_precision_loss)]
+        metrics::gauge!(WAL_RETAINED_BYTES_GAUGE, "partition" => partition.to_string())
+            .set(bytes as f64);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    metrics::gauge!(WAL_RETAINED_BYTES_TOTAL_GAUGE).set(total as f64);
+}
 
 /// Registers HELP/TYPE metadata for the two WAL-watermark metrics.
 ///
@@ -948,18 +1039,75 @@ impl WalWriter {
             WalMode::Store {
                 store: Arc::downgrade(&store),
                 durable,
+                collection: Collection {
+                    collected: AsyncMutex::new(collected.into_boxed_slice()),
+                    closed: AtomicBool::new(false),
+                    wake: Arc::new(tokio::sync::Notify::new()),
+                    task: std::sync::OnceLock::new(),
+                },
             },
         );
-        writer.start_collection();
+        writer.start_collection()?;
         Ok(writer)
     }
 
     /// Sets the retained-bytes gauges of every partition and starts the
     /// collection tick of a store-mode WAL.
-    // Grows the gauges and the tick task; until then a store-mode WAL keeps
-    // every segment, which loses nothing.
-    #[allow(clippy::unused_self)]
-    fn start_collection(self: &Arc<Self>) {}
+    ///
+    /// The task holds only weak references, as the batched timer does: the
+    /// WAL and the store it reaches through the WAL stay droppable, and the
+    /// task ends at its first wake after either is gone. Its first tick runs
+    /// one interval after the open, not at once.
+    fn start_collection(self: &Arc<Self>) -> anyhow::Result<()> {
+        let WalMode::Store { collection, .. } = &self.mode else {
+            return Ok(());
+        };
+        set_retained_gauges(&Self::segment_bytes_by_partition(&self.wal_dir)?);
+        let writer = Arc::downgrade(self);
+        let wake = Arc::clone(&collection.wake);
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep(COLLECTION_INTERVAL) => {}
+                    () = wake.notified() => {}
+                }
+                let Some(writer) = writer.upgrade() else {
+                    return;
+                };
+                if !writer.collect().await {
+                    return;
+                }
+            }
+        });
+        // Set once: this is the only place that spawns the task, and it runs
+        // once per writer.
+        let _ = collection.task.set(task);
+        Ok(())
+    }
+
+    /// The summed size of every segment file of each partition that has one.
+    ///
+    /// Read from the directory, so a partition whose segments this process
+    /// has not opened yet — after a restart — is counted and collected too.
+    fn segment_bytes_by_partition(wal_dir: &Path) -> anyhow::Result<BTreeMap<u32, u64>> {
+        let mut bytes: BTreeMap<u32, u64> = BTreeMap::new();
+        let read_dir = std::fs::read_dir(wal_dir)
+            .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
+        for entry in read_dir {
+            let entry = entry
+                .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
+            let Some((partition, _)) =
+                segment::parse_segment_filename(&entry.file_name().to_string_lossy())
+            else {
+                continue;
+            };
+            // A segment unlinked between the listing and this read retains
+            // nothing.
+            let len = entry.metadata().map_or(0, |m| m.len());
+            *bytes.entry(partition).or_default() += len;
+        }
+        Ok(bytes)
+    }
 
     /// Creates `wal_dir` if it does not exist.
     fn create_dir(wal_dir: &Path) -> anyhow::Result<()> {
@@ -1270,6 +1418,17 @@ impl WalWriter {
     /// counter and reuse a number the recovery filter then silently drops. fsyncing
     /// the data and the directory entry closes that hole.
     fn write_applied_sequence(path: &Path, seq: u64) -> anyhow::Result<()> {
+        Self::write_applied_file(path, seq)?;
+        if let Some(parent) = path.parent() {
+            fsync_dir(parent)?;
+        }
+        Ok(())
+    }
+
+    /// Writes `seq` to the `.applied` file at `path` as a big-endian u64: a
+    /// temporary file, synced, renamed into place. The directory is not
+    /// synced, so a caller writing several files syncs it once.
+    fn write_applied_file(path: &Path, seq: u64) -> anyhow::Result<()> {
         use std::io::Write as _;
         let tmp = path.with_extension("applied.tmp");
         {
@@ -1281,9 +1440,6 @@ impl WalWriter {
                 .map_err(|e| anyhow::anyhow!("Cannot fsync applied tmp {}: {e}", tmp.display()))?;
         }
         std::fs::rename(&tmp, path)?;
-        if let Some(parent) = path.parent() {
-            fsync_dir(parent)?;
-        }
         Ok(())
     }
 
@@ -1331,6 +1487,7 @@ impl WalWriter {
         let mut segments = Self::discover_partition_segments(&self.wal_dir, partition)?;
 
         let mut sealed: Vec<Segment> = Vec::new();
+        let mut active_counts: (u64, Option<std::time::Instant>) = (0, None);
         let active: Segment = if let Some((active_first_seq, active_path)) = segments.pop() {
             // The highest-`first_seq` segment is the active append target; the
             // remainder are sealed (decoded for their authoritative `max_seq`).
@@ -1387,6 +1544,11 @@ impl WalWriter {
                 })?;
             }
             let max_seq = entries.iter().map(|e| e.sequence).max().unwrap_or(0);
+            // A reopened segment's frames count toward its seal from now on:
+            // when they were appended is not recorded in the file.
+            if !entries.is_empty() {
+                active_counts = (intact_len, Some(std::time::Instant::now()));
+            }
             let file = tokio::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -1421,6 +1583,8 @@ impl WalWriter {
         let handle = Arc::new(PartitionHandle {
             active: AsyncMutex::new(active),
             sealed: AsyncMutex::new(sealed),
+            active_bytes: AtomicU64::new(active_counts.0),
+            active_first_append: std::sync::Mutex::new(active_counts.1),
         });
         map.insert(partition, Arc::clone(&handle));
         Ok(handle)
@@ -1615,6 +1779,7 @@ impl Wal for WalWriter {
                     ),
                 )
             });
+        handle.note_append(frame.len());
 
         match self.policy {
             WalFsyncPolicy::PerOp => {
@@ -1904,6 +2069,54 @@ impl Wal for WalWriter {
             .get(partition as usize)
             .map(|slot| slot.load(Ordering::Acquire))
     }
+
+    /// Ends the collection tick and, when `write_hints`, writes the rollback
+    /// hints of a clean stop.
+    ///
+    /// A hint is `partition-{p:03}.applied` holding the partition's durable
+    /// watermark — never a higher sequence, so an older binary started on
+    /// this directory replays exactly the frames the data directory lacks.
+    /// One per partition that has a segment file or a non-zero watermark;
+    /// each a synced temporary file renamed into place, the directory synced
+    /// once after the last. Sidecar mode has no tick and writes no hint.
+    async fn finish(&self, write_hints: bool) -> anyhow::Result<usize> {
+        let WalMode::Store {
+            durable,
+            collection,
+            ..
+        } = &self.mode
+        else {
+            return Ok(0);
+        };
+        collection.closed.store(true, Ordering::Release);
+        collection.wake.notify_one();
+        // Waits for a running tick to end; every later tick sees the flag.
+        let _collection = collection.collected.lock().await;
+        if !write_hints {
+            return Ok(0);
+        }
+        let with_segments = Self::segment_bytes_by_partition(&self.wal_dir)?;
+        let mut written = 0usize;
+        for partition in 0..PARTITION_COUNT {
+            let watermark = Self::durable_slot(durable, partition)?.load(Ordering::Acquire);
+            if watermark == 0 && !with_segments.contains_key(&partition) {
+                continue;
+            }
+            let path = self.applied_path(partition);
+            Self::write_applied_file(&path, watermark).map_err(|e| {
+                anyhow::anyhow!("Cannot write rollback hint {}: {e}", path.display())
+            })?;
+            written += 1;
+            #[cfg(test)]
+            if written == 1 {
+                test_abort_if_armed(TestAbortPoint::FinishInsideHints);
+            }
+        }
+        if written > 0 {
+            fsync_dir(&self.wal_dir)?;
+        }
+        Ok(written)
+    }
 }
 
 impl WalWriter {
@@ -1958,6 +2171,7 @@ impl WalWriter {
             let new_active = Segment::new_active(new_path, next_first_seq, new_file);
             let old_active = std::mem::replace(&mut *active, new_active);
             let frozen = old_active.into_sealed();
+            handle.note_rotation();
             // The sealed-set lock is taken only for the push, never held across
             // the append-lock release, so appenders are not serialized by GC.
             handle.sealed.lock().await.push(frozen);
@@ -1988,6 +2202,22 @@ impl WalWriter {
         revalidated: u64,
     ) -> Vec<PathBuf> {
         let mut sealed = handle.sealed.lock().await;
+        let reclaim = Self::reclaimable_prefix(partition, &sealed, watermark, revalidated);
+        sealed
+            .drain(..reclaim)
+            .map(|s| s.path().to_path_buf())
+            .collect()
+    }
+
+    /// How many sealed segments, from the front of `sealed`, `watermark`
+    /// covers and `revalidated` confirms. A segment `watermark` covers but
+    /// `revalidated` does not is retained, counted and logged.
+    fn reclaimable_prefix(
+        partition: u32,
+        sealed: &[Segment],
+        watermark: u64,
+        revalidated: u64,
+    ) -> usize {
         // Reclaimable sealed segments are a prefix of the ascending-ordered set
         // (oldest first), valid because sequences are monotonic and gap-free.
         // The prefix stops at the FIRST segment the re-read does not cover:
@@ -2014,10 +2244,7 @@ impl WalWriter {
             }
             reclaim += 1;
         }
-        sealed
-            .drain(..reclaim)
-            .map(|s| s.path().to_path_buf())
-            .collect()
+        reclaim
     }
 
     /// Unlinks the segments `select_reclaimable` selected, then fsyncs the
@@ -2036,6 +2263,206 @@ impl WalWriter {
             fsync_dir(&self.wal_dir)?;
         }
         Ok(())
+    }
+
+    /// Whether the tick seals `handle`'s active segment at `now`: it holds
+    /// frames, and either enough bytes were appended to it or its first frame
+    /// is old enough. Bounds the size of a segment and the time a frame waits
+    /// before collection can reach it, without a seal per commit.
+    fn seal_due(handle: &PartitionHandle, now: std::time::Instant) -> bool {
+        if handle.active_bytes.load(Ordering::Relaxed) >= SEAL_BYTES {
+            return true;
+        }
+        let first = *handle
+            .active_first_append
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        first.is_some_and(|first| now.saturating_duration_since(first) >= SEAL_AGE)
+    }
+
+    /// The store's watermark of every WAL partition, read once for a tick, or
+    /// `None` — logged and counted — when it cannot be read.
+    fn tick_watermarks(store: &dyn MapDataStore) -> Option<Vec<u64>> {
+        let error = match store.applied_watermarks() {
+            Ok(Some(watermarks)) if watermarks.by_partition.len() == PARTITION_COUNT as usize => {
+                return Some(watermarks.by_partition);
+            }
+            Ok(Some(watermarks)) => format!(
+                "the store returned {} watermarks, one per WAL partition is {PARTITION_COUNT}",
+                watermarks.by_partition.len()
+            ),
+            Ok(None) => "the store keeps no applied watermark".to_string(),
+            Err(e) => format!("{e:#}"),
+        };
+        tracing::warn!(
+            target: "topgun_server::storage::wal_watermark",
+            error,
+            "WAL collection skipped: the applied watermarks could not be read"
+        );
+        describe_wal_watermark_metrics();
+        metrics::counter!(WAL_GC_SKIPPED_COUNTER, "reason" => GC_SKIP_REASON_READ_FAILED)
+            .increment(1);
+        None
+    }
+
+    /// Unlinks the `count` oldest sealed segments of each handle, then fsyncs
+    /// the directory once. Called only once `wal-collected` covers them.
+    async fn unlink_collected(&self, reclaim: Vec<(&Arc<PartitionHandle>, usize)>) {
+        let mut unlinked = 0usize;
+        'unlink: for (handle, count) in reclaim {
+            let paths: Vec<PathBuf> = handle
+                .sealed
+                .lock()
+                .await
+                .drain(..count)
+                .map(|s| s.path().to_path_buf())
+                .collect();
+            for path in paths {
+                // A segment left behind is at or below the mark: the next
+                // start filters its frames and collects it again.
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    tracing::error!(
+                        segment = %path.display(),
+                        error = %e,
+                        "WAL collection could not unlink a sealed segment"
+                    );
+                    break 'unlink;
+                }
+                unlinked += 1;
+                #[cfg(test)]
+                if unlinked == 1 {
+                    test_abort_if_armed(TestAbortPoint::CollectInsideUnlink);
+                }
+            }
+        }
+        if unlinked > 0 {
+            #[cfg(test)]
+            test_abort_if_armed(TestAbortPoint::CollectAfterUnlink);
+            if let Err(e) = fsync_dir(&self.wal_dir) {
+                tracing::error!(error = %e, "WAL collection could not fsync the WAL directory");
+            }
+        }
+    }
+
+    /// One collection tick of a store-mode WAL (TG-WAL-003). Returns whether
+    /// the tick task should go on.
+    ///
+    /// In order: read the store's watermarks once; seal the active segments
+    /// that are due; select, per partition, the prefix of sealed segments at
+    /// or below both the durable watermark and the store's; write
+    /// `wal-collected` covering them and only then unlink them; fsync the
+    /// directory once; set the retained-bytes gauges.
+    ///
+    /// Nothing is sealed, written or unlinked after `finish`, or when the
+    /// watermarks cannot be read — the next tick tries again. The task ends
+    /// after `finish` and once the store is gone.
+    async fn collect(&self) -> bool {
+        let WalMode::Store {
+            store,
+            durable,
+            collection,
+        } = &self.mode
+        else {
+            return false;
+        };
+        let mut collected = collection.collected.lock().await;
+        if collection.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(store) = store.upgrade() else {
+            return false;
+        };
+        // Read before the store, so a commit that returns in between can
+        // only raise the store's value above it: a store value below the
+        // durable one then means the store lost a row it acknowledged, which
+        // is worth the counter and the log line.
+        let durable_now: Vec<u64> = durable.iter().map(|w| w.load(Ordering::Acquire)).collect();
+        let from_store = Self::tick_watermarks(store.as_ref());
+        drop(store);
+        let Some(from_store) = from_store else {
+            return true;
+        };
+
+        let partitions = match Self::segment_bytes_by_partition(&self.wal_dir) {
+            Ok(partitions) => partitions,
+            Err(e) => {
+                tracing::warn!(error = %e, "WAL collection skipped: the WAL directory could not be read");
+                return true;
+            }
+        };
+        let mut handles: Vec<(u32, Arc<PartitionHandle>)> = Vec::new();
+        for &partition in partitions.keys() {
+            match self.handle(partition).await {
+                Ok(handle) => handles.push((partition, handle)),
+                Err(e) => tracing::warn!(
+                    partition,
+                    error = %e,
+                    "WAL collection skipped a partition: its segments could not be opened"
+                ),
+            }
+        }
+
+        let now = std::time::Instant::now();
+        #[cfg(test)]
+        let now = now
+            + *self
+                .test_clock_offset
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (partition, handle) in &handles {
+            if Self::seal_due(handle, now) {
+                if let Err(e) = self.seal_and_rotate_if_needed(*partition, handle).await {
+                    tracing::error!(partition, error = %e, "WAL collection could not seal a segment");
+                }
+            }
+        }
+
+        // The prefix each partition may lose, and the new collected-up-to
+        // values that cover it. Only this tick changes a sealed set in store
+        // mode, so the prefix is still in place when it is unlinked below.
+        let mut reclaim: Vec<(&Arc<PartitionHandle>, usize)> = Vec::new();
+        let mut next: Box<[u64]> = collected.clone();
+        for (partition, handle) in &handles {
+            let index = *partition as usize;
+            let limit = from_store[index];
+            #[cfg(test)]
+            let limit = self
+                .test_tick_watermark_override
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(partition)
+                .map_or(limit, |forced| limit.min(*forced));
+            let sealed = handle.sealed.lock().await;
+            let count = Self::reclaimable_prefix(*partition, &sealed, durable_now[index], limit);
+            if count > 0 {
+                next[index] = next[index].max(sealed[count - 1].max_seq());
+                reclaim.push((handle, count));
+            }
+        }
+
+        if !reclaim.is_empty() {
+            // Durable before the first unlink: a start that finds a segment
+            // gone must find the mark that covers it, so it can refuse a data
+            // directory older than what was unlinked.
+            if let Err(e) = write_wal_collected(&self.wal_dir, &next) {
+                tracing::error!(
+                    error = %e,
+                    "WAL collection unlinked nothing: wal-collected could not be written"
+                );
+                return true;
+            }
+            *collected = next;
+            #[cfg(test)]
+            test_abort_if_armed(TestAbortPoint::CollectAfterMark);
+
+            self.unlink_collected(reclaim).await;
+        }
+
+        match Self::segment_bytes_by_partition(&self.wal_dir) {
+            Ok(retained) => set_retained_gauges(&retained),
+            Err(e) => tracing::warn!(error = %e, "WAL retained bytes not updated"),
+        }
+        true
     }
 
     /// Highest sequence this WAL has ever durably observed across **all**
@@ -2930,12 +3357,10 @@ impl WalWriter {
 
 /// Seams of the store mode, for its tests.
 #[cfg(test)]
-// The tests that drive these seams are written before the store mode is built.
-#[allow(dead_code, clippy::unused_async)]
 impl WalWriter {
     /// Runs one collection tick of a store-mode WAL now, as the timer would.
     pub(crate) async fn test_collect_now(&self) {
-        unimplemented!()
+        self.collect().await;
     }
 
     /// Advances the clock the collection tick reads a segment's age by.
@@ -2975,12 +3400,20 @@ impl WalWriter {
     /// Wakes the collection tick task now, without running the tick body in
     /// the caller.
     pub(crate) fn test_wake_collection_tick(&self) {
-        unimplemented!()
+        if let WalMode::Store { collection, .. } = &self.mode {
+            collection.wake.notify_one();
+        }
     }
 
     /// Whether the collection tick task of a store-mode WAL is still running.
     pub(crate) fn test_collection_tick_running(&self) -> bool {
-        unimplemented!()
+        match &self.mode {
+            WalMode::Store { collection, .. } => collection
+                .task
+                .get()
+                .is_some_and(|task| !task.is_finished()),
+            WalMode::Sidecar => false,
+        }
     }
 }
 
@@ -2996,8 +3429,6 @@ pub(crate) const TEST_ABORT_AT_ENV: &str = "TOPGUN_TEST_WAL_ABORT_AT";
 /// `std::process::abort`, to model `kill -9` there. Each fires only on the
 /// path it names: a collection point only in a tick that unlinks a segment.
 #[cfg(test)]
-// The store-mode paths that reach these points are declared but not yet built.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TestAbortPoint {
     /// A collecting tick: `wal-collected` is durable, no segment unlinked yet.
@@ -3014,8 +3445,6 @@ pub(crate) enum TestAbortPoint {
 }
 
 #[cfg(test)]
-// The store-mode paths that reach these points are declared but not yet built.
-#[allow(dead_code)]
 impl TestAbortPoint {
     /// The value of [`TEST_ABORT_AT_ENV`] that arms this point.
     pub(crate) const fn name(self) -> &'static str {
@@ -3032,8 +3461,6 @@ impl TestAbortPoint {
 /// Stops the process when [`TEST_ABORT_AT_ENV`] names `point`; does nothing
 /// otherwise.
 #[cfg(test)]
-// The store-mode paths that call it are declared but not yet built.
-#[allow(dead_code)]
 pub(crate) fn test_abort_if_armed(point: TestAbortPoint) {
     if std::env::var(TEST_ABORT_AT_ENV).is_ok_and(|armed| armed == point.name()) {
         std::process::abort();
