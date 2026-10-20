@@ -1370,6 +1370,19 @@ pub(crate) struct PartitionTracking {
     seeded: bool,
 }
 
+/// What one entry's commit makes durable beside its write, planned before the
+/// commit and settled only after it returned `Ok`.
+// Declared ahead of the commit protocol that builds it.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommitPlan {
+    /// The entry's WAL partition.
+    partition: u32,
+    /// `(wal_partition, watermark)` rows the commit carries; empty when the
+    /// WAL keeps its watermark in sidecars.
+    applied: Vec<(u32, u64)>,
+}
+
 /// Why a partition's applied watermark could not be computed.
 ///
 /// Typed rather than a silent fallback: the one state in which the watermark is
@@ -3403,6 +3416,29 @@ impl WriteBehindDataStore {
                 "Failed to mark WAL watermark applied; next restart will re-replay (safe but redundant)"
             );
         }
+    }
+
+    /// Plans the applied watermark rows one entry's commit carries, before the
+    /// commit: for every candidate partition, the watermark it would reach once
+    /// the entry's WAL sequences `seqs` are resolved, without changing any
+    /// tracking state.
+    ///
+    /// `partition` is the entry's WAL partition; it is seeded first.
+    // Declared ahead of the commit protocol that calls it.
+    #[allow(dead_code, clippy::unimplemented, clippy::unused_async)]
+    async fn plan_commit(&self, partition: u32, seqs: &BTreeSet<u64>) -> CommitPlan {
+        let _ = (partition, seqs);
+        unimplemented!()
+    }
+
+    /// Settles an entry whose commit returned `Ok`: resolves its WAL sequences
+    /// `seqs` and records every planned watermark with the WAL. Never called
+    /// for a refused commit, which changes no tracking state.
+    // Declared ahead of the commit protocol that calls it.
+    #[allow(dead_code, clippy::unimplemented, clippy::unused_async)]
+    async fn settle_committed(&self, plan: &CommitPlan, seqs: &BTreeSet<u64>) {
+        let _ = (plan, seqs);
+        unimplemented!()
     }
 
     /// Disposes of a coalesce-retired entry's WAL sequences against the survivor.

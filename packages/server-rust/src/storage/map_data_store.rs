@@ -394,6 +394,90 @@ impl StoreBrokenCause {
     }
 }
 
+/// What one [`MapDataStore::commit`] makes durable: record writes and, beside
+/// them, the applied WAL watermark rows they let advance.
+///
+/// A store that keeps applied watermarks stores both in one durable batch, so
+/// a watermark row can never be durable without the records it covers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlushCommit<'a> {
+    /// Record writes, applied in order.
+    pub writes: Vec<StoreWrite<'a>>,
+    /// `(wal_partition, sequence)`: the applied watermark of that WAL
+    /// partition once the commit is durable.
+    pub applied: Vec<(u32, u64)>,
+}
+
+/// One record write of a [`FlushCommit`], on the primary keyspace.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StoreWrite<'a> {
+    /// Stores a record, as [`MapDataStore::add`] / [`MapDataStore::add_encoded`].
+    Put {
+        /// The map.
+        map: &'a str,
+        /// The user key.
+        key: &'a str,
+        /// The record.
+        value: PutValue<'a>,
+        /// Absolute millis since epoch (0 = no expiry).
+        expiration_time: i64,
+        /// The `now` the per-entry call would be given.
+        store_time: i64,
+    },
+    /// Removes a record, as [`MapDataStore::remove`].
+    Remove {
+        /// The map.
+        map: &'a str,
+        /// The user key.
+        key: &'a str,
+        /// The `now` the per-entry call would be given.
+        store_time: i64,
+    },
+}
+
+/// The record of a [`StoreWrite::Put`]: a value, or its msgpack encoding
+/// (`rmp_serde::to_vec_named`), as [`MapDataStore::add_encoded`] takes it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PutValue<'a> {
+    /// A borrowed value.
+    Value(&'a RecordValue),
+    /// The value's msgpack encoding.
+    Encoded(Vec<u8>),
+}
+
+/// The applied WAL watermarks a store holds, read from one snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedWatermarks {
+    /// The `.applied` sidecars of the WAL directory have been imported.
+    pub imported: bool,
+    /// The store was produced by a migration and no WAL import has run since.
+    pub import_pending: bool,
+    /// The watermark of every WAL partition, indexed by partition (length
+    /// `PARTITION_COUNT`); an absent row is 0.
+    pub by_partition: Vec<u64>,
+}
+
+/// Writes of a [`FlushCommit`] the store refused on their own (a map name it
+/// does not take, a map it cannot give an id), by index in `writes`. Nothing
+/// of such a commit is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordRefused {
+    /// Indices into [`FlushCommit::writes`].
+    pub indices: Vec<usize>,
+}
+
+impl std::fmt::Display for RecordRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the store refused the writes at {:?} of the commit; nothing was written",
+            self.indices
+        )
+    }
+}
+
+impl std::error::Error for RecordRefused {}
+
 /// Used as `Arc<dyn MapDataStore>`.
 #[async_trait]
 pub trait MapDataStore: Send + Sync {
@@ -700,6 +784,58 @@ pub trait MapDataStore: Send + Sync {
     /// is the only reliable way back to a working handle.
     fn classify_error(&self, _err: &anyhow::Error) -> StoreErrorClass {
         StoreErrorClass::Unknown
+    }
+
+    /// Stores the writes of `commit` and its applied watermark rows.
+    ///
+    /// A store that keeps applied watermarks stores both as one durable batch.
+    /// Any other store refuses a commit that carries rows and stores the
+    /// writes one at a time, in order, through its per-record methods.
+    ///
+    /// # Errors
+    ///
+    /// A refused write (its chain may hold [`RecordRefused`]); rows on a store
+    /// that keeps no watermark; a store error.
+    // Declared ahead of its implementation, which a later change of this series supplies.
+    #[allow(clippy::unimplemented)]
+    async fn commit(&self, commit: &FlushCommit<'_>) -> anyhow::Result<()> {
+        let _ = commit;
+        unimplemented!()
+    }
+
+    /// Whether this store keeps applied WAL watermarks, so a WAL may be
+    /// opened over it.
+    // Declared ahead of its implementation, which a later change of this series supplies.
+    #[allow(clippy::unimplemented)]
+    fn keeps_applied_watermarks(&self) -> bool {
+        unimplemented!()
+    }
+
+    /// The applied WAL watermarks this store holds, or `None` when it keeps
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// A store error.
+    // Declared ahead of its implementation, which a later change of this series supplies.
+    #[allow(clippy::unimplemented)]
+    fn applied_watermarks(&self) -> anyhow::Result<Option<AppliedWatermarks>> {
+        unimplemented!()
+    }
+
+    /// Imports `(wal_partition, sequence)` rows read from the WAL sidecars,
+    /// together with the import marker, as one durable batch.
+    ///
+    /// Synchronous: it is called from the synchronous WAL open.
+    ///
+    /// # Errors
+    ///
+    /// A store that keeps no watermark or has imported already; a store error.
+    // Declared ahead of its implementation, which a later change of this series supplies.
+    #[allow(clippy::unimplemented)]
+    fn import_applied_watermarks(&self, rows: &[(u32, u64)]) -> anyhow::Result<()> {
+        let _ = rows;
+        unimplemented!()
     }
 }
 

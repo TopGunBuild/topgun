@@ -451,6 +451,33 @@ pub trait Wal: Send + Sync {
     async fn sync(&self) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Whether the applied watermark of this WAL is kept by the store it was
+    /// opened over, committed together with the data.
+    ///
+    /// When `true`, a caller commits each watermark row in the store batch
+    /// that makes its frames durable, and [`mark_applied`](Wal::mark_applied)
+    /// only records that the commit returned.
+    fn watermark_in_store(&self) -> bool {
+        false
+    }
+
+    /// The durable applied watermark of `partition` as the store holds it, or
+    /// `None` when the watermark is not kept by a store.
+    fn durable_applied(&self, partition: u32) -> Option<u64> {
+        let _ = partition;
+        None
+    }
+
+    /// Ends the WAL's background collection and, when `write_hints`, writes
+    /// one rollback hint per partition: its durable applied watermark, in the
+    /// sidecar format an older binary reads.
+    ///
+    /// Returns the number of hints written. The default writes none.
+    async fn finish(&self, write_hints: bool) -> anyhow::Result<usize> {
+        let _ = write_hints;
+        Ok(0)
+    }
 }
 
 // ===========================================================================
@@ -475,6 +502,63 @@ struct PartitionHandle {
     sealed: AsyncMutex<Vec<Segment>>,
 }
 
+/// Where a [`WalWriter`] keeps its applied watermark, fixed at construction.
+#[derive(Clone)]
+// The store variant is declared ahead of the open path that constructs it.
+#[allow(dead_code)]
+enum WalMode {
+    /// The `.applied` sidecar files of the WAL directory ([`WalWriter::new`]).
+    Sidecar,
+    /// The `0x20` rows of the store the WAL was opened over
+    /// ([`WalWriter::open_over_store`]). Weak, so the WAL never keeps the
+    /// store alive.
+    Store {
+        /// The store that holds the watermark.
+        store: std::sync::Weak<dyn MapDataStore>,
+    },
+}
+
+/// File name of the collected-up-to record of a store-mode WAL directory.
+// Declared ahead of the store-mode open and collection that use it.
+#[allow(dead_code)]
+pub(crate) const WAL_COLLECTED_FILE: &str = "wal-collected";
+/// File name the collected-up-to record is written to before its rename.
+// Declared ahead of the store-mode open and collection that use it.
+#[allow(dead_code)]
+pub(crate) const WAL_COLLECTED_TMP_FILE: &str = "wal-collected.tmp";
+/// Magic of the collected-up-to record.
+// Declared ahead of the store-mode open and collection that use it.
+#[allow(dead_code)]
+pub(crate) const WAL_COLLECTED_MAGIC: &[u8; 8] = b"TGWALC01";
+/// Length of the collected-up-to record: magic, one u64 BE per partition,
+/// crc32c u32 BE of the preceding bytes.
+// Declared ahead of the store-mode open and collection that use it.
+#[allow(dead_code)]
+pub(crate) const WAL_COLLECTED_LEN: usize = 8 + 8 * topgun_core::PARTITION_COUNT as usize + 4;
+
+/// Encodes the collected-up-to record: `TGWALC01 ‖ G(p) u64 BE for every
+/// partition ‖ crc32c u32 BE`.
+///
+/// `collected` holds one value per partition (length `PARTITION_COUNT`).
+// Declared ahead of the store-mode open and collection that use it.
+#[allow(dead_code, clippy::unimplemented)]
+pub(crate) fn encode_wal_collected(collected: &[u64]) -> Vec<u8> {
+    let _ = collected;
+    unimplemented!()
+}
+
+/// Decodes a collected-up-to record into one value per partition.
+///
+/// # Errors
+///
+/// A record of the wrong length, magic or checksum.
+// Declared ahead of the store-mode open that uses it.
+#[allow(dead_code, clippy::unimplemented)]
+pub(crate) fn decode_wal_collected(bytes: &[u8]) -> anyhow::Result<Vec<u64>> {
+    let _ = bytes;
+    unimplemented!()
+}
+
 /// Production append-only WAL writer.
 ///
 /// Each partition's log is split into a sequence of segment files named
@@ -497,6 +581,25 @@ pub struct WalWriter {
     /// Batched-commit group-commit timer: shared notifier woken every ~10 ms.
     /// When `policy == Batched`, the writer also fsyncs after every 100 ops.
     batch_flush_tx: tokio::sync::watch::Sender<()>,
+    /// Where the applied watermark is kept.
+    // Read by the store-mode paths, which are declared but not yet built.
+    #[allow(dead_code)]
+    mode: WalMode,
+    /// Added to the clock the collection tick reads a segment's age by, so a
+    /// test can age a segment without waiting.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    test_clock_offset: std::sync::Mutex<std::time::Duration>,
+    /// Per-partition value the collection tick uses instead of the store's
+    /// watermark when it is lower, so a test can force a retention.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    test_tick_watermark_override: std::sync::Mutex<HashMap<u32, u64>>,
+    /// Per-partition floor `unapplied` filters by instead of the durable
+    /// watermark, so a test can hand recovery a frame at or below it.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    test_unapplied_floor_override: std::sync::Mutex<HashMap<u32, u64>>,
     /// Forces the pre-unlink watermark re-read to return this value instead of
     /// the sidecar's.
     ///
@@ -671,6 +774,13 @@ impl WalWriter {
             policy,
             partitions: AsyncMutex::new(HashMap::new()),
             batch_flush_tx,
+            mode: WalMode::Sidecar,
+            #[cfg(test)]
+            test_clock_offset: std::sync::Mutex::new(std::time::Duration::ZERO),
+            #[cfg(test)]
+            test_tick_watermark_override: std::sync::Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            test_unapplied_floor_override: std::sync::Mutex::new(HashMap::new()),
             #[cfg(test)]
             gc_revalidation_override: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -726,6 +836,29 @@ impl WalWriter {
         }
 
         Ok(writer)
+    }
+
+    /// Opens a WAL in `wal_dir` whose applied watermark is kept by `store`,
+    /// committed together with the data.
+    ///
+    /// The open checks that the data directory and the WAL directory belong
+    /// together, imports the `.applied` sidecars of an older binary once, and
+    /// starts the collection tick.
+    ///
+    /// # Errors
+    ///
+    /// A store that keeps no applied watermark; a data directory older than
+    /// the WAL directory; a malformed sidecar or collected-up-to record; an
+    /// I/O or store error.
+    // Declared ahead of its implementation, which a later change of this series supplies.
+    #[allow(clippy::unimplemented)]
+    pub fn open_over_store(
+        wal_dir: PathBuf,
+        policy: WalFsyncPolicy,
+        store: Arc<dyn MapDataStore>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let _ = (wal_dir, policy, store);
+        unimplemented!()
     }
 
     /// Path of the active segment for a fresh partition (seeded at `first_seq`).
@@ -2322,6 +2455,62 @@ impl WalWriter {
             .gc_order_mode
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = mode;
+    }
+}
+
+/// Seams of the store mode, for its tests.
+#[cfg(test)]
+// The tests that drive these seams are written before the store mode is built.
+#[allow(dead_code, clippy::unused_async)]
+impl WalWriter {
+    /// Runs one collection tick of a store-mode WAL now, as the timer would.
+    pub(crate) async fn test_collect_now(&self) {
+        unimplemented!()
+    }
+
+    /// Advances the clock the collection tick reads a segment's age by.
+    pub(crate) fn test_advance_clock(&self, by: std::time::Duration) {
+        *self
+            .test_clock_offset
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += by;
+    }
+
+    /// Makes the collection tick use `value` for `partition` instead of the
+    /// store's watermark when it is lower; `None` restores the store's.
+    pub(crate) fn test_force_tick_watermark(&self, partition: u32, value: Option<u64>) {
+        let mut overrides = self
+            .test_tick_watermark_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match value {
+            Some(value) => overrides.insert(partition, value),
+            None => overrides.remove(&partition),
+        };
+    }
+
+    /// Makes `unapplied(partition)` filter by `value` instead of the durable
+    /// watermark; `None` restores the durable watermark.
+    pub(crate) fn test_force_unapplied_floor(&self, partition: u32, value: Option<u64>) {
+        let mut overrides = self
+            .test_unapplied_floor_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match value {
+            Some(value) => overrides.insert(partition, value),
+            None => overrides.remove(&partition),
+        };
+    }
+
+    /// Wakes the collection tick task now, without running the tick body in
+    /// the caller.
+    pub(crate) fn test_wake_collection_tick(&self) {
+        unimplemented!()
+    }
+
+    /// Whether the collection tick task of a store-mode WAL is still running.
+    pub(crate) fn test_collection_tick_running(&self) -> bool {
+        unimplemented!()
     }
 }
 
@@ -4854,3 +5043,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "store_mode_tests.rs"]
+mod store_mode_tests;

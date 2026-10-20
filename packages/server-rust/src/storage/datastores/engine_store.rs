@@ -45,8 +45,8 @@ use topgun_core::partition::{hash_to_partition, PARTITION_COUNT};
 
 use super::kv_engine::{KeyRange, KvEngine, KvError, KvSnapshot, WriteBatch, WriteOptions};
 use crate::storage::map_data_store::{
-    check_map_name, merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
-    ScanOrder, StoreErrorClass,
+    check_map_name, merkle_leaf_hash, AppliedWatermarks, FlushCommit, LeafSink, MapDataStore,
+    MerkleLeaf, ScanBatch, ScanCursor, ScanOrder, StoreErrorClass,
 };
 use crate::storage::record::RecordValue;
 
@@ -71,6 +71,12 @@ pub const META_NEXT_MAP_ID: &[u8] = b"next_map_id";
 pub const META_ACK_MODE: &[u8] = b"ack_mode";
 /// Metadata name of an unfinished migration's mark (opaque bytes).
 pub const META_MIGRATION: &[u8] = b"migration";
+/// Metadata name of the import marker (`[0x01]`): the WAL directory's
+/// `.applied` sidecars have been imported into the `0x20` rows.
+pub const META_WAL_WATERMARK: &[u8] = b"wal_watermark";
+/// Metadata name of the import-pending mark (`[0x01]`): the store was produced
+/// by a migration and its WAL sidecars have not been imported yet.
+pub const META_WAL_IMPORT_PENDING: &[u8] = b"wal_import_pending";
 /// The one format this binary reads and writes.
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -91,6 +97,16 @@ const LEAF_BATCH_SIZE: usize = 1024;
 /// Per-batch byte budget of a value scan called with `max_batch_cost == 0`,
 /// as the redb store's.
 const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
+
+/// The engine key of the applied watermark row of WAL partition `partition`:
+/// `KS_PARTITION_META ‖ partition u32 BE ‖ b"applied"` (12 bytes).
+#[must_use]
+// Declared ahead of its implementation, which a later change of this series supplies.
+#[allow(clippy::unimplemented)]
+pub fn applied_row_key(partition: u32) -> Vec<u8> {
+    let _ = partition;
+    unimplemented!()
+}
 
 /// The engine key of the metadata row `name`: `KS_META ‖ name`.
 #[must_use]
@@ -468,6 +484,16 @@ pub enum RecordOp<'a> {
     },
     /// `Some` sets the migration mark, `None` removes it.
     SetMigrationMark(Option<&'a [u8]>),
+    /// Stores `sequence` as the applied watermark row of WAL partition
+    /// `partition`.
+    SetAppliedWatermark {
+        /// The WAL partition.
+        partition: u32,
+        /// The applied watermark.
+        sequence: u64,
+    },
+    /// Puts the import marker and removes the import-pending mark.
+    MarkWatermarksImported,
 }
 
 impl RecordOp<'_> {
@@ -479,7 +505,9 @@ impl RecordOp<'_> {
                 Some((map, RecordSpace::of(backup).flag()))
             }
             Self::Delete { map, .. } => Some((map, 0)),
-            Self::SetMigrationMark(_) => None,
+            Self::SetMigrationMark(_)
+            | Self::SetAppliedWatermark { .. }
+            | Self::MarkWatermarksImported => None,
         }
     }
 }
@@ -757,6 +785,11 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                     batch.put(meta_key(META_MIGRATION), mark.to_vec());
                 }
                 RecordOp::SetMigrationMark(None) => batch.delete(meta_key(META_MIGRATION)),
+                // Declared ahead of its implementation, which a later change of this series supplies.
+                #[allow(clippy::unimplemented)]
+                RecordOp::SetAppliedWatermark { .. } | RecordOp::MarkWatermarksImported => {
+                    unimplemented!()
+                }
             }
         }
         if !batch.is_empty() {
@@ -1189,5 +1222,31 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
 
     async fn hard_flush(&self) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    // Declared ahead of its implementation, which a later change of this series supplies.
+    #[allow(clippy::unimplemented)]
+    async fn commit(&self, commit: &FlushCommit<'_>) -> anyhow::Result<()> {
+        let _ = commit;
+        unimplemented!()
+    }
+
+    // Declared ahead of its implementation, which a later change of this series supplies.
+    #[allow(clippy::unimplemented)]
+    fn keeps_applied_watermarks(&self) -> bool {
+        unimplemented!()
+    }
+
+    // Declared ahead of its implementation, which a later change of this series supplies.
+    #[allow(clippy::unimplemented)]
+    fn applied_watermarks(&self) -> anyhow::Result<Option<AppliedWatermarks>> {
+        unimplemented!()
+    }
+
+    // Declared ahead of its implementation, which a later change of this series supplies.
+    #[allow(clippy::unimplemented)]
+    fn import_applied_watermarks(&self, rows: &[(u32, u64)]) -> anyhow::Result<()> {
+        let _ = rows;
+        unimplemented!()
     }
 }
