@@ -2514,6 +2514,62 @@ impl WalWriter {
     }
 }
 
+/// The environment variable that names the [`TestAbortPoint`] a child
+/// process of the store-mode tests stops at.
+///
+/// An environment variable rather than a field: the open steps run inside
+/// the constructor, before any instance exists to arm.
+#[cfg(test)]
+pub(crate) const TEST_ABORT_AT_ENV: &str = "TOPGUN_TEST_WAL_ABORT_AT";
+
+/// A crash point of the store mode a test process can stop at, by
+/// `std::process::abort`, to model `kill -9` there. Each fires only on the
+/// path it names: a collection point only in a tick that unlinks a segment.
+#[cfg(test)]
+// The store-mode paths that reach these points are declared but not yet built.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestAbortPoint {
+    /// A collecting tick: `wal-collected` is durable, no segment unlinked yet.
+    CollectAfterMark,
+    /// A collecting tick: the first segment unlinked, the others not.
+    CollectInsideUnlink,
+    /// A collecting tick: every segment unlinked, the directory not yet
+    /// fsynced.
+    CollectAfterUnlink,
+    /// The open: the first `.applied` file deleted, the others not.
+    OpenInsideSidecarDelete,
+    /// `finish`: the first rollback hint renamed into place, the others not.
+    FinishInsideHints,
+}
+
+#[cfg(test)]
+// The store-mode paths that reach these points are declared but not yet built.
+#[allow(dead_code)]
+impl TestAbortPoint {
+    /// The value of [`TEST_ABORT_AT_ENV`] that arms this point.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::CollectAfterMark => "collect-after-mark",
+            Self::CollectInsideUnlink => "collect-inside-unlink",
+            Self::CollectAfterUnlink => "collect-after-unlink",
+            Self::OpenInsideSidecarDelete => "open-inside-sidecar-delete",
+            Self::FinishInsideHints => "finish-inside-hints",
+        }
+    }
+}
+
+/// Stops the process when [`TEST_ABORT_AT_ENV`] names `point`; does nothing
+/// otherwise.
+#[cfg(test)]
+// The store-mode paths that call it are declared but not yet built.
+#[allow(dead_code)]
+pub(crate) fn test_abort_if_armed(point: TestAbortPoint) {
+    if std::env::var(TEST_ABORT_AT_ENV).is_ok_and(|armed| armed == point.name()) {
+        std::process::abort();
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
