@@ -10,6 +10,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Changed (on-disk format):** each write-ahead-log partition's applied watermark — how far the
+  WAL has been stored — lives in the data directory, committed in the same batch as the records
+  it covers. The data directory and the WAL directory (`TOPGUN_WAL_DIR`) are one unit from now
+  on: back them up and restore them together.
+  - **One-time import:** the first start of this version reads the WAL directory's
+    `partition-*.applied` files into the data directory once, together with an import marker,
+    deletes the files, and writes `wal-collected` (how far the WAL has been collected) into the
+    WAL directory. Nothing has to be run by hand.
+  - **Older binaries refuse:** once this version has opened a store, the binary built from
+    `6a030bb6`, and every data-directory binary before it, exits non-zero at its store open on
+    the import marker (`store format: refusing to open: unknown metadata …`), before it opens
+    the WAL or listens, and changes no file of the WAL directory. There is no tool to go back,
+    and none is planned.
+  - **Rollback to the pre-migration file** stays possible, now with a stricter first step: the
+    new binary must exit 0 **and** log `write-behind shutdown: rollback hints written` with
+    `drained=true`. That stop writes a `partition-{p:03}.applied` rollback hint into the WAL
+    directory for each partition that has a segment or a watermark — the watermark the data
+    directory holds — for the older binary to read; keep the WAL directory in place. After a crash, a non-zero exit or `drained=false`,
+    start the new binary again and stop it until the line reads `drained=true`.
+  - **Consistency check at start:** a data directory older than the WAL directory beside it is
+    refused before the server listens, with nothing written:
+    `WAL directory check: refusing to start: the data directory is older than the WAL directory …`
+    ending `Restore the data directory and the WAL directory from the same backup, taken with
+    the server stopped`. A WAL directory older than the data directory is accepted: nothing at
+    or below the data directory's watermark is replayed and no sequence number is reused.
+  - **Collection and sealing:** the WAL is collected on a tick every 5 s, up to the watermark
+    the data directory holds; a partition's active segment is sealed once it holds 8 MiB or its
+    first frame is 30 s old, not on every write.
+  - **Metrics:** `topgun_wal_retained_bytes{partition}` and `topgun_wal_retained_bytes_total`
+    report the bytes the WAL keeps, from the first scrape; they grow while the store refuses
+    writes. `topgun_wal_gc_skipped_total{reason="watermark_read_failed"}` counts ticks that
+    could not read the watermark and collected nothing.
+
 - **Changed (on-disk format):** the server keeps its store in a **data directory** and moves an
   existing store there by itself, once, at the first start of this version. Nothing has to be
   run by hand; the old store file is kept. An older server binary started on the node refuses

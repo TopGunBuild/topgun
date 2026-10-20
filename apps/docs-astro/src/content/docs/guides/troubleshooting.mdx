@@ -197,6 +197,23 @@ This guide covers common issues you may encounter when using TopGun, organized b
 
 **Not a refusal:** `store location: TOPGUN_REDB_PATH names {L}, which is not read: TOPGUN_DATA_DIR ({D}) already holds a store` is a warning; the server starts on the data directory and leaves the file at `{L}` alone. Remove it, or point `TOPGUN_REDB_PATH` elsewhere, to silence it. `store format: the pre-migration store file is kept at {K}; delete it once this store is confirmed` is logged at every start while the kept file exists; delete `{K}` once you no longer need a way back (see [Storage backends](/docs/deploy/storage-backends)).
 
+### Server refuses to start with a WAL directory check line
+
+**Symptom:** The server exits with code 1 at startup, before it listens, with `FATAL: Cannot initialise WAL:` followed by a line that begins with `WAL directory check: refusing to start:`, or with `FATAL: WAL recovery failed:` followed by a line that begins with `WAL recovery: refusing to start:`.
+
+**Cause:** The data directory (`TOPGUN_DATA_DIR`) records, for each partition of the write-ahead log, how far the log has been stored (its applied watermark); the WAL directory (`TOPGUN_WAL_DIR`) records how far it has collected the log (`wal-collected`). The two directories are one unit. When they do not belong together, or a file in the WAL directory cannot be read, the server refuses rather than serve a store that may be missing acknowledged writes. A `WAL directory check:` refusal writes nothing to either directory. Below, `{wal_dir}` is the WAL directory.
+
+**Solutions, by the line the server logged:**
+
+- `WAL directory check: refusing to start: the data directory is older than the WAL directory {wal_dir}: partition {p} has applied watermark {V} there, but the WAL was collected up to {G}; frames {V+1}..={G} are no longer in the WAL and may be missing from the data directory. Restore the data directory and the WAL directory from the same backup, taken with the server stopped` (when more partitions are behind, `(and {n} more partitions)` follows `{G}`) — the data directory was restored from an older backup than the WAL directory, or the WAL directory belongs to another node. Restore both directories from the same backup, taken after a stop that logged `write-behind shutdown: rollback hints written` with `drained=true`.
+- `WAL directory check: refusing to start: the data directory is older than the WAL directory {wal_dir}: the data directory holds no applied watermarks, but the WAL directory has served a store that keeps them. Restore the data directory and the WAL directory from the same backup, taken with the server stopped` — the data directory was written by a version that kept the applied watermark in the WAL directory (or is a fresh, empty one), but the WAL directory has already been used by this version. Restore both directories from the same backup. To start a node from scratch, give it an empty data directory **and** an empty WAL directory.
+- `WAL directory check: refusing to start: {wal_dir}/wal-collected is malformed: {reason}` — the record of how far the log was collected is damaged (wrong size, wrong header or checksum). Restore the WAL directory together with the data directory from the same backup.
+- `WAL directory check: refusing to start: {file} holds {n} bytes, an applied watermark is 8; it cannot be imported` — at its first start over a WAL directory written by an earlier version, the server imports each `partition-{p:03}.applied` file once; this one is damaged. Restore the WAL directory and the data directory from the same backup taken under the earlier version, and start again.
+- `WAL directory check: refusing to start: {file} names no WAL partition 0..271; its applied watermark cannot be imported` — a file named like `partition-*.applied` that is not one of the 271 partitions lies in the WAL directory. Move it out of the WAL directory and start again.
+- `WAL recovery: refusing to start: partition {p} holds frame {sequence} at or below its applied watermark {W}; a frame below the watermark is never replayed` — the log hands recovery a write the data directory already counts as stored. This is not a state the server produces; keep the logs and both directories, and report it. Restoring both directories from the same backup lets the node start.
+
+**Embedding the server:** `WAL directory {dir} is kept by a store that holds its applied watermark; open it over that store` is returned by `WalWriter::new` for a WAL directory the server has used. Open it with `WalWriter::open_over_store` over the data directory's store, as the server does.
+
 ### Cluster nodes not discovering each other
 
 import { AlertBox } from '../../../components/docs/AlertBox';

@@ -22,8 +22,11 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   fsync completes before the append returns.
 - **Maintaining code:** `packages/server-rust/src/storage/wal/mod.rs` (PerOp arm, `sync_data`
   before return); `write_behind.rs` append-before-ack path.
-- **Enforcing test:** `packages/server-rust/src/storage/crash_safety_proptest.rs` (the file's
-  stated oracle is exactly this invariant; real store + WAL, SIGKILL modeled by store drop).
+- **Enforcing test:** sidecar mode — `packages/server-rust/src/storage/crash_safety_proptest.rs`
+  (the file's stated oracle is exactly this invariant; real store + WAL, SIGKILL modeled by store
+  drop). Store mode — `store_mode_tests.rs::a12_under_batched_a_wal_cut_to_its_last_fsync_never_reuses_a_sequence`,
+  `a18_a_kill_inside_or_right_after_a_commit_loses_no_acked_write` (a child process aborted
+  inside and right after a commit).
 - **Violation consequence:** silently vanished acked writes after restart — worst CRDT-storage
   class; client re-converges only if its own op-log survived.
 - **Discovered by:** SPEC-331/332/333 durability chain.
@@ -46,15 +49,42 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   SPEC-352b / TODO-603 — a Batched-policy truncate-to-durable-frontier fault schedule, which the
   in-process crash harness deliberately does not model)**.
 
-### TG-WAL-003: The applied watermark is durably fsynced before any sealed segment is unlinked
+### TG-WAL-003: The applied watermark a WAL collection reads is durable before any segment it licenses is unlinked
 
-- **Scope:** `mark_applied` → segment GC ordering, all policies.
-- **Statement:** the watermark sidecar write+fsync completes before any sealed-segment unlink it
-  licenses; a crash between them must not lose or corrupt data (GC is resumable, replay
-  idempotent under the watermark filter).
-- **Maintaining code:** `wal/mod.rs` `mark_applied` (fsync-before-unlink block + apply-time
-  re-validation before physical delete, SPEC-350).
-- **Enforcing test:** `wal_harness/cases.rs::ac7_tg_wal_003_gc_crash_point_both_directions` —
+- **Scope:** segment collection ordering, all policies, in both WAL modes — *store mode*
+  (`WalWriter::open_over_store`, what the server opens) and *sidecar mode* (`WalWriter::new`,
+  tests, simulation and benches).
+- **Statement:** the applied watermark a WAL collection reads is durable before any segment it
+  licenses is unlinked; a crash between them must not lose or corrupt data (collection is
+  resumable, replay is filtered by the watermark).
+  - *Store mode:* the watermark is the engine row of the WAL partition, committed `sync: true`
+    in the one engine batch of the records it covers, and never lower than the row it replaces;
+    the WAL's in-memory copy advances only after that commit returned `Ok`. A collection tick
+    (every 5 s) limits collection by a fresh engine read, `min(the WAL's copy, the engine
+    row)`, and collects nothing when that read fails or after `finish`. `wal-collected` (the
+    highest collected sequence of each partition) is durable before the first unlink it
+    covers. A segment is sealed only by a tick, once it holds 8 MiB or its first frame is 30 s
+    old. The `.applied` files a stop that returns `Ok` writes are rollback hints for older
+    binaries, each equal to the durable engine row (also after a drain that did not finish);
+    this binary reads one only through the import at open, when the WAL directory holds no
+    `wal-collected` or the store is `wal_import_pending`, and deletes every one at open.
+  - *Sidecar mode:* the watermark sidecar write+fsync completes before any sealed-segment
+    unlink it licenses.
+- **Maintaining code:** store mode — `wal/mod.rs` `open_over_store`, `mark_applied`, the
+  collection tick, `write_wal_collected`, `finish`; `engine_store.rs` `commit` (records and
+  `0x20` rows in one batch, a lower row refused); `write_behind.rs` the commit plan and its
+  settle after `Ok`. Sidecar mode — `wal/mod.rs` `mark_applied` (fsync-before-unlink block +
+  apply-time re-validation before physical delete, SPEC-350).
+- **Enforcing test:** store mode — `store_mode_tests.rs::a01_a_commit_is_one_engine_write_holding_its_records_and_its_watermark_rows`,
+  `a02_a_refused_commit_changes_no_watermark_and_no_pending_sequence`,
+  `a06_the_wal_collects_only_up_to_the_durable_watermark_on_its_tick`,
+  `a08_the_collected_mark_is_durable_before_the_first_unlink`,
+  `a18_a_kill_inside_or_right_after_a_commit_loses_no_acked_write`,
+  `a20_a_commit_carrying_a_watermark_below_the_held_row_is_refused_and_writes_nothing`,
+  `a21_a_tick_whose_watermark_read_fails_unlinks_nothing_and_the_next_tick_collects`,
+  `a22_after_finish_no_tick_unlinks_and_the_tick_task_ends`,
+  `a23_a_clean_stop_writes_one_rollback_hint_per_partition_equal_to_the_engine_row`.
+  Sidecar mode — `wal_harness/cases.rs::ac7_tg_wal_003_gc_crash_point_both_directions` —
   drives the real `mark_applied` with a crash injected BETWEEN the sidecar fsync and the unlink
   loop: the production `FsyncThenUnlink` order loses nothing and recovery replays every
   acked-but-unapplied frame, while the inverted `UnlinkThenFsync` order (post-unlink/pre-fsync
@@ -73,11 +103,16 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   across restarts (boot-seeded from `wal.unapplied(p)`); an unseeded partition refuses to
   advance.
 - **Maintaining code:** the tracker bundled with `Arc<dyn Wal>` (one struct, cannot diverge);
-  boot seeding; unseeded-refuse guard.
-- **Enforcing test:** `prefix_watermark_proptest.rs` — restart-crossing proptest; both loss-guards
-  (unseeded-refuse, seed-retry) verified by revert during review (fail on pre-fix code).
-  Generatively re-enforced by `wal_harness/cases.rs::ac4_c3_scalar_max_watermark_regression`
-  (the C3 scalar-max over-advance, found from generated crash/recover sequences).
+  boot seeding; unseeded-refuse guard. Store mode: the commit plan of `write_behind.rs` puts a
+  partition's row in the commit only when its new value is above the durable one — never a
+  lower or equal value, so a row cannot regress after a restart resets the tracker.
+- **Enforcing test:** sidecar mode — `prefix_watermark_proptest.rs` — restart-crossing proptest;
+  both loss-guards (unseeded-refuse, seed-retry) verified by revert during review (fail on pre-fix
+  code). Generatively re-enforced by `wal_harness/cases.rs::ac4_c3_scalar_max_watermark_regression`
+  (the C3 scalar-max over-advance, found from generated crash/recover sequences). Store mode —
+  `store_mode_tests.rs::a03_a_partition_whose_watermark_moved_by_coalescing_gets_its_row`,
+  `a04_an_unseeded_partition_gets_no_row`,
+  `a05_the_engine_watermark_never_decreases_across_commits_and_restarts`.
 - **Violation consequence:** the SPEC-350 headline defect — acked writes of one key silently
   dropped from replay because another key's flush advanced a scalar watermark past them.
 - **Discovered by:** SPEC-349 Audit v2 (three independent derivations).
@@ -307,6 +342,58 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   precondition of the OR fold's warrant (`TG-OR-003`).
 - **Discovered by:** SPEC-349b Review v1 — the one precondition of that warrant left uncatalogued.
 - **Status:** decided, **enforced (type-backed)**.
+
+### TG-WAL-013: The data directory is never older than the WAL directory it is opened with
+
+- **Scope:** `WalWriter::open_over_store` (store mode, the server's WAL) over the
+  `EngineMapDataStore` of the data directory; `wal-collected` in the WAL directory; recovery and
+  the sequence seed in store mode.
+- **Statement:** every partition's applied watermark — the engine row, or the `.applied` sidecar
+  it is about to be imported from — is at least the `wal-collected` mark of the WAL directory, or
+  the start is refused with nothing written (`WAL directory check: refusing to start: the data
+  directory is older than the WAL directory …`, the first partition below its mark named).
+  `wal-collected` is durable before any segment it covers is unlinked, and never exceeds the
+  durable watermark. A data directory with no applied watermarks (no `wal_watermark` marker)
+  beside a WAL directory that holds `wal-collected` is refused unless the store is
+  `wal_import_pending` (just migrated from the old file) — so neither a pre-marker data
+  directory beside a WAL directory after `kill -9` (no hints) nor one beside a WAL directory
+  after a stop with hints is imported silently.
+  - *The reverse case — a WAL directory older than the data directory.* It is not refused, and
+    it replays nothing wrong and reuses no sequence; no shared id or epoch ties the two
+    directories. (i) The replay window is above the engine watermark: `unapplied(p)` hands only
+    frames with `sequence > W(p)`, so every frame of the older copy at or below `W(p)` is
+    filtered, and a frame at or below `W(p)` that reached recovery would refuse the start
+    (`WAL recovery: refusing to start: partition {p} holds frame {sequence} at or below its
+    applied watermark {W}; …`), never be re-applied. (ii) The sequence counter is seeded from
+    the engine, `max(W(p), the highest sequence in any segment)`, so a new write never takes a
+    number at or below a stored row. Hence nothing acknowledged **and already in the data
+    directory** is lost or overwritten. What the data directory does not hold is only what the
+    WAL held above `W(p)` at the moment the data directory was copied; after a stop that exited
+    0 **and logged `write-behind shutdown: rollback hints written` with `drained=true`** that set
+    is empty, so a backup of both directories taken after such a stop loses nothing acknowledged
+    whichever of the two copies is older. An exit 0 alone is not enough: a drain that timed out
+    exits 0 with frames above `W(p)` (`drained=false`). A copy of a running server is not a
+    backup.
+- **Maintaining code:** `wal/mod.rs` — `open_over_store` (the import decision, the
+  `wal-collected` read, `refuse_collected_above_watermark`), `write_wal_collected`, the
+  collection tick (the mark written before the unlink, `G(p) ≤` the durable watermark),
+  `unapplied`, `max_observed_sequence`; `WalRecovery::run` (the refusal of a frame at or below
+  the engine watermark); `engine_store.rs` `applied_watermarks`.
+- **Enforcing test:** `store_mode_tests.rs::a09_a_data_directory_older_than_the_wal_directory_is_refused_and_nothing_is_written`
+  (both variants: a data directory below the collected mark, and one with no applied watermarks
+  beside the WAL directory of a killed run and of a clean stop),
+  `a08_the_collected_mark_is_durable_before_the_first_unlink`,
+  `a24_a_store_just_migrated_beside_a_used_wal_directory_imports_the_sidecars_once`; the reverse
+  case `a19_a_wal_directory_older_than_the_data_directory_replays_nothing_at_or_below_the_watermark_and_reuses_no_sequence`;
+  the migrated case end to end, `tests/integration-rust/map-name-rollback.test.ts` R-D.
+- **Violation consequence:** a data directory restored from an older backup beside a newer WAL
+  directory would serve without the frames the WAL has already collected — acknowledged writes
+  silently gone — or a sidecar no longer describing the data directory would be imported as its
+  watermark.
+- **Not claimed:** that a data directory and a WAL directory from two different nodes, or from
+  two unrelated runs, are recognised as such; only the order of the two copies is checked.
+- **Discovered by:** SPEC-395a.
+- **Status:** decided, **enforced**.
 
 ### TG-WB-001: The flushed watermark is prefix-complete — no mid-range hole
 
@@ -2584,6 +2671,9 @@ weaker than a test.
   keys; a returned cursor is the engine key of the last row of its batch, and a resume starts
   strictly after it. `PARTITION_THEN_KEY` positions (`p ‖ key bytes`) agree with that order, so the
   store declares it and the four clauses of the scan-order contract hold (`TG-WB-008`).
+  The applied watermark of WAL partition `p` lives at `0x20 ‖ p ‖ "applied"` (`p` u32 BE), its
+  value the sequence as u64 BE; an absent row means 0. That partition is the WAL partition
+  `fnv1a("{map}:{key}") % 271`, which differs from the record partition above until TODO-843.
 - **Maintaining code:** `engine_store.rs` — `RecordKey::{encode, decode}`, `PARTITION_THEN_KEY`,
   `partition_range`, `resume_partition`, `scan_from`, `enumerate_leaves`, `visit_records`.
 - **Enforcing test:** `s01_record_key_golden_vectors`,
@@ -2599,9 +2689,8 @@ weaker than a test.
 - **Violation consequence:** a record would be read under the wrong partition or map, a scan
   would skip or repeat rows, or the write-behind overlay would place a buffered key in the wrong
   batch.
-- **Not claimed:** the WAL partition of a record — the WAL partitions by `"{map}:{key}"`, so a
-  record's engine partition and its WAL partition are in general different numbers (TODO-843).
-  The store is not wired into the server yet.
+- **Not claimed:** that a record's engine partition and the WAL partition of its `0x20` row are
+  the same number — the WAL partitions by `"{map}:{key}"`, so in general they differ (TODO-843).
 - **Discovered by:** SPEC-394b2.
 - **Status:** decided, **enforced**.
 
@@ -2648,15 +2737,23 @@ weaker than a test.
 - **Statement:** `open` formats an empty engine with `format = 1`, `next_map_id = 1` and
   `ack_mode = 0` (local) in one durable batch. A non-empty engine is opened only when `format` is
   1, `ack_mode` is 0, `next_map_id` is at least 1, the metadata keyspace holds no other name, no
-  key lies in a reserved keyspace (`0x03..=0x0F`, `0x12..=0xFF`, `0x20` included) and no
+  key lies in a reserved keyspace (`0x03..=0x0F`, `0x12..=0x1F`, `0x21..=0xFF`) and no
   `migration` row is present; anything else is refused with an error starting
   `store format: refusing to open:` and nothing is written. Only `open_for_migration` admits a
   store with a migration mark; on an empty engine it writes the format rows and the mark in one
   batch. A mark is written only through `RecordOp::SetMigrationMark`, in the one batch of its
   call's records. After a crash the migration mark is the one carried by the last recovered batch
-  that carried one.
+  that carried one. The import marker `wal_watermark` (`[0x01]`) says the WAL directory's
+  `.applied` sidecars were imported: `0x20` rows exist only with it (a row without the marker is
+  refused at open), a malformed `0x20` key or a value that is not 8 bytes is refused, and the
+  marker is written only by `import_applied_watermarks`, in the batch of the imported rows. The
+  import-pending mark `wal_import_pending` (`[0x01]`) is written only in the batch that clears
+  the migration mark and deleted only in the import batch; the two marks are never present
+  together (both present is refused at open), and a mark holding anything but `[0x01]` is
+  refused.
 - **Maintaining code:** `engine_store.rs` — `read_store_metadata`, `format_rows`, `open`,
-  `open_for_migration`, `read_migration_mark`, `write_records`.
+  `open_for_migration`, `read_migration_mark`, `write_records` (the `SetMigrationMark(None)` and
+  `MarkWatermarksImported` arms), `import_applied_watermarks`.
 - **Enforcing test:** `k06_redb_registry_after_any_crash_has_no_orphan_and_lists_exactly_the_recovered_maps`,
   `k07_mem_registry_after_any_crash_has_no_orphan_and_lists_exactly_the_recovered_maps` — in
   `storage/datastores/kv_crash_tests.rs`; `s18_a_fresh_engine_gets_format_one_and_local_ack_mode`,
@@ -2665,9 +2762,13 @@ weaker than a test.
   `s21_a_key_in_a_reserved_keyspace_is_refused_at_open`,
   `s29_a_store_with_a_migration_mark_is_refused_by_open_and_admitted_by_open_for_migration`,
   `s30_a_migration_mark_is_written_in_the_batch_of_its_records` — in
-  `storage/datastores/engine_store_tests.rs`, each over the in-memory and the redb engine.
+  `storage/datastores/engine_store_tests.rs`, each over the in-memory and the redb engine;
+  `a15_the_engine_refuses_malformed_partition_metadata` and
+  `a24_a_store_just_migrated_beside_a_used_wal_directory_imports_the_sidecars_once` — in
+  `storage/wal/store_mode_tests.rs`.
 - **Violation consequence:** a binary would serve a store of a newer format or another ack mode
-  as if it were its own, or a half-finished migration as complete.
+  as if it were its own, or a half-finished migration as complete; a WAL would be filtered by
+  rows that no import vouched for, or its sidecars imported twice.
 - **Not claimed:** that only the migration issues `SetMigrationMark` — a mark set on a store from
   `open` makes the next `open` refuse (fail-closed, nothing is lost); keeping the op to the
   migration path is the migration's obligation (`TG-ENG-007`, clause 6).
