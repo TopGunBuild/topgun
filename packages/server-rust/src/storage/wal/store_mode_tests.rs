@@ -904,6 +904,10 @@ pub(super) fn run_child(
         ])
         .env_remove("DATABASE_URL")
         .env(CHILD_ENV, format!("{scenario}\n{}", root.path.display()))
+        // The store location the binary reads from the environment, given to
+        // every child so none inherits the parent's and none mutates its own.
+        .env("TOPGUN_DATA_DIR", root.data_dir())
+        .env("TOPGUN_REDB_PATH", root.path.join("topgun.redb"))
         .stdout(std::fs::File::create(&out_path).expect("stdout file"))
         .stderr(std::fs::File::create(&err_path).expect("stderr file"));
     match abort_at {
@@ -3014,11 +3018,7 @@ fn a23_a_clean_stop_writes_one_rollback_hint_per_partition_equal_to_the_engine_r
 async fn a24_a_store_just_migrated_beside_a_used_wal_directory_imports_the_sidecars_once() {
     const TEST: &str =
         "a24_a_store_just_migrated_beside_a_used_wal_directory_imports_the_sidecars_once";
-    if let Some((scenario, root)) = child_spec() {
-        // The location is taken from the environment, as the binary takes it;
-        // this process is a child of its own, so setting it races nothing.
-        std::env::set_var("TOPGUN_DATA_DIR", root.data_dir());
-        std::env::set_var("TOPGUN_REDB_PATH", root.path.join("topgun.redb"));
+    if let Some((scenario, _root)) = child_spec() {
         let location = RedbDataStore::location_from_env().expect("location");
         let store = RedbDataStore::open_location(&location).expect("the legacy file migrates");
         match scenario.as_str() {
