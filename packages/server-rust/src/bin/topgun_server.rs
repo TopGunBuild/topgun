@@ -749,9 +749,10 @@ async fn main() -> anyhow::Result<()> {
     // skipped (mirrors the write-behind skip: buffering a no-op store is wasteful).
     let wal_opt: Option<WalBootstrap> = match backend {
         StorageBackend::Redb => {
-            match WalWriter::new(
+            match WalWriter::open_over_store(
                 write_behind_config.wal_dir.clone(),
                 write_behind_config.wal_fsync_policy,
+                Arc::clone(&inner_data_store),
             ) {
                 Ok(writer) => {
                     // Run recovery through the inner store (before write-behind wrap)

@@ -62,7 +62,6 @@ const ACK_WAIT_MS = 5_000;
 const FLUSH_SETTLE_MS = 10_000;
 /** A graceful stop may spend up to 30 s draining buffered writes; past this the process is killed and the exit status says so. */
 const STOP_TIMEOUT_MS = 40_000;
-const SIDECAR_WAIT_MS = 15_000;
 
 interface MapState {
   queryK1: unknown;
@@ -258,17 +257,15 @@ describe('Integration: the newer server binary replays the WAL frames the older 
       }
       const port = first.port;
       o.controlFirstBoot = await observe(() => queryKey(port, CONTROL_MAP, 'k', 'upgrade-c1'));
-
-      const deadline = Date.now() + SIDECAR_WAIT_MS;
-      const missing = () => {
-        const now = walPartitions(walDir);
-        return o.pendingPartitions.filter((id) => !now.get(id)?.hasSidecar);
-      };
-      while (missing().length > 0 && Date.now() < deadline) await sleep(250);
-      o.partitionsStillWithoutSidecar = missing();
     }
     o.firstBootUnreplayed = unreplayedLines(first);
     o.newStop = await first.stop('SIGTERM', STOP_TIMEOUT_MS);
+    o.partitionsStillWithoutSidecar = o.pendingPartitions.filter((id) => {
+      const hint = path.join(walDir, `partition-${String(id).padStart(3, '0')}.applied`);
+      if (!fs.existsSync(hint)) return true;
+      const bytes = fs.readFileSync(hint);
+      return bytes.length !== 8 || bytes.readBigUInt64BE(0) === BigInt(0);
+    });
     noteFatal(first);
     o.firstRunLog = storeLog(first);
     o.afterFirstRun = {
@@ -356,6 +353,7 @@ describe('Integration: the newer server binary replays the WAL frames the older 
   });
 
   test('every partition that held un-applied frames now has an applied watermark', () => {
+    expect(o.newStop).toEqual({ code: 0, signal: null });
     expect(o.partitionsStillWithoutSidecar).toEqual([]);
   });
 

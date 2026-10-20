@@ -58,9 +58,9 @@ Your data stays on a path you choose and survives restarts, with no separate dat
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STORAGE_BACKEND` | `"redb"` | Set to `redb` or omit entirely |
-| `TOPGUN_DATA_DIR` | `topgun-data` beside `TOPGUN_REDB_PATH` when that is set, else `./topgun-data` | The store directory; it holds `engine.redb` |
+| `TOPGUN_DATA_DIR` | `topgun-data` beside `TOPGUN_REDB_PATH` when that is set, else `./topgun-data` | The store directory; it holds `engine.redb`, which also records how far the write-ahead log has been stored |
 | `TOPGUN_REDB_PATH` | `./topgun.redb` | The store file of earlier versions: migrated into the data directory once, then replaced by a small marker file (see below) |
-| `TOPGUN_WAL_DIR` | `./topgun-wal` | Directory of the write-ahead log; keep it on the same volume as the data directory |
+| `TOPGUN_WAL_DIR` | `./topgun-wal` | Directory of the write-ahead log; keep it on the same volume as the data directory, and treat the two as one unit |
 
 The container image sets `TOPGUN_DATA_DIR=/data/topgun-data` and `TOPGUN_REDB_PATH=/data/topgun.redb`, and its write-ahead log lives in `/data/topgun-wal`, so a volume mounted at `/data` holds everything. Every start logs `store location: data directory …` with the directory it uses and where that came from (`data_dir_source`).
 
@@ -73,7 +73,15 @@ Earlier versions kept the store as one file at `TOPGUN_REDB_PATH`. The first sta
 - It is resumable: if the process is stopped or killed during the migration, the next start continues from where it got to. A health probe that restarts the server converges as long as each run lives a few seconds; for a large store, give the start-up probe enough time.
 - The copy is verified before anything is renamed. Then the old file is kept as `{TOPGUN_REDB_PATH}.pre-migration` — every start logs `store format: the pre-migration store file is kept at …; delete it once this store is confirmed` — and a small marker file is written at `TOPGUN_REDB_PATH`.
 - **Do not delete the marker file** while an older server binary may be started with that path. An older binary refuses to start on it (it exits with an error before it listens, and changes no file); without it, an older binary would create an empty store and serve empty maps.
-- **Rolling back** is only a return to the kept file, and it loses on the server every write the new version acknowledged: stop the new server cleanly, move the data directory away, delete the marker file, rename `{TOPGUN_REDB_PATH}.pre-migration` back to `TOPGUN_REDB_PATH`, start the old server. There is no tool that exports the new format back. Never point an older binary at the data directory's `engine.redb` itself: it would open it as a store with no maps and serve empty maps.
+- **Rolling back** is only a return to the kept file, and it loses on the server every write the new version acknowledged:
+  1. Stop the new server. It must exit 0 and log `write-behind shutdown: rollback hints written` with `drained=true`; that stop writes, into the WAL directory, the hints the old server reads to know how far the log was stored. After a crash, a non-zero exit or `drained=false` (the stop could not store every buffered write in time), start the new server again and stop it until the line reads `drained=true`.
+  2. Move the data directory away. Leave the WAL directory in place.
+  3. Delete the marker file at `TOPGUN_REDB_PATH`.
+  4. Rename `{TOPGUN_REDB_PATH}.pre-migration` back to `TOPGUN_REDB_PATH`.
+  5. Start the old server.
+
+  There is no tool that exports the new format back. Never point an older binary at the data directory's `engine.redb` itself: it would open it as a store with no maps and serve empty maps.
+- **Not a rollback target:** the first version with a data directory (built from `6a030bb6`) refuses a data directory this version has opened — it exits with `store format: refusing to open: unknown metadata …` before it listens and changes no file of the WAL directory. There is no tool to go back to it.
 - If the server refuses to start with a `store location:` or `store migration:` line, see [Troubleshooting](/docs/guides/troubleshooting#server-refuses-to-start-with-a-store-location-or-store-migration-line).
 
 ### Notes
@@ -84,8 +92,8 @@ Earlier versions kept the store as one file at `TOPGUN_REDB_PATH`. The first sta
 
 ### Backup and restore
 
-- **Back up:** stop the server (`SIGTERM` — it drains its write buffer and syncs the log, then exits 0), then copy the whole data directory (`TOPGUN_DATA_DIR`) recursively **and** the WAL directory (`TOPGUN_WAL_DIR`). In the container image these are `/data/topgun-data` and `/data/topgun-wal`.
-- **Restore:** with the server stopped, put both back, then start the server.
+- **Back up:** stop the server (`SIGTERM`). The stop must exit 0 and log `write-behind shutdown: rollback hints written` with `drained=true`; after `drained=false`, start the server again and stop it until the line reads `drained=true`. Then copy both directories together: the whole data directory (`TOPGUN_DATA_DIR`) recursively **and** the WAL directory (`TOPGUN_WAL_DIR`). In the container image these are `/data/topgun-data` and `/data/topgun-wal`.
+- **Restore:** with the server stopped, put both back from the same backup, then start the server. A data directory older than the WAL directory beside it is refused at start with nothing written (`WAL directory check: refusing to start: the data directory is older than the WAL directory …`, see [Troubleshooting](/docs/guides/troubleshooting#server-refuses-to-start-with-a-wal-directory-check-line)).
 - **Not supported:** a copy of a running server's directory. The data directory alone is not the server's state while it runs, because acknowledged writes that are not yet in it live in the WAL directory, and a file copied while the server writes to it can mix pages from different moments.
 
 ## Postgres (removed)

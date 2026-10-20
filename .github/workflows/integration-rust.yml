@@ -139,10 +139,11 @@ jobs:
         # This is the same script a developer runs locally. What it leaves out,
         # and why, is listed in one place — tests/integration-rust/opt-in-suites.js —
         # and printed at the start of the run:
-        # - map-name-upgrade and map-name-rollback each drive two server binaries,
-        #   the current one and the one built from 07d009f0, and CI does not build
-        #   the older one. Rollback across that one boundary is a one-time
-        #   property, not a regression surface, so both files are run locally
+        # - map-name-upgrade, map-name-rollback and watermark-rollback each drive
+        #   two server binaries, the current one and an older one (built from
+        #   07d009f0, b346e277 and 6a030bb6 respectively), and CI does not build
+        #   the older ones. Rollback across each boundary is a one-time
+        #   property, not a regression surface, so the three files are run locally
         #   (`pnpm test:integration-rust:two-binary`) and their output is carried
         #   in the pull request.
         # - store-refusal-liveness, flush-task-panic and store-broken each need a

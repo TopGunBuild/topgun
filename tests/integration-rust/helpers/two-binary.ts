@@ -145,38 +145,80 @@ const FORMAT_BUILD_HINT =
   'RUST_SERVER_BINARY and NEW_SERVER_COMMIT.';
 
 /**
- * Reads the variables of the on-disk-format rollback test: the older binary is
- * the build from before the data directory existed (FORMAT_OLD_SERVER_BINARY /
- * FORMAT_OLD_SERVER_COMMIT), the newer one is the binary under test. Throws,
- * naming every missing older-binary variable at once; like
- * `requireTwoBinaryEnv`, it never falls back to running one binary in both
- * roles, because a refusal "proved" by the newer binary says nothing about the
- * older one.
+ * Reads the variables of a rollback test whose older binary is named by
+ * `binaryName` / `commitName`; the newer one is the binary under test. Throws,
+ * naming every missing older-binary variable at once, and never falls back to
+ * running one binary in both roles, because a refusal "proved" by the newer
+ * binary says nothing about the older one.
  */
-export function requireFormatRollbackEnv(): TwoBinaryEnv {
-  const missing = ['FORMAT_OLD_SERVER_BINARY', 'FORMAT_OLD_SERVER_COMMIT'].filter(
-    (name) => !process.env[name],
-  );
+function requireOlderBinaryEnv(binaryName: string, commitName: string, hint: string): TwoBinaryEnv {
+  const missing = [binaryName, commitName].filter((name) => !process.env[name]);
   if (missing.length > 0) {
     throw new Error(
-      `${missing.join(' and ')} ${missing.length > 1 ? 'are' : 'is'} not set. ${FORMAT_BUILD_HINT}`,
+      `${missing.join(' and ')} ${missing.length > 1 ? 'are' : 'is'} not set. ${hint}`,
     );
   }
-  const oldBinary = process.env.FORMAT_OLD_SERVER_BINARY as string;
+  const oldBinary = process.env[binaryName] as string;
   try {
     if (!fs.statSync(oldBinary).isFile()) throw new Error('not a regular file');
     fs.accessSync(oldBinary, fs.constants.X_OK);
   } catch (err) {
     throw new Error(
-      `FORMAT_OLD_SERVER_BINARY does not name an executable file (${oldBinary}: ${(err as Error).message}). ${FORMAT_BUILD_HINT}`,
+      `${binaryName} does not name an executable file (${oldBinary}: ${(err as Error).message}). ${hint}`,
     );
   }
   return {
     oldBinary,
     newBinary: requireExecutable('RUST_SERVER_BINARY'),
-    oldCommit: process.env.FORMAT_OLD_SERVER_COMMIT as string,
+    oldCommit: process.env[commitName] as string,
     newCommit: requireVariable('NEW_SERVER_COMMIT'),
   };
+}
+
+/**
+ * Reads the variables of the on-disk-format rollback test: the older binary is
+ * the build from before the data directory existed (FORMAT_OLD_SERVER_BINARY /
+ * FORMAT_OLD_SERVER_COMMIT).
+ */
+export function requireFormatRollbackEnv(): TwoBinaryEnv {
+  return requireOlderBinaryEnv(
+    'FORMAT_OLD_SERVER_BINARY',
+    'FORMAT_OLD_SERVER_COMMIT',
+    FORMAT_BUILD_HINT,
+  );
+}
+
+/** The build of the watermark rollback test's older binary. */
+export const WATERMARK_OLD_COMMIT_PREFIX = '6a030bb6';
+
+/** The commands that produce the applied-watermark rollback pair, repeated in every failure. */
+const WATERMARK_BUILD_HINT =
+  `Watermark rollback: build the server at ${WATERMARK_OLD_COMMIT_PREFIX} (the last binary that keeps ` +
+  'the applied WAL watermark in `.applied` files) in its own worktree and target directory ' +
+  `(\`git worktree add <scratch>/topgun-watermark-old ${WATERMARK_OLD_COMMIT_PREFIX}\`, then ` +
+  '`cargo build --release -p topgun-server --manifest-path <scratch>/topgun-watermark-old/Cargo.toml ' +
+  '--target-dir <scratch>/topgun-watermark-old-target`), build the newer one in this checkout, and export ' +
+  'WATERMARK_OLD_SERVER_BINARY, WATERMARK_OLD_SERVER_COMMIT (the full commit the older binary was built ' +
+  'from), RUST_SERVER_BINARY and NEW_SERVER_COMMIT.';
+
+/**
+ * Reads the variables of the applied-watermark rollback test: the older binary
+ * is the build from WATERMARK_OLD_COMMIT_PREFIX (WATERMARK_OLD_SERVER_BINARY /
+ * WATERMARK_OLD_SERVER_COMMIT). Throws when either is missing or the commit is
+ * another one, since the refusal under test is that binary's.
+ */
+export function requireWatermarkRollbackEnv(): TwoBinaryEnv {
+  const env = requireOlderBinaryEnv(
+    'WATERMARK_OLD_SERVER_BINARY',
+    'WATERMARK_OLD_SERVER_COMMIT',
+    WATERMARK_BUILD_HINT,
+  );
+  if (!env.oldCommit.startsWith(WATERMARK_OLD_COMMIT_PREFIX)) {
+    throw new Error(
+      `WATERMARK_OLD_SERVER_COMMIT is ${env.oldCommit}, not a commit starting ${WATERMARK_OLD_COMMIT_PREFIX}. ${WATERMARK_BUILD_HINT}`,
+    );
+  }
+  return env;
 }
 
 export function sha256OfFile(filePath: string): string {

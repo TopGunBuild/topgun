@@ -13,12 +13,12 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::sync::{watch, Notify};
 use topgun_core::{fnv1a_hash, PARTITION_COUNT};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::storage::engine::SlotCell;
 use crate::storage::map_data_store::{
-    merkle_leaf_hash, LeafSink, Loaded, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor, ScanOrder,
-    StoreBrokenCause, StoreErrorClass, WriteSource,
+    merkle_leaf_hash, FlushCommit, LeafSink, Loaded, MapDataStore, MerkleLeaf, PutValue, ScanBatch,
+    ScanCursor, ScanOrder, StoreBrokenCause, StoreErrorClass, StoreWrite, WriteSource,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{
@@ -2189,26 +2189,17 @@ impl WriteBehindDataStore {
                     continue;
                 }
 
-                let flush_future = persist_entry(self.inner.as_ref(), &entry);
-
-                let partition_id_for_wal = partition_for(&entry.map, &entry.key);
-                match tokio::time::timeout(remaining, flush_future).await {
-                    Ok(Ok(())) => {
+                match tokio::time::timeout(remaining, self.commit_entry(&entry)).await {
+                    Ok(Ok(applied)) => {
                         // A writer that passed the lifecycle check before the
                         // shutdown may have staged a newer write of this key —
                         // its entry already queued (it completed while this
                         // drain was inside the store call above) or not queued
-                        // yet. Removing the slot without comparing sequences
-                        // would leave that write buffered with no slot, and
-                        // reads would fall back to the older durable value
-                        // (`TG-WB-007`).
-                        self.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
-                        self.pending_count.fetch_sub(1, Ordering::Relaxed);
-                        self.resolve_pending(entry.sequence);
-                        // Resolve and advance so a restart after clean shutdown is
-                        // a no-op rather than re-replaying already-durable writes.
-                        self.resolve_and_advance(partition_id_for_wal, &entry.wal_sequences)
-                            .await;
+                        // yet; settling clears the slot only if it is still
+                        // this entry's. Resolving and advancing makes a
+                        // restart after a clean shutdown a no-op rather than a
+                        // re-replay of already-durable writes.
+                        self.settle_stored(&entry, &applied).await;
                     }
                     Ok(Err(err)) => {
                         if let StoreErrorClass::StoreBroken(cause) = self.inner.classify_error(&err)
@@ -2310,7 +2301,8 @@ impl WriteBehindDataStore {
         }
     }
 
-    /// The one way out of `hard_flush`: makes the WAL durable, then says
+    /// The one way out of `hard_flush`: makes the WAL durable, ends its
+    /// collection — writing its rollback hints when nothing failed — then says
     /// whether the store that was shut down had failed.
     ///
     /// The sync comes first and on every shutdown, not only a failed one. Under
@@ -2335,6 +2327,31 @@ impl WriteBehindDataStore {
         }
 
         let failure = self.background_failure.borrow().clone();
+        // After the sync, so the hints follow every frame this process wrote.
+        // Written exactly when this stop returns `Ok` — also after a drain
+        // that timed out or was refused — because a hint is always the durable
+        // watermark, never a pending frame's sequence; a failed node writes
+        // none and only ends the WAL's collection.
+        if let Some(tracking) = &self.wal {
+            let write_hints = failure.is_none();
+            match tracking.wal.finish(write_hints).await {
+                Ok(partitions) if write_hints && tracking.wal.watermark_in_store() => {
+                    let pending = self.pending_operation_count();
+                    info!(
+                        drained = pending == 0,
+                        pending, partitions, "write-behind shutdown: rollback hints written"
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    error!(
+                        error = %err,
+                        "write-behind shutdown: the WAL's rollback hints could not be written; \
+                         a rollback to an older binary is not exact after this stop"
+                    );
+                }
+            }
+        }
         let Some(failure) = failure else {
             return Ok(());
         };
@@ -3405,6 +3422,71 @@ impl WriteBehindDataStore {
         }
     }
 
+    /// The applied watermark rows one entry's commit carries, planned before
+    /// the commit without changing any tracking state.
+    ///
+    /// Only when the WAL keeps its watermark in the store: a row is then
+    /// durable exactly when the records it covers are, because both are one
+    /// store batch. For every tracked partition the row is the watermark the
+    /// partition reaches once the entry's WAL sequences `seqs` (all in
+    /// `partition`, the entry's WAL partition) are resolved — the
+    /// prefix-complete rule of [`Self::prefix_complete_watermark`] with `seqs`
+    /// left out. Every partition is a candidate, not only the entry's own: a
+    /// coalesce resolves sequences with no store write of their own, and their
+    /// partition's watermark becomes durable only in some later commit.
+    ///
+    /// An unseeded partition gets no row, for the reason it gets no watermark.
+    /// A row at or below the durable watermark is left out: after a restart a
+    /// partition with nothing assigned yet plans 0, and the store refuses a
+    /// lower row (`TG-WAL-005`).
+    async fn plan_commit(&self, partition: u32, seqs: &BTreeSet<u64>) -> Vec<(u32, u64)> {
+        let Some(tracking) = &self.wal else {
+            return Vec::new();
+        };
+        if !tracking.wal.watermark_in_store() {
+            return Vec::new();
+        }
+        self.ensure_wal_seeded(partition).await;
+        // Collected first, so no map shard guard is held under a partition lock.
+        let mut candidates: Vec<u32> = tracking
+            .partitions
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+        candidates.sort_unstable();
+        candidates
+            .into_iter()
+            .filter_map(|p| {
+                let planned = tracking.with_partition(p, |state| {
+                    if !state.seeded {
+                        return None;
+                    }
+                    let resolved = |seq: &&u64| p == partition && seqs.contains(*seq);
+                    Some(
+                        state
+                            .pending
+                            .keys()
+                            .find(|seq| !resolved(seq))
+                            .map_or(state.max_assigned, |min| min.saturating_sub(1)),
+                    )
+                })?;
+                let durable = tracking.wal.durable_applied(p)?;
+                (planned > durable).then_some((p, planned))
+            })
+            .collect()
+    }
+
+    /// Plans and commits one entry, returning the rows its commit carried for
+    /// [`Self::settle_stored`]. Nothing of the tracking state changes here, so
+    /// a refused commit leaves the entry exactly as it was.
+    async fn commit_entry(&self, entry: &DelayedEntry) -> anyhow::Result<Vec<(u32, u64)>> {
+        let applied = self
+            .plan_commit(partition_for(&entry.map, &entry.key), &entry.wal_sequences)
+            .await;
+        commit_write(self.inner.as_ref(), entry, &applied).await?;
+        Ok(applied)
+    }
+
     /// Disposes of a coalesce-retired entry's WAL sequences against the survivor.
     ///
     /// Returns the sequences the caller must EARLY-RESOLVE (once the partition
@@ -3583,8 +3665,9 @@ fn fault_store_panic_armed() -> bool {
     fault_store_panic_path().is_some_and(std::path::Path::exists)
 }
 
-/// Persists one dequeued entry to the inner store — the single body the
-/// background flush and the shutdown drain share.
+/// Commits one dequeued entry to the inner store, with the applied watermark
+/// rows `applied` beside its write — the single body the background flush,
+/// the probe and the shutdown drain share.
 ///
 /// A `StoreCell` entry persists the cell's value as it is now, read under the
 /// cell lock. When the inner store accepts encoded records, the value is
@@ -3592,7 +3675,16 @@ fn fault_store_panic_armed() -> bool {
 /// outlives the lock; otherwise it is cloned out under the lock. Either way the
 /// guard lives only inside its block: it is `!Send`, and must not be held
 /// across the inner store's await (or into any call that takes the same lock).
-async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow::Result<()> {
+///
+/// The commit is awaited on this task, never moved to a blocking thread: a
+/// shutdown drain whose deadline passes while a store write runs then still
+/// learns that the write and its rows are durable, so the rollback hints it
+/// writes next are the rows the store holds.
+async fn commit_write(
+    inner: &dyn MapDataStore,
+    entry: &DelayedEntry,
+    applied: &[(u32, u64)],
+) -> anyhow::Result<()> {
     // Panic here, before the inner store is reached, so the background flush
     // and the shutdown drain both unwind from the point where a panic of the
     // inner store itself would reach them.
@@ -3612,57 +3704,60 @@ async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow
         ));
     }
 
-    match &entry.operation {
+    let (map, key, store_time) = (entry.map.as_str(), entry.key.as_str(), entry.store_time);
+    let cloned;
+    let write = match &entry.operation {
         DelayedOp::Store {
             value,
             expiration_time,
-        } => {
-            inner
-                .add(
-                    &entry.map,
-                    &entry.key,
-                    value,
-                    *expiration_time,
-                    entry.store_time,
-                )
-                .await
-        }
+        } => StoreWrite::Put {
+            map,
+            key,
+            value: PutValue::Value(value),
+            expiration_time: *expiration_time,
+            store_time,
+        },
         DelayedOp::StoreCell {
             cell,
             expiration_time,
         } => {
-            if inner.accepts_encoded() {
-                let bytes = {
-                    let guard = cell.lock();
-                    rmp_serde::to_vec_named(&guard.value)?
-                };
-                inner
-                    .add_encoded(
-                        &entry.map,
-                        &entry.key,
-                        &bytes,
-                        *expiration_time,
-                        entry.store_time,
-                    )
-                    .await
+            let value = if inner.accepts_encoded() {
+                let guard = cell.lock();
+                PutValue::Encoded(rmp_serde::to_vec_named(&guard.value)?)
             } else {
-                let value = {
+                cloned = {
                     let guard = cell.lock();
                     guard.value.clone()
                 };
-                inner
-                    .add(
-                        &entry.map,
-                        &entry.key,
-                        &value,
-                        *expiration_time,
-                        entry.store_time,
-                    )
-                    .await
+                PutValue::Value(&cloned)
+            };
+            StoreWrite::Put {
+                map,
+                key,
+                value,
+                expiration_time: *expiration_time,
+                store_time,
             }
         }
-        DelayedOp::Remove => inner.remove(&entry.map, &entry.key, entry.store_time).await,
-    }
+        DelayedOp::Remove => StoreWrite::Remove {
+            map,
+            key,
+            store_time,
+        },
+    };
+    inner
+        .commit(&FlushCommit {
+            writes: vec![write],
+            applied: applied.to_vec(),
+        })
+        .await
+}
+
+/// [`commit_write`] with no watermark rows: the commit of a WAL that keeps its
+/// watermark in sidecars, for the tests that drive the flush body directly.
+#[cfg(test)]
+async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow::Result<()> {
+    commit_write(inner, entry, &[]).await
 }
 
 /// Refused entries in a row, inside one flush pass, that start a store-wide
@@ -3722,22 +3817,46 @@ struct RefusedExample {
 
 impl WriteBehindDataStore {
     /// The one terminal of an entry the store accepted, whether a pass
-    /// attempted it in its turn or as a probe.
-    async fn settle_stored(&self, entry: &DelayedEntry) {
+    /// attempted it in its turn or as a probe, or the shutdown drain did;
+    /// `applied` are the rows its commit carried.
+    async fn settle_stored(&self, entry: &DelayedEntry, applied: &[(u32, u64)]) {
         // Remove this write's staging slot ONLY if it is still the one that
-        // was flushed: a newer coalesced write must survive.
+        // was flushed: a newer coalesced write must survive (`TG-WB-007`).
         self.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
         self.pending_count.fetch_sub(1, Ordering::Relaxed);
         // The bytes are in the inner store, so the entry sequence may let the
         // prefix-complete flushed watermark past it. This is the ONLY signal
         // that advances the tombstone durability fence.
         self.resolve_pending(entry.sequence);
-        // Resolve the entry's WAL sequences and advance the partition
-        // watermark to the prefix-complete frontier, so a clean restart does
-        // not re-replay writes that are already in the inner store — and so
-        // no lower, still un-flushed frame of the partition is marked applied.
-        self.resolve_and_advance(partition_for(&entry.map, &entry.key), &entry.wal_sequences)
-            .await;
+        let partition = partition_for(&entry.map, &entry.key);
+        match &self.wal {
+            Some(tracking) if tracking.wal.watermark_in_store() => {
+                // The rows are durable with the records, so the WAL may
+                // collect up to them; it learns that only now, after the
+                // commit returned.
+                self.resolve_wal_sequences(partition, &entry.wal_sequences);
+                for &(p, watermark) in applied {
+                    if let Err(err) = tracking.wal.mark_applied(p, watermark).await {
+                        warn!(
+                            partition = p,
+                            watermark,
+                            error = %err,
+                            "Failed to note a committed WAL watermark; the WAL collects up to it \
+                             after a later commit of the partition or the next start"
+                        );
+                    }
+                }
+            }
+            // Resolve the entry's WAL sequences and advance the partition
+            // watermark to the prefix-complete frontier, so a clean restart
+            // does not re-replay writes that are already in the inner store —
+            // and so no lower, still un-flushed frame of the partition is
+            // marked applied.
+            _ => {
+                self.resolve_and_advance(partition, &entry.wal_sequences)
+                    .await;
+            }
+        }
     }
 
     /// Puts an entry a pass holds back on its queue, as it is.
@@ -3920,9 +4039,9 @@ impl WriteBehindDataStore {
                 return;
             };
             self.register_in_flight(partition, &probe.wal_sequences);
-            match persist_entry(self.inner.as_ref(), &probe).await {
-                Ok(()) => {
-                    self.settle_stored(&probe).await;
+            match self.commit_entry(&probe).await {
+                Ok(applied) => {
+                    self.settle_stored(&probe, &applied).await;
                     // The store answers again: the hold ends and this same
                     // pass goes on over everything that is due.
                     schedule.hold_until = None;
@@ -3964,9 +4083,9 @@ impl WriteBehindDataStore {
         let mut refused_in_a_row = 0u32;
         let mut entries = ready.into_iter();
         while let Some(entry) = entries.next() {
-            match persist_entry(self.inner.as_ref(), &entry).await {
-                Ok(()) => {
-                    self.settle_stored(&entry).await;
+            match self.commit_entry(&entry).await {
+                Ok(applied) => {
+                    self.settle_stored(&entry, &applied).await;
                     refused_in_a_row = 0;
                 }
                 Err(err) => {
