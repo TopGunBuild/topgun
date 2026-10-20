@@ -6,6 +6,12 @@
 //! The WAL is per-partition: one append-only file per partition under a
 //! configured `wal_dir`. `WalWriter` implements the `Wal` trait; `WalRecovery`
 //! replays un-applied entries through the inner store on startup.
+//!
+//! In store mode (`WalWriter::open_over_store`, what production opens) the
+//! applied watermark is the engine's, committed with the data it covers. The
+//! `.applied` sidecar is the persistence of a WAL opened with `WalWriter::new`
+//! over a store that keeps no watermark — tests, simulation, benches and
+//! embedders.
 
 pub mod format;
 pub mod segment;
@@ -14,6 +20,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -21,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
+use topgun_core::PARTITION_COUNT;
 
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::{OrMapEntry, RecordValue};
@@ -503,48 +511,49 @@ struct PartitionHandle {
 }
 
 /// Where a [`WalWriter`] keeps its applied watermark, fixed at construction.
-#[derive(Clone)]
-// The store variant is declared ahead of the open path that constructs it.
-#[allow(dead_code)]
 enum WalMode {
     /// The `.applied` sidecar files of the WAL directory ([`WalWriter::new`]).
     Sidecar,
     /// The `0x20` rows of the store the WAL was opened over
-    /// ([`WalWriter::open_over_store`]). Weak, so the WAL never keeps the
-    /// store alive.
+    /// ([`WalWriter::open_over_store`]).
     Store {
-        /// The store that holds the watermark.
+        /// The store that holds the watermark. Weak, so the WAL never keeps
+        /// the store alive.
+        // Read by the collection tick.
+        #[allow(dead_code)]
         store: std::sync::Weak<dyn MapDataStore>,
+        /// The durable watermark of every WAL partition, indexed by
+        /// partition: the value of its row once a commit carrying it
+        /// returned. In memory only — the store's row is the durable copy.
+        durable: Box<[AtomicU64]>,
     },
 }
 
 /// File name of the collected-up-to record of a store-mode WAL directory.
-// Declared ahead of the store-mode open and collection that use it.
-#[allow(dead_code)]
 pub(crate) const WAL_COLLECTED_FILE: &str = "wal-collected";
 /// File name the collected-up-to record is written to before its rename.
-// Declared ahead of the store-mode open and collection that use it.
-#[allow(dead_code)]
 pub(crate) const WAL_COLLECTED_TMP_FILE: &str = "wal-collected.tmp";
 /// Magic of the collected-up-to record.
-// Declared ahead of the store-mode open and collection that use it.
-#[allow(dead_code)]
 pub(crate) const WAL_COLLECTED_MAGIC: &[u8; 8] = b"TGWALC01";
 /// Length of the collected-up-to record: magic, one u64 BE per partition,
 /// crc32c u32 BE of the preceding bytes.
-// Declared ahead of the store-mode open and collection that use it.
-#[allow(dead_code)]
-pub(crate) const WAL_COLLECTED_LEN: usize = 8 + 8 * topgun_core::PARTITION_COUNT as usize + 4;
+pub(crate) const WAL_COLLECTED_LEN: usize = 8 + 8 * PARTITION_COUNT as usize + 4;
 
 /// Encodes the collected-up-to record: `TGWALC01 ‖ G(p) u64 BE for every
 /// partition ‖ crc32c u32 BE`.
 ///
-/// `collected` holds one value per partition (length `PARTITION_COUNT`).
-// Declared ahead of the store-mode open and collection that use it.
-#[allow(dead_code, clippy::unimplemented)]
+/// `collected` holds one value per partition (length `PARTITION_COUNT`); a
+/// missing value is written as 0, so the record always has its fixed length.
 pub(crate) fn encode_wal_collected(collected: &[u64]) -> Vec<u8> {
-    let _ = collected;
-    unimplemented!()
+    debug_assert_eq!(collected.len(), PARTITION_COUNT as usize);
+    let mut bytes = Vec::with_capacity(WAL_COLLECTED_LEN);
+    bytes.extend_from_slice(WAL_COLLECTED_MAGIC);
+    for partition in 0..PARTITION_COUNT as usize {
+        bytes.extend_from_slice(&collected.get(partition).copied().unwrap_or(0).to_be_bytes());
+    }
+    let crc = crc32c::crc32c(&bytes);
+    bytes.extend_from_slice(&crc.to_be_bytes());
+    bytes
 }
 
 /// Decodes a collected-up-to record into one value per partition.
@@ -552,23 +561,78 @@ pub(crate) fn encode_wal_collected(collected: &[u64]) -> Vec<u8> {
 /// # Errors
 ///
 /// A record of the wrong length, magic or checksum.
-// Declared ahead of the store-mode open that uses it.
-#[allow(dead_code, clippy::unimplemented)]
 pub(crate) fn decode_wal_collected(bytes: &[u8]) -> anyhow::Result<Vec<u64>> {
-    let _ = bytes;
-    unimplemented!()
+    if bytes.len() != WAL_COLLECTED_LEN {
+        anyhow::bail!(
+            "it holds {} bytes, a collected-up-to record holds {WAL_COLLECTED_LEN}",
+            bytes.len()
+        );
+    }
+    let (body, crc) = bytes.split_at(WAL_COLLECTED_LEN - 4);
+    if &body[..8] != WAL_COLLECTED_MAGIC {
+        anyhow::bail!("it does not start with the magic of a collected-up-to record");
+    }
+    let stored = u32::from_be_bytes(crc.try_into()?);
+    let computed = crc32c::crc32c(body);
+    if stored != computed {
+        anyhow::bail!("its checksum {stored:#010x} does not match its content ({computed:#010x})");
+    }
+    body[8..]
+        .chunks_exact(8)
+        .map(|chunk| Ok(u64::from_be_bytes(chunk.try_into()?)))
+        .collect()
+}
+
+/// Writes the collected-up-to record of `wal_dir` crash-durably: a temporary
+/// file, synced, renamed into place, then the directory synced.
+///
+/// The record licenses the absence of every frame it covers, so it must be
+/// durable before any segment it covers is unlinked; a record that a crash
+/// could tear or lose would let the next start take a data directory that
+/// lacks those frames.
+fn write_wal_collected(wal_dir: &Path, collected: &[u64]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let tmp = wal_dir.join(WAL_COLLECTED_TMP_FILE);
+    {
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| anyhow::anyhow!("Cannot create {}: {e}", tmp.display()))?;
+        file.write_all(&encode_wal_collected(collected))
+            .map_err(|e| anyhow::anyhow!("Cannot write {}: {e}", tmp.display()))?;
+        file.sync_all()
+            .map_err(|e| anyhow::anyhow!("Cannot fsync {}: {e}", tmp.display()))?;
+    }
+    let path = wal_dir.join(WAL_COLLECTED_FILE);
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        anyhow::anyhow!("Cannot rename {} to {}: {e}", tmp.display(), path.display())
+    })?;
+    fsync_dir(wal_dir)
 }
 
 /// Production append-only WAL writer.
 ///
 /// Each partition's log is split into a sequence of segment files named
 /// `partition-{id:03}-{first_seq:020}.log` (see `segment`): appends always target
-/// the single active segment, and `mark_applied` seals the active segment, rotates
-/// a fresh one in, then GC-deletes sealed segments fully covered by the applied
-/// watermark. Applied-sequence tracking uses a sidecar file
-/// `partition-{id:03}.applied` that stores the highest applied sequence number as
-/// a big-endian u64 so recovery can skip already-durable entries — and so GC and
-/// the post-restart sequence seed have a crash-durable watermark.
+/// the single active segment. Where the applied watermark lives is fixed at
+/// construction, and it decides who seals and collects:
+///
+/// - **Store mode** ([`WalWriter::open_over_store`], what production opens):
+///   the watermark of each partition is a row of the store the WAL was opened
+///   over, committed in the same durable batch as the records it covers, so it
+///   can never be durable without them. `mark_applied` only notes in memory
+///   that such a commit returned. The WAL directory holds no watermark of its
+///   own, only `wal-collected`, the highest sequence of each partition whose
+///   segments were unlinked — the check at open that the data directory is not
+///   older than the WAL directory. The `.applied` files are rollback hints for
+///   older binaries, written at a stop that exits 0; this binary reads one only
+///   when the open imports the sidecars of an older binary, and deletes them
+///   at every open.
+/// - **Sidecar mode** ([`WalWriter::new`]): the persistence of a WAL opened
+///   over a store that keeps no watermark — tests, simulation, benches and
+///   embedders. `mark_applied` writes the sidecar `partition-{id:03}.applied`
+///   (the highest applied sequence as a big-endian u64, so recovery can skip
+///   already-durable entries and GC and the post-restart sequence seed have a
+///   crash-durable watermark), then seals the active segment, rotates a fresh
+///   one in, and GC-deletes sealed segments fully covered by the watermark.
 ///
 /// Thread safety: each partition is guarded by its own `PartitionHandle` (split
 /// active/sealed locks) so concurrent appends to different partitions do not block
@@ -582,8 +646,6 @@ pub struct WalWriter {
     /// When `policy == Batched`, the writer also fsyncs after every 100 ops.
     batch_flush_tx: tokio::sync::watch::Sender<()>,
     /// Where the applied watermark is kept.
-    // Read by the store-mode paths, which are declared but not yet built.
-    #[allow(dead_code)]
     mode: WalMode,
     /// Added to the clock the collection tick reads a segment's age by, so a
     /// test can age a segment without waiting.
@@ -598,7 +660,6 @@ pub struct WalWriter {
     /// Per-partition floor `unapplied` filters by instead of the durable
     /// watermark, so a test can hand recovery a frame at or below it.
     #[cfg(test)]
-    #[allow(dead_code)]
     test_unapplied_floor_override: std::sync::Mutex<HashMap<u32, u64>>,
     /// Forces the pre-unlink watermark re-read to return this value instead of
     /// the sidecar's.
@@ -749,7 +810,9 @@ fn fsync_dir(dir: &Path) -> anyhow::Result<()> {
 }
 
 impl WalWriter {
-    /// Creates a new `WalWriter` rooted at `wal_dir`.
+    /// Creates a sidecar-mode `WalWriter` rooted at `wal_dir`: for tests,
+    /// simulation and benches; production opens
+    /// [`open_over_store`](Self::open_over_store).
     ///
     /// The directory is created if it does not exist. Returns an error if the
     /// directory cannot be created, so a misconfigured `wal_dir` surfaces at
@@ -757,16 +820,288 @@ impl WalWriter {
     ///
     /// # Errors
     ///
-    /// Returns an error if `wal_dir` cannot be created or accessed.
+    /// Returns an error if `wal_dir` cannot be created or accessed, or if it
+    /// is kept by a store that holds its applied watermark.
     pub fn new(wal_dir: PathBuf, policy: WalFsyncPolicy) -> anyhow::Result<Arc<Self>> {
-        std::fs::create_dir_all(&wal_dir).map_err(|e| {
+        Self::create_dir(&wal_dir)?;
+        // Opened in sidecar mode, such a directory would read every frame its
+        // store already holds as un-applied and collect by watermarks that
+        // were never written to it.
+        if Self::wal_collected_exists(&wal_dir)? {
+            anyhow::bail!(
+                "WAL directory {} is kept by a store that holds its applied watermark; open it \
+                 over that store",
+                wal_dir.display()
+            );
+        }
+        Ok(Self::build(wal_dir, policy, WalMode::Sidecar))
+    }
+
+    /// Opens a WAL in `wal_dir` whose applied watermark is kept by `store`,
+    /// committed together with the data.
+    ///
+    /// The open checks that the data directory and the WAL directory belong
+    /// together, imports the `.applied` sidecars of an older binary once, and
+    /// starts the collection tick. Its steps, in order:
+    ///
+    /// 1. create the WAL directory;
+    /// 2. read the store's watermarks, import marker and import-pending mark;
+    /// 3. take the store's watermarks once imported; else read the sidecars —
+    ///    only when the directory has never served a store-mode WAL (no
+    ///    `wal-collected`) or the store was just migrated from the file of an
+    ///    older binary — and refuse a data directory that holds no watermarks
+    ///    beside a directory that has served a store keeping them;
+    /// 4. refuse when any watermark is below what the WAL already collected;
+    /// 5. import the sidecar values, with the marker, in one durable batch;
+    /// 6. create `wal-collected`, all zero, when absent;
+    /// 7. delete every sidecar and sidecar temporary file;
+    /// 8. hold the watermarks in memory, set the retained-bytes gauges and
+    ///    start the collection tick.
+    ///
+    /// Every refusal returns before anything is written to the store or to
+    /// the WAL directory.
+    ///
+    /// # Errors
+    ///
+    /// A store that keeps no applied watermark; a data directory older than
+    /// the WAL directory; a malformed sidecar or collected-up-to record; an
+    /// I/O or store error.
+    // Owned, as the binary and every caller hold the store they open over;
+    // the WAL keeps only a weak reference to it.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn open_over_store(
+        wal_dir: PathBuf,
+        policy: WalFsyncPolicy,
+        store: Arc<dyn MapDataStore>,
+    ) -> anyhow::Result<Arc<Self>> {
+        if !store.keeps_applied_watermarks() {
+            anyhow::bail!(
+                "WAL directory {}: the store it is opened over keeps no applied watermark",
+                wal_dir.display()
+            );
+        }
+        Self::create_dir(&wal_dir)?;
+
+        let watermarks = store
+            .applied_watermarks()
+            .map_err(|e| anyhow::anyhow!("Cannot read the applied watermarks of the store: {e:#}"))?
+            .ok_or_else(|| anyhow::anyhow!("the store keeps no applied watermark"))?;
+        if watermarks.by_partition.len() != PARTITION_COUNT as usize {
+            anyhow::bail!(
+                "the store returned {} applied watermarks, one per WAL partition is {PARTITION_COUNT}",
+                watermarks.by_partition.len()
+            );
+        }
+
+        let collected_present = Self::wal_collected_exists(&wal_dir)?;
+        let effective = if watermarks.imported {
+            watermarks.by_partition
+        } else if !collected_present || watermarks.import_pending {
+            Self::read_sidecars_for_import(&wal_dir)?
+        } else {
+            let message = format!(
+                "WAL directory check: refusing to start: the data directory is older than the WAL \
+                 directory {}: the data directory holds no applied watermarks, but the WAL \
+                 directory has served a store that keeps them. Restore the data directory and the \
+                 WAL directory from the same backup, taken with the server stopped",
+                wal_dir.display()
+            );
+            tracing::error!("{message}");
+            anyhow::bail!(message);
+        };
+
+        let collected = if collected_present {
+            let path = wal_dir.join(WAL_COLLECTED_FILE);
+            let bytes = std::fs::read(&path)
+                .map_err(|e| anyhow::anyhow!("Cannot read {}: {e}", path.display()))?;
+            decode_wal_collected(&bytes).map_err(|e| {
+                anyhow::anyhow!(
+                    "WAL directory check: refusing to start: {} is malformed: {e}",
+                    path.display()
+                )
+            })?
+        } else {
+            vec![0; PARTITION_COUNT as usize]
+        };
+        Self::refuse_collected_above_watermark(&wal_dir, &effective, &collected)?;
+
+        if !watermarks.imported {
+            let rows: Vec<(u32, u64)> = (0..PARTITION_COUNT)
+                .zip(effective.iter().copied())
+                .filter(|(_, sequence)| *sequence > 0)
+                .collect();
+            store.import_applied_watermarks(&rows).map_err(|e| {
+                anyhow::anyhow!("Cannot import the applied watermarks into the store: {e:#}")
+            })?;
+        }
+
+        if !collected_present {
+            write_wal_collected(&wal_dir, &vec![0; PARTITION_COUNT as usize])?;
+        }
+
+        Self::delete_sidecars(&wal_dir)?;
+
+        let durable: Box<[AtomicU64]> = effective.into_iter().map(AtomicU64::new).collect();
+        let writer = Self::build(
+            wal_dir,
+            policy,
+            WalMode::Store {
+                store: Arc::downgrade(&store),
+                durable,
+            },
+        );
+        writer.start_collection();
+        Ok(writer)
+    }
+
+    /// Sets the retained-bytes gauges of every partition and starts the
+    /// collection tick of a store-mode WAL.
+    // Grows the gauges and the tick task; until then a store-mode WAL keeps
+    // every segment, which loses nothing.
+    #[allow(clippy::unused_self)]
+    fn start_collection(self: &Arc<Self>) {}
+
+    /// Creates `wal_dir` if it does not exist.
+    fn create_dir(wal_dir: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(wal_dir).map_err(|e| {
             anyhow::anyhow!(
                 "Cannot create WAL directory {}: {e}. \
                  Ensure the WAL dir is on the same volume as the durable store.",
                 wal_dir.display()
             )
-        })?;
+        })
+    }
 
+    /// Whether `wal_dir` holds a collected-up-to record, i.e. has served a
+    /// store-mode WAL.
+    fn wal_collected_exists(wal_dir: &Path) -> anyhow::Result<bool> {
+        let path = wal_dir.join(WAL_COLLECTED_FILE);
+        path.try_exists()
+            .map_err(|e| anyhow::anyhow!("Cannot check {}: {e}", path.display()))
+    }
+
+    /// The value of every `partition-{p:03}.applied` sidecar of `wal_dir`, one
+    /// per partition, 0 where there is none.
+    ///
+    /// A sidecar that is not exactly 8 bytes, or that names no WAL partition,
+    /// refuses the start rather than reading as 0: imported as 0, its
+    /// partition would replay frames the store already holds, from below the
+    /// watermark the older binary had reached. Temporary files are ignored —
+    /// an older binary renamed none of them into place.
+    fn read_sidecars_for_import(wal_dir: &Path) -> anyhow::Result<Vec<u64>> {
+        let mut values = vec![0u64; PARTITION_COUNT as usize];
+        let read_dir = std::fs::read_dir(wal_dir)
+            .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
+        for entry in read_dir {
+            let entry = entry
+                .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(id) = name
+                .strip_prefix("partition-")
+                .and_then(|rest| rest.strip_suffix(".applied"))
+            else {
+                continue;
+            };
+            let path = entry.path();
+            let partition = id
+                .parse::<u32>()
+                .ok()
+                .filter(|p| *p < PARTITION_COUNT)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "WAL directory check: refusing to start: {} names no WAL partition \
+                         0..{PARTITION_COUNT}; its applied watermark cannot be imported",
+                        path.display()
+                    )
+                })?;
+            let bytes = std::fs::read(&path)
+                .map_err(|e| anyhow::anyhow!("Cannot read {}: {e}", path.display()))?;
+            let bytes: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                anyhow::anyhow!(
+                    "WAL directory check: refusing to start: {} holds {} bytes, an applied \
+                     watermark is 8; it cannot be imported",
+                    path.display(),
+                    bytes.len()
+                )
+            })?;
+            values[partition as usize] = u64::from_be_bytes(bytes);
+        }
+        Ok(values)
+    }
+
+    /// Refuses the start when the WAL has collected, in some partition, above
+    /// the watermark the data directory holds: the frames in between are gone
+    /// from the WAL and may be missing from the data directory.
+    fn refuse_collected_above_watermark(
+        wal_dir: &Path,
+        watermarks: &[u64],
+        collected: &[u64],
+    ) -> anyhow::Result<()> {
+        let mut behind = (0..PARTITION_COUNT)
+            .zip(watermarks.iter().zip(collected))
+            .filter(|(_, (v, g))| v < g);
+        let Some((partition, (v, g))) = behind.next() else {
+            return Ok(());
+        };
+        let more = behind.count();
+        let more = if more == 0 {
+            String::new()
+        } else {
+            format!(" (and {more} more partitions)")
+        };
+        let message = format!(
+            "WAL directory check: refusing to start: the data directory is older than the WAL \
+             directory {}: partition {partition} has applied watermark {v} there, but the WAL was \
+             collected up to {g}{more}; frames {}..={g} are no longer in the WAL and may be \
+             missing from the data directory. Restore the data directory and the WAL directory \
+             from the same backup, taken with the server stopped",
+            wal_dir.display(),
+            v + 1
+        );
+        tracing::error!("{message}");
+        anyhow::bail!(message)
+    }
+
+    /// Deletes every `.applied` sidecar and sidecar temporary file of
+    /// `wal_dir`, then makes the deletions durable.
+    ///
+    /// Run at every store-mode open, also once the import marker is present:
+    /// a crash between the import and this step leaves them behind, and a
+    /// sidecar left in place would be read by an older binary after a
+    /// rollback as a watermark this binary no longer keeps.
+    fn delete_sidecars(wal_dir: &Path) -> anyhow::Result<()> {
+        let read_dir = std::fs::read_dir(wal_dir)
+            .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
+        let mut deleted = false;
+        for entry in read_dir {
+            let entry = entry
+                .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !(name.starts_with("partition-")
+                && (name.ends_with(".applied") || name.ends_with(".applied.tmp")))
+            {
+                continue;
+            }
+            let path = entry.path();
+            std::fs::remove_file(&path)
+                .map_err(|e| anyhow::anyhow!("Cannot delete {}: {e}", path.display()))?;
+            if !deleted {
+                #[cfg(test)]
+                test_abort_if_armed(TestAbortPoint::OpenInsideSidecarDelete);
+                deleted = true;
+            }
+        }
+        if deleted {
+            fsync_dir(wal_dir)?;
+        }
+        Ok(())
+    }
+
+    /// Constructs the writer and, under the batched policy, its group-commit
+    /// timer.
+    fn build(wal_dir: PathBuf, policy: WalFsyncPolicy, mode: WalMode) -> Arc<Self> {
         let (batch_flush_tx, batch_flush_rx) = tokio::sync::watch::channel(());
 
         let writer = Arc::new(Self {
@@ -774,7 +1109,7 @@ impl WalWriter {
             policy,
             partitions: AsyncMutex::new(HashMap::new()),
             batch_flush_tx,
-            mode: WalMode::Sidecar,
+            mode,
             #[cfg(test)]
             test_clock_offset: std::sync::Mutex::new(std::time::Duration::ZERO),
             #[cfg(test)]
@@ -835,30 +1170,22 @@ impl WalWriter {
             });
         }
 
-        Ok(writer)
+        writer
     }
 
-    /// Opens a WAL in `wal_dir` whose applied watermark is kept by `store`,
-    /// committed together with the data.
-    ///
-    /// The open checks that the data directory and the WAL directory belong
-    /// together, imports the `.applied` sidecars of an older binary once, and
-    /// starts the collection tick.
-    ///
-    /// # Errors
-    ///
-    /// A store that keeps no applied watermark; a data directory older than
-    /// the WAL directory; a malformed sidecar or collected-up-to record; an
-    /// I/O or store error.
-    // Declared ahead of its implementation, which a later change of this series supplies.
-    #[allow(clippy::unimplemented)]
-    pub fn open_over_store(
-        wal_dir: PathBuf,
-        policy: WalFsyncPolicy,
-        store: Arc<dyn MapDataStore>,
-    ) -> anyhow::Result<Arc<Self>> {
-        let _ = (wal_dir, policy, store);
-        unimplemented!()
+    /// The durable watermarks of a store-mode WAL, `None` in sidecar mode.
+    fn durable_watermarks(&self) -> Option<&[AtomicU64]> {
+        match &self.mode {
+            WalMode::Store { durable, .. } => Some(durable),
+            WalMode::Sidecar => None,
+        }
+    }
+
+    /// The durable watermark slot of `partition` in a store-mode WAL.
+    fn durable_slot(durable: &[AtomicU64], partition: u32) -> anyhow::Result<&AtomicU64> {
+        durable.get(partition as usize).ok_or_else(|| {
+            anyhow::anyhow!("WAL partition {partition} is outside 0..{PARTITION_COUNT}")
+        })
     }
 
     /// Path of the active segment for a fresh partition (seeded at `first_seq`).
@@ -867,19 +1194,21 @@ impl WalWriter {
             .join(segment::format_segment_filename(partition, 0))
     }
 
-    /// Path of the sidecar file that records the highest applied sequence.
+    /// Path of the sidecar file that records the highest applied sequence:
+    /// the watermark's persistence in sidecar mode, the rollback hint's file
+    /// in store mode.
     fn applied_path(&self, partition: u32) -> PathBuf {
         self.wal_dir
             .join(format!("partition-{partition:03}.applied"))
     }
 
-    /// Reads the highest applied sequence number for a partition from the
-    /// sidecar file, or 0 if the file does not exist.
-    /// Re-reads the partition's applied watermark for the pre-unlink check.
+    /// Re-reads the partition's applied watermark for the pre-unlink check of
+    /// sidecar mode.
     ///
-    /// The `.applied` sidecar is this module's only watermark source: write-behind
+    /// The `.applied` sidecar is sidecar mode's only watermark source: write-behind
     /// holds the WAL, never the reverse, so its in-memory tracker is not reachable
-    /// from here and reading it would invert the dependency.
+    /// from here and reading it would invert the dependency. Store mode never
+    /// reads it: its watermark is the store's row.
     fn revalidated_watermark(&self, partition: u32) -> u64 {
         #[cfg(test)]
         if let Some(forced) = *self
@@ -1327,6 +1656,14 @@ impl Wal for WalWriter {
 
     /// Advances the partition's applied watermark and reclaims what it covers.
     ///
+    /// # Store mode
+    ///
+    /// The caller's statement that `sequence` is durable in the store as the
+    /// partition's watermark: a commit carrying that row returned `Ok`. The
+    /// in-memory copy moves to `max(current, sequence)` — no I/O, no seal, no
+    /// GC; sealing and collection belong to the collection tick, which reads
+    /// the store's rows itself. Everything below describes sidecar mode.
+    ///
     /// # Control flow — three independent steps, each with its OWN precondition
     ///
     /// The local watermark is `max(sequence, current)`, so an under-advancing
@@ -1363,6 +1700,11 @@ impl Wal for WalWriter {
     /// fails the pre-unlink re-validation is NOT an error: it is retained,
     /// counted, and logged.
     async fn mark_applied(&self, partition: u32, sequence: u64) -> anyhow::Result<()> {
+        if let Some(durable) = self.durable_watermarks() {
+            Self::durable_slot(durable, partition)?.fetch_max(sequence, Ordering::AcqRel);
+            return Ok(());
+        }
+
         let applied_path = self.applied_path(partition);
         // Advance the watermark monotonically; never regress it.
         let current = Self::read_applied_sequence(&applied_path);
@@ -1474,7 +1816,18 @@ impl Wal for WalWriter {
     }
 
     async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>> {
-        let applied_seq = Self::read_applied_sequence(&self.applied_path(partition));
+        let applied_seq = match self.durable_watermarks() {
+            Some(durable) => Self::durable_slot(durable, partition)?.load(Ordering::Acquire),
+            None => Self::read_applied_sequence(&self.applied_path(partition)),
+        };
+        #[cfg(test)]
+        let applied_seq = self
+            .test_unapplied_floor_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&partition)
+            .copied()
+            .unwrap_or(applied_seq);
         let segments = Self::discover_partition_segments(&self.wal_dir, partition)?;
         if segments.is_empty() {
             return Ok(Vec::new());
@@ -1540,6 +1893,16 @@ impl Wal for WalWriter {
             }
         }
         first_error.map_or(Ok(()), Err)
+    }
+
+    fn watermark_in_store(&self) -> bool {
+        self.durable_watermarks().is_some()
+    }
+
+    fn durable_applied(&self, partition: u32) -> Option<u64> {
+        self.durable_watermarks()?
+            .get(partition as usize)
+            .map(|slot| slot.load(Ordering::Acquire))
     }
 }
 
@@ -1676,8 +2039,10 @@ impl WalWriter {
     }
 
     /// Highest sequence this WAL has ever durably observed across **all**
-    /// partitions: the max over every `.applied` sidecar watermark AND every
-    /// log's max sequence.
+    /// partitions: the max over every applied watermark AND every log's max
+    /// sequence. The watermarks are the store's rows as this WAL holds them in
+    /// store mode — the sidecars were deleted at the open — and the `.applied`
+    /// sidecars in sidecar mode.
     ///
     /// Seeds the live counter to `this + 1` so post-restart writes never reuse a
     /// number at or below a watermark — the recovery filter `e.sequence >
@@ -1694,12 +2059,24 @@ impl WalWriter {
     /// unrecognised magic, or an unknown format version — consistent with
     /// recovery refusing to start on corrupt data.
     pub async fn max_observed_sequence(&self) -> anyhow::Result<u64> {
-        let mut global = 0u64;
+        // A store row survives collection of every segment it covers, and a
+        // WAL cut at its last fsync under the batched policy can end below
+        // it, so every row bounds the seed whether or not frames remain.
+        let durable = self.durable_watermarks();
+        let mut global = durable.map_or(0, |durable| {
+            durable
+                .iter()
+                .map(|slot| slot.load(Ordering::Acquire))
+                .max()
+                .unwrap_or(0)
+        });
         for partition in Self::discover_all_partitions(&self.wal_dir)? {
             // The sidecar watermark survives GC even when every segment was
             // reclaimed (compacted-to-empty partition), so it must be read for
             // every partition.
-            global = global.max(Self::read_applied_sequence(&self.applied_path(partition)));
+            if durable.is_none() {
+                global = global.max(Self::read_applied_sequence(&self.applied_path(partition)));
+            }
             global = global.max(self.max_log_sequence(partition).await?);
         }
         Ok(global)
@@ -2152,9 +2529,23 @@ impl WalRecovery {
     /// and never sampled, so without the boot alarm its retained frames would be
     /// safe but invisible.
     ///
+    /// # Store mode
+    ///
+    /// When the WAL keeps its watermark in the store, `run` reads the store's
+    /// watermarks once, before replaying anything, and replays only frames
+    /// above them. A frame at or below its partition's watermark that reaches
+    /// the replay is an error, never skipped and never replayed: the window
+    /// from the watermark up, re-applied whole in sequence order onto the
+    /// durable base, converges, while one `WalOp::OrDelta` frame re-applied
+    /// below it can bring back a tag a later remove and prune took out. The
+    /// frontier is committed to the store as a row of its own, in a write
+    /// after every replay write, and only once that commit returned is the
+    /// WAL told it is applied.
+    ///
     /// # Violation posture
     ///
-    /// Recovery never refuses to boot on the state it observes. Every input here
+    /// Recovery never refuses to boot on the state it observes — except, in
+    /// store mode, a frame at or below the store's watermark. Every input here
     /// — segment bytes, frame contents, the store's replay verdict — is
     /// environmental or adversarial, so it is handled as a value, never as a
     /// panic: a hard stop would brick an already-deployed server on upgrade over
@@ -2167,8 +2558,10 @@ impl WalRecovery {
     /// # Errors
     ///
     /// Returns an error if a WAL file contains mid-file CRC corruption, an
-    /// unrecognised magic, or an unknown format version. A failed replay of an
-    /// individual entry is NOT an error: it blocks the frontier and is logged.
+    /// unrecognised magic, or an unknown format version; in store mode also if
+    /// the store's watermarks cannot be read or a frame at or below one of
+    /// them reaches the replay. A failed replay of an individual entry is NOT
+    /// an error: it blocks the frontier and is logged.
     pub async fn run(&self, inner_store: Arc<dyn MapDataStore>) -> anyhow::Result<()> {
         let partitions = if self.partitions.is_empty() {
             Self::discover_partitions(&self.wal.wal_dir)?
@@ -2176,11 +2569,32 @@ impl WalRecovery {
             self.partitions.clone()
         };
 
+        let store_watermarks = self.store_watermarks(&inner_store)?;
+
         for partition_id in partitions {
             let entries = self.wal.unapplied(partition_id).await?;
 
             if entries.is_empty() {
                 continue;
+            }
+
+            let store_watermark = store_watermarks.as_ref().map(|by_partition| {
+                by_partition
+                    .get(partition_id as usize)
+                    .copied()
+                    .unwrap_or(0)
+            });
+            if let Some(watermark) = store_watermark {
+                // `entries` is ascending, so the first frame is the lowest
+                // one at or below the watermark if any is.
+                if let Some(entry) = entries.first().filter(|e| e.sequence <= watermark) {
+                    anyhow::bail!(
+                        "WAL recovery: refusing to start: partition {partition_id} holds frame {} \
+                         at or below its applied watermark {watermark}; a frame below the \
+                         watermark is never replayed",
+                        entry.sequence
+                    );
+                }
             }
 
             // `entries` is strictly ascending by WAL sequence: `Wal::unapplied`
@@ -2290,7 +2704,10 @@ impl WalRecovery {
             }
 
             // Mark the contiguous prefix applied so a clean restart is a no-op.
-            if let Err(err) = self.wal.mark_applied(partition_id, frontier).await {
+            if let Err(err) = self
+                .mark_frontier(&inner_store, partition_id, frontier, store_watermark)
+                .await
+            {
                 tracing::warn!(
                     partition = partition_id,
                     frontier,
@@ -2302,6 +2719,59 @@ impl WalRecovery {
         }
 
         Ok(())
+    }
+
+    /// The store's applied watermarks, one per partition, read once when the
+    /// WAL keeps its watermark in the store; `None` in sidecar mode.
+    fn store_watermarks(
+        &self,
+        inner_store: &Arc<dyn MapDataStore>,
+    ) -> anyhow::Result<Option<Vec<u64>>> {
+        if !self.wal.watermark_in_store() {
+            return Ok(None);
+        }
+        let watermarks = inner_store
+            .applied_watermarks()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "WAL recovery: cannot read the applied watermarks of the store: {e:#}"
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "WAL recovery: the WAL keeps its applied watermark in the store, but the \
+                     store it replays into keeps none"
+                )
+            })?;
+        Ok(Some(watermarks.by_partition))
+    }
+
+    /// Marks `frontier` applied for `partition`.
+    ///
+    /// In store mode the frontier becomes durable as the store's row first —
+    /// a commit of its own, after every replay write, so it never covers a
+    /// frame whose write could still be lost — and the WAL learns of it only
+    /// once that commit returned. A frontier at or below the store's row
+    /// changes nothing and is not committed.
+    async fn mark_frontier(
+        &self,
+        inner_store: &Arc<dyn MapDataStore>,
+        partition: u32,
+        frontier: u64,
+        store_watermark: Option<u64>,
+    ) -> anyhow::Result<()> {
+        if let Some(watermark) = store_watermark {
+            if frontier <= watermark {
+                return Ok(());
+            }
+            inner_store
+                .commit(&crate::storage::map_data_store::FlushCommit {
+                    writes: Vec::new(),
+                    applied: vec![(partition, frontier)],
+                })
+                .await?;
+        }
+        self.wal.mark_applied(partition, frontier).await
     }
 }
 
