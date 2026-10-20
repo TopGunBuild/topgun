@@ -600,8 +600,11 @@ impl RecordOp<'_> {
                 Some((map, RecordSpace::of(backup).flag()))
             }
             Self::Delete { map, .. } => Some((map, 0)),
-            // Metadata ops name no map.
-            _ => None,
+            // Metadata ops name no map. Listed one by one so a new variant
+            // must decide whether it names a map.
+            Self::SetMigrationMark(_)
+            | Self::SetAppliedWatermark { .. }
+            | Self::MarkWatermarksImported => None,
         }
     }
 }
