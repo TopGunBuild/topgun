@@ -796,19 +796,49 @@ pub trait MapDataStore: Send + Sync {
     ///
     /// A refused write (its chain may hold [`RecordRefused`]); rows on a store
     /// that keeps no watermark; a store error.
-    // Declared ahead of its implementation, which a later change of this series supplies.
-    #[allow(clippy::unimplemented)]
     async fn commit(&self, commit: &FlushCommit<'_>) -> anyhow::Result<()> {
-        let _ = commit;
-        unimplemented!()
+        // Refused before any write: a row stored nowhere must not look stored.
+        if !commit.applied.is_empty() {
+            anyhow::bail!("this store keeps no applied watermark");
+        }
+        // Not atomic: the same per-record calls, in the same order, as a
+        // caller storing each write on its own would make.
+        for write in &commit.writes {
+            match write {
+                StoreWrite::Put {
+                    map,
+                    key,
+                    value: PutValue::Encoded(bytes),
+                    expiration_time,
+                    store_time,
+                } => {
+                    self.add_encoded(map, key, bytes, *expiration_time, *store_time)
+                        .await?;
+                }
+                StoreWrite::Put {
+                    map,
+                    key,
+                    value: PutValue::Value(value),
+                    expiration_time,
+                    store_time,
+                } => {
+                    self.add(map, key, value, *expiration_time, *store_time)
+                        .await?;
+                }
+                StoreWrite::Remove {
+                    map,
+                    key,
+                    store_time,
+                } => self.remove(map, key, *store_time).await?,
+            }
+        }
+        Ok(())
     }
 
     /// Whether this store keeps applied WAL watermarks, so a WAL may be
     /// opened over it.
-    // Declared ahead of its implementation, which a later change of this series supplies.
-    #[allow(clippy::unimplemented)]
     fn keeps_applied_watermarks(&self) -> bool {
-        unimplemented!()
+        false
     }
 
     /// The applied WAL watermarks this store holds, or `None` when it keeps
@@ -817,10 +847,8 @@ pub trait MapDataStore: Send + Sync {
     /// # Errors
     ///
     /// A store error.
-    // Declared ahead of its implementation, which a later change of this series supplies.
-    #[allow(clippy::unimplemented)]
     fn applied_watermarks(&self) -> anyhow::Result<Option<AppliedWatermarks>> {
-        unimplemented!()
+        Ok(None)
     }
 
     /// Imports `(wal_partition, sequence)` rows read from the WAL sidecars,
@@ -831,11 +859,9 @@ pub trait MapDataStore: Send + Sync {
     /// # Errors
     ///
     /// A store that keeps no watermark or has imported already; a store error.
-    // Declared ahead of its implementation, which a later change of this series supplies.
-    #[allow(clippy::unimplemented)]
     fn import_applied_watermarks(&self, rows: &[(u32, u64)]) -> anyhow::Result<()> {
         let _ = rows;
-        unimplemented!()
+        anyhow::bail!("this store keeps no applied watermark to import into")
     }
 }
 

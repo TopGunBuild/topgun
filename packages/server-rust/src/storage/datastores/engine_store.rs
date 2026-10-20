@@ -6,14 +6,14 @@
 //!
 //! | First byte | Keyspace | Key after the byte | Value |
 //! |---|---|---|---|
-//! | `0x00` | store metadata | `format`, `next_map_id`, `ack_mode`, `migration` | u32 BE `1`; u32 BE; u8 `0` (local); opaque bytes |
+//! | `0x00` | store metadata | `format`, `next_map_id`, `ack_mode`, `migration`, `wal_watermark`, `wal_import_pending` | u32 BE `1`; u32 BE; u8 `0` (local); opaque bytes; `[0x01]`; `[0x01]` |
 //! | `0x01` | map by name | the map name, UTF-8 | map id u32 BE ‖ flags u8 |
 //! | `0x02` | map by id | map id u32 BE | the map name, UTF-8 |
 //! | `0x10` | primary records | partition u32 BE ‖ map id u32 BE ‖ user key | the record's msgpack |
 //! | `0x11` | backup records | as `0x10` | as `0x10` |
-//! | `0x20` | partition metadata, reserved | — | — |
+//! | `0x20` | applied WAL watermarks | WAL partition u32 BE ‖ `applied` | sequence u64 BE |
 //!
-//! Every other first byte is reserved. The partition is
+//! Every other first byte is reserved. The partition of a record key is
 //! [`hash_to_partition`] of the user key, the function the cluster routes a
 //! key by, so a partition's records are one contiguous range per map. The
 //! user key is the last field, so no separator or escaping is needed.
@@ -21,6 +21,10 @@
 //! A map's scan walks the 271 partitions in sequence, so its rows come in
 //! `(partition, user key)` order — the byte order of their engine keys — and
 //! a cursor is the engine key of the last row ([`PARTITION_THEN_KEY`]).
+//!
+//! A `0x20` row holds the applied watermark of a **WAL** partition,
+//! `fnv1a("{map}:{key}") % 271` — not the record partition above, from which
+//! it differs. An absent row means 0 (`TG-ENG-004`).
 //!
 //! # Registry (`TG-ENG-005`) and metadata (`TG-ENG-006`)
 //!
@@ -30,11 +34,23 @@
 //! with no unfinished migration; anything else is refused at open with
 //! nothing written.
 //!
+//! The import marker `wal_watermark` says the WAL directory's `.applied`
+//! sidecars were imported; it is written only by
+//! [`MapDataStore::import_applied_watermarks`], in the batch of the imported
+//! rows, and a `0x20` row without it is refused at open. The import-pending
+//! mark `wal_import_pending` is put in the batch that ends a migration and
+//! deleted only in the import batch; the two are never present together.
+//! Both hold exactly `[0x01]`; a malformed `0x20` key or value is refused.
+//!
 //! # Durability
 //!
 //! Every [`MapDataStore`] method writes with `sync = true`: the store is
-//! write-through, durable on return, as the redb store is.
+//! write-through, durable on return, as the redb store is. A
+//! [`MapDataStore::commit`] is one durable engine batch holding its records
+//! and its `0x20` rows, so no row is ever durable without the records it
+//! covers; a row never moves below the value it holds.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -46,7 +62,8 @@ use topgun_core::partition::{hash_to_partition, PARTITION_COUNT};
 use super::kv_engine::{KeyRange, KvEngine, KvError, KvSnapshot, WriteBatch, WriteOptions};
 use crate::storage::map_data_store::{
     check_map_name, merkle_leaf_hash, AppliedWatermarks, FlushCommit, LeafSink, MapDataStore,
-    MerkleLeaf, ScanBatch, ScanCursor, ScanOrder, StoreErrorClass,
+    MerkleLeaf, PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder, StoreErrorClass,
+    StoreWrite,
 };
 use crate::storage::record::RecordValue;
 
@@ -60,7 +77,7 @@ pub const KS_MAP_BY_ID: u8 = 0x02;
 pub const KS_PRIMARY: u8 = 0x10;
 /// Backup records.
 pub const KS_BACKUP: u8 = 0x11;
-/// Partition metadata; reserved, no key is written there yet.
+/// Partition metadata: the applied watermark row of every WAL partition.
 pub const KS_PARTITION_META: u8 = 0x20;
 
 /// Metadata name of the format version (u32 BE).
@@ -98,14 +115,33 @@ const LEAF_BATCH_SIZE: usize = 1024;
 /// as the redb store's.
 const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
 
+/// The tail of every applied watermark row key.
+const APPLIED_TAIL: &[u8] = b"applied";
+
+/// The number of WAL partitions, as an index bound.
+const WAL_PARTITIONS: usize = PARTITION_COUNT as usize;
+
 /// The engine key of the applied watermark row of WAL partition `partition`:
 /// `KS_PARTITION_META ‖ partition u32 BE ‖ b"applied"` (12 bytes).
 #[must_use]
-// Declared ahead of its implementation, which a later change of this series supplies.
-#[allow(clippy::unimplemented)]
 pub fn applied_row_key(partition: u32) -> Vec<u8> {
-    let _ = partition;
-    unimplemented!()
+    let mut key = Vec::with_capacity(1 + 4 + APPLIED_TAIL.len());
+    key.push(KS_PARTITION_META);
+    key.extend_from_slice(&partition.to_be_bytes());
+    key.extend_from_slice(APPLIED_TAIL);
+    key
+}
+
+/// The WAL partition of a well-formed applied watermark row key, else `None`.
+fn decode_applied_row_key(key: &[u8]) -> Option<u32> {
+    if key.len() != 1 + 4 + APPLIED_TAIL.len()
+        || key[0] != KS_PARTITION_META
+        || &key[5..] != APPLIED_TAIL
+    {
+        return None;
+    }
+    let partition = be_u32(&key[1..5]);
+    (partition < PARTITION_COUNT).then_some(partition)
 }
 
 /// The engine key of the metadata row `name`: `KS_META ‖ name`.
@@ -389,6 +425,21 @@ fn first_key_in(snapshot: &dyn KvSnapshot, range: KeyRange) -> anyhow::Result<Op
 /// What the metadata of a non-empty engine says, once every check passed.
 struct StoreMetadata {
     migration: Option<Vec<u8>>,
+    /// The import marker is present.
+    imported: bool,
+    /// The import-pending mark is present.
+    import_pending: bool,
+    /// The applied watermark of every WAL partition; an absent row is 0.
+    applied: [u64; WAL_PARTITIONS],
+}
+
+/// Refuses a one-byte mark whose value is not `[0x01]`.
+fn check_flag_mark(name: &str, value: Option<&[u8]>) -> anyhow::Result<bool> {
+    match value {
+        None => Ok(false),
+        Some([1]) => Ok(true),
+        Some(v) => bail!("{REFUSAL} the {name} mark holds {v:?}, not [1]"),
+    }
 }
 
 /// `None` for an engine that holds no key; otherwise the checked metadata,
@@ -401,6 +452,8 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
     let mut next_map_id = None;
     let mut ack_mode = None;
     let mut migration = None;
+    let mut marker = None;
+    let mut pending = None;
     let meta = KeyRange {
         start: Some(vec![KS_META]),
         end: Some(vec![KS_MAP_BY_NAME]),
@@ -412,6 +465,8 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
             META_NEXT_MAP_ID => next_map_id = Some(value),
             META_ACK_MODE => ack_mode = Some(value),
             META_MIGRATION => migration = Some(value),
+            META_WAL_WATERMARK => marker = Some(value),
+            META_WAL_IMPORT_PENDING => pending = Some(value),
             other => bail!(
                 "{REFUSAL} unknown metadata {:?}",
                 String::from_utf8_lossy(other)
@@ -434,6 +489,11 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
         Some(v) if v.len() == 4 && be_u32(v) >= 1 => {}
         Some(v) => bail!("{REFUSAL} next map id {v:?} is not a u32 of at least 1"),
     }
+    let imported = check_flag_mark("import", marker.as_deref())?;
+    let import_pending = check_flag_mark("import-pending", pending.as_deref())?;
+    if imported && import_pending {
+        bail!("{REFUSAL} an import-pending mark beside the import marker");
+    }
     let reserved = [
         KeyRange {
             start: Some(vec![KS_MAP_BY_ID + 1]),
@@ -441,6 +501,10 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
         },
         KeyRange {
             start: Some(vec![KS_BACKUP + 1]),
+            end: Some(vec![KS_PARTITION_META]),
+        },
+        KeyRange {
+            start: Some(vec![KS_PARTITION_META + 1]),
             end: None,
         },
     ];
@@ -449,7 +513,38 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
             bail!("{REFUSAL} a key in the reserved keyspace {:#04x}", key[0]);
         }
     }
-    Ok(Some(StoreMetadata { migration }))
+    let rows = KeyRange {
+        start: Some(vec![KS_PARTITION_META]),
+        end: Some(vec![KS_PARTITION_META + 1]),
+    };
+    let mut applied = [0u64; WAL_PARTITIONS];
+    let mut any_row = false;
+    for entry in snapshot.iter(rows)? {
+        let (key, value) = entry?;
+        let Some(partition) = decode_applied_row_key(&key) else {
+            bail!("{REFUSAL} a key in the reserved keyspace {KS_PARTITION_META:#04x}");
+        };
+        let Ok(word) = <[u8; 8]>::try_from(value.as_slice()) else {
+            bail!(
+                "{REFUSAL} the applied watermark row of WAL partition {partition} is {} bytes, \
+                 not 8",
+                value.len()
+            );
+        };
+        applied[partition as usize] = u64::from_be_bytes(word);
+        any_row = true;
+    }
+    // A row is only ever written with the marker, so a row without it is
+    // not a state this store produces.
+    if any_row && !imported {
+        bail!("{REFUSAL} applied watermark rows without the import marker");
+    }
+    Ok(Some(StoreMetadata {
+        migration,
+        imported,
+        import_pending,
+        applied,
+    }))
 }
 
 /// One operation of [`EngineMapDataStore::write_records`].
@@ -505,9 +600,8 @@ impl RecordOp<'_> {
                 Some((map, RecordSpace::of(backup).flag()))
             }
             Self::Delete { map, .. } => Some((map, 0)),
-            Self::SetMigrationMark(_)
-            | Self::SetAppliedWatermark { .. }
-            | Self::MarkWatermarksImported => None,
+            // Metadata ops name no map.
+            _ => None,
         }
     }
 }
@@ -529,9 +623,29 @@ pub struct EngineMapDataStore<E: KvEngine> {
     registry_lock: Mutex<()>,
     /// `name → (map_id, flags)`, filled only from rows that exist.
     cache: RwLock<HashMap<String, (u32, u8)>>,
+    /// The durable `0x20` row of every WAL partition, loaded at open and
+    /// updated only after the engine write that stored it returned. Held
+    /// across a commit's check, write and update, so no row moves below the
+    /// value it holds, whoever commits.
+    applied: Mutex<[u64; WAL_PARTITIONS]>,
     #[cfg(test)]
     registry_park: Mutex<Option<RegistryPark>>,
 }
+
+/// A first write of a map could not be given an id: every id is issued.
+#[derive(Debug)]
+struct MapIdSpaceExhausted {
+    /// The maps left without an id.
+    maps: Vec<String>,
+}
+
+impl std::fmt::Display for MapIdSpaceExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "map id space exhausted: no id for {:?}", self.maps)
+    }
+}
+
+impl std::error::Error for MapIdSpaceExhausted {}
 
 /// A one-shot blocking park inside `write_records`.
 #[cfg(test)]
@@ -550,28 +664,34 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     /// keyspace, or an unfinished migration (`TG-ENG-006`); an engine error.
     pub fn open(engine: Arc<E>) -> anyhow::Result<Self> {
         let metadata = read_store_metadata(&*engine.snapshot()?)?;
-        match metadata {
+        let applied = match metadata {
             None => {
                 let mut batch = WriteBatch::new();
                 for (key, value) in format_rows() {
                     batch.put(key, value);
                 }
                 engine.write(batch, WriteOptions { sync: true })?;
+                [0; WAL_PARTITIONS]
             }
             Some(StoreMetadata {
                 migration: Some(_), ..
             }) => {
                 bail!("{REFUSAL} a migration into this store is unfinished");
             }
-            Some(_) => {}
-        }
-        Ok(Self {
+            Some(StoreMetadata { applied, .. }) => applied,
+        };
+        Ok(Self::over(engine, &applied))
+    }
+
+    fn over(engine: Arc<E>, applied: &[u64; WAL_PARTITIONS]) -> Self {
+        Self {
             engine,
             registry_lock: Mutex::new(()),
             cache: RwLock::new(HashMap::new()),
+            applied: Mutex::new(*applied),
             #[cfg(test)]
             registry_park: Mutex::new(None),
-        })
+        }
     }
 
     /// Opens a store whose migration is unfinished, or formats an empty
@@ -586,7 +706,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         initial_mark: &[u8],
     ) -> anyhow::Result<(Self, Vec<u8>)> {
         let metadata = read_store_metadata(&*engine.snapshot()?)?;
-        let mark = match metadata {
+        let (mark, applied) = match metadata {
             None => {
                 // One batch, so no crash point leaves a formatted store
                 // without its mark.
@@ -596,23 +716,20 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 }
                 batch.put(meta_key(META_MIGRATION), initial_mark.to_vec());
                 engine.write(batch, WriteOptions { sync: true })?;
-                initial_mark.to_vec()
+                (initial_mark.to_vec(), [0; WAL_PARTITIONS])
             }
             Some(StoreMetadata {
                 migration: Some(mark),
-            }) => mark,
-            Some(StoreMetadata { migration: None }) => bail!(
+                applied,
+                ..
+            }) => (mark, applied),
+            Some(StoreMetadata {
+                migration: None, ..
+            }) => bail!(
                 "store format: refusing to resume a migration: the store has no migration mark"
             ),
         };
-        let store = Self {
-            engine,
-            registry_lock: Mutex::new(()),
-            cache: RwLock::new(HashMap::new()),
-            #[cfg(test)]
-            registry_park: Mutex::new(None),
-        };
-        Ok((store, mark))
+        Ok((Self::over(engine, &applied), mark))
     }
 
     /// The migration mark of `engine`, read from one snapshot; writes nothing.
@@ -684,6 +801,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         let guard = self.registry_lock.lock();
         let mut puts = Vec::new();
         let mut next_map_id: Option<u32> = None;
+        let mut exhausted = Vec::new();
         for (&name, &need) in needs {
             let current = self
                 .engine
@@ -707,9 +825,13 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                         None => self.stored_next_map_id()?,
                     };
                     // `u32::MAX` is never issued, so `map_id + 1` — the end
-                    // of a map's partition range — never overflows.
+                    // of a map's partition range — never overflows. Every
+                    // map left without an id is named, so a commit can
+                    // refuse exactly its writes.
                     if map_id == u32::MAX {
-                        bail!("map id space exhausted");
+                        exhausted.push(name.to_string());
+                        next_map_id = Some(map_id);
+                        continue;
                     }
                     puts.push((map_by_name_key(name), map_by_name_value(map_id, need)));
                     puts.push((map_by_id_key(map_id), name.as_bytes().to_vec()));
@@ -718,6 +840,9 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 }
             };
             rows.insert(name, planned);
+        }
+        if !exhausted.is_empty() {
+            return Err(MapIdSpaceExhausted { maps: exhausted }.into());
         }
         if let Some(next) = next_map_id {
             puts.push((meta_key(META_NEXT_MAP_ID), next.to_be_bytes().to_vec()));
@@ -784,11 +909,20 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 RecordOp::SetMigrationMark(Some(mark)) => {
                     batch.put(meta_key(META_MIGRATION), mark.to_vec());
                 }
-                RecordOp::SetMigrationMark(None) => batch.delete(meta_key(META_MIGRATION)),
-                // Declared ahead of its implementation, which a later change of this series supplies.
-                #[allow(clippy::unimplemented)]
-                RecordOp::SetAppliedWatermark { .. } | RecordOp::MarkWatermarksImported => {
-                    unimplemented!()
+                RecordOp::SetMigrationMark(None) => {
+                    // The batch that ends a migration also records that the
+                    // WAL directory's sidecars still have to be imported, so
+                    // a crash before the WAL open cannot lose that.
+                    batch.delete(meta_key(META_MIGRATION));
+                    batch.put(meta_key(META_WAL_IMPORT_PENDING), vec![1]);
+                }
+                RecordOp::SetAppliedWatermark {
+                    partition,
+                    sequence,
+                } => batch.put(applied_row_key(partition), sequence.to_be_bytes().to_vec()),
+                RecordOp::MarkWatermarksImported => {
+                    batch.put(meta_key(META_WAL_WATERMARK), vec![1]);
+                    batch.delete(meta_key(META_WAL_IMPORT_PENDING));
                 }
             }
         }
@@ -1224,29 +1358,168 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         Ok(())
     }
 
-    // Declared ahead of its implementation, which a later change of this series supplies.
-    #[allow(clippy::unimplemented)]
     async fn commit(&self, commit: &FlushCommit<'_>) -> anyhow::Result<()> {
-        let _ = commit;
-        unimplemented!()
+        // Refused writes are named before anything is written, so the caller
+        // can tell them from a store that refuses everything.
+        let mut refused = Vec::new();
+        let mut reasons = Vec::new();
+        for (index, write) in commit.writes.iter().enumerate() {
+            if let Err(reason) = check_name(write_map(write)) {
+                refused.push(index);
+                reasons.push(reason.to_string());
+            }
+        }
+        if !refused.is_empty() {
+            return Err(
+                anyhow::Error::new(RecordRefused { indices: refused }).context(reasons.join("; "))
+            );
+        }
+
+        // The bytes `add` stores for a value, encoded before the lock.
+        let encoded = commit
+            .writes
+            .iter()
+            .map(|write| match write {
+                StoreWrite::Put {
+                    value: PutValue::Value(value),
+                    ..
+                } => rmp_serde::to_vec_named(*value).map(Cow::Owned),
+                StoreWrite::Put {
+                    value: PutValue::Encoded(bytes),
+                    ..
+                } => Ok(Cow::Borrowed(bytes.as_slice())),
+                StoreWrite::Remove { .. } => Ok(Cow::Borrowed(&[][..])),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut ops = Vec::with_capacity(commit.writes.len() + commit.applied.len());
+        for (write, encoded) in commit.writes.iter().zip(&encoded) {
+            ops.push(match write {
+                StoreWrite::Put { map, key, .. } => RecordOp::Put {
+                    map,
+                    backup: false,
+                    key,
+                    bytes: encoded,
+                },
+                StoreWrite::Remove { map, key, .. } => RecordOp::Delete {
+                    map,
+                    backup: false,
+                    key,
+                },
+            });
+        }
+
+        // Check, write and update under one lock and with no `.await`, so
+        // no other commit can store a row between this check and this write.
+        let mut held = self.applied.lock();
+        let mut next = *held;
+        for &(partition, sequence) in &commit.applied {
+            let Some(slot) = next.get_mut(partition as usize) else {
+                bail!(
+                    "applied watermark of WAL partition {partition} refused: there are \
+                     {PARTITION_COUNT} partitions"
+                );
+            };
+            // Equal is a re-commit of the same frontier; lower would let a
+            // later restart replay frames the store already holds.
+            if sequence < *slot {
+                let refusal = format!(
+                    "applied watermark regression refused: WAL partition {partition} holds \
+                     {slot}, the commit carries {sequence}"
+                );
+                tracing::error!("{refusal}");
+                bail!(refusal);
+            }
+            *slot = sequence;
+            ops.push(RecordOp::SetAppliedWatermark {
+                partition,
+                sequence,
+            });
+        }
+        match self.write_records(&ops, WriteOptions { sync: true }) {
+            Ok(()) => {
+                *held = next;
+                Ok(())
+            }
+            Err(err) => match err.downcast_ref::<MapIdSpaceExhausted>() {
+                Some(exhausted) => {
+                    let indices = commit
+                        .writes
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, write)| {
+                            matches!(write, StoreWrite::Put { map, .. }
+                                if exhausted.maps.iter().any(|m| m == map))
+                        })
+                        .map(|(index, _)| index)
+                        .collect();
+                    let reason = err.to_string();
+                    Err(anyhow::Error::new(RecordRefused { indices }).context(reason))
+                }
+                // Returned as it is, so `classify_error` still finds the
+                // engine's error in the chain (TG-WB-010).
+                None => Err(err),
+            },
+        }
     }
 
-    // Declared ahead of its implementation, which a later change of this series supplies.
-    #[allow(clippy::unimplemented)]
     fn keeps_applied_watermarks(&self) -> bool {
-        unimplemented!()
+        true
     }
 
-    // Declared ahead of its implementation, which a later change of this series supplies.
-    #[allow(clippy::unimplemented)]
     fn applied_watermarks(&self) -> anyhow::Result<Option<AppliedWatermarks>> {
-        unimplemented!()
+        // One snapshot, so the marks and the rows are of one moment.
+        let held = read_store_metadata(&*self.engine.snapshot()?)?;
+        Ok(Some(match held {
+            Some(held) => AppliedWatermarks {
+                imported: held.imported,
+                import_pending: held.import_pending,
+                by_partition: held.applied.to_vec(),
+            },
+            None => AppliedWatermarks {
+                imported: false,
+                import_pending: false,
+                by_partition: vec![0; WAL_PARTITIONS],
+            },
+        }))
     }
 
-    // Declared ahead of its implementation, which a later change of this series supplies.
-    #[allow(clippy::unimplemented)]
     fn import_applied_watermarks(&self, rows: &[(u32, u64)]) -> anyhow::Result<()> {
-        let _ = rows;
-        unimplemented!()
+        // Under the commit lock, so no commit can store a row between the
+        // marker check and the import.
+        let mut held = self.applied.lock();
+        if self.engine.get(&meta_key(META_WAL_WATERMARK))?.is_some() {
+            bail!("applied watermarks refused: the store has imported its WAL sidecars already");
+        }
+        let mut next = *held;
+        let mut ops = Vec::with_capacity(rows.len() + 1);
+        for &(partition, sequence) in rows {
+            let Some(slot) = next.get_mut(partition as usize) else {
+                bail!(
+                    "applied watermark of WAL partition {partition} refused: there are \
+                     {PARTITION_COUNT} partitions"
+                );
+            };
+            // An absent row already means 0.
+            if sequence > 0 {
+                *slot = sequence;
+                ops.push(RecordOp::SetAppliedWatermark {
+                    partition,
+                    sequence,
+                });
+            }
+        }
+        // The only construction of the marker op: the marker is written in
+        // the batch of the rows it vouches for and nowhere else (TG-ENG-006).
+        ops.push(RecordOp::MarkWatermarksImported);
+        self.write_records(&ops, WriteOptions { sync: true })?;
+        *held = next;
+        Ok(())
+    }
+}
+
+/// The map a commit write names.
+fn write_map<'a>(write: &StoreWrite<'a>) -> &'a str {
+    match write {
+        StoreWrite::Put { map, .. } | StoreWrite::Remove { map, .. } => map,
     }
 }
