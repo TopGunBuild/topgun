@@ -10,6 +10,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Changed (server):** the write buffer is stored in batches. A flush pass now takes up to
+  1000 buffered writes or 8 MiB of encoded values, whichever comes first, and stores them,
+  together with how far the write-ahead log has been stored, in one durable commit instead of
+  one store call per write. While writes are still due, the next pass starts at once instead
+  of waiting for `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`, so a full buffer is emptied in a few
+  passes. What changes for whoever runs the server:
+  - **One refused record no longer holds up the others.** When the storage refuses a commit of
+    several writes, the server splits it in two halves and commits each, again and again, until
+    the refused record is alone; every other write of the pass is stored in that pass, at a
+    cost of at most 20 extra commits for a pass of 1000. The refused record is retried on its
+    own schedule, as before. One place in every pass is kept for the oldest refused write
+    that is due, so a refused write is not starved by a stream of new ones.
+  - **A new rule for leaving the storage alone.** The server now takes the storage for down
+    when both halves of a refused commit are refused — after three calls — instead of after
+    three refusals in a row. The hold lengths and the probe are unchanged. The first refused
+    commit after the storage came back is split down to single writes and starts no hold, so
+    two refused records do not keep the storage on hold. Two records the storage refuses in
+    one pass still start one hold even though the storage is up; no such record is known for
+    the embedded redb store.
+  - **Shutdown stores the buffer in the same batches.** The drain at a stop runs passes of the
+    same limits, each a durable commit, so a clean stop leaves nothing to replay. A refused
+    drain commit is split down to single writes for as long as
+    `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS` allows; a write it could not store is applied from
+    the write-ahead log at the next start, and one refused write no longer makes the drain give
+    up on the rest. A commit that has started is not cut, so a stop can overrun the timeout by
+    one commit.
+  - **`TOPGUN_WRITEBEHIND_BATCH_SIZE` stays without effect.** The pass limits are fixed; the
+    setting is still accepted so that a configuration that sets it still starts.
+  - **New metrics:** `topgun_write_behind_flush_passes_total` (passes that committed at least
+    one write) and `topgun_write_behind_flush_pass_entries_total` (writes those passes
+    stored), both from the first scrape, and the histogram
+    `topgun_write_behind_flush_pass_seconds` (how long one committed pass took).
+    `topgun_write_behind_flush_refusals_total` now counts refused commits, each half of a
+    split commit on its own, and `topgun_write_behind_retrying_entries` counts writes refused
+    on their own, so it reads 0 when a hold begins.
+
 - **Changed (on-disk format):** each write-ahead-log partition's applied watermark — how far the
   WAL has been stored — lives in the data directory, committed in the same batch as the records
   it covers. The data directory and the WAL directory (`TOPGUN_WAL_DIR`) are one unit from now
