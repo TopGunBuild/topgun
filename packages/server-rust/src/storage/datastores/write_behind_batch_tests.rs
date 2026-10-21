@@ -44,7 +44,7 @@ use crate::storage::map_data_store::{
     ScanCursor, ScanOrder, StoreBrokenCause, StoreErrorClass, StoreWrite, WriteSource,
 };
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
-use crate::storage::wal::{OrDelta, Wal, WalFsyncPolicy, WalWriter};
+use crate::storage::wal::{Wal, WalFsyncPolicy, WalWriter};
 
 // ---------------------------------------------------------------------------
 // The engine
@@ -81,6 +81,10 @@ struct EngineWrite {
     ok: bool,
     /// The runtime's clock when the write was made.
     at: tokio::time::Instant,
+    /// The runtime's clock when the write was called, before any delay.
+    began: tokio::time::Instant,
+    /// The runtime's clock when the write returned.
+    ended: tokio::time::Instant,
 }
 
 impl EngineWrite {
@@ -154,6 +158,11 @@ struct BatchEngine {
     refuse_all: Mutex<Option<Refusal>>,
     /// Index in `log` of the one write that sleeps, and for how long.
     delay_at: Mutex<Option<(usize, Duration)>>,
+    /// Index in `log` of the one write that is applied whatever else is
+    /// armed.
+    accept_at: Mutex<Option<usize>>,
+    /// While set, every write sleeps this long before it reaches the engine.
+    delay_all: Mutex<Option<Duration>>,
 }
 
 impl BatchEngine {
@@ -165,6 +174,8 @@ impl BatchEngine {
             refuse_keys: Mutex::new(BTreeMap::new()),
             refuse_all: Mutex::new(None),
             delay_at: Mutex::new(None),
+            accept_at: Mutex::new(None),
+            delay_all: Mutex::new(None),
         })
     }
 
@@ -179,7 +190,6 @@ impl BatchEngine {
     }
 
     /// The `n`-th write from now (`n >= 1`) is refused, once.
-    #[allow(dead_code)]
     fn refuse_write_in(&self, n: usize, refusal: Refusal) {
         assert!(n >= 1, "refuse_write_in takes n >= 1");
         *self.refuse_at.lock() = Some((self.mark() + n - 1, refusal));
@@ -201,6 +211,25 @@ impl BatchEngine {
         assert!(n >= 1, "delay_write_in takes n >= 1");
         *self.delay_at.lock() = Some((self.mark() + n - 1, delay));
     }
+
+    /// The `n`-th write from now (`n >= 1`) is applied, once, even while
+    /// every write or a key it names is refused.
+    fn accept_write_in(&self, n: usize) {
+        assert!(n >= 1, "accept_write_in takes n >= 1");
+        *self.accept_at.lock() = Some(self.mark() + n - 1);
+    }
+
+    /// Writes naming the record of user key `key` are no longer refused for
+    /// it.
+    fn allow_writes_holding(&self, key: &str) {
+        self.refuse_keys.lock().remove(key);
+    }
+
+    /// Every write sleeps `delay` before it reaches the engine while `Some`,
+    /// on the calling thread: real time passes, a paused clock does not move.
+    fn delay_every_write(&self, delay: Option<Duration>) {
+        *self.delay_all.lock() = delay;
+    }
 }
 
 impl KvEngine for BatchEngine {
@@ -213,6 +242,13 @@ impl KvEngine for BatchEngine {
     }
 
     fn write(&self, batch: WriteBatch, opts: WriteOptions) -> KvResult<()> {
+        let began = tokio::time::Instant::now();
+        // Before the log lock: a reader of the log is not kept waiting on a
+        // sleeping write.
+        let delay_all = *self.delay_all.lock();
+        if let Some(delay) = delay_all {
+            std::thread::sleep(delay);
+        }
         // Held across the inner write, so the log's order is the order the
         // engine applied the batches in.
         let mut log = self.log.lock();
@@ -221,6 +257,7 @@ impl KvEngine for BatchEngine {
             std::thread::sleep(delay);
         }
         let at = tokio::time::Instant::now();
+        let accepted = *self.accept_at.lock() == Some(index);
         let refusal = (*self.refuse_at.lock())
             .filter(|(at, _)| *at == index)
             .map(|(_, refusal)| refusal)
@@ -234,7 +271,8 @@ impl KvEngine for BatchEngine {
                         .map(|(_, refusal)| *refusal),
                     BatchOp::DeleteRange { .. } => None,
                 })
-            });
+            })
+            .filter(|_| !accepted);
         let logged_ops = batch.ops().to_vec();
         let result = match refusal {
             Some(refusal) => Err(refusal.error()),
@@ -245,6 +283,8 @@ impl KvEngine for BatchEngine {
             sync: opts.sync,
             ok: result.is_ok(),
             at,
+            began,
+            ended: tokio::time::Instant::now(),
         });
         result
     }
@@ -296,6 +336,10 @@ struct CommitCall {
 
 /// A [`MapDataStore`] that forwards every call to the engine store and logs
 /// every commit.
+///
+/// The OR-witness methods keep their trait defaults, which are what the
+/// engine store answers too: a package-wide count allows exactly one test
+/// override of them, and it is not this one.
 struct CommitSpy {
     inner: Arc<EngineMapDataStore<BatchEngine>>,
     commits: Mutex<Vec<CommitCall>>,
@@ -324,20 +368,6 @@ impl MapDataStore for CommitSpy {
         self.inner.add(map, key, value, expiration_time, now).await
     }
 
-    async fn add_with_witness(
-        &self,
-        map: &str,
-        key: &str,
-        src: WriteSource<'_>,
-        expiration_time: i64,
-        now: i64,
-        witness: Option<&OrDelta>,
-    ) -> anyhow::Result<()> {
-        self.inner
-            .add_with_witness(map, key, src, expiration_time, now, witness)
-            .await
-    }
-
     fn accepts_encoded(&self) -> bool {
         self.inner.accepts_encoded()
     }
@@ -353,10 +383,6 @@ impl MapDataStore for CommitSpy {
         self.inner
             .add_encoded(map, key, bytes, expiration_time, now)
             .await
-    }
-
-    fn wants_or_witness(&self) -> bool {
-        self.inner.wants_or_witness()
     }
 
     fn scan_order(&self) -> Option<ScanOrder> {
@@ -1516,4 +1542,828 @@ async fn b09_the_shutdown_drain_commits_in_passes_with_rows_and_stops_at_its_dea
         );
         node.close().await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// b10–b19
+// ---------------------------------------------------------------------------
+
+/// The first `n` keys `{prefix}{i}` of `map` whose WAL partition is
+/// `partition`.
+fn keys_in_partition(map: &str, prefix: &str, partition: u32, n: usize) -> Vec<String> {
+    (0..)
+        .map(|i| format!("{prefix}{i}"))
+        .filter(|key| super::partition_for(map, key) == partition)
+        .take(n)
+        .collect()
+}
+
+/// The index of the first write of `writes` that names `key`'s record.
+fn first_write_naming(writes: &[EngineWrite], key: &str) -> Option<usize> {
+    writes
+        .iter()
+        .position(|w| w.user_keys().iter().any(|k| k == key))
+}
+
+/// The applied watermark the engine holds for WAL partition `partition`.
+fn durable_row(node: &Node, partition: u32) -> u64 {
+    node.spy
+        .applied_watermarks()
+        .expect("applied_watermarks")
+        .map_or(0, |w| w.by_partition[partition as usize])
+}
+
+/// Writes `key` of `MAP` with `store_time`; a far-future time keeps the entry
+/// out of every pass while the drain still takes it.
+async fn add_at(wb: &WriteBehindDataStore, key: &str, store_time: i64) {
+    wb.add(MAP, key, &lww(key, 1), 0, store_time)
+        .await
+        .expect("add");
+}
+
+/// A `store_time` no pass of a test reaches.
+const NOT_DUE: i64 = i64::MAX / 4;
+
+/// What a refused commit must leave as it was: the buffered count, the flushed
+/// write sequence, per WAL partition the in-memory watermark, the pending
+/// sequences and the durable row, the value each key reads, and each key's
+/// retry state.
+type TrackingState = (
+    u64,
+    u64,
+    Vec<(u32, Option<u64>, Vec<u64>, u64)>,
+    Vec<String>,
+    Vec<Option<(u32, bool, bool)>>,
+);
+
+async fn tracking_state(
+    node: &Node,
+    wb: &WriteBehindDataStore,
+    keys: &[String],
+    partitions: &BTreeSet<u32>,
+) -> TrackingState {
+    let mut reads = Vec::new();
+    for key in keys {
+        reads.push(format!("{:?}", wb.load(MAP, key).await.expect("load")));
+    }
+    (
+        wb.pending_operation_count(),
+        wb.flushed_watermark(),
+        partitions
+            .iter()
+            .map(|&p| {
+                (
+                    p,
+                    wb.test_wal_watermark(p).and_then(Result::ok),
+                    wb.test_pending_wal_sequences(p)
+                        .into_iter()
+                        .map(|(seq, _)| seq)
+                        .collect(),
+                    durable_row(node, p),
+                )
+            })
+            .collect(),
+        reads,
+        retry_states(wb, keys),
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn b10_a_refused_commit_leaves_staging_counts_and_both_watermarks_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let node = Node::open(dir.path());
+    let wb = node.write_behind(config()).await;
+    // Something durable first, so the watermarks a refused commit must not
+    // move are not all zero.
+    let earlier = keys("s", 3);
+    fill(&wb, &earlier, 1, |i| lww(&format!("s{i}"), 1)).await;
+    one_pass(&wb).await;
+
+    let keys = keys("k", 6);
+    fill(&wb, &keys, 10, |i| lww(&format!("v{i}"), 1)).await;
+    let partitions: BTreeSet<u32> = keys
+        .iter()
+        .chain(&earlier)
+        .map(|key| super::partition_for(MAP, key))
+        .collect();
+    let before = tracking_state(&node, &wb, &keys, &partitions).await;
+
+    node.engine.refuse_every_write(Some(Refusal::Unknown));
+    let mark = node.engine.mark();
+    one_pass(&wb).await;
+    let writes = node.engine.writes_since(mark);
+    let after = tracking_state(&node, &wb, &keys, &partitions).await;
+    assert_eq!(
+        (
+            (
+                record_counts(&writes),
+                writes.iter().any(|w| w.ok),
+                writes.first().is_some_and(|w| !w.rows().is_empty()),
+                wb.test_store_hold_active(),
+            ),
+            after,
+        ),
+        ((vec![6, 3, 3], false, true, true), before)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn b11_after_the_store_returns_every_buffered_entry_is_attempted_within_the_formula() {
+    // Real time on a multi-thread runtime: the formula is about time, and
+    // every commit sleeps a fixed 20 ms on the thread that makes it.
+    const K_MS: u64 = 100;
+    const I_MS: u64 = 100;
+    const N_T: usize = 2_500;
+    const M: usize = 999;
+    const LOG2_L: u32 = 10;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let node = Node::open(dir.path());
+    let wb = node
+        .write_behind(WriteBehindConfig {
+            flush_interval_ms: I_MS,
+            backoff_base_ms: 50,
+            backoff_cap_ms: K_MS,
+            ..config()
+        })
+        .await;
+    // Refusing from before the first write: a pass the interval starts
+    // during the fill stores nothing either.
+    node.engine.refuse_every_write(Some(Refusal::Unknown));
+    node.engine
+        .delay_every_write(Some(Duration::from_millis(20)));
+    let keys = keys("k", N_T);
+    let mark = node.engine.mark();
+    fill(&wb, &keys, 1, |i| lww(&format!("v{i}"), 1)).await;
+    wb.soft_flush().await.expect("soft_flush");
+    let held = poll_until(5_000, || wb.test_store_hold_active())
+        .await
+        .is_some();
+    // A few refused probes, so the hold is past its first length.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let returned = tokio::time::Instant::now();
+    node.engine.refuse_every_write(None);
+    let first_attempt = |writes: &[EngineWrite]| {
+        let mut first = BTreeMap::new();
+        for write in writes.iter().filter(|w| w.ended >= returned) {
+            for key in write.user_keys() {
+                first.entry(key).or_insert(write.began);
+            }
+        }
+        first
+    };
+    while first_attempt(&node.engine.writes_since(mark)).len() < N_T
+        && returned.elapsed() < Duration::from_secs(10)
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let writes = node.engine.writes_since(mark);
+    let first = first_attempt(&writes);
+    let c_max = writes
+        .iter()
+        .filter(|w| w.ended >= returned)
+        .map(|w| w.ended.saturating_duration_since(w.began))
+        .max()
+        .unwrap_or_default();
+    // `C_pass <= (1 + 2 log2 L) C_max`, and every commit of a pass that
+    // begins by the bound begins at most one `C_pass` after it.
+    let c_pass = c_max * (1 + 2 * LOG2_L);
+    let passes = u32::try_from(N_T.div_ceil(M)).expect("small");
+    let bound = Duration::from_millis(K_MS + I_MS) + c_pass * passes;
+    let latest = first
+        .values()
+        .map(|began| began.saturating_duration_since(returned))
+        .max()
+        .unwrap_or_default();
+
+    node.engine.delay_every_write(None);
+    let all_attempted = first.len() == N_T;
+    if all_attempted {
+        stop(wb).await;
+    } else {
+        // Leaves whatever pass is still running nothing slow to do.
+        node.engine.refuse_every_write(Some(Refusal::Unknown));
+    }
+    assert_eq!(
+        (held, first.len(), latest <= bound),
+        (true, N_T, true),
+        "latest first attempt {latest:?} after the store returned, bound {bound:?} \
+         (C_max {c_max:?})"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn b12_no_pass_commit_is_non_durable() {
+    // A hold and its accepted probe.
+    let probe_writes = {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let node = Node::open(dir.path());
+        let wb = node
+            .write_behind(WriteBehindConfig {
+                flush_interval_ms: 100,
+                backoff_base_ms: 500,
+                backoff_cap_ms: 5_000,
+                ..config()
+            })
+            .await;
+        let keys = keys("p", 4);
+        fill(&wb, &keys, 1, |i| lww(&format!("v{i}"), 1)).await;
+        node.engine.refuse_every_write(Some(Refusal::Unknown));
+        let mark = node.engine.mark();
+        wb.soft_flush().await.expect("soft_flush");
+        poll_until(400, || wb.test_store_hold_active() && !wb.test_pass_open()).await;
+        node.engine.refuse_every_write(None);
+        poll_until(2_000, || {
+            !wb.test_store_hold_active()
+                && !wb.test_pass_open()
+                && keys.iter().all(|k| wb.test_retry_state(MAP, k).is_none())
+        })
+        .await;
+        let writes = node.engine.writes_since(mark);
+        stop(wb).await;
+        writes
+    };
+
+    // A pass halving around one refused record, then a drain doing the same.
+    let halving_writes = {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let node = Node::open(dir.path());
+        let wb = node.write_behind(config()).await;
+        let keys = keys("k", 8);
+        node.engine
+            .refuse_writes_holding(&keys[5], Refusal::Unknown);
+        fill(&wb, &keys, 1, |i| lww(&format!("v{i}"), 1)).await;
+        let mark = node.engine.mark();
+        one_pass(&wb).await;
+        fill(&wb, &keys_in_drain(), 100, |i| lww(&format!("d{i}"), 1)).await;
+        stop(wb).await;
+        node.engine.writes_since(mark)
+    };
+
+    assert_eq!(
+        (
+            record_counts(&probe_writes),
+            probe_writes.iter().all(|w| w.sync),
+            record_counts(&halving_writes),
+            halving_writes.iter().all(|w| w.sync),
+        ),
+        (
+            vec![4, 2, 2, 1, 3],
+            true,
+            vec![8, 4, 4, 2, 2, 1, 1, 4, 2, 2, 1, 1],
+            true
+        )
+    );
+}
+
+/// The keys b12 adds just before its stop, for the drain.
+fn keys_in_drain() -> Vec<String> {
+    keys("d", 3)
+}
+
+#[tokio::test(start_paused = true)]
+async fn b13_after_an_accepted_probe_two_records_refused_in_different_halves_are_isolated_without_a_new_hold(
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let node = Node::open(dir.path());
+    let wb = node
+        .write_behind(WriteBehindConfig {
+            flush_interval_ms: 100,
+            backoff_base_ms: 500,
+            backoff_cap_ms: 5_000,
+            ..config()
+        })
+        .await;
+    let keys = keys("k", 1_000);
+    let refused = [keys[100].clone(), keys[700].clone()];
+    fill(&wb, &keys, 1, |i| lww(&format!("v{i}"), 1)).await;
+    for key in &refused {
+        node.engine.refuse_writes_holding(key, Refusal::Unknown);
+    }
+
+    // The two refused halves look like a store that is down: a hold.
+    let mark = node.engine.mark();
+    wb.soft_flush().await.expect("soft_flush");
+    let tripped = poll_until(400, || wb.test_store_hold_active() && !wb.test_pass_open())
+        .await
+        .is_some();
+    let trip = node.engine.writes_since(mark);
+
+    // The probe is accepted; the pass after it is split to single entries.
+    let mark = node.engine.mark();
+    let others: Vec<String> = keys
+        .iter()
+        .filter(|k| !refused.contains(k))
+        .cloned()
+        .collect();
+    poll_until(2_000, || {
+        !wb.test_pass_open() && others.iter().all(|k| wb.test_retry_state(MAP, k).is_none())
+    })
+    .await;
+    let after = node.engine.writes_since(mark);
+    let probe_is_another_key = after.first().is_some_and(|w| {
+        let keys = w.user_keys();
+        w.ok && keys.len() == 1 && !refused.contains(&keys[0])
+    });
+    let split = after.get(1..).unwrap_or(&[]);
+    let split_stored: usize = split
+        .iter()
+        .filter(|w| w.ok)
+        .map(EngineWrite::records)
+        .sum();
+    let stored = node.stored(&keys).await.len();
+    assert_eq!(
+        (
+            tripped,
+            record_counts(&trip),
+            trip.iter().any(|w| w.ok),
+            probe_is_another_key,
+            split.first().map(EngineWrite::records),
+            split.len() <= 1_997,
+            split_stored,
+            stored,
+            retry_states(&wb, &refused),
+            wb.test_store_hold_active(),
+        ),
+        (
+            true,
+            vec![1000, 500, 500],
+            false,
+            true,
+            Some(999),
+            true,
+            997,
+            998,
+            vec![Some((1, true, true)); 2],
+            false,
+        ),
+        "{} commits in the split pass",
+        split.len()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn b14_a_store_that_goes_down_right_after_an_accepted_probe_splits_once_then_holds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let node = Node::open(dir.path());
+    let wb = node
+        .write_behind(WriteBehindConfig {
+            flush_interval_ms: 100,
+            backoff_base_ms: 500,
+            backoff_cap_ms: 5_000,
+            ..config()
+        })
+        .await;
+    // One more than a pass takes: the probe is the one the first pass left.
+    let keys = keys("k", 1_001);
+    fill(&wb, &keys, 1, |i| lww(&format!("v{i}"), 1)).await;
+    node.engine.refuse_every_write(Some(Refusal::Unknown));
+
+    let mark = node.engine.mark();
+    wb.soft_flush().await.expect("soft_flush");
+    let tripped = poll_until(400, || wb.test_store_hold_active() && !wb.test_pass_open())
+        .await
+        .is_some();
+    let trip = node.engine.writes_since(mark);
+
+    // The probe is accepted and the store refuses everything again at once.
+    node.engine.accept_write_in(1);
+    let mark = node.engine.mark();
+    poll_until(5_000, || {
+        wb.test_store_hold_active() && !wb.test_pass_open() && node.engine.mark() > mark + 1
+    })
+    .await;
+    let after = node.engine.writes_since(mark);
+    let probe = after.first().map(|w| (w.user_keys(), w.ok));
+    // The split commit begins with the whole pass; the next commit of a whole
+    // pass is the one that trips the next hold.
+    let next_whole = after
+        .iter()
+        .enumerate()
+        .skip(2)
+        .find(|(_, w)| w.records() == 1000)
+        .map(|(i, _)| i);
+    let split = after
+        .get(1..next_whole.unwrap_or(after.len()))
+        .unwrap_or(&[]);
+    let second_trip = next_whole.map(|i| record_counts(&after[i..]));
+    let all_refused_alone = retry_states(&wb, &keys[..1000])
+        .iter()
+        .all(|state| *state == Some((1, true, true)));
+    assert_eq!(
+        (
+            tripped,
+            record_counts(&trip),
+            probe,
+            split.first().map(EngineWrite::records),
+            split.len() <= 1_999,
+            split.iter().any(|w| w.ok),
+            second_trip,
+            wb.test_store_hold_active(),
+            all_refused_alone,
+        ),
+        (
+            true,
+            vec![1000, 500, 500],
+            Some((vec![keys[1000].clone()], true)),
+            Some(1000),
+            true,
+            false,
+            Some(vec![1000, 500, 500]),
+            true,
+            true,
+        ),
+        "{} commits in the split, record counts after the probe {:?}",
+        split.len(),
+        record_counts(&after).get(..12)
+    );
+}
+
+/// The keys of an engine write, its rows for two WAL partitions, and whether
+/// it was applied.
+type TwoPartitionWrite = (BTreeSet<String>, Option<u64>, Option<u64>, bool);
+
+#[tokio::test(start_paused = true)]
+async fn b15_a_half_committed_after_its_sibling_plans_its_rows_after_the_sibling_settled() {
+    // One WAL partition: pending {5 in L, 7 in R, 9 outside the pass},
+    // durable 3.
+    {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let node = Node::open(dir.path());
+        let wb = node.write_behind(config()).await;
+        let p = super::partition_for(MAP, "p0");
+        let pk = keys_in_partition(MAP, "p", p, 6);
+        let qk: Vec<String> = (0..)
+            .map(|i| format!("q{i}"))
+            .filter(|key| super::partition_for(MAP, key) != p)
+            .take(3)
+            .collect();
+        // Sequences 1..=3, stored by a pass of their own.
+        fill(&wb, &pk[..3], 1, |i| lww(&format!("v{i}"), 1)).await;
+        one_pass(&wb).await;
+        let durable_before = durable_row(&node, p);
+        // Sequences 4..=9: 4, 6 and 8 in other partitions, none of them due.
+        add_at(&wb, &qk[0], NOT_DUE).await;
+        add_at(&wb, &pk[3], 10).await;
+        add_at(&wb, &qk[1], NOT_DUE).await;
+        add_at(&wb, &pk[4], 11).await;
+        add_at(&wb, &qk[2], NOT_DUE).await;
+        add_at(&wb, &pk[5], NOT_DUE).await;
+        let pending: Vec<u64> = wb
+            .test_pending_wal_sequences(p)
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect();
+
+        node.engine.refuse_write_in(1, Refusal::Unknown);
+        let mark = node.engine.mark();
+        one_pass(&wb).await;
+        let shape: Vec<(BTreeSet<String>, Option<u64>, bool)> = node
+            .engine
+            .writes_since(mark)
+            .iter()
+            .map(|w| {
+                (
+                    w.user_keys().into_iter().collect(),
+                    w.rows().get(&p).copied(),
+                    w.ok,
+                )
+            })
+            .collect();
+        let set = |keys: &[&String]| keys.iter().map(|k| (*k).clone()).collect::<BTreeSet<_>>();
+        assert_eq!(
+            (durable_before, pending, shape, durable_row(&node, p)),
+            (
+                3,
+                vec![5, 7, 9],
+                vec![
+                    (set(&[&pk[3], &pk[4]]), Some(8), false),
+                    (set(&[&pk[3]]), Some(6), true),
+                    (set(&[&pk[4]]), Some(8), true),
+                ],
+                8
+            ),
+            "one partition"
+        );
+    }
+
+    // Two WAL partitions: P1 pending {3 in L, 5 in R, 7 outside}, durable 1;
+    // P2 pending {4 in L, 6 in R, 8 outside}, durable 2.
+    {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let node = Node::open(dir.path());
+        let wb = node.write_behind(config()).await;
+        let p1 = super::partition_for(MAP, "a0");
+        let p2 = (0..10_000)
+            .map(|i| super::partition_for(MAP, &format!("b{i}")))
+            .find(|p| *p != p1)
+            .expect("another partition");
+        let x1 = keys_in_partition(MAP, "a", p1, 4);
+        let x2 = keys_in_partition(MAP, "b", p2, 4);
+        add_at(&wb, &x1[0], 1).await;
+        add_at(&wb, &x2[0], 2).await;
+        one_pass(&wb).await;
+        let durable_before = (durable_row(&node, p1), durable_row(&node, p2));
+        add_at(&wb, &x1[1], 10).await;
+        add_at(&wb, &x2[1], 11).await;
+        add_at(&wb, &x1[2], 12).await;
+        add_at(&wb, &x2[2], 13).await;
+        add_at(&wb, &x1[3], NOT_DUE).await;
+        add_at(&wb, &x2[3], NOT_DUE).await;
+
+        node.engine.refuse_write_in(1, Refusal::Unknown);
+        let mark = node.engine.mark();
+        one_pass(&wb).await;
+        let shape: Vec<TwoPartitionWrite> = node
+            .engine
+            .writes_since(mark)
+            .iter()
+            .map(|w| {
+                let rows = w.rows();
+                (
+                    w.user_keys().into_iter().collect(),
+                    rows.get(&p1).copied(),
+                    rows.get(&p2).copied(),
+                    w.ok,
+                )
+            })
+            .collect();
+        let set = |keys: &[&String]| keys.iter().map(|k| (*k).clone()).collect::<BTreeSet<_>>();
+        assert_eq!(
+            (
+                durable_before,
+                shape,
+                (durable_row(&node, p1), durable_row(&node, p2))
+            ),
+            (
+                (1, 2),
+                vec![
+                    (
+                        set(&[&x1[1], &x2[1], &x1[2], &x2[2]]),
+                        Some(6),
+                        Some(7),
+                        false
+                    ),
+                    (set(&[&x1[1], &x2[1]]), Some(4), Some(5), true),
+                    (set(&[&x1[2], &x2[2]]), Some(6), Some(7), true),
+                ],
+                (6, 7)
+            ),
+            "two partitions"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn b16_a_recommit_never_marks_a_refused_entry_applied() {
+    const BAD_MAP: &str = "bad__backup";
+    const BAD_KEY: &str = "x";
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let node = Node::open(dir.path());
+    let wb = node.write_behind(config()).await;
+    // Every entry in one WAL partition: `x` is refused by the store on its
+    // own (a map name it does not take), `y` by the engine.
+    let partition = super::partition_for(BAD_MAP, BAD_KEY);
+    let ours = keys_in_partition(MAP, "a", partition, 4);
+    let (key_a, key_b, key_y, key_c) = (&ours[0], &ours[1], &ours[2], &ours[3]);
+    add_at(&wb, key_a, 1).await;
+    wb.add(BAD_MAP, BAD_KEY, &lww("bad", 1), 0, 2)
+        .await
+        .expect("add");
+    add_at(&wb, key_b, 3).await;
+    add_at(&wb, key_y, 4).await;
+    add_at(&wb, key_c, 5).await;
+    let pending: Vec<u64> = wb
+        .test_pending_wal_sequences(partition)
+        .into_iter()
+        .map(|(seq, _)| seq)
+        .collect();
+    let (seq_x, seq_y) = (2, 4);
+    node.engine.refuse_writes_holding(key_y, Refusal::Unknown);
+
+    let (engine_mark, spy_mark) = (node.engine.mark(), node.spy.mark());
+    one_pass(&wb).await;
+    let commits: Vec<(BTreeSet<String>, bool)> = node
+        .spy
+        .commits_since(spy_mark)
+        .iter()
+        .map(|c| (c.writes.iter().map(|(_, k, _)| k.clone()).collect(), c.ok))
+        .collect();
+    stop(wb).await;
+    let rows: Vec<u64> = node
+        .engine
+        .writes_since(engine_mark)
+        .iter()
+        .filter_map(|w| w.rows().get(&partition).copied())
+        .collect();
+    node.close().await;
+
+    let node = Node::open(dir.path());
+    let replayed = node
+        .unapplied_keys()
+        .await
+        .remove(&partition)
+        .unwrap_or_default();
+    let stored = node.stored(&ours).await;
+    let set = |keys: &[&str]| {
+        keys.iter()
+            .map(|k| (*k).to_string())
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        (
+            pending,
+            commits,
+            rows.iter().all(|row| *row < seq_x.min(seq_y)),
+            replayed.contains(BAD_KEY) && replayed.contains(key_y),
+            stored,
+        ),
+        (
+            vec![1, 2, 3, 4, 5],
+            vec![
+                (set(&[key_a, BAD_KEY, key_b, key_y, key_c]), false),
+                (set(&[key_a, key_b, key_y, key_c]), false),
+                (set(&[key_a, key_b]), true),
+                (set(&[key_y, key_c]), false),
+                (set(&[key_y]), false),
+                (set(&[key_c]), true),
+            ],
+            true,
+            true,
+            set(&[key_a, key_b, key_c]),
+        ),
+        "rows of partition {partition}: {rows:?}"
+    );
+    node.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn b17_a_refused_entry_is_attempted_under_sustained_load() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let node = Node::open(dir.path());
+    let wb = node
+        .write_behind(WriteBehindConfig {
+            backoff_base_ms: 60_000,
+            backoff_cap_ms: 60_000,
+            ..config()
+        })
+        .await;
+    // Three entries refused once each, in order, so their retry times are in
+    // that order: the first has `R_T = 0`, the third `R_T = 2`.
+    let refused = keys("r", 3);
+    for (i, key) in refused.iter().enumerate() {
+        node.engine.refuse_writes_holding(key, Refusal::Unknown);
+        add_at(&wb, key, 1 + i64::try_from(i).expect("small")).await;
+        one_pass(&wb).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let setup = retry_states(&wb, &refused);
+    for key in &refused {
+        node.engine.allow_writes_holding(key);
+    }
+    tokio::time::sleep(Duration::from_secs(61)).await;
+
+    // 30 000 never-refused due entries: more than a pass takes, in each of
+    // 30 passes back to back.
+    let load = keys("k", 30_000);
+    fill(&wb, &load, 100, |i| lww(&format!("v{i}"), 1)).await;
+    let mark = node.engine.mark();
+    flush_until_idle(&wb).await;
+    let writes = node.engine.writes_since(mark);
+    let counts = record_counts(&writes);
+    let sustained = counts.len() >= 30 && counts[..30].iter().all(|c| *c == 1000);
+    let first = first_write_naming(&writes, &refused[0]);
+    let third = first_write_naming(&writes, &refused[2]);
+    let stored = node.stored(&refused).await.len();
+    assert_eq!(
+        (
+            setup,
+            sustained,
+            first,
+            third.is_some_and(|i| i <= 2),
+            stored
+        ),
+        (vec![Some((1, true, true)); 3], true, Some(0), true, 3),
+        "{} writes, the first record counts {:?}, the third refused entry in write {third:?}",
+        counts.len(),
+        counts.get(..5)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn b18_a_new_healthy_key_waits_at_most_its_queue_position_in_passes() {
+    // One due refused entry `R` and the queue ahead of the healthy key `H`;
+    // `R` takes the reserved slot and is accepted when attempted.
+    async fn scenario(
+        config: WriteBehindConfig,
+        ahead: usize,
+        value: impl Fn(usize) -> RecordValue,
+    ) -> (Vec<usize>, Option<usize>, bool) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let node = Node::open(dir.path());
+        let wb = node.write_behind(config).await;
+        let refused = keys("r", 1);
+        node.engine
+            .refuse_writes_holding(&refused[0], Refusal::Unknown);
+        fill(&wb, &refused, 1, &value).await;
+        one_pass(&wb).await;
+        node.engine.allow_writes_holding(&refused[0]);
+        tokio::time::sleep(Duration::from_secs(61)).await;
+
+        let ahead_keys = keys("k", ahead);
+        fill(&wb, &ahead_keys, 100, &value).await;
+        let healthy = keys("h", 1);
+        fill(
+            &wb,
+            &healthy,
+            100 + i64::try_from(ahead).expect("small"),
+            &value,
+        )
+        .await;
+        let mark = node.engine.mark();
+        flush_until_idle(&wb).await;
+        let writes = node.engine.writes_since(mark);
+        let stored = node.stored(&healthy).await.len() == 1;
+        (
+            record_counts(&writes),
+            first_write_naming(&writes, &healthy[0]),
+            stored,
+        )
+    }
+
+    let config = || WriteBehindConfig {
+        backoff_base_ms: 60_000,
+        backoff_cap_ms: 60_000,
+        ..config()
+    };
+    // `Q_H = 2 500` small values ahead, `m = 999`: by the third pass.
+    let small = scenario(config(), 2_500, |i| lww(&format!("v{i}"), 1)).await;
+    // Values just under 4 MiB encoded, `m = 1`: by pass `Q_H + 1` for
+    // `Q_H = 3`.
+    let big = scenario(config(), 3, |_| lww(&"x".repeat(4 * MIB - 1024), 1)).await;
+    assert_eq!(
+        (small, (big.0, big.1.is_some_and(|i| i <= 3), big.2)),
+        (
+            (vec![1000, 1000, 502], Some(2), true),
+            (vec![2, 2, 1], true, true)
+        )
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn b19_a_run_of_passes_yields_and_stops_at_the_shutdown_signal() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let node = Node::open(dir.path());
+    let wb = node.write_behind(config()).await;
+    let keys = keys("k", 4_000);
+    fill(&wb, &keys, 1, |i| lww(&format!("v{i}"), 1)).await;
+    let mark = node.engine.mark();
+
+    // One wake starts a run of four passes. Another task on this
+    // current-thread runtime watches the engine and, once two passes have
+    // committed, signals shutdown; a bound on its turns ends it if it is
+    // never let in.
+    wb.soft_flush().await.expect("soft_flush");
+    let observer = {
+        let wb = Arc::clone(&wb);
+        let engine = Arc::clone(&node.engine);
+        tokio::spawn(async move {
+            let mut seen = BTreeSet::new();
+            for _ in 0..10_000_000u64 {
+                let committed = engine.mark() - mark;
+                seen.insert(committed);
+                if committed >= 2 {
+                    let _ = wb.shutdown.send(true);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            seen
+        })
+    };
+    let seen = observer.await.expect("observer");
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+    }
+    let counts = record_counts(&node.engine.writes_since(mark));
+    let finished = wb
+        .flush_loop
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(tokio::task::JoinHandle::is_finished);
+    stop(wb).await;
+    let stored = node.stored(&keys).await.len();
+    assert_eq!(
+        (
+            seen.contains(&1) && seen.contains(&2),
+            counts,
+            finished,
+            stored
+        ),
+        (true, vec![1000, 1000], Some(true), 4_000),
+        "the observer saw {seen:?} committed writes"
+    );
 }
