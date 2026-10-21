@@ -51,10 +51,12 @@ pub struct WriteBehindConfig {
     pub flush_interval_ms: u64,
     /// Accepted and parsed, and currently without effect.
     ///
-    /// Nothing reads it: a flush pass takes every entry that is due when it
-    /// begins and stores them one at a time, so the value neither groups nor
-    /// limits the pass. It is kept so that a configuration which sets it
-    /// still loads.
+    /// Nothing reads it: a flush pass takes up to 1000 entries or 8 MiB of
+    /// encoded values, whichever comes first — fixed limits — and commits
+    /// them in one durable store write, so the value neither groups nor
+    /// limits the pass. Honouring it would silently cut every pass to the
+    /// value configurations copied from the documented example. It is kept so
+    /// that a configuration which sets it still loads.
     pub batch_size: u32,
     /// The wait after the first refusal of an entry is twice this, and the
     /// first length of a store-wide hold is this, in milliseconds; each
@@ -81,7 +83,7 @@ pub struct WriteBehindConfig {
     ///
     /// ```text
     /// pending_count  <=  C - 1 + W + H
-    /// H              <=  C - 1 + W
+    /// H              <=  min(L, C - 1 + W)      L = 1000 entries per pass
     /// H              <=  1                      while a store-wide hold is in force
     /// ```
     ///
@@ -92,8 +94,9 @@ pub struct WriteBehindConfig {
     ///   so with one writer and no flush pass the count reaches `C`.
     /// - `H` is the number of entries the running flush pass holds whose key
     ///   was re-written while the pass holds them; each such key is counted a
-    ///   second time, once. A pass holds every entry that was due when it
-    ///   began — `batch_size` does not bound it — hence the second line.
+    ///   second time, once. A pass holds the entries that were due when it
+    ///   began, at most `L` of them and 8 MiB of encoded values —
+    ///   `batch_size` does not bound it — hence the second line.
     ///
     /// In the worst case the count stays below `2 * (C + W)`.
     ///
@@ -101,9 +104,9 @@ pub struct WriteBehindConfig {
     /// buffer, so the count stays at the bound until the store accepts again,
     /// and for that long every write of a key that is not buffered is refused.
     /// An entry waiting for its next attempt is in its queue, not in a pass,
-    /// and adds nothing to `H`; a hold puts back every entry the pass did not
-    /// attempt, and a pass during a hold holds at most the one entry it probes
-    /// the store with.
+    /// and adds nothing to `H`; a hold puts back every entry of the pass that
+    /// was not stored, and a pass during a hold holds at most the one entry it
+    /// probes the store with.
     ///
     /// Precondition, which the callers uphold and this store does not
     /// enforce: one writer per key at a time (`TG-KEY-001`).
@@ -1629,14 +1632,15 @@ const FLUSH_PASS_SECONDS_HISTOGRAM: &str = "topgun_write_behind_flush_pass_secon
 fn register_retry_metrics() {
     metrics::describe_counter!(
         FLUSH_REFUSALS_COUNTER,
-        "Store calls made by the write-behind flush task that returned an error"
+        "Commits of the write-behind flush task that the store refused, each half of a \
+         halved commit and each probe counted on its own"
     );
     metrics::describe_gauge!(
         RETRYING_ENTRIES_GAUGE,
-        "Buffered write-behind entries the store has refused at least once, as of the last \
-         pass. It is not the size of the buffer: while the store refuses everything a hold \
-         allows one call per period, so this number is about the number of store calls made \
-         so far"
+        "Buffered write-behind entries the store has refused on their own at least once — \
+         alone in a commit, by a record-level refusal, or as a probe — as of the last pass. \
+         Entries a store-wide hold put back are not counted, so this reads 0 at a hold's start \
+         and then about the number of refused probes"
     );
     metrics::describe_gauge!(
         BUFFERED_ENTRIES_GAUGE,
@@ -2154,137 +2158,72 @@ impl WriteBehindDataStore {
     /// applied watermark below their frames so the next start replays them
     /// (`TG-WB-006`).
     async fn drain_for_shutdown(&self, deadline: tokio::time::Instant) -> usize {
-        // Flush all partition queues directly to the inner store. Using i64::MAX
-        // as the drain deadline ensures every buffered entry is eligible regardless
-        // of its write_delay_ms schedule — on shutdown we want everything, not just
-        // entries past their delay window.
+        // Passes of the flush task's limits over every queued entry, whatever
+        // its write delay or next attempt: on shutdown we want everything. A
+        // refused entry abandons only itself, so the rest of its pass and the
+        // later passes are still stored.
         let mut drained_entries = 0usize;
+        let mut abandoned: Vec<DelayedEntry> = Vec::new();
+        let mut broken: Option<StoreBrokenCause> = None;
+        let mut stopped = false;
         loop {
-            // Collect all entries still in the queues.
-            let mut all_entries: Vec<DelayedEntry> = Vec::new();
+            let pass = self.drain_pass(deadline).await;
+            if pass.taken == 0 {
+                break;
+            }
+            drained_entries += pass.taken;
+            abandoned.extend(pass.batch.abandoned);
+            match pass.batch.end {
+                BatchEnd::Broken(cause) => {
+                    broken = Some(cause);
+                    stopped = true;
+                    break;
+                }
+                BatchEnd::DeadlinePassed => {
+                    stopped = true;
+                    break;
+                }
+                BatchEnd::Resolved | BatchEnd::Held => {}
+            }
+            // Between passes, so the drain never starves the runtime.
+            tokio::task::yield_now().await;
+        }
+
+        if stopped {
+            let abandoned_by_passes = abandoned.len();
+            // Past the deadline or at a broken store no commit is made any
+            // more: what is still queued — also entries reinserted by
+            // concurrent retry paths — is drained and abandoned in one go,
+            // deliberately never registered, since it never enters a commit
+            // and an ownership that is taken and released with no call in
+            // between is a state no observer can see.
             for mut queue_ref in self.queues.iter_mut() {
                 let drained = queue_ref.value_mut().drain_ready(i64::MAX);
-                all_entries.extend(drained);
+                drained_entries += drained.len();
+                abandoned.extend(drained);
             }
-            drained_entries += all_entries.len();
-
-            if all_entries.is_empty() {
-                return drained_entries;
-            }
-
-            // Same window as the flush loop's drain: from here the entries exist
-            // only as local bindings, so record ownership before the first
-            // inner-store call and after every queue guard has dropped.
-            for entry in &all_entries {
-                self.register_in_flight(
+            // The process is exiting with these writes in neither the inner
+            // store nor applied in the WAL. Abandoning rather than resolving
+            // holds the watermark below their frames, so recovery replays
+            // them on the next boot; the passes abandoned theirs already.
+            for entry in &abandoned[abandoned_by_passes..] {
+                self.abandon_wal_sequences(
                     partition_for(&entry.map, &entry.key),
                     &entry.wal_sequences,
                 );
             }
-
-            // Persist each entry, wrapping each inner-store call with the
-            // remaining deadline budget. This ensures that even a single slow
-            // inner-store write cannot hold up the process past the configured
-            // timeout.
-            let mut timed_out_entries: Vec<DelayedEntry> = Vec::new();
-            let mut broken: Option<StoreBrokenCause> = None;
-
-            let mut entries = all_entries.into_iter();
-            while let Some(entry) = entries.next() {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    // Budget exhausted — collect this entry as timed-out.
-                    timed_out_entries.push(entry);
-                    continue;
-                }
-
-                match tokio::time::timeout(remaining, self.commit_entry(&entry)).await {
-                    Ok(Ok(applied)) => {
-                        // A writer that passed the lifecycle check before the
-                        // shutdown may have staged a newer write of this key —
-                        // its entry already queued (it completed while this
-                        // drain was inside the store call above) or not queued
-                        // yet; settling clears the slot only if it is still
-                        // this entry's. Resolving and advancing makes a
-                        // restart after a clean shutdown a no-op rather than a
-                        // re-replay of already-durable writes.
-                        self.settle_stored(&entry, &applied).await;
-                    }
-                    Ok(Err(err)) => {
-                        if let StoreErrorClass::StoreBroken(cause) = self.inner.classify_error(&err)
-                        {
-                            // A broken store stores nothing more: no further
-                            // call. This entry and every one not attempted are
-                            // abandoned, never resolved, so their frames replay
-                            // at the next start.
-                            self.record_store_broken(
-                                cause,
-                                &err,
-                                &entry.map,
-                                &entry.key,
-                                "shutdown_drain",
-                            );
-                            broken = Some(cause);
-                            timed_out_entries.push(entry);
-                            timed_out_entries.extend(entries.by_ref());
-                            break;
-                        }
-                        // Inner store returned an error; log and treat as timed-out
-                        // rather than looping forever on a failing backend.
-                        warn!(
-                            map = %entry.map,
-                            key = %entry.key,
-                            error = %err,
-                            "Inner store error during shutdown drain; entry not persisted"
-                        );
-                        timed_out_entries.push(entry);
-                    }
-                    Err(_elapsed) => {
-                        // Deadline expired mid-write.
-                        timed_out_entries.push(entry);
-                    }
-                }
-            }
-
-            if !timed_out_entries.is_empty() {
-                // Also sweep any entries reinserted by concurrent retry paths.
-                // These are drained and abandoned in one go — deliberately never
-                // registered, since they never enter a flush and an ownership
-                // that is taken and released with no call in between is a state
-                // no observer can see.
-                for mut queue_ref in self.queues.iter_mut() {
-                    let drained = queue_ref.value_mut().drain_ready(i64::MAX);
-                    drained_entries += drained.len();
-                    timed_out_entries.extend(drained);
-                }
-
-                // The process is exiting with these writes in neither the inner
-                // store nor applied in the WAL. Abandoning rather than resolving
-                // holds the watermark below their frames, so recovery replays
-                // them on the next boot.
-                for entry in &timed_out_entries {
-                    self.abandon_wal_sequences(
-                        partition_for(&entry.map, &entry.key),
-                        &entry.wal_sequences,
-                    );
-                }
-
-                if let Some(cause) = broken {
-                    error!(
-                        abandoned_entries = timed_out_entries.len(),
-                        cause = cause.as_str(),
-                        "write-behind shutdown drain stopped at a broken store: the entries it \
-                         did not store stay un-resolved and replay from the WAL at the next start"
-                    );
-                }
-
-                self.log_unpersisted(&timed_out_entries, broken);
-                return drained_entries;
-            }
-
-            // Yield briefly between iterations to avoid starving the tokio runtime.
-            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
         }
+
+        if let Some(cause) = broken {
+            error!(
+                abandoned_entries = abandoned.len(),
+                cause = cause.as_str(),
+                "write-behind shutdown drain stopped at a broken store: the entries it \
+                 did not store stay un-resolved and replay from the WAL at the next start"
+            );
+        }
+        self.log_unpersisted(&abandoned, broken);
+        drained_entries
     }
 
     /// Logs every entry the shutdown drain did not persist, naming why: a drain
@@ -3458,35 +3397,28 @@ impl WriteBehindDataStore {
         }
     }
 
-    /// The applied watermark rows one entry's commit carries, planned before
-    /// the commit without changing any tracking state.
+    /// The applied watermark rows one commit carries, planned before the
+    /// commit without changing any tracking state.
     ///
     /// Only when the WAL keeps its watermark in the store: a row is then
     /// durable exactly when the records it covers are, because both are one
-    /// store batch. For every tracked partition the row is the watermark the
-    /// partition reaches once the entry's WAL sequences `seqs` (all in
-    /// `partition`, the entry's WAL partition) are resolved — the
-    /// prefix-complete rule of [`Self::prefix_complete_watermark`] with `seqs`
-    /// left out. Every partition is a candidate, not only the entry's own: a
-    /// coalesce resolves sequences with no store write of their own, and their
-    /// partition's watermark becomes durable only in some later commit.
+    /// store batch. `own` maps each WAL partition of the commit's entries to
+    /// the WAL sequences they carry there. For every tracked partition the row
+    /// is the watermark the partition reaches once those sequences are
+    /// resolved — the prefix-complete rule of
+    /// [`Self::prefix_complete_watermark`] with them left out. Every partition
+    /// is a candidate, not only the commit's own: a coalesce resolves
+    /// sequences with no store write of their own, and their partition's
+    /// watermark becomes durable only in some later commit.
+    ///
+    /// Planned just before the commit and after every earlier commit of the
+    /// pass has settled, so an earlier commit's sequences are already gone
+    /// from `pending` and no row covers an entry that is not stored.
     ///
     /// An unseeded partition gets no row, for the reason it gets no watermark.
     /// A row at or below the durable watermark is left out: after a restart a
     /// partition with nothing assigned yet plans 0, and the store refuses a
     /// lower row (`TG-WAL-005`).
-    async fn plan_commit(&self, partition: u32, seqs: &BTreeSet<u64>) -> Vec<(u32, u64)> {
-        self.plan_rows(&BTreeMap::from([(partition, seqs.clone())]))
-            .await
-    }
-
-    /// [`Self::plan_commit`] for a commit whose entries lie in several WAL
-    /// partitions: `own` maps each of them to the WAL sequences the commit's
-    /// entries carry there, which are exactly the sequences left out of
-    /// `pending`. Planned just before the commit and after every earlier
-    /// commit of the pass has settled, so an earlier commit's sequences are
-    /// already gone from `pending` and no row covers an entry that is not
-    /// stored.
     async fn plan_rows(&self, own: &BTreeMap<u32, BTreeSet<u64>>) -> Vec<(u32, u64)> {
         let Some(tracking) = &self.wal else {
             return Vec::new();
@@ -3524,17 +3456,6 @@ impl WriteBehindDataStore {
                 (planned > durable).then_some((p, planned))
             })
             .collect()
-    }
-
-    /// Plans and commits one entry, returning the rows its commit carried for
-    /// [`Self::settle_stored`]. Nothing of the tracking state changes here, so
-    /// a refused commit leaves the entry exactly as it was.
-    async fn commit_entry(&self, entry: &DelayedEntry) -> anyhow::Result<Vec<(u32, u64)>> {
-        let applied = self
-            .plan_commit(partition_for(&entry.map, &entry.key), &entry.wal_sequences)
-            .await;
-        commit_write(self.inner.as_ref(), entry, &applied).await?;
-        Ok(applied)
     }
 
     /// Disposes of a coalesce-retired entry's WAL sequences against the survivor.
@@ -3740,9 +3661,9 @@ fn injected_store_fault() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Commits one dequeued entry to the inner store, with the applied watermark
-/// rows `applied` beside its write — the single body the background flush,
-/// the probe and the shutdown drain share.
+/// Commits one dequeued entry alone to the inner store, with no watermark
+/// rows: the commit of a WAL that keeps its watermark in sidecars, for the
+/// tests that drive one entry's flush directly.
 ///
 /// A `StoreCell` entry persists the cell's value as it is now, read under the
 /// cell lock. When the inner store accepts encoded records, the value is
@@ -3750,16 +3671,8 @@ fn injected_store_fault() -> anyhow::Result<()> {
 /// outlives the lock; otherwise it is cloned out under the lock. Either way the
 /// guard lives only inside its block: it is `!Send`, and must not be held
 /// across the inner store's await (or into any call that takes the same lock).
-///
-/// The commit is awaited on this task, never moved to a blocking thread: a
-/// shutdown drain whose deadline passes while a store write runs then still
-/// learns that the write and its rows are durable, so the rollback hints it
-/// writes next are the rows the store holds.
-async fn commit_write(
-    inner: &dyn MapDataStore,
-    entry: &DelayedEntry,
-    applied: &[(u32, u64)],
-) -> anyhow::Result<()> {
+#[cfg(test)]
+async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow::Result<()> {
     injected_store_fault()?;
 
     let (map, key, store_time) = (entry.map.as_str(), entry.key.as_str(), entry.store_time);
@@ -3806,22 +3719,11 @@ async fn commit_write(
     inner
         .commit(&FlushCommit {
             writes: vec![write],
-            applied: applied.to_vec(),
+            applied: Vec::new(),
         })
         .await
 }
 
-/// [`commit_write`] with no watermark rows: the commit of a WAL that keeps its
-/// watermark in sidecars, for the tests that drive the flush body directly.
-#[cfg(test)]
-async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow::Result<()> {
-    commit_write(inner, entry, &[]).await
-}
-
-/// Refused entries in a row, inside one flush pass, that start a store-wide
-/// hold. One refused entry can never start one.
-#[allow(dead_code)]
-const HOLD_TRIP_REFUSALS: u32 = 3;
 /// Refusals of one entry from which the retry warning is emitted.
 const RETRY_WARN_ATTEMPTS: u32 = 3;
 /// The retry warning is emitted at most once per this interval.
@@ -3877,7 +3779,6 @@ struct RetrySchedule {
     /// hold, because a store that just took the probe is not known to be down.
     /// Disarmed once that commit is resolved, or when a hold starts by any
     /// other path; never armed at process start.
-    #[allow(dead_code)]
     split_to_singles: bool,
 }
 
@@ -3891,7 +3792,6 @@ struct RefusedExample {
 }
 
 /// Which queued entries a pass may take.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 enum PassScope {
     /// A flush pass: the entries written by `deadline` whose next attempt is
@@ -3925,7 +3825,6 @@ struct PassSelection {
 }
 
 /// How the halving of a refused commit treats it.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 enum BisectMode {
     /// A flush pass: both halves refused means the store refuses, and a hold
@@ -3939,7 +3838,6 @@ enum BisectMode {
 }
 
 /// How a commit and the halving that followed it ended.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatchEnd {
     /// Every entry was stored, refused alone, or (at shutdown) abandoned
@@ -3957,7 +3855,6 @@ enum BatchEnd {
 }
 
 /// The result of [`WriteBehindDataStore::commit_bisect`].
-#[allow(dead_code)]
 struct BatchOutcome {
     /// Entries stored and settled.
     stored: usize,
@@ -3968,7 +3865,6 @@ struct BatchOutcome {
 }
 
 /// The result of [`WriteBehindDataStore::drain_pass`].
-#[allow(dead_code)]
 struct DrainPassOutcome {
     /// Entries the pass took from the queues; 0 when they were empty.
     taken: usize,
@@ -3984,9 +3880,26 @@ struct RecordCommit {
     /// error and when the refusing commit returned; in no commit any more,
     /// still in flight, for the caller to dispose of.
     refused_alone: Vec<(DelayedEntry, anyhow::Error, tokio::time::Instant)>,
-    /// A refusal that names no record: its error, when it returned, and the
-    /// entries of the refused commit, none of them stored, in pass order.
-    refused: Option<(anyhow::Error, tokio::time::Instant, Vec<PreparedEntry>)>,
+    /// The entries no commit stored, still in flight, and why.
+    unstored: Option<Unstored>,
+}
+
+/// Why the entries of a [`RecordCommit`] were not stored.
+enum Unstored {
+    /// A refusal that names no record.
+    Refused(RefusedCommit),
+    /// Shutdown only: the deadline passed before a commit could start, or
+    /// while it was still pending.
+    DeadlinePassed(Vec<PreparedEntry>),
+}
+
+/// A commit the store refused as a whole, made once already.
+struct RefusedCommit {
+    err: anyhow::Error,
+    /// When the refused commit returned.
+    returned: tokio::time::Instant,
+    /// Its entries, none of them stored, in pass order.
+    batch: Vec<PreparedEntry>,
 }
 
 impl WriteBehindDataStore {
@@ -4072,17 +3985,15 @@ impl WriteBehindDataStore {
     /// from there and not from the start of the pass, so a store that is slow
     /// to refuse is still left alone for the whole of it.
     ///
-    /// Returns what the inner store says about the error. On `StoreBroken`
-    /// the store is failed here and the schedule stops every later pass; the
-    /// caller makes no further call in this pass.
+    /// Only for an entry refused on its own: a broken store says nothing
+    /// about a record, so its entries go back with [`Self::put_back`].
     fn requeue_refused(
         &self,
         schedule: &mut RetrySchedule,
         mut entry: DelayedEntry,
         err: &anyhow::Error,
         returned: tokio::time::Instant,
-    ) -> StoreErrorClass {
-        metrics::counter!(FLUSH_REFUSALS_COUNTER).increment(1);
+    ) {
         self.retrying.store(true, Ordering::Relaxed);
         entry.retry_count = entry.retry_count.saturating_add(1);
         entry.next_attempt = Some(
@@ -4107,18 +4018,7 @@ impl WriteBehindDataStore {
             attempts: entry.retry_count,
             error: err.to_string(),
         });
-        let class = self.inner.classify_error(err);
-        if let StoreErrorClass::StoreBroken(cause) = class {
-            // Put back first, exactly as any refused entry: the record only
-            // stops further calls, it never decides the entry's fate.
-            let (map, key) = (entry.map.clone(), entry.key.clone());
-            self.put_back(entry);
-            self.record_store_broken(cause, err, &map, &key, "flush");
-            schedule.store_broken = true;
-        } else {
-            self.put_back(entry);
-        }
-        class
+        self.put_back(entry);
     }
 
     /// Chooses, over all queues, the entry a probe attempts, and says which
@@ -4252,6 +4152,11 @@ impl WriteBehindDataStore {
     /// commit of the pass has settled — and commits the batch with them.
     /// Returns the rows for the settle; nothing of the tracking state changes
     /// here, so a refused commit leaves every entry as it was.
+    ///
+    /// The commit is awaited on this task, never moved to a blocking thread: a
+    /// shutdown drain whose deadline passes while a store write runs then still
+    /// learns that the write and its rows are durable, so the rollback hints it
+    /// writes next are the rows the store holds.
     async fn commit_prepared(&self, batch: &[PreparedEntry]) -> anyhow::Result<Vec<(u32, u64)>> {
         injected_store_fault()?;
 
@@ -4346,28 +4251,61 @@ impl WriteBehindDataStore {
     /// refusals on the spot: the writes a commit refused on their own leave
     /// it and the rest is committed again, with rows planned again, so each
     /// re-commit is one entry shorter at least.
-    async fn commit_resolving_records(&self, mut batch: Vec<PreparedEntry>) -> RecordCommit {
+    ///
+    /// In a pass every refused commit is counted. At shutdown no commit
+    /// starts once `deadline` has passed, and each is cut at it while it is
+    /// still pending; the settle runs outside that cut, so a commit that
+    /// returned `Ok` is always settled.
+    async fn commit_resolving_records(
+        &self,
+        mut batch: Vec<PreparedEntry>,
+        mode: BisectMode,
+    ) -> RecordCommit {
         let mut refused_alone = Vec::new();
         loop {
             if batch.is_empty() {
                 return RecordCommit {
                     stored: 0,
                     refused_alone,
-                    refused: None,
+                    unstored: None,
                 };
             }
-            let err = match self.commit_prepared(&batch).await {
+            let committed = match mode {
+                BisectMode::Pass => self.commit_prepared(&batch).await,
+                BisectMode::Shutdown { deadline } => {
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    let cut = if remaining.is_zero() {
+                        None
+                    } else {
+                        tokio::time::timeout(remaining, self.commit_prepared(&batch))
+                            .await
+                            .ok()
+                    };
+                    let Some(committed) = cut else {
+                        return RecordCommit {
+                            stored: 0,
+                            refused_alone,
+                            unstored: Some(Unstored::DeadlinePassed(batch)),
+                        };
+                    };
+                    committed
+                }
+            };
+            let err = match committed {
                 Ok(applied) => {
                     self.settle_batch(&batch, &applied).await;
                     return RecordCommit {
                         stored: batch.len(),
                         refused_alone,
-                        refused: None,
+                        unstored: None,
                     };
                 }
                 Err(err) => err,
             };
             let returned = tokio::time::Instant::now();
+            if let BisectMode::Pass = mode {
+                metrics::counter!(FLUSH_REFUSALS_COUNTER).increment(1);
+            }
             let indices: BTreeSet<usize> = err
                 .downcast_ref::<RecordRefused>()
                 .map(|refused| {
@@ -4385,7 +4323,11 @@ impl WriteBehindDataStore {
                 return RecordCommit {
                     stored: 0,
                     refused_alone,
-                    refused: Some((err, returned, batch)),
+                    unstored: Some(Unstored::Refused(RefusedCommit {
+                        err,
+                        returned,
+                        batch,
+                    })),
                 };
             }
             let reason = format!("{err:#}");
@@ -4401,46 +4343,272 @@ impl WriteBehindDataStore {
         }
     }
 
+    /// An entry refused on its own: in a pass it waits out its backoff
+    /// (`TG-WB-009`), at shutdown it is abandoned, its frames replayable.
+    fn refuse_alone(
+        &self,
+        schedule: &mut RetrySchedule,
+        mode: BisectMode,
+        entry: DelayedEntry,
+        err: &anyhow::Error,
+        returned: tokio::time::Instant,
+        out: &mut BatchOutcome,
+    ) {
+        match mode {
+            BisectMode::Pass => self.requeue_refused(schedule, entry, err, returned),
+            BisectMode::Shutdown { .. } => {
+                warn!(
+                    map = %entry.map,
+                    key = %entry.key,
+                    error = %err,
+                    "Inner store error during shutdown drain; entry not persisted"
+                );
+                self.abandon(entry, out);
+            }
+        }
+    }
+
+    /// Gives up on an entry the shutdown drain did not store: never resolved,
+    /// so the watermark stays below its frames and the next start replays it.
+    fn abandon(&self, entry: DelayedEntry, out: &mut BatchOutcome) {
+        self.abandon_wal_sequences(partition_for(&entry.map, &entry.key), &entry.wal_sequences);
+        out.abandoned.push(entry);
+    }
+
+    /// Entries no commit stored that nothing singles out: back on their
+    /// queues untouched in a pass, abandoned at shutdown.
+    fn dispose_unstored(
+        &self,
+        mode: BisectMode,
+        entries: impl IntoIterator<Item = PreparedEntry>,
+        out: &mut BatchOutcome,
+    ) {
+        for prepared in entries {
+            match mode {
+                BisectMode::Pass => self.put_back(prepared.entry),
+                BisectMode::Shutdown { .. } => self.abandon(prepared.entry, out),
+            }
+        }
+    }
+
+    /// Folds one commit's result into `out` and returns the commit if the
+    /// store refused it as a whole. Entries cut by the deadline are disposed
+    /// of here and end the batch.
+    fn absorb(
+        &self,
+        schedule: &mut RetrySchedule,
+        mode: BisectMode,
+        commit: RecordCommit,
+        out: &mut BatchOutcome,
+    ) -> Option<RefusedCommit> {
+        out.stored += commit.stored;
+        for (entry, err, returned) in commit.refused_alone {
+            self.refuse_alone(schedule, mode, entry, &err, returned, out);
+        }
+        match commit.unstored? {
+            Unstored::Refused(refused) => Some(refused),
+            Unstored::DeadlinePassed(batch) => {
+                self.dispose_unstored(mode, batch, out);
+                out.end = BatchEnd::DeadlinePassed;
+                None
+            }
+        }
+    }
+
+    /// Stops at a broken store (`TG-WB-010`): every entry not stored is
+    /// disposed of untouched — a broken store says nothing about a record —
+    /// the failure is recorded once, naming the first entry of the failing
+    /// commit, and no further call is made.
+    #[allow(clippy::too_many_arguments)]
+    fn stop_at_broken_store(
+        &self,
+        schedule: &mut RetrySchedule,
+        mode: BisectMode,
+        cause: StoreBrokenCause,
+        failing: RefusedCommit,
+        rest: impl IntoIterator<Item = PreparedEntry>,
+        out: &mut BatchOutcome,
+    ) {
+        let (map, key) = failing
+            .batch
+            .first()
+            .map(|first| (first.entry.map.clone(), first.entry.key.clone()))
+            .unwrap_or_default();
+        self.dispose_unstored(mode, failing.batch.into_iter().chain(rest), out);
+        let site = match mode {
+            BisectMode::Pass => "flush",
+            BisectMode::Shutdown { .. } => "shutdown_drain",
+        };
+        self.record_store_broken(cause, &failing.err, &map, &key, site);
+        if let BisectMode::Pass = mode {
+            schedule.store_broken = true;
+        }
+        out.end = BatchEnd::Broken(cause);
+    }
+
+    /// Starts the store-wide hold: both halves of a refused commit were
+    /// refused, so it is the store that refuses, not a record.
+    ///
+    /// The warning and the hold gauge say so at once, not at the first
+    /// refused probe: the entries the hold put back are untouched, so no walk
+    /// of the queues would find them refused.
+    fn start_hold(
+        &self,
+        schedule: &mut RetrySchedule,
+        returned: tokio::time::Instant,
+        example: RefusedExample,
+    ) {
+        schedule.failed_probes = 0;
+        schedule.hold_until = Some(
+            returned + retry_backoff(self.config.backoff_base_ms, self.config.backoff_cap_ms, 0),
+        );
+        schedule.warning_armed = true;
+        schedule.example = Some(example);
+        schedule.split_to_singles = false;
+        self.retrying.store(true, Ordering::Relaxed);
+        self.publish_hold(schedule);
+        self.report_retries(schedule);
+    }
+
     /// Commits `batch` and resolves a refusal: a record-level refusal refuses
     /// those entries alone and commits the rest again; any other refusal of a
     /// single entry refuses it alone, and of two or more halves the batch,
     /// pass order kept, planning each half's rows just before it.
-    #[allow(clippy::unimplemented)]
+    ///
+    /// In a pass, both halves of a commit refused means the store refuses,
+    /// and a hold starts — except for the first refused commit after an
+    /// accepted probe, which is halved down to single entries, as every
+    /// refused commit is at shutdown. A broken store ends the batch with no
+    /// further call.
     async fn commit_bisect(
         &self,
         schedule: &mut RetrySchedule,
         batch: Vec<PreparedEntry>,
         mode: BisectMode,
     ) -> BatchOutcome {
-        let outcome = self.commit_resolving_records(batch).await;
-        for (entry, err, returned) in outcome.refused_alone {
-            match mode {
-                BisectMode::Pass => {
-                    self.requeue_refused(schedule, entry, &err, returned);
-                }
-                BisectMode::Shutdown { .. } => unimplemented!(),
-            }
-        }
-        if outcome.refused.is_some() {
-            unimplemented!()
-        }
-        BatchOutcome {
-            stored: outcome.stored,
+        let mut out = BatchOutcome {
+            stored: 0,
             end: BatchEnd::Resolved,
             abandoned: Vec::new(),
+        };
+        let commit = self.commit_resolving_records(batch, mode).await;
+        let Some(refused) = self.absorb(schedule, mode, commit, &mut out) else {
+            return out;
+        };
+        if let StoreErrorClass::StoreBroken(cause) = self.inner.classify_error(&refused.err) {
+            self.stop_at_broken_store(schedule, mode, cause, refused, [], &mut out);
+            return out;
         }
+        // Read and disarmed by the first refused commit of two or more
+        // entries; nothing else reads it until this batch is resolved.
+        let to_singles = match mode {
+            BisectMode::Shutdown { .. } => true,
+            BisectMode::Pass => {
+                refused.batch.len() >= 2 && std::mem::take(&mut schedule.split_to_singles)
+            }
+        };
+
+        // Refused commits still to resolve, each made once already, so each
+        // is resolved by its halves; the earlier half is resolved first.
+        let mut todo = vec![refused];
+        while let Some(RefusedCommit {
+            err,
+            returned,
+            mut batch,
+        }) = todo.pop()
+        {
+            if batch.len() == 1 {
+                if let Some(prepared) = batch.pop() {
+                    self.refuse_alone(schedule, mode, prepared.entry, &err, returned, &mut out);
+                }
+                continue;
+            }
+            let example = RefusedExample {
+                map: batch[0].entry.map.clone(),
+                key: batch[0].entry.key.clone(),
+                attempts: batch[0].entry.retry_count,
+                error: err.to_string(),
+            };
+            let right = batch.split_off(batch.len().div_ceil(2));
+            let mut halves = [batch, right].into_iter();
+            let mut refused_halves: Vec<RefusedCommit> = Vec::new();
+            while let Some(half) = halves.next() {
+                let commit = self.commit_resolving_records(half, mode).await;
+                let refused = self.absorb(schedule, mode, commit, &mut out);
+                if out.end == BatchEnd::DeadlinePassed {
+                    let rest = halves
+                        .flatten()
+                        .chain(refused_halves.into_iter().flat_map(|r| r.batch))
+                        .chain(todo.into_iter().flat_map(|r| r.batch));
+                    self.dispose_unstored(mode, rest, &mut out);
+                    return out;
+                }
+                let Some(refused) = refused else {
+                    continue;
+                };
+                if let StoreErrorClass::StoreBroken(cause) = self.inner.classify_error(&refused.err)
+                {
+                    let rest = halves
+                        .flatten()
+                        .chain(refused_halves.into_iter().flat_map(|r| r.batch))
+                        .chain(todo.into_iter().flat_map(|r| r.batch));
+                    self.stop_at_broken_store(schedule, mode, cause, refused, rest, &mut out);
+                    return out;
+                }
+                refused_halves.push(refused);
+            }
+            if refused_halves.len() == 2 && !to_singles {
+                // The store refuses, not a record: what is not stored goes
+                // back as it was, so the refusal is not held against it.
+                let returned = refused_halves[1].returned;
+                let rest = refused_halves
+                    .into_iter()
+                    .flat_map(|r| r.batch)
+                    .chain(todo.into_iter().flat_map(|r| r.batch));
+                self.dispose_unstored(mode, rest, &mut out);
+                self.start_hold(schedule, returned, example);
+                out.end = BatchEnd::Held;
+                return out;
+            }
+            todo.extend(refused_halves.into_iter().rev());
+        }
+        out
     }
 
     /// One pass of the shutdown drain: takes every queued entry up to the
-    /// limits of a pass and commits them by [`BisectMode::Shutdown`].
-    #[allow(
-        dead_code,
-        unused_variables,
-        clippy::unused_async,
-        clippy::unimplemented
-    )]
+    /// limits of a pass, whatever its next attempt, and commits them by
+    /// [`BisectMode::Shutdown`].
     async fn drain_pass(&self, deadline: tokio::time::Instant) -> DrainPassOutcome {
-        unimplemented!()
+        let selection = self.select_pass(PassScope::Shutdown);
+        let taken = selection.prepared.len() + selection.unencodable.len();
+        let mut batch = BatchOutcome {
+            stored: 0,
+            end: BatchEnd::Resolved,
+            abandoned: Vec::new(),
+        };
+        for (entry, err) in selection.unencodable {
+            warn!(
+                map = %entry.map,
+                key = %entry.key,
+                error = %err,
+                "Write-behind entry could not be encoded during shutdown drain; entry not persisted"
+            );
+            self.abandon(entry, &mut batch);
+        }
+        if !selection.prepared.is_empty() {
+            // No hold at shutdown: the schedule is the halving's alone.
+            let committed = self
+                .commit_bisect(
+                    &mut RetrySchedule::default(),
+                    selection.prepared,
+                    BisectMode::Shutdown { deadline },
+                )
+                .await;
+            batch.stored = committed.stored;
+            batch.end = committed.end;
+            batch.abandoned.extend(committed.abandoned);
+        }
+        DrainPassOutcome { taken, batch }
     }
 
     /// The test park between the choice of a probe and its removal.
@@ -4519,33 +4687,35 @@ impl WriteBehindDataStore {
                 return 0;
             };
             self.register_in_flight(partition, &probe.wal_sequences);
-            // The probe is one entry committed alone, whatever refuses it.
-            let refusal = match self.encode_put(&probe) {
-                Err(err) => Some((probe, err, tokio::time::Instant::now())),
+            // The probe is one entry committed alone, whatever refuses it, so
+            // a refusal of it is that entry's alone and never halves anything.
+            let accepted = match self.encode_put(&probe) {
+                Err(err) => {
+                    self.requeue_refused(schedule, probe, &err, tokio::time::Instant::now());
+                    false
+                }
                 Ok(encoded) => {
                     let outcome = self
-                        .commit_resolving_records(vec![PreparedEntry {
-                            entry: probe,
-                            encoded,
-                        }])
+                        .commit_bisect(
+                            schedule,
+                            vec![PreparedEntry {
+                                entry: probe,
+                                encoded,
+                            }],
+                            BisectMode::Pass,
+                        )
                         .await;
+                    if let BatchEnd::Broken(_) = outcome.end {
+                        return 0;
+                    }
                     stored += outcome.stored;
-                    outcome.refused_alone.into_iter().next().or_else(|| {
-                        outcome.refused.and_then(|(err, returned, batch)| {
-                            batch
-                                .into_iter()
-                                .next()
-                                .map(|prepared| (prepared.entry, err, returned))
-                        })
-                    })
+                    outcome.stored > 0
                 }
             };
-            if let Some((probe, err, returned)) = refusal {
-                if let StoreErrorClass::StoreBroken(_) =
-                    self.requeue_refused(schedule, probe, &err, returned)
-                {
-                    return 0;
-                }
+            if !accepted {
+                // Read right after the refused commit returned: nothing in
+                // between suspends.
+                let returned = tokio::time::Instant::now();
                 schedule.failed_probes = schedule.failed_probes.saturating_add(1);
                 schedule.hold_until =
                     Some(returned + retry_backoff(base, cap, schedule.failed_probes));
@@ -4553,9 +4723,12 @@ impl WriteBehindDataStore {
                 return 0;
             }
             // The store answers again: the hold ends and this same pass goes
-            // on over everything that is due.
+            // on over everything that is due. A store that just took the probe
+            // is not known to be down, so its next refused commit is halved to
+            // single entries before it may start another hold.
             schedule.hold_until = None;
             schedule.failed_probes = 0;
+            schedule.split_to_singles = true;
             self.publish_hold(schedule);
         }
 
@@ -4613,7 +4786,9 @@ impl WriteBehindDataStore {
         metrics::gauge!(RETRYING_ENTRIES_GAUGE).set(count_as_gauge(retrying));
         metrics::gauge!(OLDEST_REFUSAL_AGE_GAUGE).set(oldest_refusal_age.as_secs_f64());
 
-        if retrying == 0 {
+        // A hold puts its entries back untouched, so during one the walk may
+        // find nothing refused; the backlog is not clear until it ends.
+        if retrying == 0 && schedule.hold_until.is_none() {
             self.retrying.store(false, Ordering::Relaxed);
             // Only after a warning: a refusal nobody was told about needs no
             // all-clear either.
@@ -4721,8 +4896,16 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
 
         // A pass that stored nothing ends the run, and so does a hold or a
         // broken store; a pass that stored something may have left due
-        // entries behind its limits, and the next pass takes them.
-        run_on = stored > 0 && schedule.hold_until.is_none() && !schedule.store_broken;
+        // entries behind its limits, or a write became due meanwhile, and
+        // the next pass takes them. With nothing due the loop waits as
+        // always, so a write made after the pass waits for its wake.
+        run_on = stored > 0 && schedule.hold_until.is_none() && !schedule.store_broken && {
+            #[allow(clippy::cast_possible_wrap)]
+            let deadline = now_millis().saturating_sub(store.config.write_delay_ms as i64);
+            store
+                .choose_probe(deadline, tokio::time::Instant::now())
+                .is_some()
+        };
     }
 }
 
