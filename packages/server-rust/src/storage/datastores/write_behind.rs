@@ -1632,6 +1632,15 @@ const BUFFERED_ENTRIES_GAUGE: &str = "topgun_write_behind_buffered_entries";
 const OLDEST_REFUSAL_AGE_GAUGE: &str = "topgun_write_behind_oldest_refusal_age_seconds";
 /// 1 while a store-wide hold is in force.
 const STORE_HOLD_GAUGE: &str = "topgun_write_behind_store_hold";
+/// Flush passes that committed at least one entry.
+#[allow(dead_code)]
+const FLUSH_PASSES_COUNTER: &str = "topgun_write_behind_flush_passes_total";
+/// Entries the committed flush passes stored, summed over the passes.
+#[allow(dead_code)]
+const FLUSH_PASS_ENTRIES_COUNTER: &str = "topgun_write_behind_flush_pass_entries_total";
+/// Seconds one committed flush pass took, one observation per pass.
+#[allow(dead_code)]
+const FLUSH_PASS_SECONDS_HISTOGRAM: &str = "topgun_write_behind_flush_pass_seconds";
 
 /// Registers the retry series at zero.
 ///
@@ -3768,6 +3777,17 @@ const RETRY_WARN_ATTEMPTS: u32 = 3;
 /// The retry warning is emitted at most once per this interval.
 const RETRY_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Entries one pass commits at most. With the byte limit below it bounds the
+/// one engine write a pass makes, and so how long that write holds the
+/// worker.
+#[allow(dead_code)]
+const PASS_MAX_ENTRIES: usize = 1000;
+/// Encoded value bytes one pass commits at most; a remove counts 0. The first
+/// entry a pass takes is admitted whole whatever its size, so a value larger
+/// than the limit is still stored, alone.
+#[allow(dead_code)]
+const PASS_MAX_VALUE_BYTES: usize = 8 * 1024 * 1024;
+
 /// How long the store is left alone after the `attempt`-th refusal:
 /// `min(base << attempt, cap)`, for every `attempt`.
 ///
@@ -3804,6 +3824,13 @@ struct RetrySchedule {
     /// The inner store reported itself broken: no pass calls it again
     /// (`TG-WB-010`).
     store_broken: bool,
+    /// Armed when a probe is accepted: the next refused commit of two or
+    /// more entries is halved down to single entries instead of starting a
+    /// hold, because a store that just took the probe is not known to be down.
+    /// Disarmed once that commit is resolved, or when a hold starts by any
+    /// other path; never armed at process start.
+    #[allow(dead_code)]
+    split_to_singles: bool,
 }
 
 /// One refused entry, named in the retry warning so an operator has a
@@ -3813,6 +3840,93 @@ struct RefusedExample {
     key: String,
     attempts: u32,
     error: String,
+}
+
+/// Which queued entries a pass may take.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+enum PassScope {
+    /// A flush pass: the entries written by `deadline` whose next attempt is
+    /// not after `now`.
+    Due {
+        deadline: i64,
+        now: tokio::time::Instant,
+    },
+    /// The shutdown drain: every queued entry, whatever its next attempt,
+    /// because a stop gives each buffered write one last attempt.
+    Shutdown,
+}
+
+/// An entry a pass took, with the encoding of its put made before any commit
+/// is formed, so a record that cannot be encoded is refused on its own.
+#[allow(dead_code)]
+struct PreparedEntry {
+    entry: DelayedEntry,
+    /// `rmp_serde::to_vec_named` of the put's value; `None` for a remove.
+    /// What the byte limit of a pass measures, and what a commit carries as
+    /// `PutValue::Encoded` when the inner store accepts encoded records.
+    encoded: Option<Vec<u8>>,
+}
+
+/// What one pass took from the queues.
+#[allow(dead_code)]
+struct PassSelection {
+    /// The entries of the pass's commit, in `pass_order`.
+    prepared: Vec<PreparedEntry>,
+    /// Entries whose encoding failed, with the error: each is refused alone
+    /// and is in no commit.
+    unencodable: Vec<(DelayedEntry, anyhow::Error)>,
+}
+
+/// How the halving of a refused commit treats it.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+enum BisectMode {
+    /// A flush pass: both halves refused means the store refuses, and a hold
+    /// starts, unless the split to single entries is armed.
+    Pass,
+    /// The shutdown drain: no hold at shutdown, so a refused commit is halved
+    /// down to single entries and a refused single entry is abandoned. No
+    /// commit starts after `deadline`, and each is wrapped in a timeout of
+    /// what remains of it.
+    Shutdown { deadline: tokio::time::Instant },
+}
+
+/// How a commit and the halving that followed it ended.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchEnd {
+    /// Every entry was stored, refused alone, or (at shutdown) abandoned
+    /// alone.
+    Resolved,
+    /// Both halves of a commit were refused: a hold started and every entry
+    /// not stored is back on its queue untouched.
+    Held,
+    /// The inner store reported itself broken: no further call; in a pass
+    /// every entry not stored is back untouched, at shutdown it is abandoned.
+    Broken(StoreBrokenCause),
+    /// Shutdown only: the deadline passed before a commit could start; every
+    /// entry not stored is abandoned.
+    DeadlinePassed,
+}
+
+/// The result of [`WriteBehindDataStore::commit_bisect`].
+#[allow(dead_code)]
+struct BatchOutcome {
+    /// Entries stored and settled.
+    stored: usize,
+    end: BatchEnd,
+    /// Shutdown only: the entries not stored, their WAL sequences already
+    /// abandoned so they replay at the next start; empty in a pass.
+    abandoned: Vec<DelayedEntry>,
+}
+
+/// The result of [`WriteBehindDataStore::drain_pass`].
+#[allow(dead_code)]
+struct DrainPassOutcome {
+    /// Entries the pass took from the queues; 0 when they were empty.
+    taken: usize,
+    batch: BatchOutcome,
 }
 
 impl WriteBehindDataStore {
@@ -3963,6 +4077,71 @@ impl WriteBehindDataStore {
             }
         }
         best.map(|(_, partition, key)| (partition, key))
+    }
+
+    /// The encoding of an entry's put, made once before any commit: a
+    /// `StoreCell` value is encoded under its cell lock; `None` for a remove.
+    #[allow(dead_code, unused_variables, clippy::unimplemented)]
+    fn encode_put(&self, entry: &DelayedEntry) -> anyhow::Result<Option<Vec<u8>>> {
+        unimplemented!()
+    }
+
+    /// Takes one pass's entries out of the queues: first the due refused
+    /// entry with the smallest `(next_attempt, sequence)` — the slot that
+    /// keeps a refused entry reachable under sustained load — then entries in
+    /// `pass_order`, until the pass holds [`PASS_MAX_ENTRIES`] or the next
+    /// entry would carry it over [`PASS_MAX_VALUE_BYTES`]. Every taken
+    /// entry's WAL sequences are registered in flight once no queue guard is
+    /// held. Untaken entries stay queued, untouched.
+    #[allow(dead_code, unused_variables, clippy::unimplemented)]
+    fn select_pass(&self, scope: PassScope) -> PassSelection {
+        unimplemented!()
+    }
+
+    /// Plans the applied rows of one commit of `batch` — with exactly its own
+    /// entries' WAL sequences left out of `pending`, after every earlier
+    /// commit of the pass has settled — and commits the batch with them.
+    /// Returns the rows for the settle; nothing of the tracking state changes
+    /// here, so a refused commit leaves every entry as it was.
+    #[allow(
+        dead_code,
+        unused_variables,
+        clippy::unused_async,
+        clippy::unimplemented
+    )]
+    async fn commit_prepared(&self, batch: &[PreparedEntry]) -> anyhow::Result<Vec<(u32, u64)>> {
+        unimplemented!()
+    }
+
+    /// Commits `batch` and resolves a refusal: a record-level refusal refuses
+    /// those entries alone and commits the rest again; any other refusal of a
+    /// single entry refuses it alone, and of two or more halves the batch,
+    /// pass order kept, planning each half's rows just before it.
+    #[allow(
+        dead_code,
+        unused_variables,
+        clippy::unused_async,
+        clippy::unimplemented
+    )]
+    async fn commit_bisect(
+        &self,
+        schedule: &mut RetrySchedule,
+        batch: Vec<PreparedEntry>,
+        mode: BisectMode,
+    ) -> BatchOutcome {
+        unimplemented!()
+    }
+
+    /// One pass of the shutdown drain: takes every queued entry up to the
+    /// limits of a pass and commits them by [`BisectMode::Shutdown`].
+    #[allow(
+        dead_code,
+        unused_variables,
+        clippy::unused_async,
+        clippy::unimplemented
+    )]
+    async fn drain_pass(&self, deadline: tokio::time::Instant) -> DrainPassOutcome {
+        unimplemented!()
     }
 
     /// The test park between the choice of a probe and its removal.
@@ -12063,6 +12242,12 @@ mod tests {
         assert_eq!((warnings, cleared), (0, 0));
     }
 }
+
+// Declared after the inline `mod tests` so that module's literal opening line
+// stays the first of its kind in this file, which a test there splits on.
+#[cfg(test)]
+#[path = "write_behind_batch_tests.rs"]
+mod batch_tests;
 
 // ---------------------------------------------------------------------------
 // Durability / crash-recovery tests (R12(b) WAL-retention + AC3f double-crash)
