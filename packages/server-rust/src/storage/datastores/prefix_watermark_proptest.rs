@@ -3546,13 +3546,18 @@ impl Stepped {
         }
     }
 
-    /// Keeps refusing the first key until a call of the other key parks, and
-    /// accepts that one. Does nothing more when the store goes idle first.
+    /// Keeps refusing the first key and accepting the other until the other
+    /// key's write — the last one made — is resolved. Accepting its call is
+    /// not enough: a commit that holds both keys is refused on the first key
+    /// after the other key's write went through, and only the half that
+    /// holds the other key alone settles it. Does nothing more when the store
+    /// goes idle first.
     async fn flush_the_other_key(&self) {
-        loop {
+        let other = self.store.test_max_assigned_wal_sequence(self.partition);
+        while self.pending().iter().any(|(seq, _)| *seq == other) {
             match self.settle("a verdict on the way to the other key").await {
                 Settled::Parked(key) if key == self.key() => self.inner.grant(Verdict::Refuse),
-                Settled::Parked(_) => return self.inner.grant(Verdict::Accept),
+                Settled::Parked(_) => self.inner.grant(Verdict::Accept),
                 Settled::Idle => return,
             }
         }
