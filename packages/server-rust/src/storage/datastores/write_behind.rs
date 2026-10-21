@@ -9159,18 +9159,23 @@ mod tests {
     }
 
     /// `(bytes, allocations)` one `value.clone()` of an OR slot of `n` entries
-    /// allocates, and the same for one `persist_entry` of a cell entry holding
-    /// that slot, flushed to a [`ReceivingStore`].
+    /// allocates, the same for one encoding of that slot, and the same for one
+    /// flush of a cell entry holding it — the encoding a pass makes before its
+    /// commit, then the commit — to a [`ReceivingStore`].
     #[cfg(feature = "count-alloc")]
-    async fn cell_flush_allocations(n: usize) -> ((u64, u64), (u64, u64)) {
+    async fn cell_flush_allocations(n: usize) -> ((u64, u64), (u64, u64), (u64, u64)) {
         let tags: Vec<String> = (0..n).map(|i| format!("{i:020}:0:node-a")).collect();
         let tags: Vec<&str> = tags.iter().map(String::as_str).collect();
         let value = or_value(&tags);
-        let inner = ReceivingStore {
+        let inner = Arc::new(ReceivingStore {
             expected: value.clone(),
             adds: std::sync::atomic::AtomicU32::new(0),
             matched: std::sync::atomic::AtomicBool::new(false),
-        };
+        });
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&inner) as Arc<dyn MapDataStore>,
+            WriteBehindConfig::default(),
+        );
         let cell = crate::storage::engine::new_slot_cell(crate::storage::record::Record {
             value,
             metadata: crate::storage::record::RecordMetadata::new(0, 0),
@@ -9203,8 +9208,17 @@ mod tests {
         std::hint::black_box(copy);
 
         let before = read();
-        persist_entry(&inner, &entry).await.expect("persist_entry");
+        let bytes = rmp_serde::to_vec_named(&cell.lock().value).expect("encode");
+        let encode = delta(before, read());
+        std::hint::black_box(bytes);
+
+        // Nothing here suspends, so no task of the store runs in between.
+        let before = read();
+        let encoded = store.encode_put(&entry).expect("encode_put");
+        let prepared = [PreparedEntry { entry, encoded }];
+        store.commit_prepared(&prepared).await.expect("commit");
         let flush = delta(before, read());
+        drop(prepared);
 
         assert_eq!(
             inner.adds.load(Ordering::Relaxed),
@@ -9215,14 +9229,18 @@ mod tests {
             inner.matched.load(Ordering::Relaxed),
             "N={n}: the inner add must receive the cell's value"
         );
-        (clone, flush)
+        (clone, encode, flush)
     }
 
     /// Flushing a cell entry to a store that does not accept encoded records
-    /// copies the record exactly once: the flush's per-entry byte and
-    /// allocation slopes equal those of one `RecordValue::clone()` of the same
-    /// slot (a second copy would double them; the constant part — the boxed
-    /// `add` future — does not grow with the slot).
+    /// copies the record exactly once beside its one encoding: a pass encodes
+    /// every put before its commit — the byte limit of a pass measures those
+    /// bytes — and the store, which takes no bytes, then gets the value
+    /// cloned out under the cell lock. So the flush's per-entry byte and
+    /// allocation slopes equal those of one `RecordValue::clone()` plus one
+    /// encoding of the same slot (a second copy would add a clone's slope; the
+    /// constant part — the commit's vectors and futures — does not grow with
+    /// the slot).
     ///
     /// A local allocation proof, not a CI guard: CI never enables `count-alloc`,
     /// and the counters are process-global, so it is meaningful only when run
@@ -9232,17 +9250,23 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "local allocation proof: run single-threaded under count-alloc"]
     async fn count_alloc_cell_flush_to_a_non_encoding_inner_copies_once() {
-        let (small_clone, small_flush) = cell_flush_allocations(1_000).await;
-        let (large_clone, large_flush) = cell_flush_allocations(10_000).await;
+        let (small_clone, small_encode, small_flush) = cell_flush_allocations(1_000).await;
+        let (large_clone, large_encode, large_flush) = cell_flush_allocations(10_000).await;
         #[allow(clippy::cast_precision_loss)]
         let slope = |small: u64, large: u64| (large as f64 - small as f64) / 9_000.0;
         let clone_bytes = slope(small_clone.0, large_clone.0);
+        let encode_bytes = slope(small_encode.0, large_encode.0);
         let flush_bytes = slope(small_flush.0, large_flush.0);
         let clone_allocs = slope(small_clone.1, large_clone.1);
+        let encode_allocs = slope(small_encode.1, large_encode.1);
         let flush_allocs = slope(small_flush.1, large_flush.1);
         println!(
             "count_alloc_cell_flush clone N=1000 bytes={} allocs={} N=10000 bytes={} allocs={}",
             small_clone.0, small_clone.1, large_clone.0, large_clone.1
+        );
+        println!(
+            "count_alloc_cell_flush encode N=1000 bytes={} allocs={} N=10000 bytes={} allocs={}",
+            small_encode.0, small_encode.1, large_encode.0, large_encode.1
         );
         println!(
             "count_alloc_cell_flush flush N=1000 bytes={} allocs={} N=10000 bytes={} allocs={}",
@@ -9250,18 +9274,21 @@ mod tests {
         );
         println!(
             "count_alloc_cell_flush slope clone={clone_bytes:.3} B/entry {clone_allocs:.3} allocs/entry \
+             encode={encode_bytes:.3} B/entry {encode_allocs:.3} allocs/entry \
              flush={flush_bytes:.3} B/entry {flush_allocs:.3} allocs/entry"
         );
         assert!(clone_bytes > 0.0, "the clone slope must be measurable");
+        let expected_bytes = clone_bytes + encode_bytes;
+        let expected_allocs = clone_allocs + encode_allocs;
         assert!(
-            (flush_bytes - clone_bytes).abs() <= 0.1 * clone_bytes,
-            "one clone per flushed entry: flush slope {flush_bytes:.3} B/entry must equal the \
-             clone slope {clone_bytes:.3} B/entry within 10 %"
+            (flush_bytes - expected_bytes).abs() <= 0.1 * expected_bytes,
+            "one clone and one encoding per flushed entry: flush slope {flush_bytes:.3} B/entry \
+             must equal clone + encoding {expected_bytes:.3} B/entry within 10 %"
         );
         assert!(
-            (flush_allocs - clone_allocs).abs() <= 0.1 * clone_allocs,
-            "one clone per flushed entry: flush slope {flush_allocs:.3} allocs/entry must equal \
-             the clone slope {clone_allocs:.3} allocs/entry within 10 %"
+            (flush_allocs - expected_allocs).abs() <= 0.1 * expected_allocs,
+            "one clone and one encoding per flushed entry: flush slope {flush_allocs:.3} \
+             allocs/entry must equal clone + encoding {expected_allocs:.3} allocs/entry within 10 %"
         );
     }
 
@@ -11363,16 +11390,22 @@ mod tests {
             hold_seen |= store.test_store_hold_active();
             tokio::time::sleep_until(round + tokio::time::Duration::from_millis(1_000)).await;
         }
+        // Attempts, not calls: a pass that holds A beside a healthy key
+        // commits A twice — the whole pass, then the half A is left alone in.
+        let attempts = store
+            .test_retry_state(SCHEDULE_MAP, "A")
+            .map_or(0, |(retry_count, _)| retry_count);
         let calls = spy.calls_for("A");
         assert_eq!(
             (
-                (5..=15).contains(&calls),
+                (5..=15).contains(&attempts),
+                calls <= 2 * attempts as usize,
                 hold_seen,
                 all_stored,
                 slowest <= 210
             ),
-            (true, false, true, true),
-            "calls(A) = {calls}, slowest healthy key = {slowest} ms"
+            (true, true, false, true, true),
+            "attempts(A) = {attempts}, calls(A) = {calls}, slowest healthy key = {slowest} ms"
         );
     }
 
@@ -11947,14 +11980,16 @@ mod tests {
             .sum();
         let pending_sequences = store.pending_seqs().len();
         let loaded = store.load(SCHEDULE_MAP, "E").await.unwrap();
+        // The pass's commit, then its two halves `[A, B, C]` and `[D, E]`:
+        // each stops at its first refused write, and both halves refused
+        // start the hold with every entry back untouched.
+        let called: Vec<String> = spy.timeline().into_iter().map(|call| call.key).collect();
         assert_eq!(
             (
                 (held_by_a_pass, closed),
                 (spy.call_count(), spy.calls_for("D") + spy.calls_for("E")),
-                (
-                    store.test_retry_state(SCHEDULE_MAP, "D"),
-                    store.test_retry_state(SCHEDULE_MAP, "E"),
-                ),
+                called,
+                KEYS.map(|key| store.test_retry_state(SCHEDULE_MAP, key)),
                 (
                     count_while_held,
                     store.pending_operation_count(),
@@ -11965,14 +12000,15 @@ mod tests {
             ),
             (
                 (true, true),
-                (3, 0),
-                (Some((0, None)), Some((0, None))),
+                (3, 1),
+                vec!["A".to_string(), "A".to_string(), "D".to_string()],
+                [Some((0, None)); 5],
                 (6, 5, 5),
                 (Some(2), 0),
                 Some(lww("v2", 2)),
             ),
-            "((held by a pass, pass closed), (store calls, calls on D and E), (retry state \
-             of D, of E), (count while held, count, pending entry sequences), (WAL \
+            "((held by a pass, pass closed), (store calls, calls on D and E), keys called, \
+             retry states of A..E, (count while held, count, pending entry sequences), (WAL \
              sequences E's queued entry owns, WAL sequences in flight), load of E)"
         );
     }
@@ -12018,8 +12054,26 @@ mod tests {
                 .await
                 .unwrap();
         }
-        advance(5_000).await;
-        let second_trip = spy.timeline().split_off(before_second);
+        // The first refused commit after the accepted probe is halved down
+        // to single entries — seven calls at one instant, no hold — and each
+        // entry waits out its first backoff; when the four are due again
+        // their commit and its two halves are refused, and that trip starts
+        // a hold at the first length.
+        advance(100).await;
+        let held_after_the_split = store.test_store_hold_active();
+        advance(4_900).await;
+        let second = spy.timeline().split_off(before_second);
+        let split_at_one_instant =
+            second.len() >= 11 && second[..7].iter().all(|call| call.began == second[0].began);
+        let due_again_gap = second
+            .get(6)
+            .and_then(|call| call.returned)
+            .zip(second.get(7))
+            .map(|(split_returned, call)| call.began.duration_since(split_returned).as_millis());
+        let second_trip = second
+            .get(7..)
+            .map(<[SpyTimedCall]>::to_vec)
+            .unwrap_or_default();
         let first_gap = first_probe_gap(&first_trip);
         let second_gap = first_probe_gap(&second_trip);
         assert_eq!(
@@ -12029,37 +12083,58 @@ mod tests {
                 after_the_accepted_probe.0,
                 after_the_accepted_probe.1,
                 is_the_first_length(first_gap),
+                (split_at_one_instant, held_after_the_split),
+                due_again_gap.is_some_and(|ms| (1_000..=1_110).contains(&ms)),
                 is_the_first_length(second_gap),
             ),
-            (true, true, false, 0, true, true),
+            (true, true, false, 0, true, (true, false), true, true),
             "most failed probes = {most_failed_probes}, gaps: {first_gap:?} ms, \
-             {second_gap:?} ms"
+             due again after {due_again_gap:?} ms, {second_gap:?} ms"
         );
     }
 
+    /// One refused half never starts a hold: the refused record is isolated
+    /// by halving, the others are stored in the same pass.
     #[tokio::test(start_paused = true)]
-    async fn an_accepted_entry_between_refusals_resets_the_count_in_a_row() {
+    async fn one_refused_record_among_healthy_ones_starts_no_hold() {
+        const KEYS: [&str; 5] = ["A", "B", "C", "D", "E"];
+
         let spy = Arc::new(SpyDataStore::retaining());
-        for key in ["A", "B", "D", "E"] {
-            spy.refuse_key(key);
-        }
+        spy.refuse_key("A");
         let store = schedule_store(&spy, schedule_config());
-        for key in ["A", "B", "C", "D", "E"] {
+        for (store_time, key) in (1i64..).zip(KEYS) {
             store
-                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, 1)
+                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, store_time)
                 .await
                 .unwrap();
         }
         store.soft_flush().await.unwrap();
         let _ = poll_until(1_000, || spy.call_count() > 0).await;
         advance(10).await;
+        // The pass `[A..E]`, its halves `[A, B, C]` (refused) and `[D, E]`,
+        // then `[A, B]` (refused) and `[C]`, then `[A]` alone and `[B]`; each
+        // commit stops at its first refused write.
+        let called: Vec<String> = spy.timeline().into_iter().map(|call| call.key).collect();
         assert_eq!(
             (
-                spy.call_count(),
+                called,
                 store.test_store_hold_active(),
-                spy.held(SCHEDULE_MAP, "C").is_some()
+                KEYS[1..]
+                    .iter()
+                    .map(|key| spy.held(SCHEDULE_MAP, key).is_some())
+                    .collect::<Vec<_>>(),
+                store
+                    .test_retry_state(SCHEDULE_MAP, "A")
+                    .map(|(retry_count, next_attempt)| (retry_count, next_attempt.is_some())),
             ),
-            (5, false, true)
+            (
+                ["A", "A", "D", "E", "A", "C", "A", "B"]
+                    .map(String::from)
+                    .to_vec(),
+                false,
+                vec![true; 4],
+                Some((1, true)),
+            )
         );
     }
 
@@ -12078,6 +12153,16 @@ mod tests {
             .await
             .expect("three refusals");
         let third_returned = spy.timeline()[2].returned.expect("the third call returned");
+        // A hold puts its entries back untouched, so they would be due for
+        // its first probe; refused once and inside their own backoff,
+        // written onto the queued entries, they are not.
+        for mut queue in store.queues.iter_mut() {
+            for entry in queue.value_mut().entries.values_mut() {
+                entry.retry_count = 1;
+                entry.next_attempt =
+                    Some(third_returned + tokio::time::Duration::from_millis(1_000));
+            }
+        }
         // The hold is over by now and every entry is still inside its own
         // backoff: nothing is due for a probe.
         tokio::time::sleep_until(third_returned + tokio::time::Duration::from_millis(900)).await;
@@ -12140,16 +12225,39 @@ mod tests {
             !store.test_pass_open() && store.test_passes_closed() > closed_before
         })
         .await;
+        // The hold put a, b and c back untouched, so they are due when the
+        // probe is accepted, and that pass halves their refused commit down
+        // to single entries: `[a, b, c]`, `[a, b]`, `[c]`, `[a]`, `[b]`.
+        let timeline = spy.timeline();
+        let fourth = timeline
+            .get(3)
+            .map(|call| (call.key.clone(), call.accepted));
+        let refused_alone = ["a", "b", "c"].map(|key| {
+            store
+                .test_retry_state(SCHEDULE_MAP, key)
+                .map(|(retry_count, next_attempt)| (retry_count, next_attempt.is_some()))
+        });
         assert_eq!(
             (
                 park_reached,
                 spy.call_count(),
+                fourth,
                 spy.held(SCHEDULE_MAP, "D") == Some(lww("d2", 2)),
                 store.test_retry_state(SCHEDULE_MAP, "D").is_some(),
                 store.test_store_hold_active(),
                 store.test_failed_probes(),
+                refused_alone,
             ),
-            (true, 4, true, false, false, 0)
+            (
+                true,
+                9,
+                Some(("D".to_string(), true)),
+                true,
+                false,
+                false,
+                0,
+                [Some((1, true)); 3],
+            )
         );
     }
 
@@ -15108,7 +15216,8 @@ mod background_task_panic_tests {
     }
 
     /// A flush pass takes every entry that is due when it begins, in every
-    /// partition; `batch_size` only groups the iteration and limits nothing.
+    /// partition, and at most 1000 entries / 8 MiB per pass; `batch_size`
+    /// limits nothing.
     #[tokio::test]
     async fn a_flush_pass_holds_every_due_entry_whatever_the_batch_size() {
         // Two keys in one partition and a third in another: a pass cut short
@@ -15756,12 +15865,10 @@ mod store_broken_tests {
     }
 
     /// An inner store that refuses every write and classifies its error as
-    /// `class`. It counts every call it gets, reads included, and remembers
-    /// the key of every refused write in call order.
+    /// `class`. It counts every call it gets, reads included.
     struct RefusingStore {
         class: StoreErrorClass,
         calls: AtomicU64,
-        refused_keys: Mutex<Vec<String>>,
         empty: NullDataStore,
     }
 
@@ -15770,7 +15877,6 @@ mod store_broken_tests {
             Arc::new(Self {
                 class,
                 calls: AtomicU64::new(0),
-                refused_keys: Mutex::new(Vec::new()),
                 empty: NullDataStore,
             })
         }
@@ -15779,19 +15885,8 @@ mod store_broken_tests {
             self.calls.load(Ordering::SeqCst)
         }
 
-        fn refused_keys(&self) -> Vec<String> {
-            self.refused_keys
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        }
-
-        fn refuse(&self, key: &str) -> anyhow::Result<()> {
+        fn refuse(&self) -> anyhow::Result<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.refused_keys
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(key.to_string());
             Err(anyhow::anyhow!("the test store refuses the write"))
         }
     }
@@ -15801,31 +15896,31 @@ mod store_broken_tests {
         async fn add(
             &self,
             _map: &str,
-            key: &str,
+            _key: &str,
             _value: &RecordValue,
             _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
-            self.refuse(key)
+            self.refuse()
         }
 
         async fn add_backup(
             &self,
             _map: &str,
-            key: &str,
+            _key: &str,
             _value: &RecordValue,
             _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
-            self.refuse(key)
+            self.refuse()
         }
 
-        async fn remove(&self, _map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
-            self.refuse(key)
+        async fn remove(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+            self.refuse()
         }
 
-        async fn remove_backup(&self, _map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
-            self.refuse(key)
+        async fn remove_backup(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+            self.refuse()
         }
 
         async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
@@ -15872,8 +15967,8 @@ mod store_broken_tests {
                 .await
         }
 
-        async fn remove_all(&self, _map: &str, keys: &[String]) -> anyhow::Result<()> {
-            self.refuse(&keys.join(","))
+        async fn remove_all(&self, _map: &str, _keys: &[String]) -> anyhow::Result<()> {
+            self.refuse()
         }
 
         fn is_loadable(&self, _key: &str) -> bool {
@@ -16182,38 +16277,29 @@ mod store_broken_tests {
                 "the failing call is counted as one refusal, like any refusal; render \
                  was:\n{rendered}"
             );
-            let refused_key = inner.refused_keys()[0].clone();
             let entries = queued_entries(&store);
             assert_eq!(
                 entries.len(),
                 KEYS.len(),
-                "every entry of the pass, the refused one included, is back on its queue"
+                "every entry of the pass, the one the commit failed on included, is back on \
+                 its queue"
             );
-            let refused: Vec<&DelayedEntry> = entries
-                .iter()
-                .filter(|entry| entry.key == refused_key)
-                .collect();
-            assert_eq!(
-                refused.len(),
-                1,
-                "the refused entry {refused_key} is queued"
-            );
-            assert_eq!(refused[0].retry_count, 1, "the refused entry was counted");
-            assert!(
-                refused[0].next_attempt.is_some() && refused[0].first_refused.is_some(),
-                "the refused entry carries its backoff and its first refusal time"
-            );
-            for entry in entries.iter().filter(|entry| entry.key != refused_key) {
+            for entry in &entries {
                 assert_eq!(
                     (entry.retry_count, entry.next_attempt, entry.first_refused),
                     (0, None, None),
-                    "the entry {} was not attempted and goes back untouched",
+                    "a broken store says nothing about a record: the entry {} goes back \
+                     untouched",
                     entry.key
                 );
             }
 
-            one_pass(&store).await;
-            one_pass(&store).await;
+            // Two more pass attempts. A broken store starts no pass any more,
+            // so none closes; each is given time to make the call it must not.
+            for _ in 0..2 {
+                store.soft_flush().await.expect("soft_flush");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
             assert_eq!(
                 inner.calls(),
                 1,
@@ -16266,58 +16352,68 @@ mod store_broken_tests {
         assert_eq!(broken_lines[0].field("site"), Some("shutdown_drain"));
     }
 
-    #[tokio::test]
-    async fn t_unknown_unchanged() {
-        let inner = RefusingStore::new(StoreErrorClass::Unknown);
-        let store = store_over(&inner);
-        add_keys(&store).await;
+    #[test]
+    fn t_unknown_unchanged() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let ((), events) = run_observed(&recorder, async {
+            let inner = RefusingStore::new(StoreErrorClass::Unknown);
+            let store = store_over(&inner);
+            add_keys(&store).await;
 
-        one_pass(&store).await;
+            one_pass(&store).await;
 
-        assert_eq!(
-            inner.calls(),
-            3,
-            "every due entry is attempted until the hold trips"
-        );
-        assert!(
-            store.background_failure().borrow().is_none(),
-            "an unknown refusal records no failure"
-        );
-        let backoff = retry_backoff(store.config.backoff_base_ms, store.config.backoff_cap_ms, 1);
-        let entries = queued_entries(&store);
-        assert_eq!(entries.len(), KEYS.len(), "every refused entry is back");
-        for entry in &entries {
-            assert_eq!(entry.retry_count, 1, "{} was counted once", entry.key);
-            let first_refused = entry
-                .first_refused
-                .expect("a refused entry carries its first refusal time");
             assert_eq!(
-                entry.next_attempt,
-                Some(first_refused + backoff),
-                "{} waits one backoff from its refusal",
-                entry.key
+                inner.calls(),
+                3,
+                "the pass's commit and its two halves are refused before the hold trips"
             );
-        }
-        assert!(
-            store.store_hold.load(Ordering::SeqCst),
-            "three refusals in a row start the store-wide hold"
-        );
-        assert_eq!(store.failed_probes.load(Ordering::SeqCst), 0);
+            assert!(
+                store.background_failure().borrow().is_none(),
+                "an unknown refusal records no failure"
+            );
+            let entries = queued_entries(&store);
+            assert_eq!(entries.len(), KEYS.len(), "every entry is back");
+            for entry in &entries {
+                assert_eq!(
+                    (entry.retry_count, entry.next_attempt, entry.first_refused),
+                    (0, None, None),
+                    "a hold puts {} back untouched",
+                    entry.key
+                );
+            }
+            assert!(
+                store.store_hold.load(Ordering::SeqCst),
+                "both halves refused start the store-wide hold"
+            );
+            assert_eq!(store.failed_probes.load(Ordering::SeqCst), 0);
 
-        one_pass(&store).await;
-        assert_eq!(inner.calls(), 3, "no call while the hold is in force");
+            one_pass(&store).await;
+            assert_eq!(inner.calls(), 3, "no call while the hold is in force");
 
-        store
-            .add(MAP, "k4", &value("k4"), 0, now_millis())
-            .await
-            .expect("an unknown refusal leaves the store accepting writes");
-        bounded_hard_flush(&store)
-            .await
-            .expect("a drain over unknown refusals ends as on the base");
+            store
+                .add(MAP, "k4", &value("k4"), 0, now_millis())
+                .await
+                .expect("an unknown refusal leaves the store accepting writes");
+            bounded_hard_flush(&store)
+                .await
+                .expect("a drain over unknown refusals ends as on the base");
+            assert_eq!(
+                inner.calls(),
+                3 + 7,
+                "the drain halves the commit of the four entries down to single entries: \
+                 2 * 4 - 1 commits, each refused"
+            );
+        });
+        // The double keeps no WAL, so the four abandoned entries are read from
+        // the drain's lines rather than from a replay.
         assert_eq!(
-            inner.calls(),
-            7,
-            "the drain gives each of the four entries its one last attempt"
+            events_saying(
+                &events,
+                "Shutdown drain timed out; write-behind entry could not be persisted"
+            )
+            .len(),
+            4,
+            "the drain abandons the four entries; captured events: {events:?}"
         );
     }
 
