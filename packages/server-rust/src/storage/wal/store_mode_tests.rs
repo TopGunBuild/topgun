@@ -998,13 +998,15 @@ async fn a01_a_commit_is_one_engine_write_holding_its_records_and_its_watermark_
 
     let mark = node.engine.mark();
     let mut entries = Vec::new();
+    // A pass commits every due entry at once, so each entry is flushed on
+    // its own to make each pass the commit of exactly one entry.
     for partition in [Q, R, U] {
         let key = keys_in(partition, 1).remove(0);
         wb.add(MAP, &key, &lww(&key, 2), 0, 0).await.unwrap();
         let seq = wb.test_max_assigned_wal_sequence(partition);
         entries.push((partition, key, seq));
+        flush_idle(&wb).await;
     }
-    flush_idle(&wb).await;
 
     let writes = node.engine.writes_since(mark);
     assert_eq!(
@@ -2560,7 +2562,10 @@ async fn a17_a_sidecar_mode_wal_refuses_a_directory_kept_by_a_store() {
 async fn a18_a_kill_inside_or_right_after_a_commit_loses_no_acked_write() {
     const TEST: &str = "a18_a_kill_inside_or_right_after_a_commit_loses_no_acked_write";
     let keys = keys_in(P, 4);
-    let value = |i: usize| lww(&keys[i], i as u64 + 1);
+    // Two such values exceed a pass's 8 MiB value limit, so each pass takes
+    // one entry and the three acknowledged entries are three commits.
+    let filler = "x".repeat(5 << 20);
+    let value = |i: usize| lww(&format!("{}-{filler}", keys[i]), i as u64 + 1);
     if let Some((scenario, root)) = child_spec() {
         let (n, side) = scenario.split_once('-').expect("scenario");
         let n: usize = n.parse().expect("write number");
@@ -3130,8 +3135,10 @@ fn a25_a_stop_whose_drain_timed_out_writes_hints_at_the_durable_watermark_and_lo
         ..wb_config()
     };
 
-    // Every commit takes 500 ms against a 50 ms drain deadline, so the drain
-    // stores at most one of the three entries.
+    // Every commit takes 500 ms against a 50 ms drain deadline, and two of
+    // the entries' values exceed a pass's 8 MiB value limit, so the drain's
+    // first pass takes one entry and the drain stores at most one of the
+    // three entries.
     let root = Root::new();
     let ((left, rows, unstored), events) = run_captured(async {
         let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
@@ -3139,11 +3146,18 @@ fn a25_a_stop_whose_drain_timed_out_writes_hints_at_the_durable_watermark_and_lo
         let keys = keys_in(P, 4);
         wb.add(MAP, &keys[0], &lww("warm", 1), 0, 0).await.unwrap();
         flush_idle(&wb).await;
+        let filler = "x".repeat(5 << 20);
         let mut sequences = Vec::new();
         for (i, key) in keys[1..].iter().enumerate() {
-            wb.add(MAP, key, &lww(key, i as u64 + 2), 0, 0)
-                .await
-                .unwrap();
+            wb.add(
+                MAP,
+                key,
+                &lww(&format!("{key}-{filler}"), i as u64 + 2),
+                0,
+                0,
+            )
+            .await
+            .unwrap();
             sequences.push((key.clone(), wb.test_max_assigned_wal_sequence(P)));
         }
         node.engine.set_write_delay(Duration::from_millis(500));
