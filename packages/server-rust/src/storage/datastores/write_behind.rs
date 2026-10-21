@@ -1859,6 +1859,10 @@ pub struct WriteBehindDataStore {
     /// batch is in no queue.
     #[cfg(test)]
     flush_pass_epoch: AtomicU64,
+    /// Keys whose put encoding fails, because no value a test can build fails
+    /// to encode, and a record that cannot be encoded must be refused alone.
+    #[cfg(test)]
+    encode_refusals: Mutex<BTreeSet<(String, String)>>,
     /// Whether a store-wide hold is in force. The flush task owns the hold;
     /// this mirrors it for readers outside that task.
     store_hold: AtomicBool,
@@ -1984,6 +1988,8 @@ impl WriteBehindDataStore {
             test_parks: TestParks::default(),
             #[cfg(test)]
             flush_pass_epoch: AtomicU64::new(0),
+            #[cfg(test)]
+            encode_refusals: Mutex::new(BTreeSet::new()),
             store_hold: AtomicBool::new(false),
             failed_probes: AtomicU32::new(0),
             retrying: AtomicBool::new(false),
@@ -2577,6 +2583,34 @@ impl WriteBehindDataStore {
     #[cfg(test)]
     pub(crate) fn test_store_hold_active(&self) -> bool {
         self.store_hold.load(Ordering::SeqCst)
+    }
+
+    /// From now on the encoding of every put of `(map, key)` fails.
+    #[cfg(test)]
+    pub(crate) fn test_refuse_encoding(&self, map: &str, key: &str) {
+        self.encode_refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((map.to_string(), key.to_string()));
+    }
+
+    /// The injected encoding failure of `entry`'s put, if one is set: what
+    /// the encoding before a commit consults first.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn test_encode_refusal(&self, entry: &DelayedEntry) -> Option<anyhow::Error> {
+        let refused = self
+            .encode_refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&(entry.map.clone(), entry.key.clone()));
+        refused.then(|| {
+            anyhow::anyhow!(
+                "injected encoding failure of map={} key={}",
+                entry.map,
+                entry.key
+            )
+        })
     }
 
     /// Probes refused in a row in the current hold.
