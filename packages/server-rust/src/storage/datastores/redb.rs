@@ -4117,6 +4117,16 @@ mod store_broken_tests {
         })
         .await
         .expect("k0 was not stored within 5 s");
+        // k0 is visible once its commit returns, while its pass still settles;
+        // a write made then is taken by the next pass at once, so the disk may
+        // fill only after that pass has closed with nothing left pending.
+        tokio::time::timeout(HANG_LIMIT, async {
+            while store.test_pass_open() || store.pending_operation_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the pass that stored k0 did not close within 5 s");
 
         backend.full.store(true, Ordering::SeqCst);
         let mut recorded = store.background_failure();
