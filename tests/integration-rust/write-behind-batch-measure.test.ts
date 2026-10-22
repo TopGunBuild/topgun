@@ -16,7 +16,10 @@
  *   timed out`; new: exit 0 and `rollback hints written` with `drained=true`)
  *   and the next start replays no frame.
  * - S: write N more keys, `kill -9`, start again: S = spawn to `PORT=`. The run
- *   counts only if that start replayed exactly N frames.
+ *   counts only if the writes went through one client session and that start
+ *   replayed exactly N + 1 frames: the N writes and the one device-credential
+ *   record the server mints, through the WAL, for a session that presents no
+ *   device token (both binaries do). The D session's record is drained with D.
  * - P (new arm only): a fresh directory with a 60 s flush interval; write N
  *   keys, wait for the passes to empty the buffer, read the p99 of
  *   `topgun_write_behind_flush_pass_seconds` in the first scrape that shows it.
@@ -182,9 +185,13 @@ async function start(
   return { server, startSeconds };
 }
 
+/** Client sessions `fill` has opened; each one adds a device-credential frame to the WAL. */
+let sessionsOpened = 0;
+
 /** Writes `count` distinct keys `{prefix}{i}` of ~100-byte values in OP_BATCH frames, each acknowledged. */
 async function fill(port: number, prefix: string, count: number): Promise<void> {
   const client = await connectWithin(port, `measure-${prefix}`, 30_000);
+  sessionsOpened += 1;
   try {
     for (let first = 0; first < count; first += OPS_PER_BATCH) {
       const ops = [];
@@ -311,14 +318,19 @@ async function oneRun(
 
   // S.
   ({ server } = await start(binaries, arm, dir, label('S fill')));
+  const sessionsBefore = sessionsOpened;
   await fill(server.port as number, 's', N);
+  record.checks.sSessions = sessionsOpened - sessionsBefore;
   await server.stop('SIGKILL');
   const replay = await start(binaries, arm, dir, label('S replay'));
   record.S = replay.startSeconds;
   record.checks.replayedFrames = replayedFrames(replay.server, arm);
   record.checks.replayExit = await replay.server.stop('SIGTERM', DRAIN_EXIT_WAIT_MS);
-  if (record.checks.replayedFrames !== N) {
-    return invalid(`the start replayed ${record.checks.replayedFrames} frames, not ${N}`);
+  if (record.checks.sSessions !== 1 || record.checks.replayedFrames !== N + 1) {
+    return invalid(
+      `the S writes used ${record.checks.sSessions} sessions and the start replayed ` +
+        `${record.checks.replayedFrames} frames, not 1 session and ${N + 1} frames`,
+    );
   }
 
   // P, new arm only.
