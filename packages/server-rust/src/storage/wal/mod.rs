@@ -738,6 +738,21 @@ pub struct WalWriter {
     /// hazard rather than passing vacuously.
     #[cfg(test)]
     gc_order_mode: std::sync::Mutex<GcOrderMode>,
+    /// Called with `(path, length)` after every successful fsync of an active
+    /// segment, still under that segment's lock, so a crash test learns the
+    /// last length of each file that a power loss would keep.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity, dead_code)]
+    test_fsync_observer: std::sync::Mutex<Option<Arc<dyn Fn(&Path, u64) + Send + Sync>>>,
+    /// While set, the batched policy fsyncs no frame: the group-commit timer
+    /// skips its round and the 100-frame fsync does not fire.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    test_hold_batched_fsync: AtomicBool,
+    /// Sealed segments the collection tick fails to unlink.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    test_refused_unlinks: std::sync::Mutex<HashSet<PathBuf>>,
 }
 
 /// TG-WAL-003 crash-point seam (R7): where `mark_applied` may end an
@@ -1270,6 +1285,12 @@ impl WalWriter {
             gc_crash_point: std::sync::Mutex::new(GcCrashPoint::None),
             #[cfg(test)]
             gc_order_mode: std::sync::Mutex::new(GcOrderMode::FsyncThenUnlink),
+            #[cfg(test)]
+            test_fsync_observer: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            test_hold_batched_fsync: AtomicBool::new(false),
+            #[cfg(test)]
+            test_refused_unlinks: std::sync::Mutex::new(HashSet::new()),
         });
 
         // For the Batched policy, spawn a background task that fsyncs every open
@@ -2570,6 +2591,47 @@ impl WalWriter {
 // WalRecovery — startup replay
 // ===========================================================================
 
+/// The most frames one replay batch of a store-mode WAL takes.
+#[allow(dead_code)]
+const REPLAY_BATCH_MAX_FRAMES: usize = 1000;
+/// The most encoded value bytes one replay batch takes; the first frame of a
+/// batch is admitted whole.
+#[allow(dead_code)]
+const REPLAY_BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// What replaying one frame writes to the store.
+#[allow(dead_code)]
+enum ReplayWrite {
+    /// Stores `value` under the frame's key.
+    Put {
+        /// The record.
+        value: RecordValue,
+        /// Absolute millis since epoch (0 = no expiry).
+        expiration_time: i64,
+    },
+    /// Removes the frame's key.
+    Remove,
+}
+
+/// The values a replay batch has prepared and not yet committed, by
+/// `(map, key)`; `None` is a key the batch removes.
+#[allow(dead_code)]
+#[derive(Default)]
+struct ReplayOverlay {
+    values: HashMap<(String, String), Option<RecordValue>>,
+}
+
+/// What the replay of one partition did.
+#[allow(dead_code)]
+struct PartitionReplay {
+    /// The contiguous-success frontier: every frame at or below it is stored.
+    frontier: u64,
+    /// The first frame that was not stored, if any.
+    first_failed: Option<u64>,
+    /// The batches committed.
+    batches: usize,
+}
+
 /// Replays all un-applied WAL entries through an inner `MapDataStore` on startup.
 ///
 /// Called **before** the WebSocket listener accepts connections so clients never
@@ -2602,6 +2664,11 @@ pub struct WalRecovery {
     /// which is the trivial configuration the seam was written to replace.
     #[cfg(test)]
     re_replayed_frames: std::sync::atomic::AtomicUsize,
+    /// Replay batch limits used instead of the production ones, so a test can
+    /// make small windows span several batches.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    test_batch_limits: Option<(usize, usize)>,
 }
 
 impl WalRecovery {
@@ -2617,7 +2684,17 @@ impl WalRecovery {
             re_replay_oldest_frame: false,
             #[cfg(test)]
             re_replayed_frames: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            test_batch_limits: None,
         }
+    }
+
+    /// Test-only: replay batches of at most `frames` frames or `bytes` encoded
+    /// value bytes instead of the production limits.
+    #[cfg(test)]
+    #[allow(clippy::unimplemented, unused_variables, dead_code)]
+    pub(crate) fn test_set_replay_batch_limits(&mut self, frames: usize, bytes: usize) {
+        unimplemented!()
     }
 
     /// Test-only: disable (or re-enable) the `RecordValue::Lww` merge gate in
@@ -3200,6 +3277,43 @@ impl WalRecovery {
         }
         self.wal.mark_applied(partition, frontier).await
     }
+
+    /// What replaying `entry` writes, reading the key's current value from
+    /// `overlay` first and from `inner_store` when the overlay does not hold
+    /// the key; `None` when the frame writes nothing.
+    #[allow(
+        clippy::unimplemented,
+        unused_variables,
+        clippy::unused_async,
+        dead_code
+    )]
+    async fn prepare_entry(
+        inner_store: &Arc<dyn MapDataStore>,
+        overlay: &ReplayOverlay,
+        entry: &WalEntry,
+        merge_gate: bool,
+    ) -> anyhow::Result<Option<ReplayWrite>> {
+        unimplemented!()
+    }
+
+    /// Replays the un-applied `entries` of a store-mode partition in batches,
+    /// each one commit holding its frames' writes and the partition's row.
+    #[allow(
+        clippy::unimplemented,
+        unused_variables,
+        clippy::unused_async,
+        dead_code
+    )]
+    async fn replay_partition(
+        &self,
+        inner_store: &Arc<dyn MapDataStore>,
+        partition: u32,
+        entries: &[WalEntry],
+        watermark: u64,
+        now: i64,
+    ) -> anyhow::Result<PartitionReplay> {
+        unimplemented!()
+    }
 }
 
 /// The recovery fold: ONE delta, folded onto the key's CURRENT durable value.
@@ -3414,6 +3528,46 @@ impl WalWriter {
                 .is_some_and(|task| !task.is_finished()),
             WalMode::Sidecar => false,
         }
+    }
+
+    /// Installs the fsync observer, or removes it with `None`.
+    #[allow(
+        clippy::type_complexity,
+        clippy::unimplemented,
+        clippy::needless_pass_by_value,
+        unused_variables,
+        dead_code
+    )]
+    pub(crate) fn test_set_fsync_observer(
+        &self,
+        observer: Option<Arc<dyn Fn(&Path, u64) + Send + Sync>>,
+    ) {
+        unimplemented!()
+    }
+
+    /// Holds every fsync of the batched policy while `hold` is set.
+    #[allow(clippy::unimplemented, unused_variables, dead_code)]
+    pub(crate) fn test_hold_batched_fsync(&self, hold: bool) {
+        unimplemented!()
+    }
+
+    /// Makes the collection tick fail to unlink the sealed segment at
+    /// `path` while `refuse` is set.
+    #[allow(clippy::unimplemented, unused_variables, dead_code)]
+    pub(crate) fn test_refuse_unlink(&self, path: &Path, refuse: bool) {
+        unimplemented!()
+    }
+
+    /// The paths of the sealed segments the WAL holds for `partition`,
+    /// oldest first.
+    #[allow(
+        clippy::unimplemented,
+        unused_variables,
+        clippy::unused_async,
+        dead_code
+    )]
+    pub(crate) async fn test_sealed_paths(&self, partition: u32) -> Vec<PathBuf> {
+        unimplemented!()
     }
 }
 
@@ -6000,3 +6154,7 @@ mod tests {
 #[cfg(test)]
 #[path = "store_mode_tests.rs"]
 mod store_mode_tests;
+
+#[cfg(test)]
+#[path = "batched_replay_tests.rs"]
+mod batched_replay_tests;
