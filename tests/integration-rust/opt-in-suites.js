@@ -17,6 +17,12 @@ const optInSuites = [
       'each needs a server built with the fault-injection cargo feature (FAULT_SERVER_BINARY, FAULT_SERVER_COMMIT)',
     script: 'pnpm test:integration-rust:liveness',
   },
+  {
+    files: ['write-behind-batch-measure'],
+    reason:
+      'measures the write-behind drain and the start replay of a 6a030bb6 build against the binary under test, out of process, for up to three hours (MEASURE_BASE_SERVER_BINARY, MEASURE_BASE_SERVER_COMMIT, RUST_SERVER_BINARY, MEASURE_NEW_SERVER_COMMIT)',
+    script: 'pnpm test:integration-rust:measure',
+  },
 ];
 
 // Left out only where the environment asks for it. The 3-node suite fails to
