@@ -30,6 +30,7 @@ use topgun_core::types::Value;
 use super::store_mode_tests::{
     dump_at, lww, open_engine, rows_of, store_frame, wait_for, CountingEngine, Root, MAP,
 };
+use super::tests::delta_frame;
 use super::{OrDelta, Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery, WalWriter};
 use crate::storage::datastores::engine_store::{EngineMapDataStore, KS_PARTITION_META, KS_PRIMARY};
 use crate::storage::map_data_store::{
@@ -487,16 +488,6 @@ fn remove_frame(key: &str, sequence: u64) -> WalEntry {
     }
 }
 
-fn delta_frame(key: &str, delta: OrDelta, sequence: u64) -> WalEntry {
-    WalEntry {
-        map: MAP.to_string(),
-        key: key.to_string(),
-        op: WalOp::OrDelta { delta },
-        timestamp: None,
-        sequence,
-    }
-}
-
 /// The record keys of a write the counting engine logged.
 fn record_count(write: &super::store_mode_tests::WriteRecord) -> usize {
     write.record_keys().len()
@@ -561,13 +552,21 @@ async fn c01_a_replay_batch_is_one_durable_engine_write_with_its_row() {
         .iter()
         .map(|w| (record_count(w), w.sync, w.ok, w.rows()))
         .collect();
+    let committed: Vec<String> = writes
+        .iter()
+        .flat_map(super::store_mode_tests::WriteRecord::record_keys)
+        .map(|k| String::from_utf8_lossy(&k).into_owned())
+        .collect();
+    println!("c01: the replay commit's record keys, in order: {committed:?}");
+    // Every frame of the window writes its key: one record op per frame.
+    let frames = usize::try_from(seq).expect("frame count");
     assert_eq!(
         (
             shape,
             node.store.single_writes(),
             node.wal.durable_applied(P)
         ),
-        (vec![(9, true, true, vec![(P, seq)])], 0, Some(seq)),
+        (vec![(frames, true, true, vec![(P, seq)])], 0, Some(seq)),
         "the replay of one batch is one durable engine write holding every record and the row"
     );
     assert_eq!(
@@ -766,6 +765,7 @@ async fn batched_outcome(window: &Window, entries: &[WalEntry], batch_frames: us
     let mut recovery = node.recovery();
     recovery.test_set_replay_batch_limits(batch_frames, 8 * 1024 * 1024);
     recovery.run(node.dyn_store()).await.expect("recovery");
+    drop(recovery);
     let mut values = Vec::new();
     for k in 0..GEN_KEYS {
         values.push(node.load(&gen_key(k)).await);

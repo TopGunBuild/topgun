@@ -5058,12 +5058,19 @@ mod tests {
     }
 
     fn or_delta_frame(key: &str, delta: OrDelta) -> WalEntry {
+        delta_frame(key, delta, 1)
+    }
+
+    /// A delta frame of map `m` at `sequence`, for the replay tests of this
+    /// module and of its sibling test modules: delta frames are built only in
+    /// the WAL's own files.
+    pub(super) fn delta_frame(key: &str, delta: OrDelta, sequence: u64) -> WalEntry {
         WalEntry {
             map: "m".to_string(),
             key: key.to_string(),
             op: WalOp::OrDelta { delta },
             timestamp: None,
-            sequence: 1,
+            sequence,
         }
     }
 
