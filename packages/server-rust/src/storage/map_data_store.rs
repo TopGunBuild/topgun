@@ -872,7 +872,9 @@ pub trait MapDataStore: Send + Sync {
 /// refuses, holds or gates behaves as it does without rows. The rows are held
 /// only once the records returned `Ok`, and a row below the one held is
 /// refused before any record is written, as the engine store does
-/// (`TG-WAL-005`). `S` is reached through `Deref`.
+/// (`TG-WAL-005`). `S` is reached through `Deref`. The witness methods keep
+/// their defaults: only the write-behind store and one test spy implement them,
+/// and a test guards that count.
 #[cfg(test)]
 pub(crate) struct WatermarkKeeping<S> {
     inner: S,
@@ -921,20 +923,6 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
         self.inner.add(map, key, value, expiration_time, now).await
     }
 
-    async fn add_with_witness(
-        &self,
-        map: &str,
-        key: &str,
-        src: WriteSource<'_>,
-        expiration_time: i64,
-        now: i64,
-        witness: Option<&OrDelta>,
-    ) -> anyhow::Result<()> {
-        self.inner
-            .add_with_witness(map, key, src, expiration_time, now, witness)
-            .await
-    }
-
     fn accepts_encoded(&self) -> bool {
         self.inner.accepts_encoded()
     }
@@ -950,10 +938,6 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
         self.inner
             .add_encoded(map, key, bytes, expiration_time, now)
             .await
-    }
-
-    fn wants_or_witness(&self) -> bool {
-        self.inner.wants_or_witness()
     }
 
     fn scan_order(&self) -> Option<ScanOrder> {
