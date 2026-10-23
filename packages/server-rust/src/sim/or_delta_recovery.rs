@@ -5,10 +5,11 @@
 //! and Merkle-syncs; the converged value is the semantic truth the CRDT algebra
 //! demands. A single durable node then applies the SAME churn through a
 //! write-behind store over a real file WAL and suffers a **node failure** — the
-//! store is dropped before its buffer ever reaches the backend, so the on-disk
-//! WAL is the only surviving copy. Recovery replays that WAL into a FRESH
-//! backend, and the reconstructed OR-Map must carry exactly the live entries and
-//! the tombstone the partitioned cluster converged on.
+//! node is killed before its buffer ever reaches the backend, so the on-disk
+//! WAL is the only surviving copy of the churn. The restarted node opens the WAL
+//! over the same backend and recovery replays it there, and the reconstructed
+//! OR-Map must carry exactly the live entries and the tombstone the partitioned
+//! cluster converged on.
 //!
 //! # What this discriminates
 //!
@@ -69,6 +70,7 @@ mod tests {
     use crate::storage::impls::StorageConfig;
     use crate::storage::map_data_store::MapDataStore;
     use crate::storage::record::RecordValue;
+    use crate::storage::wal::segment::parse_segment_filename;
     use crate::storage::wal::{Wal, WalEntry, WalFsyncPolicy, WalRecovery, WalWriter};
 
     const MAP: &str = "ormap";
@@ -285,11 +287,49 @@ mod tests {
             .expect("both nodes should hold a value after convergence")
     }
 
-    /// Fault B — node failure. The same churn is applied through the real CRDT
-    /// write path onto a write-behind store over a file WAL; the store is then
-    /// dropped with its buffer still full (a `kill -9` inside the write-behind
-    /// window), and the surviving WAL is replayed into a FRESH backend. Returns
-    /// the reconstructed OR-Map.
+    /// Runs `life` — one lifetime of the durable node, which opens the WAL and
+    /// returns it — on a runtime of its own, then kills that runtime: every task
+    /// the node started stops where it is, with no drain (a `kill -9` inside the
+    /// write-behind window). Returns once nothing holds the WAL any more, so the
+    /// restarted node can open its directory again.
+    async fn kill_after<T: Send + 'static>(
+        life: impl std::future::Future<Output = (Arc<WalWriter>, T)> + Send + 'static,
+    ) -> T {
+        let node = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("node runtime");
+        let (wal, out) = node
+            .spawn(life)
+            .await
+            .expect("the node's lifetime completes");
+        node.shutdown_background();
+        let weak = Arc::downgrade(&wal);
+        drop(wal);
+        let deadline = tokio::time::Instant::now() + WAIT_BOUND;
+        while weak.upgrade().is_some() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the WAL writer must be released once the node is killed"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        out
+    }
+
+    /// Opens `wal_dir` over `backend` in store mode, as the server opens it.
+    fn open_wal(wal_dir: &std::path::Path, backend: &Arc<dyn MapDataStore>) -> Arc<WalWriter> {
+        // PerOp fsync so every ack in the churn is already on disk when the
+        // crash lands: the oracle is "no acked mutation is lost", and a
+        // group-commit window would blur which acks that covers.
+        WalWriter::open_over_store(
+            wal_dir.to_path_buf(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(backend),
+        )
+        .expect("WalWriter::open_over_store")
+    }
+
     /// Total bytes the WAL segments under `dir` occupy on disk.
     ///
     /// Deliberately a BYTE total and never a frame-variant name: this module is
@@ -301,66 +341,73 @@ mod tests {
         std::fs::read_dir(dir)
             .expect("the wal directory must be readable")
             .flatten()
-            .filter(|entry| entry.path().is_file())
+            .filter(|entry| parse_segment_filename(&entry.file_name().to_string_lossy()).is_some())
             .map(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
             .sum()
     }
 
-    /// Returns the reconstructed OR-Map and the bytes its churn put on disk.
+    /// Fault B — node failure. The same churn is applied through the real CRDT
+    /// write path onto a write-behind store over a file WAL; the node is then
+    /// killed with its buffer still full (a `kill -9` inside the write-behind
+    /// window), and the restarted node replays the surviving WAL into the
+    /// backend, which holds nothing of the churn. Returns the reconstructed
+    /// OR-Map and the bytes its churn put on disk.
     async fn churn_then_crash_and_recover(or_delta_wal: bool) -> (RecordValue, u64) {
         let wal_dir = tempfile::tempdir().expect("wal tempdir");
-        let pre_crash_dir = tempfile::tempdir().expect("pre-crash backend tempdir");
-        let recovered_dir = tempfile::tempdir().expect("recovered backend tempdir");
-
-        // PerOp fsync so every ack in the churn below is already on disk when
-        // the crash lands: the oracle is "no acked mutation is lost", and a
-        // group-commit window would blur which acks that covers.
-        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
-            .expect("WalWriter::new");
-
-        let pre_crash_backend: Arc<dyn MapDataStore> = Arc::new(
-            RedbDataStore::new(pre_crash_dir.path().join("pre-crash.redb"))
-                .expect("pre-crash redb should open"),
-        );
-        let store = WriteBehindDataStore::new_with_wal(
-            pre_crash_backend,
-            never_flush_config(or_delta_wal),
-            Some(WalBootstrap {
-                wal: Arc::clone(&wal) as Arc<dyn Wal>,
-                sequence_start: 1,
-            }),
+        let backend_dir = tempfile::tempdir().expect("backend tempdir");
+        let backend: Arc<dyn MapDataStore> = Arc::new(
+            RedbDataStore::new(backend_dir.path().join("backend.redb"))
+                .expect("backend redb should open"),
         );
 
-        {
-            let node = DurableNode::build(Arc::clone(&store) as Arc<dyn MapDataStore>);
-            for i in 0..ADDS_PER_SIDE {
-                node.apply(or_add_op(&format!("a{i}"), &format!("v{i}")))
-                    .await;
-                node.apply(or_add_op(&format!("b{i}"), &format!("v{i}")))
-                    .await;
+        kill_after({
+            let (wal_path, backend) = (wal_dir.path().to_path_buf(), Arc::clone(&backend));
+            async move {
+                let wal = open_wal(&wal_path, &backend);
+                let store = WriteBehindDataStore::new_with_wal(
+                    backend,
+                    never_flush_config(or_delta_wal),
+                    Some(WalBootstrap {
+                        wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                        sequence_start: 1,
+                    }),
+                );
+                let node = DurableNode::build(store as Arc<dyn MapDataStore>);
+                for i in 0..ADDS_PER_SIDE {
+                    node.apply(or_add_op(&format!("a{i}"), &format!("v{i}")))
+                        .await;
+                    node.apply(or_add_op(&format!("b{i}"), &format!("v{i}")))
+                        .await;
+                }
+                node.apply(or_remove_op(REMOVED_TAG)).await;
+                (wal, ())
             }
-            node.apply(or_remove_op(REMOVED_TAG)).await;
-        }
+        })
+        .await;
 
-        // The crash: the resident record set and the un-flushed buffer go away
-        // together. The pre-crash backend is deliberately NOT reused below, so
-        // nothing but the WAL can carry the churn across.
-        drop(store);
+        // The crash: the resident record set and the un-flushed buffer went away
+        // together, and the backend holds nothing of the churn, so nothing but
+        // the WAL can carry it across.
+        assert!(
+            backend
+                .load(MAP, KEY)
+                .await
+                .expect("backend load before recovery")
+                .is_none(),
+            "the churn reached the backend before the crash"
+        );
 
         // Measured after the crash and before replay, so it is exactly what the
         // churn wrote — replay adds nothing to this directory.
         let wal_bytes = wal_bytes_on_disk(wal_dir.path());
 
-        let recovered_backend: Arc<dyn MapDataStore> = Arc::new(
-            RedbDataStore::new(recovered_dir.path().join("recovered.redb"))
-                .expect("recovered redb should open"),
-        );
+        let wal = open_wal(wal_dir.path(), &backend);
         WalRecovery::new(Arc::clone(&wal), Vec::new())
-            .run(Arc::clone(&recovered_backend))
+            .run(Arc::clone(&backend))
             .await
             .expect("recovery must succeed on an intact WAL");
 
-        let recovered = recovered_backend
+        let recovered = backend
             .load(MAP, KEY)
             .await
             .expect("recovered backend load should not error")
@@ -526,6 +573,22 @@ mod tests {
         async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>> {
             self.inner.unapplied(partition).await
         }
+
+        async fn sync(&self) -> anyhow::Result<()> {
+            self.inner.sync().await
+        }
+
+        fn watermark_in_store(&self) -> bool {
+            self.inner.watermark_in_store()
+        }
+
+        fn durable_applied(&self, partition: u32) -> Option<u64> {
+            self.inner.durable_applied(partition)
+        }
+
+        async fn finish(&self, write_hints: bool) -> anyhow::Result<usize> {
+            self.inner.finish(write_hints).await
+        }
     }
 
     /// Where the flush lands relative to the churn's last add.
@@ -666,54 +729,58 @@ mod tests {
         let wal_dir = tempfile::tempdir().expect("wal tempdir");
         let backend_dir = tempfile::tempdir().expect("backend tempdir");
 
-        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
-            .expect("WalWriter::new");
-        let holding = Arc::new(HoldingWal::new(Arc::clone(&wal)));
         let backend: Arc<dyn MapDataStore> = Arc::new(
             RedbDataStore::new(backend_dir.path().join("backend.redb"))
                 .expect("backend redb should open"),
         );
-        // Entries are due at once, but only a requested flush drains them.
-        let store = WriteBehindDataStore::new_with_wal(
-            Arc::clone(&backend),
-            WriteBehindConfig {
-                write_delay_ms: 0,
-                ..never_flush_config(or_delta_wal)
-            },
-            Some(WalBootstrap {
-                wal: Arc::clone(&holding) as Arc<dyn Wal>,
-                sequence_start: 1,
-            }),
-        );
 
-        let mut violations = Vec::new();
-        {
-            let node = Arc::new(DurableNode::build(
-                Arc::clone(&store) as Arc<dyn MapDataStore>
-            ));
-            for i in 0..ADDS_PER_SIDE {
-                node.apply(or_add_op(&format!("a{i}"), &format!("v{i}")))
-                    .await;
-                if i + 1 < ADDS_PER_SIDE {
-                    node.apply(or_add_op(&format!("b{i}"), &format!("v{i}")))
+        let violations = kill_after({
+            let (wal_path, backend) = (wal_dir.path().to_path_buf(), Arc::clone(&backend));
+            async move {
+                let wal = open_wal(&wal_path, &backend);
+                let holding = Arc::new(HoldingWal::new(Arc::clone(&wal)));
+                // Entries are due at once, but only a requested flush drains them.
+                let store = WriteBehindDataStore::new_with_wal(
+                    Arc::clone(&backend),
+                    WriteBehindConfig {
+                        write_delay_ms: 0,
+                        ..never_flush_config(or_delta_wal)
+                    },
+                    Some(WalBootstrap {
+                        wal: Arc::clone(&holding) as Arc<dyn Wal>,
+                        sequence_start: 1,
+                    }),
+                );
+
+                let mut violations = Vec::new();
+                let node = Arc::new(DurableNode::build(
+                    Arc::clone(&store) as Arc<dyn MapDataStore>
+                ));
+                for i in 0..ADDS_PER_SIDE {
+                    node.apply(or_add_op(&format!("a{i}"), &format!("v{i}")))
                         .await;
+                    if i + 1 < ADDS_PER_SIDE {
+                        node.apply(or_add_op(&format!("b{i}"), &format!("v{i}")))
+                            .await;
+                    }
                 }
+                let violation = match case {
+                    CellCase::FlushLeadsAnUnresolvedFrame => {
+                        flush_while_the_last_add_is_held(&node, &store, &holding, &backend).await
+                    }
+                    CellCase::EvictThenReadopt => evict_then_readopt(&node, &store, &holding).await,
+                };
+                violations.extend(violation);
+
+                // Framed and acked after the flush: its frame is unresolved at
+                // the crash, so only the replay can carry it across.
+                node.apply(or_remove_op(REMOVED_TAG)).await;
+                (wal, violations)
             }
-            let violation = match case {
-                CellCase::FlushLeadsAnUnresolvedFrame => {
-                    flush_while_the_last_add_is_held(&node, &store, &holding, &backend).await
-                }
-                CellCase::EvictThenReadopt => evict_then_readopt(&node, &store, &holding).await,
-            };
-            violations.extend(violation);
+        })
+        .await;
 
-            // Framed and acked after the flush: its frame is unresolved at the
-            // crash, so only the replay can carry it across.
-            node.apply(or_remove_op(REMOVED_TAG)).await;
-        }
-
-        drop(store);
-
+        let wal = open_wal(wal_dir.path(), &backend);
         WalRecovery::new(Arc::clone(&wal), Vec::new())
             .run(Arc::clone(&backend))
             .await

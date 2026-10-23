@@ -22,9 +22,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   fsync completes before the append returns.
 - **Maintaining code:** `packages/server-rust/src/storage/wal/mod.rs` (PerOp arm, `sync_data`
   before return); `write_behind.rs` append-before-ack path.
-- **Enforcing test:** sidecar mode — `packages/server-rust/src/storage/crash_safety_proptest.rs`
-  (the file's stated oracle is exactly this invariant; real store + WAL, SIGKILL modeled by store
-  drop). Store mode — `store_mode_tests.rs::a12_under_batched_a_wal_cut_to_its_last_fsync_never_reuses_a_sequence`,
+- **Enforcing test:** `packages/server-rust/src/storage/crash_safety_proptest.rs` (the file's
+  stated oracle is exactly this invariant; real write-behind over a store-mode WAL, SIGKILL
+  modeled by killing the runtime that runs them while the store survives, which holds none of
+  the acked writes before recovery); `store_mode_tests.rs::a12_under_batched_a_wal_cut_to_its_last_fsync_never_reuses_a_sequence`,
   `a18_a_kill_inside_or_right_after_a_commit_loses_no_acked_write` (a child process aborted
   inside and right after a commit); `batched_replay_tests.rs::c90_crash_loop` (and its 50-kill
   `c90_crash_loop_long`): a child process running write-behind over the store-mode WAL is killed
@@ -94,7 +95,11 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `a23_a_clean_stop_writes_one_rollback_hint_per_partition_equal_to_the_engine_row`,
   `batched_replay_tests.rs::c09_a_segment_that_fails_to_unlink_holds_back_only_its_own_partition`,
   `batched_replay_tests.rs::c90_crash_loop` (`wal-collected` never above the engine row of a
-  partition at any observation across real SIGKILLs, under both policies).
+  partition at any observation across real SIGKILLs, under both policies),
+  `crash_safety_proptest.rs::concurrent_compaction_loses_no_acked_write_across_crash` (collection
+  ticks racing appends to one partition lose no acked write across a crash),
+  `crash_safety_proptest.rs::crash_on_partial_active_segment_recovers_intact_prefix` (a torn
+  active segment beside sealed ones is tolerated and every frame below the tear replays).
   Sidecar mode — `wal_harness/cases.rs::ac7_tg_wal_003_gc_crash_point_both_directions` —
   drives the real `mark_applied` with a crash injected BETWEEN the sidecar fsync and the unlink
   loop: the production `FsyncThenUnlink` order loses nothing and recovery replays every
