@@ -2975,7 +2975,7 @@ impl WalRecovery {
     /// one store commit holding its frames' writes and, when the frontier
     /// moved, the partition's row, so the row is never durable without the
     /// writes it covers; only once that commit returned is the WAL told it is
-    /// applied. One `WAL recovery complete` line ends the run.
+    /// applied.
     ///
     /// # Violation posture
     ///
