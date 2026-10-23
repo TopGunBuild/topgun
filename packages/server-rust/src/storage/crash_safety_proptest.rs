@@ -4,16 +4,22 @@
 //! driving the **real** production write path end-to-end:
 //!
 //! - A real `WriteBehindDataStore` built over a real file-backed `WalWriter` in
-//!   a temp directory (append-before-ack is production behavior: the WAL frame is
-//!   durable before the store method returns `Ok(())`).
-//! - The crash is modeled by **dropping** the `WriteBehindDataStore` — its
-//!   in-memory staging buffer vanishes — while the temp WAL files on disk survive
-//!   intact. This faithfully models SIGKILL: the process dies but the OS preserves
-//!   bytes already written to the file (the test process stays alive, so the file
-//!   is fully readable, including written-but-not-yet-fsynced bytes).
-//! - Recovery runs the real `WalRecovery` into a **fresh** inner `MapDataStore`
-//!   (a retaining store — NOT `NullDataStore`, which would discard writes and make
-//!   the post-recovery assertion vacuous).
+//!   a temp directory, opened over the store in store mode as the server opens
+//!   it (append-before-ack is production behavior: the WAL frame is durable
+//!   before the store method returns `Ok(())`).
+//! - The crash is modeled by **dropping** the `WriteBehindDataStore` and the
+//!   WAL — the in-memory staging buffer vanishes — while the temp WAL files on
+//!   disk survive intact. This faithfully models SIGKILL: the process dies but
+//!   the OS preserves bytes already written to the file (the test process stays
+//!   alive, so the file is fully readable, including written-but-not-yet-fsynced
+//!   bytes).
+//! - The store survives the crash, as the data directory does: the restart
+//!   opens the WAL directory over the **same** store and runs the real
+//!   `WalRecovery` into it. Write-behind never flushes before the crash, and
+//!   each test asserts the store holds none of the acked writes before
+//!   recovery, so whatever recovery brings back came through the WAL alone. The
+//!   store retains what it is told (NOT `NullDataStore`, which would discard
+//!   writes and make the post-recovery assertion vacuous).
 //!
 //! The oracle is "acked-before-crash ⊆ present-after-recovery": every op that
 //! received an ack before the drop must be present after recovery; ops that never
@@ -24,7 +30,9 @@
 //! thing faked is the crash itself.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use proptest::prelude::*;
@@ -37,8 +45,11 @@ use topgun_core::types::Value;
 use crate::storage::datastores::{
     RedbDataStore, WalBootstrap, WriteBehindConfig, WriteBehindDataStore,
 };
-use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
+use crate::storage::map_data_store::{
+    LeafSink, MapDataStore, ScanBatch, ScanCursor, WatermarkKeeping,
+};
 use crate::storage::record::{OrMapEntry, RecordValue};
+use crate::storage::wal::segment::parse_segment_filename;
 use crate::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
 
 // ---------------------------------------------------------------------------
@@ -240,6 +251,124 @@ fn never_flush_config() -> WriteBehindConfig {
     }
 }
 
+/// The retaining store with the applied watermark rows a store-mode WAL needs.
+type KeptStore = WatermarkKeeping<RetainingStore>;
+
+/// Past the age at which a collection tick seals an active segment.
+const SEAL_AGE: Duration = Duration::from_secs(31);
+
+fn kept_store() -> Arc<KeptStore> {
+    Arc::new(WatermarkKeeping::new(RetainingStore::default()))
+}
+
+/// Opens `wal_dir` over `store` in store mode, as the server opens it.
+fn open_wal(wal_dir: &Path, policy: WalFsyncPolicy, store: &Arc<KeptStore>) -> Arc<WalWriter> {
+    WalWriter::open_over_store(
+        wal_dir.to_path_buf(),
+        policy,
+        Arc::clone(store) as Arc<dyn MapDataStore>,
+    )
+    .expect("WalWriter::open_over_store")
+}
+
+/// Write-behind over `store` and `wal` that never flushes within a test.
+fn write_behind(
+    store: &Arc<KeptStore>,
+    wal: &Arc<WalWriter>,
+    sequence_start: u64,
+) -> Arc<WriteBehindDataStore> {
+    WriteBehindDataStore::new_with_wal(
+        Arc::clone(store) as Arc<dyn MapDataStore>,
+        never_flush_config(),
+        Some(WalBootstrap {
+            wal: Arc::clone(wal) as Arc<dyn Wal>,
+            sequence_start,
+        }),
+    )
+}
+
+/// Runs `life` — one process lifetime, which opens the WAL and returns it — on
+/// a runtime of its own, then kills that runtime: every task the process
+/// started (write-behind's flush loop and watchdog, the WAL's timers) stops
+/// where it is, with no drain, as on SIGKILL. Returns once nothing holds the
+/// WAL any more, so the next open of its directory is a restart.
+async fn kill_after<T: Send + 'static>(
+    life: impl std::future::Future<Output = (Arc<WalWriter>, T)> + Send + 'static,
+) -> T {
+    let process = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("process runtime");
+    let (wal, out) = process
+        .spawn(life)
+        .await
+        .expect("the process lifetime completes");
+    process.shutdown_background();
+    release(wal).await;
+    out
+}
+
+/// Drops `wal` and returns once nothing holds it any more, so the next open of
+/// its directory is a restart.
+async fn release(wal: Arc<WalWriter>) {
+    let weak = Arc::downgrade(&wal);
+    drop(wal);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while weak.upgrade().is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for the WAL writer to be released"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// Replays `wal` into `store`, as the server does at start.
+async fn recover(wal: &Arc<WalWriter>, store: &Arc<KeptStore>) -> anyhow::Result<()> {
+    WalRecovery::new(Arc::clone(wal), Vec::new())
+        .run(Arc::clone(store) as Arc<dyn MapDataStore>)
+        .await
+}
+
+/// Asserts the store holds neither a value nor a tombstone of any of `keys`:
+/// write-behind never flushed, so only the WAL can carry them across.
+async fn assert_only_the_wal_holds<'a>(
+    store: &KeptStore,
+    keys: impl IntoIterator<Item = &'a String>,
+) {
+    for key in keys {
+        assert!(
+            !store.contains(TEST_MAP, key).await && !store.is_tombstone(TEST_MAP, key).await,
+            "key={key} reached the store before the crash"
+        );
+    }
+}
+
+/// The segments of `partition` in `wal_dir`, ascending by first sequence.
+fn segments_of(wal_dir: &Path, partition: u32) -> Vec<(u64, PathBuf)> {
+    let mut segments: Vec<(u64, PathBuf)> = std::fs::read_dir(wal_dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            parse_segment_filename(&name)
+                .and_then(|(p, first_seq)| (p == partition).then(|| (first_seq, e.path())))
+        })
+        .collect();
+    segments.sort_by_key(|(first_seq, _)| *first_seq);
+    segments
+}
+
+/// Whether no segment of `partition` holds a byte: every frame it held was
+/// collected, and what is left is at most the empty active segment the last
+/// seal rotated in.
+fn holds_no_frame(wal_dir: &Path, partition: u32) -> bool {
+    segments_of(wal_dir, partition)
+        .iter()
+        .all(|(_, path)| std::fs::metadata(path).unwrap().len() == 0)
+}
+
 /// Final intended state of each key (last op wins) given a fully-acked sequence.
 /// `Some(value_tag)` means the key should be present, `None` means removed.
 fn expected_final_state(ops: &[Op]) -> HashMap<String, Option<u64>> {
@@ -266,67 +395,67 @@ async fn run_crash_scenario(
     ops: &[Op],
     crash_after: usize,
     policy: WalFsyncPolicy,
-) -> (Arc<RetainingStore>, HashMap<String, Option<u64>>) {
+) -> (Arc<KeptStore>, HashMap<String, Option<u64>>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let wal_dir = dir.path().to_path_buf();
 
     // Pre-crash: build a real write-behind store over a real file WAL.
-    let pre_crash_inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
-    let wal = WalWriter::new(wal_dir.clone(), policy).expect("WalWriter::new");
-    let wal_dyn: Arc<dyn Wal> = Arc::clone(&wal) as Arc<dyn Wal>;
-    let store = WriteBehindDataStore::new_with_wal(
-        pre_crash_inner,
-        never_flush_config(),
-        Some(WalBootstrap {
-            wal: wal_dyn,
-            sequence_start: 1,
-        }),
-    );
+    let durable = kept_store();
+    let ops: Vec<Op> = ops.iter().take(crash_after).cloned().collect();
+    let acked = kill_after({
+        let (wal_dir, durable) = (wal_dir.clone(), Arc::clone(&durable));
+        async move {
+            let wal = open_wal(&wal_dir, policy, &durable);
+            let store = write_behind(&durable, &wal, 1);
 
-    // Apply ops up to the crash point, recording the acked set per key. Each ack
-    // (the store method returning Ok) means the WAL frame is already durable.
-    let mut acked: HashMap<String, Option<u64>> = HashMap::new();
-    let mut hlc_millis: u64 = 1;
-    for op in ops.iter().take(crash_after) {
-        match op {
-            Op::Store { key, value_tag } => {
-                let value = lww_value(*value_tag, hlc_millis);
-                hlc_millis += 1;
-                store
-                    .add(TEST_MAP, key, &value, 0, 1000)
-                    .await
-                    .expect("add must ack");
-                acked.insert(key.clone(), Some(*value_tag));
+            // Apply ops up to the crash point, recording the acked set per key.
+            // Each ack (the store method returning Ok) means the WAL frame is
+            // already durable.
+            let mut acked: HashMap<String, Option<u64>> = HashMap::new();
+            let mut hlc_millis: u64 = 1;
+            for op in &ops {
+                match op {
+                    Op::Store { key, value_tag } => {
+                        let value = lww_value(*value_tag, hlc_millis);
+                        hlc_millis += 1;
+                        store
+                            .add(TEST_MAP, key, &value, 0, 1000)
+                            .await
+                            .expect("add must ack");
+                        acked.insert(key.clone(), Some(*value_tag));
+                    }
+                    Op::Remove { key } => {
+                        store
+                            .remove(TEST_MAP, key, 1000)
+                            .await
+                            .expect("remove must ack");
+                        acked.insert(key.clone(), None);
+                    }
+                }
             }
-            Op::Remove { key } => {
-                store
-                    .remove(TEST_MAP, key, 1000)
-                    .await
-                    .expect("remove must ack");
-                acked.insert(key.clone(), None);
-            }
+            (wal, acked)
         }
-    }
+    })
+    .await;
 
-    // Model the crash: drop the write-behind store. Its in-memory staging buffer
-    // is lost; the temp WAL files on disk survive. We must NOT reuse the pre-crash
-    // inner store — recovery replays into a fresh one so the test proves WAL
-    // replay, not surviving in-memory state.
-    drop(store);
+    // The crash killed write-behind and the WAL: the in-memory staging buffer is
+    // lost; the temp WAL files on disk and the store survive. The store holds
+    // none of the acked ops, so the test proves WAL replay, not surviving
+    // in-memory state.
+    assert_only_the_wal_holds(&durable, acked.keys()).await;
 
-    // Recover from the surviving on-disk WAL into a fresh inner store via the
-    // real recovery path (empty partition list ⇒ auto-discover from the dir).
-    let recovered_inner = Arc::new(RetainingStore::default());
-    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
-    recovery
-        .run(Arc::clone(&recovered_inner) as Arc<dyn MapDataStore>)
+    // Restart: reopen the surviving on-disk WAL over the store and recover via
+    // the real recovery path (empty partition list ⇒ auto-discover from the dir).
+    let wal = open_wal(&wal_dir, policy, &durable);
+    recover(&wal, &durable)
         .await
         .expect("recovery must succeed on an intact WAL");
 
     // Keep the tempdir alive until after recovery has read the files.
+    release(wal).await;
     drop(dir);
 
-    (recovered_inner, acked)
+    (durable, acked)
 }
 
 /// A process-wide multi-threaded Tokio runtime for the proptest bridge.
@@ -390,7 +519,7 @@ proptest! {
 
     /// Across many randomized op sequences (overlapping keys, mixed store/remove)
     /// and crash points, dropping a real write-behind store while the temp WAL
-    /// survives and recovering into a fresh inner store loses no acked op.
+    /// survives and recovering into the surviving store loses no acked op.
     #[test]
     fn no_acked_op_lost_after_crash_perop((ops, crash_after) in ops_and_crash_point()) {
         let (recovered, acked) =
@@ -556,28 +685,24 @@ async fn ac2b_truncated_tail_tolerated() {
     // (partition is derived from map:key), so the file holds frame1 (prefix) then
     // frame2 (tail) — truncating its tail leaves an intact, recoverable prefix.
     let key = "same_partition_key";
-    {
-        let inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
-        let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::Batched).unwrap();
-        let wal_dyn: Arc<dyn Wal> = Arc::clone(&wal) as Arc<dyn Wal>;
-        let store = WriteBehindDataStore::new_with_wal(
-            inner,
-            never_flush_config(),
-            Some(WalBootstrap {
-                wal: wal_dyn,
-                sequence_start: 1,
-            }),
-        );
-        store
-            .add(TEST_MAP, key, &lww_value(1, 1), 0, 1000)
-            .await
-            .unwrap();
-        store
-            .add(TEST_MAP, key, &lww_value(2, 2), 0, 1000)
-            .await
-            .unwrap();
-        drop(store);
-    }
+    let durable = kept_store();
+    kill_after({
+        let (wal_dir, durable) = (wal_dir.clone(), Arc::clone(&durable));
+        async move {
+            let wal = open_wal(&wal_dir, WalFsyncPolicy::Batched, &durable);
+            let store = write_behind(&durable, &wal, 1);
+            store
+                .add(TEST_MAP, key, &lww_value(1, 1), 0, 1000)
+                .await
+                .unwrap();
+            store
+                .add(TEST_MAP, key, &lww_value(2, 2), 0, 1000)
+                .await
+                .unwrap();
+            (wal, ())
+        }
+    })
+    .await;
 
     // Locate the single partition file and lop off its last few bytes.
     let log_path = std::fs::read_dir(&wal_dir)
@@ -598,19 +723,17 @@ async fn ac2b_truncated_tail_tolerated() {
     // Truncate the last 3 bytes so the final frame is incomplete on disk.
     std::fs::write(&log_path, &bytes[..bytes.len() - 3]).unwrap();
 
+    assert_only_the_wal_holds(&durable, [&key.to_string()]).await;
+
     // Recovery must tolerate the truncated tail (Ok) and replay the prefix.
-    let recovered = Arc::new(RetainingStore::default());
-    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::Batched).unwrap();
-    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
-    let result = recovery
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
-        .await;
+    let wal = open_wal(&wal_dir, WalFsyncPolicy::Batched, &durable);
+    let result = recover(&wal, &durable).await;
     assert!(
         result.is_ok(),
         "truncated tail must be tolerated, not fatal: {result:?}"
     );
     assert!(
-        recovered.contains(TEST_MAP, key).await,
+        durable.contains(TEST_MAP, key).await,
         "the intact prefix frame must be replayed despite a truncated tail"
     );
 }
@@ -633,28 +756,24 @@ async fn ac2c_mid_file_corruption_is_fatal() {
     // same key land in one partition file, so the first frame is genuinely
     // mid-file. decode_all classifies this as Corruption ⇒ recovery must bail.
     let key = "same_partition_key";
-    {
-        let inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
-        let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).unwrap();
-        let wal_dyn: Arc<dyn Wal> = Arc::clone(&wal) as Arc<dyn Wal>;
-        let store = WriteBehindDataStore::new_with_wal(
-            inner,
-            never_flush_config(),
-            Some(WalBootstrap {
-                wal: wal_dyn,
-                sequence_start: 1,
-            }),
-        );
-        store
-            .add(TEST_MAP, key, &lww_value(1, 1), 0, 1000)
-            .await
-            .unwrap();
-        store
-            .add(TEST_MAP, key, &lww_value(2, 2), 0, 1000)
-            .await
-            .unwrap();
-        drop(store);
-    }
+    let durable = kept_store();
+    kill_after({
+        let (wal_dir, durable) = (wal_dir.clone(), Arc::clone(&durable));
+        async move {
+            let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
+            let store = write_behind(&durable, &wal, 1);
+            store
+                .add(TEST_MAP, key, &lww_value(1, 1), 0, 1000)
+                .await
+                .unwrap();
+            store
+                .add(TEST_MAP, key, &lww_value(2, 2), 0, 1000)
+                .await
+                .unwrap();
+            (wal, ())
+        }
+    })
+    .await;
 
     let log_path = std::fs::read_dir(&wal_dir)
         .unwrap()
@@ -677,12 +796,8 @@ async fn ac2c_mid_file_corruption_is_fatal() {
     bytes[corrupt_at] ^= 0xFF;
     std::fs::write(&log_path, &bytes).unwrap();
 
-    let recovered = Arc::new(RetainingStore::default());
-    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).unwrap();
-    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
-    let result = recovery
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
-        .await;
+    let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
+    let result = recover(&wal, &durable).await;
     assert!(
         result.is_err(),
         "mid-file corruption must be fatal (recovery returns Err so the caller exits non-zero)"
@@ -722,20 +837,6 @@ fn partition_of(map: &str, key: &str) -> u32 {
     topgun_core::fnv1a_hash(&combined) % topgun_core::PARTITION_COUNT
 }
 
-/// Recovers from the on-disk WAL at `wal_dir` into `inner`.
-///
-/// `inner` models the durable backend (redb): it persists across restart cycles,
-/// so an applied-then-compacted entry stays present even though it is no longer
-/// in the WAL tail. Recovery replays only the unapplied WAL entries on top.
-async fn recover_into(wal_dir: &std::path::Path, inner: Arc<RetainingStore>) {
-    let wal = WalWriter::new(wal_dir.to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
-    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
-    recovery
-        .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
-        .await
-        .expect("recovery must succeed on an intact WAL");
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn ac4_acked_writes_survive_multiple_restart_cycles() {
     let dir = tempfile::tempdir().unwrap();
@@ -744,79 +845,93 @@ async fn ac4_acked_writes_survive_multiple_restart_cycles() {
     let k0 = "k0".to_string();
     // k1 must share a partition with k0 so the watermark collision bites.
     let k1 = colliding_key(TEST_MAP, &k0);
+    let partition = partition_of(TEST_MAP, &k0);
     assert_eq!(
-        partition_of(TEST_MAP, &k0),
+        partition,
         partition_of(TEST_MAP, &k1),
         "k0 and k1 must collide on one partition to exercise the watermark resume"
     );
 
     // The durable backend (modeled by redb) persists across restart cycles, so
-    // an applied-then-compacted entry stays present even once it leaves the WAL.
-    let durable: Arc<RetainingStore> = Arc::new(RetainingStore::default());
+    // an applied-then-collected entry stays present even once it leaves the WAL.
+    let durable = kept_store();
 
-    // --- Cycle 1: write k0, drop before flush ---
-    {
-        let inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
-        let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).unwrap();
-        let wal_dyn: Arc<dyn Wal> = Arc::clone(&wal) as Arc<dyn Wal>;
-        // Fresh node: seed 1 (no WAL observed yet).
-        let store = WriteBehindDataStore::new_with_wal(
-            inner,
-            never_flush_config(),
-            Some(WalBootstrap {
-                wal: wal_dyn,
-                sequence_start: 1,
-            }),
-        );
-        store
-            .add(TEST_MAP, &k0, &lww_value(1, 1), 0, 1000)
-            .await
-            .expect("k0 add must ack");
-        drop(store);
-    }
+    // --- Cycle 1: write k0, crash before flush ---
+    kill_after({
+        let (wal_dir, durable, k0) = (wal_dir.clone(), Arc::clone(&durable), k0.clone());
+        async move {
+            let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
+            // Fresh node: seed 1 (no WAL observed yet).
+            let store = write_behind(&durable, &wal, 1);
+            store
+                .add(TEST_MAP, &k0, &lww_value(1, 1), 0, 1000)
+                .await
+                .expect("k0 add must ack");
+            (wal, ())
+        }
+    })
+    .await;
+    assert_only_the_wal_holds(&durable, [&k0]).await;
 
-    // First recovery into the durable store: k0 must be present. This also
-    // advances the .applied watermark for k0's partition and compacts that log
-    // to empty.
-    recover_into(&wal_dir, Arc::clone(&durable)).await;
+    // First recovery into the durable store: k0 must be present. It commits k0
+    // with its partition's watermark row; a tick then seals k0's segment and
+    // collects it, so the partition has no frame left, only its row.
+    let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
+    recover(&wal, &durable)
+        .await
+        .expect("recovery must succeed on an intact WAL");
     assert!(
         durable.contains(TEST_MAP, &k0).await,
         "k0 must be present after the first recovery (Symptom 1 path)"
     );
+    wal.test_advance_clock(SEAL_AGE);
+    wal.test_collect_now().await;
+    let row = durable
+        .applied_watermarks()
+        .unwrap()
+        .expect("the store keeps watermarks")
+        .by_partition[partition as usize];
+    assert!(
+        holds_no_frame(&wal_dir, partition) && row > 0,
+        "precondition (the compaction trap): k0's partition is collected to no frame \
+         while its row stays, got segments {:?} and row {row}",
+        segments_of(&wal_dir, partition)
+    );
+    release(wal).await;
 
     // --- Cycle 2: rebuild a NEW store over a NEW WalWriter on the SAME wal_dir,
     // seeded from the WAL so the live counter resumes past the watermark. ---
-    {
-        let inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
-        let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).unwrap();
-        // Seed AFTER recovery so it observes the advanced watermark (the
-        // compaction trap: k0's log is now empty but its sidecar persists).
-        let sequence_start = wal
-            .max_observed_sequence()
-            .await
-            .expect("max_observed_sequence")
-            + 1;
-        let wal_dyn: Arc<dyn Wal> = Arc::clone(&wal) as Arc<dyn Wal>;
-        let store = WriteBehindDataStore::new_with_wal(
-            inner,
-            never_flush_config(),
-            Some(WalBootstrap {
-                wal: wal_dyn,
-                sequence_start,
-            }),
-        );
-        store
-            .add(TEST_MAP, &k1, &lww_value(2, 2), 0, 1000)
-            .await
-            .expect("k1 add must ack");
-        drop(store);
-    }
+    kill_after({
+        let (wal_dir, durable, k1) = (wal_dir.clone(), Arc::clone(&durable), k1.clone());
+        async move {
+            let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
+            // Seed AFTER recovery so it observes the advanced watermark (the
+            // compaction trap: k0's partition has no frame, but its row
+            // persists).
+            let sequence_start = wal
+                .max_observed_sequence()
+                .await
+                .expect("max_observed_sequence")
+                + 1;
+            let store = write_behind(&durable, &wal, sequence_start);
+            store
+                .add(TEST_MAP, &k1, &lww_value(2, 2), 0, 1000)
+                .await
+                .expect("k1 add must ack");
+            (wal, ())
+        }
+    })
+    .await;
+    assert_only_the_wal_holds(&durable, [&k1]).await;
 
     // Second recovery into the SAME durable store: k0 stayed there from cycle 1,
     // and k1 must now replay from the WAL. Without the seed fix k1 reuses a
     // sequence <= the watermark recovery wrote for the shared partition, so the
     // recovery filter drops it here and the assertion fails.
-    recover_into(&wal_dir, Arc::clone(&durable)).await;
+    let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
+    recover(&wal, &durable)
+        .await
+        .expect("recovery must succeed on an intact WAL");
     assert!(
         durable.contains(TEST_MAP, &k0).await,
         "k0 must still be present after the second recovery"
@@ -827,40 +942,41 @@ async fn ac4_acked_writes_survive_multiple_restart_cycles() {
          the counter must resume past the persisted watermark"
     );
 
+    release(wal).await;
     drop(dir);
 }
 
 // ---------------------------------------------------------------------------
-// Compaction trap: max_observed_sequence must read the .applied sidecar of a
-// partition whose log was compacted to empty (so its log max is 0) but whose
-// watermark W persists. Returned max must be >= W or the seed lands below W and
-// a post-restart write to that partition is dropped.
+// Compaction trap: max_observed_sequence must read the watermark row of a
+// partition whose segments were all collected (so its log max is 0) but whose
+// watermark W persists in the store. Returned max must be >= W or the seed lands
+// below W and a post-restart write to that partition is dropped.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
+    use crate::storage::map_data_store::{FlushCommit, PutValue, StoreWrite};
     use crate::storage::wal::{WalEntry, WalOp, WalStorePayload};
 
     let dir = tempfile::tempdir().unwrap();
     let wal_dir = dir.path().to_path_buf();
     let watermark: u64 = 7;
+    let durable = kept_store();
 
-    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).unwrap();
-    // Append an entry, then mark it applied: mark_applied writes the .applied
-    // sidecar (watermark) AND compacts the log to retain only seq > watermark,
-    // leaving partition 3's log empty while its sidecar holds W.
+    let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
+    let value = RecordValue::Lww {
+        value: Value::Int(1),
+        timestamp: Timestamp {
+            millis: 1,
+            counter: 0,
+            node_id: "n".to_string(),
+        },
+    };
     let entry = WalEntry {
         map: "m".to_string(),
         key: "k".to_string(),
         op: WalOp::Store {
-            value: WalStorePayload::Record(RecordValue::Lww {
-                value: Value::Int(1),
-                timestamp: Timestamp {
-                    millis: 1,
-                    counter: 0,
-                    node_id: "n".to_string(),
-                },
-            }),
+            value: WalStorePayload::Record(value.clone()),
             expiration_time: None,
         },
         timestamp: Some(Timestamp {
@@ -871,21 +987,46 @@ async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
         sequence: watermark,
     };
     wal.append(3, &entry).await.unwrap();
+    // The row W is committed with the record it covers, as a flush commits it,
+    // and only then does the WAL learn it; a tick then seals partition 3's
+    // segment and collects it, leaving the partition no frame while the
+    // store keeps W.
+    durable
+        .commit(&FlushCommit {
+            writes: vec![StoreWrite::Put {
+                map: "m",
+                key: "k",
+                value: PutValue::Value(&value),
+                expiration_time: 0,
+                store_time: 0,
+            }],
+            applied: vec![(3, watermark)],
+        })
+        .await
+        .unwrap();
     wal.mark_applied(3, watermark).await.unwrap();
+    wal.test_advance_clock(SEAL_AGE);
+    wal.test_collect_now().await;
 
     // Sanity: the log is now compacted to empty (no entries above the watermark).
     let unapplied = wal.unapplied(3).await.unwrap();
     assert!(
         unapplied.is_empty(),
-        "log must be compacted-empty after mark_applied"
+        "log must be compacted-empty after the watermark is applied"
     );
+    assert!(
+        holds_no_frame(&wal_dir, 3),
+        "precondition: every frame of partition 3 is collected, got segments {:?}",
+        segments_of(&wal_dir, 3)
+    );
+    release(wal).await;
 
-    // A fresh WalWriter (cold start) must still observe the sidecar watermark.
-    let cold = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).unwrap();
+    // A fresh WalWriter (cold start) must still observe the store's watermark.
+    let cold = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
     let max = cold.max_observed_sequence().await.unwrap();
     assert!(
         max >= watermark,
-        "max_observed_sequence must be >= the .applied watermark {watermark} of a \
+        "max_observed_sequence must be >= the watermark {watermark} of a \
          compacted-empty partition, got {max}"
     );
 }
@@ -900,22 +1041,22 @@ async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
 // (the page cache survives a process kill, and steady-state entries usually also
 // reached the inner store before the kill).
 //
-// This test runs append and compaction CONCURRENTLY on ONE partition through the
+// This test runs append and collection CONCURRENTLY on ONE partition through the
 // production WriteBehindDataStore write path, then models the crash (drop), and
-// asserts against a FRESH durable inner store recovered from the on-disk WAL —
-// NOT against the OS-cached WAL file. With never-flush config every acked write
+// asserts against the durable store recovered from the on-disk WAL — NOT
+// against the OS-cached WAL file. With never-flush config every acked write
 // lives only in the WAL until the crash, so a seal/rotate that drops a
 // concurrently-appended frame is a lost acked write that recovery cannot find.
 //
-// `mark_applied(partition, 0)` is the fault injection: it retains every entry
-// (watermark 0) yet still seals the active segment and rotates a fresh one in,
-// exactly as the real flush loop's mark_applied does while clients keep writing
-// the same partition. Driving it directly (rather than via the flush loop) is
-// what makes the race deterministic instead of timing-dependent.
+// Collection ticks are the fault injection: with the clock past the seal age,
+// every tick seals the active segment and rotates a fresh one in while the
+// appender keeps writing the same partition, and with watermark 0 it retains
+// every entry. Driving the ticks directly (rather than waiting for the timer)
+// is what makes the race dense instead of timing-dependent.
 //
-// Negative control: reverting mark_applied to the pre-PR#50 unlocked
-// read/rewrite/rename shape (or sealing without freezing the active frames first)
-// makes this test drop a large fraction of acked writes and fail.
+// Negative control: a seal that does not freeze the active frames first, or a
+// collection that unlinks segments above the watermark, makes this test drop
+// a large fraction of acked writes and fail.
 // ---------------------------------------------------------------------------
 
 /// Generates `count` distinct keys that all map to `partition` under
@@ -948,66 +1089,65 @@ async fn concurrent_compaction_loses_no_acked_write_across_crash() {
     // Production write path; never-flush so acked writes live ONLY in the WAL
     // until the crash (no leak to the inner store before the drop). None policy
     // also maximally stresses the append()-flush visibility path (PR #49).
-    let pre_crash_inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
-    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::None).expect("WalWriter::new");
-    let store = WriteBehindDataStore::new_with_wal(
-        pre_crash_inner,
-        never_flush_config(),
-        Some(WalBootstrap {
-            wal: Arc::clone(&wal) as Arc<dyn Wal>,
-            sequence_start: 1,
-        }),
-    );
+    let durable = kept_store();
+    kill_after({
+        let (wal_dir, durable, keys) = (wal_dir.clone(), Arc::clone(&durable), keys.clone());
+        async move {
+            let wal = open_wal(&wal_dir, WalFsyncPolicy::None, &durable);
+            let store = write_behind(&durable, &wal, 1);
 
-    // Appender: each add returns Ok (an ack) ⇒ its WAL frame is durable per the
-    // append-before-ack contract.
-    let appender = {
-        let store = Arc::clone(&store);
-        let keys = keys.clone();
-        tokio::spawn(async move {
-            for (i, key) in keys.iter().enumerate() {
-                let tag = u64::try_from(i).unwrap() + 1;
-                store
-                    .add(TEST_MAP, key, &lww_value(tag, tag), 0, 1000)
-                    .await
-                    .expect("add must ack");
-            }
-        })
-    };
+            // Appender: each add returns Ok (an ack) ⇒ its WAL frame is durable
+            // per the append-before-ack contract.
+            let appender = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move {
+                    for (i, key) in keys.iter().enumerate() {
+                        let tag = u64::try_from(i).unwrap() + 1;
+                        store
+                            .add(TEST_MAP, key, &lww_value(tag, tag), 0, 1000)
+                            .await
+                            .expect("add must ack");
+                    }
+                })
+            };
 
-    // Compactor: hammer mark_applied on the SAME partition, racing the appender's
-    // writes to the active log file.
-    let compactor = {
-        let wal = Arc::clone(&wal);
-        tokio::spawn(async move {
-            for _ in 0..total {
-                wal.mark_applied(partition, 0).await.expect("mark_applied");
-                tokio::task::yield_now().await;
-            }
-        })
-    };
+            // Compactor: hammer collection ticks on the SAME partition, racing
+            // the appender's writes to the active segment.
+            wal.test_advance_clock(SEAL_AGE);
+            let compactor = {
+                let wal = Arc::clone(&wal);
+                tokio::spawn(async move {
+                    for _ in 0..total {
+                        wal.test_collect_now().await;
+                        tokio::task::yield_now().await;
+                    }
+                })
+            };
 
-    appender.await.unwrap();
-    compactor.await.unwrap();
+            appender.await.unwrap();
+            compactor.await.unwrap();
+            (wal, ())
+        }
+    })
+    .await;
 
     // Crash: the in-memory staging buffer is gone; the on-disk WAL survives.
-    drop(store);
+    assert_only_the_wal_holds(&durable, &keys).await;
 
-    // Recover into a FRESH durable inner store via the real recovery path and
-    // assert against THAT — not the OS-cached WAL file.
-    let recovered: Arc<RetainingStore> = Arc::new(RetainingStore::default());
-    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
-    recovery
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+    // Recover into the durable store via the real recovery path and assert
+    // against THAT — not the OS-cached WAL file.
+    let wal = open_wal(&wal_dir, WalFsyncPolicy::None, &durable);
+    recover(&wal, &durable)
         .await
         .expect("recovery must succeed on an intact WAL");
+    release(wal).await;
     drop(dir);
 
     // Every acked write must survive. Pre-fix the compaction race silently drops
     // most concurrently-appended frames and this fails (negative control).
     let mut missing = Vec::new();
     for key in &keys {
-        if !recovered.contains(TEST_MAP, key).await {
+        if !durable.contains(TEST_MAP, key).await {
             missing.push(key.clone());
         }
     }
@@ -1034,7 +1174,7 @@ async fn concurrent_compaction_loses_no_acked_write_across_crash() {
 // partition ends with several sealed segments plus a populated active segment),
 // models the crash by dropping the store, then PHYSICALLY TRUNCATES the active
 // (highest-first_seq) segment's tail to model the half-written final frame.
-// Recovery into a FRESH durable inner store must:
+// Recovery into the durable store, which holds none of the acked writes, must:
 //   - succeed (the truncated tail on the active segment is tolerated, WARN + Ok);
 //   - replay every acked write whose frame is in the intact prefix (the sealed
 //     segments + the active segment up to the torn byte) — no acked op below the
@@ -1050,8 +1190,6 @@ async fn concurrent_compaction_loses_no_acked_write_across_crash() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)]
 async fn crash_on_partial_active_segment_recovers_intact_prefix() {
-    use crate::storage::wal::segment::parse_segment_filename;
-
     let dir = tempfile::tempdir().unwrap();
     let wal_dir = dir.path().to_path_buf();
 
@@ -1063,88 +1201,88 @@ async fn crash_on_partial_active_segment_recovers_intact_prefix() {
     // until the crash. PerOp fsync so each frame is fully on disk at ack time —
     // we then synthesize the torn FINAL frame by truncating, not by relying on a
     // partial OS flush.
-    let pre_crash_inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
-    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("WalWriter::new");
-    let store = WriteBehindDataStore::new_with_wal(
-        pre_crash_inner,
-        never_flush_config(),
-        Some(WalBootstrap {
-            wal: Arc::clone(&wal) as Arc<dyn Wal>,
-            sequence_start: 1,
-        }),
-    );
-
-    // Appender: each add returns Ok ⇒ its WAL frame is durable.
-    let appender = {
-        let store = Arc::clone(&store);
-        let keys = keys.clone();
-        tokio::spawn(async move {
-            for (i, key) in keys.iter().enumerate() {
-                let tag = u64::try_from(i).unwrap() + 1;
-                store
-                    .add(TEST_MAP, key, &lww_value(tag, tag), 0, 1000)
-                    .await
-                    .expect("add must ack");
-            }
-        })
-    };
-
-    // Compactor: seal/rotate the same partition repeatedly so the partition ends
-    // with several SEALED segments plus a populated ACTIVE segment — the layout
-    // where "torn final segment" is meaningfully distinct from "torn whole log".
-    let compactor = {
-        let wal = Arc::clone(&wal);
-        tokio::spawn(async move {
-            for _ in 0..total {
-                wal.mark_applied(partition, 0).await.expect("mark_applied");
-                tokio::task::yield_now().await;
-            }
-        })
-    };
-
-    appender.await.unwrap();
-    // Stop the compactor BEFORE the final tail batch so no rotation can run
-    // between those appends and the truncation — the seal/rotate race already ran
-    // for the bulk of the load above; the tail batch deterministically populates
-    // the active segment so a torn final frame is guaranteed to exist there
-    // (a last-moment seal would otherwise leave the active segment empty, which is
-    // a legitimate state but not the "torn active segment" this test targets).
-    compactor.await.unwrap();
-
-    // Final deterministic tail batch through the real write path, landing in the
-    // current active segment with no concurrent rotation. The last of these is the
-    // frame the truncation tears off.
+    let durable = kept_store();
+    // The tail batch: the last of these is the frame the truncation tears off.
     let tail_keys = keys_for_partition(TEST_MAP, partition, total + 8)
         .split_off(total)
         .into_iter()
         .collect::<Vec<_>>();
-    for (i, key) in tail_keys.iter().enumerate() {
-        let tag = u64::try_from(total + i).unwrap() + 1;
-        store
-            .add(TEST_MAP, key, &lww_value(tag, tag), 0, 1000)
-            .await
-            .expect("tail add must ack");
-    }
+    kill_after({
+        let (wal_dir, durable) = (wal_dir.clone(), Arc::clone(&durable));
+        let (keys, tail_keys) = (keys.clone(), tail_keys.clone());
+        async move {
+            let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
+            let store = write_behind(&durable, &wal, 1);
 
-    // Crash: in-memory staging gone; on-disk segments survive.
-    drop(store);
-    // Drop the WAL handle so its open active-segment file descriptor is closed
-    // before we truncate on disk (avoids racing an in-flight fsync timer).
-    drop(wal);
+            // Appender: each add returns Ok ⇒ its WAL frame is durable.
+            let appender = {
+                let store = Arc::clone(&store);
+                tokio::spawn(async move {
+                    for (i, key) in keys.iter().enumerate() {
+                        let tag = u64::try_from(i).unwrap() + 1;
+                        store
+                            .add(TEST_MAP, key, &lww_value(tag, tag), 0, 1000)
+                            .await
+                            .expect("add must ack");
+                    }
+                })
+            };
+
+            // Compactor: collection ticks seal/rotate the same partition
+            // repeatedly, racing the appender, so the seal/append race is
+            // covered. The layout the test needs does not rest on this race
+            // (see below).
+            wal.test_advance_clock(SEAL_AGE);
+            let compactor = {
+                let wal = Arc::clone(&wal);
+                tokio::spawn(async move {
+                    for _ in 0..total {
+                        wal.test_collect_now().await;
+                        tokio::task::yield_now().await;
+                    }
+                })
+            };
+
+            appender.await.unwrap();
+            compactor.await.unwrap();
+
+            // The multi-segment layout is built here, once the frames exist,
+            // whatever the schedule above was: this tick seals the active
+            // segment if it holds frames, and if the compactor's last tick
+            // already sealed it a sealed segment exists anyway. The tail batch
+            // below then lands in a new active segment, so the partition always
+            // has a sealed and an active segment.
+            wal.test_collect_now().await;
+            // End the timer's ticks before the tail batch, so no rotation can
+            // run between those appends and the truncation (a last-moment seal
+            // would leave the active segment empty, which is a legitimate state
+            // but not the "torn active segment" this test targets).
+            wal.finish(false)
+                .await
+                .expect("finish ends the collection ticks");
+
+            // Final deterministic tail batch through the real write path,
+            // landing in the current active segment with no concurrent rotation.
+            for (i, key) in tail_keys.iter().enumerate() {
+                let tag = u64::try_from(total + i).unwrap() + 1;
+                store
+                    .add(TEST_MAP, key, &lww_value(tag, tag), 0, 1000)
+                    .await
+                    .expect("tail add must ack");
+            }
+            (wal, ())
+        }
+    })
+    .await;
+
+    // Crash: in-memory staging gone; on-disk segments survive. The WAL handle is
+    // released, so its open active-segment file descriptor is closed before we
+    // truncate on disk (avoids racing an in-flight fsync timer).
+    assert_only_the_wal_holds(&durable, keys.iter().chain(&tail_keys)).await;
 
     // Identify the ACTIVE (highest-first_seq) segment of the partition and lop off
     // its last few bytes to model a half-written final frame at SIGKILL time.
-    let mut segments: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(&wal_dir)
-        .unwrap()
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            parse_segment_filename(&name)
-                .and_then(|(p, first_seq)| (p == partition).then(|| (first_seq, e.path())))
-        })
-        .collect();
-    segments.sort_by_key(|(first_seq, _)| *first_seq);
+    let segments = segments_of(&wal_dir, partition);
     assert!(
         segments.len() >= 2,
         "test must produce a multi-segment partition (sealed + active); got {}",
@@ -1161,14 +1299,10 @@ async fn crash_on_partial_active_segment_recovers_intact_prefix() {
     // on disk — the classic torn-tail SIGKILL signature.
     std::fs::write(&active_path, &active_bytes[..active_bytes.len() - 3]).unwrap();
 
-    // Recover into a FRESH durable inner store via the real recovery path. A torn
-    // tail on the ACTIVE (last) segment must be tolerated (Ok), not fatal.
-    let recovered: Arc<RetainingStore> = Arc::new(RetainingStore::default());
-    let wal2 = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).unwrap();
-    let recovery = WalRecovery::new(Arc::clone(&wal2), Vec::new());
-    let result = recovery
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
-        .await;
+    // Recover into the durable store via the real recovery path. A torn tail on
+    // the ACTIVE (last) segment must be tolerated (Ok), not fatal.
+    let wal2 = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
+    let result = recover(&wal2, &durable).await;
     assert!(
         result.is_ok(),
         "a torn tail on the active segment must be tolerated, not fatal: {result:?}"
@@ -1179,7 +1313,7 @@ async fn crash_on_partial_active_segment_recovers_intact_prefix() {
     // single torn final frame (the last tail-batch key) may be absent.
     let mut missing_bulk = Vec::new();
     for key in &keys {
-        if !recovered.contains(TEST_MAP, key).await {
+        if !durable.contains(TEST_MAP, key).await {
             missing_bulk.push(key.clone());
         }
     }
@@ -1196,7 +1330,7 @@ async fn crash_on_partial_active_segment_recovers_intact_prefix() {
     // active prefix.
     let mut missing_tail = Vec::new();
     for key in &tail_keys {
-        if !recovered.contains(TEST_MAP, key).await {
+        if !durable.contains(TEST_MAP, key).await {
             missing_tail.push(key.clone());
         }
     }
@@ -1212,11 +1346,12 @@ async fn crash_on_partial_active_segment_recovers_intact_prefix() {
     // always survive — proves recovery replayed across all sealed segments, not
     // just the active one.
     assert!(
-        recovered.contains(TEST_MAP, &keys[0]).await,
+        durable.contains(TEST_MAP, &keys[0]).await,
         "the earliest acked write (deep in a sealed segment) must survive a torn \
          active-segment tail"
     );
 
+    release(wal2).await;
     drop(dir);
 }
 
@@ -1268,35 +1403,33 @@ async fn ac2_wal_only_recovery_preserves_ormap_adds() {
 
     // never_flush_config ⇒ the OR add never reaches the inner store before the
     // crash; its only durable record is the WAL frame.
-    let pre_crash_inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
-    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("WalWriter::new");
-    let wal_dyn: Arc<dyn Wal> = Arc::clone(&wal) as Arc<dyn Wal>;
-    let store = WriteBehindDataStore::new_with_wal(
-        pre_crash_inner,
-        never_flush_config(),
-        Some(WalBootstrap {
-            wal: wal_dyn,
-            sequence_start: 1,
-        }),
-    );
-
+    let durable = kept_store();
     let or_value = or_record();
-    store
-        .add(TEST_MAP, "ork-1", &or_value, 0, 1000)
-        .await
-        .expect("OR add must ack");
+    kill_after({
+        let (wal_dir, durable, or_value) =
+            (wal_dir.clone(), Arc::clone(&durable), or_value.clone());
+        async move {
+            let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
+            let store = write_behind(&durable, &wal, 1);
+            store
+                .add(TEST_MAP, "ork-1", &or_value, 0, 1000)
+                .await
+                .expect("OR add must ack");
+            (wal, ())
+        }
+    })
+    .await;
 
-    // Crash: drop the write-behind store; only the on-disk WAL survives.
-    drop(store);
+    // Crash: write-behind and the WAL are gone; the on-disk WAL survives and the
+    // store holds nothing of the OR add.
+    assert_only_the_wal_holds(&durable, [&"ork-1".to_string()]).await;
 
-    let recovered = Arc::new(RetainingStore::default());
-    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
-    recovery
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+    let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
+    recover(&wal, &durable)
         .await
         .expect("recovery must succeed on an intact WAL");
 
-    let got = recovered
+    let got = durable
         .load(TEST_MAP, "ork-1")
         .await
         .unwrap()
@@ -1324,7 +1457,8 @@ async fn ac4_legacy_bare_value_wal_frame_replays_as_lww() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let wal_dir = dir.path().to_path_buf();
-    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("WalWriter::new");
+    let recovered = kept_store();
+    let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &recovered);
 
     let legacy_entry = WalEntry {
         map: TEST_MAP.to_string(),
@@ -1340,10 +1474,7 @@ async fn ac4_legacy_bare_value_wal_frame_replays_as_lww() {
         .await
         .expect("append legacy frame");
 
-    let recovered = Arc::new(RetainingStore::default());
-    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
-    recovery
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+    recover(&wal, &recovered)
         .await
         .expect("server must not refuse to start on a legacy WAL");
 
@@ -1375,7 +1506,8 @@ async fn ac4_legacy_null_value_wal_frame_replays_as_zero_epoch_lww() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let wal_dir = dir.path().to_path_buf();
-    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("WalWriter::new");
+    let recovered = kept_store();
+    let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &recovered);
 
     // The exact shape an older server wrote for OR-Map data: bare Value::Null, no ts.
     let legacy_entry = WalEntry {
@@ -1392,10 +1524,7 @@ async fn ac4_legacy_null_value_wal_frame_replays_as_zero_epoch_lww() {
         .await
         .expect("append legacy Value::Null frame");
 
-    let recovered = Arc::new(RetainingStore::default());
-    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
-    recovery
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+    recover(&wal, &recovered)
         .await
         .expect("server must not refuse to start on a legacy Value::Null WAL");
 
@@ -1429,7 +1558,8 @@ async fn ac2_wal_only_recovery_preserves_ortombstones() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let wal_dir = dir.path().to_path_buf();
-    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("WalWriter::new");
+    let recovered = kept_store();
+    let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &recovered);
 
     let tomb = RecordValue::OrTombstones {
         tags: vec!["t-1".to_string(), "t-2".to_string()],
@@ -1448,10 +1578,7 @@ async fn ac2_wal_only_recovery_preserves_ortombstones() {
         .await
         .expect("append OrTombstones frame");
 
-    let recovered = Arc::new(RetainingStore::default());
-    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
-    recovery
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+    recover(&wal, &recovered)
         .await
         .expect("recovery must succeed on an OrTombstones WAL frame");
 
@@ -1478,7 +1605,8 @@ async fn ac4_mixed_legacy_and_record_frames_both_replay() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let wal_dir = dir.path().to_path_buf();
-    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("WalWriter::new");
+    let recovered = kept_store();
+    let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &recovered);
 
     let or_value = or_record();
     let legacy = WalEntry {
@@ -1506,10 +1634,7 @@ async fn ac4_mixed_legacy_and_record_frames_both_replay() {
         .await
         .expect("append modern OR frame");
 
-    let recovered = Arc::new(RetainingStore::default());
-    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
-    recovery
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+    recover(&wal, &recovered)
         .await
         .expect("recovery must succeed on a mixed-format WAL");
 

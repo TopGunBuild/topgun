@@ -186,7 +186,12 @@ fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let inner = Arc::new(RedbDataStore::new(dir.path().join("db.redb")).expect("redb"));
     let wal_dir = dir.path().join("wal");
-    let writer = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::None).expect("wal writer");
+    let writer = WalWriter::open_over_store(
+        wal_dir.clone(),
+        WalFsyncPolicy::None,
+        Arc::clone(&inner) as Arc<dyn MapDataStore>,
+    )
+    .expect("wal writer");
     let wal: Arc<dyn Wal> = writer;
     let write_behind = WriteBehindDataStore::new_with_wal(
         Arc::clone(&inner) as Arc<dyn MapDataStore>,

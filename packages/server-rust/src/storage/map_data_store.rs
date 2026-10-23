@@ -865,6 +865,291 @@ pub trait MapDataStore: Send + Sync {
     }
 }
 
+/// A test store that keeps applied WAL watermarks over a store `S` that keeps
+/// none, so a WAL can be opened over `S` in the store mode the server runs.
+///
+/// The records of a commit go to `S` through its own `commit`, so whatever `S`
+/// refuses, holds or gates behaves as it does without rows. The rows are held
+/// only once the records returned `Ok`, and a row below the one held is
+/// refused before any record is written, as the engine store does
+/// (`TG-WAL-005`). `S` is reached through `Deref`. The witness methods keep
+/// their defaults: only the write-behind store and one test spy implement them,
+/// and a test guards that count.
+#[cfg(test)]
+pub(crate) struct WatermarkKeeping<S> {
+    inner: S,
+    /// Held across a whole commit, so no other commit can store a row
+    /// between the check of this commit's rows and their store.
+    commits: tokio::sync::Mutex<()>,
+    rows: parking_lot::Mutex<AppliedWatermarks>,
+}
+
+#[cfg(test)]
+impl<S> WatermarkKeeping<S> {
+    /// Wraps `inner`, with no watermark imported yet, as a fresh engine store.
+    pub(crate) fn new(inner: S) -> Self {
+        Self {
+            inner,
+            commits: tokio::sync::Mutex::new(()),
+            rows: parking_lot::Mutex::new(AppliedWatermarks {
+                imported: false,
+                import_pending: false,
+                by_partition: vec![0; topgun_core::PARTITION_COUNT as usize],
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<S> std::ops::Deref for WatermarkKeeping<S> {
+    type Target = S;
+
+    fn deref(&self) -> &S {
+        &self.inner
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
+    async fn add(
+        &self,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
+        expiration_time: i64,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        self.inner.add(map, key, value, expiration_time, now).await
+    }
+
+    fn accepts_encoded(&self) -> bool {
+        self.inner.accepts_encoded()
+    }
+
+    async fn add_encoded(
+        &self,
+        map: &str,
+        key: &str,
+        bytes: &[u8],
+        expiration_time: i64,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .add_encoded(map, key, bytes, expiration_time, now)
+            .await
+    }
+
+    fn scan_order(&self) -> Option<ScanOrder> {
+        self.inner.scan_order()
+    }
+
+    async fn add_backup(
+        &self,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
+        expiration_time: i64,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .add_backup(map, key, value, expiration_time, now)
+            .await
+    }
+
+    async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+        self.inner.remove(map, key, now).await
+    }
+
+    async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+        self.inner.remove_backup(map, key, now).await
+    }
+
+    async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+        self.inner.load(map, key).await
+    }
+
+    async fn load_slot(&self, map: &str, key: &str) -> anyhow::Result<Option<Loaded>> {
+        self.inner.load_slot(map, key).await
+    }
+
+    async fn load_all(
+        &self,
+        map: &str,
+        keys: &[String],
+    ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+        self.inner.load_all(map, keys).await
+    }
+
+    async fn enumerate_leaves(
+        &self,
+        map: &str,
+        is_backup: bool,
+        sink: &mut dyn LeafSink,
+    ) -> anyhow::Result<()> {
+        self.inner.enumerate_leaves(map, is_backup, sink).await
+    }
+
+    async fn scan_values(
+        &self,
+        map: &str,
+        is_backup: bool,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        self.inner.scan_values(map, is_backup, max_batch_cost).await
+    }
+
+    async fn scan_values_batched(
+        &self,
+        map: &str,
+        is_backup: bool,
+        cursor: ScanCursor,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        self.inner
+            .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+            .await
+    }
+
+    async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+        self.inner.remove_all(map, keys).await
+    }
+
+    async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+        self.inner.list_maps().await
+    }
+
+    fn is_loadable(&self, key: &str) -> bool {
+        self.inner.is_loadable(key)
+    }
+
+    fn pending_operation_count(&self) -> u64 {
+        self.inner.pending_operation_count()
+    }
+
+    async fn soft_flush(&self) -> anyhow::Result<u64> {
+        self.inner.soft_flush().await
+    }
+
+    fn assigned_write_sequence(&self) -> u64 {
+        self.inner.assigned_write_sequence()
+    }
+
+    fn flushed_watermark(&self) -> u64 {
+        self.inner.flushed_watermark()
+    }
+
+    async fn hard_flush(&self) -> anyhow::Result<()> {
+        self.inner.hard_flush().await
+    }
+
+    fn is_null(&self) -> bool {
+        self.inner.is_null()
+    }
+
+    fn classify_error(&self, err: &anyhow::Error) -> StoreErrorClass {
+        self.inner.classify_error(err)
+    }
+
+    async fn commit(&self, commit: &FlushCommit<'_>) -> anyhow::Result<()> {
+        let _commits = self.commits.lock().await;
+        let mut next = self.rows.lock().by_partition.clone();
+        for &(partition, sequence) in &commit.applied {
+            let Some(slot) = next.get_mut(partition as usize) else {
+                anyhow::bail!("applied watermark of WAL partition {partition} refused");
+            };
+            if sequence < *slot {
+                anyhow::bail!(
+                    "applied watermark regression refused: WAL partition {partition} holds \
+                     {slot}, the commit carries {sequence}"
+                );
+            }
+            *slot = sequence;
+        }
+        // Replay hands its records over encoded whatever the store answers to
+        // `accepts_encoded`; a store that does not accept them gets the value,
+        // as replay frame by frame gave it.
+        let decoded = commit
+            .writes
+            .iter()
+            .map(|write| match write {
+                StoreWrite::Put {
+                    value: PutValue::Encoded(bytes),
+                    ..
+                } if !self.inner.accepts_encoded() => {
+                    rmp_serde::from_slice::<RecordValue>(bytes).map(Some)
+                }
+                _ => Ok(None),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let writes = commit
+            .writes
+            .iter()
+            .zip(&decoded)
+            .map(|(write, decoded)| match (write, decoded) {
+                (
+                    StoreWrite::Put {
+                        map,
+                        key,
+                        expiration_time,
+                        store_time,
+                        ..
+                    },
+                    Some(value),
+                ) => StoreWrite::Put {
+                    map,
+                    key,
+                    value: PutValue::Value(value),
+                    expiration_time: *expiration_time,
+                    store_time: *store_time,
+                },
+                _ => write.clone(),
+            })
+            .collect();
+        self.inner
+            .commit(&FlushCommit {
+                writes,
+                applied: Vec::new(),
+            })
+            .await?;
+        // Row by row, not the whole vector: an import that ran during the
+        // await keeps every row this commit does not carry.
+        let mut held = self.rows.lock();
+        for &(partition, sequence) in &commit.applied {
+            held.by_partition[partition as usize] = sequence;
+        }
+        Ok(())
+    }
+
+    fn keeps_applied_watermarks(&self) -> bool {
+        true
+    }
+
+    fn applied_watermarks(&self) -> anyhow::Result<Option<AppliedWatermarks>> {
+        Ok(Some(self.rows.lock().clone()))
+    }
+
+    fn import_applied_watermarks(&self, rows: &[(u32, u64)]) -> anyhow::Result<()> {
+        let mut held = self.rows.lock();
+        if held.imported {
+            anyhow::bail!("applied watermarks refused: the store has imported already");
+        }
+        let mut next = held.by_partition.clone();
+        for &(partition, sequence) in rows {
+            let Some(slot) = next.get_mut(partition as usize) else {
+                anyhow::bail!("applied watermark of WAL partition {partition} refused");
+            };
+            // An absent row already means 0.
+            if sequence > 0 {
+                *slot = sequence;
+            }
+        }
+        held.by_partition = next;
+        held.imported = true;
+        Ok(())
+    }
+}
+
 /// A point-in-time snapshot of a map's coordinate-trie, held entirely in
 /// memory after a single enumeration pass.
 ///
