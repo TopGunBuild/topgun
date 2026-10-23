@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Changed (server):** a start after an unclean stop replays the write-ahead log in batches.
+  The frames a partition has not yet stored are applied up to 1000 frames or 8 MiB of encoded
+  values at a time, each batch one durable commit that also records how far the log is stored,
+  instead of one commit per frame — so a restart after a full write buffer takes seconds rather
+  than the better part of a minute. The result is the same as replaying frame by frame: a batch
+  reads the values its own earlier frames wrote. A frame the storage refuses is retried alone and
+  does not hold up the other frames, as before; a broken storage still stops the replay of that
+  partition and the node exits at its first flush. The start now logs one `WAL recovery complete`
+  line with the number of frames and batches and the time it took.
+- **Changed (server):** on a small store the store file (`topgun-data/engine.redb`) can be about
+  twice as large as before: one doubling of redb's usable space, plus its header and region
+  layout. A durable commit of a whole flush pass or replay batch copies the pages it changes, and
+  the pages the previous commit freed become reusable only after the next commit; while the file
+  is small, redb grows it by doubling, so that peak can cross one more doubling step than one
+  write per commit did. Measured on a Mac after a drain of 9 900 ~100-byte records: 8.96 MB
+  against 4.10 MB before; with 99 000 records 67.9 MB against 48.5 MB. The extra space is bounded
+  by what one commit touches, not by the amount of data, and it is reused: writing the same
+  records again and draining them again does not grow the file. Larger stores and Linux have not
+  been measured.
+- **Fixed (server):** a WAL segment that the collection could not delete no longer stops the
+  collection of the other partitions, and is no longer forgotten until the next restart: it stays
+  counted in `topgun_wal_retained_bytes` and is deleted by a later collection.
 - **Changed (server):** the write buffer is stored in batches. A flush pass now takes up to
   1000 buffered writes or 8 MiB of encoded values, whichever comes first, and stores them,
   together with how far the write-ahead log has been stored, in one durable commit instead of

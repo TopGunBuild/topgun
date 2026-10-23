@@ -738,6 +738,19 @@ pub struct WalWriter {
     /// hazard rather than passing vacuously.
     #[cfg(test)]
     gc_order_mode: std::sync::Mutex<GcOrderMode>,
+    /// Called with `(path, length)` after every successful fsync of an active
+    /// segment, still under that segment's lock, so a crash test learns the
+    /// last length of each file that a power loss would keep.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    test_fsync_observer: std::sync::Mutex<Option<Arc<dyn Fn(&Path, u64) + Send + Sync>>>,
+    /// While set, the batched policy fsyncs no frame: the group-commit timer
+    /// skips its round and the 100-frame fsync does not fire.
+    #[cfg(test)]
+    test_hold_batched_fsync: AtomicBool,
+    /// Sealed segments the collection tick fails to unlink.
+    #[cfg(test)]
+    test_refused_unlinks: std::sync::Mutex<HashSet<PathBuf>>,
 }
 
 /// TG-WAL-003 crash-point seam (R7): where `mark_applied` may end an
@@ -1270,6 +1283,12 @@ impl WalWriter {
             gc_crash_point: std::sync::Mutex::new(GcCrashPoint::None),
             #[cfg(test)]
             gc_order_mode: std::sync::Mutex::new(GcOrderMode::FsyncThenUnlink),
+            #[cfg(test)]
+            test_fsync_observer: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            test_hold_batched_fsync: AtomicBool::new(false),
+            #[cfg(test)]
+            test_refused_unlinks: std::sync::Mutex::new(HashSet::new()),
         });
 
         // For the Batched policy, spawn a background task that fsyncs every open
@@ -1293,6 +1312,10 @@ impl WalWriter {
                     let Some(w) = writer_weak.upgrade() else {
                         return;
                     };
+                    #[cfg(test)]
+                    if w.test_hold_batched_fsync.load(Ordering::Acquire) {
+                        continue;
+                    }
                     // Snapshot the handle list under the map lock, then fsync each
                     // active segment under its own lock so the timer never blocks
                     // appends to other partitions.
@@ -1305,12 +1328,16 @@ impl WalWriter {
                             // would leave acked frames non-durable under Batched
                             // with no operator signal that durability is
                             // compromised.
-                            if let Err(e) = active.sync_data().await {
-                                tracing::error!(
+                            match active.sync_data().await {
+                                Ok(()) => {
+                                    #[cfg(test)]
+                                    w.test_observe_fsync(&active);
+                                }
+                                Err(e) => tracing::error!(
                                     segment = ?active.path(),
                                     error = %e,
                                     "WAL batch fsync failed; acked frames may not be durable"
-                                );
+                                ),
                             }
                         }
                     }
@@ -1792,11 +1819,17 @@ impl Wal for WalWriter {
                         ),
                     )
                 });
+                #[cfg(test)]
+                self.test_observe_fsync(&active);
             }
             WalFsyncPolicy::Batched => {
+                #[cfg(test)]
+                let held = self.test_hold_batched_fsync.load(Ordering::Acquire);
+                #[cfg(not(test))]
+                let held = false;
                 // Flush immediately when the batch threshold is reached so
                 // high-throughput bursts don't wait for the timer task.
-                if count >= 100 {
+                if count >= 100 && !held {
                     active.sync_data().await.unwrap_or_else(|e| {
                         wal_fail_stop(
                             WalFailStopTier::B,
@@ -1806,6 +1839,8 @@ impl Wal for WalWriter {
                             ),
                         )
                     });
+                    #[cfg(test)]
+                    self.test_observe_fsync(&active);
                     // Notify the background timer that we just fsynced so it
                     // resets its internal cooldown.
                     let _ = self.batch_flush_tx.send(());
@@ -2053,8 +2088,14 @@ impl Wal for WalWriter {
             if active.unfsynced_count() == 0 {
                 continue;
             }
-            if let Err(e) = active.sync_data().await {
-                first_error.get_or_insert(e);
+            match active.sync_data().await {
+                Ok(()) => {
+                    #[cfg(test)]
+                    self.test_observe_fsync(&active);
+                }
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
             }
         }
         first_error.map_or(Ok(()), Err)
@@ -2145,6 +2186,8 @@ impl WalWriter {
             // orphan: returning early keeps the old active in place with no
             // dangling new segment.
             active.sync_data().await?;
+            #[cfg(test)]
+            self.test_observe_fsync(&active);
 
             let next_first_seq = active.max_seq().saturating_add(1);
             let new_path = self
@@ -2307,33 +2350,35 @@ impl WalWriter {
 
     /// Unlinks the `count` oldest sealed segments of each handle, then fsyncs
     /// the directory once. Called only once `wal-collected` covers them.
+    ///
+    /// A segment leaves the sealed set only once its file is gone, so the set,
+    /// the disk and the retained-bytes gauge agree. A segment that cannot be
+    /// unlinked ends its partition's unlinking — the segments after it stay
+    /// too, so the set keeps a contiguous run of frames — and the other
+    /// partitions are still collected. A later tick unlinks what is left: its
+    /// frames are at or below `wal-collected`, and a start filters them.
     async fn unlink_collected(&self, reclaim: Vec<(&Arc<PartitionHandle>, usize)>) {
         let mut unlinked = 0usize;
-        'unlink: for (handle, count) in reclaim {
-            let paths: Vec<PathBuf> = handle
-                .sealed
-                .lock()
-                .await
-                .drain(..count)
-                .map(|s| s.path().to_path_buf())
-                .collect();
-            for path in paths {
-                // A segment left behind is at or below the mark: the next
-                // start filters its frames and collects it again.
-                if let Err(e) = tokio::fs::remove_file(&path).await {
+        for (handle, count) in reclaim {
+            let mut sealed = handle.sealed.lock().await;
+            let mut removed = 0usize;
+            for segment in sealed.iter().take(count) {
+                if let Err(e) = self.unlink_segment(segment.path()).await {
                     tracing::error!(
-                        segment = %path.display(),
+                        segment = %segment.path().display(),
                         error = %e,
                         "WAL collection could not unlink a sealed segment"
                     );
-                    break 'unlink;
+                    break;
                 }
+                removed += 1;
                 unlinked += 1;
                 #[cfg(test)]
                 if unlinked == 1 {
                     test_abort_if_armed(TestAbortPoint::CollectInsideUnlink);
                 }
             }
+            sealed.drain(..removed);
         }
         if unlinked > 0 {
             #[cfg(test)]
@@ -2342,6 +2387,20 @@ impl WalWriter {
                 tracing::error!(error = %e, "WAL collection could not fsync the WAL directory");
             }
         }
+    }
+
+    /// Unlinks one sealed segment file.
+    async fn unlink_segment(&self, path: &Path) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self
+            .test_refused_unlinks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(path)
+        {
+            return Err(std::io::Error::other("injected: the unlink is refused"));
+        }
+        tokio::fs::remove_file(path).await
     }
 
     /// One collection tick of a store-mode WAL (TG-WAL-003). Returns whether
@@ -2570,6 +2629,71 @@ impl WalWriter {
 // WalRecovery — startup replay
 // ===========================================================================
 
+/// The most frames one replay batch of a store-mode WAL takes.
+const REPLAY_BATCH_MAX_FRAMES: usize = 1000;
+/// The most encoded value bytes one replay batch takes; the first frame of a
+/// batch is admitted whole.
+const REPLAY_BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// What replaying one frame writes to the store.
+enum ReplayWrite {
+    /// Stores `value` under the frame's key.
+    Put {
+        /// The record.
+        value: RecordValue,
+        /// Absolute millis since epoch (0 = no expiry).
+        expiration_time: i64,
+    },
+    /// Removes the frame's key.
+    Remove,
+}
+
+/// The values a replay batch has prepared and not yet committed, by
+/// `(map, key)`; `None` is a key the batch removes.
+#[derive(Default)]
+struct ReplayOverlay {
+    values: HashMap<(String, String), Option<RecordValue>>,
+}
+
+/// One frame of a replay batch, once prepared.
+enum Prepared {
+    /// The frame writes nothing: an LWW frame the gate discards.
+    Nothing,
+    /// A put, as the msgpack encoding `add` stores.
+    Put {
+        encoded: Vec<u8>,
+        /// Absolute millis since epoch (0 = no expiry).
+        expiration_time: i64,
+    },
+    /// A remove.
+    Remove,
+    /// Preparing the frame failed, or the store refused its write: it blocks
+    /// the frontier and stays replayable.
+    Failed,
+}
+
+/// Where the replay of one partition stands.
+struct ReplayProgress {
+    /// The contiguous-success frontier so far.
+    frontier: u64,
+    /// The first frame that was not stored, if any.
+    first_failed: Option<u64>,
+    /// The partition's row as the store holds it.
+    row: u64,
+    /// The store reported itself broken.
+    broken: bool,
+}
+
+/// What the replay of one partition did.
+struct PartitionReplay {
+    /// The contiguous-success frontier: every frame at or below it is stored.
+    frontier: u64,
+    /// The first frame that was not stored, if any.
+    first_failed: Option<u64>,
+    /// The batches committed.
+    batches: usize,
+}
+
 /// Replays all un-applied WAL entries through an inner `MapDataStore` on startup.
 ///
 /// Called **before** the WebSocket listener accepts connections so clients never
@@ -2602,6 +2726,10 @@ pub struct WalRecovery {
     /// which is the trivial configuration the seam was written to replace.
     #[cfg(test)]
     re_replayed_frames: std::sync::atomic::AtomicUsize,
+    /// Replay batch limits used instead of the production ones, so a test can
+    /// make small windows span several batches.
+    #[cfg(test)]
+    test_batch_limits: Option<(usize, usize)>,
 }
 
 impl WalRecovery {
@@ -2617,7 +2745,16 @@ impl WalRecovery {
             re_replay_oldest_frame: false,
             #[cfg(test)]
             re_replayed_frames: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            test_batch_limits: None,
         }
+    }
+
+    /// Test-only: replay batches of at most `frames` frames or `bytes` encoded
+    /// value bytes instead of the production limits.
+    #[cfg(test)]
+    pub(crate) fn test_set_replay_batch_limits(&mut self, frames: usize, bytes: usize) {
+        self.test_batch_limits = Some((frames.max(1), bytes));
     }
 
     /// Test-only: disable (or re-enable) the `RecordValue::Lww` merge gate in
@@ -2720,11 +2857,14 @@ impl WalRecovery {
     /// INVARIANTS.md TG-WAL-009 for the full state-machine argument).
     ///
     /// A `WalOp::OrDelta` frame is FOLDED, not written through. The arm loads the
-    /// key's CURRENT durable value, folds THIS ONE delta onto it via
+    /// key's CURRENT value, folds THIS ONE delta onto it via
     /// [`OrDeltaFold::fold`], and writes the result back, so the durable store —
     /// never a WAL-window checkpoint — is both the fold base and the accumulator,
     /// and each frame is applied in its own sequence position inside the single
-    /// replay stream rather than batched per key. Re-replay is a semantic no-op
+    /// replay stream rather than batched per key. A store-mode replay batch reads
+    /// that value from its own-batch overlay when an earlier frame of the batch
+    /// wrote the key, which is the value the store holds once that frame's write
+    /// is committed. Re-replay is a semantic no-op
     /// because the folded algebra IS the live one and its ops are idempotent set
     /// ops (retain, dedup push, subtract) — not because a delta is a snapshot. A
     /// delta carries only its own mutation, which is why it can never be skipped
@@ -2752,152 +2892,18 @@ impl WalRecovery {
         now: i64,
         merge_gate: bool,
     ) -> anyhow::Result<()> {
-        match &entry.op {
-            WalOp::Store {
+        let overlay = ReplayOverlay::default();
+        match Self::prepare_entry(inner_store, &overlay, entry, merge_gate).await? {
+            None => Ok(()),
+            Some(ReplayWrite::Put {
                 value,
                 expiration_time,
-            } => {
-                // Reconstruct the exact RecordValue. Current frames carry the full
-                // value (LWW or OR), so OR-Map adds/tombstones replay losslessly.
-                // Legacy frames carried a bare Value and are replayed as LWW; an
-                // absent WAL timestamp (legacy/malformed) becomes a zero-epoch
-                // timestamp so the inner store treats the replay as always-merge.
-                let record_value = match value {
-                    WalStorePayload::Record(rv) => rv.clone(),
-                    WalStorePayload::Legacy(v) => {
-                        let ts = entry.timestamp.clone().unwrap_or_else(|| Timestamp {
-                            millis: 0,
-                            counter: 0,
-                            node_id: String::new(),
-                        });
-                        RecordValue::Lww {
-                            value: v.clone(),
-                            timestamp: ts,
-                        }
-                    }
-                };
-
-                // Merge-idempotency gate (TG-WAL-006), scoped to modern Lww frames.
-                // Only a `Record`-payload `Lww` frame carries a real value timestamp
-                // to compare; if the current durable value is a strictly-newer Lww
-                // value, this frame is stale (it was superseded by a write outside
-                // the replay window) and must be discarded rather than clobber it.
-                // Legacy frames, OR frames, and a non-Lww stored value all fall
-                // through to the blind replay unchanged (see the doc-contract above).
-                // `merge_gate` is always `true` in production; the harness flips it
-                // off to reproduce the pre-fix blind clobber.
-                if merge_gate {
-                    if let WalStorePayload::Record(RecordValue::Lww {
-                        timestamp: incoming_ts,
-                        ..
-                    }) = value
-                    {
-                        if let Some(RecordValue::Lww {
-                            timestamp: stored_ts,
-                            ..
-                        }) = inner_store.load(&entry.map, &entry.key).await?
-                        {
-                            if *incoming_ts < stored_ts {
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-
-                // ABSOLUTE SET, in this frame's sequence position — for an OR
-                // value as much as for an LWW one. `add` REPLACES the key's
-                // value with this frame's; it never unions the frame with the
-                // value the store already holds, and it is never a "skip the
-                // fold up to here" hint. A delta frame later in the window then
-                // folds onto what this frame just wrote.
-                //
-                // What licenses the replace is that a `WalOp::Store` OR frame is
-                // a COMPLETE post-state snapshot of ONE key: it carries the live
-                // set AND the tombstone set as of its own sequence, so every
-                // effect at or below that sequence — removes included — is
-                // already inside it. Completeness, not recency, is the load-
-                // bearing condition: a partial or live-set-only OR snapshot
-                // would make this replace UNSAFE, because the tombstones it
-                // omitted would come back from the store's older value. That
-                // completeness is TG-WAL-012, and it holds by the payload TYPE
-                // — `WalEntry` is per-key and carries a whole `RecordValue`,
-                // whose `OrMap` shape has no partial form to frame.
-                //
-                // A naive union/merge here would be a correctness trap in the
-                // other direction: the store's pre-crash value may still hold a
-                // tag live that this frame tombstoned, and unioning resurrects
-                // it. Deletes do not self-heal.
-                //
-                // Ordering and window bounds are inherited, not re-derived here:
-                // the APPLIED watermark is prefix-complete and never leads
-                // durable state (TG-WAL-005 — the wal_seq-space tracker; NOT
-                // TG-WB-001, which is the entry-space FLUSHED watermark and
-                // explicitly independent of it), sequences are minted strictly
-                // monotone per partition in that same wal_seq space at append
-                // time (TG-WAL-010), and the window is replayed strictly
-                // ascending in it (TG-WAL-011).
+            }) => {
                 inner_store
-                    .add(
-                        &entry.map,
-                        &entry.key,
-                        &record_value,
-                        expiration_time.unwrap_or(0),
-                        now,
-                    )
+                    .add(&entry.map, &entry.key, &value, expiration_time, now)
                     .await
             }
-            WalOp::Remove => {
-                // Replay a Remove UNCONDITIONALLY (TG-WAL-009) — identical to the
-                // live remove path, which is a blind delete with no timestamp
-                // compare. `entry.timestamp` is deliberately NOT consulted and
-                // `merge_gate` is ignored for this arm: a gate the live path does not
-                // have would make `replay(Remove) != live(Remove)` and would itself
-                // lose acked deletes (the exact regression an HLC-sourced gate
-                // produced). No gate is needed — under prefix-complete in-order
-                // replay a stale Remove can never be juxtaposed over a strictly-newer
-                // re-creation (see `run`'s doc-contract and INVARIANTS.md TG-WAL-009
-                // for the state-machine argument). The harness reproduces the
-                // synthetic out-of-order clobber via its `re_replay_oldest_frame`
-                // seam, not through this arm.
-                inner_store.remove(&entry.map, &entry.key, now).await
-            }
-            WalOp::OrDelta { delta } => {
-                // Store-seeded, one frame at a time: load the key's CURRENT
-                // durable value, fold this ONE delta onto it, write it back. The
-                // durable store is the accumulator, so nothing here collects a
-                // key's deltas out of the replay stream — the next frame for this
-                // key reads what this one just wrote, exactly as the live path's
-                // read-modify-write does.
-                let base = inner_store.load(&entry.map, &entry.key).await?;
-                let folded = <Self as OrDeltaFold>::fold(base, delta);
-
-                // Expiration `0` ("no expiry"): `load` returns no TTL and `add`
-                // requires one, and a delta frame carries no expiration field —
-                // it records a mutation, not a whole slot. `0` matches what the
-                // live OR write path produces today, so the fold introduces no
-                // TTL drift. An OR path that starts writing TTLs would need the
-                // frame to carry one; it is not a value this arm may invent.
-                //
-                // "Produces `0` today" is a property of the CONFIGURATION, not of
-                // the OR policy, and nothing detects the divergence if that
-                // default ever moves — the KNOWN BOUND clause in this fn's
-                // doc-contract states it in full, with its owner.
-                inner_store
-                    .add(&entry.map, &entry.key, &folded, 0, now)
-                    .await
-            }
-            // An explicit arm rather than a `_` catch-all: the exhaustiveness is
-            // what forces a future framing to declare its replay semantics here
-            // instead of inheriting someone else's. This variant is never
-            // appended by production code, so reaching replay means a test built
-            // a frame it has no way to apply.
-            #[cfg(test)]
-            WalOp::TestNonSubsuming => Err(anyhow::anyhow!(
-                "partial-state WAL framing has no replay semantics: map={}, key={}, sequence={}",
-                entry.map,
-                entry.key,
-                entry.sequence
-            )),
+            Some(ReplayWrite::Remove) => inner_store.remove(&entry.map, &entry.key, now).await,
         }
     }
 
@@ -2965,9 +2971,11 @@ impl WalRecovery {
     /// from the watermark up, re-applied whole in sequence order onto the
     /// durable base, converges, while one `WalOp::OrDelta` frame re-applied
     /// below it can bring back a tag a later remove and prune took out. The
-    /// frontier is committed to the store as a row of its own, in a write
-    /// after every replay write, and only once that commit returned is the
-    /// WAL told it is applied.
+    /// window is replayed in batches (see `replay_partition`): each batch is
+    /// one store commit holding its frames' writes and, when the frontier
+    /// moved, the partition's row, so the row is never durable without the
+    /// writes it covers; only once that commit returned is the WAL told it is
+    /// applied.
     ///
     /// # Violation posture
     ///
@@ -2989,7 +2997,9 @@ impl WalRecovery {
     /// the store's watermarks cannot be read or a frame at or below one of
     /// them reaches the replay. A failed replay of an individual entry is NOT
     /// an error: it blocks the frontier and is logged.
+    #[allow(clippy::too_many_lines)]
     pub async fn run(&self, inner_store: Arc<dyn MapDataStore>) -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
         let partitions = if self.partitions.is_empty() {
             Self::discover_partitions(&self.wal.wal_dir)?
         } else {
@@ -2997,6 +3007,8 @@ impl WalRecovery {
         };
 
         let store_watermarks = self.store_watermarks(&inner_store)?;
+        let mut frames = 0usize;
+        let mut batches = 0usize;
 
         for partition_id in partitions {
             let entries = self.wal.unapplied(partition_id).await?;
@@ -3011,18 +3023,6 @@ impl WalRecovery {
                     .copied()
                     .unwrap_or(0)
             });
-            if let Some(watermark) = store_watermark {
-                // `entries` is ascending, so the first frame is the lowest
-                // one at or below the watermark if any is.
-                if let Some(entry) = entries.first().filter(|e| e.sequence <= watermark) {
-                    anyhow::bail!(
-                        "WAL recovery: refusing to start: partition {partition_id} holds frame {} \
-                         at or below its applied watermark {watermark}; a frame below the \
-                         watermark is never replayed",
-                        entry.sequence
-                    );
-                }
-            }
 
             // `entries` is strictly ascending by WAL sequence: `Wal::unapplied`
             // sorts defensively (see its impl), and the loop below replays in that
@@ -3046,40 +3046,51 @@ impl WalRecovery {
             let highest_enumerated = entries.iter().map(|e| e.sequence).max().unwrap_or(0);
             let now = current_millis();
 
-            for entry in &entries {
-                match Self::replay_entry(&inner_store, entry, now, self.replay_merge_gate).await {
-                    Ok(()) => {
-                        // Only a success that is still contiguous with the prefix
-                        // may advance the frontier. Once an entry has failed, later
-                        // successes are kept — re-running them next boot is free —
-                        // but they must NOT license GC of the frame that failed.
-                        //
-                        // "Free" rests on a different argument per frame kind:
-                        // Lww on the read-compare in `replay_entry`; a
-                        // `WalOp::Store` OR snapshot on monotonicity; and a
-                        // `WalOp::OrDelta` on set-algebra fold idempotency
-                        // through `crdt::apply_or_delta`, over the whole
-                        // un-applied window replayed in sequence order from the
-                        // durable-store base. Monotonicity does not cover the
-                        // delta kind.
-                        if first_failed.is_none() {
-                            frontier = entry.sequence;
+            if let Some(watermark) = store_watermark {
+                let replay = self
+                    .replay_partition(&inner_store, partition_id, &entries, watermark, now)
+                    .await?;
+                frontier = replay.frontier;
+                first_failed = replay.first_failed;
+                frames += entries.len();
+                batches += replay.batches;
+            } else {
+                for entry in &entries {
+                    match Self::replay_entry(&inner_store, entry, now, self.replay_merge_gate).await
+                    {
+                        Ok(()) => {
+                            // Only a success that is still contiguous with the prefix
+                            // may advance the frontier. Once an entry has failed, later
+                            // successes are kept — re-running them next boot is free —
+                            // but they must NOT license GC of the frame that failed.
+                            //
+                            // "Free" rests on a different argument per frame kind:
+                            // Lww on the read-compare in `replay_entry`; a
+                            // `WalOp::Store` OR snapshot on monotonicity; and a
+                            // `WalOp::OrDelta` on set-algebra fold idempotency
+                            // through `crdt::apply_or_delta`, over the whole
+                            // un-applied window replayed in sequence order from the
+                            // durable-store base. Monotonicity does not cover the
+                            // delta kind.
+                            if first_failed.is_none() {
+                                frontier = entry.sequence;
+                            }
                         }
-                    }
-                    Err(err) => {
-                        // A store error here is environmental, so it is logged and
-                        // the boot continues; refusing to boot would convert a
-                        // transient backend failure into an availability outage.
-                        tracing::warn!(
-                            partition = partition_id,
-                            map = %entry.map,
-                            key = %entry.key,
-                            seq = entry.sequence,
-                            error = %err,
-                            "WAL recovery: replay failed for entry; \
-                             watermark stops below it and it stays replayable"
-                        );
-                        first_failed.get_or_insert(entry.sequence);
+                        Err(err) => {
+                            // A store error here is environmental, so it is logged and
+                            // the boot continues; refusing to boot would convert a
+                            // transient backend failure into an availability outage.
+                            tracing::warn!(
+                                partition = partition_id,
+                                map = %entry.map,
+                                key = %entry.key,
+                                seq = entry.sequence,
+                                error = %err,
+                                "WAL recovery: replay failed for entry; \
+                                 watermark stops below it and it stays replayable"
+                            );
+                            first_failed.get_or_insert(entry.sequence);
+                        }
                     }
                 }
             }
@@ -3125,16 +3136,14 @@ impl WalRecovery {
 
             // Marking `0` would be a no-op on the sidecar but would still run
             // seal/rotate and GC for their own side effects; nothing was replayed,
-            // so skip the call and its I/O entirely.
-            if frontier == 0 {
+            // so skip the call and its I/O entirely. In store mode every batch
+            // committed its own row.
+            if frontier == 0 || store_watermark.is_some() {
                 continue;
             }
 
             // Mark the contiguous prefix applied so a clean restart is a no-op.
-            if let Err(err) = self
-                .mark_frontier(&inner_store, partition_id, frontier, store_watermark)
-                .await
-            {
+            if let Err(err) = self.wal.mark_applied(partition_id, frontier).await {
                 tracing::warn!(
                     partition = partition_id,
                     frontier,
@@ -3145,6 +3154,14 @@ impl WalRecovery {
             }
         }
 
+        if store_watermarks.is_some() {
+            tracing::info!(
+                frames,
+                batches,
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "WAL recovery complete"
+            );
+        }
         Ok(())
     }
 
@@ -3173,32 +3190,563 @@ impl WalRecovery {
         Ok(Some(watermarks.by_partition))
     }
 
-    /// Marks `frontier` applied for `partition`.
+    /// What replaying `entry` writes, reading the key's current value from
+    /// `overlay` first and from `inner_store` when the overlay does not hold
+    /// the key; `None` when the frame writes nothing.
     ///
-    /// In store mode the frontier becomes durable as the store's row first —
-    /// a commit of its own, after every replay write, so it never covers a
-    /// frame whose write could still be lost — and the WAL learns of it only
-    /// once that commit returned. A frontier at or below the store's row
-    /// changes nothing and is not committed.
-    async fn mark_frontier(
+    /// The one place a frame's replay is decided, so the gate and the fold
+    /// exist once: `replay_entry` writes what this returns at once, a
+    /// store-mode batch collects it. The contract of each arm is the one
+    /// stated on `replay_entry`.
+    async fn prepare_entry(
+        inner_store: &Arc<dyn MapDataStore>,
+        overlay: &ReplayOverlay,
+        entry: &WalEntry,
+        merge_gate: bool,
+    ) -> anyhow::Result<Option<ReplayWrite>> {
+        match &entry.op {
+            WalOp::Store {
+                value,
+                expiration_time,
+            } => {
+                // Reconstruct the exact RecordValue. Current frames carry the full
+                // value (LWW or OR), so OR-Map adds/tombstones replay losslessly.
+                // Legacy frames carried a bare Value and are replayed as LWW; an
+                // absent WAL timestamp (legacy/malformed) becomes a zero-epoch
+                // timestamp so the inner store treats the replay as always-merge.
+                let record_value = match value {
+                    WalStorePayload::Record(rv) => rv.clone(),
+                    WalStorePayload::Legacy(v) => {
+                        let ts = entry.timestamp.clone().unwrap_or_else(|| Timestamp {
+                            millis: 0,
+                            counter: 0,
+                            node_id: String::new(),
+                        });
+                        RecordValue::Lww {
+                            value: v.clone(),
+                            timestamp: ts,
+                        }
+                    }
+                };
+
+                // Merge-idempotency gate (TG-WAL-006), scoped to modern Lww frames.
+                // Only a `Record`-payload `Lww` frame carries a real value timestamp
+                // to compare; if the current value is a strictly-newer Lww value,
+                // this frame is stale (it was superseded by a write outside the
+                // replay window) and must be discarded rather than clobber it.
+                // Legacy frames, OR frames, and a non-Lww current value all fall
+                // through to the blind replay unchanged (see the doc-contract on
+                // `replay_entry`). `merge_gate` is always `true` in production; the
+                // harness flips it off to reproduce the pre-fix blind clobber.
+                if merge_gate {
+                    if let WalStorePayload::Record(RecordValue::Lww {
+                        timestamp: incoming_ts,
+                        ..
+                    }) = value
+                    {
+                        if let Some(RecordValue::Lww {
+                            timestamp: stored_ts,
+                            ..
+                        }) = overlay.load(inner_store, &entry.map, &entry.key).await?
+                        {
+                            if *incoming_ts < stored_ts {
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
+
+                // ABSOLUTE SET, in this frame's sequence position — for an OR
+                // value as much as for an LWW one. The write REPLACES the key's
+                // value with this frame's; it never unions the frame with the
+                // value the store already holds, and it is never a "skip the
+                // fold up to here" hint. A delta frame later in the window then
+                // folds onto what this frame wrote.
+                //
+                // What licenses the replace is that a `WalOp::Store` OR frame is
+                // a COMPLETE post-state snapshot of ONE key: it carries the live
+                // set AND the tombstone set as of its own sequence, so every
+                // effect at or below that sequence — removes included — is
+                // already inside it. Completeness, not recency, is the load-
+                // bearing condition: a partial or live-set-only OR snapshot
+                // would make this replace UNSAFE, because the tombstones it
+                // omitted would come back from the store's older value. That
+                // completeness is TG-WAL-012, and it holds by the payload TYPE
+                // — `WalEntry` is per-key and carries a whole `RecordValue`,
+                // whose `OrMap` shape has no partial form to frame.
+                //
+                // A naive union/merge here would be a correctness trap in the
+                // other direction: the store's pre-crash value may still hold a
+                // tag live that this frame tombstoned, and unioning resurrects
+                // it. Deletes do not self-heal.
+                //
+                // Ordering and window bounds are inherited, not re-derived here:
+                // the APPLIED watermark is prefix-complete and never leads
+                // durable state (TG-WAL-005 — the wal_seq-space tracker; NOT
+                // TG-WB-001, which is the entry-space FLUSHED watermark and
+                // explicitly independent of it), sequences are minted strictly
+                // monotone per partition in that same wal_seq space at append
+                // time (TG-WAL-010), and the window is replayed strictly
+                // ascending in it (TG-WAL-011).
+                Ok(Some(ReplayWrite::Put {
+                    value: record_value,
+                    expiration_time: expiration_time.unwrap_or(0),
+                }))
+            }
+            WalOp::Remove => {
+                // Replay a Remove UNCONDITIONALLY (TG-WAL-009) — identical to the
+                // live remove path, which is a blind delete with no timestamp
+                // compare. `entry.timestamp` is deliberately NOT consulted and
+                // `merge_gate` is ignored for this arm: a gate the live path does not
+                // have would make `replay(Remove) != live(Remove)` and would itself
+                // lose acked deletes (the exact regression an HLC-sourced gate
+                // produced). No gate is needed — under prefix-complete in-order
+                // replay a stale Remove can never be juxtaposed over a strictly-newer
+                // re-creation (see `run`'s doc-contract and INVARIANTS.md TG-WAL-009
+                // for the state-machine argument). The harness reproduces the
+                // synthetic out-of-order clobber via its `re_replay_oldest_frame`
+                // seam, not through this arm.
+                Ok(Some(ReplayWrite::Remove))
+            }
+            WalOp::OrDelta { delta } => {
+                // One frame at a time: load the key's CURRENT value, fold this ONE
+                // delta onto it, write it back. The durable store is the
+                // accumulator, so nothing here collects a key's deltas out of the
+                // replay stream — the next frame for this key reads what this one
+                // wrote, exactly as the live path's read-modify-write does. In a
+                // store-mode replay batch that read is served by the own-batch
+                // overlay while the batch is not yet committed: the overlay holds
+                // what this frame's write will have made the store hold.
+                let base = overlay.load(inner_store, &entry.map, &entry.key).await?;
+                let folded = <Self as OrDeltaFold>::fold(base, delta);
+
+                // Expiration `0` ("no expiry"): `load` returns no TTL and `add`
+                // requires one, and a delta frame carries no expiration field —
+                // it records a mutation, not a whole slot. `0` matches what the
+                // live OR write path produces today, so the fold introduces no
+                // TTL drift. An OR path that starts writing TTLs would need the
+                // frame to carry one; it is not a value this arm may invent.
+                //
+                // "Produces `0` today" is a property of the CONFIGURATION, not of
+                // the OR policy, and nothing detects the divergence if that
+                // default ever moves — the KNOWN BOUND clause in `replay_entry`'s
+                // doc-contract states it in full, with its owner.
+                Ok(Some(ReplayWrite::Put {
+                    value: folded,
+                    expiration_time: 0,
+                }))
+            }
+            // An explicit arm rather than a `_` catch-all: the exhaustiveness is
+            // what forces a future framing to declare its replay semantics here
+            // instead of inheriting someone else's. This variant is never
+            // appended by production code, so reaching replay means a test built
+            // a frame it has no way to apply.
+            #[cfg(test)]
+            WalOp::TestNonSubsuming => Err(anyhow::anyhow!(
+                "partial-state WAL framing has no replay semantics: map={}, key={}, sequence={}",
+                entry.map,
+                entry.key,
+                entry.sequence
+            )),
+        }
+    }
+
+    /// The batch limits of a store-mode replay.
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    fn replay_batch_limits(&self) -> (usize, usize) {
+        #[cfg(test)]
+        if let Some(limits) = self.test_batch_limits {
+            return limits;
+        }
+        (REPLAY_BATCH_MAX_FRAMES, REPLAY_BATCH_MAX_BYTES)
+    }
+
+    /// Prepares `entry` for a batch reading `overlay`, and encodes a put as
+    /// the store's `add` would. Returns the frame's write and the value the
+    /// overlay takes for its key once the frame is admitted (`Some(None)` for
+    /// a remove, `None` when the key's value does not change).
+    async fn prepare_frame(
+        &self,
+        inner_store: &Arc<dyn MapDataStore>,
+        overlay: &ReplayOverlay,
+        partition: u32,
+        entry: &WalEntry,
+    ) -> (Prepared, Option<Option<RecordValue>>) {
+        let prepared =
+            Self::prepare_entry(inner_store, overlay, entry, self.replay_merge_gate).await;
+        let encoded = match prepared {
+            Ok(Some(ReplayWrite::Put {
+                value,
+                expiration_time,
+            })) => rmp_serde::to_vec_named(&value)
+                .map(|encoded| {
+                    (
+                        Prepared::Put {
+                            encoded,
+                            expiration_time,
+                        },
+                        Some(Some(value)),
+                    )
+                })
+                .map_err(anyhow::Error::from),
+            Ok(Some(ReplayWrite::Remove)) => Ok((Prepared::Remove, Some(None))),
+            Ok(None) => Ok((Prepared::Nothing, None)),
+            Err(err) => Err(err),
+        };
+        encoded.unwrap_or_else(|err| {
+            log_unreplayed(partition, entry, &err);
+            (Prepared::Failed, None)
+        })
+    }
+
+    /// Prepares `frames` again in sequence order over a fresh overlay, so each
+    /// reads the store as the writes committed so far left it; a frame whose
+    /// write the store refused stays failed.
+    async fn reprepare(
         &self,
         inner_store: &Arc<dyn MapDataStore>,
         partition: u32,
-        frontier: u64,
-        store_watermark: Option<u64>,
-    ) -> anyhow::Result<()> {
-        if let Some(watermark) = store_watermark {
-            if frontier <= watermark {
-                return Ok(());
+        frames: &[WalEntry],
+        refused: &[bool],
+    ) -> Vec<Prepared> {
+        let mut overlay = ReplayOverlay::default();
+        let mut prepared = Vec::with_capacity(frames.len());
+        for (entry, refused) in frames.iter().zip(refused) {
+            if *refused {
+                prepared.push(Prepared::Failed);
+                continue;
             }
-            inner_store
-                .commit(&crate::storage::map_data_store::FlushCommit {
-                    writes: Vec::new(),
-                    applied: vec![(partition, frontier)],
-                })
-                .await?;
+            let (frame, value) = self
+                .prepare_frame(inner_store, &overlay, partition, entry)
+                .await;
+            if let Some(value) = value {
+                overlay.note(entry, value);
+            }
+            prepared.push(frame);
         }
-        self.wal.mark_applied(partition, frontier).await
+        prepared
+    }
+
+    /// Replays the un-applied `entries` of a store-mode partition in batches.
+    ///
+    /// A batch takes frames in sequence order (TG-WAL-011) up to
+    /// [`REPLAY_BATCH_MAX_FRAMES`] or [`REPLAY_BATCH_MAX_BYTES`] of encoded
+    /// values, its first frame whole. Each frame is prepared against the
+    /// batch's own-batch overlay, so it reads what an earlier frame of the
+    /// batch wrote exactly as per-frame replay reads it from the store — the
+    /// LWW gate (TG-WAL-006), the OR fold (TG-OR-003) and an unconditional
+    /// Remove (TG-WAL-009) see the same values. The batch is one store commit
+    /// holding its writes and, when the contiguous-success frontier moved
+    /// above the row the store holds, the partition's row: the row is never
+    /// durable without the writes it covers. Only once that commit returned is
+    /// the WAL told the frontier is applied.
+    ///
+    /// Every frame is checked against `watermark`, the store's row read when
+    /// `run` began: a frame at or below it refuses the start, naming it, and is
+    /// never skipped. A frame that fails to prepare writes nothing and stops
+    /// the frontier below it; later frames are still replayed, as per-frame
+    /// replay does. A refused commit is handled by `commit_batch`; only a store
+    /// that reports itself broken ends the partition's replay early.
+    async fn replay_partition(
+        &self,
+        inner_store: &Arc<dyn MapDataStore>,
+        partition: u32,
+        entries: &[WalEntry],
+        watermark: u64,
+        now: i64,
+    ) -> anyhow::Result<PartitionReplay> {
+        let (max_frames, max_bytes) = self.replay_batch_limits();
+        let mut progress = ReplayProgress {
+            frontier: 0,
+            first_failed: None,
+            row: watermark,
+            broken: false,
+        };
+        let mut batches = 0;
+        let mut next = 0;
+        while next < entries.len() && !progress.broken {
+            let first = next;
+            let mut overlay = ReplayOverlay::default();
+            let mut batch = Vec::new();
+            let mut bytes = 0usize;
+            while let Some(entry) = entries.get(next) {
+                if batch.len() == max_frames {
+                    break;
+                }
+                if entry.sequence <= watermark {
+                    anyhow::bail!(
+                        "WAL recovery: refusing to start: partition {partition} holds frame {} \
+                         at or below its applied watermark {watermark}; a frame below the \
+                         watermark is never replayed",
+                        entry.sequence
+                    );
+                }
+                let (frame, value) = self
+                    .prepare_frame(inner_store, &overlay, partition, entry)
+                    .await;
+                let len = frame.encoded_len();
+                if !batch.is_empty() && bytes.saturating_add(len) > max_bytes {
+                    break;
+                }
+                bytes = bytes.saturating_add(len);
+                if let Some(value) = value {
+                    overlay.note(entry, value);
+                }
+                batch.push(frame);
+                next += 1;
+            }
+            batches += 1;
+            self.commit_batch(
+                inner_store,
+                partition,
+                &entries[first..next],
+                batch,
+                &mut progress,
+                now,
+            )
+            .await;
+        }
+        Ok(PartitionReplay {
+            frontier: progress.frontier,
+            first_failed: progress.first_failed,
+            batches,
+        })
+    }
+
+    /// Commits one replay batch, its row inside.
+    ///
+    /// A commit refused with [`RecordRefused`] leaves out the refused writes —
+    /// their frames block the frontier — and commits the rest again; a commit
+    /// refused otherwise is halved, each half committed in order, down to
+    /// single frames, at most `2n − 1` commits for a batch of `n`. A frame
+    /// refused alone blocks the frontier and the frames after it are still
+    /// committed, as per-frame replay does; there is no hold to protect at
+    /// start, so no refusal pattern ends the partition. Before a part is
+    /// committed again its frames are prepared again from the store, which by
+    /// then holds every write of this batch committed so far, so a refused
+    /// write is never read by a later frame. A store that reports itself
+    /// broken (`TG-WB-010`) ends the partition's replay: nothing more is
+    /// committed for it.
+    async fn commit_batch(
+        &self,
+        inner_store: &Arc<dyn MapDataStore>,
+        partition: u32,
+        frames: &[WalEntry],
+        prepared: Vec<Prepared>,
+        progress: &mut ReplayProgress,
+        now: i64,
+    ) {
+        let mut refused = vec![false; frames.len()];
+        // Parts still to commit, the next one last.
+        let mut parts = vec![(0, frames.len())];
+        let mut first_attempt = Some(prepared);
+        while let Some((lo, hi)) = parts.pop() {
+            let mut part = match first_attempt.take() {
+                Some(prepared) => prepared,
+                None => {
+                    self.reprepare(inner_store, partition, &frames[lo..hi], &refused[lo..hi])
+                        .await
+                }
+            };
+            loop {
+                let (writes, origin) = batch_writes(&frames[lo..hi], &part, now);
+                let frontier = progress.frontier_after(&frames[lo..hi], &part);
+                let applied = if frontier > progress.row {
+                    vec![(partition, frontier)]
+                } else {
+                    Vec::new()
+                };
+                if writes.is_empty() && applied.is_empty() {
+                    progress.settle(&frames[lo..hi], &part);
+                    break;
+                }
+                let commit = crate::storage::map_data_store::FlushCommit {
+                    writes,
+                    applied: applied.clone(),
+                };
+                let err = match inner_store.commit(&commit).await {
+                    Ok(()) => {
+                        progress.settle(&frames[lo..hi], &part);
+                        if let Some(&(_, row)) = applied.first() {
+                            progress.row = row;
+                            if let Err(err) = self.wal.mark_applied(partition, row).await {
+                                tracing::warn!(
+                                    partition,
+                                    frontier = row,
+                                    error = %err,
+                                    "WAL recovery: failed to mark entries applied; \
+                                     next restart will re-replay (safe but redundant)"
+                                );
+                            }
+                        }
+                        break;
+                    }
+                    Err(err) => err,
+                };
+                if let crate::storage::map_data_store::StoreErrorClass::StoreBroken(cause) =
+                    inner_store.classify_error(&err)
+                {
+                    tracing::error!(
+                        partition,
+                        cause = cause.as_str(),
+                        error = %err,
+                        "WAL recovery: the durable store is broken; the replay of this \
+                         partition stops and its frames stay replayable"
+                    );
+                    progress.broken = true;
+                    return;
+                }
+                let mut named: Vec<usize> = err
+                    .chain()
+                    .find_map(|e| e.downcast_ref::<crate::storage::map_data_store::RecordRefused>())
+                    .map(|r| {
+                        r.indices
+                            .iter()
+                            .filter_map(|w| origin.get(*w).copied())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // Only the first refused write of a key is taken as refused: a
+                // later write of that key was prepared from the refused one,
+                // so it is prepared again without it and committed again.
+                named.sort_unstable();
+                let mut keys = HashSet::new();
+                named.retain(|i| keys.insert((&frames[lo + i].map, &frames[lo + i].key)));
+                if !named.is_empty() {
+                    for i in named {
+                        let entry = &frames[lo + i];
+                        log_unreplayed(partition, entry, &err);
+                        refused[lo + i] = true;
+                    }
+                    part = self
+                        .reprepare(inner_store, partition, &frames[lo..hi], &refused[lo..hi])
+                        .await;
+                    continue;
+                }
+                if hi - lo == 1 {
+                    let entry = &frames[lo];
+                    log_unreplayed(partition, entry, &err);
+                    refused[lo] = true;
+                    progress.settle(&frames[lo..hi], &[Prepared::Failed]);
+                    break;
+                }
+                let mid = lo + (hi - lo) / 2;
+                parts.push((mid, hi));
+                parts.push((lo, mid));
+                break;
+            }
+        }
+    }
+}
+
+/// Logs a frame whose replay failed: it blocks the frontier and stays
+/// replayable.
+fn log_unreplayed(partition: u32, entry: &WalEntry, err: &anyhow::Error) {
+    tracing::warn!(
+        partition,
+        map = %entry.map,
+        key = %entry.key,
+        seq = entry.sequence,
+        error = %err,
+        "WAL recovery: replay failed for entry; \
+         watermark stops below it and it stays replayable"
+    );
+}
+
+/// The store writes of a prepared part of a replay batch, and for each write
+/// the index of its frame in the part.
+fn batch_writes<'a>(
+    frames: &'a [WalEntry],
+    prepared: &[Prepared],
+    now: i64,
+) -> (
+    Vec<crate::storage::map_data_store::StoreWrite<'a>>,
+    Vec<usize>,
+) {
+    use crate::storage::map_data_store::{PutValue, StoreWrite};
+    let mut writes = Vec::new();
+    let mut origin = Vec::new();
+    for (i, (frame, entry)) in prepared.iter().zip(frames).enumerate() {
+        let write = match frame {
+            Prepared::Put {
+                encoded,
+                expiration_time,
+            } => StoreWrite::Put {
+                map: &entry.map,
+                key: &entry.key,
+                value: PutValue::Encoded(encoded.clone()),
+                expiration_time: *expiration_time,
+                store_time: now,
+            },
+            Prepared::Remove => StoreWrite::Remove {
+                map: &entry.map,
+                key: &entry.key,
+                store_time: now,
+            },
+            Prepared::Nothing | Prepared::Failed => continue,
+        };
+        origin.push(i);
+        writes.push(write);
+    }
+    (writes, origin)
+}
+
+impl ReplayOverlay {
+    /// The current value of `(map, key)`: what the batch has prepared for it,
+    /// else what the store holds.
+    async fn load(
+        &self,
+        inner_store: &Arc<dyn MapDataStore>,
+        map: &str,
+        key: &str,
+    ) -> anyhow::Result<Option<RecordValue>> {
+        match self.values.get(&(map.to_string(), key.to_string())) {
+            Some(value) => Ok(value.clone()),
+            None => inner_store.load(map, key).await,
+        }
+    }
+
+    /// Records the value `entry`'s key holds once the batch is committed.
+    fn note(&mut self, entry: &WalEntry, value: Option<RecordValue>) {
+        self.values
+            .insert((entry.map.clone(), entry.key.clone()), value);
+    }
+}
+
+impl Prepared {
+    /// The bytes this frame adds to its batch.
+    fn encoded_len(&self) -> usize {
+        match self {
+            Self::Put { encoded, .. } => encoded.len(),
+            Self::Remove | Self::Nothing | Self::Failed => 0,
+        }
+    }
+}
+
+impl ReplayProgress {
+    /// The frontier once `prepared` — the frames `frames` — is committed.
+    fn frontier_after(&self, frames: &[WalEntry], prepared: &[Prepared]) -> u64 {
+        let mut frontier = self.frontier;
+        if self.first_failed.is_none() {
+            for (entry, frame) in frames.iter().zip(prepared) {
+                if matches!(frame, Prepared::Failed) {
+                    break;
+                }
+                frontier = entry.sequence;
+            }
+        }
+        frontier
+    }
+
+    /// Takes in the outcome of `frames`, committed or failed.
+    fn settle(&mut self, frames: &[WalEntry], prepared: &[Prepared]) {
+        for (entry, frame) in frames.iter().zip(prepared) {
+            if matches!(frame, Prepared::Failed) {
+                self.first_failed.get_or_insert(entry.sequence);
+            } else if self.first_failed.is_none() {
+                self.frontier = entry.sequence;
+            }
+        }
     }
 }
 
@@ -3218,10 +3766,13 @@ impl WalRecovery {
 /// would be free to drift from what the write path actually did, and on this
 /// path drift is a silently lost mutation rather than a visible error.
 impl OrDeltaFold for WalRecovery {
-    /// One frame, one call: the caller passes the store's value as `base` and
-    /// writes the result straight back, so the DURABLE STORE is the accumulator.
-    /// The parameter is a single delta, not a window, so a key's frames cannot be
-    /// collected out of the replay stream and folded as a batch.
+    /// One frame, one call: the caller passes the key's current value as `base`
+    /// and writes the result back, so the DURABLE STORE is the accumulator. In a
+    /// store-mode replay batch that value comes from the batch's own-batch
+    /// overlay when an earlier frame of the batch wrote the key — the value the
+    /// store holds once the batch is committed. The parameter is a single
+    /// delta, not a window, so a key's frames are still folded one at a time in
+    /// sequence order, never collected out of the replay stream.
     fn fold(base: Option<RecordValue>, delta: &OrDelta) -> RecordValue {
         // An absent record is a legitimate first write, not an error: the empty
         // OR-Map here is byte-identical to the `init` value the live OR_ADD /
@@ -3414,6 +3965,60 @@ impl WalWriter {
                 .is_some_and(|task| !task.is_finished()),
             WalMode::Sidecar => false,
         }
+    }
+
+    /// Installs the fsync observer, or removes it with `None`.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn test_set_fsync_observer(
+        &self,
+        observer: Option<Arc<dyn Fn(&Path, u64) + Send + Sync>>,
+    ) {
+        *self
+            .test_fsync_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = observer;
+    }
+
+    /// Hands the observer the length of the active segment just fsynced,
+    /// read while the caller still holds the segment's lock: no frame can be
+    /// appended between the fsync and the length.
+    fn test_observe_fsync(&self, active: &Segment) {
+        let observer = self
+            .test_fsync_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(observer) = observer {
+            let length = std::fs::metadata(active.path()).map_or(0, |m| m.len());
+            observer(active.path(), length);
+        }
+    }
+
+    /// Holds every fsync of the batched policy while `hold` is set.
+    pub(crate) fn test_hold_batched_fsync(&self, hold: bool) {
+        self.test_hold_batched_fsync.store(hold, Ordering::Release);
+    }
+
+    /// Makes the collection tick fail to unlink the sealed segment at
+    /// `path` while `refuse` is set.
+    pub(crate) fn test_refuse_unlink(&self, path: &Path, refuse: bool) {
+        let mut refused = self
+            .test_refused_unlinks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if refuse {
+            refused.insert(path.to_path_buf());
+        } else {
+            refused.remove(path);
+        }
+    }
+
+    /// The paths of the sealed segments the WAL holds for `partition`,
+    /// oldest first.
+    pub(crate) async fn test_sealed_paths(&self, partition: u32) -> Vec<PathBuf> {
+        let handle = self.handle(partition).await.expect("partition handle");
+        let sealed = handle.sealed.lock().await;
+        sealed.iter().map(|s| s.path().to_path_buf()).collect()
     }
 }
 
@@ -4453,12 +5058,19 @@ mod tests {
     }
 
     fn or_delta_frame(key: &str, delta: OrDelta) -> WalEntry {
+        delta_frame(key, delta, 1)
+    }
+
+    /// A delta frame of map `m` at `sequence`, for the replay tests of this
+    /// module and of its sibling test modules: delta frames are built only in
+    /// the WAL's own files.
+    pub(super) fn delta_frame(key: &str, delta: OrDelta, sequence: u64) -> WalEntry {
         WalEntry {
             map: "m".to_string(),
             key: key.to_string(),
             op: WalOp::OrDelta { delta },
             timestamp: None,
-            sequence: 1,
+            sequence,
         }
     }
 
@@ -6000,3 +6612,7 @@ mod tests {
 #[cfg(test)]
 #[path = "store_mode_tests.rs"]
 mod store_mode_tests;
+
+#[cfg(test)]
+#[path = "batched_replay_tests.rs"]
+mod batched_replay_tests;

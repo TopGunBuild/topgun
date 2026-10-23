@@ -151,6 +151,12 @@ jobs:
         #   builds one binary without it. All three are run locally
         #   (`pnpm test:integration-rust:liveness`). What guards the three defects
         #   in CI is the in-process tests in `cargo test` and the clippy gate.
+        # - write-behind-batch-measure times the write-behind drain and the start
+        #   replay of a 6a030bb6 build against this binary, out of process, for up
+        #   to three hours on one machine; CI builds neither the 6a030bb6 binary nor
+        #   offers a quiet machine, so it is run locally
+        #   (`pnpm test:integration-rust:measure`) and its JSON is carried in the
+        #   pull request.
         # - cluster-routing is left out by the variable below and gated separately
         #   (non-blocking) in the next job.
         # Each of these files fails, never skips, when what it needs is not given.

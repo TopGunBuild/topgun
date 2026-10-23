@@ -26,7 +26,11 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   (the file's stated oracle is exactly this invariant; real store + WAL, SIGKILL modeled by store
   drop). Store mode — `store_mode_tests.rs::a12_under_batched_a_wal_cut_to_its_last_fsync_never_reuses_a_sequence`,
   `a18_a_kill_inside_or_right_after_a_commit_loses_no_acked_write` (a child process aborted
-  inside and right after a commit).
+  inside and right after a commit); `batched_replay_tests.rs::c90_crash_loop` (and its 50-kill
+  `c90_crash_loop_long`): a child process running write-behind over the store-mode WAL is killed
+  with SIGKILL at a seeded moment, every WAL segment is cut back to its last logged fsync, and
+  under `PerOp` every acknowledged op is found after the restart unless a later op of its key
+  superseded it.
 - **Violation consequence:** silently vanished acked writes after restart — worst CRDT-storage
   class; client re-converges only if its own op-log survived.
 - **Discovered by:** SPEC-331/332/333 durability chain.
@@ -47,7 +51,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Discovered by:** extraction pilot audit 2026-07-16; fsync-tier asymmetry noted vs TiKV.
 - **Status:** decided (gap intentional), **enforcement NAKED (TODO-602; the natural vehicle is
   SPEC-352b / TODO-603 — a Batched-policy truncate-to-durable-frontier fault schedule, which the
-  in-process crash harness deliberately does not model)**.
+  in-process crash harness deliberately does not model)**. `batched_replay_tests.rs::c90_crash_loop`
+  cuts the WAL to its last logged fsync under `Batched` and proves no sequence is reused and no
+  segment is collected above the engine watermark; it does not make this row enforced, because the
+  logged fsync lengths are the loss model's input, not an oracle of how much may be lost.
 
 ### TG-WAL-003: The applied watermark a WAL collection reads is durable before any segment it licenses is unlinked
 
@@ -63,8 +70,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     (every 5 s) limits collection by a fresh engine read, `min(the WAL's copy, the engine
     row)`, and collects nothing when that read fails or after `finish`. `wal-collected` (the
     highest collected sequence of each partition) is durable before the first unlink it
-    covers. A segment is sealed only by a tick, once it holds 8 MiB or its first frame is 30 s
-    old. The `.applied` files a stop that returns `Ok` writes are rollback hints for older
+    covers. A segment leaves the WAL's sealed set only once its file is unlinked; a segment that
+    cannot be unlinked holds back only its own partition, and a later tick unlinks it. A segment
+    is sealed only by a tick, once it holds 8 MiB or its first frame is 30 s old. The `.applied` files a stop that returns `Ok` writes are rollback hints for older
     binaries, each equal to the durable engine row (also after a drain that did not finish);
     this binary reads one only through the import at open, when the WAL directory holds no
     `wal-collected` or the store is `wal_import_pending`, and deletes every one at open.
@@ -83,7 +91,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `a20_a_commit_carrying_a_watermark_below_the_held_row_is_refused_and_writes_nothing`,
   `a21_a_tick_whose_watermark_read_fails_unlinks_nothing_and_the_next_tick_collects`,
   `a22_after_finish_no_tick_unlinks_and_the_tick_task_ends`,
-  `a23_a_clean_stop_writes_one_rollback_hint_per_partition_equal_to_the_engine_row`.
+  `a23_a_clean_stop_writes_one_rollback_hint_per_partition_equal_to_the_engine_row`,
+  `batched_replay_tests.rs::c09_a_segment_that_fails_to_unlink_holds_back_only_its_own_partition`,
+  `batched_replay_tests.rs::c90_crash_loop` (`wal-collected` never above the engine row of a
+  partition at any observation across real SIGKILLs, under both policies).
   Sidecar mode — `wal_harness/cases.rs::ac7_tg_wal_003_gc_crash_point_both_directions` —
   drives the real `mark_applied` with a crash injected BETWEEN the sidecar fsync and the unlink
   loop: the production `FsyncThenUnlink` order loses nothing and recovery replays every
@@ -112,7 +123,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   (the C3 scalar-max over-advance, found from generated crash/recover sequences). Store mode —
   `store_mode_tests.rs::a03_a_partition_whose_watermark_moved_by_coalescing_gets_its_row`,
   `a04_an_unseeded_partition_gets_no_row`,
-  `a05_the_engine_watermark_never_decreases_across_commits_and_restarts`.
+  `a05_the_engine_watermark_never_decreases_across_commits_and_restarts`,
+  `batched_replay_tests.rs::c90_crash_loop` (the engine row of every partition never decreases
+  across SIGKILLed incarnations, and no sequence at or below it, or of a frame left in the WAL, is
+  handed out again).
 - **Violation consequence:** the SPEC-350 headline defect — acked writes of one key silently
   dropped from replay because another key's flush advanced a scalar watermark past them.
 - **Discovered by:** SPEC-349 Audit v2 (three independent derivations).
@@ -305,14 +319,21 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   sequence — a defensive `sort_by_key(|e| e.sequence)` that holds REGARDLESS of the order frames were
   appended or enumerated across segments — and `run` replays that Vec in order. A frame at sequence
   `M > N` is therefore always replayed AFTER the frame at `N` (premise (d) of `TG-WAL-009`), and the
-  contiguous-success frontier the applied watermark advances to is well-defined by sequence.
+  contiguous-success frontier the applied watermark advances to is well-defined by sequence. In
+  store mode the window is replayed in batches that keep this order — a batch takes the next frames
+  in sequence and applies its writes in that order — and the partition's row is committed
+  in the batch of the frames it covers, so it is never durable without them.
 - **Maintaining code:** `wal/mod.rs::WalWriter::unapplied` (the `all.sort_by_key(|e| e.sequence)`
-  before the `applied_seq` filter) + `WalRecovery::run`'s in-order replay loop.
+  before the `applied_seq` filter) + `WalRecovery::run`'s in-order replay loop; in store mode
+  `WalRecovery::replay_partition` and `commit_batch`.
 - **Enforcing test:** `wal/mod.rs::tests::wal_recovery_replays_in_strictly_ascending_sequence_order`
   — frames appended out of order (seq 3, 1, 2) are returned by `unapplied` and replayed 1, 2, 3.
   Mutation-verified: removing the `sort_by_key` fails the FIRST assertion (`unapplied`'s returned order,
   `left: [3, 1, 2]` vs `right: [1, 2, 3]`), which aborts the test before the replay-order assertion is
   reached — so the enforcement is real, but it is the enumeration-order assertion that discriminates.
+  Store mode: `batched_replay_tests.rs::c01_a_replay_batch_is_one_durable_engine_write_with_its_row`
+  (the row is in the one durable write of its batch), `c04_replay_batches_respect_1000_frames_or_8_mib`,
+  `c06_a_kill_between_replay_batches_resumes_from_the_last_committed_row`.
 - **Violation consequence:** out-of-order replay would let a stale Remove delete a strictly-newer
   re-creation replayed before it, or miscompute the contiguous frontier — an acked-write loss.
 - **Discovered by:** SPEC-354 Review v2 (cataloguing the gate-free warrant's premises).
@@ -1581,7 +1602,10 @@ weaker than a test.
   production and both are in scope for this invariant.
 - **Statement:** folding any op sequence through the delta path and the full-snapshot path yields
   equal `or_map_semantic_view` (live set + tombstones + pruned), with the durable store as fold
-  base and snapshot frames as in-order absolute-set inputs.
+  base and snapshot frames as in-order absolute-set inputs. In a store-mode replay batch the fold
+  base of a key an earlier frame of the batch wrote is that frame's value, read from the batch's
+  own-batch overlay, which makes batched replay equal to per-frame replay; the fold itself stays
+  one delta at a time.
 - **Maintaining code:** types + oracle landed (SPEC-346); fold delegates to the live apply path
   (single-algebra rule, SPEC-349 R-mandate). That path now has a named anchor: `crdt.rs::apply_or_delta`
   — the ONE extracted pure apply of the add-wins / remove-wins / prune algebra, which the live OR_ADD,
@@ -1613,6 +1637,10 @@ weaker than a test.
   `…ac9_injected_frames_carry_the_golden_on_disk_shape…` (the harness's synthetic frames bound to the
   checked-in golden bytes), `…ac10ii_b…` (legacy `Store`/`Remove`-only replay), `…ac11d…` (re-replay
   of an applied OR frame is a no-op on set AND gauge — the OR merge-idempotency residual).
+  Batched replay: `wal/batched_replay_tests.rs::c02_batched_replay_equals_per_frame_replay` (generated
+  windows of LWW, remove, OR snapshot and delta frames, several of one key per batch, against
+  batches of one frame and against per-frame `replay_entry`) and `c08_…_under_refusals` (the same with
+  refused records and refused commits); removing the own-batch overlay reddens c02.
   Mutation-proven: deleting the fold's `normalize_to_or_map` call reddens exactly the non-`OrMap`
   base-shape arms while the `OrMap`-only cases stay green; and dropping `apply_or_delta`'s tombstone
   dedup reddens exactly the re-fold arms.

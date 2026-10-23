@@ -2194,8 +2194,8 @@ async fn a14_recovery_commits_its_frontier_row_and_a_second_start_replays_nothin
         return;
     }
 
-    // Recovery replays the window in sequence order, then commits the
-    // frontier as one row of its own.
+    // Recovery replays the window and commits the frontier row in the same
+    // commit as the frames it covers.
     let root = Root::new();
     a14_setup(&root, &records).await;
     let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("reopen");
@@ -2212,20 +2212,11 @@ async fn a14_recovery_commits_its_frontier_row_and_a_second_start_replays_nothin
         "the frontier commit is durable"
     );
     assert_eq!(frontier.rows(), vec![(P, 3)]);
-    assert!(
-        frontier.record_keys().is_empty(),
-        "the frontier commit holds no record"
-    );
-    let mut previous = None;
     for (key, value) in &records {
-        let record = record_key(&node.engine, key);
-        let at = writes
-            .iter()
-            .position(|w| w.touches(&record))
-            .unwrap_or_else(|| panic!("{key} is replayed"));
-        assert!(at < with_rows[0], "{key} is replayed before the frontier");
-        assert!(previous < Some(at), "the window replays in sequence order");
-        previous = Some(at);
+        assert!(
+            frontier.touches(&record_key(&node.engine, key)),
+            "the frontier commit holds {key}, a frame of the window it covers"
+        );
         assert_eq!(
             node.store.load(MAP, key).await.unwrap().as_ref(),
             Some(value)
@@ -2280,7 +2271,7 @@ async fn a14_recovery_commits_its_frontier_row_and_a_second_start_replays_nothin
             .iter()
             .position(|w| w.touches(&record))
             .unwrap_or_else(|| panic!("{key} is replayed again"));
-        assert!(previous < Some(at), "the window replays in sequence order");
+        assert!(previous <= Some(at), "the window replays in sequence order");
         previous = Some(at);
         assert_eq!(
             node.store.load(MAP, key).await.unwrap().as_ref(),
