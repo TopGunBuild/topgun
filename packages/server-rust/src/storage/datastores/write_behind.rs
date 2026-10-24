@@ -3429,6 +3429,8 @@ impl WriteBehindDataStore {
         for &partition in own.keys() {
             self.ensure_wal_seeded(partition).await;
         }
+        #[cfg(test)]
+        let watermark_mode = self.watermark_mode();
         // Collected first, so no map shard guard is held under a partition lock.
         let mut candidates: Vec<u32> = tracking
             .partitions
@@ -3444,6 +3446,29 @@ impl WriteBehindDataStore {
                         return None;
                     }
                     let resolved = |seq: &&u64| own.get(&p).is_some_and(|seqs| seqs.contains(*seq));
+                    // The negative controls of the watermark rule, on the path
+                    // the server runs: the commit's own sequences count as
+                    // resolved, as `resolve_and_advance` resolves them.
+                    #[cfg(test)]
+                    match watermark_mode {
+                        WatermarkMode::ScalarMax => {
+                            // A partition with none of its own sequences in the
+                            // commit gets no row, as the scalar advance did not
+                            // move it.
+                            return own.get(&p).and_then(|seqs| seqs.last().copied());
+                        }
+                        #[cfg(test)]
+                        WatermarkMode::InclusiveOffByOne => {
+                            return Some(
+                                state
+                                    .pending
+                                    .keys()
+                                    .find(|seq| !resolved(seq))
+                                    .map_or(state.max_assigned, |min| *min),
+                            );
+                        }
+                        WatermarkMode::PrefixComplete => {}
+                    }
                     Some(
                         state
                             .pending
