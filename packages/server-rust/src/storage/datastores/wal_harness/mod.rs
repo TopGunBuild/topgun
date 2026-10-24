@@ -10,7 +10,7 @@
 //!
 //! The harness's crash is a **modelled incarnation loss**: it destroys the in-memory
 //! `WriteBehindDataStore` and inner-store handle between incarnations while preserving the durable
-//! WAL directory, watermark sidecars, and inner store's on-disk file. It does **not** model OS
+//! WAL directory and the inner store's on-disk records and applied watermark rows. It does **not** model OS
 //! page-cache loss under `kill -9` — an un-fsynced-but-written byte that the OS still holds in page
 //! cache survives an in-process drop-and-reopen, so this harness cannot exercise or bound that loss
 //! window. Claiming otherwise would be an over-claimed crash model, which is worse than no harness
@@ -38,7 +38,7 @@
 pub(crate) mod driver;
 
 /// Proptest strategies, incarnation-preserving shrinking, the property tests
-/// (AC1/AC2/AC3), the four regression meta-tests (AC4–AC7), and the oracle-
+/// (AC1/AC2/AC3), the regression meta-tests (AC4–AC6), and the oracle-
 /// coverage guard (AC14). Layered on the driver and the vocabulary this module
 /// declares.
 #[cfg(test)]
@@ -122,8 +122,9 @@ pub(crate) enum WorkOp {
     /// Drives the real due-time drain + coalescing (`drain_ready`), never a synthetic flush.
     /// `advance_ms` is a millisecond duration and is never `f64`.
     FlushTick { advance_ms: u64 },
-    /// Drives the real `mark_applied` at the current `W(p)` — including seal + segment unlink. The
-    /// harness MUST NOT invent a separate GC path.
+    /// Drives one real WAL collection tick — seal the active segment, then unlink the sealed
+    /// segments the store's applied watermark row covers. The harness MUST NOT invent a separate
+    /// GC path.
     GcTick,
     /// Toggles the inner-store reject-all switch on/off — manufactures abandoned terminals and R5
     /// `Indeterminate` states.
@@ -220,9 +221,6 @@ pub(crate) enum DefectMode {
     EmptyBootSeed,
     /// Re-introduces C13 via `write_behind.rs`'s new `WatermarkMode::InclusiveOffByOne` seam.
     InclusiveOffByOne,
-    /// Re-introduces the `TG-WAL-003` hazard via `wal/mod.rs`'s new
-    /// `GcOrderMode::UnlinkThenFsync` seam.
-    UnlinkThenFsync,
     /// Re-introduces the pre-`TG-WAL-006` recovery clobber via `wal/mod.rs`'s
     /// `WalRecovery` test seams: the `RecordValue::Lww` merge gate is disabled
     /// (blind replay) AND each partition's oldest un-applied frame is re-replayed
@@ -247,17 +245,6 @@ pub(crate) enum DefectMode {
     /// that [`DefectMode::None`] proves. A run under this mode is expected GREEN; a
     /// violation here means the gate stopped holding.
     ReReplayOldestFrameGateOn,
-}
-
-/// `wal/mod.rs::mark_applied` crash-injection point (R7), fired between the sidecar write+fsync
-/// and the unlink loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum GcCrashPoint {
-    #[default]
-    None,
-    /// Crash between the sidecar write+fsync and the unlink loop: the sidecar is durable, the
-    /// segments are not yet unlinked.
-    PreUnlink,
 }
 
 /// Boot pending-map seeding seam (R6) in `write_behind.rs`.
@@ -410,9 +397,10 @@ pub(crate) enum InvariantViolation {
     /// became observable.
     AckedWriteLost { key: Key, incarnation: usize },
 
-    /// `TG-WAL-005` (the O2 `wal.unapplied(p)` clause): the implementation's `wal.unapplied(p)`
-    /// does not contain a sequence the model still holds as acked-but-not-durably-applied — a frame
-    /// that should still be replayed on next boot was filtered out.
+    /// `TG-WAL-005` / `TG-WAL-003` (the O2 `wal.unapplied(p)` clause): the implementation's
+    /// `wal.unapplied(p)` does not contain a sequence the model still holds as
+    /// acked-but-not-durably-applied — a frame that should still be replayed on next boot is gone,
+    /// whether a watermark that advanced too far filtered it or its segment was unlinked.
     UnappliedFrameFiltered {
         partition: PartitionId,
         sequence: Sequence,
@@ -422,14 +410,6 @@ pub(crate) enum InvariantViolation {
     /// sequence the model still holds as unresolved for `partition` — the exact off-by-one shape
     /// `InclusiveOffByOne` (C13) re-introduces.
     WatermarkAboveUnresolved {
-        partition: PartitionId,
-        sequence: Sequence,
-    },
-
-    /// `TG-WAL-003`: a sealed segment holding a model-unresolved sequence was unlinked before the
-    /// watermark sidecar's write+fsync completed — the GC-ordering hazard the R7 crash-point seam
-    /// and `GcOrderMode::UnlinkThenFsync` re-introduce.
-    SegmentUnlinkedBeforeWatermarkFsync {
         partition: PartitionId,
         sequence: Sequence,
     },

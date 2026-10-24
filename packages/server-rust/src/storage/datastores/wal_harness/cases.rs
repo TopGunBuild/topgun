@@ -1,5 +1,5 @@
 //! Proptest strategies, incarnation-preserving shrinking, the property tests, and
-//! the four regression meta-tests for the crash/recovery harness.
+//! the regression meta-tests for the crash/recovery harness.
 //!
 //! # Case-count knob and CI budget (R8)
 //!
@@ -41,8 +41,8 @@ use topgun_core::types::Value;
 use super::super::{DelayedEntry, DelayedOp, WriteBehindDataStore};
 use super::driver::{or_delta_frame, or_view_pair, run_case, OrWriteMode, RunConfig, RunOutcome};
 use super::{
-    Case, CaseShape, DefectMode, GcCrashPoint, Incarnation, IncarnationEnd, InvariantViolation,
-    Key, OrMutation, OrSlot, OracleConfig, WorkOp, MAX_KEY_INDEX,
+    Case, CaseShape, DefectMode, Incarnation, IncarnationEnd, InvariantViolation, Key, OrMutation,
+    OrSlot, OracleConfig, WorkOp, MAX_KEY_INDEX,
 };
 use crate::service::domain::crdt::OrMapSemanticView;
 use crate::storage::record::{OrMapEntry, RecordValue};
@@ -87,7 +87,7 @@ fn case_budget() -> usize {
         .unwrap_or(64)
 }
 
-/// The number of generated cases the four regression meta-tests (AC4–AC7) sweep
+/// The number of generated cases the regression meta-tests (AC4–AC6) sweep
 /// looking for their injected defect. The restart-boundary defects (C3/C12/C13)
 /// only manifest on a specific cross-incarnation shape — a seeded lower sequence
 /// still model-unresolved while a higher one resolves — so a larger sweep than
@@ -1063,59 +1063,6 @@ fn ac6_c13_inclusive_off_by_one_regression() {
 }
 
 // ---------------------------------------------------------------------------
-// AC7 — TG-WAL-003 GC crash-point injection, both directions
-// ---------------------------------------------------------------------------
-
-/// (a) The production order (`FsyncThenUnlink`) with a crash injected at the R7
-/// point loses nothing across the full budget, and recovery replays every
-/// acked-but-unapplied frame (proven by O1 evaluating with zero loss). (b) The
-/// inverted order (`GcOrderMode::UnlinkThenFsync`, which also forces the
-/// `PreUnlink` crash point) yields ≥ 1 violation from a generated sequence — (a) without (b)
-/// would show only that recovery runs.
-#[test]
-fn ac7_tg_wal_003_gc_crash_point_both_directions() {
-    let shape = CaseShape::default();
-
-    // (a) production order + crash at the seam: zero violations over the full
-    // budget, with recovery proven to run.
-    let prod_cfg = RunConfig {
-        gc_crash_point: GcCrashPoint::PreUnlink,
-        ..RunConfig::baseline()
-    };
-    let cases = gen_cases(&shape, case_budget());
-    let total = sweep(&cases, &prod_cfg);
-    assert!(
-        total.violations.is_empty(),
-        "AC7(a): production GC order + PreUnlink crash must yield zero violations, got {:?}",
-        total.violations
-    );
-    assert!(
-        total.coverage.o1_healthy_recovery_evaluations >= 1,
-        "AC7(a): recovery must actually replay across the crash boundary (O1 must have evaluated)"
-    );
-
-    // (b) inverted order: >= 1 violation from a generated sequence.
-    let inverted_cfg = RunConfig {
-        defect: DefectMode::UnlinkThenFsync,
-        ..RunConfig::baseline()
-    };
-    let hit = detect_first(&shape, &inverted_cfg, meta_budget(), |v| {
-        matches!(
-            v,
-            InvariantViolation::SegmentUnlinkedBeforeWatermarkFsync { .. }
-                | InvariantViolation::AckedWriteLost { .. }
-        )
-    })
-    .expect(
-        "AC7(b): UnlinkThenFsync must yield >= 1 violation — (a) without (b) proves only recovery runs",
-    );
-    assert!(
-        !hit.is_empty(),
-        "AC7(b): counterexample must be a non-empty generated sequence"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // TG-OR-003 — the OR delta-fold differential recovery family
 // ---------------------------------------------------------------------------
 //
@@ -1711,18 +1658,15 @@ fn tg_or_003_ac4_prune_is_an_idempotent_tombstone_set_subtraction() {
 
 /// AC2 — the STRANDED BASE and the RE-FOLD of a window recovery has already seen.
 ///
-/// Three arms, all reaching the same last-acked semantic set:
+/// Two arms, both reaching the same last-acked semantic set:
 ///
-/// - **(a) stranded base.** A real `mark_applied` + the segment GC it drives run
-///   BETWEEN the key's earlier ops and its later, un-applied deltas. After the
-///   `GcTick` the earlier frames are no longer enumerated as un-applied, so the ONLY
+/// - **(a) stranded base.** The flush commits the snapshot together with the applied
+///   watermark row that covers it, and a real collection tick then seals and unlinks
+///   its segment, BETWEEN the key's earlier ops and its later, un-applied deltas. After
+///   the `GcTick` the earlier frames are no longer enumerated as un-applied, so the ONLY
 ///   surviving copy of `tag-a` / `tag-z` is the DURABLE STORE. A fold that seeds from
 ///   `None`/empty when the store holds the key writes the delta's own effect over the
 ///   whole slot and strands those tags with no error to observe.
-/// - **(b) a crash point INSIDE the flushed-but-unmarked window.** The same ops
-///   without the `GcTick`: the snapshot is durable in the inner store yet still
-///   enumerated un-applied, so recovery replays it a second time before folding the
-///   deltas above it. Re-applying work the store already reflects must change nothing.
 /// - **(c) the re-fold.** Arm (a) again with the oldest un-applied frame replayed once
 ///   more AFTER the in-order pass. That oldest frame is the `Remove` delta, already
 ///   folded in this same recovery, so a fold that double-applies it (a tombstone push
@@ -1745,10 +1689,10 @@ fn tg_or_003_ac2_stranded_base_and_re_fold_idempotency() {
         Incarnation {
             ops: vec![
                 or_snapshot(0, &["tag-a", "tag-b"], &["tag-z"]),
-                // Resolves the snapshot's sequence, which lifts the prefix-complete
-                // watermark to it.
+                // Commits the snapshot with the watermark row that covers its
+                // sequence.
                 WorkOp::FlushTick { advance_ms: 5_000 },
-                // The real `mark_applied` at that watermark, plus its segment GC.
+                // The real collection tick up to that row: seal, then unlink.
                 WorkOp::GcTick,
                 // Above the watermark, owned by no queue entry: nothing flushes these,
                 // so they stay un-applied until recovery folds them.
@@ -1766,38 +1710,18 @@ fn tg_or_003_ac2_stranded_base_and_re_fold_idempotency() {
     assert_eq!(
         outcome.final_or_view(0),
         expected,
-        "AC2(a): after mark_applied + segment GC the durable store is the ONLY carrier of tag-a \
-         and tag-z — seeding the fold from an empty OR-Map strands them"
+        "AC2(a): after the commit of the row + segment GC the durable store is the ONLY carrier \
+         of tag-a and tag-z — seeding the fold from an empty OR-Map strands them"
     );
     assert_eq!(
         outcome.reconciled_tombstone_bytes, expected_bytes,
         "AC2(a): the gauge follows the recovered tombstone set, base tombstones included"
     );
 
-    // (b) The crash lands in the flushed-but-unmarked window: same ops, no GcTick.
-    let unmarked: Case = vec![
-        Incarnation {
-            ops: vec![
-                or_snapshot(0, &["tag-a", "tag-b"], &["tag-z"]),
-                WorkOp::FlushTick { advance_ms: 5_000 },
-                or_remove(0, "tag-b"),
-                or_add(0, "tag-c"),
-            ],
-            end: IncarnationEnd::Crash,
-        },
-        settle(0),
-    ];
-    let outcome = run_or_case(&unmarked);
-    assert_eq!(
-        outcome.final_or_view(0),
-        expected,
-        "AC2(b): a window that is durable but not yet marked applied replays in full — the \
-         re-applied snapshot must not disturb the deltas folded above it"
-    );
-    assert_eq!(
-        outcome.reconciled_tombstone_bytes, expected_bytes,
-        "AC2(b): re-applying a durable snapshot must not move the gauge"
-    );
+    // No arm crashes between the flush and the watermark: the applied watermark row is
+    // committed in the same store commit as the records it covers, so no state holds the
+    // durable snapshot without its row — there is no flushed-but-unmarked window to
+    // crash in.
 
     // (c) The re-fold: the oldest un-applied frame (the Remove delta) is folded a
     // second time onto a store that already reflects it.
