@@ -104,8 +104,7 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   drives the real `mark_applied` with a crash injected BETWEEN the sidecar fsync and the unlink
   loop: the production `FsyncThenUnlink` order loses nothing and recovery replays every
   acked-but-unapplied frame, while the inverted `UnlinkThenFsync` order (post-unlink/pre-fsync
-  crash) loses data — the both-directions proof. `prefix_watermark_proptest.rs` (SPEC-350) also
-  drives GC gating + boot seeding across incarnations.
+  crash) loses data — the both-directions proof.
 - **Violation consequence:** under-seeded `max_observed_sequence` on restart → sequence reuse →
   recovery filter silently drops frames.
 - **Discovered by:** SPEC-330 era; hardened by SPEC-350; crash-point injection proved by SPEC-352.
@@ -122,9 +121,13 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   boot seeding; unseeded-refuse guard. Store mode: the commit plan of `write_behind.rs` puts a
   partition's row in the commit only when its new value is above the durable one — never a
   lower or equal value, so a row cannot regress after a restart resets the tracker.
-- **Enforcing test:** sidecar mode — `prefix_watermark_proptest.rs` — restart-crossing proptest;
-  both loss-guards (unseeded-refuse, seed-retry) verified by revert during review (fail on pre-fix
-  code). Generatively re-enforced by `wal_harness/cases.rs::ac4_c3_scalar_max_watermark_regression`
+- **Enforcing test:** store mode — `prefix_watermark_proptest.rs` — restart-crossing proptest
+  (`stranded_lower_sequences_survive_only_under_prefix_complete`,
+  `boot_seeding_holds_the_watermark_at_the_prior_incarnations_frontier`, each with its live
+  scalar-max negative control through the commit plan); both loss-guards — unseeded-refuse
+  (`an_unseeded_partition_never_advances_even_with_pending_sequences`) and the seed retry of the
+  commit plan (phase B of `an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_read_recovers`)
+  — fail with the guard removed (mutation runs). Generatively re-enforced by `wal_harness/cases.rs::ac4_c3_scalar_max_watermark_regression`
   (the C3 scalar-max over-advance, found from generated crash/recover sequences). Store mode —
   `store_mode_tests.rs::a03_a_partition_whose_watermark_moved_by_coalescing_gets_its_row`,
   `a04_an_unseeded_partition_gets_no_row`,
