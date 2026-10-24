@@ -8361,11 +8361,20 @@ mod tests {
         dir: &std::path::Path,
         armed: bool,
     ) -> (Arc<dyn Wal>, Arc<WriteBehindDataStore>) {
+        use crate::storage::map_data_store::WatermarkKeeping;
         use crate::storage::wal::WalWriter;
 
-        let wal = WalWriter::new(dir.to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let inner: Arc<dyn MapDataStore> = Arc::new(WatermarkKeeping::new(
+            crate::storage::datastores::null::NullDataStore,
+        ));
+        let wal = WalWriter::open_over_store(
+            dir.to_path_buf(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(&inner),
+        )
+        .unwrap();
         let store = WriteBehindDataStore::new_with_wal(
-            Arc::new(crate::storage::datastores::null::NullDataStore) as Arc<dyn MapDataStore>,
+            inner,
             WriteBehindConfig {
                 write_delay_ms: 60_000,
                 flush_interval_ms: 60_000,
@@ -8384,8 +8393,8 @@ mod tests {
     /// Every frame the log directory holds, read back off disk.
     ///
     /// Segments are selected by the log's OWN name parser rather than by
-    /// guessing an extension: the directory also holds per-partition
-    /// applied-watermark files, which carry no frames.
+    /// guessing an extension: the directory also holds the collected-up-to
+    /// record, which carries no frames.
     fn frames_on_disk(dir: &std::path::Path) -> Vec<WalEntry> {
         use crate::storage::wal::format::{decode_all, FrameDecodeResult};
         use crate::storage::wal::segment::parse_segment_filename;
@@ -8550,10 +8559,15 @@ mod tests {
     #[tokio::test]
     async fn a_delta_frame_never_shrinks_what_is_queued_or_stored() {
         let dir = tempfile::tempdir().unwrap();
-        let inner = Arc::new(SpyDataStore::new());
-        let wal =
-            crate::storage::wal::WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
-                .unwrap();
+        let inner = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            SpyDataStore::new(),
+        ));
+        let wal = crate::storage::wal::WalWriter::open_over_store(
+            dir.path().to_path_buf(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(&inner) as Arc<dyn MapDataStore>,
+        )
+        .unwrap();
         let store = WriteBehindDataStore::new_with_wal(
             Arc::clone(&inner) as Arc<dyn MapDataStore>,
             WriteBehindConfig {
@@ -12446,8 +12460,15 @@ mod tests {
         use crate::storage::wal::{WalRecovery, WalWriter};
 
         let dir = tempfile::tempdir().unwrap();
-        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
-        let spy = Arc::new(SpyDataStore::retaining());
+        let spy = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            SpyDataStore::retaining(),
+        ));
+        let wal = WalWriter::open_over_store(
+            dir.path().to_path_buf(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+        )
+        .unwrap();
         spy.refuse_everything(true);
         let store = WriteBehindDataStore::new_with_wal(
             Arc::clone(&spy) as Arc<dyn MapDataStore>,
@@ -12486,16 +12507,21 @@ mod tests {
             .into_iter()
             .map(|(_, origin)| origin)
             .collect();
-        let frames = wal.unapplied(partition).await.unwrap().len();
+        let frames = super::replayable(&wal, &*spy, partition).await.len();
         drop(store);
-        let recovered = Arc::new(SpyDataStore::retaining());
+        // What the replay brings back, only the WAL carries: the store took none of it.
+        let held_before: Vec<bool> = keys
+            .iter()
+            .map(|key| spy.held(SCHEDULE_MAP, key).is_some())
+            .collect();
+        spy.refuse_everything(false);
         WalRecovery::new(Arc::clone(&wal), Vec::new())
-            .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+            .run(Arc::clone(&spy) as Arc<dyn MapDataStore>)
             .await
             .unwrap();
         let replayed: Vec<bool> = keys
             .iter()
-            .map(|key| recovered.held(SCHEDULE_MAP, key) == Some(lww(key, 1)))
+            .map(|key| spy.held(SCHEDULE_MAP, key) == Some(lww(key, 1)))
             .collect();
         assert_eq!(
             (
@@ -12504,6 +12530,7 @@ mod tests {
                 loaded,
                 tags,
                 frames,
+                held_before,
                 replayed
             ),
             (
@@ -12512,6 +12539,7 @@ mod tests {
                 vec![true; 3],
                 vec![PendingOrigin::Abandoned; 3],
                 3,
+                vec![false; 3],
                 vec![true; 3]
             ),
             "hard_flush took {took:?}"
@@ -12880,6 +12908,47 @@ mod tests {
 #[path = "write_behind_batch_tests.rs"]
 mod batch_tests;
 
+/// The un-applied frames of `partition`, each checked against the applied
+/// watermark row `store` holds.
+///
+/// `unapplied` filters by the WAL's in-memory copy, which a commit moves only
+/// after it returned; the row is what a restart replays above. A frame listed
+/// here but covered by the row would look replayable and is not.
+#[cfg(test)]
+async fn replayable(
+    wal: &crate::storage::wal::WalWriter,
+    store: &dyn MapDataStore,
+    partition: u32,
+) -> Vec<WalEntry> {
+    let row = store
+        .applied_watermarks()
+        .expect("applied watermarks")
+        .expect("a store that keeps applied watermarks")
+        .by_partition[partition as usize];
+    let frames = wal.unapplied(partition).await.expect("unapplied frames");
+    assert!(
+        frames.iter().all(|frame| frame.sequence > row),
+        "partition {partition}: a frame at or below the stored row {row} is listed as un-applied"
+    );
+    frames
+}
+
+/// Drops `wal` and returns once nothing holds it, so the next open of its
+/// directory is a restart and not a second writer beside the first.
+#[cfg(test)]
+async fn release_wal(wal: Arc<crate::storage::wal::WalWriter>) {
+    let weak = Arc::downgrade(&wal);
+    drop(wal);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while weak.upgrade().is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the WAL writer was never released"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Durability / crash-recovery tests (R12(b) WAL-retention + AC3f double-crash)
 // ---------------------------------------------------------------------------
@@ -12920,7 +12989,12 @@ mod durability_tests {
         let redb_dir = tempfile::tempdir().unwrap();
         let inner: Arc<dyn MapDataStore> =
             Arc::new(RedbDataStore::new(redb_dir.path().join("d.redb")).unwrap());
-        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let wal = WalWriter::open_over_store(
+            wal_dir.path().to_path_buf(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(&inner),
+        )
+        .unwrap();
         let store = WriteBehindDataStore::new_with_wal(
             Arc::clone(&inner),
             buffered_config(),
@@ -12939,7 +13013,7 @@ mod durability_tests {
         // Buffered: the WAL frame is fsynced but the inner store has not seen it.
         // R12(b) requires the WAL to still hold the frame (never both-lost).
         assert!(
-            !wal.unapplied(partition).await.unwrap().is_empty(),
+            !super::replayable(&wal, &*inner, partition).await.is_empty(),
             "un-flushed tombstone frame must be retained in the WAL"
         );
         assert!(
@@ -12950,7 +13024,7 @@ mod durability_tests {
         // Drain to the inner store; only NOW is the frame eligible for release.
         store.hard_flush().await.unwrap();
         assert!(
-            wal.unapplied(partition).await.unwrap().is_empty(),
+            super::replayable(&wal, &*inner, partition).await.is_empty(),
             "once the bytes are durable in the inner store the frame is applied/releasable"
         );
         assert!(
@@ -12981,7 +13055,14 @@ mod durability_tests {
             // through WriteBehindDataStore here would leave its background flush task
             // holding the inner-store handle — a real crash releases it; the direct
             // append is the faithful "frame fsynced, inner never written" window.)
-            let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+            // The store is opened only because the WAL keeps its watermark there.
+            let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&redb_path).unwrap());
+            let wal = WalWriter::open_over_store(
+                wal_dir.path().to_path_buf(),
+                WalFsyncPolicy::PerOp,
+                Arc::clone(&inner),
+            )
+            .unwrap();
             let entry = WalEntry {
                 map: "m".to_string(),
                 key: "k1".to_string(),
@@ -12993,17 +13074,27 @@ mod durability_tests {
                 sequence: 1,
             };
             wal.append(partition, &entry).await.unwrap();
+            super::release_wal(wal).await;
         }
 
         // --- Crash 2: DURING recovery — replay the still-unapplied frame into the
         // inner store, then "die" before marking it applied. ---
         {
             let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&redb_path).unwrap());
-            let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
-            let unapplied = wal.unapplied(partition).await.unwrap();
+            let wal = WalWriter::open_over_store(
+                wal_dir.path().to_path_buf(),
+                WalFsyncPolicy::PerOp,
+                Arc::clone(&inner),
+            )
+            .unwrap();
+            let unapplied = super::replayable(&wal, &*inner, partition).await;
             assert!(
                 !unapplied.is_empty(),
                 "the un-flushed tombstone frame survived crash 1 in the WAL (R12(b))"
+            );
+            assert!(
+                inner.load("m", "k1").await.unwrap().is_none(),
+                "before the replay only the WAL carries the tombstone"
             );
             for entry in &unapplied {
                 if let WalOp::Store {
@@ -13023,6 +13114,7 @@ mod durability_tests {
                 ),
                 "tombstone recovered into the inner store mid-recovery"
             );
+            super::release_wal(wal).await;
         }
 
         // --- Recovery completes: crash 2 never marked the frame applied, so R12(b)
@@ -13030,9 +13122,14 @@ mod durability_tests {
         // finally marks it applied. The tombstone survives BOTH crashes. ---
         {
             let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&redb_path).unwrap());
-            let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+            let wal = WalWriter::open_over_store(
+                wal_dir.path().to_path_buf(),
+                WalFsyncPolicy::PerOp,
+                Arc::clone(&inner),
+            )
+            .unwrap();
             assert!(
-                !wal.unapplied(partition).await.unwrap().is_empty(),
+                !super::replayable(&wal, &*inner, partition).await.is_empty(),
                 "crash 2 did not mark the frame applied, so WAL retention still holds it"
             );
             let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
@@ -13058,7 +13155,7 @@ mod durability_tests {
                 }
             }
             assert!(
-                wal.unapplied(partition).await.unwrap().is_empty(),
+                super::replayable(&wal, &*inner, partition).await.is_empty(),
                 "a completed recovery marks the frame applied"
             );
         }
@@ -14332,6 +14429,8 @@ mod background_task_panic_tests {
     struct Stranded {
         wal_dir: tempfile::TempDir,
         wal: Arc<crate::storage::wal::WalWriter>,
+        /// The store the WAL keeps its watermark in, over the panicking store.
+        kept: Arc<dyn MapDataStore>,
         memory: Arc<MemoryStore>,
         store: Arc<WriteBehindDataStore>,
     }
@@ -14347,17 +14446,22 @@ mod background_task_panic_tests {
     /// one tag on each side of the park, each as a delta frame.
     async fn stranded_shutdown(keys: &StrandedKeys, with_or_map: bool) -> Stranded {
         let wal_dir = tempfile::tempdir().expect("tempdir");
-        let wal = crate::storage::wal::WalWriter::new(
-            wal_dir.path().to_path_buf(),
-            WalFsyncPolicy::PerOp,
-        )
-        .expect("WAL writer");
         let memory = Arc::new(MemoryStore::default());
         let (inner, mut about_to_panic) =
             PanickingAddStore::over(Arc::clone(&memory) as Arc<dyn MapDataStore>, 1);
         let mut pass_parked = inner.arm_park();
+        let kept: Arc<dyn MapDataStore> =
+            Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+                Arc::into_inner(inner).expect("the panicking store is held here alone"),
+            ));
+        let wal = crate::storage::wal::WalWriter::open_over_store(
+            wal_dir.path().to_path_buf(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(&kept),
+        )
+        .expect("WAL writer");
         let store = WriteBehindDataStore::new_with_wal(
-            inner,
+            Arc::clone(&kept),
             WriteBehindConfig {
                 or_delta_wal: true,
                 ..manual_flush_config()
@@ -14434,6 +14538,7 @@ mod background_task_panic_tests {
         Stranded {
             wal_dir,
             wal,
+            kept,
             memory,
             store,
         }
@@ -14446,11 +14551,7 @@ mod background_task_panic_tests {
 
         let ((pending, unapplied, memory), events) = run_captured(async {
             let stranded = stranded_shutdown(&keys, false).await;
-            let unapplied = stranded
-                .wal
-                .unapplied(partition)
-                .await
-                .expect("unapplied frames");
+            let unapplied = super::replayable(&stranded.wal, &*stranded.kept, partition).await;
             (
                 stranded.store.pending_operation_count(),
                 unapplied,
@@ -14525,6 +14626,7 @@ mod background_task_panic_tests {
         let Stranded {
             wal_dir,
             wal,
+            kept,
             memory,
             store,
         } = stranded_shutdown(&keys, true).await;
@@ -14532,7 +14634,7 @@ mod background_task_panic_tests {
         // The precondition the outcome rests on, asserted and not assumed: the
         // drained value's frame is still in the replay window, after the dead
         // batch's older frame of the same key.
-        let unapplied = wal.unapplied(partition).await.expect("unapplied frames");
+        let unapplied = super::replayable(&wal, &*kept, partition).await;
         let frames = stored_frames(&unapplied);
         let older_at = frames
             .iter()
@@ -14551,13 +14653,17 @@ mod background_task_panic_tests {
         );
 
         // The simulated start: the old process is gone, a new writer opens
-        // the same directory and recovery replays into the same inner store.
+        // the same directory over the same store and recovery replays into it.
         drop(store);
-        drop(wal);
-        let reopened = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
-            .expect("reopened WAL writer");
+        super::release_wal(wal).await;
+        let reopened = WalWriter::open_over_store(
+            wal_dir.path().to_path_buf(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(&kept),
+        )
+        .expect("reopened WAL writer");
         WalRecovery::new(Arc::clone(&reopened), Vec::new())
-            .run(Arc::clone(&memory) as Arc<dyn MapDataStore>)
+            .run(Arc::clone(&kept))
             .await
             .expect("recovery");
 
@@ -14808,15 +14914,20 @@ mod background_task_panic_tests {
         let parked_value = lww_text("in-the-parked-batch", 1);
         let (observed, events) = run_captured(async {
             let wal_dir = tempfile::tempdir().expect("tempdir");
-            let wal = crate::storage::wal::WalWriter::new(
-                wal_dir.path().to_path_buf(),
-                WalFsyncPolicy::PerOp,
-            )
-            .expect("WAL writer");
             let (inner, mut about_to_panic) = PanickingAddStore::new(1);
             let mut pass_parked = inner.arm_park();
+            let kept: Arc<dyn MapDataStore> =
+                Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+                    Arc::into_inner(inner).expect("the panicking store is held here alone"),
+                ));
+            let wal = crate::storage::wal::WalWriter::open_over_store(
+                wal_dir.path().to_path_buf(),
+                WalFsyncPolicy::PerOp,
+                Arc::clone(&kept),
+            )
+            .expect("WAL writer");
             let store = WriteBehindDataStore::new_with_wal(
-                inner,
+                Arc::clone(&kept),
                 manual_flush_config(),
                 Some(bootstrap(Arc::clone(&wal) as Arc<dyn Wal>)),
             );
@@ -14864,10 +14975,7 @@ mod background_task_panic_tests {
                 .expect("`hard_flush` never returned after the flush task died")
                 .expect("the `hard_flush` task");
             let failure = store.background_failure().borrow().clone();
-            let unapplied = wal
-                .unapplied(partition_for(MAP, PARKED_KEY))
-                .await
-                .expect("unapplied frames");
+            let unapplied = super::replayable(&wal, &*kept, partition_for(MAP, PARKED_KEY)).await;
             let write_after = store
                 .add(MAP, "after-the-shutdown", &lww_value(), 0, now_millis())
                 .await;
