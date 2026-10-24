@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Removed (server):** `WalWriter::new`, the WAL constructor that kept the applied watermark in
+  files beside the log, is gone. Open the WAL with `WalWriter::open_over_store` over a store that
+  keeps applied watermarks, as the server does.
 - **Changed (server):** a start after an unclean stop replays the write-ahead log in batches.
   The frames a partition has not yet stored are applied up to 1000 frames or 8 MiB of encoded
   values at a time, each batch one durable commit that also records how far the log is stored,

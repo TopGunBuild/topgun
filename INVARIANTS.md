@@ -59,9 +59,8 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 ### TG-WAL-003: The applied watermark a WAL collection reads is durable before any segment it licenses is unlinked
 
-- **Scope:** segment collection ordering, all policies, in both WAL modes — *store mode*
-  (`WalWriter::open_over_store`, what the server opens) and *sidecar mode* (`WalWriter::new`,
-  tests, simulation and benches).
+- **Scope:** segment collection ordering, all policies, of the WAL the server opens
+  (`WalWriter::open_over_store`), whose applied watermark the store keeps.
 - **Statement:** the applied watermark a WAL collection reads is durable before any segment it
   licenses is unlinked; a crash between them must not lose or corrupt data (collection is
   resumable, replay is filtered by the watermark).
@@ -77,13 +76,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     binaries, each equal to the durable engine row (also after a drain that did not finish);
     this binary reads one only through the import at open, when the WAL directory holds no
     `wal-collected` or the store is `wal_import_pending`, and deletes every one at open.
-  - *Sidecar mode:* the watermark sidecar write+fsync completes before any sealed-segment
-    unlink it licenses.
 - **Maintaining code:** store mode — `wal/mod.rs` `open_over_store`, `mark_applied`, the
   collection tick, `write_wal_collected`, `finish`; `engine_store.rs` `commit` (records and
   `0x20` rows in one batch, a lower row refused); `write_behind.rs` the commit plan and its
-  settle after `Ok`. Sidecar mode — `wal/mod.rs` `mark_applied` (fsync-before-unlink block +
-  apply-time re-validation before physical delete, SPEC-350).
+  settle after `Ok`.
 - **Enforcing test:** store mode — `store_mode_tests.rs::a01_a_commit_is_one_engine_write_holding_its_records_and_its_watermark_rows`,
   `a02_a_refused_commit_changes_no_watermark_and_no_pending_sequence`,
   `a06_the_wal_collects_only_up_to_the_durable_watermark_on_its_tick`,
@@ -2937,7 +2933,8 @@ weaker than a test.
 
 - **Scope:** `RedbDataStore::open_location` (the location rules L1–L13, the migration and the
   stub) and `RedbDataStore::new` (the same rules with no legacy path), as called by the server
-  binary's `select_datastore` before `WalWriter::new` and before the listener; `run_migration`.
+  binary's `select_datastore` before `WalWriter::open_over_store` and before the listener;
+  `run_migration`.
   `D` = `TOPGUN_DATA_DIR` (or the directory derived from `TOPGUN_REDB_PATH`, or
   `./topgun-data`); `L` = `TOPGUN_REDB_PATH` (default `./topgun.redb`), the legacy path;
   `K` = `{L}.pre-migration`; the stub = a regular file at `L` of at most 16 384 bytes whose first
