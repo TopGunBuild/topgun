@@ -212,8 +212,6 @@ This guide covers common issues you may encounter when using TopGun, organized b
 - `WAL directory check: refusing to start: {file} names no WAL partition 0..271; its applied watermark cannot be imported` — a file named like `partition-*.applied` that is not one of the 271 partitions lies in the WAL directory. Move it out of the WAL directory and start again.
 - `WAL recovery: refusing to start: partition {p} holds frame {sequence} at or below its applied watermark {W}; a frame below the watermark is never replayed` — the log hands recovery a write the data directory already counts as stored. This is not a state the server produces; keep the logs and both directories, and report it. Restoring both directories from the same backup lets the node start.
 
-**Embedding the server:** `WAL directory {dir} is kept by a store that holds its applied watermark; open it over that store` is returned by `WalWriter::new` for a WAL directory the server has used. Open it with `WalWriter::open_over_store` over the data directory's store, as the server does.
-
 ### Cluster nodes not discovering each other
 
 import { AlertBox } from '../../../components/docs/AlertBox';
