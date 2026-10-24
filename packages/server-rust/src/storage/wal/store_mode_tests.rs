@@ -1736,11 +1736,22 @@ async fn a09_a_data_directory_older_than_the_wal_directory_is_refused_and_nothin
 const A10_P1: u32 = 3;
 const A10_P2: u32 = 4;
 
-/// A WAL directory written in sidecar mode — sidecars `A10_P1 = 3` and
-/// `A10_P2 = 4` — beside a data directory with no applied watermarks.
+/// A WAL directory as an older binary leaves it — `.applied` files
+/// `A10_P1 = 3` and `A10_P2 = 4` and no `wal-collected` — beside a data
+/// directory with no applied watermarks.
 async fn a10_setup(root: &Root) {
     write_pre_marker_data_dir(&root.data_dir()).await;
-    let wal = WalWriter::new(root.wal_dir(), WalFsyncPolicy::PerOp).expect("sidecar-mode open");
+    // The frames are written over a throwaway store; the older binary's
+    // files are then written by hand, in its format.
+    let scratch: Arc<dyn MapDataStore> = Arc::new(
+        EngineMapDataStore::open(Arc::new(
+            crate::storage::datastores::kv_engine::MemKvEngine::new(),
+        ))
+        .expect("store"),
+    );
+    let wal =
+        WalWriter::open_over_store(root.wal_dir(), WalFsyncPolicy::PerOp, Arc::clone(&scratch))
+            .expect("wal open");
     for seq in 1..=3 {
         wal.append(
             A10_P1,
@@ -1757,16 +1768,17 @@ async fn a10_setup(root: &Root) {
         .await
         .unwrap();
     }
-    wal.mark_applied(A10_P1, 3).await.unwrap();
-    wal.mark_applied(A10_P2, 4).await.unwrap();
-    assert_eq!(wal.test_read_applied_sequence(A10_P1), 3);
-    assert_eq!(wal.test_read_applied_sequence(A10_P2), 4);
     let weak = Arc::downgrade(&wal);
     drop(wal);
-    wait_for("the sidecar-mode WAL to be released", || {
-        weak.upgrade().is_none()
-    })
-    .await;
+    wait_for("the WAL to be released", || weak.upgrade().is_none()).await;
+    std::fs::remove_file(root.wal_dir().join(WAL_COLLECTED_FILE)).unwrap();
+    for (partition, applied) in [(A10_P1, 3u64), (A10_P2, 4)] {
+        std::fs::write(
+            sidecar_path(&root.wal_dir(), partition),
+            applied.to_be_bytes(),
+        )
+        .unwrap();
+    }
 }
 
 /// Checks the state a finished import leaves.
@@ -2513,40 +2525,6 @@ async fn a16_the_retained_wal_bytes_gauges_render_from_the_first_scrape_and_foll
         run.stdout,
         run.stderr
     );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a17_a_sidecar_mode_wal_refuses_a_directory_kept_by_a_store() {
-    let root = Root::new();
-    let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
-    node.append(P, &keys_in(P, 1).remove(0), &lww("v", 1), 1)
-        .await;
-    node.close().await;
-    assert!(read_collected(&root.wal_dir()).is_some());
-
-    let before = fingerprint(&root.wal_dir());
-    let error = match WalWriter::new(root.wal_dir(), WalFsyncPolicy::PerOp) {
-        Ok(_) => panic!("a sidecar-mode open of a directory kept by a store succeeded"),
-        Err(e) => format!("{e:#}"),
-    };
-    assert!(
-        error.contains(&format!(
-            "WAL directory {} is kept by a store that holds its applied watermark; open it over \
-             that store",
-            root.wal_dir().display()
-        )),
-        "the refusal: {error}"
-    );
-    assert_eq!(
-        fingerprint(&root.wal_dir()),
-        before,
-        "the refusal changed the WAL directory"
-    );
-
-    // A directory no store keeps still opens in sidecar mode.
-    let fresh = Root::new();
-    let wal = WalWriter::new(fresh.wal_dir(), WalFsyncPolicy::PerOp).expect("sidecar-mode open");
-    assert!(!wal.watermark_in_store());
 }
 
 #[tokio::test(flavor = "multi_thread")]
