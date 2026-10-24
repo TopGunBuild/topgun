@@ -26,7 +26,8 @@
 //! background tasks are signalled to stop and the `Arc` is dropped, so the
 //! staging buffer, pending tracker, in-flight registry, queues and seeded-set
 //! all vanish) while PRESERVING the durable artefacts (the on-disk WAL directory
-//! and the retained inner store's contents). It does NOT model OS page-cache
+//! and the retained inner store's records and applied watermark rows); the next
+//! incarnation reopens the WAL directory over that same store. It does NOT model OS page-cache
 //! loss — an un-fsynced byte the OS still holds survives an in-process drop — so
 //! this harness cannot bound that loss window; that is a categorically different
 //! crash model and is out of scope (see `wal_harness/mod.rs`'s module doc).
@@ -40,7 +41,9 @@
 //! reject state persists across the crash too, modelling a backend that is still
 //! down after a restart — which is the state that makes C12 (empty boot seed)
 //! reachable, since only a recovery that cannot replay a frame leaves work for
-//! the boot-seed to protect.
+//! the boot-seed to protect. It is wrapped in [`WatermarkKeeping`], which keeps the
+//! applied watermark rows a store-mode WAL needs, so the WAL runs in the store mode
+//! the server runs: the rows are committed with the records they cover.
 //!
 //! Reopening a real `RedbDataStore` in-process while its file lock races the
 //! background flush task is flaky, so the redb drop-and-reopen case is recorded
@@ -48,8 +51,10 @@
 //! double exercises the identical drop/preserve/reopen control flow.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex as AsyncMutex;
@@ -57,27 +62,26 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
 use super::super::{
-    partition_for, persist_entry, WalBootstrap, WatermarkMode, WriteBehindConfig,
+    partition_for, release_wal, PreparedEntry, WalBootstrap, WatermarkMode, WriteBehindConfig,
     WriteBehindDataStore,
 };
 use super::{
-    BootSeedMode, Case, CaseShape, DefectMode, GcCrashPoint, IncarnationEnd, InvariantViolation,
-    Key, ModelValue, OrMutation, OrSlot, OracleConfig, OracleCoverage, OracleCoverageFloors,
-    PartitionId, ReferenceModel, Sequence, WorkOp, MAX_KEY_INDEX,
+    BootSeedMode, Case, CaseShape, DefectMode, IncarnationEnd, InvariantViolation, Key, ModelValue,
+    OrMutation, OrSlot, OracleConfig, OracleCoverage, OracleCoverageFloors, PartitionId,
+    ReferenceModel, Sequence, WorkOp, MAX_KEY_INDEX,
 };
 use crate::service::domain::crdt::{
     apply_or_delta, normalize_to_or_map, or_map_semantic_view, OrMapSemanticView,
 };
 use crate::storage::engine::new_slot_cell;
-use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor, WriteSource};
+use crate::storage::map_data_store::{
+    LeafSink, MapDataStore, ScanBatch, ScanCursor, WatermarkKeeping, WriteSource,
+};
 use crate::storage::record::{
     reconcile_tombstone_bytes, OrMapEntry, Record, RecordMetadata, RecordValue,
 };
 use crate::storage::tombstone_gauge::with_isolated_gauge;
-use crate::storage::wal::{
-    GcCrashPoint as WalGcCrashPoint, GcOrderMode as WalGcOrderMode, OrDelta, Wal, WalEntry,
-    WalFsyncPolicy, WalOp, WalRecovery, WalWriter,
-};
+use crate::storage::wal::{OrDelta, Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery, WalWriter};
 
 /// The single map every harness key lives in.
 const TEST_MAP: &str = "wm";
@@ -113,12 +117,12 @@ struct HarnessInnerStore {
 }
 
 impl HarnessInnerStore {
-    fn new(encoding: bool) -> Arc<Self> {
-        Arc::new(Self {
+    fn new(encoding: bool) -> Self {
+        Self {
             data: AsyncMutex::new(HashMap::new()),
             healthy: AtomicBool::new(true),
             encoding,
-        })
+        }
     }
 
     fn set_healthy(&self, healthy: bool) {
@@ -300,6 +304,29 @@ impl MapDataStore for HarnessInnerStore {
     }
 }
 
+/// The harness inner store with the applied watermark rows a store-mode WAL needs.
+type KeptStore = WatermarkKeeping<HarnessInnerStore>;
+
+/// Past the age at which a collection tick seals an active segment.
+const SEAL_AGE: Duration = Duration::from_secs(31);
+
+/// Opens the harness WAL directory over `inner` in store mode, as the server
+/// opens it, with the collection clock past the seal age, so every `GcTick`
+/// seals an active segment that holds frames before it collects.
+fn open_wal(dir: &Path, inner: &Arc<KeptStore>) -> Arc<WalWriter> {
+    // No fsync: the in-process crash model preserves un-fsynced bytes (the OS
+    // page cache holds them across a drop-and-reopen), so PerOp would only slow
+    // the run without changing what a crash can lose here.
+    let wal = WalWriter::open_over_store(
+        dir.to_path_buf(),
+        WalFsyncPolicy::None,
+        Arc::clone(inner) as Arc<dyn MapDataStore>,
+    )
+    .expect("open the WAL over the store");
+    wal.test_advance_clock(SEAL_AGE);
+    wal
+}
+
 // ---------------------------------------------------------------------------
 // Run configuration and outcome
 // ---------------------------------------------------------------------------
@@ -311,10 +338,6 @@ pub(crate) struct RunConfig {
     pub defect: DefectMode,
     /// Which oracles are active. Value equality defaults OFF (TG-WAL-006).
     pub oracle: OracleConfig,
-    /// The GC crash point to install (R7). Used by AC7(a) with the production
-    /// order and by AC7(b) with the inverted order; `DefectMode::UnlinkThenFsync`
-    /// forces `PreUnlink` regardless, so the loss window is exercised.
-    pub gc_crash_point: GcCrashPoint,
     /// Case-shape constraints, including the below-floor control flags.
     pub shape: CaseShape,
     /// How OR snapshot writes reach the store, and whether the inner store
@@ -342,23 +365,13 @@ pub(crate) enum OrWriteMode {
 
 impl RunConfig {
     /// The baseline: no defect, both structural oracles on, value equality off,
-    /// no GC crash point, default shape.
+    /// default shape.
     pub fn baseline() -> Self {
         Self {
             defect: DefectMode::None,
             oracle: OracleConfig::default(),
-            gc_crash_point: GcCrashPoint::None,
             shape: CaseShape::default(),
             or_write: OrWriteMode::Cell,
-        }
-    }
-
-    /// The effective GC crash point: `UnlinkThenFsync` forces `PreUnlink` (R6).
-    fn effective_gc_crash_point(&self) -> GcCrashPoint {
-        if self.defect == DefectMode::UnlinkThenFsync {
-            GcCrashPoint::PreUnlink
-        } else {
-            self.gc_crash_point
         }
     }
 }
@@ -835,19 +848,18 @@ fn harness_config() -> WriteBehindConfig {
 
 /// Drives one generated [`Case`] end-to-end and returns the oracle outcome.
 ///
-/// Constructs a real `WalWriter` (durable across incarnations) and a retained
-/// inner store, then for each incarnation builds a fresh `WriteBehindDataStore`
-/// on real boot-seeding, applies the ops, and ends the incarnation with a real
-/// crash or graceful drain. O1 runs after each healthy recovery; O2 runs after
-/// every op.
+/// Opens a real `WalWriter` in store mode over a retained inner store (both
+/// durable across incarnations), then for each incarnation builds a fresh
+/// `WriteBehindDataStore` on real boot-seeding, applies the ops, and ends the
+/// incarnation with a real crash or graceful drain; the next incarnation reopens
+/// the WAL directory over the same store and recovers. O1 runs after each
+/// healthy recovery; O2 runs after every op.
 pub(crate) async fn run_case(case: &Case, config: &RunConfig) -> RunOutcome {
     let wal_dir = tempfile::tempdir().expect("wal tempdir");
-    // No fsync: the in-process crash model preserves un-fsynced bytes (the OS
-    // page cache holds them across a drop-and-reopen), so PerOp would only slow
-    // the run without changing what a crash can lose here.
-    let wal =
-        WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::None).expect("wal writer");
-    let inner = HarnessInnerStore::new(config.or_write == OrWriteMode::Cell);
+    let inner = Arc::new(WatermarkKeeping::new(HarnessInnerStore::new(
+        config.or_write == OrWriteMode::Cell,
+    )));
+    let wal = open_wal(wal_dir.path(), &inner);
 
     let partition = harness_partition();
     let key_strings = keys_in_partition(partition, usize::from(MAX_KEY_INDEX) + 1);
@@ -860,10 +872,9 @@ pub(crate) async fn run_case(case: &Case, config: &RunConfig) -> RunOutcome {
         "force_single_incarnation run must not contain a crash/recover cycle"
     );
 
-    let gc_crash_point = config.effective_gc_crash_point();
-
     let mut driver = Driver {
-        wal: Arc::clone(&wal),
+        wal_dir,
+        wal: Some(wal),
         inner: Arc::clone(&inner),
         partition,
         key_strings,
@@ -873,7 +884,6 @@ pub(crate) async fn run_case(case: &Case, config: &RunConfig) -> RunOutcome {
         store_healthy: true,
         model: LogModel::default(),
         outcome: RunOutcome::default(),
-        gc_crash_point,
         or_writes: 0,
     };
 
@@ -882,29 +892,20 @@ pub(crate) async fn run_case(case: &Case, config: &RunConfig) -> RunOutcome {
         let is_first = i == 0;
         let store = driver.boot_store(is_first, i).await;
 
-        let mut crashed_by_gc = false;
         for (step, op) in incarnation.ops.iter().enumerate() {
-            let ended = driver.apply_op(&store, op, i, step).await;
-            if ended {
-                crashed_by_gc = true;
-                break;
-            }
+            driver.apply_op(&store, op, i, step).await;
         }
 
-        // A GcTick under an active PreUnlink crash point ends the incarnation as a
-        // crash regardless of the generated end. Otherwise honour the end.
-        if crashed_by_gc {
-            driver.crash(store);
-        } else {
-            match incarnation.end {
-                IncarnationEnd::Crash => driver.crash(store),
-                IncarnationEnd::CleanShutdown => driver.clean_shutdown(store).await,
-            }
+        match incarnation.end {
+            IncarnationEnd::Crash => driver.crash(store).await,
+            IncarnationEnd::CleanShutdown => driver.clean_shutdown(store).await,
         }
 
-        // Recovery is what the NEXT incarnation runs against; O1 evaluates there.
+        // Recovery is what the NEXT incarnation runs against, over the WAL
+        // directory reopened as a restart; O1 evaluates there.
         let has_next = i + 1 < incarnation_count;
         if has_next {
+            driver.restart_wal().await;
             driver.recover(i + 1).await;
         }
     }
@@ -920,18 +921,19 @@ pub(crate) async fn run_case(case: &Case, config: &RunConfig) -> RunOutcome {
     // The gauge, through the REAL boot-time reconciliation the server bootstrap runs
     // after recovery — never a second copy of its accounting. The isolated scope keeps
     // the absolute re-baseline off the process gauge other tests read.
-    let (reconciled, _sink_total) = with_isolated_gauge(reconcile_tombstone_bytes(
-        Arc::clone(&inner) as Arc<dyn MapDataStore>,
-    ))
-    .await;
+    let (reconciled, _sink_total) =
+        with_isolated_gauge(reconcile_tombstone_bytes(inner as Arc<dyn MapDataStore>)).await;
     driver.outcome.reconciled_tombstone_bytes = reconciled;
 
     driver.outcome
 }
 
 struct Driver {
-    wal: Arc<WalWriter>,
-    inner: Arc<HarnessInnerStore>,
+    wal_dir: tempfile::TempDir,
+    /// The WAL of the running incarnation; `None` only inside [`Self::restart_wal`],
+    /// between the release of one writer and the open of the next.
+    wal: Option<Arc<WalWriter>>,
+    inner: Arc<KeptStore>,
     partition: PartitionId,
     key_strings: Vec<String>,
     config: RunConfig,
@@ -947,12 +949,17 @@ struct Driver {
     store_healthy: bool,
     model: LogModel,
     outcome: RunOutcome,
-    gc_crash_point: GcCrashPoint,
     /// OR snapshot writes so far, for [`OrWriteMode::Mixed`]'s alternation.
     or_writes: usize,
 }
 
 impl Driver {
+    fn wal(&self) -> &Arc<WalWriter> {
+        self.wal
+            .as_ref()
+            .expect("the WAL of the running incarnation")
+    }
+
     fn key_str(&self, key: Key) -> &str {
         &self.key_strings[usize::from(key) % self.key_strings.len()]
     }
@@ -968,7 +975,7 @@ impl Driver {
         let sequence_start = if is_first {
             1
         } else {
-            self.wal
+            self.wal()
                 .max_observed_sequence()
                 .await
                 .expect("read max observed WAL sequence")
@@ -979,7 +986,7 @@ impl Driver {
             Arc::clone(&self.inner) as Arc<dyn MapDataStore>,
             self.wb_config.clone(),
             Some(WalBootstrap {
-                wal: Arc::clone(&self.wal) as Arc<dyn Wal>,
+                wal: Arc::clone(self.wal()) as Arc<dyn Wal>,
                 sequence_start,
             }),
         );
@@ -1005,7 +1012,6 @@ impl Driver {
             // The replay-side modes are recovery-side seams (see `recover`), so they
             // install nothing on the store.
             DefectMode::None
-            | DefectMode::UnlinkThenFsync
             | DefectMode::ReplayClobberOlderFrame
             | DefectMode::ReplayStaleRemoveOverNewerValue
             | DefectMode::ReReplayOldestFrameGateOn => {}
@@ -1052,16 +1058,14 @@ impl Driver {
         std::mem::take(&mut *guard)
     }
 
-    /// Applies one op. Returns `true` if the op ended the incarnation (a `GcTick`
-    /// under an active `PreUnlink` crash point).
+    /// Applies one op.
     async fn apply_op(
         &mut self,
         store: &Arc<WriteBehindDataStore>,
         op: &WorkOp,
         incarnation: usize,
         step: usize,
-    ) -> bool {
-        let mut ended = false;
+    ) {
         // Every op is queue-backed unless its own arm says otherwise; set here so a
         // WAL-only op can never leak its backing into the next op's ack.
         self.model.cur_op_backing = OpBacking::Queued;
@@ -1144,9 +1148,7 @@ impl Driver {
                     .saturating_add(i64::try_from(*advance_ms).unwrap_or(i64::MAX));
                 self.flush_due(store).await;
             }
-            WorkOp::GcTick => {
-                ended = self.gc_tick(store).await;
-            }
+            WorkOp::GcTick => self.wal().test_collect_now().await,
             WorkOp::SetStoreHealth { healthy } => {
                 self.store_healthy = *healthy;
                 self.inner.set_healthy(*healthy);
@@ -1164,10 +1166,7 @@ impl Driver {
             }
         }
 
-        if !ended {
-            self.evaluate_o2(store).await;
-        }
-        ended
+        self.evaluate_o2(store).await;
     }
 
     /// Writes an LWW record through the real `WriteBehindDataStore::add`.
@@ -1372,9 +1371,9 @@ impl Driver {
     }
 
     /// Drives the REAL due-time drain + coalescing at the virtual deadline, then
-    /// applies each drained entry through the store's own resolution path — the
-    /// path that carries the C3 / C13 watermark seam. Not a synthetic per-key
-    /// flush.
+    /// commits the drained entries in one store commit, as a flush pass does: the
+    /// records and the applied watermark rows that cover them, planned on the path
+    /// that carries the C3 / C13 watermark seam. Not a synthetic per-key flush.
     async fn flush_due(&mut self, store: &Arc<WriteBehindDataStore>) {
         let deadline = self.clock.saturating_sub(self.flush_interval_ms());
 
@@ -1387,18 +1386,32 @@ impl Driver {
             drained.extend(queue.value_mut().drain_ready(deadline));
         }
 
-        for entry in drained {
-            let p = partition_for(&entry.map, &entry.key);
-            // The production flush body, so a `StoreCell` entry takes the same
-            // encoded hand-off (the inner store accepts encoded records, like redb).
-            let result = persist_entry(store.inner.as_ref(), &entry).await;
-            store.resolve_pending(entry.sequence);
-            if result.is_ok() {
-                // Real resolve + advance: this is where the WatermarkMode seam
-                // (C3 / C13) computes the watermark and marks applied.
-                store.resolve_and_advance(p, &entry.wal_sequences).await;
-            } else {
-                store.abandon_wal_sequences(p, &entry.wal_sequences);
+        if !drained.is_empty() {
+            let batch: Vec<PreparedEntry> = drained
+                .into_iter()
+                .map(|entry| {
+                    store.register_in_flight(
+                        partition_for(&entry.map, &entry.key),
+                        &entry.wal_sequences,
+                    );
+                    let encoded = store.encode_put(&entry).expect("encode a drained entry");
+                    PreparedEntry { entry, encoded }
+                })
+                .collect();
+            // The production commit and settle, so a `StoreCell` entry takes the
+            // same encoded hand-off (the inner store accepts encoded records, like
+            // redb) and the WatermarkMode seam (C3 / C13) plans the rows.
+            match store.commit_prepared(&batch).await {
+                Ok(applied) => store.settle_batch(&batch, &applied).await,
+                Err(_) => {
+                    for PreparedEntry { entry, .. } in &batch {
+                        store.resolve_pending(entry.sequence);
+                        store.abandon_wal_sequences(
+                            partition_for(&entry.map, &entry.key),
+                            &entry.wal_sequences,
+                        );
+                    }
+                }
             }
         }
 
@@ -1410,31 +1423,6 @@ impl Driver {
                 self.model.flush_due_key_indeterminate(key);
             }
         }
-    }
-
-    /// Real `mark_applied` at the current prefix-complete watermark, honouring the
-    /// installed GC order and crash point (R7). Returns `true` when a `PreUnlink`
-    /// crash point is active, ending the incarnation at the seam (sidecar durable
-    /// under the production order; segments already unlinked under the inverted
-    /// one).
-    async fn gc_tick(&mut self, store: &Arc<WriteBehindDataStore>) -> bool {
-        self.wal.test_set_gc_order_mode(match self.config.defect {
-            DefectMode::UnlinkThenFsync => WalGcOrderMode::UnlinkThenFsync,
-            _ => WalGcOrderMode::FsyncThenUnlink,
-        });
-        self.wal.test_set_gc_crash_point(match self.gc_crash_point {
-            GcCrashPoint::PreUnlink => WalGcCrashPoint::PreUnlink,
-            GcCrashPoint::None => WalGcCrashPoint::None,
-        });
-
-        // Read the watermark to DRIVE the implementation's own GC (not a model
-        // input). Unseeded / no-WAL → nothing to collect.
-        let Some(Ok(watermark)) = store.test_wal_watermark(self.partition) else {
-            return false;
-        };
-        let _ = self.wal.mark_applied(self.partition, watermark).await;
-
-        matches!(self.gc_crash_point, GcCrashPoint::PreUnlink)
     }
 
     /// O2 (frame oracle) — model-derived LEFT, implementation-observed RIGHT.
@@ -1474,37 +1462,23 @@ impl Driver {
         }
 
         // Clause 3 (+ clause 2): wal.unapplied(p) must still contain every
-        // model-unresolved sequence — a frame that should replay must not have
-        // been filtered out. When a frame IS missing, the PERSISTED applied
-        // watermark (the `.applied` sidecar, the value that actually governs what
-        // `unapplied` returns) discriminates the cause: a persisted watermark that
-        // advanced to or past it FILTERED it (the C13 inclusive-off-by-one shape);
-        // a frame gone while the persisted watermark stayed below it means its
-        // sealed segment was unlinked before the sidecar was durable (the
-        // TG-WAL-003 hazard). The recomputed prefix-complete `test_wal_watermark`
-        // used by clause 1 always sits one below the smallest unresolved sequence,
-        // so it cannot make this distinction — only the persisted sidecar can.
-        let persisted_watermark = self.wal.test_applied_watermark(p);
-        let unapplied: HashSet<Sequence> = match self.wal.unapplied(p).await {
+        // model-unresolved sequence. A missing one is a violation whatever removed
+        // it — a watermark advanced to or past it filters it, an unlink of its
+        // segment deletes it — because either way the next boot cannot replay an
+        // acked write the store does not hold.
+        let unapplied: HashSet<Sequence> = match self.wal().unapplied(p).await {
             Ok(frames) => frames.into_iter().map(|f| f.sequence).collect(),
             Err(_) => HashSet::new(),
         };
-        for s in &unresolved {
-            if unapplied.contains(s) {
-                continue;
+        for s in unresolved {
+            if !unapplied.contains(&s) {
+                self.outcome
+                    .violations
+                    .push(InvariantViolation::UnappliedFrameFiltered {
+                        partition: p,
+                        sequence: s,
+                    });
             }
-            let violation = if persisted_watermark >= *s {
-                InvariantViolation::UnappliedFrameFiltered {
-                    partition: p,
-                    sequence: *s,
-                }
-            } else {
-                InvariantViolation::SegmentUnlinkedBeforeWatermarkFsync {
-                    partition: p,
-                    sequence: *s,
-                }
-            };
-            self.outcome.violations.push(violation);
         }
     }
 
@@ -1584,15 +1558,21 @@ impl Driver {
         }
     }
 
-    /// Ends an incarnation with a real crash: signal the store's background tasks
-    /// to stop WITHOUT a graceful drain, then drop the `Arc` so every in-memory
-    /// structure is destroyed. The WAL directory and the retained inner store —
-    /// the durable artefacts — survive.
-    fn crash(&mut self, store: Arc<WriteBehindDataStore>) {
-        // Stop the background flush + watchdog loops so their Arc clones drop and
-        // the store is actually destroyed; this is a process-stop signal, not a
-        // drain (the flush loop returns immediately on the shutdown flag).
-        let _ = store.shutdown.send(true);
+    /// Ends an incarnation with a real crash, as `SIGKILL` would end it: the flush
+    /// loop is aborted where it stands, with no drain, the watchdog is told to end,
+    /// and the `Arc` is dropped, so every in-memory structure is destroyed. The WAL
+    /// directory and the retained inner store — the durable artefacts — survive.
+    async fn crash(&mut self, store: Arc<WriteBehindDataStore>) {
+        let flush = store
+            .flush_loop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(flush) = flush {
+            flush.abort();
+            let _ = flush.await;
+        }
+        store.shutdown.send_replace(true);
         drop(store);
         self.model.on_crash();
     }
@@ -1614,6 +1594,14 @@ impl Driver {
         drop(store);
     }
 
+    /// Reopens the WAL directory over the same store, as a restarted process does:
+    /// the previous writer is released first, once the dropped store's tasks no
+    /// longer hold it, so the new one is a restart and not a second writer.
+    async fn restart_wal(&mut self) {
+        release_wal(self.wal.take().expect("the WAL of the ended incarnation")).await;
+        self.wal = Some(open_wal(self.wal_dir.path(), &self.inner));
+    }
+
     /// Runs the REAL recovery against the reopened (retained) inner store, then —
     /// if the store is healthy — evaluates O1 and advances the model's per-
     /// partition unresolved view to match the empty post-recovery pending map.
@@ -1630,7 +1618,7 @@ impl Driver {
             }
         }
 
-        let mut recovery = WalRecovery::new(Arc::clone(&self.wal), vec![self.partition]);
+        let mut recovery = WalRecovery::new(Arc::clone(self.wal()), vec![self.partition]);
         // Both replay-clobber defects re-replay each partition's oldest un-applied
         // frame over the newer durable value the in-order pass left behind.
         // `ReplayClobberOlderFrame` (TG-WAL-006) arranges that oldest frame to be a
@@ -1656,8 +1644,7 @@ impl Driver {
             DefectMode::None
             | DefectMode::ScalarMaxWatermark
             | DefectMode::EmptyBootSeed
-            | DefectMode::InclusiveOffByOne
-            | DefectMode::UnlinkThenFsync => {}
+            | DefectMode::InclusiveOffByOne => {}
         }
         let _ = recovery
             .run(Arc::clone(&self.inner) as Arc<dyn MapDataStore>)

@@ -3686,69 +3686,6 @@ fn injected_store_fault() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Commits one dequeued entry alone to the inner store, with no watermark
-/// rows: the commit of a WAL that keeps its watermark in sidecars, for the
-/// tests that drive one entry's flush directly.
-///
-/// A `StoreCell` entry persists the cell's value as it is now, read under the
-/// cell lock. When the inner store accepts encoded records, the value is
-/// encoded under the lock and handed over as bytes, so no copy of the record
-/// outlives the lock; otherwise it is cloned out under the lock. Either way the
-/// guard lives only inside its block: it is `!Send`, and must not be held
-/// across the inner store's await (or into any call that takes the same lock).
-#[cfg(test)]
-async fn persist_entry(inner: &dyn MapDataStore, entry: &DelayedEntry) -> anyhow::Result<()> {
-    injected_store_fault()?;
-
-    let (map, key, store_time) = (entry.map.as_str(), entry.key.as_str(), entry.store_time);
-    let cloned;
-    let write = match &entry.operation {
-        DelayedOp::Store {
-            value,
-            expiration_time,
-        } => StoreWrite::Put {
-            map,
-            key,
-            value: PutValue::Value(value),
-            expiration_time: *expiration_time,
-            store_time,
-        },
-        DelayedOp::StoreCell {
-            cell,
-            expiration_time,
-        } => {
-            let value = if inner.accepts_encoded() {
-                let guard = cell.lock();
-                PutValue::Encoded(rmp_serde::to_vec_named(&guard.value)?)
-            } else {
-                cloned = {
-                    let guard = cell.lock();
-                    guard.value.clone()
-                };
-                PutValue::Value(&cloned)
-            };
-            StoreWrite::Put {
-                map,
-                key,
-                value,
-                expiration_time: *expiration_time,
-                store_time,
-            }
-        }
-        DelayedOp::Remove => StoreWrite::Remove {
-            map,
-            key,
-            store_time,
-        },
-    };
-    inner
-        .commit(&FlushCommit {
-            writes: vec![write],
-            applied: Vec::new(),
-        })
-        .await
-}
-
 /// Refusals of one entry from which the retry warning is emitted.
 const RETRY_WARN_ATTEMPTS: u32 = 3;
 /// The retry warning is emitted at most once per this interval.
