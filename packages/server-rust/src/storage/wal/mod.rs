@@ -2500,7 +2500,7 @@ impl WalRecovery {
     /// re-applied on a later boot.
     ///
     /// That re-application is idempotent for `RecordValue::Lww` (TG-WAL-006):
-    /// `replay_entry` reads the current durable value and discards a frame whose HLC
+    /// `prepare_entry` reads the current durable value and discards a frame whose HLC
     /// timestamp is strictly older, so a stale replayed frame can no longer clobber a
     /// newer durable value written outside the window (e.g. a frameless write-behind
     /// flush). Legacy frames keep always-merge replay.
@@ -3251,7 +3251,7 @@ impl ReplayProgress {
         // the frame that failed.
         //
         // "Free" rests on a different argument per frame kind: Lww on the
-        // read-compare in `replay_entry`; a `WalOp::Store` OR snapshot on
+        // read-compare in `prepare_entry`; a `WalOp::Store` OR snapshot on
         // monotonicity; and a `WalOp::OrDelta` on set-algebra fold idempotency
         // through `crdt::apply_or_delta`, over the whole un-applied window
         // replayed in sequence order from the durable-store base. Monotonicity
@@ -3271,8 +3271,8 @@ impl ReplayProgress {
 /// `WalRecovery` is the implementor because it is already the object that owns
 /// replay — a separate fold type would be a second seam over the same algebra.
 /// The receiver is dropped because the fold is a pure function of
-/// `(base, delta)`: `replay_entry` is an associated function reached as
-/// `WalRecovery::replay_entry(inner_store, entry, now, merge_gate)` and holds no
+/// `(base, delta)`: `prepare_entry` is an associated function reached as
+/// `WalRecovery::prepare_entry(inner_store, overlay, entry, merge_gate)` and holds no
 /// `WalRecovery` value to call a method on.
 ///
 /// The fold owns no algebra of its own. It normalizes the base through the live

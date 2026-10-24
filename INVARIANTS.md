@@ -136,15 +136,15 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 ### TG-WAL-006: WAL re-replay is merge-idempotent for `RecordValue::Lww` (enforced, LWW-scoped)
 
-- **Scope:** `WalRecovery::run` replay through `replay_entry`, for `RecordValue::Lww` values.
+- **Scope:** `WalRecovery::run` replay through `prepare_entry`, for `RecordValue::Lww` values.
 - **Statement (positive):** re-replaying a WAL frame whose value is OLDER than the current durable
-  value MUST NOT change the durable value, for `RecordValue::Lww`: `replay_entry` reads the current
+  value MUST NOT change the durable value, for `RecordValue::Lww`: `prepare_entry` reads the current
   value and discards a modern Lww frame whose HLC timestamp is strictly lower (last-write-wins by
   timestamp); ties and newer timestamps write through. `WalStorePayload::Legacy` frames (synthesized
   always-merge timestamp), `RecordValue::OrMap`/`OrTombstones` frames, and a cross-kind (non-Lww
   stored) value BYPASS the gate and keep the pre-existing blind replay. `write_one` stays a
   CRDT-agnostic blind insert; the merge lives at the recovery boundary.
-- **Maintaining code:** `wal/mod.rs::replay_entry` (the `RecordValue::Lww` read-compare gate) +
+- **Maintaining code:** `wal/mod.rs::prepare_entry` (the `RecordValue::Lww` read-compare gate) +
   `run` / call-site doc-contracts; `datastores/redb.rs` (`write_one` doc-comment records the
   guarantee lives upstream).
 - **Enforcing test:** `wal/mod.rs::tests::replay_lww_gate_discards_older_frame_isolated` (older
@@ -199,7 +199,7 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 ### TG-WAL-009: WAL re-replay is idempotent for `WalOp::Remove` (enforced, Remove-scoped)
 
-- **Scope:** `WalRecovery::replay_entry` `WalOp::Remove` arm. Modern Remove frames carry
+- **Scope:** `WalRecovery::prepare_entry` `WalOp::Remove` arm. Modern Remove frames carry
   `timestamp: None`; replay does not consult it.
 - **Statement (positive):** a `WalOp::Remove` replays UNCONDITIONALLY — a blind delete, identical to
   the live remove path (`WriteBehindDataStore::remove`, which stages a pending-delete with no
@@ -261,7 +261,7 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     `a_subsuming_write_over_a_survivor_resolves_the_carried_sequences`). The early resolve is
     sound: the subsuming write's own frame is still pending at a higher sequence, so the watermark
     does not pass it. No value becomes durable without a frame of its own.
-- **Maintaining code:** `wal/mod.rs::replay_entry` (`WalOp::Remove` arm, unconditional) + `run` /
+- **Maintaining code:** `wal/mod.rs::prepare_entry` (`WalOp::Remove` arm, unconditional) + `run` /
   `WalEntry` doc-contracts; `datastores/write_behind.rs` `remove`/`remove_all` append Remove frames
   with `timestamp: None`.
 - **Enforcing test:** `wal/mod.rs::tests::replay_remove_replays_unconditionally_isolated`
@@ -345,7 +345,7 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 - **Scope:** `WalOp::Store` frames carrying `WalStorePayload::Record(RecordValue::OrMap { .. })`
   — the frame kind legacy WALs hold and bulk/SYNC ingestion still produces — as read by
-  `WalRecovery::replay_entry`'s absolute-set `add`.
+  `WalRecovery::prepare_entry`'s absolute-set write.
 - **Statement:** such a frame carries the key's WHOLE post-state as of its own sequence: the live
   record set AND the tombstone set. Every effect at or below that sequence, removes included, is
   therefore already inside it. No partial, live-set-only or field-projected OR snapshot is framed.
@@ -359,7 +359,7 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `TG-WAL-009`'s premise (b): it holds by construction of the payload type, so there is no mutation
   that could redden a behavioural test without failing to compile first, and it needs no test of
   its own for the same reason premise (b) cites none.
-- **Violation consequence:** the absolute-set `add` in `replay_entry` becomes UNSAFE. Completeness,
+- **Violation consequence:** the absolute-set write in `prepare_entry` becomes UNSAFE. Completeness,
   not recency, is what licenses that replace: tombstones a partial snapshot omitted would come back
   from the store's older value, resurrecting deleted tags after a crash. It is the load-bearing
   precondition of the OR fold's warrant (`TG-OR-003`).
@@ -1596,7 +1596,7 @@ weaker than a test.
 
 ### TG-OR-003: OR delta-fold recovery is semantic-set-equivalent to the snapshot path
 
-- **Scope:** `OrDelta`/`OrDeltaFold`, wired on the RECOVERY READ side: `WalRecovery::replay_entry`'s
+- **Scope:** `OrDelta`/`OrDeltaFold`, wired on the RECOVERY READ side: `WalRecovery::prepare_entry`'s
   `WalOp::OrDelta` arm and `impl OrDeltaFold for WalRecovery`. The matching WRITE side is live:
   `WriteBehindDataStore::add_with_witness` frames an OR mutation as `WalOp::OrDelta` when its
   `TOPGUN_OR_DELTA_WAL` arming flag is on **and** the mutation point handed it a witness; a `None`
