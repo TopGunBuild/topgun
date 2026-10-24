@@ -87,7 +87,8 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Enforcing test:** store mode — `store_mode_tests.rs::a01_a_commit_is_one_engine_write_holding_its_records_and_its_watermark_rows`,
   `a02_a_refused_commit_changes_no_watermark_and_no_pending_sequence`,
   `a06_the_wal_collects_only_up_to_the_durable_watermark_on_its_tick`,
-  `a08_the_collected_mark_is_durable_before_the_first_unlink`,
+  `a08_the_collected_mark_is_durable_before_the_first_unlink` (also the other direction: moving
+  the unlink ahead of the durable `wal-collected` write reddens it, mutation run),
   `a18_a_kill_inside_or_right_after_a_commit_loses_no_acked_write`,
   `a20_a_commit_carrying_a_watermark_below_the_held_row_is_refused_and_writes_nothing`,
   `a21_a_tick_whose_watermark_read_fails_unlinks_nothing_and_the_next_tick_collects`,
@@ -100,15 +101,11 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   ticks racing appends to one partition lose no acked write across a crash),
   `crash_safety_proptest.rs::crash_on_partial_active_segment_recovers_intact_prefix` (a torn
   active segment beside sealed ones is tolerated and every frame below the tear replays).
-  Sidecar mode — `wal_harness/cases.rs::ac7_tg_wal_003_gc_crash_point_both_directions` —
-  drives the real `mark_applied` with a crash injected BETWEEN the sidecar fsync and the unlink
-  loop: the production `FsyncThenUnlink` order loses nothing and recovery replays every
-  acked-but-unapplied frame, while the inverted `UnlinkThenFsync` order (post-unlink/pre-fsync
-  crash) loses data — the both-directions proof.
 - **Violation consequence:** under-seeded `max_observed_sequence` on restart → sequence reuse →
   recovery filter silently drops frames.
 - **Discovered by:** SPEC-330 era; hardened by SPEC-350; crash-point injection proved by SPEC-352.
-- **Status:** decided, **enforced** (crash-point injection closed by the harness).
+- **Status:** decided, **enforced** (crash-point injection closed by `a08`, which kills a child
+  process at each point of a collection).
 
 ### TG-WAL-005: The per-partition applied watermark is prefix-complete across incarnations
 
@@ -128,7 +125,8 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   (`an_unseeded_partition_never_advances_even_with_pending_sequences`) and the seed retry of the
   commit plan (phase B of `an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_read_recovers`)
   — fail with the guard removed (mutation runs). Generatively re-enforced by `wal_harness/cases.rs::ac4_c3_scalar_max_watermark_regression`
-  (the C3 scalar-max over-advance, found from generated crash/recover sequences). Store mode —
+  (the C3 scalar-max over-advance through the seam in the commit plan, found from generated
+  crash/recover sequences). Store mode —
   `store_mode_tests.rs::a03_a_partition_whose_watermark_moved_by_coalescing_gets_its_row`,
   `a04_an_unseeded_partition_gets_no_row`,
   `a05_the_engine_watermark_never_decreases_across_commits_and_restarts`,
@@ -1636,8 +1634,13 @@ weaker than a test.
   tombstoning a live durable tag), `…ac3d…` (cross-kind/legacy base under a delta, post-state pinned
   literally), `…ac4…` (`Prune` as pure tombstone-set subtraction), `…ac5…` (single-algebra
   behavioural: remove-wins suppression of a re-added tombstoned tag), `…ac16…` (the injection rides the
-  observed append seam only), `…ac2…` (stranded base + re-fold idempotency across `mark_applied` +
-  segment GC), `…ac7b…` (the non-subsuming survivor's carry-forward route), `…ac9…` (delta-frame
+  observed append seam only), `…ac2…` (stranded base + re-fold idempotency across the commit of the
+  watermark row + segment GC; no crash between a flush and its watermark is tested because none
+  exists — the row is committed with the records, proven by
+  `store_mode_tests.rs::a01_a_commit_is_one_engine_write_holding_its_records_and_its_watermark_rows`
+  and `a18_a_kill_inside_or_right_after_a_commit_loses_no_acked_write`, and the re-fold of a window
+  from its durable base by `batched_replay_tests.rs::c02_batched_replay_equals_per_frame_replay` and
+  `c08_…_under_refusals`), `…ac7b…` (the non-subsuming survivor's carry-forward route), `…ac9…` (delta-frame
   construction stays inside its sanctioned home — ADVISORY ONLY, an early warning that names the
   offending file at review time, with **nothing stronger standing behind it**: the tier-P append
   refusal that used to hold the property at frame level is retired, because the sanctioned emitter
