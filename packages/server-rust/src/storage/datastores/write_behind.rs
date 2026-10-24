@@ -2283,7 +2283,7 @@ impl WriteBehindDataStore {
         if let Some(tracking) = &self.wal {
             let write_hints = failure.is_none();
             match tracking.wal.finish(write_hints).await {
-                Ok(partitions) if write_hints && tracking.wal.watermark_in_store() => {
+                Ok(partitions) if write_hints => {
                     let pending = self.pending_operation_count();
                     info!(
                         drained = pending == 0,
@@ -3148,22 +3148,6 @@ impl WriteBehindDataStore {
         }
     }
 
-    /// C13 re-introduction (`WatermarkMode::InclusiveOffByOne`): identical to
-    /// [`Self::prefix_complete_watermark`] except it returns `min(pending)`
-    /// rather than `min(pending) - 1`, marking the smallest still-unresolved
-    /// sequence applied instead of stopping one below it. Test-only: production
-    /// always uses the prefix-complete rule.
-    #[cfg(test)]
-    fn inclusive_off_by_one_watermark(state: &PartitionTracking) -> Result<u64, WalWatermarkError> {
-        if !state.seeded {
-            return Err(WalWatermarkError::Unseeded);
-        }
-        match state.pending.keys().next() {
-            Some(min) => Ok(*min),
-            None => Ok(state.max_assigned),
-        }
-    }
-
     /// Seeds `partition`'s pending map from the frames the on-disk WAL still
     /// reports as un-applied, so this incarnation's watermark respects what the
     /// previous one left behind.
@@ -3298,13 +3282,14 @@ impl WriteBehindDataStore {
 
     /// Resolves `seqs` WITHOUT advancing the durable watermark.
     ///
-    /// This is the coalesce-retire disposition. The retired frames are subsumed
-    /// by the survivor's, so they must stop holding the pending prefix back — but
-    /// no write has reached the inner store here, and the survivor is still only
-    /// buffered. Advancing would put `mark_applied`'s read-write-fsync, and the
-    /// segment seal/rotate it triggers, on the `add()` path — changing the sidecar
-    /// cadence and paying disk I/O per coalesce. The survivor's own durable
-    /// terminal is what advances past them, one flush later.
+    /// The watermark moves only as a row in a store commit, durable with the
+    /// records it covers; resolving just lets the next planned row pass these
+    /// sequences. For a stored entry the row was already in its commit. For a
+    /// coalesce-retired entry no write has reached the inner store and the
+    /// survivor is still only buffered, so there is nothing a row could be
+    /// committed with: the retired frames are subsumed by the survivor's and
+    /// stop holding the pending prefix back, and a later commit carries the
+    /// row past them.
     fn resolve_wal_sequences(&self, partition: u32, seqs: &BTreeSet<u64>) {
         let Some(tracking) = &self.wal else {
             return;
@@ -3315,86 +3300,6 @@ impl WriteBehindDataStore {
                 state.pending.remove(seq);
             }
         });
-    }
-
-    /// Resolves `seqs` as durably applied and advances the partition's WAL
-    /// watermark to the prefix-complete frontier.
-    ///
-    /// Resolve and advance are ONE unit: a durable terminal that resolves without
-    /// advancing leaves the sidecar frozen and the WAL growing, and neither alarm
-    /// tier can see it because both key on the pending set, which advanced.
-    ///
-    /// The tracking lock is dropped before `mark_applied`, which does disk I/O.
-    /// A racing computation can therefore hand it a stale-but-lower watermark;
-    /// that is harmless because `mark_applied` clamps monotonically, and lower is
-    /// the safe direction.
-    async fn resolve_and_advance(&self, partition: u32, seqs: &BTreeSet<u64>) {
-        let Some(tracking) = &self.wal else {
-            return;
-        };
-        // Seeded by construction at every advance, not only at the mutating
-        // entry points — this is the seed RETRY site.
-        //
-        // `ensure_wal_seeded` swallows a WAL-read error and leaves the partition
-        // unseeded (under-advancing is the safe direction), so a transient read
-        // failure at the entry point leaves a partition with no knowable
-        // watermark. The mutating entry points retry only when another write for
-        // the same partition arrives; a partition that goes quiet after that
-        // failure reaches its terminals through the flush loop and the shutdown
-        // drain alone, and would otherwise stay unseeded forever and grow its
-        // WAL where neither alarm can see it. Retrying here makes every advance
-        // site seeded by construction.
-        //
-        // Cheap after the first success — a bool read under the partition lock.
-        self.ensure_wal_seeded(partition).await;
-        #[cfg(test)]
-        let watermark_mode = self.watermark_mode();
-
-        let watermark = tracking.with_partition(partition, |state| {
-            for seq in seqs {
-                state.in_flight.remove(seq);
-                state.pending.remove(seq);
-            }
-            #[cfg(test)]
-            match watermark_mode {
-                WatermarkMode::ScalarMax => {
-                    // Reproduces the pre-fix scalar advance so the differential
-                    // test keeps a live negative control rather than a one-off
-                    // revert.
-                    return Ok(seqs.iter().copied().max().unwrap_or(0));
-                }
-                #[cfg(test)]
-                WatermarkMode::InclusiveOffByOne => {
-                    return Self::inclusive_off_by_one_watermark(state);
-                }
-                WatermarkMode::PrefixComplete => {}
-            }
-            Self::prefix_complete_watermark(state)
-        });
-
-        let watermark = match watermark {
-            Ok(watermark) => watermark,
-            Err(err) => {
-                // Nothing is marked applied. The frames stay replayable and the
-                // WAL grows, which is the safe direction: the alternative is
-                // guessing a watermark for frames this process never saw.
-                error!(
-                    partition,
-                    error = %err,
-                    "Refusing to advance the WAL watermark for an unseeded partition"
-                );
-                return;
-            }
-        };
-
-        if let Err(err) = tracking.wal.mark_applied(partition, watermark).await {
-            warn!(
-                partition,
-                watermark,
-                error = %err,
-                "Failed to mark WAL watermark applied; next restart will re-replay (safe but redundant)"
-            );
-        }
     }
 
     /// The applied watermark rows one commit carries, planned before the
@@ -3423,9 +3328,6 @@ impl WriteBehindDataStore {
         let Some(tracking) = &self.wal else {
             return Vec::new();
         };
-        if !tracking.wal.watermark_in_store() {
-            return Vec::new();
-        }
         for &partition in own.keys() {
             self.ensure_wal_seeded(partition).await;
         }
@@ -3448,7 +3350,7 @@ impl WriteBehindDataStore {
                     let resolved = |seq: &&u64| own.get(&p).is_some_and(|seqs| seqs.contains(*seq));
                     // The negative controls of the watermark rule, on the path
                     // the server runs: the commit's own sequences count as
-                    // resolved, as `resolve_and_advance` resolves them.
+                    // resolved, as `settle_stored` resolves them.
                     #[cfg(test)]
                     match watermark_mode {
                         WatermarkMode::ScalarMax => {
@@ -3878,32 +3780,20 @@ impl WriteBehindDataStore {
         // that advances the tombstone durability fence.
         self.resolve_pending(entry.sequence);
         let partition = partition_for(&entry.map, &entry.key);
-        match &self.wal {
-            Some(tracking) if tracking.wal.watermark_in_store() => {
-                // The rows are durable with the records, so the WAL may
-                // collect up to them; it learns that only now, after the
-                // commit returned.
-                self.resolve_wal_sequences(partition, &entry.wal_sequences);
-                for &(p, watermark) in applied {
-                    if let Err(err) = tracking.wal.mark_applied(p, watermark).await {
-                        warn!(
-                            partition = p,
-                            watermark,
-                            error = %err,
-                            "Failed to note a committed WAL watermark; the WAL collects up to it \
-                             after a later commit of the partition or the next start"
-                        );
-                    }
+        if let Some(tracking) = &self.wal {
+            // The rows are durable with the records, so the WAL may collect up
+            // to them; it learns that only now, after the commit returned.
+            self.resolve_wal_sequences(partition, &entry.wal_sequences);
+            for &(p, watermark) in applied {
+                if let Err(err) = tracking.wal.mark_applied(p, watermark).await {
+                    warn!(
+                        partition = p,
+                        watermark,
+                        error = %err,
+                        "Failed to note a committed WAL watermark; the WAL collects up to it \
+                         after a later commit of the partition or the next start"
+                    );
                 }
-            }
-            // Resolve the entry's WAL sequences and advance the partition
-            // watermark to the prefix-complete frontier, so a clean restart
-            // does not re-replay writes that are already in the inner store —
-            // and so no lower, still un-flushed frame of the partition is
-            // marked applied.
-            _ => {
-                self.resolve_and_advance(partition, &entry.wal_sequences)
-                    .await;
             }
         }
     }
@@ -7056,7 +6946,7 @@ mod tests {
     /// Minimal in-memory WAL for testing write-path WAL integration.
     struct InMemoryTestWal {
         appended: Arc<tokio::sync::Mutex<Vec<(u32, WalEntry)>>>,
-        applied: Arc<tokio::sync::Mutex<Vec<(u32, u64)>>>,
+        applied: Arc<std::sync::Mutex<Vec<(u32, u64)>>>,
         append_count: Arc<TestAtomicU64>,
     }
 
@@ -7064,7 +6954,7 @@ mod tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 appended: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-                applied: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                applied: Arc::new(std::sync::Mutex::new(Vec::new())),
                 append_count: Arc::new(TestAtomicU64::new(0)),
             })
         }
@@ -7079,13 +6969,13 @@ mod tests {
         }
 
         async fn mark_applied(&self, partition: u32, sequence: u64) -> anyhow::Result<()> {
-            self.applied.lock().await.push((partition, sequence));
+            self.applied.lock().unwrap().push((partition, sequence));
             Ok(())
         }
 
         async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>> {
             let guard = self.appended.lock().await;
-            let applied_guard = self.applied.lock().await;
+            let applied_guard = self.applied.lock().unwrap();
             let applied_seqs: std::collections::HashSet<u64> = applied_guard
                 .iter()
                 .filter(|(p, _)| *p == partition)
@@ -7096,6 +6986,21 @@ mod tests {
                 .filter(|(p, e)| *p == partition && !applied_seqs.contains(&e.sequence))
                 .map(|(_, e)| e.clone())
                 .collect())
+        }
+
+        // The highest watermark a commit carried: `mark_applied` is called
+        // only once the commit holding the row returned.
+        fn durable_applied(&self, partition: u32) -> Option<u64> {
+            Some(
+                self.applied
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(p, _)| *p == partition)
+                    .map(|(_, seq)| *seq)
+                    .max()
+                    .unwrap_or(0),
+            )
         }
     }
 
@@ -7283,10 +7188,12 @@ mod tests {
         let applied_store = Arc::clone(&wal.applied);
         let wal_arc: Arc<dyn Wal> = Arc::clone(&wal) as Arc<dyn Wal>;
 
-        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let inner = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            SpyDataStore::new(),
+        ));
         let config = short_delay_config();
         let store = WriteBehindDataStore::new_with_wal(
-            inner,
+            Arc::clone(&inner) as Arc<dyn MapDataStore>,
             config,
             Some(WalBootstrap {
                 wal: wal_arc,
@@ -7300,11 +7207,25 @@ mod tests {
         // Wait for flush loop to process the entry
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
 
-        let applied = applied_store.lock().await;
+        let applied = applied_store.lock().unwrap();
         assert!(
             !applied.is_empty(),
             "WAL entry must be marked applied after the flush loop persists it to the inner store"
         );
+        // The WAL learns of a watermark only after the commit that carried its
+        // row returned, so the store holds every watermark the WAL was given.
+        let rows = inner
+            .applied_watermarks()
+            .expect("applied watermarks")
+            .expect("a store that keeps applied watermarks")
+            .by_partition;
+        for &(partition, sequence) in applied.iter() {
+            assert!(
+                rows[partition as usize] >= sequence,
+                "partition {partition}: marked applied up to {sequence}, but the store's row is {}",
+                rows[partition as usize]
+            );
+        }
     }
 
     /// Build a `from_source` lookup closure from a fixed map of overrides — the
@@ -8048,9 +7969,7 @@ mod tests {
              frame out of replay"
         );
 
-        store
-            .resolve_and_advance(partition, &BTreeSet::from([1]))
-            .await;
+        store.resolve_wal_sequences(partition, &BTreeSet::from([1]));
 
         assert_eq!(
             store.test_wal_watermark(partition),
@@ -8078,23 +7997,31 @@ mod tests {
         store.promote_wal_sequence(partition, low);
         store.promote_wal_sequence(partition, high);
 
+        // A commit that stores only the higher sequence's entry.
+        let own = BTreeMap::from([(partition, BTreeSet::from([high]))]);
+
         store.test_set_watermark_mode(WatermarkMode::ScalarMax);
-        store
-            .resolve_and_advance(partition, &BTreeSet::from([high]))
-            .await;
         assert_eq!(
-            *applied.lock().await,
+            store.plan_rows(&own).await,
             vec![(partition, high)],
-            "the negative control must actually discriminate: scalar-max marks the \
-             still-buffered lower frame applied"
+            "the negative control must actually discriminate: scalar-max plans a row \
+             that marks the still-buffered lower frame applied"
         );
 
         store.test_set_watermark_mode(WatermarkMode::PrefixComplete);
-        store.resolve_and_advance(partition, &BTreeSet::new()).await;
         assert_eq!(
-            applied.lock().await.last().copied(),
-            Some((partition, low - 1)),
+            store.test_wal_watermark(partition),
+            Some(Ok(low - 1)),
             "prefix-complete holds below the unresolved sequence"
+        );
+        assert!(
+            store.plan_rows(&own).await.is_empty(),
+            "a row at the held watermark is not above the durable one, so the commit \
+             carries none"
+        );
+        assert!(
+            applied.lock().unwrap().is_empty(),
+            "planning marks nothing applied: only a returned commit does"
         );
     }
 
@@ -8133,9 +8060,7 @@ mod tests {
         let seq = store.assign_wal_sequence(partition);
         // The flush task is separate and a coalesced entry is immediately
         // drain-eligible, so a terminal can land inside the assign→promote window.
-        store
-            .resolve_and_advance(partition, &BTreeSet::from([seq]))
-            .await;
+        store.resolve_wal_sequences(partition, &BTreeSet::from([seq]));
         store.promote_wal_sequence(partition, seq);
 
         assert!(
@@ -9407,7 +9332,9 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let wal = InMemoryTestWal::new();
-        let spy = Arc::new(SpyDataStore::new());
+        let spy = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            SpyDataStore::new(),
+        ));
         spy.set_fail_add(true);
         let calls = spy.calls();
         // The stall bound puts the watchdog's first tick 60 s out, past every
@@ -9554,7 +9481,9 @@ mod tests {
     async fn two_writers_of_one_key_interleaved_between_sequence_and_insert_leave_nothing_unaccounted(
     ) {
         let wal = InMemoryTestWal::new();
-        let spy = Arc::new(SpyDataStore::new());
+        let spy = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            SpyDataStore::new(),
+        ));
         let store = WriteBehindDataStore::new_with_wal(
             Arc::clone(&spy) as Arc<dyn MapDataStore>,
             WriteBehindConfig {
@@ -11165,7 +11094,7 @@ mod tests {
     }
 
     fn schedule_store_with_wal(
-        spy: &Arc<SpyDataStore>,
+        spy: &Arc<crate::storage::map_data_store::WatermarkKeeping<SpyDataStore>>,
         config: WriteBehindConfig,
     ) -> Arc<WriteBehindDataStore> {
         WriteBehindDataStore::new_with_wal(
@@ -11210,7 +11139,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_entry_refused_for_longer_than_the_old_ladder_is_stored_when_the_store_returns() {
-        let spy = Arc::new(SpyDataStore::retaining());
+        let spy = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            SpyDataStore::retaining(),
+        ));
         spy.refuse_everything(true);
         let store = schedule_store_with_wal(&spy, schedule_config());
         store
@@ -11535,7 +11466,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn keys_of_one_partition_are_stored_out_of_write_order_and_the_watermarks_follow() {
-        let spy = Arc::new(SpyDataStore::retaining());
+        let spy = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            SpyDataStore::retaining(),
+        ));
         let store = schedule_store_with_wal(&spy, schedule_config());
         let partition = 7;
         let keys = keys_of_partition(partition, 2);
@@ -11573,7 +11506,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_refused_cell_entry_persists_what_the_cell_holds_when_it_is_accepted() {
-        let spy = Arc::new(SpyDataStore::retaining());
+        let spy = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            SpyDataStore::retaining(),
+        ));
         spy.refuse_everything(true);
         let store = schedule_store_with_wal(&spy, schedule_config());
         let partition = partition_for(SCHEDULE_MAP, "set");
@@ -11911,7 +11846,9 @@ mod tests {
     async fn entries_put_back_by_a_hold_are_accounted_like_a_retry() {
         const KEYS: [&str; 5] = ["A", "B", "C", "D", "E"];
 
-        let spy = Arc::new(SpyDataStore::retaining());
+        let spy = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            SpyDataStore::retaining(),
+        ));
         spy.refuse_everything(true);
         let store = schedule_store_with_wal(&spy, schedule_config());
         // The first store call of the pass, on A, stops inside the store: the
@@ -13544,9 +13481,38 @@ mod background_task_panic_tests {
         }
     }
 
+    /// The applied watermark of a test WAL that keeps no frames: per
+    /// partition the highest sequence `mark_applied` was given, which is the
+    /// row the last commit of the partition carried.
+    #[derive(Default)]
+    struct DurableMarks(Mutex<HashMap<u32, u64>>);
+
+    impl DurableMarks {
+        fn mark(&self, partition: u32, sequence: u64) {
+            let mut marks = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mark = marks.entry(partition).or_insert(0);
+            *mark = (*mark).max(sequence);
+        }
+
+        fn get(&self, partition: u32) -> u64 {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&partition)
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
     /// A WAL that accepts every frame and holds none. It is here because the
     /// stall watchdog returns at once on a store that has no WAL.
-    struct AcceptingWal;
+    #[derive(Default)]
+    struct AcceptingWal {
+        marks: DurableMarks,
+    }
 
     #[async_trait]
     impl Wal for AcceptingWal {
@@ -13554,12 +13520,17 @@ mod background_task_panic_tests {
             Ok(())
         }
 
-        async fn mark_applied(&self, _partition: u32, _sequence: u64) -> anyhow::Result<()> {
+        async fn mark_applied(&self, partition: u32, sequence: u64) -> anyhow::Result<()> {
+            self.marks.mark(partition, sequence);
             Ok(())
         }
 
         async fn unapplied(&self, _partition: u32) -> anyhow::Result<Vec<WalEntry>> {
             Ok(Vec::new())
+        }
+
+        fn durable_applied(&self, partition: u32) -> Option<u64> {
+            Some(self.marks.get(partition))
         }
     }
 
@@ -13576,6 +13547,7 @@ mod background_task_panic_tests {
     #[derive(Default)]
     struct RecordingWal {
         calls: Mutex<Vec<WalCall>>,
+        marks: DurableMarks,
     }
 
     impl RecordingWal {
@@ -13608,9 +13580,14 @@ mod background_task_panic_tests {
             Ok(())
         }
 
-        async fn mark_applied(&self, _partition: u32, _sequence: u64) -> anyhow::Result<()> {
+        async fn mark_applied(&self, partition: u32, sequence: u64) -> anyhow::Result<()> {
             self.record(WalCall::MarkApplied);
+            self.marks.mark(partition, sequence);
             Ok(())
+        }
+
+        fn durable_applied(&self, partition: u32) -> Option<u64> {
+            Some(self.marks.get(partition))
         }
 
         async fn unapplied(&self, _partition: u32) -> anyhow::Result<Vec<WalEntry>> {
@@ -13891,6 +13868,10 @@ mod background_task_panic_tests {
         let memory = Arc::new(MemoryStore::default());
         let (inner, mut about_to_panic) =
             PanickingAddStore::over(Arc::clone(&memory) as Arc<dyn MapDataStore>, 1);
+        // Outermost, so a commit that carries rows reaches the panicking `add`.
+        let inner = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            Arc::into_inner(inner).expect("the panicking store is held here alone"),
+        ));
         let store =
             WriteBehindDataStore::new_with_wal(inner, manual_flush_config(), wal.map(bootstrap));
         store
@@ -13955,9 +13936,11 @@ mod background_task_panic_tests {
 
     #[tokio::test]
     async fn a_stall_watchdog_panic_fails_the_store() {
-        let wal: Arc<dyn Wal> = Arc::new(AcceptingWal);
+        let wal: Arc<dyn Wal> = Arc::new(AcceptingWal::default());
         let store = WriteBehindDataStore::new_with_wal(
-            Arc::new(NullDataStore),
+            Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+                NullDataStore,
+            )),
             // The flush task stays out of the way for the whole test, and the
             // watchdog ticks at its floor instead of once every six seconds.
             WriteBehindConfig {
@@ -14659,7 +14642,9 @@ mod background_task_panic_tests {
         {
             let wal = Arc::new(RecordingWal::default());
             let store = WriteBehindDataStore::new_with_wal(
-                Arc::new(MemoryStore::default()),
+                Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+                    MemoryStore::default(),
+                )),
                 buffered_config(),
                 Some(bootstrap(Arc::clone(&wal) as Arc<dyn Wal>)),
             );
@@ -14671,7 +14656,9 @@ mod background_task_panic_tests {
         {
             let wal = Arc::new(RecordingWal::default());
             let store = WriteBehindDataStore::new_with_wal(
-                Arc::new(MemoryStore::default()),
+                Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+                    MemoryStore::default(),
+                )),
                 buffered_config(),
                 Some(bootstrap(Arc::clone(&wal) as Arc<dyn Wal>)),
             );
@@ -14693,7 +14680,9 @@ mod background_task_panic_tests {
         // time, with no clock involved.
         {
             let wal = Arc::new(RecordingWal::default());
-            let memory = Arc::new(MemoryStore::default());
+            let memory = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+                MemoryStore::default(),
+            ));
             let store = WriteBehindDataStore::new_with_wal(
                 Arc::clone(&memory) as Arc<dyn MapDataStore>,
                 buffered_config(),
@@ -14737,8 +14726,10 @@ mod background_task_panic_tests {
         const QUEUED: [&str; 3] = ["tracked-1", "tracked-2", "tracked-3"];
 
         let ((failure, flush_task_alive, shutdown, persisted), events) = run_captured(async {
-            let memory = Arc::new(MemoryStore::default());
-            let wal: Arc<dyn Wal> = Arc::new(AcceptingWal);
+            let memory = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+                MemoryStore::default(),
+            ));
+            let wal: Arc<dyn Wal> = Arc::new(AcceptingWal::default());
             let store = WriteBehindDataStore::new_with_wal(
                 Arc::clone(&memory) as Arc<dyn MapDataStore>,
                 // The flush task stays out of the way for the whole test, and
@@ -14986,11 +14977,13 @@ mod background_task_panic_tests {
     async fn a_clean_stop_is_not_a_failure() {
         // `hard_flush` on a healthy WAL-backed store with a write queued.
         {
-            let memory = Arc::new(MemoryStore::default());
+            let memory = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+                MemoryStore::default(),
+            ));
             let store = WriteBehindDataStore::new_with_wal(
                 Arc::clone(&memory) as Arc<dyn MapDataStore>,
                 manual_flush_config(),
-                Some(bootstrap(Arc::new(AcceptingWal))),
+                Some(bootstrap(Arc::new(AcceptingWal::default()))),
             );
             store
                 .add(MAP, "queued", &lww_value(), 0, now_millis())
@@ -15146,7 +15139,9 @@ mod background_task_panic_tests {
 
     #[tokio::test]
     async fn hard_flush_completes_with_a_poisoned_wal_tracking_cell_lock() {
-        let memory = Arc::new(MemoryStore::default());
+        let memory = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            MemoryStore::default(),
+        ));
         let wal = Arc::new(RecordingWal::default());
         let store = WriteBehindDataStore::new_with_wal(
             Arc::clone(&memory) as Arc<dyn MapDataStore>,
@@ -16144,6 +16139,19 @@ mod store_broken_tests {
                 .map(|(_, entry)| entry.clone())
                 .collect())
         }
+
+        fn durable_applied(&self, partition: u32) -> Option<u64> {
+            Some(
+                self.applied
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .filter(|(applied_partition, _)| *applied_partition == partition)
+                    .map(|(_, sequence)| *sequence)
+                    .max()
+                    .unwrap_or(0),
+            )
+        }
     }
 
     /// A flush task that runs a pass only when a test asks for one, and a
@@ -16169,7 +16177,7 @@ mod store_broken_tests {
     }
 
     fn store_with_wal(
-        inner: &Arc<RefusingStore>,
+        inner: &Arc<crate::storage::map_data_store::WatermarkKeeping<RefusingStore>>,
         wal: &Arc<FrameWal>,
     ) -> Arc<WriteBehindDataStore> {
         WriteBehindDataStore::new_with_wal(
@@ -16382,7 +16390,9 @@ mod store_broken_tests {
     fn t_drain_one_call_on_a_broken_store() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let ((), events) = run_observed(&recorder, async {
-            let inner = RefusingStore::new(broken());
+            let inner = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+                Arc::into_inner(RefusingStore::new(broken())).expect("held here alone"),
+            ));
             let wal = Arc::new(FrameWal::default());
             let store = store_with_wal(&inner, &wal);
             add_keys(&store).await;
@@ -16563,7 +16573,9 @@ mod store_broken_tests {
     fn t_refuse_broken() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         run_observed(&recorder, async {
-            let inner = RefusingStore::new(broken());
+            let inner = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+                Arc::into_inner(RefusingStore::new(broken())).expect("held here alone"),
+            ));
             let wal = Arc::new(FrameWal::default());
             let store = store_with_wal(&inner, &wal);
             add_keys(&store).await;

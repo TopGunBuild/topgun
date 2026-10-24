@@ -736,10 +736,6 @@ impl Wal for FaultWal {
         self.inner.sync().await
     }
 
-    fn watermark_in_store(&self) -> bool {
-        self.inner.watermark_in_store()
-    }
-
     fn durable_applied(&self, partition: u32) -> Option<u64> {
         self.inner.durable_applied(partition)
     }
@@ -2637,10 +2633,6 @@ impl Wal for UnseedableWal {
         self.0.sync().await
     }
 
-    fn watermark_in_store(&self) -> bool {
-        self.0.watermark_in_store()
-    }
-
     fn durable_applied(&self, partition: u32) -> Option<u64> {
         self.0.durable_applied(partition)
     }
@@ -2736,10 +2728,6 @@ impl Wal for FlakyUnseedableWal {
 
     async fn sync(&self) -> anyhow::Result<()> {
         self.inner.sync().await
-    }
-
-    fn watermark_in_store(&self) -> bool {
-        self.inner.watermark_in_store()
     }
 
     fn durable_applied(&self, partition: u32) -> Option<u64> {

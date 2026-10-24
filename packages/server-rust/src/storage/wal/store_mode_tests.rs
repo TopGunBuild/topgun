@@ -816,10 +816,6 @@ impl Wal for UnseedableWal {
         self.inner.sync().await
     }
 
-    fn watermark_in_store(&self) -> bool {
-        self.inner.watermark_in_store()
-    }
-
     fn durable_applied(&self, partition: u32) -> Option<u64> {
         self.inner.durable_applied(partition)
     }

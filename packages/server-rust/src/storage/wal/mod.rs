@@ -459,22 +459,15 @@ pub trait Wal: Send + Sync {
         Ok(())
     }
 
-    /// Whether the applied watermark of this WAL is kept by the store it was
-    /// opened over, committed together with the data.
-    ///
-    /// When `true`, a caller commits each watermark row in the store batch
-    /// that makes its frames durable, and [`mark_applied`](Wal::mark_applied)
-    /// only records that the commit returned.
-    fn watermark_in_store(&self) -> bool {
-        false
-    }
-
     /// The durable applied watermark of `partition` as the store holds it, or
-    /// `None` when the watermark is not kept by a store.
-    fn durable_applied(&self, partition: u32) -> Option<u64> {
-        let _ = partition;
-        None
-    }
+    /// `None` for a partition this WAL does not have.
+    ///
+    /// The watermark is kept by the store the WAL was opened over, committed
+    /// together with the data: a caller commits each watermark row in the
+    /// store batch that makes its frames durable, and
+    /// [`mark_applied`](Wal::mark_applied) only records that the commit
+    /// returned.
+    fn durable_applied(&self, partition: u32) -> Option<u64>;
 
     /// Ends the WAL's background collection and, when `write_hints`, writes
     /// one rollback hint per partition: its durable applied watermark, in the
@@ -1774,10 +1767,6 @@ impl Wal for WalWriter {
             }
         }
         first_error.map_or(Ok(()), Err)
-    }
-
-    fn watermark_in_store(&self) -> bool {
-        true
     }
 
     fn durable_applied(&self, partition: u32) -> Option<u64> {
@@ -5599,14 +5588,14 @@ mod tests {
     /// Minimal in-memory WAL used to prove object-safety.
     struct InMemoryWal {
         entries: tokio::sync::Mutex<Vec<(u32, WalEntry)>>,
-        applied: tokio::sync::Mutex<Vec<(u32, u64)>>,
+        applied: std::sync::Mutex<Vec<(u32, u64)>>,
     }
 
     impl InMemoryWal {
         fn new() -> Self {
             Self {
                 entries: tokio::sync::Mutex::new(Vec::new()),
-                applied: tokio::sync::Mutex::new(Vec::new()),
+                applied: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -5619,13 +5608,13 @@ mod tests {
         }
 
         async fn mark_applied(&self, partition: u32, sequence: u64) -> anyhow::Result<()> {
-            self.applied.lock().await.push((partition, sequence));
+            self.applied.lock().unwrap().push((partition, sequence));
             Ok(())
         }
 
         async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>> {
             let guard = self.entries.lock().await;
-            let applied_guard = self.applied.lock().await;
+            let applied_guard = self.applied.lock().unwrap();
             let applied_seqs: std::collections::HashSet<u64> = applied_guard
                 .iter()
                 .filter(|(p, _)| *p == partition)
@@ -5636,6 +5625,19 @@ mod tests {
                 .filter(|(p, e)| *p == partition && !applied_seqs.contains(&e.sequence))
                 .map(|(_, e)| e.clone())
                 .collect())
+        }
+
+        fn durable_applied(&self, partition: u32) -> Option<u64> {
+            Some(
+                self.applied
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(p, _)| *p == partition)
+                    .map(|(_, seq)| *seq)
+                    .max()
+                    .unwrap_or(0),
+            )
         }
     }
 
