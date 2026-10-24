@@ -7,14 +7,15 @@
 //! `datastores` can name them. A child reaches them directly, with no visibility
 //! widening on the production surface.
 //!
-//! The incarnation-crossing model follows `storage/crash_safety_proptest.rs`:
-//! drop the `WriteBehindDataStore` (staging buffer, pending tracker, in-flight
-//! registry, queues and inner store all vanish), keep the on-disk WAL, and replay
-//! into a FRESH inner store. The WAL handle itself may cross — it is the durable
-//! artefact's accessor and every value it returns is read from disk. This proves
-//! WAL-REPLAY correctness, NOT WAL-REOPEN correctness (the torn-tail truncate and
-//! segment re-discovery paths are not re-run), and it does not model OS page
-//! cache loss; both are the out-of-process soak harness's job.
+//! Every WAL here is opened in store mode, as the server opens it: the applied
+//! watermark is a row of the inner store, committed with the records it covers.
+//! The incarnation-crossing model: kill the `WriteBehindDataStore` with no drain
+//! (staging buffer, pending tracker, in-flight registry and queues all vanish),
+//! wait until nothing holds the WAL, then reopen the WAL directory over the SAME
+//! inner store — records and rows survive a crash — and replay into it. Where a
+//! test judges acked writes by what the replay brings back, it first asserts the
+//! store holds none of them, so only the WAL can carry them across. This does
+//! not model OS page cache loss; that is the out-of-process soak harness's job.
 
 use std::collections::HashSet;
 use std::sync::atomic::AtomicU64 as FaultAtomicU64;
@@ -28,6 +29,7 @@ use topgun_core::types::Value;
 
 use super::*;
 use crate::service::middleware::init_observability;
+use crate::storage::map_data_store::WatermarkKeeping;
 use crate::storage::record::reconcile_tombstone_bytes;
 use crate::storage::tombstone_gauge::with_isolated_gauge;
 use crate::storage::wal::{
@@ -219,9 +221,12 @@ struct GateState {
     calls: u64,
 }
 
+/// The fault store with the applied watermark rows a store-mode WAL needs.
+type KeptStore = WatermarkKeeping<FaultStore>;
+
 impl FaultStore {
-    fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+    fn new() -> Arc<KeptStore> {
+        Arc::new(WatermarkKeeping::new(Self::default()))
     }
 
     fn gate_state(&self) -> std::sync::MutexGuard<'_, GateState> {
@@ -366,7 +371,13 @@ impl FaultStore {
             .insert(key.to_string());
     }
 
+    /// Releases every parked call, which then fails, and stores every later
+    /// call of the keys that hung, as a store that has recovered does.
     fn release(&self) {
+        self.hang
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.released
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.wake.notify_waiters();
@@ -720,14 +731,75 @@ impl Wal for FaultWal {
     async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>> {
         self.inner.unapplied(partition).await
     }
+
+    async fn sync(&self) -> anyhow::Result<()> {
+        self.inner.sync().await
+    }
+
+    fn watermark_in_store(&self) -> bool {
+        self.inner.watermark_in_store()
+    }
+
+    fn durable_applied(&self, partition: u32) -> Option<u64> {
+        self.inner.durable_applied(partition)
+    }
+
+    async fn finish(&self, write_hints: bool) -> anyhow::Result<usize> {
+        self.inner.finish(write_hints).await
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Store construction
 // ---------------------------------------------------------------------------
 
+/// Opens `dir` over `store` in store mode, as the server opens it.
+fn open_wal<S: MapDataStore + 'static>(
+    dir: &std::path::Path,
+    policy: WalFsyncPolicy,
+    store: &Arc<S>,
+) -> Arc<WalWriter> {
+    WalWriter::open_over_store(
+        dir.to_path_buf(),
+        policy,
+        Arc::clone(store) as Arc<dyn MapDataStore>,
+    )
+    .expect("open the WAL over the store")
+}
+
+/// The applied watermark row of `partition` the store holds: what a restart
+/// replays above, and what the WAL collects up to.
+fn stored_row(store: &dyn MapDataStore, partition: u32) -> u64 {
+    store
+        .applied_watermarks()
+        .expect("applied watermarks")
+        .expect("a store that keeps applied watermarks")
+        .by_partition[partition as usize]
+}
+
+/// Kills `store` as `SIGKILL` would, then returns once nothing holds `wal`, so
+/// the next open of its directory is a restart.
+///
+/// The flush loop is aborted where it stands, with no drain, and the watchdog
+/// is told to end: both hold the store, and through it the WAL. The inner
+/// store and the WAL files survive.
+async fn crash(store: Arc<WriteBehindDataStore>, wal: Arc<WalWriter>) {
+    let flush = store
+        .flush_loop
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(flush) = flush {
+        flush.abort();
+        let _ = flush.await;
+    }
+    store.shutdown.send_replace(true);
+    drop(store);
+    release_wal(wal).await;
+}
+
 fn build_store(
-    inner: &Arc<FaultStore>,
+    inner: &Arc<KeptStore>,
     wal: Arc<dyn Wal>,
     sequence_start: u64,
 ) -> Arc<WriteBehindDataStore> {
@@ -759,10 +831,10 @@ fn build_store(
 /// flaky negative control is not a control.
 async fn stranded_entry_scenario(mode: WatermarkMode, low_key_count: usize) -> Vec<String> {
     let dir = tempfile::tempdir().expect("tempdir");
-    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).expect("wal");
-    let pre_crash_inner = FaultStore::new();
+    let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     let store = build_store_with(
-        &pre_crash_inner,
+        &inner,
         Arc::clone(&wal) as Arc<dyn Wal>,
         1,
         requested_flush_config(),
@@ -792,29 +864,30 @@ async fn stranded_entry_scenario(mode: WatermarkMode, low_key_count: usize) -> V
 
     run_requested_pass(&store, "the pass that flushes the coalesced entry").await;
     assert!(
-        pre_crash_inner.contains(high).await,
+        inner.contains(high).await,
         "the coalesced entry must have been flushed before the crash"
     );
     for key in lows {
         assert!(
-            !pre_crash_inner.contains(key).await,
+            !inner.contains(key).await,
             "the low keys must still be buffered at the crash, or nothing is stranded"
         );
     }
 
     // Crash: every write-behind-side structure dies with the store; the WAL files
-    // on disk survive and the handle that reads them may cross.
-    drop(store);
+    // and the inner store, with its rows, survive. The low keys are in the store
+    // nowhere, as asserted above, so only the WAL can bring them back.
+    crash(store, wal).await;
 
-    let recovered = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     WalRecovery::new(Arc::clone(&wal), Vec::new())
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
         .await
         .expect("recovery must succeed on an intact WAL");
 
     let mut missing = Vec::new();
     for key in &keys {
-        if !recovered.contains(key).await {
+        if !inner.contains(key).await {
             missing.push(key.clone());
         }
     }
@@ -857,8 +930,8 @@ proptest! {
 #[tokio::test]
 async fn watermark_is_exactly_one_below_the_lowest_unresolved_sequence() {
     let dir = tempfile::tempdir().unwrap();
-    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
     let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::None, &inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
     let partition = test_partition();
 
@@ -883,9 +956,16 @@ async fn watermark_is_exactly_one_below_the_lowest_unresolved_sequence() {
          of replay and its segment made collectable while the write is buffered"
     );
 
-    store
-        .resolve_and_advance(partition, &BTreeSet::from([low]))
-        .await;
+    // The row a commit of `low`'s entry carries, planned by the code that puts
+    // the production row in the commit.
+    assert_eq!(
+        store
+            .plan_rows(&BTreeMap::from([(partition, BTreeSet::from([low]))]))
+            .await,
+        vec![(partition, mid - 1)],
+        "the planned row stops one below the next unresolved sequence"
+    );
+    store.resolve_wal_sequences(partition, &BTreeSet::from([low]));
     assert_eq!(
         store.test_wal_watermark(partition),
         Some(Ok(mid - 1)),
@@ -896,17 +976,23 @@ async fn watermark_is_exactly_one_below_the_lowest_unresolved_sequence() {
 #[tokio::test]
 async fn empty_and_seeded_watermark_is_max_assigned_never_the_counter() {
     let dir = tempfile::tempdir().unwrap();
-    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
     let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::None, &inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
     let partition = test_partition();
 
     store.ensure_wal_seeded(partition).await;
     let seq = store.assign_wal_sequence(partition);
     store.promote_wal_sequence(partition, seq);
-    store
-        .resolve_and_advance(partition, &BTreeSet::from([seq]))
-        .await;
+    assert_eq!(
+        store
+            .plan_rows(&BTreeMap::from([(partition, BTreeSet::from([seq]))]))
+            .await,
+        vec![(partition, seq)],
+        "with nothing else pending the planned row is the highest assigned \
+         sequence, not the counter"
+    );
+    store.resolve_wal_sequences(partition, &BTreeSet::from([seq]));
 
     assert_eq!(
         store.test_wal_watermark(partition),
@@ -931,8 +1017,8 @@ async fn empty_and_seeded_watermark_is_max_assigned_never_the_counter() {
 #[tokio::test]
 async fn a_frame_written_after_the_partition_drains_is_still_replayed() {
     let dir = tempfile::tempdir().unwrap();
-    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
     let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     let store = build_store_with(
         &inner,
         Arc::clone(&wal) as Arc<dyn Wal>,
@@ -961,16 +1047,20 @@ async fn a_frame_written_after_the_partition_drains_is_still_replayed() {
         .add(TEST_MAP, &keys[1], &lww(2), 0, 1000)
         .await
         .unwrap();
-    drop(store);
+    crash(store, wal).await;
+    assert!(
+        !inner.contains(&keys[1]).await,
+        "before the replay only the WAL carries the later frame"
+    );
 
-    let recovered = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     WalRecovery::new(Arc::clone(&wal), Vec::new())
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
         .await
         .unwrap();
 
     assert!(
-        recovered.contains(&keys[1]).await,
+        inner.contains(&keys[1]).await,
         "a frame appended AFTER the partition drained must still be replayed"
     );
 }
@@ -978,8 +1068,8 @@ async fn a_frame_written_after_the_partition_drains_is_still_replayed() {
 #[tokio::test]
 async fn an_unseeded_partition_yields_a_typed_error_not_a_silent_advance() {
     let dir = tempfile::tempdir().unwrap();
-    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
     let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::None, &inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
     let partition = test_partition();
 
@@ -1009,8 +1099,8 @@ async fn an_unseeded_partition_yields_a_typed_error_not_a_silent_advance() {
 #[tokio::test]
 async fn heavy_coalescing_across_add_remove_and_remove_all_advances_the_full_prefix() {
     let dir = tempfile::tempdir().unwrap();
-    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
     let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::None, &inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
     let partition = test_partition();
     let keys = keys_in_partition(partition, 4);
@@ -1052,9 +1142,9 @@ async fn heavy_coalescing_across_add_remove_and_remove_all_advances_the_full_pre
          resolve shows up here as a stall, not as a loss"
     );
     assert_eq!(
-        wal.test_read_applied_sequence(partition),
+        stored_row(&*inner, partition),
         max_assigned,
-        "the durable sidecar carries the advance, not just the in-memory tracker"
+        "the durable row carries the advance, not just the in-memory tracker"
     );
 }
 
@@ -1065,8 +1155,8 @@ async fn heavy_coalescing_across_add_remove_and_remove_all_advances_the_full_pre
 #[tokio::test]
 async fn a_refused_entry_holds_the_watermark_and_its_frame_is_replayed() {
     let dir = tempfile::tempdir().unwrap();
-    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
     let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     let store = build_store_with(
         &inner,
         Arc::clone(&wal) as Arc<dyn Wal>,
@@ -1120,13 +1210,20 @@ async fn a_refused_entry_holds_the_watermark_and_its_frame_is_replayed() {
     let shutdown_ok = store.hard_flush().await.is_ok();
     let after_shutdown = store.test_pending_wal_sequences(partition);
 
-    drop(store);
-    let recovered = FaultStore::new();
+    // The next start: the store accepts the key again, and holds none of it
+    // until the replay.
+    crash(store, wal).await;
+    inner.accept_all();
+    assert!(
+        !inner.contains(&keys[0]).await,
+        "before the replay only the WAL carries the refused write"
+    );
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     WalRecovery::new(Arc::clone(&wal), Vec::new())
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
         .await
         .unwrap();
-    let replayed = recovered.contains(&keys[0]).await;
+    let replayed = inner.contains(&keys[0]).await;
 
     assert_eq!(
         (
@@ -1167,12 +1264,12 @@ fn fault_wal_store(
 ) -> (
     Arc<WalWriter>,
     Arc<FaultWal>,
-    Arc<FaultStore>,
+    Arc<KeptStore>,
     Arc<WriteBehindDataStore>,
 ) {
-    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
-    let fault = FaultWal::new(Arc::clone(&wal));
     let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
+    let fault = FaultWal::new(Arc::clone(&wal));
     let store = build_store(&inner, Arc::clone(&fault) as Arc<dyn Wal>, 1);
     (wal, fault, inner, store)
 }
@@ -1235,7 +1332,7 @@ async fn a_pre_frame_append_failure_removes_only_the_frameless_sequence_from_rem
 #[tokio::test]
 async fn a_mid_loop_remove_all_failure_rolls_back_only_the_failed_key() {
     let dir = tempfile::tempdir().unwrap();
-    let (wal, fault, _inner, store) = fault_wal_store(&dir);
+    let (_wal, fault, inner, store) = fault_wal_store(&dir);
     let partition = test_partition();
     let keys = keys_in_partition(partition, 4);
 
@@ -1259,7 +1356,7 @@ async fn a_mid_loop_remove_all_failure_rolls_back_only_the_failed_key() {
          Err returns"
     );
     assert_eq!(
-        wal.test_read_applied_sequence(partition),
+        stored_row(&*inner, partition),
         0,
         "nothing durable may have been marked applied past those frames"
     );
@@ -1271,7 +1368,7 @@ async fn a_mid_loop_remove_all_failure_rolls_back_only_the_failed_key() {
 #[tokio::test]
 async fn a_mid_loop_remove_all_failure_still_replays_the_earlier_tombstones() {
     let dir = tempfile::tempdir().unwrap();
-    let (wal, fault, _inner, store) = fault_wal_store(&dir);
+    let (wal, fault, recovered, store) = fault_wal_store(&dir);
     let partition = test_partition();
     let keys = keys_in_partition(partition, 4);
 
@@ -1279,17 +1376,23 @@ async fn a_mid_loop_remove_all_failure_still_replays_the_earlier_tombstones() {
     assert!(store.remove_all(TEST_MAP, &keys).await.is_err());
 
     // Cross the incarnation boundary BEFORE keys 1..3 flush.
-    drop(store);
+    drop(fault);
+    crash(store, wal).await;
 
-    // Pre-populate the fresh store so an un-replayed tombstone is visible as a
-    // RESURRECTED key rather than as an indistinguishable absence.
-    let recovered = FaultStore::new();
+    // Pre-populate the store so an un-replayed tombstone is visible as a
+    // RESURRECTED key rather than as an indistinguishable absence. It holds
+    // nothing of these keys yet: only the WAL carries the tombstones.
     for key in &keys {
+        assert!(
+            !recovered.contains(key).await && !recovered.is_tombstone(key).await,
+            "before the replay the store holds nothing of {key}"
+        );
         recovered
             .add(TEST_MAP, key, &lww(1), 0, 1000)
             .await
             .unwrap();
     }
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &recovered);
     WalRecovery::new(Arc::clone(&wal), Vec::new())
         .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
         .await
@@ -1387,11 +1490,13 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
     let dir = tempfile::tempdir().unwrap();
     let partition = test_partition();
     let keys = keys_in_partition(partition, 4);
-    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+    // One inner store for all three incarnations: its records and rows survive
+    // every crash.
+    let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
 
     // --- Incarnation 1: one applied frame at 100, then 101/102 left buffered ---
-    {
-        let inner = FaultStore::new();
+    let wal = {
         let store = build_store_with(
             &inner,
             Arc::clone(&wal) as Arc<dyn Wal>,
@@ -1407,9 +1512,9 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
         // must still ack.
         run_requested_pass(&store, "the pass that applies the first frame").await;
         assert_eq!(
-            wal.test_read_applied_sequence(partition),
+            stored_row(&*inner, partition),
             100,
-            "the first frame is durably applied, so the sidecar sits at 100"
+            "the first frame is durably applied, so the row sits at 100"
         );
         store
             .add(TEST_MAP, &keys[1], &lww(2), 0, 1000)
@@ -1420,20 +1525,24 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
             .await
             .unwrap();
         // kill -9: frames 101 and 102 are on disk and un-applied.
-        drop(store);
-    }
+        crash(store, wal).await;
+        open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner)
+    };
 
     // --- Incarnation 2: recovery fails the replay of 101 ---
-    let inner = FaultStore::new();
+    assert!(
+        !inner.contains(&keys[1]).await && !inner.contains(&keys[2]).await,
+        "before the replay only the WAL carries frames 101 and 102"
+    );
     inner.reject_key(&keys[1]);
     WalRecovery::new(Arc::clone(&wal), Vec::new())
         .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
         .await
         .unwrap();
     assert_eq!(
-        wal.test_read_applied_sequence(partition),
+        stored_row(&*inner, partition),
         100,
-        "R5: the sidecar stops at the contiguous-SUCCESS frontier, so 102's success \
+        "R5: the row stops at the contiguous-SUCCESS frontier, so 102's success \
          cannot license the release of the 101 that failed below it"
     );
 
@@ -1468,35 +1577,37 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
     run_requested_pass(&store, "the pass that flushes the live write").await;
     assert!(inner.contains(&keys[3]).await, "the live write flushed");
 
-    let sidecar_after_live_flush = wal.test_read_applied_sequence(partition);
+    let row_after_live_flush = stored_row(&*inner, partition);
     let alarm = store.test_run_classifier_sample(partition);
-    let retained: Vec<u64> = wal
-        .unapplied(partition)
+    let retained: Vec<u64> = replayable(&wal, &*inner, partition)
         .await
-        .unwrap()
         .iter()
         .map(|e| e.sequence)
         .collect();
 
     // --- Incarnation 3: the store is healthy again ---
-    drop(store);
-    let healthy = FaultStore::new();
-    healthy.accept_all();
+    crash(store, wal).await;
+    inner.accept_all();
+    assert!(
+        !inner.contains(&keys[1]).await,
+        "before the replay only the WAL carries frame 101"
+    );
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     WalRecovery::new(Arc::clone(&wal), Vec::new())
-        .run(Arc::clone(&healthy) as Arc<dyn MapDataStore>)
+        .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
         .await
         .unwrap();
-    let healed_keys_present = healthy.contains(&keys[1]).await && healthy.contains(&keys[2]).await;
-    let sidecar_after_heal = wal.test_read_applied_sequence(partition);
+    let healed_keys_present = inner.contains(&keys[1]).await && inner.contains(&keys[2]).await;
+    let row_after_heal = stored_row(&*inner, partition);
 
     drop(dir);
     BootSeedingOutcome {
         seeded,
-        sidecar_after_live_flush,
+        row_after_live_flush,
         alarm,
         retained,
         healed_keys_present,
-        sidecar_after_heal,
+        row_after_heal,
     }
 }
 
@@ -1505,11 +1616,11 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
 /// shared by both directions could only be one that does not discriminate.
 struct BootSeedingOutcome {
     seeded: Vec<(u64, PendingOrigin)>,
-    sidecar_after_live_flush: u64,
+    row_after_live_flush: u64,
     alarm: Option<WalWatermarkAlarm>,
     retained: Vec<u64>,
     healed_keys_present: bool,
-    sidecar_after_heal: u64,
+    row_after_heal: u64,
 }
 
 #[tokio::test]
@@ -1529,7 +1640,7 @@ async fn boot_seeding_holds_the_watermark_at_the_prior_incarnations_frontier() {
          prior incarnation left un-applied"
     );
     assert_eq!(
-        outcome.sidecar_after_live_flush, 100,
+        outcome.row_after_live_flush, 100,
         "W(p) stays at the prior incarnation's frontier — it must NOT jump to this \
          incarnation's live counter, which is what erases R5's work on the first flush"
     );
@@ -1556,7 +1667,7 @@ async fn boot_seeding_holds_the_watermark_at_the_prior_incarnations_frontier() {
          working as contracted"
     );
     assert!(
-        outcome.sidecar_after_heal >= 102,
+        outcome.row_after_heal >= 102,
         "and only THEN does W(p) advance past them"
     );
 }
@@ -1569,10 +1680,10 @@ async fn the_naive_empty_set_watermark_erases_the_prior_incarnations_frontier() 
     // the previous one's un-replayed frames applied.
     let outcome = boot_seeding_scenario(WatermarkMode::ScalarMax).await;
     assert!(
-        outcome.sidecar_after_live_flush > 102,
-        "the control did not discriminate: a scalar advance must push the sidecar \
+        outcome.row_after_live_flush > 102,
+        "the control did not discriminate: a scalar advance must push the row \
          past the retained frames 101/102; got {}",
-        outcome.sidecar_after_live_flush
+        outcome.row_after_live_flush
     );
     assert!(
         outcome.retained.is_empty(),
@@ -1592,21 +1703,21 @@ async fn the_naive_empty_set_watermark_erases_the_prior_incarnations_frontier() 
 #[tokio::test]
 async fn a_partition_without_a_live_write_never_marks_anything_applied() {
     let dir = tempfile::tempdir().unwrap();
-    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+    let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     let partition = test_partition();
     let keys = keys_in_partition(partition, 1);
 
     {
-        let inner = FaultStore::new();
         let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
         store
             .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
             .await
             .unwrap();
-        drop(store);
+        crash(store, wal).await;
     }
 
-    let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 2);
     // Writes land in a DIFFERENT partition, so `partition` is never touched.
     let other = (0..PARTITION_COUNT).find(|p| *p != partition).unwrap();
@@ -1622,11 +1733,11 @@ async fn a_partition_without_a_live_write_never_marks_anything_applied() {
         "an untouched partition is never seeded"
     );
     assert_eq!(
-        wal.test_read_applied_sequence(partition),
+        stored_row(&*inner, partition),
         0,
         "and never has anything marked applied, so its frames stay retained"
     );
-    assert!(!wal.unapplied(partition).await.unwrap().is_empty());
+    assert!(!replayable(&wal, &*inner, partition).await.is_empty());
 }
 
 // ===========================================================================
@@ -1647,7 +1758,7 @@ fn draining_config() -> WriteBehindConfig {
 }
 
 fn build_store_with(
-    inner: &Arc<FaultStore>,
+    inner: &Arc<KeptStore>,
     wal: Arc<dyn Wal>,
     sequence_start: u64,
     config: WriteBehindConfig,
@@ -1662,10 +1773,11 @@ fn build_store_with(
     )
 }
 
-/// A real `WalWriter` in a fresh directory, kept alive by the returned guard.
-fn real_wal() -> (tempfile::TempDir, Arc<WalWriter>) {
+/// A real `WalWriter` in a fresh directory over `store`, kept alive by the
+/// returned guard.
+fn real_wal<S: MapDataStore + 'static>(store: &Arc<S>) -> (tempfile::TempDir, Arc<WalWriter>) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).expect("wal");
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, store);
     (dir, wal)
 }
 
@@ -1719,18 +1831,31 @@ fn queued_wal_sequences_of(
 
 /// What a node that crashed at this moment would recover on its next start.
 ///
-/// Recovery runs over a copy of the WAL files: run over the live store's own
-/// WAL it would mark frames applied under a store that is still retrying them.
-async fn crash_image(wal_dir: &std::path::Path) -> Arc<FaultStore> {
+/// Recovery runs over a copy of the WAL files and a store that holds the rows
+/// of `store` but none of its records: run over the live store's own WAL it
+/// would mark frames applied under a store that is still retrying them. The
+/// rows are read after the copy, so they are at least as high as the
+/// collected-up-to record it holds.
+async fn crash_image(wal_dir: &std::path::Path, store: &KeptStore) -> Arc<KeptStore> {
     let image_dir = tempfile::tempdir().expect("tempdir");
     for file in std::fs::read_dir(wal_dir).expect("read the WAL directory") {
         let file = file.expect("a WAL directory entry");
         std::fs::copy(file.path(), image_dir.path().join(file.file_name()))
             .expect("copy a WAL file");
     }
-    let wal = WalWriter::new(image_dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
-        .expect("open the copied WAL");
+    let held = store
+        .applied_watermarks()
+        .expect("applied watermarks")
+        .expect("a store that keeps applied watermarks");
+    let rows: Vec<(u32, u64)> = (0..PARTITION_COUNT)
+        .zip(held.by_partition)
+        .filter(|(_, row)| *row > 0)
+        .collect();
     let recovered = FaultStore::new();
+    recovered
+        .import_applied_watermarks(&rows)
+        .expect("import the rows of the crashed store");
+    let wal = open_wal(image_dir.path(), WalFsyncPolicy::PerOp, &recovered);
     WalRecovery::new(wal, Vec::new())
         .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
         .await
@@ -1775,8 +1900,8 @@ async fn a_hung_inner_store_is_an_abandoned_write_not_a_leak() {
     init_observability();
     let partition = 250;
     let key = keys_in_partition(partition, 1).remove(0);
-    let (_dir, wal) = real_wal();
     let inner = FaultStore::new();
+    let (_dir, wal) = real_wal(&inner);
     let store = build_store_with(
         &inner,
         Arc::clone(&wal) as Arc<dyn Wal>,
@@ -1824,18 +1949,18 @@ async fn a_boot_unreplayed_sequence_is_an_abandoned_write_not_a_leak() {
     init_observability();
     let partition = 251;
     let key = keys_in_partition(partition, 1).remove(0);
-    let (_dir, wal) = real_wal();
+    let inner = FaultStore::new();
+    let (dir, wal) = real_wal(&inner);
 
     // A prior incarnation acked a write whose frame never reached the store.
     {
-        let inner = FaultStore::new();
         let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
         store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
-        drop(store);
+        crash(store, wal).await;
     }
 
     // A fresh incarnation: no queue, no registry, no entry — by construction.
-    let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 2);
     store.ensure_wal_seeded(partition).await;
     assert_eq!(
@@ -1866,8 +1991,8 @@ async fn a_queued_then_dequeued_sequence_missing_from_the_registry_is_a_leak() {
     init_observability();
     let partition = 252;
     let key = keys_in_partition(partition, 1).remove(0);
-    let (_dir, wal) = real_wal();
     let inner = FaultStore::new();
+    let (_dir, wal) = real_wal(&inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
 
     store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
@@ -1918,8 +2043,8 @@ async fn a_refused_entry_under_retry_is_an_abandoned_write_not_a_leak() {
     init_observability();
     let partition = 253;
     let key = keys_in_partition(partition, 1).remove(0);
-    let (_dir, wal) = real_wal();
     let inner = FaultStore::new();
+    let (_dir, wal) = real_wal(&inner);
     let store = build_store_with(
         &inner,
         Arc::clone(&wal) as Arc<dyn Wal>,
@@ -1965,8 +2090,8 @@ async fn a_sequence_queued_behind_a_blocked_worker_is_an_abandoned_write_not_a_l
     let queued_partition = 255;
     let blocked_key = keys_in_partition(blocked_partition, 1).remove(0);
     let queued_key = keys_in_partition(queued_partition, 1).remove(0);
-    let (_dir, wal) = real_wal();
     let inner = FaultStore::new();
+    let (_dir, wal) = real_wal(&inner);
     let store = build_store_with(
         &inner,
         Arc::clone(&wal) as Arc<dyn Wal>,
@@ -2020,9 +2145,9 @@ async fn a_hung_wal_append_is_an_appending_abandoned_write_not_a_leak() {
     init_observability();
     let partition = 256;
     let key = keys_in_partition(partition, 1).remove(0);
-    let (_dir, inner_wal) = real_wal();
-    let wal = FaultWal::new(inner_wal);
     let inner = FaultStore::new();
+    let (_dir, inner_wal) = real_wal(&inner);
+    let wal = FaultWal::new(inner_wal);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
 
     wal.hang_appends();
@@ -2070,8 +2195,8 @@ async fn a_hung_wal_append_is_an_appending_abandoned_write_not_a_leak() {
 async fn a_transient_ownerless_window_never_fires_an_alarm() {
     let partition = 257;
     let key = keys_in_partition(partition, 1).remove(0);
-    let (_dir, wal) = real_wal();
     let inner = FaultStore::new();
+    let (_dir, wal) = real_wal(&inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
 
     store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
@@ -2101,10 +2226,9 @@ async fn a_transient_ownerless_window_never_fires_an_alarm() {
         "the transient window must NOT be a verdict"
     );
 
-    // The write then completes normally, before the confirming sample.
-    store
-        .resolve_and_advance(partition, &BTreeSet::from([1]))
-        .await;
+    // The write then completes normally, before the confirming sample: its
+    // entry is stored and its sequence resolved, as `settle_stored` does.
+    store.resolve_wal_sequences(partition, &BTreeSet::from([1]));
 
     assert_eq!(
         store.test_run_classifier_sample(partition),
@@ -2150,13 +2274,12 @@ async fn stored_millis(
 async fn a_re_replayed_window_lands_on_the_newest_frame_and_moves_no_tombstone_bytes() {
     let partition = 258;
     let key = keys_in_partition(partition, 1).remove(0);
-    let (_wal_dir, wal) = real_wal();
     let store_dir = tempfile::tempdir().expect("tempdir");
 
-    // ONE durable handle for the whole test: the background flush task holds an
-    // `Arc` of the write-behind store, so a reopen here would race redb's file
-    // lock. Re-opening is AC9's subject, not this one's.
+    // ONE durable handle for the whole test: a reopen of the redb file is AC9's
+    // subject, not this one's.
     let redb = redb_store(&store_dir.path().join("redb"));
+    let (wal_dir, wal) = real_wal(&redb);
     {
         let store = WriteBehindDataStore::new_with_wal(
             Arc::clone(&redb) as Arc<dyn MapDataStore>,
@@ -2169,8 +2292,13 @@ async fn a_re_replayed_window_lands_on_the_newest_frame_and_moves_no_tombstone_b
         // Two framed writes for one key, both inside the widened window.
         store.add(TEST_MAP, &key, &lww(10), 0, 0).await.unwrap();
         store.add(TEST_MAP, &key, &lww(20), 0, 0).await.unwrap();
-        drop(store);
+        crash(store, wal).await;
     }
+    assert_eq!(
+        stored_millis(&redb, &key).await,
+        None,
+        "before the replay only the WAL carries the key"
+    );
 
     // The durable tombstone-byte ground truth is read through the PRODUCTION boot
     // reconciliation, so this test and the server share one accounting and cannot
@@ -2189,12 +2317,14 @@ async fn a_re_replayed_window_lands_on_the_newest_frame_and_moves_no_tombstone_b
 
     // Replay the window twice. Re-replay is what widening `[W, max]` makes
     // routine, so landing on the newest frame must be a property of the window,
-    // not of running it exactly once.
+    // not of running it exactly once. Each replay is a start of its own.
     for _ in 0..2 {
+        let wal = open_wal(wal_dir.path(), WalFsyncPolicy::PerOp, &redb);
         WalRecovery::new(Arc::clone(&wal), Vec::new())
             .run(Arc::clone(&redb) as Arc<dyn MapDataStore>)
             .await
             .expect("re-replay of an intact window must succeed");
+        release_wal(wal).await;
         assert_eq!(
             stored_millis(&redb, &key).await,
             Some(20),
@@ -2226,23 +2356,29 @@ async fn a_re_replayed_window_lands_on_the_newest_frame_and_moves_no_tombstone_b
 async fn recovery_stops_at_the_contiguous_success_frontier() {
     let partition = 259;
     let keys = keys_in_partition(partition, 3);
-    let (_wal_dir, wal) = real_wal();
+    let recovered = FaultStore::new();
+    let (wal_dir, wal) = real_wal(&recovered);
 
     {
-        let inner = FaultStore::new();
-        let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+        let store = build_store(&recovered, Arc::clone(&wal) as Arc<dyn Wal>, 1);
         for (i, key) in keys.iter().enumerate() {
             store
                 .add(TEST_MAP, key, &lww(i as u64 + 1), 0, 0)
                 .await
                 .unwrap();
         }
-        drop(store);
+        crash(store, wal).await;
+    }
+    for key in &keys {
+        assert!(
+            !recovered.contains(key).await,
+            "before the replay only the WAL carries {key}"
+        );
     }
 
     // [1 Ok, 2 Err, 3 Ok]: the frontier is 1, NOT 3 — marking 3 applied would
     // license GC of the frame that failed to replay.
-    let recovered = FaultStore::new();
+    let wal = open_wal(wal_dir.path(), WalFsyncPolicy::PerOp, &recovered);
     recovered.reject_key(&keys[1]);
     let outcome = WalRecovery::new(Arc::clone(&wal), Vec::new())
         .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
@@ -2250,14 +2386,12 @@ async fn recovery_stops_at_the_contiguous_success_frontier() {
     assert!(outcome.is_ok(), "a failed replay must not refuse the boot");
 
     assert_eq!(
-        wal.test_read_applied_sequence(partition),
+        stored_row(&*recovered, partition),
         1,
-        "the sidecar stops at the last CONTIGUOUS success"
+        "the row stops at the last CONTIGUOUS success"
     );
-    let unapplied: Vec<u64> = wal
-        .unapplied(partition)
+    let unapplied: Vec<u64> = replayable(&wal, &*recovered, partition)
         .await
-        .unwrap()
         .iter()
         .map(|e| e.sequence)
         .collect();
@@ -2268,20 +2402,23 @@ async fn recovery_stops_at_the_contiguous_success_frontier() {
     );
 
     // The stall self-heals on the next boot once the store accepts the write.
+    release_wal(wal).await;
     recovered.accept_all();
+    let wal = open_wal(wal_dir.path(), WalFsyncPolicy::PerOp, &recovered);
     WalRecovery::new(Arc::clone(&wal), Vec::new())
         .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
         .await
         .expect("second recovery");
-    assert_eq!(wal.test_read_applied_sequence(partition), 3);
-    assert!(wal.unapplied(partition).await.unwrap().is_empty());
+    assert_eq!(stored_row(&*recovered, partition), 3);
+    assert!(replayable(&wal, &*recovered, partition).await.is_empty());
 }
 
 #[tokio::test]
 async fn a_legacy_shaped_wal_still_boots_and_replays() {
     let partition = 260;
     let key = keys_in_partition(partition, 1).remove(0);
-    let (_wal_dir, wal) = real_wal();
+    let recovered = FaultStore::new();
+    let (wal_dir, wal) = real_wal(&recovered);
 
     // The bare-`Value` framing an older server wrote. Refusing to start on it
     // would strand every existing deployment's WAL.
@@ -2301,7 +2438,8 @@ async fn a_legacy_shaped_wal_still_boots_and_replays() {
     .await
     .unwrap();
 
-    let recovered = FaultStore::new();
+    release_wal(wal).await;
+    let wal = open_wal(wal_dir.path(), WalFsyncPolicy::PerOp, &recovered);
     WalRecovery::new(Arc::clone(&wal), Vec::new())
         .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
         .await
@@ -2344,8 +2482,8 @@ async fn a_committed_redb_write_survives_a_drop_and_reopen() {
 async fn a_coalesce_leaves_the_keys_due_time_stable() {
     let partition = 261;
     let key = keys_in_partition(partition, 1).remove(0);
-    let (_wal_dir, wal) = real_wal();
     let inner = FaultStore::new();
+    let (_wal_dir, wal) = real_wal(&inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
 
     store.add(TEST_MAP, &key, &lww(1), 0, 1_000).await.unwrap();
@@ -2377,8 +2515,8 @@ async fn a_coalesce_leaves_the_keys_due_time_stable() {
 async fn a_subsuming_survivor_early_resolves_the_retired_sequence() {
     let partition = 262;
     let keys = keys_in_partition(partition, 2);
-    let (_wal_dir, wal) = real_wal();
     let inner = FaultStore::new();
+    let (_wal_dir, wal) = real_wal(&inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
 
     // Store-onto-Store: a full snapshot subsumes its predecessor.
@@ -2412,8 +2550,8 @@ async fn a_subsuming_survivor_early_resolves_the_retired_sequence() {
 async fn a_non_subsuming_survivor_carries_the_retired_sequence_forward() {
     let partition = 263;
     let key = keys_in_partition(partition, 1).remove(0);
-    let (wal_dir, wal) = real_wal();
     let inner = FaultStore::new();
+    let (wal_dir, wal) = real_wal(&inner);
     let store = build_store_with(
         &inner,
         Arc::clone(&wal) as Arc<dyn Wal>,
@@ -2448,9 +2586,12 @@ async fn a_non_subsuming_survivor_carries_the_retired_sequence_forward() {
         store.test_pending_wal_sequences(partition),
         queued_wal_sequences_of(&store, partition, &key),
         store.test_wal_watermark(partition),
-        wal.test_read_applied_sequence(partition),
+        stored_row(&*inner, partition),
     );
-    let replayed = crash_image(wal_dir.path()).await.contains(&key).await;
+    let replayed = crash_image(wal_dir.path(), &inner)
+        .await
+        .contains(&key)
+        .await;
 
     inner.accept_all();
     wait_until("the store to go idle once it accepts", || {
@@ -2460,7 +2601,7 @@ async fn a_non_subsuming_survivor_carries_the_retired_sequence_forward() {
     let once_accepted = (
         store.test_pending_wal_sequences(partition),
         store.test_wal_watermark(partition),
-        wal.test_read_applied_sequence(partition),
+        stored_row(&*inner, partition),
         inner.contains(&key).await,
     );
 
@@ -2496,43 +2637,65 @@ impl Wal for UnseedableWal {
     async fn unapplied(&self, _partition: u32) -> anyhow::Result<Vec<WalEntry>> {
         anyhow::bail!("injected failure reading un-applied frames")
     }
+
+    async fn sync(&self) -> anyhow::Result<()> {
+        self.0.sync().await
+    }
+
+    fn watermark_in_store(&self) -> bool {
+        self.0.watermark_in_store()
+    }
+
+    fn durable_applied(&self, partition: u32) -> Option<u64> {
+        self.0.durable_applied(partition)
+    }
+
+    async fn finish(&self, write_hints: bool) -> anyhow::Result<usize> {
+        self.0.finish(write_hints).await
+    }
 }
 
 #[tokio::test]
 async fn an_unseeded_partition_never_advances_even_with_pending_sequences() {
     let partition = 264;
     let keys = keys_in_partition(partition, 2);
-    let (_wal_dir, wal) = real_wal();
+    let inner = FaultStore::new();
+    let (wal_dir, wal) = real_wal(&inner);
 
     // A prior incarnation left frames 1 and 2 un-replayed.
     {
-        let inner = FaultStore::new();
         let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
         for key in &keys {
             store.add(TEST_MAP, key, &lww(1), 0, 0).await.unwrap();
         }
-        drop(store);
+        crash(store, wal).await;
     }
 
     // The new incarnation cannot seed: the WAL read fails. Its own sequences
     // start ABOVE the prior incarnation's, so a watermark computed from them
     // alone would sit above frames that were never replayed.
-    let inner = FaultStore::new();
-    let store = build_store(
+    let wal = open_wal(wal_dir.path(), WalFsyncPolicy::PerOp, &inner);
+    let store = build_store_with(
         &inner,
         Arc::new(UnseedableWal(Arc::clone(&wal))) as Arc<dyn Wal>,
         3,
+        requested_flush_config(),
     );
-    for key in &keys {
-        store.add(TEST_MAP, key, &lww(2), 0, 0).await.unwrap();
-    }
+    store.add(TEST_MAP, &keys[0], &lww(2), 0, 0).await.unwrap();
+    store
+        .add(TEST_MAP, &keys[1], &lww(2), 0, not_yet_due())
+        .await
+        .unwrap();
     assert!(!store.test_wal_partition_seeded(partition));
 
-    // Resolve only the FIRST of the two, so the pending map is non-empty at the
-    // advance — the case a seeded-only-on-empty guard lets straight through.
-    store
-        .resolve_and_advance(partition, &BTreeSet::from([3]))
-        .await;
+    // Flush only the FIRST of the two, so the pending map is non-empty when the
+    // commit plans its rows — the case a seeded-only-on-empty guard lets
+    // straight through.
+    run_requested_pass(&store, "the pass that flushes the first key").await;
+    assert!(
+        inner.contains(&keys[0]).await,
+        "the commit must have happened, or an unwritten row proves nothing"
+    );
 
     assert_eq!(
         store.test_wal_watermark(partition),
@@ -2540,13 +2703,13 @@ async fn an_unseeded_partition_never_advances_even_with_pending_sequences() {
         "an unseeded partition has no knowable watermark, pending or not"
     );
     assert_eq!(
-        wal.test_read_applied_sequence(partition),
+        stored_row(&*inner, partition),
         0,
         "and nothing may be marked applied: frames 1 and 2 were never replayed, \
          so advancing to 2 would hand their segments to GC"
     );
     assert_eq!(
-        wal.unapplied(partition).await.unwrap().len(),
+        replayable(&wal, &*inner, partition).await.len(),
         4,
         "every frame stays replayable — under-advancing is the safe direction"
     );
@@ -2575,6 +2738,22 @@ impl Wal for FlakyUnseedableWal {
         }
         self.inner.unapplied(partition).await
     }
+
+    async fn sync(&self) -> anyhow::Result<()> {
+        self.inner.sync().await
+    }
+
+    fn watermark_in_store(&self) -> bool {
+        self.inner.watermark_in_store()
+    }
+
+    fn durable_applied(&self, partition: u32) -> Option<u64> {
+        self.inner.durable_applied(partition)
+    }
+
+    async fn finish(&self, write_hints: bool) -> anyhow::Result<usize> {
+        self.inner.finish(write_hints).await
+    }
 }
 
 /// The two guards compose: while a partition is unseeded the advance is REFUSED
@@ -2583,27 +2762,27 @@ impl Wal for FlakyUnseedableWal {
 ///
 /// Both halves are load-bearing and this asserts each against its own failure
 /// mode. Removing the refuse-guard turns phase A into an over-advance above
-/// never-replayed frames; removing the seed retry from `resolve_and_advance`
-/// leaves phase B unseeded forever, so the sidecar never moves and the WAL grows
-/// where neither alarm can see it.
+/// never-replayed frames; removing the seed retry from `plan_rows` leaves phase
+/// B unseeded forever, so the row never moves and the WAL grows where neither
+/// alarm can see it.
 #[tokio::test]
 async fn an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_read_recovers() {
     let partition = 264;
     let keys = keys_in_partition(partition, 2);
-    let (_wal_dir, wal) = real_wal();
+    let inner = FaultStore::new();
+    let (wal_dir, wal) = real_wal(&inner);
 
     // A prior incarnation left frames 1 and 2 un-replayed.
     {
-        let inner = FaultStore::new();
         let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
         for key in &keys {
             store.add(TEST_MAP, key, &lww(1), 0, 0).await.unwrap();
         }
-        drop(store);
+        crash(store, wal).await;
     }
 
     let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let inner = FaultStore::new();
+    let wal = open_wal(wal_dir.path(), WalFsyncPolicy::PerOp, &inner);
     let store = build_store_with(
         &inner,
         Arc::new(FlakyUnseedableWal {
@@ -2633,15 +2812,15 @@ async fn an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_rea
         "an unseeded partition has no knowable watermark, pending or not"
     );
     assert_eq!(
-        wal.test_read_applied_sequence(partition),
+        stored_row(&*inner, partition),
         0,
         "nothing may be marked applied while unseeded: min(pending) - 1 would be 2, \
          which sits ABOVE frames 1 and 2 that were never replayed"
     );
 
     // ---- Phase B: the WAL read recovers. No further add/remove arrives for this
-    // partition, so `resolve_and_advance` — reached through the `Ok` terminal
-    // of a flush pass — is the ONLY remaining site that can retry the seed.
+    // partition, so `plan_rows` — reached through the commit of a flush pass —
+    // is the ONLY remaining site that can retry the seed.
     failing.store(false, Ordering::Relaxed);
     run_requested_pass(&store, "the pass that flushes the first key").await;
     assert!(
@@ -2661,30 +2840,42 @@ async fn an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_rea
          for the prior incarnation's un-applied frames 1 and 2"
     );
     assert_eq!(
-        wal.test_read_applied_sequence(partition),
+        stored_row(&*inner, partition),
         0,
         "still 0 — frames 1 and 2 remain un-replayed, so the prefix stops below them"
     );
 
-    // ---- Phase C: once the prior incarnation's frames resolve too, the sidecar
+    // ---- Phase C: once the prior incarnation's frames resolve too, the row
     // actually moves. This is what the seed bought: without it the watermark
     // would still be Err(Unseeded) here and the WAL would grow forever.
     //
     // It moves to 3, not 4: `keys[1]`'s sequence 4 was never flushed and is still
     // pending, so the prefix stops immediately below it. Advancing to 4 here
     // would be the over-advance this whole invariant exists to forbid.
+    //
+    // A row reaches the store only inside a commit, and a commit plans a row
+    // for every tracked partition: the next one, of a key of another
+    // partition, carries this partition's row.
+    store.resolve_wal_sequences(partition, &BTreeSet::from([1, 2]));
+    let other_key = keys_in_partition(partition + 1, 1).remove(0);
     store
-        .resolve_and_advance(partition, &BTreeSet::from([1, 2]))
-        .await;
+        .add(TEST_MAP, &other_key, &lww(3), 0, 0)
+        .await
+        .unwrap();
+    run_requested_pass(&store, "the pass that flushes the other partition's key").await;
+    assert!(
+        inner.contains(&other_key).await,
+        "the commit that carries the row must have happened"
+    );
     assert_eq!(
         store.test_wal_watermark(partition),
         Some(Ok(3)),
         "the prefix stops below the still-pending sequence 4"
     );
     assert_eq!(
-        wal.test_read_applied_sequence(partition),
+        stored_row(&*inner, partition),
         3,
-        "the sidecar moves 0 -> 3 — a seeded partition can reclaim its segments"
+        "the row moves 0 -> 3 — a seeded partition can reclaim its segments"
     );
 }
 
@@ -2838,10 +3029,10 @@ async fn apply_or(store: &DefaultRecordStore, key: &str, op: OrOp) -> anyhow::Re
 /// real WAL behind the fault layer. `key` is durable as {old-1, old-2} and
 /// resident (hydrated, not staged).
 struct CellFixture {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     wal: Arc<WalWriter>,
     fault: Arc<FaultWal>,
-    inner: Arc<FaultStore>,
+    inner: Arc<KeptStore>,
     write_behind: Arc<WriteBehindDataStore>,
     store: Arc<DefaultRecordStore>,
     partition: u32,
@@ -2851,9 +3042,9 @@ struct CellFixture {
 impl CellFixture {
     async fn new(config: WriteBehindConfig) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).expect("wal");
-        let fault = FaultWal::new(Arc::clone(&wal));
         let inner = FaultStore::new();
+        let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
+        let fault = FaultWal::new(Arc::clone(&wal));
         let write_behind = WriteBehindDataStore::new_with_wal(
             Arc::clone(&inner) as Arc<dyn MapDataStore>,
             config,
@@ -2885,7 +3076,7 @@ impl CellFixture {
             "precondition: the key is resident"
         );
         Self {
-            _dir: dir,
+            dir,
             wal,
             fault,
             inner,
@@ -2941,15 +3132,18 @@ impl CellFixture {
         );
 
         let Self {
-            _dir,
+            dir,
             wal,
+            fault,
             inner,
             write_behind,
             store,
             ..
         } = self;
         drop(store);
-        drop(write_behind);
+        drop(fault);
+        crash(write_behind, wal).await;
+        let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
         WalRecovery::new(Arc::clone(&wal), Vec::new())
             .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
             .await
@@ -3148,15 +3342,18 @@ async fn a_capacity_rejected_mutation_is_persisted_by_the_next_write_through() {
 
     let key = fx.key().to_string();
     let CellFixture {
-        _dir,
+        dir,
         wal,
+        fault,
         inner,
         write_behind,
         store,
         ..
     } = fx;
     drop(store);
-    drop(write_behind);
+    drop(fault);
+    crash(write_behind, wal).await;
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     WalRecovery::new(Arc::clone(&wal), Vec::new())
         .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
         .await
@@ -3346,6 +3543,11 @@ async fn hard_flush_drains_cell_entries_like_value_entries() {
         store.test_pending_wal_sequences(partition).is_empty(),
         "every drained entry resolves its WAL sequence"
     );
+    assert_eq!(
+        stored_row(&*inner, partition),
+        store.test_max_assigned_wal_sequence(partition),
+        "the drain's commits carry the partition's row up to every resolved sequence"
+    );
     assert_eq!(store.pending_operation_count(), 0);
 }
 
@@ -3355,8 +3557,8 @@ async fn hard_flush_drains_cell_entries_like_value_entries() {
 /// drain and whether its frame replays on the next boot.
 async fn timed_out_drain(kind: EntryKind, in_loop: bool) -> (Vec<PendingOrigin>, bool) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).expect("wal");
     let inner = FaultStore::new();
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     let config = WriteBehindConfig {
         write_delay_ms: if in_loop { 0 } else { 600_000 },
         ..never_flush_config()
@@ -3391,14 +3593,19 @@ async fn timed_out_drain(kind: EntryKind, in_loop: bool) -> (Vec<PendingOrigin>,
         .map(|(_, origin)| origin)
         .collect();
 
+    // The next start finds the store healthy, and holding none of the entry.
     inner.release();
-    drop(store);
-    let recovered = FaultStore::new();
+    crash(store, wal).await;
+    assert!(
+        !inner.contains(&key).await,
+        "before the replay only the WAL carries the entry"
+    );
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     WalRecovery::new(Arc::clone(&wal), Vec::new())
-        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
         .await
         .expect("recovery");
-    (disposition, recovered.contains(&key).await)
+    (disposition, inner.contains(&key).await)
 }
 
 // A cell entry the drain times out on is abandoned and replayed exactly as a
@@ -3456,8 +3663,7 @@ fn stepped_config() -> WriteBehindConfig {
 /// of one partition.
 struct Stepped {
     dir: tempfile::TempDir,
-    wal: Arc<WalWriter>,
-    inner: Arc<FaultStore>,
+    inner: Arc<KeptStore>,
     store: Arc<WriteBehindDataStore>,
     partition: u32,
     keys: Vec<String>,
@@ -3465,13 +3671,12 @@ struct Stepped {
 
 impl Stepped {
     fn new(partition: u32, config: WriteBehindConfig) -> Self {
-        let (dir, wal) = real_wal();
         let inner = FaultStore::new();
+        let (dir, wal) = real_wal(&inner);
         inner.arm_gate();
-        let store = build_store_with(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1, config);
+        let store = build_store_with(&inner, wal as Arc<dyn Wal>, 1, config);
         Self {
             dir,
-            wal,
             inner,
             store,
             partition,
@@ -3564,8 +3769,8 @@ impl Stepped {
     }
 
     /// See [`crash_image`].
-    async fn crash_image(&self) -> Arc<FaultStore> {
-        crash_image(self.dir.path()).await
+    async fn crash_image(&self) -> Arc<KeptStore> {
+        crash_image(self.dir.path(), &self.inner).await
     }
 
     /// Accepts everything from here on and waits for the store to go idle.
@@ -3938,7 +4143,7 @@ async fn a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable
     let (refusals, _) = stepped.refuse_first_key(10).await;
     let pending_after_refusals = stepped.pending();
     let other_stored = stepped.inner.contains(other_key).await;
-    let applied = stepped.wal.test_read_applied_sequence(partition);
+    let applied = stored_row(&*stepped.inner, partition);
 
     // Crash: only the WAL survives.
     let image = stepped.crash_image().await;
@@ -4182,7 +4387,7 @@ async fn a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable() 
         stepped.inner.contains(other_key).await,
         stepped.pending(),
         stepped.store.test_wal_watermark(partition),
-        stepped.wal.test_read_applied_sequence(partition),
+        stored_row(&*stepped.inner, partition),
     );
 
     // Crash: only the WAL survives.
@@ -4269,9 +4474,13 @@ fn a_retired_entry_hands_its_earlier_due_time_to_the_queued_write() {
 // what writers already past it add
 // ===========================================================================
 
-fn capacity_store(wal: Arc<dyn Wal>, capacity: u64) -> Arc<WriteBehindDataStore> {
+fn capacity_store(
+    inner: &Arc<KeptStore>,
+    wal: Arc<dyn Wal>,
+    capacity: u64,
+) -> Arc<WriteBehindDataStore> {
     build_store_with(
-        &FaultStore::new(),
+        inner,
         wal,
         1,
         WriteBehindConfig {
@@ -4292,9 +4501,9 @@ async fn distinct_new_key_writers_past_the_check_exceed_capacity_by_at_most_thei
 
     // ---- Writers parked between the check and their insert.
     let dir = tempfile::tempdir().unwrap();
-    let fault =
-        FaultWal::new(WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap());
-    let store = capacity_store(Arc::clone(&fault) as Arc<dyn Wal>, CAPACITY);
+    let inner = FaultStore::new();
+    let fault = FaultWal::new(open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner));
+    let store = capacity_store(&inner, Arc::clone(&fault) as Arc<dyn Wal>, CAPACITY);
     for i in 0..CAPACITY - 1 {
         store
             .add(TEST_MAP, &format!("filled-{i}"), &lww(1), 0, 1000)
@@ -4348,9 +4557,9 @@ async fn distinct_new_key_writers_past_the_check_exceed_capacity_by_at_most_thei
 
     // ---- The boundary itself: one writer, nobody in the window, no pass.
     let boundary_dir = tempfile::tempdir().unwrap();
-    let boundary_wal =
-        WalWriter::new(boundary_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
-    let boundary = capacity_store(boundary_wal as Arc<dyn Wal>, CAPACITY);
+    let boundary_inner = FaultStore::new();
+    let boundary_wal = open_wal(boundary_dir.path(), WalFsyncPolicy::PerOp, &boundary_inner);
+    let boundary = capacity_store(&boundary_inner, boundary_wal as Arc<dyn Wal>, CAPACITY);
     for i in 0..CAPACITY - 1 {
         boundary
             .add(TEST_MAP, &format!("filled-{i}"), &lww(1), 0, 1000)
@@ -4379,8 +4588,8 @@ async fn distinct_new_key_writers_past_the_check_exceed_capacity_by_at_most_thei
 /// WAL sequence is registered in flight.
 #[tokio::test]
 async fn the_shutdown_drain_registers_its_batch_in_flight() {
-    let (_dir, wal) = real_wal();
     let inner = FaultStore::new();
+    let (_dir, wal) = real_wal(&inner);
     // Never due, so only the shutdown drain can take the entry; and a drain
     // deadline the test cannot reach, so the entry is not abandoned between the
     // wait and the assertion.
