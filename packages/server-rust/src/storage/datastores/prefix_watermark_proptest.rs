@@ -1496,38 +1496,36 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
     let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
 
     // --- Incarnation 1: one applied frame at 100, then 101/102 left buffered ---
-    let wal = {
-        let store = build_store_with(
-            &inner,
-            Arc::clone(&wal) as Arc<dyn Wal>,
-            100,
-            requested_flush_config(),
-        );
-        store
-            .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
-            .await
-            .unwrap();
-        // Drained by a requested pass rather than with `hard_flush`, which marks
-        // the store shut down and would reject the two writes this incarnation
-        // must still ack.
-        run_requested_pass(&store, "the pass that applies the first frame").await;
-        assert_eq!(
-            stored_row(&*inner, partition),
-            100,
-            "the first frame is durably applied, so the row sits at 100"
-        );
-        store
-            .add(TEST_MAP, &keys[1], &lww(2), 0, 1000)
-            .await
-            .unwrap();
-        store
-            .add(TEST_MAP, &keys[2], &lww(3), 0, 1000)
-            .await
-            .unwrap();
-        // kill -9: frames 101 and 102 are on disk and un-applied.
-        crash(store, wal).await;
-        open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner)
-    };
+    let store = build_store_with(
+        &inner,
+        Arc::clone(&wal) as Arc<dyn Wal>,
+        100,
+        requested_flush_config(),
+    );
+    store
+        .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
+        .await
+        .unwrap();
+    // Drained by a requested pass rather than with `hard_flush`, which marks
+    // the store shut down and would reject the two writes this incarnation
+    // must still ack.
+    run_requested_pass(&store, "the pass that applies the first frame").await;
+    assert_eq!(
+        stored_row(&*inner, partition),
+        100,
+        "the first frame is durably applied, so the row sits at 100"
+    );
+    store
+        .add(TEST_MAP, &keys[1], &lww(2), 0, 1000)
+        .await
+        .unwrap();
+    store
+        .add(TEST_MAP, &keys[2], &lww(3), 0, 1000)
+        .await
+        .unwrap();
+    // kill -9: frames 101 and 102 are on disk and un-applied.
+    crash(store, wal).await;
+    let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
 
     // --- Incarnation 2: recovery fails the replay of 101 ---
     assert!(
@@ -1588,10 +1586,7 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
     // --- Incarnation 3: the store is healthy again ---
     crash(store, wal).await;
     inner.accept_all();
-    assert!(
-        !inner.contains(&keys[1]).await,
-        "before the replay only the WAL carries frame 101"
-    );
+    assert!(!inner.contains(&keys[1]).await, "only the WAL carries 101");
     let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
     WalRecovery::new(Arc::clone(&wal), Vec::new())
         .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
