@@ -1495,6 +1495,7 @@ fn m14_an_older_binary_cannot_open_the_stub_or_the_data_directory() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn m15_wal_frames_left_by_an_older_binary_replay_into_the_migrated_store() {
     use crate::storage::wal::{
         Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery, WalStorePayload, WalWriter,
@@ -1545,16 +1546,41 @@ async fn m15_wal_frames_left_by_an_older_binary_replay_into_the_migrated_store()
         &[table(MAP, false, vec![("k0".to_string(), k0.clone())])],
     );
     let wal_dir = r.root.join("wal");
+    // The frames are written over a throwaway store; an older binary leaves
+    // no `wal-collected`, and no `.applied` file while nothing is applied.
     {
-        let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("wal open");
+        let scratch: Arc<dyn MapDataStore> = Arc::new(
+            EngineMapDataStore::open(Arc::new(
+                crate::storage::datastores::kv_engine::MemKvEngine::new(),
+            ))
+            .expect("store"),
+        );
+        let wal = WalWriter::open_over_store(
+            wal_dir.clone(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(&scratch),
+        )
+        .expect("wal open");
         for frame in &frames {
             wal.append(PARTITION, frame).await.expect("wal append");
         }
+        let released = Arc::downgrade(&wal);
+        drop(wal);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while released.upgrade().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "the WAL writer was never released"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        fs::remove_file(wal_dir.join(crate::storage::wal::WAL_COLLECTED_FILE)).unwrap();
     }
 
     let store = Arc::new(RedbDataStore::open_location(&r.location()).expect("the migration"));
-    let wal = WalWriter::new(wal_dir, WalFsyncPolicy::PerOp).expect("wal reopen");
     let inner: Arc<dyn MapDataStore> = store.clone();
+    let wal = WalWriter::open_over_store(wal_dir, WalFsyncPolicy::PerOp, Arc::clone(&inner))
+        .expect("wal reopen");
     WalRecovery::new(Arc::clone(&wal), Vec::new())
         .run(inner)
         .await
@@ -1562,7 +1588,14 @@ async fn m15_wal_frames_left_by_an_older_binary_replay_into_the_migrated_store()
 
     let unreplayed = wal.unapplied(PARTITION).await.expect("unapplied");
     assert!(unreplayed.is_empty(), "{unreplayed:?}");
-    assert_eq!(wal.test_applied_watermark(PARTITION), 3);
+    assert_eq!(
+        store
+            .applied_watermarks()
+            .expect("applied watermarks")
+            .expect("a store that keeps applied watermarks")
+            .by_partition[PARTITION as usize],
+        3
+    );
     assert_eq!(store.load(MAP, "k2").await.expect("load"), Some(k2_value));
     assert_eq!(store.load(MAP, "k1").await.expect("load"), None);
     assert_eq!(

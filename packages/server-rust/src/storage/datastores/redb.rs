@@ -3237,6 +3237,7 @@ mod tests {
     /// observable — replayed before its store, or skipped, it would leave the
     /// first key readable (TG-WAL-011).
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn recovery_replays_frames_abandoned_for_a_previously_refused_map_name() {
         use crate::storage::wal::{
             Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery, WalStorePayload, WalWriter,
@@ -3284,27 +3285,50 @@ mod tests {
 
         let dir = tempdir().expect("tempdir");
         let wal_dir = dir.path().join("wal");
+        let store = Arc::new(RedbDataStore::new(dir.path().join("store.redb")).expect("redb open"));
+        let inner: Arc<dyn MapDataStore> = store.clone();
 
         // The log as the earlier process left it: frames durable, nothing
-        // marked applied. The writer is dropped so recovery reads the files
+        // marked applied. The writer is released so recovery reads the files
         // the way a new process would.
         {
-            let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("wal open");
+            let wal = WalWriter::open_over_store(
+                wal_dir.clone(),
+                WalFsyncPolicy::PerOp,
+                Arc::clone(&inner),
+            )
+            .expect("wal open");
             for frame in &frames {
                 wal.append(PARTITION, frame).await.expect("wal append");
             }
+            let released = Arc::downgrade(&wal);
+            drop(wal);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while released.upgrade().is_some() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the WAL writer was never released"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
         }
 
-        let wal = WalWriter::new(wal_dir, WalFsyncPolicy::PerOp).expect("wal reopen");
+        let wal = WalWriter::open_over_store(wal_dir, WalFsyncPolicy::PerOp, Arc::clone(&inner))
+            .expect("wal reopen");
         let before = wal.unapplied(PARTITION).await.expect("unapplied");
         assert_eq!(
             before.as_slice(),
             frames.as_slice(),
             "fixture: the reopened log holds exactly the three frames, in order, all un-applied"
         );
+        for key in ["k1", "k2"] {
+            assert_eq!(
+                store.load(MAP, key).await.map_err(|e| e.to_string()),
+                Ok(None),
+                "fixture: before recovery only the WAL carries {key}"
+            );
+        }
 
-        let store = Arc::new(RedbDataStore::new(dir.path().join("store.redb")).expect("redb open"));
-        let inner: Arc<dyn MapDataStore> = store.clone();
         WalRecovery::new(Arc::clone(&wal), Vec::new())
             .run(inner)
             .await
@@ -3317,7 +3341,11 @@ mod tests {
             .into_iter()
             .map(|e| (e.key, e.sequence))
             .collect();
-        let watermark = wal.test_applied_watermark(PARTITION);
+        let watermark = store
+            .applied_watermarks()
+            .expect("applied watermarks")
+            .expect("a store that keeps applied watermarks")
+            .by_partition[PARTITION as usize];
         let k1 = store.load(MAP, "k1").await.map_err(|e| e.to_string());
         let k2 = store.load(MAP, "k2").await.map_err(|e| e.to_string());
         eprintln!(
@@ -4091,7 +4119,12 @@ mod store_broken_tests {
         let wal_dir = tempfile::tempdir().unwrap();
         let backend = MemBackend::new(None);
         let inner = Arc::new(backend.store());
-        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let wal = WalWriter::open_over_store(
+            wal_dir.path().to_path_buf(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(&inner) as Arc<dyn MapDataStore>,
+        )
+        .unwrap();
         let store = WriteBehindDataStore::new_with_wal(
             Arc::clone(&inner) as Arc<dyn MapDataStore>,
             WriteBehindConfig {
