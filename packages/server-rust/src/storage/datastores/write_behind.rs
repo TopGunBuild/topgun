@@ -5105,7 +5105,7 @@ impl MapDataStore for WriteBehindDataStore {
         // Append to WAL before updating in-memory state so crash recovery can
         // replay the tombstone if the process dies after ack but before flush. A
         // Remove frame carries no timestamp: replay deletes unconditionally, exactly
-        // as this live path does (see `WalRecovery::replay_entry`, TG-WAL-009).
+        // as this live path does (see `WalRecovery::prepare_entry`, TG-WAL-009).
         let wal_entry = WalEntry {
             map: map.to_string(),
             key: key.to_string(),
@@ -5299,7 +5299,7 @@ impl MapDataStore for WriteBehindDataStore {
             // Append each tombstone to the WAL before queuing so crash recovery
             // can replay every individual key deletion, not just the batch call. A
             // Remove frame carries no timestamp: replay deletes unconditionally, as
-            // this live path does (see `WalRecovery::replay_entry`, TG-WAL-009).
+            // this live path does (see `WalRecovery::prepare_entry`, TG-WAL-009).
             let wal_entry = WalEntry {
                 map: map.to_string(),
                 key: key.clone(),

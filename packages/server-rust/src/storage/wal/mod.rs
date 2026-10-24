@@ -148,7 +148,7 @@ pub enum WalOp {
     /// variant can take over:
     ///
     /// - It is the only `WalOp` with no replay semantics — its
-    ///   [`WalRecovery::replay_entry`] arm returns an error rather than applying
+    ///   [`WalRecovery::prepare_entry`] arm returns an error rather than applying
     ///   anything — so it is what keeps recovery's behaviour on a frame kind it
     ///   cannot apply under test. `OrDelta` cannot fill that role: it folds
     ///   successfully.
@@ -2267,7 +2267,7 @@ pub struct WalRecovery {
     wal: Arc<WalWriter>,
     /// Partition IDs to recover. If empty, all log files in `wal_dir` are used.
     partitions: Vec<u32>,
-    /// Whether the `RecordValue::Lww` merge-idempotency gate in `replay_entry` is
+    /// Whether the `RecordValue::Lww` merge-idempotency gate in `prepare_entry` is
     /// active. Always `true` in production; the harness flips it off to reproduce
     /// the pre-`TG-WAL-006` blind clobber.
     replay_merge_gate: bool,
@@ -2321,7 +2321,7 @@ impl WalRecovery {
     }
 
     /// Test-only: disable (or re-enable) the `RecordValue::Lww` merge gate in
-    /// `replay_entry`. Disabling it reproduces the pre-`TG-WAL-006` blind replay.
+    /// `prepare_entry`. Disabling it reproduces the pre-`TG-WAL-006` blind replay.
     #[cfg(test)]
     pub(crate) fn test_set_replay_merge_gate(&mut self, enabled: bool) {
         self.replay_merge_gate = enabled;
@@ -2364,91 +2364,9 @@ impl WalRecovery {
         Ok(ids)
     }
 
-    /// Replays ONE entry through the inner store.
-    ///
-    /// Goes straight to the store rather than through the CRDT service layer, so
-    /// the merge that upholds re-replay idempotency lives HERE, at the recovery
-    /// boundary, not in the store (`write_one` stays a CRDT-agnostic blind insert).
-    ///
-    /// Re-replay of a `RecordValue::Lww` frame is idempotent (TG-WAL-006): before
-    /// applying a modern Lww frame this reads the current durable value and, if the
-    /// incoming frame's HLC timestamp is strictly OLDER than the stored value's,
-    /// discards it (last-write-wins by timestamp). A stale replayed frame therefore
-    /// can no longer clobber a newer durable value written outside the replay window
-    /// (e.g. a frameless write-behind flush). Ties and newer timestamps write
-    /// through unchanged. The read-then-write is not atomic, which is safe because
-    /// recovery runs before the listener accepts connections — there are no
-    /// concurrent writers at boot.
-    ///
-    /// The gate is scoped to modern `WalStorePayload::Record(RecordValue::Lww)`
-    /// frames only:
-    /// - `WalStorePayload::Legacy` frames carry a SYNTHESIZED timestamp (zero-epoch
-    ///   when the WAL recorded none) whose intent is always-merge, so they BYPASS
-    ///   the gate and keep the pre-existing blind replay.
-    /// - `RecordValue::OrMap`/`OrTombstones` frames carried by a `WalOp::Store`
-    ///   BYPASS the gate: their CROSS-NODE convergence is set-union of
-    ///   tags+tombstones, not a scalar timestamp max — replay itself is never a
-    ///   union but an absolute-set REPLACE, since unioning a snapshot onto the
-    ///   durable value would resurrect tombstoned tags. Such a frame is a post-RMW
-    ///   COMPLETE snapshot of the key that is monotone in `wal_seq` order, so
-    ///   in-sequence replay converges to the newest snapshot regardless of
-    ///   re-replay. That argument
-    ///   covers snapshot framing only — a `WalOp::OrDelta` frame is not a snapshot
-    ///   and rests on the separate argument below. OR merge-idempotency as its own
-    ///   property is owned by `TG-OR-003`, not this path.
-    /// - A cross-kind case (stored value is not `Lww` while the incoming frame is)
-    ///   cannot be compared by timestamp, so it also BYPASSES the gate and writes
-    ///   through.
-    ///
-    /// Re-replay of a `WalOp::Remove` frame is idempotent WITHOUT a gate, under a
-    /// DISTINCT invariant (`TG-WAL-009`, Remove-scoped — not the `TG-WAL-006` value
-    /// claim above). A Remove replays UNCONDITIONALLY, identical to the live remove
-    /// path (a blind delete with no timestamp compare): `entry.timestamp` is not
-    /// consulted. This is single-algebra-correct — a gate the live path does not
-    /// have would make `replay(Remove) != live(Remove)` and would itself lose acked
-    /// deletes (a Remove whose sourced value-HLC is strictly older than the LWW
-    /// survivor would be wrongly skipped). No gate is NEEDED either: under
-    /// prefix-complete, in-order replay of the unapplied window, a stale Remove at
-    /// sequence N is replayed only when N is above the watermark, in which case
-    /// every higher-sequence frame — including any strictly-newer re-creation — is
-    /// also above the watermark and replayed AFTER it, so the re-creation survives;
-    /// and the only way a re-creation is durable-but-unframed is that its sequence
-    /// is below the watermark, i.e. OLDER than the replayed Remove, so deleting it
-    /// is live-correct. The `stale-Remove-over-newer-frameless-value` juxtaposition
-    /// is unreachable except by re-applying an already-applied older frame — the
-    /// harness `re_replay_oldest_frame` seam, never a production path (see
-    /// INVARIANTS.md TG-WAL-009 for the full state-machine argument).
-    ///
-    /// A `WalOp::OrDelta` frame is FOLDED, not written through. The arm loads the
-    /// key's CURRENT value, folds THIS ONE delta onto it via
-    /// [`OrDeltaFold::fold`], and writes the result back, so the durable store —
-    /// never a WAL-window checkpoint — is both the fold base and the accumulator,
-    /// and each frame is applied in its own sequence position inside the single
-    /// replay stream rather than batched per key. A store-mode replay batch reads
-    /// that value from its own-batch overlay when an earlier frame of the batch
-    /// wrote the key, which is the value the store holds once that frame's write
-    /// is committed. Re-replay is a semantic no-op
-    /// because the folded algebra IS the live one and its ops are idempotent set
-    /// ops (retain, dedup push, subtract) — not because a delta is a snapshot. A
-    /// delta carries only its own mutation, which is why it can never be skipped
-    /// or dropped: a dropped remove resurrects an entry, and unlike a full-snapshot
-    /// frame a delta is never repaired by a later frame.
-    ///
-    /// KNOWN BOUND on that arm, deferred rather than closed (TODO-627): the fold
-    /// writes the key back with NO expiry, and "no expiry is what the live OR path
-    /// produces" is a property of the CONFIGURATION, not of the OR policy —
-    /// `ExpiryPolicy::NONE` resolves through `compute_expiration_time`, which falls
-    /// back to `StorageConfig::default_ttl_millis`, a real evictable field that is
-    /// `0` in every production wiring but is not required to be. Wire a map-level
-    /// default TTL and the snapshot arm carries the expiry across recovery while the
-    /// delta arm discards it, silently, with nothing detecting the divergence. Stated
-    /// here because a doc-contract that asserted TTL-equivalence between the two arms
-    /// would be asserting a property this code does not have.
-    ///
-    /// A `WalOp::Store` frame carrying an OR value stays a SUPPORTED input and is
-    /// applied in its sequence position as an ABSOLUTE SET, never as a fold-base
-    /// skip hint and never as a union — see the arm for why the snapshot's
-    /// completeness is what licenses the replace.
+    /// Replays ONE entry through the inner store, writing at once what
+    /// [`Self::prepare_entry`] decides; the contract of each arm is stated
+    /// there.
     ///
     /// `run` replays in batches through `prepare_entry`; this one-frame path
     /// is kept for the tests and the re-replay seam, which drive one frame.
@@ -2689,9 +2607,93 @@ impl WalRecovery {
     /// the key; `None` when the frame writes nothing.
     ///
     /// The one place a frame's replay is decided, so the gate and the fold
-    /// exist once: `replay_entry` writes what this returns at once, a
-    /// store-mode batch collects it. The contract of each arm is the one
-    /// stated on `replay_entry`.
+    /// exist once: a store-mode replay batch collects what this returns, and
+    /// the one-frame `replay_entry` of the tests writes it at once.
+    ///
+    /// Replay goes straight to the store rather than through the CRDT service layer, so
+    /// the merge that upholds re-replay idempotency lives HERE, at the recovery
+    /// boundary, not in the store (`write_one` stays a CRDT-agnostic blind insert).
+    ///
+    /// Re-replay of a `RecordValue::Lww` frame is idempotent (TG-WAL-006): before
+    /// applying a modern Lww frame this reads the current durable value and, if the
+    /// incoming frame's HLC timestamp is strictly OLDER than the stored value's,
+    /// discards it (last-write-wins by timestamp). A stale replayed frame therefore
+    /// can no longer clobber a newer durable value written outside the replay window
+    /// (e.g. a frameless write-behind flush). Ties and newer timestamps write
+    /// through unchanged. The read-then-write is not atomic, which is safe because
+    /// recovery runs before the listener accepts connections — there are no
+    /// concurrent writers at boot.
+    ///
+    /// The gate is scoped to modern `WalStorePayload::Record(RecordValue::Lww)`
+    /// frames only:
+    /// - `WalStorePayload::Legacy` frames carry a SYNTHESIZED timestamp (zero-epoch
+    ///   when the WAL recorded none) whose intent is always-merge, so they BYPASS
+    ///   the gate and keep the pre-existing blind replay.
+    /// - `RecordValue::OrMap`/`OrTombstones` frames carried by a `WalOp::Store`
+    ///   BYPASS the gate: their CROSS-NODE convergence is set-union of
+    ///   tags+tombstones, not a scalar timestamp max — replay itself is never a
+    ///   union but an absolute-set REPLACE, since unioning a snapshot onto the
+    ///   durable value would resurrect tombstoned tags. Such a frame is a post-RMW
+    ///   COMPLETE snapshot of the key that is monotone in `wal_seq` order, so
+    ///   in-sequence replay converges to the newest snapshot regardless of
+    ///   re-replay. That argument
+    ///   covers snapshot framing only — a `WalOp::OrDelta` frame is not a snapshot
+    ///   and rests on the separate argument below. OR merge-idempotency as its own
+    ///   property is owned by `TG-OR-003`, not this path.
+    /// - A cross-kind case (stored value is not `Lww` while the incoming frame is)
+    ///   cannot be compared by timestamp, so it also BYPASSES the gate and writes
+    ///   through.
+    ///
+    /// Re-replay of a `WalOp::Remove` frame is idempotent WITHOUT a gate, under a
+    /// DISTINCT invariant (`TG-WAL-009`, Remove-scoped — not the `TG-WAL-006` value
+    /// claim above). A Remove replays UNCONDITIONALLY, identical to the live remove
+    /// path (a blind delete with no timestamp compare): `entry.timestamp` is not
+    /// consulted. This is single-algebra-correct — a gate the live path does not
+    /// have would make `replay(Remove) != live(Remove)` and would itself lose acked
+    /// deletes (a Remove whose sourced value-HLC is strictly older than the LWW
+    /// survivor would be wrongly skipped). No gate is NEEDED either: under
+    /// prefix-complete, in-order replay of the unapplied window, a stale Remove at
+    /// sequence N is replayed only when N is above the watermark, in which case
+    /// every higher-sequence frame — including any strictly-newer re-creation — is
+    /// also above the watermark and replayed AFTER it, so the re-creation survives;
+    /// and the only way a re-creation is durable-but-unframed is that its sequence
+    /// is below the watermark, i.e. OLDER than the replayed Remove, so deleting it
+    /// is live-correct. The `stale-Remove-over-newer-frameless-value` juxtaposition
+    /// is unreachable except by re-applying an already-applied older frame — the
+    /// harness `re_replay_oldest_frame` seam, never a production path (see
+    /// INVARIANTS.md TG-WAL-009 for the full state-machine argument).
+    ///
+    /// A `WalOp::OrDelta` frame is FOLDED, not written through. The arm loads the
+    /// key's CURRENT value, folds THIS ONE delta onto it via
+    /// [`OrDeltaFold::fold`], and writes the result back, so the durable store —
+    /// never a WAL-window checkpoint — is both the fold base and the accumulator,
+    /// and each frame is applied in its own sequence position inside the single
+    /// replay stream rather than batched per key. A store-mode replay batch reads
+    /// that value from its own-batch overlay when an earlier frame of the batch
+    /// wrote the key, which is the value the store holds once that frame's write
+    /// is committed. Re-replay is a semantic no-op
+    /// because the folded algebra IS the live one and its ops are idempotent set
+    /// ops (retain, dedup push, subtract) — not because a delta is a snapshot. A
+    /// delta carries only its own mutation, which is why it can never be skipped
+    /// or dropped: a dropped remove resurrects an entry, and unlike a full-snapshot
+    /// frame a delta is never repaired by a later frame.
+    ///
+    /// KNOWN BOUND on that arm, deferred rather than closed (TODO-627): the fold
+    /// writes the key back with NO expiry, and "no expiry is what the live OR path
+    /// produces" is a property of the CONFIGURATION, not of the OR policy —
+    /// `ExpiryPolicy::NONE` resolves through `compute_expiration_time`, which falls
+    /// back to `StorageConfig::default_ttl_millis`, a real evictable field that is
+    /// `0` in every production wiring but is not required to be. Wire a map-level
+    /// default TTL and the snapshot arm carries the expiry across recovery while the
+    /// delta arm discards it, silently, with nothing detecting the divergence. Stated
+    /// here because a doc-contract that asserted TTL-equivalence between the two arms
+    /// would be asserting a property this code does not have.
+    ///
+    /// A `WalOp::Store` frame carrying an OR value stays a SUPPORTED input and is
+    /// applied in its sequence position as an ABSOLUTE SET, never as a fold-base
+    /// skip hint and never as a union — see the arm for why the snapshot's
+    /// completeness is what licenses the replace.
+    ///
     async fn prepare_entry(
         inner_store: &Arc<dyn MapDataStore>,
         overlay: &ReplayOverlay,
@@ -2730,7 +2732,7 @@ impl WalRecovery {
                 // replay window) and must be discarded rather than clobber it.
                 // Legacy frames, OR frames, and a non-Lww current value all fall
                 // through to the blind replay unchanged (see the doc-contract on
-                // `replay_entry`). `merge_gate` is always `true` in production; the
+                // `prepare_entry`). `merge_gate` is always `true` in production; the
                 // harness flips it off to reproduce the pre-fix blind clobber.
                 if merge_gate {
                     if let WalStorePayload::Record(RecordValue::Lww {
@@ -2823,7 +2825,7 @@ impl WalRecovery {
                 //
                 // "Produces `0` today" is a property of the CONFIGURATION, not of
                 // the OR policy, and nothing detects the divergence if that
-                // default ever moves — the KNOWN BOUND clause in `replay_entry`'s
+                // default ever moves — the KNOWN BOUND clause in `prepare_entry`'s
                 // doc-contract states it in full, with its owner.
                 Ok(Some(ReplayWrite::Put {
                     value: folded,
