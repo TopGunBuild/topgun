@@ -5982,6 +5982,7 @@ mod tests {
     /// live semantic set — asserted here as the equality of the last frame's
     /// absolute payload with the value the live path holds.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn a_no_effect_or_write_frames_a_full_record_that_cannot_resurrect_it() {
         use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
         use crate::storage::wal::format::{decode_all, FrameDecodeResult};
@@ -6022,9 +6023,17 @@ mod tests {
         // pass by observing an empty segment. The long delays keep the frames
         // un-applied, so watermark-driven segment reclamation cannot remove the
         // very frames under assertion.
-        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let inner: Arc<dyn MapDataStore> = Arc::new(
+            crate::storage::map_data_store::WatermarkKeeping::new(NullDataStore),
+        );
+        let wal = WalWriter::open_over_store(
+            wal_dir.path().to_path_buf(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(&inner),
+        )
+        .unwrap();
         let store = WriteBehindDataStore::new_with_wal(
-            Arc::new(NullDataStore) as Arc<dyn MapDataStore>,
+            inner,
             WriteBehindConfig {
                 write_delay_ms: 60_000,
                 flush_interval_ms: 60_000,
@@ -10805,6 +10814,7 @@ mod tests {
     mod non_resident_writes {
         use super::*;
         use crate::storage::datastores::{RedbDataStore, WriteBehindConfig, WriteBehindDataStore};
+        use crate::storage::map_data_store::WatermarkKeeping;
 
         const MAP: &str = "nonres_map";
         const KEY: &str = "doc";
@@ -12315,6 +12325,7 @@ mod tests {
         // flush, what the flush writes and what is recovered after a restart
         // must all be the value of the write that started later.
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[allow(clippy::too_many_lines)]
         async fn two_routes_writing_one_key_leave_store_staging_and_restart_on_the_later_stamp() {
             use crate::storage::datastores::WalBootstrap;
             use crate::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
@@ -12324,13 +12335,17 @@ mod tests {
             let redb_path = dir.path().join("two_routes.redb");
             let journal = Arc::new(JournalStore::new(100));
 
-            let (inner, staged_read, y_waited) = {
+            let (inner, staged_read, y_waited, released) = {
                 let redb: Arc<dyn MapDataStore> =
                     Arc::new(RedbDataStore::new(&redb_path).expect("redb open"));
                 // Every frame is fsynced before its write returns, and the
                 // delays keep the flush loop from draining by itself.
-                let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
-                    .expect("wal open");
+                let wal = WalWriter::open_over_store(
+                    wal_dir.path().to_path_buf(),
+                    WalFsyncPolicy::PerOp,
+                    Arc::clone(&redb),
+                )
+                .expect("wal open");
                 let write_behind = WriteBehindDataStore::new_with_wal(
                     Arc::clone(&redb),
                     WriteBehindConfig {
@@ -12375,16 +12390,29 @@ mod tests {
                 let staged_read = lww_text(write_behind.load(MAP, KEY).await.expect("staged read"));
                 write_behind.hard_flush().await.expect("hard_flush");
                 let inner = lww_text(redb.load(MAP, KEY).await.expect("inner read"));
-                (inner, staged_read, y_waited)
+                (inner, staged_read, y_waited, Arc::downgrade(&wal))
             };
 
-            // Restart: everything above is dropped; the same redb file and WAL
-            // directory are reopened and recovery runs over them.
+            // Restart: everything above is dropped; once nothing holds the
+            // WAL, the same redb file and WAL directory are reopened and
+            // recovery runs over them.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while released.upgrade().is_some() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the WAL writer was never released"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
             let after_restart = {
                 let redb: Arc<dyn MapDataStore> =
                     Arc::new(RedbDataStore::new(&redb_path).expect("redb reopen"));
-                let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
-                    .expect("wal reopen");
+                let wal = WalWriter::open_over_store(
+                    wal_dir.path().to_path_buf(),
+                    WalFsyncPolicy::PerOp,
+                    Arc::clone(&redb),
+                )
+                .expect("wal reopen");
                 WalRecovery::new(Arc::clone(&wal), Vec::new())
                     .run(Arc::clone(&redb))
                     .await
@@ -12740,7 +12768,7 @@ mod tests {
             factory: Arc<RecordStoreFactory>,
             write_behind: Arc<WriteBehindDataStore>,
             wal: Arc<crate::storage::wal::WalWriter>,
-            inner: Arc<RefusingStore>,
+            inner: Arc<WatermarkKeeping<RefusingStore>>,
             journal: Arc<JournalStore>,
             /// Keeps the subscribed connection's channel open, when there is one.
             _listener:
@@ -12758,9 +12786,13 @@ mod tests {
             use crate::storage::datastores::WalBootstrap;
             use crate::storage::wal::{Wal, WalFsyncPolicy, WalWriter};
 
-            let inner = Arc::new(RefusingStore::gating(MAP, KEY));
-            let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
-                .expect("wal open");
+            let inner = Arc::new(WatermarkKeeping::new(RefusingStore::gating(MAP, KEY)));
+            let wal = WalWriter::open_over_store(
+                wal_dir.path().to_path_buf(),
+                WalFsyncPolicy::PerOp,
+                Arc::clone(&inner) as Arc<dyn MapDataStore>,
+            )
+            .expect("wal open");
             let write_behind = WriteBehindDataStore::new_with_wal(
                 Arc::clone(&inner) as Arc<dyn MapDataStore>,
                 WriteBehindConfig {
@@ -12815,7 +12847,7 @@ mod tests {
         ) -> Option<Timestamp> {
             use crate::storage::wal::WalRecovery;
 
-            let image = Arc::new(RefusingStore::image_of(inner));
+            let image = Arc::new(WatermarkKeeping::new(RefusingStore::image_of(inner)));
             WalRecovery::new(Arc::clone(wal), Vec::new())
                 .run(Arc::clone(&image) as Arc<dyn MapDataStore>)
                 .await
@@ -13135,7 +13167,7 @@ mod tests {
         ) -> String {
             use crate::storage::wal::WalRecovery;
 
-            let image = Arc::new(RefusingStore::image_of(inner));
+            let image = Arc::new(WatermarkKeeping::new(RefusingStore::image_of(inner)));
             WalRecovery::new(Arc::clone(wal), Vec::new())
                 .run(Arc::clone(&image) as Arc<dyn MapDataStore>)
                 .await
