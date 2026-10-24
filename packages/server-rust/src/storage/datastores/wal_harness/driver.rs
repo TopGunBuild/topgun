@@ -23,12 +23,12 @@
 //! # Crash model limit
 //!
 //! An `IncarnationEnd::Crash` DESTROYS the in-memory `WriteBehindDataStore` (its
-//! background tasks are signalled to stop and the `Arc` is dropped, so the
-//! staging buffer, pending tracker, in-flight registry, queues and seeded-set
-//! all vanish) while PRESERVING the durable artefacts (the on-disk WAL directory
-//! and the retained inner store's records and applied watermark rows); the next
-//! incarnation reopens the WAL directory over that same store. It does NOT model OS page-cache
-//! loss — an un-fsynced byte the OS still holds survives an in-process drop — so
+//! flush loop is aborted with no drain, its watchdog is told to end and the `Arc`
+//! is dropped, so the staging buffer, pending tracker, in-flight registry, queues
+//! and seeded-set all vanish) while PRESERVING the durable artefacts (the on-disk
+//! WAL directory and the retained inner store's records and applied watermark
+//! rows); the next incarnation reopens the WAL directory over that same store. It
+//! does NOT model OS page-cache loss — an un-fsynced byte the OS still holds survives an in-process drop — so
 //! this harness cannot bound that loss window; that is a categorically different
 //! crash model and is out of scope (see `wal_harness/mod.rs`'s module doc).
 //!
