@@ -1102,7 +1102,7 @@ mod tombstone_bytes_gauge_tests {
             tag_bytes: 70,
             seeded: false,
         };
-        let mut observed = Vec::new();
+        let mut censuses = Vec::new();
         for refuse in [
             Refuse::ListMaps,
             Refuse::ScanValues,
@@ -1115,9 +1115,9 @@ mod tombstone_bytes_gauge_tests {
                 reconcile_tombstone_bytes(Arc::new(RefusingScan(refuse))),
             )
             .await;
-            observed.push((refuse, observer.read_live()));
+            censuses.push((refuse, observer.read_live()));
         }
-        let wrong: Vec<_> = observed
+        let wrong: Vec<_> = censuses
             .iter()
             .filter(|(_, census)| *census != unchanged)
             .collect();
