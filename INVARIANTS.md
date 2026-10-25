@@ -1919,6 +1919,37 @@ weaker than a test.
   ingest by SPEC-375.
 - **Status:** decided, **enforced**.
 
+### TG-OR-008: The live OR census equals the entries the OrMap slots hold, whatever their residency
+
+- **Scope:** the process live OR census (`storage/tombstone_gauge.rs` sink, `record.rs`
+  `add_live_census` / `sub_live_census` / `set_live_census` / `live_census`), exported on every
+  `/metrics` scrape as `topgun_ormap_live_entries`, `topgun_ormap_live_tag_bytes` and
+  `topgun_ormap_live_census_seeded` (internal series, like `topgun_or_prune_*`).
+- **Statement:** for every state reached through `OR_ADD`, `OR_REMOVE`, the epoch prune, SYNC OR
+  ingest, and a `REMOVE` or LWW `PUT` of a key whose slot is resident, `live_entries` is the number
+  of entries over all `OrMap` slots and `live_tag_bytes` the sum of their `tag.len()`, whether a
+  slot is resident or evicted; after a restart with `seeded = 1` the same holds for the recovered
+  state. **Known exception (TODO-874):** a `REMOVE` or LWW `PUT` of a key whose `OrMap` slot is not
+  resident, and an LWW `PUT` over an `OrMap` slot whose store write fails, drop entries the server
+  does not see, so the census stays too high by them until the next restart re-seeds it.
+- **Maintaining code:** `crdt.rs::apply_or_delta` reports `live_removed` and stays counter-free;
+  the OR_ADD and OR_REMOVE mutate closures charge it under the key's writer, beside the
+  tombstone-bytes charge; `REMOVE` and LWW `PUT` subtract the old `OrMap` value `remove` / `put`
+  return; SYNC OR ingest (`sync.rs`) charges each entry it drops or pushes inside its merge loops;
+  `reconcile_tombstone_bytes` sets the census absolutely in its one boot walk and marks it seeded
+  only when the walk completes; eviction, rehydration and WAL replay never move it.
+- **Enforcing test:** `crdt.rs::proptest_live_or_census_matches_the_materialized_or_slots` (256
+  cases, census against the materialized slots after every step);
+  `record.rs::reconcile_seeds_the_live_census_to_the_durable_primary_ormap_entries`,
+  `::reconcile_that_stops_early_leaves_the_live_census_unseeded`;
+  `metrics_endpoint.rs::metrics_handler_exports_the_live_or_census_of_the_bound_sink`;
+  `tombstone_gauge.rs::the_process_live_census_hot_methods_are_atomics_only`.
+- **Violation consequence:** a soak series reading the census to count live OR entries reads a
+  number that drifts from the store, and its predicates decide on it.
+- **Discovered by:** SPEC-397b (TODO-732: the soak census needed a live count the server did not
+  keep).
+- **Status:** decided, **enforced** except the TODO-874 paths.
+
 ### TG-MRK-001: The OR-Map Merkle leaf hash is set-canonical (order-independent)
 
 - **Scope:** `merkle_leaf_hash` (`map_data_store.rs`), mirrored bit-identically by the TS client's
