@@ -500,18 +500,14 @@ async fn main() {
 
     // Guard: a bare invocation (e.g. `cargo test --all-targets` running this
     // harness=false bench, which passes only foreign libtest args) must not
-    // launch a multi-hour soak. Require an explicit mode flag.
-    // A `cfg(test)` build of this `harness = false` target is how its tests
-    // run: see `tests::run_all`. A thread of its own, because the tests build
-    // runtimes of their own and may not start inside this one.
-    #[cfg(test)]
+    // launch a multi-hour soak. Require an explicit mode flag. It runs the
+    // bench's own tests instead (see `tests::run_all`) — on a thread of its own,
+    // because the tests build runtimes of their own and may not start inside
+    // this one — then prints usage, and exits non-zero if a test failed.
     if !config.mode_requested {
-        std::process::exit(std::thread::spawn(tests::run_all).join().unwrap_or(101));
-    }
-
-    if !config.mode_requested {
+        let code = std::thread::spawn(tests::run_all).join().unwrap_or(101);
         print_usage();
-        std::process::exit(0);
+        std::process::exit(code);
     }
 
     let code = if config.inject_panic {
@@ -2075,7 +2071,6 @@ impl CensusLog {
     }
 
     /// A writer into memory, and the handle its lines are read back through.
-    #[cfg(test)]
     fn buffer() -> (Self, Arc<Mutex<Vec<String>>>) {
         let lines = Arc::new(Mutex::new(Vec::new()));
         (Self(Some(Arc::clone(&lines))), lines)
@@ -4625,17 +4620,25 @@ fn parse_f64(s: &str) -> f64 {
     })
 }
 
-#[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::Path;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use super::{
+        run_live_census_loop, sample_durable_corpus_via_copy, sample_live_census_via_copy,
+        CensusCounts, CensusFailStep, CensusLog, CensusSource, CorpusSampler, LoopEndReason,
+        RecordValue, RedbDataStore, OR_MAP, STORE_DIR,
+    };
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;
     use topgun_server::storage::record::OrMapEntry;
 
     /// This bench target is declared `harness = false`, so rustc strips every
-    /// `#[test]` item from it, and `cargo test --bench soak_harness` (or CI's
-    /// `cargo test --all-targets`) builds it with `cfg(test)` and runs `main`.
-    /// `main` hands over to this runner in that build, so the tests below are
+    /// `#[test]` item from it: no libtest runs here. `cargo test --bench
+    /// soak_harness` (or CI's `cargo test --all-targets`) runs `main` with no
+    /// mode flag, and `main` hands over to this runner, so the tests below are
     /// EXECUTED, not merely compiled. Each runs on its own thread, so one that
     /// panics fails alone and the rest still run; the summary line has
     /// libtest's shape, and a failure makes the exit code non-zero.
