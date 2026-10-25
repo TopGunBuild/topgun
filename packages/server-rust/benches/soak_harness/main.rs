@@ -931,14 +931,14 @@ async fn run_soak(config: &Config) -> i32 {
     // only by an explicit positive interval. Its records are OBSERVATION ONLY
     // and land in their own tally — see `sample_live_census_via_copy` for why a
     // census taken off a live store file may not decide anything.
-    if config.live_census_interval_secs > 0 {
+    let live_census_task = (config.live_census_interval_secs > 0).then(|| {
         tokio::spawn(run_live_census_loop(
             Arc::clone(&corpus_sampler),
             Arc::clone(&stop),
             Duration::from_secs(config.live_census_interval_secs),
             sampler_start,
-        ));
-    }
+        ))
+    });
 
     // --- Orchestration loop ---
     let start = Instant::now();
@@ -1104,6 +1104,11 @@ async fn run_soak(config: &Config) -> i32 {
     paused.store(false, Ordering::SeqCst);
     for h in churn_handles {
         let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+    }
+    // Awaited so the loop's end is on the console and in the report: a run that
+    // exits while the loop still sleeps would report it as never having ended.
+    if let Some(h) = live_census_task {
+        let _ = h.await;
     }
     supervisor.shutdown().await;
 
@@ -2332,7 +2337,16 @@ async fn run_live_census_loop(
     sampler_start: Instant,
 ) {
     let join_error = loop {
-        tokio::time::sleep(interval).await;
+        // Sleeps in short steps so a stop ends the loop within one step rather
+        // than one whole interval.
+        let wake = tokio::time::Instant::now() + interval;
+        while !stop.load(Ordering::SeqCst) {
+            let left = wake.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            tokio::time::sleep(left.min(Duration::from_millis(50))).await;
+        }
         if stop.load(Ordering::SeqCst) {
             break None;
         }
@@ -4622,7 +4636,7 @@ fn parse_f64(s: &str) -> f64 {
 
 mod tests {
     use std::path::Path;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -4842,35 +4856,54 @@ mod tests {
     /// A loop whose stop flag is already set ends at its first wake-up and says
     /// so in exactly one line. Time is paused, so the interval elapses at once.
     fn live_census_loop_prints_one_end_line_on_stop() {
-        let root = tempfile::tempdir().expect("root");
-        let (log, lines) = CensusLog::buffer();
-        let sampler = Arc::new(CorpusSampler::new(
-            root.path().join("data"),
-            root.path().join("scratch"),
-            log,
-        ));
-        let stop = Arc::new(AtomicBool::new(true));
-        tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .start_paused(true)
-            .build()
-            .expect("runtime")
-            .block_on(run_live_census_loop(
-                Arc::clone(&sampler),
-                stop,
-                Duration::from_secs(300),
-                Instant::now(),
+        const INTERVAL: Duration = Duration::from_secs(300);
+        // A stop raised before the loop starts, and one raised while it sleeps
+        // through its first interval: the second must end the loop well before
+        // that interval is over, or a run would exit before the loop ends.
+        for stop_after in [None, Some(Duration::from_secs(1))] {
+            let root = tempfile::tempdir().expect("root");
+            let (log, lines) = CensusLog::buffer();
+            let sampler = Arc::new(CorpusSampler::new(
+                root.path().join("data"),
+                root.path().join("scratch"),
+                log,
             ));
+            let stop = Arc::new(AtomicBool::new(stop_after.is_none()));
+            let took = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .expect("runtime")
+                .block_on(async {
+                    if let Some(after) = stop_after {
+                        let stop = Arc::clone(&stop);
+                        tokio::spawn(async move {
+                            tokio::time::sleep(after).await;
+                            stop.store(true, Ordering::SeqCst);
+                        });
+                    }
+                    let begun = tokio::time::Instant::now();
+                    run_live_census_loop(
+                        Arc::clone(&sampler),
+                        Arc::clone(&stop),
+                        INTERVAL,
+                        Instant::now(),
+                    )
+                    .await;
+                    begun.elapsed()
+                });
 
-        let lines = lines.lock().clone();
-        assert_eq!(
-            lines.as_slice(),
-            ["LIVE_CENSUS_LOOP_END reason=stop last_ordinal=0"],
-            "lines {lines:?}"
-        );
-        assert_eq!(
-            sampler.live_tally.lock().loop_end,
-            Some(LoopEndReason::Stop)
-        );
+            let lines = lines.lock().clone();
+            assert_eq!(
+                lines.as_slice(),
+                ["LIVE_CENSUS_LOOP_END reason=stop last_ordinal=0"],
+                "stop after {stop_after:?}: lines {lines:?}"
+            );
+            assert_eq!(
+                sampler.live_tally.lock().loop_end,
+                Some(LoopEndReason::Stop)
+            );
+            assert!(took < INTERVAL, "stop after {stop_after:?}: took {took:?}");
+        }
     }
 }
