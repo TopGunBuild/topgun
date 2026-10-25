@@ -1093,9 +1093,16 @@ mod tombstone_bytes_gauge_tests {
     }
 
     /// A walk that stops early sets nothing and leaves the census unseeded, at
-    /// each of its three exits.
+    /// each of its three exits. All three are run before the one assertion, so
+    /// a failure names every exit that went wrong.
     #[tokio::test]
     async fn reconcile_that_stops_early_leaves_the_live_census_unseeded() {
+        let unchanged = LiveCensus {
+            entries: 7,
+            tag_bytes: 70,
+            seeded: false,
+        };
+        let mut observed = Vec::new();
         for refuse in [
             Refuse::ListMaps,
             Refuse::ScanValues,
@@ -1108,16 +1115,16 @@ mod tombstone_bytes_gauge_tests {
                 reconcile_tombstone_bytes(Arc::new(RefusingScan(refuse))),
             )
             .await;
-            assert_eq!(
-                observer.read_live(),
-                LiveCensus {
-                    entries: 7,
-                    tag_bytes: 70,
-                    seeded: false,
-                },
-                "a walk refused at {refuse:?} must leave the census as it was, unseeded"
-            );
+            observed.push((refuse, observer.read_live()));
         }
+        let wrong: Vec<_> = observed
+            .iter()
+            .filter(|(_, census)| *census != unchanged)
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "a refused walk must leave the census as it was, unseeded; wrong at {wrong:?}"
+        );
     }
 }
 
