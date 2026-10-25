@@ -556,10 +556,15 @@ impl CrdtService {
             // holds: the remove stages its durable delete before it empties the
             // engine, and an in-place write in between would mutate the still-
             // resident slot and re-stage it over that delete (TG-OR-007).
-            store
+            let old = store
                 .remove(writer, &op.key, CallerProvenance::CrdtMerge)
                 .await
                 .map_err(OperationError::Internal)?;
+            // The old slot leaves the live OR census. Only a resident slot comes
+            // back; a non-resident one is the known gap of TG-OR-008 (TODO-874).
+            if let Some(old) = &old {
+                crate::storage::record::sub_live_census_of(old);
+            }
 
             Ok(ServerEventPayload {
                 map_name: op.map_name.clone(),
@@ -641,8 +646,18 @@ impl CrdtService {
                 } else {
                     None
                 };
-                // The apply consumes the delta.
+                // The apply consumes the delta, so the tag length is read first.
+                let tag_len = entry.tag.len() as u64;
                 let outcome = apply_or_delta(OrDelta::Add { entry }, value);
+                // Live OR census, under the key's writer like the tombstone
+                // bytes: the accepted entry joins, the same-tag entries it
+                // replaced leave. Two calls, never a difference that could
+                // underflow when a slot held the tag twice.
+                if outcome.added {
+                    crate::storage::record::add_live_census(1, tag_len);
+                    let removed = outcome.live_removed as u64;
+                    crate::storage::record::sub_live_census(removed, removed * tag_len);
+                }
                 // A witness, when one is owed, is read back out of the slot the
                 // apply just wrote it into, so it is literally the post-image
                 // entry rather than anything re-derived from a before/after
@@ -737,6 +752,10 @@ impl CrdtService {
                     // Only a genuinely-new tag is counted and epoch-stamped, which
                     // the apply reports back via `new_tombstone`.
                     let outcome = apply_or_delta(OrDelta::Remove { tag: tag.clone() }, value);
+                    // The entries this remove dropped leave the live OR census,
+                    // whether or not the tombstone itself is new.
+                    let removed = outcome.live_removed as u64;
+                    crate::storage::record::sub_live_census(removed, removed * tag.len() as u64);
                     if outcome.new_tombstone {
                         // Feeds the residency-independent soak leak gauge. Counted
                         // here, atomically with the resident push (under the engine's
@@ -825,7 +844,7 @@ impl CrdtService {
                 } else {
                     (lww_record_to_record_value(rec), rec.clone())
                 };
-                store
+                let old = store
                     .put(
                         writer,
                         &op.key,
@@ -835,6 +854,12 @@ impl CrdtService {
                     )
                     .await
                     .map_err(OperationError::Internal)?;
+                // An OR slot this put replaced leaves the live OR census. A
+                // non-resident slot, or a put whose store write failed, is the
+                // known gap of TG-OR-008 (TODO-874).
+                if let Some(old) = &old {
+                    crate::storage::record::sub_live_census_of(old);
+                }
                 Some(stored_rec)
             } else {
                 None
@@ -1628,6 +1653,9 @@ pub(crate) struct OrApplyOutcome {
     pub new_tombstone: bool,
     /// `Prune`: how many tombstone tags were actually dropped.
     pub pruned: usize,
+    /// `Add`/`Remove`: how many live entries the delta dropped from `records`
+    /// (an add drops the entries with its own tag before pushing itself).
+    pub live_removed: usize,
 }
 
 /// Applies exactly ONE [`OrDelta`] to a resident OR-Map slot, consuming it.
@@ -1662,6 +1690,7 @@ pub(crate) fn apply_or_delta(delta: OrDelta, value: &mut RecordValue) -> OrApply
     let mut added = false;
     let mut new_tombstone = false;
     let mut pruned = 0usize;
+    let mut live_removed = 0usize;
 
     if let RecordValue::OrMap {
         records,
@@ -1673,7 +1702,9 @@ pub(crate) fn apply_or_delta(delta: OrDelta, value: &mut RecordValue) -> OrApply
                 // Remove-wins: a tag already observed-removed is never resurrected.
                 if !tombstones.contains(&entry.tag) {
                     // Remove any existing entry with the same tag (idempotent re-add).
+                    let before = records.len();
                     records.retain(|e| e.tag != entry.tag);
+                    live_removed = before - records.len();
                     // Moved, not copied: the slot becomes the entry's only owner.
                     records.push(entry);
                     added = true;
@@ -1681,7 +1712,9 @@ pub(crate) fn apply_or_delta(delta: OrDelta, value: &mut RecordValue) -> OrApply
             }
             OrDelta::Remove { tag } => {
                 // Drop only the matched tag, preserving every concurrent survivor.
+                let before = records.len();
                 records.retain(|e| e.tag != tag);
+                live_removed = before - records.len();
                 // Dedup: a re-issued remove must not duplicate the tombstone, so
                 // only a genuinely-new tag is reported back to the caller (which
                 // is what keeps its gauge and epoch stamp exactly-once).
@@ -1702,6 +1735,7 @@ pub(crate) fn apply_or_delta(delta: OrDelta, value: &mut RecordValue) -> OrApply
         added,
         new_tombstone,
         pruned,
+        live_removed,
     }
 }
 
@@ -3684,6 +3718,274 @@ mod tests {
             matches!(resp, OperationResponse::Message(ref msg) if matches!(**msg, Message::OpAck(_))),
             "expected OpAck, got {resp:?}"
         );
+    }
+
+    // TG-OR-008: the live OR census charged on the write path equals the
+    // entries the key slots actually hold, through every path that changes them.
+    #[derive(Debug, Clone)]
+    enum CensusAction {
+        OrAdd {
+            key: u8,
+            tag: u8,
+        },
+        OrRemove {
+            key: u8,
+            tag: u8,
+        },
+        Sync {
+            key: u8,
+            records: u8,
+            tombstones: u8,
+        },
+        Evict {
+            key: u8,
+        },
+        Prune,
+        Remove {
+            key: u8,
+        },
+        LwwPut {
+            key: u8,
+        },
+    }
+
+    const CENSUS_MAP: &str = "census";
+    const CENSUS_KEYS: u8 = 3;
+    const CENSUS_TAGS: u8 = 4;
+
+    fn census_key(key: u8) -> String {
+        format!("k{key}")
+    }
+
+    /// Tags of different lengths, so a byte count charged with the wrong tag
+    /// cannot balance out by accident.
+    fn census_tag(tag: u8) -> String {
+        "t".repeat(usize::from(tag) + 1)
+    }
+
+    fn arb_census_action() -> impl Strategy<Value = CensusAction> {
+        // Tiny key and tag pools, so a repeated add, an add after a remove (which
+        // remove-wins suppresses), a remove of an absent or already-removed tag,
+        // and a sync over the same tags all occur in most sequences.
+        prop_oneof![
+            4 => (0..CENSUS_KEYS, 0..CENSUS_TAGS)
+                .prop_map(|(key, tag)| CensusAction::OrAdd { key, tag }),
+            3 => (0..CENSUS_KEYS, 0..CENSUS_TAGS)
+                .prop_map(|(key, tag)| CensusAction::OrRemove { key, tag }),
+            2 => (0..CENSUS_KEYS, 0u8..16, 0u8..16).prop_map(|(key, records, tombstones)| {
+                CensusAction::Sync { key, records, tombstones }
+            }),
+            2 => (0..CENSUS_KEYS).prop_map(|key| CensusAction::Evict { key }),
+            1 => Just(CensusAction::Prune),
+            1 => (0..CENSUS_KEYS).prop_map(|key| CensusAction::Remove { key }),
+            1 => (0..CENSUS_KEYS).prop_map(|key| CensusAction::LwwPut { key }),
+        ]
+    }
+
+    fn census_client_op(
+        key: &str,
+        op_type: Option<&str>,
+        record: Option<topgun_core::LWWRecord<rmpv::Value>>,
+    ) -> Operation {
+        Operation::ClientOp {
+            ctx: make_ctx_for_key(key),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some(format!("census-{key}")),
+                    map_name: CENSUS_MAP.to_string(),
+                    key: key.to_string(),
+                    op_type: op_type.map(str::to_string),
+                    record: record.map(Some),
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        }
+    }
+
+    /// The oracle: entries and tag bytes of the `OrMap` values the keys hold,
+    /// read from memory when resident and from the durable store otherwise,
+    /// without loading anything back.
+    async fn census_oracle(
+        factory: &Arc<RecordStoreFactory>,
+        ds: &Arc<dyn MapDataStore>,
+    ) -> (u64, u64) {
+        let (mut entries, mut tag_bytes) = (0u64, 0u64);
+        for key in (0..CENSUS_KEYS).map(census_key) {
+            let store = factory.get_or_create(CENSUS_MAP, hash_to_partition(&key));
+            let value = if store.exists_in_memory(&key) {
+                store.get(&key, false).await.unwrap().map(|r| r.value)
+            } else {
+                ds.load(CENSUS_MAP, &key).await.unwrap()
+            };
+            if let Some(RecordValue::OrMap { records, .. }) = value {
+                entries += records.len() as u64;
+                tag_bytes += records.iter().map(|e| e.tag.len() as u64).sum::<u64>();
+            }
+        }
+        (entries, tag_bytes)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn census_apply(
+        action: &CensusAction,
+        svc: &Arc<CrdtService>,
+        sync: &Arc<crate::service::domain::sync::SyncService>,
+        factory: &Arc<RecordStoreFactory>,
+        frontier: &Arc<TombstoneFrontier>,
+    ) {
+        use topgun_core::messages::{ORMapEntry, ORMapPushDiff, ORMapPushDiffPayload};
+
+        let store_of = |key: &str| factory.get_or_create(CENSUS_MAP, hash_to_partition(key));
+        match action {
+            CensusAction::OrAdd { key, tag } => {
+                let tag = census_tag(*tag);
+                svc.clone()
+                    .oneshot(or_add_op(CENSUS_MAP, &census_key(*key), "v", &tag))
+                    .await
+                    .unwrap();
+            }
+            CensusAction::OrRemove { key, tag } => {
+                svc.clone()
+                    .oneshot(or_remove_op(
+                        CENSUS_MAP,
+                        &census_key(*key),
+                        &census_tag(*tag),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            CensusAction::Sync {
+                key,
+                records,
+                tombstones,
+            } => {
+                let pick = |mask: u8| -> Vec<String> {
+                    (0..CENSUS_TAGS)
+                        .filter(|t| mask & (1 << t) != 0)
+                        .map(census_tag)
+                        .collect()
+                };
+                let entry = ORMapEntry {
+                    key: census_key(*key),
+                    records: pick(*records)
+                        .into_iter()
+                        .map(|tag| topgun_core::ORMapRecord {
+                            value: rmpv::Value::String("synced".into()),
+                            timestamp: make_timestamp(),
+                            tag,
+                            ttl_ms: None,
+                        })
+                        .collect(),
+                    tombstones: pick(*tombstones),
+                };
+                sync.clone()
+                    .oneshot(Operation::ORMapPushDiff {
+                        ctx: make_ctx_sync(),
+                        payload: ORMapPushDiff {
+                            payload: ORMapPushDiffPayload {
+                                map_name: CENSUS_MAP.to_string(),
+                                entries: vec![entry],
+                            },
+                        },
+                    })
+                    .await
+                    .unwrap();
+            }
+            CensusAction::Evict { key } => {
+                let key = census_key(*key);
+                store_of(&key).evict(&key, false);
+            }
+            CensusAction::Prune => {
+                let client: String = "a5:alice|dev-1".into();
+                frontier.set_delivered(ConnectionId(1), u64::MAX);
+                let _ = frontier
+                    .confirm_apply_ack(&client, frontier.current_epoch(), ConnectionId(1))
+                    .await;
+                frontier.set_durable_epoch_watermark(u64::MAX);
+                prune_epoch_tombstones(frontier, factory, &svc.key_writer).await;
+            }
+            CensusAction::Remove { key } | CensusAction::LwwPut { key } => {
+                let key = census_key(*key);
+                // A REMOVE or PUT over a non-resident OR slot is the known gap
+                // of TG-OR-008 (TODO-874), so the key is loaded back first.
+                store_of(&key).get(&key, false).await.unwrap();
+                let op = if matches!(action, CensusAction::Remove { .. }) {
+                    census_client_op(&key, Some("REMOVE"), None)
+                } else {
+                    census_client_op(
+                        &key,
+                        None,
+                        Some(topgun_core::LWWRecord {
+                            value: Some(rmpv::Value::String("lww".into())),
+                            timestamp: make_timestamp(),
+                            ttl_ms: None,
+                        }),
+                    )
+                };
+                svc.clone().oneshot(op).await.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn proptest_live_or_census_matches_the_materialized_or_slots() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::merkle_sync::MerkleSyncManager;
+        use crate::storage::tombstone_gauge::{with_gauge_sink, IsolatedGauge, TombstoneGaugeSink};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut runner = proptest::test_runner::TestRunner::new(proptest::test_runner::Config {
+            cases: 256,
+            ..proptest::test_runner::Config::default()
+        });
+
+        runner
+            .run(
+                &proptest::collection::vec(arb_census_action(), 1..32),
+                |actions| {
+                    runtime.block_on(async {
+                        // A store that keeps an evicted slot: over a null store an
+                        // eviction loses the slot and the census could not match.
+                        // In memory, so 256 cases pay no file syncs.
+                        let ds: Arc<dyn MapDataStore> = Arc::new(
+                            RedbDataStore::with_backend(redb::backends::InMemoryBackend::new())
+                                .unwrap(),
+                        );
+                        let (svc, factory, frontier) =
+                            make_service_with_frontier_and_store(Arc::clone(&ds), Vec::new());
+                        let sync = Arc::new(crate::service::domain::sync::SyncService::new(
+                            Arc::new(MerkleSyncManager::default()),
+                            Arc::clone(&factory),
+                            Arc::new(ConnectionRegistry::new()),
+                        ));
+                        let sink = Arc::new(IsolatedGauge::new());
+                        let observer = Arc::clone(&sink);
+                        with_gauge_sink(sink, async {
+                            for (step, action) in actions.iter().enumerate() {
+                                census_apply(action, &svc, &sync, &factory, &frontier).await;
+                                let live = observer.read_live();
+                                let oracle = census_oracle(&factory, &ds).await;
+                                prop_assert_eq!(
+                                    (live.entries, live.tag_bytes),
+                                    oracle,
+                                    "live census drifted from the slots at step {} ({:?})",
+                                    step,
+                                    action
+                                );
+                            }
+                            Ok(())
+                        })
+                        .await
+                    })
+                },
+            )
+            .unwrap();
     }
 
     // -- LWW REMOVE (op_type) --
@@ -7521,6 +7823,15 @@ mod tests {
             !body.contains("_tombstone_bytes"),
             "the apply must stay counter-free, found a `*_tombstone_bytes` call in its body"
         );
+        // The live OR census is charged by the callers from `live_removed`, and
+        // the apply also replays WAL frames before the boot seed: a charge in
+        // here would count replayed entries the seed then counts again.
+        for needle in ["live_census", "with_sink("] {
+            assert!(
+                !body.contains(needle),
+                "the apply must stay counter-free, found `{needle}` in its body"
+            );
+        }
     }
 
     /// A genuinely-new tombstone is charged to the gauge even when the durable

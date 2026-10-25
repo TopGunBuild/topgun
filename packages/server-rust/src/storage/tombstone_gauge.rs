@@ -32,6 +32,29 @@ pub trait TombstoneGaugeSink: Send + Sync {
     fn read(&self) -> u64;
     /// Re-baselines the gauge to an absolute `total`.
     fn set(&self, total: u64);
+    /// Adds `entries` live OR entries carrying `tag_bytes` tag bytes.
+    fn add_live(&self, entries: u64, tag_bytes: u64);
+    /// Subtracts `entries` live OR entries carrying `tag_bytes` tag bytes.
+    fn sub_live(&self, entries: u64, tag_bytes: u64);
+    /// Sets the live census to absolute values and marks it seeded.
+    fn set_live(&self, entries: u64, tag_bytes: u64);
+    /// Reads the live census.
+    fn read_live(&self) -> LiveCensus;
+}
+
+/// The live OR-Map census: how many entries the `OrMap` slots of the process
+/// hold, and the summed UTF-8 byte length of their tags.
+///
+/// `seeded` is `false` until the boot walk has set both counts from the
+/// persisted keyspace; before that they only count changes made since start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LiveCensus {
+    /// Live entries across every `OrMap` slot.
+    pub entries: u64,
+    /// Sum of `tag.len()` over those entries.
+    pub tag_bytes: u64,
+    /// Whether the boot walk has set the counts.
+    pub seeded: bool,
 }
 
 /// The production sink: an `AtomicU64` plus the exported Prometheus series.
@@ -73,6 +96,16 @@ pub struct ProcessGauge {
     /// reliably observes a prior arm even if the two ever run on different
     /// threads.
     add_fired: AtomicBool,
+
+    /// Live OR entries; see [`LiveCensus`]. Kept beside the tombstone bytes so
+    /// one sink, and one test seam, carries both. Exported only when
+    /// `/metrics` is scraped, so the write path touches nothing but atomics.
+    live_entries: AtomicU64,
+    /// Summed tag bytes of the live OR entries.
+    live_tag_bytes: AtomicU64,
+    /// Set by [`ProcessGauge::set_live`]; `Release`/`Acquire` so a reader that
+    /// sees it also sees the counts it was set with.
+    live_seeded: AtomicBool,
 }
 
 impl ProcessGauge {
@@ -85,6 +118,9 @@ impl ProcessGauge {
         Self {
             bytes: AtomicU64::new(0),
             add_fired: AtomicBool::new(false),
+            live_entries: AtomicU64::new(0),
+            live_tag_bytes: AtomicU64::new(0),
+            live_seeded: AtomicBool::new(false),
         }
     }
 
@@ -203,6 +239,43 @@ impl ProcessGauge {
         metrics::gauge!("topgun_ormap_tombstone_bytes").set(total as f64);
     }
 
+    /// Adds live OR entries. Runs on every accepted OR add, so it is atomics
+    /// only: no lock, no allocation, no Prometheus call.
+    pub fn add_live(&self, entries: u64, tag_bytes: u64) {
+        self.live_entries.fetch_add(entries, Ordering::Relaxed);
+        self.live_tag_bytes.fetch_add(tag_bytes, Ordering::Relaxed);
+    }
+
+    /// Subtracts live OR entries; wraps on underflow like [`ProcessGauge::sub`],
+    /// so an accounting regression stays visible.
+    pub fn sub_live(&self, entries: u64, tag_bytes: u64) {
+        self.live_entries.fetch_sub(entries, Ordering::Relaxed);
+        self.live_tag_bytes.fetch_sub(tag_bytes, Ordering::Relaxed);
+    }
+
+    /// Sets the live census to absolute values and marks it seeded. Boot only.
+    ///
+    /// Unlike [`ProcessGauge::set`] it needs no tripwire: nothing here is an
+    /// additive Prometheus counter, the gauges are set from these atomics at
+    /// scrape time.
+    pub fn set_live(&self, entries: u64, tag_bytes: u64) {
+        self.live_entries.store(entries, Ordering::Relaxed);
+        self.live_tag_bytes.store(tag_bytes, Ordering::Relaxed);
+        self.live_seeded.store(true, Ordering::Release);
+    }
+
+    /// Reads the live census.
+    #[must_use]
+    pub fn read_live(&self) -> LiveCensus {
+        // The flag first: a reader that sees `seeded` sees the seeded counts.
+        let seeded = self.live_seeded.load(Ordering::Acquire);
+        LiveCensus {
+            entries: self.live_entries.load(Ordering::Relaxed),
+            tag_bytes: self.live_tag_bytes.load(Ordering::Relaxed),
+            seeded,
+        }
+    }
+
     /// Reports whether an add has fired on **this instance**.
     ///
     /// Instance-scoped by construction: it can only ever report on its receiver,
@@ -247,6 +320,22 @@ impl TombstoneGaugeSink for ProcessGauge {
     fn set(&self, total: u64) {
         Self::set(self, total);
     }
+
+    fn add_live(&self, entries: u64, tag_bytes: u64) {
+        Self::add_live(self, entries, tag_bytes);
+    }
+
+    fn sub_live(&self, entries: u64, tag_bytes: u64) {
+        Self::sub_live(self, entries, tag_bytes);
+    }
+
+    fn set_live(&self, entries: u64, tag_bytes: u64) {
+        Self::set_live(self, entries, tag_bytes);
+    }
+
+    fn read_live(&self) -> LiveCensus {
+        Self::read_live(self)
+    }
 }
 
 /// The one gauge production ever writes to.
@@ -260,6 +349,9 @@ pub(crate) static PROCESS_GAUGE: ProcessGauge = ProcessGauge::new();
 #[cfg(test)]
 pub(crate) struct IsolatedGauge {
     bytes: AtomicU64,
+    live_entries: AtomicU64,
+    live_tag_bytes: AtomicU64,
+    live_seeded: AtomicBool,
 }
 
 #[cfg(test)]
@@ -268,6 +360,9 @@ impl IsolatedGauge {
     pub(crate) const fn new() -> Self {
         Self {
             bytes: AtomicU64::new(0),
+            live_entries: AtomicU64::new(0),
+            live_tag_bytes: AtomicU64::new(0),
+            live_seeded: AtomicBool::new(false),
         }
     }
 }
@@ -290,6 +385,31 @@ impl TombstoneGaugeSink for IsolatedGauge {
 
     fn set(&self, total: u64) {
         self.bytes.store(total, Ordering::Relaxed);
+    }
+
+    fn add_live(&self, entries: u64, tag_bytes: u64) {
+        self.live_entries.fetch_add(entries, Ordering::Relaxed);
+        self.live_tag_bytes.fetch_add(tag_bytes, Ordering::Relaxed);
+    }
+
+    fn sub_live(&self, entries: u64, tag_bytes: u64) {
+        self.live_entries.fetch_sub(entries, Ordering::Relaxed);
+        self.live_tag_bytes.fetch_sub(tag_bytes, Ordering::Relaxed);
+    }
+
+    fn set_live(&self, entries: u64, tag_bytes: u64) {
+        self.live_entries.store(entries, Ordering::Relaxed);
+        self.live_tag_bytes.store(tag_bytes, Ordering::Relaxed);
+        self.live_seeded.store(true, Ordering::Release);
+    }
+
+    fn read_live(&self) -> LiveCensus {
+        let seeded = self.live_seeded.load(Ordering::Acquire);
+        LiveCensus {
+            entries: self.live_entries.load(Ordering::Relaxed),
+            tag_bytes: self.live_tag_bytes.load(Ordering::Relaxed),
+            seeded,
+        }
     }
 }
 
@@ -411,6 +531,22 @@ mod tests {
         dynamic.add(9);
         ProcessGauge::sub(&inherent, 4);
         dynamic.sub(4);
+        ProcessGauge::add_live(&inherent, 5, 50);
+        dynamic.add_live(5, 50);
+        ProcessGauge::sub_live(&inherent, 2, 20);
+        dynamic.sub_live(2, 20);
+        assert_eq!(
+            ProcessGauge::read_live(&inherent),
+            dynamic.read_live(),
+            "inherent and trait dispatch must leave identical live counts"
+        );
+        ProcessGauge::set_live(&inherent, 7, 70);
+        dynamic.set_live(7, 70);
+        assert_eq!(
+            ProcessGauge::read_live(&inherent),
+            dynamic.read_live(),
+            "inherent and trait dispatch must seed the live census identically"
+        );
 
         assert_eq!(
             ProcessGauge::read(&inherent),
@@ -544,6 +680,42 @@ mod tests {
             observer.armed(),
             "an add routed through the public API must arm the receiving instance"
         );
+    }
+
+    /// The live-census methods of the production gauge run on every OR write,
+    /// so their bodies must stay atomics only. Read from this file's source so
+    /// a Prometheus call, a lock or an allocation added there turns this red.
+    #[test]
+    fn the_process_live_census_hot_methods_are_atomics_only() {
+        let source = include_str!("tombstone_gauge.rs");
+        let inherent = source
+            .split_once(concat!("impl ProcessGauge ", "{"))
+            .expect("the inherent ProcessGauge block must exist")
+            .1;
+        for method in [concat!("fn add_", "live("), concat!("fn sub_", "live(")] {
+            let start = inherent
+                .find(method)
+                .unwrap_or_else(|| panic!("`{method}` must be in the inherent ProcessGauge block"));
+            let body = &inherent[start..];
+            let end = body
+                .find("\n    }\n")
+                .unwrap_or_else(|| panic!("the body of `{method}` must close"));
+            let body = &body[..end];
+            for banned in [
+                "metrics::",
+                ".lock(",
+                "format!",
+                "Vec",
+                "to_string",
+                "tracing::",
+                "eprintln!",
+            ] {
+                assert!(
+                    !body.contains(banned),
+                    "`{method}` runs on every OR write and must not contain `{banned}`"
+                );
+            }
+        }
     }
 
     #[test]

@@ -34,6 +34,17 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
     let connection_count = state.registry.count() as f64;
     metrics::gauge!("topgun_active_connections").set(connection_count);
 
+    // The live OR census is kept in atomics on the write path and set here,
+    // so an OR write never calls into the recorder and every scrape, the
+    // first included, carries all three series.
+    let live = crate::storage::record::live_census();
+    #[allow(clippy::cast_precision_loss)]
+    {
+        metrics::gauge!("topgun_ormap_live_entries").set(live.entries as f64);
+        metrics::gauge!("topgun_ormap_live_tag_bytes").set(live.tag_bytes as f64);
+    }
+    metrics::gauge!("topgun_ormap_live_census_seeded").set(f64::from(u8::from(live.seeded)));
+
     match &state.observability {
         Some(handle) => {
             // Pull the conjunct snapshot fresh on every scrape — this is the only call
@@ -82,6 +93,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(metrics_scrape)]
     async fn metrics_handler_returns_200_without_observability() {
         let state = test_state_no_obs();
         let resp = metrics_handler(State(state)).await.into_response();
@@ -89,6 +101,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(metrics_scrape)]
     async fn metrics_handler_content_type_without_observability() {
         let state = test_state_no_obs();
         let resp = metrics_handler(State(state)).await.into_response();
@@ -100,6 +113,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(metrics_scrape)]
     async fn metrics_handler_returns_200_with_observability() {
         use crate::service::middleware::init_observability;
         let obs = init_observability();
@@ -124,6 +138,7 @@ mod tests {
     /// asserted for the gauges, plus a strict rise of the snapshot counter: a counter never
     /// goes down, so that rise survives any interleaving.
     #[tokio::test]
+    #[serial_test::serial(metrics_scrape)]
     async fn metrics_handler_publishes_conjunct_snapshot_before_render() {
         use crate::service::middleware::init_observability;
         use crate::tombstone_frontier::{
@@ -210,6 +225,66 @@ mod tests {
             snapshots_after > snapshots_before,
             "the handler's own body must show a snapshot published during this scrape \
              (before={snapshots_before}, after={snapshots_after})"
+        );
+    }
+
+    /// Every scrape carries the three live OR census series, set from the
+    /// sink at that moment: zero and unseeded before the boot walk, the
+    /// seeded values after it.
+    ///
+    /// Serial with the other scrapes of this module: the gauges live in the
+    /// one process recorder, and only a scrape sets them.
+    #[tokio::test]
+    #[serial_test::serial(metrics_scrape)]
+    async fn metrics_handler_exports_the_live_or_census_of_the_bound_sink() {
+        use crate::service::middleware::init_observability;
+        use crate::storage::tombstone_gauge::{with_gauge_sink, IsolatedGauge, TombstoneGaugeSink};
+
+        async fn scrape(state: AppState) -> String {
+            let resp = metrics_handler(State(state)).await.into_response();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("readable body");
+            String::from_utf8(body.to_vec()).expect("utf-8 body")
+        }
+
+        fn assert_lines(body: &str, expected: [&str; 3]) {
+            for line in expected {
+                assert!(
+                    body.lines().any(|l| l == line),
+                    "missing line `{line}`; body was:\n{body}"
+                );
+            }
+        }
+
+        let obs = Arc::new(init_observability());
+        let mut state = test_state_no_obs();
+        state.observability = Some(obs);
+
+        let sink = Arc::new(IsolatedGauge::new());
+        let observer = Arc::clone(&sink);
+        let (fresh, seeded) = with_gauge_sink(sink, async {
+            let fresh = scrape(state.clone()).await;
+            observer.set_live(3, 30);
+            (fresh, scrape(state).await)
+        })
+        .await;
+
+        assert_lines(
+            &fresh,
+            [
+                "topgun_ormap_live_entries 0",
+                "topgun_ormap_live_tag_bytes 0",
+                "topgun_ormap_live_census_seeded 0",
+            ],
+        );
+        assert_lines(
+            &seeded,
+            [
+                "topgun_ormap_live_entries 3",
+                "topgun_ormap_live_tag_bytes 30",
+                "topgun_ormap_live_census_seeded 1",
+            ],
         );
     }
 }

@@ -1718,8 +1718,16 @@ impl SyncService {
                         }
                     }
 
-                    // Drop any stored record whose tag is now tombstoned.
-                    records.retain(|r| !known.contains(r.tag.as_str()));
+                    // Drop any stored record whose tag is now tombstoned; each
+                    // dropped entry leaves the live OR census, and each pushed
+                    // one below joins it.
+                    records.retain(|r| {
+                        let keep = !known.contains(r.tag.as_str());
+                        if !keep {
+                            crate::storage::record::sub_live_census(1, r.tag.len() as u64);
+                        }
+                        keep
+                    });
 
                     // Apply inbound records (add-wins): keep a record unless its tag
                     // is tombstoned. De-duplicate by tag so repeated pushes are
@@ -1732,6 +1740,7 @@ impl SyncService {
                         if records.iter().any(|existing| existing.tag == r.tag) {
                             continue;
                         }
+                        crate::storage::record::add_live_census(1, r.tag.len() as u64);
                         records.push(crate::storage::record::OrMapEntry {
                             value: crate::service::domain::crdt::rmpv_to_value(&r.value),
                             // Tag stays verbatim (OR identity — re-stamping breaks
