@@ -1512,6 +1512,98 @@ impl CensusSource {
     }
 }
 
+/// The step at which one census attempt failed. Every failure path of the copy
+/// and of the scan maps to exactly one variant, so a blind instrument always
+/// says where it went blind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CensusFailStep {
+    /// The ordinal-scoped scratch directory could not be created.
+    ScratchDir,
+    /// The store directory could not be copied into it.
+    Copy,
+    /// The directory scanned holds no `engine.redb`.
+    EngineMissing,
+    /// The store could not be opened.
+    Open,
+    /// The records of the map could not be visited.
+    Visit,
+}
+
+impl CensusFailStep {
+    /// Every variant, in the order the per-step counts are rendered.
+    pub const ALL: [Self; 5] = [
+        Self::ScratchDir,
+        Self::Copy,
+        Self::EngineMissing,
+        Self::Open,
+        Self::Visit,
+    ];
+
+    /// The single rendered token, shared by the console line and the JSON key.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ScratchDir => "scratch_dir",
+            Self::Copy => "copy",
+            Self::EngineMissing => "engine_missing",
+            Self::Open => "open",
+            Self::Visit => "visit",
+        }
+    }
+}
+
+/// Why one census attempt failed: the step, and the source error rendered
+/// with its whole chain (for [`CensusFailStep::EngineMissing`], the path that
+/// was missing).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CensusFailure {
+    pub step: CensusFailStep,
+    pub error: String,
+}
+
+/// Failed census attempts per step. It is the ONLY record of failures a tally
+/// keeps — the failed total is its sum — so the total and the per-step counts
+/// cannot disagree.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FailuresByStep([usize; CensusFailStep::ALL.len()]);
+
+impl FailuresByStep {
+    pub fn record(&mut self, step: CensusFailStep) {
+        self.0[step as usize] += 1;
+    }
+
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.0.iter().sum()
+    }
+
+    /// Every step with its count, zeros included.
+    pub fn iter(&self) -> impl Iterator<Item = (CensusFailStep, usize)> + '_ {
+        CensusFailStep::ALL
+            .into_iter()
+            .map(|s| (s, self.0[s as usize]))
+    }
+}
+
+/// Why the live census loop ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopEndReason {
+    /// The run set its stop flag.
+    Stop,
+    /// The blocking task that takes one census could not be joined.
+    JoinError,
+}
+
+impl LoopEndReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::JoinError => "join_error",
+        }
+    }
+}
+
 /// One census, tagged with when it was taken and from what.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CensusRecord {

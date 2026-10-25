@@ -125,23 +125,24 @@ use monitor::{
     assess_tombstone_corpus_level, classify_durable_reading, classify_origin_reading,
     classify_series_shape, corpus_level_clause_undecided, exclude_boot_gap_samples, fold_lww_key,
     fold_or_key, fold_undecodable_key, max_count_in_window, parse_labelled_gauge, sample_disk_mb,
-    sample_redb_bytes, sample_rss_mb, sample_wal_retention, BootGap, CensusRecord, CensusSource,
-    CorpusLevelDisposition, CorpusSample, DiskAssessment, DiskSample, DurableCensus,
-    DurableReading, EpochsExitedAbsence, GaugeFold, GaugeObservation, GaugeReading, MemSample,
-    OrVariant, OriginLine, SeriesPoint, SeriesShapeReading, TombstoneAssessment,
-    TombstoneCorpusAssessment, TombstoneLevelBound, TombstoneSample, DECIDING_SERIES,
-    DEFAULT_DISK_CEILING_MB, DEFAULT_DISK_MIN_GROWTH_MB, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
-    DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS, DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES,
-    DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES, DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
-    DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS, DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS,
-    DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS, DEFAULT_TOMBSTONE_STAMP_LATENCY_ALLOWANCE_SECS,
+    sample_redb_bytes, sample_rss_mb, sample_wal_retention, BootGap, CensusFailStep, CensusFailure,
+    CensusRecord, CensusSource, CorpusLevelDisposition, CorpusSample, DiskAssessment, DiskSample,
+    DurableCensus, DurableReading, EpochsExitedAbsence, FailuresByStep, GaugeFold,
+    GaugeObservation, GaugeReading, LoopEndReason, MemSample, OrVariant, OriginLine, SeriesPoint,
+    SeriesShapeReading, TombstoneAssessment, TombstoneCorpusAssessment, TombstoneLevelBound,
+    TombstoneSample, DECIDING_SERIES, DEFAULT_DISK_CEILING_MB, DEFAULT_DISK_MIN_GROWTH_MB,
+    DEFAULT_DISK_THRESHOLD_MB_PER_HOUR, DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+    DEFAULT_TOMBSTONE_CORPUS_CEILING_BYTES, DEFAULT_TOMBSTONE_CORPUS_HEADROOM_BYTES,
+    DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES, DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
+    DEFAULT_TOMBSTONE_FENCE_AGE_BOUND_MS, DEFAULT_TOMBSTONE_LEVEL_MIN_WINDOW_SECS,
+    DEFAULT_TOMBSTONE_STAMP_LATENCY_ALLOWANCE_SECS,
 };
 use or_noloss::{missing_acked_adds, OrLedger};
 use process::{resolve_server_binary, OriginCaptureSnapshot, ServerConfig, ServerSupervisor};
 use report::{
     append_progress, effective_epoch_width, scan_wal_frame_sizes, utc_timestamp_now, write_report,
-    ConfirmApplyReport, DiskReport, MemoryReport, ProgressSnapshot, SoakReport,
-    TombstoneCorpusReport, TombstoneReport, WalFrameStats,
+    CensusCounts, ConfirmApplyReport, DiskReport, LiveCensusReport, MemoryReport, ProgressSnapshot,
+    SoakReport, TombstoneCorpusReport, TombstoneReport, WalFrameStats,
 };
 use topgun_server::storage::record::RecordValue;
 use topgun_server::storage::RedbDataStore;
@@ -500,6 +501,14 @@ async fn main() {
     // Guard: a bare invocation (e.g. `cargo test --all-targets` running this
     // harness=false bench, which passes only foreign libtest args) must not
     // launch a multi-hour soak. Require an explicit mode flag.
+    // A `cfg(test)` build of this `harness = false` target is how its tests
+    // run: see `tests::run_all`. A thread of its own, because the tests build
+    // runtimes of their own and may not start inside this one.
+    #[cfg(test)]
+    if !config.mode_requested {
+        std::process::exit(std::thread::spawn(tests::run_all).join().unwrap_or(101));
+    }
+
     if !config.mode_requested {
         print_usage();
         std::process::exit(0);
@@ -916,39 +925,23 @@ async fn run_soak(config: &Config) -> i32 {
     // Durable-corpus series: one sample per recovery checkpoint (taken from a
     // byte copy while the child is reaped) plus the terminal scan, all on the
     // same `sampler_start` clock as the RSS/tombstone-byte/disk series.
-    let corpus_sampler = Arc::new(CorpusSampler::new(data_dir.clone(), corpus_scratch));
+    let corpus_sampler = Arc::new(CorpusSampler::new(
+        data_dir.clone(),
+        corpus_scratch,
+        CensusLog::stderr(),
+    ));
 
     // Live-copy census sampler: DISARMED by default (interval 0), and armed
     // only by an explicit positive interval. Its records are OBSERVATION ONLY
     // and land in their own tally — see `sample_live_census_via_copy` for why a
     // census taken off a live store file may not decide anything.
     if config.live_census_interval_secs > 0 {
-        let sampler = Arc::clone(&corpus_sampler);
-        let stop = Arc::clone(&stop);
-        let interval = Duration::from_secs(config.live_census_interval_secs);
-        let start = sampler_start;
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(interval).await;
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                let elapsed = start.elapsed().as_secs_f64();
-                let sampler = Arc::clone(&sampler);
-                // A whole-file copy is genuinely blocking work; keeping it off
-                // the async workers is what stops an observation-only sampler
-                // from stalling the churn clients whose write rate defines the
-                // workload under measurement.
-                if tokio::task::spawn_blocking(move || {
-                    sample_live_census_via_copy(&sampler, start, elapsed);
-                })
-                .await
-                .is_err()
-                {
-                    return;
-                }
-            }
-        });
+        tokio::spawn(run_live_census_loop(
+            Arc::clone(&corpus_sampler),
+            Arc::clone(&stop),
+            Duration::from_secs(config.live_census_interval_secs),
+            sampler_start,
+        ));
     }
 
     // --- Orchestration loop ---
@@ -1138,10 +1131,13 @@ async fn run_soak(config: &Config) -> i32 {
     // same byte total they consumed before the census existed: the census is
     // strictly additive to what this scan returns, and this adapter is the whole
     // of the difference.
-    let redb_tombstone_scan = redb_tombstone_census.map(|c| c.tombstone_bytes);
+    let redb_tombstone_scan = redb_tombstone_census
+        .as_ref()
+        .ok()
+        .map(|c| c.tombstone_bytes);
     corpus_sampler.record_terminal_scan(
         boot_gap_clock.sampler_start.elapsed().as_secs_f64(),
-        redb_tombstone_census,
+        &redb_tombstone_census,
     );
 
     // --- Assess memory (secondary/backstop gate) ---
@@ -1258,7 +1254,7 @@ async fn run_soak(config: &Config) -> i32 {
     let corpus = assess_tombstone_corpus_level(
         &corpus_snapshot.samples,
         corpus_snapshot.scans_attempted,
-        corpus_snapshot.scans_failed,
+        corpus_snapshot.failures_by_step.total(),
         config.tombstone_corpus_headroom_bytes,
         DEFAULT_TOMBSTONE_CORPUS_MIN_SPAN_SECS,
         DEFAULT_TOMBSTONE_CORPUS_MIN_SAMPLES,
@@ -1436,6 +1432,7 @@ async fn run_soak(config: &Config) -> i32 {
     let conjunct = *conjunct_maxima.lock();
     let (ack_latency_p99_ms, ack_latency_max_ms) =
         metrics.or_remove_ack_latency_ms.p99_and_max_ms();
+    let live_census = corpus_sampler.live_census_report(config.live_census_interval_secs);
     let report = SoakReport {
         mode: "soak".to_string(),
         duration_secs_target: config.duration.as_secs(),
@@ -1510,6 +1507,7 @@ async fn run_soak(config: &Config) -> i32 {
         tombstone_corpus: TombstoneCorpusReport {
             scans_attempted: corpus.scans_attempted,
             scans_failed: corpus.scans_failed,
+            failures_by_step: corpus_snapshot.failures_by_step,
             samples: corpus.samples,
             first_bytes: corpus.first_bytes,
             min_bytes: corpus.min_bytes,
@@ -1524,6 +1522,7 @@ async fn run_soak(config: &Config) -> i32 {
             passed: corpus.passed,
             reason: corpus.reason.clone(),
         },
+        live_census,
         disk: DiskReport {
             samples: disk.samples,
             first_mb: disk.first_mb,
@@ -2028,14 +2027,15 @@ fn parse_tombstone_bytes_gauge(body: &str) -> Option<u64> {
 ///
 /// `scans_attempted` is incremented ONCE per checkpoint. A checkpoint that
 /// could not obtain the state — whether the byte copy failed or the scan
-/// itself returned `None` — increments `scans_failed` and pushes no sample:
-/// an instrument that was blind is blind whichever step failed, and there is
-/// no third outcome and no silent skip.
+/// itself failed — counts one failure at its step and pushes no sample: an
+/// instrument that was blind is blind whichever step failed, and there is no
+/// third outcome and no silent skip. The failed total is the sum of
+/// `failures_by_step`, so the two cannot disagree.
 #[derive(Debug, Default, Clone)]
 struct CorpusScanTally {
     samples: Vec<CorpusSample>,
     scans_attempted: usize,
-    scans_failed: usize,
+    failures_by_step: FailuresByStep,
     /// The census taken at each of those same scans. Strictly ADDITIVE: it is
     /// derived from the scan the three fields above were already counting, and
     /// it never changes which scans are attempted or which of them failed, so
@@ -2049,7 +2049,7 @@ struct CorpusScanTally {
 /// A byte copy of a LIVE store file is a smeared image, so the census it yields
 /// is best-effort by construction and OBSERVATION ONLY. Keeping those records
 /// here — never on the corpus-scan tally's `samples` / `scans_attempted` /
-/// `scans_failed` — is what makes the durable-corpus estimator's input
+/// `failures_by_step` — is what makes the durable-corpus estimator's input
 /// identical whether this sampler is armed or not, rather than merely intended
 /// to be. The fence is a typed property of the record, not a convention: every
 /// record carries its own source.
@@ -2057,7 +2057,36 @@ struct CorpusScanTally {
 struct LiveCensusTally {
     censuses: Vec<CensusRecord>,
     scans_attempted: usize,
-    scans_failed: usize,
+    failures_by_step: FailuresByStep,
+    /// `None` while the sampling loop runs.
+    loop_end: Option<LoopEndReason>,
+}
+
+/// The one writer of the census diagnostic lines (`CENSUS_FAIL`,
+/// `LIVE_CENSUS_LOOP_END`, `LIVE_CENSUS_TALLY`). A run writes them to stderr; a
+/// test hands the sampler a buffer and reads back exactly what a run would
+/// have printed, so a line that bypasses this writer is a line the tests miss.
+#[derive(Clone)]
+struct CensusLog(Option<Arc<Mutex<Vec<String>>>>);
+
+impl CensusLog {
+    fn stderr() -> Self {
+        Self(None)
+    }
+
+    /// A writer into memory, and the handle its lines are read back through.
+    #[cfg(test)]
+    fn buffer() -> (Self, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        (Self(Some(Arc::clone(&lines))), lines)
+    }
+
+    fn line(&self, line: String) {
+        match &self.0 {
+            Some(lines) => lines.lock().push(line),
+            None => eprintln!("{line}"),
+        }
+    }
 }
 
 /// The durable-corpus sampler's per-run state, bundled the way the boot-gap
@@ -2073,15 +2102,17 @@ struct CorpusSampler {
     /// tally rather than a flag on the first one, so no code path can add a
     /// smeared-image record to the series a gate's estimator reads.
     live_tally: Mutex<LiveCensusTally>,
+    census_log: CensusLog,
 }
 
 impl CorpusSampler {
-    fn new(data_dir: PathBuf, scratch_root: PathBuf) -> Self {
+    fn new(data_dir: PathBuf, scratch_root: PathBuf, census_log: CensusLog) -> Self {
         Self {
             data_dir,
             scratch_root,
             tally: Mutex::new(CorpusScanTally::default()),
             live_tally: Mutex::new(LiveCensusTally::default()),
+            census_log,
         }
     }
 
@@ -2090,36 +2121,94 @@ impl CorpusSampler {
         self.tally.lock().clone()
     }
 
+    /// Count one failed attempt and print its line. The one place both happen,
+    /// so no failure is counted without its line or printed without being
+    /// counted. The error is the last field and runs to the end of the line, so
+    /// a line break inside it is flattened to keep the attempt on one line.
+    fn record_failure(
+        &self,
+        failures: &mut FailuresByStep,
+        source: CensusSource,
+        ordinal: usize,
+        failure: &CensusFailure,
+    ) {
+        failures.record(failure.step);
+        self.census_log.line(format!(
+            "CENSUS_FAIL source={} ordinal={ordinal} step={} error={}",
+            source.as_str(),
+            failure.step.as_str(),
+            failure.error.replace(['\r', '\n'], " "),
+        ));
+    }
+
     /// Fold the TERMINAL scan onto the same two counters as the checkpoint
     /// samples. That scan is the one siting that reads the data dir directly
     /// and takes no copy: it runs post-teardown, nothing boots after it, so
     /// there is nothing left for the instrument to stay neutral toward.
-    fn record_terminal_scan(&self, elapsed_secs: f64, scanned: Option<DurableCensus>) {
+    fn record_terminal_scan(
+        &self,
+        elapsed_secs: f64,
+        scanned: &Result<DurableCensus, CensusFailure>,
+    ) {
         let mut t = self.tally.lock();
         t.scans_attempted += 1;
-        if let Some(census) = scanned {
-            t.censuses.push(CensusRecord {
-                elapsed_secs,
-                // This scan takes NO copy -- it reads the data dir directly
-                // once the child is gone -- so there is no copy window to
-                // report and `None` is the honest value, not a missing one.
-                // Rendering it as an explicit null is what keeps "this producer
-                // never copied" distinguishable from "this artifact predates
-                // the field".
-                copy_completed_secs: None,
-                source: CensusSource::Terminal,
-                census,
-            });
+        let ordinal = t.scans_attempted;
+        match scanned {
+            Ok(census) => {
+                t.censuses.push(CensusRecord {
+                    elapsed_secs,
+                    // This scan takes NO copy -- it reads the data dir directly
+                    // once the child is gone -- so there is no copy window to
+                    // report and `None` is the honest value, not a missing one.
+                    // Rendering it as an explicit null is what keeps "this
+                    // producer never copied" distinguishable from "this artifact
+                    // predates the field".
+                    copy_completed_secs: None,
+                    source: CensusSource::Terminal,
+                    census: *census,
+                });
+                // The estimator keeps consuming the same summation over the
+                // same two variants it consumed before the census existed.
+                t.samples.push(CorpusSample {
+                    elapsed_secs,
+                    bytes: census.tombstone_bytes,
+                });
+            }
+            Err(failure) => self.record_failure(
+                &mut t.failures_by_step,
+                CensusSource::Terminal,
+                ordinal,
+                failure,
+            ),
         }
-        // The estimator keeps consuming the same summation over the same two
-        // variants it consumed before the census existed; this adapter is the
-        // whole of the difference.
-        match scanned.map(|c| c.tombstone_bytes) {
-            Some(bytes) => t.samples.push(CorpusSample {
-                elapsed_secs,
-                bytes,
-            }),
-            None => t.scans_failed += 1,
+    }
+
+    /// The live tally's section of the report, and its one console line,
+    /// rendered from the same snapshot so the two cannot disagree.
+    fn live_census_report(&self, interval_secs: u64) -> LiveCensusReport {
+        let t = self.live_tally.lock().clone();
+        let counts = CensusCounts::new(t.scans_attempted, t.failures_by_step);
+        let by_step: Vec<String> = counts
+            .failures_by_step
+            .iter()
+            .filter(|&(_, n)| n > 0)
+            .map(|(step, n)| format!("{}:{n}", step.as_str()))
+            .collect();
+        self.census_log.line(format!(
+            "LIVE_CENSUS_TALLY attempted={} ok={} failed={} by_step={}",
+            counts.attempted,
+            counts.ok,
+            counts.failed,
+            if by_step.is_empty() {
+                "none".to_string()
+            } else {
+                by_step.join(",")
+            },
+        ));
+        LiveCensusReport {
+            interval_secs,
+            counts,
+            loop_end_reason: t.loop_end,
         }
     }
 }
@@ -2162,23 +2251,27 @@ fn sample_durable_corpus_via_copy(
     let copy_completed_secs = sampler_start.elapsed().as_secs_f64();
 
     let mut t = sampler.tally.lock();
-    if let Some(census) = scanned {
-        t.censuses.push(CensusRecord {
-            elapsed_secs,
-            copy_completed_secs: Some(copy_completed_secs),
-            source: CensusSource::Checkpoint,
-            census,
-        });
-    }
-    // The estimator keeps consuming the same summation over the same two
-    // variants it consumed before the census existed; this adapter is the whole
-    // of the difference.
-    match scanned.map(|c| c.tombstone_bytes) {
-        Some(bytes) => t.samples.push(CorpusSample {
-            elapsed_secs,
-            bytes,
-        }),
-        None => t.scans_failed += 1,
+    match scanned {
+        Ok(census) => {
+            t.censuses.push(CensusRecord {
+                elapsed_secs,
+                copy_completed_secs: Some(copy_completed_secs),
+                source: CensusSource::Checkpoint,
+                census,
+            });
+            // The estimator keeps consuming the same summation over the same
+            // two variants it consumed before the census existed.
+            t.samples.push(CorpusSample {
+                elapsed_secs,
+                bytes: census.tombstone_bytes,
+            });
+        }
+        Err(failure) => sampler.record_failure(
+            &mut t.failures_by_step,
+            CensusSource::Checkpoint,
+            ordinal,
+            &failure,
+        ),
     }
 }
 
@@ -2193,8 +2286,8 @@ fn sample_durable_corpus_via_copy(
 /// the copy is a smeared image of a file being written underneath it and the
 /// census it yields is best-effort by construction. It therefore lands in the
 /// live tally and NEVER on the corpus-scan tally the durable-corpus estimator
-/// reads — including its `scans_attempted` / `scans_failed` counters, so an
-/// armed live sampler cannot even move that estimator's instrument clause.
+/// reads — including its attempt and failure counters, so an armed live
+/// sampler cannot even move that estimator's instrument clause.
 fn sample_live_census_via_copy(sampler: &CorpusSampler, sampler_start: Instant, elapsed_secs: f64) {
     let ordinal = {
         let mut t = sampler.live_tally.lock();
@@ -2217,19 +2310,74 @@ fn sample_live_census_via_copy(sampler: &CorpusSampler, sampler_start: Instant, 
 
     let mut t = sampler.live_tally.lock();
     match scanned {
-        Some(census) => t.censuses.push(CensusRecord {
+        Ok(census) => t.censuses.push(CensusRecord {
             elapsed_secs,
             copy_completed_secs: Some(copy_completed_secs),
             source: CensusSource::LiveCopy,
             census,
         }),
-        None => t.scans_failed += 1,
+        Err(failure) => sampler.record_failure(
+            &mut t.failures_by_step,
+            CensusSource::LiveCopy,
+            ordinal,
+            &failure,
+        ),
     }
 }
 
+/// The live-copy census loop: one census per `interval` on the sampler's run
+/// clock (`sampler_start`) until `stop` is set or a census task cannot be
+/// joined. Whichever ends it, it records the reason on the live tally and
+/// prints exactly one `LIVE_CENSUS_LOOP_END` line, so a sampler that stopped
+/// sampling is never mistaken for one that found nothing to report.
+async fn run_live_census_loop(
+    sampler: Arc<CorpusSampler>,
+    stop: Arc<AtomicBool>,
+    interval: Duration,
+    sampler_start: Instant,
+) {
+    let join_error = loop {
+        tokio::time::sleep(interval).await;
+        if stop.load(Ordering::SeqCst) {
+            break None;
+        }
+        let elapsed = sampler_start.elapsed().as_secs_f64();
+        let task_sampler = Arc::clone(&sampler);
+        // A whole-file copy is genuinely blocking work; keeping it off the
+        // async workers is what stops an observation-only sampler from stalling
+        // the churn clients whose write rate defines the workload under
+        // measurement.
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            sample_live_census_via_copy(&task_sampler, sampler_start, elapsed);
+        })
+        .await
+        {
+            break Some(e);
+        }
+    };
+    let reason = if join_error.is_some() {
+        LoopEndReason::JoinError
+    } else {
+        LoopEndReason::Stop
+    };
+    let last_ordinal = {
+        let mut t = sampler.live_tally.lock();
+        t.loop_end = Some(reason);
+        t.scans_attempted
+    };
+    let error = join_error.map_or(String::new(), |e| {
+        format!(" error={}", e.to_string().replace(['\r', '\n'], " "))
+    });
+    sampler.census_log.line(format!(
+        "LIVE_CENSUS_LOOP_END reason={} last_ordinal={last_ordinal}{error}",
+        reason.as_str()
+    ));
+}
+
 /// Byte-copy the server's store directory into an ordinal-scoped scratch directory,
-/// scan the COPY, delete it, and return the census. `None` if the copy or the
-/// scan failed — the caller owns what a failure means for its own tally.
+/// scan the COPY, delete it, and return the census, or the step at which the
+/// copy or the scan failed — the caller owns what a failure means for its own
+/// tally.
 ///
 /// A COPY, never the original: `redb::Database::open` repairs and commits an
 /// uncleanly-closed file, so opening the server's own file here would make this
@@ -2249,25 +2397,24 @@ fn copy_and_scan_census(
     sampler: &CorpusSampler,
     label: &str,
     ordinal: usize,
-) -> Option<DurableCensus> {
+) -> Result<DurableCensus, CensusFailure> {
     let copy_dir = sampler.scratch_root.join(format!("{label}-{ordinal}"));
     // The scan resolves `topgun-data` under the directory it is given, so the
     // ordinal is carried by the directory and the copy keeps the name the scan
     // looks for.
     let copy_path = copy_dir.join(STORE_DIR);
-    if let Err(e) = std::fs::create_dir_all(&copy_dir) {
-        eprintln!(
-            "{label} sample {ordinal}: cannot create scratch dir {}: {e}",
-            copy_dir.display()
-        );
-        return None;
-    }
+    std::fs::create_dir_all(&copy_dir).map_err(|e| CensusFailure {
+        step: CensusFailStep::ScratchDir,
+        error: format!("{e:#}"),
+    })?;
     // `std::fs::copy` truncates an existing destination, so even an aliasing
     // bug could not produce a partial-overwrite hybrid.
-    if let Err(e) = copy_dir_recursive(&sampler.data_dir.join(STORE_DIR), &copy_path) {
-        eprintln!("{label} sample {ordinal}: cannot copy the store directory: {e}");
-        return None;
-    }
+    copy_dir_recursive(&sampler.data_dir.join(STORE_DIR), &copy_path).map_err(|e| {
+        CensusFailure {
+            step: CensusFailStep::Copy,
+            error: format!("{e:#}"),
+        }
+    })?;
 
     // The scan owns and drops its redb handle inside its own body, so the
     // handle is released before the delete below and before the caller
@@ -2359,21 +2506,28 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 /// exception, and it is stated as such: it runs post-teardown, nothing boots
 /// after it, so it reads the data dir directly.
 ///
-/// Returns `None` on any failure (file missing, corrupt header, table absent)
-/// — best-effort, mirroring `sample_rss_mb`/`sample_disk_mb`'s None-on-failure
-/// contract. That `None` is the durable-corpus INSTRUMENT clause's breach
-/// input, and at a live checkpoint a failed COPY reaches the same clause by the
-/// same path. The clause is report-only, so a blind instrument is recorded on
-/// `pending_gates` rather than failing the run. An honest `Some(0)` from a
-/// never-written table stays distinguishable from it.
-fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Option<DurableCensus> {
+/// Returns the step it failed at on any failure (engine file missing, store
+/// not openable, records not visitable), never a silent `None`. A failure is
+/// the durable-corpus INSTRUMENT clause's breach input, and at a live
+/// checkpoint a failed COPY reaches the same clause by the same path. The
+/// clause is report-only, so a blind instrument is recorded on `pending_gates`
+/// rather than failing the run. An honest empty census from a never-written
+/// table stays distinguishable from it.
+fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Result<DurableCensus, CensusFailure> {
     let store_dir = data_dir.join(STORE_DIR);
     // Opening creates a missing store, so the engine file is checked first: a
     // store that is not there is a failed scan, never an empty one.
-    if !store_dir.join("engine.redb").exists() {
-        return None;
+    let engine = store_dir.join("engine.redb");
+    if !engine.exists() {
+        return Err(CensusFailure {
+            step: CensusFailStep::EngineMissing,
+            error: engine.display().to_string(),
+        });
     }
-    let store = RedbDataStore::new(&store_dir).ok()?;
+    let store = RedbDataStore::new(&store_dir).map_err(|e| CensusFailure {
+        step: CensusFailStep::Open,
+        error: format!("{e:#}"),
+    })?;
 
     // A never-written map (e.g. no OR-Map write ever landed) is visited zero
     // times and contributes an EMPTY census — a real, honest answer, not a
@@ -2408,8 +2562,13 @@ fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Option<DurableCensu
         }
         Ok(())
     };
-    store.visit_records(map, false, &mut visit).ok()?;
-    Some(census)
+    store
+        .visit_records(map, false, &mut visit)
+        .map_err(|e| CensusFailure {
+            step: CensusFailStep::Visit,
+            error: format!("{e:#}"),
+        })?;
+    Ok(census)
 }
 
 // ---------------------------------------------------------------------------
@@ -4468,66 +4627,87 @@ fn parse_f64(s: &str) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+    use topgun_server::storage::record::OrMapEntry;
+
+    /// This bench target is declared `harness = false`, so rustc strips every
+    /// `#[test]` item from it, and `cargo test --bench soak_harness` (or CI's
+    /// `cargo test --all-targets`) builds it with `cfg(test)` and runs `main`.
+    /// `main` hands over to this runner in that build, so the tests below are
+    /// EXECUTED, not merely compiled. Each runs on its own thread, so one that
+    /// panics fails alone and the rest still run; the summary line has
+    /// libtest's shape, and a failure makes the exit code non-zero.
+    pub(super) fn run_all() -> i32 {
+        let tests: [(&str, fn()); 3] = [
+            (
+                "live_copy_census_never_contaminates_the_corpus_tally",
+                live_copy_census_never_contaminates_the_corpus_tally,
+            ),
+            (
+                "every_failed_census_attempt_prints_one_line_with_its_step",
+                every_failed_census_attempt_prints_one_line_with_its_step,
+            ),
+            (
+                "live_census_loop_prints_one_end_line_on_stop",
+                live_census_loop_prints_one_end_line_on_stop,
+            ),
+        ];
+        let mut failed = 0usize;
+        for (name, test) in tests {
+            let ok = std::thread::spawn(test).join().is_ok();
+            println!("test {name} ... {}", if ok { "ok" } else { "FAILED" });
+            failed += usize::from(!ok);
+        }
+        let passed = tests.len() - failed;
+        println!(
+            "test result: {}. {passed} passed; {failed} failed",
+            if failed == 0 { "ok" } else { "FAILED" }
+        );
+        i32::from(failed > 0)
+    }
+
+    /// Write one OR-Map row — live entries plus tombstones — into a real store
+    /// directory under `dir`, through the store the server uses, in the map
+    /// and encoding the scan reads. A real store rather than a stub, so the
+    /// path under test is the whole path: copy, open, visit, fold.
+    fn write_or_fixture(dir: &Path) {
+        use topgun_server::storage::MapDataStore;
+
+        let store = RedbDataStore::new(dir.join(STORE_DIR)).expect("create store");
+        let value = RecordValue::OrMap {
+            records: vec![OrMapEntry {
+                value: Value::String("alive".to_string()),
+                tag: "live-tag".to_string(),
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "live-census-fixture".to_string(),
+                },
+            }],
+            tombstones: vec!["dead-tag-a".to_string(), "dead-tag-b".to_string()],
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(store.add(OR_MAP, "ork-1", &value, 0, 0))
+            .expect("write row");
+    }
+
     /// The observation fence, asserted rather than assumed: folding live-copy
     /// censuses must leave the durable-corpus estimator's ENTIRE input alone —
     /// its series and both of its scan counters — so an armed live sampler
     /// cannot move a gate's instrument clause, let alone its level clause.
-    ///
-    /// Everything this proof needs is nested inside it, so the whole fixture
-    /// travels with the assertion it exists for and nothing else in this module
-    /// can name it.
-    #[test]
     fn live_copy_census_never_contaminates_the_corpus_tally() {
-        assert_live_copy_census_never_contaminates_the_corpus_tally();
-    }
-
-    /// The assertion body, and it is uncalled ON PURPOSE.
-    ///
-    /// This bench target is declared `harness = false`, so rustc strips every
-    /// `#[test]` item from it: the wrapper above is removed before type-checking
-    /// and takes its only call to this function with it. Siting the body here
-    /// instead is what keeps it COMPILED — `cargo clippy --all-targets` builds
-    /// this module — so it cannot rot silently while the code it asserts over
-    /// moves underneath it. EXECUTING it needs a target with a test harness,
-    /// which this harness's file ledger does not have.
-    #[allow(dead_code)]
-    fn assert_live_copy_census_never_contaminates_the_corpus_tally() {
-        use super::*;
-        use topgun_core::hlc::Timestamp;
-        use topgun_core::types::Value;
-        use topgun_server::storage::record::OrMapEntry;
-
-        /// Write one OR-Map row — live entries plus tombstones — into a real
-        /// store directory under `dir`, through the store the server uses, in
-        /// the map and encoding the scan reads. A real store rather than a stub,
-        /// so the path under test is the whole path: copy, open, visit, fold.
-        fn write_or_fixture(dir: &Path) {
-            use topgun_server::storage::MapDataStore;
-
-            let store = RedbDataStore::new(dir.join(STORE_DIR)).expect("create store");
-            let value = RecordValue::OrMap {
-                records: vec![OrMapEntry {
-                    value: Value::String("alive".to_string()),
-                    tag: "live-tag".to_string(),
-                    timestamp: Timestamp {
-                        millis: 1,
-                        counter: 0,
-                        node_id: "live-census-fixture".to_string(),
-                    },
-                }],
-                tombstones: vec!["dead-tag-a".to_string(), "dead-tag-b".to_string()],
-            };
-            tokio::runtime::Builder::new_current_thread()
-                .build()
-                .expect("runtime")
-                .block_on(store.add(OR_MAP, "ork-1", &value, 0, 0))
-                .expect("write row");
-        }
-
         let data = tempfile::tempdir().expect("data dir");
         let scratch = tempfile::tempdir().expect("scratch dir");
         write_or_fixture(data.path());
-        let sampler = CorpusSampler::new(data.path().to_path_buf(), scratch.path().to_path_buf());
+        let sampler = CorpusSampler::new(
+            data.path().to_path_buf(),
+            scratch.path().to_path_buf(),
+            CensusLog::buffer().0,
+        );
 
         // The initiation stamps are synthetic here; the completion instants are
         // measured off this clock, so the records carry a real copy window.
@@ -4546,7 +4726,8 @@ mod tests {
             "live-copy censuses must never be counted as corpus scan attempts"
         );
         assert_eq!(
-            corpus.scans_failed, 0,
+            corpus.failures_by_step.total(),
+            0,
             "live-copy censuses must never be counted as corpus scan failures"
         );
         assert!(
@@ -4556,7 +4737,7 @@ mod tests {
 
         let live = sampler.live_tally.lock().clone();
         assert_eq!(live.scans_attempted, 3);
-        assert_eq!(live.scans_failed, 0);
+        assert_eq!(live.failures_by_step.total(), 0);
         assert_eq!(live.censuses.len(), 3);
         assert!(
             live.censuses
@@ -4571,5 +4752,122 @@ mod tests {
         assert_eq!(first.or_map_keys, 1);
         assert_eq!(first.live_entries, 1);
         assert_eq!(first.tombstone_entries, 2);
+    }
+
+    /// Every failure step reachable from a file system, driven through the
+    /// checkpoint sampler on a fresh sampler each: exactly one `CENSUS_FAIL`
+    /// line naming the step, and a tally that counts the attempt as failed at
+    /// that step and at no other.
+    fn every_failed_census_attempt_prints_one_line_with_its_step() {
+        fn assert_fails_at(case: &str, data_dir: &Path, scratch_root: &Path, step: CensusFailStep) {
+            let (log, lines) = CensusLog::buffer();
+            let sampler =
+                CorpusSampler::new(data_dir.to_path_buf(), scratch_root.to_path_buf(), log);
+            sample_durable_corpus_via_copy(&sampler, Instant::now(), 0.0);
+
+            let lines = lines.lock().clone();
+            let fail_lines: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.starts_with("CENSUS_FAIL "))
+                .collect();
+            assert_eq!(fail_lines.len(), 1, "{case}: lines {lines:?}");
+            assert!(
+                fail_lines[0].starts_with(&format!(
+                    "CENSUS_FAIL source=CHECKPOINT ordinal=1 step={} error=",
+                    step.as_str()
+                )),
+                "{case}: {}",
+                fail_lines[0]
+            );
+
+            let t = sampler.snapshot();
+            let counts = CensusCounts::new(t.scans_attempted, t.failures_by_step);
+            let json = serde_json::to_value(&counts).expect("serialize");
+            assert_eq!(json["attempted"], 1, "{case}: {json}");
+            assert_eq!(json["ok"], 0, "{case}: {json}");
+            assert_eq!(json["failed"], 1, "{case}: {json}");
+            for other in CensusFailStep::ALL {
+                let want = usize::from(other == step);
+                assert_eq!(
+                    json["failuresByStep"][other.as_str()],
+                    want,
+                    "{case}: {json}"
+                );
+            }
+            assert!(t.samples.is_empty() && t.censuses.is_empty(), "{case}");
+        }
+
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        std::fs::create_dir(&scratch).expect("scratch");
+
+        // The scratch root is a file, so no directory can be created under it.
+        let file_root = root.path().join("scratch-is-a-file");
+        std::fs::write(&file_root, b"").expect("file");
+        let data = root.path().join("data-ok");
+        write_or_fixture(&data);
+        assert_fails_at("scratch_dir", &data, &file_root, CensusFailStep::ScratchDir);
+
+        // The data dir holds no store directory to copy.
+        let empty = root.path().join("data-empty");
+        std::fs::create_dir(&empty).expect("empty");
+        assert_fails_at("copy", &empty, &scratch, CensusFailStep::Copy);
+
+        // The store directory is there but holds no engine file.
+        let no_engine = root.path().join("data-no-engine");
+        std::fs::create_dir_all(no_engine.join(STORE_DIR)).expect("store dir");
+        assert_fails_at(
+            "engine_missing",
+            &no_engine,
+            &scratch,
+            CensusFailStep::EngineMissing,
+        );
+
+        // A real, non-empty store whose redb magic number is zeroed: redb
+        // rejects a non-empty file with a foreign magic before it reads either
+        // commit slot, so there is no recovery from the second slot.
+        let bad_magic = root.path().join("data-bad-magic");
+        write_or_fixture(&bad_magic);
+        let engine = bad_magic.join(STORE_DIR).join("engine.redb");
+        let mut bytes = std::fs::read(&engine).expect("read engine");
+        assert!(bytes.len() > 9, "the fixture store is non-empty");
+        bytes[..9].fill(0);
+        std::fs::write(&engine, &bytes).expect("write engine");
+        assert_fails_at("open", &bad_magic, &scratch, CensusFailStep::Open);
+    }
+
+    /// A loop whose stop flag is already set ends at its first wake-up and says
+    /// so in exactly one line. Time is paused, so the interval elapses at once.
+    fn live_census_loop_prints_one_end_line_on_stop() {
+        let root = tempfile::tempdir().expect("root");
+        let (log, lines) = CensusLog::buffer();
+        let sampler = Arc::new(CorpusSampler::new(
+            root.path().join("data"),
+            root.path().join("scratch"),
+            log,
+        ));
+        let stop = Arc::new(AtomicBool::new(true));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .expect("runtime")
+            .block_on(run_live_census_loop(
+                Arc::clone(&sampler),
+                stop,
+                Duration::from_secs(300),
+                Instant::now(),
+            ));
+
+        let lines = lines.lock().clone();
+        assert_eq!(
+            lines.as_slice(),
+            ["LIVE_CENSUS_LOOP_END reason=stop last_ordinal=0"],
+            "lines {lines:?}"
+        );
+        assert_eq!(
+            sampler.live_tally.lock().loop_end,
+            Some(LoopEndReason::Stop)
+        );
     }
 }

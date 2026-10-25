@@ -18,7 +18,9 @@ use std::path::Path;
 use serde::Serialize;
 use topgun_server::storage::record::RecordValue;
 
-use crate::monitor::{CorpusLevelDisposition, TombstoneClauseDisposition};
+use crate::monitor::{
+    CorpusLevelDisposition, FailuresByStep, LoopEndReason, TombstoneClauseDisposition,
+};
 use topgun_server::storage::wal::format::{self, FrameDecodeResult};
 use topgun_server::storage::wal::{WalOp, WalStorePayload};
 
@@ -141,6 +143,79 @@ where
     serializer.serialize_str(value.as_str())
 }
 
+/// Emit per-step failure counts as an object keyed by every step, zeros
+/// included, so an absent key can never be read as a zero.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn serialize_failures_by_step<S>(value: &FailuresByStep, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(Some(value.iter().count()))?;
+    for (step, n) in value.iter() {
+        map.serialize_entry(step.as_str(), &n)?;
+    }
+    map.end()
+}
+
+/// Emit the loop's end reason as its token, or `null` while the loop runs.
+#[allow(clippy::trivially_copy_pass_by_ref, clippy::ref_option)]
+fn serialize_loop_end_reason<S>(
+    value: &Option<LoopEndReason>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(reason) => serializer.serialize_str(reason.as_str()),
+        None => serializer.serialize_none(),
+    }
+}
+
+/// Attempt counters of one census tally. `failed` is the sum of
+/// `failures_by_step` and `ok` is `attempted - failed`, both computed in
+/// [`CensusCounts::new`], so `attempted = ok + failed` holds by construction.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CensusCounts {
+    pub attempted: usize,
+    pub ok: usize,
+    pub failed: usize,
+    #[serde(serialize_with = "serialize_failures_by_step")]
+    pub failures_by_step: FailuresByStep,
+}
+
+impl CensusCounts {
+    #[must_use]
+    pub fn new(attempted: usize, failures_by_step: FailuresByStep) -> Self {
+        let failed = failures_by_step.total();
+        Self {
+            attempted,
+            ok: attempted - failed,
+            failed,
+            failures_by_step,
+        }
+    }
+}
+
+/// The live-copy census sampler's section of the final report: its attempts
+/// were otherwise visible nowhere, so a sampler that went blind for a whole
+/// run looked the same as one that was never armed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveCensusReport {
+    /// `0` when the sampler was disarmed.
+    pub interval_secs: u64,
+    #[serde(flatten)]
+    pub counts: CensusCounts,
+    /// `null` while the loop has not ended. Explicit, with no
+    /// `skip_serializing_if`, so "still running" is never confused with "this
+    /// report predates the field".
+    #[serde(serialize_with = "serialize_loop_end_reason")]
+    pub loop_end_reason: Option<LoopEndReason>,
+}
+
 /// Durable-corpus section of the final report.
 ///
 /// Persisted for the same reason as [`TombstoneReport`], and for one more: this
@@ -157,6 +232,8 @@ where
 pub struct TombstoneCorpusReport {
     pub scans_attempted: usize,
     pub scans_failed: usize,
+    #[serde(serialize_with = "serialize_failures_by_step")]
+    pub failures_by_step: FailuresByStep,
     pub samples: usize,
     pub first_bytes: u64,
     pub min_bytes: u64,
@@ -261,6 +338,7 @@ pub struct SoakReport {
     /// is report-only rather than ANDed into `passed`, which is exactly why it
     /// has to survive into the artifact: nothing else records it.
     pub tombstone_corpus: TombstoneCorpusReport,
+    pub live_census: LiveCensusReport,
     pub disk: DiskReport,
     pub confirm_apply: ConfirmApplyReport,
     pub panic_report: Option<String>,
