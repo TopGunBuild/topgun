@@ -1527,16 +1527,19 @@ pub enum CensusFailStep {
     Open,
     /// The records of the map could not be visited.
     Visit,
+    /// The census panicked; the error is the panic message.
+    Panic,
 }
 
 impl CensusFailStep {
     /// Every variant, in the order the per-step counts are rendered.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::ScratchDir,
         Self::Copy,
         Self::EngineMissing,
         Self::Open,
         Self::Visit,
+        Self::Panic,
     ];
 
     /// The single rendered token, shared by the console line and the JSON key.
@@ -1548,6 +1551,7 @@ impl CensusFailStep {
             Self::EngineMissing => "engine_missing",
             Self::Open => "open",
             Self::Visit => "visit",
+            Self::Panic => "panic",
         }
     }
 }

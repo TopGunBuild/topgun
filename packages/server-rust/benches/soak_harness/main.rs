@@ -2289,12 +2289,39 @@ fn sample_durable_corpus_via_copy(
 /// reads — including its attempt and failure counters, so an armed live
 /// sampler cannot even move that estimator's instrument clause.
 fn sample_live_census_via_copy(sampler: &CorpusSampler, sampler_start: Instant, elapsed_secs: f64) {
+    take_live_census(sampler, sampler_start, elapsed_secs, |ordinal| {
+        copy_and_scan_census(sampler, "live-census", ordinal)
+    });
+}
+
+/// One live census with `scan` as its copy and scan. A panic in `scan` is a
+/// failed attempt at step `panic`, so the attempt is still a record or a
+/// `CENSUS_FAIL` line, and the loop goes on sampling.
+fn take_live_census(
+    sampler: &CorpusSampler,
+    sampler_start: Instant,
+    elapsed_secs: f64,
+    scan: impl FnOnce(usize) -> Result<DurableCensus, CensusFailure>,
+) {
     let ordinal = {
         let mut t = sampler.live_tally.lock();
         t.scans_attempted += 1;
         t.scans_attempted
     };
-    let scanned = copy_and_scan_census(sampler, "live-census", ordinal);
+    // Unwind-safe in effect: the scan holds no tally lock, and what it owns
+    // is its own scratch copy, which a later attempt never reads.
+    let scanned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan(ordinal)))
+        .unwrap_or_else(|payload| {
+            let error = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a panic with a non-string payload".to_string());
+            Err(CensusFailure {
+                step: CensusFailStep::Panic,
+                error,
+            })
+        });
     // The window's FAR edge, on the same run clock as the near edge. This is
     // the producer the smear question is actually asked of: the server is
     // writing underneath this copy, so how wide the window was is the whole of
@@ -4642,8 +4669,8 @@ mod tests {
 
     use super::{
         run_live_census_loop, sample_durable_corpus_via_copy, sample_live_census_via_copy,
-        CensusCounts, CensusFailStep, CensusLog, CensusSource, CorpusSampler, LoopEndReason,
-        RecordValue, RedbDataStore, OR_MAP, STORE_DIR,
+        take_live_census, CensusCounts, CensusFailStep, CensusLog, CensusSource, CorpusSampler,
+        LoopEndReason, RecordValue, RedbDataStore, OR_MAP, STORE_DIR,
     };
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;
@@ -4657,7 +4684,7 @@ mod tests {
     /// panics fails alone and the rest still run; the summary line has
     /// libtest's shape, and a failure makes the exit code non-zero.
     pub(super) fn run_all() -> i32 {
-        let tests: [(&str, fn()); 3] = [
+        let tests: [(&str, fn()); 4] = [
             (
                 "live_copy_census_never_contaminates_the_corpus_tally",
                 live_copy_census_never_contaminates_the_corpus_tally,
@@ -4669,6 +4696,10 @@ mod tests {
             (
                 "live_census_loop_prints_one_end_line_on_stop",
                 live_census_loop_prints_one_end_line_on_stop,
+            ),
+            (
+                "panicking_live_census_is_one_failure_at_step_panic",
+                panicking_live_census_is_one_failure_at_step_panic,
             ),
         ];
         let mut failed = 0usize;
@@ -4851,6 +4882,31 @@ mod tests {
         bytes[..9].fill(0);
         std::fs::write(&engine, &bytes).expect("write engine");
         assert_fails_at("open", &bad_magic, &scratch, CensusFailStep::Open);
+    }
+
+    /// A live census whose scan panics is one failed attempt at step `panic`,
+    /// with one `CENSUS_FAIL` line, and the panic does not leave the attempt.
+    fn panicking_live_census_is_one_failure_at_step_panic() {
+        let root = tempfile::tempdir().expect("root");
+        let (log, lines) = CensusLog::buffer();
+        let sampler =
+            CorpusSampler::new(root.path().join("data"), root.path().join("scratch"), log);
+        take_live_census(&sampler, Instant::now(), 0.0, |_| panic!("smeared page"));
+
+        let lines = lines.lock().clone();
+        assert_eq!(
+            lines.as_slice(),
+            ["CENSUS_FAIL source=LIVE_COPY ordinal=1 step=panic error=smeared page"],
+            "lines {lines:?}"
+        );
+        let t = sampler.live_tally.lock();
+        let json = serde_json::to_value(CensusCounts::new(t.scans_attempted, t.failures_by_step))
+            .expect("serialize");
+        assert_eq!(json["attempted"], 1, "{json}");
+        assert_eq!(json["ok"], 0, "{json}");
+        assert_eq!(json["failed"], 1, "{json}");
+        assert_eq!(json["failuresByStep"]["panic"], 1, "{json}");
+        assert!(t.censuses.is_empty());
     }
 
     /// A loop whose stop flag is already set ends at its first wake-up and says
