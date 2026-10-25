@@ -554,8 +554,19 @@ struct Collection {
 const COLLECTION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// Bytes appended to an active segment that make the tick seal it.
 const SEAL_BYTES: u64 = 8 * 1024 * 1024;
-/// Age of an active segment's first frame that makes the tick seal it.
+/// Age of an active segment's first frame that makes the tick seal it, before
+/// the partition's offset (see `seal_age`).
 const SEAL_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Age of `partition`'s first frame that makes the tick seal it: `SEAL_AGE`
+/// plus an offset that spreads the partitions evenly over one more `SEAL_AGE`,
+/// so every partition seals between 30 and 60 s. Partitions whose first frames
+/// arrive together would otherwise all seal in one tick, and each seal fsyncs
+/// under the partition's append lock: on a device whose fsync flushes its whole
+/// cache, that is hundreds of flushes back to back while appends wait.
+fn seal_age(partition: u32) -> std::time::Duration {
+    SEAL_AGE + SEAL_AGE * partition / PARTITION_COUNT
+}
 
 /// File name of the collected-up-to record of a store-mode WAL directory.
 pub(crate) const WAL_COLLECTED_FILE: &str = "wal-collected";
@@ -1915,11 +1926,11 @@ impl WalWriter {
         reclaim
     }
 
-    /// Whether the tick seals `handle`'s active segment at `now`: it holds
+    /// Whether the tick seals `partition`'s active segment at `now`: it holds
     /// frames, and either enough bytes were appended to it or its first frame
     /// is old enough. Bounds the size of a segment and the time a frame waits
     /// before collection can reach it, without a seal per commit.
-    fn seal_due(handle: &PartitionHandle, now: std::time::Instant) -> bool {
+    fn seal_due(partition: u32, handle: &PartitionHandle, now: std::time::Instant) -> bool {
         if handle.active_bytes.load(Ordering::Relaxed) >= SEAL_BYTES {
             return true;
         }
@@ -1927,7 +1938,7 @@ impl WalWriter {
             .active_first_append
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        first.is_some_and(|first| now.saturating_duration_since(first) >= SEAL_AGE)
+        first.is_some_and(|first| now.saturating_duration_since(first) >= seal_age(partition))
     }
 
     /// The store's watermark of every WAL partition, read once for a tick, or
@@ -2072,7 +2083,7 @@ impl WalWriter {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (partition, handle) in &handles {
-            if Self::seal_due(handle, now) {
+            if Self::seal_due(*partition, handle, now) {
                 if let Err(e) = self.seal_and_rotate_if_needed(*partition, handle).await {
                     tracing::error!(partition, error = %e, "WAL collection could not seal a segment");
                 }
@@ -4991,6 +5002,53 @@ mod tests {
         let unapplied = wal.unapplied(0).await.unwrap();
         assert_eq!(unapplied.len(), 1, "Entry must be readable after append");
         assert_eq!(unapplied[0].sequence, 1);
+    }
+
+    // Partitions whose first frames arrive together must not all seal in one
+    // tick, and each must still seal within 2 * SEAL_AGE plus one tick.
+    #[tokio::test]
+    async fn partitions_with_one_first_frame_time_seal_in_different_ticks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wal, _store) = open_over(dir.path(), WalFsyncPolicy::None, ReplayStore::default());
+        for partition in 0..PARTITION_COUNT {
+            wal.append(partition, &make_wal_entry(1)).await.unwrap();
+        }
+
+        let mut sealed_at = vec![None; PARTITION_COUNT as usize];
+        let mut elapsed = std::time::Duration::ZERO;
+        while elapsed < 2 * SEAL_AGE + COLLECTION_INTERVAL {
+            wal.test_advance_clock(COLLECTION_INTERVAL);
+            elapsed += COLLECTION_INTERVAL;
+            wal.test_collect_now().await;
+            for partition in 0..PARTITION_COUNT {
+                let at = &mut sealed_at[partition as usize];
+                if at.is_none() && !wal.test_sealed_paths(partition).await.is_empty() {
+                    *at = Some(elapsed);
+                }
+            }
+        }
+
+        let unsealed: Vec<u32> = (0..PARTITION_COUNT)
+            .filter(|p| sealed_at[*p as usize].is_none())
+            .collect();
+        assert!(
+            unsealed.is_empty(),
+            "every partition seals within 2 * SEAL_AGE plus one tick, unsealed: {unsealed:?}"
+        );
+        let last = PARTITION_COUNT as usize - 1;
+        assert_ne!(
+            sealed_at[0], sealed_at[last],
+            "partitions 0 and {last} sealed in the same tick"
+        );
+        let mut per_tick: HashMap<std::time::Duration, usize> = HashMap::new();
+        for at in sealed_at.iter().flatten() {
+            *per_tick.entry(*at).or_default() += 1;
+        }
+        let largest = per_tick.values().copied().max().unwrap_or(0);
+        assert!(
+            largest <= PARTITION_COUNT as usize / 2,
+            "one tick sealed {largest} of {PARTITION_COUNT} partitions: {per_tick:?}"
+        );
     }
 
     // -----------------------------------------------------------------------

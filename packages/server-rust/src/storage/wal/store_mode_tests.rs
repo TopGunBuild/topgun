@@ -969,7 +969,9 @@ async fn assert_open_refused_untouched(root: &Root, expect: &[String]) {
     );
 }
 
-const SEAL_AGE: Duration = Duration::from_secs(31);
+/// Past the age at which a collection tick seals an active segment of any
+/// partition: 30 s plus a per-partition offset below 30 s.
+const SEAL_AGE: Duration = Duration::from_secs(61);
 
 const P: u32 = 7;
 const Q: u32 = 11;
@@ -1432,7 +1434,7 @@ async fn a07_segments_are_sealed_by_size_or_age_not_per_commit() {
     assert_eq!(
         segment_files(&root.wal_dir(), P).len(),
         1,
-        "200 commits under 8 MiB and 30 s leave one segment"
+        "200 commits under 8 MiB and the seal age leave one segment"
     );
 
     let big = "x".repeat(1 << 20);
@@ -1464,7 +1466,7 @@ async fn a07_segments_are_sealed_by_size_or_age_not_per_commit() {
     assert_eq!(
         segment_files(&root.wal_dir(), P).len(),
         3,
-        "a segment whose first frame is 30 s old is sealed"
+        "a segment whose first frame is past its seal age is sealed"
     );
 
     stop_write_behind(wb).await;

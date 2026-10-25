@@ -307,8 +307,9 @@ impl MapDataStore for HarnessInnerStore {
 /// The harness inner store with the applied watermark rows a store-mode WAL needs.
 type KeptStore = WatermarkKeeping<HarnessInnerStore>;
 
-/// Past the age at which a collection tick seals an active segment.
-const SEAL_AGE: Duration = Duration::from_secs(31);
+/// Past the age at which a collection tick seals an active segment of any
+/// partition: 30 s plus a per-partition offset below 30 s.
+const SEAL_AGE: Duration = Duration::from_secs(61);
 
 /// Opens the harness WAL directory over `inner` in store mode, as the server
 /// opens it, with the collection clock past the seal age, so every `GcTick`

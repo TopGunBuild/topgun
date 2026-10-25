@@ -254,8 +254,9 @@ fn never_flush_config() -> WriteBehindConfig {
 /// The retaining store with the applied watermark rows a store-mode WAL needs.
 type KeptStore = WatermarkKeeping<RetainingStore>;
 
-/// Past the age at which a collection tick seals an active segment.
-const SEAL_AGE: Duration = Duration::from_secs(31);
+/// Past the age at which a collection tick seals an active segment of any
+/// partition: 30 s plus a per-partition offset below 30 s.
+const SEAL_AGE: Duration = Duration::from_secs(61);
 
 fn kept_store() -> Arc<KeptStore> {
     Arc::new(WatermarkKeeping::new(RetainingStore::default()))
