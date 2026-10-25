@@ -1,0 +1,21 @@
+# Live-copy census reproduction cell on a Mac (macOS, Apple Silicon), before the byte copy is removed.
+#
+# Runner: scratch script r5-cell.sh, sha256 15cb8694957002fae1d76ec1e91a690fdf694ecb893a8afe340e762f634a2c6d,
+# NOT spec377-cells.sh: that runner refuses any host but Linux (spec377-cells.sh:487) and checks out its
+# .rs tree at SERIES_PIN, so it cannot run this branch on a Mac. r5-cell.sh passes the harness flags of the
+# SPEC-377 cell (spec377-cells.sh:895-918, :1367-1393) with --live-census-interval 300, and samples the
+# store size every 60 s as du -sk of {data_dir}/topgun-data (the store directory; the SPEC-377 runner
+# measured {data_dir}/topgun.redb, the store file before the data-directory layout).
+# Harness binary: built from the tree committed as 93d5333d (before c51537e7). The sha256 of the launched
+# binary was not recorded. In that build the live census loop slept one whole interval before it read the
+# stop flag and was not awaited, so this run printed no LIVE_CENSUS_LOOP_END line and soak.json has
+# liveCensus.loopEndReason null; c51537e7 fixes that. The census counts below are not affected by it.
+# Prediction written before the run; it was not met. On a Mac the failure is not reproduced; a Linux run
+# is not planned without the user's decision.
+CELL_PARAMS=--duration 7200 --churn-clients 6 --keyspace 200 --or-churn true --or-keyspace 48 --or-every 5 --write-interval-ms 20 --writes-per-life 200 --offline-keys 3 --confirm-interval 2 --crash-interval 0 --steady-interval 300 --quiesce 3 --mem-sample-interval 5 --mem-min-growth-mb 1000000 --mem-threshold-mb-per-hour 1000000 --mem-ceiling-mb 1000000 --wal-fsync batched --mechanism-report --durable-reading --live-census-interval 300 --sampler-jitter-seed 20260831
+PREDICTION_AT=2026-10-25T15:56:02Z
+PREDICTION=live-copy census failures occur (failed>=1) and every failure step is in {open, visit}
+RUN_STARTED_AT=2026-10-25T16:55:31Z
+REDB_MB_MAX=131.027
+LIVE_CENSUS_TALLY attempted=23 ok=23 failed=0 by_step=none
+VERDICT=not_reproduced
