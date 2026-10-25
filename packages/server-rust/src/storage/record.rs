@@ -11,7 +11,7 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
 use super::map_data_store::MapDataStore;
-use super::tombstone_gauge::with_sink;
+use super::tombstone_gauge::{with_sink, LiveCensus};
 
 /// Process-monotonic counter for minting per-write identity tokens.
 ///
@@ -120,6 +120,56 @@ pub fn set_tombstone_bytes(total: u64) {
     with_sink(|s| s.set(total));
 }
 
+/// Adds `entries` live OR entries carrying `tag_bytes` tag bytes to the
+/// process live census.
+///
+/// The live census counts the entries of every `OrMap` slot of the process and
+/// the summed UTF-8 byte length of their tags, whether the slot is resident or
+/// evicted (TG-OR-008). It is charged from the OR algebra the write path
+/// already runs, under the key's writer, in the same closures that charge
+/// [`add_tombstone_bytes`]; eviction and rehydration never move it; the boot
+/// walk [`reconcile_tombstone_bytes`] sets it absolutely ([`set_live_census`]).
+/// `/metrics` exports it as `topgun_ormap_live_entries`,
+/// `topgun_ormap_live_tag_bytes` and `topgun_ormap_live_census_seeded`.
+///
+/// Known exception (TODO-874): a `REMOVE` or an LWW `PUT` of a key whose
+/// `OrMap` slot is not resident, and an LWW `PUT` over an `OrMap` slot whose
+/// store write fails, discard the old slot without the server seeing its
+/// entries, so the census stays too high by them until the next restart
+/// re-seeds it. Removing that would need a store read on the write path.
+pub fn add_live_census(entries: u64, tag_bytes: u64) {
+    with_sink(|s| s.add_live(entries, tag_bytes));
+}
+
+/// Subtracts live OR entries from the process live census; see
+/// [`add_live_census`].
+pub fn sub_live_census(entries: u64, tag_bytes: u64) {
+    with_sink(|s| s.sub_live(entries, tag_bytes));
+}
+
+/// Sets the process live census to absolute values and marks it seeded; boot
+/// only, from [`reconcile_tombstone_bytes`]. See [`add_live_census`].
+pub fn set_live_census(entries: u64, tag_bytes: u64) {
+    with_sink(|s| s.set_live(entries, tag_bytes));
+}
+
+/// Reads the process live census; see [`add_live_census`].
+#[must_use]
+// Same release/test resolver split as `tombstone_bytes`.
+#[allow(clippy::redundant_closure_for_method_calls)]
+pub fn live_census() -> LiveCensus {
+    with_sink(|s| s.read_live())
+}
+
+/// Subtracts every entry of `value` from the live census when it is an `OrMap`
+/// slot: the old value a `REMOVE` or an LWW `PUT` just replaced.
+pub(crate) fn sub_live_census_of(value: &RecordValue) {
+    if let RecordValue::OrMap { records, .. } = value {
+        let tag_bytes = records.iter().map(|e| e.tag.len() as u64).sum();
+        sub_live_census(records.len() as u64, tag_bytes);
+    }
+}
+
 /// The startup warning for a detected legacy [`RecordValue::OrTombstones`] corpus,
 /// or `None` when the store holds none.
 ///
@@ -152,6 +202,10 @@ pub fn legacy_tombstone_warning(legacy_row_count: u64) -> Option<String> {
 /// This makes the scraped `topgun_ormap_tombstone_bytes_total` series survive a
 /// `kill -9` restart — the gauge otherwise resets to 0 on every process start
 /// and never re-counts rehydrated (redb-persisted) tombstones.
+///
+/// The same walk sums the live entries and their tag bytes over the same
+/// records and sets the live census with [`set_live_census`], which marks it
+/// seeded; a walk that stops early leaves it unseeded.
 ///
 /// Returns the reconciled total it passed to [`set_tombstone_bytes`], so a
 /// caller (or a test) can assert the reconciled sum through this function
@@ -202,6 +256,8 @@ pub async fn reconcile_tombstone_bytes(store: Arc<dyn MapDataStore>) -> u64 {
     };
 
     let mut total: u64 = 0;
+    let mut live_entries: u64 = 0;
+    let mut live_tag_bytes: u64 = 0;
     let mut records_scanned: u64 = 0;
     // Folded into this existing boot-only walk (no second O(keyspace) scan): the
     // count of legacy tombstone-only blobs, which a clean-slate store never grows
@@ -231,9 +287,16 @@ pub async fn reconcile_tombstone_bytes(store: Arc<dyn MapDataStore>) -> u64 {
             for (_key, value) in &batch.records {
                 records_scanned += 1;
                 match value {
-                    RecordValue::OrMap { tombstones, .. } => {
+                    RecordValue::OrMap {
+                        records,
+                        tombstones,
+                    } => {
                         for tag in tombstones {
                             total += tag.len() as u64;
+                        }
+                        live_entries += records.len() as u64;
+                        for entry in records {
+                            live_tag_bytes += entry.tag.len() as u64;
                         }
                     }
                     RecordValue::OrTombstones { .. } => legacy_rows += 1,
@@ -262,10 +325,13 @@ pub async fn reconcile_tombstone_bytes(store: Arc<dyn MapDataStore>) -> u64 {
     }
 
     set_tombstone_bytes(total);
+    set_live_census(live_entries, live_tag_bytes);
 
     tracing::info!(
         target: "topgun_server::bootstrap",
         tombstone_bytes = total,
+        live_entries = live_entries,
+        live_tag_bytes = live_tag_bytes,
         records_scanned = records_scanned,
         maps = maps.len(),
         "OR-Map tombstone-bytes gauge reconciled from persisted keyspace"
@@ -621,7 +687,10 @@ pub struct Record {
 mod tombstone_bytes_gauge_tests {
     use super::*;
     use crate::storage::datastores::RedbDataStore;
-    use crate::storage::tombstone_gauge::with_isolated_gauge;
+    use crate::storage::map_data_store::{ScanBatch, ScanCursor};
+    use crate::storage::tombstone_gauge::{
+        with_gauge_sink, with_isolated_gauge, IsolatedGauge, TombstoneGaugeSink,
+    };
 
     // Every test here binds a private sink for the duration of its own future,
     // so it observes only the writes it makes itself. `#[tokio::test]` is
@@ -840,6 +909,215 @@ mod tombstone_bytes_gauge_tests {
             "the walk must re-baseline the gauge to the total it returns, so the \
              returned value and the observed gauge cannot drift apart"
         );
+    }
+
+    /// An `OrMap` slot with one live entry per tag and no tombstones.
+    fn or_map_with_entries(tags: &[String]) -> RecordValue {
+        RecordValue::OrMap {
+            records: tags
+                .iter()
+                .map(|tag| OrMapEntry {
+                    value: Value::String("live".to_string()),
+                    tag: tag.clone(),
+                    timestamp: Timestamp {
+                        millis: 1,
+                        counter: 0,
+                        node_id: "node-a".to_string(),
+                    },
+                })
+                .collect(),
+            tombstones: Vec::new(),
+        }
+    }
+
+    /// A census sink that already holds counts, unseeded: `set_live` would
+    /// mark it seeded, so the stale counts are added instead.
+    fn stale_census_sink() -> Arc<IsolatedGauge> {
+        let sink = Arc::new(IsolatedGauge::new());
+        sink.add_live(7, 70);
+        sink
+    }
+
+    /// The boot walk sets the live census absolutely, over the primary `OrMap`
+    /// entries alone, and marks it seeded: a stale count before it is replaced,
+    /// not added to.
+    #[tokio::test]
+    async fn reconcile_seeds_the_live_census_to_the_durable_primary_ormap_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn MapDataStore> =
+            Arc::new(RedbDataStore::new(dir.path().join("census.redb")).expect("redb open"));
+
+        let counted = or_map_with_entries(&["a".repeat(2), "b".repeat(3), "c".repeat(4)]);
+        seed_primary(&store, "census_a", "k1", &counted).await;
+        seed_primary(
+            &store,
+            "census_b",
+            "k1",
+            &or_map_with_entries(&["d".repeat(5)]),
+        )
+        .await;
+        seed_primary(&store, "census_b", "k2", &lww_record_value()).await;
+        let legacy = RecordValue::OrTombstones {
+            tags: vec!["e".repeat(6)],
+        };
+        seed_primary(&store, "census_a", "legacy", &legacy).await;
+        store
+            .add_backup(
+                "census_a",
+                "backup-key",
+                &or_map_with_entries(&["f".repeat(9)]),
+                0,
+                0,
+            )
+            .await
+            .expect("seed a backup OrMap row");
+
+        let sink = stale_census_sink();
+        let observer = Arc::clone(&sink);
+        with_gauge_sink(sink, reconcile_tombstone_bytes(Arc::clone(&store))).await;
+
+        assert_eq!(
+            observer.read_live(),
+            LiveCensus {
+                entries: 4,
+                tag_bytes: 2 + 3 + 4 + 5,
+                seeded: true,
+            },
+            "the walk must set the census to the primary OrMap entries — backup, \
+             legacy and LWW rows excluded — replacing the stale 7 / 70"
+        );
+    }
+
+    /// Which call of the boot walk the double refuses.
+    #[derive(Clone, Copy, Debug)]
+    enum Refuse {
+        ListMaps,
+        ScanValues,
+        ScanValuesBatched,
+    }
+
+    /// Serves one map whose first batch carries a cursor, and refuses the one
+    /// call it is told to. The cursor comes from the double itself: redb hands
+    /// out none for a corpus this small, and without one the walk never reaches
+    /// `scan_values_batched`.
+    struct RefusingScan(Refuse);
+
+    #[async_trait::async_trait]
+    impl MapDataStore for RefusingScan {
+        async fn add(
+            &self,
+            _: &str,
+            _: &str,
+            _: &RecordValue,
+            _: i64,
+            _: i64,
+        ) -> anyhow::Result<()> {
+            unreachable!("the boot walk only lists and scans")
+        }
+        async fn add_backup(
+            &self,
+            _: &str,
+            _: &str,
+            _: &RecordValue,
+            _: i64,
+            _: i64,
+        ) -> anyhow::Result<()> {
+            unreachable!("the boot walk only lists and scans")
+        }
+        async fn remove(&self, _: &str, _: &str, _: i64) -> anyhow::Result<()> {
+            unreachable!("the boot walk only lists and scans")
+        }
+        async fn remove_backup(&self, _: &str, _: &str, _: i64) -> anyhow::Result<()> {
+            unreachable!("the boot walk only lists and scans")
+        }
+        async fn load(&self, _: &str, _: &str) -> anyhow::Result<Option<RecordValue>> {
+            unreachable!("the boot walk only lists and scans")
+        }
+        async fn load_all(
+            &self,
+            _: &str,
+            _: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            unreachable!("the boot walk only lists and scans")
+        }
+        async fn remove_all(&self, _: &str, _: &[String]) -> anyhow::Result<()> {
+            unreachable!("the boot walk only lists and scans")
+        }
+        async fn enumerate_leaves(
+            &self,
+            _: &str,
+            _: bool,
+            _: &mut dyn super::super::map_data_store::LeafSink,
+        ) -> anyhow::Result<()> {
+            unreachable!("the boot walk only lists and scans")
+        }
+        async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+            match self.0 {
+                Refuse::ListMaps => Err(anyhow::anyhow!("refused list_maps")),
+                _ => Ok(vec!["census".to_string()]),
+            }
+        }
+        async fn scan_values(&self, _: &str, _: bool, _: u64) -> anyhow::Result<ScanBatch> {
+            match self.0 {
+                Refuse::ScanValues => Err(anyhow::anyhow!("refused scan_values")),
+                _ => Ok(ScanBatch {
+                    records: vec![("k1".to_string(), or_map_with_entries(&["g".repeat(3)]))],
+                    next_cursor: Some(ScanCursor(b"k1".to_vec())),
+                }),
+            }
+        }
+        async fn scan_values_batched(
+            &self,
+            _: &str,
+            _: bool,
+            _: ScanCursor,
+            _: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            match self.0 {
+                Refuse::ScanValuesBatched => Err(anyhow::anyhow!("refused scan_values_batched")),
+                _ => Ok(ScanBatch::default()),
+            }
+        }
+        fn is_loadable(&self, _: &str) -> bool {
+            true
+        }
+        fn pending_operation_count(&self) -> u64 {
+            0
+        }
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A walk that stops early sets nothing and leaves the census unseeded, at
+    /// each of its three exits.
+    #[tokio::test]
+    async fn reconcile_that_stops_early_leaves_the_live_census_unseeded() {
+        for refuse in [
+            Refuse::ListMaps,
+            Refuse::ScanValues,
+            Refuse::ScanValuesBatched,
+        ] {
+            let sink = stale_census_sink();
+            let observer = Arc::clone(&sink);
+            with_gauge_sink(
+                sink,
+                reconcile_tombstone_bytes(Arc::new(RefusingScan(refuse))),
+            )
+            .await;
+            assert_eq!(
+                observer.read_live(),
+                LiveCensus {
+                    entries: 7,
+                    tag_bytes: 70,
+                    seeded: false,
+                },
+                "a walk refused at {refuse:?} must leave the census as it was, unseeded"
+            );
+        }
     }
 }
 
