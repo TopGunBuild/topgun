@@ -72,7 +72,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     highest collected sequence of each partition) is durable before the first unlink it
     covers. A segment leaves the WAL's sealed set only once its file is unlinked; a segment that
     cannot be unlinked holds back only its own partition, and a later tick unlinks it. A segment
-    is sealed only by a tick, once it holds 8 MiB or its first frame is 30 s old. The `.applied` files a stop that returns `Ok` writes are rollback hints for older
+    is sealed only by a tick, once it holds 8 MiB or its first frame is between 30 and 60 s
+    old, an age fixed per partition so that partitions do not all seal in one tick. The
+    `.applied` files a stop that returns `Ok` writes are rollback hints for older
     binaries, each equal to the durable engine row (also after a drain that did not finish);
     this binary reads one only through the import at open, when the WAL directory holds no
     `wal-collected` or the store is `wal_import_pending`, and deletes every one at open.

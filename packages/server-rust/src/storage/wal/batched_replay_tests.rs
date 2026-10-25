@@ -1336,8 +1336,9 @@ async fn c09_a_segment_that_fails_to_unlink_holds_back_only_its_own_partition() 
     node.seed(&[("warm".to_string(), lww("warm", 1))]).await;
     // Two sealed segments in A, one in B, every frame at or below the rows:
     // a tick seals an active segment whose first frame is old enough, and
-    // collects nothing while no row covers a segment.
-    let seal_age = Duration::from_secs(31);
+    // collects nothing while no row covers a segment. 61 s is past the seal
+    // age of every partition (30 s plus a per-partition offset below 30 s).
+    let seal_age = Duration::from_secs(61);
     node.append(A, &store_frame("a1", &lww("v", 5), 1)).await;
     node.append(B, &store_frame("b1", &lww("v", 5), 2)).await;
     node.wal.test_advance_clock(seal_age);
