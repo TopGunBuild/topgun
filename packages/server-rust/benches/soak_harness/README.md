@@ -61,9 +61,11 @@ caffeinate -dimsu cargo bench --bench soak_harness -- \
   --json-output soak.json --progress-output soak-progress.jsonl
 ```
 
-A bare invocation (no mode flag) prints usage and exits 0 — this is deliberate
-so `cargo test --all-targets`, which runs `harness=false` benches, never launches
-a multi-hour default soak.
+A bare invocation (no mode flag) runs the harness's own tests, prints usage, and
+exits 0, or 1 if a test failed — this is deliberate so `cargo test --all-targets`,
+which runs `harness=false` benches, never launches a multi-hour default soak, and
+so the tests in `main.rs` (stripped as `#[test]` items, because the target has no
+libtest) are executed rather than only compiled.
 
 ### Key flags
 

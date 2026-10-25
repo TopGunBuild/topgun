@@ -400,6 +400,7 @@ fn sample_report(wal_fsync: &str, epoch_width: u64) -> SoakReport {
         tombstone_corpus: TombstoneCorpusReport {
             scans_attempted: 41,
             scans_failed: 7,
+            failures_by_step: monitor::FailuresByStep::default(),
             samples: 34,
             first_bytes: 101,
             min_bytes: 97,
@@ -413,6 +414,11 @@ fn sample_report(wal_fsync: &str, epoch_width: u64) -> SoakReport {
             ceiling_bytes: Some(262_144),
             passed: false,
             reason: Some("durable corpus level rose past its headroom".to_string()),
+        },
+        live_census: report::LiveCensusReport {
+            interval_secs: 0,
+            counts: report::CensusCounts::new(0, monitor::FailuresByStep::default()),
+            loop_end_reason: None,
         },
         disk: DiskReport {
             samples: 60,
