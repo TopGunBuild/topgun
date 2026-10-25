@@ -1,7 +1,8 @@
 //! Metrics middleware for operations.
 //!
-//! Records operation duration and increments counters using both `tracing` spans
-//! and the `metrics` crate (Prometheus-compatible counters and histograms).
+//! Records operation duration and increments counters with the `metrics` crate
+//! (Prometheus-compatible counters and histograms), and runs each operation in a
+//! `tracing` span that gives the events it emits their service and call id.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -27,7 +28,7 @@ pub fn total_operations() -> u64 {
 // MetricsLayer
 // ---------------------------------------------------------------------------
 
-/// Tower layer that instruments operations with timing and counting via `tracing` spans.
+/// Tower layer that instruments operations with timing and counting.
 #[derive(Debug, Clone)]
 pub struct MetricsLayer;
 
@@ -43,7 +44,7 @@ impl<S> Layer<S> for MetricsLayer {
 // MetricsService
 // ---------------------------------------------------------------------------
 
-/// Service wrapper that records operation duration and outcome in tracing spans.
+/// Service wrapper that records operation duration and outcome as metrics.
 #[derive(Debug, Clone)]
 pub struct MetricsService<S> {
     inner: S,
@@ -66,13 +67,11 @@ where
         let service_name = op.ctx().service_name;
         let call_id = op.ctx().call_id;
 
-        let span = info_span!(
-            "operation",
-            service = service_name,
-            call_id = call_id,
-            duration_ms = tracing::field::Empty,
-            outcome = tracing::field::Empty,
-        );
+        // No event per operation: the counters and the histogram below already
+        // count every operation, and a log line per operation is a synchronous
+        // write on the worker thread that stalls every connection whenever the
+        // log file's device is slow.
+        let span = info_span!("operation", service = service_name, call_id = call_id);
 
         let fut = self.inner.call(op);
 
@@ -80,27 +79,12 @@ where
             async move {
                 let start = Instant::now();
                 let result = fut.await;
-                let elapsed = start.elapsed();
-                let duration_ms = elapsed.as_millis();
-                let duration_secs = elapsed.as_secs_f64();
+                let duration_secs = start.elapsed().as_secs_f64();
 
                 let outcome = match &result {
                     Ok(_) => "ok",
                     Err(_) => "error",
                 };
-
-                #[allow(clippy::cast_possible_truncation)]
-                let duration_u64 = duration_ms as u64;
-                tracing::Span::current().record("duration_ms", duration_u64);
-                tracing::Span::current().record("outcome", outcome);
-
-                tracing::info!(
-                    service = service_name,
-                    call_id = call_id,
-                    duration_ms = duration_u64,
-                    outcome = outcome,
-                    "operation complete"
-                );
 
                 // Increment lightweight atomic counter for /api/status.
                 TOTAL_OPERATIONS.fetch_add(1, Ordering::Relaxed);
