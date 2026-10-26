@@ -2455,12 +2455,12 @@ weaker than a test.
   - `GarbageCollect` — not decoded from any client message; only the server issues it.
   - `QueryUnsubscribe`, `SearchUnsubscribe`, `HybridSearchUnsubscribe`, `JournalUnsubscribe` —
     remove a subscription by its id and read nothing; the subscription was authorized when made.
-    They do not check that the id belongs to the calling connection (open: reported with TODO-876, not fixed there).
+    They do not check that the id belongs to the calling connection (open, tracked in TODO-879).
   - `TopicUnsubscribe` — removes only the calling connection from the topic.
   - `LockRequest`, `LockRelease` — a lock name is not a map name and no policy names locks; a
-    release needs the lock's fencing token (open: reported with TODO-876, not fixed there).
+    release needs the lock's fencing token (open, tracked in TODO-879).
   - `CounterRequest` — reads a counter by name and subscribes to it, unchecked, while `CounterSync`
-    is checked as a write (open: reported with TODO-876, not fixed there).
+    is checked as a write (open, tracked in TODO-879).
   - `QuerySyncInit` — a no-op stub; it reads nothing. `SqlQuery` is classified as a read of the
     empty name, so an allow on `*` admits it across every map (tracked, TODO-444).
 - **Stated limits:** a subscription that names a map (`QuerySubscribe`, `SearchSubscribe`,
@@ -2486,7 +2486,7 @@ weaker than a test.
 - **Violation consequence:** a client reads or changes data of a map the policy denies it — every
   mutation of every map through the journal, a denied map's vectors, its resolvers.
 - **Discovered by:** the TODO-859/861 research; TODO-876.
-- **Status:** decided, **enforced**.
+- **Status:** decided, **enforced** for the scoped families; the three exemptions marked open above are not enforced (TODO-879).
 
 ### TG-KEY-001: Every write of a record holds that record's per-key writer
 
