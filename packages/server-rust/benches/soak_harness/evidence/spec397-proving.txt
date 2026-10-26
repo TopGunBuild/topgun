@@ -1,0 +1,26 @@
+# Live-census coverage proving cell on a Mac (macOS, Apple Silicon): one cell of the series load,
+# live census every 300 s, D = 7200 s, store grown past 120 MB, read by census-coverage.sh.
+#
+# Runner: scratch script proving-cell.sh, sha256 9c01f758bbf2f9f934b44459dd28867b27583a9bcc08f0b6cfcbf45e1daf002e,
+# NOT spec377-cells.sh: that runner refuses any host but Linux and checks out its .rs tree at its own
+# series pin, so it cannot run this branch on a Mac. proving-cell.sh passes the harness flags of the
+# series cell (below), and samples the store size every 60 s as du -sk of {data_dir}/topgun-data (the
+# store directory) into a CSV column redb_mb. It wrote the sha256 of both binaries before launching them.
+# Binaries: built from 582fe2fc, whose .rs tree is that of baee9f70 (this change adds no .rs).
+CELL_PARAMS=--duration 7200 --churn-clients 6 --keyspace 200 --or-churn true --or-keyspace 48 --or-every 5 --write-interval-ms 20 --writes-per-life 200 --offline-keys 3 --confirm-interval 2 --crash-interval 0 --steady-interval 300 --quiesce 3 --mem-sample-interval 5 --mem-min-growth-mb 1000000 --mem-threshold-mb-per-hour 1000000 --mem-ceiling-mb 1000000 --wal-fsync batched --mechanism-report --durable-reading --live-census-interval 300 --sampler-jitter-seed 20260831
+RUN_STARTED_AT=2026-10-26T13:25:59Z
+RUN_ENDED_AT=2026-10-26T15:27:02Z
+HARNESS_EXIT=0
+REDB_MB_MAX=129.027
+SHA256_SERVER=fe2cdccc5a89fdf8a19a433717849eea6ccc3c4641ce0ba65b768d4f6d657bfe
+SHA256_HARNESS=c365b7211097d1620e117bf09a944415c18c1ecd0054aeff7ccc2799f620de5e
+LIVE_CENSUS_TALLY attempted=24 ok=24 failed=0 by_step=none expected=23 missed=none absent=none excused=none retries=0 quiesced_live=593364 quiesced_live_tag_bytes=20175201 terminal_live=593364 terminal_live_tag_bytes=20175201 reconcile=match reason=none
+VERDICT=proved
+# census-coverage.sh <run>/console.log <run>/soak.json 7200 300 proving 0
+CENSUS_EXPECTED_N_proving=23
+CENSUS_ABSENT_N_proving=0
+CENSUS_ABSENT_proving=none
+CENSUS_EXCUSED_N_proving=0
+CENSUS_RECONCILE_proving=TRUE
+CENSUS_LOOP_END_proving=stop
+CENSUS_COVERAGE_proving=TRUE
