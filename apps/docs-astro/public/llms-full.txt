@@ -1407,6 +1407,10 @@ Authorization runs on every client operation (`read`, `write`, `remove`):
   text="Because uncovered maps default to deny once any policy exists, adding a single narrow policy can lock non-admin clients out of every other map. Plan your policy set so that each collection your clients use has an explicit allow rule (a broad pattern like '*' works for a baseline)."
 />
 
+### What counts as a read and a write
+
+Every operation that names a map is checked against that map: queries, searches (full-text, hybrid and vector), sync, journal reads and subscriptions are reads; record writes, entry processors and conflict resolver registration and removal are writes. Pub/sub topics are matched by the same patterns: publishing to a topic is a write on its name, subscribing is a read. A journal read or subscription that names no map is allowed, and returns only the events of the maps the principal may read.
+
 ## Policy model
 
 A policy is a single rule binding a map pattern + action to an allow/deny effect, with an optional condition:
@@ -2214,6 +2218,7 @@ The server records every applied mutation (`PUT`/`OR_ADD` → `PUT`, `REMOVE`/`O
 - **`previousValue` is not yet populated.** Events carry the new `value`; capturing the prior value on the hot path is a planned follow-up.
 - **Live push is best-effort (at-most-once).** A subscriber that is briefly disconnected or backpressured may miss a live event; use `readFrom`/`getLatestSequence` to backfill gaps from the buffer.
 - **Opt-out.** Set `TOPGUN_JOURNAL_ENABLED=false` on the server to disable capture; reads then return no events.
+- **Only maps you may read.** With [RBAC policies](/docs/guides/rbac) configured, a journal read or subscription that names a map needs read access to it, and one that names no map returns and pushes only events of the maps the caller may read. Events of the server's internal maps are never returned.
 
 ## Conflict Resolvers
 

@@ -718,6 +718,7 @@ The server records every applied mutation (`PUT`/`OR_ADD` → `PUT`, `REMOVE`/`O
 - **`previousValue` is not yet populated.** Events carry the new `value`; capturing the prior value on the hot path is a planned follow-up.
 - **Live push is best-effort (at-most-once).** A subscriber that is briefly disconnected or backpressured may miss a live event; use `readFrom`/`getLatestSequence` to backfill gaps from the buffer.
 - **Opt-out.** Set `TOPGUN_JOURNAL_ENABLED=false` on the server to disable capture; reads then return no events.
+- **Only maps you may read.** With [RBAC policies](/docs/guides/rbac) configured, a journal read or subscription that names a map needs read access to it, and one that names no map returns and pushes only events of the maps the caller may read. Events of the server's internal maps are never returned.
 
 ## Conflict Resolvers
 
