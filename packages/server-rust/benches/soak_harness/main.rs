@@ -2620,14 +2620,7 @@ async fn run_live_census_loop<R, RF, B, BF>(
                 break 'moments;
             }
             let elapsed_secs = grid_start.elapsed().as_secs_f64();
-            let result = tokio::time::timeout(LIVE_ATTEMPT_TIMEOUT, read())
-                .await
-                .unwrap_or_else(|_| {
-                    Err(GaugeFailure {
-                        step: GaugeFailStep::Timeout,
-                        error: format!("no answer within {LIVE_ATTEMPT_TIMEOUT:?}"),
-                    })
-                });
+            let result = within_read_timeout(read()).await;
             sampler.record_gauge_attempt(ordinal, attempt, elapsed_secs, &result);
             if result.is_ok() {
                 break;
@@ -2725,6 +2718,57 @@ enum EndWait<T> {
     Exited(ServerExit),
 }
 
+/// What the polls of one end-sequence phase last saw, for the one line a
+/// phase that spent every poll prints: the latest failure and the latest
+/// buffered count each, so a gauge that was never read (renamed, missing) is
+/// told apart from a buffer that never emptied.
+#[derive(Default)]
+struct EndPolls {
+    polls: usize,
+    last_failure: Option<GaugeFailure>,
+    last_buffered: Option<u64>,
+}
+
+impl EndPolls {
+    /// Count one poll and keep what it saw.
+    fn note<T>(&mut self, read: Result<T, GaugeFailure>) -> Option<T> {
+        self.polls += 1;
+        read.map_err(|failure| self.last_failure = Some(failure))
+            .ok()
+    }
+
+    /// Print the phase's `LIVE_CENSUS_END_FAIL` line and give up.
+    fn exhausted<T>(self, log: &CensusLog, phase: &str) -> EndWait<T> {
+        let (step, error) = self.last_failure.map_or_else(
+            || ("none".to_string(), "none".to_string()),
+            |f| (f.step.render(), f.error.replace(['\r', '\n'], " ")),
+        );
+        log.line(format!(
+            "LIVE_CENSUS_END_FAIL phase={phase} polls={} last_step={step} last_error={error} \
+             last_buffered={}",
+            self.polls,
+            self.last_buffered
+                .map_or_else(|| "none".to_string(), |n| n.to_string()),
+        ));
+        EndWait::Exhausted
+    }
+}
+
+/// `read`, failed at step `timeout` when it does not finish within the
+/// timeout of one read.
+async fn within_read_timeout<T>(
+    read: impl Future<Output = Result<T, GaugeFailure>>,
+) -> Result<T, GaugeFailure> {
+    tokio::time::timeout(LIVE_ATTEMPT_TIMEOUT, read)
+        .await
+        .unwrap_or_else(|_| {
+            Err(GaugeFailure {
+                step: GaugeFailStep::Timeout,
+                error: format!("no answer within {LIVE_ATTEMPT_TIMEOUT:?}"),
+            })
+        })
+}
+
 /// Poll the write-behind buffer until two polls in a row read it empty, at
 /// most `polls` polls `every` apart. `liveness` runs before every poll, so a
 /// dead server ends the wait without a request.
@@ -2734,7 +2778,9 @@ async fn wait_for_drain(
     url: &str,
     polls: usize,
     every: Duration,
+    log: &CensusLog,
 ) -> EndWait<()> {
+    let mut seen = EndPolls::default();
     let mut empty_in_a_row = 0;
     for poll in 0..polls {
         if poll > 0 {
@@ -2743,11 +2789,15 @@ async fn wait_for_drain(
         if let Some(exit) = liveness() {
             return EndWait::Exited(exit);
         }
-        let buffered = tokio::time::timeout(LIVE_ATTEMPT_TIMEOUT, get_metrics_body(http, url))
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .and_then(|body| whole_gauge(&body, BUFFERED_ENTRIES_METRIC).ok());
+        let buffered = seen.note(
+            within_read_timeout(async {
+                whole_gauge(&get_metrics_body(http, url).await?, BUFFERED_ENTRIES_METRIC)
+            })
+            .await,
+        );
+        if buffered.is_some() {
+            seen.last_buffered = buffered;
+        }
         empty_in_a_row = if buffered == Some(0) {
             empty_in_a_row + 1
         } else {
@@ -2757,7 +2807,7 @@ async fn wait_for_drain(
             return EndWait::Reached(());
         }
     }
-    EndWait::Exhausted
+    seen.exhausted(log, "drain")
 }
 
 /// Take pairs of live-census reads `gap` apart until both reads of a pair
@@ -2767,33 +2817,31 @@ async fn wait_for_quiesce<R, RF>(
     read: R,
     pairs: usize,
     gap: Duration,
+    log: &CensusLog,
 ) -> EndWait<LiveGauges>
 where
     R: Fn() -> RF,
     RF: Future<Output = Result<LiveGauges, GaugeFailure>>,
 {
-    let read_once = || async {
-        match liveness() {
-            Some(exit) => Err(exit),
-            None => Ok(tokio::time::timeout(LIVE_ATTEMPT_TIMEOUT, read())
-                .await
-                .ok()
-                .and_then(Result::ok)),
-        }
-    };
+    let mut seen = EndPolls::default();
     for _ in 0..pairs {
-        let first = match read_once().await {
-            Ok(first) => first,
-            Err(exit) => return EndWait::Exited(exit),
-        };
-        tokio::time::sleep(gap).await;
-        match read_once().await {
-            Ok(Some(second)) if first == Some(second) => return EndWait::Reached(second),
-            Ok(_) => {}
-            Err(exit) => return EndWait::Exited(exit),
+        let mut pair = [None; 2];
+        for (i, read_at) in pair.iter_mut().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(gap).await;
+            }
+            if let Some(exit) = liveness() {
+                return EndWait::Exited(exit);
+            }
+            *read_at = seen.note(within_read_timeout(read()).await);
+        }
+        if let [Some(first), Some(second)] = pair {
+            if first == second {
+                return EndWait::Reached(second);
+            }
         }
     }
-    EndWait::Exhausted
+    seen.exhausted(log, "quiesce")
 }
 
 /// What the end sequence observed, the input of the reconciliation.
@@ -2822,7 +2870,16 @@ async fn end_live_census(
     let mut drained = false;
     let mut found_dead = None;
     if churn_joined {
-        match wait_for_drain(liveness, &http, url, DRAIN_POLLS, END_POLL_GAP).await {
+        match wait_for_drain(
+            liveness,
+            &http,
+            url,
+            DRAIN_POLLS,
+            END_POLL_GAP,
+            &sampler.census_log,
+        )
+        .await
+        {
             EndWait::Reached(()) => {
                 drained = true;
                 match wait_for_quiesce(
@@ -2830,6 +2887,7 @@ async fn end_live_census(
                     || read_live_gauges(&http, url),
                     QUIESCE_PAIRS,
                     END_POLL_GAP,
+                    &sampler.census_log,
                 )
                 .await
                 {
@@ -5993,8 +6051,9 @@ mod tests {
         );
     }
 
-    /// The drain wait needs two empty polls in a row, gives up after its polls,
-    /// and asks a dead server nothing.
+    /// The drain wait needs two empty polls in a row, asks a dead server
+    /// nothing, and when it spends its polls says in one line what they last
+    /// saw — a count that stayed up apart from a gauge that was never there.
     fn the_drain_poll_checks_liveness_before_every_request() {
         let buffered = |n: u64| (200, format!("topgun_write_behind_buffered_entries {n}\n"));
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -6006,22 +6065,46 @@ mod tests {
             let every = Duration::from_millis(10);
             let alive = || None;
 
+            let (log, lines) = CensusLog::buffer();
             let (url, hits) = serve_metrics(vec![buffered(3)], Duration::ZERO).await;
-            let got = wait_for_drain(alive, &http, &url, 4, every).await;
+            let got = wait_for_drain(alive, &http, &url, 4, every, &log).await;
             assert_eq!(got, EndWait::Exhausted);
             assert_eq!(hits.load(Ordering::SeqCst), 4);
+            assert_eq!(
+                lines.lock().as_slice(),
+                [
+                    "LIVE_CENSUS_END_FAIL phase=drain polls=4 last_step=none last_error=none \
+                     last_buffered=3"
+                ]
+            );
 
+            let (log, lines) = CensusLog::buffer();
+            let (url, _) = serve_metrics(vec![(200, String::new())], Duration::ZERO).await;
+            let got = wait_for_drain(alive, &http, &url, 2, every, &log).await;
+            assert_eq!(got, EndWait::Exhausted);
+            assert_eq!(
+                lines.lock().as_slice(),
+                ["LIVE_CENSUS_END_FAIL phase=drain polls=2 \
+                     last_step=absent:topgun_write_behind_buffered_entries \
+                     last_error=not in the /metrics body last_buffered=none"]
+            );
+
+            let (log, lines) = CensusLog::buffer();
             let (url, hits) =
                 serve_metrics(vec![buffered(3), buffered(0), buffered(0)], Duration::ZERO).await;
-            let got = wait_for_drain(alive, &http, &url, 60, every).await;
+            let got = wait_for_drain(alive, &http, &url, 60, every, &log).await;
             assert_eq!(got, EndWait::Reached(()));
             assert_eq!(hits.load(Ordering::SeqCst), 3);
 
             let (url, hits) = serve_metrics(vec![buffered(0)], Duration::ZERO).await;
             let dead = || Some(ServerExit::AlreadyExited);
-            let got = wait_for_drain(dead, &http, &url, 60, every).await;
+            let got = wait_for_drain(dead, &http, &url, 60, every, &log).await;
             assert_eq!(got, EndWait::Exited(ServerExit::AlreadyExited));
             assert_eq!(hits.load(Ordering::SeqCst), 0);
+            assert!(
+                lines.lock().is_empty(),
+                "only a phase that spent its polls prints"
+            );
         });
     }
 
