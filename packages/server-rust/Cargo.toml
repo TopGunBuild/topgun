@@ -79,9 +79,22 @@ regex = "1"
 redb = { version = "2", optional = true }
 fs4 = { version = "0.8", default-features = false }
 madsim = { workspace = true, optional = true }
-datafusion = { version = "45", optional = true }
+# Default features minus `compression` and `parquet`: the SQL path only queries
+# in-memory tables, and both features pull in zstd 0.13.
+datafusion = { version = "45", optional = true, default-features = false, features = [
+    "nested_expressions",
+    "crypto_expressions",
+    "datetime_expressions",
+    "encoding_expressions",
+    "regex_expressions",
+    "string_expressions",
+    "unicode_expressions",
+    "recursive_protection",
+] }
 arrow = { version = "54", optional = true }
-tantivy = "0.22"
+# The index lives in RAM, so mmap is not needed; the columnar zstd codec is left
+# out because it pulls in zstd 0.13.
+tantivy = { version = "0.25", default-features = false, features = ["lz4-compression"] }
 clap = { version = "4", features = ["derive", "env"] }
 jsonwebtoken = "9"
 subtle = "2"
