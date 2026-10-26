@@ -3972,7 +3972,7 @@ mod tests {
             .expect("the second put must succeed");
         let node0_stamps: Vec<Timestamp> = cluster.nodes[0]
             .journal_store
-            .read(0, 100, Some(MAP))
+            .read(0, 100, Some(MAP), None)
             .0
             .into_iter()
             .filter(|event| event.key == KEY)
@@ -4153,7 +4153,7 @@ mod tests {
             .expect("the second put must succeed");
         let node0_stamps: Vec<Timestamp> = cluster.nodes[0]
             .journal_store
-            .read(0, 100, Some(MAP))
+            .read(0, 100, Some(MAP), None)
             .0
             .into_iter()
             .filter(|event| event.key == KEY)

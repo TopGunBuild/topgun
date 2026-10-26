@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Security (server):** vector search, journal reads and subscriptions that name a map, conflict
+  resolver registration, removal and listing, and topic subscriptions were not authorized against
+  their map or topic. Each is now checked by the same policies as its neighbours: vector search,
+  journal operations, resolver listing and topic subscriptions as reads, resolver registration and
+  removal as writes; a reserved map name is refused for all of them. **Behaviour change:** a
+  journal read or subscription that names no map (`getEventJournal()` / `useEventJournal` without
+  a map) still succeeds, but now returns and pushes only the events of maps the caller may read,
+  and never events of the server's reserved maps — also on a server without policies. A caller
+  allowed to read every map sees the same events as before.
 - **Removed (server):** `WalWriter::new`, the WAL constructor that kept the applied watermark in
   files beside the log, is gone. Open the WAL with `WalWriter::open_over_store` over a store that
   keeps applied watermarks, as the server does.

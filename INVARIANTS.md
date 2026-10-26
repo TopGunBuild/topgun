@@ -7,7 +7,8 @@ that every cited enforcing test still exists and that no new entry lands without
 an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", not "zero NAKED".
 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
-EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine). Cite the ID verbatim in code comments and test names. Statuses:
+EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine, AUTHZ
+authorization). Cite the ID verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -2381,7 +2382,7 @@ weaker than a test.
   (LWW `PUT`/`REMOVE`, OR `OR_ADD`/`OR_REMOVE`), `OpBatch` (every op), `EntryProcess`,
   `EntryProcessBatch`, `ORMapPushDiff`, `QuerySubscribe`, `Search`, `SearchSubscribe`,
   `HybridSearch`, `HybridSearchSubscribe`, `SyncInit`, `MerkleReqBucket`, `ORMapSyncInit`,
-  `ORMapMerkleReqBucket`, `ORMapDiffRequest` — if any carried map name `n ∉ N`, then: the operation
+  `ORMapMerkleReqBucket`, `ORMapDiffRequest`, `VectorSearch` — if any carried map name `n ∉ N`, then: the operation
   returns `OperationError::InvalidMapName` (disposition `Permanent`), the inner service is never
   called, no WAL frame is appended and no `OP_ACK` is sent for the refused operation. For an
   `OpBatch` the unit is the **sub-batch** (the ops of the batch that share a partition), and the
@@ -2394,9 +2395,9 @@ weaker than a test.
     batch-level `ERROR` carrying code 400, which names no operation.
 
   Sub-batches of the same batch that hold no name outside `N` are dispatched as before.
-- **Not covered, and why none is a durability hole:** three families carry a `map_name` field and
-  are not checked — `VectorSearch`, `RegisterResolver` and `JournalSubscribe` (an `Option`). None
-  of them makes a durable store write under that name (read / registration / subscription paths),
+- **Not covered, and why none is a durability hole:** two families carry a `map_name` field and
+  are not checked — `RegisterResolver` and `JournalSubscribe` (an `Option`). Neither
+  of them makes a durable store write under that name (registration / subscription paths),
   so a refused-shape name there cannot become an acked-then-lost write. Their siblings in the
   authorization bypass group (`JournalRead`, `UnregisterResolver`, `ListResolvers`) are in the
   same position. `TopicPublish` and `CounterSync` carry a topic / counter name, not a map name.
@@ -2427,6 +2428,65 @@ weaker than a test.
   ack; SPEC-381a.
 - **Status:** decided, **enforced**. Stated limit, not a gap in the invariant: on the
   single-message paths the refusal sends no frame (tracker TODO-744).
+
+### TG-AUTHZ-001: A client operation that names a map or a topic is authorized against it, and a journal event reaches a principal only for a map it may read
+
+- **Scope:** the server binary's operation pipeline (which always installs the authorization layer,
+  as in TG-NAME-002) and the event journal it wires the same `PolicyEvaluator` into, for operations
+  of origin `Client`, `HttpClient` or `Anonymous`. **Excluded:** trusted origins (they early-return
+  in `AuthorizationService::call`); a pipeline or journal built without an evaluator (bench and
+  tests), where every non-reserved map is readable.
+- **Statement:** (1) every client operation that carries a map name or a topic is checked by
+  `classify_operation` as `(action, that name)` and passes the reserved-map guard on that name:
+  reads — `QuerySubscribe`, `Search`, `SearchSubscribe`, `HybridSearch`, `HybridSearchSubscribe`,
+  `VectorSearch`, `SyncInit`, `MerkleReqBucket`, `ORMapSyncInit`, `ORMapMerkleReqBucket`,
+  `ORMapDiffRequest`, `JournalRead` / `JournalSubscribe` / `ListResolvers` when they name a map,
+  `TopicSubscribe` (topic); writes — `ClientOp`, `OpBatch` (every op), `ORMapPushDiff`,
+  `EntryProcess`, `EntryProcessBatch`, `RegisterResolver`, `UnregisterResolver`, `TopicPublish`
+  (topic), `CounterSync` (counter name). (2) `JournalRead` and `JournalSubscribe` **without** a map
+  are admitted, and the journal keeps every event of a map the principal may not read: a read
+  filters before its page limit, so `has_more` and the page count only visible events; a live
+  subscription is checked per event at delivery, with the principal it was made with and the
+  policy in force at that moment. (3) An event of a reserved map (`_topgun_*`, `__topgun_*`)
+  reaches no client by read or by subscription, also under NO_AUTH.
+- **Exemptions, each with its reason** (the bypass group, `(None, "")`):
+  - `Ping`, `PartitionMapRequest` — carry no data of any map; cluster routing under NO_AUTH depends
+    on them.
+  - `GarbageCollect` — not decoded from any client message; only the server issues it.
+  - `QueryUnsubscribe`, `SearchUnsubscribe`, `HybridSearchUnsubscribe`, `JournalUnsubscribe` —
+    remove a subscription by its id and read nothing; the subscription was authorized when made.
+    They do not check that the id belongs to the calling connection (open: reported with TODO-876, not fixed there).
+  - `TopicUnsubscribe` — removes only the calling connection from the topic.
+  - `LockRequest`, `LockRelease` — a lock name is not a map name and no policy names locks; a
+    release needs the lock's fencing token (open: reported with TODO-876, not fixed there).
+  - `CounterRequest` — reads a counter by name and subscribes to it, unchecked, while `CounterSync`
+    is checked as a write (open: reported with TODO-876, not fixed there).
+  - `QuerySyncInit` — a no-op stub; it reads nothing. `SqlQuery` is classified as a read of the
+    empty name, so an allow on `*` admits it across every map (tracked, TODO-444).
+- **Stated limits:** a subscription that names a map (`QuerySubscribe`, `SearchSubscribe`,
+  `HybridSearchSubscribe`, `JournalSubscribe`, `TopicSubscribe`) is authorized when it is made; a
+  later policy change does not revoke it. Record-level policy conditions are evaluated against no
+  record on every read path — `Search`, `VectorSearch` and the journal alike — so a condition on
+  `data` does not filter the events or hits a read returns. The resolver list is always empty, so
+  `ListResolvers` without a map has nothing to filter. The journal decides without waiting
+  (`PolicyEvaluator::may_read_now`); a policy store that cannot answer at once denies.
+- **Maintaining code:** `service/middleware/authorization.rs` `classify_operation`,
+  `reserved_target_map_name`; `service/domain/journal.rs` `JournalStore::read` and
+  `subscribers_for`; `service/policy/mod.rs` `may_read_now`; the journal is given the evaluator in
+  `bin/topgun_server.rs` `build_services`.
+- **Enforcing test:** `vector_search_is_held_to_the_read_policy_of_its_map`,
+  `resolver_operations_are_held_to_the_policy_of_their_map`,
+  `topic_subscribe_is_held_to_the_read_policy_of_its_topic`,
+  `journal_operations_naming_a_map_are_held_to_its_read_policy`,
+  `newly_scoped_operations_cannot_name_a_reserved_map_under_no_auth`,
+  `journal_read_without_a_map_returns_only_readable_maps`,
+  `journal_subscription_without_a_map_is_delivered_only_readable_maps` and
+  `reserved_map_events_reach_no_client_under_no_auth`, in `authorization.rs`'s test module; at the
+  wire, `tests/integration-rust/journal.test.ts`.
+- **Violation consequence:** a client reads or changes data of a map the policy denies it — every
+  mutation of every map through the journal, a denied map's vectors, its resolvers.
+- **Discovered by:** the TODO-859/861 research; TODO-876.
+- **Status:** decided, **enforced**.
 
 ### TG-KEY-001: Every write of a record holds that record's per-key writer
 

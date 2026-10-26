@@ -358,6 +358,31 @@ impl PolicyEvaluator {
         }
     }
 
+    /// Whether `principal` may read `map_name`, decided without waiting: the
+    /// gate and the evaluation as the authorization middleware runs them, for
+    /// a caller that must not await (the journal's delivery runs under a key
+    /// writer). Record conditions see no record, as on every read path. A
+    /// store that cannot answer at once denies, as a store that fails does.
+    #[must_use]
+    pub fn may_read_now(&self, principal: Option<&topgun_core::Principal>, map_name: &str) -> bool {
+        use futures_util::FutureExt;
+
+        match self.should_evaluate().now_or_never() {
+            Some(GateDecision::AllowAll) => true,
+            Some(GateDecision::Evaluate) => {
+                self.evaluate(
+                    principal,
+                    PermissionAction::Read,
+                    map_name,
+                    &rmpv::Value::Nil,
+                )
+                .now_or_never()
+                    == Some(PolicyDecision::Allow)
+            }
+            Some(GateDecision::Deny) | None => false,
+        }
+    }
+
     /// Evaluates whether the given principal may perform `action` on `map_name`.
     ///
     /// Constructs an auth context from `principal` so that policy conditions

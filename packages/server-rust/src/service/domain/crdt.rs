@@ -3648,7 +3648,7 @@ mod tests {
         };
         svc.oneshot(remove).await.unwrap();
 
-        let (events, _) = journal.read(0, 100, None);
+        let (events, _) = journal.read(0, 100, None, None);
         assert_eq!(events.len(), 2, "both writes recorded in the journal");
         assert_eq!(events[0].event_type, JournalEventType::PUT);
         assert_eq!(events[0].map_name, "users");
@@ -12378,7 +12378,7 @@ mod tests {
         /// were recorded.
         fn journal_stamps(journal: &JournalStore) -> Vec<Timestamp> {
             journal
-                .read(0, 100, Some(MAP))
+                .read(0, 100, Some(MAP), None)
                 .0
                 .into_iter()
                 .filter(|event| event.key == KEY)

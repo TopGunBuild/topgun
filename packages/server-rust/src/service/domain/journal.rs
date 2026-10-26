@@ -4,16 +4,23 @@
 //! subscription management. Events are appended with monotonically increasing
 //! sequence numbers. Subscriptions track connection IDs and optional filters
 //! (map name, event types).
+//!
+//! An event reaches a principal only for a map it may read, and never for a
+//! reserved map (TG-AUTHZ-001).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
 use topgun_core::messages::{JournalEventData, JournalEventType};
+use topgun_core::Principal;
 
 use crate::network::connection::ConnectionId;
+use crate::service::middleware::authorization::is_reserved_map_name;
+use crate::service::policy::PolicyEvaluator;
 
 // ---------------------------------------------------------------------------
 // JournalSubscription
@@ -27,6 +34,10 @@ pub struct JournalSubscription {
     pub map_name: Option<String>,
     /// Optional event type filter (only these event types).
     pub types: Option<Vec<JournalEventType>>,
+    /// Who subscribed. A subscription without a map filter receives an event
+    /// only if this principal may read the event's map when it is delivered;
+    /// one with a map filter was authorized for that map when it was made.
+    pub principal: Option<Principal>,
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +65,9 @@ pub struct JournalStore {
     /// simply observe an empty buffer (an explicit operator opt-out, surfaced at
     /// startup, not a silent dark feature).
     enabled: bool,
+    /// The policies an event's reader is held to. `None` admits every
+    /// non-reserved map, as a pipeline without the authorization layer does.
+    policy: Option<Arc<PolicyEvaluator>>,
 }
 
 impl JournalStore {
@@ -76,7 +90,24 @@ impl JournalStore {
             capacity,
             subscriptions: DashMap::new(),
             enabled,
+            policy: None,
         }
+    }
+
+    /// Holds every reader of this journal to `policy`'s read decisions.
+    #[must_use]
+    pub fn with_policy(mut self, policy: Arc<PolicyEvaluator>) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// Whether `principal` may see an event of `map_name`.
+    fn visible(&self, principal: Option<&Principal>, map_name: &str) -> bool {
+        !is_reserved_map_name(map_name)
+            && self
+                .policy
+                .as_ref()
+                .is_none_or(|policy| policy.may_read_now(principal, map_name))
     }
 
     /// Returns whether this journal is enabled (appends are recorded).
@@ -139,29 +170,32 @@ impl JournalStore {
     /// `map_name`, and its `types` filter is absent or contains `event_type`.
     /// One connection may hold several subscriptions; each ID appears once so
     /// the caller pushes a single `JOURNAL_EVENT` per connection (the client
-    /// re-applies per-listener filters on receipt).
+    /// re-applies per-listener filters on receipt). A subscription without a
+    /// map filter matches only if its principal may read `map_name` now; an
+    /// event of a reserved map matches none.
     #[must_use]
     pub fn subscribers_for(
         &self,
         map_name: &str,
         event_type: &JournalEventType,
     ) -> Vec<ConnectionId> {
+        if is_reserved_map_name(map_name) {
+            return Vec::new();
+        }
         let mut ids: Vec<ConnectionId> = self
             .subscriptions
             .iter()
             .filter(|entry| {
                 let sub = entry.value();
-                if let Some(ref m) = sub.map_name {
-                    if m != map_name {
-                        return false;
-                    }
-                }
                 if let Some(ref types) = sub.types {
                     if !types.contains(event_type) {
                         return false;
                     }
                 }
-                true
+                match sub.map_name {
+                    Some(ref m) => m == map_name,
+                    None => self.visible(sub.principal.as_ref(), map_name),
+                }
             })
             .map(|entry| entry.value().connection_id)
             .collect();
@@ -183,18 +217,22 @@ impl JournalStore {
     }
 
     /// Reads events from the ring buffer starting at `from_sequence` with
-    /// optional map name filter.
+    /// optional map name filter, keeping only events `principal` may see.
     ///
     /// Returns a tuple of `(events, has_more)` where `has_more` indicates
-    /// whether additional events exist beyond the requested page.
+    /// whether additional events exist beyond the requested page. Both count
+    /// visible events only, so a page is never cut short by withheld ones.
     #[must_use]
     pub fn read(
         &self,
         from_sequence: u64,
         limit: u32,
         map_name: Option<&str>,
+        principal: Option<&Principal>,
     ) -> (Vec<JournalEventData>, bool) {
         let events = self.events.read();
+        // One decision per map per read: the buffer repeats a few maps many times.
+        let mut visible: HashMap<&str, bool> = HashMap::new();
 
         let filtered: Vec<JournalEventData> = events
             .iter()
@@ -210,7 +248,9 @@ impl JournalStore {
                         return false;
                     }
                 }
-                true
+                *visible
+                    .entry(e.map_name.as_str())
+                    .or_insert_with(|| self.visible(principal, &e.map_name))
             })
             .cloned()
             .collect();
@@ -271,7 +311,7 @@ mod tests {
         let store = JournalStore::new(100);
         store.append(make_event("m1", "k1", JournalEventType::PUT));
 
-        let (events, _) = store.read(1, 100, None);
+        let (events, _) = store.read(1, 100, None, None);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].sequence, "1");
     }
@@ -284,7 +324,7 @@ mod tests {
         store.append(make_event("m1", "k3", JournalEventType::PUT));
         store.append(make_event("m1", "k4", JournalEventType::PUT)); // evicts seq 1
 
-        let (events, _) = store.read(1, 100, None);
+        let (events, _) = store.read(1, 100, None, None);
         // Only seq 2, 3, 4 remain; seq 1 evicted.
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].sequence, "2");
@@ -300,7 +340,7 @@ mod tests {
         store.append(make_event("m1", "k2", JournalEventType::PUT));
         store.append(make_event("m1", "k3", JournalEventType::PUT));
 
-        let (events, has_more) = store.read(2, 100, None);
+        let (events, has_more) = store.read(2, 100, None, None);
         assert_eq!(events.len(), 2); // seq 2 and 3
         assert!(!has_more);
         assert_eq!(events[0].sequence, "2");
@@ -313,7 +353,7 @@ mod tests {
         store.append(make_event("m1", "k2", JournalEventType::PUT));
         store.append(make_event("m1", "k3", JournalEventType::PUT));
 
-        let (events, has_more) = store.read(1, 2, None);
+        let (events, has_more) = store.read(1, 2, None, None);
         assert_eq!(events.len(), 2);
         assert!(has_more);
     }
@@ -325,7 +365,7 @@ mod tests {
         store.append(make_event("orders", "k1", JournalEventType::PUT));
         store.append(make_event("users", "k2", JournalEventType::UPDATE));
 
-        let (events, _) = store.read(1, 100, Some("users"));
+        let (events, _) = store.read(1, 100, Some("users"), None);
         assert_eq!(events.len(), 2);
         assert!(events.iter().all(|e| e.map_name == "users"));
     }
@@ -337,7 +377,7 @@ mod tests {
         let seq = store.append(make_event("m1", "k1", JournalEventType::PUT));
         // Disabled append assigns no sequence and stores nothing.
         assert_eq!(seq, 0);
-        let (events, has_more) = store.read(0, 100, None);
+        let (events, has_more) = store.read(0, 100, None, None);
         assert!(events.is_empty());
         assert!(!has_more);
     }
@@ -368,7 +408,7 @@ mod tests {
             h.join().expect("append thread panicked");
         }
 
-        let (events, _) = store.read(0, u32::MAX, None);
+        let (events, _) = store.read(0, u32::MAX, None, None);
         assert_eq!(events.len(), threads * per_thread);
         let mut prev = 0u64;
         for e in &events {
@@ -400,6 +440,7 @@ mod tests {
             connection_id: ConnectionId(conn),
             map_name: map_name.map(str::to_string),
             types,
+            principal: None,
         }
     }
 
@@ -453,7 +494,7 @@ mod tests {
     #[test]
     fn read_empty_store_returns_empty() {
         let store = JournalStore::new(100);
-        let (events, has_more) = store.read(1, 100, None);
+        let (events, has_more) = store.read(1, 100, None, None);
         assert!(events.is_empty());
         assert!(!has_more);
     }
@@ -463,7 +504,7 @@ mod tests {
         let store = JournalStore::new(100);
         store.append(make_event("m1", "k1", JournalEventType::PUT));
 
-        let (events, has_more) = store.read(999, 100, None);
+        let (events, has_more) = store.read(999, 100, None, None);
         assert!(events.is_empty());
         assert!(!has_more);
     }
@@ -477,6 +518,7 @@ mod tests {
             connection_id: ConnectionId(1),
             map_name: Some("users".to_string()),
             types: None,
+            principal: None,
         };
         store.subscribe("sub-1".to_string(), sub);
 
@@ -503,6 +545,7 @@ mod tests {
                 connection_id: ConnectionId(1),
                 map_name: None,
                 types: None,
+                principal: None,
             },
         );
         store.subscribe(
@@ -511,6 +554,7 @@ mod tests {
                 connection_id: ConnectionId(1),
                 map_name: None,
                 types: None,
+                principal: None,
             },
         );
         store.subscribe(
@@ -519,6 +563,7 @@ mod tests {
                 connection_id: ConnectionId(2),
                 map_name: None,
                 types: None,
+                principal: None,
             },
         );
 
@@ -536,6 +581,7 @@ mod tests {
             connection_id: ConnectionId(1),
             map_name: Some("users".to_string()),
             types: Some(vec![JournalEventType::PUT, JournalEventType::DELETE]),
+            principal: None,
         };
         store.subscribe("filtered-sub".to_string(), sub);
 

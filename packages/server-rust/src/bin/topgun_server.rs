@@ -2088,10 +2088,13 @@ fn build_services(
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|c| *c > 0)
         .unwrap_or(DEFAULT_JOURNAL_CAPACITY);
-    let journal_store = Arc::new(JournalStore::with_enabled(
-        journal_capacity,
-        journal_enabled,
-    ));
+    // The journal holds its readers to the same policies as the pipeline, so a
+    // read or subscription without a map sees only the maps its principal may read.
+    let mut journal_store = JournalStore::with_enabled(journal_capacity, journal_enabled);
+    if let Some(evaluator) = &policy_evaluator {
+        journal_store = journal_store.with_policy(Arc::clone(evaluator));
+    }
+    let journal_store = Arc::new(journal_store);
     tracing::info!(
         journal_enabled,
         journal_capacity,
