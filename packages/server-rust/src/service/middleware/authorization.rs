@@ -89,7 +89,7 @@ where
         // below, so the NO_AUTH `GateDecision::AllowAll` passthrough cannot skip it;
         // trusted origins never reach here (they early-return in `call`), so the
         // server's own internal writes to these maps stay exempt. Ops with an empty
-        // `map_name` (bypass group, `SqlQuery`/`VectorSearch`/`QuerySyncInit`)
+        // `map_name` (bypass group, `SqlQuery`/`QuerySyncInit`)
         // cannot name a reserved map, so they fall through unaffected. For an
         // `OpBatch` EVERY op is inspected (not just the classified first one) —
         // each op is applied by its own `map_name`, so a reserved map in a
@@ -258,7 +258,7 @@ const RESERVED_MAP_PREFIXES: [&str; 2] = ["_topgun_", "__topgun_"];
 /// other leading-underscore names (`_internal`, `tags`, …) stay valid. The prefix
 /// match is ASCII-case-insensitive so a `_TOPGUN_*` variant cannot slip past the
 /// guard if any downstream layer folds map-name case.
-fn is_reserved_map_name(map_name: &str) -> bool {
+pub(crate) fn is_reserved_map_name(map_name: &str) -> bool {
     let bytes = map_name.as_bytes();
     RESERVED_MAP_PREFIXES.iter().any(|prefix| {
         let p = prefix.as_bytes();
@@ -318,17 +318,17 @@ fn inadmissible_map_name(op: &Operation) -> Option<(&str, MapNameViolation)> {
         Operation::HybridSearchSubscribe { payload, .. } => &payload.map_name,
         Operation::SyncInit { payload, .. } => &payload.map_name,
         Operation::ORMapSyncInit { payload, .. } => &payload.map_name,
+        Operation::VectorSearch { payload, .. } => &payload.map_name,
 
         // Not checked. A topic and a counter are named, but not by a map name;
-        // `QuerySyncInit` and `SqlQuery` name no map; `VectorSearch`,
-        // `RegisterResolver` and `JournalSubscribe` carry one but make no
-        // durable store write under it, so a refused shape there cannot become
-        // an acknowledged write the store then drops. The rest name no map.
+        // `QuerySyncInit` and `SqlQuery` name no map; `RegisterResolver` and
+        // `JournalSubscribe` carry one but make no durable store write under
+        // it, so a refused shape there cannot become an acknowledged write the
+        // store then drops. The rest name no map.
         Operation::TopicPublish { .. }
         | Operation::CounterSync { .. }
         | Operation::QuerySyncInit { .. }
         | Operation::SqlQuery { .. }
-        | Operation::VectorSearch { .. }
         | Operation::Ping { .. }
         | Operation::PartitionMapRequest { .. }
         | Operation::GarbageCollect { .. }
@@ -474,10 +474,13 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
             Some(PermissionAction::Read),
             payload.payload.map_name.clone(),
         ),
-        // QuerySyncInit resumes by query_id; SqlQuery and VectorSearch may span multiple maps.
-        Operation::QuerySyncInit { .. }
-        | Operation::SqlQuery { .. }
-        | Operation::VectorSearch { .. } => (Some(PermissionAction::Read), String::new()),
+        // QuerySyncInit resumes by query_id; SqlQuery may span multiple maps.
+        Operation::QuerySyncInit { .. } | Operation::SqlQuery { .. } => {
+            (Some(PermissionAction::Read), String::new())
+        }
+        Operation::VectorSearch { payload, .. } => {
+            (Some(PermissionAction::Read), payload.map_name.clone())
+        }
         Operation::Search { payload, .. } => {
             (Some(PermissionAction::Read), payload.map_name.clone())
         }
@@ -511,25 +514,53 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
         Operation::HybridSearchSubscribe { payload, .. } => {
             (Some(PermissionAction::Read), payload.map_name.clone())
         }
+        Operation::TopicSubscribe { payload, .. } => {
+            (Some(PermissionAction::Read), payload.topic.clone())
+        }
 
-        // --- Bypass group (no policy check) ---
+        // Without a map these span every map: they are admitted here, and the
+        // journal withholds from each principal the events of the maps it may
+        // not read (TG-AUTHZ-001). The resolver list is always empty.
+        Operation::JournalRead { payload, .. } => {
+            optional_map_scope(payload.map_name.as_ref(), PermissionAction::Read)
+        }
+        Operation::JournalSubscribe { payload, .. } => {
+            optional_map_scope(payload.map_name.as_ref(), PermissionAction::Read)
+        }
+        Operation::ListResolvers { payload, .. } => {
+            optional_map_scope(payload.map_name.as_ref(), PermissionAction::Read)
+        }
+        Operation::RegisterResolver { payload, .. } => {
+            (Some(PermissionAction::Write), payload.map_name.clone())
+        }
+        Operation::UnregisterResolver { payload, .. } => {
+            (Some(PermissionAction::Write), payload.map_name.clone())
+        }
+
+        // --- Bypass group (no policy check; each exemption is stated in TG-AUTHZ-001) ---
         Operation::Ping { .. }
         | Operation::PartitionMapRequest { .. }
         | Operation::GarbageCollect { .. }
         | Operation::LockRequest { .. }
         | Operation::LockRelease { .. }
-        | Operation::TopicSubscribe { .. }
         | Operation::TopicUnsubscribe { .. }
         | Operation::QueryUnsubscribe { .. }
         | Operation::SearchUnsubscribe { .. }
         | Operation::HybridSearchUnsubscribe { .. }
-        | Operation::JournalSubscribe { .. }
         | Operation::JournalUnsubscribe { .. }
-        | Operation::JournalRead { .. }
-        | Operation::RegisterResolver { .. }
-        | Operation::UnregisterResolver { .. }
-        | Operation::ListResolvers { .. }
         | Operation::CounterRequest { .. } => (None, String::new()),
+    }
+}
+
+/// `(action, map)` for an operation whose map is optional: the named map, or
+/// the bypass group when none is named.
+fn optional_map_scope(
+    map_name: Option<&String>,
+    action: PermissionAction,
+) -> (Option<PermissionAction>, String) {
+    match map_name {
+        Some(map_name) => (Some(action), map_name.clone()),
+        None => (None, String::new()),
     }
 }
 
@@ -1586,9 +1617,24 @@ mod tests {
                     ctx: client_ctx(service_names::SYNC, origin),
                     payload: sync::ORMapDiffRequest {
                         payload: sync::ORMapDiffRequestPayload {
-                            map_name,
+                            map_name: map_name.clone(),
                             keys: vec!["k".to_string()],
                         },
+                    },
+                },
+            ),
+            (
+                "VectorSearch",
+                Operation::VectorSearch {
+                    ctx: client_ctx(service_names::SEARCH, origin),
+                    payload: vector::VectorSearchPayload {
+                        id: "v".to_string(),
+                        map_name,
+                        index_name: None,
+                        query_vector: Vec::new(),
+                        k: 1,
+                        ef_search: None,
+                        options: None,
                     },
                 },
             ),
@@ -1629,7 +1675,7 @@ mod tests {
             for (name, expected) in refused_names() {
                 for origin in CLIENT_ORIGINS {
                     let ops = checked_family_ops(&name, origin);
-                    assert_eq!(ops.len(), 15, "every checked family is exercised");
+                    assert_eq!(ops.len(), 16, "every checked family is exercised");
                     for (family, op) in ops {
                         let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
                         let case = format!(
@@ -1802,21 +1848,6 @@ mod tests {
                     payload: query::SqlQueryPayload {
                         sql: "SELECT 1".to_string(),
                         query_id: "q".to_string(),
-                    },
-                },
-            ),
-            (
-                "VectorSearch",
-                Operation::VectorSearch {
-                    ctx: client_ctx(service_names::SEARCH, origin),
-                    payload: vector::VectorSearchPayload {
-                        id: "v".to_string(),
-                        map_name: String::new(),
-                        index_name: None,
-                        query_vector: Vec::new(),
-                        k: 1,
-                        ef_search: None,
-                        options: None,
                     },
                 },
             ),
@@ -1996,5 +2027,369 @@ mod tests {
             },
             Instant::now(),
         );
+    }
+
+    /// TG-AUTHZ-001: the operations that name a map or a topic are held to the
+    /// policy of that map or topic. Policy: allow Read and Write on `*`, deny
+    /// Read and Write on `secret`.
+    mod scope {
+        use super::*;
+        use crate::network::connection::{ConnectionId, ConnectionRegistry};
+        use crate::service::domain::journal::JournalStore;
+        use crate::service::domain::persistence::PersistenceService;
+        use crate::service::policy::{PermissionPolicy, PolicyEffect};
+        use topgun_core::messages::{
+            messaging, vector, JournalEventData, JournalEventType, Message,
+        };
+
+        async fn secret_denied_policy() -> Arc<PolicyEvaluator> {
+            let store = Arc::new(InMemoryPolicyStore::new());
+            for (id, action, effect, pattern) in [
+                (
+                    "allow-read",
+                    PermissionAction::Read,
+                    PolicyEffect::Allow,
+                    "*",
+                ),
+                (
+                    "allow-write",
+                    PermissionAction::Write,
+                    PolicyEffect::Allow,
+                    "*",
+                ),
+                (
+                    "deny-read",
+                    PermissionAction::Read,
+                    PolicyEffect::Deny,
+                    "secret",
+                ),
+                (
+                    "deny-write",
+                    PermissionAction::Write,
+                    PolicyEffect::Deny,
+                    "secret",
+                ),
+            ] {
+                store
+                    .upsert_policy(PermissionPolicy {
+                        id: id.to_string(),
+                        map_pattern: pattern.to_string(),
+                        action,
+                        effect,
+                        condition: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+            Arc::new(PolicyEvaluator::new(store))
+        }
+
+        fn user_ctx(service_name: &'static str) -> OperationContext {
+            let mut ctx = client_ctx(service_name, CallerOrigin::Client);
+            ctx.principal = Some(Principal {
+                id: "user".to_string(),
+                roles: vec![],
+            });
+            ctx
+        }
+
+        fn vector_search(map: &str) -> Operation {
+            Operation::VectorSearch {
+                ctx: user_ctx(service_names::SEARCH),
+                payload: vector::VectorSearchPayload {
+                    id: "v".to_string(),
+                    map_name: map.to_string(),
+                    index_name: None,
+                    query_vector: Vec::new(),
+                    k: 1,
+                    ef_search: None,
+                    options: None,
+                },
+            }
+        }
+
+        fn topic_subscribe(topic: &str) -> Operation {
+            Operation::TopicSubscribe {
+                ctx: user_ctx(service_names::MESSAGING),
+                payload: messaging::TopicSubPayload {
+                    topic: topic.to_string(),
+                },
+            }
+        }
+
+        fn register_resolver(map: &str) -> Operation {
+            Operation::RegisterResolver {
+                ctx: user_ctx(service_names::PERSISTENCE),
+                payload: messaging::RegisterResolverData {
+                    request_id: "r".to_string(),
+                    map_name: map.to_string(),
+                    resolver: messaging::ConflictResolver {
+                        name: "noop".to_string(),
+                        code: String::new(),
+                        priority: None,
+                        key_pattern: None,
+                    },
+                },
+            }
+        }
+
+        fn unregister_resolver(map: &str) -> Operation {
+            Operation::UnregisterResolver {
+                ctx: user_ctx(service_names::PERSISTENCE),
+                payload: messaging::UnregisterResolverData {
+                    request_id: "r".to_string(),
+                    map_name: map.to_string(),
+                    resolver_name: "noop".to_string(),
+                },
+            }
+        }
+
+        fn list_resolvers(map: Option<&str>) -> Operation {
+            Operation::ListResolvers {
+                ctx: user_ctx(service_names::PERSISTENCE),
+                payload: messaging::ListResolversData {
+                    request_id: "r".to_string(),
+                    map_name: map.map(str::to_string),
+                },
+            }
+        }
+
+        fn journal_read(map: Option<&str>) -> Operation {
+            Operation::JournalRead {
+                ctx: user_ctx(service_names::PERSISTENCE),
+                payload: messaging::JournalReadData {
+                    request_id: "j".to_string(),
+                    from_sequence: "0".to_string(),
+                    limit: Some(100),
+                    map_name: map.map(str::to_string),
+                },
+            }
+        }
+
+        fn journal_subscribe(map: Option<&str>, connection: ConnectionId) -> Operation {
+            let mut ctx = user_ctx(service_names::PERSISTENCE);
+            ctx.connection_id = Some(connection);
+            Operation::JournalSubscribe {
+                ctx,
+                payload: messaging::JournalSubscribeData {
+                    request_id: format!("j-{}", connection.0),
+                    map_name: map.map(str::to_string),
+                    ..Default::default()
+                },
+            }
+        }
+
+        /// Each `(family, secret op, public op)` is refused on `secret` and
+        /// answered on `public`.
+        async fn assert_scoped(cases: Vec<(&str, Operation, Operation)>) {
+            let mut svc =
+                AuthorizationLayer::new(secret_denied_policy().await).layer(AlwaysOkService);
+            for (family, secret, public) in cases {
+                let result = ServiceExt::ready(&mut svc)
+                    .await
+                    .unwrap()
+                    .call(secret)
+                    .await;
+                assert!(
+                    matches!(result, Err(OperationError::Forbidden { ref map_name }) if map_name == "secret"),
+                    "{family} on secret: got {result:?}"
+                );
+                let result = ServiceExt::ready(&mut svc)
+                    .await
+                    .unwrap()
+                    .call(public)
+                    .await;
+                assert!(result.is_ok(), "{family} on public: got {result:?}");
+            }
+        }
+
+        #[tokio::test]
+        async fn vector_search_is_held_to_the_read_policy_of_its_map() {
+            assert_scoped(vec![(
+                "VectorSearch",
+                vector_search("secret"),
+                vector_search("public"),
+            )])
+            .await;
+        }
+
+        #[tokio::test]
+        async fn resolver_operations_are_held_to_the_policy_of_their_map() {
+            assert_scoped(vec![
+                (
+                    "RegisterResolver",
+                    register_resolver("secret"),
+                    register_resolver("public"),
+                ),
+                (
+                    "UnregisterResolver",
+                    unregister_resolver("secret"),
+                    unregister_resolver("public"),
+                ),
+                (
+                    "ListResolvers",
+                    list_resolvers(Some("secret")),
+                    list_resolvers(Some("public")),
+                ),
+            ])
+            .await;
+        }
+
+        #[tokio::test]
+        async fn topic_subscribe_is_held_to_the_read_policy_of_its_topic() {
+            assert_scoped(vec![(
+                "TopicSubscribe",
+                topic_subscribe("secret"),
+                topic_subscribe("public"),
+            )])
+            .await;
+        }
+
+        #[tokio::test]
+        async fn journal_operations_naming_a_map_are_held_to_its_read_policy() {
+            assert_scoped(vec![
+                (
+                    "JournalRead",
+                    journal_read(Some("secret")),
+                    journal_read(Some("public")),
+                ),
+                (
+                    "JournalSubscribe",
+                    journal_subscribe(Some("secret"), ConnectionId(1)),
+                    journal_subscribe(Some("public"), ConnectionId(1)),
+                ),
+            ])
+            .await;
+        }
+
+        /// Under NO_AUTH (a store that was never configured) no client op may
+        /// name a reserved map, in any family that now carries one.
+        #[tokio::test]
+        async fn newly_scoped_operations_cannot_name_a_reserved_map_under_no_auth() {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut svc = AuthorizationLayer::new(Arc::new(PolicyEvaluator::new(Arc::new(
+                InMemoryPolicyStore::new(),
+            ))))
+            .layer(CountingService(Arc::clone(&calls)));
+            let reserved = "_topgun_device_credentials";
+            for op in [
+                vector_search(reserved),
+                register_resolver(reserved),
+                unregister_resolver(reserved),
+                list_resolvers(Some(reserved)),
+                journal_read(Some(reserved)),
+                journal_subscribe(Some(reserved), ConnectionId(1)),
+            ] {
+                let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+                assert!(
+                    matches!(result, Err(OperationError::Forbidden { .. })),
+                    "got {result:?}"
+                );
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+
+        fn event(map: &str, key: &str) -> JournalEventData {
+            JournalEventData {
+                sequence: String::new(),
+                event_type: JournalEventType::PUT,
+                map_name: map.to_string(),
+                key: key.to_string(),
+                value: None,
+                previous_value: None,
+                timestamp: make_timestamp(),
+                node_id: "test".to_string(),
+                metadata: None,
+            }
+        }
+
+        /// The authorization layer over a real persistence service, sharing a
+        /// journal that holds `secret`, `public` and reserved-map events.
+        fn journal_pipeline(
+            policy: Arc<PolicyEvaluator>,
+        ) -> (
+            AuthorizationService<Arc<PersistenceService>>,
+            Arc<JournalStore>,
+        ) {
+            let journal = Arc::new(JournalStore::new(100).with_policy(Arc::clone(&policy)));
+            journal.append(event("secret", "s1"));
+            journal.append(event("public", "p1"));
+            journal.append(event("_topgun_device_credentials", "d1"));
+            journal.append(event("public", "p2"));
+            let persistence = Arc::new(PersistenceService::with_journal_store(
+                Arc::new(ConnectionRegistry::new()),
+                "node".to_string(),
+                Arc::clone(&journal),
+            ));
+            (AuthorizationLayer::new(policy).layer(persistence), journal)
+        }
+
+        async fn read_keys(svc: &mut AuthorizationService<Arc<PersistenceService>>) -> Vec<String> {
+            let response = ServiceExt::ready(svc)
+                .await
+                .unwrap()
+                .call(journal_read(None))
+                .await
+                .unwrap();
+            let OperationResponse::Message(message) = response else {
+                panic!("expected a message, got {response:?}");
+            };
+            let Message::JournalReadResponse(page) = *message else {
+                panic!("expected JournalReadResponse");
+            };
+            page.events.into_iter().map(|e| e.key).collect()
+        }
+
+        /// A journal read without a map returns only the events of maps the
+        /// principal may read, and never those of a reserved map.
+        #[tokio::test]
+        async fn journal_read_without_a_map_returns_only_readable_maps() {
+            let (mut svc, _) = journal_pipeline(secret_denied_policy().await);
+            assert_eq!(read_keys(&mut svc).await, vec!["p1", "p2"]);
+        }
+
+        /// A live subscription without a map is not delivered an event of a
+        /// map its principal may not read; one of a readable map is delivered.
+        #[tokio::test]
+        async fn journal_subscription_without_a_map_is_delivered_only_readable_maps() {
+            let (mut svc, journal) = journal_pipeline(secret_denied_policy().await);
+            let connection = ConnectionId(7);
+            ServiceExt::ready(&mut svc)
+                .await
+                .unwrap()
+                .call(journal_subscribe(None, connection))
+                .await
+                .unwrap();
+            assert!(journal
+                .subscribers_for("secret", &JournalEventType::PUT)
+                .is_empty());
+            assert_eq!(
+                journal.subscribers_for("public", &JournalEventType::PUT),
+                vec![connection]
+            );
+        }
+
+        /// Under NO_AUTH every non-reserved map is readable, and a reserved
+        /// map's events reach no client by read or by subscription.
+        #[tokio::test]
+        async fn reserved_map_events_reach_no_client_under_no_auth() {
+            let no_auth = Arc::new(PolicyEvaluator::new(Arc::new(InMemoryPolicyStore::new())));
+            let (mut svc, journal) = journal_pipeline(no_auth);
+            assert_eq!(read_keys(&mut svc).await, vec!["s1", "p1", "p2"]);
+            let connection = ConnectionId(8);
+            ServiceExt::ready(&mut svc)
+                .await
+                .unwrap()
+                .call(journal_subscribe(None, connection))
+                .await
+                .unwrap();
+            assert!(journal
+                .subscribers_for("_topgun_device_credentials", &JournalEventType::PUT)
+                .is_empty());
+            assert_eq!(
+                journal.subscribers_for("secret", &JournalEventType::PUT),
+                vec![connection]
+            );
+        }
     }
 }

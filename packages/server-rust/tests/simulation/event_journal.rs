@@ -19,14 +19,14 @@ async fn write_is_journaled_on_local_node() {
         .await
         .expect("write on node 0 should succeed");
 
-    let (events, _) = cluster.nodes[0].journal_store.read(0, 100, None);
+    let (events, _) = cluster.nodes[0].journal_store.read(0, 100, None, None);
     assert_eq!(events.len(), 1, "node 0 journal recorded the write");
     assert_eq!(events[0].event_type, JournalEventType::PUT);
     assert_eq!(events[0].map_name, "todos");
     assert_eq!(events[0].key, "t1");
 
     // The write was local; other nodes journal nothing.
-    let (n1, _) = cluster.nodes[1].journal_store.read(0, 100, None);
+    let (n1, _) = cluster.nodes[1].journal_store.read(0, 100, None, None);
     assert!(
         n1.is_empty(),
         "node 1 journal is independent of node 0's write"
@@ -51,7 +51,7 @@ async fn journal_records_each_side_under_partition() {
         .await
         .expect("write on node 1 should apply locally");
 
-    let (n0, _) = cluster.nodes[0].journal_store.read(0, 100, None);
+    let (n0, _) = cluster.nodes[0].journal_store.read(0, 100, None, None);
     assert_eq!(
         n0.len(),
         1,
@@ -59,7 +59,7 @@ async fn journal_records_each_side_under_partition() {
     );
     assert_eq!(n0[0].key, "k0");
 
-    let (n1, _) = cluster.nodes[1].journal_store.read(0, 100, None);
+    let (n1, _) = cluster.nodes[1].journal_store.read(0, 100, None, None);
     assert_eq!(
         n1.len(),
         1,

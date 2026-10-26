@@ -191,7 +191,9 @@ impl Service<Operation> for Arc<PersistenceService> {
                     Operation::JournalUnsubscribe { ctx: _, payload } => {
                         svc.handle_journal_unsubscribe(&payload)
                     }
-                    Operation::JournalRead { ctx: _, payload } => svc.handle_journal_read(&payload),
+                    Operation::JournalRead { ctx, payload } => {
+                        svc.handle_journal_read(&ctx, &payload)
+                    }
 
                     // Entry processing stubs (WASM sandbox required)
                     Operation::EntryProcess { ctx: _, payload } => {
@@ -308,8 +310,8 @@ impl PersistenceService {
 
     // --- Journal handlers ---
 
-    /// Handles `JournalSubscribe`: registers subscription metadata and returns
-    /// `Empty`. Active push delivery is deferred.
+    /// Handles `JournalSubscribe`: registers the subscription, with the
+    /// caller's principal for the read check at delivery, and returns `Empty`.
     fn handle_journal_subscribe(
         &self,
         ctx: &OperationContext,
@@ -324,6 +326,7 @@ impl PersistenceService {
             connection_id: conn_id,
             map_name: payload.map_name.clone(),
             types: payload.types.clone(),
+            principal: ctx.principal.clone(),
         };
 
         self.journal_store
@@ -341,19 +344,23 @@ impl PersistenceService {
         Ok(OperationResponse::Empty)
     }
 
-    /// Handles `JournalRead`: reads events from the ring buffer with optional
-    /// `map_name` filter and returns a paginated response.
+    /// Handles `JournalRead`: reads the events the caller may see from the ring
+    /// buffer with optional `map_name` filter and returns a paginated response.
     fn handle_journal_read(
         &self,
+        ctx: &OperationContext,
         payload: &JournalReadData,
     ) -> Result<OperationResponse, OperationError> {
         // Parse from_sequence from string to u64.
         let from_sequence: u64 = payload.from_sequence.parse().unwrap_or(0);
         let limit = payload.limit.unwrap_or(100);
 
-        let (events, has_more) =
-            self.journal_store
-                .read(from_sequence, limit, payload.map_name.as_deref());
+        let (events, has_more) = self.journal_store.read(
+            from_sequence,
+            limit,
+            payload.map_name.as_deref(),
+            ctx.principal.as_ref(),
+        );
 
         Ok(OperationResponse::Message(Box::new(
             Message::JournalReadResponse(JournalReadResponseData {

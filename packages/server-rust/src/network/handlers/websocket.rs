@@ -1940,6 +1940,7 @@ mod tests {
                 connection_id: conn,
                 map_name: Some("users".to_string()),
                 types: None,
+                principal: None,
             },
         );
 
@@ -2125,7 +2126,7 @@ mod tests {
         /// Keys of every journalled event, in apply order.
         fn journalled_keys(&self) -> Vec<String> {
             self.journal
-                .read(0, 1000, None)
+                .read(0, 1000, None, None)
                 .0
                 .into_iter()
                 .map(|event| event.key)
