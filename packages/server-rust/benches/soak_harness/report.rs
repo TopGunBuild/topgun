@@ -208,8 +208,12 @@ pub struct CensusCounts {
     /// Attempts after the first one of their moment.
     pub retries: usize,
     /// Null when the end sequence did not reach a quiesced pair. Explicit,
-    /// with no `skip_serializing_if`, like `reconcile`.
-    pub quiesced: Option<QuiescedReport>,
+    /// with no `skip_serializing_if`, like `terminal` and `reconcile`.
+    pub quiesced: Option<LiveCountsReport>,
+    /// The live entries summed over every map of the stopped store, the other
+    /// side of the reconciliation; null when the run did not reach the sum or
+    /// the sum failed.
+    pub terminal: Option<LiveCountsReport>,
     #[serde(serialize_with = "serialize_reconcile")]
     pub reconcile: Option<Reconcile>,
 }
@@ -229,15 +233,16 @@ impl CensusCounts {
             excused_ordinals: Vec::new(),
             retries: 0,
             quiesced: None,
+            terminal: None,
             reconcile: None,
         }
     }
 }
 
-/// The live census once the write-behind buffer drained and two reads agreed.
+/// One side of the reconciliation: live entries and their tag bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct QuiescedReport {
+pub struct LiveCountsReport {
     pub live: u64,
     pub live_tag_bytes: u64,
 }

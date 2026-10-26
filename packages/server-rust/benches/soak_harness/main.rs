@@ -145,8 +145,8 @@ use process::{
 };
 use report::{
     append_progress, effective_epoch_width, scan_wal_frame_sizes, utc_timestamp_now, write_report,
-    CensusCounts, ConfirmApplyReport, DiskReport, LiveCensusReport, MemoryReport, ProgressSnapshot,
-    QuiescedReport, SoakReport, TombstoneCorpusReport, TombstoneReport, WalFrameStats,
+    CensusCounts, ConfirmApplyReport, DiskReport, LiveCensusReport, LiveCountsReport, MemoryReport,
+    ProgressSnapshot, SoakReport, TombstoneCorpusReport, TombstoneReport, WalFrameStats,
 };
 use topgun_server::storage::record::RecordValue;
 use topgun_server::storage::{MapDataStore, RedbDataStore};
@@ -1164,7 +1164,7 @@ async fn run_soak(config: &Config) -> i32 {
             Ok(store) => live_sum_over_all_maps(store).await,
             Err(failure) => Err(failure.clone()),
         };
-        corpus_sampler.live_tally.lock().reconcile = Some(decide_reconcile(end, &terminal_sum));
+        corpus_sampler.reconcile_with_terminal(end, &terminal_sum);
     }
     drop(terminal_store);
     // The summary line, the estimator and the mechanism report all consume the
@@ -2105,6 +2105,7 @@ struct LiveCensusTally {
     /// The last moment the loop took up, read or missed.
     last_ordinal: usize,
     quiesced: Option<LiveGauges>,
+    terminal: Option<LiveGauges>,
     reconcile: Option<Reconcile>,
     /// `None` while the sampling loop runs.
     loop_end: Option<LoopEndReason>,
@@ -2123,6 +2124,15 @@ struct GaugeAttemptFailure {
 struct LiveGauges {
     live: u64,
     live_tag_bytes: u64,
+}
+
+impl LiveGauges {
+    fn report(self) -> LiveCountsReport {
+        LiveCountsReport {
+            live: self.live,
+            live_tag_bytes: self.live_tag_bytes,
+        }
+    }
 }
 
 /// Why one read of the live-census gauges failed.
@@ -2324,6 +2334,30 @@ impl CorpusSampler {
         ));
     }
 
+    /// Record the terminal sum, print its line — the sum, or the step and error
+    /// it failed at — and reconcile the quiesced reading with it, so a
+    /// mismatch is read with both of its sides at hand.
+    fn reconcile_with_terminal(
+        &self,
+        end: &EndObservation,
+        terminal: &Result<LiveGauges, CensusFailure>,
+    ) {
+        self.census_log.line(match terminal {
+            Ok(g) => format!(
+                "  LIVE_CENSUS_TERMINAL live={} live_tag_bytes={}",
+                g.live, g.live_tag_bytes
+            ),
+            Err(failure) => format!(
+                "LIVE_CENSUS_TERMINAL_FAIL step={} error={}",
+                failure.step.as_str(),
+                failure.error.replace(['\r', '\n'], " "),
+            ),
+        });
+        let mut t = self.live_tally.lock();
+        t.terminal = terminal.as_ref().ok().copied();
+        t.reconcile = Some(decide_reconcile(end, terminal));
+    }
+
     /// The live tally's section of the report, and its console lines, rendered
     /// from the same snapshot so the two cannot disagree.
     ///
@@ -2365,10 +2399,8 @@ impl CorpusSampler {
             absent_ordinals: absent,
             excused_ordinals: excused,
             retries: t.retries,
-            quiesced: t.quiesced.map(|g| QuiescedReport {
-                live: g.live,
-                live_tag_bytes: g.live_tag_bytes,
-            }),
+            quiesced: t.quiesced.map(LiveGauges::report),
+            terminal: t.terminal.map(LiveGauges::report),
             reconcile: t.reconcile,
             ..CensusCounts::new(t.attempted, t.failures_by_step)
         };
@@ -2380,8 +2412,7 @@ impl CorpusSampler {
             .collect();
         self.census_log.line(format!(
             "LIVE_CENSUS_TALLY attempted={} ok={} failed={} by_step={} expected={} missed={} \
-             absent={} excused={} retries={} quiesced_live={} quiesced_live_tag_bytes={} \
-             reconcile={} reason={}",
+             absent={} excused={} retries={} {} {} reconcile={} reason={}",
             counts.attempted,
             counts.ok,
             counts.failed,
@@ -2391,12 +2422,8 @@ impl CorpusSampler {
             list_or_none(&counts.absent_ordinals),
             list_or_none(&counts.excused_ordinals),
             counts.retries,
-            counts
-                .quiesced
-                .map_or_else(|| "none".to_string(), |q| q.live.to_string()),
-            counts
-                .quiesced
-                .map_or_else(|| "none".to_string(), |q| q.live_tag_bytes.to_string()),
+            counts_or_none("quiesced", counts.quiesced),
+            counts_or_none("terminal", counts.terminal),
             counts.reconcile.map_or("none", |r| r.status.as_str()),
             counts
                 .reconcile
@@ -2409,6 +2436,16 @@ impl CorpusSampler {
             loop_end_reason: t.loop_end,
         }
     }
+}
+
+/// `<side>_live=<n> <side>_live_tag_bytes=<b>`, each `none` when that side
+/// has no reading.
+fn counts_or_none(side: &str, counts: Option<LiveCountsReport>) -> String {
+    let (live, bytes) = counts.map_or_else(
+        || ("none".to_string(), "none".to_string()),
+        |c| (c.live.to_string(), c.live_tag_bytes.to_string()),
+    );
+    format!("{side}_live={live} {side}_live_tag_bytes={bytes}")
 }
 
 /// `a,b,c`, or `none` for an empty list, so a field is never blank on a line.
@@ -5171,7 +5208,7 @@ mod tests {
     /// panics fails alone and the rest still run; the summary line has
     /// libtest's shape, and a failure makes the exit code non-zero.
     pub(super) fn run_all() -> i32 {
-        let tests: [(&str, fn()); 13] = [
+        let tests: [(&str, fn()); 14] = [
             (
                 "live_gauge_readings_never_contaminate_the_corpus_tally",
                 live_gauge_readings_never_contaminate_the_corpus_tally,
@@ -5207,6 +5244,10 @@ mod tests {
             (
                 "reconcile_names_the_first_reason_that_holds",
                 reconcile_names_the_first_reason_that_holds,
+            ),
+            (
+                "a_mismatch_shows_both_sides_in_its_line_and_field",
+                a_mismatch_shows_both_sides_in_its_line_and_field,
             ),
             (
                 "the_drain_poll_checks_liveness_before_every_request",
@@ -5660,7 +5701,8 @@ mod tests {
             [
                 "LIVE_CENSUS_TALLY attempted=3 ok=0 failed=3 by_step=status:3 expected=1 \
                  missed=none absent=1 excused=none retries=2 quiesced_live=none \
-                 quiesced_live_tag_bytes=none reconcile=none reason=none"
+                 quiesced_live_tag_bytes=none terminal_live=none terminal_live_tag_bytes=none \
+                 reconcile=none reason=none"
             ]
         );
     }
@@ -5869,6 +5911,86 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    /// A mismatch is read with both of its sides: the terminal sum has its own
+    /// line and its own field beside the quiesced reading, and a terminal sum
+    /// that failed says at which step, with the field null.
+    fn a_mismatch_shows_both_sides_in_its_line_and_field() {
+        let quiesced = LiveGauges {
+            live: 4,
+            live_tag_bytes: 40,
+        };
+        let end = EndObservation {
+            exit: ServerExit::Code(0),
+            churn_joined: true,
+            drained: true,
+            quiesced: Some(quiesced),
+        };
+
+        let (sampler, lines, _root) = live_sampler();
+        sampler.record_quiesced(quiesced);
+        sampler.reconcile_with_terminal(
+            &end,
+            &Ok(LiveGauges {
+                live: 5,
+                live_tag_bytes: 41,
+            }),
+        );
+        let json = serde_json::to_value(sampler.live_census_report(60, Duration::ZERO, &[]))
+            .expect("serialize");
+        assert_eq!(
+            json["quiesced"],
+            serde_json::json!({"live": 4, "liveTagBytes": 40}),
+            "{json}"
+        );
+        assert_eq!(
+            json["terminal"],
+            serde_json::json!({"live": 5, "liveTagBytes": 41}),
+            "{json}"
+        );
+        assert_eq!(
+            json["reconcile"],
+            serde_json::json!({"status": "mismatch", "reason": null}),
+            "{json}"
+        );
+        let lines = lines.lock().clone();
+        assert_eq!(
+            lines[..2],
+            [
+                "  LIVE_GAUGE_QUIESCED live=4 live_tag_bytes=40",
+                "  LIVE_CENSUS_TERMINAL live=5 live_tag_bytes=41",
+            ]
+        );
+        assert!(
+            lines[2].contains(
+                " quiesced_live=4 quiesced_live_tag_bytes=40 terminal_live=5 \
+                 terminal_live_tag_bytes=41 reconcile=mismatch reason=none"
+            ),
+            "{}",
+            lines[2]
+        );
+
+        let (sampler, lines, _root) = live_sampler();
+        sampler.reconcile_with_terminal(
+            &end,
+            &Err(CensusFailure {
+                step: CensusFailStep::ListMaps,
+                error: "no\nmaps".to_string(),
+            }),
+        );
+        let json = serde_json::to_value(sampler.live_census_report(60, Duration::ZERO, &[]))
+            .expect("serialize");
+        assert_eq!(json["terminal"], serde_json::Value::Null, "{json}");
+        assert_eq!(
+            json["reconcile"],
+            serde_json::json!({"status": "n/a", "reason": "terminal_failed:list_maps"}),
+            "{json}"
+        );
+        assert_eq!(
+            lines.lock()[0],
+            "LIVE_CENSUS_TERMINAL_FAIL step=list_maps error=no maps"
+        );
     }
 
     /// The drain wait needs two empty polls in a row, gives up after its polls,
