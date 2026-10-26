@@ -108,6 +108,7 @@ mod or_noloss;
 mod process;
 mod report;
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -124,11 +125,12 @@ use monitor::{
     aggregate_origin_lines, assess, assess_disk, assess_tombstone_bytes,
     assess_tombstone_corpus_level, classify_durable_reading, classify_origin_reading,
     classify_series_shape, corpus_level_clause_undecided, exclude_boot_gap_samples, fold_lww_key,
-    fold_or_key, fold_undecodable_key, max_count_in_window, parse_labelled_gauge, sample_disk_mb,
-    sample_redb_bytes, sample_rss_mb, sample_wal_retention, BootGap, CensusFailStep, CensusFailure,
-    CensusRecord, CensusSource, CorpusLevelDisposition, CorpusSample, DiskAssessment, DiskSample,
-    DurableCensus, DurableReading, EpochsExitedAbsence, FailuresByStep, GaugeFold,
-    GaugeObservation, GaugeReading, LoopEndReason, MemSample, OrVariant, OriginLine, SeriesPoint,
+    fold_or_key, fold_undecodable_key, in_boot_gap, max_count_in_window, parse_labelled_gauge,
+    sample_disk_mb, sample_redb_bytes, sample_rss_mb, sample_wal_retention, BootGap,
+    CensusFailStep, CensusFailure, CensusRecord, CensusSource, CorpusLevelDisposition,
+    CorpusSample, DiskAssessment, DiskSample, DurableCensus, DurableReading, EpochsExitedAbsence,
+    FailuresByStep, GaugeFailStep, GaugeFold, GaugeObservation, GaugeReading, LoopEndReason,
+    MemSample, OrVariant, OriginLine, Reconcile, ReconcileReason, ReconcileStatus, SeriesPoint,
     SeriesShapeReading, TombstoneAssessment, TombstoneCorpusAssessment, TombstoneLevelBound,
     TombstoneSample, DECIDING_SERIES, DEFAULT_DISK_CEILING_MB, DEFAULT_DISK_MIN_GROWTH_MB,
     DEFAULT_DISK_THRESHOLD_MB_PER_HOUR, DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
@@ -138,14 +140,16 @@ use monitor::{
     DEFAULT_TOMBSTONE_STAMP_LATENCY_ALLOWANCE_SECS,
 };
 use or_noloss::{missing_acked_adds, OrLedger};
-use process::{resolve_server_binary, OriginCaptureSnapshot, ServerConfig, ServerSupervisor};
+use process::{
+    resolve_server_binary, OriginCaptureSnapshot, ServerConfig, ServerExit, ServerSupervisor,
+};
 use report::{
     append_progress, effective_epoch_width, scan_wal_frame_sizes, utc_timestamp_now, write_report,
     CensusCounts, ConfirmApplyReport, DiskReport, LiveCensusReport, MemoryReport, ProgressSnapshot,
-    SoakReport, TombstoneCorpusReport, TombstoneReport, WalFrameStats,
+    QuiescedReport, SoakReport, TombstoneCorpusReport, TombstoneReport, WalFrameStats,
 };
 use topgun_server::storage::record::RecordValue;
-use topgun_server::storage::RedbDataStore;
+use topgun_server::storage::{MapDataStore, RedbDataStore};
 
 /// Subject index used by the orchestrator's verifier connections. Far above the
 /// churn-client range so it never owns keys or collides with churn auth.
@@ -254,11 +258,11 @@ struct Config {
     /// extra sampler task at all, so its sampling behaviour is exactly what it
     /// was before this mode existed.
     durable_reading: bool,
-    /// How often, in seconds, to take a store-level census from a byte COPY of
-    /// the LIVE store file. `0` DISARMS it, and that is the default: a copy of
-    /// a live store file is a smeared image, so the census it yields is
-    /// best-effort by construction and OBSERVATION ONLY — it may not enter any
-    /// predicate, and an armed run also pays a full file copy per sample.
+    /// How often, in seconds, to read the running server's live-census
+    /// gauges. `0` DISARMS it, and that is the default; otherwise it is at
+    /// least 60. The readings are OBSERVATION ONLY — they may not enter any
+    /// predicate. An armed run ends with a drained, quiesced reading, a
+    /// SIGTERM stop and a reconciliation with the terminal scan.
     live_census_interval_secs: u64,
     /// Seed for the filesystem samplers' bounded cadence jitter. SUPPLIED BY
     /// THE RUNNER and never derived inside this binary: the runner echoes the
@@ -927,16 +931,25 @@ async fn run_soak(config: &Config) -> i32 {
         CensusLog::stderr(),
     ));
 
-    // Live-copy census sampler: DISARMED by default (interval 0), and armed
-    // only by an explicit positive interval. Its records are OBSERVATION ONLY
-    // and land in their own tally — see `sample_live_census_via_copy` for why a
-    // census taken off a live store file may not decide anything.
+    // Live census sampler: DISARMED by default (interval 0), and armed only by
+    // an explicit positive interval. It reads the running server's own
+    // live-census gauges on a grid of moments; its readings are OBSERVATION
+    // ONLY and land in their own tally.
+    let live_census_url = format!("http://127.0.0.1:{port}/metrics");
     let live_census_task = (config.live_census_interval_secs > 0).then(|| {
+        let http = reqwest::Client::new();
+        let url = live_census_url.clone();
         tokio::spawn(run_live_census_loop(
             Arc::clone(&corpus_sampler),
             Arc::clone(&stop),
             Duration::from_secs(config.live_census_interval_secs),
-            sampler_start,
+            tokio::time::Instant::from_std(sampler_start),
+            move || {
+                let http = http.clone();
+                let url = url.clone();
+                async move { read_live_gauges(&http, &url).await }
+            },
+            |_| std::future::ready(()),
         ))
     });
 
@@ -1102,15 +1115,26 @@ async fn run_soak(config: &Config) -> i32 {
 
     stop.store(true, Ordering::SeqCst);
     paused.store(false, Ordering::SeqCst);
+    let mut churn_joined = true;
     for h in churn_handles {
-        let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+        churn_joined &= tokio::time::timeout(Duration::from_secs(5), h)
+            .await
+            .is_ok();
     }
     // Awaited so the loop's end is on the console and in the report: a run that
     // exits while the loop still sleeps would report it as never having ended.
     if let Some(h) = live_census_task {
-        let _ = h.await;
+        await_live_census_loop(&corpus_sampler, h).await;
     }
-    supervisor.shutdown().await;
+    // An armed live census ends with a drained, quiesced reading and a SIGTERM
+    // stop, so the terminal scan reads the store the server itself closed and
+    // the reading can be reconciled with it; otherwise the stop is as before.
+    let live_end = if config.live_census_interval_secs > 0 {
+        Some(end_live_census(&supervisor, &corpus_sampler, &live_census_url, churn_joined).await)
+    } else {
+        supervisor.shutdown().await;
+        None
+    };
 
     let wal_mb_after_drain = if config.mechanism_report {
         sample_disk_mb(&wal_dir)
@@ -1127,7 +1151,22 @@ async fn run_soak(config: &Config) -> i32 {
     // `last_bytes` survives on the same rendered line — see
     // `scan_redb_tombstone_corpus`'s doc for why a divergence there is exactly
     // the failure mode this exists to catch.
-    let redb_tombstone_census = scan_redb_tombstone_corpus(&data_dir, OR_MAP);
+    //
+    // An armed live census also sums the live entries over every map through
+    // the same open of the store, and reconciles its quiesced reading with it.
+    let terminal_store = open_census_store(&data_dir);
+    let redb_tombstone_census = terminal_store
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|store| census_of_map(store, OR_MAP));
+    if let Some(end) = &live_end {
+        let terminal_sum = match &terminal_store {
+            Ok(store) => live_sum_over_all_maps(store).await,
+            Err(failure) => Err(failure.clone()),
+        };
+        corpus_sampler.live_tally.lock().reconcile = Some(decide_reconcile(end, &terminal_sum));
+    }
+    drop(terminal_store);
     // The summary line, the estimator and the mechanism report all consume the
     // same byte total they consumed before the census existed: the census is
     // strictly additive to what this scan returns, and this adapter is the whole
@@ -1408,12 +1447,8 @@ async fn run_soak(config: &Config) -> i32 {
         // reports and the filter its `armed` flag was derived from cannot
         // disagree.
         let log_filter = process::effective_server_log_filter();
-        // Checkpoint and terminal censuses, plus the observation-only live-copy
-        // records, in clock order. The live records travel in their own tally
-        // right up to this point, so the durable-corpus estimator's input above
-        // is identical whether the live sampler was armed or not.
+        // Checkpoint and terminal censuses, in clock order.
         let mut census_records = corpus_snapshot.censuses.clone();
-        census_records.extend(corpus_sampler.live_tally.lock().censuses.iter().copied());
         census_records.sort_by(|a, b| a.elapsed_secs.total_cmp(&b.elapsed_secs));
         let origin_snapshot = supervisor.origin_capture().snapshot();
         let (reading, built) =
@@ -1433,7 +1468,11 @@ async fn run_soak(config: &Config) -> i32 {
     let conjunct = *conjunct_maxima.lock();
     let (ack_latency_p99_ms, ack_latency_max_ms) =
         metrics.or_remove_ack_latency_ms.p99_and_max_ms();
-    let live_census = corpus_sampler.live_census_report(config.live_census_interval_secs);
+    let live_census = corpus_sampler.live_census_report(
+        config.live_census_interval_secs,
+        config.duration,
+        &boot_gap_clock.boot_gaps.lock(),
+    );
     let report = SoakReport {
         mode: "soak".to_string(),
         duration_secs_target: config.duration.as_secs(),
@@ -2036,7 +2075,7 @@ fn parse_tombstone_bytes_gauge(body: &str) -> Option<u64> {
 struct CorpusScanTally {
     samples: Vec<CorpusSample>,
     scans_attempted: usize,
-    failures_by_step: FailuresByStep,
+    failures_by_step: FailuresByStep<CensusFailStep>,
     /// The census taken at each of those same scans. Strictly ADDITIVE: it is
     /// derived from the scan the three fields above were already counting, and
     /// it never changes which scans are attempted or which of them failed, so
@@ -2044,23 +2083,53 @@ struct CorpusScanTally {
     censuses: Vec<CensusRecord>,
 }
 
-/// The live-copy census sampler's own tally, deliberately SEPARATE from
+/// The live census sampler's own tally, deliberately SEPARATE from
 /// [`CorpusScanTally`].
 ///
-/// A byte copy of a LIVE store file is a smeared image, so the census it yields
-/// is best-effort by construction and OBSERVATION ONLY. Keeping those records
-/// here — never on the corpus-scan tally's `samples` / `scans_attempted` /
-/// `failures_by_step` — is what makes the durable-corpus estimator's input
-/// identical whether this sampler is armed or not, rather than merely intended
-/// to be. The fence is a typed property of the record, not a convention: every
-/// record carries its own source.
+/// Its readings come from the RUNNING server's counters, so they are
+/// OBSERVATION ONLY. Keeping them here — never on the corpus-scan tally's
+/// `samples` / `scans_attempted` / `failures_by_step` — is what makes the
+/// durable-corpus estimator's input identical whether this sampler is armed or
+/// not, rather than merely intended to be.
 #[derive(Debug, Default, Clone)]
 struct LiveCensusTally {
-    censuses: Vec<CensusRecord>,
-    scans_attempted: usize,
-    failures_by_step: FailuresByStep,
+    /// The moment of each successful read, in the order taken.
+    present: Vec<usize>,
+    /// Every failed read, kept so the export can tell which absent moments a
+    /// boot gap excuses.
+    failures: Vec<GaugeAttemptFailure>,
+    attempted: usize,
+    failures_by_step: FailuresByStep<GaugeFailStep>,
+    retries: usize,
+    missed: Vec<usize>,
+    /// The last moment the loop took up, read or missed.
+    last_ordinal: usize,
+    quiesced: Option<LiveGauges>,
+    reconcile: Option<Reconcile>,
     /// `None` while the sampling loop runs.
     loop_end: Option<LoopEndReason>,
+}
+
+/// One failed read of the live-census gauges.
+#[derive(Debug, Clone, Copy)]
+struct GaugeAttemptFailure {
+    ordinal: usize,
+    elapsed_secs: f64,
+    step: GaugeFailStep,
+}
+
+/// The server's live census as `/metrics` exports it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct LiveGauges {
+    live: u64,
+    live_tag_bytes: u64,
+}
+
+/// Why one read of the live-census gauges failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GaugeFailure {
+    step: GaugeFailStep,
+    error: String,
 }
 
 /// The one writer of the census diagnostic lines (`CENSUS_FAIL`,
@@ -2098,9 +2167,9 @@ struct CorpusSampler {
     data_dir: PathBuf,
     scratch_root: PathBuf,
     tally: Mutex<CorpusScanTally>,
-    /// The observation-only sink the live-copy sampler folds into. A second
+    /// The observation-only sink the live census sampler folds into. A second
     /// tally rather than a flag on the first one, so no code path can add a
-    /// smeared-image record to the series a gate's estimator reads.
+    /// live reading to the series a gate's estimator reads.
     live_tally: Mutex<LiveCensusTally>,
     census_log: CensusLog,
 }
@@ -2127,7 +2196,7 @@ impl CorpusSampler {
     /// a line break inside it is flattened to keep the attempt on one line.
     fn record_failure(
         &self,
-        failures: &mut FailuresByStep,
+        failures: &mut FailuresByStep<CensusFailStep>,
         source: CensusSource,
         ordinal: usize,
         failure: &CensusFailure,
@@ -2183,27 +2252,156 @@ impl CorpusSampler {
         }
     }
 
-    /// The live tally's section of the report, and its one console line,
-    /// rendered from the same snapshot so the two cannot disagree.
-    fn live_census_report(&self, interval_secs: u64) -> LiveCensusReport {
+    /// Count one read of the live-census gauges at moment `ordinal` and print
+    /// its line: the reading, or the step and error of its failure.
+    fn record_gauge_attempt(
+        &self,
+        ordinal: usize,
+        attempt: usize,
+        elapsed_secs: f64,
+        read: &Result<LiveGauges, GaugeFailure>,
+    ) {
+        let mut t = self.live_tally.lock();
+        t.attempted += 1;
+        t.retries += usize::from(attempt > 1);
+        match read {
+            Ok(g) => {
+                t.present.push(ordinal);
+                self.census_log.line(format!(
+                    "  {} t={elapsed_secs:.1}s ordinal={ordinal} attempt={attempt} live={} \
+                     live_tag_bytes={}",
+                    CensusSource::LiveGauge.as_str(),
+                    g.live,
+                    g.live_tag_bytes,
+                ));
+            }
+            Err(failure) => {
+                t.failures_by_step.record(failure.step);
+                t.failures.push(GaugeAttemptFailure {
+                    ordinal,
+                    elapsed_secs,
+                    step: failure.step,
+                });
+                self.census_log.line(format!(
+                    "LIVE_GAUGE_FAIL ordinal={ordinal} attempt={attempt} step={} error={}",
+                    failure.step.render(),
+                    failure.error.replace(['\r', '\n'], " "),
+                ));
+            }
+        }
+    }
+
+    /// Count moment `ordinal` as skipped: the next one was already due.
+    fn record_missed(&self, ordinal: usize) {
+        self.live_tally.lock().missed.push(ordinal);
+        self.census_log.line(format!(
+            "LIVE_GAUGE_MISSED ordinal={ordinal} reason=missed_tick"
+        ));
+    }
+
+    /// Record why the live census loop ended and print its one end line.
+    fn end_live_loop(&self, reason: LoopEndReason, error: Option<&str>) {
+        let last_ordinal = {
+            let mut t = self.live_tally.lock();
+            t.loop_end = Some(reason);
+            t.last_ordinal
+        };
+        let error = error.map_or(String::new(), |e| {
+            format!(" error={}", e.replace(['\r', '\n'], " "))
+        });
+        self.census_log.line(format!(
+            "LIVE_CENSUS_LOOP_END reason={} last_ordinal={last_ordinal}{error}",
+            reason.as_str()
+        ));
+    }
+
+    /// Record the quiesced live census and print its line.
+    fn record_quiesced(&self, g: LiveGauges) {
+        self.live_tally.lock().quiesced = Some(g);
+        self.census_log.line(format!(
+            "  LIVE_GAUGE_QUIESCED live={} live_tag_bytes={}",
+            g.live, g.live_tag_bytes
+        ));
+    }
+
+    /// The live tally's section of the report, and its console lines, rendered
+    /// from the same snapshot so the two cannot disagree.
+    ///
+    /// Which moments are absent is derived HERE, from the moments the run
+    /// expected and the ones it read, never kept by the loop: a loop that died
+    /// early still leaves every moment it never reached absent, and `expected`
+    /// is the present moments plus the absent ones by construction.
+    fn live_census_report(
+        &self,
+        interval_secs: u64,
+        duration: Duration,
+        boot_gaps: &[BootGap],
+    ) -> LiveCensusReport {
         let t = self.live_tally.lock().clone();
-        let counts = CensusCounts::new(t.scans_attempted, t.failures_by_step);
+        let expected = expected_moments(interval_secs, duration);
+        let absent: Vec<usize> = (1..=expected).filter(|k| !t.present.contains(k)).collect();
+        // A moment is excused only when its every attempt was made and each of
+        // them failed to connect inside a boot gap; a moment a stop cut short
+        // is absent for that reason, not for the gap's.
+        let excused: Vec<usize> = absent
+            .iter()
+            .copied()
+            .filter(|&k| {
+                let attempts: Vec<&GaugeAttemptFailure> =
+                    t.failures.iter().filter(|f| f.ordinal == k).collect();
+                attempts.len() == LIVE_ATTEMPT_OFFSETS.len()
+                    && attempts.iter().all(|f| {
+                        f.step == GaugeFailStep::Connect && in_boot_gap(f.elapsed_secs, boot_gaps)
+                    })
+            })
+            .collect();
+        for k in &excused {
+            self.census_log
+                .line(format!("LIVE_GAUGE_EXCUSED ordinal={k}"));
+        }
+        let counts = CensusCounts {
+            expected,
+            missed_ordinals: t.missed,
+            absent_ordinals: absent,
+            excused_ordinals: excused,
+            retries: t.retries,
+            quiesced: t.quiesced.map(|g| QuiescedReport {
+                live: g.live,
+                live_tag_bytes: g.live_tag_bytes,
+            }),
+            reconcile: t.reconcile,
+            ..CensusCounts::new(t.attempted, t.failures_by_step)
+        };
         let by_step: Vec<String> = counts
             .failures_by_step
             .iter()
             .filter(|&(_, n)| n > 0)
-            .map(|(step, n)| format!("{}:{n}", step.as_str()))
+            .map(|(step, n)| format!("{step}:{n}"))
             .collect();
         self.census_log.line(format!(
-            "LIVE_CENSUS_TALLY attempted={} ok={} failed={} by_step={}",
+            "LIVE_CENSUS_TALLY attempted={} ok={} failed={} by_step={} expected={} missed={} \
+             absent={} excused={} retries={} quiesced_live={} quiesced_live_tag_bytes={} \
+             reconcile={} reason={}",
             counts.attempted,
             counts.ok,
             counts.failed,
-            if by_step.is_empty() {
-                "none".to_string()
-            } else {
-                by_step.join(",")
-            },
+            list_or_none(&by_step),
+            counts.expected,
+            list_or_none(&counts.missed_ordinals),
+            list_or_none(&counts.absent_ordinals),
+            list_or_none(&counts.excused_ordinals),
+            counts.retries,
+            counts
+                .quiesced
+                .map_or_else(|| "none".to_string(), |q| q.live.to_string()),
+            counts
+                .quiesced
+                .map_or_else(|| "none".to_string(), |q| q.live_tag_bytes.to_string()),
+            counts.reconcile.map_or("none", |r| r.status.as_str()),
+            counts
+                .reconcile
+                .and_then(|r| r.reason)
+                .map_or_else(|| "none".to_string(), ReconcileReason::render),
         ));
         LiveCensusReport {
             interval_secs,
@@ -2211,6 +2409,18 @@ impl CorpusSampler {
             loop_end_reason: t.loop_end,
         }
     }
+}
+
+/// `a,b,c`, or `none` for an empty list, so a field is never blank on a line.
+fn list_or_none<T: std::fmt::Display>(items: &[T]) -> String {
+    if items.is_empty() {
+        return "none".to_string();
+    }
+    items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Take one durable-corpus sample while the server process is dead, WITHOUT
@@ -2243,7 +2453,7 @@ fn sample_durable_corpus_via_copy(
         t.scans_attempted += 1;
         t.scans_attempted
     };
-    let scanned = copy_and_scan_census(sampler, "durable-corpus", ordinal);
+    let scanned = copy_and_scan_census(sampler, ordinal);
     // The window's FAR edge, read off the same run clock the caller stamped the
     // near edge on, and read HERE because here is the only place that knows the
     // copy and the scan are done. Taken unconditionally, before the tally lock,
@@ -2275,139 +2485,380 @@ fn sample_durable_corpus_via_copy(
     }
 }
 
-/// Take one OBSERVATION-ONLY census from a byte copy of the LIVE store file.
-///
-/// The copy-then-scan discipline is the checkpoint sampler's, for the same two
-/// reasons: the copy lives outside the data dir so the disk gate's `du -sk`
-/// input is not stepped, and the ORIGINAL is never opened, so this harness
-/// never runs the server's own recovery ahead of the server.
-///
-/// What differs is what the result may DECIDE. The server is running here, so
-/// the copy is a smeared image of a file being written underneath it and the
-/// census it yields is best-effort by construction. It therefore lands in the
-/// live tally and NEVER on the corpus-scan tally the durable-corpus estimator
-/// reads — including its attempt and failure counters, so an armed live
-/// sampler cannot even move that estimator's instrument clause.
-fn sample_live_census_via_copy(sampler: &CorpusSampler, sampler_start: Instant, elapsed_secs: f64) {
-    take_live_census(sampler, sampler_start, elapsed_secs, |ordinal| {
-        copy_and_scan_census(sampler, "live-census", ordinal)
-    });
+/// When, after its moment, each of a moment's reads starts.
+const LIVE_ATTEMPT_OFFSETS: [Duration; 3] = [
+    Duration::from_secs(0),
+    Duration::from_secs(10),
+    Duration::from_secs(20),
+];
+
+/// How long one read of the live-census gauges may take.
+const LIVE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The live-census gauges `/metrics` exports, read from one body.
+const LIVE_ENTRIES_METRIC: &str = "topgun_ormap_live_entries";
+const LIVE_TAG_BYTES_METRIC: &str = "topgun_ormap_live_tag_bytes";
+const LIVE_SEEDED_METRIC: &str = "topgun_ormap_live_census_seeded";
+const BUFFERED_ENTRIES_METRIC: &str = "topgun_write_behind_buffered_entries";
+
+/// The end sequence's polls: up to this many polls of the write-behind buffer,
+/// this far apart, and up to this many pairs of live-census reads this far
+/// apart.
+const DRAIN_POLLS: usize = 60;
+const QUIESCE_PAIRS: usize = 5;
+const END_POLL_GAP: Duration = Duration::from_secs(2);
+
+/// The grid moments a run of `duration` expects: every `k >= 1` whose last
+/// read ends by `k * interval + 20 s + 5 s <= duration`, so every read of an
+/// expected moment ends before the stop a run that reaches its duration
+/// raises. `0` when the sampler is disarmed.
+fn expected_moments(interval_secs: u64, duration: Duration) -> usize {
+    if interval_secs == 0 {
+        return 0;
+    }
+    let last_read_ends =
+        LIVE_ATTEMPT_OFFSETS[LIVE_ATTEMPT_OFFSETS.len() - 1] + LIVE_ATTEMPT_TIMEOUT;
+    usize::try_from(duration.saturating_sub(last_read_ends).as_secs() / interval_secs)
+        .unwrap_or(usize::MAX)
 }
 
-/// One live census with `scan` as its copy and scan. A panic in `scan` is a
-/// failed attempt at step `panic`, so the attempt is still a record or a
-/// `CENSUS_FAIL` line, and the loop goes on sampling.
-fn take_live_census(
-    sampler: &CorpusSampler,
-    sampler_start: Instant,
-    elapsed_secs: f64,
-    scan: impl FnOnce(usize) -> Result<DurableCensus, CensusFailure>,
-) {
-    let ordinal = {
-        let mut t = sampler.live_tally.lock();
-        t.scans_attempted += 1;
-        t.scans_attempted
-    };
-    // Unwind-safe in effect: the scan holds no tally lock, and what it owns
-    // is its own scratch copy, which a later attempt never reads.
-    let scanned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan(ordinal)))
-        .unwrap_or_else(|payload| {
-            let error = payload
-                .downcast_ref::<&str>()
-                .map(|s| (*s).to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "a panic with a non-string payload".to_string());
-            Err(CensusFailure {
-                step: CensusFailStep::Panic,
-                error,
-            })
-        });
-    // The window's FAR edge, on the same run clock as the near edge. This is
-    // the producer the smear question is actually asked of: the server is
-    // writing underneath this copy, so how wide the window was is the whole of
-    // what tells a reader how much the image could have smeared.
-    //
-    // The stamp lands after the copy AND the scan, because that is the only
-    // point that knows both are done. Smearing accrues only while files are
-    // being copied — the scan reads an already-frozen image — so the far edge
-    // is an UPPER BOUND on the smear window, not the window itself. Read it as
-    // a bound: a reader who takes the difference from the near edge gets a
-    // number that cannot understate how much the image could have moved.
-    let copy_completed_secs = sampler_start.elapsed().as_secs_f64();
-
-    let mut t = sampler.live_tally.lock();
-    match scanned {
-        Ok(census) => t.censuses.push(CensusRecord {
-            elapsed_secs,
-            copy_completed_secs: Some(copy_completed_secs),
-            source: CensusSource::LiveCopy,
-            census,
-        }),
-        Err(failure) => sampler.record_failure(
-            &mut t.failures_by_step,
-            CensusSource::LiveCopy,
-            ordinal,
-            &failure,
-        ),
+/// Sleep until `deadline`, waking at least once a second to look at `stop`;
+/// `false` when `stop` was raised first, so a stop ends a wait within a second
+/// rather than at the end of a whole interval.
+async fn sleep_until_unless_stopped(deadline: tokio::time::Instant, stop: &AtomicBool) -> bool {
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return true;
+        }
+        tokio::time::sleep_until(deadline.min(now + Duration::from_secs(1))).await;
     }
 }
 
-/// The live-copy census loop: one census per `interval` on the sampler's run
-/// clock (`sampler_start`) until `stop` is set or a census task cannot be
-/// joined. Whichever ends it, it records the reason on the live tally and
-/// prints exactly one `LIVE_CENSUS_LOOP_END` line, so a sampler that stopped
-/// sampling is never mistaken for one that found nothing to report.
-async fn run_live_census_loop(
+/// The live census loop: moment `k` falls at `grid_start + k * interval` on
+/// one absolute grid, so how long a moment's reads take never shifts the
+/// moments after it.
+///
+/// Moments are taken in order. One the loop reaches when the next moment is
+/// already due is not read but counted missed, with its line; otherwise its
+/// reads start at the moment plus 0, 10 and 20 s (or at once, when that is
+/// already past), each `read` bounded by a 5 s timeout, until one succeeds.
+/// `before_tick(k)` runs after the wait for moment `k` and before the lateness
+/// check; a run passes a no-op, and a test delays a moment through it.
+///
+/// A stop ends the waits, never a read already begun: that read comes to its
+/// outcome and is counted, so every attempt is a reading or a failure line
+/// whenever the stop lands. The loop ends with one `LIVE_CENSUS_LOOP_END`
+/// line; a loop that panics leaves that line to the run that awaits it.
+async fn run_live_census_loop<R, RF, B, BF>(
     sampler: Arc<CorpusSampler>,
     stop: Arc<AtomicBool>,
     interval: Duration,
-    sampler_start: Instant,
-) {
-    let join_error = loop {
-        // Sleeps in short steps so a stop ends the loop within one step rather
-        // than one whole interval.
-        let wake = tokio::time::Instant::now() + interval;
-        while !stop.load(Ordering::SeqCst) {
-            let left = wake.saturating_duration_since(tokio::time::Instant::now());
-            if left.is_zero() {
+    grid_start: tokio::time::Instant,
+    read: R,
+    before_tick: B,
+) where
+    R: Fn() -> RF,
+    RF: Future<Output = Result<LiveGauges, GaugeFailure>>,
+    B: Fn(usize) -> BF,
+    BF: Future<Output = ()>,
+{
+    let mut due = grid_start;
+    'moments: for ordinal in 1.. {
+        due += interval;
+        if !sleep_until_unless_stopped(due, &stop).await {
+            break;
+        }
+        before_tick(ordinal).await;
+        sampler.live_tally.lock().last_ordinal = ordinal;
+        if tokio::time::Instant::now() >= due + interval {
+            sampler.record_missed(ordinal);
+            continue;
+        }
+        for (attempt, offset) in (1..).zip(LIVE_ATTEMPT_OFFSETS) {
+            if !sleep_until_unless_stopped(due + offset, &stop).await {
+                break 'moments;
+            }
+            let elapsed_secs = grid_start.elapsed().as_secs_f64();
+            let result = tokio::time::timeout(LIVE_ATTEMPT_TIMEOUT, read())
+                .await
+                .unwrap_or_else(|_| {
+                    Err(GaugeFailure {
+                        step: GaugeFailStep::Timeout,
+                        error: format!("no answer within {LIVE_ATTEMPT_TIMEOUT:?}"),
+                    })
+                });
+            sampler.record_gauge_attempt(ordinal, attempt, elapsed_secs, &result);
+            if result.is_ok() {
                 break;
             }
-            tokio::time::sleep(left.min(Duration::from_millis(50))).await;
         }
-        if stop.load(Ordering::SeqCst) {
-            break None;
-        }
-        let elapsed = sampler_start.elapsed().as_secs_f64();
-        let task_sampler = Arc::clone(&sampler);
-        // A whole-file copy is genuinely blocking work; keeping it off the
-        // async workers is what stops an observation-only sampler from stalling
-        // the churn clients whose write rate defines the workload under
-        // measurement.
-        if let Err(e) = tokio::task::spawn_blocking(move || {
-            sample_live_census_via_copy(&task_sampler, sampler_start, elapsed);
-        })
+    }
+    sampler.end_live_loop(LoopEndReason::Stop, None);
+}
+
+/// Await the live census loop's task. A task that panicked cannot print its
+/// own end line, so it is printed here, and the run still exports its tally:
+/// the moments the loop never reached come out absent.
+async fn await_live_census_loop(sampler: &CorpusSampler, task: tokio::task::JoinHandle<()>) {
+    if let Err(e) = task.await {
+        sampler.end_live_loop(LoopEndReason::JoinError, Some(&e.to_string()));
+    }
+}
+
+/// One read of the live-census gauges: one `GET /metrics`, all three gauges
+/// from its one body, so the two counts describe the same instant.
+async fn read_live_gauges(http: &reqwest::Client, url: &str) -> Result<LiveGauges, GaugeFailure> {
+    live_gauges_from_body(&get_metrics_body(http, url).await?)
+}
+
+/// The body of one `GET /metrics`, or the step at which it was not obtained.
+async fn get_metrics_body(http: &reqwest::Client, url: &str) -> Result<String, GaugeFailure> {
+    let fail = |step, e: reqwest::Error| GaugeFailure {
+        step,
+        error: format!("{:#}", anyhow::Error::from(e)),
+    };
+    let resp = http
+        .get(url)
+        .send()
         .await
-        {
-            break Some(e);
+        .map_err(|e| fail(GaugeFailStep::Connect, e))?;
+    if !resp.status().is_success() {
+        return Err(GaugeFailure {
+            step: GaugeFailStep::Status,
+            error: resp.status().to_string(),
+        });
+    }
+    resp.text().await.map_err(|e| fail(GaugeFailStep::Body, e))
+}
+
+/// The live census a `/metrics` body carries. A census the server has not
+/// seeded is a failure, never a reading: its counts are increments since boot,
+/// not totals.
+fn live_gauges_from_body(body: &str) -> Result<LiveGauges, GaugeFailure> {
+    let live = whole_gauge(body, LIVE_ENTRIES_METRIC)?;
+    let live_tag_bytes = whole_gauge(body, LIVE_TAG_BYTES_METRIC)?;
+    let seeded = whole_gauge(body, LIVE_SEEDED_METRIC)?;
+    if seeded != 1 {
+        return Err(GaugeFailure {
+            step: GaugeFailStep::SeedNotOk,
+            error: format!("{LIVE_SEEDED_METRIC} is {seeded}"),
+        });
+    }
+    Ok(LiveGauges {
+        live,
+        live_tag_bytes,
+    })
+}
+
+/// The one whole-number sample of an unlabelled gauge. Two samples, or one
+/// beside a malformed one, is not a reading of it.
+fn whole_gauge(body: &str, metric: &'static str) -> Result<u64, GaugeFailure> {
+    match parse_labelled_gauge(body, metric) {
+        GaugeReading::Read(g) if g.parsed_samples == 1 && g.malformed_samples == 0 => Ok(g.sum),
+        GaugeReading::Read(g) => Err(GaugeFailure {
+            step: GaugeFailStep::Unparseable(metric),
+            error: format!(
+                "{} samples read, {} malformed",
+                g.parsed_samples, g.malformed_samples
+            ),
+        }),
+        GaugeReading::Unreadable { malformed_samples } => Err(GaugeFailure {
+            step: GaugeFailStep::Unparseable(metric),
+            error: format!("{malformed_samples} malformed samples"),
+        }),
+        GaugeReading::Absent => Err(GaugeFailure {
+            step: GaugeFailStep::Absent(metric),
+            error: "not in the /metrics body".to_string(),
+        }),
+    }
+}
+
+/// How the end sequence's wait on the server went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndWait<T> {
+    /// What was waited for, reached.
+    Reached(T),
+    /// Every poll was spent without reaching it.
+    Exhausted,
+    /// The server was found dead before a poll; no poll was made after.
+    Exited(ServerExit),
+}
+
+/// Poll the write-behind buffer until two polls in a row read it empty, at
+/// most `polls` polls `every` apart. `liveness` runs before every poll, so a
+/// dead server ends the wait without a request.
+async fn wait_for_drain(
+    liveness: impl Fn() -> Option<ServerExit>,
+    http: &reqwest::Client,
+    url: &str,
+    polls: usize,
+    every: Duration,
+) -> EndWait<()> {
+    let mut empty_in_a_row = 0;
+    for poll in 0..polls {
+        if poll > 0 {
+            tokio::time::sleep(every).await;
+        }
+        if let Some(exit) = liveness() {
+            return EndWait::Exited(exit);
+        }
+        let buffered = tokio::time::timeout(LIVE_ATTEMPT_TIMEOUT, get_metrics_body(http, url))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|body| whole_gauge(&body, BUFFERED_ENTRIES_METRIC).ok());
+        empty_in_a_row = if buffered == Some(0) {
+            empty_in_a_row + 1
+        } else {
+            0
+        };
+        if empty_in_a_row == 2 {
+            return EndWait::Reached(());
+        }
+    }
+    EndWait::Exhausted
+}
+
+/// Take pairs of live-census reads `gap` apart until both reads of a pair
+/// succeed and agree, at most `pairs` pairs. `liveness` runs before every read.
+async fn wait_for_quiesce<R, RF>(
+    liveness: impl Fn() -> Option<ServerExit>,
+    read: R,
+    pairs: usize,
+    gap: Duration,
+) -> EndWait<LiveGauges>
+where
+    R: Fn() -> RF,
+    RF: Future<Output = Result<LiveGauges, GaugeFailure>>,
+{
+    let read_once = || async {
+        match liveness() {
+            Some(exit) => Err(exit),
+            None => Ok(tokio::time::timeout(LIVE_ATTEMPT_TIMEOUT, read())
+                .await
+                .ok()
+                .and_then(Result::ok)),
         }
     };
-    let reason = if join_error.is_some() {
-        LoopEndReason::JoinError
-    } else {
-        LoopEndReason::Stop
+    for _ in 0..pairs {
+        let first = match read_once().await {
+            Ok(first) => first,
+            Err(exit) => return EndWait::Exited(exit),
+        };
+        tokio::time::sleep(gap).await;
+        match read_once().await {
+            Ok(Some(second)) if first == Some(second) => return EndWait::Reached(second),
+            Ok(_) => {}
+            Err(exit) => return EndWait::Exited(exit),
+        }
+    }
+    EndWait::Exhausted
+}
+
+/// What the end sequence observed, the input of the reconciliation.
+#[derive(Debug, Clone, Copy)]
+struct EndObservation {
+    exit: ServerExit,
+    churn_joined: bool,
+    drained: bool,
+    quiesced: Option<LiveGauges>,
+}
+
+/// Steps 0 to 3 of the end sequence, run once the churn has been joined and
+/// the live census loop has ended: wait for the write-behind buffer to drain,
+/// take the quiesced reading, then stop the server with `SIGTERM` and keep how
+/// it exited. A server found dead skips what is left before the stop; a churn
+/// task still running skips the drain and the reading, because the store can
+/// still move under them.
+async fn end_live_census(
+    supervisor: &ServerSupervisor,
+    sampler: &CorpusSampler,
+    url: &str,
+    churn_joined: bool,
+) -> EndObservation {
+    let http = reqwest::Client::new();
+    let liveness = || supervisor.liveness();
+    let mut drained = false;
+    let mut found_dead = None;
+    if churn_joined {
+        match wait_for_drain(liveness, &http, url, DRAIN_POLLS, END_POLL_GAP).await {
+            EndWait::Reached(()) => {
+                drained = true;
+                match wait_for_quiesce(
+                    liveness,
+                    || read_live_gauges(&http, url),
+                    QUIESCE_PAIRS,
+                    END_POLL_GAP,
+                )
+                .await
+                {
+                    EndWait::Reached(g) => sampler.record_quiesced(g),
+                    EndWait::Exhausted => {}
+                    EndWait::Exited(exit) => found_dead = Some(exit),
+                }
+            }
+            EndWait::Exhausted => {}
+            EndWait::Exited(exit) => found_dead = Some(exit),
+        }
+    }
+    let exit = match found_dead {
+        Some(exit) => exit,
+        None => supervisor.graceful_shutdown().await,
     };
-    let last_ordinal = {
-        let mut t = sampler.live_tally.lock();
-        t.loop_end = Some(reason);
-        t.scans_attempted
+    let quiesced = sampler.live_tally.lock().quiesced;
+    EndObservation {
+        exit,
+        churn_joined,
+        drained,
+        quiesced,
+    }
+}
+
+/// Compare the quiesced live census with the terminal sum over every map.
+///
+/// The reasons are checked in this order and the first that holds is the
+/// outcome. A server that did not exit 0 comes first because its death (exit
+/// 70, 71 or 72 included) also explains a churn that did not end and a buffer
+/// that did not drain; named after those, the reason would be false.
+fn decide_reconcile(
+    end: &EndObservation,
+    terminal: &Result<LiveGauges, CensusFailure>,
+) -> Reconcile {
+    let not_applicable = |reason| Reconcile {
+        status: ReconcileStatus::NotApplicable,
+        reason: Some(reason),
     };
-    let error = join_error.map_or(String::new(), |e| {
-        format!(" error={}", e.to_string().replace(['\r', '\n'], " "))
-    });
-    sampler.census_log.line(format!(
-        "LIVE_CENSUS_LOOP_END reason={} last_ordinal={last_ordinal}{error}",
-        reason.as_str()
-    ));
+    match end.exit {
+        ServerExit::Code(0) => {}
+        ServerExit::Code(code) => return not_applicable(ReconcileReason::ExitCode(code)),
+        ServerExit::Signal(_) => return not_applicable(ReconcileReason::ExitSignal),
+        ServerExit::AlreadyExited => return not_applicable(ReconcileReason::ExitGone),
+    }
+    if !end.churn_joined {
+        return not_applicable(ReconcileReason::ChurnNotJoined);
+    }
+    if !end.drained {
+        return not_applicable(ReconcileReason::NotDrained);
+    }
+    let Some(quiesced) = end.quiesced else {
+        return not_applicable(ReconcileReason::NotQuiesced);
+    };
+    let terminal = match terminal {
+        Ok(terminal) => terminal,
+        Err(failure) => return not_applicable(ReconcileReason::TerminalFailed(failure.step)),
+    };
+    Reconcile {
+        status: if quiesced == *terminal {
+            ReconcileStatus::Match
+        } else {
+            ReconcileStatus::Mismatch
+        },
+        reason: None,
+    }
 }
 
 /// Byte-copy the server's store directory into an ordinal-scoped scratch directory,
@@ -2423,18 +2874,17 @@ async fn run_live_census_loop(
 /// input is `du -sk` over that dir and a copy written inside it would step that
 /// gate too.
 ///
-/// `label` names the sampler in both the scratch path and the diagnostics, so
-/// two samplers running concurrently can never alias each other's copies, and a
-/// delete that failed cannot leave one sampler's bytes to be re-scanned as the
-/// other's. A failed DELETE is NOT a scan failure — the census was obtained —
-/// so it is logged and the run continues; the teardown sweep removes the
-/// residue.
+/// The scratch path carries the checkpoint ordinal, so a delete that failed
+/// cannot leave one sample's bytes to be re-scanned as another's. A failed
+/// DELETE is NOT a scan failure — the census was obtained — so it is logged and
+/// the run continues; the teardown sweep removes the residue.
 fn copy_and_scan_census(
     sampler: &CorpusSampler,
-    label: &str,
     ordinal: usize,
 ) -> Result<DurableCensus, CensusFailure> {
-    let copy_dir = sampler.scratch_root.join(format!("{label}-{ordinal}"));
+    let copy_dir = sampler
+        .scratch_root
+        .join(format!("durable-corpus-{ordinal}"));
     // The scan resolves `topgun-data` under the directory it is given, so the
     // ordinal is carried by the directory and the copy keeps the name the scan
     // looks for.
@@ -2459,7 +2909,7 @@ fn copy_and_scan_census(
 
     if let Err(e) = std::fs::remove_dir_all(&copy_dir) {
         eprintln!(
-            "{label} sample {ordinal}: scratch copy left behind at {} ({e}) — sample \
+            "durable-corpus sample {ordinal}: scratch copy left behind at {} ({e}) — sample \
              still counted; teardown sweeps the residue",
             copy_dir.display()
         );
@@ -2550,6 +3000,12 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 /// rather than failing the run. An honest empty census from a never-written
 /// table stays distinguishable from it.
 fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Result<DurableCensus, CensusFailure> {
+    census_of_map(&open_census_store(data_dir)?, map)
+}
+
+/// Open the store under `data_dir` for a census, or say at which step that
+/// failed.
+fn open_census_store(data_dir: &Path) -> Result<RedbDataStore, CensusFailure> {
     let store_dir = data_dir.join(STORE_DIR);
     // Opening creates a missing store, so the engine file is checked first: a
     // store that is not there is a failed scan, never an empty one.
@@ -2560,11 +3016,14 @@ fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Result<DurableCensu
             error: engine.display().to_string(),
         });
     }
-    let store = RedbDataStore::new(&store_dir).map_err(|e| CensusFailure {
+    RedbDataStore::new(&store_dir).map_err(|e| CensusFailure {
         step: CensusFailStep::Open,
         error: format!("{e:#}"),
-    })?;
+    })
+}
 
+/// The census of one map of an open store.
+fn census_of_map(store: &RedbDataStore, map: &str) -> Result<DurableCensus, CensusFailure> {
     // A never-written map (e.g. no OR-Map write ever landed) is visited zero
     // times and contributes an EMPTY census — a real, honest answer, not a
     // scan failure.
@@ -2605,6 +3064,23 @@ fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Result<DurableCensu
             error: format!("{e:#}"),
         })?;
     Ok(census)
+}
+
+/// The live entries and their tag bytes summed over EVERY map of an open
+/// store — the maps the server's own boot walk seeds its live census from —
+/// so the two sides of the reconciliation count the same set of maps.
+async fn live_sum_over_all_maps(store: &RedbDataStore) -> Result<LiveGauges, CensusFailure> {
+    let maps = store.list_maps().await.map_err(|e| CensusFailure {
+        step: CensusFailStep::ListMaps,
+        error: format!("{e:#}"),
+    })?;
+    let mut sum = LiveGauges::default();
+    for map in maps {
+        let census = census_of_map(store, &map)?;
+        sum.live += census.live_entries;
+        sum.live_tag_bytes += census.live_tag_bytes;
+    }
+    Ok(sum)
 }
 
 // ---------------------------------------------------------------------------
@@ -2971,15 +3447,13 @@ struct SeriesShapeRow {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CensusRow {
-    /// `CHECKPOINT`, `TERMINAL` or `LIVE_COPY`, rendered through the source's
-    /// own `as_str`. A `LIVE_COPY` row is taken from a smeared image of a live
-    /// store file and is OBSERVATION ONLY — the token is what fences it.
+    /// `CHECKPOINT` or `TERMINAL`, rendered through the source's own `as_str`.
     source: String,
     /// When the census was INITIATED. Meaning unchanged, so the sort and the
     /// nearest-record lookup keyed on it are value-identical to before.
     elapsed_secs: f64,
-    /// When the census COMPLETED — the far edge of the window a live copy is
-    /// smeared across. Disposition-bearing: it always serializes, as an
+    /// When the census COMPLETED — the far edge of the window a checkpoint copy
+    /// was taken across. Disposition-bearing: it always serializes, as an
     /// explicit null where the producer took no copy, so "this producer takes
     /// no copy" is never confused with "this artifact predates the field".
     copy_completed_secs: Option<f64>,
@@ -3087,8 +3561,8 @@ struct DurableReadingReport {
     reason: Option<String>,
     /// The four frozen deciding series, one row each.
     deciding_series: Vec<SeriesShapeRow>,
-    /// Every census taken during the run, checkpoint, terminal and live-copy
-    /// alike, in clock order.
+    /// Every census taken from the store during the run, checkpoint and
+    /// terminal alike, in clock order.
     censuses: Vec<CensusRow>,
     /// The last census taken with the server process DEAD after the run.
     ///
@@ -4430,8 +4904,8 @@ fn print_usage() {
          \x20 # durable-layer reading (report-only): arms the filesystem samplers and\n\
          \x20 # writes <json-output>.durable.json beside the primary report\n\
          \x20 soak_harness --durable-reading --json-output soak.json --data-dir ./soak-data\n\
-         \x20 # live-copy census sampler (seconds; 0 = DISARMED, the default).\n\
-         \x20 # Observation only: a census off a live store file is a smeared image\n\
+         \x20 # live census from the server's own gauges (seconds; 0 = DISARMED, the\n\
+         \x20 # default, else >= 60). Observation only; ends in a reconciliation\n\
          \x20 soak_harness --durable-reading --live-census-interval 60\n\
          \x20 # seed for the filesystem samplers\' cadence jitter. Runner-supplied,\n\
          \x20 # never derived in the binary, so the recorded seed IS the seed used\n\
@@ -4669,15 +5143,21 @@ fn parse_f64(s: &str) -> f64 {
 }
 
 mod tests {
+    use std::collections::VecDeque;
+    use std::future::ready;
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use parking_lot::Mutex;
+
     use super::{
-        run_live_census_loop, sample_durable_corpus_via_copy, sample_live_census_via_copy,
-        take_live_census, CensusCounts, CensusFailStep, CensusLog, CensusSource, CorpusSampler,
-        LoopEndReason, RecordValue, RedbDataStore, OR_MAP, STORE_DIR,
+        await_live_census_loop, decide_reconcile, read_live_gauges, run_live_census_loop,
+        sample_durable_corpus_via_copy, wait_for_drain, BootGap, CensusFailStep, CensusFailure,
+        CensusLog, CorpusSampler, EndObservation, EndWait, GaugeFailStep, GaugeFailure, LiveGauges,
+        LoopEndReason, ReconcileReason, ReconcileStatus, RecordValue, RedbDataStore, ServerExit,
+        OR_MAP, STORE_DIR,
     };
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;
@@ -4691,10 +5171,10 @@ mod tests {
     /// panics fails alone and the rest still run; the summary line has
     /// libtest's shape, and a failure makes the exit code non-zero.
     pub(super) fn run_all() -> i32 {
-        let tests: [(&str, fn()); 4] = [
+        let tests: [(&str, fn()); 13] = [
             (
-                "live_copy_census_never_contaminates_the_corpus_tally",
-                live_copy_census_never_contaminates_the_corpus_tally,
+                "live_gauge_readings_never_contaminate_the_corpus_tally",
+                live_gauge_readings_never_contaminate_the_corpus_tally,
             ),
             (
                 "every_failed_census_attempt_prints_one_line_with_its_step",
@@ -4705,8 +5185,44 @@ mod tests {
                 live_census_loop_prints_one_end_line_on_stop,
             ),
             (
-                "panicking_live_census_is_one_failure_at_step_panic",
-                panicking_live_census_is_one_failure_at_step_panic,
+                "failed_reads_are_retried_and_each_prints_its_line",
+                failed_reads_are_retried_and_each_prints_its_line,
+            ),
+            (
+                "a_moment_whose_reads_all_fail_is_absent",
+                a_moment_whose_reads_all_fail_is_absent,
+            ),
+            (
+                "an_unseeded_census_is_not_a_reading",
+                an_unseeded_census_is_not_a_reading,
+            ),
+            (
+                "a_missing_gauge_is_named_on_its_line",
+                a_missing_gauge_is_named_on_its_line,
+            ),
+            (
+                "a_late_moment_is_missed_and_the_grid_does_not_drift",
+                a_late_moment_is_missed_and_the_grid_does_not_drift,
+            ),
+            (
+                "reconcile_names_the_first_reason_that_holds",
+                reconcile_names_the_first_reason_that_holds,
+            ),
+            (
+                "the_drain_poll_checks_liveness_before_every_request",
+                the_drain_poll_checks_liveness_before_every_request,
+            ),
+            (
+                "a_read_begun_before_the_stop_comes_to_its_outcome",
+                a_read_begun_before_the_stop_comes_to_its_outcome,
+            ),
+            (
+                "a_loop_that_panics_still_ends_in_a_line_and_exports_its_tally",
+                a_loop_that_panics_still_ends_in_a_line_and_exports_its_tally,
+            ),
+            (
+                "excused_moments_are_absent_moments",
+                excused_moments_are_absent_moments,
             ),
         ];
         let mut failed = 0usize;
@@ -4750,63 +5266,206 @@ mod tests {
             .expect("write row");
     }
 
-    /// The observation fence, asserted rather than assumed: folding live-copy
-    /// censuses must leave the durable-corpus estimator's ENTIRE input alone —
-    /// its series and both of its scan counters — so an armed live sampler
-    /// cannot move a gate's instrument clause, let alone its level clause.
-    fn live_copy_census_never_contaminates_the_corpus_tally() {
-        let data = tempfile::tempdir().expect("data dir");
-        let scratch = tempfile::tempdir().expect("scratch dir");
-        write_or_fixture(data.path());
-        let sampler = CorpusSampler::new(
-            data.path().to_path_buf(),
-            scratch.path().to_path_buf(),
-            CensusLog::buffer().0,
-        );
+    const INTERVAL: Duration = Duration::from_secs(60);
 
-        // The initiation stamps are synthetic here; the completion instants are
-        // measured off this clock, so the records carry a real copy window.
-        let sampler_start = Instant::now();
-        for i in 0..3 {
-            sample_live_census_via_copy(&sampler, sampler_start, f64::from(i));
+    /// A sampler whose lines land in memory, the handle they are read back
+    /// through, and the directory its paths live under (the live census never
+    /// touches them).
+    fn live_sampler() -> (
+        Arc<CorpusSampler>,
+        Arc<Mutex<Vec<String>>>,
+        tempfile::TempDir,
+    ) {
+        let root = tempfile::tempdir().expect("root");
+        let (log, lines) = CensusLog::buffer();
+        let sampler = Arc::new(CorpusSampler::new(
+            root.path().join("data"),
+            root.path().join("scratch"),
+            log,
+        ));
+        (sampler, lines, root)
+    }
+
+    /// A runtime whose clock is paused, so a moment minutes away is reached at
+    /// once and every instant on the grid is exact.
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime")
+    }
+
+    /// Run `test` on a paused clock that a driver task moves forward 1 ms at a
+    /// time. Auto-advance cannot be used where a test talks to a real socket:
+    /// it jumps the clock to the next timer whenever the runtime waits on I/O,
+    /// so a 5 s read timeout fires before a localhost answer arrives. The
+    /// driver never lets the runtime idle, so the clock moves only by its
+    /// steps, I/O is polled between them, and minutes of grid still pass in
+    /// well under a second.
+    fn on_driven_clock<T>(test: impl std::future::Future<Output = T>) -> T {
+        paused_runtime().block_on(async {
+            let driver = tokio::spawn(async {
+                loop {
+                    tokio::time::advance(Duration::from_millis(1)).await;
+                }
+            });
+            let out = test.await;
+            driver.abort();
+            out
+        })
+    }
+
+    /// A `/metrics` body carrying the three live-census gauges.
+    fn census_body(live: u64, tag_bytes: u64, seeded: u64) -> String {
+        format!(
+            "# TYPE topgun_ormap_live_entries gauge\ntopgun_ormap_live_entries {live}\n\
+             # TYPE topgun_ormap_live_tag_bytes gauge\ntopgun_ormap_live_tag_bytes {tag_bytes}\n\
+             # TYPE topgun_ormap_live_census_seeded gauge\n\
+             topgun_ormap_live_census_seeded {seeded}\n"
+        )
+    }
+
+    /// A test `/metrics` server answering with `script` in order, its last
+    /// answer repeated, each after `delay`. Returns its URL and the count of
+    /// requests it received.
+    async fn serve_metrics(
+        script: Vec<(u16, String)>,
+        delay: Duration,
+    ) -> (String, Arc<AtomicUsize>) {
+        use axum::extract::State;
+        use axum::http::StatusCode;
+
+        type Script = (
+            Arc<Mutex<VecDeque<(u16, String)>>>,
+            Arc<AtomicUsize>,
+            Duration,
+        );
+        async fn answer(State((script, hits, delay)): State<Script>) -> (StatusCode, String) {
+            hits.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(delay).await;
+            let (code, body) = {
+                let mut script = script.lock();
+                if script.len() > 1 {
+                    script.pop_front()
+                } else {
+                    script.front().cloned()
+                }
+                .expect("a scripted answer")
+            };
+            (StatusCode::from_u16(code).expect("status"), body)
         }
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let state: Script = (
+            Arc::new(Mutex::new(script.into_iter().collect())),
+            Arc::clone(&hits),
+            delay,
+        );
+        let app = axum::Router::new()
+            .route("/metrics", axum::routing::get(answer))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}/metrics", listener.local_addr().expect("addr"));
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (url, hits)
+    }
+
+    /// A `before_tick` that raises `stop` once the loop reaches moment `last + 1`,
+    /// so a test takes exactly moments `1..=last`.
+    fn stop_after(stop: &Arc<AtomicBool>, last: usize) -> impl Fn(usize) -> std::future::Ready<()> {
+        let stop = Arc::clone(stop);
+        move |k| {
+            if k > last {
+                stop.store(true, Ordering::SeqCst);
+            }
+            ready(())
+        }
+    }
+
+    /// Run the loop for moment 1 against a test server answering `script`, and
+    /// return the lines so far, the handle later lines land in, and the sampler.
+    fn one_moment_against(
+        script: Vec<(u16, String)>,
+    ) -> (Vec<String>, Arc<Mutex<Vec<String>>>, Arc<CorpusSampler>) {
+        let (sampler, lines, _root) = live_sampler();
+        let stop = Arc::new(AtomicBool::new(false));
+        on_driven_clock(async {
+            let (url, _) = serve_metrics(script, Duration::ZERO).await;
+            let http = reqwest::Client::new();
+            run_live_census_loop(
+                Arc::clone(&sampler),
+                Arc::clone(&stop),
+                INTERVAL,
+                tokio::time::Instant::now(),
+                || read_live_gauges(&http, &url),
+                stop_after(&stop, 1),
+            )
+            .await;
+        });
+        let so_far = lines.lock().clone();
+        (so_far, lines, sampler)
+    }
+
+    /// The lines that start with `prefix`.
+    fn starting_with<'a>(lines: &'a [String], prefix: &str) -> Vec<&'a String> {
+        lines.iter().filter(|l| l.starts_with(prefix)).collect()
+    }
+
+    /// The observation fence, asserted rather than assumed: live readings —
+    /// successful or failed — must leave the durable-corpus estimator's ENTIRE
+    /// input alone, its series and both of its scan counters, so an armed live
+    /// sampler cannot move a gate's instrument clause, let alone its level
+    /// clause.
+    fn live_gauge_readings_never_contaminate_the_corpus_tally() {
+        let (sampler, lines, _root) = live_sampler();
+        let reading = Ok(LiveGauges {
+            live: 7,
+            live_tag_bytes: 70,
+        });
+        let failure = Err(GaugeFailure {
+            step: GaugeFailStep::Connect,
+            error: "refused".to_string(),
+        });
+        sampler.record_gauge_attempt(1, 1, 60.0, &reading);
+        sampler.record_gauge_attempt(2, 1, 120.0, &failure);
+        sampler.record_gauge_attempt(2, 2, 130.0, &reading);
 
         let corpus = sampler.tally.lock().clone();
         assert!(
             corpus.samples.is_empty(),
-            "live-copy censuses must never reach the estimator's series"
+            "live readings must never reach the estimator's series"
         );
         assert_eq!(
             corpus.scans_attempted, 0,
-            "live-copy censuses must never be counted as corpus scan attempts"
+            "live readings must never be counted as corpus scan attempts"
         );
         assert_eq!(
             corpus.failures_by_step.total(),
             0,
-            "live-copy censuses must never be counted as corpus scan failures"
+            "live readings must never be counted as corpus scan failures"
         );
         assert!(
             corpus.censuses.is_empty(),
-            "live-copy censuses must never reach the corpus tally's census list"
+            "live readings must never reach the corpus tally's census list"
         );
 
         let live = sampler.live_tally.lock().clone();
-        assert_eq!(live.scans_attempted, 3);
-        assert_eq!(live.failures_by_step.total(), 0);
-        assert_eq!(live.censuses.len(), 3);
-        assert!(
-            live.censuses
-                .iter()
-                .all(|r| r.source == CensusSource::LiveCopy),
-            "every record from this sampler carries the live-copy source"
+        assert_eq!(live.attempted, 3);
+        assert_eq!(live.failures_by_step.total(), 1);
+        assert_eq!(live.present, [1, 2]);
+        assert_eq!(live.retries, 1);
+        let lines = lines.lock().clone();
+        assert_eq!(
+            lines,
+            [
+                "  LIVE_GAUGE t=60.0s ordinal=1 attempt=1 live=7 live_tag_bytes=70",
+                "LIVE_GAUGE_FAIL ordinal=2 attempt=1 step=connect error=refused",
+                "  LIVE_GAUGE t=130.0s ordinal=2 attempt=2 live=7 live_tag_bytes=70",
+            ]
         );
-        // The census is really taken, not merely recorded as an empty shell:
-        // one row, one live entry, two tombstones.
-        let first = live.censuses[0].census;
-        assert_eq!(first.keys_scanned, 1);
-        assert_eq!(first.or_map_keys, 1);
-        assert_eq!(first.live_entries, 1);
-        assert_eq!(first.tombstone_entries, 2);
     }
 
     /// Every failure step reachable from a file system, driven through the
@@ -4836,18 +5495,16 @@ mod tests {
             );
 
             let t = sampler.snapshot();
-            let counts = CensusCounts::new(t.scans_attempted, t.failures_by_step);
-            let json = serde_json::to_value(&counts).expect("serialize");
-            assert_eq!(json["attempted"], 1, "{case}: {json}");
-            assert_eq!(json["ok"], 0, "{case}: {json}");
-            assert_eq!(json["failed"], 1, "{case}: {json}");
-            for other in CensusFailStep::ALL {
-                let want = usize::from(other == step);
-                assert_eq!(
-                    json["failuresByStep"][other.as_str()],
-                    want,
-                    "{case}: {json}"
-                );
+            assert_eq!(t.scans_attempted, 1, "{case}");
+            assert_eq!(t.failures_by_step.total(), 1, "{case}");
+            let by_step: Vec<(&str, usize)> = t.failures_by_step.iter().collect();
+            assert_eq!(
+                by_step.len(),
+                6,
+                "{case}: every step is counted, zeros included"
+            );
+            for (key, n) in by_step {
+                assert_eq!(n, usize::from(key == step.as_str()), "{case}: {key}");
             }
             assert!(t.samples.is_empty() && t.censuses.is_empty(), "{case}");
         }
@@ -4891,31 +5548,6 @@ mod tests {
         assert_fails_at("open", &bad_magic, &scratch, CensusFailStep::Open);
     }
 
-    /// A live census whose scan panics is one failed attempt at step `panic`,
-    /// with one `CENSUS_FAIL` line, and the panic does not leave the attempt.
-    fn panicking_live_census_is_one_failure_at_step_panic() {
-        let root = tempfile::tempdir().expect("root");
-        let (log, lines) = CensusLog::buffer();
-        let sampler =
-            CorpusSampler::new(root.path().join("data"), root.path().join("scratch"), log);
-        take_live_census(&sampler, Instant::now(), 0.0, |_| panic!("smeared page"));
-
-        let lines = lines.lock().clone();
-        assert_eq!(
-            lines.as_slice(),
-            ["CENSUS_FAIL source=LIVE_COPY ordinal=1 step=panic error=smeared page"],
-            "lines {lines:?}"
-        );
-        let t = sampler.live_tally.lock();
-        let json = serde_json::to_value(CensusCounts::new(t.scans_attempted, t.failures_by_step))
-            .expect("serialize");
-        assert_eq!(json["attempted"], 1, "{json}");
-        assert_eq!(json["ok"], 0, "{json}");
-        assert_eq!(json["failed"], 1, "{json}");
-        assert_eq!(json["failuresByStep"]["panic"], 1, "{json}");
-        assert!(t.censuses.is_empty());
-    }
-
     /// A loop whose stop flag is already set ends at its first wake-up and says
     /// so in exactly one line. Time is paused, so the interval elapses at once.
     fn live_census_loop_prints_one_end_line_on_stop() {
@@ -4924,37 +5556,32 @@ mod tests {
         // through its first interval: the second must end the loop well before
         // that interval is over, or a run would exit before the loop ends.
         for stop_after in [None, Some(Duration::from_secs(1))] {
-            let root = tempfile::tempdir().expect("root");
-            let (log, lines) = CensusLog::buffer();
-            let sampler = Arc::new(CorpusSampler::new(
-                root.path().join("data"),
-                root.path().join("scratch"),
-                log,
-            ));
+            let (sampler, lines, _root) = live_sampler();
             let stop = Arc::new(AtomicBool::new(stop_after.is_none()));
-            let took = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .start_paused(true)
-                .build()
-                .expect("runtime")
-                .block_on(async {
-                    if let Some(after) = stop_after {
-                        let stop = Arc::clone(&stop);
-                        tokio::spawn(async move {
-                            tokio::time::sleep(after).await;
-                            stop.store(true, Ordering::SeqCst);
-                        });
-                    }
-                    let begun = tokio::time::Instant::now();
-                    run_live_census_loop(
-                        Arc::clone(&sampler),
-                        Arc::clone(&stop),
-                        INTERVAL,
-                        Instant::now(),
-                    )
-                    .await;
-                    begun.elapsed()
-                });
+            let reads = AtomicUsize::new(0);
+            let took = paused_runtime().block_on(async {
+                if let Some(after) = stop_after {
+                    let stop = Arc::clone(&stop);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(after).await;
+                        stop.store(true, Ordering::SeqCst);
+                    });
+                }
+                let begun = tokio::time::Instant::now();
+                run_live_census_loop(
+                    Arc::clone(&sampler),
+                    Arc::clone(&stop),
+                    INTERVAL,
+                    begun,
+                    || {
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        ready(Ok(LiveGauges::default()))
+                    },
+                    |_| ready(()),
+                )
+                .await;
+                begun.elapsed()
+            });
 
             let lines = lines.lock().clone();
             assert_eq!(
@@ -4966,7 +5593,455 @@ mod tests {
                 sampler.live_tally.lock().loop_end,
                 Some(LoopEndReason::Stop)
             );
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
             assert!(took < INTERVAL, "stop after {stop_after:?}: took {took:?}");
         }
+    }
+
+    /// Two refused reads and an answered third: one line per attempt, the
+    /// reading on the third.
+    fn failed_reads_are_retried_and_each_prints_its_line() {
+        let (lines, _, sampler) = one_moment_against(vec![
+            (500, String::new()),
+            (500, String::new()),
+            (200, census_body(5, 50, 1)),
+        ]);
+        let fails = starting_with(&lines, "LIVE_GAUGE_FAIL ");
+        assert_eq!(fails.len(), 2, "lines {lines:?}");
+        for (attempt, line) in (1..).zip(&fails) {
+            assert!(
+                line.starts_with(&format!(
+                    "LIVE_GAUGE_FAIL ordinal=1 attempt={attempt} step=status error=500"
+                )),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            starting_with(&lines, "  LIVE_GAUGE "),
+            ["  LIVE_GAUGE t=80.0s ordinal=1 attempt=3 live=5 live_tag_bytes=50"],
+            "lines {lines:?}"
+        );
+        let t = sampler.live_tally.lock();
+        assert_eq!(
+            (t.attempted, t.failures_by_step.total(), t.retries),
+            (3, 2, 2)
+        );
+    }
+
+    /// Three refused reads: the moment is absent, and the export says so.
+    fn a_moment_whose_reads_all_fail_is_absent() {
+        let (lines, handle, sampler) = one_moment_against(vec![(500, String::new())]);
+        assert_eq!(starting_with(&lines, "LIVE_GAUGE_FAIL ").len(), 3);
+        assert!(starting_with(&lines, "  LIVE_GAUGE ").is_empty());
+
+        // 60 + 20 + 5 <= 85: moment 1 is the one moment a run of 85 s expects.
+        let report = sampler.live_census_report(60, Duration::from_secs(85), &[]);
+        let json = serde_json::to_value(&report).expect("serialize");
+        assert_eq!(json["expected"], 1, "{json}");
+        assert_eq!(json["absentOrdinals"], serde_json::json!([1]), "{json}");
+        assert_eq!(json["excusedOrdinals"], serde_json::json!([]), "{json}");
+        assert_eq!(json["attempted"], 3, "{json}");
+        assert_eq!(json["ok"], 0, "{json}");
+        assert_eq!(json["failed"], 3, "{json}");
+        assert_eq!(json["retries"], 2, "{json}");
+        assert_eq!(
+            json["failuresByStep"],
+            serde_json::json!({
+                "connect": 0, "status": 3, "body": 0, "absent": 0,
+                "unparseable": 0, "seed_not_ok": 0, "timeout": 0,
+            }),
+            "{json}"
+        );
+        assert_eq!(json["quiesced"], serde_json::Value::Null, "{json}");
+        assert_eq!(json["reconcile"], serde_json::Value::Null, "{json}");
+        let lines = handle.lock().clone();
+        assert_eq!(
+            starting_with(&lines, "LIVE_CENSUS_TALLY "),
+            [
+                "LIVE_CENSUS_TALLY attempted=3 ok=0 failed=3 by_step=status:3 expected=1 \
+                 missed=none absent=1 excused=none retries=2 quiesced_live=none \
+                 quiesced_live_tag_bytes=none reconcile=none reason=none"
+            ]
+        );
+    }
+
+    /// A census the server has not seeded is a failed read, not a reading.
+    fn an_unseeded_census_is_not_a_reading() {
+        let (lines, _, _) = one_moment_against(vec![(200, census_body(5, 50, 0))]);
+        assert!(
+            starting_with(&lines, "  LIVE_GAUGE ").is_empty(),
+            "{lines:?}"
+        );
+        let fails = starting_with(&lines, "LIVE_GAUGE_FAIL ");
+        assert_eq!(fails.len(), 3, "{lines:?}");
+        assert!(
+            fails[0].starts_with("LIVE_GAUGE_FAIL ordinal=1 attempt=1 step=seed_not_ok error="),
+            "{}",
+            fails[0]
+        );
+    }
+
+    /// A body without the live-entries gauge fails at `absent`, naming it.
+    fn a_missing_gauge_is_named_on_its_line() {
+        let body = census_body(5, 50, 1).replace("topgun_ormap_live_entries 5\n", "");
+        let (lines, _, _) = one_moment_against(vec![(200, body)]);
+        let fails = starting_with(&lines, "LIVE_GAUGE_FAIL ");
+        assert_eq!(fails.len(), 3, "{lines:?}");
+        assert!(
+            fails[0].starts_with(
+                "LIVE_GAUGE_FAIL ordinal=1 attempt=1 step=absent:topgun_ormap_live_entries error="
+            ),
+            "{}",
+            fails[0]
+        );
+        assert_eq!(
+            fails.iter().filter(|l| l.contains(" step=absent:")).count(),
+            3
+        );
+    }
+
+    /// Moment 2 is held up by twice the interval. Moments 2 and 3 are then
+    /// reached after their successors fell due and are missed; moment 4 is read
+    /// on time, because the grid is absolute and the wait for a moment is a
+    /// wait for its instant, not an interval after the previous work.
+    fn a_late_moment_is_missed_and_the_grid_does_not_drift() {
+        let (sampler, lines, _root) = live_sampler();
+        let stop = Arc::new(AtomicBool::new(false));
+        paused_runtime().block_on(async {
+            let stopper = Arc::clone(&stop);
+            run_live_census_loop(
+                Arc::clone(&sampler),
+                Arc::clone(&stop),
+                INTERVAL,
+                tokio::time::Instant::now(),
+                || {
+                    ready(Ok(LiveGauges {
+                        live: 1,
+                        live_tag_bytes: 2,
+                    }))
+                },
+                move |k| {
+                    let stopper = Arc::clone(&stopper);
+                    async move {
+                        if k == 2 {
+                            tokio::time::sleep(INTERVAL * 2).await;
+                        }
+                        if k > 4 {
+                            stopper.store(true, Ordering::SeqCst);
+                        }
+                    }
+                },
+            )
+            .await;
+        });
+        let lines = lines.lock().clone();
+        assert_eq!(
+            lines,
+            [
+                "  LIVE_GAUGE t=60.0s ordinal=1 attempt=1 live=1 live_tag_bytes=2",
+                "LIVE_GAUGE_MISSED ordinal=2 reason=missed_tick",
+                "LIVE_GAUGE_MISSED ordinal=3 reason=missed_tick",
+                "  LIVE_GAUGE t=240.0s ordinal=4 attempt=1 live=1 live_tag_bytes=2",
+                "LIVE_CENSUS_LOOP_END reason=stop last_ordinal=5",
+            ]
+        );
+        assert_eq!(sampler.live_tally.lock().missed, [2, 3]);
+    }
+
+    /// Every reason from its own input with the rest healthy, the order where
+    /// two hold, and the two outcomes of a comparison.
+    fn reconcile_names_the_first_reason_that_holds() {
+        let g = LiveGauges {
+            live: 4,
+            live_tag_bytes: 40,
+        };
+        let healthy = EndObservation {
+            exit: ServerExit::Code(0),
+            churn_joined: true,
+            drained: true,
+            quiesced: Some(g),
+        };
+        let terminal_failed = |step| {
+            Err(CensusFailure {
+                step,
+                error: "x".to_string(),
+            })
+        };
+        let rows: [(
+            &str,
+            EndObservation,
+            Result<LiveGauges, CensusFailure>,
+            &str,
+        ); 10] = [
+            (
+                "code 70",
+                EndObservation {
+                    exit: ServerExit::Code(70),
+                    ..healthy
+                },
+                Ok(g),
+                "n/a exit_nonzero:70",
+            ),
+            (
+                "signal",
+                EndObservation {
+                    exit: ServerExit::Signal(9),
+                    ..healthy
+                },
+                Ok(g),
+                "n/a exit_nonzero:signal",
+            ),
+            (
+                "gone",
+                EndObservation {
+                    exit: ServerExit::AlreadyExited,
+                    ..healthy
+                },
+                Ok(g),
+                "n/a exit_nonzero:gone",
+            ),
+            (
+                "churn",
+                EndObservation {
+                    churn_joined: false,
+                    ..healthy
+                },
+                Ok(g),
+                "n/a churn_not_joined",
+            ),
+            (
+                "drain",
+                EndObservation {
+                    drained: false,
+                    ..healthy
+                },
+                Ok(g),
+                "n/a not_drained",
+            ),
+            (
+                "quiesce",
+                EndObservation {
+                    quiesced: None,
+                    ..healthy
+                },
+                Ok(g),
+                "n/a not_quiesced",
+            ),
+            (
+                "terminal",
+                healthy,
+                terminal_failed(CensusFailStep::ListMaps),
+                "n/a terminal_failed:list_maps",
+            ),
+            (
+                "order: a dead server explains the undrained buffer",
+                EndObservation {
+                    exit: ServerExit::Code(70),
+                    drained: false,
+                    ..healthy
+                },
+                Ok(g),
+                "n/a exit_nonzero:70",
+            ),
+            (
+                "mismatch",
+                healthy,
+                Ok(LiveGauges {
+                    live: 4,
+                    live_tag_bytes: 41,
+                }),
+                "mismatch none",
+            ),
+            ("match", healthy, Ok(g), "match none"),
+        ];
+        for (case, end, terminal, want) in rows {
+            let r = decide_reconcile(&end, &terminal);
+            let got = format!(
+                "{} {}",
+                r.status.as_str(),
+                r.reason
+                    .map_or_else(|| "none".to_string(), ReconcileReason::render)
+            );
+            assert_eq!(got, want, "{case}");
+            assert_eq!(
+                r.reason.is_some(),
+                r.status == ReconcileStatus::NotApplicable,
+                "{case}"
+            );
+        }
+    }
+
+    /// The drain wait needs two empty polls in a row, gives up after its polls,
+    /// and asks a dead server nothing.
+    fn the_drain_poll_checks_liveness_before_every_request() {
+        let buffered = |n: u64| (200, format!("topgun_write_behind_buffered_entries {n}\n"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let http = reqwest::Client::new();
+            let every = Duration::from_millis(10);
+            let alive = || None;
+
+            let (url, hits) = serve_metrics(vec![buffered(3)], Duration::ZERO).await;
+            let got = wait_for_drain(alive, &http, &url, 4, every).await;
+            assert_eq!(got, EndWait::Exhausted);
+            assert_eq!(hits.load(Ordering::SeqCst), 4);
+
+            let (url, hits) =
+                serve_metrics(vec![buffered(3), buffered(0), buffered(0)], Duration::ZERO).await;
+            let got = wait_for_drain(alive, &http, &url, 60, every).await;
+            assert_eq!(got, EndWait::Reached(()));
+            assert_eq!(hits.load(Ordering::SeqCst), 3);
+
+            let (url, hits) = serve_metrics(vec![buffered(0)], Duration::ZERO).await;
+            let dead = || Some(ServerExit::AlreadyExited);
+            let got = wait_for_drain(dead, &http, &url, 60, every).await;
+            assert_eq!(got, EndWait::Exited(ServerExit::AlreadyExited));
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    /// A stop raised while a read is in flight does not cut that read: it
+    /// comes to its outcome and is counted, and no read starts after it.
+    fn a_read_begun_before_the_stop_comes_to_its_outcome() {
+        let (sampler, lines, _root) = live_sampler();
+        let stop = Arc::new(AtomicBool::new(false));
+        on_driven_clock(async {
+            let (url, hits) =
+                serve_metrics(vec![(200, census_body(3, 30, 1))], Duration::from_secs(1)).await;
+            let http = reqwest::Client::new();
+            let stopper = Arc::clone(&stop);
+            tokio::spawn(async move {
+                tokio::time::sleep(INTERVAL + Duration::from_millis(500)).await;
+                stopper.store(true, Ordering::SeqCst);
+            });
+            run_live_census_loop(
+                Arc::clone(&sampler),
+                Arc::clone(&stop),
+                INTERVAL,
+                tokio::time::Instant::now(),
+                || read_live_gauges(&http, &url),
+                |_| ready(()),
+            )
+            .await;
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+        });
+        let lines = lines.lock().clone();
+        assert_eq!(
+            lines,
+            [
+                "  LIVE_GAUGE t=60.0s ordinal=1 attempt=1 live=3 live_tag_bytes=30",
+                "LIVE_CENSUS_LOOP_END reason=stop last_ordinal=1",
+            ]
+        );
+        assert_eq!(sampler.live_tally.lock().attempted, 1);
+    }
+
+    /// A loop whose task panics cannot print its own end line; awaiting it
+    /// prints one, and the export still comes out, with every moment the loop
+    /// never reached absent.
+    fn a_loop_that_panics_still_ends_in_a_line_and_exports_its_tally() {
+        let (sampler, handle, _root) = live_sampler();
+        let stop = Arc::new(AtomicBool::new(false));
+        paused_runtime().block_on(async {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let task = tokio::spawn(run_live_census_loop(
+                Arc::clone(&sampler),
+                Arc::clone(&stop),
+                INTERVAL,
+                tokio::time::Instant::now(),
+                move || {
+                    let n = reads.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        assert!(n == 0, "the census read broke");
+                        Ok(LiveGauges::default())
+                    }
+                },
+                |_| ready(()),
+            ));
+            await_live_census_loop(&sampler, task).await;
+        });
+        // 3 * 60 + 25 <= 205: the run expects moments 1 to 3.
+        let report = sampler.live_census_report(60, Duration::from_secs(205), &[]);
+        let json = serde_json::to_value(&report).expect("serialize");
+        assert_eq!(json["loopEndReason"], "join_error", "{json}");
+        assert_eq!(json["expected"], 3, "{json}");
+        assert_eq!(json["absentOrdinals"], serde_json::json!([2, 3]), "{json}");
+        assert_eq!(json["attempted"], 1, "{json}");
+        assert_eq!(json["ok"], 1, "{json}");
+        let lines = handle.lock().clone();
+        let ends = starting_with(&lines, "LIVE_CENSUS_LOOP_END ");
+        assert_eq!(ends.len(), 1, "{lines:?}");
+        assert!(
+            ends[0].starts_with("LIVE_CENSUS_LOOP_END reason=join_error last_ordinal=2 error="),
+            "{}",
+            ends[0]
+        );
+        assert_eq!(starting_with(&lines, "LIVE_CENSUS_TALLY ").len(), 1);
+    }
+
+    /// Only an absent moment whose every read failed to connect inside a boot
+    /// gap is excused; a moment read on a retry is present, whatever its
+    /// earlier reads met.
+    fn excused_moments_are_absent_moments() {
+        let (sampler, lines, _root) = live_sampler();
+        let fail = |step| {
+            Err(GaugeFailure {
+                step,
+                error: "x".to_string(),
+            })
+        };
+        let connect = fail(GaugeFailStep::Connect);
+        let ok = Ok(LiveGauges::default());
+        let attempts: [(usize, f64, &Result<LiveGauges, GaugeFailure>); 11] = [
+            // Every read refused inside the first gap: excused.
+            (1, 60.0, &connect),
+            (1, 70.0, &connect),
+            (1, 80.0, &connect),
+            // Refused inside the second gap, then read: present.
+            (2, 120.0, &connect),
+            (2, 130.0, &connect),
+            (2, 140.0, &ok),
+            // Refused outside every gap: absent, not excused.
+            (3, 180.0, &connect),
+            (3, 190.0, &connect),
+            (3, 200.0, &connect),
+            // Inside a gap, but cut short after two reads: absent, not excused.
+            (4, 240.0, &connect),
+            (4, 250.0, &connect),
+        ];
+        for (k, (ordinal, at, read)) in (0..).zip(attempts) {
+            let attempt = 1 + k % 3;
+            sampler.record_gauge_attempt(ordinal, attempt, at, read);
+        }
+        let gaps = [
+            BootGap {
+                start_secs: 50.0,
+                end_secs: 100.0,
+            },
+            BootGap {
+                start_secs: 110.0,
+                end_secs: 150.0,
+            },
+            BootGap {
+                start_secs: 230.0,
+                end_secs: 270.0,
+            },
+        ];
+        let report = sampler.live_census_report(60, Duration::from_secs(4 * 60 + 25), &gaps);
+        let json = serde_json::to_value(&report).expect("serialize");
+        assert_eq!(
+            json["absentOrdinals"],
+            serde_json::json!([1, 3, 4]),
+            "{json}"
+        );
+        assert_eq!(json["excusedOrdinals"], serde_json::json!([1]), "{json}");
+        let lines = lines.lock().clone();
+        assert_eq!(
+            starting_with(&lines, "LIVE_GAUGE_EXCUSED "),
+            ["LIVE_GAUGE_EXCUSED ordinal=1"]
+        );
     }
 }

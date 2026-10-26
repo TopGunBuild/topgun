@@ -133,6 +133,7 @@
 //! a fully synthetic sequence — no real process required.
 
 use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::path::Path;
 use std::process::Command;
 
@@ -1239,7 +1240,7 @@ pub struct BootGap {
 /// a couple of trustworthy pre-kill samples is strictly safer than ever
 /// admitting a post-kill, pre-reconcile spurious low/zero read into the slope
 /// fit — the gap is deliberately a touch wider than the strict kill→ready span.
-fn in_boot_gap(elapsed_secs: f64, boot_gaps: &[BootGap]) -> bool {
+pub fn in_boot_gap(elapsed_secs: f64, boot_gaps: &[BootGap]) -> bool {
     boot_gaps
         .iter()
         .any(|g| elapsed_secs >= g.start_secs && elapsed_secs < g.end_secs)
@@ -1480,20 +1481,18 @@ pub enum OrVariant {
 /// Where a census record was taken, and therefore what it may decide.
 ///
 /// The observation fence is a TYPED property of the record, not a convention:
-/// [`CensusSource::LiveCopy`] records are taken from a byte copy of a **live**
-/// store file, which is a smeared image, so they are best-effort by
-/// construction and may not enter any predicate. They land in their own tally
-/// and are never added to the corpus-scan tally, which is what keeps the
-/// durable-corpus estimator's input identical whether the live sampler is armed
-/// or not.
+/// a [`CensusSource::LiveGauge`] reading comes from the RUNNING server's own
+/// counters, never from its store, so it lands in the live tally and is never
+/// added to the corpus-scan tally, which is what keeps the durable-corpus
+/// estimator's input identical whether the live sampler is armed or not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CensusSource {
     /// Taken at a recovery checkpoint, with the server process DEAD.
     Checkpoint,
     /// Taken after the run, with the server process DEAD.
     Terminal,
-    /// Taken from a byte copy of the LIVE store file. OBSERVATION ONLY.
-    LiveCopy,
+    /// Read from the running server's live-census gauges. OBSERVATION ONLY.
+    LiveGauge,
 }
 
 impl CensusSource {
@@ -1502,15 +1501,32 @@ impl CensusSource {
     /// disagree and no site retypes a literal. Deliberately hand-written rather
     /// than serde-derived: this file is `#[path]`-included by two integration
     /// targets and must stay `std`-only.
+    ///
+    /// The live token is not the retired copy sampler's: a frozen program that
+    /// reads the old token must not take a gauge reading for a store census.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Checkpoint => "CHECKPOINT",
             Self::Terminal => "TERMINAL",
-            Self::LiveCopy => "LIVE_COPY",
+            Self::LiveGauge => "LIVE_GAUGE",
         }
     }
 }
+
+/// A failure step a tally counts by, rendered under a fixed set of keys.
+///
+/// A step may carry detail its line prints (a metric name) that its tally key
+/// leaves out, so the key set stays fixed and every key is always rendered.
+pub trait FailStep: Copy {
+    /// Every tally key, in the order the per-step counts are rendered.
+    const KEYS: &'static [&'static str];
+    /// The position of this step's key in [`FailStep::KEYS`].
+    fn key_index(self) -> usize;
+}
+
+/// The most keys any [`FailStep`] has; the tally's storage is this wide.
+const FAIL_STEP_SLOTS: usize = 7;
 
 /// The step at which one census attempt failed. Every failure path of the copy
 /// and of the scan maps to exactly one variant, so a blind instrument always
@@ -1527,34 +1543,93 @@ pub enum CensusFailStep {
     Open,
     /// The records of the map could not be visited.
     Visit,
-    /// The census panicked; the error is the panic message.
-    Panic,
+    /// The store's maps could not be listed (the terminal sum over all maps).
+    ListMaps,
 }
 
 impl CensusFailStep {
-    /// Every variant, in the order the per-step counts are rendered.
-    pub const ALL: [Self; 6] = [
-        Self::ScratchDir,
-        Self::Copy,
-        Self::EngineMissing,
-        Self::Open,
-        Self::Visit,
-        Self::Panic,
-    ];
-
     /// The single rendered token, shared by the console line and the JSON key.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
+        Self::KEYS[self as usize]
+    }
+}
+
+impl FailStep for CensusFailStep {
+    const KEYS: &'static [&'static str] = &[
+        "scratch_dir",
+        "copy",
+        "engine_missing",
+        "open",
+        "visit",
+        "list_maps",
+    ];
+
+    fn key_index(self) -> usize {
+        self as usize
+    }
+}
+
+/// The step at which one read of the live-census gauges failed. `Absent` and
+/// `Unparseable` name the metric on the line; the tally counts them under one
+/// key each, so its key set is fixed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GaugeFailStep {
+    /// No response: the request could not be sent or answered.
+    Connect,
+    /// A response with a non-success status.
+    Status,
+    /// A response whose body could not be read.
+    Body,
+    /// The metric is missing from the body.
+    Absent(&'static str),
+    /// The metric is there, but not as exactly one whole number.
+    Unparseable(&'static str),
+    /// The server's census is not seeded, so its counts are not totals.
+    SeedNotOk,
+    /// The read did not finish within its timeout.
+    Timeout,
+}
+
+impl GaugeFailStep {
+    /// The step as its line prints it, metric name included.
+    #[must_use]
+    pub fn render(self) -> String {
         match self {
-            Self::ScratchDir => "scratch_dir",
-            Self::Copy => "copy",
-            Self::EngineMissing => "engine_missing",
-            Self::Open => "open",
-            Self::Visit => "visit",
-            Self::Panic => "panic",
+            Self::Absent(metric) | Self::Unparseable(metric) => {
+                format!("{}:{metric}", Self::KEYS[self.key_index()])
+            }
+            _ => Self::KEYS[self.key_index()].to_string(),
         }
     }
 }
+
+impl FailStep for GaugeFailStep {
+    const KEYS: &'static [&'static str] = &[
+        "connect",
+        "status",
+        "body",
+        "absent",
+        "unparseable",
+        "seed_not_ok",
+        "timeout",
+    ];
+
+    fn key_index(self) -> usize {
+        match self {
+            Self::Connect => 0,
+            Self::Status => 1,
+            Self::Body => 2,
+            Self::Absent(_) => 3,
+            Self::Unparseable(_) => 4,
+            Self::SeedNotOk => 5,
+            Self::Timeout => 6,
+        }
+    }
+}
+
+const _: () = assert!(CensusFailStep::KEYS.len() <= FAIL_STEP_SLOTS);
+const _: () = assert!(GaugeFailStep::KEYS.len() <= FAIL_STEP_SLOTS);
 
 /// Why one census attempt failed: the step, and the source error rendered
 /// with its whole chain (for [`CensusFailStep::EngineMissing`], the path that
@@ -1565,27 +1640,37 @@ pub struct CensusFailure {
     pub error: String,
 }
 
-/// Failed census attempts per step. It is the ONLY record of failures a tally
-/// keeps — the failed total is its sum — so the total and the per-step counts
-/// cannot disagree.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct FailuresByStep([usize; CensusFailStep::ALL.len()]);
+/// Failed attempts per step. It is the ONLY record of failures a tally keeps
+/// — the failed total is its sum — so the total and the per-step counts cannot
+/// disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailuresByStep<S> {
+    counts: [usize; FAIL_STEP_SLOTS],
+    step: PhantomData<S>,
+}
 
-impl FailuresByStep {
-    pub fn record(&mut self, step: CensusFailStep) {
-        self.0[step as usize] += 1;
+impl<S> Default for FailuresByStep<S> {
+    fn default() -> Self {
+        Self {
+            counts: [0; FAIL_STEP_SLOTS],
+            step: PhantomData,
+        }
+    }
+}
+
+impl<S: FailStep> FailuresByStep<S> {
+    pub fn record(&mut self, step: S) {
+        self.counts[step.key_index()] += 1;
     }
 
     #[must_use]
     pub fn total(&self) -> usize {
-        self.0.iter().sum()
+        self.counts.iter().sum()
     }
 
-    /// Every step with its count, zeros included.
-    pub fn iter(&self) -> impl Iterator<Item = (CensusFailStep, usize)> + '_ {
-        CensusFailStep::ALL
-            .into_iter()
-            .map(|s| (s, self.0[s as usize]))
+    /// Every key with its count, zeros included.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, usize)> + '_ {
+        S::KEYS.iter().copied().zip(self.counts)
     }
 }
 
@@ -1594,7 +1679,8 @@ impl FailuresByStep {
 pub enum LoopEndReason {
     /// The run set its stop flag.
     Stop,
-    /// The blocking task that takes one census could not be joined.
+    /// The loop's task could not be joined (it panicked); the run records
+    /// this when it awaits the task, so a dead loop still ends in a line.
     JoinError,
 }
 
@@ -1608,6 +1694,70 @@ impl LoopEndReason {
     }
 }
 
+/// How the quiesced live census compared with the terminal sum over every map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileStatus {
+    /// The two are equal, both counts.
+    Match,
+    /// Both were obtained and they differ.
+    Mismatch,
+    /// No comparison could be made; the reason says why.
+    NotApplicable,
+}
+
+impl ReconcileStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Match => "match",
+            Self::Mismatch => "mismatch",
+            Self::NotApplicable => "n/a",
+        }
+    }
+}
+
+/// Why no comparison could be made, in the order the reasons are checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileReason {
+    /// The server exited with this non-zero code.
+    ExitCode(i32),
+    /// The server was ended by a signal.
+    ExitSignal,
+    /// The server was already gone when the run looked.
+    ExitGone,
+    /// A churn task was still running, so the store could still move.
+    ChurnNotJoined,
+    /// The write-behind buffer never read empty twice in a row.
+    NotDrained,
+    /// No two reads of the live census agreed.
+    NotQuiesced,
+    /// The terminal sum failed at this step.
+    TerminalFailed(CensusFailStep),
+}
+
+impl ReconcileReason {
+    #[must_use]
+    pub fn render(self) -> String {
+        match self {
+            Self::ExitCode(code) => format!("exit_nonzero:{code}"),
+            Self::ExitSignal => "exit_nonzero:signal".to_string(),
+            Self::ExitGone => "exit_nonzero:gone".to_string(),
+            Self::ChurnNotJoined => "churn_not_joined".to_string(),
+            Self::NotDrained => "not_drained".to_string(),
+            Self::NotQuiesced => "not_quiesced".to_string(),
+            Self::TerminalFailed(step) => format!("terminal_failed:{}", step.as_str()),
+        }
+    }
+}
+
+/// The outcome of the reconciliation; `reason` is set exactly when the status
+/// is [`ReconcileStatus::NotApplicable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reconcile {
+    pub status: ReconcileStatus,
+    pub reason: Option<ReconcileReason>,
+}
+
 /// One census, tagged with when it was taken and from what.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CensusRecord {
@@ -1618,9 +1768,8 @@ pub struct CensusRecord {
     /// one.
     pub elapsed_secs: f64,
     /// When the census COMPLETED — for a copy-then-scan producer, when the scan
-    /// of the copy finished. Without it a reader cannot tell how wide the
-    /// window was that the copy smeared across, which on a LIVE copy is the
-    /// whole question. `None` where the producer took no copy at all (the
+    /// of the copy finished, so a reader can tell how wide the window was that
+    /// the copy was taken across. `None` where the producer took no copy at all (the
     /// terminal scan reads the data dir directly), so an absent window is a
     /// visible gap rather than a zero-width one.
     pub copy_completed_secs: Option<f64>,
@@ -4860,7 +5009,7 @@ mod tests {
         assert_eq!(SeriesShape::default(), SeriesShape::Indeterminate);
         assert_eq!(CensusSource::Checkpoint.as_str(), "CHECKPOINT");
         assert_eq!(CensusSource::Terminal.as_str(), "TERMINAL");
-        assert_eq!(CensusSource::LiveCopy.as_str(), "LIVE_COPY");
+        assert_eq!(CensusSource::LiveGauge.as_str(), "LIVE_GAUGE");
     }
 
     // ---------------------------------------------------------------------
