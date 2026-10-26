@@ -1,0 +1,8 @@
+=== TopGun soak harness (G4b / TODO-484) ===
+starting server (port 55202, data /tmp/x) ...
+  LIVE_GAUGE t=300.0s ordinal=1 attempt=1 live=100 live_tag_bytes=3400
+  LIVE_GAUGE t=600.0s ordinal=2 attempt=1 live=200 live_tag_bytes=6800
+LIVE_CENSUS_LOOP_END reason=join_error last_ordinal=2 error=task 7 panicked with message "boom"
+  LIVE_GAUGE_QUIESCED live=400 live_tag_bytes=13600
+  LIVE_CENSUS_TERMINAL live=400 live_tag_bytes=13600
+LIVE_CENSUS_TALLY attempted=2 ok=2 failed=0 by_step=none expected=4 missed=none absent=3,4 excused=none retries=0 quiesced_live=400 quiesced_live_tag_bytes=13600 terminal_live=400 terminal_live_tag_bytes=13600 reconcile=match reason=none

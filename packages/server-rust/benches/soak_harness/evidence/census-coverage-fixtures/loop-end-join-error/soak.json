@@ -1,0 +1,19 @@
+{
+  "durationSecs": 0,
+  "liveCensus": {
+    "intervalSecs": 300,
+    "attempted": 2,
+    "ok": 2,
+    "failed": 0,
+    "failuresByStep": {"connect": 0, "status": 0, "body": 0, "absent": 0, "unparseable": 0, "seed_not_ok": 0, "timeout": 0},
+    "expected": 4,
+    "missedOrdinals": [],
+    "absentOrdinals": [3,4],
+    "excusedOrdinals": [],
+    "retries": 0,
+    "quiesced": {"live": 400, "liveTagBytes": 13600},
+    "terminal": {"live": 400, "liveTagBytes": 13600},
+    "reconcile": {"status": "match", "reason": null},
+    "loopEndReason": "join_error"
+  }
+}
