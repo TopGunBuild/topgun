@@ -4603,7 +4603,14 @@ fn parse_args() -> Config {
                 i += 1;
             }
             "--live-census-interval" => {
-                c.live_census_interval_secs = parse_u64(&need(i, &args, "--live-census-interval"));
+                let v = parse_u64(&need(i, &args, "--live-census-interval"));
+                // Under 60 s the three attempts of one moment (offsets 0, 10 and
+                // 20 s, 5 s each) would run into the next moment's.
+                if (1..60).contains(&v) {
+                    eprintln!("--live-census-interval must be 0 or >= 60, got {v}");
+                    std::process::exit(2);
+                }
+                c.live_census_interval_secs = v;
                 i += 2;
             }
             "--sampler-jitter-seed" => {
