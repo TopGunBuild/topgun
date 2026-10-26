@@ -19,7 +19,8 @@ use serde::Serialize;
 use topgun_server::storage::record::RecordValue;
 
 use crate::monitor::{
-    CorpusLevelDisposition, FailuresByStep, LoopEndReason, TombstoneClauseDisposition,
+    CensusFailStep, CorpusLevelDisposition, FailStep, FailuresByStep, GaugeFailStep, LoopEndReason,
+    Reconcile, ReconcileReason, TombstoneClauseDisposition,
 };
 use topgun_server::storage::wal::format::{self, FrameDecodeResult};
 use topgun_server::storage::wal::{WalOp, WalStorePayload};
@@ -146,14 +147,18 @@ where
 /// Emit per-step failure counts as an object keyed by every step, zeros
 /// included, so an absent key can never be read as a zero.
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn serialize_failures_by_step<S>(value: &FailuresByStep, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_failures_by_step<F, S>(
+    value: &FailuresByStep<F>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
+    F: FailStep,
     S: serde::Serializer,
 {
     use serde::ser::SerializeMap;
-    let mut map = serializer.serialize_map(Some(value.iter().count()))?;
-    for (step, n) in value.iter() {
-        map.serialize_entry(step.as_str(), &n)?;
+    let mut map = serializer.serialize_map(Some(F::KEYS.len()))?;
+    for (key, n) in value.iter() {
+        map.serialize_entry(key, &n)?;
     }
     map.end()
 }
@@ -173,35 +178,95 @@ where
     }
 }
 
-/// Attempt counters of one census tally. `failed` is the sum of
+/// The live census tally as exported. `failed` is the sum of
 /// `failures_by_step` and `ok` is `attempted - failed`, both computed in
-/// [`CensusCounts::new`], so `attempted = ok + failed` holds by construction.
+/// [`CensusCounts::new`], so `attempted = ok + failed` holds by construction;
+/// `absent_ordinals` is the expected moments without a reading, so `expected`
+/// is the present ones plus the absent ones by construction too.
+///
+/// [`CensusCounts::new`] is the tally of a sampler that took no moment and
+/// reached no end sequence: the moment fields empty, `quiesced` and
+/// `reconcile` null.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CensusCounts {
+    /// `GET /metrics` attempts at grid moments.
     pub attempted: usize,
     pub ok: usize,
     pub failed: usize,
     #[serde(serialize_with = "serialize_failures_by_step")]
-    pub failures_by_step: FailuresByStep,
+    pub failures_by_step: FailuresByStep<GaugeFailStep>,
+    /// Grid moments whose attempts all end before the run's stop.
+    pub expected: usize,
+    /// Moments skipped because the next one was already due.
+    pub missed_ordinals: Vec<usize>,
+    /// Expected moments without a reading.
+    pub absent_ordinals: Vec<usize>,
+    /// Absent moments whose every attempt failed to connect inside a boot gap;
+    /// a subset of `absent_ordinals`, never a third kind of moment.
+    pub excused_ordinals: Vec<usize>,
+    /// Attempts after the first one of their moment.
+    pub retries: usize,
+    /// Null when the end sequence did not reach a quiesced pair. Explicit,
+    /// with no `skip_serializing_if`, like `terminal` and `reconcile`.
+    pub quiesced: Option<LiveCountsReport>,
+    /// The live entries summed over every map of the stopped store, the other
+    /// side of the reconciliation; null when the run did not reach the sum or
+    /// the sum failed.
+    pub terminal: Option<LiveCountsReport>,
+    #[serde(serialize_with = "serialize_reconcile")]
+    pub reconcile: Option<Reconcile>,
 }
 
 impl CensusCounts {
     #[must_use]
-    pub fn new(attempted: usize, failures_by_step: FailuresByStep) -> Self {
+    pub fn new(attempted: usize, failures_by_step: FailuresByStep<GaugeFailStep>) -> Self {
         let failed = failures_by_step.total();
         Self {
             attempted,
             ok: attempted - failed,
             failed,
             failures_by_step,
+            expected: 0,
+            missed_ordinals: Vec::new(),
+            absent_ordinals: Vec::new(),
+            excused_ordinals: Vec::new(),
+            retries: 0,
+            quiesced: None,
+            terminal: None,
+            reconcile: None,
         }
     }
 }
 
-/// The live-copy census sampler's section of the final report: its attempts
-/// were otherwise visible nowhere, so a sampler that went blind for a whole
-/// run looked the same as one that was never armed.
+/// One side of the reconciliation: live entries and their tag bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveCountsReport {
+    pub live: u64,
+    pub live_tag_bytes: u64,
+}
+
+/// Emit the reconciliation as `{status, reason}` (reason `null` unless the
+/// status is `n/a`), or `null` when the run never reconciled.
+#[allow(clippy::trivially_copy_pass_by_ref, clippy::ref_option)]
+fn serialize_reconcile<S>(value: &Option<Reconcile>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    let Some(reconcile) = value else {
+        return serializer.serialize_none();
+    };
+    let mut map = serializer.serialize_map(Some(2))?;
+    map.serialize_entry("status", reconcile.status.as_str())?;
+    map.serialize_entry("reason", &reconcile.reason.map(ReconcileReason::render))?;
+    map.end()
+}
+
+/// The live census sampler's section of the final report: its attempts are
+/// otherwise visible nowhere, so a sampler that went blind for a whole run
+/// would look the same as one that was never armed.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveCensusReport {
@@ -233,7 +298,7 @@ pub struct TombstoneCorpusReport {
     pub scans_attempted: usize,
     pub scans_failed: usize,
     #[serde(serialize_with = "serialize_failures_by_step")]
-    pub failures_by_step: FailuresByStep,
+    pub failures_by_step: FailuresByStep<CensusFailStep>,
     pub samples: usize,
     pub first_bytes: u64,
     pub min_bytes: u64,
