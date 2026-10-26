@@ -1,0 +1,8 @@
+CENSUS_EXPECTED_N_cell=4
+CENSUS_ABSENT_N_cell=1
+CENSUS_ABSENT_cell=900
+CENSUS_EXCUSED_N_cell=0
+CENSUS_RECONCILE_cell=TRUE
+CENSUS_LOOP_END_cell=stop
+CENSUS_COVERAGE_cell=FALSE reason=duplicate_ordinal,unexcused_absent
+exit=1

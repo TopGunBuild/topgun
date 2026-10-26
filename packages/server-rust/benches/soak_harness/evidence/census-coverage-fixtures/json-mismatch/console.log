@@ -1,0 +1,10 @@
+=== TopGun soak harness (G4b / TODO-484) ===
+starting server (port 55202, data /tmp/x) ...
+  LIVE_GAUGE t=300.0s ordinal=1 attempt=1 live=100 live_tag_bytes=3400
+  LIVE_GAUGE t=600.0s ordinal=2 attempt=1 live=200 live_tag_bytes=6800
+  LIVE_GAUGE t=900.0s ordinal=3 attempt=1 live=300 live_tag_bytes=10200
+  LIVE_GAUGE t=1200.0s ordinal=4 attempt=1 live=400 live_tag_bytes=13600
+LIVE_CENSUS_LOOP_END reason=stop last_ordinal=4
+  LIVE_GAUGE_QUIESCED live=400 live_tag_bytes=13600
+  LIVE_CENSUS_TERMINAL live=400 live_tag_bytes=13600
+LIVE_CENSUS_TALLY attempted=4 ok=4 failed=0 by_step=none expected=4 missed=none absent=none excused=none retries=0 quiesced_live=400 quiesced_live_tag_bytes=13600 terminal_live=400 terminal_live_tag_bytes=13600 reconcile=match reason=none
