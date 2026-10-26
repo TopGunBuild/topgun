@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::net::{SocketAddr, TcpListener};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -441,28 +441,47 @@ impl ServerSupervisor {
 
     /// SIGTERM the child and wait (bounded) for a clean exit, falling back to
     /// SIGKILL if it overruns. Marks the kill intentional so the exit watcher
-    /// stays quiet, mirroring `kill9`.
-    async fn graceful_shutdown(&self) {
+    /// stays quiet, mirroring `kill9`. An empty slot — the exit watcher or a
+    /// liveness check already reaped the child — is [`ServerExit::AlreadyExited`].
+    pub async fn graceful_shutdown(&self) -> ServerExit {
         self.intentional_kill.store(true, Ordering::SeqCst);
         let pid = self.current_pid();
         let child = self.child.lock().take();
-        if let Some(mut child) = child {
-            if let Some(pid) = pid {
-                // tokio's Child only exposes SIGKILL via start_kill; shell out to
-                // deliver the catchable SIGTERM the server drains on.
-                let _ = Command::new("kill")
-                    .arg("-TERM")
-                    .arg(pid.to_string())
-                    .status()
-                    .await;
-            }
-            if tokio::time::timeout(Duration::from_secs(90), child.wait())
-                .await
-                .is_err()
-            {
+        let Some(mut child) = child else {
+            return ServerExit::AlreadyExited;
+        };
+        if let Some(pid) = pid {
+            // tokio's Child only exposes SIGKILL via start_kill; shell out to
+            // deliver the catchable SIGTERM the server drains on.
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status()
+                .await;
+        }
+        let status =
+            if let Ok(status) = tokio::time::timeout(Duration::from_secs(90), child.wait()).await {
+                status
+            } else {
                 let _ = child.start_kill();
-                let _ = child.wait().await;
-            }
+                child.wait().await
+            };
+        // A wait that failed leaves no status to read; the child is not ours to
+        // wait on any more, which is what an empty slot means too.
+        status.map_or(ServerExit::AlreadyExited, ServerExit::from)
+    }
+
+    /// Whether the child still runs: `None` while it does, else how it ended.
+    ///
+    /// Reaps exactly as the exit watcher does — under the slot's lock, clearing
+    /// the slot — and reports an exit nobody asked for the same way, so a
+    /// child this check reaps is never one the watcher would have reported and
+    /// now cannot.
+    pub fn liveness(&self) -> Option<ServerExit> {
+        match self.reap_and_report() {
+            ChildOutcome::Running => None,
+            ChildOutcome::Exited(status) => Some(ServerExit::from(status)),
+            ChildOutcome::Gone => Some(ServerExit::AlreadyExited),
         }
     }
 
@@ -477,18 +496,29 @@ impl ServerSupervisor {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                match this.poll_child_exit() {
-                    ChildOutcome::Exited(detail) => {
-                        if !this.intentional_kill.load(Ordering::SeqCst) {
-                            this.panic_watch.record_unexpected_exit(&detail);
-                        }
-                        return;
-                    }
-                    ChildOutcome::Gone => return,
+                match this.reap_and_report() {
+                    ChildOutcome::Exited(_) | ChildOutcome::Gone => return,
                     ChildOutcome::Running => {}
                 }
             }
         });
+    }
+
+    /// Poll the child and, if it died without an intentional kill, record an
+    /// unexpected-exit panic report.
+    fn reap_and_report(&self) -> ChildOutcome {
+        let outcome = self.poll_child_exit();
+        if let ChildOutcome::Exited(status) = outcome {
+            if !self.intentional_kill.load(Ordering::SeqCst) {
+                let detail = match (status.code(), status.signal()) {
+                    (Some(c), _) => format!("exited with code {c}"),
+                    (None, Some(s)) => format!("terminated by signal {s}"),
+                    _ => "exited (unknown status)".to_string(),
+                };
+                self.panic_watch.record_unexpected_exit(&detail);
+            }
+        }
+        outcome
     }
 
     /// Synchronously poll the current child's status, clearing the slot on exit.
@@ -500,13 +530,8 @@ impl ServerSupervisor {
         };
         match child.try_wait() {
             Ok(Some(status)) => {
-                let detail = match (status.code(), status.signal()) {
-                    (Some(c), _) => format!("exited with code {c}"),
-                    (None, Some(s)) => format!("terminated by signal {s}"),
-                    _ => "exited (unknown status)".to_string(),
-                };
                 *guard = None;
-                ChildOutcome::Exited(detail)
+                ChildOutcome::Exited(status)
             }
             Ok(None) => ChildOutcome::Running,
             Err(_) => ChildOutcome::Gone,
@@ -514,10 +539,33 @@ impl ServerSupervisor {
     }
 }
 
+/// How the server process ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerExit {
+    /// It exited with this code.
+    Code(i32),
+    /// It was ended by this signal.
+    Signal(i32),
+    /// The slot was already empty: the exit watcher reaped it, and its code is
+    /// in the unexpected-exit report.
+    AlreadyExited,
+}
+
+impl From<ExitStatus> for ServerExit {
+    fn from(status: ExitStatus) -> Self {
+        // A reaped Unix child either exited or was signalled; the fallback is
+        // a status that is neither, never a code of 0.
+        status
+            .code()
+            .map_or_else(|| Self::Signal(status.signal().unwrap_or(0)), Self::Code)
+    }
+}
+
 /// Result of polling the supervised child's status.
+#[derive(Clone, Copy)]
 enum ChildOutcome {
     Running,
-    Exited(String),
+    Exited(ExitStatus),
     Gone,
 }
 
