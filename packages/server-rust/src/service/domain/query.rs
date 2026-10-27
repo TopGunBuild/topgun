@@ -100,10 +100,12 @@ pub struct QuerySubscription {
 /// In-memory registry of standing query subscriptions.
 ///
 /// Thread-safe via `DashMap`. Keyed by `map_name` for efficient lookup
-/// during mutation observation.
+/// during mutation observation, then by the owning connection and the
+/// client-chosen `query_id`: two connections may pick the same id, and neither
+/// may replace or remove the other's subscription.
 pub struct QueryRegistry {
-    /// `map_name` -> { `query_id` -> `QuerySubscription` }
-    subscriptions: DashMap<String, DashMap<String, Arc<QuerySubscription>>>,
+    /// `map_name` -> { (`connection_id`, `query_id`) -> `QuerySubscription` }
+    subscriptions: DashMap<String, DashMap<(ConnectionId, String), Arc<QuerySubscription>>>,
 }
 
 impl QueryRegistry {
@@ -115,26 +117,28 @@ impl QueryRegistry {
         }
     }
 
-    /// Registers a standing query subscription.
+    /// Registers a standing query subscription, replacing one of the same
+    /// connection with the same `query_id` on the same map.
     pub fn register(&self, sub: QuerySubscription) {
         let map_name = sub.map_name.clone();
-        let query_id = sub.query_id.clone();
+        let key = (sub.connection_id, sub.query_id.clone());
         let sub = Arc::new(sub);
 
         self.subscriptions
             .entry(map_name)
             .or_default()
-            .insert(query_id, sub);
+            .insert(key, sub);
     }
 
-    /// Removes a subscription by `query_id`. Returns `true` if found.
+    /// Removes `connection_id`'s subscription `query_id`. Returns `true` if
+    /// found; another connection's subscription of the same id is untouched.
     #[must_use]
-    pub fn unregister(&self, query_id: &str) -> bool {
+    pub fn unregister(&self, connection_id: ConnectionId, query_id: &str) -> bool {
+        let key = (connection_id, query_id.to_string());
         let mut found = false;
         // Iterate all maps to find the subscription
         self.subscriptions.retain(|_, inner| {
-            if inner.contains_key(query_id) {
-                inner.remove(query_id);
+            if inner.remove(&key).is_some() {
                 found = true;
             }
             // Remove the outer entry if the inner map is now empty
@@ -172,17 +176,19 @@ impl QueryRegistry {
             .collect()
     }
 
-    /// Looks up a subscription by `query_id` across all maps.
-    ///
-    /// Used by `handle_query_sync_init` to resolve the `map_name` for a query.
+    /// Looks up `connection_id`'s subscription `query_id` on `map_name`.
     #[must_use]
-    pub fn get_subscription(&self, query_id: &str) -> Option<Arc<QuerySubscription>> {
-        for entry in &self.subscriptions {
-            if let Some(sub) = entry.value().get(query_id) {
-                return Some(sub.value().clone());
-            }
-        }
-        None
+    pub fn get_subscription(
+        &self,
+        map_name: &str,
+        connection_id: ConnectionId,
+        query_id: &str,
+    ) -> Option<Arc<QuerySubscription>> {
+        self.subscriptions.get(map_name).and_then(|inner| {
+            inner
+                .get(&(connection_id, query_id.to_string()))
+                .map(|sub| Arc::clone(sub.value()))
+        })
     }
 
     /// Total subscription count across all maps (for testing).
@@ -922,7 +928,10 @@ impl QueryService {
         {
             // Look up the registered subscription to update its prev-keys. The
             // subscription was registered above and is still live.
-            if let Some(sub) = self.query_registry.get_subscription(&query_id) {
+            if let Some(sub) =
+                self.query_registry
+                    .get_subscription(&map_name, connection_id, &query_id)
+            {
                 for entry in &results {
                     sub.previous_result_keys.insert(entry.key.clone());
                 }
@@ -982,7 +991,10 @@ impl QueryService {
         // signal so the client knows to resubscribe.
         match delta_buffer.deactivate_and_drain(&fence) {
             Ok(post_fence_entries) => {
-                if let Some(sub) = self.query_registry.get_subscription(&query_id) {
+                if let Some(sub) =
+                    self.query_registry
+                        .get_subscription(&map_name, connection_id, &query_id)
+                {
                     for (key, entry) in post_fence_entries {
                         // Run post-fence buffered mutations through the live window so
                         // membership is consistent with what the subscriber will observe.
@@ -1054,14 +1066,20 @@ impl QueryService {
         }
     }
 
-    /// Handles a `QueryUnsubscribe` operation.
+    /// Handles a `QueryUnsubscribe` operation: removes the calling
+    /// connection's subscription of that id. An id the caller does not hold —
+    /// another connection's, or none at all — is a no-op with the same answer.
     #[allow(clippy::unnecessary_wraps)]
     fn handle_query_unsubscribe(
         &self,
-        _ctx: &crate::service::operation::OperationContext,
+        ctx: &crate::service::operation::OperationContext,
         payload: &topgun_core::messages::query::QueryUnsubMessage,
     ) -> Result<OperationResponse, OperationError> {
-        let _ = self.query_registry.unregister(&payload.payload.query_id);
+        if let Some(connection_id) = ctx.connection_id {
+            let _ = self
+                .query_registry
+                .unregister(connection_id, &payload.payload.query_id);
+        }
         Ok(OperationResponse::Empty)
     }
 
@@ -1688,14 +1706,15 @@ mod tests {
             delta_buffer: inactive_buffer(),
         });
 
-        assert!(registry.unregister("q-1"));
+        assert!(!registry.unregister(ConnectionId(2), "q-1"));
+        assert!(registry.unregister(ConnectionId(1), "q-1"));
         assert_eq!(registry.subscription_count(), 0);
     }
 
     #[test]
     fn registry_unregister_returns_false_when_not_found() {
         let registry = QueryRegistry::new();
-        assert!(!registry.unregister("nonexistent"));
+        assert!(!registry.unregister(ConnectionId(1), "nonexistent"));
     }
 
     #[test]
@@ -2776,6 +2795,124 @@ mod tests {
         assert_eq!(registry.subscription_count(), 0);
     }
 
+    /// Subscribes `connection` to every record of `users` as `query_id`
+    /// through the query service.
+    async fn subscribe_all_users(
+        svc: &Arc<QueryService>,
+        connection: ConnectionId,
+        query_id: &str,
+    ) {
+        let op = Operation::QuerySubscribe {
+            ctx: make_ctx(Some(connection)),
+            payload: QuerySubMessage {
+                payload: QuerySubPayload {
+                    query_id: query_id.to_string(),
+                    map_name: "users".to_string(),
+                    query: Query::default(),
+                    fields: None,
+                },
+            },
+        };
+        svc.clone().oneshot(op).await.unwrap();
+    }
+
+    /// The `(query_id, key)` of every `QUERY_UPDATE` waiting on `rx`.
+    fn received_updates(
+        rx: &mut tokio::sync::mpsc::Receiver<OutboundMessage>,
+    ) -> Vec<(String, String)> {
+        let mut updates = Vec::new();
+        while let Ok(OutboundMessage::Binary(bytes)) = rx.try_recv() {
+            if let Message::QueryUpdate { payload } = rmp_serde::from_slice(&bytes).unwrap() {
+                updates.push((payload.query_id, payload.key));
+            }
+        }
+        updates
+    }
+
+    /// A query service over a fresh registry with two client connections, and
+    /// an observer of `users` that feeds that registry.
+    fn two_connection_query_service() -> (
+        Arc<QueryService>,
+        QueryMutationObserver,
+        (ConnectionId, tokio::sync::mpsc::Receiver<OutboundMessage>),
+        (ConnectionId, tokio::sync::mpsc::Receiver<OutboundMessage>),
+    ) {
+        let registry = Arc::new(QueryRegistry::new());
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let (a, rx_a) = conn_registry.register(ConnectionKind::Client, &test_config());
+        let (b, rx_b) = conn_registry.register(ConnectionKind::Client, &test_config());
+        let svc = Arc::new(QueryService::new(
+            registry.clone(),
+            make_factory(),
+            Arc::clone(&conn_registry),
+            10_000,
+            None,
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+        let observer = QueryMutationObserver::new(registry, conn_registry, "users".to_string(), 0);
+        (svc, observer, (a.id, rx_a), (b.id, rx_b))
+    }
+
+    fn query_unsubscribe(connection: ConnectionId, query_id: &str) -> Operation {
+        Operation::QueryUnsubscribe {
+            ctx: make_ctx(Some(connection)),
+            payload: QueryUnsubMessage {
+                payload: QueryUnsubPayload {
+                    query_id: query_id.to_string(),
+                },
+            },
+        }
+    }
+
+    fn write_user(observer: &QueryMutationObserver, key: &str) {
+        let record = make_record(make_value_map(vec![("n", Value::Int(1))]));
+        observer.on_put(key, &record, None, false);
+    }
+
+    fn update(query_id: &str, key: &str) -> Vec<(String, String)> {
+        vec![(query_id.to_string(), key.to_string())]
+    }
+
+    /// An unsubscribe of an id the caller does not hold leaves the holder's
+    /// subscription delivering.
+    #[tokio::test]
+    async fn a_connection_cannot_remove_another_connections_query_subscription() {
+        let (svc, observer, (a, mut rx_a), (b, mut rx_b)) = two_connection_query_service();
+        subscribe_all_users(&svc, a, "q-a").await;
+
+        svc.clone()
+            .oneshot(query_unsubscribe(b, "q-a"))
+            .await
+            .unwrap();
+        write_user(&observer, "k1");
+
+        assert_eq!(received_updates(&mut rx_a), update("q-a", "k1"));
+        assert!(received_updates(&mut rx_b).is_empty());
+    }
+
+    /// Two connections that choose the same query id each keep their own
+    /// subscription: both are delivered a matching write, and one's
+    /// unsubscribe stops only its own delivery.
+    #[tokio::test]
+    async fn connections_choosing_the_same_query_id_keep_separate_subscriptions() {
+        let (svc, observer, (a, mut rx_a), (b, mut rx_b)) = two_connection_query_service();
+        subscribe_all_users(&svc, a, "shared").await;
+        subscribe_all_users(&svc, b, "shared").await;
+
+        write_user(&observer, "k1");
+        assert_eq!(received_updates(&mut rx_a), update("shared", "k1"));
+        assert_eq!(received_updates(&mut rx_b), update("shared", "k1"));
+
+        svc.clone()
+            .oneshot(query_unsubscribe(a, "shared"))
+            .await
+            .unwrap();
+        write_user(&observer, "k2");
+        assert!(received_updates(&mut rx_a).is_empty());
+        assert_eq!(received_updates(&mut rx_b), update("shared", "k2"));
+    }
+
     // ---- get_subscribed_connection_ids tests (AC1, AC2) ----
 
     #[test]
@@ -2987,7 +3124,7 @@ mod tests {
         assert_eq!(config.max_query_records, 10_000);
     }
 
-    /// Verify `QueryRegistry::get_subscription` lookup by query_id.
+    /// Verify `QueryRegistry::get_subscription` lookup by map, connection and query_id.
     #[test]
     fn registry_get_subscription_by_query_id() {
         let registry = QueryRegistry::new();
@@ -3002,15 +3139,23 @@ mod tests {
             delta_buffer: inactive_buffer(),
         });
 
-        let sub = registry.get_subscription("q-lookup");
+        let sub = registry.get_subscription("users", ConnectionId(1), "q-lookup");
         assert!(sub.is_some());
         let sub = sub.unwrap();
         assert_eq!(sub.query_id, "q-lookup");
         assert_eq!(sub.map_name, "users");
         assert_eq!(sub.fields, Some(vec!["name".to_string()]));
 
-        // Non-existent query returns None
-        assert!(registry.get_subscription("nonexistent").is_none());
+        // Another connection's id, another map, or an unknown id returns None
+        assert!(registry
+            .get_subscription("users", ConnectionId(2), "q-lookup")
+            .is_none());
+        assert!(registry
+            .get_subscription("orders", ConnectionId(1), "q-lookup")
+            .is_none());
+        assert!(registry
+            .get_subscription("users", ConnectionId(1), "nonexistent")
+            .is_none());
     }
 
     /// Verifies `map_dag_rows_to_entries`: the entry key prefers the real `_key`

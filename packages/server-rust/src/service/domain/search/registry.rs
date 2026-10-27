@@ -35,11 +35,13 @@ pub trait RegistryEntry: Send + Sync + 'static {
 
 /// Generic concurrent subscription registry backed by [`DashMap`].
 ///
-/// Keyed by `subscription_id` for O(1) lookup. Per-map iteration is O(n)
-/// where n is the total number of subscriptions across all maps, acceptable
-/// for the expected workload (few hundred concurrent subscriptions per server).
+/// Keyed by the owning connection and the client-chosen `subscription_id`:
+/// two connections may pick the same id, and neither may replace or remove the
+/// other's subscription. Per-map iteration is O(n) where n is the total number
+/// of subscriptions across all maps, acceptable for the expected workload (few
+/// hundred concurrent subscriptions per server).
 pub struct SubscriptionRegistry<S: RegistryEntry> {
-    pub(crate) subscriptions: DashMap<String, Arc<S>>,
+    pub(crate) subscriptions: DashMap<(ConnectionId, String), Arc<S>>,
 }
 
 impl<S: RegistryEntry> SubscriptionRegistry<S> {
@@ -53,19 +55,21 @@ impl<S: RegistryEntry> SubscriptionRegistry<S> {
 
     /// Registers a standing subscription, wrapping it in `Arc`.
     ///
-    /// If a subscription with the same ID already exists it is replaced.
+    /// If the same connection already holds a subscription with the same ID
+    /// it is replaced.
     pub fn register(&self, sub: S) {
-        let id = sub.subscription_id().to_owned();
-        self.subscriptions.insert(id, Arc::new(sub));
+        let key = (sub.connection_id(), sub.subscription_id().to_owned());
+        self.subscriptions.insert(key, Arc::new(sub));
     }
 
-    /// Removes a subscription by ID.
+    /// Removes `connection_id`'s subscription with the given ID.
     ///
-    /// Returns the removed subscription, or `None` if not found.
+    /// Returns the removed subscription, or `None` if that connection holds
+    /// none with this ID.
     #[must_use]
-    pub fn unregister(&self, subscription_id: &str) -> Option<Arc<S>> {
+    pub fn unregister(&self, connection_id: ConnectionId, subscription_id: &str) -> Option<Arc<S>> {
         self.subscriptions
-            .remove(subscription_id)
+            .remove(&(connection_id, subscription_id.to_owned()))
             .map(|(_, sub)| sub)
     }
 
@@ -76,8 +80,8 @@ impl<S: RegistryEntry> SubscriptionRegistry<S> {
     #[must_use]
     pub fn unregister_by_connection(&self, connection_id: ConnectionId) -> Vec<String> {
         let mut removed = Vec::new();
-        self.subscriptions.retain(|id, sub| {
-            if sub.connection_id() == connection_id {
+        self.subscriptions.retain(|(owner, id), _| {
+            if *owner == connection_id {
                 removed.push(id.clone());
                 false
             } else {

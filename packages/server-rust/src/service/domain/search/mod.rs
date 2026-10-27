@@ -544,11 +544,17 @@ fn send_to_connection(conn_reg: &ConnectionRegistry, conn_id: ConnectionId, msg:
 /// This is a free function (not a method on `SearchService`) to avoid borrow complications
 /// when both `self.registry` and `self.hybrid_registry` need to be called from within
 /// the same match arm.
+///
+/// Only the calling connection's subscription of that id is removed; an id it
+/// does not hold — another connection's, or none at all — is a no-op.
 fn handle_unsubscribe<S: RegistryEntry>(
     registry: &SubscriptionRegistry<S>,
+    connection_id: Option<ConnectionId>,
     subscription_id: &str,
 ) -> OperationResponse {
-    let _ = registry.unregister(subscription_id);
+    if let Some(connection_id) = connection_id {
+        let _ = registry.unregister(connection_id, subscription_id);
+    }
     OperationResponse::Empty
 }
 
@@ -1420,9 +1426,11 @@ impl SearchService {
                 })))
             }
 
-            Operation::SearchUnsubscribe { payload, .. } => {
-                Ok(handle_unsubscribe(&self.registry, &payload.subscription_id))
-            }
+            Operation::SearchUnsubscribe { ctx, payload } => Ok(handle_unsubscribe(
+                &self.registry,
+                ctx.connection_id,
+                &payload.subscription_id,
+            )),
 
             _ => Err(OperationError::WrongService),
         }
@@ -1700,9 +1708,14 @@ impl SearchService {
     /// Handle a hybrid search unsubscribe request.
     fn handle_hybrid_search_unsubscribe(
         &self,
+        ctx: &OperationContext,
         payload: &HybridSearchUnsubPayload,
     ) -> OperationResponse {
-        handle_unsubscribe(&self.hybrid_registry, &payload.subscription_id)
+        handle_unsubscribe(
+            &self.hybrid_registry,
+            ctx.connection_id,
+            &payload.subscription_id,
+        )
     }
 
     /// Re-evaluate all hybrid subscriptions for a map on data mutation.
@@ -1934,9 +1947,10 @@ impl Service<Operation> for Arc<SearchService> {
                         ref ctx,
                         ref payload,
                     } => svc.handle_hybrid_search_subscribe(ctx, payload).await,
-                    Operation::HybridSearchUnsubscribe { ref payload, .. } => {
-                        Ok(svc.handle_hybrid_search_unsubscribe(payload))
-                    }
+                    Operation::HybridSearchUnsubscribe {
+                        ref ctx,
+                        ref payload,
+                    } => Ok(svc.handle_hybrid_search_unsubscribe(ctx, payload)),
                     _ => svc.handle(op),
                 }
             }
@@ -2069,8 +2083,8 @@ mod tests {
         }
     }
 
-    fn make_unsubscribe_op(subscription_id: &str) -> Operation {
-        let ctx = OperationContext::new(
+    fn make_unsubscribe_op(connection: ConnectionId, subscription_id: &str) -> Operation {
+        let mut ctx = OperationContext::new(
             44,
             service_names::SEARCH,
             Timestamp {
@@ -2080,6 +2094,7 @@ mod tests {
             },
             5000,
         );
+        ctx.connection_id = Some(connection);
         Operation::SearchUnsubscribe {
             ctx,
             payload: SearchUnsubPayload {
@@ -2235,7 +2250,8 @@ mod tests {
         reg.register(sub);
         assert_eq!(reg.get_subscriptions_for_map("my-map").len(), 1);
 
-        let removed = reg.unregister("sub-1");
+        assert!(reg.unregister(ConnectionId(7), "sub-1").is_none());
+        let removed = reg.unregister(ConnectionId(42), "sub-1");
         assert!(removed.is_some());
         assert!(reg.get_subscriptions_for_map("my-map").is_empty());
     }
@@ -2367,7 +2383,7 @@ mod tests {
 
         let resp = svc
             .clone()
-            .oneshot(make_unsubscribe_op("sub-1"))
+            .oneshot(make_unsubscribe_op(ConnectionId(1), "sub-1"))
             .await
             .unwrap();
         assert!(reg.get_subscriptions_for_map("my-map").is_empty());
@@ -2505,12 +2521,12 @@ mod tests {
         reg.register(sub);
         assert_eq!(reg.get_subscriptions_for_map("my-map").len(), 1);
 
-        let removed = reg.unregister("hsub-1");
+        let removed = reg.unregister(ConnectionId(99), "hsub-1");
         assert!(removed.is_some());
         assert!(reg.get_subscriptions_for_map("my-map").is_empty());
 
         // Second unregister of the same ID returns None.
-        let removed2 = reg.unregister("hsub-1");
+        let removed2 = reg.unregister(ConnectionId(99), "hsub-1");
         assert!(removed2.is_none());
     }
 
@@ -2572,8 +2588,8 @@ mod tests {
         }
     }
 
-    fn make_hybrid_unsub_op(sub_id: &str) -> Operation {
-        let ctx = OperationContext::new(
+    fn make_hybrid_unsub_op(connection: ConnectionId, sub_id: &str) -> Operation {
+        let mut ctx = OperationContext::new(
             52,
             service_names::SEARCH,
             topgun_core::hlc::Timestamp {
@@ -2583,6 +2599,7 @@ mod tests {
             },
             5000,
         );
+        ctx.connection_id = Some(connection);
         Operation::HybridSearchUnsubscribe {
             ctx,
             payload: HybridSearchUnsubPayload {
@@ -2656,7 +2673,7 @@ mod tests {
         // Unsubscribe.
         let resp = svc
             .clone()
-            .oneshot(make_hybrid_unsub_op("sub-h1"))
+            .oneshot(make_hybrid_unsub_op(ConnectionId(1), "sub-h1"))
             .await
             .unwrap();
         assert!(
@@ -2671,13 +2688,89 @@ mod tests {
             .is_empty());
     }
 
+    /// A search or hybrid-search subscription belongs to the connection that
+    /// made it: another connection choosing the same id gets a subscription of
+    /// its own, and an unsubscribe removes only the caller's.
+    #[tokio::test]
+    async fn search_subscriptions_are_owned_by_the_connection_that_made_them() {
+        let svc = make_service();
+        let (a, b) = (ConnectionId(1), ConnectionId(2));
+        let as_connection = |op: Operation, connection: ConnectionId| match op {
+            Operation::SearchSubscribe { mut ctx, payload } => {
+                ctx.connection_id = Some(connection);
+                Operation::SearchSubscribe { ctx, payload }
+            }
+            Operation::HybridSearchSubscribe { mut ctx, payload } => {
+                ctx.connection_id = Some(connection);
+                Operation::HybridSearchSubscribe { ctx, payload }
+            }
+            other => panic!("unexpected op {other:?}"),
+        };
+        let owners = |svc: &SearchService| {
+            let mut text: Vec<ConnectionId> = svc
+                .registry
+                .get_subscriptions_for_map("my-map")
+                .iter()
+                .map(|sub| sub.connection_id)
+                .collect();
+            let mut hybrid: Vec<ConnectionId> = svc
+                .hybrid_registry
+                .get_subscriptions_for_map("my-map")
+                .iter()
+                .map(|sub| sub.connection_id)
+                .collect();
+            text.sort_unstable_by_key(|c| c.0);
+            hybrid.sort_unstable_by_key(|c| c.0);
+            (text, hybrid)
+        };
+
+        for connection in [a, b] {
+            svc.clone()
+                .oneshot(as_connection(
+                    make_subscribe_op("my-map", "hello"),
+                    connection,
+                ))
+                .await
+                .unwrap();
+            svc.clone()
+                .oneshot(as_connection(
+                    make_hybrid_sub_op("my-map", "hello", "sub-h1"),
+                    connection,
+                ))
+                .await
+                .unwrap();
+        }
+        assert_eq!(owners(&svc), (vec![a, b], vec![a, b]));
+
+        svc.clone()
+            .oneshot(make_unsubscribe_op(b, "sub-1"))
+            .await
+            .unwrap();
+        svc.clone()
+            .oneshot(make_hybrid_unsub_op(b, "sub-h1"))
+            .await
+            .unwrap();
+        assert_eq!(owners(&svc), (vec![a], vec![a]));
+
+        // A second unsubscribe by B finds nothing of its own and leaves A's.
+        svc.clone()
+            .oneshot(make_unsubscribe_op(b, "sub-1"))
+            .await
+            .unwrap();
+        svc.clone()
+            .oneshot(make_hybrid_unsub_op(b, "sub-h1"))
+            .await
+            .unwrap();
+        assert_eq!(owners(&svc), (vec![a], vec![a]));
+    }
+
     #[tokio::test]
     async fn hybrid_search_unsubscribe_of_an_unknown_subscription_answers_with_no_frame() {
         // Unsubscribing a subscription the server does not hold is a no-op, and a
         // no-op has even less to acknowledge than a real removal.
         let svc = make_service();
         let resp = svc
-            .oneshot(make_hybrid_unsub_op("no-such-sub"))
+            .oneshot(make_hybrid_unsub_op(ConnectionId(1), "no-such-sub"))
             .await
             .unwrap();
         assert!(
