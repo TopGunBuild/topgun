@@ -2829,13 +2829,15 @@ mod tests {
         updates
     }
 
+    type TestConnection = (ConnectionId, tokio::sync::mpsc::Receiver<OutboundMessage>);
+
     /// A query service over a fresh registry with two client connections, and
     /// an observer of `users` that feeds that registry.
     fn two_connection_query_service() -> (
         Arc<QueryService>,
         QueryMutationObserver,
-        (ConnectionId, tokio::sync::mpsc::Receiver<OutboundMessage>),
-        (ConnectionId, tokio::sync::mpsc::Receiver<OutboundMessage>),
+        TestConnection,
+        TestConnection,
     ) {
         let registry = Arc::new(QueryRegistry::new());
         let conn_registry = Arc::new(ConnectionRegistry::new());

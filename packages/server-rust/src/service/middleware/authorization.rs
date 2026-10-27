@@ -433,6 +433,8 @@ static MAP_NAME_REFUSAL_LOG: MapNameRefusalLog = MapNameRefusalLog::new();
 ///
 /// Returns `(None, _)` for operations in the bypass group — these pass through
 /// without any policy evaluation (e.g., Ping, `PartitionMapRequest`, `GarbageCollect`).
+// One flat arm per operation variant, with no `_` arm, so a new variant must be classified here.
+#[allow(clippy::too_many_lines)]
 fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
     match op {
         // --- Write actions ---
@@ -517,8 +519,6 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
         Operation::TopicSubscribe { payload, .. } => {
             (Some(PermissionAction::Read), payload.topic.clone())
         }
-        // Reading a counter also subscribes to its updates, so it is a read of
-        // the counter name, as `CounterSync` is a write of it.
         Operation::CounterRequest { payload, .. } => {
             (Some(PermissionAction::Read), payload.name.clone())
         }
