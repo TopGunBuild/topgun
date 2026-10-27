@@ -244,6 +244,7 @@ mod integration_tests {
                 merkle_manager,
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
+                Arc::clone(&query_registry),
             )),
         );
         router.register(
@@ -490,6 +491,7 @@ mod integration_tests {
             merkle_manager_for_sync,
             Arc::clone(&record_store_factory),
             connection_registry_for_sync,
+            Arc::clone(&query_registry),
         ));
         registry.register(QueryService::new(
             query_registry,

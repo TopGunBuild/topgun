@@ -2455,6 +2455,11 @@ weaker than a test.
   subscription of that id — another connection's, or none, is a no-op with the same empty answer.
   (5) A lock is released only by the connection holding it, with its fencing token; another
   connection, or a caller with no connection, gets the same `success: false` as a wrong token.
+  (6) A live data event (`ServerEvent`) of a map reaches only the connections holding a query
+  subscription on that map — which was authorized as a read of it when made — and never the
+  connection that wrote it: the CRDT write path and the OR-Map push-diff path both send through
+  `broadcast_server_event`. The one message sent to every client connection is the partition
+  map, which carries no data of any map.
 - **Exemptions, each with its reason** (the bypass group, `(None, "")`):
   - `Ping`, `PartitionMapRequest` — carry no data of any map; cluster routing under NO_AUTH depends
     on them.
@@ -2483,7 +2488,9 @@ weaker than a test.
   `reserved_target_map_name`; `service/domain/journal.rs` `JournalStore::read` and
   `subscribers_for`, `subscribe`, `unsubscribe`; `service/domain/query.rs` `QueryRegistry`;
   `service/domain/search/registry.rs` `SubscriptionRegistry`;
-  `service/domain/coordination_lock.rs` `LockRegistry::release`; `service/policy/mod.rs`
+  `service/domain/coordination_lock.rs` `LockRegistry::release`; `service/domain/crdt.rs`
+  `broadcast_server_event` and its callers in `crdt.rs` and `sync.rs`
+  (`handle_ormap_push_diff`); `service/policy/mod.rs`
   `may_read_now`; the journal is given the evaluator in `bin/topgun_server.rs` `build_services`.
 - **Enforcing test:** `vector_search_is_held_to_the_read_policy_of_its_map`,
   `resolver_operations_are_held_to_the_policy_of_their_map`,
@@ -2498,13 +2505,15 @@ weaker than a test.
   `connections_choosing_the_same_query_id_keep_separate_subscriptions` (`query.rs`),
   `search_subscriptions_are_owned_by_the_connection_that_made_them` (`search/mod.rs`),
   `subscriptions_with_the_same_id_on_two_connections_are_separate` (`journal.rs`),
-  `lock_release_by_a_connection_that_does_not_hold_it_keeps_the_lock` (`coordination.rs`); at the
-  wire, `tests/integration-rust/journal.test.ts`.
+  `lock_release_by_a_connection_that_does_not_hold_it_keeps_the_lock` (`coordination.rs`),
+  `ormap_push_diff_event_reaches_only_the_maps_subscribers` (`sync.rs`); at the wire,
+  `tests/integration-rust/journal.test.ts` and the `OR_ADD via ORMAP_PUSH_DIFF` case of
+  `tests/integration-rust/crdt-ormap.test.ts`.
 - **Violation consequence:** a client reads or changes data of a map the policy denies it — every
   mutation of every map through the journal, a denied map's vectors, its resolvers, a denied
   counter — or takes another client's lock away, or stops or takes over another client's live
-  subscription.
-- **Discovered by:** the TODO-859/861 research; TODO-876; TODO-879.
+  subscription, or receives the records written to a map it holds no subscription on.
+- **Discovered by:** the TODO-859/861 research; TODO-876; TODO-879; TODO-882.
 - **Status:** decided, **enforced**.
 
 ### TG-KEY-001: Every write of a record holds that record's per-key writer

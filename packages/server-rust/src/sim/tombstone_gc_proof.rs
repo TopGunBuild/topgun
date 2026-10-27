@@ -110,6 +110,7 @@ mod tests {
                 Arc::new(MerkleSyncManager::default()),
                 Arc::clone(&factory),
                 Arc::clone(&registry),
+                Arc::new(crate::service::domain::query::QueryRegistry::new()),
             )
             .with_frontier(Arc::clone(&frontier), Arc::clone(&key_writer)),
         );
@@ -2481,8 +2482,13 @@ mod tests {
         let key_writer = Arc::new(KeyWriterRegistry::new());
         let registry = Arc::new(ConnectionRegistry::new());
         let svc = Arc::new(
-            SyncService::new(manager, Arc::clone(&factory), Arc::clone(&registry))
-                .with_frontier(Arc::clone(&frontier), Arc::clone(&key_writer)),
+            SyncService::new(
+                manager,
+                Arc::clone(&factory),
+                Arc::clone(&registry),
+                Arc::new(crate::service::domain::query::QueryRegistry::new()),
+            )
+            .with_frontier(Arc::clone(&frontier), Arc::clone(&key_writer)),
         );
 
         // ---- 1. K and J under different depth-1 buckets; an epoch is stamped.

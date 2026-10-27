@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Security (server):** OR-Map push-diff events were delivered to connections not subscribed to
+  the map. They now reach only the connections with a query subscription on that map, other than
+  the one that pushed, as events of ordinary writes already did. A client that subscribes to the
+  map receives them as before.
 - **Security (server):** a lock release, a counter read, and the unsubscribe operations of
   queries, search, hybrid search and the event journal did not check the caller's ownership or
   policy. A lock is now released only by the connection that holds it; a counter read is checked

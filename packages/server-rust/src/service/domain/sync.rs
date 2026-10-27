@@ -60,9 +60,10 @@ fn parse_partition_prefix(path: &str) -> Option<(u32, String)> {
 use dashmap::DashMap;
 use tracing::Instrument;
 
-use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionRegistry};
+use crate::network::connection::{ConnectionId, ConnectionRegistry};
 use crate::network::device_identity::frontier_client_id;
 use crate::service::domain::key_writer::KeyWriterRegistry;
+use crate::service::domain::query::QueryRegistry;
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::map_data_store::{DurableMerkleIndex, MapDataStore, MerkleSession};
@@ -137,6 +138,10 @@ pub struct SyncService {
     merkle_manager: Arc<MerkleSyncManager>,
     record_store_factory: Arc<RecordStoreFactory>,
     connection_registry: Arc<ConnectionRegistry>,
+    /// Standing query subscriptions: a push diff's `OR_ADD` events go only to
+    /// connections subscribed to the map, as the CRDT write path's do. MUST be
+    /// the SAME `Arc` the `CrdtService` and `QueryService` hold.
+    query_registry: Arc<QueryRegistry>,
     /// Durable Merkle index: when present, tree-walk handlers resolve
     /// root/buckets/leaf-keys from this index instead of the in-memory manager.
     durable_index: Option<Arc<dyn DurableMerkleIndex + Send + Sync>>,
@@ -263,6 +268,7 @@ impl SyncService {
         merkle_manager: Arc<MerkleSyncManager>,
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
+        query_registry: Arc<QueryRegistry>,
     ) -> Self {
         let session_registry = Arc::new(SyncSessionRegistry::default());
         // Release a connection's sessions when it disconnects: the registry's
@@ -279,6 +285,7 @@ impl SyncService {
             merkle_manager,
             record_store_factory,
             connection_registry,
+            query_registry,
             durable_index: None,
             durable_store: None,
             session_registry,
@@ -1534,7 +1541,8 @@ impl SyncService {
         Some(client)
     }
 
-    /// Handles `ORMapPushDiff` — merges incoming OR-Map entries and broadcasts changes.
+    /// Handles `ORMapPushDiff` — merges incoming OR-Map entries and sends the
+    /// surviving adds to the map's subscribers.
     ///
     /// Every entry is merged under the key's shared writer through the in-place
     /// seam, with the forgotten-client gate evaluated per entry under that writer
@@ -1551,7 +1559,9 @@ impl SyncService {
         use std::collections::HashSet;
         use topgun_core::messages::{ServerEventPayload, ServerEventType};
 
-        use crate::service::domain::crdt::{admit_or_tags, normalize_to_or_map};
+        use crate::service::domain::crdt::{
+            admit_or_tags, broadcast_server_event, normalize_to_or_map,
+        };
         use crate::storage::MutateOutcome;
 
         let map_name = payload.payload.map_name;
@@ -1780,7 +1790,7 @@ impl SyncService {
                 .await
                 .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
 
-            // Broadcast OR_ADD only for inbound records that actually survived the
+            // Send OR_ADD only for inbound records that actually survived the
             // merge. A record whose tag is tombstoned (remove-wins) was suppressed
             // from stored state, so emitting an OR_ADD for it would tell subscribers
             // to resurrect a removed entry. This runs while `key_guard` is still
@@ -1797,13 +1807,12 @@ impl SyncService {
                     or_record: Some(record.clone()),
                     or_tag: Some(record.tag.clone()),
                 };
-                let msg = Message::ServerEvent {
-                    payload: event_payload,
-                };
-                let bytes = rmp_serde::to_vec_named(&msg)
-                    .map_err(|e| OperationError::Internal(anyhow::anyhow!("serialize: {e}")))?;
-                self.connection_registry
-                    .broadcast(&bytes, ConnectionKind::Client);
+                broadcast_server_event(
+                    &self.query_registry,
+                    &self.connection_registry,
+                    &event_payload,
+                    ctx.connection_id,
+                )?;
             }
         }
 
@@ -1984,7 +1993,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::network::connection::ConnectionRegistry;
+    use crate::network::connection::{ConnectionKind, ConnectionRegistry};
     // The leaf handler only TRIGGERS a pass, so a test that wants the drop has to
     // run the pass itself; production no longer calls this from this file.
     use crate::service::domain::crdt::prune_epoch_tombstones;
@@ -2021,6 +2030,7 @@ mod tests {
             merkle_manager,
             record_store_factory,
             connection_registry,
+            Arc::new(QueryRegistry::new()),
         ))
     }
 
@@ -2038,6 +2048,7 @@ mod tests {
                 Arc::new(MerkleSyncManager::default()),
                 Arc::clone(&factory),
                 Arc::new(ConnectionRegistry::new()),
+                Arc::new(QueryRegistry::new()),
             )
             .with_frontier(Arc::clone(&frontier), key_writer),
         );
@@ -2214,6 +2225,7 @@ mod tests {
             Arc::clone(&merkle_manager),
             make_factory(),
             connection_registry,
+            Arc::new(QueryRegistry::new()),
         ));
 
         // SyncInit returns the cross-partition aggregate, not the raw partition
@@ -2292,6 +2304,7 @@ mod tests {
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
+            Arc::new(QueryRegistry::new()),
         ));
 
         let op = Operation::MerkleReqBucket {
@@ -2365,6 +2378,7 @@ mod tests {
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
+            Arc::new(QueryRegistry::new()),
         ));
 
         let op = Operation::MerkleReqBucket {
@@ -2529,6 +2543,7 @@ mod tests {
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
+            Arc::new(QueryRegistry::new()),
         ));
 
         // ORMapSyncInit returns the cross-partition aggregate, not the raw
@@ -2614,6 +2629,7 @@ mod tests {
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
+            Arc::new(QueryRegistry::new()),
         ));
 
         use topgun_core::messages::ORMapMerkleReqBucket;
@@ -2677,6 +2693,7 @@ mod tests {
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
+            Arc::new(QueryRegistry::new()),
         ));
 
         use topgun_core::messages::ORMapMerkleReqBucket;
@@ -2824,6 +2841,7 @@ mod tests {
             Arc::clone(&merkle_manager),
             factory,
             connection_registry,
+            Arc::new(QueryRegistry::new()),
         ));
 
         // Precondition: OR-Map tree for ("tags", 0) should have root_hash = 0.
@@ -2895,6 +2913,124 @@ mod tests {
             matches!(resp, OperationResponse::Empty),
             "a push diff with no entries must be answered with no frame, got {resp:?}"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // ORMapPushDiff events reach only the map's subscribers (TG-AUTHZ-001)
+    // -------------------------------------------------------------------------
+
+    /// Registers a client connection; when `map_name` is given, also subscribes
+    /// it to that map with an unfiltered query.
+    fn register_client(
+        connection_registry: &ConnectionRegistry,
+        query_registry: &QueryRegistry,
+        map_name: Option<&str>,
+    ) -> (
+        ConnectionId,
+        tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>,
+    ) {
+        use crate::query::delta_buffer::DeltaBuffer;
+        use crate::service::domain::query::QuerySubscription;
+        use topgun_core::messages::Query;
+
+        let (handle, rx) = connection_registry.register(
+            ConnectionKind::Client,
+            &crate::network::config::ConnectionConfig::default(),
+        );
+        if let Some(map_name) = map_name {
+            query_registry.register(QuerySubscription {
+                query_id: "q".to_string(),
+                connection_id: handle.id,
+                map_name: map_name.to_string(),
+                query: Query::default(),
+                previous_result_keys: dashmap::DashSet::new(),
+                live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
+                fields: None,
+                delta_buffer: Arc::new(DeltaBuffer::new(64)),
+            });
+        }
+        (handle.id, rx)
+    }
+
+    /// Decodes the `ServerEvent` frames a connection has been sent so far.
+    fn received_events(
+        rx: &mut tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>,
+    ) -> Vec<topgun_core::messages::ServerEventPayload> {
+        let mut events = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::network::connection::OutboundMessage::Binary(bytes) = msg {
+                if let Ok(Message::ServerEvent { payload }) = rmp_serde::from_slice(&bytes) {
+                    events.push(payload);
+                }
+            }
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn ormap_push_diff_event_reaches_only_the_maps_subscribers() {
+        use topgun_core::messages::{ORMapPushDiff, ORMapPushDiffPayload, ServerEventType};
+
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = Arc::new(SyncService::new(
+            Arc::new(MerkleSyncManager::default()),
+            make_factory(),
+            Arc::clone(&connection_registry),
+            Arc::clone(&query_registry),
+        ));
+        // The writer is subscribed too, so excluding it is what keeps its own
+        // event from coming back, as on the CRDT write path.
+        let (writer, mut writer_rx) =
+            register_client(&connection_registry, &query_registry, Some("tags"));
+        let (_, mut unsubscribed_rx) = register_client(&connection_registry, &query_registry, None);
+        let (_, mut other_map_rx) =
+            register_client(&connection_registry, &query_registry, Some("other"));
+        let (_, mut subscriber_rx) =
+            register_client(&connection_registry, &query_registry, Some("tags"));
+
+        let record = ORMapRecord {
+            value: rmpv::Value::String("secret".into()),
+            timestamp: make_timestamp(),
+            tag: "1700000000000:0:node-1".to_string(),
+            ttl_ms: None,
+        };
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(writer);
+        let op = Operation::ORMapPushDiff {
+            ctx,
+            payload: ORMapPushDiff {
+                payload: ORMapPushDiffPayload {
+                    map_name: "tags".to_string(),
+                    entries: vec![ORMapEntry {
+                        key: "tag-1".to_string(),
+                        records: vec![record.clone()],
+                        tombstones: Vec::new(),
+                    }],
+                },
+            },
+        };
+        svc.oneshot(op).await.unwrap();
+
+        assert!(
+            received_events(&mut unsubscribed_rx).is_empty(),
+            "a connection with no subscription received the map's event"
+        );
+        assert!(
+            received_events(&mut other_map_rx).is_empty(),
+            "a connection subscribed to another map received the map's event"
+        );
+        assert!(
+            received_events(&mut writer_rx).is_empty(),
+            "the writer received its own event back"
+        );
+        let events = received_events(&mut subscriber_rx);
+        assert_eq!(events.len(), 1, "the subscriber must receive the add once");
+        assert_eq!(events[0].event_type, ServerEventType::OR_ADD);
+        assert_eq!(events[0].map_name, "tags");
+        assert_eq!(events[0].key, "tag-1");
+        assert_eq!(events[0].or_record.as_ref(), Some(&record));
+        assert_eq!(events[0].or_tag.as_deref(), Some(record.tag.as_str()));
     }
 
     // -------------------------------------------------------------------------
@@ -2975,6 +3111,7 @@ mod tests {
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
+            Arc::new(QueryRegistry::new()),
         ));
 
         let expected = merkle_manager.aggregate_lww_root_hash("users");
@@ -3023,6 +3160,7 @@ mod tests {
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
+            Arc::new(QueryRegistry::new()),
         ));
 
         // Request partition 42's root bucket with empty sub-path "042/".
@@ -3079,6 +3217,7 @@ mod tests {
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
+            Arc::new(QueryRegistry::new()),
         ));
 
         let op = Operation::MerkleReqBucket {
@@ -3194,8 +3333,13 @@ mod tests {
         let record_store_factory = make_factory();
         let connection_registry = Arc::new(ConnectionRegistry::new());
         let svc = Arc::new(
-            SyncService::new(merkle_manager, record_store_factory, connection_registry)
-                .with_durable_index(durable_index, durable_store),
+            SyncService::new(
+                merkle_manager,
+                record_store_factory,
+                connection_registry,
+                Arc::new(QueryRegistry::new()),
+            )
+            .with_durable_index(durable_index, durable_store),
         );
 
         // Fault scenario: simulate peer-node failure by dropping the peer's store
@@ -3283,6 +3427,7 @@ mod tests {
                 Arc::new(MerkleSyncManager::default()),
                 make_factory(),
                 Arc::new(ConnectionRegistry::new()),
+                Arc::new(QueryRegistry::new()),
             )
             .with_durable_index(durable_index, durable_store),
         );
@@ -3399,6 +3544,7 @@ mod tests {
                 Arc::new(MerkleSyncManager::default()),
                 factory,
                 Arc::new(ConnectionRegistry::new()),
+                Arc::new(QueryRegistry::new()),
             )
             .with_durable_index(durable_index, durable_store),
         );
@@ -3512,6 +3658,7 @@ mod tests {
                 Arc::new(MerkleSyncManager::default()),
                 factory,
                 Arc::new(ConnectionRegistry::new()),
+                Arc::new(QueryRegistry::new()),
             )
             .with_durable_index(durable_index, durable_store),
         );
@@ -3611,6 +3758,7 @@ mod tests {
                 Arc::new(MerkleSyncManager::default()),
                 factory,
                 Arc::new(ConnectionRegistry::new()),
+                Arc::new(QueryRegistry::new()),
             )
             .with_durable_index(durable_index, durable_store),
         );
@@ -3828,6 +3976,7 @@ mod tests {
                 Arc::new(MerkleSyncManager::default()),
                 factory,
                 Arc::new(ConnectionRegistry::new()),
+                Arc::new(QueryRegistry::new()),
             )
             .with_durable_index(durable_index, durable_store),
         );
@@ -4193,6 +4342,7 @@ mod tests {
                 Arc::new(MerkleSyncManager::default()),
                 factory,
                 Arc::new(ConnectionRegistry::new()),
+                Arc::new(QueryRegistry::new()),
             )
             .with_durable_index(durable_index, durable_store),
         );
@@ -4641,6 +4791,7 @@ mod tests {
                 Arc::new(MerkleSyncManager::default()),
                 factory,
                 Arc::clone(&registry),
+                Arc::new(QueryRegistry::new()),
             )
             .with_durable_index(durable_index, durable_store),
         );
@@ -4711,6 +4862,7 @@ mod tests {
                 Arc::new(MerkleSyncManager::default()),
                 Arc::clone(&factory),
                 Arc::clone(&registry),
+                Arc::new(QueryRegistry::new()),
             )
             .with_frontier(Arc::clone(&frontier), key_writer),
         );
@@ -5435,7 +5587,7 @@ mod tests {
         // (A)-(D) run with the gate dark: the push is merged unless refused.
         let (svc, factory, _frontier, registry) = make_gated_service();
         let (_listener, mut listener_rx) =
-            registry.register(ConnectionKind::Client, &ConnectionConfig::default());
+            register_client(&registry, &svc.query_registry, Some(MAP));
 
         // (A)-(C) The clean entry comes FIRST, so an implementation that refuses
         // only when it reaches the offending entry has already merged it.
@@ -6055,6 +6207,7 @@ mod tests {
                 Arc::new(MerkleSyncManager::default()),
                 Arc::clone(&factory),
                 Arc::clone(&registry),
+                Arc::new(QueryRegistry::new()),
             )
             .with_frontier(Arc::clone(&frontier), Arc::new(KeyWriterRegistry::new())),
         );
@@ -6359,9 +6512,8 @@ mod tests {
             // `Internal`, the load log holds the offending key exactly once
             // and nothing else, and both slots are still absent.
             let probed = probed_push_service();
-            let (_listener, mut listener_rx) = probed
-                .registry
-                .register(ConnectionKind::Client, &ConnectionConfig::default());
+            let (_listener, mut listener_rx) =
+                register_client(&probed.registry, &probed.svc.query_registry, Some(MAP));
             probed.loads.set_unreadable(Some(BAD));
             let result = Arc::clone(&probed.svc).oneshot(push()).await;
 
@@ -6415,9 +6567,8 @@ mod tests {
         // silence above is not a deaf listener.
         {
             let probed = probed_push_service();
-            let (_listener, mut listener_rx) = probed
-                .registry
-                .register(ConnectionKind::Client, &ConnectionConfig::default());
+            let (_listener, mut listener_rx) =
+                register_client(&probed.registry, &probed.svc.query_registry, Some(MAP));
             let result = Arc::clone(&probed.svc)
                 .oneshot(push_entries(
                     make_ctx(service_names::SYNC),
@@ -6738,6 +6889,7 @@ mod tests {
                 Arc::new(MerkleSyncManager::default()),
                 Arc::clone(&factory),
                 Arc::clone(&registry),
+                Arc::new(QueryRegistry::new()),
             )
             .with_durable_index(index, Arc::clone(&store))
             .with_frontier(Arc::clone(&frontier), Arc::new(KeyWriterRegistry::new())),
@@ -6771,8 +6923,13 @@ mod tests {
         frontier.set_epoch_width(1);
         let registry = Arc::new(ConnectionRegistry::new());
         let svc = Arc::new(
-            SyncService::new(manager, Arc::clone(&factory), Arc::clone(&registry))
-                .with_frontier(Arc::clone(&frontier), Arc::new(KeyWriterRegistry::new())),
+            SyncService::new(
+                manager,
+                Arc::clone(&factory),
+                Arc::clone(&registry),
+                Arc::new(QueryRegistry::new()),
+            )
+            .with_frontier(Arc::clone(&frontier), Arc::new(KeyWriterRegistry::new())),
         );
         RoundRig {
             svc,
@@ -7578,6 +7735,7 @@ mod tests {
                     Arc::new(MerkleSyncManager::default()),
                     factory,
                     Arc::new(ConnectionRegistry::new()),
+                    Arc::new(QueryRegistry::new()),
                 )
                 .with_durable_index(index, durable),
             );
@@ -7597,6 +7755,7 @@ mod tests {
                 manager,
                 factory,
                 Arc::new(ConnectionRegistry::new()),
+                Arc::new(QueryRegistry::new()),
             ));
             (svc, probe)
         }
